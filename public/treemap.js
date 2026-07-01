@@ -12,13 +12,18 @@ function tmRet(r){ const k=TF_MAP[state.tf]||'d1'; const v=r[k]; return (v==null
 const MAP_SCALE={ honest:1, balanced:0.5, flat:0.28 };
 const MIN_SHARE=0.0012;   // floor: no visible market below ~0.12% of the map
 
-function tmColor(ret, cap){
-  if(ret==null) return 'var(--panel2)';
+function tmRGB(ret, cap){
+  if(ret==null) return null;
   const t=clamp(ret/cap,-1,1), a=Math.abs(t);
   const mid=[26,24,18], up=[70,185,126], dn=[229,96,77], tg=t>=0?up:dn;
   const L=(x,y)=>Math.round(x+(y-x)*a);
-  return `rgb(${L(mid[0],tg[0])},${L(mid[1],tg[1])},${L(mid[2],tg[2])})`;
+  return [L(mid[0],tg[0]),L(mid[1],tg[1]),L(mid[2],tg[2])];
 }
+function tmFill(rgb){ return rgb ? `rgb(${rgb[0]},${rgb[1]},${rgb[2]})` : 'var(--panel2)'; }
+function tmInk(rgb){ if(!rgb) return '#e8e8e0';                        // null → dark tile → light ink
+  const lum=0.299*rgb[0]+0.587*rgb[1]+0.114*rgb[2]; return lum>150?'#0d0d0a':'#fff'; }
+// crude monospace width estimate; JetBrains Mono ~0.6em per glyph
+function tmFits(str, fs){ return str.length*fs*0.60; }
 function pctile(arr,p){ const a=arr.filter(x=>x!=null&&isFinite(x)).sort((x,y)=>x-y);
   if(!a.length) return 0; return a[clamp(Math.floor(p*(a.length-1)),0,a.length-1)]; }
 
@@ -61,7 +66,7 @@ function tmSquarify(nodes, X,Y,W,H){
 }
 
 // --- render ---------------------------------------------------------------
-const TM_PAD=2, TM_HEAD=15;
+const TM_PAD=2, TM_HEAD=16;
 function tmSyncControls(){
   const set=(sel,attr,val)=>document.querySelectorAll(sel+' button').forEach(b=>b.classList.toggle('active',b.dataset[attr]===val));
   set('#tmf','tf',state.tf); set('#mapsize','size',state.map.size); set('#mapscale','scale',state.map.scale);
@@ -94,23 +99,41 @@ function renderTreemap(){
 
   for(const sec of cells){
     s+=`<rect x="${sec.x.toFixed(1)}" y="${sec.y.toFixed(1)}" width="${sec.w.toFixed(1)}" height="${sec.h.toFixed(1)}" fill="var(--panel)" stroke="var(--border)" stroke-width="1"/>`;
-    if(sec.w>60 && sec.h>TM_HEAD+8)
-      s+=`<text x="${(sec.x+4).toFixed(1)}" y="${(sec.y+11).toFixed(1)}" style="font-size:10px;fill:var(--muted)">${esc(sectorShort(sec.name))}</text>`;
 
-    const ix=sec.x+TM_PAD, iy=sec.y+TM_HEAD, iw=sec.w-2*TM_PAD, ih=sec.h-TM_HEAD-TM_PAD;
+    // header band — only when there's real room, so short sectors aren't squashed
+    const canHead = sec.w>66 && sec.h>30;
+    const head = canHead ? TM_HEAD : 0;
+    if(canHead){
+      s+=`<rect x="${sec.x.toFixed(1)}" y="${sec.y.toFixed(1)}" width="${sec.w.toFixed(1)}" height="${head}" fill="var(--panel2)"/>`;
+      const nm=sectorShort(sec.name).toUpperCase();
+      let hfs=Math.min(10, (sec.w-10)/Math.max(1,nm.length*0.62));
+      if(hfs>=7) s+=`<text x="${(sec.x+5).toFixed(1)}" y="${(sec.y+11.5).toFixed(1)}" style="font-size:${hfs.toFixed(1)}px;letter-spacing:.4px;fill:var(--muted)">${esc(nm)}</text>`;
+    }
+
+    const ix=sec.x+TM_PAD, iy=sec.y+(canHead?head:TM_PAD), iw=sec.w-2*TM_PAD, ih=sec.h-(canHead?head:TM_PAD)-TM_PAD;
     if(iw<3||ih<3) continue;
     tmScale(sec.members, iw*ih);
     const tiles=tmSquarify(sec.members, ix,iy,iw,ih);
 
     for(const t of tiles){
-      const col=tmColor(t.ret, cap), rp=t.ret==null?'n/a':(t.ret>=0?'+':'')+t.ret.toFixed(2)+'%';
+      const rgb=tmRGB(t.ret, cap), fill=tmFill(rgb), ink=tmInk(rgb);
+      const rp=t.ret==null?'n/a':(t.ret>=0?'+':'')+t.ret.toFixed(2)+'%';
       s+=`<g class="tm-tile" data-coin="${esc(t.coin)}" style="cursor:pointer">`;
       s+=`<title>${esc(t.ticker)} · ${rp} (${state.tf}) · ${fmtUsd(t.raw)} ${state.map.size==='oi'?'OI':'vol'}</title>`;
-      s+=`<rect x="${t.x.toFixed(1)}" y="${t.y.toFixed(1)}" width="${t.w.toFixed(1)}" height="${t.h.toFixed(1)}" fill="${col}" stroke="var(--bg)" stroke-width="1"/>`;
-      if(t.w>34 && t.h>16){
-        const tx=(t.x+t.w/2).toFixed(1);
-        s+=`<text x="${tx}" y="${(t.y+t.h/2-1).toFixed(1)}" text-anchor="middle" style="font-size:10.5px;fill:#fff;font-weight:600">${esc(t.ticker)}</text>`;
-        if(t.h>32) s+=`<text x="${tx}" y="${(t.y+t.h/2+11).toFixed(1)}" text-anchor="middle" style="font-size:9px;fill:rgba(255,255,255,.85)">${rp}</text>`;
+      s+=`<rect x="${t.x.toFixed(1)}" y="${t.y.toFixed(1)}" width="${t.w.toFixed(1)}" height="${t.h.toFixed(1)}" fill="${fill}" stroke="var(--bg)" stroke-width="1"/>`;
+
+      // labels: only draw what actually fits the tile — never overflow
+      const availW=t.w-5, cx=(t.x+t.w/2);
+      let fs=Math.min(11, availW/Math.max(1,t.ticker.length*0.60));
+      if(t.w>=24 && t.h>=13 && fs>=6.5){
+        fs=clamp(fs,6.5,11);
+        const twoLines = t.h>=30 && t.ret!=null;
+        let pfs=Math.min(fs-1, availW/Math.max(1,rp.length*0.60));
+        const showPct = twoLines && pfs>=6.5 && tmFits(rp,pfs)<=availW;
+        const tickY = showPct ? (t.y+t.h/2-1) : (t.y+t.h/2+fs*0.34);
+        s+=`<text x="${cx.toFixed(1)}" y="${tickY.toFixed(1)}" text-anchor="middle" style="font-size:${fs.toFixed(1)}px;fill:${ink};font-weight:600">${esc(t.ticker)}</text>`;
+        if(showPct)
+          s+=`<text x="${cx.toFixed(1)}" y="${(t.y+t.h/2+pfs+1).toFixed(1)}" text-anchor="middle" style="font-size:${pfs.toFixed(1)}px;fill:${ink};opacity:.82">${rp}</text>`;
       }
       s+='</g>';
     }
