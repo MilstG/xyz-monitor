@@ -1,17 +1,12 @@
 // ===== App-wide tooltips — self-installing ==================================
-// Drop into /public and add ONE line to index.html, after app.js (order vs.
-// treemap.js doesn't matter):
+// Drop into /public and add ONE line to index.html, after app.js:
 //     <script src="tooltips.js"></script>
 //
-// Does two things with zero edits to your existing code:
-//  1. Turns every SVG chart's native <title> (flow map, leaders map, treemap
-//     tiles, any titled bubble/cell) into a styled, cursor-following tooltip.
-//  2. Adds a crosshair + value readout to the trend sparklines (.tspark),
-//     reading the real closes straight from state.rows — no data duplication.
-//
-// Sparklines can also opt in explicitly by carrying data on the <svg>:
-//     data-series="1,2,3"  [data-labels="Mon|Tue|Wed"] [data-unit="%"]
-//     [data-name="AAPL"] [data-tip="OI"]
+//  1. Styled, cursor-following tooltips for every SVG chart carrying a <title>
+//     (flow map, leaders map, treemap tiles).
+//  2. Crosshair + value readout on the trend sparklines (.tspark), read from
+//     state.rows — and on any sparkline that carries data-series (e.g. after
+//     the one-line sparkline() patch: drawer OI/funding + correlation pairs).
 
 (function(){
   var tip, cross=null;
@@ -31,7 +26,6 @@
     document.head.appendChild(st);
     tip=document.createElement('div'); tip.className='tt-pop'; document.body.appendChild(tip);
   }
-
   function place(x,y){
     var r=tip.getBoundingClientRect(), nx=x+14, ny=y+16;
     if(nx+r.width>innerWidth-8) nx=x-r.width-14;
@@ -78,10 +72,20 @@
     return { vals:cl, name:r.ticker||host.getAttribute('data-coin'), unit:'price', pre:'close' };
   }
   function seriesFromData(svg){
-    var d=svg.dataset||{}; if(!d.series) return null;
-    var vals=d.series.split(',').map(Number).filter(isFinite); if(vals.length<2) return null;
+    var d=svg.dataset||{}; if(d.series==null) return null;
+    var vals=d.series.split(',').map(function(x){ if(x==='') return null; var n=parseFloat(x); return isFinite(n)?n:null; });
+    if(vals.filter(function(x){return x!=null;}).length<2) return null;
     return { vals:vals, labels:d.labels?d.labels.split('|'):null,
       name:d.name||'', unit:d.unit||'', pre:d.tip||'' };
+  }
+  // nearest finite sample to idx (series may have gaps)
+  function nearest(vals, idx){
+    if(vals[idx]!=null) return idx;
+    for(var k=1;k<vals.length;k++){
+      if(idx-k>=0 && vals[idx-k]!=null) return idx-k;
+      if(idx+k<vals.length && vals[idx+k]!=null) return idx+k;
+    }
+    return -1;
   }
 
   function clearCross(){ if(cross){ if(cross.g.parentNode) cross.g.parentNode.removeChild(cross.g); cross=null; } }
@@ -98,20 +102,21 @@
 
   function handleSpark(svg,e){
     var info=seriesFromData(svg) || (svg.classList.contains('tspark') ? seriesFromState(svg) : null);
-    if(!info){ hide(); return false; }
-    var rect=svg.getBoundingClientRect(); if(!rect.width){ hide(); return false; }
+    if(!info){ hide(); return; }
+    var rect=svg.getBoundingClientRect(); if(!rect.width){ hide(); return; }
     var frac=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
-    var idx=Math.round(frac*(info.vals.length-1)), v=info.vals[idx];
-    drawCross(svg, idx/(info.vals.length-1));
+    var n=info.vals.length, idx=nearest(info.vals, Math.round(frac*(n-1)));
+    if(idx<0){ hide(); return; }
+    var v=info.vals[idx];
+    drawCross(svg, idx/(n-1));
     var valStr = info.unit==='price' ? '$'+fmtNum(v) : (fmtNum(v)+(info.unit||''));
     var line = (info.pre?esc(info.pre)+' ':'')+valStr;
     if(info.labels && info.labels[idx]) line = esc(info.labels[idx])+' \u00b7 '+line;
     var h = info.name ? '<b>'+esc(info.name)+'</b>' : '';
     h += '<div class="k">'+line+'</div>';
-    var chg = info.vals[0] ? (v/info.vals[0]-1)*100 : null;
-    if(chg!=null && isFinite(chg)) h += '<div class="k">'+(chg>=0?'+':'')+chg.toFixed(2)+'% from start</div>';
+    var base=null; for(var b=0;b<n;b++){ if(info.vals[b]!=null){ base=info.vals[b]; break; } }
+    if(base){ var chg=(v/base-1)*100; if(isFinite(chg)) h+='<div class="k">'+(chg>=0?'+':'')+chg.toFixed(2)+'% from start</div>'; }
     show(h, e.clientX, e.clientY);
-    return true;
   }
 
   // --- dispatch ------------------------------------------------------------
