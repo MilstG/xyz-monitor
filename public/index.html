@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
+<script>try{if(localStorage.getItem('xyzmon.theme')==='amber')document.documentElement.setAttribute('data-theme','amber');}catch(e){}</script>
 </head>
 <body>
 <header>
@@ -27,6 +28,7 @@
   <button class="tab active" data-view="markets">Markets</button>
   <button class="tab" data-view="sectors">Sectors</button>
   <button class="tab" data-view="corr">Correlation</button>
+  <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
 </nav>
 
 <div id="view-markets">
@@ -116,7 +118,7 @@
     <div class="seg" id="sectmode" role="group" aria-label="Map mode">
       <span class="seglbl">view</span>
       <button type="button" data-mode="flow">flow map</button>
-      <button type="button" data-mode="rrg">rotation graph</button>
+      <button type="button" data-mode="leaders">leaders</button>
     </div>
     <button class="btn" id="sectExport" title="Download the sector board as CSV" style="margin-left:auto">↓ CSV</button>
   </div>
