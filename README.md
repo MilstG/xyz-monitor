@@ -15,6 +15,11 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **`/api/daily`** — daily closes per market, used client-side for correlation, beta and
   trend sparklines. Rebuilt every ~60s.
 - **`/api/health`** — liveness + basic stats (used as the Railway healthcheck).
+- **`/api/series?coin=<coin>`** — per-market OI and funding history (powers the ticker drawer sparklines).
+- **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
+- **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
+- **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
+- **Deep links** — the URL reflects the current tab and open ticker (`#sectors`, `#t=<coin>`), so links are shareable.
 - **Persistent OI** — open interest accrues over time and can't be re-fetched, so every
   sample is written to an append-only log on a mounted volume (`$DATA_DIR/oi.log`) and
   reloaded on boot. It survives restarts and redeploys. Pruned to 31 days daily.
@@ -93,6 +98,20 @@ You need a GitHub account and a Railway account.
   which is cheap and expected.
 - The refresh selector in the UI controls how often *your browser* re-fetches the cached
   snapshot (30s–15m). The server updates independently every ~30s regardless.
+
+## Tests
+
+```bash
+npm test
+```
+
+Runs the classifier + compute regression tests (Node's built-in runner, no deps).
+
+## Optional: shared-password access
+
+By default the site is public to anyone with the link. To require a shared password,
+set `SITE_PASSWORD` (and optionally `SITE_USER`, default `friend`) as Railway variables —
+the server then gates every request with HTTP Basic auth. Leave it unset to stay open.
 
 ## Tuning (optional)
 
