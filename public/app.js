@@ -806,14 +806,14 @@ function renderSectors(){
   if(!state.rows.size){ el('sect-map').innerHTML='<div class="msg">Markets still loading — switch back in a moment.</div>'; return; }
   computeDerived();
   const list=computeSectors();
-  const lg=el('sect-legend'); if(lg) lg.innerHTML = state.sect.mode==='rrg'
-    ? '<b>Rotation graph</b> — each sector\u2019s trajectory in relative strength vs the S&amp;P (JdK RS-Ratio / RS-Momentum, approximated). Right = outperforming, up = strengthening; sectors drift clockwise through Leading → Weakening → Lagging → Improving. The tail shows the recent path.'
+  const lg=el('sect-legend'); if(lg) lg.innerHTML = state.sect.mode==='leaders'
+    ? '<b>Leadership map</b> — where each sector sits vs the S&amp;P over ~90 days. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> sectors are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume.'
     : '<b>Flow map</b> — horizontal = capital direction (price + OI conviction), vertical = activity heat (volume + volatility). Top-right = accumulation, top-left = distribution. Bubble size = 24h volume.';
-  if(state.sect.mode==='rrg'){
-    const rrg=computeRRG(list);
-    el('sect-map').innerHTML = rrg ? renderRRG(rrg)
-      : '<div class="msg">Rotation graph needs the S&amp;P benchmark and a few weeks of daily history — it fills in as the background daily backfill completes.</div>';
-    if(rrg) attachRRGHandlers();
+  if(state.sect.mode==='leaders'){
+    const data=computeLeaders(list);
+    el('sect-map').innerHTML = data ? renderLeaders(data)
+      : '<div class="msg">The leadership map needs the S&amp;P benchmark and a few weeks of daily history — it fills in as the background daily backfill completes.</div>';
+    if(data) attachLeadersHandlers();
   } else {
     el('sect-map').innerHTML=renderSectorMap(list);
     attachMapHandlers();
@@ -822,87 +822,85 @@ function renderSectors(){
   renderSectorDetail();
   renderSectorCorr(list);
 }
-// ---- Relative Rotation Graph (approx. JdK RS-Ratio / RS-Momentum vs the S&P benchmark) ----
-function rollingZ(arr, W){
-  const out=arr.map(()=>null), need=Math.max(5, Math.floor(W/2));
-  for(let i=0;i<arr.length;i++){ if(arr[i]==null) continue; const w=[];
-    for(let j=Math.max(0,i-W+1);j<=i;j++) if(arr[j]!=null) w.push(arr[j]);
-    if(w.length<need) continue;
-    const m=w.reduce((a,b)=>a+b,0)/w.length, sd=stdev(w);
-    out[i]= sd>0 ? (arr[i]-m)/sd : 0; }
-  return out;
-}
-function computeRRG(list){
+// ---- Leadership map: plain % relative to the S&P (X) and whether the lead is growing (Y) ----
+function computeLeaders(list){
   const bench=state.benchCoin?state.rows.get(state.benchCoin):null;
-  if(!bench||!bench.daily||bench.daily.length<30) return null;
-  const benchByDay=new Map();
-  for(const k of bench.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) benchByDay.set(d,cl); }
-  const allDays=[...benchByDay.keys()].sort((a,b)=>a-b);
-  const win=allDays.slice(-Math.min(70, allDays.length));
-  if(win.length<25) return null;
-  const b0=benchByDay.get(win[0]); if(!(b0>0)) return null;
-  const benchIdx=win.map(d=>{ const v=benchByDay.get(d); return v!=null?v/b0:null; });
-  const W=Math.min(20, Math.floor(win.length/2)), LAG=Math.max(3, Math.floor(W/3)), K=8;
+  if(!bench||!bench.daily||bench.daily.length<20) return null;
+  const bDay=new Map();
+  for(const k of bench.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) bDay.set(d,cl); }
+  const days=[...bDay.keys()].sort((a,b)=>a-b);
+  const win=days.slice(-Math.min(90, days.length));
+  if(win.length<15) return null;
+  const b0=bDay.get(win[0]); if(!(b0>0)) return null;
+  const mid=Math.floor(win.length/2), bMid=bDay.get(win[mid]), bEnd=bDay.get(win[win.length-1]);
+  const benchRet=bEnd/b0-1, benchEarly=bMid/b0-1, benchLate=bEnd/bMid-1;
   const out=[];
   for(const g of list){
     if(g.name==='Unclassified') continue;
     const series=[];
-    for(const r of g.members){ if(!r.daily||r.daily.length<25) continue;
+    for(const r of g.members){ if(!r.daily||r.daily.length<15) continue;
       const bd=new Map();
       for(const k of r.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) bd.set(d,cl); }
-      const first=win.find(d=>bd.has(d)); if(first==null) continue;
-      const f=bd.get(first); if(!(f>0)) continue;
+      const first=win.find(d=>bd.has(d)); if(first==null) continue; const f=bd.get(first); if(!(f>0)) continue;
       series.push({bd, f}); }
     if(!series.length) continue;
-    const secIdx=win.map(d=>{ let s=0,n=0; for(const ms of series){ const cl=ms.bd.get(d); if(cl!=null&&cl>0){ s+=cl/ms.f; n++; } } return n?s/n:null; });
-    const rs=secIdx.map((v,i)=> (v!=null&&benchIdx[i]>0)? v/benchIdx[i]*100 : null);
-    const rsRatio=rollingZ(rs, W).map(z=> z==null?null:100+z);
-    const momRaw=rsRatio.map((v,i)=> (v!=null&&rsRatio[i-LAG]!=null)? v-rsRatio[i-LAG] : null);
-    const rsMom=rollingZ(momRaw, W).map(z=> z==null?null:100+z);
-    const pts=[];
-    for(let i=win.length-1;i>=0&&pts.length<K;i--){ if(rsRatio[i]!=null&&rsMom[i]!=null) pts.push({x:rsRatio[i], y:rsMom[i]}); }
-    pts.reverse();
-    if(pts.length<2) continue;
-    out.push({name:g.name, pts, head:pts[pts.length-1]});
+    const idxAt=d=>{ let s=0,n=0; for(const ms of series){ const cl=ms.bd.get(d); if(cl!=null&&cl>0){ s+=cl/ms.f; n++; } } return n?s/n:null; };
+    const i0=idxAt(win[0]), iMid=idxAt(win[mid]), iEnd=idxAt(win[win.length-1]);
+    if(i0==null||iEnd==null||!(i0>0)) continue;
+    const x=((iEnd/i0-1)-benchRet)*100;                    // % ahead of / behind the S&P
+    let y=0;                                                // change in that lead (recent vs earlier)
+    if(iMid!=null&&iMid>0){ const exEarly=((iMid/i0-1)-benchEarly)*100, exLate=((iEnd/iMid-1)-benchLate)*100; y=exLate-exEarly; }
+    out.push({name:g.name, x, y, vol:g.totVol});
   }
   return out.length?out:null;
 }
-function rrgQuad(x,y){ if(x>=100&&y>=100)return {l:'Leading',c:'var(--up)'}; if(x>=100&&y<100)return {l:'Weakening',c:'var(--accent)'}; if(x<100&&y<100)return {l:'Lagging',c:'var(--down)'}; return {l:'Improving',c:'var(--blue)'}; }
-function renderRRG(rrg){
-  const W=760,H=420, px0=52,px1=W-18, py0=H-30, py1=20;
-  let minX=100,maxX=100,minY=100,maxY=100;
-  for(const s of rrg) for(const p of s.pts){ minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); }
-  const padX=Math.max(0.6,(maxX-minX)*0.12), padY=Math.max(0.6,(maxY-minY)*0.12);
-  minX-=padX; maxX+=padX; minY-=padY; maxY+=padY;
-  const xM=v=>px0+(clamp(v,minX,maxX)-minX)/(maxX-minX)*(px1-px0);
-  const yM=v=>py0-(clamp(v,minY,maxY)-minY)/(maxY-minY)*(py0-py1);
-  const cx=xM(100), cy=yM(100);
+function leadQuad(x,y){ if(x>=0&&y>=0)return {l:'Leaders',c:'var(--up)'}; if(x<0&&y>=0)return {l:'Catching up',c:'var(--blue)'}; if(x>=0&&y<0)return {l:'Cooling',c:'var(--accent)'}; return {l:'Laggards',c:'var(--down)'}; }
+function renderLeaders(data){
+  const W=760,H=430, px0=44,px1=W-14, py0=H-48, py1=30;
+  let mx=0.6,my=0.6; for(const s of data){ mx=Math.max(mx,Math.abs(s.x)); my=Math.max(my,Math.abs(s.y)); }
+  mx*=1.18; my*=1.18;
+  const xM=v=>px0+(clamp(v,-mx,mx)+mx)/(2*mx)*(px1-px0);
+  const yM=v=>py0-(clamp(v,-my,my)+my)/(2*my)*(py0-py1);
+  const cx=xM(0), cy=yM(0), maxVol=Math.max(1,...data.map(s=>s.vol||0));
   const ql='font-family:var(--mono);font-size:10px;fill:var(--faint)';
   let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
-  s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.35"/>`;
-  // quadrant tints
-  s+=`<rect x="${cx}" y="${py1}" width="${px1-cx}" height="${cy-py1}" fill="rgb(70,185,126)" opacity="0.05"/>`;
-  s+=`<rect x="${cx}" y="${cy}" width="${px1-cx}" height="${py0-cy}" fill="rgb(227,165,60)" opacity="0.05"/>`;
-  s+=`<rect x="${px0}" y="${cy}" width="${cx-px0}" height="${py0-cy}" fill="rgb(229,96,77)" opacity="0.05"/>`;
-  s+=`<rect x="${px0}" y="${py1}" width="${cx-px0}" height="${cy-py1}" fill="rgb(111,147,201)" opacity="0.05"/>`;
-  s+=`<line x1="${cx}" y1="${py1}" x2="${cx}" y2="${py0}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
-  s+=`<line x1="${px0}" y1="${cy}" x2="${px1}" y2="${cy}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
-  s+=`<text x="${px1-6}" y="${py1+14}" text-anchor="end" style="${ql}">Leading</text>`;
-  s+=`<text x="${px1-6}" y="${py0-6}" text-anchor="end" style="${ql}">Weakening</text>`;
-  s+=`<text x="${px0+6}" y="${py0-6}" style="${ql}">Lagging</text>`;
-  s+=`<text x="${px0+6}" y="${py1+14}" style="${ql}">Improving</text>`;
-  s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← weaker   ·   relative strength vs S&amp;P   ·   stronger →</text>`;
-  s+=`<text x="14" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 14 ${(py0+py1)/2})" style="${ql}">RS momentum →</text>`;
-  for(const sec of rrg){ const q=rrgQuad(sec.head.x, sec.head.y), col=q.c;
-    let d=''; sec.pts.forEach((p,i)=> d+=(i?'L':'M')+xM(p.x).toFixed(1)+' '+yM(p.y).toFixed(1)+' ');
-    s+=`<g class="rrg" data-sect="${esc(sec.name)}" style="cursor:pointer"><title>${esc(sec.name)} — ${q.l} · RS ${sec.head.x.toFixed(1)} · momentum ${sec.head.y.toFixed(1)}</title>`;
-    s+=`<path d="${d.trim()}" fill="none" stroke="${col}" stroke-width="1.4" opacity="0.5"/>`;
-    sec.pts.forEach((p,i)=>{ const last=i===sec.pts.length-1; s+=`<circle cx="${xM(p.x).toFixed(1)}" cy="${yM(p.y).toFixed(1)}" r="${last?4.5:2}" fill="${col}" opacity="${last?1:0.4+0.5*i/sec.pts.length}"/>`; });
-    s+=`<text x="${(xM(sec.head.x)+7).toFixed(1)}" y="${(yM(sec.head.y)+3).toFixed(1)}" style="font-family:var(--mono);font-size:10px;fill:var(--text)">${esc(sectorShort(sec.name))}</text></g>`; }
+  s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.3"/>`;
+  s+=`<rect x="${cx}" y="${py1}" width="${px1-cx}" height="${cy-py1}" fill="rgb(70,185,126)" opacity="0.07"/>`;
+  s+=`<rect x="${px0}" y="${py1}" width="${cx-px0}" height="${cy-py1}" fill="rgb(111,147,201)" opacity="0.07"/>`;
+  s+=`<rect x="${cx}" y="${cy}" width="${px1-cx}" height="${py0-cy}" fill="rgb(227,165,60)" opacity="0.07"/>`;
+  s+=`<rect x="${px0}" y="${cy}" width="${cx-px0}" height="${py0-cy}" fill="rgb(229,96,77)" opacity="0.07"/>`;
+  s+=`<line x1="${cx}" y1="${py1}" x2="${cx}" y2="${py0}" stroke="var(--border)"/>`;
+  s+=`<line x1="${px0}" y1="${cy}" x2="${px1}" y2="${cy}" stroke="var(--border)"/>`;
+  s+=`<text x="${px1-8}" y="${py1+14}" text-anchor="end" style="font-family:var(--mono);font-size:10.5px;fill:var(--up);font-weight:600">LEADERS · ahead &amp; gaining</text>`;
+  s+=`<text x="${px0+8}" y="${py1+14}" style="font-family:var(--mono);font-size:10.5px;fill:var(--blue);font-weight:600">CATCHING UP · behind, gaining</text>`;
+  s+=`<text x="${px1-8}" y="${py0-8}" text-anchor="end" style="font-family:var(--mono);font-size:10.5px;fill:var(--accent);font-weight:600">COOLING · ahead, slowing</text>`;
+  s+=`<text x="${px0+8}" y="${py0-8}" style="font-family:var(--mono);font-size:10.5px;fill:var(--down);font-weight:600">LAGGARDS · behind &amp; falling</text>`;
+  [-mx, -mx/2, mx/2, mx].forEach(t=>{ const x=xM(t); s+=`<line x1="${x}" y1="${py0}" x2="${x}" y2="${py0+4}" stroke="var(--faint)"/><text x="${x.toFixed(1)}" y="${py0+16}" text-anchor="middle" style="${ql}">${t>0?'+':''}${t.toFixed(1)}%</text>`; });
+  s+=`<text x="${cx.toFixed(1)}" y="${py0+16}" text-anchor="middle" style="${ql}">S&amp;P</text>`;
+  s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← behind the S&amp;P    ·    % vs S&amp;P over ~90 days    ·    ahead →</text>`;
+  s+=`<text x="12" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 12 ${(py0+py1)/2})" style="${ql}">lead shrinking ▼ · growing ▲</text>`;
+  for(const sec of data){ const q=leadQuad(sec.x,sec.y), col=q.c, r=8+22*Math.sqrt((sec.vol||0)/maxVol);
+    const X=xM(sec.x), Y=yM(sec.y), dir=sec.y>=0?'lead growing':'lead shrinking';
+    const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ~90d, ${dir} — ${q.l}`;
+    s+=`<g class="lead" data-sect="${esc(sec.name)}" style="cursor:pointer"><title>${esc(tip)}</title>`;
+    s+=`<circle cx="${X.toFixed(1)}" cy="${Y.toFixed(1)}" r="${r.toFixed(1)}" fill="${col}" fill-opacity="0.3" stroke="${col}" stroke-width="1.5"/>`;
+    s+=`<text x="${X.toFixed(1)}" y="${(Y+r+11).toFixed(1)}" text-anchor="middle" style="font-family:var(--mono);font-size:10.5px;fill:var(--text)">${esc(sectorShort(sec.name))}</text></g>`; }
   s+='</svg>';
-  return s;
+  return s + leadersRankHtml(data);
 }
-function attachRRGHandlers(){ el('sect-map').querySelectorAll('.rrg').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
+function leadersRankHtml(data){
+  const sorted=[...data].sort((a,b)=>b.x-a.x);
+  const maxAbs=Math.max(0.5,...sorted.map(s=>Math.abs(s.x)));
+  const li=s=>{ const ahead=s.x>=0, w=Math.round(Math.abs(s.x)/maxAbs*88);
+    const arrow=s.y>=0?'<span class="pos" title="beating the S&amp;P by more lately (lead growing)">▲</span>':'<span class="neg" title="lead is shrinking">▼</span>';
+    return `<div class="crow lrow" data-sect="${esc(s.name)}"><span class="ct" style="width:104px">${esc(sectorShort(s.name))}</span>`+
+      `<span class="cv ${ahead?'pos':'neg'}" style="width:56px;margin-left:0">${ahead?'+':''}${s.x.toFixed(1)}%</span>`+
+      `<span style="width:16px;text-align:center">${arrow}</span>`+
+      `<span class="cbar" style="width:${w}px;background:${ahead?'var(--up)':'var(--down)'};opacity:.55"></span></div>`; };
+  return `<div class="cp-sub" style="margin:16px 2px 8px">Sectors ranked vs the S&amp;P (~90d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ lead growing · ▼ shrinking · click a row to drill in</span></div>`+
+    sorted.map(li).join('');
+}
+function attachLeadersHandlers(){ el('sect-map').querySelectorAll('.lead, .lrow').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
 function renderSectorMap(list){
   const W=760,H=380, px0=52,px1=W-18, py0=H-30, py1=20;
   const plot=list.filter(g=>g.direction!=null&&g.name!=='Unclassified');
@@ -1090,6 +1088,16 @@ document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state
   b.addEventListener('click',()=>{ document.querySelectorAll('#rfseg button').forEach(x=>x.classList.toggle('active',x===b));
     setRefresh(+b.dataset.ms); savePrefs(); }); });
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));
+(function(){ const isAmber=()=>document.documentElement.getAttribute('data-theme')==='amber';
+  const setLabel=()=>{ const b=el('themeBtn'); if(b) b.textContent = isAmber()?'◐ dark':'◐ amber'; };
+  setLabel();
+  el('themeBtn').addEventListener('click',()=>{
+    if(isAmber()){ document.documentElement.removeAttribute('data-theme'); store.set('xyzmon.theme','dark'); }
+    else { document.documentElement.setAttribute('data-theme','amber'); store.set('xyzmon.theme','amber'); }
+    setLabel();
+    render(); if(!el('view-sectors').hidden) renderSectors(); if(!el('view-corr').hidden) renderCorr();
+  });
+})();
 document.querySelectorAll('#corrtf button').forEach(b=>{ if(b.dataset.d===state.corr.tf)b.classList.add('active');
   b.addEventListener('click',()=>{ state.corr.tf=b.dataset.d; document.querySelectorAll('#corrtf button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-corr').hidden) renderCorr(); }); });
