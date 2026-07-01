@@ -807,8 +807,8 @@ function renderSectors(){
   computeDerived();
   const list=computeSectors();
   const lg=el('sect-legend'); if(lg) lg.innerHTML = state.sect.mode==='leaders'
-    ? '<b>Leadership map</b> — where each sector sits vs the S&amp;P over ~90 days. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> sectors are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume.'
-    : '<b>Flow map</b> — horizontal = capital direction (price + OI conviction), vertical = activity heat (volume + volatility). Top-right = accumulation, top-left = distribution. Bubble size = 24h volume.';
+    ? `<b>Leadership map</b> — where each sector sits vs the S&amp;P over the last <b>${leadersDays()}d</b>${leadersFloored()?' <span class="sec">(leadership needs a multi-day window, so intraday selections show 7d — use the rotation board below for shorter windows)</span>':''}. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> sectors are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume.`
+    : '<b>Flow map</b> — horizontal = capital direction (price + OI conviction) over the selected window, vertical = activity heat (volume + volatility). Top-right = accumulation, top-left = distribution. Bubble size = 24h volume.';
   if(state.sect.mode==='leaders'){
     const data=computeLeaders(list);
     el('sect-map').innerHTML = data ? renderLeaders(data)
@@ -823,14 +823,17 @@ function renderSectors(){
   renderSectorCorr(list);
 }
 // ---- Leadership map: plain % relative to the S&P (X) and whether the lead is growing (Y) ----
+// Leadership lookback follows the window selector (7d/30d). It's daily-based, so intraday choices floor to 7d.
+function leadersDays(){ return {'1h':7,'4h':7,'1d':7,'7d':7,'30d':30}[state.tf]||30; }
+function leadersFloored(){ return state.tf==='1h'||state.tf==='4h'||state.tf==='1d'; }
 function computeLeaders(list){
   const bench=state.benchCoin?state.rows.get(state.benchCoin):null;
-  if(!bench||!bench.daily||bench.daily.length<20) return null;
+  if(!bench||!bench.daily||bench.daily.length<5) return null;
   const bDay=new Map();
   for(const k of bench.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) bDay.set(d,cl); }
   const days=[...bDay.keys()].sort((a,b)=>a-b);
-  const win=days.slice(-Math.min(90, days.length));
-  if(win.length<15) return null;
+  const win=days.slice(-Math.min(leadersDays(), days.length));
+  if(win.length<5) return null;
   const b0=bDay.get(win[0]); if(!(b0>0)) return null;
   const mid=Math.floor(win.length/2), bMid=bDay.get(win[mid]), bEnd=bDay.get(win[win.length-1]);
   const benchRet=bEnd/b0-1, benchEarly=bMid/b0-1, benchLate=bEnd/bMid-1;
@@ -838,7 +841,7 @@ function computeLeaders(list){
   for(const g of list){
     if(g.name==='Unclassified') continue;
     const series=[];
-    for(const r of g.members){ if(!r.daily||r.daily.length<15) continue;
+    for(const r of g.members){ if(!r.daily||r.daily.length<5) continue;
       const bd=new Map();
       for(const k of r.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) bd.set(d,cl); }
       const first=win.find(d=>bd.has(d)); if(first==null) continue; const f=bd.get(first); if(!(f>0)) continue;
@@ -856,6 +859,7 @@ function computeLeaders(list){
 }
 function leadQuad(x,y){ if(x>=0&&y>=0)return {l:'Leaders',c:'var(--up)'}; if(x<0&&y>=0)return {l:'Catching up',c:'var(--blue)'}; if(x>=0&&y<0)return {l:'Cooling',c:'var(--accent)'}; return {l:'Laggards',c:'var(--down)'}; }
 function renderLeaders(data){
+  const wl=leadersDays()+'d';
   const W=760,H=430, px0=44,px1=W-14, py0=H-48, py1=30;
   let mx=0.6,my=0.6; for(const s of data){ mx=Math.max(mx,Math.abs(s.x)); my=Math.max(my,Math.abs(s.y)); }
   mx*=1.18; my*=1.18;
@@ -877,11 +881,11 @@ function renderLeaders(data){
   s+=`<text x="${px0+8}" y="${py0-8}" style="font-family:var(--mono);font-size:10.5px;fill:var(--down);font-weight:600">LAGGARDS · behind &amp; falling</text>`;
   [-mx, -mx/2, mx/2, mx].forEach(t=>{ const x=xM(t); s+=`<line x1="${x}" y1="${py0}" x2="${x}" y2="${py0+4}" stroke="var(--faint)"/><text x="${x.toFixed(1)}" y="${py0+16}" text-anchor="middle" style="${ql}">${t>0?'+':''}${t.toFixed(1)}%</text>`; });
   s+=`<text x="${cx.toFixed(1)}" y="${py0+16}" text-anchor="middle" style="${ql}">S&amp;P</text>`;
-  s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← behind the S&amp;P    ·    % vs S&amp;P over ~90 days    ·    ahead →</text>`;
+  s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← behind the S&amp;P    ·    % vs S&amp;P over ${wl}    ·    ahead →</text>`;
   s+=`<text x="12" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 12 ${(py0+py1)/2})" style="${ql}">lead shrinking ▼ · growing ▲</text>`;
   for(const sec of data){ const q=leadQuad(sec.x,sec.y), col=q.c, r=8+22*Math.sqrt((sec.vol||0)/maxVol);
     const X=xM(sec.x), Y=yM(sec.y), dir=sec.y>=0?'lead growing':'lead shrinking';
-    const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ~90d, ${dir} — ${q.l}`;
+    const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ${wl}, ${dir} — ${q.l}`;
     s+=`<g class="lead" data-sect="${esc(sec.name)}" style="cursor:pointer"><title>${esc(tip)}</title>`;
     s+=`<circle cx="${X.toFixed(1)}" cy="${Y.toFixed(1)}" r="${r.toFixed(1)}" fill="${col}" fill-opacity="0.3" stroke="${col}" stroke-width="1.5"/>`;
     s+=`<text x="${X.toFixed(1)}" y="${(Y+r+11).toFixed(1)}" text-anchor="middle" style="font-family:var(--mono);font-size:10.5px;fill:var(--text)">${esc(sectorShort(sec.name))}</text></g>`; }
@@ -897,7 +901,7 @@ function leadersRankHtml(data){
       `<span class="cv ${ahead?'pos':'neg'}" style="width:56px;margin-left:0">${ahead?'+':''}${s.x.toFixed(1)}%</span>`+
       `<span style="width:16px;text-align:center">${arrow}</span>`+
       `<span class="cbar" style="width:${w}px;background:${ahead?'var(--up)':'var(--down)'};opacity:.55"></span></div>`; };
-  return `<div class="cp-sub" style="margin:16px 2px 8px">Sectors ranked vs the S&amp;P (~90d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ lead growing · ▼ shrinking · click a row to drill in</span></div>`+
+  return `<div class="cp-sub" style="margin:16px 2px 8px">Sectors ranked vs the S&amp;P (${leadersDays()}d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ lead growing · ▼ shrinking · click a row to drill in</span></div>`+
     sorted.map(li).join('');
 }
 function attachLeadersHandlers(){ el('sect-map').querySelectorAll('.lead, .lrow').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
