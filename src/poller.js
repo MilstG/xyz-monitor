@@ -104,11 +104,12 @@ function createPoller({ dex, store, log }) {
       r.d1 = (r.px != null && r.prevDay) ? (r.px - r.prevDay) / r.prevDay * 100 : r.d1;
       seen.add(coin);
     });
-    for (const k of [...rows.keys()]) if (!seen.has(k)) rows.delete(k);
-    benchCoin = detectBenchmark();
+    let removed = 0;
+    for (const k of [...rows.keys()]) if (!seen.has(k)) { rows.delete(k); hist.delete(k); removed++; }
+    if (newCount || removed || benchCoin == null) benchCoin = detectBenchmark();
     sampleOI();
     lastPoll = Date.now();
-    buildSnapshot();
+    if (newCount || removed) buildSnapshot();
   }
 
   async function refreshHourly(coin) {
@@ -145,7 +146,8 @@ function createPoller({ dex, store, log }) {
   async function hourlyWorker() {
     for (;;) {
       const coin = pick(needHourly);
-      if (!coin || inflight.has("h:" + coin)) { await sleep(500); continue; }
+      if (!coin) { await sleep(2000); continue; }
+      if (inflight.has("h:" + coin)) { await sleep(500); continue; }
       inflight.add("h:" + coin);
       try { await refreshHourly(coin); } catch (_) {} finally { inflight.delete("h:" + coin); }
     }
@@ -165,7 +167,8 @@ function createPoller({ dex, store, log }) {
     for (;;) {
       if (!hourlyPassComplete()) { await sleep(1000); continue; }
       const coin = pick(needDaily);
-      if (!coin || inflight.has("d:" + coin)) { await sleep(800); continue; }
+      if (!coin) { await sleep(2000); continue; }
+      if (inflight.has("d:" + coin)) { await sleep(800); continue; }
       inflight.add("d:" + coin);
       try { await refreshDaily(coin); } catch (_) {} finally { inflight.delete("d:" + coin); }
     }
@@ -173,9 +176,12 @@ function createPoller({ dex, store, log }) {
 
   function activeMarkets() { return order.map((c) => rows.get(c)).filter(Boolean); }
 
+  const _clsCache = new Map();
+  function classifyCached(t) { let v = _clsCache.get(t); if (!v) { v = classify(t); _clsCache.set(t, v); } return v; }
+
   function buildSnapshot() {
     const markets = activeMarkets().map((r) => {
-      const cl = classify(r.ticker);
+      const cl = classifyCached(r.ticker);
       return {
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted,
         px: r.px, prevDay: r.prevDay, funding: r.funding, vol: r.vol, oi: r.oi, oiBase: r.oiBase,

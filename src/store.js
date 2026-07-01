@@ -6,6 +6,8 @@
 const fs = require("fs");
 const path = require("path");
 
+const MAX_BUF = 50000; // hard cap on unflushed lines if the volume is unwritable
+
 function openStore(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, "oi.log");
@@ -15,7 +17,11 @@ function openStore(dataDir) {
   function flush() {
     if (!buf.length) return;
     try { fs.appendFileSync(file, buf.join("")); buf = []; }
-    catch (_) { /* keep buffer for next attempt */ }
+    catch (_) {
+      // Keep the buffer for the next attempt, but don't let it grow without bound if the
+      // volume is detached/full — drop the oldest half so memory stays bounded.
+      if (buf.length > MAX_BUF) buf = buf.slice(buf.length >> 1);
+    }
   }
 
   return {

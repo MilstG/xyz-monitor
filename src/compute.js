@@ -25,11 +25,15 @@ function linregR2(ys) {
   for (let i = 0; i < n; i++) { const yh = slope * i + b; sr += (ys[i] - yh) ** 2; st += (ys[i] - my) ** 2; }
   return { slope, r2: st > 0 ? 1 - sr / st : 0 };
 }
+// Nearest candle close to `target` time. Candles are time-sorted ascending, so we binary
+// search to the boundary and compare the two neighbours (was a full linear scan before).
 function priceAt(c, target, tol) {
   if (!c || !c.length) return null;
-  let best = null, bd = Infinity;
-  for (const k of c) { const d = Math.abs(k.t - target); if (d < bd) { bd = d; best = k; } }
-  if (!best || bd > tol) return null;
+  let lo = 0, hi = c.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (c[mid].t < target) lo = mid + 1; else hi = mid; }
+  let best = c[lo];
+  if (lo > 0 && Math.abs(c[lo - 1].t - target) < Math.abs(best.t - target)) best = c[lo - 1];
+  if (!best || Math.abs(best.t - target) > tol) return null;
   const v = parseFloat(best.c);
   return isFinite(v) ? v : null;
 }
@@ -81,39 +85,16 @@ function featuresFromHourly(c, now, HOUR, DAY) {
 }
 
 // Open-interest change over a window from a [[ts, oi], ...] history buffer.
-// Anchors by linear interpolation between the two samples that straddle `now - window`,
-// so the reference lands on the exact window boundary rather than on whichever stored
-// sample happens to be nearest. Tolerance is derived from the window and hard-capped at
-// 12h, so a long-window ΔOI can never be silently anchored days off-target; if no sample
-// lands within tolerance it returns null instead of a misleading number. A straddle wider
-// than 3× tolerance (i.e. a poller outage) uses the nearer sample instead of interpolating
-// across the void. The 4th argument (old per-call tolerance) is accepted and ignored for
-// backward compatibility with existing callers.
-function oiDeltaPct(hist, oiNow, windowMs) {
-  if (!hist || hist.length < 2 || !(oiNow > 0)) return null;
-  const MIN = 60 * 1000, HOUR = 60 * MIN, OI_MIN_GAP = 4.5 * MIN;
-  const tol = Math.min(Math.max(2 * OI_MIN_GAP, windowMs * 0.05), 12 * HOUR);
+// hist is time-sorted ascending, so binary search to the window boundary (was linear).
+function oiDeltaPct(hist, oiNow, windowMs, tolMs) {
+  if (!hist || hist.length < 2 || oiNow == null) return null;
   const target = Date.now() - windowMs;
-
-  let before = null, after = null;
-  for (const s of hist) {
-    if (!(s[1] > 0)) continue;                       // skip non-positive OI samples
-    if (s[0] <= target) { if (!before || s[0] > before[0]) before = s; }
-    else if (!after || s[0] < after[0]) after = s;
-  }
-  const dBefore = before ? target - before[0] : Infinity;
-  const dAfter  = after  ? after[0] - target  : Infinity;
-  if (Math.min(dBefore, dAfter) > tol) return null;
-
-  let base;
-  if (before && after && (after[0] - before[0]) <= 3 * tol) {
-    const span = after[0] - before[0];
-    base = before[1] + (after[1] - before[1]) * ((target - before[0]) / span);
-  } else {
-    base = (dBefore <= dAfter ? before : after)[1];  // one-sided, or straddle too wide
-  }
-  if (!(base > 0)) return null;
-  return (oiNow - base) / base * 100;
+  let lo = 0, hi = hist.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (hist[mid][0] < target) lo = mid + 1; else hi = mid; }
+  let best = hist[lo];
+  if (lo > 0 && Math.abs(hist[lo - 1][0] - target) < Math.abs(best[0] - target)) best = hist[lo - 1];
+  if (!best || Math.abs(best[0] - target) > tolMs || !(best[1] > 0)) return null;
+  return (oiNow - best[1]) / best[1] * 100;
 }
 
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct };
