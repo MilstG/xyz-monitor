@@ -48,7 +48,7 @@ const LAYOUT_V=2; // bump to force a one-time reset of saved layouts to the new 
 const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'90', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
-  sect:{ wt:'vol', sel:null },
+  sect:{ wt:'vol', sel:null, mode:'flow' }, dataTs:0, connOk:true, view:'markets',
   watch:new Set(), watchOnly:false, detail:null,
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
@@ -137,6 +137,7 @@ function applySnapshot(s){
   }
   for(const k of [...state.rows.keys()]) if(!seen.has(k)) state.rows.delete(k);
   state.benchCoin=s.benchCoin||detectBenchmark();
+  if(s.dataTs) state.dataTs=s.dataTs;
   const bn=el('benchnote'); if(bn) bn.textContent=(state.benchCoin&&state.rows.get(state.benchCoin))?state.rows.get(state.benchCoin).ticker:'not found';
   updateAggregates(); render(); updateMovers(); updateSyncProgress();
 }
@@ -153,7 +154,11 @@ function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   el('s-mkts').textContent=rows.length; el('s-vol').textContent=fmtUsd(v); el('s-oi').textContent=fmtUsd(o);
   el('s-upd').textContent=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 function errRow(m){ return `<tr><td colspan="${COLS.length}"><div class="msg err"><span class="big">Couldn't reach the server</span>${esc(m||'Network error')}. Will retry on the next interval.</div></td></tr>`; }
-function setStatus(ok){ const d=el('live'); if(d){ d.style.background=ok?'var(--up)':'var(--down)'; d.title=ok?'live':'connection error'; } }
+function setStatus(ok){ state.connOk=ok; const d=el('live'); if(d){ d.style.background=ok?'var(--up)':'var(--down)'; d.title=ok?'live':'connection error'; } if(ok) updateFreshness(); }
+function updateFreshness(){ if(!state.connOk) return; const d=el('live'); if(!d||!state.dataTs) return;
+  const age=Date.now()-state.dataTs;
+  if(age>180000){ d.style.background='var(--accent)'; d.title='server data is '+Math.round(age/60000)+'m old — the poller may be stalled'; }
+  else { d.style.background='var(--up)'; d.title='live'; } }
 function updateSyncProgress(){ const rows=activeRows(); let done=0; for(const r of rows) if(r.feat) done++;
   const s=el('sync'); if(!s) return;
   if(rows.length>0&&done>=rows.length){ s.classList.add('done'); el('sync-t').textContent='synced'; }
@@ -281,8 +286,10 @@ function miniSpark(vals, color){ const w=62,h=18,pad=2; if(vals.length<2) return
   const X=i=>pad+(i/(vals.length-1))*(w-2*pad), Y=v=>h-pad-((v-mn)/rng)*(h-2*pad);
   let d=''; vals.forEach((v,i)=>d+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' ');
   return `<svg class="tspark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${d.trim()}" fill="none" stroke="${color}" stroke-width="1.3" vector-effect="non-scaling-stroke"/></svg>`; }
-function trendCell(r){ const c=r.daily; if(!c||c.length<3) return '<td><span class="na">·</span></td>';
-  const cl=c.slice(-31).map(k=>parseFloat(k.c)).filter(isFinite); if(cl.length<3) return '<td><span class="na">·</span></td>';
+function trendCell(r){
+  let cl = (r.feat && Array.isArray(r.feat.px30)) ? r.feat.px30.slice(-31)
+         : (r.daily ? r.daily.slice(-31).map(k=>parseFloat(k.c)).filter(isFinite) : null);
+  if(!cl || cl.length<3) return '<td><span class="na">·</span></td>';
   const up=cl[cl.length-1]>=cl[0]; return `<td title="30d path">${miniSpark(cl, up?'var(--up)':'var(--down)')}</td>`; }
 function volCell(r){ if(r.vol30==null||!isFinite(r.vol30)) return '<td><span class="na" title="loading hourly history…">·</span></td>';
   return `<td class="sec" title="annualized realized vol">${r.vol30.toFixed(0)}%</td>`; }
@@ -579,6 +586,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
       <button class="dclose" id="dclose" title="close">✕</button></div>
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}</div>
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
+    <div id="dseries"></div>
     <div class="dsec">Metrics</div>
     <div class="dgrid">
       ${st('Funding (APR)',`<span class="${fu.c}">${fu.t}</span>`)}
@@ -596,8 +604,24 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   el('drawer').classList.add('show'); el('drawerbg').classList.add('show'); el('drawer').setAttribute('aria-hidden','false');
   el('dclose').onclick=closeDetail;
   el('dstar').onclick=()=>{ toggleWatch(coin); openDetail(coin); };
+  setHash('t='+encodeURIComponent(coin));
+  loadDrawerSeries(coin);
 }
-function closeDetail(){ state.detail=null; el('drawer').classList.remove('show'); el('drawerbg').classList.remove('show'); el('drawer').setAttribute('aria-hidden','true'); }
+async function loadDrawerSeries(coin){
+  const box=el('dseries'); if(!box) return;
+  try{
+    const s=await fetchJSON('/api/series?coin='+encodeURIComponent(coin));
+    if(state.detail!==coin || !box.isConnected) return;
+    const span=arr=>{ if(!arr||arr.length<2)return ''; const ms=arr[arr.length-1][0]-arr[0][0], d=ms/86400000; return d>=1?('· last '+d.toFixed(0)+'d'):('· last '+(ms/3600000).toFixed(0)+'h'); };
+    let html='';
+    if(s.oi && s.oi.length>2){ const v=s.oi.map(p=>p[1]), up=v[v.length-1]>=v[0];
+      html+=`<div class="dsec">Open interest ${span(s.oi)}</div>${sparkline(v,{color:up?'var(--up)':'var(--down)'})}`; }
+    if(s.funding && s.funding.length>2){ const v=s.funding.map(p=>p[1]*24*365*100), last=v[v.length-1];
+      html+=`<div class="dsec">Funding APR ${span(s.funding)} · now ${(last>=0?'+':'')+last.toFixed(1)}%</div>${sparkline(v,{zero:true,color:'var(--blue)'})}`; }
+    box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:12px">collecting — the trend appears here as history accrues server-side</div>';
+  }catch(_){}
+}
+function closeDetail(){ state.detail=null; el('drawer').classList.remove('show'); el('drawerbg').classList.remove('show'); el('drawer').setAttribute('aria-hidden','true'); setHash(state.view==='markets'?'':state.view); }
 function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); else state.watch.add(coin); savePrefs(); render(); }
 
 // ===== persistence (localStorage; UI prefs only) =====
@@ -702,13 +726,19 @@ function saveAlerts(){ store.set(AKEY, JSON.stringify({rules:state.alerts.rules,
 function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch(_){ d=null; } if(!d) return;
   if(Array.isArray(d.rules)) state.alerts.rules=d.rules.filter(r=>r&&AM_BY[r.metric]); state.alerts.notify=!!d.notify; }
 
+function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
+function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
+  if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
+  if(h==='sectors'||h==='corr'||h==='markets') showView(h); }
 function showView(v){
+  state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   el('view-markets').hidden = v!=='markets';
   el('view-sectors').hidden = v!=='sectors';
   el('view-corr').hidden = v!=='corr';
   if(v==='corr') openCorr();
   if(v==='sectors') renderSectors();
+  if(!state.detail) setHash(v==='markets'?'':v);
 }
 
 // ===== sectors tab =====
@@ -776,12 +806,103 @@ function renderSectors(){
   if(!state.rows.size){ el('sect-map').innerHTML='<div class="msg">Markets still loading — switch back in a moment.</div>'; return; }
   computeDerived();
   const list=computeSectors();
-  el('sect-map').innerHTML=renderSectorMap(list);
-  attachMapHandlers();
+  const lg=el('sect-legend'); if(lg) lg.innerHTML = state.sect.mode==='rrg'
+    ? '<b>Rotation graph</b> — each sector\u2019s trajectory in relative strength vs the S&amp;P (JdK RS-Ratio / RS-Momentum, approximated). Right = outperforming, up = strengthening; sectors drift clockwise through Leading → Weakening → Lagging → Improving. The tail shows the recent path.'
+    : '<b>Flow map</b> — horizontal = capital direction (price + OI conviction), vertical = activity heat (volume + volatility). Top-right = accumulation, top-left = distribution. Bubble size = 24h volume.';
+  if(state.sect.mode==='rrg'){
+    const rrg=computeRRG(list);
+    el('sect-map').innerHTML = rrg ? renderRRG(rrg)
+      : '<div class="msg">Rotation graph needs the S&amp;P benchmark and a few weeks of daily history — it fills in as the background daily backfill completes.</div>';
+    if(rrg) attachRRGHandlers();
+  } else {
+    el('sect-map').innerHTML=renderSectorMap(list);
+    attachMapHandlers();
+  }
   renderSectorBoard(list);
   renderSectorDetail();
   renderSectorCorr(list);
 }
+// ---- Relative Rotation Graph (approx. JdK RS-Ratio / RS-Momentum vs the S&P benchmark) ----
+function rollingZ(arr, W){
+  const out=arr.map(()=>null), need=Math.max(5, Math.floor(W/2));
+  for(let i=0;i<arr.length;i++){ if(arr[i]==null) continue; const w=[];
+    for(let j=Math.max(0,i-W+1);j<=i;j++) if(arr[j]!=null) w.push(arr[j]);
+    if(w.length<need) continue;
+    const m=w.reduce((a,b)=>a+b,0)/w.length, sd=stdev(w);
+    out[i]= sd>0 ? (arr[i]-m)/sd : 0; }
+  return out;
+}
+function computeRRG(list){
+  const bench=state.benchCoin?state.rows.get(state.benchCoin):null;
+  if(!bench||!bench.daily||bench.daily.length<30) return null;
+  const benchByDay=new Map();
+  for(const k of bench.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) benchByDay.set(d,cl); }
+  const allDays=[...benchByDay.keys()].sort((a,b)=>a-b);
+  const win=allDays.slice(-Math.min(70, allDays.length));
+  if(win.length<25) return null;
+  const b0=benchByDay.get(win[0]); if(!(b0>0)) return null;
+  const benchIdx=win.map(d=>{ const v=benchByDay.get(d); return v!=null?v/b0:null; });
+  const W=Math.min(20, Math.floor(win.length/2)), LAG=Math.max(3, Math.floor(W/3)), K=8;
+  const out=[];
+  for(const g of list){
+    if(g.name==='Unclassified') continue;
+    const series=[];
+    for(const r of g.members){ if(!r.daily||r.daily.length<25) continue;
+      const bd=new Map();
+      for(const k of r.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) bd.set(d,cl); }
+      const first=win.find(d=>bd.has(d)); if(first==null) continue;
+      const f=bd.get(first); if(!(f>0)) continue;
+      series.push({bd, f}); }
+    if(!series.length) continue;
+    const secIdx=win.map(d=>{ let s=0,n=0; for(const ms of series){ const cl=ms.bd.get(d); if(cl!=null&&cl>0){ s+=cl/ms.f; n++; } } return n?s/n:null; });
+    const rs=secIdx.map((v,i)=> (v!=null&&benchIdx[i]>0)? v/benchIdx[i]*100 : null);
+    const rsRatio=rollingZ(rs, W).map(z=> z==null?null:100+z);
+    const momRaw=rsRatio.map((v,i)=> (v!=null&&rsRatio[i-LAG]!=null)? v-rsRatio[i-LAG] : null);
+    const rsMom=rollingZ(momRaw, W).map(z=> z==null?null:100+z);
+    const pts=[];
+    for(let i=win.length-1;i>=0&&pts.length<K;i--){ if(rsRatio[i]!=null&&rsMom[i]!=null) pts.push({x:rsRatio[i], y:rsMom[i]}); }
+    pts.reverse();
+    if(pts.length<2) continue;
+    out.push({name:g.name, pts, head:pts[pts.length-1]});
+  }
+  return out.length?out:null;
+}
+function rrgQuad(x,y){ if(x>=100&&y>=100)return {l:'Leading',c:'var(--up)'}; if(x>=100&&y<100)return {l:'Weakening',c:'var(--accent)'}; if(x<100&&y<100)return {l:'Lagging',c:'var(--down)'}; return {l:'Improving',c:'var(--blue)'}; }
+function renderRRG(rrg){
+  const W=760,H=420, px0=52,px1=W-18, py0=H-30, py1=20;
+  let minX=100,maxX=100,minY=100,maxY=100;
+  for(const s of rrg) for(const p of s.pts){ minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); }
+  const padX=Math.max(0.6,(maxX-minX)*0.12), padY=Math.max(0.6,(maxY-minY)*0.12);
+  minX-=padX; maxX+=padX; minY-=padY; maxY+=padY;
+  const xM=v=>px0+(clamp(v,minX,maxX)-minX)/(maxX-minX)*(px1-px0);
+  const yM=v=>py0-(clamp(v,minY,maxY)-minY)/(maxY-minY)*(py0-py1);
+  const cx=xM(100), cy=yM(100);
+  const ql='font-family:var(--mono);font-size:10px;fill:var(--faint)';
+  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.35"/>`;
+  // quadrant tints
+  s+=`<rect x="${cx}" y="${py1}" width="${px1-cx}" height="${cy-py1}" fill="rgb(70,185,126)" opacity="0.05"/>`;
+  s+=`<rect x="${cx}" y="${cy}" width="${px1-cx}" height="${py0-cy}" fill="rgb(227,165,60)" opacity="0.05"/>`;
+  s+=`<rect x="${px0}" y="${cy}" width="${cx-px0}" height="${py0-cy}" fill="rgb(229,96,77)" opacity="0.05"/>`;
+  s+=`<rect x="${px0}" y="${py1}" width="${cx-px0}" height="${cy-py1}" fill="rgb(111,147,201)" opacity="0.05"/>`;
+  s+=`<line x1="${cx}" y1="${py1}" x2="${cx}" y2="${py0}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
+  s+=`<line x1="${px0}" y1="${cy}" x2="${px1}" y2="${cy}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
+  s+=`<text x="${px1-6}" y="${py1+14}" text-anchor="end" style="${ql}">Leading</text>`;
+  s+=`<text x="${px1-6}" y="${py0-6}" text-anchor="end" style="${ql}">Weakening</text>`;
+  s+=`<text x="${px0+6}" y="${py0-6}" style="${ql}">Lagging</text>`;
+  s+=`<text x="${px0+6}" y="${py1+14}" style="${ql}">Improving</text>`;
+  s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← weaker   ·   relative strength vs S&amp;P   ·   stronger →</text>`;
+  s+=`<text x="14" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 14 ${(py0+py1)/2})" style="${ql}">RS momentum →</text>`;
+  for(const sec of rrg){ const q=rrgQuad(sec.head.x, sec.head.y), col=q.c;
+    let d=''; sec.pts.forEach((p,i)=> d+=(i?'L':'M')+xM(p.x).toFixed(1)+' '+yM(p.y).toFixed(1)+' ');
+    s+=`<g class="rrg" data-sect="${esc(sec.name)}" style="cursor:pointer"><title>${esc(sec.name)} — ${q.l} · RS ${sec.head.x.toFixed(1)} · momentum ${sec.head.y.toFixed(1)}</title>`;
+    s+=`<path d="${d.trim()}" fill="none" stroke="${col}" stroke-width="1.4" opacity="0.5"/>`;
+    sec.pts.forEach((p,i)=>{ const last=i===sec.pts.length-1; s+=`<circle cx="${xM(p.x).toFixed(1)}" cy="${yM(p.y).toFixed(1)}" r="${last?4.5:2}" fill="${col}" opacity="${last?1:0.4+0.5*i/sec.pts.length}"/>`; });
+    s+=`<text x="${(xM(sec.head.x)+7).toFixed(1)}" y="${(yM(sec.head.y)+3).toFixed(1)}" style="font-family:var(--mono);font-size:10px;fill:var(--text)">${esc(sectorShort(sec.name))}</text></g>`; }
+  s+='</svg>';
+  return s;
+}
+function attachRRGHandlers(){ el('sect-map').querySelectorAll('.rrg').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
 function renderSectorMap(list){
   const W=760,H=380, px0=52,px1=W-18, py0=H-30, py1=20;
   const plot=list.filter(g=>g.direction!=null&&g.name!=='Unclassified');
@@ -899,7 +1020,7 @@ function startCycle(){ clearInterval(cycleTimer); cycleTimer=setInterval(()=>{ l
 function setRefresh(ms){ state.refreshMs=ms; state.pollMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
 setInterval(()=>{ const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left/60000), s=Math.floor((left%60000)/1000);
-  el('cd').textContent=m+':'+String(s).padStart(2,'0'); },500);
+  el('cd').textContent=m+':'+String(s).padStart(2,'0'); updateFreshness(); },500);
 
 // ===== init =====
 loadPrefs();
@@ -961,6 +1082,10 @@ document.querySelectorAll('#sectwt button').forEach(b=>{ if(b.dataset.wt===state
     document.querySelectorAll('#sectwt button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-sectors').hidden) renderSectors(); }); });
 el('sectExport').addEventListener('click', exportSectors);
+document.querySelectorAll('#sectmode button').forEach(b=>{ if(b.dataset.mode===state.sect.mode)b.classList.add('active');
+  b.addEventListener('click',()=>{ state.sect.mode=b.dataset.mode;
+    document.querySelectorAll('#sectmode button').forEach(x=>x.classList.toggle('active',x===b));
+    if(!el('view-sectors').hidden) renderSectors(); }); });
 document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state.refreshMs)b.classList.add('active');
   b.addEventListener('click',()=>{ document.querySelectorAll('#rfseg button').forEach(x=>x.classList.toggle('active',x===b));
     setRefresh(+b.dataset.ms); savePrefs(); }); });
@@ -981,6 +1106,7 @@ el('corrExport').addEventListener('click', exportCorr);
 
 (async ()=>{
   await Promise.all([loadSnapshot(), loadDaily()]);
+  applyHash();
   startCycle();
   dailyTimer=setInterval(loadDaily, 15*60*1000);
 })();
