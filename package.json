@@ -6,7 +6,8 @@
   "description": "Server-cached monitor for HIP-3 perp markets on Hyperliquid (dex: xyz)",
   "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@fastify/compress": "^7.0.3",

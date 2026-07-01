@@ -8,6 +8,8 @@ const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+const SITE_PASSWORD = process.env.SITE_PASSWORD || ""; // set to require a shared password
+const SITE_USER = process.env.SITE_USER || "friend";
 
 function log(msg) { console.log(new Date().toISOString() + " " + msg); }
 
@@ -16,6 +18,20 @@ const poller = createPoller({ dex: DEX, store, log });
 
 async function main() {
   const fastify = Fastify({ logger: false });
+
+  // Optional shared-password gate (HTTP Basic). Disabled unless SITE_PASSWORD is set.
+  if (SITE_PASSWORD) {
+    fastify.addHook("onRequest", async (req, reply) => {
+      const hdr = req.headers.authorization || "";
+      const [scheme, enc] = hdr.split(" ");
+      if (scheme === "Basic" && enc) {
+        const [u, p] = Buffer.from(enc, "base64").toString().split(":");
+        if (u === SITE_USER && p === SITE_PASSWORD) return;
+      }
+      reply.header("WWW-Authenticate", 'Basic realm="xyz-monitor"').code(401).send("Authentication required");
+    });
+    log("Access control: shared-password protection ENABLED");
+  }
 
   await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"] });
   await fastify.register(require("@fastify/static"), { root: path.join(__dirname, "public"), prefix: "/" });
@@ -28,6 +44,11 @@ async function main() {
     reply.header("cache-control", "no-store");
     return poller.getDaily() || { ts: 0, daily: {} };
   });
+  fastify.get("/api/series", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const coin = (req.query && req.query.coin) || "";
+    return poller.getSeries(coin) || { oi: [], funding: [] };
+  });
   fastify.get("/api/health", () => ({ ok: true, ...poller.stats(), ts: Date.now() }));
 
   await fastify.listen({ port: PORT, host: HOST });
@@ -37,6 +58,6 @@ async function main() {
 
 main().catch((e) => { console.error(e); process.exit(1); });
 
-function shutdown() { store.close(); process.exit(0); }
+function shutdown() { try { poller.persistFeatures(); } catch (_) {} store.close(); process.exit(0); }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
