@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>[XYZ] Markets Monitor · Hyperliquid HIP-3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="wordmark"><span>Trade</span><span class="bk">[XYZ]</span><span class="dot" id="live" title="connecting"></span></div>
+    <div class="sub">HIP-3 perp markets on <b>Hyperliquid</b> · dex <code style="font-family:var(--mono)">xyz</code> · served from a continuously updated cache</div>
+  </div>
+  <div class="stats">
+    <div class="stat"><span class="k">Markets</span><span class="v" id="s-mkts">—</span></div>
+    <div class="stat"><span class="k">24h Volume</span><span class="v" id="s-vol">—</span></div>
+    <div class="stat"><span class="k">Open Interest</span><span class="v" id="s-oi">—</span></div>
+    <div class="stat"><span class="k">Updated</span><span class="v" id="s-upd" style="font-size:13px">—</span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-view="markets">Markets</button>
+  <button class="tab" data-view="sectors">Sectors</button>
+  <button class="tab" data-view="corr">Correlation</button>
+</nav>
+
+<div id="view-markets">
+<div class="controls">
+  <div class="search">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input id="filter" type="text" placeholder="Filter ticker…" autocomplete="off" spellcheck="false"/>
+  </div>
+  <div class="seg" id="tfseg" role="group" aria-label="Analysis window">
+    <span class="seglbl">window</span>
+    <button type="button" data-tf="1h">1h</button>
+    <button type="button" data-tf="4h">4h</button>
+    <button type="button" data-tf="1d">1d</button>
+    <button type="button" data-tf="7d">7d</button>
+    <button type="button" data-tf="30d">30d</button>
+  </div>
+  <div class="seg" id="rfseg" role="group" aria-label="Refresh cadence">
+    <span class="seglbl">refresh</span>
+    <button type="button" data-ms="30000">30s</button>
+    <button type="button" data-ms="60000">1m</button>
+    <button type="button" data-ms="300000">5m</button>
+    <button type="button" data-ms="900000">15m</button>
+  </div>
+  <span class="benchnote">benchmark: <b id="benchnote">…</b></span>
+  <button class="btn" id="refresh" title="Refresh now"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Refresh</button>
+  <div class="colmenu">
+    <button class="btn" id="colsBtn" aria-haspopup="true" aria-expanded="false" title="Show, hide & reorder columns">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="1"/><line x1="9" y1="4" x2="9" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/></svg>Columns
+    </button>
+    <div class="colpop" id="colpop" hidden></div>
+  </div>
+  <button class="btn" id="mktExport" title="Download the current table as CSV">↓ CSV</button>
+  <div class="bellwrap">
+    <button class="btn" id="bellBtn" aria-haspopup="true" aria-expanded="false" title="Alerts">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Alerts
+      <span class="bell-badge" id="bellBadge">0</span>
+    </button>
+    <div class="alertpop" id="alertpop" hidden></div>
+  </div>
+  <span class="countdown"><span id="cdlabel">next in </span><b id="cd">—:—</b></span>
+  <span class="sync" id="sync"><span class="sdot"></span><span id="sync-t">starting…</span></span>
+</div>
+
+<div class="controls frow">
+  <span class="flbl" title="In millions by default: 1 = 1M, 0.1 = 100K. Suffixes override: 500k, 2.5b">24h Vol <span class="sec">(M)</span></span>
+  <input class="fnum" id="volMin" placeholder="min" autocomplete="off" spellcheck="false"/>
+  <span class="fdash">–</span>
+  <input class="fnum" id="volMax" placeholder="max" autocomplete="off" spellcheck="false"/>
+  <span class="flbl" style="margin-left:8px" title="In millions by default: 1 = 1M, 0.1 = 100K. Suffixes override: 500k, 2.5b">OI <span class="sec">(M)</span></span>
+  <input class="fnum" id="oiMin" placeholder="min" autocomplete="off" spellcheck="false"/>
+  <span class="fdash">–</span>
+  <input class="fnum" id="oiMax" placeholder="max" autocomplete="off" spellcheck="false"/>
+  <button class="btn" id="clearFilters" style="padding:7px 11px">Clear</button>
+  <button class="btn" id="watchOnly" style="padding:7px 11px" title="Show only watchlisted tickers">★ only</button>
+  <span class="benchnote" id="fcount"></span>
+</div>
+
+<div class="movers" id="movers" hidden>
+  <span class="lbl">1d movers</span>
+  <span id="movers-list" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+</div>
+
+<div class="wrap">
+  <table>
+    <thead><tr id="head"></tr></thead>
+    <tbody id="body"><tr><td colspan="13"><div class="msg" id="status"><span class="big">Connecting…</span>Loading Trade[XYZ] markets.</div></td></tr></tbody>
+  </table>
+</div>
+
+</div><!-- /view-markets -->
+
+<section id="view-sectors" hidden>
+  <div class="controls">
+    <div class="seg" id="sectf" role="group" aria-label="Window">
+      <span class="seglbl">window</span>
+      <button type="button" data-tf="1h">1h</button>
+      <button type="button" data-tf="4h">4h</button>
+      <button type="button" data-tf="1d">1d</button>
+      <button type="button" data-tf="7d">7d</button>
+      <button type="button" data-tf="30d">30d</button>
+    </div>
+    <div class="seg" id="sectwt" role="group" aria-label="Weighting">
+      <span class="seglbl">weight</span>
+      <button type="button" data-wt="vol">by volume</button>
+      <button type="button" data-wt="eq">equal</button>
+    </div>
+    <button class="btn" id="sectExport" title="Download the sector board as CSV" style="margin-left:auto">↓ CSV</button>
+  </div>
+  <div class="sect-legend">
+    <b>Rotation map</b> — horizontal = capital direction (price + OI conviction), vertical = activity heat (volume + volatility).
+    Top-right = money flowing in with conviction (accumulation); top-left = flowing out with activity (distribution). Bubble size = 24h volume.
+  </div>
+  <div id="sect-map" class="corrwrap" style="padding:6px 10px"><div class="msg">Loading…</div></div>
+  <div id="sect-board" class="corrpanel" style="margin-top:14px"></div>
+  <div id="sect-detail" class="corrpanel" hidden></div>
+  <div class="cp-sub" style="margin:18px 2px 8px">Sector × sector correlation <span class="sec" style="text-transform:none;letter-spacing:0">· average pairwise daily-return correlation between members (90d)</span></div>
+  <div id="sect-corr" class="corrwrap"></div>
+</section>
+
+<section id="view-corr" hidden>
+  <div class="controls">
+    <div class="search">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="corrsearch" type="text" placeholder="Focus tickers… e.g. AAPL, NVDA, SPX" autocomplete="off" spellcheck="false"/>
+    </div>
+    <div class="seg" id="corrtf" role="group" aria-label="Correlation lookback">
+      <span class="seglbl">lookback</span>
+      <button type="button" data-d="30">30d</button>
+      <button type="button" data-d="90">90d</button>
+      <button type="button" data-d="180">180d</button>
+      <button type="button" data-d="365">1y</button>
+    </div>
+    <div class="seg" id="corrn" role="group" aria-label="Universe size">
+      <span class="seglbl">top by vol</span>
+      <button type="button" data-n="20">20</button>
+      <button type="button" data-n="40">40</button>
+      <button type="button" data-n="60">60</button>
+    </div>
+    <span class="sync" id="corrsync"><span class="sdot"></span><span id="corrsync-t">—</span></span>
+    <button class="btn" id="corrExport" title="Download the matrix as CSV" style="margin-left:auto">↓ CSV</button>
+  </div>
+  <div class="corr-legend">
+    <span>inverse</span><span class="grad"></span><span>co-moving</span>
+    <span id="corr-readout" class="sec" style="margin-left:14px">Hover a cell to read a pair · click a cell for the pair view · click a ticker label for its co-movers &amp; hedges</span>
+  </div>
+  <div id="corrwrap" class="corrwrap"><div class="msg">Loading…</div></div>
+  <div id="corrtip" class="corrtip" hidden></div>
+  <div id="pairpanel" class="corrpanel" hidden></div>
+  <div id="corrpanel" class="corrpanel" hidden></div>
+  <div class="controls" style="margin-top:18px">
+    <div class="cp-sub" style="margin:0">Strongest pairs across the set</div>
+    <div class="seg" id="corrtop" role="group" aria-label="Pair count">
+      <span class="seglbl">show</span>
+      <button type="button" data-k="10">10</button>
+      <button type="button" data-k="20">20</button>
+    </div>
+  </div>
+  <div id="corrpairs" class="corrpairs"></div>
+</section>
+
+<div class="drawer-bg" id="drawerbg"></div>
+<aside class="drawer" id="drawer" aria-hidden="true"></aside>
+<div class="toast-wrap" id="toastwrap"></div>
+
+<footer>
+  Data: Hyperliquid public REST API, fetched once server-side and cached; your browser reads a single pre-computed snapshot.
+  Funding = annualized (hourly ×24×365), <span class="pos">green = positive</span>, <span class="neg">red = negative</span>.
+  <b>Momentum</b> (−100…+100): risk-adjusted 1h–30d returns × 7d trend quality, tilted by range position, then modulated by OI conviction; <span class="hotdot">●</span> = volume above the market's own norm.
+  <b>vs S&amp;P</b> = excess return over the window. <b>ΔOI</b> = open-interest change over the window with a regime tag
+  (<span class="rg-long">longs+</span> price↑/OI↑ · <span class="rg-sqz">squeeze</span> price↑/OI↓ · <span class="rg-short">shorts+</span> price↓/OI↑ · <span class="rg-unw">unwind</span> price↓/OI↓).
+  OI history is stored server-side and persists across restarts. New HIP-3 listings are detected automatically and backfilled. Not investment advice.
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
