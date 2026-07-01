@@ -32,6 +32,7 @@ const COLS=[
   {key:'mom', label:'Momentum', type:'num', def:'desc', tip:'Self-normalizing momentum −100…+100: risk-adjusted multi-horizon return × 7d trend quality + range position, modulated by OI conviction.',
     td:r=>`<td${shade(r.mom,60)}>${momCell(r)}</td>`},
   {key:'vol30', label:'Vol (ann)', type:'num', tip:'Annualized realized volatility from hourly returns over ~30 days.', td:r=>volCell(r)},
+  {key:'adr', label:'Avg Range', type:'num', tip:'Average daily range: mean of each completed day\u2019s (high − low) / close, over the window (7d, or 30d when the 30d window is selected). Reads as "on a typical day this moves X%."', td:r=>adrCell(r)},
   {key:'dd', label:'vs 30d hi', type:'num', tip:'Distance below the 30-day high (0% = sitting at the high).', td:r=>ddCell(r)},
   {key:'doi', label:'ΔOI', type:'num', tip:'Open-interest change over the window, with a price-vs-OI regime tag. Stored server-side and persistent.',
     td:r=>`<td>${oiCell(r)}</td>`},
@@ -43,6 +44,7 @@ const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'90', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:COLS.map(c=>c.key), colHidden:new Set(), pollMs:60000,
+  sect:{ wt:'vol', sel:null },
   watch:new Set(), watchOnly:false, detail:null,
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
@@ -122,6 +124,8 @@ function applySnapshot(s){
     if(m.ref) r.ref=m.ref;
     if(m.feat) r.feat=m.feat;
     if(m.doi) r.doiByWin=m.doi;
+    if(m.sector) r.sector=m.sector;
+    if(m.assetClass) r.assetClass=m.assetClass;
     r.d1=(r.px!=null&&r.prevDay)?(r.px-r.prevDay)/r.prevDay*100:r.d1;
     recomputeChanges(r);
     r.candleTs=r.feat?Date.now():(r.candleTs||0);
@@ -177,6 +181,8 @@ function computeDerived(){
     else if(benchRet==null) r.rs=null;
     else { const a=r[tfKey]; r.rs=(a!=null&&isFinite(a))?a-benchRet:null; }
     r.vol30=(r.feat&&r.feat.volH>0)?r.feat.volH*Math.sqrt(24*365)*100:undefined;
+    const adrN=state.tf==='30d'?30:7;
+    r.adr=(r.feat&&r.feat.dr&&r.feat.dr.length)?(()=>{ const s=r.feat.dr.slice(-adrN); return s.reduce((p,q)=>p+q,0)/s.length; })():undefined;
     r.dd=(r.px!=null&&r.feat&&r.feat.hi30>0)?(r.px-r.feat.hi30)/r.feat.hi30*100:undefined;
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
     if(!state.benchCoin) r.beta=undefined;
@@ -221,6 +227,7 @@ function moveColumn(src, dst, after){
 function buildHead(){ const tr=el('head'); tr.innerHTML='';
   visibleCols().forEach(c=>{ const th=document.createElement('th'); th.tabIndex=0; th.dataset.key=c.key; th.setAttribute('role','columnheader'); th.draggable=true;
     let label=c.label; if(c.key==='rs')label=`vs S&amp;P (${state.tf})`; if(c.key==='doi')label=`ΔOI (${state.tf})`;
+    if(c.key==='adr')label=`Avg Range (${state.tf==='30d'?'30d':'7d'})`;
     const active=state.sortKey===c.key; th.setAttribute('aria-sort', active?(state.sortDir==='asc'?'ascending':'descending'):'none');
     if(c.tip) th.title=c.tip;
     th.innerHTML=`<span class="grip" aria-hidden="true">⠿</span>${label}`+(active?`<span class="arw">${state.sortDir==='asc'?'▲':'▼'}</span>`:'');
@@ -275,6 +282,9 @@ function trendCell(r){ const c=r.daily; if(!c||c.length<3) return '<td><span cla
   const up=cl[cl.length-1]>=cl[0]; return `<td title="30d path">${miniSpark(cl, up?'var(--up)':'var(--down)')}</td>`; }
 function volCell(r){ if(r.vol30==null||!isFinite(r.vol30)) return '<td><span class="na" title="loading hourly history…">·</span></td>';
   return `<td class="sec" title="annualized realized vol">${r.vol30.toFixed(0)}%</td>`; }
+function adrCell(r){ if(r.adr==null||!isFinite(r.adr)) return '<td><span class="na" title="loading hourly history…">·</span></td>';
+  const t=Math.min(r.adr/8,1)*0.18;
+  return `<td class="sec" style="background:rgba(227,165,60,${t.toFixed(3)})" title="avg daily high−low as % of close, over ${state.tf==='30d'?'30d':'7d'}">${r.adr.toFixed(2)}%</td>`; }
 function ddCell(r){ if(r.dd==null||!isFinite(r.dd)) return '<td><span class="na">·</span></td>';
   const c=r.dd>=-0.5?'pos':(r.dd<=-15?'neg':'sec'); return `<td class="${c}" title="distance below the 30-day high">${r.dd.toFixed(1)}%</td>`; }
 function render(){
@@ -530,6 +540,8 @@ function csvCell(k,r){ switch(k){
   case 'funding': return r.funding!=null?(r.funding*24*365*100).toFixed(4):'';
   case 'h1':return r.h1; case 'h4':return r.h4; case 'd1':return r.d1; case 'd7':return r.d7; case 'd30':return r.d30;
   case 'rs': return r.rs; case 'mom': return r.mom!=null?Math.round(r.mom):'';
+  case 'vol30': return r.vol30!=null&&isFinite(r.vol30)?r.vol30.toFixed(1):'';
+  case 'adr': return r.adr!=null&&isFinite(r.adr)?r.adr.toFixed(3):'';
   case 'beta': return r.beta!=null&&isFinite(r.beta)?r.beta.toFixed(3):'';
   case 'doi': return r.doi!=null?r.doi.toFixed(2):'';
   case 'vol': return r.vol; case 'oi': return r.oi; default: return ''; } }
@@ -687,9 +699,193 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 function showView(v){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   el('view-markets').hidden = v!=='markets';
+  el('view-sectors').hidden = v!=='sectors';
   el('view-corr').hidden = v!=='corr';
   if(v==='corr') openCorr();
+  if(v==='sectors') renderSectors();
 }
+
+// ===== sectors tab =====
+const SECT={ _rows:null, _cohesion:null };
+function zscores(arr){ const v=arr.filter(x=>x!=null&&isFinite(x));
+  if(v.length<2) return arr.map(()=>0);
+  const m=v.reduce((a,b)=>a+b,0)/v.length, sd=stdev(v)||1;
+  return arr.map(x=>(x!=null&&isFinite(x))?(x-m)/sd:0); }
+function sectorShort(name){ const M={'Information Technology':'Info Tech','Communication Services':'Comm Svcs','Consumer Discretionary':'Cons Disc','Consumer Staples':'Cons Stpl','Health Care':'Health','Real Estate':'Real Est'}; return M[name]||name; }
+
+function computeSectors(){
+  const tfKey=TF_MAP[state.tf]||'d1', byVol=state.sect.wt!=='eq';
+  const groups=new Map();
+  for(const r of activeRows()){ const g=r.sector||'Unclassified';
+    let o=groups.get(g); if(!o){ o={name:g, assetClass:r.assetClass||'—', members:[]}; groups.set(g,o); }
+    o.members.push(r); }
+  const list=[];
+  for(const o of groups.values()){ const ms=o.members;
+    let wsum=0; for(const r of ms) if(byVol&&r.vol>0) wsum+=r.vol;
+    const wOf=r=> byVol ? (wsum>0?((r.vol>0?r.vol:0)/wsum):1/ms.length) : 1/ms.length;
+    const wavg=(sel)=>{ let s=0,ww=0; for(const r of ms){ const v=sel(r); if(v==null||!isFinite(v))continue; const wi=wOf(r); s+=wi*v; ww+=wi; } return ww>0?s/ww:null; };
+    const withRet=ms.filter(r=>r[tfKey]!=null&&isFinite(r[tfKey]));
+    const ret=wavg(r=>r[tfKey]);
+    const retEW=withRet.length?withRet.reduce((a,r)=>a+r[tfKey],0)/withRet.length:null;
+    const doi=wavg(r=>r.doi);
+    const rvol=wavg(r=>r.vol30);
+    let totVol=0,totOI=0,volBase=0;
+    for(const r of ms){ if(r.vol)totVol+=r.vol; if(r.oi)totOI+=r.oi; if(r.feat&&r.feat.volBase>0)volBase+=r.feat.volBase; }
+    const relVol=volBase>0?totVol/volBase:null;
+    const green=withRet.length?withRet.filter(r=>r[tfKey]>0).length/withRet.length:null;
+    const greenN=withRet.length?withRet.filter(r=>r[tfKey]>0).length:0;
+    const momArr=ms.filter(r=>r.mom!=null&&isFinite(r.mom));
+    const momUp=momArr.length?momArr.filter(r=>r.mom>0).length/momArr.length:null;
+    list.push({ name:o.name, assetClass:o.assetClass, n:ms.length, members:ms,
+      ret, retEW, doi, rvol, relVol, totVol, totOI, green, greenN, greenT:withRet.length, momUp });
+  }
+  // rotation = capital direction (return + OI conviction) · heat = activity (volume + volatility)
+  const rets=list.map(g=>g.ret);
+  const retSd=stdev(rets.filter(x=>x!=null&&isFinite(x)))||1;
+  const oic=list.map(g=>(g.doi!=null&&g.ret!=null)?g.doi*Math.tanh(g.ret/retSd):null);
+  const zRet=zscores(rets), zOIc=zscores(oic),
+        zRV=zscores(list.map(g=>g.relVol!=null&&g.relVol>0?Math.log(g.relVol):null)),
+        zVol=zscores(list.map(g=>g.rvol)), zDO=zscores(list.map(g=>g.doi!=null?Math.abs(g.doi):null));
+  list.forEach((g,i)=>{
+    g.direction=(g.ret==null)?null:100*Math.tanh((0.55*zRet[i]+0.45*zOIc[i])/1.2);
+    const hr=0.5*zRV[i]+0.3*zVol[i]+0.2*zDO[i];
+    g.heat=Math.round(100/(1+Math.exp(-hr)));
+    g.rotation=g.direction;
+  });
+  // cohesion (avg internal daily-return correlation) via the shared correlation builder
+  const withDaily=activeRows().filter(r=>r.daily&&r.sector);
+  const coh=new Map();
+  if(withDaily.length>1){ const {C}=buildCorr(withDaily,90);
+    const idxByG=new Map(); withDaily.forEach((r,i)=>{ const g=r.sector; (idxByG.get(g)||idxByG.set(g,[]).get(g)).push(i); });
+    for(const [g,idx] of idxByG){ let s=0,n=0; for(let a=0;a<idx.length;a++)for(let b=a+1;b<idx.length;b++){ const v=C[idx[a]][idx[b]]; if(v!=null&&isFinite(v)){s+=v;n++;} } coh.set(g,n?s/n:null); }
+    SECT._corrCache={C, idxByG, rows:withDaily};
+  } else SECT._corrCache=null;
+  list.forEach(g=>g.cohesion=coh.has(g.name)?coh.get(g.name):null);
+  list.sort((a,b)=>{ const av=a.rotation,bv=b.rotation; if(av==null&&bv==null)return (b.totVol||0)-(a.totVol||0); if(av==null)return 1; if(bv==null)return -1; return bv-av; });
+  SECT._rows=list;
+  return list;
+}
+
+function renderSectors(){
+  if(!state.rows.size){ el('sect-map').innerHTML='<div class="msg">Markets still loading — switch back in a moment.</div>'; return; }
+  computeDerived();
+  const list=computeSectors();
+  el('sect-map').innerHTML=renderSectorMap(list);
+  attachMapHandlers();
+  renderSectorBoard(list);
+  renderSectorDetail();
+  renderSectorCorr(list);
+}
+function renderSectorMap(list){
+  const W=760,H=380, px0=52,px1=W-18, py0=H-30, py1=20;
+  const plot=list.filter(g=>g.direction!=null&&g.name!=='Unclassified');
+  if(plot.length<1) return '<div class="msg">No classified sectors with returns yet.</div>';
+  const maxVol=Math.max(1,...plot.map(g=>g.totVol||0));
+  const xM=d=>px0+(clamp(d,-100,100)+100)/200*(px1-px0);
+  const yM=h=>py0-clamp(h,0,100)/100*(py0-py1);
+  const cx0=xM(0), cy50=yM(50);
+  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.35"/>`;
+  s+=`<line x1="${cx0}" y1="${py1}" x2="${cx0}" y2="${py0}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
+  s+=`<line x1="${px0}" y1="${cy50}" x2="${px1}" y2="${cy50}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
+  const ql='font-family:var(--mono);font-size:10px;fill:var(--faint)';
+  s+=`<text x="${px1-6}" y="${py1+14}" text-anchor="end" style="${ql}">accumulation ▲in</text>`;
+  s+=`<text x="${px0+6}" y="${py1+14}" style="${ql}">distribution ▲out</text>`;
+  s+=`<text x="${px1-6}" y="${py0-6}" text-anchor="end" style="${ql}">stealth inflow</text>`;
+  s+=`<text x="${px0+6}" y="${py0-6}" style="${ql}">quiet / lagging</text>`;
+  s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← outflow   ·   capital direction   ·   inflow →</text>`;
+  s+=`<text x="14" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 14 ${(py0+py1)/2})" style="${ql}">activity heat →</text>`;
+  for(const g of plot){ const r=6+24*Math.sqrt((g.totVol||0)/maxVol), cx=xM(g.direction), cy=yM(g.heat), col=momColor(g.direction);
+    const lbl=sectorShort(g.name);
+    s+=`<g class="bub" data-sect="${esc(g.name)}" style="cursor:pointer"><title>${esc(g.name)} · rotation ${Math.round(g.direction)} · heat ${g.heat} · ret ${g.ret==null?'n/a':(g.ret>=0?'+':'')+g.ret.toFixed(2)+'%'} · ΔOI ${g.doi==null?'n/a':(g.doi>=0?'+':'')+g.doi.toFixed(2)+'%'}</title>`;
+    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="${col}" fill-opacity="0.32" stroke="${col}" stroke-width="1.4"/>`;
+    s+=`<text x="${cx.toFixed(1)}" y="${(cy+r+11).toFixed(1)}" text-anchor="middle" style="font-family:var(--mono);font-size:10px;fill:var(--text)">${esc(lbl)}</text></g>`; }
+  s+='</svg>';
+  return s;
+}
+function attachMapHandlers(){ el('sect-map').querySelectorAll('.bub').forEach(b=>b.addEventListener('click',()=>{ state.sect.sel=b.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
+function heatBar(h){ const c=h>=66?'var(--accent)':h>=33?'var(--blue)':'var(--faint)'; return `<span style="display:inline-block;vertical-align:middle;width:46px;height:7px;border-radius:3px;background:var(--grid)"><span style="display:block;height:7px;border-radius:3px;width:${clamp(h,0,100)}%;background:${c}"></span></span>`; }
+function rotCell(d){ if(d==null)return '<span class="na">—</span>'; const s=d>0?'+':''; return `<span style="color:${momColor(d)};font-weight:600">${s}${Math.round(d)}</span>`; }
+function renderSectorBoard(list){
+  const rows=list.map(g=>{
+    const sel=state.sect.sel===g.name?' style="background:rgba(227,165,60,.08)"':'';
+    return `<tr data-sect="${esc(g.name)}"${sel}>`+
+      `<td class="pp">${esc(sectorShort(g.name))}</td>`+
+      `<td class="sec" style="text-align:left">${esc(g.assetClass)}</td>`+
+      `<td class="sec">${g.n}</td>`+
+      `<td>${rotCell(g.rotation)}</td>`+
+      `<td>${heatBar(g.heat)}</td>`+
+      `<td class="${g.ret>=0?'pos':'neg'}">${g.ret==null?'<span class="na">—</span>':(g.ret>=0?'+':'')+g.ret.toFixed(2)+'%'}</td>`+
+      `<td class="${g.doi>=0?'pos':'neg'}">${g.doi==null?'<span class="na">—</span>':(g.doi>=0?'+':'')+g.doi.toFixed(2)+'%'}</td>`+
+      `<td class="sec" title="${g.greenN}/${g.greenT} up${g.momUp!=null?' · '+Math.round(g.momUp*100)+'% mom+':''}">${g.green==null?'—':Math.round(g.green*100)+'%'}</td>`+
+      `<td class="sec">${fmtUsd(g.totVol)}</td>`+
+      `<td class="sec">${fmtUsd(g.totOI)}</td>`+
+      `<td class="sec" title="avg internal daily-return correlation">${g.cohesion==null?'·':g.cohesion.toFixed(2)}</td>`+
+      `</tr>`;
+  }).join('');
+  const head='<thead><tr><th>Sector</th><th style="text-align:left">Type</th><th>#</th><th title="capital direction: price + OI conviction, ranked across sectors">Rotation</th><th>Heat</th><th>Return</th><th title="avg open-interest change over the window">ΔOI</th><th title="% of members up">Breadth</th><th>24h Vol</th><th>OI</th><th title="avg internal correlation">Cohesion</th></tr></thead>';
+  el('sect-board').innerHTML=`<div class="cp-head" style="margin-bottom:10px">Sector rotation board <span class="sec" style="font-weight:400">— ${state.tf} window · ${state.sect.wt==='eq'?'equal-weighted':'volume-weighted'} · click a row or bubble for detail</span></div>`+
+    `<div style="overflow-x:auto"><table class="ptbl" style="min-width:760px">${head}<tbody>${rows}</tbody></table></div>`;
+  el('sect-board').querySelectorAll('tbody tr[data-sect]').forEach(tr=>tr.addEventListener('click',()=>{ state.sect.sel=tr.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); }));
+}
+function renderSectorDetail(){
+  const p=el('sect-detail'), list=SECT._rows, name=state.sect.sel;
+  if(!list||!name){ p.hidden=true; return; }
+  const g=list.find(x=>x.name===name); if(!g){ p.hidden=true; return; }
+  const tfKey=TF_MAP[state.tf]||'d1';
+  const bench=state.benchCoin?state.rows.get(state.benchCoin):null, benchRet=bench?bench[tfKey]:null;
+  const rs=(g.ret!=null&&benchRet!=null)?g.ret-benchRet:null;
+  const ms=[...g.members].sort((a,b)=>((b[tfKey]||-1e9)-(a[tfKey]||-1e9)));
+  const mrow=r=>`<tr data-coin="${esc(r.coin)}"><td class="pp">${esc(r.ticker)}</td>`+
+    `<td class="${(r[tfKey]||0)>=0?'pos':'neg'}">${r[tfKey]==null?'<span class="na">·</span>':(r[tfKey]>=0?'+':'')+r[tfKey].toFixed(2)+'%'}</td>`+
+    `<td class="${(r.doi||0)>=0?'pos':'neg'}">${r.doi==null?'<span class="na">·</span>':(r.doi>=0?'+':'')+r.doi.toFixed(2)+'%'}</td>`+
+    `<td>${r.mom==null?'<span class="ph">·</span>':`<span style="color:${momColor(r.mom)}">${r.mom>0?'+':''}${Math.round(r.mom)}</span>`}</td>`+
+    `<td class="sec">${r.vol30!=null?r.vol30.toFixed(0)+'%':'·'}</td>`+
+    `<td class="sec">${fmtUsd(r.vol)}</td></tr>`;
+  const st=(k,v)=>`<span>${k}<b>${v}</b></span>`;
+  p.hidden=false;
+  p.innerHTML=`<div class="cp-head">${esc(sectorShort(g.name))} <span class="sec" style="font-weight:400">— ${esc(g.assetClass)} · ${g.n} markets · ${state.tf} window</span>`+
+    `<button class="btn xtiny" id="sectDetClose" style="float:right">✕</button></div>`+
+    `<div class="pairstats">${st('rotation ', rotCell(g.rotation))}${st('heat ', g.heat)}`+
+      `${st('return ', g.ret==null?'—':`<span class="${g.ret>=0?'pos':'neg'}">${g.ret>=0?'+':''}${g.ret.toFixed(2)}%</span>`)}`+
+      `${st('ΔOI ', g.doi==null?'—':`<span class="${g.doi>=0?'pos':'neg'}">${g.doi>=0?'+':''}${g.doi.toFixed(2)}%</span>`)}`+
+      `${st('vs S&amp;P ', rs==null?'—':`<span class="${rs>=0?'pos':'neg'}">${rs>=0?'+':''}${rs.toFixed(2)}%</span>`)}`+
+      `${st('breadth ', g.green==null?'—':`${g.greenN}/${g.greenT}`)}`+
+      `${st('cohesion ', g.cohesion==null?'·':g.cohesion.toFixed(2))}`+
+      `${st('24h vol ', fmtUsd(g.totVol))}${st('OI ', fmtUsd(g.totOI))}</div>`+
+    `<div class="cp-sub">Members <span class="sec" style="text-transform:none;letter-spacing:0">· sorted by ${state.tf} return · click to open the ticker</span></div>`+
+    `<div style="overflow-x:auto"><table class="ptbl"><thead><tr><th>Ticker</th><th>${state.tf}</th><th>ΔOI</th><th>Mom</th><th>Vol</th><th>24h Vol</th></tr></thead><tbody>${ms.map(mrow).join('')}</tbody></table></div>`;
+  el('sectDetClose').onclick=()=>{ state.sect.sel=null; p.hidden=true; renderSectorBoard(SECT._rows); };
+  p.querySelectorAll('tbody tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>openDetail(tr.dataset.coin)));
+  renderSectorBoard(SECT._rows);
+}
+function renderSectorCorr(list){
+  const box=el('sect-corr'), cache=SECT._corrCache;
+  if(!cache){ box.innerHTML='<div class="sec" style="padding:8px 2px">Daily history still loading — sector correlation appears once enough markets have it.</div>'; return; }
+  const {C, idxByG}=cache;
+  const names=list.map(g=>g.name).filter(n=>idxByG.has(n)&&idxByG.get(n).length);
+  if(names.length<2){ box.innerHTML='<div class="sec" style="padding:8px 2px">Need at least two sectors with daily history.</div>'; return; }
+  const avg=(A,B)=>{ const ia=idxByG.get(A), ib=idxByG.get(B); let s=0,n=0;
+    for(const i of ia)for(const j of ib){ if(A===B&&j<=i)continue; const v=C[i][j]; if(v!=null&&isFinite(v)){s+=v;n++;} }
+    return n?s/n:null; };
+  const cell=names.length<=8?34:names.length<=14?24:18;
+  let h=`<table class="cmx" style="--cell:${cell}px"><thead><tr><th class="corner"></th>`;
+  names.forEach(n=>h+=`<th class="cl"><span>${esc(sectorShort(n))}</span></th>`);
+  h+='</tr></thead><tbody>';
+  names.forEach(rn=>{ h+=`<tr><th class="rl">${esc(sectorShort(rn))}</th>`;
+    names.forEach(cn=>{ const self=rn===cn, v=self?1:avg(rn,cn);
+      const txt=(v==null)?'':`${v<0?'−':''}${Math.abs(v).toFixed(1).replace(/^0/,'')}`;
+      h+=`<td class="${self?'diag':(v==null?'nodata':'')}" title="${esc(sectorShort(rn))} × ${esc(sectorShort(cn))}: ${v==null?'n/a':v.toFixed(2)}" style="${self||v==null?'':'background:'+corrColor(v)}">${self?'':txt}</td>`; });
+    h+='</tr>'; });
+  h+='</tbody></table>';
+  box.innerHTML=h;
+}
+function exportSectors(){ const list=SECT._rows; if(!list) return;
+  const head=['Sector','Type','Members','Rotation','Heat','Return%','DeltaOI%','Breadth%','Vol24h','OI','Cohesion'];
+  const body=list.map(g=>[g.name,g.assetClass,g.n, g.rotation!=null?Math.round(g.rotation):'', g.heat,
+    g.ret!=null?g.ret.toFixed(2):'', g.doi!=null?g.doi.toFixed(2):'', g.green!=null?Math.round(g.green*100):'',
+    g.totVol!=null?Math.round(g.totVol):'', g.totOI!=null?Math.round(g.totOI):'', g.cohesion!=null?g.cohesion.toFixed(3):'']);
+  downloadCSV(`xyz-sectors-${state.tf}.csv`,[head,...body]); }
 
 // ===== polling cycle + countdown =====
 let cycleTimer=null, nextCycle=0, dailyTimer=null;
@@ -744,9 +940,21 @@ el('colsBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('c
   else { pop.hidden=true; el('colsBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('colpop');
   if(pop && !pop.hidden && !pop.contains(e.target) && !el('colsBtn').contains(e.target)){ pop.hidden=true; el('colsBtn').setAttribute('aria-expanded','false'); } });
+function setWindow(tf){ state.tf=tf;
+  document.querySelectorAll('#tfseg button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
+  document.querySelectorAll('#sectf button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
+  buildHead(); render();
+  if(!el('view-sectors').hidden) renderSectors();
+  savePrefs(); }
 document.querySelectorAll('#tfseg button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');
-  b.addEventListener('click',()=>{ state.tf=b.dataset.tf;
-    document.querySelectorAll('#tfseg button').forEach(x=>x.classList.toggle('active',x===b)); buildHead(); render(); savePrefs(); }); });
+  b.addEventListener('click',()=>setWindow(b.dataset.tf)); });
+document.querySelectorAll('#sectf button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');
+  b.addEventListener('click',()=>setWindow(b.dataset.tf)); });
+document.querySelectorAll('#sectwt button').forEach(b=>{ if(b.dataset.wt===state.sect.wt)b.classList.add('active');
+  b.addEventListener('click',()=>{ state.sect.wt=b.dataset.wt;
+    document.querySelectorAll('#sectwt button').forEach(x=>x.classList.toggle('active',x===b));
+    if(!el('view-sectors').hidden) renderSectors(); }); });
+el('sectExport').addEventListener('click', exportSectors);
 document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state.refreshMs)b.classList.add('active');
   b.addEventListener('click',()=>{ document.querySelectorAll('#rfseg button').forEach(x=>x.classList.toggle('active',x===b));
     setRefresh(+b.dataset.ms); savePrefs(); }); });

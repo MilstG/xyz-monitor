@@ -246,3 +246,7 @@ svg.spark{width:100%;height:46px;display:block;margin:5px 0 2px}
 .btn.xtiny{padding:2px 8px;font-size:12px;line-height:1.4}
 table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 @media(max-width:620px){.cp-cols{grid-template-columns:1fr;gap:16px} .pairgrid{grid-template-columns:1fr;gap:16px} .corrtip{display:none}}
+
+/* sectors tab */
+.sect-legend{margin:2px 2px 12px;font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.5}
+.sect-legend b{color:var(--text);font-weight:500}

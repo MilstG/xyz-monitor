@@ -25,6 +25,7 @@
 
 <nav class="tabs">
   <button class="tab active" data-view="markets">Markets</button>
+  <button class="tab" data-view="sectors">Sectors</button>
   <button class="tab" data-view="corr">Correlation</button>
 </nav>
 
@@ -96,6 +97,34 @@
 </div>
 
 </div><!-- /view-markets -->
+
+<section id="view-sectors" hidden>
+  <div class="controls">
+    <div class="seg" id="sectf" role="group" aria-label="Window">
+      <span class="seglbl">window</span>
+      <button type="button" data-tf="1h">1h</button>
+      <button type="button" data-tf="4h">4h</button>
+      <button type="button" data-tf="1d">1d</button>
+      <button type="button" data-tf="7d">7d</button>
+      <button type="button" data-tf="30d">30d</button>
+    </div>
+    <div class="seg" id="sectwt" role="group" aria-label="Weighting">
+      <span class="seglbl">weight</span>
+      <button type="button" data-wt="vol">by volume</button>
+      <button type="button" data-wt="eq">equal</button>
+    </div>
+    <button class="btn" id="sectExport" title="Download the sector board as CSV" style="margin-left:auto">↓ CSV</button>
+  </div>
+  <div class="sect-legend">
+    <b>Rotation map</b> — horizontal = capital direction (price + OI conviction), vertical = activity heat (volume + volatility).
+    Top-right = money flowing in with conviction (accumulation); top-left = flowing out with activity (distribution). Bubble size = 24h volume.
+  </div>
+  <div id="sect-map" class="corrwrap" style="padding:6px 10px"><div class="msg">Loading…</div></div>
+  <div id="sect-board" class="corrpanel" style="margin-top:14px"></div>
+  <div id="sect-detail" class="corrpanel" hidden></div>
+  <div class="cp-sub" style="margin:18px 2px 8px">Sector × sector correlation <span class="sec" style="text-transform:none;letter-spacing:0">· average pairwise daily-return correlation between members (90d)</span></div>
+  <div id="sect-corr" class="corrwrap"></div>
+</section>
 
 <section id="view-corr" hidden>
   <div class="controls">
