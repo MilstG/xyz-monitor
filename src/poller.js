@@ -22,7 +22,7 @@ function createPoller({ dex, store, log }) {
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
   let benchCoin = null;
-  let snapshotCache = null, dailyCache = null;
+  let snapshotCache = null, dailyCache = null, lastPoll = 0;
   const inflight = new Set();
 
   log(`Loaded persisted OI history for ${hist.size} market(s)`);
@@ -56,10 +56,20 @@ function createPoller({ dex, store, log }) {
       if (!h) { h = []; hist.set(r.coin, h); }
       const last = h[h.length - 1];
       if (last && now - last[0] < OI_MIN_GAP) continue;
-      h.push([now, r.oiBase]);
-      store.insert(r.coin, now, r.oiBase);
+      const f = (r.funding != null && isFinite(r.funding)) ? r.funding : null;
+      h.push([now, r.oiBase, f]);
+      store.insert(r.coin, now, r.oiBase, f);
       while (h.length && h[0][0] < cut) h.shift();
     }
+  }
+
+  // Per-market OI + funding history (for the ticker drawer sparklines).
+  function getSeries(coin) {
+    const h = hist.get(coin);
+    if (!h) return { oi: [], funding: [] };
+    const oi = [], funding = [];
+    for (const s of h) { oi.push([s[0], s[1]]); if (s[2] != null) funding.push([s[0], s[2]]); }
+    return { oi, funding };
   }
 
   function computeDoi(r) {
@@ -97,6 +107,7 @@ function createPoller({ dex, store, log }) {
     for (const k of [...rows.keys()]) if (!seen.has(k)) rows.delete(k);
     benchCoin = detectBenchmark();
     sampleOI();
+    lastPoll = Date.now();
     buildSnapshot();
   }
 
@@ -107,7 +118,7 @@ function createPoller({ dex, store, log }) {
     if (r.px == null) { r.hourlyTs = now; return; }
     const c = await fetchCandles(coin, "1h", now - 31 * DAY, now, 33);
     const { ref, feat } = featuresFromHourly(c, now, HOUR, DAY);
-    r.ref = ref; r.feat = feat; r.hourlyTs = Date.now();
+    r.ref = ref; r.feat = feat; r.hourlyTs = Date.now(); r.isNew = false;
   }
   async function refreshDaily(coin) {
     const r = rows.get(coin);
@@ -139,8 +150,20 @@ function createPoller({ dex, store, log }) {
       try { await refreshHourly(coin); } catch (_) {} finally { inflight.delete("h:" + coin); }
     }
   }
+  // The default view needs only hourly data, so let it claim the full rate budget first;
+  // daily (β + correlation) waits until every active market has its hourly features.
+  function hourlyPassComplete() {
+    let any = false;
+    for (const r of rows.values()) {
+      if (r.delisted) continue;
+      any = true;
+      if (!r.feat) return false;
+    }
+    return any;
+  }
   async function dailyWorker() {
     for (;;) {
+      if (!hourlyPassComplete()) { await sleep(1000); continue; }
       const coin = pick(needDaily);
       if (!coin || inflight.has("d:" + coin)) { await sleep(800); continue; }
       inflight.add("d:" + coin);
@@ -160,12 +183,42 @@ function createPoller({ dex, store, log }) {
         sector: cl.sector, assetClass: cl.assetClass,
       };
     });
-    snapshotCache = { ts: Date.now(), dex, benchCoin, markets };
+    snapshotCache = { ts: Date.now(), dataTs: lastPoll, dex, benchCoin, markets };
   }
   function buildDaily() {
     const daily = {};
     for (const r of activeMarkets()) if (r.dailyRaw) daily[r.coin] = r.dailyRaw.map((k) => [k.t, k.c]);
     dailyCache = { ts: Date.now(), daily };
+  }
+
+  // ---- warm-cache persistence: survive restarts so redeploys serve instantly ----
+  function hydrateFeatures() {
+    const data = store.loadFeatures();
+    if (!data || !data.markets) return 0;
+    let n = 0;
+    for (const coin in data.markets) {
+      const m = data.markets[coin], r = getRow(coin);
+      if (m.ref) r.ref = m.ref;
+      if (m.feat) r.feat = m.feat;
+      if (typeof m.hourlyTs === "number") r.hourlyTs = m.hourlyTs;
+      if (typeof m.dailyTs === "number") r.dailyTs = m.dailyTs;
+      if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c]) => ({ t, c }));
+      r.isNew = false;
+      n++;
+    }
+    return n;
+  }
+  function persistFeatures() {
+    const markets = {};
+    for (const r of rows.values()) {
+      if (r.delisted || (!r.feat && !r.dailyRaw)) continue;
+      markets[r.coin] = {
+        ref: r.ref || null, feat: r.feat || null,
+        hourlyTs: r.hourlyTs || 0, dailyTs: r.dailyTs || 0,
+        daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c]) : null,
+      };
+    }
+    store.saveFeatures({ ts: Date.now(), markets });
   }
 
   function maintenance() {
@@ -177,6 +230,8 @@ function createPoller({ dex, store, log }) {
   }
 
   async function start() {
+    const restored = hydrateFeatures();
+    if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     await pollUniverse();
     buildSnapshot(); buildDaily();
     setInterval(pollUniverse, UNIVERSE_MS);
@@ -185,6 +240,7 @@ function createPoller({ dex, store, log }) {
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
     setInterval(() => store.flush(), 30 * 1000);
+    setInterval(persistFeatures, 120 * 1000);
     setInterval(maintenance, 24 * 3600 * 1000);
     setTimeout(maintenance, 60 * 1000);
   }
@@ -193,7 +249,9 @@ function createPoller({ dex, store, log }) {
     start,
     getSnapshot: () => snapshotCache,
     getDaily: () => dailyCache,
-    stats: () => ({ markets: rows.size, bench: benchCoin, oiCoins: hist.size }),
+    getSeries,
+    persistFeatures,
+    stats: () => ({ markets: rows.size, bench: benchCoin, oiCoins: hist.size, lastPoll }),
   };
 }
 

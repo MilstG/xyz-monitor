@@ -9,6 +9,7 @@ const path = require("path");
 function openStore(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, "oi.log");
+  const featFile = path.join(dataDir, "features.json");
   let buf = [];
 
   function flush() {
@@ -18,8 +19,8 @@ function openStore(dataDir) {
   }
 
   return {
-    insert(coin, ts, oi) {
-      buf.push(coin + "\t" + ts + "\t" + oi + "\n");
+    insert(coin, ts, oi, funding) {
+      buf.push(coin + "\t" + ts + "\t" + oi + "\t" + (funding == null ? "" : funding) + "\n");
       if (buf.length >= 200) flush();
     },
     flush,
@@ -48,17 +49,26 @@ function openStore(dataDir) {
         const lines = fs.readFileSync(file, "utf8").split("\n");
         for (const ln of lines) {
           if (!ln) continue;
-          const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
-          if (i1 < 0 || i2 < 0) continue;
-          const coin = ln.slice(0, i1), ts = +ln.slice(i1 + 1, i2), oi = +ln.slice(i2 + 1);
+          const parts = ln.split("\t");
+          if (parts.length < 3) continue;
+          const coin = parts[0], ts = +parts[1], oi = +parts[2];
+          const f = parts.length >= 4 && parts[3] !== "" ? +parts[3] : null;
           if (!Number.isFinite(ts) || !Number.isFinite(oi) || ts < since) continue;
           let a = m.get(coin);
           if (!a) { a = []; m.set(coin, a); }
-          a.push([ts, oi]);
+          a.push([ts, oi, Number.isFinite(f) ? f : null]);
         }
         for (const a of m.values()) a.sort((x, y) => x[0] - y[0]);
       } catch (_) {}
       return m;
+    },
+    saveFeatures(data) {
+      try { fs.writeFileSync(featFile, JSON.stringify(data)); } catch (_) {}
+    },
+    loadFeatures() {
+      try { if (fs.existsSync(featFile)) return JSON.parse(fs.readFileSync(featFile, "utf8")); }
+      catch (_) {}
+      return null;
     },
     close() { flush(); },
   };

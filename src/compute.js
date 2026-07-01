@@ -62,10 +62,12 @@ function featuresFromHourly(c, now, HOUR, DAY) {
   const { r2 } = linregR2(seg);
   // average-daily-range series: (high − low) / close per COMPLETED day, oldest→newest
   const today = Math.floor(now / DAY);
-  const dr = [...dayHLC.entries()]
+  const dayEntries = [...dayHLC.entries()].sort((a, b) => a[0] - b[0]);
+  const dr = dayEntries
     .filter(([day, d]) => day < today && d.hi > -Infinity && d.lo < Infinity && d.c > 0)
-    .sort((a, b) => a[0] - b[0])
     .map(([, d]) => (d.hi - d.lo) / d.c * 100);
+  // daily-close path (last ~31 days) so the 30d-trend sparkline needs no daily candles
+  const px30 = dayEntries.map(([, d]) => d.c).filter((v) => v != null && isFinite(v)).slice(-31);
   const feat = {
     volH: stdev(rets),
     r2,
@@ -73,6 +75,7 @@ function featuresFromHourly(c, now, HOUR, DAY) {
     lo30: lo < Infinity ? lo : null,
     volBase: median([...dayMap.values()].filter((x) => x > 0)),
     dr,
+    px30,
   };
   return { ref, feat };
 }
