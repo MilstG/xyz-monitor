@@ -48,7 +48,7 @@ const LAYOUT_V=2; // bump to force a one-time reset of saved layouts to the new 
 const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
-  sect:{ wt:'vol', sel:null, mode:'flow' }, dataTs:0, connOk:true, view:'markets',
+  sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets',
   watch:new Set(), watchOnly:false, detail:null,
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
@@ -860,7 +860,7 @@ function computeSectors(){
   // cohesion (avg internal daily-return correlation) via the shared correlation builder
   const withDaily=activeRows().filter(r=>r.daily&&r.sector);
   const coh=new Map();
-  if(withDaily.length>1){ const {C}=buildCorr(withDaily,90);
+  if(withDaily.length>1){ const scL=({'7':7,'30':30,'90':90}[state.sect.corrTf]||30); const {C}=buildCorr(withDaily,scL);
     const idxByG=new Map(); withDaily.forEach((r,i)=>{ const g=r.sector; (idxByG.get(g)||idxByG.set(g,[]).get(g)).push(i); });
     for(const [g,idx] of idxByG){ let s=0,n=0; for(let a=0;a<idx.length;a++)for(let b=a+1;b<idx.length;b++){ const v=C[idx[a]][idx[b]]; if(v!=null&&isFinite(v)){s+=v;n++;} } coh.set(g,n?s/n:null); }
     SECT._corrCache={C, idxByG, rows:withDaily};
@@ -1058,11 +1058,19 @@ function renderSectorDetail(){
   renderSectorBoard(SECT._rows);
 }
 function renderSectorCorr(list){
-  const box=el('sect-corr'), cache=SECT._corrCache;
-  if(!cache){ box.innerHTML='<div class="sec" style="padding:8px 2px">Daily history still loading — sector correlation appears once enough markets have it.</div>'; return; }
+  const box=el('sect-corr');
+  const tf=({'7':1,'30':1,'90':1}[state.sect.corrTf])?state.sect.corrTf:'30';
+  const btn=(d,on)=>`<button type="button" data-scorr="${d}" style="font:inherit;cursor:pointer;padding:2px 8px;margin-left:4px;border-radius:4px;border:1px solid ${on?'var(--accent)':'var(--grid)'};background:transparent;color:${on?'var(--accent)':'inherit'};font-weight:${on?600:400}">${d}d</button>`;
+  const ctl=`<div class="cp-head" style="margin-bottom:8px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">`
+    +`Sector × sector correlation <span class="sec" style="font-weight:400">— ${tf}d daily-return correlation, averaged across members</span>`
+    +`<span style="margin-left:auto"><span class="sec" style="margin-right:2px">lookback</span>${btn('7',tf==='7')}${btn('30',tf==='30')}${btn('90',tf==='90')}</span></div>`;
+  const bind=()=>{ box.querySelectorAll('button[data-scorr]').forEach(b=>b.addEventListener('click',()=>{
+    state.sect.corrTf=b.dataset.scorr; if(!el('view-sectors').hidden) renderSectors(); })); };
+  const cache=SECT._corrCache;
+  if(!cache){ box.innerHTML=ctl+'<div class="sec" style="padding:8px 2px">Daily history still loading — sector correlation appears once enough markets have it.</div>'; bind(); return; }
   const {C, idxByG}=cache;
   const names=list.map(g=>g.name).filter(n=>idxByG.has(n)&&idxByG.get(n).length);
-  if(names.length<2){ box.innerHTML='<div class="sec" style="padding:8px 2px">Need at least two sectors with daily history.</div>'; return; }
+  if(names.length<2){ box.innerHTML=ctl+'<div class="sec" style="padding:8px 2px">Need at least two sectors with daily history.</div>'; bind(); return; }
   const avg=(A,B)=>{ const ia=idxByG.get(A), ib=idxByG.get(B); let s=0,n=0;
     for(const i of ia)for(const j of ib){ if(A===B&&j<=i)continue; const v=C[i][j]; if(v!=null&&isFinite(v)){s+=v;n++;} }
     return n?s/n:null; };
@@ -1073,10 +1081,11 @@ function renderSectorCorr(list){
   names.forEach(rn=>{ h+=`<tr><th class="rl">${esc(sectorShort(rn))}</th>`;
     names.forEach(cn=>{ const self=rn===cn, v=self?1:avg(rn,cn);
       const txt=(v==null)?'':`${v<0?'−':''}${Math.abs(v).toFixed(1).replace(/^0/,'')}`;
-      h+=`<td class="${self?'diag':(v==null?'nodata':'')}" title="${esc(sectorShort(rn))} × ${esc(sectorShort(cn))}: ${v==null?'n/a':v.toFixed(2)}" style="${self||v==null?'':'background:'+corrColor(v)}">${self?'':txt}</td>`; });
+      h+=`<td class="${self?'diag':(v==null?'nodata':'')}" title="${esc(sectorShort(rn))} × ${esc(sectorShort(cn))} · ${tf}d: ${v==null?'n/a':v.toFixed(2)}" style="${self||v==null?'':'background:'+corrColor(v)}">${self?'':txt}</td>`; });
     h+='</tr>'; });
   h+='</tbody></table>';
-  box.innerHTML=h;
+  box.innerHTML=ctl+h;
+  bind();
 }
 function exportSectors(){ const list=SECT._rows; if(!list) return;
   const head=['Sector','Type','Members','Rotation','Heat','Return%','DeltaOI%','Breadth%','Vol24h','OI','Cohesion'];
