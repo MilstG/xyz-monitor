@@ -48,7 +48,7 @@ const LAYOUT_V=2; // bump to force a one-time reset of saved layouts to the new 
 const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
-  sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets',
+  sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   watch:new Set(), watchOnly:false, detail:null,
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
@@ -192,6 +192,7 @@ function applySnapshot(s){
   for(const k of [...state.rows.keys()]) if(!seen.has(k)) state.rows.delete(k);
   state.benchCoin=s.benchCoin||detectBenchmark();
   if(s.dataTs) state.dataTs=s.dataTs;
+  if(s.regime) state.regimeSrv=s.regime;
   const bn=el('benchnote'); if(bn) bn.textContent=(state.benchCoin&&state.rows.get(state.benchCoin))?state.rows.get(state.benchCoin).ticker:'not found';
   updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
 }
@@ -201,9 +202,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
     r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1]})):r.daily;
     r._dret=null; r._wrL=null; }
   scheduleRender();
-  dailyVersion++;
   if(!el('view-corr').hidden) renderCorr();
-  renderRegimeStrip();
 }
 function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   for(const r of rows){ if(r.vol)v+=r.vol; if(r.oi)o+=r.oi; }
@@ -379,45 +378,36 @@ function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(
   el('movers-list').innerHTML=byChg.slice(0,3).map(chip).join('')+`<span style="width:1px;background:var(--border);margin:0 2px"></span>`+byChg.slice(-3).reverse().map(chip).join(''); }
 
 // ===== market regime strip =====
-// A tape-level readout above every tab: breadth (how many names are up), dispersion (how spread
-// out the moves are) and mean pairwise correlation (how much the market moves as one block).
-// Breadth + dispersion are instant from the snapshot and follow the window selector; correlation
-// needs daily history and is fixed at 30d over the top markets by volume (a coherent subset — the
-// full mixed equity/FX/crypto/commodity universe would blur it). NOTE: absolute correlation isn't
-// very meaningful without a historical baseline (a later pass will percentile it against its own
-// recent range); for now the label is a heuristic and the raw numbers are the point.
-let dailyVersion=0;                          // bumped whenever daily data is applied
-const REGIME={ corr:null, corrN:0, _dv:-1 };
-function meanPairwiseCorr(rows, Ldays){
-  if(rows.length<3) return {c:null,n:0};
-  const {C}=buildCorr(rows, Ldays); let s=0,n=0;
-  for(let i=0;i<rows.length;i++) for(let j=i+1;j<rows.length;j++){ const v=C[i][j]; if(v!=null&&isFinite(v)){ s+=v; n++; } }
-  return { c:n?s/n:null, n };
-}
+// A tape-level readout above every tab. Breadth (share of names up) and dispersion (spread of
+// returns) are computed live client-side and follow the window selector. Correlation is computed
+// AND baselined server-side: the server samples mean pairwise 30d correlation across the top
+// markets every 30 min, keeps ~90 days, and ships the current value plus its percentile in that
+// history. So "0.55 · 88th pct" reads as "unusually correlated for this market" rather than a bare
+// number whose absolute level means little.
+function ordinal(n){ const v=n%100, s=(v>=11&&v<=13)?'th':(['th','st','nd','rd'][n%10]||'th'); return n+s; }
 function computeRegime(){
   const tfKey=TF_MAP[state.tf]||'d1', rows=activeRows();
   const rets=rows.map(r=>r[tfKey]).filter(v=>v!=null&&isFinite(v));
   const breadth=rets.length?rets.filter(v=>v>0).length/rets.length:null;
   const dispersion=rets.length>=2?stdev(rets):null;
-  if(REGIME._dv!==dailyVersion){            // recompute correlation only when daily data changed
-    const top=rows.filter(r=>r.daily).sort((a,b)=>(b.vol||0)-(a.vol||0)).slice(0,40);
-    const mc=meanPairwiseCorr(top,30); REGIME.corr=mc.c; REGIME.corrN=top.length; REGIME._dv=dailyVersion;
-  }
-  return { breadth, dispersion, corr:REGIME.corr, corrN:REGIME.corrN, n:rets.length };
+  const sr=state.regimeSrv||{};
+  return { breadth, dispersion, n:rets.length,
+    corr:(sr.corr!=null?sr.corr:null), corrPct:(sr.corrPct!=null?sr.corrPct:null),
+    corrN:sr.corrN||0, corrSamples:sr.corrSamples||0 };
 }
 function regimeLabel(g){
   if(g.breadth==null) return {t:'\u2014',cls:'sec',tip:'not enough data yet'};
-  const c=g.corr, up=g.breadth;
-  if(c!=null&&c>=0.5){
-    if(up>=0.65) return {t:'risk-on block',cls:'pos',tip:'high correlation + broad gains \u2014 one factor lifting everything'};
-    if(up<=0.35) return {t:'risk-off block',cls:'neg',tip:'high correlation + broad losses \u2014 one factor pressing everything'};
-    return {t:'correlated',cls:'sec',tip:'moving together, but direction is split'};
+  const p=g.corrPct, up=g.breadth, hi=p!=null&&p>=75, lo=p!=null&&p<=25;
+  if(hi){
+    if(up>=0.65) return {t:'risk-on block',cls:'pos',tip:`correlation unusually high (${ordinal(p)} pct of 90d) + broad gains \u2014 one factor lifting everything`};
+    if(up<=0.35) return {t:'risk-off block',cls:'neg',tip:`correlation unusually high (${ordinal(p)} pct of 90d) + broad losses \u2014 one factor pressing everything`};
+    return {t:'correlated',cls:'sec',tip:`correlation unusually high (${ordinal(p)} pct of 90d); direction is split`};
   }
-  if(c!=null&&c<0.3) return {t:'dispersed',cls:'blue',tip:'low correlation \u2014 names moving on their own stories (a stock-picker\u2019s tape)'};
-  if(c==null) return (up>=0.65||up<=0.35)
-    ? {t:up>=0.65?'broad bid':'broad offer',cls:up>=0.65?'pos':'neg',tip:'directional breadth; correlation still loading'}
-    : {t:'mixed',cls:'sec',tip:'no dominant direction; correlation still loading'};
-  return {t:'mixed',cls:'sec',tip:'no dominant single-factor behavior'};
+  if(lo) return {t:'dispersed',cls:'blue',tip:`correlation unusually low (${ordinal(p)} pct of 90d) \u2014 names moving on their own stories (a stock-picker\u2019s tape)`};
+  if(p==null) return (up>=0.65||up<=0.35)
+    ? {t:up>=0.65?'broad bid':'broad offer',cls:up>=0.65?'pos':'neg',tip:'directional breadth; correlation baseline still building (needs a few hours of samples)'}
+    : {t:'mixed',cls:'sec',tip:'no dominant direction; correlation baseline still building'};
+  return {t:'mixed',cls:'sec',tip:`correlation mid-range (${ordinal(p)} pct of 90d)`};
 }
 function renderRegimeStrip(){
   const box=el('regime'); if(!box) return;
@@ -426,15 +416,18 @@ function renderRegimeStrip(){
   if(g.breadth==null){ box.hidden=true; return; }
   box.hidden=false;
   const lab=regimeLabel(g), upN=Math.round(g.breadth*g.n), bw=Math.round(clamp(g.breadth,0,1)*100);
-  const corrCls=g.corr==null?'na':(g.corr>=0.5?'pos':(g.corr<0.3?'blue':'sec'));
-  const corrTxt=g.corr==null?'<span class="na">loading\u2026</span>':`<b class="${corrCls}">${g.corr.toFixed(2)}</b>`;
+  const pctTxt=g.corrPct!=null?` <span class="sec">\u00b7 ${ordinal(g.corrPct)} pct</span>`:'';
+  const corrCls=g.corrPct==null?'sec':(g.corrPct>=75?'pos':(g.corrPct<=25?'blue':'sec'));
+  const corrTxt=g.corr==null?'<span class="na">loading\u2026</span>':`<b class="${corrCls}">${g.corr.toFixed(2)}</b>${pctTxt}`;
+  const corrTip=g.corr==null?'mean pairwise 30d correlation across the top markets by volume (loading)'
+    :`mean pairwise 30d correlation across the top ${g.corrN} by volume`+(g.corrPct!=null?`, ranked against the last 90 days (${g.corrSamples} samples)`:` \u2014 baseline still building (${g.corrSamples} samples)`);
   box.innerHTML=
      `<span class="rs-lab ${lab.cls}" title="${esc(lab.tip)}">${esc(lab.t)}</span>`
     +`<span class="rs-m" title="share of markets up over ${state.tf} (${upN}/${g.n})"><span class="rs-k">breadth</span>`
       +`<span class="rs-bar"><span class="rs-bar-fill" style="width:${bw}%"></span></span>`
       +`<b class="${g.breadth>=0.5?'pos':'neg'}">${bw}%</b></span>`
     +`<span class="rs-m" title="cross-sectional stdev of ${state.tf} returns \u2014 how spread out the moves are"><span class="rs-k">dispersion</span> <b>\u00b1${g.dispersion!=null?g.dispersion.toFixed(2):'\u2014'}%</b></span>`
-    +`<span class="rs-m" title="mean pairwise 30d daily-return correlation across the top ${g.corrN||''} by volume \u2014 reads best against its own history (baseline coming)"><span class="rs-k">avg 30d corr</span> ${corrTxt}</span>`;
+    +`<span class="rs-m" title="${esc(corrTip)}"><span class="rs-k">30d corr</span> ${corrTxt}</span>`;
 }
 
 // ===== correlation tab =====
