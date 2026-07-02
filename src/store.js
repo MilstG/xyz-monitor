@@ -14,6 +14,7 @@ function openStore(dataDir) {
   const file = path.join(dataDir, "oi.log");
   const featFile = path.join(dataDir, "features.json");
   const regimeFile = path.join(dataDir, "regime.json");
+  const hourlyFile = path.join(dataDir, "hourly.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
 
@@ -112,6 +113,21 @@ function openStore(dataDir) {
     },
     saveRegime(arr) {
       try { fs.writeFileSync(regimeFile, JSON.stringify(arr)); } catch (_) {}
+    },
+    // Raw 60d hourly OHLCV spine — large, so written atomically (temp + rename) on a slow cadence so a
+    // crash or redeploy mid-write can never corrupt the live file. Restored on boot so the session
+    // analytics come back warm instead of blanking for minutes while the workers re-fetch candles.
+    saveHourly(data) {
+      try {
+        const tmp = hourlyFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, hourlyFile);
+      } catch (_) {}
+    },
+    loadHourly() {
+      try { if (fs.existsSync(hourlyFile)) return JSON.parse(fs.readFileSync(hourlyFile, "utf8")); }
+      catch (_) {}
+      return null;
     },
     close() { flush(); },
   };

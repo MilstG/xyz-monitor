@@ -24,6 +24,7 @@ const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new 
 const FAIL_BACKOFF = 60 * 1000;       // after a failed candle fetch, wait >= this before retrying that coin
 const HOURLY_PASS_THRESHOLD = 0.9;    // start daily backfill once this fraction of markets have hourly features
 const ANALYTICS_MS = 3 * 60 * 1000;   // recompute the session / time-of-day analytics payload every 3 min
+const HOURLY_PERSIST_MS = 10 * 60 * 1000;   // save the raw hourly spine to /data so it survives redeploys
                                       // (so a few permanently-unfetchable markets can't block all daily data)
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
@@ -571,6 +572,34 @@ function createPoller({ dex, store, log }) {
     store.saveFeatures({ ts: Date.now(), markets });
   }
 
+  // Persist the raw 60d hourly spine so the session analytics survive redeploys instead of blanking
+  // while the workers re-fetch. Candles are stored as compact [t,o,h,l,c,v] arrays (the six fields
+  // getHourly reads); the current in-memory spine is already <= 60d, so no pruning is needed here.
+  function persistHourly() {
+    const hourly = {};
+    for (const r of rows.values()) {
+      if (r.delisted || !Array.isArray(r.hourlyRaw) || !r.hourlyRaw.length) continue;
+      hourly[r.coin] = r.hourlyRaw.map((k) => [+k.t, +k.o, +k.h, +k.l, +k.c, +k.v]);
+    }
+    store.saveHourly({ ts: Date.now(), hourly });
+  }
+  function hydrateHourly() {
+    const data = store.loadHourly();
+    if (!data || !data.hourly) return 0;
+    const cut = Date.now() - HOURLY_HISTORY_DAYS * DAY;
+    let n = 0;
+    for (const coin in data.hourly) {
+      const arr = data.hourly[coin];
+      if (!Array.isArray(arr) || !arr.length) continue;
+      const out = [];
+      for (const a of arr) if (Array.isArray(a) && a.length >= 6 && Number.isFinite(a[0]) && a[0] >= cut) out.push({ t: a[0], o: a[1], h: a[2], l: a[3], c: a[4], v: a[5] });
+      if (!out.length) continue;
+      getRow(coin).hourlyRaw = out;
+      n++;
+    }
+    return n;
+  }
+
   async function maintenance() {
     try {
       const n = await store.prune(Date.now() - OI_RETENTION);
@@ -588,6 +617,8 @@ function createPoller({ dex, store, log }) {
   async function start() {
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
+    const restoredHourly = hydrateHourly();
+    if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
@@ -600,6 +631,8 @@ function createPoller({ dex, store, log }) {
     setInterval(buildAnalytics, ANALYTICS_MS);
     setInterval(() => store.flush(), 30 * 1000);
     setInterval(persistFeatures, 120 * 1000);
+    setInterval(persistHourly, HOURLY_PERSIST_MS);
+    setTimeout(persistHourly, 90 * 1000);   // early snapshot so even a quick redeploy keeps the spine warm
     setInterval(maintenance, 24 * 3600 * 1000);
     setTimeout(maintenance, 60 * 1000);
   }
