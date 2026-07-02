@@ -193,7 +193,7 @@ function applySnapshot(s){
   state.benchCoin=s.benchCoin||detectBenchmark();
   if(s.dataTs) state.dataTs=s.dataTs;
   const bn=el('benchnote'); if(bn) bn.textContent=(state.benchCoin&&state.rows.get(state.benchCoin))?state.rows.get(state.benchCoin).ticker:'not found';
-  updateAggregates(); render(); updateMovers(); updateSyncProgress();
+  updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
 }
 function applyDaily(d){ if(!d||!d.daily) return;
   for(const coin in d.daily){ const r=state.rows.get(coin); if(!r) continue;
@@ -201,7 +201,9 @@ function applyDaily(d){ if(!d||!d.daily) return;
     r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1]})):r.daily;
     r._dret=null; r._wrL=null; }
   scheduleRender();
+  dailyVersion++;
   if(!el('view-corr').hidden) renderCorr();
+  renderRegimeStrip();
 }
 function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   for(const r of rows){ if(r.vol)v+=r.vol; if(r.oi)o+=r.oi; }
@@ -375,6 +377,65 @@ function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(
   const byChg=[...rows].sort((a,b)=>b.d1-a.d1);
   const chip=r=>`<span class="chip ${r.d1>=0?'up':'down'}"><span class="t">${esc(r.ticker)}</span><span class="p">${fmtPct(r.d1).t}</span></span>`;
   el('movers-list').innerHTML=byChg.slice(0,3).map(chip).join('')+`<span style="width:1px;background:var(--border);margin:0 2px"></span>`+byChg.slice(-3).reverse().map(chip).join(''); }
+
+// ===== market regime strip =====
+// A tape-level readout above every tab: breadth (how many names are up), dispersion (how spread
+// out the moves are) and mean pairwise correlation (how much the market moves as one block).
+// Breadth + dispersion are instant from the snapshot and follow the window selector; correlation
+// needs daily history and is fixed at 30d over the top markets by volume (a coherent subset — the
+// full mixed equity/FX/crypto/commodity universe would blur it). NOTE: absolute correlation isn't
+// very meaningful without a historical baseline (a later pass will percentile it against its own
+// recent range); for now the label is a heuristic and the raw numbers are the point.
+let dailyVersion=0;                          // bumped whenever daily data is applied
+const REGIME={ corr:null, corrN:0, _dv:-1 };
+function meanPairwiseCorr(rows, Ldays){
+  if(rows.length<3) return {c:null,n:0};
+  const {C}=buildCorr(rows, Ldays); let s=0,n=0;
+  for(let i=0;i<rows.length;i++) for(let j=i+1;j<rows.length;j++){ const v=C[i][j]; if(v!=null&&isFinite(v)){ s+=v; n++; } }
+  return { c:n?s/n:null, n };
+}
+function computeRegime(){
+  const tfKey=TF_MAP[state.tf]||'d1', rows=activeRows();
+  const rets=rows.map(r=>r[tfKey]).filter(v=>v!=null&&isFinite(v));
+  const breadth=rets.length?rets.filter(v=>v>0).length/rets.length:null;
+  const dispersion=rets.length>=2?stdev(rets):null;
+  if(REGIME._dv!==dailyVersion){            // recompute correlation only when daily data changed
+    const top=rows.filter(r=>r.daily).sort((a,b)=>(b.vol||0)-(a.vol||0)).slice(0,40);
+    const mc=meanPairwiseCorr(top,30); REGIME.corr=mc.c; REGIME.corrN=top.length; REGIME._dv=dailyVersion;
+  }
+  return { breadth, dispersion, corr:REGIME.corr, corrN:REGIME.corrN, n:rets.length };
+}
+function regimeLabel(g){
+  if(g.breadth==null) return {t:'\u2014',cls:'sec',tip:'not enough data yet'};
+  const c=g.corr, up=g.breadth;
+  if(c!=null&&c>=0.5){
+    if(up>=0.65) return {t:'risk-on block',cls:'pos',tip:'high correlation + broad gains \u2014 one factor lifting everything'};
+    if(up<=0.35) return {t:'risk-off block',cls:'neg',tip:'high correlation + broad losses \u2014 one factor pressing everything'};
+    return {t:'correlated',cls:'sec',tip:'moving together, but direction is split'};
+  }
+  if(c!=null&&c<0.3) return {t:'dispersed',cls:'blue',tip:'low correlation \u2014 names moving on their own stories (a stock-picker\u2019s tape)'};
+  if(c==null) return (up>=0.65||up<=0.35)
+    ? {t:up>=0.65?'broad bid':'broad offer',cls:up>=0.65?'pos':'neg',tip:'directional breadth; correlation still loading'}
+    : {t:'mixed',cls:'sec',tip:'no dominant direction; correlation still loading'};
+  return {t:'mixed',cls:'sec',tip:'no dominant single-factor behavior'};
+}
+function renderRegimeStrip(){
+  const box=el('regime'); if(!box) return;
+  if(!state.rows.size){ box.hidden=true; return; }
+  const g=computeRegime();
+  if(g.breadth==null){ box.hidden=true; return; }
+  box.hidden=false;
+  const lab=regimeLabel(g), upN=Math.round(g.breadth*g.n), bw=Math.round(clamp(g.breadth,0,1)*100);
+  const corrCls=g.corr==null?'na':(g.corr>=0.5?'pos':(g.corr<0.3?'blue':'sec'));
+  const corrTxt=g.corr==null?'<span class="na">loading\u2026</span>':`<b class="${corrCls}">${g.corr.toFixed(2)}</b>`;
+  box.innerHTML=
+     `<span class="rs-lab ${lab.cls}" title="${esc(lab.tip)}">${esc(lab.t)}</span>`
+    +`<span class="rs-m" title="share of markets up over ${state.tf} (${upN}/${g.n})"><span class="rs-k">breadth</span>`
+      +`<span class="rs-bar"><span class="rs-bar-fill" style="width:${bw}%"></span></span>`
+      +`<b class="${g.breadth>=0.5?'pos':'neg'}">${bw}%</b></span>`
+    +`<span class="rs-m" title="cross-sectional stdev of ${state.tf} returns \u2014 how spread out the moves are"><span class="rs-k">dispersion</span> <b>\u00b1${g.dispersion!=null?g.dispersion.toFixed(2):'\u2014'}%</b></span>`
+    +`<span class="rs-m" title="mean pairwise 30d daily-return correlation across the top ${g.corrN||''} by volume \u2014 reads best against its own history (baseline coming)"><span class="rs-k">avg 30d corr</span> ${corrTxt}</span>`;
+}
 
 // ===== correlation tab =====
 const CORR={ _rows:null, _C:null, _N:null, _ord:null, _readout:'Hover a cell to read a pair · click a ticker for its co-movers &amp; hedges' };
@@ -1150,7 +1211,7 @@ document.addEventListener('click',e=>{ const pop=el('colpop');
 function setWindow(tf){ state.tf=tf;
   document.querySelectorAll('#tfseg button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
   document.querySelectorAll('#sectf button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
-  buildHead(); render();
+  buildHead(); render(); renderRegimeStrip();
   if(!el('view-sectors').hidden) renderSectors();
   savePrefs(); }
 document.querySelectorAll('#tfseg button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');

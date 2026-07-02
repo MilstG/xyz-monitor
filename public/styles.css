@@ -291,3 +291,18 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 :root[data-theme="amber"] ::-webkit-scrollbar-track{ background:#000; }
 :root[data-theme="amber"] ::-webkit-scrollbar-thumb{ background:#2c2c2c; border-radius:5px; }
 :root[data-theme="amber"] ::-webkit-scrollbar-thumb:hover{ background:#454545; }
+
+/* ===== market regime strip ===== */
+.regimestrip{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;
+  margin:0 0 16px;padding:8px 14px;background:var(--panel);border:1px solid var(--border);
+  border-radius:8px;font-family:var(--mono);font-size:12px}
+.regimestrip .rs-lab{font-family:var(--disp);font-weight:600;font-size:12.5px;letter-spacing:.2px;
+  padding:2px 9px;border-radius:5px;background:var(--panel2);border:1px solid var(--border)}
+.regimestrip .rs-m{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.regimestrip .rs-k{color:var(--muted);text-transform:uppercase;letter-spacing:.7px;font-size:10px}
+.regimestrip .rs-m b{font-weight:600}
+.regimestrip .rs-bar{position:relative;width:52px;height:6px;border-radius:3px;
+  background:var(--down);opacity:.5;overflow:hidden;display:inline-block}
+.regimestrip .rs-bar-fill{position:absolute;left:0;top:0;bottom:0;background:var(--up)}
+.blue{color:var(--blue)}
+@media(max-width:640px){ .regimestrip{font-size:11px;gap:6px 14px;padding:7px 10px} .regimestrip .rs-bar{width:40px} }
