@@ -5,6 +5,7 @@
 // compaction rewrites the file with only the last 31 days. No build toolchain required.
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 
 const MAX_BUF = 50000; // hard cap on unflushed lines if the volume is unwritable
 
@@ -13,9 +14,10 @@ function openStore(dataDir) {
   const file = path.join(dataDir, "oi.log");
   const featFile = path.join(dataDir, "features.json");
   let buf = [];
+  let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
 
   function flush() {
-    if (!buf.length) return;
+    if (!buf.length || pruning) return;
     try { fs.appendFileSync(file, buf.join("")); buf = []; }
     catch (_) {
       // Keep the buffer for the next attempt, but don't let it grow without bound if the
@@ -30,22 +32,43 @@ function openStore(dataDir) {
       if (buf.length >= 200) flush();
     },
     flush,
-    prune(before) {
-      flush();
+    // Daily compaction. Streams the log to a temp file line-by-line (so it never loads the
+    // whole thing into memory or blocks the event loop) and atomically renames it into place
+    // (so a crash mid-prune can't leave a half-written log). Appends are held in `buf` while
+    // this runs and flushed to the new file afterward. Async: callers should await it.
+    async prune(before) {
+      if (pruning) return 0;
+      flush();                              // fold buffered samples into the file first
+      if (!fs.existsSync(file)) return 0;
+      pruning = true;
+      const tmp = file + ".tmp";
       let removed = 0;
       try {
-        if (!fs.existsSync(file)) return 0;
-        const lines = fs.readFileSync(file, "utf8").split("\n");
-        const keep = [];
-        for (const ln of lines) {
-          if (!ln) continue;
-          const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
-          if (i1 < 0 || i2 < 0) continue;
-          const ts = +ln.slice(i1 + 1, i2);
-          if (Number.isFinite(ts) && ts >= before) keep.push(ln); else removed++;
-        }
-        fs.writeFileSync(file, keep.length ? keep.join("\n") + "\n" : "");
-      } catch (_) {}
+        await new Promise((resolve, reject) => {
+          const input = fs.createReadStream(file, { encoding: "utf8" });
+          const output = fs.createWriteStream(tmp);
+          const rl = readline.createInterface({ input, crlfDelay: Infinity });
+          rl.on("line", (ln) => {
+            if (!ln) return;
+            const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
+            if (i1 < 0 || i2 < 0) return;
+            const t = +ln.slice(i1 + 1, i2);
+            if (Number.isFinite(t) && t >= before) output.write(ln + "\n");
+            else removed++;
+          });
+          rl.on("close", () => output.end());
+          rl.on("error", reject);
+          output.on("finish", resolve);
+          output.on("error", reject);
+        });
+        fs.renameSync(tmp, file);           // atomic swap
+      } catch (_) {
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        removed = 0;                        // prune failed — leave the original untouched
+      } finally {
+        pruning = false;
+        flush();                            // write anything buffered while we were pruning
+      }
       return removed;
     },
     loadAll(since) {

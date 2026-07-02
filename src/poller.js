@@ -14,6 +14,7 @@ const OI_RETENTION = 31 * DAY;        // keep 31 days of OI history
 const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const DAILY_STALE = 6 * 3600 * 1000;  // refresh daily candles every 6 h
 const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new markets
+const FAIL_BACKOFF = 60 * 1000;       // after a failed candle fetch, wait >= this before retrying that coin
 
 function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Number.isFinite(v) ? v : null; }
 
@@ -23,6 +24,7 @@ function createPoller({ dex, store, log }) {
   let order = [];
   let benchCoin = null;
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
+  let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
   const inflight = new Set();
 
   log(`Loaded persisted OI history for ${hist.size} market(s)`);
@@ -149,8 +151,8 @@ function createPoller({ dex, store, log }) {
     }
     return best ? best.coin : null;
   }
-  const needHourly = (r) => Date.now() - r.hourlyTs > HOURLY_STALE;
-  const needDaily = (r) => !r.dailyRaw || Date.now() - r.dailyTs > DAILY_STALE;
+  const needHourly = (r) => Date.now() - r.hourlyTs > HOURLY_STALE && Date.now() >= (r.hFailUntil || 0);
+  const needDaily = (r) => (!r.dailyRaw || Date.now() - r.dailyTs > DAILY_STALE) && Date.now() >= (r.dFailUntil || 0);
 
   async function hourlyWorker() {
     for (;;) {
@@ -158,7 +160,11 @@ function createPoller({ dex, store, log }) {
       if (!coin) { await sleep(2000); continue; }
       if (inflight.has("h:" + coin)) { await sleep(500); continue; }
       inflight.add("h:" + coin);
-      try { await refreshHourly(coin); } catch (_) {} finally { inflight.delete("h:" + coin); }
+      try { await refreshHourly(coin); const r = rows.get(coin); if (r) r.hFail = 0; }
+      catch (_) {
+        const r = rows.get(coin);
+        if (r) { r.hFail = (r.hFail || 0) + 1; r.hFailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.hFail, 15 * 60 * 1000); }
+      } finally { inflight.delete("h:" + coin); }
     }
   }
   // The default view needs only hourly data, so let it claim the full rate budget first;
@@ -179,7 +185,11 @@ function createPoller({ dex, store, log }) {
       if (!coin) { await sleep(2000); continue; }
       if (inflight.has("d:" + coin)) { await sleep(800); continue; }
       inflight.add("d:" + coin);
-      try { await refreshDaily(coin); } catch (_) {} finally { inflight.delete("d:" + coin); }
+      try { await refreshDaily(coin); const r = rows.get(coin); if (r) r.dFail = 0; }
+      catch (_) {
+        const r = rows.get(coin);
+        if (r) { r.dFail = (r.dFail || 0) + 1; r.dFailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.dFail, 15 * 60 * 1000); }
+      } finally { inflight.delete("d:" + coin); }
     }
   }
 
@@ -202,8 +212,11 @@ function createPoller({ dex, store, log }) {
   }
   function buildDaily() {
     const daily = {};
-    for (const r of activeMarkets()) if (r.dailyRaw) daily[r.coin] = r.dailyRaw.map((k) => [k.t, k.c]);
-    dailyCache = { ts: Date.now(), daily };
+    let coins = 0, lens = 0;
+    for (const r of activeMarkets()) if (r.dailyRaw) { daily[r.coin] = r.dailyRaw.map((k) => [k.t, k.c]); coins++; lens += r.dailyRaw.length; }
+    const sig = coins + ":" + lens;
+    if (sig !== dailySig) { dailySig = sig; dailyVer = Date.now(); }   // content changed -> new ETag
+    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily };
   }
 
   // ---- warm-cache persistence: survive restarts so redeploys serve instantly ----
@@ -236,9 +249,11 @@ function createPoller({ dex, store, log }) {
     store.saveFeatures({ ts: Date.now(), markets });
   }
 
-  function maintenance() {
-    const n = store.prune(Date.now() - OI_RETENTION);
-    if (n) log(`Pruned ${n} OI sample(s) older than 31d`);
+  async function maintenance() {
+    try {
+      const n = await store.prune(Date.now() - OI_RETENTION);
+      if (n) log(`Pruned ${n} OI sample(s) older than 31d`);
+    } catch (e) { log("prune failed: " + (e && e.message)); }
     const total = activeMarkets().filter((r) => !r.delisted).length;
     const pending = activeMarkets().filter((r) => !r.delisted && !r.dailyRaw).length;
     log(`Daily audit: ${total} active market(s), ${pending} awaiting history backfill`);
