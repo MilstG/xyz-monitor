@@ -874,6 +874,69 @@ async function loadAnalytics(){
   if(state.view==='sessions') drawSessions();
 }
 function covPct(n,d){ return d>0?Math.round(100*n/d):0; }
+function fp(x,dp){ dp=(dp==null?2:dp); if(x==null||!isFinite(x))return '—'; return (x>0?'+':'')+(x*100).toFixed(dp)+'%'; }
+function dcls(x){ return x>0?'pos':(x<0?'neg':'sec'); }
+function sessDate(t){ try{ return new Date(t).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }catch(_){ return ''; } }
+function sessCurveSvg(curve, horizonTs){
+  const W=520,H=148, pl=46,pr=14,pt=12,pb=22;
+  if(!curve || curve.length<2) return '<div class="msg" style="height:110px;display:flex;align-items:center;justify-content:center">Not enough boundaries yet.</div>';
+  const n=curve.length, gs=curve.map(p=>p[1]), ns=curve.map(p=>p[2]);
+  let lo=Math.min(0,...gs,...ns), hi=Math.max(0,...gs,...ns);
+  if(hi===lo){ hi+=0.01; lo-=0.01; }
+  const padd=(hi-lo)*0.08; hi+=padd; lo-=padd;
+  const X=i=> pl + (n<=1?0:i/(n-1))*(W-pl-pr);
+  const Y=v=> pt + (1-(v-lo)/(hi-lo))*(H-pt-pb);
+  const pathOf=idx=> curve.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[idx]).toFixed(1)).join(' ');
+  let hIdx=-1; if(horizonTs!=null){ for(let i=0;i<n;i++){ if(curve[i][0]>=horizonTs){ hIdx=i; break; } } }
+  const zeroY=Y(0);
+  const yl=(v)=>`<text x="${pl-6}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${fp(v,1)}</text>`;
+  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  s+=`<line x1="${pl}" y1="${zeroY.toFixed(1)}" x2="${W-pr}" y2="${zeroY.toFixed(1)}" stroke="var(--faint)" stroke-dasharray="3 3" stroke-width="1"/>`;
+  s+=yl(hi)+yl(0)+yl(lo);
+  if(hIdx>0){ const hx=X(hIdx).toFixed(1);
+    s+=`<line x1="${hx}" y1="${pt}" x2="${hx}" y2="${H-pb}" stroke="var(--accent-dim)" stroke-dasharray="2 3" stroke-width="1"/>`;
+    s+=`<text x="${hx}" y="${pt+8}" text-anchor="middle" style="font-family:var(--mono);font-size:8px;fill:var(--accent-dim)">funding→</text>`; }
+  s+=`<path d="${pathOf(1)}" fill="none" stroke="var(--blue)" stroke-width="1.6"/>`;
+  const netDash = hIdx<0 ? ' stroke-dasharray="4 3"' : '';
+  s+=`<path d="${pathOf(2)}" fill="none" stroke="var(--accent)" stroke-width="1.6"${netDash}/>`;
+  s+=`<circle cx="${X(n-1).toFixed(1)}" cy="${Y(gs[n-1]).toFixed(1)}" r="2.4" fill="var(--blue)"/>`;
+  s+=`<circle cx="${X(n-1).toFixed(1)}" cy="${Y(ns[n-1]).toFixed(1)}" r="2.4" fill="var(--accent)"/>`;
+  s+=`<text x="${pl}" y="${H-6}" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${sessDate(curve[0][0])}</text>`;
+  s+=`<text x="${W-pr}" y="${H-6}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${sessDate(curve[n-1][0])}</text>`;
+  return s+'</svg>';
+}
+function renderSessionDecomp(sd){
+  const h=sd.headline, S=sd.sessions;
+  const funded = h.fundingHorizonTs!=null;
+  const dragBp = (h.meanGross - h.meanNet)*1e4;
+  const endp = sd.fundingEndpoint==='on' ? 'live funding history' : 'sampled funding';
+  const hero = `<span class="${dcls(h.medianNet)}">${fp(h.medianNet)}</span>`;
+  const head = `<div style="background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:16px 18px;margin-bottom:18px">`+
+    `<div class="sec" style="font-size:11px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px">Overnight · buy at close, sell before open · equity class (${sd.equityCount} names)</div>`+
+    `<div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">`+
+      `<div style="font-family:var(--mono);font-size:30px;line-height:1">${hero}<span class="sec" style="font-size:13px"> /night median net</span></div>`+
+      `<div class="sec" style="font-size:13px">gross <span class="${dcls(h.medianGross)}">${fp(h.medianGross)}</span> · funding drag ${dragBp.toFixed(1)}bp/night</div>`+
+    `</div>`+
+    `<div class="sec" style="font-size:12px;margin-top:10px;display:flex;gap:18px;flex-wrap:wrap">`+
+      `<span>60d compounded: net <span class="${dcls(h.totNet)}">${fp(h.totNet)}</span> vs gross <span class="${dcls(h.totGross)}">${fp(h.totGross)}</span></span>`+
+      `<span>win ${(h.winNet*100).toFixed(0)}%</span>`+
+      `<span>${h.nights} nights · ~${h.breadth.toFixed(0)} names/night</span>`+
+    `</div>`+
+    `<div class="sec" style="font-size:11px;margin-top:8px;opacity:.85">`+
+      (funded ? `Net reliable from ${sessDate(h.fundingHorizonTs)} onward (${endp}).`
+              : `Net-of-funding is approximate — funding history is sparse (${endp}); the dashed net line tracks gross.`)+
+    `</div></div>`;
+  const legend = `<div class="sec" style="font-size:11px;display:flex;gap:16px;margin-bottom:6px"><span style="color:var(--blue)">▬ gross</span><span style="color:var(--accent)">▬ net of funding</span></div>`;
+  const chart=(key,label)=>{ const x=S[key]; if(!x||!x.n) return '';
+    return `<div style="flex:1 1 340px;min-width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px">`+
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px"><span style="color:var(--text);font-size:13px">${label}</span>`+
+      `<span class="sec" style="font-size:11px">net <span class="${dcls(x.totNet)}">${fp(x.totNet)}</span> · ${x.n} · win ${(x.winNet*100).toFixed(0)}%</span></div>`+
+      sessCurveSvg(x.curve, x.fundingHorizonTs)+`</div>`; };
+  const charts = legend+`<div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px">`+
+    chart('overnight','Overnight (close→open)')+chart('weekend','Weekend (Fri→Mon)')+chart('cash','Cash (open→close)')+`</div>`;
+  const title=`<div class="cp-sub" style="margin:0 0 12px">◆ Session decomposition <span class="sec" style="font-weight:400">— what an overnight / weekend / cash hold actually pays, pooled one bet per boundary across the equity class</span></div>`;
+  return title+head+charts;
+}
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
   const a=state.analytics.data, err=state.analytics.err;
@@ -896,7 +959,7 @@ function drawSessions(){
   const rp=covPct(c.ready,c.markets);
   const bar=`<div style="margin-bottom:22px"><div class="sec" style="font-size:11px;margin-bottom:6px">Spine readiness — session studies unlock as this fills</div>`+
     `<div style="height:8px;border-radius:4px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${rp}%;background:var(--accent);transition:width .4s"></div></div></div>`;
-  const panels=[
+  let panels=[
     ['Session decomposition','cash / overnight / weekend equity curves, gross &amp; net-of-funding','★★★★★'],
     ['Hour-of-day activity clock','volatility · volume · funding per ticker','★★★★☆'],
     ['Funding clock','when carry is with you or against you, on a schedule','★★★★☆'],
@@ -905,6 +968,10 @@ function drawSessions(){
     ['Day-of-week 7×24 heatmap','weekend-gap &amp; Friday→Monday risk','★★★☆☆'],
     ['Return seasonality by hour','exploratory · significance-flagged','★★☆☆☆'],
   ];
+  const sd = a.sections && a.sections.sessionDecomp;
+  let flagship='';
+  if(sd && !sd.pending){ flagship = renderSessionDecomp(sd); panels = panels.filter(p=>p[0]!=='Session decomposition'); }
+  else if(sd && sd.pending){ panels[0]=['Session decomposition',`computing — needs ≥${sd.need} equities with ≥3d hourly spine (have ${sd.equityCount})`,'★★★★★']; }
   const deck=`<div class="cp-sub" style="margin:0 0 10px">On deck</div>`+
     `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
     panels.map(p=>`<div style="display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel);flex-wrap:wrap">`+
@@ -914,7 +981,7 @@ function drawSessions(){
       `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
       `</div>`).join('')+`</div>`;
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
-  host.innerHTML=head+cards+bar+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  host.innerHTML=head+cards+bar+flagship+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
 }
 function showView(v){
   state.view=v;
