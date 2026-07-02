@@ -55,6 +55,8 @@ async function main() {
     serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] }));
   fastify.get("/api/daily", (req, reply) =>
     serveCached(req, reply, poller.getDaily(), { ts: 0, daily: {} }));
+  fastify.get("/api/analytics", (req, reply) =>
+    serveCached(req, reply, poller.getAnalytics(), { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} }));
   fastify.get("/api/series", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
