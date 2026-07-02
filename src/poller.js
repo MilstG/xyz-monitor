@@ -135,11 +135,15 @@ function createPoller({ dex, store, log }) {
     buildDaily();
   }
 
-  // Prioritise newly listed markets, then highest 24h volume.
-  function pick(needsFetch) {
+  // Prioritise newly listed markets, then highest 24h volume. Skips coins already being
+  // fetched (identified by `prefix`) so a second worker claims the next candidate instead of
+  // spinning on the one the first worker already holds — this is what makes the doubled
+  // hourly/daily workers actually run in parallel.
+  function pick(needsFetch, prefix) {
     let best = null;
     for (const r of rows.values()) {
       if (r.delisted || !needsFetch(r)) continue;
+      if (prefix && inflight.has(prefix + r.coin)) continue;
       if (!best || (r.isNew && !best.isNew) ||
           (r.isNew === best.isNew && (r.vol || 0) > (best.vol || 0))) best = r;
     }
@@ -150,7 +154,7 @@ function createPoller({ dex, store, log }) {
 
   async function hourlyWorker() {
     for (;;) {
-      const coin = pick(needHourly);
+      const coin = pick(needHourly, "h:");
       if (!coin) { await sleep(2000); continue; }
       if (inflight.has("h:" + coin)) { await sleep(500); continue; }
       inflight.add("h:" + coin);
@@ -171,7 +175,7 @@ function createPoller({ dex, store, log }) {
   async function dailyWorker() {
     for (;;) {
       if (!hourlyPassComplete()) { await sleep(1000); continue; }
-      const coin = pick(needDaily);
+      const coin = pick(needDaily, "d:");
       if (!coin) { await sleep(2000); continue; }
       if (inflight.has("d:" + coin)) { await sleep(800); continue; }
       inflight.add("d:" + coin);
