@@ -1036,8 +1036,11 @@ function mapLabelSvg(n, sizePx){
 // hover a bubble -> raise it to the front and dim the rest
 function attachMapHover(){
   const svg=el('sect-map').querySelector('svg.smapsvg'); if(!svg) return;
+  // Emphasis is done purely with a class + CSS dimming of the others. We deliberately do NOT re-append
+  // the hovered <g> to raise it: moving a node inside its own mouseenter cancels the browser's click
+  // gesture (mousedown/mouseup land on a re-inserted node), which made bubbles unclickable.
   svg.querySelectorAll('.bub,.lead').forEach(g=>{
-    g.addEventListener('mouseenter',()=>{ svg.classList.add('hv'); g.classList.add('hot'); svg.appendChild(g); });
+    g.addEventListener('mouseenter',()=>{ svg.classList.add('hv'); g.classList.add('hot'); });
     g.addEventListener('mouseleave',()=>{ svg.classList.remove('hv'); g.classList.remove('hot'); });
   });
 }
