@@ -433,6 +433,31 @@ function hourReturnMeans(prices) {
   return { ret, n: cnt };
 }
 
+// Per-ET-hour return stats for ONE ticker as a time series: each day's ln(close/open) in that hour is
+// one observation, so this is a within-name t-test (mean/se/t/n) — distinct from the cross-sectional
+// build in the poller (which uses one mean per ticker). Noisier and does not model autocorrelation, so
+// the client labels single-name views with extra caution. Pure; shape matches the cross-sectional hours.
+function hourReturnStats(prices) {
+  const sum = new Array(24).fill(0), sq = new Array(24).fill(0), cnt = new Array(24).fill(0), offCache = new Map();
+  for (const k of (prices || [])) {
+    const t = k[0], o = k[1], c = k[4];
+    if (!Number.isFinite(t) || !Number.isFinite(o) || !Number.isFinite(c) || o <= 0 || c <= 0) continue;
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    const hr = ((Math.floor((t % DAY) / HOUR) + off) % 24 + 24) % 24;
+    const x = Math.log(c / o); sum[hr] += x; sq[hr] += x * x; cnt[hr]++;
+  }
+  const hours = [];
+  for (let h = 0; h < 24; h++) {
+    const n = cnt[h];
+    if (n < 3) { hours.push({ h, mean: null, se: null, t: null, n }); continue; }
+    const mean = sum[h] / n, varr = (sq[h] - n * mean * mean) / (n - 1);
+    const sd = Math.sqrt(Math.max(0, varr)), se = sd / Math.sqrt(n);
+    hours.push({ h, mean: +mean.toFixed(6), se: +se.toFixed(6), t: se > 0 ? +(mean / se).toFixed(2) : 0, n });
+  }
+  return { hours, sigCount: hours.filter((x) => x.t != null && Math.abs(x.t) >= 2).length };
+}
+
 // Top-2 principal components of a set of row vectors, via power iteration + deflation (no deps).
 // Returns { coords:[[x,y],...] } (one 2D point per row, mean-centred) and varExplained:[f1,f2]
 // (fraction of total variance each axis captures — so the 2D scatter can honestly show how much
@@ -523,4 +548,4 @@ function sessionComposite(perTickerHolds) {
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
-  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans };
+  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };

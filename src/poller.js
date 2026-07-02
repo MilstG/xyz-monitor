@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep } = require("./hyperliquid");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock,
-  pca2, hourReturnMeans, pearson } = require("./compute");
+  pca2, hourReturnMeans, hourReturnStats, pearson } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -592,18 +592,15 @@ function createPoller({ dex, store, log }) {
     return { points, classes, oddballs, varExplained: varExplained.map((v) => +v.toFixed(3)), count: ts.length };
   }
 
-  // Return seasonality by ET hour (EXPLORATORY / quarantined). Each equity contributes one mean
-  // intra-hour return per hour; we run a cross-sectional t-test per hour (ticker = one observation,
-  // avoiding candle pseudo-replication) so the client can grey out the noise and only highlight
-  // hours that clear |t| >= 2. Never a standalone trade signal — the payload is significance-flagged.
+  // Return seasonality by ET hour (EXPLORATORY / quarantined). Default is a cross-sectional t-test per
+  // hour (ticker = one observation, avoiding candle pseudo-replication) so we only highlight hours that
+  // clear |t| >= 2. The client can also drill into one sector (cross-sectional over its members) or one
+  // ticker (a within-name time series, each day = one observation — noisier, labeled with extra caution).
+  // Never a standalone trade signal — the payload is significance-flagged.
   const SEASON_MIN = 8;
-  function buildSeasonality() {
-    const eq = activeMarkets().filter((r) =>
-      !r.delisted && classifyCached(r.ticker).assetClass === "Equity" &&
-      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
-    if (eq.length < SEASON_MIN) return { pending: true, count: eq.length, need: SEASON_MIN };
+  function crossHours(meansList) {
     const perHour = Array.from({ length: 24 }, () => []);
-    for (const r of eq) { const { ret } = hourReturnMeans(getHourly(r.coin)); for (let h = 0; h < 24; h++) if (Number.isFinite(ret[h])) perHour[h].push(ret[h]); }
+    for (const means of meansList) for (let h = 0; h < 24; h++) if (Number.isFinite(means[h])) perHour[h].push(means[h]);
     const hours = [];
     for (let h = 0; h < 24; h++) {
       const a = perHour[h], n = a.length;
@@ -613,7 +610,29 @@ function createPoller({ dex, store, log }) {
       const sd = Math.sqrt(v / (n - 1)), se = sd / Math.sqrt(n);
       hours.push({ h, mean: +mean.toFixed(6), se: +se.toFixed(6), t: se > 0 ? +(mean / se).toFixed(2) : 0, n });
     }
-    return { equityCount: eq.length, hours, sigCount: hours.filter((x) => x.t != null && Math.abs(x.t) >= 2).length };
+    return { hours, sigCount: hours.filter((x) => x.t != null && Math.abs(x.t) >= 2).length };
+  }
+  function buildSeasonality() {
+    const eq = activeMarkets().filter((r) =>
+      !r.delisted && classifyCached(r.ticker).assetClass === "Equity" &&
+      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
+    if (eq.length < SEASON_MIN) return { pending: true, count: eq.length, need: SEASON_MIN };
+    const byTicker = {}, universe = [], sectorMeans = {}, allMeans = [];
+    for (const r of eq) {
+      const st = hourReturnStats(getHourly(r.coin));            // within-name time series (each day = one obs)
+      byTicker[r.coin] = { hours: st.hours, sigCount: st.sigCount };
+      const means = st.hours.map((x) => x.mean);                 // one mean per hour -> cross-sectional input
+      allMeans.push(means);
+      const sec = classifyCached(r.ticker).sector || "Unclassified";
+      (sectorMeans[sec] = sectorMeans[sec] || []).push(means);
+      universe.push({ coin: r.coin, ticker: r.ticker, sector: sec });
+    }
+    const bySector = {};
+    for (const sec in sectorMeans) {
+      if (sectorMeans[sec].length >= 3) bySector[sec] = Object.assign(crossHours(sectorMeans[sec]), { n: sectorMeans[sec].length });
+    }
+    universe.sort((a, b) => (a.ticker < b.ticker ? -1 : 1));
+    return { equityCount: eq.length, all: crossHours(allMeans), bySector, byTicker, universe };
   }
 
 
