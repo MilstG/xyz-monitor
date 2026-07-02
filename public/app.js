@@ -1250,7 +1250,9 @@ function seasonResolve(se, sel){
     if(p) return { hours:p.hours, sigCount:p.sigCount, label:s, kind:'sector', n:p.n }; }
   if(sel && sel.indexOf('tk:')===0){ const c=sel.slice(3); const p=se.byTicker&&se.byTicker[c];
     if(p){ const u=(se.universe||[]).find(x=>x.coin===c); return { hours:p.hours, sigCount:p.sigCount, label:u?u.ticker:c, kind:'ticker', sub:u?u.sector:'' }; } }
-  const a=se.all||{}; return { hours:a.hours||[], sigCount:a.sigCount||0, label:'All equities', kind:'all', n:se.equityCount };
+  const a=se.all||{}, hours=(a.hours&&a.hours.length)?a.hours:(se.hours||[]);   // legacy shape (server predates drill-down) still renders the cross-section
+  const sigCount=(a.sigCount!=null?a.sigCount:se.sigCount)||0;
+  return { hours, sigCount, label:'All equities', kind:'all', n:se.equityCount };
 }
 function renderSeasonality(se){
   const st=state.analytics.season, v=seasonResolve(se, st.sel);
