@@ -50,7 +50,7 @@ const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:''
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   watch:new Set(), watchOnly:false, detail:null,
-  analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' } },
+  analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
 function el(id){ return document.getElementById(id); }
@@ -1245,13 +1245,37 @@ function seasonBarSvg(hours){
     const sig=h.t!=null&&Math.abs(h.t)>=2; return `<b style="color:var(--text)">${h.h}:00 ET</b><br>mean ${(h.mean*1e4).toFixed(1)} bp · t ${h.t}<br><span style="color:${sig?(h.mean>=0?'var(--up)':'var(--down)'):'var(--faint)'}">${sig?'significant':'noise'}</span> · n=${h.n}`; });
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
+function seasonResolve(se, sel){
+  if(sel && sel.indexOf('sec:')===0){ const s=sel.slice(4); const p=se.bySector&&se.bySector[s];
+    if(p) return { hours:p.hours, sigCount:p.sigCount, label:s, kind:'sector', n:p.n }; }
+  if(sel && sel.indexOf('tk:')===0){ const c=sel.slice(3); const p=se.byTicker&&se.byTicker[c];
+    if(p){ const u=(se.universe||[]).find(x=>x.coin===c); return { hours:p.hours, sigCount:p.sigCount, label:u?u.ticker:c, kind:'ticker', sub:u?u.sector:'' }; } }
+  const a=se.all||{}; return { hours:a.hours||[], sigCount:a.sigCount||0, label:'All equities', kind:'all', n:se.equityCount };
+}
 function renderSeasonality(se){
+  const st=state.analytics.season, v=seasonResolve(se, st.sel);
+  const opt=(val,l,sel)=>`<option value="${esc(val)}"${sel===val?' selected':''}>${esc(l)}</option>`;
+  const sectors=Object.keys(se.bySector||{}).sort(), uni=se.universe||[];
+  let selHtml=`<select id="seasonsel" class="clocksel">`+opt('all','All equities (cross-section)',st.sel);
+  if(sectors.length) selHtml+=`<optgroup label="By sector">`+sectors.map(s=>opt('sec:'+s, `${s} (${se.bySector[s].n})`, st.sel)).join('')+`</optgroup>`;
+  if(uni.length) selHtml+=`<optgroup label="By ticker">`+uni.map(u=>opt('tk:'+u.coin, u.ticker, st.sel)).join('')+`</optgroup>`;
+  selHtml+=`</select>`;
+  const rt = v.kind==='ticker' ? `${esc(v.label)}${v.sub?' · '+esc(v.sub):''} · one name, across days`
+          : v.kind==='sector' ? `${esc(v.label)} · ${v.n} stocks, cross-section`
+          : `${v.n} equities, cross-section`;
+  const controls=`<div class="s-ctrls"><span class="lbl">series</span>${selHtml}<span class="rt">${rt}</span></div>`;
+  const isTS = v.kind==='ticker';
+  const unit = isTS ? 'each trading day = one observation' : (v.kind==='sector' ? `each of ${v.n} stocks = one observation` : 'each equity = one observation');
+  const bannerBody = isTS
+    ? `Mean intra-hour return by ET hour for <b style="color:var(--text)">${esc(v.label)}</b> alone, time-series t-test (${unit}). Single-name and noisy — autocorrelation isn't modeled, so treat |t| loosely: <b style="color:var(--text)">${v.sigCount} of 24</b> hours clear |t|≥2. Not a standalone signal.`
+    : `Mean intra-hour return by ET hour, cross-sectional t-test (${unit}). Fragile: <b style="color:var(--text)">${v.sigCount} of 24</b> hours clear |t|≥2 and ~1 is expected by chance. Only the colored bars are flagged — never trade this alone.`;
   const banner=`<div style="background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--down);border-radius:10px;padding:11px 14px;margin-bottom:12px">`+
     `<span style="color:var(--down);font-family:var(--mono);font-size:11px;letter-spacing:.5px;font-weight:600">⚠ EXPLORATORY</span> `+
-    `<span class="sec" style="font-size:12px">Mean intra-hour return by ET hour, cross-sectional t-test (each equity = one observation). Fragile: <b style="color:var(--text)">${se.sigCount} of 24</b> hours clear |t|≥2 and ~1 is expected by chance. Only the colored bars are flagged — never trade this alone.</span></div>`;
-  const cap='Bar height = mean return in basis points; whiskers = ±1 standard error across the equity cross-section. Grey bars are noise; green/red bars cleared |t|≥2. Blue band = US cash session. <b>Hover</b> a bar for its mean, t-stat and sample size.';
-  return sHead('Return seasonality by hour','quarantined — grey is noise, colored cleared significance')+banner+sCard(seasonBarSvg(se.hours))+sCap(cap);
+    `<span class="sec" style="font-size:12px">${bannerBody}</span></div>`;
+  const cap = `Bar height = mean return in basis points; whiskers = ±1 standard error across ${isTS?"this name's trading days":'the cross-section'}. Grey bars are noise; green/red bars cleared |t|≥2. Blue band = US cash session. <b>Hover</b> a bar for its mean, t-stat and sample size.`;
+  return sHead('Return seasonality by hour','quarantined — pick all, a sector or one name; grey is noise, colored cleared significance')+controls+banner+sCard(seasonBarSvg(v.hours))+sCap(cap);
 }
+function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; drawSessions(); }); }
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
   _hoverReg={}; _hoverSeq=0;
@@ -1318,6 +1342,7 @@ function drawSessions(){
   host.innerHTML=head+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
   if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
   if(dow && !dow.pending) attachDowControls();
+  if(se && !se.pending) attachSeasonControls();
   attachLineHover();
 }
 function showView(v){
