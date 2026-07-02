@@ -345,6 +345,77 @@ function summarize(holds) {
     equityNet: eqNet - 1, equityGross: eqGross - 1,   // compounded total return over all holds
   };
 }
+// Hour-of-day (ET) activity profile for one ticker: bins each hourly candle by its ET wall-clock hour
+// and returns raw per-hour aggregates — Parkinson-style range volatility ln(high/low), mean candle
+// volume, mean funding rate, and sample counts. ET so the 09:30 open / 16:00 close humps line up with
+// the session decomposition. Pure; the poller normalizes and pools these.
+function activityClock(prices, funding) {
+  const vSum = new Array(24).fill(0), vCnt = new Array(24).fill(0);
+  const qSum = new Array(24).fill(0), qCnt = new Array(24).fill(0);
+  const fSum = new Array(24).fill(0), fCnt = new Array(24).fill(0);
+  // Candles are on the hour, so ET hour = (UTC hour + offset) mod 24, and the ET/UTC offset only
+  // changes at DST boundaries. Cache the offset per UTC day (one formatToParts each) instead of
+  // calling etParts on every candle — ~48x fewer Intl calls. A handful of candles on the two DST
+  // transition days may bin 1h off; immaterial for an activity clock (the session math uses the exact
+  // path). offset is -4 (EDT) or -5 (EST): ET hour = ((utcHour + offset) % 24 + 24) % 24.
+  const offCache = new Map();
+  const etHour = (t) => {
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day);
+    if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    return ((Math.floor((t % DAY) / HOUR) + off) % 24 + 24) % 24;
+  };
+  for (const k of (prices || [])) {
+    const t = k[0], hi = k[2], lo = k[3], v = k[5];
+    if (!Number.isFinite(t)) continue;
+    const hr = etHour(t);
+    if (Number.isFinite(hi) && Number.isFinite(lo) && hi > 0 && lo > 0 && hi >= lo) { vSum[hr] += Math.log(hi / lo); vCnt[hr]++; }
+    if (Number.isFinite(v)) { qSum[hr] += v; qCnt[hr]++; }
+  }
+  for (const p of (funding || [])) {
+    const t = p[0], r = p[1];
+    if (!Number.isFinite(t) || !Number.isFinite(r)) continue;
+    const hr = etHour(t); fSum[hr] += r; fCnt[hr]++;
+  }
+  const vol = new Array(24), volume = new Array(24), fund = new Array(24), n = new Array(24);
+  for (let i = 0; i < 24; i++) {
+    n[i] = vCnt[i];
+    vol[i] = vCnt[i] ? vSum[i] / vCnt[i] : null;
+    volume[i] = qCnt[i] ? qSum[i] / qCnt[i] : null;
+    fund[i] = fCnt[i] ? fSum[i] / fCnt[i] : null;
+  }
+  return { vol, volume, fund, n };
+}
+
+// Day-of-week x hour-of-day (7 x 24, ET) range-volatility + volume grid for one ticker. ET weekday and
+// hour both come from a per-UTC-day offset cache: shifting the timestamp by the ET offset yields an
+// instant whose UTC calendar equals the ET wall calendar, so getUTCDay()/getUTCHours() give ET
+// weekday (0=Sun) and hour with no per-candle formatToParts. Pure; the poller normalizes and pools.
+function dowClock(prices) {
+  const mk = () => Array.from({ length: 7 }, () => new Array(24).fill(0));
+  const vSum = mk(), vCnt = mk(), qSum = mk(), qCnt = mk();
+  const offCache = new Map();
+  for (const k of (prices || [])) {
+    const t = k[0], hi = k[2], lo = k[3], v = k[5];
+    if (!Number.isFinite(t)) continue;
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    const et = new Date(t + off * HOUR), wd = et.getUTCDay(), hr = et.getUTCHours();
+    if (Number.isFinite(hi) && Number.isFinite(lo) && hi > 0 && lo > 0 && hi >= lo) { vSum[wd][hr] += Math.log(hi / lo); vCnt[wd][hr]++; }
+    if (Number.isFinite(v)) { qSum[wd][hr] += v; qCnt[wd][hr]++; }
+  }
+  const vol = [], volume = [], n = [];
+  for (let d = 0; d < 7; d++) {
+    vol[d] = []; volume[d] = []; n[d] = [];
+    for (let h = 0; h < 24; h++) {
+      n[d][h] = vCnt[d][h];
+      vol[d][h] = vCnt[d][h] ? vSum[d][h] / vCnt[d][h] : null;
+      volume[d][h] = qCnt[d][h] ? qSum[d][h] / qCnt[d][h] : null;
+    }
+  }
+  return { vol, volume, n };
+}
+
 // Pool holds across many tickers (the statistically sound "composite" — averages out single-name noise).
 function poolSummary(byTicker) {
   const all = [];
@@ -400,4 +471,4 @@ function sessionComposite(perTickerHolds) {
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
-  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite };
+  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock };

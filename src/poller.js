@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep } = require("./hyperliquid");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
-  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite } = require("./compute");
+  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -411,6 +411,8 @@ function createPoller({ dex, store, log }) {
       universe,
       sections: {
         sessionDecomp: buildSessionDecomp(),
+        hourClock: buildActivityClocks(),
+        dow: buildDowHeatmap(),
       },
     };
   }
@@ -456,6 +458,86 @@ function createPoller({ dex, store, log }) {
         fundingHorizonTs: ov.fundingHorizonTs,
       },
     };
+  }
+
+  // Hour-of-day activity + funding clocks (the robust timing layer). Per ticker we bin the hourly
+  // spine into 24 ET hours (range volatility, volume, funding rate), normalize vol/volume to each
+  // ticker's own average (so the *shape* is comparable and poolable), and keep funding raw (real
+  // cash). We also pool equal-weight per asset class and overall for a sensible default view.
+  const CLOCK_MIN_SPINE = 5 * 24;   // need >= ~5 days so each ET hour has several samples
+  function _nanmean(a) { let s = 0, n = 0; for (const x of a) if (Number.isFinite(x)) { s += x; n++; } return n ? s / n : null; }
+  function _normTo(a, m) { return a.map((x) => (Number.isFinite(x) && m) ? x / m : (Number.isFinite(x) ? x : null)); }
+  function _round(a, dp) { const f = Math.pow(10, dp); return a.map((x) => Number.isFinite(x) ? Math.round(x * f) / f : null); }
+  function _poolClocks(list) {
+    const vr = new Array(24), qr = new Array(24), fund = new Array(24), n = new Array(24).fill(0);
+    for (let h = 0; h < 24; h++) {
+      let vs = 0, vc = 0, qs = 0, qc = 0, fs = 0, fc = 0;
+      for (const c of list) {
+        if (Number.isFinite(c.vr[h])) { vs += c.vr[h]; vc++; }
+        if (Number.isFinite(c.qr[h])) { qs += c.qr[h]; qc++; }
+        if (Number.isFinite(c.fund[h])) { fs += c.fund[h]; fc++; }
+        n[h] += c.n[h] || 0;
+      }
+      vr[h] = vc ? vs / vc : null; qr[h] = qc ? qs / qc : null; fund[h] = fc ? fs / fc : null;
+    }
+    return { vr: _round(vr, 3), qr: _round(qr, 3), fund: _round(fund, 9), n, count: list.length };
+  }
+  function buildActivityClocks() {
+    const mkts = activeMarkets().filter((r) =>
+      !r.delisted && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
+    if (mkts.length < 3) return { pending: true, count: mkts.length };
+    const tickers = [];
+    for (const r of mkts) {
+      const cl = classifyCached(r.ticker);
+      const raw = activityClock(getHourly(r.coin), getFunding(r.coin));
+      const vm = _nanmean(raw.vol), qm = _nanmean(raw.volume);
+      tickers.push({
+        coin: r.coin, ticker: r.ticker, sector: cl.sector, assetClass: cl.assetClass,
+        vr: _round(_normTo(raw.vol, vm), 3),
+        qr: _round(_normTo(raw.volume, qm), 3),
+        fund: _round(raw.fund, 9),
+        n: raw.n.map((x) => x || 0),
+        volAbsMean: vm != null ? +vm.toFixed(6) : null,
+      });
+    }
+    const byClass = {};
+    for (const c of [...new Set(tickers.map((t) => t.assetClass))]) byClass[c] = _poolClocks(tickers.filter((t) => t.assetClass === c));
+    return { hours: 24, tz: "ET", metricDefault: "vol", tickers, pooled: { all: _poolClocks(tickers), byClass } };
+  }
+
+  // Day-of-week x hour-of-day 7x24 heatmap (the weekend-gap / Friday->Monday story). Per-ticker grids
+  // are normalized to each name's own grand-mean cell then pooled equal-weight per asset class + all —
+  // shipped pooled only (per-ticker weekday-hour cells are too thin over 60d, and it keeps the payload
+  // lean). Weekend cells sit near-empty for equities and alive for 24/7 crypto/FX, which is the point.
+  function _nanmean2(g) { let s = 0, n = 0; for (const row of g) for (const x of row) if (Number.isFinite(x)) { s += x; n++; } return n ? s / n : null; }
+  function _normGrid(g, m) { return g.map((row) => row.map((x) => (Number.isFinite(x) && m) ? x / m : (Number.isFinite(x) ? x : null))); }
+  function _roundGrid(g, dp) { const f = Math.pow(10, dp); return g.map((row) => row.map((x) => Number.isFinite(x) ? Math.round(x * f) / f : null)); }
+  function _poolGrids(list) {
+    const vol = Array.from({ length: 7 }, () => new Array(24)), volume = Array.from({ length: 7 }, () => new Array(24)), n = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+      let vs = 0, vc = 0, qs = 0, qc = 0;
+      for (const c of list) {
+        const a = c.volN[d][h], b = c.volumeN[d][h];
+        if (Number.isFinite(a)) { vs += a; vc++; }
+        if (Number.isFinite(b)) { qs += b; qc++; }
+        n[d][h] += c.n[d][h] || 0;
+      }
+      vol[d][h] = vc ? vs / vc : null; volume[d][h] = qc ? qs / qc : null;
+    }
+    return { vol: _roundGrid(vol, 3), volume: _roundGrid(volume, 3), n, count: list.length };
+  }
+  function buildDowHeatmap() {
+    const mkts = activeMarkets().filter((r) =>
+      !r.delisted && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
+    if (mkts.length < 3) return { pending: true, count: mkts.length };
+    const per = [];
+    for (const r of mkts) {
+      const cl = classifyCached(r.ticker), g = dowClock(getHourly(r.coin));
+      per.push({ assetClass: cl.assetClass, volN: _normGrid(g.vol, _nanmean2(g.vol)), volumeN: _normGrid(g.volume, _nanmean2(g.volume)), n: g.n });
+    }
+    const byClass = {};
+    for (const c of [...new Set(per.map((p) => p.assetClass))]) byClass[c] = _poolGrids(per.filter((p) => p.assetClass === c));
+    return { hours: 24, tz: "ET", metricDefault: "vol", pooled: { all: _poolGrids(per), byClass } };
   }
 
 
