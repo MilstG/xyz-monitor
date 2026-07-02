@@ -50,6 +50,7 @@ const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:''
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   watch:new Set(), watchOnly:false, detail:null,
+  analytics:{ data:null, err:null, ts:0 },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
 function el(id){ return document.getElementById(id); }
@@ -862,14 +863,68 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
-  if(h==='sectors'||h==='corr'||h==='markets') showView(h); }
+  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions') showView(h); }
+let _analyticsInflight=false;
+function renderSessions(){ drawSessions(); loadAnalytics(); }
+async function loadAnalytics(){
+  if(_analyticsInflight) return; _analyticsInflight=true;
+  try{ const d=await fetchJSON('/api/analytics'); state.analytics.data=d; state.analytics.err=null; state.analytics.ts=Date.now(); }
+  catch(e){ state.analytics.err=e.message||String(e); }
+  finally{ _analyticsInflight=false; }
+  if(state.view==='sessions') drawSessions();
+}
+function covPct(n,d){ return d>0?Math.round(100*n/d):0; }
+function drawSessions(){
+  const host=el('sessions-body'); if(!host) return;
+  const a=state.analytics.data, err=state.analytics.err;
+  const head=`<div class="cp-head" style="margin-bottom:4px">Session &amp; time-of-day analytics</div>`+
+    `<div class="sec" style="margin-bottom:16px;max-width:680px;line-height:1.55">Server-side studies of when each market is alive and what an overnight / weekend / cash hold actually pays — built on the 60-day hourly price &amp; funding spines. Panels unlock here as coverage accrues.</div>`;
+  if(err && !a){ host.innerHTML=head+`<div class="msg">Couldn't load analytics: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
+  if(!a || !a.coverage || !a.coverage.hourly){ host.innerHTML=head+`<div class="msg">Computing… warming up the spines.</div>`; return; }
+  const c=a.coverage, w=a.window||{}, hr=c.hourly||{}, fund=c.funding||{};
+  const endpoint = fund.endpoint==='on' ? '<span class="pos">live history</span>' : '<span class="sec">sampled fallback</span>';
+  const card=(label,val,sub)=>`<div style="flex:1 1 150px;min-width:150px;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px 14px">`+
+    `<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">${label}</div>`+
+    `<div style="font-family:var(--mono);font-size:20px;color:var(--text)">${val}</div>`+
+    (sub?`<div class="sec" style="font-size:11px;margin-top:4px">${sub}</div>`:'')+`</div>`;
+  const cards=`<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px">`+
+    card('Markets', c.markets, `${c.equityMarkets} equity`)+
+    card('Hourly spine', hr.coins||0, `${(hr.candles||0).toLocaleString()} candles · ${w.hourlyDays||60}d`)+
+    card('Funding spine', fund.coins||0, `${(fund.points||0).toLocaleString()} pts · ${endpoint}`)+
+    card('Ready', `${c.ready}/${c.markets}`, `≥ ${Math.round((c.readyHours||480)/24)}d hourly · ${covPct(c.ready,c.markets)}%`)+
+    `</div>`;
+  const rp=covPct(c.ready,c.markets);
+  const bar=`<div style="margin-bottom:22px"><div class="sec" style="font-size:11px;margin-bottom:6px">Spine readiness — session studies unlock as this fills</div>`+
+    `<div style="height:8px;border-radius:4px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${rp}%;background:var(--accent);transition:width .4s"></div></div></div>`;
+  const panels=[
+    ['Session decomposition','cash / overnight / weekend equity curves, gross &amp; net-of-funding','★★★★★'],
+    ['Hour-of-day activity clock','volatility · volume · funding per ticker','★★★★☆'],
+    ['Funding clock','when carry is with you or against you, on a schedule','★★★★☆'],
+    ['Cross-ticker clustering','group markets by when they trade; flag the oddballs','★★★★☆'],
+    ['Asset-class overlays','pooled hour-of-day curves per class','★★★☆☆'],
+    ['Day-of-week 7×24 heatmap','weekend-gap &amp; Friday→Monday risk','★★★☆☆'],
+    ['Return seasonality by hour','exploratory · significance-flagged','★★☆☆☆'],
+  ];
+  const deck=`<div class="cp-sub" style="margin:0 0 10px">On deck</div>`+
+    `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
+    panels.map(p=>`<div style="display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel);flex-wrap:wrap">`+
+      `<span style="color:var(--accent);font-size:11px;letter-spacing:1px;min-width:52px">${p[2]}</span>`+
+      `<span style="min-width:180px;color:var(--text)">${p[0]}</span>`+
+      `<span class="sec" style="font-size:12px;flex:1 1 200px">${p[1]}</span>`+
+      `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
+      `</div>`).join('')+`</div>`;
+  const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
+  host.innerHTML=head+cards+bar+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+}
 function showView(v){
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   el('view-markets').hidden = v!=='markets';
   el('view-sectors').hidden = v!=='sectors';
   el('view-corr').hidden = v!=='corr';
+  el('view-sessions').hidden = v!=='sessions';
   if(v==='corr') openCorr();
+  if(v==='sessions') renderSessions();
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
 }
