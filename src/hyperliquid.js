@@ -53,5 +53,8 @@ function fetchMetaAndCtxs(dex) {
 function fetchCandles(coin, interval, startTime, endTime, weight) {
   return infoPost({ type: "candleSnapshot", req: { coin, interval, startTime, endTime } }, weight);
 }
+function fetchFundingHistory(coin, startTime, endTime, weight) {
+  return infoPost({ type: "fundingHistory", coin, startTime, endTime }, weight);
+}
 
-module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, sleep };
+module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep };

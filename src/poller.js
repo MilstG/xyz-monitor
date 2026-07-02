@@ -1,7 +1,7 @@
 "use strict";
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
-const { fetchMetaAndCtxs, fetchCandles, sleep } = require("./hyperliquid");
+const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep } = require("./hyperliquid");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr } = require("./compute");
 const { classify } = require("./sectors");
 
@@ -12,6 +12,12 @@ const SP_ALIASES = ["SPX", "SPX500", "SP500", "US500", "USSPX500", "SP500USD", "
 const OI_MIN_GAP = 4.5 * 60 * 1000;   // store at most one OI sample per ~5 min
 const OI_RETENTION = 31 * DAY;        // keep 31 days of OI history
 const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
+const HOURLY_HISTORY_DAYS = 60;       // rolling hourly-OHLCV window retained for time-of-day / session analytics
+const HOURLY_FEAT_DAYS = 31;          // window actually fed to featuresFromHourly (keep features identical to before)
+const HOURLY_FETCH_WEIGHT = 50;       // rate-limit weight for the wider hourly candle pull
+const FUNDING_HISTORY_DAYS = 60;      // rolling hourly funding-rate window (aligned with the price spine)
+const FUNDING_FETCH_WEIGHT = 20;      // rate-limit weight for a fundingHistory pull
+const FUNDING_PROBE_MIN = 8;          // if the first N (highest-vol) backfills all return nothing, treat
 const DAILY_STALE = 6 * 3600 * 1000;  // refresh daily candles every 6 h
 const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new markets
 const FAIL_BACKOFF = 60 * 1000;       // after a failed candle fetch, wait >= this before retrying that coin
@@ -36,6 +42,9 @@ function createPoller({ dex, store, log }) {
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
   const inflight = new Set();
+  // fundingHistory-endpoint support is unknown until probed against this dex; forward-fill + the
+  // oi.log seed guarantee >=~31d of funding regardless, so this only gates the 60d backfill.
+  let fundingHistoryEnabled = true, fundProbeTries = 0, fundProbeOk = 0;
 
   log(`Loaded persisted OI history for ${hist.size} market(s)`);
 
@@ -45,7 +54,8 @@ function createPoller({ dex, store, log }) {
       r = {
         coin, ticker: coin.includes(":") ? coin.split(":")[1] : coin,
         px: null, prevDay: null, funding: null, vol: null, oi: null, oiBase: null, oracle: null, d1: null,
-        ref: null, feat: null, dailyRaw: null, hourlyTs: 0, dailyTs: 0, isNew: true, delisted: false,
+        ref: null, feat: null, dailyRaw: null, hourlyRaw: null, fundH: new Map(), fundBackfilled: false,
+        hourlyTs: 0, dailyTs: 0, isNew: true, delisted: false,
       };
       rows.set(coin, r);
     }
@@ -84,6 +94,55 @@ function createPoller({ dex, store, log }) {
     return { oi, funding };
   }
 
+  // Per-market hourly OHLCV spine (rolling ~HOURLY_HISTORY_DAYS): [[t,o,h,l,c,v], ...] oldest->newest.
+  // Backs the time-of-day / session / boundary-hold analytics. Re-fetched wholesale on every hourly
+  // refresh, so it self-heals after a restart (no separate persistence) — it just needs one refresh
+  // cycle (<= HOURLY_STALE) to repopulate for markets that were serving warm from features.json.
+  function getHourly(coin) {
+    const r = rows.get(coin), c = r && r.hourlyRaw;
+    if (!Array.isArray(c)) return [];
+    const out = [];
+    for (const k of c) {
+      const t = +k.t, o = +k.o, h = +k.h, l = +k.l, cl = +k.c, v = +k.v;
+      if (Number.isFinite(t) && Number.isFinite(cl))
+        out.push([t, Number.isFinite(o) ? o : cl, Number.isFinite(h) ? h : cl, Number.isFinite(l) ? l : cl, cl, Number.isFinite(v) ? v : 0]);
+    }
+    return out;
+  }
+  function hourlyCoverage() {
+    let coins = 0, candles = 0;
+    for (const r of rows.values()) if (Array.isArray(r.hourlyRaw) && r.hourlyRaw.length) { coins++; candles += r.hourlyRaw.length; }
+    return { coins, candles };
+  }
+
+  // Per-market hourly funding-rate series: [[hourTs, rate], ...] oldest->newest, rolling FUNDING_HISTORY_DAYS.
+  // Built from three sources (oi.log seed, live forward-fill, best-effort fundingHistory backfill) and
+  // deduped by hour, so the boundary engine can integrate funding cost over any hold window.
+  function getFunding(coin) {
+    const r = rows.get(coin);
+    if (!r || !r.fundH || !r.fundH.size) return [];
+    const cut = Date.now() - FUNDING_HISTORY_DAYS * DAY, out = [];
+    for (const [t, rate] of r.fundH) if (t >= cut && Number.isFinite(rate)) out.push([t, rate]);
+    out.sort((a, b) => a[0] - b[0]);
+    return out;
+  }
+  function fundingCoverage() {
+    let coins = 0, points = 0;
+    for (const r of rows.values()) if (r.fundH && r.fundH.size) { coins++; points += r.fundH.size; }
+    return { coins, points, endpoint: fundingHistoryEnabled ? "on" : "off(sampled)" };
+  }
+  // Seed the hourly funding series from persisted oi.log samples (one value per hour) so we start with
+  // ~31d of funding history immediately, independent of whether fundingHistory works for this dex.
+  function seedFundingFromOI() {
+    let seeded = 0;
+    for (const [coin, h] of hist) {
+      const r = rows.get(coin); if (!r) continue;
+      for (const s of h) { const t = s[0], f = s[2]; if (f != null && Number.isFinite(f)) { r.fundH.set(Math.floor(t / HOUR) * HOUR, f); } }
+      if (r.fundH.size) seeded++;
+    }
+    if (seeded) log(`Seeded hourly funding from oi.log for ${seeded} market(s)`);
+  }
+
   function computeDoi(r) {
     const h = hist.get(r.coin), out = {};
     for (const k in TF) out[k] = oiDeltaPct(h, r.oiBase, TF[k]); // tolerance is derived inside oiDeltaPct
@@ -106,6 +165,7 @@ function createPoller({ dex, store, log }) {
     order = uni.map((u) => u.name);
     const seen = new Set();
     let newCount = 0;
+    const hourNow = Math.floor(Date.now() / HOUR) * HOUR;
     uni.forEach((u, i) => {
       const coin = u.name, ctx = ctxs[i] || {}, existed = rows.has(coin), r = getRow(coin);
       if (!existed) { newCount++; log("NEW market detected: " + coin + " — queued for history backfill"); }
@@ -113,7 +173,7 @@ function createPoller({ dex, store, log }) {
       const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
       if (px != null) r.px = px;
       const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
-      const fn = num(ctx.funding); if (fn != null) r.funding = fn;
+      const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); }  // forward-fill the current hour
       const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
       const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
       const oi = num(ctx.openInterest);
@@ -134,8 +194,14 @@ function createPoller({ dex, store, log }) {
     if (!r) return;
     const now = Date.now();
     if (r.px == null) { r.hourlyTs = now; return; }
-    const c = await fetchCandles(coin, "1h", now - 31 * DAY, now, 33);
-    const { ref, feat } = featuresFromHourly(c, now, HOUR, DAY);
+    // Pull the wider spine window in one call; retain it raw for time-of-day / session / boundary analytics.
+    const c = await fetchCandles(coin, "1h", now - HOURLY_HISTORY_DAYS * DAY, now, HOURLY_FETCH_WEIGHT);
+    r.hourlyRaw = Array.isArray(c) ? c : null;
+    // Features are computed from ONLY the last 31 days so hi30/lo30, volH and volD are byte-identical
+    // to the previous 31d fetch — the wider window must not leak into the feature math.
+    const cut = now - HOURLY_FEAT_DAYS * DAY;
+    const featWin = Array.isArray(c) ? c.filter((k) => k.t >= cut) : [];
+    const { ref, feat } = featuresFromHourly(featWin, now, HOUR, DAY);
     r.ref = ref; r.feat = feat; r.hourlyTs = Date.now(); r.isNew = false;
   }
   async function refreshDaily(coin) {
@@ -206,6 +272,45 @@ function createPoller({ dex, store, log }) {
         const r = rows.get(coin);
         if (r) { r.dFail = (r.dFail || 0) + 1; r.dFailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.dFail, 15 * 60 * 1000); }
       } finally { inflight.delete("d:" + coin); }
+    }
+  }
+
+  // Best-effort 60d hourly-funding backfill via fundingHistory. HIP-3 dex support is uncertain, so:
+  // per-coin backoff on failure, and if the first FUNDING_PROBE_MIN highest-volume markets all come
+  // back empty we conclude the endpoint isn't available here and stop (forward-fill + oi.log seed remain).
+  async function backfillFunding(coin) {
+    const r = rows.get(coin); if (!r) return 0;
+    const now = Date.now();
+    const data = await fetchFundingHistory(coin, now - FUNDING_HISTORY_DAYS * DAY, now, FUNDING_FETCH_WEIGHT);
+    let n = 0;
+    if (Array.isArray(data)) for (const e of data) {
+      const t = num(e && (e.time ?? e.t)), rate = num(e && (e.fundingRate ?? e.funding));
+      if (t != null && rate != null) { r.fundH.set(Math.floor(t / HOUR) * HOUR, rate); n++; }
+    }
+    r.fundBackfilled = true;      // don't re-pull a coin that legitimately returned nothing
+    return n;
+  }
+  const needFunding = (r) => fundingHistoryEnabled && !r.fundBackfilled && Date.now() >= (r.fFailUntil || 0);
+  async function fundingWorker() {
+    for (;;) {
+      if (!fundingHistoryEnabled) { await sleep(60000); continue; }
+      const coin = pick(needFunding, "f:");
+      if (!coin) { await sleep(5000); continue; }
+      if (inflight.has("f:" + coin)) { await sleep(800); continue; }
+      inflight.add("f:" + coin);
+      try {
+        const n = await backfillFunding(coin);
+        fundProbeTries++; if (n > 0) fundProbeOk++;
+        const r = rows.get(coin); if (r) r.fFail = 0;
+      } catch (_) {
+        fundProbeTries++;
+        const r = rows.get(coin);
+        if (r) { r.fFail = (r.fFail || 0) + 1; r.fFailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.fFail, 15 * 60 * 1000); }
+      } finally { inflight.delete("f:" + coin); }
+      if (fundProbeTries >= FUNDING_PROBE_MIN && fundProbeOk === 0) {
+        fundingHistoryEnabled = false;
+        log("fundingHistory returned no data for this dex — using sampled funding (~31d) + live forward-fill");
+      }
     }
   }
 
@@ -306,17 +411,23 @@ function createPoller({ dex, store, log }) {
     } catch (e) { log("prune failed: " + (e && e.message)); }
     const total = activeMarkets().filter((r) => !r.delisted).length;
     const pending = activeMarkets().filter((r) => !r.delisted && !r.dailyRaw).length;
-    log(`Daily audit: ${total} active market(s), ${pending} awaiting history backfill`);
+    const hc = hourlyCoverage();
+    const fcut = Date.now() - FUNDING_HISTORY_DAYS * DAY;
+    for (const r of rows.values()) if (r.fundH && r.fundH.size) for (const t of r.fundH.keys()) if (t < fcut) r.fundH.delete(t);
+    const fc = fundingCoverage();
+    log(`Daily audit: ${total} active market(s), ${pending} awaiting history backfill; hourly spine: ${hc.coins} market(s), ${hc.candles} candle(s); funding[${fc.endpoint}]: ${fc.coins} market(s), ${fc.points} hour(s)`);
   }
 
   async function start() {
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     await pollUniverse();
+    seedFundingFromOI();
     buildSnapshot(); buildDaily();
     setInterval(pollUniverse, UNIVERSE_MS);
     hourlyWorker(); hourlyWorker();
     dailyWorker(); dailyWorker();
+    fundingWorker();
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
     setInterval(() => store.flush(), 30 * 1000);
@@ -330,8 +441,10 @@ function createPoller({ dex, store, log }) {
     getSnapshot: () => snapshotCache,
     getDaily: () => dailyCache,
     getSeries,
+    getHourly,
+    getFunding,
     persistFeatures,
-    stats: () => ({ markets: rows.size, bench: benchCoin, oiCoins: hist.size, lastPoll }),
+    stats: () => ({ markets: rows.size, bench: benchCoin, oiCoins: hist.size, hourly: hourlyCoverage(), funding: fundingCoverage(), lastPoll }),
   };
 }
 
