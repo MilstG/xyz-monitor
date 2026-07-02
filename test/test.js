@@ -76,6 +76,17 @@ test("featuresFromHourly: produces ref, px30 and dr", () => {
   assert.ok(Array.isArray(feat.px30) && feat.px30.length >= 3);
   assert.ok(Array.isArray(feat.dr) && feat.dr.length >= 1);
   assert.ok(feat.volH > 0);
+  assert.equal(feat.volD, null); // <5 completed daily returns -> not enough for a daily-vol estimate
+});
+
+test("featuresFromHourly: volD is a measured daily vol once enough days exist", () => {
+  const now = Date.now(), c = [];
+  for (let t = now - 25 * DAY; t <= now; t += HOUR) {
+    const day = Math.floor(t / DAY), base = 100 + Math.sin(day) * 6; // real day-to-day variation
+    c.push({ t, c: base.toFixed(2), h: (base + 1).toFixed(2), l: (base - 1).toFixed(2), v: "10" });
+  }
+  const { feat } = featuresFromHourly(c, now, HOUR, DAY);
+  assert.ok(feat.volD != null && isFinite(feat.volD) && feat.volD > 0);
 });
 
 test("oiDeltaPct: percent change vs a past sample", () => {
