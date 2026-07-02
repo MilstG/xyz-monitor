@@ -222,8 +222,14 @@ function updateSyncProgress(){ const rows=activeRows(); let done=0; for(const r 
 // ===== derived metrics =====
 function computeMomentum(r){
   const f=r.feat; if(!f||!(f.volH>0)) return undefined;
+  const volD=(f.volD>0)?f.volD:null;   // measured daily vol; null until hourly features load -> falls back to hourly x sqrt(t)
   const H=[[r.h1,1,0.10],[r.h4,4,0.15],[r.d1,24,0.30],[r.d7,168,0.30],[r.d30,720,0.15]];
-  let s=0,w=0; for(const [ret,hrs,wt] of H){ if(ret==null||!isFinite(ret))continue; s+=wt*((ret/100)/(f.volH*Math.sqrt(hrs))); w+=wt; }
+  let s=0,w=0;
+  for(const [ret,hrs,wt] of H){ if(ret==null||!isFinite(ret))continue;
+    // 1d+ horizons use directly-measured daily vol (no iid sqrt(t) assumption); intraday uses hourly vol
+    const sigma=(hrs>=24&&volD)?volD*Math.sqrt(hrs/24):f.volH*Math.sqrt(hrs);
+    if(!(sigma>0))continue;
+    s+=wt*((ret/100)/sigma); w+=wt; }
   if(w===0) return null;
   let core=(s/w)*(0.5+0.5*(f.r2||0));
   if(r.px!=null&&f.hi30!=null&&f.lo30!=null&&f.hi30>f.lo30) core+=0.4*(clamp((r.px-f.lo30)/(f.hi30-f.lo30),0,1)-0.5)*2;
