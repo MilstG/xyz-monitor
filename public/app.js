@@ -877,8 +877,36 @@ function covPct(n,d){ return d>0?Math.round(100*n/d):0; }
 function fp(x,dp){ dp=(dp==null?2:dp); if(x==null||!isFinite(x))return '—'; return (x>0?'+':'')+(x*100).toFixed(dp)+'%'; }
 function dcls(x){ return x>0?'pos':(x<0?'neg':'sec'); }
 function sessDate(t){ try{ return new Date(t).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }catch(_){ return ''; } }
+// Shared interactive hover for line/bar charts: builder registers per-index x-pixels + readout rows,
+// the wrapper embeds a crosshair line + a readout box, and attachLineHover wires mousemove to the
+// nearest index. Every chart carries hover info (a standing requirement).
+let _hoverReg={}, _hoverSeq=0;
+function hoverChart(svgInner, o){
+  const id='lc'+(++_hoverSeq);
+  _hoverReg[id]={ xs:o.xs, rows:o.rows };
+  return `<div class="lwrap"><svg id="${id}" class="lchart" viewBox="0 0 ${o.w} ${o.h}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`+
+    svgInner+
+    `<line class="lcx" x1="0" y1="${o.pt}" x2="0" y2="${o.h-o.pb}"/></svg>`+
+    `<div class="lread" id="${id}-r"></div></div>`;
+}
+function attachLineHover(){
+  document.querySelectorAll('svg.lchart').forEach(svg=>{
+    const reg=_hoverReg[svg.id]; if(!reg||!reg.xs||!reg.xs.length) return;
+    const cx=svg.querySelector('.lcx'), read=el(svg.id+'-r'); if(!read) return;
+    svg.addEventListener('mousemove',(ev)=>{
+      const r=svg.getBoundingClientRect(); if(!r.width) return;
+      const vbW=(svg.viewBox&&svg.viewBox.baseVal&&svg.viewBox.baseVal.width)||r.width;
+      const px=(ev.clientX-r.left)/r.width*vbW;
+      let bi=0,bd=Infinity; for(let i=0;i<reg.xs.length;i++){ const dd=Math.abs(reg.xs[i]-px); if(dd<bd){bd=dd;bi=i;} }
+      cx.setAttribute('x1',reg.xs[bi]); cx.setAttribute('x2',reg.xs[bi]); cx.style.opacity='1';
+      read.innerHTML=reg.rows[bi]; read.style.opacity='1';
+      read.style.left = px > vbW*0.55 ? '10px' : 'auto'; read.style.right = px > vbW*0.55 ? 'auto' : '10px';
+    });
+    svg.addEventListener('mouseleave',()=>{ if(cx)cx.style.opacity='0'; read.style.opacity='0'; });
+  });
+}
 function sessCurveSvg(curve, horizonTs){
-  const W=520,H=148, pl=46,pr=14,pt=12,pb=22;
+  const W=520,H=150, pl=46,pr=52,pt=12,pb=22;
   if(!curve || curve.length<2) return '<div class="msg" style="height:110px;display:flex;align-items:center;justify-content:center">Not enough boundaries yet.</div>';
   const n=curve.length, gs=curve.map(p=>p[1]), ns=curve.map(p=>p[2]);
   let lo=Math.min(0,...gs,...ns), hi=Math.max(0,...gs,...ns);
@@ -890,8 +918,7 @@ function sessCurveSvg(curve, horizonTs){
   let hIdx=-1; if(horizonTs!=null){ for(let i=0;i<n;i++){ if(curve[i][0]>=horizonTs){ hIdx=i; break; } } }
   const zeroY=Y(0);
   const yl=(v)=>`<text x="${pl-6}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${fp(v,1)}</text>`;
-  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
-  s+=`<line x1="${pl}" y1="${zeroY.toFixed(1)}" x2="${W-pr}" y2="${zeroY.toFixed(1)}" stroke="var(--faint)" stroke-dasharray="3 3" stroke-width="1"/>`;
+  let s=`<line x1="${pl}" y1="${zeroY.toFixed(1)}" x2="${W-pr}" y2="${zeroY.toFixed(1)}" stroke="var(--faint)" stroke-dasharray="3 3" stroke-width="1"/>`;
   s+=yl(hi)+yl(0)+yl(lo);
   if(hIdx>0){ const hx=X(hIdx).toFixed(1);
     s+=`<line x1="${hx}" y1="${pt}" x2="${hx}" y2="${H-pb}" stroke="var(--accent-dim)" stroke-dasharray="2 3" stroke-width="1"/>`;
@@ -901,9 +928,14 @@ function sessCurveSvg(curve, horizonTs){
   s+=`<path d="${pathOf(2)}" fill="none" stroke="var(--accent)" stroke-width="1.6"${netDash}/>`;
   s+=`<circle cx="${X(n-1).toFixed(1)}" cy="${Y(gs[n-1]).toFixed(1)}" r="2.4" fill="var(--blue)"/>`;
   s+=`<circle cx="${X(n-1).toFixed(1)}" cy="${Y(ns[n-1]).toFixed(1)}" r="2.4" fill="var(--accent)"/>`;
+  // end value labels (readability)
+  s+=`<text x="${(W-pr+4)}" y="${(Y(gs[n-1])+3).toFixed(1)}" style="font-family:var(--mono);font-size:9px;fill:var(--blue)">${fp(gs[n-1],1)}</text>`;
+  s+=`<text x="${(W-pr+4)}" y="${(Y(ns[n-1])+3).toFixed(1)}" style="font-family:var(--mono);font-size:9px;fill:var(--accent)">${fp(ns[n-1],1)}</text>`;
   s+=`<text x="${pl}" y="${H-6}" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${sessDate(curve[0][0])}</text>`;
-  s+=`<text x="${W-pr}" y="${H-6}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${sessDate(curve[n-1][0])}</text>`;
-  return s+'</svg>';
+  s+=`<text x="${(W-pr)}" y="${H-6}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${sessDate(curve[n-1][0])}</text>`;
+  const xs=curve.map((_,i)=>X(i));
+  const rows=curve.map((p,i)=>`<b style="color:var(--text)">${sessDate(p[0])}</b> · bet ${i+1}/${n}<br><span style="color:var(--blue)">gross ${fp(p[1])}</span> · <span style="color:var(--accent)">net ${fp(p[2])}</span><br><span style="opacity:.7">${p[4]||0} names · funding ${Math.round((p[3]||0)*100)}% known</span>`);
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function renderSessionDecomp(sd){
   const h=sd.headline, S=sd.sessions;
@@ -1052,14 +1084,11 @@ function overlayLineSvg(series, metric){
   const padd=(hi-lo)*0.08; hi+=padd; lo-=padd;
   const X=h=> pl + (h/23)*(W-pl-pr);
   const Y=v=> pt + (1-(v-lo)/(hi-lo))*(H-pt-pb);
-  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
-  // RTH band 09:30-16:00 ET
-  s+=`<rect x="${X(9.5).toFixed(1)}" y="${pt}" width="${(X(16)-X(9.5)).toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"/>`;
-  // baseline
+  const fmtV=(v)=> metric==='funding' ? (v*100).toFixed(4)+'%' : v.toFixed(2)+'×';
+  let s=`<rect x="${X(9.5).toFixed(1)}" y="${pt}" width="${(X(16)-X(9.5)).toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"/>`;
   s+=`<line x1="${pl}" y1="${Y(base).toFixed(1)}" x2="${W-pr}" y2="${Y(base).toFixed(1)}" stroke="var(--faint)" stroke-dasharray="3 3" stroke-width="1"/>`;
   const ylab=(v)=>`<text x="${pl-6}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${metric==='funding'?(v*100).toFixed(3)+'%':v.toFixed(1)+'×'}</text>`;
   s+=ylab(hi)+ylab(base)+ylab(lo);
-  // hour ticks
   for(let h=0;h<=24;h+=6){ const hh=Math.min(h,23); s+=`<text x="${X(hh).toFixed(1)}" y="${H-8}" text-anchor="middle" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${h}</text>`; }
   s+=`<text x="${(pl+W-pr)/2}" y="${H-8}" text-anchor="middle" style="font-family:var(--mono);font-size:8px;fill:var(--faint)">ET hour</text>`;
   for(const ser of series){
@@ -1067,7 +1096,9 @@ function overlayLineSvg(series, metric){
     for(let h=0;h<24;h++){ const v=ser.vec[h]; if(!Number.isFinite(v)){ pen=false; continue; } d+=(pen?'L':'M')+X(h).toFixed(1)+' '+Y(v).toFixed(1)+' '; pen=true; }
     if(d) s+=`<path d="${d.trim()}" fill="none" stroke="${ser.color}" stroke-width="1.7" stroke-linejoin="round"/>`;
   }
-  return s+'</svg>';
+  const xs=[]; for(let h=0;h<24;h++) xs.push(X(h));
+  const rows=[]; for(let h=0;h<24;h++){ rows.push(`<b style="color:var(--text)">${h}:00 ET</b><br>`+series.map(ser=>`<span style="color:${ser.color}">${esc(ser.cls)} ${Number.isFinite(ser.vec[h])?fmtV(ser.vec[h]):'—'}</span>`).join('<br>')); }
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function renderClassOverlay(hc){
   const st=state.analytics.overlay, key = st.metric==='volume'?'qr':(st.metric==='funding'?'fund':'vr');
@@ -1120,15 +1151,97 @@ function renderDow(dow){
   const controls=`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px"><span class="sec" style="font-size:11px">group</span>${selHtml}`+
     `<span class="clockseg">${mbtn('vol','range vol')}${mbtn('volume','volume')}</span>`+
     `<span class="sec" style="font-size:11px;margin-left:auto">${esc(r.label)} · ${r.count} markets · <span style="opacity:.75">darker = more active vs its own avg</span></span></div>`;
-  const title=`<div class="cp-sub" style="margin:22px 0 12px">◆ Day-of-week × hour heatmap <span class="sec" style="font-weight:400">— the weekend-gap / Friday→Monday story; weekend rows empty for equities, alive for 24/7 crypto</span></div>`;
-  return title+controls+`<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow-x:auto">${dowHeatSvg(r.grid, st.metric)}</div>`;
+  const title=`<div class="cp-sub" style="margin:22px 0 12px">◆ Day-of-week × hour heatmap <span class="sec" style="font-weight:400">— the weekend-gap / Friday→Monday story; weekend rows empty for equities, alive for 24/7 crypto. Hover a cell.</span></div>`;
+  const legend=`<div style="display:flex;align-items:center;gap:8px;margin-top:8px"><span class="sec" style="font-size:10px">less</span>`+
+    `<span style="width:120px;height:9px;border-radius:3px;display:inline-block;background:linear-gradient(90deg,var(--panel2),var(--accent))"></span>`+
+    `<span class="sec" style="font-size:10px">more active vs group avg</span><span class="sec" style="font-size:10px;margin-left:10px;opacity:.7">empty = no trading</span></div>`;
+  return title+controls+`<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow-x:auto">${dowHeatSvg(r.grid, st.metric)}${legend}</div>`;
 }
 function attachDowControls(){
   const sel=el('dowsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.dow.sel=sel.value; drawSessions(); });
   document.querySelectorAll('.dowmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.dow.metric=b.dataset.m; drawSessions(); }));
 }
+
+// ---- cross-ticker clustering (PCA of the normalized 24h vol profile) ----
+function clusterScatterSvg(points, classes){
+  const W=560,H=380, pl=16,pr=16,pt=16,pb=16;
+  if(!points||points.length<2) return '<div class="msg">Not enough markets yet.</div>';
+  let xlo=Infinity,xhi=-Infinity,ylo=Infinity,yhi=-Infinity;
+  for(const p of points){ xlo=Math.min(xlo,p.x);xhi=Math.max(xhi,p.x);ylo=Math.min(ylo,p.y);yhi=Math.max(yhi,p.y); }
+  if(xhi===xlo){xhi+=1;xlo-=1;} if(yhi===ylo){yhi+=1;ylo-=1;}
+  const px=(xhi-xlo)*0.08, py=(yhi-ylo)*0.08; xlo-=px;xhi+=px;ylo-=py;yhi+=py;
+  const X=v=>pl+(v-xlo)/(xhi-xlo)*(W-pl-pr), Y=v=>pt+(1-(v-ylo)/(yhi-ylo))*(H-pt-pb);
+  const cidx={}; classes.forEach((c,i)=>cidx[c]=i);
+  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  // faint centroid crosshair at origin
+  s+=`<line x1="${X(0).toFixed(1)}" y1="${pt}" x2="${X(0).toFixed(1)}" y2="${H-pb}" stroke="var(--grid)" stroke-width="1"/>`;
+  s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
+  for(const p of points){ const col=classColor(p.assetClass, cidx[p.assetClass]||0), cx=X(p.x).toFixed(1), cy=Y(p.y).toFixed(1);
+    const tip=`${p.ticker} · ${p.assetClass}${p.odd&&p.bestClass?` — trades like ${p.bestClass} (r ${p.bestCorr}) vs own ${p.ownCorr}`:(p.ownCorr!=null?` — fits its class (r ${p.ownCorr})`:'')}`;
+    if(p.odd){ s+=`<circle cx="${cx}" cy="${cy}" r="6.5" fill="none" stroke="var(--down)" stroke-width="1.6"/>`;
+      s+=`<circle cx="${cx}" cy="${cy}" r="3.6" fill="${col}"><title>${esc(tip)}</title></circle>`;
+      s+=`<text x="${(+cx+8).toFixed(1)}" y="${(+cy+3).toFixed(1)}" style="font-family:var(--mono);font-size:9px;fill:var(--down)">${esc(p.ticker)}</text>`; }
+    else s+=`<circle cx="${cx}" cy="${cy}" r="3.6" fill="${col}" fill-opacity="0.85"><title>${esc(tip)}</title></circle>`;
+  }
+  return s+'</svg>';
+}
+function renderClusters(cl){
+  const classes=cl.classes||[];
+  const cidx={}; classes.forEach((c,i)=>cidx[c]=i);
+  const legend=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">`+
+    classes.map((c,i)=>`<span class="sec" style="font-size:11px;display:inline-flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:${classColor(c,i)};display:inline-block"></span>${esc(c)}</span>`).join('')+
+    `<span class="sec" style="font-size:11px;display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:50%;border:1.5px solid var(--down);display:inline-block"></span>oddball</span></div>`;
+  const ve=cl.varExplained||[0,0];
+  const sub=`${cl.count} markets · PC1 ${(ve[0]*100).toFixed(0)}% + PC2 ${(ve[1]*100).toFixed(0)}% of profile variance shown`;
+  const odd = (cl.oddballs||[]);
+  const oddList = odd.length
+    ? `<div class="sec" style="font-size:12px;margin-top:12px;line-height:1.6"><b style="color:var(--text)">Oddballs</b> — activity rhythm matches another class:<br>`+
+        odd.slice(0,8).map(o=>`<span style="color:var(--down)">${esc(o.ticker)}</span> <span style="opacity:.7">(${esc(o.assetClass)})</span> trades like <b style="color:var(--text)">${esc(o.bestClass)}</b> — r ${o.bestCorr} vs own ${o.ownCorr}`).join('<br>')+`</div>`
+    : `<div class="sec" style="font-size:12px;margin-top:12px">No oddballs — every market's 24h rhythm best matches its own class. (Taxonomy looks clean.)</div>`;
+  const title=`<div class="cp-sub" style="margin:22px 0 12px">◆ Cross-ticker clustering <span class="sec" style="font-weight:400">— markets placed by the shape of their 24h volatility profile (when they're alive); nearby = similar rhythm. Hover a dot.</span></div>`;
+  return title+`<div class="sec" style="font-size:11px;margin-bottom:8px">${sub}</div>`+legend+
+    `<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px">${clusterScatterSvg(cl.points, classes)}</div>`+oddList;
+}
+
+// ---- return seasonality by hour (EXPLORATORY / quarantined) ----
+function seasonBarSvg(hours){
+  const W=560,H=200, pl=44,pr=14,pt=16,pb=24;
+  const means=hours.map(h=>h.mean), ses=hours.map(h=>h.se);
+  let lo=0,hi=0,any=false;
+  for(let i=0;i<24;i++){ const m=means[i],e=ses[i]||0; if(Number.isFinite(m)){ lo=Math.min(lo,m-e); hi=Math.max(hi,m+e); any=true; } }
+  if(!any) return '<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center">No returns yet.</div>';
+  if(hi===lo){hi+=0.001;lo-=0.001;} const pad=(hi-lo)*0.1; hi+=pad; lo-=pad;
+  const X=h=> pl + (h+0.5)/24*(W-pl-pr);
+  const Y=v=> pt + (1-(v-lo)/(hi-lo))*(H-pt-pb);
+  const bw=(W-pl-pr)/24*0.7;
+  const zeroY=Y(0);
+  let s=`<line x1="${pl}" y1="${zeroY.toFixed(1)}" x2="${W-pr}" y2="${zeroY.toFixed(1)}" stroke="var(--faint)" stroke-width="1"/>`;
+  const yl=(v)=>`<text x="${pl-6}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${(v*1e4).toFixed(0)}</text>`;
+  s+=yl(hi)+yl(0)+yl(lo);
+  s+=`<text x="10" y="${(pt+ (H-pt-pb)/2).toFixed(1)}" transform="rotate(-90 10 ${(pt+(H-pt-pb)/2).toFixed(1)})" text-anchor="middle" style="font-family:var(--mono);font-size:8px;fill:var(--faint)">mean bp</text>`;
+  // RTH band
+  s+=`<rect x="${X(9.5).toFixed(1)}" y="${pt}" width="${(X(16)-X(9.5)).toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.05"/>`;
+  for(let h=0;h<24;h++){ const m=means[h]; if(!Number.isFinite(m)) continue; const sig=hours[h].t!=null&&Math.abs(hours[h].t)>=2;
+    const col= sig ? (m>=0?'var(--up)':'var(--down)') : 'var(--faint)';
+    const y0=Y(0), y1=Y(m), top=Math.min(y0,y1), hgt=Math.abs(y1-y0);
+    s+=`<rect x="${(X(h)-bw/2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0.5,hgt).toFixed(1)}" fill="${col}" fill-opacity="${sig?0.9:0.5}"/>`;
+    const e=ses[h]||0; if(e>0) s+=`<line x1="${X(h).toFixed(1)}" y1="${Y(m-e).toFixed(1)}" x2="${X(h).toFixed(1)}" y2="${Y(m+e).toFixed(1)}" stroke="var(--muted)" stroke-width="1"/>`;
+  }
+  for(let h=0;h<=24;h+=3){ const hh=Math.min(h,23); s+=`<text x="${X(hh).toFixed(1)}" y="${H-8}" text-anchor="middle" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${h}</text>`; }
+  const xs=[]; for(let h=0;h<24;h++) xs.push(X(h));
+  const rows=hours.map(h=>{ if(h.mean==null) return `<b style="color:var(--text)">${h.h}:00 ET</b><br><span style="opacity:.7">no data</span>`;
+    const sig=h.t!=null&&Math.abs(h.t)>=2; return `<b style="color:var(--text)">${h.h}:00 ET</b><br>mean ${(h.mean*1e4).toFixed(1)} bp · t ${h.t}<br><span style="color:${sig?(h.mean>=0?'var(--up)':'var(--down)'):'var(--faint)'}">${sig?'significant':'noise'}</span> · n=${h.n}`; });
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+function renderSeasonality(se){
+  const banner=`<div style="background:var(--panel2);border:1px solid var(--down);border-left:3px solid var(--down);border-radius:8px;padding:10px 14px;margin-bottom:12px">`+
+    `<span style="color:var(--down);font-family:var(--mono);font-size:11px;letter-spacing:.5px">⚠ EXPLORATORY</span> <span class="sec" style="font-size:12px">— mean intra-hour return by ET hour, cross-sectional t-test (each equity = one observation). Fragile: <b style="color:var(--text)">${se.sigCount} of 24</b> hours clear |t|≥2, and ~1 is expected by chance. Only the colored bars are flagged; never trade this alone.</span></div>`;
+  const title=`<div class="cp-sub" style="margin:22px 0 12px">◆ Return seasonality by hour <span class="sec" style="font-weight:400">— quarantined; grey = noise, colored = |t|≥2; whiskers = ±1 s.e.; ${se.equityCount} equities</span></div>`;
+  return title+banner+`<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px">${seasonBarSvg(se.hours)}</div>`;
+}
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
+  _hoverReg={}; _hoverSeq=0;
   const a=state.analytics.data, err=state.analytics.err;
   const head=`<div class="cp-head" style="margin-bottom:4px">Session &amp; time-of-day analytics</div>`+
     `<div class="sec" style="margin-bottom:16px;max-width:680px;line-height:1.55">Server-side studies of when each market is alive and what an overnight / weekend / cash hold actually pays — built on the 60-day hourly price &amp; funding spines. Panels unlock here as coverage accrues.</div>`;
@@ -1172,18 +1285,29 @@ function drawSessions(){
   let dowBlock='';
   if(dow && !dow.pending){ dowBlock = renderDow(dow); panels = panels.filter(p=>p[0]!=='Day-of-week 7×24 heatmap'); }
   else if(dow && dow.pending){ const di=panels.findIndex(p=>p[0]==='Day-of-week 7×24 heatmap'); if(di>=0) panels[di]=['Day-of-week 7×24 heatmap',`computing — needs ≥3 markets with ≥5d hourly spine (have ${dow.count})`,'★★★☆☆']; }
-  const deck=`<div class="cp-sub" style="margin:0 0 10px">On deck</div>`+
-    `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
-    panels.map(p=>`<div style="display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel);flex-wrap:wrap">`+
-      `<span style="color:var(--accent);font-size:11px;letter-spacing:1px;min-width:52px">${p[2]}</span>`+
-      `<span style="min-width:180px;color:var(--text)">${p[0]}</span>`+
-      `<span class="sec" style="font-size:12px;flex:1 1 200px">${p[1]}</span>`+
-      `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
-      `</div>`).join('')+`</div>`;
+  const cl = a.sections && a.sections.clusters;
+  let clBlock='';
+  if(cl && !cl.pending){ clBlock = renderClusters(cl); panels = panels.filter(p=>p[0]!=='Cross-ticker clustering'); }
+  else if(cl && cl.pending){ const ci=panels.findIndex(p=>p[0]==='Cross-ticker clustering'); if(ci>=0) panels[ci]=['Cross-ticker clustering',`computing — needs ≥8 markets with an hourly profile (have ${cl.count||0})`,'★★★★☆']; }
+  const se = a.sections && a.sections.seasonality;
+  let seBlock='';
+  if(se && !se.pending){ seBlock = renderSeasonality(se); panels = panels.filter(p=>p[0]!=='Return seasonality by hour'); }
+  else if(se && se.pending){ const si=panels.findIndex(p=>p[0]==='Return seasonality by hour'); if(si>=0) panels[si]=['Return seasonality by hour',`computing — needs ≥${se.need||8} equities with ≥5d hourly spine (have ${se.count||0})`,'★★☆☆☆']; }
+  const deck = panels.length
+    ? `<div class="cp-sub" style="margin:22px 0 10px">On deck</div>`+
+      `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
+      panels.map(p=>`<div style="display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel);flex-wrap:wrap">`+
+        `<span style="color:var(--accent);font-size:11px;letter-spacing:1px;min-width:52px">${p[2]}</span>`+
+        `<span style="min-width:180px;color:var(--text)">${p[0]}</span>`+
+        `<span class="sec" style="font-size:12px;flex:1 1 200px">${p[1]}</span>`+
+        `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
+        `</div>`).join('')+`</div>`
+    : `<div class="sec" style="margin:22px 0 4px;font-size:12px;opacity:.8">All seven studies live. ◆</div>`;
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
-  host.innerHTML=head+cards+bar+flagship+clocks+overlay+dowBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  host.innerHTML=head+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
   if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
   if(dow && !dow.pending) attachDowControls();
+  attachLineHover();
 }
 function showView(v){
   state.view=v;

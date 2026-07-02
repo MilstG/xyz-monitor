@@ -321,3 +321,11 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .clockmetric:hover,.ovmetric:hover,.dowmetric:hover{color:var(--text)}
 .clockmetric.on,.ovmetric.on,.dowmetric.on{background:var(--accent);color:var(--bg)}
 .clockmetric+.clockmetric,.ovmetric+.ovmetric,.dowmetric+.dowmetric{border-left:1px solid var(--border)}
+
+/* Sessions tab — interactive chart hover (crosshair + readout) */
+.lwrap{position:relative}
+.lchart{cursor:crosshair}
+.lchart .lcx{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3;opacity:0;pointer-events:none}
+.lread{position:absolute;top:8px;right:10px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;
+  padding:6px 9px;font-family:var(--mono);font-size:11px;color:var(--text);opacity:0;pointer-events:none;
+  transition:opacity .08s;max-width:62%;line-height:1.5;z-index:3;box-shadow:0 2px 10px rgba(0,0,0,.35)}
