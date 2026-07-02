@@ -416,6 +416,58 @@ function dowClock(prices) {
   return { vol, volume, n };
 }
 
+// Mean intra-hour return ln(close/open) by ET hour for one ticker (for the quarantined return-
+// seasonality study). Same per-UTC-day offset cache as activityClock. Pure.
+function hourReturnMeans(prices) {
+  const sum = new Array(24).fill(0), cnt = new Array(24).fill(0), offCache = new Map();
+  for (const k of (prices || [])) {
+    const t = k[0], o = k[1], c = k[4];
+    if (!Number.isFinite(t) || !Number.isFinite(o) || !Number.isFinite(c) || o <= 0 || c <= 0) continue;
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    const hr = ((Math.floor((t % DAY) / HOUR) + off) % 24 + 24) % 24;
+    sum[hr] += Math.log(c / o); cnt[hr]++;
+  }
+  const ret = new Array(24);
+  for (let i = 0; i < 24; i++) ret[i] = cnt[i] ? sum[i] / cnt[i] : null;
+  return { ret, n: cnt };
+}
+
+// Top-2 principal components of a set of row vectors, via power iteration + deflation (no deps).
+// Returns { coords:[[x,y],...] } (one 2D point per row, mean-centred) and varExplained:[f1,f2]
+// (fraction of total variance each axis captures — so the 2D scatter can honestly show how much
+// structure it's actually displaying). Rows with non-finite entries are treated as 0 after centring.
+function pca2(rows) {
+  const n = rows.length, d = n ? rows[0].length : 0;
+  if (n < 2 || d < 2) return { coords: rows.map(() => [0, 0]), varExplained: [0, 0] };
+  const mean = new Array(d).fill(0);
+  for (const r of rows) for (let j = 0; j < d; j++) mean[j] += (Number.isFinite(r[j]) ? r[j] : 0);
+  for (let j = 0; j < d; j++) mean[j] /= n;
+  const X = rows.map((r) => r.map((x, j) => (Number.isFinite(x) ? x : 0) - mean[j]));
+  // covariance d x d
+  const C = Array.from({ length: d }, () => new Array(d).fill(0));
+  for (const x of X) for (let a = 0; a < d; a++) { const xa = x[a]; if (!xa) continue; for (let b = 0; b < d; b++) C[a][b] += xa * x[b]; }
+  const denom = n - 1; for (let a = 0; a < d; a++) for (let b = 0; b < d; b++) C[a][b] /= denom;
+  let trace = 0; for (let a = 0; a < d; a++) trace += C[a][a];
+  const matVec = (M, v) => { const o = new Array(d).fill(0); for (let a = 0; a < d; a++) { let s = 0; for (let b = 0; b < d; b++) s += M[a][b] * v[b]; o[a] = s; } return o; };
+  const norm = (v) => { let s = 0; for (const x of v) s += x * x; return Math.sqrt(s) || 1; };
+  function topEig(M) {
+    let v = new Array(d).fill(0).map((_, i) => Math.sin(i + 1) + 0.1);   // deterministic seed
+    let nv = norm(v); v = v.map((x) => x / nv);
+    for (let it = 0; it < 120; it++) { const w = matVec(M, v); const wn = norm(w); v = w.map((x) => x / wn); }
+    const Mv = matVec(M, v); let lam = 0; for (let a = 0; a < d; a++) lam += v[a] * Mv[a];
+    return { vec: v, val: lam };
+  }
+  const e1 = topEig(C);
+  const C2 = C.map((row, a) => row.map((x, b) => x - e1.val * e1.vec[a] * e1.vec[b]));
+  const e2 = topEig(C2);
+  const coords = X.map((x) => {
+    let p = 0, q = 0; for (let a = 0; a < d; a++) { p += x[a] * e1.vec[a]; q += x[a] * e2.vec[a]; }
+    return [p, q];
+  });
+  return { coords, varExplained: [trace ? e1.val / trace : 0, trace ? e2.val / trace : 0] };
+}
+
 // Pool holds across many tickers (the statistically sound "composite" — averages out single-name noise).
 function poolSummary(byTicker) {
   const all = [];
@@ -471,4 +523,4 @@ function sessionComposite(perTickerHolds) {
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
-  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock };
+  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans };

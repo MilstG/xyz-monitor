@@ -3,7 +3,8 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep } = require("./hyperliquid");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
-  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock } = require("./compute");
+  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock,
+  pca2, hourReturnMeans, pearson } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -410,11 +411,16 @@ function createPoller({ dex, store, log }) {
         markets: universe.length, equityMarkets, ready, readyHours: READY_HOURS,
       },
       universe,
-      sections: {
-        sessionDecomp: buildSessionDecomp(),
-        hourClock: buildActivityClocks(),
-        dow: buildDowHeatmap(),
-      },
+      sections: (() => {
+        const hourClock = buildActivityClocks();
+        return {
+          sessionDecomp: buildSessionDecomp(),
+          hourClock,
+          dow: buildDowHeatmap(),
+          clusters: buildClusters(hourClock),
+          seasonality: buildSeasonality(),
+        };
+      })(),
     };
   }
 
@@ -539,6 +545,75 @@ function createPoller({ dex, store, log }) {
     const byClass = {};
     for (const c of [...new Set(per.map((p) => p.assetClass))]) byClass[c] = _poolGrids(per.filter((p) => p.assetClass === c));
     return { hours: 24, tz: "ET", metricDefault: "vol", pooled: { all: _poolGrids(per), byClass } };
+  }
+
+  // Cross-ticker clustering on the normalized 24h volatility profile (when each name is alive). We
+  // PCA the profiles to 2D so the scatter shows whether markets separate by asset class (a taxonomy
+  // sanity check), and flag "oddballs" — names whose activity shape matches a different class's
+  // centroid better than their own (e.g. an equity perp unusually alive overnight = speculation-led).
+  const CLUSTER_MIN = 8;
+  function buildClusters(hourClock) {
+    if (!hourClock || hourClock.pending || !Array.isArray(hourClock.tickers)) return { pending: true, count: hourClock ? (hourClock.count || 0) : 0 };
+    const ts = hourClock.tickers.filter((t) => Array.isArray(t.vr) && t.vr.filter(Number.isFinite).length >= 18);
+    if (ts.length < CLUSTER_MIN) return { pending: true, count: ts.length, need: CLUSTER_MIN };
+    // impute missing hours with the ticker's mean so every profile is a full 24-vector
+    const rows = ts.map((t) => {
+      const m = t.vr.filter(Number.isFinite).reduce((s, x, _, a) => s + x / a.length, 0) || 1;
+      return t.vr.map((x) => (Number.isFinite(x) ? x : m));
+    });
+    const { coords, varExplained } = pca2(rows);
+    // class centroids (mean profile per asset class)
+    const classes = [...new Set(ts.map((t) => t.assetClass))];
+    const centroid = {};
+    for (const c of classes) {
+      const members = rows.filter((_, i) => ts[i].assetClass === c);
+      const cen = new Array(24).fill(0);
+      for (const r of members) for (let h = 0; h < 24; h++) cen[h] += r[h] / members.length;
+      centroid[c] = { vec: cen, count: members.length };
+    }
+    const points = ts.map((t, i) => {
+      let ownCorr = null, best = null, bestCorr = -2;
+      for (const c of classes) {
+        if (centroid[c].count < 2) continue;                 // need a real class to compare against
+        const corr = pearson(rows[i], centroid[c].vec);
+        if (!Number.isFinite(corr)) continue;
+        if (c === t.assetClass) ownCorr = corr;
+        if (corr > bestCorr) { bestCorr = corr; best = c; }
+      }
+      const odd = best != null && best !== t.assetClass && ownCorr != null && (bestCorr - ownCorr) > 0.15;
+      return {
+        coin: t.coin, ticker: t.ticker, assetClass: t.assetClass, sector: t.sector,
+        x: +coords[i][0].toFixed(4), y: +coords[i][1].toFixed(4),
+        ownCorr: ownCorr == null ? null : +ownCorr.toFixed(3),
+        bestClass: best, bestCorr: bestCorr <= -2 ? null : +bestCorr.toFixed(3), odd,
+      };
+    });
+    const oddballs = points.filter((p) => p.odd).sort((a, b) => (b.bestCorr - b.ownCorr) - (a.bestCorr - a.ownCorr));
+    return { points, classes, oddballs, varExplained: varExplained.map((v) => +v.toFixed(3)), count: ts.length };
+  }
+
+  // Return seasonality by ET hour (EXPLORATORY / quarantined). Each equity contributes one mean
+  // intra-hour return per hour; we run a cross-sectional t-test per hour (ticker = one observation,
+  // avoiding candle pseudo-replication) so the client can grey out the noise and only highlight
+  // hours that clear |t| >= 2. Never a standalone trade signal — the payload is significance-flagged.
+  const SEASON_MIN = 8;
+  function buildSeasonality() {
+    const eq = activeMarkets().filter((r) =>
+      !r.delisted && classifyCached(r.ticker).assetClass === "Equity" &&
+      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
+    if (eq.length < SEASON_MIN) return { pending: true, count: eq.length, need: SEASON_MIN };
+    const perHour = Array.from({ length: 24 }, () => []);
+    for (const r of eq) { const { ret } = hourReturnMeans(getHourly(r.coin)); for (let h = 0; h < 24; h++) if (Number.isFinite(ret[h])) perHour[h].push(ret[h]); }
+    const hours = [];
+    for (let h = 0; h < 24; h++) {
+      const a = perHour[h], n = a.length;
+      if (n < 3) { hours.push({ h, mean: null, se: null, t: null, n }); continue; }
+      const mean = a.reduce((s, x) => s + x, 0) / n;
+      let v = 0; for (const x of a) v += (x - mean) * (x - mean);
+      const sd = Math.sqrt(v / (n - 1)), se = sd / Math.sqrt(n);
+      hours.push({ h, mean: +mean.toFixed(6), se: +se.toFixed(6), t: se > 0 ? +(mean / se).toFixed(2) : 0, n });
+    }
+    return { equityCount: eq.length, hours, sigCount: hours.filter((x) => x.t != null && Math.abs(x.t) >= 2).length };
   }
 
 
