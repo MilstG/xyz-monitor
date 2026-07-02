@@ -255,30 +255,39 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .lrow{cursor:pointer;border-radius:4px;padding:2px 4px}
 .lrow:hover{background:rgba(227,165,60,.08)}
 
-/* ============ Bloomberg-style amber terminal theme ============ */
+/* ============ Bloomberg terminal theme (new palette) ============
+   #000000 base · #fb8b1e orange (headers/labels/active) · #0068ff blue
+   (benchmark + interactive) · #4af6c3 mint up · #ff433d red down.
+   Neutral off-white body text; orange + blue do the standout work.
+   Attribute key stays "amber" so the toggle wiring + reset flag are untouched. */
 :root[data-theme="amber"]{
-  --bg:#000000; --panel:#0a0a07; --panel2:#17140d; --border:#3a3524;
-  --text:#ffcf6b; --muted:#c2913a; --faint:#75612f;
-  --accent:#ff9d1c; --accent-dim:#9c5f0a; --blue:#4bd3ff;
-  --up:#3ad277; --down:#ff5b49; --grid:#1b1810;
+  --bg:#000000; --panel:#0a0a0a; --panel2:#121212; --border:#262626;
+  --text:#e6e4df; --muted:#8b8b8b; --faint:#565656;
+  --accent:#fb8b1e; --accent-dim:#8a4d10; --blue:#0068ff;
+  --up:#4af6c3; --down:#ff433d; --grid:#161616;
   --disp:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
 }
 :root[data-theme="amber"] body{ letter-spacing:.1px; }
 :root[data-theme="amber"] .wordmark{ letter-spacing:0; }
-:root[data-theme="amber"] .seg button.active,
-:root[data-theme="amber"] .wrap thead th .arw{ color:#140c00; }
-:root[data-theme="amber"] .seg button.active{ background:var(--accent); color:#140c00; }
+:root[data-theme="amber"] .seg button.active{ background:var(--accent); color:#000; }
+:root[data-theme="amber"] .btn.on{ background:var(--accent); color:#000; }
+:root[data-theme="amber"] .wrap thead th .arw{ color:var(--accent); }
 :root[data-theme="amber"] .tab.active{ color:var(--accent); border-bottom-color:var(--accent); }
 :root[data-theme="amber"] .wrap thead th{ color:var(--accent); }
-:root[data-theme="amber"] .cp-head,
-:root[data-theme="amber"] .stat .v{ color:var(--text); }
-:root[data-theme="amber"] .btn.on{ color:#140c00; background:var(--accent); }
-:root[data-theme="amber"] .wrap tbody tr:hover td:first-child{ background:#1c160a; }
-:root[data-theme="amber"] table.ptbl tbody tr:hover td{ background:rgba(255,157,28,.07); }
 :root[data-theme="amber"] .cp-sub{ color:var(--accent); }
 :root[data-theme="amber"] .hd{ color:var(--accent); }
-:root[data-theme="amber"] ::selection{ background:#ff9d1c; color:#140c00; }
+:root[data-theme="amber"] .cp-head,
+:root[data-theme="amber"] .stat .v{ color:var(--text); }
+:root[data-theme="amber"] a{ color:var(--blue); }
+:root[data-theme="amber"] .search input:focus{ border-color:var(--blue); }
+:root[data-theme="amber"] .wrap tbody tr:hover td{ background:rgba(251,139,30,.055); }
+:root[data-theme="amber"] .wrap tbody tr:hover td:first-child{ background:#191308; }
+:root[data-theme="amber"] table.ptbl tbody tr:hover td{ background:rgba(251,139,30,.07); }
+:root[data-theme="amber"] .lrow:hover{ background:rgba(251,139,30,.08); }
+:root[data-theme="amber"] .benchrow td:first-child{ box-shadow:inset 3px 0 0 var(--blue); }
+:root[data-theme="amber"] .benchrow td{ background:rgba(0,104,255,.08); }
+:root[data-theme="amber"] ::selection{ background:var(--blue); color:#fff; }
 :root[data-theme="amber"] ::-webkit-scrollbar{ width:10px; height:10px; }
 :root[data-theme="amber"] ::-webkit-scrollbar-track{ background:#000; }
-:root[data-theme="amber"] ::-webkit-scrollbar-thumb{ background:#3a3524; border-radius:5px; }
-:root[data-theme="amber"] ::-webkit-scrollbar-thumb:hover{ background:#5a5030; }
+:root[data-theme="amber"] ::-webkit-scrollbar-thumb{ background:#2c2c2c; border-radius:5px; }
+:root[data-theme="amber"] ::-webkit-scrollbar-thumb:hover{ background:#454545; }
