@@ -15,6 +15,8 @@ const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const DAILY_STALE = 6 * 3600 * 1000;  // refresh daily candles every 6 h
 const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new markets
 const FAIL_BACKOFF = 60 * 1000;       // after a failed candle fetch, wait >= this before retrying that coin
+const HOURLY_PASS_THRESHOLD = 0.9;    // start daily backfill once this fraction of markets have hourly features
+                                      // (so a few permanently-unfetchable markets can't block all daily data)
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
 const REGIME_SAMPLE_MS = 30 * 60 * 1000;  // append one correlation sample to history every 30 min
@@ -177,14 +179,20 @@ function createPoller({ dex, store, log }) {
   }
   // The default view needs only hourly data, so let it claim the full rate budget first;
   // daily (β + correlation) waits until every active market has its hourly features.
+  // Daily backfill waits for the hourly pass to be "mostly" done rather than 100% complete:
+  // in a large heterogeneous universe a few markets may be permanently unfetchable (thematics /
+  // synthetics with no candle history, null px, etc.), and requiring EVERY market to have hourly
+  // features let a single straggler block ALL daily data (and thus every correlation feature) forever.
+  // Once ~90% have features we start daily; the stragglers still get daily via pick(needDaily) — they
+  // just lack correlation until (if ever) they resolve, instead of poisoning the whole board.
   function hourlyPassComplete() {
-    let any = false;
+    let total = 0, done = 0;
     for (const r of rows.values()) {
       if (r.delisted) continue;
-      any = true;
-      if (!r.feat) return false;
+      total++;
+      if (r.feat) done++;
     }
-    return any;
+    return total > 0 && done >= total * HOURLY_PASS_THRESHOLD;
   }
   async function dailyWorker() {
     for (;;) {
