@@ -943,9 +943,11 @@ function renderSectors(){
     el('sect-map').innerHTML = data ? renderLeaders(data)
       : '<div class="msg">The leadership map needs the S&amp;P benchmark and a few weeks of daily history — it fills in as the background daily backfill completes.</div>';
     if(data) attachLeadersHandlers();
+    if(data) attachMapHover();
   } else {
     el('sect-map').innerHTML=renderSectorMap(list);
     attachMapHandlers();
+    attachMapHover();
   }
   renderSectorBoard(list);
   renderSectorDetail();
@@ -987,6 +989,54 @@ function computeLeaders(list){
   return out.length?out:null;
 }
 function leadQuad(x,y){ if(x>=0&&y>=0)return {l:'Leaders',c:'var(--up)'}; if(x<0&&y>=0)return {l:'Catching up',c:'var(--blue)'}; if(x>=0&&y<0)return {l:'Cooling',c:'var(--accent)'}; return {l:'Laggards',c:'var(--down)'}; }
+// ---- shared bubble-map label handling: halo (#1) + greedy de-collision w/ leader lines (#2) + hover (#3) ----
+// nodes: [{cx,cy,r,label,...}] mutated in place with n._lbl={p,x1,y1,x2,y2,def}. b={px0,px1,py1,py0}.
+// Bubbles never move (their position IS the data); only labels are routed to a free side, which is lossless.
+function layoutMapLabels(nodes, b){
+  const placed=[], boxes=nodes.map(n=>({x1:n.cx-n.r,y1:n.cy-n.r,x2:n.cx+n.r,y2:n.cy+n.r}));
+  const ov=(a,c)=>!(a.x2<c.x1||a.x1>c.x2||a.y2<c.y1||a.y1>c.y2);
+  const inB=c=>c.x1>=b.px0-34&&c.x2<=b.px1+34&&c.y1>=b.py1-6&&c.y2<=b.py0+22;
+  for(const n of [...nodes].sort((a,c)=>c.r-a.r)){          // biggest bubbles keep the natural spot; small ones route around
+    const w=(n.label||'').length*6.2+2, h=12;
+    const cand=[
+      {p:'below',x1:n.cx-w/2,     y1:n.cy+n.r+3},
+      {p:'above',x1:n.cx-w/2,     y1:n.cy-n.r-3-h},
+      {p:'right',x1:n.cx+n.r+5,   y1:n.cy-h/2},
+      {p:'left', x1:n.cx-n.r-5-w, y1:n.cy-h/2},
+      {p:'below',x1:n.cx-w/2,     y1:n.cy+n.r+3+h+3},
+      {p:'above',x1:n.cx-w/2,     y1:n.cy-n.r-3-2*h-3},
+    ].map(c=>({...c,x2:c.x1+w,y2:c.y1+h}));
+    let chosen=null;
+    for(const c of cand){ if(!inB(c))continue;
+      let bad=placed.some(p=>ov(c,p));
+      if(!bad) for(let i=0;i<nodes.length;i++){ if(nodes[i]===n)continue; if(ov(c,boxes[i])){bad=true;break;} }
+      if(!bad){ chosen=c; break; } }
+    if(!chosen) chosen=cand[0];                             // last resort: default below (halo still helps)
+    chosen.def=(chosen===cand[0]);                          // default 'below' needs no leader line
+    placed.push(chosen); n._lbl=chosen;
+  }
+  return nodes;
+}
+function mapLabelSvg(n, sizePx){
+  const L=n._lbl;
+  const ln=(x1,y1,x2,y2)=>`<line class="mleader" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"/>`;
+  let tx,ty,anchor,leader='';
+  if(L.p==='below'||L.p==='above'){ tx=n.cx; ty=L.y1+9.5; anchor='middle';
+    if(!L.def) leader = L.p==='below' ? ln(n.cx,n.cy+n.r,n.cx,L.y1-1) : ln(n.cx,n.cy-n.r,n.cx,L.y2+1); }
+  else if(L.p==='right'){ tx=L.x1; ty=n.cy+3.5; anchor='start'; leader=ln(n.cx+n.r,n.cy,L.x1-2,n.cy); }
+  else { tx=L.x2; ty=n.cy+3.5; anchor='end'; leader=ln(n.cx-n.r,n.cy,L.x2+2,n.cy); }
+  // halo: paint-order stroke in the page colour carves the label out from bubbles and neighbouring labels
+  const txt=`<text class="mlbl" x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" text-anchor="${anchor}" style="font-family:var(--mono);font-size:${sizePx}px;fill:var(--text);paint-order:stroke;stroke:var(--bg);stroke-width:3px;stroke-linejoin:round">${esc(n.label)}</text>`;
+  return { leader, txt };
+}
+// hover a bubble -> raise it to the front and dim the rest
+function attachMapHover(){
+  const svg=el('sect-map').querySelector('svg.smapsvg'); if(!svg) return;
+  svg.querySelectorAll('.bub,.lead').forEach(g=>{
+    g.addEventListener('mouseenter',()=>{ svg.classList.add('hv'); g.classList.add('hot'); svg.appendChild(g); });
+    g.addEventListener('mouseleave',()=>{ svg.classList.remove('hv'); g.classList.remove('hot'); });
+  });
+}
 function renderLeaders(data){
   const wl=leadersDays()+'d';
   const W=760,H=430, px0=44,px1=W-14, py0=H-48, py1=30;
@@ -996,7 +1046,7 @@ function renderLeaders(data){
   const yM=v=>py0-(clamp(v,-my,my)+my)/(2*my)*(py0-py1);
   const cx=xM(0), cy=yM(0), maxVol=Math.max(1,...data.map(s=>s.vol||0));
   const ql='font-family:var(--mono);font-size:10px;fill:var(--faint)';
-  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  let s=`<svg class="smapsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
   s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.3"/>`;
   s+=`<rect x="${cx}" y="${py1}" width="${px1-cx}" height="${cy-py1}" fill="rgb(70,185,126)" opacity="0.07"/>`;
   s+=`<rect x="${px0}" y="${py1}" width="${cx-px0}" height="${cy-py1}" fill="rgb(111,147,201)" opacity="0.07"/>`;
@@ -1012,12 +1062,16 @@ function renderLeaders(data){
   s+=`<text x="${cx.toFixed(1)}" y="${py0+16}" text-anchor="middle" style="${ql}">S&amp;P</text>`;
   s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← behind the S&amp;P    ·    % vs S&amp;P over ${wl}    ·    ahead →</text>`;
   s+=`<text x="12" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 12 ${(py0+py1)/2})" style="${ql}">lead shrinking ▼ · growing ▲</text>`;
-  for(const sec of data){ const q=leadQuad(sec.x,sec.y), col=q.c, r=8+22*Math.sqrt((sec.vol||0)/maxVol);
-    const X=xM(sec.x), Y=yM(sec.y), dir=sec.y>=0?'lead growing':'lead shrinking';
+  const nodes=data.map(sec=>({cx:xM(sec.x),cy:yM(sec.y),r:8+22*Math.sqrt((sec.vol||0)/maxVol),label:sectorShort(sec.name),sec}));
+  layoutMapLabels(nodes,{px0,px1,py1,py0});
+  for(const n of nodes){ const sec=n.sec, q=leadQuad(sec.x,sec.y), col=q.c;
+    const dir=sec.y>=0?'lead growing':'lead shrinking';
     const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ${wl}, ${dir} — ${q.l}`;
+    const lp=mapLabelSvg(n,10.5);
     s+=`<g class="lead" data-sect="${esc(sec.name)}" style="cursor:pointer"><title>${esc(tip)}</title>`;
-    s+=`<circle cx="${X.toFixed(1)}" cy="${Y.toFixed(1)}" r="${r.toFixed(1)}" fill="${col}" fill-opacity="0.3" stroke="${col}" stroke-width="1.5"/>`;
-    s+=`<text x="${X.toFixed(1)}" y="${(Y+r+11).toFixed(1)}" text-anchor="middle" style="font-family:var(--mono);font-size:10.5px;fill:var(--text)">${esc(sectorShort(sec.name))}</text></g>`; }
+    s+=lp.leader;
+    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r.toFixed(1)}" fill="${col}" fill-opacity="0.3" stroke="${col}" stroke-width="1.5"/>`;
+    s+=lp.txt+`</g>`; }
   s+='</svg>';
   return s + leadersRankHtml(data);
 }
@@ -1042,7 +1096,7 @@ function renderSectorMap(list){
   const xM=d=>px0+(clamp(d,-100,100)+100)/200*(px1-px0);
   const yM=h=>py0-clamp(h,0,100)/100*(py0-py1);
   const cx0=xM(0), cy50=yM(50);
-  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  let s=`<svg class="smapsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
   s+=`<rect x="${px0}" y="${py1}" width="${px1-px0}" height="${py0-py1}" fill="var(--panel2)" opacity="0.35"/>`;
   s+=`<line x1="${cx0}" y1="${py1}" x2="${cx0}" y2="${py0}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
   s+=`<line x1="${px0}" y1="${cy50}" x2="${px1}" y2="${cy50}" stroke="var(--border)" stroke-dasharray="4 4"/>`;
@@ -1053,11 +1107,14 @@ function renderSectorMap(list){
   s+=`<text x="${px0+6}" y="${py0-6}" style="${ql}">quiet / lagging</text>`;
   s+=`<text x="${(px0+px1)/2}" y="${H-6}" text-anchor="middle" style="${ql}">← outflow   ·   capital direction   ·   inflow →</text>`;
   s+=`<text x="14" y="${(py0+py1)/2}" text-anchor="middle" transform="rotate(-90 14 ${(py0+py1)/2})" style="${ql}">activity heat →</text>`;
-  for(const g of plot){ const r=6+24*Math.sqrt((g.totVol||0)/maxVol), cx=xM(g.direction), cy=yM(g.heat), col=momColor(g.direction);
-    const lbl=sectorShort(g.name);
+  const nodes=plot.map(g=>({cx:xM(g.direction),cy:yM(g.heat),r:6+24*Math.sqrt((g.totVol||0)/maxVol),label:sectorShort(g.name),g}));
+  layoutMapLabels(nodes,{px0,px1,py1,py0});
+  for(const n of nodes){ const g=n.g, col=momColor(g.direction);
+    const lp=mapLabelSvg(n,10);
     s+=`<g class="bub" data-sect="${esc(g.name)}" style="cursor:pointer"><title>${esc(g.name)} · rotation ${Math.round(g.direction)} · heat ${g.heat} · ret ${g.ret==null?'n/a':(g.ret>=0?'+':'')+g.ret.toFixed(2)+'%'} · ΔOI ${g.doi==null?'n/a':(g.doi>=0?'+':'')+g.doi.toFixed(2)+'%'}</title>`;
-    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="${col}" fill-opacity="0.32" stroke="${col}" stroke-width="1.4"/>`;
-    s+=`<text x="${cx.toFixed(1)}" y="${(cy+r+11).toFixed(1)}" text-anchor="middle" style="font-family:var(--mono);font-size:10px;fill:var(--text)">${esc(lbl)}</text></g>`; }
+    s+=lp.leader;
+    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r.toFixed(1)}" fill="${col}" fill-opacity="0.32" stroke="${col}" stroke-width="1.4"/>`;
+    s+=lp.txt+`</g>`; }
   s+='</svg>';
   return s;
 }
