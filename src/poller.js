@@ -2,7 +2,8 @@
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep } = require("./hyperliquid");
-const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr } = require("./compute");
+const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
+  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -408,9 +409,55 @@ function createPoller({ dex, store, log }) {
         markets: universe.length, equityMarkets, ready, readyHours: READY_HOURS,
       },
       universe,
-      sections: {},   // filled by later slices
+      sections: {
+        sessionDecomp: buildSessionDecomp(),
+      },
     };
   }
+
+  // Session decomposition (the flagship): for the equity class, run overnight (close->open),
+  // weekend (Fri close->Mon open) and cash (open->close) holds on each name's hourly spine, then
+  // pool them into one equal-weight bet per calendar boundary and compound gross vs net-of-funding
+  // equity curves. Net is only as deep as the funding spine, so each curve carries a per-boundary
+  // funding-known fraction and a horizon timestamp — the client renders net as approximate before it.
+  const SESSION_MIN_SPINE = 3 * 24;    // a ticker needs >= 3 days of hourly candles to contribute
+  const SESSION_MIN_EQUITIES = 5;      // don't publish the study until the class is broad enough
+  function buildSessionDecomp() {
+    const now = Date.now();
+    const end = Math.floor(now / HOUR) * HOUR;
+    const start = end - HOURLY_HISTORY_DAYS * DAY;
+    const tol = 3 * HOUR;
+    const eq = activeMarkets().filter((r) =>
+      !r.delisted && classifyCached(r.ticker).assetClass === "Equity" &&
+      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= SESSION_MIN_SPINE);
+    if (eq.length < SESSION_MIN_EQUITIES) return { pending: true, equityCount: eq.length, need: SESSION_MIN_EQUITIES };
+    const anchors = {
+      overnight: overnightAnchors(start, end),
+      weekend: weekendAnchors(start, end),
+      cash: cashAnchors(start, end),
+    };
+    const sessions = {};
+    for (const s of ["overnight", "weekend", "cash"]) {
+      const perTicker = [];
+      for (const r of eq) perTicker.push(runHolds(getHourly(r.coin), getFunding(r.coin), anchors[s], tol));
+      sessions[s] = sessionComposite(perTicker);
+    }
+    const ov = sessions.overnight;
+    return {
+      window: { start, end, days: HOURLY_HISTORY_DAYS },
+      equityCount: eq.length,
+      fundingEndpoint: fundingCoverage().endpoint,
+      sessions,
+      headline: {   // the "buy at close, sell before open" story lives in the overnight session
+        medianGross: ov.medianGross, medianNet: ov.medianNet,
+        meanGross: ov.meanGross, meanNet: ov.meanNet,
+        totGross: ov.totGross, totNet: ov.totNet,
+        winNet: ov.winNet, nights: ov.n, breadth: ov.breadth,
+        fundingHorizonTs: ov.fundingHorizonTs,
+      },
+    };
+  }
+
 
   // ---- warm-cache persistence: survive restarts so redeploys serve instantly ----
   function hydrateFeatures() {

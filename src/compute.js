@@ -352,7 +352,52 @@ function poolSummary(byTicker) {
   return summarize(all);
 }
 
+// Cross-sectional composite for ONE session: each calendar boundary (a given night / weekend / cash
+// day) becomes a single equal-weight bet across every ticker that had a valid hold on it; the per-
+// boundary mean return is then compounded into an equity curve. This is the "one clean bet per
+// boundary across the class" framing — single-name noise averages out, and because anchors are
+// calendar-derived the enter timestamps line up across tickers, so grouping by `enter` is exact.
+// Input: array of per-ticker hold arrays (each already produced by runHolds for the same anchor set).
+// Output: { n, tickers, breadth, curve:[[t, eqGross, eqNet, fundingKnownFrac, breadth], ...],
+//           mean/median/win (gross & net), totGross, totNet, fundingHorizonTs }.
+function _mean(a) { let s = 0, n = 0; for (const x of a) if (Number.isFinite(x)) { s += x; n++; } return n ? s / n : 0; }
+function _round6(x) { return Math.round(x * 1e6) / 1e6; }
+function sessionComposite(perTickerHolds) {
+  const byB = new Map();
+  let tickers = 0;
+  for (const hs of perTickerHolds) {
+    if (!hs || !hs.length) continue;
+    tickers++;
+    for (const h of hs) {
+      let b = byB.get(h.enter);
+      if (!b) { b = { enter: h.enter, exit: h.exit, g: [], n: [], fk: 0 }; byB.set(h.enter, b); }
+      b.g.push(h.gross); b.n.push(h.net); if (h.fundingKnown) b.fk++;
+    }
+  }
+  const bounds = [...byB.values()].sort((a, b) => a.enter - b.enter);
+  let eqG = 1, eqN = 1, fundingHorizonTs = null;
+  const curve = [], perG = [], perN = [];
+  for (const b of bounds) {
+    const mg = _mean(b.g), mn = _mean(b.n), fk = b.g.length ? b.fk / b.g.length : 0;
+    eqG *= 1 + mg; eqN *= 1 + mn;
+    curve.push([b.enter, _round6(eqG - 1), _round6(eqN - 1), Math.round(fk * 1000) / 1000, b.g.length]);
+    perG.push(mg); perN.push(mn);
+    if (fundingHorizonTs === null && fk >= 0.5) fundingHorizonTs = b.enter;
+  }
+  const winFrac = (a) => (a.length ? a.filter((x) => x > 0).length / a.length : 0);
+  return {
+    n: bounds.length, tickers,
+    breadth: bounds.length ? _mean(bounds.map((b) => b.g.length)) : 0,
+    curve,
+    meanGross: _mean(perG), meanNet: _mean(perN),
+    medianGross: median(perG), medianNet: median(perN),
+    winGross: winFrac(perG), winNet: winFrac(perN),
+    totGross: eqG - 1, totNet: eqN - 1,
+    fundingHorizonTs,
+  };
+}
+
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
-  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary };
+  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite };
