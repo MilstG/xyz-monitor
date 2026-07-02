@@ -224,14 +224,18 @@ function computeMomentum(r){
   const f=r.feat; if(!f||!(f.volH>0)) return undefined;
   const volD=(f.volD>0)?f.volD:null;   // measured daily vol; null until hourly features load -> falls back to hourly x sqrt(t)
   const H=[[r.h1,1,0.10],[r.h4,4,0.15],[r.d1,24,0.30],[r.d7,168,0.30],[r.d30,720,0.15]];
-  let s=0,w=0;
+  let s=0,w=0,sa=0;
   for(const [ret,hrs,wt] of H){ if(ret==null||!isFinite(ret))continue;
     // 1d+ horizons use directly-measured daily vol (no iid sqrt(t) assumption); intraday uses hourly vol
     const sigma=(hrs>=24&&volD)?volD*Math.sqrt(hrs/24):f.volH*Math.sqrt(hrs);
     if(!(sigma>0))continue;
-    s+=wt*((ret/100)/sigma); w+=wt; }
+    const z=(ret/100)/sigma; s+=wt*z; sa+=wt*Math.abs(z); w+=wt; }
   if(w===0) return null;
-  let core=(s/w)*(0.5+0.5*(f.r2||0));
+  // cross-horizon coherence: |net blended move| / total absolute path across horizons, in [0,1].
+  // 1 = every horizon agrees (clean trend), ->0 = horizons fight (choppy / rolling over). Replaces the
+  // single-horizon 30d r2 gate so the quality factor reflects the multi-horizon blend the score is built from.
+  const kappa = sa>0 ? Math.abs(s)/sa : 0;
+  let core=(s/w)*(0.5+0.5*kappa);
   if(r.px!=null&&f.hi30!=null&&f.lo30!=null&&f.hi30>f.lo30) core+=0.4*(clamp((r.px-f.lo30)/(f.hi30-f.lo30),0,1)-0.5)*2;
   if(r.doi!=null&&isFinite(r.doi)) core*=clamp(1+0.4*Math.tanh(r.doi/8),0.6,1.4);
   return 100*Math.tanh(core/1.5);
