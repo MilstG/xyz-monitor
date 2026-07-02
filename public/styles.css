@@ -313,3 +313,11 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .regimestrip .rs-bar-fill{position:absolute;left:0;top:0;bottom:0;background:var(--up)}
 .blue{color:var(--blue)}
 @media(max-width:640px){ .regimestrip{font-size:11px;gap:6px 14px;padding:7px 10px} .regimestrip .rs-bar{width:40px} }
+
+/* Sessions tab — hour-of-day clock controls */
+.clocksel{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-family:var(--mono);font-size:12px;max-width:220px}
+.clockseg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.clockmetric,.ovmetric,.dowmetric{background:var(--panel2);color:var(--muted);border:none;padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer}
+.clockmetric:hover,.ovmetric:hover,.dowmetric:hover{color:var(--text)}
+.clockmetric.on,.ovmetric.on,.dowmetric.on{background:var(--accent);color:var(--bg)}
+.clockmetric+.clockmetric,.ovmetric+.ovmetric,.dowmetric+.dowmetric{border-left:1px solid var(--border)}

@@ -50,7 +50,7 @@ const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:''
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   watch:new Set(), watchOnly:false, detail:null,
-  analytics:{ data:null, err:null, ts:0 },
+  analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
 function el(id){ return document.getElementById(id); }
@@ -937,6 +937,196 @@ function renderSessionDecomp(sd){
   const title=`<div class="cp-sub" style="margin:0 0 12px">◆ Session decomposition <span class="sec" style="font-weight:400">— what an overnight / weekend / cash hold actually pays, pooled one bet per boundary across the equity class</span></div>`;
   return title+head+charts;
 }
+
+// ---- hour-of-day activity + funding clocks (ET, midnight at top, clockwise) ----
+function clockPolar(cx,cy,r,deg){ const a=deg*Math.PI/180; return [cx+r*Math.cos(a), cy+r*Math.sin(a)]; }
+function clockDeg(hf){ return hf*15-90; }   // hour 0 = top; clockwise
+function clockWedge(cx,cy,ri,ro,d0,d1){
+  const P=(r,a)=>clockPolar(cx,cy,r,a).map(v=>v.toFixed(2));
+  const [x0,y0]=P(ri,d0),[x1,y1]=P(ro,d0),[x2,y2]=P(ro,d1),[x3,y3]=P(ri,d1);
+  const large=(d1-d0)>180?1:0;
+  return `M${x0} ${y0} L${x1} ${y1} A${ro} ${ro} 0 ${large} 1 ${x2} ${y2} L${x3} ${y3} A${ri} ${ri} 0 ${large} 0 ${x0} ${y0} Z`;
+}
+function clockArc(cx,cy,r,d0,d1){ const P=(a)=>clockPolar(cx,cy,r,a).map(v=>v.toFixed(2)); const [x0,y0]=P(d0),[x1,y1]=P(d1); const large=(d1-d0)>180?1:0; return `M${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1}`; }
+function clockScaffold(cx,cy,ri,ro){
+  let s='';
+  // US cash-session highlight arc (09:30–16:00 ET)
+  s+=`<path d="${clockWedge(cx,cy,ri-3,ro+10,clockDeg(9.5),clockDeg(16))}" fill="var(--blue)" opacity="0.07"/>`;
+  // hour ticks + labels every 3h
+  for(let h=0;h<24;h+=3){ const [lx,ly]=clockPolar(cx,cy,ro+16,clockDeg(h)); const lab=h===0?'0':(h===12?'12':(''+h));
+    s+=`<text x="${lx.toFixed(1)}" y="${(ly+3).toFixed(1)}" text-anchor="middle" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${lab}</text>`; }
+  // open/close ticks
+  for(const hh of [9.5,16]){ const [a,b]=clockPolar(cx,cy,ri-3,clockDeg(hh)), [c,d]=clockPolar(cx,cy,ro+3,clockDeg(hh));
+    s+=`<line x1="${a.toFixed(1)}" y1="${b.toFixed(1)}" x2="${c.toFixed(1)}" y2="${d.toFixed(1)}" stroke="var(--blue)" stroke-width="1" opacity="0.6"/>`; }
+  return s;
+}
+function activityClockSvg(vec, metric){
+  const W=224,H=224, cx=112,cy=112, ri=30, roMax=96;
+  const arr = (metric==='volume'?vec.qr:vec.vr)||[];
+  const vals = arr.filter(Number.isFinite);
+  if(vals.length<6) return '<div class="msg" style="height:200px;display:flex;align-items:center;justify-content:center">Not enough samples yet.</div>';
+  const maxV = Math.max(...vals);
+  let s=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`;
+  s+=clockScaffold(cx,cy,ri,roMax);
+  // baseline ring at relative value 1 (the ticker's own average hour)
+  const r1 = ri + (maxV?1/maxV:0)*(roMax-ri);
+  s+=`<circle cx="${cx}" cy="${cy}" r="${r1.toFixed(1)}" fill="none" stroke="var(--faint)" stroke-dasharray="2 3" stroke-width="1" opacity="0.7"/>`;
+  for(let h=0;h<24;h++){ const val=arr[h]; if(!Number.isFinite(val)) continue;
+    const ro = ri + (val/maxV)*(roMax-ri);
+    const op = 0.25 + 0.6*(val/maxV);
+    s+=`<path d="${clockWedge(cx,cy,ri,ro,clockDeg(h)+1.4,clockDeg(h+1)-1.4)}" fill="var(--accent)" fill-opacity="${op.toFixed(2)}"><title>${h}:00 ET · ${(val).toFixed(2)}× avg${vec.volAbsMean&&metric!=='volume'?' · '+(val*vec.volAbsMean*100).toFixed(2)+'% range':''}</title></path>`; }
+  s+=`<circle cx="${cx}" cy="${cy}" r="${ri}" fill="var(--panel)" stroke="var(--border)"/>`;
+  s+=`<text x="${cx}" y="${cy-2}" text-anchor="middle" style="font-family:var(--mono);font-size:10px;fill:var(--muted)">${metric==='volume'?'volume':'range'}</text>`;
+  s+=`<text x="${cx}" y="${cy+10}" text-anchor="middle" style="font-family:var(--mono);font-size:8px;fill:var(--faint)">ET</text>`;
+  return s+'</svg>';
+}
+function fundingClockSvg(fund){
+  const W=224,H=224, cx=112,cy=112, ri=44, ro=96;
+  const arr = fund||[]; const vals=arr.filter(Number.isFinite);
+  if(vals.length<6) return '<div class="msg" style="height:200px;display:flex;align-items:center;justify-content:center">No funding schedule yet.</div>';
+  const maxAbs = Math.max(...vals.map(Math.abs))||1e-9;
+  let s=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`;
+  s+=clockScaffold(cx,cy,ri,ro);
+  for(let h=0;h<24;h++){ const f=arr[h]; if(!Number.isFinite(f)){ continue; }
+    const col = f>0?'var(--down)':'var(--up)';   // >0 longs pay (cost), <0 longs receive
+    const op = 0.18 + 0.62*(Math.abs(f)/maxAbs);
+    s+=`<path d="${clockWedge(cx,cy,ri,ro,clockDeg(h)+1.4,clockDeg(h+1)-1.4)}" fill="${col}" fill-opacity="${op.toFixed(2)}"><title>${h}:00 ET · ${(f*100).toFixed(4)}%/h (${f>0?'longs pay':'longs receive'})</title></path>`; }
+  const net = arr.reduce((a,b)=>a+(Number.isFinite(b)?b:0),0);   // expected daily funding for a 1x long
+  const netCls = net>0?'--down':(net<0?'--up':'--muted');
+  s+=`<circle cx="${cx}" cy="${cy}" r="${ri}" fill="var(--panel)" stroke="var(--border)"/>`;
+  s+=`<text x="${cx}" y="${cy-6}" text-anchor="middle" style="font-family:var(--mono);font-size:9px;fill:var(--muted)">net/day</text>`;
+  s+=`<text x="${cx}" y="${cy+7}" text-anchor="middle" style="font-family:var(--mono);font-size:13px;fill:var(${netCls})">${(net>0?'+':'')+(net*100).toFixed(3)}%</text>`;
+  s+=`<text x="${cx}" y="${cy+18}" text-anchor="middle" style="font-family:var(--mono);font-size:8px;fill:var(--faint)">${(net*365*100>0?'+':'')+(net*365*100).toFixed(0)}%/yr</text>`;
+  return s+'</svg>';
+}
+function clockResolve(hc, sel){
+  if(sel && sel.indexOf('coin:')===0){ const c=sel.slice(5); const t=(hc.tickers||[]).find(x=>x.coin===c); if(t) return Object.assign({}, t, {label:t.ticker, sub:t.sector+' · '+t.assetClass}); }
+  if(sel && sel.indexOf('class:')===0){ const c=sel.slice(6); const p=(hc.pooled.byClass||{})[c]; if(p) return Object.assign({}, p, {label:'Pooled · '+c, sub:p.count+' markets, equal-weight'}); }
+  const all=hc.pooled.all||{}; return Object.assign({}, all, {label:'Pooled · all markets', sub:(all.count||0)+' markets, equal-weight'});
+}
+function peakHour(arr){ let bi=-1,bv=-Infinity; for(let h=0;h<24;h++) if(Number.isFinite(arr[h])&&arr[h]>bv){bv=arr[h];bi=h;} return bi<0?null:bi; }
+function renderClocks(hc){
+  const st=state.analytics.clock, vec=clockResolve(hc, st.sel);
+  // selector
+  const opt=(v,l,sel)=>`<option value="${esc(v)}"${sel===v?' selected':''}>${esc(l)}</option>`;
+  const classes=Object.keys(hc.pooled.byClass||{}).sort();
+  let selHtml=`<select id="clocksel" class="clocksel">`;
+  selHtml+=`<optgroup label="Pooled">`+opt('all','All markets',st.sel)+classes.map(c=>opt('class:'+c, c, st.sel)).join('')+`</optgroup>`;
+  const byCls={}; (hc.tickers||[]).forEach(t=>{ (byCls[t.assetClass]=byCls[t.assetClass]||[]).push(t); });
+  for(const c of Object.keys(byCls).sort()){ selHtml+=`<optgroup label="${esc(c)}">`+byCls[c].sort((a,b)=>a.ticker<b.ticker?-1:1).map(t=>opt('coin:'+t.coin, t.ticker, st.sel)).join('')+`</optgroup>`; }
+  selHtml+=`</select>`;
+  const mbtn=(m,l)=>`<button type="button" class="clockmetric${st.metric===m?' on':''}" data-m="${m}">${l}</button>`;
+  const controls=`<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">`+
+    `<span class="sec" style="font-size:11px">clock</span>${selHtml}`+
+    `<span class="clockseg">${mbtn('vol','range vol')}${mbtn('volume','volume')}</span>`+
+    `<span class="sec" style="font-size:11px;margin-left:auto">${esc(vec.label)} — <span style="opacity:.75">${esc(vec.sub||'')}</span></span></div>`;
+  // insight line
+  const ph=peakHour(st.metric==='volume'?vec.qr:vec.vr);
+  const fh=vec.fund?peakHour(vec.fund.map(Math.abs)):null;
+  const insight=`<div class="sec" style="font-size:11px;margin-top:2px;opacity:.85">`+
+    (ph!=null?`Most active around <b style="color:var(--text)">${ph}:00–${(ph+1)%24}:00 ET</b>`:'')+
+    (fh!=null&&Number.isFinite(vec.fund[fh])?` · strongest carry near <b style="color:var(--text)">${fh}:00 ET</b> (${vec.fund[fh]>0?'longs pay':'longs receive'})`:'')+`</div>`;
+  const twin=`<div style="display:flex;gap:16px;flex-wrap:wrap">`+
+    `<div style="flex:1 1 240px;min-width:230px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px"><div class="sec" style="font-size:11px;margin-bottom:4px">Activity — when it moves</div>${activityClockSvg(vec, st.metric)}</div>`+
+    `<div style="flex:1 1 240px;min-width:230px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px"><div class="sec" style="font-size:11px;margin-bottom:4px">Funding — <span style="color:var(--up)">receive</span> / <span style="color:var(--down)">pay</span> by hour</div>${fundingClockSvg(vec.fund)}</div>`+
+    `</div>`;
+  const title=`<div class="cp-sub" style="margin:22px 0 12px">◆ Hour-of-day clocks <span class="sec" style="font-weight:400">— the robust timing layer (range volatility, volume, funding by ET hour; blue band = US cash session)</span></div>`;
+  return title+controls+insight+twin;
+}
+function attachClockControls(){
+  const sel=el('clocksel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.clock.sel=sel.value; drawSessions(); });
+  document.querySelectorAll('.clockmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.clock.metric=b.dataset.m; drawSessions(); }));
+}
+
+// ---- asset-class composite overlays (pooled hour-of-day curves, from the Slice-3 hourClock data) ----
+const CLASS_COLORS={ Equity:'var(--accent)', Crypto:'var(--blue)', FX:'var(--up)', Commodity:'#c98a3c', Index:'var(--muted)', 'Pre-IPO':'var(--down)', Rates:'#7d6ff0' };
+const CLASS_FALLBACK=['var(--accent)','var(--blue)','var(--up)','var(--down)','var(--muted)','#c98a3c','#7d6ff0'];
+function classColor(c,i){ return CLASS_COLORS[c]||CLASS_FALLBACK[i%CLASS_FALLBACK.length]; }
+function overlayLineSvg(series, metric){
+  const W=560,H=190, pl=46,pr=14,pt=10,pb=24;
+  const base = metric==='funding'?0:1;
+  let lo=base, hi=base, any=false;
+  for(const s of series) for(const v of s.vec) if(Number.isFinite(v)){ lo=Math.min(lo,v); hi=Math.max(hi,v); any=true; }
+  if(!any) return '<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center">No pooled profiles yet.</div>';
+  if(hi===lo){ hi+=0.01; lo-=0.01; }
+  const padd=(hi-lo)*0.08; hi+=padd; lo-=padd;
+  const X=h=> pl + (h/23)*(W-pl-pr);
+  const Y=v=> pt + (1-(v-lo)/(hi-lo))*(H-pt-pb);
+  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  // RTH band 09:30-16:00 ET
+  s+=`<rect x="${X(9.5).toFixed(1)}" y="${pt}" width="${(X(16)-X(9.5)).toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"/>`;
+  // baseline
+  s+=`<line x1="${pl}" y1="${Y(base).toFixed(1)}" x2="${W-pr}" y2="${Y(base).toFixed(1)}" stroke="var(--faint)" stroke-dasharray="3 3" stroke-width="1"/>`;
+  const ylab=(v)=>`<text x="${pl-6}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${metric==='funding'?(v*100).toFixed(3)+'%':v.toFixed(1)+'×'}</text>`;
+  s+=ylab(hi)+ylab(base)+ylab(lo);
+  // hour ticks
+  for(let h=0;h<=24;h+=6){ const hh=Math.min(h,23); s+=`<text x="${X(hh).toFixed(1)}" y="${H-8}" text-anchor="middle" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${h}</text>`; }
+  s+=`<text x="${(pl+W-pr)/2}" y="${H-8}" text-anchor="middle" style="font-family:var(--mono);font-size:8px;fill:var(--faint)">ET hour</text>`;
+  for(const ser of series){
+    let d='', pen=false;
+    for(let h=0;h<24;h++){ const v=ser.vec[h]; if(!Number.isFinite(v)){ pen=false; continue; } d+=(pen?'L':'M')+X(h).toFixed(1)+' '+Y(v).toFixed(1)+' '; pen=true; }
+    if(d) s+=`<path d="${d.trim()}" fill="none" stroke="${ser.color}" stroke-width="1.7" stroke-linejoin="round"/>`;
+  }
+  return s+'</svg>';
+}
+function renderClassOverlay(hc){
+  const st=state.analytics.overlay, key = st.metric==='volume'?'qr':(st.metric==='funding'?'fund':'vr');
+  const byClass=hc.pooled.byClass||{};
+  const classes=Object.keys(byClass).sort((a,b)=>(byClass[b].count||0)-(byClass[a].count||0));
+  const series=classes.map((c,i)=>({ cls:c, color:classColor(c,i), vec:(byClass[c][key]||[]) }));
+  const legend=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">`+
+    series.map(s=>`<span class="sec" style="font-size:11px;display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2.5px;background:${s.color};display:inline-block"></span>${esc(s.cls)} <span style="opacity:.6">${byClass[s.cls].count}</span></span>`).join('')+`</div>`;
+  const mbtn=(m,l)=>`<button type="button" class="ovmetric${st.metric===m?' on':''}" data-m="${m}">${l}</button>`;
+  const controls=`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px"><span class="sec" style="font-size:11px">metric</span><span class="clockseg">${mbtn('vol','range vol')}${mbtn('volume','volume')}${mbtn('funding','funding')}</span></div>`;
+  const title=`<div class="cp-sub" style="margin:22px 0 12px">◆ Asset-class overlays <span class="sec" style="font-weight:400">— pooled hour-of-day shapes per class (${st.metric==='funding'?'mean rate':'× each class avg'}); blue band = US cash session</span></div>`;
+  return title+controls+legend+`<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px">${overlayLineSvg(series, st.metric)}</div>`;
+}
+function attachOverlayControls(){ document.querySelectorAll('.ovmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.overlay.metric=b.dataset.m; drawSessions(); })); }
+
+// ---- day-of-week 7x24 heatmap ----
+const WD_NAMES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const WD_ORDER=[1,2,3,4,5,6,0];   // display Mon..Sun
+function dowResolve(dow, sel){
+  if(sel && sel.indexOf('class:')===0){ const c=sel.slice(6); const p=(dow.pooled.byClass||{})[c]; if(p) return { grid:p, label:c, count:p.count }; }
+  const all=dow.pooled.all||{}; return { grid:all, label:'All markets', count:all.count||0 };
+}
+function dowHeatSvg(grid, metric){
+  const cells = metric==='volume'?grid.volume:grid.vol;
+  const ns = grid.n||[];
+  if(!cells) return '<div class="msg">No grid yet.</div>';
+  const lx=38, cw=Math.max(18,Math.min(30,Math.floor((560-lx-14)/24))), ch=20, top=6, W=lx+cw*24+14, H=top+ch*7+22;
+  let cap=0; for(let d=0;d<7;d++)for(let h=0;h<24;h++){ const v=cells[d][h]; if(Number.isFinite(v)&&v>cap)cap=v; } if(!cap)cap=1;
+  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  // RTH block outline over Mon..Fri, cols 9.5-16
+  const rx=lx+9.5*cw, rw=(16-9.5)*cw;
+  s+=`<rect x="${rx.toFixed(1)}" y="${top}" width="${rw.toFixed(1)}" height="${(ch*5)}" fill="var(--blue)" opacity="0.06"/>`;
+  for(let row=0;row<7;row++){ const d=WD_ORDER[row]; const y=top+row*ch;
+    s+=`<text x="${lx-6}" y="${(y+ch/2+3).toFixed(1)}" text-anchor="end" style="font-family:var(--mono);font-size:10px;fill:${(d===0||d===6)?'var(--faint)':'var(--muted)'}">${WD_NAMES[d]}</text>`;
+    for(let h=0;h<24;h++){ const x=lx+h*cw; const v=cells[d][h];
+      s+=`<rect x="${x}" y="${y}" width="${cw-1}" height="${ch-1}" fill="var(--panel2)"/>`;
+      if(Number.isFinite(v)){ const op=Math.max(0.04,Math.min(1,v/cap)); s+=`<rect x="${x}" y="${y}" width="${cw-1}" height="${ch-1}" fill="var(--accent)" fill-opacity="${op.toFixed(3)}"><title>${WD_NAMES[d]} ${h}:00 ET · ${v.toFixed(2)}× avg${ns[d]?' · n='+(ns[d][h]||0):''}</title></rect>`; }
+    }
+  }
+  // hour axis
+  for(let h=0;h<=24;h+=3){ const hh=Math.min(h,23); const x=lx+hh*cw+cw/2; s+=`<text x="${x.toFixed(1)}" y="${(top+ch*7+13)}" text-anchor="middle" style="font-family:var(--mono);font-size:9px;fill:var(--faint)">${h}</text>`; }
+  return s+'</svg>';
+}
+function renderDow(dow){
+  const st=state.analytics.dow, r=dowResolve(dow, st.sel);
+  const classes=Object.keys(dow.pooled.byClass||{}).sort();
+  const opt=(v,l,sel)=>`<option value="${esc(v)}"${sel===v?' selected':''}>${esc(l)}</option>`;
+  let selHtml=`<select id="dowsel" class="clocksel">`+opt('all','All markets',st.sel)+classes.map(c=>opt('class:'+c,c,st.sel)).join('')+`</select>`;
+  const mbtn=(m,l)=>`<button type="button" class="dowmetric${st.metric===m?' on':''}" data-m="${m}">${l}</button>`;
+  const controls=`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px"><span class="sec" style="font-size:11px">group</span>${selHtml}`+
+    `<span class="clockseg">${mbtn('vol','range vol')}${mbtn('volume','volume')}</span>`+
+    `<span class="sec" style="font-size:11px;margin-left:auto">${esc(r.label)} · ${r.count} markets · <span style="opacity:.75">darker = more active vs its own avg</span></span></div>`;
+  const title=`<div class="cp-sub" style="margin:22px 0 12px">◆ Day-of-week × hour heatmap <span class="sec" style="font-weight:400">— the weekend-gap / Friday→Monday story; weekend rows empty for equities, alive for 24/7 crypto</span></div>`;
+  return title+controls+`<div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow-x:auto">${dowHeatSvg(r.grid, st.metric)}</div>`;
+}
+function attachDowControls(){
+  const sel=el('dowsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.dow.sel=sel.value; drawSessions(); });
+  document.querySelectorAll('.dowmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.dow.metric=b.dataset.m; drawSessions(); }));
+}
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
   const a=state.analytics.data, err=state.analytics.err;
@@ -972,6 +1162,16 @@ function drawSessions(){
   let flagship='';
   if(sd && !sd.pending){ flagship = renderSessionDecomp(sd); panels = panels.filter(p=>p[0]!=='Session decomposition'); }
   else if(sd && sd.pending){ panels[0]=['Session decomposition',`computing — needs ≥${sd.need} equities with ≥3d hourly spine (have ${sd.equityCount})`,'★★★★★']; }
+  const hc = a.sections && a.sections.hourClock;
+  let clocks='', overlay='';
+  if(hc && !hc.pending){ clocks = renderClocks(hc); panels = panels.filter(p=>p[0]!=='Hour-of-day activity clock' && p[0]!=='Funding clock');
+    if(hc.pooled && hc.pooled.byClass && Object.keys(hc.pooled.byClass).length){ overlay = renderClassOverlay(hc); panels = panels.filter(p=>p[0]!=='Asset-class overlays'); }
+  }
+  else if(hc && hc.pending){ const ci=panels.findIndex(p=>p[0]==='Hour-of-day activity clock'); if(ci>=0) panels[ci]=['Hour-of-day activity clock',`computing — needs ≥3 markets with ≥5d hourly spine (have ${hc.count})`,'★★★★☆']; }
+  const dow = a.sections && a.sections.dow;
+  let dowBlock='';
+  if(dow && !dow.pending){ dowBlock = renderDow(dow); panels = panels.filter(p=>p[0]!=='Day-of-week 7×24 heatmap'); }
+  else if(dow && dow.pending){ const di=panels.findIndex(p=>p[0]==='Day-of-week 7×24 heatmap'); if(di>=0) panels[di]=['Day-of-week 7×24 heatmap',`computing — needs ≥3 markets with ≥5d hourly spine (have ${dow.count})`,'★★★☆☆']; }
   const deck=`<div class="cp-sub" style="margin:0 0 10px">On deck</div>`+
     `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
     panels.map(p=>`<div style="display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel);flex-wrap:wrap">`+
@@ -981,7 +1181,9 @@ function drawSessions(){
       `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
       `</div>`).join('')+`</div>`;
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
-  host.innerHTML=head+cards+bar+flagship+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  host.innerHTML=head+cards+bar+flagship+clocks+overlay+dowBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
+  if(dow && !dow.pending) attachDowControls();
 }
 function showView(v){
   state.view=v;
