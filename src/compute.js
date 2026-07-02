@@ -68,8 +68,17 @@ function featuresFromHourly(c, now, HOUR, DAY) {
     .map(([, d]) => (d.hi - d.lo) / d.c * 100);
   // daily-close path (last ~31 days) so the 30d-trend sparkline needs no daily candles
   const px30 = dayEntries.map(([, d]) => d.c).filter((v) => v != null && isFinite(v)).slice(-31);
+  // Daily-return volatility from completed-day closes. Momentum uses this to risk-adjust its
+  // day-plus horizons rather than extrapolating hourly vol by sqrt(t): the sqrt(t) rule assumes
+  // iid returns, which fits poorly for perps on closed-hours underlyings (session structure,
+  // overnight gaps), so a directly measured daily vol is the more trustworthy yardstick over 1d+.
+  const dCloses = dayEntries.filter(([day, d]) => day < today && d.c > 0).map(([, d]) => d.c);
+  const dRets = [];
+  for (let i = 1; i < dCloses.length; i++) if (dCloses[i - 1] > 0) dRets.push(Math.log(dCloses[i] / dCloses[i - 1]));
+  const volD = dRets.length >= 5 ? stdev(dRets) : null;
   const feat = {
     volH: stdev(rets),
+    volD,
     r2,
     hi30: hi > -Infinity ? hi : null,
     lo30: lo < Infinity ? lo : null,
