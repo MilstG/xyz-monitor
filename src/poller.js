@@ -2,7 +2,7 @@
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, sleep } = require("./hyperliquid");
-const { featuresFromHourly, oiDeltaPct } = require("./compute");
+const { featuresFromHourly, oiDeltaPct, fundingAvg } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -74,10 +74,15 @@ function createPoller({ dex, store, log }) {
 
   function computeDoi(r) {
     const h = hist.get(r.coin), out = {};
-    for (const k in TF) {
-      const win = TF[k], tol = Math.max(15 * 60 * 1000, win * 0.25);
-      out[k] = oiDeltaPct(h, r.oiBase, win, tol);
-    }
+    for (const k in TF) out[k] = oiDeltaPct(h, r.oiBase, TF[k]); // tolerance is derived inside oiDeltaPct
+    return out;
+  }
+
+  // Time-weighted average funding per window, over the same interval as the ΔOI legs, so the
+  // regime's funding corroboration is measured on matching windows rather than a point-in-time rate.
+  function computeFundWin(r) {
+    const h = hist.get(r.coin), out = {};
+    for (const k in TF) out[k] = fundingAvg(h, TF[k]);
     return out;
   }
 
@@ -185,7 +190,7 @@ function createPoller({ dex, store, log }) {
       return {
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted,
         px: r.px, prevDay: r.prevDay, funding: r.funding, vol: r.vol, oi: r.oi, oiBase: r.oiBase,
-        oracle: r.oracle, d1: r.d1, ref: r.ref, feat: r.feat, doi: computeDoi(r),
+        oracle: r.oracle, d1: r.d1, ref: r.ref, feat: r.feat, doi: computeDoi(r), fundByWin: computeFundWin(r),
         sector: cl.sector, assetClass: cl.assetClass,
       };
     });
