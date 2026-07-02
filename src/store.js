@@ -13,6 +13,7 @@ function openStore(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, "oi.log");
   const featFile = path.join(dataDir, "features.json");
+  const regimeFile = path.join(dataDir, "regime.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
 
@@ -98,6 +99,19 @@ function openStore(dataDir) {
       try { if (fs.existsSync(featFile)) return JSON.parse(fs.readFileSync(featFile, "utf8")); }
       catch (_) {}
       return null;
+    },
+    // Rolling market-wide regime history ([[ts, corr], ...]) — small, rewritten whole on each sample.
+    loadRegime(since) {
+      try {
+        if (fs.existsSync(regimeFile)) {
+          const a = JSON.parse(fs.readFileSync(regimeFile, "utf8"));
+          if (Array.isArray(a)) return a.filter((x) => Array.isArray(x) && Number.isFinite(x[0]) && x[0] >= since);
+        }
+      } catch (_) {}
+      return [];
+    },
+    saveRegime(arr) {
+      try { fs.writeFileSync(regimeFile, JSON.stringify(arr)); } catch (_) {}
     },
     close() { flush(); },
   };

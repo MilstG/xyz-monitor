@@ -2,7 +2,7 @@
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, sleep } = require("./hyperliquid");
-const { featuresFromHourly, oiDeltaPct, fundingAvg } = require("./compute");
+const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -15,6 +15,11 @@ const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const DAILY_STALE = 6 * 3600 * 1000;  // refresh daily candles every 6 h
 const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new markets
 const FAIL_BACKOFF = 60 * 1000;       // after a failed candle fetch, wait >= this before retrying that coin
+const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
+const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
+const REGIME_SAMPLE_MS = 30 * 60 * 1000;  // append one correlation sample to history every 30 min
+const REGIME_RETENTION = 90 * DAY;    // keep ~90 days of samples to percentile against
+const REGIME_MIN_SAMPLES = 8;         // don't report a percentile until the baseline has this many
 
 function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Number.isFinite(v) ? v : null; }
 
@@ -25,6 +30,9 @@ function createPoller({ dex, store, log }) {
   let benchCoin = null;
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
+  const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
+  let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
+  log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
   const inflight = new Set();
 
   log(`Loaded persisted OI history for ${hist.size} market(s)`);
@@ -198,7 +206,38 @@ function createPoller({ dex, store, log }) {
   const _clsCache = new Map();
   function classifyCached(t) { let v = _clsCache.get(t); if (!v) { v = classify(t); _clsCache.set(t, v); } return v; }
 
+  // ---- market regime: mean pairwise correlation across the top markets, percentiled vs history ----
+  function computeCorrNow() {
+    const top = activeMarkets()
+      .filter((r) => !r.delisted && r.dailyRaw && r.dailyRaw.length >= 5)
+      .sort((a, b) => (b.vol || 0) - (a.vol || 0))
+      .slice(0, REGIME_TOPN);
+    if (top.length < 3) return { corr: null, n: top.length };
+    const { corr } = meanPairwiseCorr(top.map((r) => r.dailyRaw), REGIME_LOOKBACK);
+    return { corr, n: top.length };
+  }
+  function percentileOf(v) {
+    if (v == null) return null;
+    let below = 0, cnt = 0;
+    for (const s of regimeHist) { const c = s[1]; if (c == null || !isFinite(c)) continue; cnt++; if (c <= v) below++; }
+    return cnt >= REGIME_MIN_SAMPLES ? Math.round((100 * below) / cnt) : null;
+  }
+  function sampleRegime() {
+    const { corr, n } = computeCorrNow();
+    curCorr = corr; curCorrN = n;
+    const now = Date.now();
+    if (corr != null && now - lastRegimeSample >= REGIME_SAMPLE_MS) {
+      regimeHist.push([now, corr]);
+      const cut = now - REGIME_RETENTION;
+      while (regimeHist.length && regimeHist[0][0] < cut) regimeHist.shift();
+      lastRegimeSample = now;
+      store.saveRegime(regimeHist);
+    }
+    curCorrPct = percentileOf(corr);
+  }
+
   function buildSnapshot() {
+    sampleRegime();
     const markets = activeMarkets().map((r) => {
       const cl = classifyCached(r.ticker);
       return {
@@ -208,7 +247,10 @@ function createPoller({ dex, store, log }) {
         sector: cl.sector, assetClass: cl.assetClass,
       };
     });
-    snapshotCache = { ts: Date.now(), dataTs: lastPoll, dex, benchCoin, markets };
+    snapshotCache = {
+      ts: Date.now(), dataTs: lastPoll, dex, benchCoin, markets,
+      regime: { corr: curCorr, corrPct: curCorrPct, corrN: curCorrN, corrSamples: regimeHist.length },
+    };
   }
   function buildDaily() {
     const daily = {};

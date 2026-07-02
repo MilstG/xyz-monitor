@@ -144,4 +144,49 @@ function fundingAvg(hist, windowMs) {
   return simN ? simSum / simN : null;
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg };
+// Daily log-returns keyed by day-index, from a [[t, close], ...] or [{t, c}, ...] series.
+function dailyLogReturns(daily) {
+  const m = new Map(); let prev = null;
+  if (!daily) return m;
+  for (const k of daily) {
+    const t = Array.isArray(k) ? k[0] : k.t;
+    const c = parseFloat(Array.isArray(k) ? k[1] : k.c);
+    if (!Number.isFinite(c)) continue;
+    const day = Math.floor(t / 86400000);
+    if (prev != null && prev > 0) m.set(day, Math.log(c / prev));
+    prev = c;
+  }
+  return m;
+}
+function pearson(a, b) {
+  const n = a.length; if (n < 3) return null;
+  let sa = 0, sb = 0; for (let i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+  const ma = sa / n, mb = sb / n; let cov = 0, va = 0, vb = 0;
+  for (let i = 0; i < n; i++) { const da = a[i] - ma, db = b[i] - mb; cov += da * db; va += da * da; vb += db * db; }
+  if (va <= 0 || vb <= 0) return null;
+  return cov / Math.sqrt(va * vb);
+}
+// Mean pairwise daily-return correlation across a set of series over the trailing `Ldays`.
+// Same overlap rule as the client correlation tab (>= max(15, half the window)), so the strip's
+// number and the matrix agree. Returns { corr, pairs } — corr is null until enough pairs qualify.
+function meanPairwiseCorr(seriesList, Ldays) {
+  const cutoff = Math.floor(Date.now() / 86400000) - Ldays;
+  const minOv = Math.max(15, Math.floor(Ldays * 0.5));
+  const maps = seriesList.map((s) => {
+    const m = dailyLogReturns(s), f = new Map();
+    for (const [d, v] of m) if (d >= cutoff) f.set(d, v);
+    return f;
+  });
+  let sum = 0, n = 0;
+  for (let i = 0; i < maps.length; i++)
+    for (let j = i + 1; j < maps.length; j++) {
+      const A = maps[i], B = maps[j], small = A.size < B.size ? A : B, other = small === A ? B : A, xa = [], xb = [];
+      for (const [d, v] of small) { const w = other.get(d); if (w !== undefined) { xa.push(v); xb.push(w); } }
+      if (xa.length < minOv) continue;
+      const c = pearson(xa, xb);
+      if (c != null && Number.isFinite(c)) { sum += c; n++; }
+    }
+  return { corr: n ? sum / n : null, pairs: n };
+}
+
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr };
