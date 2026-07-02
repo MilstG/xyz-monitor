@@ -198,4 +198,161 @@ function meanPairwiseCorr(seriesList, Ldays) {
   return { corr: n ? sum / n : null, pairs: n };
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr };
+
+
+// =====================================================================================
+// Boundary-backtest engine — evaluate "hold between two calendar-defined timestamps, net of
+// funding" over the hourly price + funding spines. Anchor presets (overnight / weekend / cash)
+// sit on a general primitive: give it enter/exit timestamps and it tabulates the long-side hold.
+// =====================================================================================
+// Boundary-backtest engine (pure, no I/O). Evaluates "hold between two calendar-defined timestamps,
+// net of funding" over the hourly price + funding spines. The named anchor generators (overnight /
+// weekend / cash) are just presets over a general primitive: give it enter/exit timestamps and it
+// tabulates the hold. Long-perspective P&L: buy at `enter`, sell at `exit`.
+//
+// Funding sign: Hyperliquid funding rate > 0 means longs pay shorts, so a long's net return over a
+// hold is grossReturn - sum(hourlyFundingRate) across the held hours.
+
+const HOUR = 3600 * 1000, DAY = 86400 * 1000;
+const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+// ---- ET (America/New_York) wall-clock, DST-correct via Intl (no hardcoded DST rules) ----
+const _etFmt = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short",
+});
+function etParts(ms) {
+  const p = _etFmt.formatToParts(new Date(ms));
+  const g = (t) => p.find((x) => x.type === t).value;
+  let h = +g("hour"); if (h === 24) h = 0;
+  return { y: +g("year"), mo: +g("month"), d: +g("day"), h, mi: +g("minute"), wd: WD[g("weekday")] };
+}
+// Offset (hours) of ET from UTC at instant ms: -4 during EDT, -5 during EST.
+function etOffsetAt(ms) {
+  const et = etParts(ms);
+  const asUtc = Date.UTC(et.y, et.mo - 1, et.d, et.h, et.mi);
+  return Math.round((asUtc - ms) / HOUR);
+}
+// UTC ms whose ET wall-clock is (y,mo,d,h,mi). Guess EST, then correct by the real offset in effect.
+function etWallToUtc(y, mo, d, h, mi) {
+  const base = Date.UTC(y, mo - 1, d, h, mi);
+  const off = etOffsetAt(base + 5 * HOUR);   // probe near the EST guess
+  return base - off * HOUR;
+}
+
+// Enumerate ET calendar days in [startMs, endMs] (12h steps + dedupe so DST never skips a day).
+function etDays(startMs, endMs) {
+  const out = [], seen = new Set();
+  for (let ms = startMs; ms <= endMs + DAY; ms += 12 * HOUR) {
+    const et = etParts(ms), key = et.y + "-" + et.mo + "-" + et.d;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(et);
+  }
+  return out;
+}
+function nextEtDate(et, days) {
+  const noon = etWallToUtc(et.y, et.mo, et.d, 12, 0) + days * DAY;
+  return etParts(noon);
+}
+
+// ---- anchor generators: [{enter, exit, tag}] ----
+// Cash session: 09:30 -> 16:00 ET, weekdays.
+function cashAnchors(startMs, endMs) {
+  const out = [];
+  for (const et of etDays(startMs, endMs)) {
+    if (et.wd < 1 || et.wd > 5) continue;
+    const enter = etWallToUtc(et.y, et.mo, et.d, 9, 30), exit = etWallToUtc(et.y, et.mo, et.d, 16, 0);
+    if (enter >= startMs && exit <= endMs) out.push({ enter, exit, tag: "cash" });
+  }
+  return out;
+}
+// Overnight: Mon-Thu 16:00 ET -> next day 09:30 ET (single-night holds; Fri handled by weekend).
+function overnightAnchors(startMs, endMs) {
+  const out = [];
+  for (const et of etDays(startMs, endMs)) {
+    if (et.wd < 1 || et.wd > 4) continue;            // Mon..Thu
+    const nx = nextEtDate(et, 1);
+    const enter = etWallToUtc(et.y, et.mo, et.d, 16, 0), exit = etWallToUtc(nx.y, nx.mo, nx.d, 9, 30);
+    if (enter >= startMs && exit <= endMs) out.push({ enter, exit, tag: "overnight" });
+  }
+  return out;
+}
+// Weekend: Fri 16:00 ET -> Mon 09:30 ET (the longest unanchored stretch).
+function weekendAnchors(startMs, endMs) {
+  const out = [];
+  for (const et of etDays(startMs, endMs)) {
+    if (et.wd !== 5) continue;                        // Fri
+    const mon = nextEtDate(et, 3);
+    const enter = etWallToUtc(et.y, et.mo, et.d, 16, 0), exit = etWallToUtc(mon.y, mon.mo, mon.d, 9, 30);
+    if (enter >= startMs && exit <= endMs) out.push({ enter, exit, tag: "weekend" });
+  }
+  return out;
+}
+
+// ---- hold math over the hourly spines ----
+// Price "as of" t: close of the latest candle at or before t, within tol (hourly resolution snaps to
+// the hour, so a 09:30 boundary uses the ~09:00 candle — an acknowledged approximation).
+function priceAsOf(prices, t, tol) {
+  tol = tol || 3 * HOUR;
+  let lo = 0, hi = prices.length - 1, idx = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (prices[m][0] <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+  if (idx < 0) return null;
+  const row = prices[idx];
+  if (t - row[0] > tol) return null;
+  const c = row[4];
+  return Number.isFinite(c) && c > 0 ? c : null;
+}
+// Sum of hourly funding rates over [enter, exit) — the fraction a 1x long pays (or receives, if <0).
+function fundingOver(funding, enter, exit) {
+  let s = 0, any = false;
+  for (const [t, r] of funding) { if (t >= enter && t < exit && Number.isFinite(r)) { s += r; any = true; } }
+  return { sum: s, any };
+}
+function holdReturn(prices, funding, enter, exit, tol) {
+  const pe = priceAsOf(prices, enter, tol), px = priceAsOf(prices, exit, tol);
+  if (pe == null || px == null) return { ok: false };
+  const gross = px / pe - 1;
+  const f = fundingOver(funding || [], enter, exit);
+  return { ok: true, enter, exit, hours: Math.round((exit - enter) / HOUR), pxEnter: pe, pxExit: px, gross, funding: f.sum, fundingKnown: f.any, net: gross - f.sum };
+}
+function runHolds(prices, funding, anchors, tol) {
+  const out = [];
+  for (const a of anchors) { const h = holdReturn(prices, funding, a.enter, a.exit, tol); if (h.ok) { h.tag = a.tag; out.push(h); } }
+  return out;
+}
+
+// ---- aggregation (fat-tailed: report median + IQR + distribution, not just the mean) ----
+function _stats(arr) {
+  const a = arr.filter(Number.isFinite).sort((x, y) => x - y), n = a.length;
+  if (!n) return { n: 0 };
+  const q = (p) => { const i = (n - 1) * p, lo = Math.floor(i), hi = Math.ceil(i); return a[lo] + (a[hi] - a[lo]) * (i - lo); };
+  const mean = a.reduce((s, x) => s + x, 0) / n;
+  let v = 0; for (const x of a) v += (x - mean) * (x - mean);
+  return { n, mean, median: q(0.5), p25: q(0.25), p75: q(0.75), min: a[0], max: a[n - 1], stdev: n > 1 ? Math.sqrt(v / (n - 1)) : 0 };
+}
+function summarize(holds) {
+  const net = holds.map((h) => h.net), gross = holds.map((h) => h.gross), fund = holds.map((h) => h.funding);
+  const sn = _stats(net);
+  if (!sn.n) return { n: 0 };
+  let eqNet = 1, eqGross = 1;
+  for (const h of holds) { eqNet *= 1 + h.net; eqGross *= 1 + h.gross; }
+  const wins = net.filter((x) => x > 0).length;
+  return {
+    n: sn.n,
+    net: sn, gross: _stats(gross), funding: _stats(fund),
+    winRate: wins / sn.n,
+    equityNet: eqNet - 1, equityGross: eqGross - 1,   // compounded total return over all holds
+  };
+}
+// Pool holds across many tickers (the statistically sound "composite" — averages out single-name noise).
+function poolSummary(byTicker) {
+  const all = [];
+  for (const k in byTicker) for (const h of byTicker[k]) all.push(h);
+  return summarize(all);
+}
+
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr,
+  // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
+  etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
+  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary };
