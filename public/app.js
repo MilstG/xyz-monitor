@@ -91,11 +91,64 @@ function recomputeChanges(r){ const cur=r.px, ref=r.ref; if(cur==null||!ref)retu
   r.d7=ref.p7d?(cur-ref.p7d)/ref.p7d*100:null;  r.d30=ref.p30d?(cur-ref.p30d)/ref.p30d*100:null; }
 function setPrice(r,px){ if(px==null)return; if(r.px!=null&&px!==r.px) r.flash=px>r.px?'up':'down'; r.px=px; }
 function activeRows(){ const a=[]; for(const r of state.rows.values()) if(!r.delisted)a.push(r); return a; }
-function regimeOf(p,o){ if(p==null||o==null||!isFinite(p)||!isFinite(o)) return null;
-  if(p>=0&&o>=0) return {l:'longs+',c:'rg-long'};
-  if(p>=0&&o<0)  return {l:'squeeze',c:'rg-sqz'};
-  if(p<0&&o>=0)  return {l:'shorts+',c:'rg-short'};
-  return {l:'unwind',c:'rg-unw'}; }
+// ===== ΔOI regime =====
+// Category (price×OI signs, with a noise dead-zone) + conviction (magnitude, OI-led) +
+// funding corroboration (does the crowded/paying side agree with the story?).
+// side: +1 = long-side story (expects positive funding: longs pay), -1 = short-side story
+// (expects negative funding: shorts pay), 0 = flat.
+const RG_COLOR={'rg-long':'var(--up)','rg-sqz':'var(--accent)','rg-short':'var(--down)','rg-unw':'var(--blue)','rg-flat':'var(--faint)'};
+const RG_STORY={
+  'longs+':'new longs opening as price rises — new money confirming the up-move',
+  'squeeze':'price up while OI falls — shorts covering (a squeeze), not fresh demand',
+  'shorts+':'new shorts opening as price falls — new money pressing lower',
+  'unwind':'price down while OI falls — longs closing / deleveraging, not fresh shorting',
+  'flat':'price and OI both within noise this window — no meaningful positioning signal' };
+function regimeOf(p,o,pEps,oEps){ if(p==null||o==null||!isFinite(p)||!isFinite(o)) return null;
+  pEps=pEps||0; oEps=oEps||0;
+  if(Math.abs(p)<=pEps && Math.abs(o)<=oEps) return {l:'flat',c:'rg-flat',side:0};
+  const pu=p>=0, ou=o>=0;
+  if(pu&&ou)  return {l:'longs+', c:'rg-long', side:+1};
+  if(pu&&!ou) return {l:'squeeze',c:'rg-sqz',  side:-1};
+  if(!pu&&ou) return {l:'shorts+',c:'rg-short',side:-1};
+  return {l:'unwind',c:'rg-unw', side:+1}; }
+// Full regime for one window: category + conviction (0..1) + funding note.
+function regimeDetail(price,oi,funding,volH,hours){
+  if(price==null||oi==null||!isFinite(price)||!isFinite(oi)) return null;
+  const expMove=(volH!=null&&volH>0)?volH*100*Math.sqrt(hours):null;   // ~1σ price move over the window (%)
+  const pEps=expMove!=null?Math.max(0.08,0.18*expMove):0.12;           // price dead-zone, vol-scaled
+  const oEps=Math.max(0.4,0.3*Math.sqrt(hours/24));                    // OI dead-zone, window-scaled
+  const cat=regimeOf(price,oi,pEps,oEps); if(!cat) return null;
+  const sOI=Math.tanh(Math.abs(oi)/8);                                 // OI-led strength (matches momentum scale)
+  const sPx=expMove!=null?Math.tanh((Math.abs(price)/expMove)/1.4):Math.tanh(Math.abs(price)/6);
+  const base=Math.pow(sOI,0.6)*Math.pow(Math.max(sPx,1e-6),0.4);       // both legs required
+  let fAPR=null,align=0,fN=0; const hasF=(funding!=null&&isFinite(funding));
+  if(hasF){ fAPR=funding*24*365*100; fN=Math.tanh(fAPR/25); align=fN*cat.side; }  // +funding = longs pay
+  const mult=hasF?clamp(1+0.30*align,0.7,1.3):1;                       // funding corroboration, bounded ±30%
+  let conv=clamp(base*mult,0,1); if(cat.side===0) conv=0;
+  const tier=conv>=0.6?'high':(conv>=0.3?'moderate':'low');
+  let fnote='';
+  if(cat.side!==0){
+    if(!hasF) fnote='funding n/a';
+    else if(Math.abs(fN)<0.15) fnote=`funding ${fAPR>=0?'+':''}${fAPR.toFixed(0)}% ~flat (neutral)`;
+    else if(align>0) fnote=`funding ${fAPR>=0?'+':''}${fAPR.toFixed(0)}% corroborates the ${cat.side>0?'long':'short'}-side read`;
+    else fnote=`funding ${fAPR>=0?'+':''}${fAPR.toFixed(0)}% conflicts — crowd is on the opposite side`;
+  }
+  return {l:cat.l,c:cat.c,side:cat.side,conv,tier,fAPR,fnote}; }
+function regimeMeter(rg){ const n=rg.tier==='high'?3:(rg.tier==='moderate'?2:1), col=RG_COLOR[rg.c]||'var(--muted)';
+  let m=`<span style="display:inline-flex;gap:1.5px;margin-left:5px;vertical-align:middle" title="conviction ${rg.tier} — ${Math.round(rg.conv*100)}/100">`;
+  for(let i=0;i<3;i++) m+=`<i style="width:3px;height:9px;border-radius:1px;display:inline-block;background:${i<n?col:'var(--grid)'}"></i>`;
+  return m+'</span>'; }
+function pctTxt(x){ return (x!=null&&isFinite(x))?`${x>=0?'+':''}${x.toFixed(2)}%`:'n/a'; }
+function regimeTip(rg,pPct,oPct){
+  let t=`${rg.l.toUpperCase()} — ${RG_STORY[rg.l]||''}. Price ${pctTxt(pPct)} · OI ${pctTxt(oPct)} over ${state.tf}.`;
+  if(rg.side!==0){ t+=` Conviction ${Math.round(rg.conv*100)}/100 (${rg.tier}).`; if(rg.fnote) t+=' '+rg.fnote+'.'; }
+  return esc(t); }
+function regimeReadout(r){ const rg=r.regime; if(!rg) return '';
+  const pPct=r[TF_MAP[state.tf]];
+  if(rg.side===0) return esc(`FLAT — ${RG_STORY.flat}. Price ${pctTxt(pPct)} · OI ${pctTxt(r.doi)} over ${state.tf}.`);
+  const head=`<span class="rg ${rg.c}">${rg.l}</span>${regimeMeter(rg)} <span class="sec">conviction ${Math.round(rg.conv*100)}/100 (${rg.tier})</span>`;
+  const body=esc(`${RG_STORY[rg.l]}. Price ${pctTxt(pPct)} · OI ${pctTxt(r.doi)} over ${state.tf}.${rg.fnote?' '+rg.fnote+'.':''}`);
+  return `${head}<br><span style="opacity:.8">${body}</span>`; }
 function detectBenchmark(){
   for(const a of SP_ALIASES){ for(const r of state.rows.values()) if(!r.delisted&&r.ticker.toUpperCase()===a) return r.coin; }
   for(const r of state.rows.values()){ if(!r.delisted&&/(?:^|[^A-Z])(SPX|SP500|S&P)/i.test(r.ticker)) return r.coin; }
@@ -128,6 +181,7 @@ function applySnapshot(s){
     if(m.ref) r.ref=m.ref;
     if(m.feat) r.feat=m.feat;
     if(m.doi) r.doiByWin=m.doi;
+    if(m.fundByWin) r.fundByWin=m.fundByWin;
     if(m.sector) r.sector=m.sector;
     if(m.assetClass) r.assetClass=m.assetClass;
     r.d1=(r.px!=null&&r.prevDay)?(r.px-r.prevDay)/r.prevDay*100:r.d1;
@@ -180,7 +234,7 @@ function computeDerived(){
   const bench=state.benchCoin?state.rows.get(state.benchCoin):null, benchRet=bench?bench[tfKey]:null;
   for(const r of state.rows.values()){ if(r.delisted)continue;
     r.doi=r.doiByWin?(r.doiByWin[tfKey]??null):null;
-    r.regime=regimeOf(r[tfKey], r.doi);
+    r.regime=regimeDetail(r[tfKey], r.doi, (r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding), (r.feat&&r.feat.volH), (TF_MS[state.tf]||DAY)/HOUR);
     r.mom=computeMomentum(r);
     const prem=(r.px!=null&&r.oracle)?Math.abs((r.px-r.oracle)/r.oracle):0;
     const vs=(r.vol!=null&&r.feat&&r.feat.volBase>0)?r.vol/r.feat.volBase:null;
@@ -279,7 +333,15 @@ function rsCell(r){ if(!state.benchCoin)return '<span class="na" title="no S&amp
 function oiCell(r){ if(r.doi==null)return '<span class="na" title="collecting OI history (server-side, accrues over time)">—</span>';
   const oc=r.doi>0?'pos':(r.doi<0?'neg':'sec'), sign=r.doi>0?'+':'';
   let s=`<span class="${oc}">${sign}${r.doi.toFixed(2)}%</span>`;
-  if(r.regime) s+=`<span class="rg ${r.regime.c}" title="price ${r[TF_MAP[state.tf]]>=0?'up':'down'} + OI ${r.doi>=0?'up':'down'} over ${state.tf}">${r.regime.l}</span>`;
+  const rg=r.regime;
+  if(rg){ const pPct=r[TF_MAP[state.tf]];
+    if(rg.side===0){
+      s+=`<span class="rg" style="color:var(--faint);margin-left:5px" title="${regimeTip(rg,pPct,r.doi)}">${rg.l}</span>`;
+    } else {
+      const op=(0.5+0.5*clamp(rg.conv,0,1)).toFixed(2);
+      s+=`<span class="rg ${rg.c}" style="opacity:${op}" title="${regimeTip(rg,pPct,r.doi)}">${rg.l}</span>${regimeMeter(rg)}`;
+    }
+  }
   return s; }
 function shade(v, cap){ if(v==null||!isFinite(v)) return ''; const t=Math.min(Math.abs(v)/cap,1)*0.20; const rgb=v>=0?'70,185,126':'229,96,77'; return ` style="background:rgba(${rgb},${t.toFixed(3)})"`; }
 function miniSpark(vals, color){ const w=62,h=18,pad=2; if(vals.length<2) return ''; const mn=Math.min(...vals),mx=Math.max(...vals),rng=(mx-mn)||1;
@@ -605,6 +667,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
       ${st('ΔOI ('+state.tf+')', r.doi!=null?`<span class="${r.doi>=0?'pos':'neg'}">${r.doi>=0?'+':''}${r.doi.toFixed(2)}%</span>`:'<span class="na">—</span>')}
       ${st('24h Vol',fmtUsd(r.vol))} ${st('Open Interest',fmtUsd(r.oi))}
     </div>
+    ${r.regime?`<div class="sec" style="font-size:11.5px;margin:2px 0 12px;line-height:1.55">${regimeReadout(r)}</div>`:''}
     <div class="dsec">Top co-movers (90d)</div>${pos.length?pos.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">daily history still loading…</div>'}
     <div class="dsec">Top hedges — inverse (90d)</div>${neg.length?neg.map(x=>li(x[0],x[1])).join(''):'<div class="sec" style="font-size:12px">no negative correlations</div>'}`;
   el('drawer').classList.add('show'); el('drawerbg').classList.add('show'); el('drawer').setAttribute('aria-hidden','false');
