@@ -1609,9 +1609,15 @@ function renderTreemap(){
     badge.innerHTML='<b>\u26a0 Unclassified ('+names.length+')</b> '+shown+' \u2014 add to src/sectors.js';
   }
 
+  // The unclassified badge is a maintainer aid ("add to src/sectors.js"), so only show it
+  // locally or when ?debug is present — friends visiting the live site shouldn't see it.
+  var UC_DEBUG = (function(){ try {
+    return location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+      || /[?&]debug\b/.test(location.search);
+  } catch(_){ return false; } })();
+
   ready(function(){
     fixCorrLookback();
-    updateBadge();
-    setInterval(updateBadge, 4000);   // re-checks as snapshots refresh (~15s server-side)
+    if(UC_DEBUG){ updateBadge(); setInterval(updateBadge, 4000); }   // re-checks as snapshots refresh (~15s server-side)
   });
 })();
