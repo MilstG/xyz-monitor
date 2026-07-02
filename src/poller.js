@@ -22,6 +22,7 @@ const DAILY_STALE = 6 * 3600 * 1000;  // refresh daily candles every 6 h
 const UNIVERSE_MS = 30 * 1000;        // poll price/funding/vol/OI + detect new markets
 const FAIL_BACKOFF = 60 * 1000;       // after a failed candle fetch, wait >= this before retrying that coin
 const HOURLY_PASS_THRESHOLD = 0.9;    // start daily backfill once this fraction of markets have hourly features
+const ANALYTICS_MS = 3 * 60 * 1000;   // recompute the session / time-of-day analytics payload every 3 min
                                       // (so a few permanently-unfetchable markets can't block all daily data)
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
@@ -38,6 +39,7 @@ function createPoller({ dex, store, log }) {
   let benchCoin = null;
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
+  let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
@@ -374,6 +376,42 @@ function createPoller({ dex, store, log }) {
     dailyCache = { ts: Date.now(), dataTs: dailyVer, daily };
   }
 
+  // ---- session / time-of-day analytics (served at /api/analytics) ----
+  // The hourly-price and funding spines live only in poller memory (60d x ~100 markets), so the math
+  // runs here on a slow interval and the browser is handed one compact, pre-aggregated payload rather
+  // than raw candles. Slice 1 establishes the data path + coverage/readiness; the seven studies
+  // (session decomposition, hour/funding clocks, day-of-week grid, clustering, seasonality) populate
+  // `sections` in later slices.
+  function buildAnalytics() {
+    const READY_HOURS = 20 * 24;   // "ready" = >= ~20 trading days of hourly candles for the session studies
+    const universe = activeMarkets()
+      .filter((r) => !r.delisted)
+      .map((r) => {
+        const cl = classifyCached(r.ticker);
+        return {
+          coin: r.coin, ticker: r.ticker, sector: cl.sector, assetClass: cl.assetClass,
+          hours: Array.isArray(r.hourlyRaw) ? r.hourlyRaw.length : 0,
+          funding: r.fundH ? r.fundH.size : 0,
+        };
+      });
+    const hc = hourlyCoverage(), fc = fundingCoverage();
+    const equityMarkets = universe.filter((u) => u.assetClass === "Equity").length;
+    const ready = universe.filter((u) => u.hours >= READY_HOURS).length;
+    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}`;
+    if (sig !== analyticsSig) { analyticsSig = sig; analyticsVer = Date.now(); }   // content changed -> new ETag
+    analyticsCache = {
+      ts: Date.now(),
+      dataTs: analyticsVer,
+      window: { hourlyDays: HOURLY_HISTORY_DAYS, fundingDays: FUNDING_HISTORY_DAYS },
+      coverage: {
+        hourly: hc, funding: fc,
+        markets: universe.length, equityMarkets, ready, readyHours: READY_HOURS,
+      },
+      universe,
+      sections: {},   // filled by later slices
+    };
+  }
+
   // ---- warm-cache persistence: survive restarts so redeploys serve instantly ----
   function hydrateFeatures() {
     const data = store.loadFeatures();
@@ -423,13 +461,14 @@ function createPoller({ dex, store, log }) {
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     await pollUniverse();
     seedFundingFromOI();
-    buildSnapshot(); buildDaily();
+    buildSnapshot(); buildDaily(); buildAnalytics();
     setInterval(pollUniverse, UNIVERSE_MS);
     hourlyWorker(); hourlyWorker();
     dailyWorker(); dailyWorker();
     fundingWorker();
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
+    setInterval(buildAnalytics, ANALYTICS_MS);
     setInterval(() => store.flush(), 30 * 1000);
     setInterval(persistFeatures, 120 * 1000);
     setInterval(maintenance, 24 * 3600 * 1000);
@@ -440,6 +479,7 @@ function createPoller({ dex, store, log }) {
     start,
     getSnapshot: () => snapshotCache,
     getDaily: () => dailyCache,
+    getAnalytics: () => analyticsCache,
     getSeries,
     getHourly,
     getFunding,
