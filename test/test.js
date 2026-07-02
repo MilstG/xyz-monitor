@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { classify } = require("../src/sectors");
-const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct } = require("../src/compute");
+const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr } = require("../src/compute");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 
@@ -84,4 +84,21 @@ test("oiDeltaPct: percent change vs a past sample", () => {
   const d = oiDeltaPct(hist, 120, HOUR, 30 * 60 * 1000); // vs ~1h ago (110) -> +9.09%
   assert.ok(d != null && Math.abs(d - 9.09) < 0.1);
   assert.equal(oiDeltaPct(null, 120, HOUR, 1000), null);
+});
+
+test("pearson: perfect positive, perfect negative, flat", () => {
+  assert.ok(Math.abs(pearson([1, 2, 3, 4], [2, 4, 6, 8]) - 1) < 1e-9);
+  assert.ok(Math.abs(pearson([1, 2, 3, 4], [8, 6, 4, 2]) + 1) < 1e-9);
+  assert.equal(pearson([1, 1, 1, 1], [1, 2, 3, 4]), null); // zero variance -> null
+  assert.equal(pearson([1, 2], [1, 2]), null);             // too few points
+});
+
+test("meanPairwiseCorr: identical series -> ~1, needs overlap", () => {
+  const now = Date.now(), DAY = 86400000, mk = (f) => { const a = []; for (let i = 60; i >= 0; i--) a.push([now - i * DAY, f(i)]); return a; };
+  const up = mk((i) => 100 + (60 - i) + Math.sin(i));       // three series that move together
+  const s1 = up, s2 = mk((i) => 100 + (60 - i) + Math.sin(i) + 0.01), s3 = mk((i) => 100 + (60 - i) + Math.sin(i) - 0.01);
+  const { corr, pairs } = meanPairwiseCorr([s1, s2, s3], 30);
+  assert.ok(pairs === 3 && corr > 0.9);
+  // a single series can form no pairs
+  assert.equal(meanPairwiseCorr([s1], 30).corr, null);
 });
