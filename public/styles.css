@@ -51,7 +51,10 @@ header{display:flex;flex-wrap:wrap;align-items:flex-end;gap:18px 28px;
 .benchnote b{color:var(--muted);font-weight:500}
 .countdown{font-family:var(--mono);font-size:13px;color:var(--muted)}
 .countdown b{color:var(--accent);font-weight:600}
-.frow{margin-top:-2px}
+.statusline{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:4px 12px;
+  margin:-6px 0 16px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+.statusline b{color:var(--text);font-weight:500}
+.statusline .st-sep{color:var(--faint)}
 .flbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted)}
 .fnum{width:78px;background:var(--panel);border:1px solid var(--border);color:var(--text);
   font-family:var(--mono);font-size:12.5px;padding:7px 9px;border-radius:6px;outline:none;text-align:right}
@@ -134,6 +137,17 @@ footer code{font-family:var(--mono);color:var(--muted)}
 .wrap thead th.dragging{opacity:.45}
 .wrap thead th.drop-before{box-shadow:inset 3px 0 0 var(--accent)}
 .wrap thead th.drop-after{box-shadow:inset -3px 0 0 var(--accent)}
+.filtermenu{position:relative}
+.filt-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block;margin-left:1px}
+.filterpop{position:absolute;top:calc(100% + 6px);right:0;z-index:35;background:var(--panel2);border:1px solid var(--border);
+  border-radius:9px;padding:12px 14px;min-width:236px;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.filterpop .cphead{font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin:0 2px 10px}
+.filterpop .fpg{display:flex;align-items:center;gap:7px;margin-bottom:9px}
+.filterpop .fpg .flbl{flex:1 1 auto}
+.filterpop .fpg-act{justify-content:flex-end;gap:8px;margin-top:2px;margin-bottom:0}
+.filterpop .fpg-act .btn{padding:7px 12px}
+.filterpop .fpfoot{color:var(--muted);font-size:11px;margin-top:9px;min-height:13px;text-align:right}
+@media(max-width:480px){ .filterpop{right:auto;left:0} }
 .colmenu{position:relative}
 .colpop{position:absolute;top:calc(100% + 6px);right:0;z-index:30;background:var(--panel2);border:1px solid var(--border);
   border-radius:9px;padding:10px;min-width:200px;max-height:60vh;overflow:auto;box-shadow:0 12px 32px rgba(0,0,0,.5)}

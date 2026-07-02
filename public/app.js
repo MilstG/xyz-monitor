@@ -1698,7 +1698,7 @@ el('filter').addEventListener('input', e=>{ state.filter=e.target.value; render(
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
   if(star){ e.stopPropagation(); toggleWatch(star.dataset.star); return; }
   const tr=e.target.closest('tr[data-coin]'); if(tr) openDetail(tr.dataset.coin); });
-el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); render(); savePrefs(); });
+el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
 el('drawerbg').addEventListener('click', closeDetail);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && state.detail) closeDetail(); });
 el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('alertpop');
@@ -1709,12 +1709,22 @@ document.addEventListener('click',e=>{ const pop=el('alertpop');
 function applyNumFilters(){
   for(const id of ['volMin','volMax','oiMin','oiMax']){ const inp=el(id), v=parseAmount(inp.value);
     if(Number.isNaN(v)) inp.classList.add('bad'); else { inp.classList.remove('bad'); state.filters[id]=v; } }
-  render(); savePrefs();
+  updateFilterChip(); render(); savePrefs();
 }
 ['volMin','volMax','oiMin','oiMax'].forEach(id=>el(id).addEventListener('input', applyNumFilters));
 applyNumFilters();
 el('clearFilters').addEventListener('click', ()=>{ ['volMin','volMax','oiMin','oiMax'].forEach(id=>{ el(id).value=''; el(id).classList.remove('bad'); });
-  state.filters={volMin:null,volMax:null,oiMin:null,oiMax:null}; render(); savePrefs(); });
+  state.filters={volMin:null,volMax:null,oiMin:null,oiMax:null}; updateFilterChip(); render(); savePrefs(); });
+function updateFilterChip(){
+  const f=state.filters, on = f.volMin!=null||f.volMax!=null||f.oiMin!=null||f.oiMax!=null||!!state.watchOnly;
+  const dot=el('filtDot'); if(dot) dot.hidden=!on;
+  const b=el('filtersBtn'); if(b) b.classList.toggle('on', on);
+}
+el('filtersBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('filterpop');
+  if(pop.hidden){ pop.hidden=false; el('filtersBtn').setAttribute('aria-expanded','true'); const m=el('volMin'); if(m) m.focus(); }
+  else { pop.hidden=true; el('filtersBtn').setAttribute('aria-expanded','false'); } });
+document.addEventListener('click',e=>{ const pop=el('filterpop');
+  if(pop && !pop.hidden && !pop.contains(e.target) && !el('filtersBtn').contains(e.target)){ pop.hidden=true; el('filtersBtn').setAttribute('aria-expanded','false'); } });
 function buildColMenu(){ const pop=el('colpop'); let h='<div class="cphead">Show columns · drag headers to reorder</div>';
   for(const key of state.colOrder){ const c=COL_BY_KEY[key]; if(!c) continue;
     const dis=c.hideable===false, checked=!state.colHidden.has(key);
