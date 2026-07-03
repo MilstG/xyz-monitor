@@ -24,6 +24,8 @@ const COLS=[
   {key:'d1', label:'1d', type:'num', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
   {key:'d7', label:'7d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d7,12)}>${pctInner(r.d7)}</td>`},
   {key:'d30', label:'30d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d30,25)}>${pctInner(r.d30)}</td>`},
+  {key:'gap', label:'Gap', type:'num', tip:'Last close\u2192open gap \u2014 how much the perp moved from the most recent cash-session close to the next open (overnight 16:00\u219209:30 ET, or Fri\u2192Mon over a weekend). One move, always the latest, regardless of the timeframe selector. Hover for the cumulative off-hours drift over ~30d. Measured on US session hours, so it reads cleanest for US-linked names.',
+    td:r=>gapCell(r)},
   {key:'trend', label:'30d trend', type:'num', tip:'30-day price path (sparkline). Sorts by 30-day % change.', td:r=>trendCell(r)},
   {key:'rs', label:'vs S&P', type:'num', tip:'Excess return vs the S&P 500 perp over the window (this market % − S&P %).',
     td:r=>`<td${shade(r.rs,8)}>${rsCell(r)}</td>`},
@@ -41,7 +43,7 @@ const COLS=[
 ];
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, OI.
-const DEFAULT_ORDER=['ticker','px','funding','h1','h4','d1','d7','d30','trend','rs','mom','dd','vol','adr','beta','vol30','doi','oi'];
+const DEFAULT_ORDER=['ticker','px','funding','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','oi'];
 const DEFAULT_HIDDEN=['beta','vol30','doi','oi'];
 const LAYOUT_V=2; // bump to force a one-time reset of saved layouts to the new default
 
@@ -50,7 +52,7 @@ const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:''
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
-    direction:'high', structure:'ls', weighting:'eq', reqSign:false },
+    direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
   watch:new Set(), watchOnly:false, detail:null,
   analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
@@ -200,10 +202,18 @@ function applySnapshot(s){
   updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
 }
 function applyDaily(d){ if(!d||!d.daily) return;
+  state.offHours = d.offHours || {closed:false};                    // current cash-session state (global): whether closed now and the window bounds
   for(const coin in d.daily){ const r=state.rows.get(coin); if(!r) continue;
     const arr=d.daily[coin];
     r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1]})):r.daily;
+    r.closePx=(d.liveClose && d.liveClose[coin]>0)?d.liveClose[coin]:null;   // price at the last close, for the live in-progress gap
     if(d.funding && Array.isArray(d.funding[coin])){ r.dailyFund=d.funding[coin].map(p=>({t:p[0], f:p[1]})); r._dfund=null; }
+    if(d.overnight && Array.isArray(d.overnight[coin])){ r.overnight=d.overnight[coin].map(p=>({t:p[0], g:p[1], f:p[2]})); r._dov=null;
+      const cut=Date.now()-30*DAY; let eq=1, n=0;                    // 30d cumulative off-hours drift (tooltip)
+      for(const h of r.overnight){ if(h.t>=cut && isFinite(h.g)){ eq*=(1+h.g); n++; } }
+      r.gap30 = n? (eq-1)*100 : undefined;
+      const last=r.overnight[r.overnight.length-1]; r.gapDone = last&&isFinite(last.g)? last.g*100 : undefined;   // last completed close->open gap
+    }
     r._dret=null; r._wrL=null; }
   scheduleRender();
   if(!el('view-corr').hidden) renderCorr();
@@ -262,6 +272,7 @@ function computeDerived(){
     const adrN=state.tf==='30d'?30:7;
     r.adr=(r.feat&&r.feat.dr&&r.feat.dr.length)?(()=>{ const s=r.feat.dr.slice(-adrN); return s.reduce((p,q)=>p+q,0)/s.length; })():undefined;
     r.dd=(r.px!=null&&r.feat&&r.feat.hi30>0)?(r.px-r.feat.hi30)/r.feat.hi30*100:undefined;
+    r.gap = (state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone;   // live in-progress gap when the cash market is closed, else the last completed gap
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
     if(!state.benchCoin) r.beta=undefined;
     else if(r.coin===state.benchCoin){ r.beta=1; r.betaR2=1; }
@@ -339,6 +350,14 @@ function sortedRows(){ let rows=activeRows(); const f=state.filter.trim().toUppe
   if(state.watch.size){ const star=rows.filter(r=>state.watch.has(r.coin)), rest=rows.filter(r=>!state.watch.has(r.coin)); rows=[...star,...rest]; }
   return rows; }
 function pctInner(v){ if(v===undefined)return '<span class="ph">·</span>'; const p=fmtPct(v); return `<span class="${p.c}">${p.t}</span>`; }
+function gapCell(r){ const g=r.gap;
+  const live = !!(state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px));
+  const t = (g!=null&&isFinite(g))
+    ? (live ? 'Live \u2014 move since the last cash close (market closed now)' : 'Last close\u2192open gap')
+        + ((r.gap30!=null&&isFinite(r.gap30))?' \u00b7 30d off-hours drift '+(r.gap30>0?'+':'')+r.gap30.toFixed(1)+'%':'')
+    : 'Off-hours (overnight + weekend) gap \u2014 fills in with the hourly spine';
+  const dot = live ? '<span class="live-dot" title="live \u2014 market closed">\u25cf</span>' : '';
+  return `<td${shade(g,4)} title="${esc(t)}">${pctInner(g)}${dot}</td>`; }
 function momCell(r){ if(r.mom===undefined)return '<span class="ph">·</span>'; if(r.mom===null)return '<span class="na">—</span>';
   const sign=r.mom>0?'+':'';
   return `<span style="color:${momColor(r.mom)};font-weight:600">${sign}${Math.round(r.mom)}</span>`+(r.hot?'<span class="hotdot" title="volume / activity well above this market\u2019s own norm">●</span>':''); }
@@ -460,6 +479,8 @@ function dailyReturns(r){ if(r._dret) return r._dret; const c=r.daily; if(!c||c.
   r._dret=m; return m; }
 function dailyFunding(r){ if(r._dfund!==undefined && r._dfund!==null) return r._dfund; const c=r.dailyFund; if(!c||!c.length){ r._dfund=null; return null; }
   const m=new Map(); for(const k of c){ const f=parseFloat(k.f); if(isFinite(f)) m.set(Math.floor(k.t/DAY), f); } r._dfund=m; return m; }
+function overnightReturns(r){ if(r._dov!==undefined && r._dov!==null) return r._dov; const c=r.overnight; if(!c||!c.length){ r._dov=null; return null; }
+  const g=new Map(), f=new Map(); for(const k of c){ const gr=parseFloat(k.g), fn=parseFloat(k.f); const d=Math.floor(k.t/DAY); if(isFinite(gr)){ g.set(d,gr); f.set(d, isFinite(fn)?fn:0); } } r._dov={g,f}; return r._dov; }
 function pearson(a,b){ const n=a.length; if(n<3) return null; let sa=0,sb=0; for(let i=0;i<n;i++){sa+=a[i];sb+=b[i];}
   const ma=sa/n, mb=sb/n; let cov=0,va=0,vb=0; for(let i=0;i<n;i++){ const da=a[i]-ma, db=b[i]-mb; cov+=da*db; va+=da*da; vb+=db*db; }
   if(va<=0||vb<=0) return null; return cov/Math.sqrt(va*vb); }
@@ -1380,7 +1401,10 @@ function btMatrix(){
   const fund=new Map();                                     // per-name daily funding a 1x long pays (0 where unknown), aligned to the day axis
   let fundCov=0;
   for(const r of rows){ const fm=dailyFunding(r); if(fm && fm.size){ const a=new Float64Array(days.length).fill(0); for(const [d,v] of fm) if(idx.has(d)) a[idx.get(d)]=v; fund.set(r.coin,a); fundCov++; } }
-  return { rows, days, series, benchSeries, fund, fundCov };
+  const ovG=new Map(), ovF=new Map(); let ovCov=0;          // overnight+weekend hold: gross return (NaN where no hold that morning) and the funding paid during the hold
+  for(const r of rows){ const ov=overnightReturns(r); if(ov && ov.g.size){ const g=new Float64Array(days.length).fill(NaN), f=new Float64Array(days.length).fill(0);
+      for(const [d,v] of ov.g) if(idx.has(d)){ g[idx.get(d)]=v; f[idx.get(d)]=ov.f.get(d)||0; } ovG.set(r.coin,g); ovF.set(r.coin,f); ovCov++; } }
+  return { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov };
 }
 // signal score for one name at day-index di over a trailing L-day window (uses returns through di only — no lookahead)
 function btScore(sig, a, bench, di, L){
@@ -1402,8 +1426,8 @@ function btScore(sig, a, bench, di, L){
 function btRun(){
   const p=state.backtest, mx=btMatrix();
   if(mx.rows.length<8 || mx.days.length<p.lookback+p.cadence+6) return { ok:false, have:mx.rows.length, days:mx.days.length };
-  const { rows, days, series, benchSeries, fund, fundCov }=mx, coins=rows.map(r=>r.coin);
-  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=L;
+  const { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov }=mx, coins=rows.map(r=>r.coin);
+  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=L, on=p.holdWindow==='on';
   let weights=new Map(), lastBook=null, feeCum=0, fundCum=0;
   const tkOf=new Map(rows.map(r=>[r.coin, r.ticker]));
   const portR=[], eq=[1], eqg=[1], eqb=[1], eqew=[1], curveDays=[days[start]];
@@ -1414,7 +1438,7 @@ function btRun(){
       for(const c of coins){ const raw=btScore(p.signal, series.get(c), benchSeries, di, L);
         if(Number.isFinite(raw)) scored.push({ c, raw, s:(p.direction==='low'? -raw : raw) }); }  // s = the quantity we go long on
       scored.sort((a,b)=>b.s-a.s);
-      const N=scored.length, k=Math.max(1,Math.floor(N*q)), nw=new Map();
+      const N=scored.length, k=Math.max(1,Math.min(N,Math.floor(N*q))), nw=new Map();
       let longs=scored.slice(0,k), shorts=scored.slice(N-k);
       if(p.reqSign){ longs=longs.filter(x=>x.s>0); shorts=shorts.filter(x=>x.s<0); }   // only take names whose signal actually points the right way
       const wt=(x)=> p.weighting==='sig' ? Math.max(1e-9,Math.abs(x.s))
@@ -1423,33 +1447,39 @@ function btRun(){
       const place=(arr,budget)=>{ if(!arr.length) return; const w=arr.map(wt); let sum=0; for(const z of w) sum+=z;
         if(!(sum>0)){ arr.forEach(x=>nw.set(x.c,(nw.get(x.c)||0)+budget/arr.length)); return; }
         arr.forEach((x,i)=> nw.set(x.c,(nw.get(x.c)||0)+budget*w[i]/sum)); };
-      if(N>=2*k){
-        if(p.structure==='long') place(longs,+1);                    // long-only: full capital long the top
-        else if(p.structure==='short') place(shorts,-1);             // short-only
-        else { place(longs,+0.5); place(shorts,-0.5); }              // long/short dollar-neutral
-      }
+      if(p.structure==='long'){ if(longs.length) place(longs,+1); }   // long-only: full capital long the top (or all, if book=all)
+      else if(p.structure==='short'){ if(shorts.length) place(shorts,-1); }
+      else if(N>=2*k){ place(longs,+0.5); place(shorts,-0.5); }       // long/short dollar-neutral needs disjoint tails
       posSum+=nw.size; if(nw.size) posCount++;
       const bk={ longs:[], shorts:[] };                              // snapshot the book for the "what it holds now" panel
       for(const [c,w] of nw){ const s=scored.find(z=>z.c===c); (w>=0?bk.longs:bk.shorts).push({ coin:c, ticker:tkOf.get(c)||c, w, score:s?s.raw:null }); }
       bk.longs.sort((a,b)=>b.w-a.w); bk.shorts.sort((a,b)=>a.w-b.w); lastBook=bk;
       let to=0; const keys=new Set([...weights.keys(),...nw.keys()]);
       for(const c of keys) to+=Math.abs((nw.get(c)||0)-(weights.get(c)||0));
-      turnoverSum+=to; rebalances++; feeCum+=to*costR;
-      eq[eq.length-1]*=(1-to*costR);                                 // taker fee on turnover (market orders), charged to the net curve
+      turnoverSum+=to; rebalances++;
+      if(!on){ feeCum+=to*costR; eq[eq.length-1]*=(1-to*costR); }      // close-to-close: taker fee on turnover; overnight charges a nightly round-trip instead
       weights=nw;
     }
-    const fd=di+1; let pr=0, fpay=0, ok=false;                       // realize next day; funding accrues on the held weights
-    for(const [c,w] of weights){ const x=series.get(c)[fd]; if(Number.isFinite(x)){ pr+=w*(Math.exp(x)-1); ok=true; } const fa=fund.get(c); if(fa) fpay+=w*fa[fd]; }
+    const fd=di+1; let pr=0, fpay=0, ok=false, gb=0;
+    if(on){                                                            // overnight: capture the close->open (+weekend) hold, flat during the cash session
+      for(const [c,w] of weights){ const ga=ovG.get(c), g=ga?ga[fd]:NaN;
+        if(Number.isFinite(g)){ pr+=w*g; ok=true; gb+=Math.abs(w); }   // overnight gross is already a simple return
+        const fa=ovF.get(c); if(fa) fpay+=w*fa[fd]; }
+    } else {
+      for(const [c,w] of weights){ const x=series.get(c)[fd]; if(Number.isFinite(x)){ pr+=w*(Math.exp(x)-1); ok=true; } const fa=fund.get(c); if(fa) fpay+=w*fa[fd]; }
+    }
     pr=ok?pr:0; const fRet=-fpay;                                    // a position pays w*rate: a long pays when funding>0, a short receives
-    fundCum+=fRet; portR.push(pr+fRet);                              // net daily return incl. funding (fees are lumpy, charged at rebalance)
-    eq.push(eq[eq.length-1]*(1+pr+fRet)); eqg.push(eqg[eqg.length-1]*(1+pr));   // gross = price only; net = price + funding − fees
+    const feeDay=on? gb*2*costR : 0;                                 // overnight round-trips the whole book every night (exit at open + enter at close)
+    if(on) feeCum+=feeDay;
+    fundCum+=fRet; portR.push(pr+fRet-feeDay);                        // net return incl. funding and (overnight) the nightly fee
+    eq.push(eq[eq.length-1]*(1+pr+fRet-feeDay)); eqg.push(eqg[eqg.length-1]*(1+pr));   // gross = price only; net = price + funding − fees
     const bx=benchSeries?benchSeries[fd]:NaN; eqb.push(eqb[eqb.length-1]*(1+(Number.isFinite(bx)?Math.exp(bx)-1:0)));
     let ew=0,ewn=0; for(const c of coins){ const x=series.get(c)[fd]; if(Number.isFinite(x)){ ew+=Math.exp(x)-1; ewn++; } }
     eqew.push(eqew[eqew.length-1]*(1+(ewn?ew/ewn:0))); curveDays.push(days[fd]);
   }
   return { ok:true, days:curveDays, eq, eqg, eqb, eqew, portR,
     turnover:rebalances?turnoverSum/rebalances:0, avgPos:posCount?posSum/posCount:0, universeN:rows.length, book:lastBook,
-    fundCov, fundCum, feeCum };
+    fundCov, fundCum, feeCum, ovCov, on };
 }
 function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
   for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ s+=x; sq+=x*x; n++; } }
@@ -1511,12 +1541,14 @@ function btStatBox(label, st, accent){
     `<div class="s-row"><span>max DD</span><b class="neg">${(st.mdd*100).toFixed(1)}%</b></div></div>`;
 }
 function btBookPanel(book){
-  const b=book||{longs:[],shorts:[]};
+  const b=book||{longs:[],shorts:[]}, MAX=12;
   const col=(title,items,cls,sign)=>{
-    const list=items.length? items.map(x=>
+    const shown=items.slice(0,MAX);
+    const list=items.length? shown.map(x=>
         `<div class="bt-pos"><span class="bt-tk">${esc(x.ticker)}</span>`+
         `<span class="bt-sc">${x.score!=null?(x.score>0?'+':'')+(x.score*100).toFixed(1)+'%':'—'}</span>`+
         `<span class="bt-w ${cls}">${sign}${(Math.abs(x.w)*100).toFixed(1)}%</span></div>`).join('')
+        +(items.length>MAX?`<div class="sec" style="padding:6px 2px">+${items.length-MAX} more</div>`:'')
       : `<div class="sec" style="padding:8px 2px">— none —</div>`;
     return `<div class="bt-col"><div class="bt-col-h"><span class="${cls}">${title}</span> <span class="sec">${items.length} names</span></div>${list}</div>`;
   };
@@ -1536,10 +1568,11 @@ function renderBacktest(){
   uniSel+=`</select>`;
   let sigSel=`<select id="btSig" class="clocksel">`+Object.keys(BT_SIGNALS).map(k=>opt(k,BT_SIGNALS[k],p.signal)).join('')+`</select>`;
   const controls=
-    `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}</div>`+
+    `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}`+
+    `<span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}</div>`+
     `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d']])}`+
     `<span class="lbl">rebalance</span>${seg('btCad',p.cadence,[[1,'1d'],[5,'5d'],[10,'10d']])}`+
-    `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%']])}`+
+    `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`+
     `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
     `<span class="lbl">in-sample</span>${seg('btSplit',p.split,[[0.5,'50%'],[0.6,'60%'],[0.7,'70%']])}</div>`+
     `<div class="s-ctrls"><span class="lbl">direction</span>${seg('btDir',p.direction,[['high','long strong'],['low','long weak']])}`+
@@ -1566,7 +1599,9 @@ function renderBacktest(){
     : p.structure==='short' ? `<b>short-only</b>, shorting the ${p.direction==='high'?'bottom':'top'} ${pctq}%`
     : `<b>long/short</b> — long the ${dirTop} ${pctq}%, short the other tail, dollar-neutral`;
   const wtTxt = p.weighting==='sig'?'signal-weighted':p.weighting==='vol'?'inverse-vol weighted':'equal-weight';
-  const cap=`Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled, ~2 months of the current universe. <b>Hover</b> the curve. Not a live trade signal.`;
+  const cap = p.holdWindow==='on'
+    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled. <b>Hover</b> the curve. Not a live trade signal.`
+    : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled, ~2 months of the current universe. <b>Hover</b> the curve. Not a live trade signal.`;
   return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap);
 }
 function attachBtControls(){
@@ -1574,7 +1609,7 @@ function attachBtControls(){
   const uni=el('btUni'); if(uni) uni.addEventListener('change',()=>{ state.backtest.universe=uni.value; drawBacktest(); });
   const segWire=(id,key,num)=>{ const g=el(id); if(!g) return; g.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest[key]=num?parseFloat(b.dataset.v):b.dataset.v; drawBacktest(); })); };
   segWire('btLb','lookback',true); segWire('btCad','cadence',true); segWire('btQ','quantile',true); segWire('btCost','cost',true); segWire('btSplit','split',true);
-  segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false);
+  segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false); segWire('btHold','holdWindow',false);
   const rq=el('btReq'); if(rq) rq.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest.reqSign=(b.dataset.v==='sign'); drawBacktest(); }));
 }
 function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); }
