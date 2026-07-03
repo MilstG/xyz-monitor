@@ -49,6 +49,8 @@ const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:''
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
+  backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
+    direction:'high', structure:'ls', weighting:'eq', reqSign:false },
   watch:new Set(), watchOnly:false, detail:null,
   analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
@@ -201,6 +203,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
   for(const coin in d.daily){ const r=state.rows.get(coin); if(!r) continue;
     const arr=d.daily[coin];
     r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1]})):r.daily;
+    if(d.funding && Array.isArray(d.funding[coin])){ r.dailyFund=d.funding[coin].map(p=>({t:p[0], f:p[1]})); r._dfund=null; }
     r._dret=null; r._wrL=null; }
   scheduleRender();
   if(!el('view-corr').hidden) renderCorr();
@@ -455,6 +458,8 @@ function dailyReturns(r){ if(r._dret) return r._dret; const c=r.daily; if(!c||c.
   const m=new Map(); let prev=null;
   for(const k of c){ const cl=parseFloat(k.c), day=Math.floor(k.t/DAY); if(isFinite(cl)){ if(prev!=null&&prev>0) m.set(day, Math.log(cl/prev)); prev=cl; } }
   r._dret=m; return m; }
+function dailyFunding(r){ if(r._dfund!==undefined && r._dfund!==null) return r._dfund; const c=r.dailyFund; if(!c||!c.length){ r._dfund=null; return null; }
+  const m=new Map(); for(const k of c){ const f=parseFloat(k.f); if(isFinite(f)) m.set(Math.floor(k.t/DAY), f); } r._dfund=m; return m; }
 function pearson(a,b){ const n=a.length; if(n<3) return null; let sa=0,sb=0; for(let i=0;i<n;i++){sa+=a[i];sb+=b[i];}
   const ma=sa/n, mb=sb/n; let cov=0,va=0,vb=0; for(let i=0;i<n;i++){ const da=a[i]-ma, db=b[i]-mb; cov+=da*db; va+=da*da; vb+=db*db; }
   if(va<=0||vb<=0) return null; return cov/Math.sqrt(va*vb); }
@@ -863,7 +868,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
-  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions') showView(h); }
+  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest') showView(h); }
 let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
@@ -1347,6 +1352,234 @@ function drawSessions(){
   if(se && !se.pending) attachSeasonControls();
   attachLineHover();
 }
+// ===== Strategy backtest — client-side, cross-sectional long/short on the daily returns already loaded =====
+// Everything runs in-browser off state.rows[*].daily (shipped via /api/daily) + the SP500 benchmark, so
+// parameter tweaks are instant and add no server load. Non-fitted ranking rules: the honest overfitting
+// risk is the user picking params by eye, which the in-sample/out-of-sample split is there to expose.
+const BT_MIN_DAYS=25, BT_ANN=252;
+const BT_SIGNALS={ mom:'Momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)', lowvol:'Low volatility' };
+function btUniverse(){
+  const u=state.backtest.universe;
+  return [...state.rows.values()].filter(r=>{
+    if(r.delisted || !r.daily || r.coin===state.benchCoin) return false;
+    const m=dailyReturns(r); if(!m || m.size<BT_MIN_DAYS) return false;
+    if(u==='eq') return r.assetClass==='Equity';
+    if(u && u.indexOf('sec:')===0) return r.sector===u.slice(4);
+    return true;
+  });
+}
+function btMatrix(){
+  const rows=btUniverse(), dayset=new Set(), rmap=new Map();
+  for(const r of rows){ const m=dailyReturns(r); rmap.set(r.coin,m); for(const d of m.keys()) dayset.add(d); }
+  const days=[...dayset].sort((a,b)=>a-b), idx=new Map(days.map((d,i)=>[d,i]));
+  const series=new Map();                                   // dense per-name log-return series over the common day axis (NaN where missing)
+  for(const r of rows){ const m=rmap.get(r.coin), a=new Float64Array(days.length).fill(NaN);
+    for(const [d,v] of m) a[idx.get(d)]=v; series.set(r.coin,a); }
+  let benchSeries=null; const bench=state.benchCoin?state.rows.get(state.benchCoin):null;
+  if(bench){ const bm=dailyReturns(bench); if(bm){ benchSeries=new Float64Array(days.length).fill(NaN); for(const [d,v] of bm) if(idx.has(d)) benchSeries[idx.get(d)]=v; } }
+  const fund=new Map();                                     // per-name daily funding a 1x long pays (0 where unknown), aligned to the day axis
+  let fundCov=0;
+  for(const r of rows){ const fm=dailyFunding(r); if(fm && fm.size){ const a=new Float64Array(days.length).fill(0); for(const [d,v] of fm) if(idx.has(d)) a[idx.get(d)]=v; fund.set(r.coin,a); fundCov++; } }
+  return { rows, days, series, benchSeries, fund, fundCov };
+}
+// signal score for one name at day-index di over a trailing L-day window (uses returns through di only — no lookahead)
+function btScore(sig, a, bench, di, L){
+  const lo=di-L+1; if(lo<0) return NaN;
+  if(sig==='rev'){ const v=a[di]; return Number.isFinite(v)? -v : NaN; }            // fade the most recent day
+  if(sig==='res'){                                                                   // cumulative return net of a within-window β to the benchmark
+    let mn=0,mb=0,cn=0; for(let i=lo;i<=di;i++){ const x=a[i], y=bench?bench[i]:NaN; if(Number.isFinite(x)&&Number.isFinite(y)){ mn+=x; mb+=y; cn++; } }
+    if(cn<Math.max(5,L*0.6)) return NaN; mn/=cn; mb/=cn;
+    let c=0,vb=0,sx=0,sy=0; for(let i=lo;i<=di;i++){ const x=a[i], y=bench?bench[i]:NaN; if(Number.isFinite(x)&&Number.isFinite(y)){ c+=(x-mn)*(y-mb); vb+=(y-mb)*(y-mb); sx+=x; sy+=y; } }
+    return sx-(vb>0?c/vb:0)*sy;
+  }
+  let sum=0,sq=0,n=0; for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ sum+=x; sq+=x*x; n++; } }
+  if(n<Math.max(5,L*0.6)) return NaN;
+  if(sig==='lowvol'){ const mean=sum/n, varr=(sq-n*mean*mean)/Math.max(1,n-1); return -Math.sqrt(Math.max(0,varr)); }  // low vol ranks high
+  // momentum: skip the most recent day so 1-day reversion doesn't contaminate the trend
+  let s2=0,n2=0; for(let i=lo;i<=di-1;i++){ const x=a[i]; if(Number.isFinite(x)){ s2+=x; n2++; } }
+  return n2>=Math.max(4,L*0.5)? s2 : NaN;
+}
+function btRun(){
+  const p=state.backtest, mx=btMatrix();
+  if(mx.rows.length<8 || mx.days.length<p.lookback+p.cadence+6) return { ok:false, have:mx.rows.length, days:mx.days.length };
+  const { rows, days, series, benchSeries, fund, fundCov }=mx, coins=rows.map(r=>r.coin);
+  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=L;
+  let weights=new Map(), lastBook=null, feeCum=0, fundCum=0;
+  const tkOf=new Map(rows.map(r=>[r.coin, r.ticker]));
+  const portR=[], eq=[1], eqg=[1], eqb=[1], eqew=[1], curveDays=[days[start]];
+  let turnoverSum=0, rebalances=0, posSum=0, posCount=0;
+  for(let di=start; di<days.length-1; di++){
+    if((di-start)%cad===0){                                          // rebalance
+      const scored=[];
+      for(const c of coins){ const raw=btScore(p.signal, series.get(c), benchSeries, di, L);
+        if(Number.isFinite(raw)) scored.push({ c, raw, s:(p.direction==='low'? -raw : raw) }); }  // s = the quantity we go long on
+      scored.sort((a,b)=>b.s-a.s);
+      const N=scored.length, k=Math.max(1,Math.floor(N*q)), nw=new Map();
+      let longs=scored.slice(0,k), shorts=scored.slice(N-k);
+      if(p.reqSign){ longs=longs.filter(x=>x.s>0); shorts=shorts.filter(x=>x.s<0); }   // only take names whose signal actually points the right way
+      const wt=(x)=> p.weighting==='sig' ? Math.max(1e-9,Math.abs(x.s))
+                   : p.weighting==='vol' ? (function(){ const v=btVol(series.get(x.c),di,L); return v>0?1/v:0; })()
+                   : 1;                                                                 // equal
+      const place=(arr,budget)=>{ if(!arr.length) return; const w=arr.map(wt); let sum=0; for(const z of w) sum+=z;
+        if(!(sum>0)){ arr.forEach(x=>nw.set(x.c,(nw.get(x.c)||0)+budget/arr.length)); return; }
+        arr.forEach((x,i)=> nw.set(x.c,(nw.get(x.c)||0)+budget*w[i]/sum)); };
+      if(N>=2*k){
+        if(p.structure==='long') place(longs,+1);                    // long-only: full capital long the top
+        else if(p.structure==='short') place(shorts,-1);             // short-only
+        else { place(longs,+0.5); place(shorts,-0.5); }              // long/short dollar-neutral
+      }
+      posSum+=nw.size; if(nw.size) posCount++;
+      const bk={ longs:[], shorts:[] };                              // snapshot the book for the "what it holds now" panel
+      for(const [c,w] of nw){ const s=scored.find(z=>z.c===c); (w>=0?bk.longs:bk.shorts).push({ coin:c, ticker:tkOf.get(c)||c, w, score:s?s.raw:null }); }
+      bk.longs.sort((a,b)=>b.w-a.w); bk.shorts.sort((a,b)=>a.w-b.w); lastBook=bk;
+      let to=0; const keys=new Set([...weights.keys(),...nw.keys()]);
+      for(const c of keys) to+=Math.abs((nw.get(c)||0)-(weights.get(c)||0));
+      turnoverSum+=to; rebalances++; feeCum+=to*costR;
+      eq[eq.length-1]*=(1-to*costR);                                 // taker fee on turnover (market orders), charged to the net curve
+      weights=nw;
+    }
+    const fd=di+1; let pr=0, fpay=0, ok=false;                       // realize next day; funding accrues on the held weights
+    for(const [c,w] of weights){ const x=series.get(c)[fd]; if(Number.isFinite(x)){ pr+=w*(Math.exp(x)-1); ok=true; } const fa=fund.get(c); if(fa) fpay+=w*fa[fd]; }
+    pr=ok?pr:0; const fRet=-fpay;                                    // a position pays w*rate: a long pays when funding>0, a short receives
+    fundCum+=fRet; portR.push(pr+fRet);                              // net daily return incl. funding (fees are lumpy, charged at rebalance)
+    eq.push(eq[eq.length-1]*(1+pr+fRet)); eqg.push(eqg[eqg.length-1]*(1+pr));   // gross = price only; net = price + funding − fees
+    const bx=benchSeries?benchSeries[fd]:NaN; eqb.push(eqb[eqb.length-1]*(1+(Number.isFinite(bx)?Math.exp(bx)-1:0)));
+    let ew=0,ewn=0; for(const c of coins){ const x=series.get(c)[fd]; if(Number.isFinite(x)){ ew+=Math.exp(x)-1; ewn++; } }
+    eqew.push(eqew[eqew.length-1]*(1+(ewn?ew/ewn:0))); curveDays.push(days[fd]);
+  }
+  return { ok:true, days:curveDays, eq, eqg, eqb, eqew, portR,
+    turnover:rebalances?turnoverSum/rebalances:0, avgPos:posCount?posSum/posCount:0, universeN:rows.length, book:lastBook,
+    fundCov, fundCum, feeCum };
+}
+function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
+  for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ s+=x; sq+=x*x; n++; } }
+  if(n<3) return 0; const m=s/n; return Math.sqrt(Math.max(0,(sq-n*m*m)/(n-1))); }
+function btStats(portR, eqSeg){
+  const n=portR.length; if(!n||eqSeg.length<2) return null;
+  let mean=0; for(const x of portR) mean+=x; mean/=n;
+  let v=0; for(const x of portR) v+=(x-mean)*(x-mean); const sd=Math.sqrt(v/Math.max(1,n-1));
+  let hit=0; for(const x of portR) if(x>0) hit++;
+  const total=eqSeg[eqSeg.length-1]/eqSeg[0]-1;
+  let peak=eqSeg[0], mdd=0; for(const e of eqSeg){ if(e>peak) peak=e; const dd=e/peak-1; if(dd<mdd) mdd=dd; }
+  return { total, sharpe: sd>0? mean/sd*Math.sqrt(BT_ANN):0, hit:hit/n, mdd, n };
+}
+// equity curve: net (accent) / gross (blue) / benchmark (muted) / equal-weight (faint); IS|OOS split shaded; crosshair hover
+function btCurveSvg(res, splitIdx){
+  const W=680,H=210, pl=48,pr=54,pt=14,pb=26, days=res.days, m=days.length;
+  const pct=arr=>arr.map(e=>(e/arr[0]-1)*100);
+  const net=pct(res.eq), gross=pct(res.eqg), bench=pct(res.eqb), ew=pct(res.eqew);
+  let lo=Infinity,hi=-Infinity; for(const arr of [net,gross,bench,ew]) for(const y of arr){ if(y<lo)lo=y; if(y>hi)hi=y; }
+  if(!(hi>lo)){ hi=1; lo=-1; } const padv=(hi-lo)*0.08||1; lo-=padv; hi+=padv;
+  const X=i=>pl+(m<2?0:i/(m-1))*(W-pl-pr), Y=y=>pt+(1-(y-lo)/(hi-lo))*(H-pt-pb);
+  const path=arr=>arr.map((y,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(y).toFixed(1)).join(' ');
+  const ticks=lcTicks(lo,hi,4);
+  let s='';
+  if(splitIdx>0 && splitIdx<m-1){                                   // shade the out-of-sample region
+    s+=`<rect x="${X(splitIdx).toFixed(1)}" y="${pt}" width="${(X(m-1)-X(splitIdx)).toFixed(1)}" height="${H-pt-pb}" fill="var(--accent)" opacity="0.05"/>`;
+    s+=`<line x1="${X(splitIdx).toFixed(1)}" y1="${pt}" x2="${X(splitIdx).toFixed(1)}" y2="${H-pb}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"/>`;
+    s+=`<text x="${(X(splitIdx)+4).toFixed(1)}" y="${pt+9}" class="lc-tick" style="fill:var(--muted)">out-of-sample →</text>`;
+  }
+  s+=lcGrid(pl,W-pr,ticks,Y,v=>(v>0?'+':'')+v.toFixed(1)+'%');
+  s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`;
+  s+=`<path d="${path(ew)}" fill="none" stroke="var(--faint)" stroke-width="1"/>`;
+  s+=`<path d="${path(bench)}" fill="none" stroke="var(--muted)" stroke-width="1.2"/>`;
+  s+=`<path d="${path(gross)}" fill="none" stroke="var(--blue)" stroke-width="1.2" opacity="0.85"/>`;
+  s+=`<path d="${path(net)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  const endLab=(arr,col)=>`<text x="${(W-pr+4)}" y="${(Y(arr[m-1])+3).toFixed(1)}" style="font-size:9px;fill:${col}">${(arr[m-1]>0?'+':'')+arr[m-1].toFixed(1)}%</text>`;
+  s+=endLab(net,'var(--accent)');
+  // x date labels (start / split / end)
+  const dfmt=d=>{ const dt=new Date(d*DAY); return (dt.getUTCMonth()+1)+'/'+dt.getUTCDate(); };
+  s+=`<text x="${pl}" y="${H-8}" class="lc-tick">${dfmt(days[0])}</text>`;
+  s+=`<text x="${(W-pr).toFixed(1)}" y="${H-8}" text-anchor="end" class="lc-tick">${dfmt(days[m-1])}</text>`;
+  const xs=days.map((_,i)=>X(i)), rows=days.map((d,i)=>{
+    const tag=(splitIdx>0&&i>=splitIdx)?'<span style="color:var(--muted)">OOS</span>':'<span style="color:var(--muted)">IS</span>';
+    return `<b>${dfmt(d)}</b> ${tag}<br>`+
+      `<span style="color:var(--accent)">net ${(net[i]>0?'+':'')+net[i].toFixed(2)}%</span> · `+
+      `<span style="color:var(--blue)">gross ${(gross[i]>0?'+':'')+gross[i].toFixed(2)}%</span><br>`+
+      `<span style="color:var(--muted)">bench ${(bench[i]>0?'+':'')+bench[i].toFixed(2)}%</span> · `+
+      `<span style="color:var(--faint)">EW ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`;
+  });
+  return hoverChart(s, { w:W, h:H, pt, pb, xs, rows });
+}
+function btStatBox(label, st, accent){
+  if(!st) return `<div class="s-stat"><div class="s-k">${label}</div><div class="sec">—</div></div>`;
+  const f=(x,d,pct)=>(x>0?'+':'')+(x*(pct?100:1)).toFixed(d)+(pct?'%':'');
+  return `<div class="s-stat"><div class="s-k">${label} · ${st.n}d</div>`+
+    `<div class="s-row"><span>return</span><b class="${st.total>=0?'pos':'neg'}">${f(st.total,1,true)}</b></div>`+
+    `<div class="s-row"><span>Sharpe</span><b style="color:${accent}">${st.sharpe.toFixed(2)}</b></div>`+
+    `<div class="s-row"><span>hit</span><b>${(st.hit*100).toFixed(0)}%</b></div>`+
+    `<div class="s-row"><span>max DD</span><b class="neg">${(st.mdd*100).toFixed(1)}%</b></div></div>`;
+}
+function btBookPanel(book){
+  const b=book||{longs:[],shorts:[]};
+  const col=(title,items,cls,sign)=>{
+    const list=items.length? items.map(x=>
+        `<div class="bt-pos"><span class="bt-tk">${esc(x.ticker)}</span>`+
+        `<span class="bt-sc">${x.score!=null?(x.score>0?'+':'')+(x.score*100).toFixed(1)+'%':'—'}</span>`+
+        `<span class="bt-w ${cls}">${sign}${(Math.abs(x.w)*100).toFixed(1)}%</span></div>`).join('')
+      : `<div class="sec" style="padding:8px 2px">— none —</div>`;
+    return `<div class="bt-col"><div class="bt-col-h"><span class="${cls}">${title}</span> <span class="sec">${items.length} names</span></div>${list}</div>`;
+  };
+  return sCard(`<div class="s-cap" style="margin:0 0 9px">Latest rebalance — the actual positions the rule holds now (ticker · signal · weight)</div>`+
+    `<div class="bt-book-grid">`+col('LONG',b.longs,'pos','+')+col('SHORT',b.shorts,'neg','−')+`</div>`);
+}
+function renderBacktest(){
+  const p=state.backtest;
+  const res=btRun();
+  const head=sHead('Strategy backtest','define a cross-sectional rule and test it net of costs — in-sample vs out-of-sample');
+  // controls
+  const opt=(v,l,cur)=>`<option value="${esc(v)}"${cur===v?' selected':''}>${esc(l)}</option>`;
+  const seg=(id,cur,opts)=>`<div class="seg" id="${id}">`+opts.map(([v,l])=>`<button data-v="${v}"${String(cur)===String(v)?' class="active"':''}>${l}</button>`).join('')+`</div>`;
+  const sectors=[...new Set([...state.rows.values()].filter(r=>r.assetClass==='Equity'&&r.sector).map(r=>r.sector))].sort();
+  let uniSel=`<select id="btUni" class="clocksel">`+opt('all','All markets',p.universe)+opt('eq','Equities only',p.universe);
+  if(sectors.length) uniSel+=`<optgroup label="By sector">`+sectors.map(sc=>opt('sec:'+sc, sc, p.universe)).join('')+`</optgroup>`;
+  uniSel+=`</select>`;
+  let sigSel=`<select id="btSig" class="clocksel">`+Object.keys(BT_SIGNALS).map(k=>opt(k,BT_SIGNALS[k],p.signal)).join('')+`</select>`;
+  const controls=
+    `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}</div>`+
+    `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d']])}`+
+    `<span class="lbl">rebalance</span>${seg('btCad',p.cadence,[[1,'1d'],[5,'5d'],[10,'10d']])}`+
+    `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%']])}`+
+    `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
+    `<span class="lbl">in-sample</span>${seg('btSplit',p.split,[[0.5,'50%'],[0.6,'60%'],[0.7,'70%']])}</div>`+
+    `<div class="s-ctrls"><span class="lbl">direction</span>${seg('btDir',p.direction,[['high','long strong'],['low','long weak']])}`+
+    `<span class="lbl">structure</span>${seg('btStruct',p.structure,[['ls','long / short'],['long','long-only'],['short','short-only']])}`+
+    `<span class="lbl">weighting</span>${seg('btWt',p.weighting,[['eq','equal'],['sig','by signal'],['vol','inverse-vol']])}`+
+    `<span class="lbl">gate</span>${seg('btReq',p.reqSign?'sign':'any',[['any','any rank'],['sign','signal must agree']])}</div>`;
+  if(!res.ok){
+    return head+controls+sCard(`<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center">Not enough daily history yet — ${res.have||0} names, need 8 with ≥${BT_MIN_DAYS}d. Fills in as /api/daily loads.</div>`);
+  }
+  const m=res.days.length, splitIdx=Math.max(1,Math.min(m-2,Math.floor(m*p.split)));
+  const isR=res.portR.slice(0,splitIdx), oosR=res.portR.slice(splitIdx);
+  const isE=res.eq.slice(0,splitIdx+1), oosE=res.eq.slice(splitIdx);
+  const full=btStats(res.portR,res.eq), is=btStats(isR,isE), oos=btStats(oosR,oosE);
+  const stats=`<div class="s-grid" style="margin:12px 0 4px">`+
+    btStatBox('In-sample',is,'var(--blue)')+btStatBox('Out-of-sample',oos,'var(--accent)')+btStatBox('Full period',full,'var(--text)')+
+    `<div class="s-stat"><div class="s-k">Frictions</div>`+
+      `<div class="s-row"><span>universe</span><b>${res.universeN}</b></div>`+
+      `<div class="s-row"><span>turnover</span><b>${(res.turnover*100).toFixed(0)}%</b></div>`+
+      `<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`+
+      `<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div></div></div>`;
+  const leg=sLeg([{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:'benchmark'},{color:'var(--faint)',label:'equal-weight'}]);
+  const pctq=(p.quantile*100).toFixed(0), dirTop=p.direction==='high'?'top':'bottom';
+  const structTxt = p.structure==='long' ? `<b>long-only</b>, holding the ${dirTop} ${pctq}%`
+    : p.structure==='short' ? `<b>short-only</b>, shorting the ${p.direction==='high'?'bottom':'top'} ${pctq}%`
+    : `<b>long/short</b> — long the ${dirTop} ${pctq}%, short the other tail, dollar-neutral`;
+  const wtTxt = p.weighting==='sig'?'signal-weighted':p.weighting==='vol'?'inverse-vol weighted':'equal-weight';
+  const cap=`Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled, ~2 months of the current universe. <b>Hover</b> the curve. Not a live trade signal.`;
+  return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap);
+}
+function attachBtControls(){
+  const sig=el('btSig'); if(sig) sig.addEventListener('change',()=>{ state.backtest.signal=sig.value; drawBacktest(); });
+  const uni=el('btUni'); if(uni) uni.addEventListener('change',()=>{ state.backtest.universe=uni.value; drawBacktest(); });
+  const segWire=(id,key,num)=>{ const g=el(id); if(!g) return; g.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest[key]=num?parseFloat(b.dataset.v):b.dataset.v; drawBacktest(); })); };
+  segWire('btLb','lookback',true); segWire('btCad','cadence',true); segWire('btQ','quantile',true); segWire('btCost','cost',true); segWire('btSplit','split',true);
+  segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false);
+  const rq=el('btReq'); if(rq) rq.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest.reqSign=(b.dataset.v==='sign'); drawBacktest(); }));
+}
+function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); }
+async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values()].some(r=>r.daily)){ await loadDaily(); if(state.view==='backtest') drawBacktest(); } }
+
 function showView(v){
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -1354,8 +1587,10 @@ function showView(v){
   el('view-sectors').hidden = v!=='sectors';
   el('view-corr').hidden = v!=='corr';
   el('view-sessions').hidden = v!=='sessions';
+  el('view-backtest').hidden = v!=='backtest';
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
+  if(v==='backtest') renderBacktest_load();
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
 }

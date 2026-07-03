@@ -364,6 +364,17 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .s-stat .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
 .s-stat .v{font-family:var(--mono);font-size:19px;color:var(--text);line-height:1.1}
 .s-stat .s{color:var(--muted);font-size:11px;margin-top:4px}
+.s-stat .s-k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
+.s-stat .s-row{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:12.5px;margin:3px 0}
+.s-stat .s-row span{color:var(--muted)}
+.s-stat .s-row b{color:var(--text);font-weight:500}
+.bt-book-grid{display:flex;gap:14px;flex-wrap:wrap}
+.bt-col{flex:1 1 220px;min-width:200px}
+.bt-col-h{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:5px}
+.bt-pos{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-family:var(--mono);font-size:12.5px;padding:3px 2px}
+.bt-pos .bt-tk{color:var(--text);flex:0 0 auto}
+.bt-pos .bt-sc{color:var(--muted);font-size:11px;margin-left:auto}
+.bt-pos .bt-w{flex:0 0 56px;text-align:right}
 /* shared SVG text scale (one place) */
 .lchart text,.sclock text,.sheat text{font-family:var(--mono)}
 .lc-tick{font-size:9px;fill:var(--muted)}
