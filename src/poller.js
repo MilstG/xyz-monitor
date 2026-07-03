@@ -371,12 +371,20 @@ function createPoller({ dex, store, log }) {
     };
   }
   function buildDaily() {
-    const daily = {};
+    const daily = {}, funding = {};
     let coins = 0, lens = 0;
-    for (const r of activeMarkets()) if (r.dailyRaw) { daily[r.coin] = r.dailyRaw.map((k) => [k.t, k.c]); coins++; lens += r.dailyRaw.length; }
+    for (const r of activeMarkets()) if (r.dailyRaw) {
+      daily[r.coin] = r.dailyRaw.map((k) => [k.t, k.c]); coins++; lens += r.dailyRaw.length;
+      const fh = getFunding(r.coin);                                    // hourly [t,rate] -> daily funding a 1x long pays (sum of the day's hourly rates)
+      if (fh.length) {
+        const byDay = new Map();
+        for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
+        funding[r.coin] = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
+      }
+    }
     const sig = coins + ":" + lens;
     if (sig !== dailySig) { dailySig = sig; dailyVer = Date.now(); }   // content changed -> new ETag
-    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily };
+    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding };
   }
 
   // ---- session / time-of-day analytics (served at /api/analytics) ----
