@@ -370,6 +370,15 @@ function createPoller({ dex, store, log }) {
       regime: { corr: curCorr, corrPct: curCorrPct, corrN: curCorrN, corrSamples: regimeHist.length },
     };
   }
+  // Derive daily closes from the array hourly spine (last candle per UTC day) so /api/daily — and the
+  // client-side correlation that reads it — can populate from the hourly spine (available early, and what
+  // the warm cache restores) instead of waiting on the separate rate-limited 370d daily backfill.
+  function deriveDailyClose(hs) {
+    const byDay = new Map();
+    for (const k of hs) { const t = k[0], c = k[4]; if (!Number.isFinite(t) || !Number.isFinite(c)) continue; const d = Math.floor(t / DAY) * DAY; const cur = byDay.get(d); if (!cur || t >= cur[0]) byDay.set(d, [t, c]); }
+    return [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => [v[0] - (v[0] % DAY), v[1]]);
+  }
+
   function buildDaily() {
     const daily = {}, funding = {}, overnight = {}, liveClose = {};
     const nowMs = Date.now();
@@ -377,24 +386,30 @@ function createPoller({ dex, store, log }) {
     { const s = nowMs - 4 * DAY, e = nowMs + 4 * DAY, wins = overnightAnchors(s, e).concat(weekendAnchors(s, e));
       for (const a of wins) if (nowMs >= a.enter && nowMs < a.exit) { offHours = { closed: true, closeT: a.enter, openT: a.exit }; break; } }
     let coins = 0, lens = 0;
-    for (const r of activeMarkets()) if (r.dailyRaw) {
-      daily[r.coin] = r.dailyRaw.map((k) => [k.t, k.c]); coins++; lens += r.dailyRaw.length;
+    for (const r of activeMarkets()) {
+      const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
+      // daily closes: prefer the real 370d backfill; otherwise bootstrap from the hourly spine
+      let dr = null;
+      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c]);
+      else if (hs.length > 24) dr = deriveDailyClose(hs);
+      if (dr && dr.length) { daily[r.coin] = dr; coins++; lens += dr.length; }
+
       const fh = getFunding(r.coin);                                    // hourly [t,rate] -> daily funding a 1x long pays (sum of the day's hourly rates)
       if (fh.length) {
         const byDay = new Map();
         for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
         funding[r.coin] = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
       }
-      // overnight + weekend holds (buy at close, sell before open) via the boundary engine; memoized to the hourly-spine version
-      if (r.hourlyRaw && r.hourlyRaw.length > 2) {
+      // overnight + weekend holds (buy at close, sell before open) via the boundary engine; memoized to the spine version
+      if (hs.length > 2) {
         if (r._ovTs !== r.hourlyTs) {
-          const px = r.hourlyRaw, start = px[0][0], end = px[px.length - 1][0];
+          const start = hs[0][0], end = hs[hs.length - 1][0];
           const anchors = overnightAnchors(start, end).concat(weekendAnchors(start, end));
-          r._ovClose = runHolds(px, fh, anchors).map((h) => [Math.floor(h.exit / DAY) * DAY, +h.gross.toFixed(8), +(h.funding || 0).toFixed(8)]).sort((a, b) => a[0] - b[0]);
+          r._ovClose = runHolds(hs, fh, anchors).map((h) => [Math.floor(h.exit / DAY) * DAY, +h.gross.toFixed(8), +(h.funding || 0).toFixed(8)]).sort((a, b) => a[0] - b[0]);
           r._ovTs = r.hourlyTs;
         }
         if (r._ovClose && r._ovClose.length) overnight[r.coin] = r._ovClose;
-        if (offHours.closed) { const pc = priceAsOf(r.hourlyRaw, offHours.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
+        if (offHours.closed) { const pc = priceAsOf(hs, offHours.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
       }
     }
     const sig = coins + ":" + lens;
