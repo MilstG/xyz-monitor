@@ -1583,14 +1583,15 @@ async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values(
 function showView(v){
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
-  el('view-markets').hidden = v!=='markets';
-  el('view-sectors').hidden = v!=='sectors';
-  el('view-corr').hidden = v!=='corr';
-  el('view-sessions').hidden = v!=='sessions';
-  el('view-backtest').hidden = v!=='backtest';
+  const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
+  setHidden('view-markets', v!=='markets');
+  setHidden('view-sectors', v!=='sectors');
+  setHidden('view-corr', v!=='corr');
+  setHidden('view-sessions', v!=='sessions');
+  setHidden('view-backtest', v!=='backtest');
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
-  if(v==='backtest') renderBacktest_load();
+  if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
 }
