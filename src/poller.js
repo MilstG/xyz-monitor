@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep } = require("./hyperliquid");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
-  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock,
+  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson } = require("./compute");
 const { classify } = require("./sectors");
 
@@ -371,7 +371,11 @@ function createPoller({ dex, store, log }) {
     };
   }
   function buildDaily() {
-    const daily = {}, funding = {};
+    const daily = {}, funding = {}, overnight = {}, liveClose = {};
+    const nowMs = Date.now();
+    let offHours = { closed: false };                                 // is the US cash market closed right now? (global, drives the live gap)
+    { const s = nowMs - 4 * DAY, e = nowMs + 4 * DAY, wins = overnightAnchors(s, e).concat(weekendAnchors(s, e));
+      for (const a of wins) if (nowMs >= a.enter && nowMs < a.exit) { offHours = { closed: true, closeT: a.enter, openT: a.exit }; break; } }
     let coins = 0, lens = 0;
     for (const r of activeMarkets()) if (r.dailyRaw) {
       daily[r.coin] = r.dailyRaw.map((k) => [k.t, k.c]); coins++; lens += r.dailyRaw.length;
@@ -381,10 +385,21 @@ function createPoller({ dex, store, log }) {
         for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
         funding[r.coin] = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
       }
+      // overnight + weekend holds (buy at close, sell before open) via the boundary engine; memoized to the hourly-spine version
+      if (r.hourlyRaw && r.hourlyRaw.length > 2) {
+        if (r._ovTs !== r.hourlyTs) {
+          const px = r.hourlyRaw, start = px[0][0], end = px[px.length - 1][0];
+          const anchors = overnightAnchors(start, end).concat(weekendAnchors(start, end));
+          r._ovClose = runHolds(px, fh, anchors).map((h) => [Math.floor(h.exit / DAY) * DAY, +h.gross.toFixed(8), +(h.funding || 0).toFixed(8)]).sort((a, b) => a[0] - b[0]);
+          r._ovTs = r.hourlyTs;
+        }
+        if (r._ovClose && r._ovClose.length) overnight[r.coin] = r._ovClose;
+        if (offHours.closed) { const pc = priceAsOf(r.hourlyRaw, offHours.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
+      }
     }
     const sig = coins + ":" + lens;
     if (sig !== dailySig) { dailySig = sig; dailyVer = Date.now(); }   // content changed -> new ETag
-    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding };
+    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, liveClose };
   }
 
   // ---- session / time-of-day analytics (served at /api/analytics) ----
@@ -753,4 +768,3 @@ function createPoller({ dex, store, log }) {
 }
 
 module.exports = { createPoller };
-
