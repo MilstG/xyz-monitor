@@ -273,6 +273,7 @@ function createPoller({ dex, store, log, version }) {
     for (const r of rows.values()) {
       if (r.delisted || !needsFetch(r)) continue;
       if (prefix && inflight.has(prefix + r.coin)) continue;
+      if (r.coin === benchCoin) return r.coin;   // benchmark first, always: RS, β, leaders and every correlation panel gate on its history
       if (!best || (r.isNew && !best.isNew) ||
           (r.isNew === best.isNew && (r.vol || 0) > (best.vol || 0))) best = r;
     }
@@ -313,8 +314,17 @@ function createPoller({ dex, store, log, version }) {
   }
   async function dailyWorker() {
     for (;;) {
-      if (!hourlyPassComplete()) { await sleep(1000); continue; }
-      const coin = pick(needDaily, "d:");
+      let coin = null;
+      if (!hourlyPassComplete()) {
+        // Carve-out: the benchmark's daily history is what leaders/β/RS/correlation panels gate
+        // on, and it costs a single fetch — pull it immediately instead of making it wait the
+        // ~4 minutes of hourly backfill on a cold volume. Everything else still yields.
+        const b = benchCoin ? rows.get(benchCoin) : null;
+        if (b && !b.delisted && needDaily(b) && !inflight.has("d:" + b.coin)) coin = b.coin;
+        else { await sleep(1000); continue; }
+      } else {
+        coin = pick(needDaily, "d:");
+      }
       if (!coin) { await sleep(2000); continue; }
       if (inflight.has("d:" + coin)) { await sleep(800); continue; }
       inflight.add("d:" + coin);
@@ -451,6 +461,14 @@ function createPoller({ dex, store, log, version }) {
       ts: Date.now(), dataTs: lastPoll, dex, benchCoin, markets,
       v: version || null,
       offHours: computeOffHours(Date.now()),
+      // live warmup counts: h = markets without hourly features yet, d = markets with no daily
+      // closes servable at all (no 370d backfill AND no hourly spine to derive from) — lets the
+      // client show "N still backfilling" instead of a mystery placeholder, and poll accordingly
+      warm: (() => { let h = 0, d = 0;
+        for (const r of activeMarkets()) { if (r.delisted) continue;
+          if (!r.feat) h++;
+          if (!r.dailyRaw && !(r.hourlyRaw && r.hourlyRaw.length > 24)) d++; }
+        return { h, d }; })(),
       regime: { corr: curCorr, corrPct: curCorrPct, corrN: curCorrN, corrSamples: regimeHist.length },
     };
   }
