@@ -1,8 +1,14 @@
 "use strict";
 const path = require("path");
+const crypto = require("crypto");
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
+
+// Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
+// the UI status line — one glance answers "is the live site actually running this build?"
+// (most historical "it doesn't work" reports were stale deploys, not bugs).
+const VERSION = "2026.07.04-2";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -14,7 +20,7 @@ const SITE_USER = process.env.SITE_USER || "friend";
 function log(msg) { console.log(new Date().toISOString() + " " + msg); }
 
 const store = openStore(DATA_DIR);
-const poller = createPoller({ dex: DEX, store, log });
+const poller = createPoller({ dex: DEX, store, log, version: VERSION });
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -26,6 +32,16 @@ function serveCached(req, reply, payload, fallback) {
   reply.header("etag", tag);
   if (req.headers["if-none-match"] === tag) { reply.code(304).send(); return; }
   return body;
+}
+
+// Constant-time credential check: hash both sides to equal length, then timingSafeEqual.
+// Plain === leaks match length/position through response timing; hashing first also makes
+// the comparison safe for unequal-length inputs (timingSafeEqual throws on those).
+const sha = (s) => crypto.createHash("sha256").update(String(s)).digest();
+function credsOk(u, p) {
+  const uOk = crypto.timingSafeEqual(sha(u), sha(SITE_USER));
+  const pOk = crypto.timingSafeEqual(sha(p), sha(SITE_PASSWORD));
+  return (uOk & pOk) === 1;   // bitwise: both comparisons always execute (no short-circuit timing)
 }
 
 async function main() {
@@ -41,7 +57,7 @@ async function main() {
       const [scheme, enc] = hdr.split(" ");
       if (scheme === "Basic" && enc) {
         const [u, p] = Buffer.from(enc, "base64").toString().split(":");
-        if (u === SITE_USER && p === SITE_PASSWORD) return;
+        if (credsOk(u, p)) return;
       }
       reply.header("WWW-Authenticate", 'Basic realm="xyz-monitor"').code(401).send("Authentication required");
     });
@@ -62,10 +78,17 @@ async function main() {
     const coin = (req.query && req.query.coin) || "";
     return poller.getSeries(coin) || { oi: [], funding: [] };
   });
-  fastify.get("/api/health", () => ({ ok: true, ...poller.stats(), ts: Date.now() }));
+  // Hourly OHLCV for the drawer candle chart. days: 1..60, default 14.
+  fastify.get("/api/candles", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const coin = (req.query && req.query.coin) || "";
+    const days = req.query && req.query.days;
+    return { coin, candles: poller.getCandles(coin, days) };
+  });
+  fastify.get("/api/health", () => ({ ok: true, version: VERSION, ...poller.stats(), ts: Date.now() }));
 
   await fastify.listen({ port: PORT, host: HOST });
-  log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR})`);
+  log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
   poller.start().catch((e) => log("poller start error: " + (e && e.message)));
 }
 

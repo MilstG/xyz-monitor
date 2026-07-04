@@ -16,6 +16,7 @@ instant, and the per-IP rate limit stops being a per-user problem.
   trend sparklines. Rebuilt every ~60s.
 - **`/api/health`** — liveness + basic stats (used as the Railway healthcheck).
 - **`/api/series?coin=<coin>`** — per-market OI and funding history (powers the ticker drawer sparklines).
+- **`/api/candles?coin=<coin>&days=N`** — per-market hourly OHLCV (1–60d, default 14; powers the drawer candle chart).
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
@@ -23,6 +24,11 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **Persistent OI** — open interest accrues over time and can't be re-fetched, so every
   sample is written to an append-only log on a mounted volume (`$DATA_DIR/oi.log`) and
   reloaded on boot. It survives restarts and redeploys. Pruned to 31 days daily.
+- **WebSocket universe feed** — subscribes to `allDexsAssetCtxs` for real-time price /
+  funding / OI pushes at zero rate-limit cost; REST drops to a slow reconciliation poll
+  while the socket is healthy and instantly resumes 30s polling if it goes quiet.
+- **Build stamp** — a version constant is shipped in `/api/health`, the snapshot payload and
+  the UI status line, so a stale deploy is visible at a glance.
 - **Auto-detect new HIP-3 listings** — the universe is re-polled every 30s. Any market that
   wasn't there before is logged (`NEW market detected: …`) and its candle history is
   backfilled immediately (new listings jump the queue). A daily audit line logs the active
@@ -44,7 +50,8 @@ railway.json         Railway build/deploy config
 
 ## Run locally
 
-Requires Node 20+.
+Requires Node 22+ (the WebSocket universe feed uses the built-in WebSocket client; on
+older runtimes the app runs identically on pure REST).
 
 ```bash
 npm install
