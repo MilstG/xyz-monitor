@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.04-2";
+const VERSION = "2026.07.04-4";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -65,7 +65,14 @@ async function main() {
   }
 
   await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"] });
-  await fastify.register(require("@fastify/static"), { root: path.join(__dirname, "public"), prefix: "/" });
+  await fastify.register(require("@fastify/static"), {
+    root: path.join(__dirname, "public"),
+    prefix: "/",
+    // Force revalidation on every static asset. Without this, browsers heuristically cache
+    // app.js/styles.css and a fresh deploy can look like nothing changed until a hard refresh —
+    // the exact "I deployed but I don't see it" failure. ETags make revalidation a cheap 304.
+    setHeaders(res) { res.setHeader("cache-control", "no-cache"); },
+  });
 
   fastify.get("/api/snapshot", (req, reply) =>
     serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] }));
