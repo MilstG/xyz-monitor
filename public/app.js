@@ -204,6 +204,7 @@ function applySnapshot(s){
   state.benchCoin=s.benchCoin||detectBenchmark();
   if(s.dataTs) state.dataTs=s.dataTs;
   if(s.regime) state.regimeSrv=s.regime;
+  if(s.warm) state.warm=s.warm;
   if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
@@ -231,7 +232,8 @@ function applyDaily(d){ if(!d||!d.daily) return;
     }
     r._dret=null; r._wrL=null; }
   scheduleRender();
-  if(!el('view-corr').hidden) renderCorr();
+  if(!el('view-corr').hidden) openCorr();           // wrapper, so the "loading X/Y" sync counter advances with the data
+  if(!el('view-sectors').hidden) renderSectors();   // leaders map + sector corr fill in live as daily coverage grows
 }
 function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
   for(const r of rows){ if(r.vol)v+=r.vol; if(r.oi)o+=r.oi; }
@@ -1875,7 +1877,7 @@ function renderSectors(){
         for(const h of hist){ if(!h.pts) continue; const p=h.pts.find(x=>x.name===sec.name); if(p) sec.trail.push({x:p.x, y:p.y, o:h.o}); } }
     }
     el('sect-map').innerHTML = data ? renderLeaders(data)
-      : '<div class="msg">The leadership map needs the S&amp;P benchmark and a few weeks of daily history — it fills in as the background daily backfill completes.</div>';
+      : `<div class="msg">The leadership map needs the S&amp;P benchmark and daily history — it fills in automatically as the server backfill completes.${warmCount()}</div>`;
     if(data) attachLeadersHandlers();
     if(data) attachMapHover();
   } else {
@@ -2135,7 +2137,7 @@ function renderSectorCorr(list){
   const bind=()=>{ box.querySelectorAll('button[data-scorr]').forEach(b=>b.addEventListener('click',()=>{
     state.sect.corrTf=b.dataset.scorr; if(!el('view-sectors').hidden) renderSectors(); })); };
   const cache=SECT._corrCache;
-  if(!cache){ box.innerHTML=ctl+'<div class="sec" style="padding:8px 2px">Daily history still loading — sector correlation appears once enough markets have it.</div>'; bind(); return; }
+  if(!cache){ box.innerHTML=ctl+`<div class="sec" style="padding:8px 2px">Daily history still loading — sector correlation appears automatically once enough markets have it.${warmCount()}</div>`; bind(); return; }
   const {C, idxByG}=cache;
   const names=list.map(g=>g.name).filter(n=>idxByG.has(n)&&idxByG.get(n).length);
   if(names.length<2){ box.innerHTML=ctl+'<div class="sec" style="padding:8px 2px">Need at least two sectors with daily history.</div>'; bind(); return; }
@@ -2164,6 +2166,28 @@ function exportSectors(){ const list=SECT._rows; if(!list) return;
 
 // ===== polling cycle + countdown =====
 let cycleTimer=null, nextCycle=0, dailyTimer=null;
+// Daily refetch cadence is adaptive. The old fixed 15-min interval meant a tab open across a
+// redeploy (or opened mid-warmup) showed empty leaders/correlation panels for up to 15 minutes
+// AFTER the server was already warm. While coverage is incomplete we poll every 20s — the
+// server rebuilds /api/daily every 60s and serves 304s in between, so this is nearly free —
+// then relax to 15 min once the benchmark plus ~80% of active markets have daily history.
+function dailyWarm(){
+  const rows=activeRows(); if(!rows.length) return true;
+  let have=0; for(const r of rows) if(r.daily&&r.daily.length>=5) have++;
+  const b=state.benchCoin?state.rows.get(state.benchCoin):null;
+  const benchOk=!state.benchCoin||(b&&b.daily&&b.daily.length>=5);
+  return !benchOk || have<rows.length*0.8;
+}
+function scheduleDaily(){
+  clearTimeout(dailyTimer);
+  dailyTimer=setTimeout(async()=>{ await loadDaily(); scheduleDaily(); }, dailyWarm()? 20*1000 : 15*60*1000);
+}
+// Live warmup annotation for placeholder panels, fed by the snapshot's server-side counts.
+function warmCount(){
+  const w=state.warm;
+  if(!w||!(w.d>0)) return '';
+  return ` <span class="sec">(server backfill in progress — <b>${w.d}</b> market${w.d===1?'':'s'} remaining, refreshing every 20s)</span>`;
+}
 function startCycle(){ clearInterval(cycleTimer); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }, state.refreshMs); nextCycle=Date.now()+state.refreshMs; }
 function setRefresh(ms){ state.refreshMs=ms; state.pollMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
@@ -2276,7 +2300,7 @@ el('corrExport').addEventListener('click', exportCorr);
   await Promise.all([loadSnapshot(), loadDaily()]);
   applyHash();
   startCycle();
-  dailyTimer=setInterval(loadDaily, 15*60*1000);
+  scheduleDaily();
 })();
 
 
