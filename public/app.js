@@ -19,6 +19,8 @@ const COLS=[
     td:r=>`<td class="px${r.flash?' flash-'+r.flash:''}">${fmtPrice(r.px)}</td>`},
   {key:'funding', label:'Funding (APR)', type:'num',
     td:r=>{ const f=fmtFunding(r.funding); return `<td class="${f.c}" title="${f.title}">${f.t}</td>`; }},
+  {key:'prem', label:'Prem', type:'num', tip:'Perp vs oracle dislocation in basis points: (mark \u2212 oracle) / oracle. When the cash market is closed the oracle sits near the last print, so a persistent premium (perp rich) or discount (perp cheap) IS the live off-hours price discovery \u2014 the tradeable dislocation. Hover a cell for the exact mark vs oracle prices.',
+    td:r=>premCell(r)},
   {key:'h1', label:'1h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h1,2.5)}>${pctInner(r.h1)}</td>`},
   {key:'h4', label:'4h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h4,4)}>${pctInner(r.h4)}</td>`},
   {key:'d1', label:'1d', type:'num', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
@@ -38,14 +40,18 @@ const COLS=[
   {key:'dd', label:'vs 30d hi', type:'num', tip:'Distance below the 30-day high (0% = sitting at the high).', td:r=>ddCell(r)},
   {key:'doi', label:'ΔOI', type:'num', tip:'Open-interest change over the window, with a price-vs-OI regime tag. Stored server-side and persistent.',
     td:r=>`<td>${oiCell(r)}</td>`},
+  {key:'sqz', label:'Squeeze', type:'num', def:'desc', tip:'Squeeze susceptibility 0\u2013100: how loaded the short-squeeze spring is over the window. Crowding (how hard shorts pay via window-avg negative funding) \u00d7 fuel (OI building) \u00d7 trigger (price pressing toward the 30d high). 0 whenever funding is positive \u2014 no crowded shorts, no squeeze. Sort descending to screen. Hover for the components.',
+    td:r=>sqzCell(r)},
+  {key:'carry', label:'Carry', type:'num', def:'desc', tip:'Funding carry per unit of risk: window-avg funding (APR%) \u00f7 annualized realized vol. +0.5 = the short side collects half a vol-unit per year just for holding; negative = the long side is paid. The screen for "paid to take the unpopular side." Same sign convention as the funding column.',
+    td:r=>carryCell(r)},
   {key:'vol', label:'24h Vol', type:'num', td:r=>`<td class="sec">${fmtUsd(r.vol)}</td>`},
   {key:'oi', label:'OI', type:'num', td:r=>`<td class="sec">${fmtUsd(r.oi)}</td>`},
 ];
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
-// Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, OI.
-const DEFAULT_ORDER=['ticker','px','funding','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','oi'];
-const DEFAULT_HIDDEN=['beta','vol30','doi','oi'];
-const LAYOUT_V=2; // bump to force a one-time reset of saved layouts to the new default
+// Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','sqz','carry','oi'];
+const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi'];
+const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
 const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', topN:40, selected:null, search:'', topPairs:10, pair:null},
@@ -198,11 +204,20 @@ function applySnapshot(s){
   state.benchCoin=s.benchCoin||detectBenchmark();
   if(s.dataTs) state.dataTs=s.dataTs;
   if(s.regime) state.regimeSrv=s.regime;
+  if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
+  // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
+  // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
+  // immediately: the closed→open direction needs the freshly completed close→open gap, and
+  // open→closed needs the new liveClose anchors.
+  if(s.offHours){ const prev=state._ohClosed; state._ohSnap=true; state.offHours=s.offHours;
+    const cl=!!s.offHours.closed;
+    if(prev!=null&&prev!==cl) loadDaily();
+    state._ohClosed=cl; }
   const bn=el('benchnote'); if(bn) bn.textContent=(state.benchCoin&&state.rows.get(state.benchCoin))?state.rows.get(state.benchCoin).ticker:'not found';
   updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
 }
 function applyDaily(d){ if(!d||!d.daily) return;
-  state.offHours = d.offHours || {closed:false};                    // current cash-session state (global): whether closed now and the window bounds
+  if(!state._ohSnap) state.offHours = d.offHours || {closed:false};   // legacy path: only until a snapshot has shipped the fresher copy
   for(const coin in d.daily){ const r=state.rows.get(coin); if(!r) continue;
     const arr=d.daily[coin];
     r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1]})):r.daily;
@@ -272,6 +287,12 @@ function computeDerived(){
     const adrN=state.tf==='30d'?30:7;
     r.adr=(r.feat&&r.feat.dr&&r.feat.dr.length)?(()=>{ const s=r.feat.dr.slice(-adrN); return s.reduce((p,q)=>p+q,0)/s.length; })():undefined;
     r.dd=(r.px!=null&&r.feat&&r.feat.hi30>0)?(r.px-r.feat.hi30)/r.feat.hi30*100:undefined;
+    // premium / squeeze / carry — all off data already in the row (oracle, window funding, ΔOI, vol)
+    const fw=(r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding);
+    r.prem=(r.px!=null&&r.oracle>0)?(r.px/r.oracle-1)*1e4:undefined;
+    r.sqz=computeSqueeze(r,fw);
+    r._carryF=(fw!=null&&isFinite(fw))?fw*24*365*100:null;
+    r.carry=(r._carryF!=null&&r.vol30!=null&&isFinite(r.vol30)&&r.vol30>5)?r._carryF/r.vol30:undefined;
     r.gap = (state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone;   // live in-progress gap when the cash market is closed, else the last completed gap
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
     if(!state.benchCoin) r.beta=undefined;
@@ -394,6 +415,40 @@ function adrCell(r){ if(r.adr==null||!isFinite(r.adr)) return '<td><span class="
   return `<td class="sec" style="background:rgba(227,165,60,${t.toFixed(3)})" title="avg daily high−low as % of close, over ${state.tf==='30d'?'30d':'7d'}">${r.adr.toFixed(2)}%</td>`; }
 function ddCell(r){ if(r.dd==null||!isFinite(r.dd)) return '<td><span class="na">·</span></td>';
   const c=r.dd>=-0.5?'pos':(r.dd<=-15?'neg':'sec'); return `<td class="${c}" title="distance below the 30-day high">${r.dd.toFixed(1)}%</td>`; }
+function premCell(r){ if(r.prem==null||!isFinite(r.prem)) return '<td><span class="na" title="needs both mark and oracle prices">·</span></td>';
+  const v=r.prem, c=v>0.5?'pos':(v<-0.5?'neg':'sec');
+  const t=`mark ${fmtPrice(r.px)} vs oracle ${fmtPrice(r.oracle)} \u2014 perp ${v>=0?'rich (premium)':'cheap (discount)'} ${Math.abs(v).toFixed(1)}bp`+
+    (state.offHours&&state.offHours.closed?' \u00b7 cash market closed: this dislocation is the live off-hours price discovery':'');
+  return `<td${shade(v,25)} title="${esc(t)}"><span class="${c}">${v>=0?'+':''}${v.toFixed(1)}bp</span></td>`; }
+// Squeeze susceptibility 0-100. Necessary condition: crowded shorts, i.e. the window-average
+// funding is NEGATIVE (shorts pay longs to stay short — conviction crowding). That crowding
+// term is then amplified by fuel (OI building = fresh shorts pressing) and trigger (price
+// position in the 30d range — shorts near the highs are already underwater).
+function computeSqueeze(r, fundWin){
+  if(fundWin==null||!isFinite(fundWin)) return undefined;   // no window funding yet — accrues server-side
+  const fAPR=fundWin*24*365*100;
+  const crowd=fAPR<0?Math.tanh(-fAPR/35):0;
+  const fuel=(r.doi!=null&&isFinite(r.doi))?Math.tanh(Math.max(0,r.doi)/8):0;
+  let trig=0.5; const f=r.feat;
+  if(r.px!=null&&f&&f.hi30!=null&&f.lo30!=null&&f.hi30>f.lo30) trig=clamp((r.px-f.lo30)/(f.hi30-f.lo30),0,1);
+  r._sqzq={fAPR,crowd,fuel,trig};
+  if(crowd<=0) return 0;
+  return Math.round(100*crowd*(0.45+0.30*fuel+0.25*trig));
+}
+function sqzCell(r){ const v=r.sqz;
+  if(v===undefined) return '<td><span class="na" title="needs window-average funding \u2014 accrues server-side">·</span></td>';
+  const q=r._sqzq||{};
+  const t=v>0
+    ? `crowding ${Math.round((q.crowd||0)*100)}/100 (shorts paying ${Math.abs(q.fAPR||0).toFixed(0)}% APR over ${state.tf}) \u00b7 fuel ${Math.round((q.fuel||0)*100)}/100 (\u0394OI ${r.doi!=null?(r.doi>=0?'+':'')+r.doi.toFixed(1)+'%':'n/a'}) \u00b7 trigger ${Math.round((q.trig||0)*100)}/100 (position in the 30d range)`
+    : `no squeeze fuel \u2014 window funding ${q.fAPR!=null?(q.fAPR>=0?'+':'')+q.fAPR.toFixed(0)+'% APR':'n/a'} (${q.fAPR>=0?'longs are the crowded side':'shorts barely paying'})`;
+  if(v===0) return `<td title="${esc(t)}"><span class="na">0</span></td>`;
+  const col=v>=60?'var(--accent)':(v>=30?'var(--text)':'var(--muted)');
+  return `<td title="${esc(t)}"><span style="color:${col};font-weight:${v>=30?600:400}">${v}</span></td>`; }
+function carryCell(r){ const v=r.carry;
+  if(v==null||!isFinite(v)) return '<td><span class="na" title="needs window funding + annualized vol">·</span></td>';
+  const c=v>0.05?'pos':(v<-0.05?'neg':'sec'), fAPR=(r._carryF!=null)?r._carryF:null;
+  const t=`funding ${fAPR!=null?(fAPR>=0?'+':'')+fAPR.toFixed(0)+'% APR':'n/a'} \u00f7 vol ${r.vol30!=null?r.vol30.toFixed(0)+'%':'n/a'} \u2014 ${v>=0?'shorts are paid':'longs are paid'} ${Math.abs(v).toFixed(2)} vol-units/yr to hold`;
+  return `<td${shade(v,1)} title="${esc(t)}"><span class="${c}">${v>=0?'+':''}${v.toFixed(2)}</span></td>`; }
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts();
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
@@ -423,8 +478,13 @@ function computeRegime(){
   const rets=rows.map(r=>r[tfKey]).filter(v=>v!=null&&isFinite(v));
   const breadth=rets.length?rets.filter(v=>v>0).length/rets.length:null;
   const dispersion=rets.length>=2?stdev(rets):null;
+  // OI-weighted regime mix: where the open interest says positioning is going this window.
+  // Aggregates the per-row regime tags nobody reads one-by-one into a single tape-level bar.
+  const mix={}; let mixOI=0;
+  for(const r of rows){ const rg=r.regime; if(!rg||!(r.oi>0)) continue;
+    const m=mix[rg.l]||(mix[rg.l]={oi:0,n:0}); m.oi+=r.oi; m.n++; mixOI+=r.oi; }
   const sr=state.regimeSrv||{};
-  return { breadth, dispersion, n:rets.length,
+  return { breadth, dispersion, n:rets.length, mix, mixOI,
     corr:(sr.corr!=null?sr.corr:null), corrPct:(sr.corrPct!=null?sr.corrPct:null),
     corrN:sr.corrN||0, corrSamples:sr.corrSamples||0 };
 }
@@ -454,13 +514,26 @@ function renderRegimeStrip(){
   const corrTxt=g.corr==null?'<span class="na">loading\u2026</span>':`<b class="${corrCls}">${g.corr.toFixed(2)}</b>${pctTxt}`;
   const corrTip=g.corr==null?'mean pairwise 30d correlation across the top markets by volume (loading)'
     :`mean pairwise 30d correlation across the top ${g.corrN} by volume`+(g.corrPct!=null?`, ranked against the last 90 days (${g.corrSamples} samples)`:` \u2014 baseline still building (${g.corrSamples} samples)`);
+  // OI-weighted positioning mix: stacked bar of regime shares + the dominant directional read
+  const RG_CLS={'longs+':'rg-long','squeeze':'rg-sqz','shorts+':'rg-short','unwind':'rg-unw','flat':'rg-flat'};
+  const RG_ORDER=['longs+','squeeze','shorts+','unwind','flat'];
+  let mixHtml='';
+  if(g.mixOI>0){ let segs='',domL=null,domV=0;
+    for(const l of RG_ORDER){ const m=g.mix[l]; if(!m||!(m.oi>0)) continue;
+      const sh=m.oi/g.mixOI;
+      if(l!=='flat'&&sh>domV){domV=sh;domL=l;}
+      segs+=`<span class="rs-mix-seg" data-tip="${esc(`${l} \u2014 ${Math.round(sh*100)}% of open interest (${m.n} market${m.n===1?'':'s'}, ${fmtUsd(m.oi)}). ${RG_STORY[l]||''}`)}" style="width:${(sh*100).toFixed(1)}%;background:${RG_COLOR[RG_CLS[l]]||'var(--faint)'}"></span>`; }
+    mixHtml=`<span class="rs-m"><span class="rs-k" data-tip="Share of total open interest sitting in each price\u00d7OI regime over ${state.tf} \u2014 is new money entering the complex (longs+/shorts+) or is this positioning unwinding (squeeze/unwind)? Hover each segment for the breakdown.">positioning</span>`+
+      `<span class="rs-mix">${segs}</span>`+
+      (domL?`<b class="${RG_CLS[domL]}" style="font-size:11px" data-tip="largest non-flat regime by OI share">${Math.round(domV*100)}% ${esc(domL)}</b>`:'')+`</span>`; }
   box.innerHTML=
-     `<span class="rs-lab ${lab.cls}" title="${esc(lab.tip)}">${esc(lab.t)}</span>`
-    +`<span class="rs-m" title="share of markets up over ${state.tf} (${upN}/${g.n})"><span class="rs-k">breadth</span>`
+     `<span class="rs-lab ${lab.cls}" data-tip="${esc(lab.tip)}">${esc(lab.t)}</span>`
+    +`<span class="rs-m" data-tip="share of markets up over ${state.tf} (${upN}/${g.n})"><span class="rs-k">breadth</span>`
       +`<span class="rs-bar"><span class="rs-bar-fill" style="width:${bw}%"></span></span>`
       +`<b class="${g.breadth>=0.5?'pos':'neg'}">${bw}%</b></span>`
-    +`<span class="rs-m" title="cross-sectional stdev of ${state.tf} returns \u2014 how spread out the moves are"><span class="rs-k">dispersion</span> <b>\u00b1${g.dispersion!=null?g.dispersion.toFixed(2):'\u2014'}%</b></span>`
-    +`<span class="rs-m" title="${esc(corrTip)}"><span class="rs-k">30d corr</span> ${corrTxt}</span>`;
+    +`<span class="rs-m" data-tip="cross-sectional stdev of ${state.tf} returns \u2014 how spread out the moves are"><span class="rs-k">dispersion</span> <b>\u00b1${g.dispersion!=null?g.dispersion.toFixed(2):'\u2014'}%</b></span>`
+    +mixHtml
+    +`<span class="rs-m" data-tip="${esc(corrTip)}"><span class="rs-k">30d corr</span> ${corrTxt}</span>`;
 }
 
 // ===== correlation tab =====
@@ -709,6 +782,10 @@ function csvCell(k,r){ switch(k){
   case 'ticker': return r.ticker; case 'px': return r.px;
   case 'funding': return r.funding!=null?(r.funding*24*365*100).toFixed(4):'';
   case 'h1':return r.h1; case 'h4':return r.h4; case 'd1':return r.d1; case 'd7':return r.d7; case 'd30':return r.d30;
+  case 'gap': return r.gap!=null&&isFinite(r.gap)?r.gap.toFixed(3):'';
+  case 'prem': return r.prem!=null&&isFinite(r.prem)?r.prem.toFixed(2):'';
+  case 'sqz': return r.sqz!==undefined?r.sqz:'';
+  case 'carry': return r.carry!=null&&isFinite(r.carry)?r.carry.toFixed(3):'';
   case 'rs': return r.rs; case 'mom': return r.mom!=null?Math.round(r.mom):'';
   case 'vol30': return r.vol30!=null&&isFinite(r.vol30)?r.vol30.toFixed(1):'';
   case 'adr': return r.adr!=null&&isFinite(r.adr)?r.adr.toFixed(3):'';
@@ -739,12 +816,24 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   const bar=v=>`<span class="cbar" style="width:${Math.round(Math.abs(v)*64)}px;background:${corrColor(v)}"></span>`;
   const li=(t,v)=>`<div class="crow"><span class="ct">${esc(t)}</span>${bar(v)}<span class="cv ${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span></div>`;
   const starred=state.watch.has(coin);
+  const split=sessionSplit30(r);
+  const splitHtml = split
+    ? `<div class="dsec" data-tip="30d return split into what accrued off-hours (overnight + weekend close\u2192open holds) vs during the US cash session. When most of the return lives in the off-hours leg, the name moves while the cash market sleeps \u2014 the classic overnight-effect pattern.">Where the 30d return happened</div>`+
+      `<div class="dsplit">`+
+        `<span data-tip="total 30d price return">total <b class="${split.total>=0?'pos':'neg'}">${split.total>=0?'+':''}${split.total.toFixed(1)}%</b></span>`+
+        `<span data-tip="compounded across ${split.n} close\u2192open holds (overnight + weekend)">off-hours <b class="${split.off>=0?'pos':'neg'}">${split.off>=0?'+':''}${split.off.toFixed(1)}%</b></span>`+
+        `<span data-tip="the residual: what accrued 09:30\u201316:00 ET">session <b class="${split.sess>=0?'pos':'neg'}">${split.sess>=0?'+':''}${split.sess.toFixed(1)}%</b></span>`+
+        (Math.abs(split.off)>Math.abs(split.total)*0.7&&Math.abs(split.total)>2?`<span class="sec" style="font-size:10.5px" data-tip="\u226570% of the 30d move accrued while the cash market was closed">\u26a1 overnight-driven</span>`:'')+
+      `</div>`
+    : '';
   el('drawer').innerHTML=`
     <div class="dhead">${esc(r.ticker)}
       <span class="star${starred?' on':''}" id="dstar" style="font-size:16px;cursor:pointer">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}</div>
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
+    <div id="dcandles"></div>
+    ${splitHtml}
     <div id="dseries"></div>
     <div class="dsec">Metrics</div>
     <div class="dgrid">
@@ -754,6 +843,10 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
       ${st('1d',pct(r.d1))} ${st('7d',pct(r.d7))}
       ${st('30d',pct(r.d30))} ${st('vs S&amp;P ('+state.tf+')', r.rs==null?'<span class="na">—</span>':pct(r.rs))}
       ${st('β vs S&amp;P',betaTxt)} ${st('Vol (ann)', r.vol30!=null?r.vol30.toFixed(0)+'%':'·')}
+      ${st('Premium', (r.prem!=null&&isFinite(r.prem))?`<span class="${r.prem>0.5?'pos':(r.prem<-0.5?'neg':'sec')}">${r.prem>=0?'+':''}${r.prem.toFixed(1)}bp</span>`:'·')}
+      ${st('Gap', (r.gap!=null&&isFinite(r.gap))?`<span class="${r.gap>=0?'pos':'neg'}">${r.gap>=0?'+':''}${r.gap.toFixed(2)}%</span>`:'·')}
+      ${st('Squeeze', r.sqz!==undefined?`<span style="color:${r.sqz>=60?'var(--accent)':(r.sqz>=30?'var(--text)':'var(--faint)')}">${r.sqz}</span>`:'·')}
+      ${st('Carry', (r.carry!=null&&isFinite(r.carry))?`<span class="${r.carry>0.05?'pos':(r.carry<-0.05?'neg':'sec')}">${r.carry>=0?'+':''}${r.carry.toFixed(2)}</span>`:'·')}
       ${st('vs 30d high', r.dd!=null?`<span class="${r.dd>=-0.5?'pos':'sec'}">${r.dd.toFixed(1)}%</span>`:'·')}
       ${st('ΔOI ('+state.tf+')', r.doi!=null?`<span class="${r.doi>=0?'pos':'neg'}">${r.doi>=0?'+':''}${r.doi.toFixed(2)}%</span>`:'<span class="na">—</span>')}
       ${st('24h Vol',fmtUsd(r.vol))} ${st('Open Interest',fmtUsd(r.oi))}
@@ -766,6 +859,71 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   el('dstar').onclick=()=>{ toggleWatch(coin); openDetail(coin); };
   setHash('t='+encodeURIComponent(coin));
   loadDrawerSeries(coin);
+  loadDrawerCandles(coin);
+}
+// 30d overnight-effect decomposition for one name: total return vs the compounded off-hours
+// (close→open) leg, session = the residual. Built entirely from data already shipped to the
+// client (daily closes + the overnight hold series), so it costs nothing server-side.
+function sessionSplit30(r){
+  if(!r.daily||!r.overnight||r.daily.length<5||!r.overnight.length) return null;
+  const cut=Date.now()-30*DAY;
+  let first=null,last=null;
+  for(const k of r.daily){ const c=parseFloat(k.c); if(!isFinite(c))continue; if(k.t>=cut&&first==null)first=c; last=c; }
+  if(!(first>0)||last==null) return null;
+  const total=last/first-1;
+  let eq=1,n=0;
+  for(const h of r.overnight){ if(h.t>=cut&&isFinite(h.g)){ eq*=(1+h.g); n++; } }
+  if(n<3) return null;
+  const off=eq-1, sess=(1+total)/(1+off)-1;
+  return {total:total*100, off:off*100, sess:sess*100, n};
+}
+// Hourly candlestick chart for the drawer, fed by /api/candles. Crosshair + OHLC readout via
+// the shared hoverChart infrastructure (same one the Sessions curves use).
+function candleSvg(cd){
+  const W=420,H=176, pl=4,pr=52,pt=10,pb=20;
+  if(!cd||cd.length<5) return '';
+  let lo=Infinity,hi=-Infinity;
+  for(const k of cd){ if(isFinite(k[3])&&k[3]<lo)lo=k[3]; if(isFinite(k[2])&&k[2]>hi)hi=k[2]; }
+  if(!(hi>lo)) return '';
+  const pad=(hi-lo)*0.06; hi+=pad; lo-=pad;
+  const n=cd.length, X=i=>pl+(i+0.5)/n*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
+  const bw=Math.max(1,Math.min(6,(W-pl-pr)/n*0.72));
+  const axf=v=>{ const a=Math.abs(v);
+    if(a>=1e6) return (v/1e6).toFixed(2)+'M';
+    if(a>=1e4) return (v/1e3).toFixed(1)+'k';
+    return fmtPrice(v); };
+  let s='';
+  for(const v of lcTicks(lo,hi,4)){ const y=Y(v).toFixed(1);
+    s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`+
+       `<text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${axf(v)}</text>`; }
+  for(let i=0;i<n;i++){ const k=cd[i], o=k[1],h=k[2],l=k[3],c=k[4];
+    if(!isFinite(o)||!isFinite(c)) continue;
+    const up=c>=o, col=up?'var(--up)':'var(--down)', x=X(i);
+    if(isFinite(h)&&isFinite(l)) s+=`<line x1="${x.toFixed(1)}" y1="${Y(h).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Y(l).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
+    const y0=Y(Math.max(o,c)), hgt=Math.max(1,Math.abs(Y(o)-Y(c)));
+    s+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" fill="${col}"${up?' fill-opacity="0.85"':''}/>`; }
+  const dfmt=t=>{ const d=new Date(t); return (d.getMonth()+1)+'/'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':00'; };
+  s+=`<text x="${pl}" y="${H-6}" class="lc-tick">${dfmt(cd[0][0])}</text>`;
+  s+=`<text x="${(W-pr)}" y="${H-6}" text-anchor="end" class="lc-tick">${dfmt(cd[n-1][0])}</text>`;
+  const xs=cd.map((_,i)=>X(i));
+  const rows=cd.map(k=>{ const chg=(isFinite(k[1])&&k[1]>0&&isFinite(k[4]))?(k[4]/k[1]-1)*100:null;
+    return `<b style="color:var(--text)">${dfmt(k[0])}</b><br>O ${fmtPrice(k[1])} · H ${fmtPrice(k[2])}<br>L ${fmtPrice(k[3])} · C ${fmtPrice(k[4])}`+
+      (chg!=null?`<br><span class="${chg>=0?'pos':'neg'}" style="color:${chg>=0?'var(--up)':'var(--down)'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`:''); });
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+async function loadDrawerCandles(coin){
+  const box=el('dcandles'); if(!box) return;
+  const days=state.candTf||7;
+  try{
+    const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(coin)+'&days='+days);
+    if(state.detail!==coin || !box.isConnected) return;
+    const cd=(res&&Array.isArray(res.candles))?res.candles:[];
+    if(cd.length<5){ box.innerHTML=''; return; }   // server not updated yet, or spine still filling — the drawer just omits the chart
+    const seg=[3,7,14,30].map(d=>`<button type="button" class="cdtf${d===days?' on':''}" data-d="${d}">${d}d</button>`).join('');
+    box.innerHTML=`<div class="dsec" style="display:flex;align-items:center;gap:8px">Hourly candles <span class="cdtf-seg" style="margin-left:auto">${seg}</span></div>`+candleSvg(cd);
+    box.querySelectorAll('.cdtf').forEach(b=>b.addEventListener('click',()=>{ state.candTf=+b.dataset.d; loadDrawerCandles(coin); }));
+    attachLineHover();
+  }catch(_){ }
 }
 async function loadDrawerSeries(coin){
   const box=el('dseries'); if(!box) return;
@@ -811,6 +969,8 @@ const ALERT_METRICS=[
   {k:'d7',label:'7d %',unit:'%',get:r=>r.d7},
   {k:'d30',label:'30d %',unit:'%',get:r=>r.d30},
   {k:'funding',label:'Funding APR %',unit:'%',get:r=>r.funding!=null?r.funding*24*365*100:null},
+  {k:'prem',label:'Premium (bp)',unit:'bp',get:r=>r.prem},
+  {k:'sqz',label:'Squeeze (0-100)',unit:'',get:r=>r.sqz},
   {k:'mom',label:'Momentum',unit:'',get:r=>r.mom},
   {k:'doi',label:'ΔOI %',unit:'%',get:r=>r.doi},
   {k:'beta',label:'Beta',unit:'',get:r=>r.beta},
@@ -832,7 +992,7 @@ function evaluateAlerts(){ const A=state.alerts; if(!A.rules.length) return;
       else alertFired.delete(key);
     } } }
 function fireAlert(rule,r,v,m){ const A=state.alerts;
-  const vs = m.unit==='%' ? (v>=0?'+':'')+v.toFixed(2)+'%' : m.unit==='$' ? fmtPrice(v) : m.unit==='M' ? fmtUsd(v) : (Math.round(v*100)/100);
+  const vs = m.unit==='%' ? (v>=0?'+':'')+v.toFixed(2)+'%' : m.unit==='$' ? fmtPrice(v) : m.unit==='M' ? fmtUsd(v) : m.unit==='bp' ? (v>=0?'+':'')+v.toFixed(1)+'bp' : (Math.round(v*100)/100);
   const text=`${r.ticker} · ${m.label} ${rule.op} ${rule.value} · now ${vs}`;
   A.log.unshift({t:Date.now(), text}); if(A.log.length>60) A.log.pop();
   A.unseen++; updateBell(); pushToast(text);
@@ -917,6 +1077,7 @@ function hoverChart(svgInner, o){
 }
 function attachLineHover(){
   document.querySelectorAll('svg.lchart').forEach(svg=>{
+    if(svg.dataset.hb) return; svg.dataset.hb='1';   // bind once — this now runs from several render paths
     const reg=_hoverReg[svg.id]; if(!reg||!reg.xs||!reg.xs.length) return;
     const cx=svg.querySelector('.lcx'), read=el(svg.id+'-r'); if(!read) return;
     svg.addEventListener('mousemove',(ev)=>{
@@ -1306,7 +1467,10 @@ function renderSeasonality(se){
 function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; drawSessions(); }); }
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
-  _hoverReg={}; _hoverSeq=0;
+  // GC stale hover entries instead of wiping the registry: hoverChart is now also used by the
+  // drawer candle chart, which must survive a sessions re-render. _hoverSeq is never reset —
+  // resetting it could reissue an id that a still-live chart owns.
+  for(const id in _hoverReg) if(!document.getElementById(id)) delete _hoverReg[id];
   const a=state.analytics.data, err=state.analytics.err;
   const head=`<div class="cp-head" style="margin-bottom:4px">Session &amp; time-of-day analytics</div>`+
     `<div class="sec" style="margin-bottom:16px;max-width:680px;line-height:1.55">Server-side studies of when each market is alive and what an overnight / weekend / cash hold actually pays — built on the 60-day hourly price &amp; funding spines. Panels unlock here as coverage accrues.</div>`;
@@ -1697,10 +1861,19 @@ function renderSectors(){
   computeDerived();
   const list=computeSectors();
   const lg=el('sect-legend'); if(lg) lg.innerHTML = state.sect.mode==='leaders'
-    ? `<b>Leadership map</b> — where each sector sits vs the S&amp;P over the last <b>${leadersDays()}d</b>${leadersFloored()?' <span class="sec">(leadership needs a multi-day window, so intraday selections show 7d — use the rotation board below for shorter windows)</span>':''}. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> sectors are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume.`
+    ? `<b>Leadership map</b> — where each sector sits vs the S&amp;P over the last <b>${leadersDays()}d</b>${leadersFloored()?' <span class="sec">(leadership needs a multi-day window, so intraday selections show 7d — use the rotation board below for shorter windows)</span>':''}. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> sectors are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume. The <b>dotted tail</b> behind each bubble is its recent path (oldest → now) — hover the tail dots for the values.`
     : '<b>Flow map</b> — horizontal = capital direction (price + OI conviction) over the selected window, vertical = activity heat (volume + volatility). Top-right = accumulation, top-left = distribution. Bubble size = 24h volume.';
   if(state.sect.mode==='leaders'){
     const data=computeLeaders(list);
+    // Trails: re-evaluate the same map with the window ending 2/4/6 (7d) or 4/8/12 (30d)
+    // benchmark days earlier, giving each sector a short trajectory — the whole point of a
+    // rotation graph is the path, not the snapshot. Drawn oldest→newest into the live bubble.
+    if(data){
+      const offs = leadersDays()<=7 ? [6,4,2] : [12,8,4];
+      const hist = offs.map(o=>({o, pts:computeLeaders(list,o)}));
+      for(const sec of data){ sec.trail=[];
+        for(const h of hist){ if(!h.pts) continue; const p=h.pts.find(x=>x.name===sec.name); if(p) sec.trail.push({x:p.x, y:p.y, o:h.o}); } }
+    }
     el('sect-map').innerHTML = data ? renderLeaders(data)
       : '<div class="msg">The leadership map needs the S&amp;P benchmark and a few weeks of daily history — it fills in as the background daily backfill completes.</div>';
     if(data) attachLeadersHandlers();
@@ -1718,13 +1891,16 @@ function renderSectors(){
 // Leadership lookback follows the window selector (7d/30d). It's daily-based, so intraday choices floor to 7d.
 function leadersDays(){ return {'1h':7,'4h':7,'1d':7,'7d':7,'30d':30}[state.tf]||30; }
 function leadersFloored(){ return state.tf==='1h'||state.tf==='4h'||state.tf==='1d'; }
-function computeLeaders(list){
+function computeLeaders(list, offset){
+  offset=offset||0;   // end the window `offset` benchmark days ago (0 = now) — powers the trails
   const bench=state.benchCoin?state.rows.get(state.benchCoin):null;
   if(!bench||!bench.daily||bench.daily.length<5) return null;
   const bDay=new Map();
   for(const k of bench.daily){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)) bDay.set(d,cl); }
   const days=[...bDay.keys()].sort((a,b)=>a-b);
-  const win=days.slice(-Math.min(leadersDays(), days.length));
+  const endI=days.length-offset;
+  if(endI<5) return null;
+  const win=days.slice(Math.max(0, endI-leadersDays()), endI);
   if(win.length<5) return null;
   const b0=bDay.get(win[0]); if(!(b0>0)) return null;
   const mid=Math.floor(win.length/2), bMid=bDay.get(win[mid]), bEnd=bDay.get(win[win.length-1]);
@@ -1804,7 +1980,9 @@ function attachMapHover(){
 function renderLeaders(data){
   const wl=leadersDays()+'d';
   const W=760,H=430, px0=44,px1=W-14, py0=H-48, py1=30;
-  let mx=0.6,my=0.6; for(const s of data){ mx=Math.max(mx,Math.abs(s.x)); my=Math.max(my,Math.abs(s.y)); }
+  let mx=0.6,my=0.6;
+  for(const s of data){ mx=Math.max(mx,Math.abs(s.x)); my=Math.max(my,Math.abs(s.y));
+    if(s.trail) for(const t of s.trail){ mx=Math.max(mx,Math.abs(t.x)); my=Math.max(my,Math.abs(t.y)); } }
   mx*=1.18; my*=1.18;
   const xM=v=>px0+(clamp(v,-mx,mx)+mx)/(2*mx)*(px1-px0);
   const yM=v=>py0-(clamp(v,-my,my)+my)/(2*my)*(py0-py1);
@@ -1830,10 +2008,19 @@ function renderLeaders(data){
   layoutMapLabels(nodes,{px0,px1,py1,py0});
   for(const n of nodes){ const sec=n.sec, q=leadQuad(sec.x,sec.y), col=q.c;
     const dir=sec.y>=0?'lead growing':'lead shrinking';
-    const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ${wl}, ${dir} — ${q.l}`;
+    const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ${wl}, ${dir} — ${q.l}. Dotted tail = its path (oldest → now).`;
     const lp=mapLabelSvg(n,10.5);
     s+=`<g class="lead" data-sect="${esc(sec.name)}" style="cursor:pointer"><title>${esc(tip)}</title>`;
     s+=lp.leader;
+    if(sec.trail&&sec.trail.length){
+      const tp=sec.trail.map(t=>({px:xM(t.x), py:yM(t.y), t}));
+      let d=''; tp.forEach((p,i)=>d+=(i?'L':'M')+p.px.toFixed(1)+' '+p.py.toFixed(1)+' ');
+      d+='L'+n.cx.toFixed(1)+' '+n.cy.toFixed(1);
+      s+=`<path d="${d.trim()}" fill="none" stroke="${col}" stroke-width="1" stroke-dasharray="2 3" opacity="0.5"/>`;
+      tp.forEach((p,i)=>{
+        const dt=`${sec.name} · ${p.t.o} bench-day${p.t.o===1?'':'s'} ago: ${p.t.x>=0?'+':''}${p.t.x.toFixed(1)}% vs S&P, ${p.t.y>=0?'lead growing':'lead shrinking'}`;
+        s+=`<circle cx="${p.px.toFixed(1)}" cy="${p.py.toFixed(1)}" r="${(2+i*0.7).toFixed(1)}" fill="${col}" fill-opacity="${(0.28+0.16*i).toFixed(2)}"><title>${esc(dt)}</title></circle>`; });
+    }
     s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r.toFixed(1)}" fill="${col}" fill-opacity="0.3" stroke="${col}" stroke-width="1.5"/>`;
     s+=lp.txt+`</g>`; }
   s+='</svg>';
