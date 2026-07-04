@@ -93,8 +93,15 @@ function openStore(dataDir) {
       } catch (_) {}
       return m;
     },
+    // Written atomically (temp + rename): the warm cache exists so redeploys serve instantly,
+    // so a crash mid-write must never be able to leave a truncated features.json behind —
+    // that would silently cost a cold-start, the exact failure this file prevents.
     saveFeatures(data) {
-      try { fs.writeFileSync(featFile, JSON.stringify(data)); } catch (_) {}
+      try {
+        const tmp = featFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, featFile);
+      } catch (_) {}
     },
     loadFeatures() {
       try { if (fs.existsSync(featFile)) return JSON.parse(fs.readFileSync(featFile, "utf8")); }
@@ -112,7 +119,11 @@ function openStore(dataDir) {
       return [];
     },
     saveRegime(arr) {
-      try { fs.writeFileSync(regimeFile, JSON.stringify(arr)); } catch (_) {}
+      try {
+        const tmp = regimeFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(arr));
+        fs.renameSync(tmp, regimeFile);
+      } catch (_) {}
     },
     // Raw 60d hourly OHLCV spine — large, so written atomically (temp + rename) on a slow cadence so a
     // crash or redeploy mid-write can never corrupt the live file. Restored on boot so the session

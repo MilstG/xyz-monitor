@@ -1,7 +1,7 @@
 "use strict";
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
-const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep } = require("./hyperliquid");
+const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson } = require("./compute");
@@ -34,8 +34,14 @@ const REGIME_RETENTION = 90 * DAY;    // keep ~90 days of samples to percentile 
 const REGIME_MIN_SAMPLES = 8;         // don't report a percentile until the baseline has this many
 
 function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Number.isFinite(v) ? v : null; }
+// Payload-trim helpers: the snapshot ships hundreds of derived floats per market at full
+// double precision (17 digits) — quantizing to what the UI can actually display cuts the
+// JSON 30-50% without changing a single rendered pixel. `rnd` = fixed decimals (for %
+// values), `sig` = significant digits (for prices, which span 6 orders of magnitude).
+function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
+function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 
-function createPoller({ dex, store, log }) {
+function createPoller({ dex, store, log, version }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -47,6 +53,9 @@ function createPoller({ dex, store, log }) {
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
   const inflight = new Set();
+  // WebSocket universe accelerator: null until start(); REST remains authoritative for
+  // membership. wsApplied counts ctx batches folded into rows (for /api/health).
+  let sock = null, wsApplied = 0, lastWsApply = 0, universeTick = 0;
   // fundingHistory-endpoint support is unknown until probed against this dex; forward-fill + the
   // oi.log seed guarantee >=~31d of funding regardless, so this only gates the 60d backfill.
   let fundingHistoryEnabled = true, fundProbeTries = 0, fundProbeOk = 0;
@@ -70,8 +79,10 @@ function createPoller({ dex, store, log }) {
   function detectBenchmark() {
     for (const a of SP_ALIASES)
       for (const r of rows.values()) if (!r.delisted && r.ticker.toUpperCase() === a) return r.coin;
+    // Fallback for unseen variants: the token must END after optional digits (SPX, SPX500,
+    // SPX-mini) — a trailing letter (SPXW, SPYDER) is a different instrument, not the index.
     for (const r of rows.values())
-      if (!r.delisted && /(?:^|[^A-Z])(SPX|SP500|S&P)/i.test(r.ticker)) return r.coin;
+      if (!r.delisted && /(?:^|[^A-Z])(?:SPX|SP500|S&P)\d*(?![A-Z0-9])/i.test(r.ticker)) return r.coin;
     return null;
   }
 
@@ -173,8 +184,11 @@ function createPoller({ dex, store, log }) {
     const hourNow = Math.floor(Date.now() / HOUR) * HOUR;
     uni.forEach((u, i) => {
       const coin = u.name, ctx = ctxs[i] || {}, existed = rows.has(coin), r = getRow(coin);
-      if (!existed) { newCount++; log("NEW market detected: " + coin + " — queued for history backfill"); }
+      if (!existed && !u.isDelisted) { newCount++; log("NEW market detected: " + coin + " — queued for history backfill"); }
+      const wasDelisted = r.delisted;
       r.delisted = !!u.isDelisted;
+      if (r.delisted && !wasDelisted) r.delistedAt = Date.now();   // starts the heavy-data GC clock (see maintenance)
+      if (!r.delisted) r.delistedAt = 0;
       const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
       if (px != null) r.px = px;
       const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
@@ -192,6 +206,38 @@ function createPoller({ dex, store, log }) {
     sampleOI();
     lastPoll = Date.now();
     if (newCount || removed) buildSnapshot();
+  }
+
+  // Fold a WebSocket allDexsAssetCtxs event into rows. The ctx array for our dex is
+  // index-aligned with its universe order — the exact alignment metaAndAssetCtxs uses — so
+  // we map by position against the `order` captured on the last REST poll. If lengths
+  // disagree the universe changed since that poll: skip the batch and let the next REST
+  // reconciliation re-sync membership rather than smearing contexts across the wrong coins.
+  // Throttled to ~1 apply per 2s: sub-second pushes buy nothing when the snapshot rebuilds
+  // every 15s, and the throttle keeps sampleOI/JSON churn negligible.
+  function applyWsCtxs(tuples) {
+    const now = Date.now();
+    if (now - lastWsApply < 2000 || !order.length) return;
+    let arr = null;
+    for (const t of tuples) if (Array.isArray(t) && t[0] === dex && Array.isArray(t[1])) { arr = t[1]; break; }
+    if (!arr || arr.length !== order.length) return;
+    const hourNow = Math.floor(now / HOUR) * HOUR;
+    for (let i = 0; i < order.length; i++) {
+      const r = rows.get(order[i]);
+      if (!r || r.delisted) continue;
+      const ctx = arr[i] || {};
+      const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
+      if (px != null) r.px = px;
+      const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
+      const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); }
+      const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
+      const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
+      const oi = num(ctx.openInterest);
+      if (oi != null) { r.oiBase = oi; r.oi = r.px != null ? oi * r.px : null; }
+      r.d1 = (r.px != null && r.prevDay) ? (r.px - r.prevDay) / r.prevDay * 100 : r.d1;
+    }
+    sampleOI();
+    lastPoll = now; lastWsApply = now; wsApplied++;
   }
 
   async function refreshHourly(coin) {
@@ -354,19 +400,57 @@ function createPoller({ dex, store, log }) {
     curCorrPct = percentileOf(corr);
   }
 
+  // Is the US cash market closed right now? Global (not per-market): drives the table's live
+  // gap mode. Lives here — computed fresh in EVERY snapshot build (15s) — so the open↔closed
+  // flip reaches clients on their normal snapshot poll instead of riding the slow /api/daily
+  // path (60s rebuild × 15-min client refetch), which is what used to lag the mode ~15 min.
+  function computeOffHours(nowMs) {
+    const s = nowMs - 4 * DAY, e = nowMs + 4 * DAY;
+    const wins = overnightAnchors(s, e).concat(weekendAnchors(s, e));
+    for (const a of wins) if (nowMs >= a.enter && nowMs < a.exit) return { closed: true, closeT: a.enter, openT: a.exit };
+    return { closed: false };
+  }
+
+  // Quantize one market's snapshot fields (see rnd/sig at top). Never mutates the row —
+  // r.feat/r.ref are shared with persistence and the feature math.
+  function trimRef(ref) {
+    if (!ref) return ref || null;
+    return { p1h: sig(ref.p1h, 9), p4h: sig(ref.p4h, 9), p7d: sig(ref.p7d, 9), p30d: sig(ref.p30d, 9) };
+  }
+  function trimFeat(f) {
+    if (!f) return f || null;
+    return {
+      volH: sig(f.volH, 6), volD: sig(f.volD, 6), r2: rnd(f.r2, 4),
+      hi30: sig(f.hi30, 9), lo30: sig(f.lo30, 9), volBase: rnd(f.volBase, 0),
+      dr: Array.isArray(f.dr) ? f.dr.map((x) => rnd(x, 3)) : f.dr,
+      px30: Array.isArray(f.px30) ? f.px30.map((x) => sig(x, 7)) : f.px30,
+    };
+  }
+  function trimWin(o, digits) {
+    if (!o) return o || null;
+    const out = {};
+    for (const k in o) out[k] = digits != null ? sig(o[k], digits) : rnd(o[k], 4);
+    return out;
+  }
+
   function buildSnapshot() {
     sampleRegime();
     const markets = activeMarkets().map((r) => {
       const cl = classifyCached(r.ticker);
       return {
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted,
-        px: r.px, prevDay: r.prevDay, funding: r.funding, vol: r.vol, oi: r.oi, oiBase: r.oiBase,
-        oracle: r.oracle, d1: r.d1, ref: r.ref, feat: r.feat, doi: computeDoi(r), fundByWin: computeFundWin(r),
+        px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
+        vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
+        oracle: sig(r.oracle, 9), d1: rnd(r.d1, 4),
+        ref: trimRef(r.ref), feat: trimFeat(r.feat),
+        doi: trimWin(computeDoi(r)), fundByWin: trimWin(computeFundWin(r), 6),
         sector: cl.sector, assetClass: cl.assetClass,
       };
     });
     snapshotCache = {
       ts: Date.now(), dataTs: lastPoll, dex, benchCoin, markets,
+      v: version || null,
+      offHours: computeOffHours(Date.now()),
       regime: { corr: curCorr, corrPct: curCorrPct, corrN: curCorrN, corrSamples: regimeHist.length },
     };
   }
@@ -382,9 +466,7 @@ function createPoller({ dex, store, log }) {
   function buildDaily() {
     const daily = {}, funding = {}, overnight = {}, liveClose = {};
     const nowMs = Date.now();
-    let offHours = { closed: false };                                 // is the US cash market closed right now? (global, drives the live gap)
-    { const s = nowMs - 4 * DAY, e = nowMs + 4 * DAY, wins = overnightAnchors(s, e).concat(weekendAnchors(s, e));
-      for (const a of wins) if (nowMs >= a.enter && nowMs < a.exit) { offHours = { closed: true, closeT: a.enter, openT: a.exit }; break; } }
+    const offHours = computeOffHours(nowMs);   // kept here too for client compatibility; the snapshot copy is the fresh one
     let coins = 0, lens = 0;
     for (const r of activeMarkets()) {
       const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
@@ -737,6 +819,21 @@ function createPoller({ dex, store, log }) {
       const n = await store.prune(Date.now() - OI_RETENTION);
       if (n) log(`Pruned ${n} OI sample(s) older than 31d`);
     } catch (e) { log("prune failed: " + (e && e.message)); }
+    // Heavy-data GC for markets delisted > 7d. They stay in Hyperliquid's meta forever (so the
+    // row itself must survive to keep the universe index-aligned for the WS feed), but there's
+    // no reason to keep holding their 60d hourly spine, funding map and OI history in memory.
+    const dcut = Date.now() - 7 * DAY;
+    let swept = 0;
+    for (const [coin, r] of rows) {
+      if (!r.delisted || !r.delistedAt || r.delistedAt >= dcut) continue;
+      if (r.hourlyRaw || r.dailyRaw || (r.fundH && r.fundH.size) || hist.has(coin)) {
+        r.hourlyRaw = null; r.dailyRaw = null; r.ref = null; r.feat = null;
+        if (r.fundH) r.fundH.clear();
+        hist.delete(coin);
+        swept++;
+      }
+    }
+    if (swept) log(`Freed cached history for ${swept} market(s) delisted > 7d`);
     const total = activeMarkets().filter((r) => !r.delisted).length;
     const pending = activeMarkets().filter((r) => !r.delisted && !r.dailyRaw).length;
     const hc = hourlyCoverage();
@@ -754,7 +851,16 @@ function createPoller({ dex, store, log }) {
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
-    setInterval(pollUniverse, UNIVERSE_MS);
+    // WebSocket accelerator: real-time price/funding/OI pushes at zero rate-limit weight.
+    // While it's healthy the REST universe poll drops to every 5th tick (~150s) — it still
+    // owns membership (names / new listings / delistings) and instantly resumes the full
+    // 30s cadence the moment the socket goes quiet.
+    sock = createUniverseSocket({ onCtxs: applyWsCtxs, log });
+    setInterval(() => {
+      universeTick++;
+      if (sock && sock.enabled && sock.healthy() && universeTick % 5 !== 0) return;
+      pollUniverse().catch(() => {});
+    }, UNIVERSE_MS);
     hourlyWorker(); hourlyWorker();
     dailyWorker(); dailyWorker();
     fundingWorker();
@@ -769,6 +875,18 @@ function createPoller({ dex, store, log }) {
     setTimeout(maintenance, 60 * 1000);
   }
 
+  // Per-market hourly OHLCV for the drawer candle chart: [[t,o,h,l,c,v], ...] over the last
+  // `days` (default 14, capped at the retained spine). Values quantized like the snapshot.
+  function getCandles(coin, days) {
+    const d = Math.max(1, Math.min(HOURLY_HISTORY_DAYS, Number(days) || 14));
+    const cut = Date.now() - d * DAY, out = [];
+    for (const k of getHourly(coin)) {
+      if (k[0] < cut) continue;
+      out.push([k[0], sig(k[1], 9), sig(k[2], 9), sig(k[3], 9), sig(k[4], 9), rnd(k[5], 2)]);
+    }
+    return out;
+  }
+
   return {
     start,
     getSnapshot: () => snapshotCache,
@@ -777,8 +895,32 @@ function createPoller({ dex, store, log }) {
     getSeries,
     getHourly,
     getFunding,
+    getCandles,
     persistFeatures,
-    stats: () => ({ markets: rows.size, bench: benchCoin, oiCoins: hist.size, hourly: hourlyCoverage(), funding: fundingCoverage(), lastPoll }),
+    // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
+    // WS status make "it looks stale" diagnosable from /api/health instead of Railway logs.
+    stats: () => {
+      const now = Date.now();
+      let active = 0, hFailing = 0, dFailing = 0, fFailing = 0, pendH = 0, pendD = 0;
+      for (const r of rows.values()) {
+        if (r.delisted) continue;
+        active++;
+        if ((r.hFailUntil || 0) > now) hFailing++;
+        if ((r.dFailUntil || 0) > now) dFailing++;
+        if ((r.fFailUntil || 0) > now) fFailing++;
+        if (!r.feat) pendH++;
+        if (!r.dailyRaw) pendD++;
+      }
+      return {
+        version: version || null,
+        markets: rows.size, active, bench: benchCoin, oiCoins: hist.size,
+        hourly: hourlyCoverage(), funding: fundingCoverage(), lastPoll,
+        backfill: { hourlyPending: pendH, dailyPending: pendD },
+        failing: { hourly: hFailing, daily: dFailing, funding: fFailing },
+        rate: limiterUsage(),
+        ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
+      };
+    },
   };
 }
 
