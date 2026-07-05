@@ -151,3 +151,21 @@ test("event studies: continuation series shows continuation; sample sizes honest
   assert.ok(bo.d5.n > 0 && bo.d5.med > 0, "breakouts in a trend resolve up");
   assert.deepEqual(C.summarizeEvents([]), { n: 0 }, "empty in, honest zero out");
 });
+
+test("playbook: computed levels are mechanical and sane", () => {
+  const bo = C.playbook("breakout", { px: 105, level: 100, med: 2.1 });
+  assert.ok(/continuation up/.test(bo.bias));
+  assert.equal(bo.stop, 100);                       // failed breakout = back below the level
+  assert.ok(Math.abs(bo.target - 105 * 1.021) < 0.01);
+  const pr = C.playbook("prem", { prem: 18, oracle: 250, closed: true });
+  assert.equal(pr.target, 250);                     // reversion target IS the oracle
+  assert.ok(/rich/.test(pr.bias));
+  const gp = C.playbook("gap", { px: 101, closePx: 100, gapDir: 1, gapSd: 0.8, med: -0.4, n: 12 });
+  assert.ok(/FADES/.test(gp.bias) && gp.target === 100, "n>=8 negative median means fade toward the close");
+});
+
+test("EV_META horizons align with the studies' sign conventions", () => {
+  assert.equal(C.EV_META.bigmove.horizonMs, DAY);
+  assert.equal(C.EV_META.breakout.horizonMs, 5 * DAY);
+  assert.equal(C.EV_META.gap.horizonMs, null);      // gap resolves at the next session close, calendar-aware
+});
