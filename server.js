@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.04-4";
+const VERSION = "2026.07.04-5";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -80,6 +80,9 @@ async function main() {
     serveCached(req, reply, poller.getDaily(), { ts: 0, daily: {} }));
   fastify.get("/api/analytics", (req, reply) =>
     serveCached(req, reply, poller.getAnalytics(), { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} }));
+  // Ranked live signals + their per-market historical base rates (event studies).
+  fastify.get("/api/signals", (req, reply) =>
+    serveCached(req, reply, poller.getSignals(), { ts: 0, dataTs: 0, count: 0, signals: [] }));
   fastify.get("/api/series", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
