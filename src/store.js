@@ -16,6 +16,7 @@ function openStore(dataDir) {
   const regimeFile = path.join(dataDir, "regime.json");
   const hourlyFile = path.join(dataDir, "hourly.json");
   const ledgerFile = path.join(dataDir, "ledger.json");
+  const beatFile = path.join(dataDir, "volume-heartbeat.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
 
@@ -118,6 +119,22 @@ function openStore(dataDir) {
         }
       } catch (_) {}
       return [];
+    },
+    // Volume heartbeat: increments a counter file on every boot. The definitive persistence
+    // test — if the boot log ever reports "boot #1" twice, the data dir is ephemeral (wrong
+    // DATA_DIR, or the volume isn't attached), no interpretation of cache sizes required.
+    heartbeat() {
+      let d = null;
+      try { d = JSON.parse(fs.readFileSync(beatFile, "utf8")); } catch (_) {}
+      const now = Date.now();
+      const out = { boots: (d && Number.isFinite(d.boots) ? d.boots : 0) + 1,
+        firstBoot: d && Number.isFinite(d.firstBoot) ? d.firstBoot : now, lastBoot: now };
+      try {
+        const tmp = beatFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(out));
+        fs.renameSync(tmp, beatFile);
+      } catch (_) {}
+      return out;
     },
     // Signal ledger: every fired signal + its resolved out-of-sample outcome. Written atomically —
     // this file IS the track record; a truncated write would silently erase the honesty loop.
