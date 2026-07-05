@@ -113,3 +113,41 @@ test("meanPairwiseCorr: identical series -> ~1, needs overlap", () => {
   // a single series can form no pairs
   assert.equal(meanPairwiseCorr([s1], 30).corr, null);
 });
+
+const C = require("../src/compute");
+test("US market calendar: holidays, observance shifts, early closes", () => {
+  assert.equal(C.usDayStatus(2026, 7, 3), 2);    // Jul 4 2026 is a Saturday -> observed Friday, fully closed
+  assert.equal(C.usDayStatus(2025, 7, 4), 2);    // Independence Day on a Friday
+  assert.equal(C.usDayStatus(2025, 7, 3), 1);    // early close when Jul 4 falls Tue-Fri
+  assert.equal(C.usDayStatus(2026, 11, 26), 2);  // Thanksgiving
+  assert.equal(C.usDayStatus(2026, 11, 27), 1);  // Friday after: 13:00 ET close
+  assert.equal(C.usDayStatus(2026, 4, 3), 2);    // Good Friday (computus)
+  assert.equal(C.usDayStatus(2026, 7, 8), 0);    // ordinary Wednesday
+});
+
+test("closedWindows: the Jul-4-2026 span is one Thu-close -> Mon-open window", () => {
+  const w = C.closedWindows(Date.UTC(2026, 6, 1), Date.UTC(2026, 6, 8));
+  const long = w.find((a) => a.exit - a.enter > 48 * 3600 * 1000);
+  assert.ok(long, "expected a multi-day closure");
+  assert.equal(new Date(long.enter).toISOString(), "2026-07-02T20:00:00.000Z"); // Thu 16:00 ET
+  assert.equal(new Date(long.exit).toISOString(), "2026-07-06T13:30:00.000Z");  // Mon 09:30 ET
+  // Sat Jul 4 17:00 UTC falls inside it -> offHours must report closed with the THURSDAY close
+  const now = Date.UTC(2026, 6, 4, 17, 0, 0);
+  assert.ok(long.enter <= now && now < long.exit);
+});
+
+test("event studies: continuation series shows continuation; sample sizes honest", () => {
+  const DAYMS = 86400 * 1000, t0 = Date.UTC(2025, 0, 1);
+  // trending series with occasional 3-sigma up-thrusts that keep running
+  const closes = []; let px = 100;
+  for (let i = 0; i < 200; i++) {
+    px *= 1 + (i % 25 === 0 && i > 30 ? 0.06 : 0.004) + (i % 2 ? 0.002 : -0.002);
+    closes.push([t0 + i * DAYMS, px]);
+  }
+  const bm = C.studyBigMove(closes);
+  assert.ok(bm.d1.n >= 5, "found events");
+  assert.ok(bm.d1.med > 0, "uptrend thrusts continued (direction-signed median positive)");
+  const bo = C.studyBreakout(closes);
+  assert.ok(bo.d5.n > 0 && bo.d5.med > 0, "breakouts in a trend resolve up");
+  assert.deepEqual(C.summarizeEvents([]), { n: 0 }, "empty in, honest zero out");
+});
