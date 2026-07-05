@@ -674,16 +674,19 @@ function createPoller({ dex, store, log, version }) {
     const per = {};
     for (const e of ledgerClosed) {
       if (e.status !== "resolved") continue;
-      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [] });
+      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [] });
       b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
+      if (e.claim && Number.isFinite(e.claim.med)) b.claims.push(e.claim.med);
     }
     const out = {};
     for (const ev in per) {
       const b = per[ev], sm = summarizeEvents(b.rets);
       out[ev] = { resolved: b.resolved, hit: b.resolved ? +(b.wins / b.resolved).toFixed(2) : null,
-        med: sm.n ? sm.med : null, open: 0, unit: ev === "prem" ? "bp" : "%" };
+        med: sm.n ? sm.med : null, avg: sm.n ? sm.avg : null,
+        claimMed: b.claims.length ? +(b.claims.reduce((a, c) => a + c, 0) / b.claims.length).toFixed(2) : null,
+        open: 0, unit: ev === "prem" ? "bp" : "%" };
     }
-    for (const e of ledgerOpen.values()) { (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, open: 0, unit: e.ev === "prem" ? "bp" : "%" })).open++; }
+    for (const e of ledgerOpen.values()) { (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: e.ev === "prem" ? "bp" : "%" })).open++; }
     recordCache = out;
   }
   function liveNoEdge(ev) {
@@ -871,7 +874,9 @@ function createPoller({ dex, store, log, version }) {
     const top = kept.slice(0, 40);
     const sig = top.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",");
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
-    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {} };
+    const recent = ledgerClosed.filter((e) => e.status === "resolved").slice(-10).reverse()
+      .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: e.ev === "prem" ? "bp" : "%" }));
+    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {}, recent };
     persistLedger();
   }
 
