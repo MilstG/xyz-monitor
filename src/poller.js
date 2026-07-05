@@ -604,6 +604,7 @@ function createPoller({ dex, store, log, version }) {
   // in-sample base rate and the live out-of-sample record are directly comparable. Event types
   // whose live record shows no edge get their evidence score capped automatically.
   let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null;
+  const seenAt = new Map();   // coin|ev -> first-seen ms, for events with no ledger entry (no directional claim)
   function hydrateLedger() {
     const d = store.loadLedger();
     if (!d) return;
@@ -843,18 +844,25 @@ function createPoller({ dex, store, log, version }) {
         out.push(sig);
       }
     }
-    // freshness: age from the ledger; a signal past its own horizon decays, past 2x it drops
-    const kept = [];
+    // freshness: trigger time + age on every signal. Ledgered events use their ledger entry;
+    // the rest use a light first-seen map. Past its horizon a signal decays, past 2x it drops.
+    const kept = [], live = new Set();
     for (const g of out) {
-      const e = ledgerOpen.get(g.coin + "|" + g.ev);
+      const key = g.coin + "|" + g.ev;
+      live.add(key);
+      const e = ledgerOpen.get(key);
       if (e) {
-        g.age = now - e.t0;
+        g.t0 = e.t0; g.age = now - e.t0;
         const span = Math.max(1, e.resolveAt - e.t0);
         if (g.age > 2 * span) continue;
         if (g.age > span) g.score = Math.round(g.score * 0.6);
+      } else {
+        if (!seenAt.has(key)) seenAt.set(key, now);
+        g.t0 = seenAt.get(key); g.age = now - g.t0;
       }
       kept.push(g);
     }
+    for (const [k, t] of seenAt) if (!live.has(k) && now - t > 12 * HOUR) seenAt.delete(k);
     // confluence: several independent conditions on one name compound
     const byCoin = {};
     for (const g of kept) (byCoin[g.coin] || (byCoin[g.coin] = [])).push(g);
