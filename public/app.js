@@ -1917,6 +1917,28 @@ function sigRowHtml(gr, rank){
     +`</div>`;
 }
 // Accuracy panel below the list: overall record + per-event claimed-vs-live table + last resolutions.
+// Cumulative-R claim curve with the shared crosshair/readout (standing rule: every chart hovers).
+function recCurveSvg(curve){
+  const W=430,H=120, pl=4,pr=44,pt=8,pb=16;
+  let lo=0,hi=0; for(const p of curve){ if(p[1]<lo)lo=p[1]; if(p[1]>hi)hi=p[1]; }
+  if(hi===lo) hi=lo+1;
+  const pad=(hi-lo)*0.08; hi+=pad; lo-=pad;
+  const n=curve.length, X=i=>pl+(n<2?0.5:i/(n-1))*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
+  let s='';
+  for(const v of lcTicks(lo,hi,3)){ const y=Y(v).toFixed(1);
+    s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`+
+       `<text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${v.toFixed(1)}R</text>`; }
+  if(lo<0&&hi>0) s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--faint)" stroke-width="1" stroke-dasharray="3 3"/>`;
+  let dpath=''; curve.forEach((p,i)=>dpath+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[1]).toFixed(1)+' ');
+  const last=curve[curve.length-1][1];
+  s+=`<path d="${dpath}" fill="none" stroke="${last>=0?'var(--up)':'var(--down)'}" stroke-width="1.6"/>`;
+  const dfmt=t=>{ const x=new Date(t); return (x.getMonth()+1)+'/'+x.getDate(); };
+  s+=`<text x="${pl}" y="${H-4}" class="lc-tick">${dfmt(curve[0][0])}</text>`;
+  s+=`<text x="${W-pr}" y="${H-4}" text-anchor="end" class="lc-tick">${dfmt(curve[n-1][0])}</text>`;
+  const xs=curve.map((_,i)=>X(i));
+  const rows=curve.map(p=>`<b style="color:var(--text)">${esc(p[2])}</b> \u00b7 ${esc(EV_LABELS[p[3]]||p[3])}<br>${dfmt(p[0])}: realized <span style="color:${p[4]>=0?'var(--up)':'var(--down)'}">${p[4]>=0?'+':''}${p[4]}R</span> \u2192 cum ${p[1]>=0?'+':''}${p[1]}R`);
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
 function sigRecordHtml(d){
   const rc=d&&d.record?d.record:{};
   const evs=Object.keys(rc);
@@ -1935,16 +1957,43 @@ function sigRecordHtml(d){
     +(hitAll!=null&&resolved?`<span data-tip="share of resolved claims that moved the way the signal implied, across all event types"><b class="${hitAll>=50?'pos':'neg'}">${hitAll}%</b> overall hit</span>`:'')
     +`</div>`;
   if(resolved){
-    s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th></th></tr></thead><tbody>';
+    s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th></th></tr></thead><tbody>';
     for(const ev of evs){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
       const bad=r.resolved>=10&&r.hit<0.5&&r.med<=0, good=r.resolved>=10&&r.hit>=0.55&&r.med>0;
       s+=`<tr><td>${esc(EV_LABELS[ev]||ev)}</td><td>${r.resolved}${r.open?` <span class="sec">/${r.open}</span>`:''}</td>`
         +`<td>${r.hit!=null?`<span class="${r.hit>=0.5?'pos':'neg'}">${Math.round(r.hit*100)}%</span>`:'\u2014'}</td>`
         +`<td>${r.med!=null?`<span class="${r.med>=0?'pos':'neg'}">${r.med>=0?'+':''}${r.med}${r.unit}</span>`:'\u2014'}</td>`
+        +`<td>${r.pf!=null?`<span class="${r.pf>=1?'pos':'neg'}" data-tip="${esc(`avg win ${r.avgWin!=null?'+'+r.avgWin+r.unit:'\u2014'} vs avg loss ${r.avgLoss!=null?r.avgLoss+r.unit:'\u2014'}`)}">${r.pf}</span>`:'\u2014'}</td>`
         +`<td>${r.claimMed!=null?`${r.claimMed>=0?'+':''}${r.claimMed}${r.unit}`:'\u2014'}</td>`
         +`<td>${bad?'<i class="sig-unp" style="color:var(--down);border-color:var(--down)">no live edge</i>':(good?'<i class="sig-unp" style="color:var(--up);border-color:var(--up)">confirmed</i>':'')}</td></tr>`;
     }
     s+='</tbody></table>';
+  }
+  const rx=d&&d.recordX;
+  if(rx){
+    if(rx.buckets&&rx.buckets.some(b=>b.n>0)){
+      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="calibration: does the score at fire time actually rank outcomes? If higher buckets don't hit more often, the scoring \u2014 not the events \u2014 needs work.">calibration</span>`;
+      for(const b of rx.buckets) s+=`<span class="sigrec-chip" data-tip="claims fired with score ${esc(b.k)}: ${b.n} resolved">score ${esc(b.k)}: ${b.hit!=null?`<b class="${b.hit>=0.5?'pos':'neg'}">${Math.round(b.hit*100)}%</b>`:'\u2014'} <i>(n=${b.n})</i></span>`;
+      s+='</div>';
+    }
+    if(rx.side&&(rx.side.long.n||rx.side.short.n)){
+      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="resolved claims split by implied direction \u2014 a persistent gap here means the engine reads one side of the tape better than the other">by side</span>`
+        +`<span class="sigrec-chip">longs ${rx.side.long.hit!=null?`<b class="${rx.side.long.hit>=0.5?'pos':'neg'}">${Math.round(rx.side.long.hit*100)}%</b>`:'\u2014'} <i>(n=${rx.side.long.n})</i></span>`
+        +`<span class="sigrec-chip">shorts ${rx.side.short.hit!=null?`<b class="${rx.side.short.hit>=0.5?'pos':'neg'}">${Math.round(rx.side.short.hit*100)}%</b>`:'\u2014'} <i>(n=${rx.side.short.n})</i></span></div>`;
+    }
+    if(rx.form&&rx.form.recentN>=10){
+      const f=rx.form, up=f.recentHit>=f.allHit;
+      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="recent form vs all-time \u2014 is the engine improving as the blend and caps kick in, or degrading with the regime?">form</span>`
+        +`<span class="sigrec-chip">last ${f.recentN}: <b class="${f.recentHit>=0.5?'pos':'neg'}">${Math.round(f.recentHit*100)}%</b> ${up?'\u2197':'\u2198'} vs all-time ${Math.round(f.allHit*100)}% <i>(n=${f.allN})</i></span></div>`;
+    }
+    if(rx.tickers){
+      const chip=(x)=>`<span class="sigrec-chip" data-tip="${x.n} resolved claims on ${esc(x.t)}">${esc(x.t)} <b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b> <i>(n=${x.n})</i></span>`;
+      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="which markets this engine actually reads well (\u22655 resolutions each) \u2014 signal quality is not uniform across the universe">reads best</span>${rx.tickers.best.map(chip).join('')}`
+        +`<span class="sigrec-k" style="margin-left:14px">worst</span>${rx.tickers.worst.map(chip).join('')}</div>`;
+    }
+    if(rx.curve&&rx.curve.length>=5){
+      s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="equal-weight cumulative realized outcome of every resolved R-united claim (big move, breakout, funding flip), in sigma units \u2014 the equity curve of the engine's claims. Premium (bp) and gap (%) claims are excluded because mixed units cannot be summed honestly.">claim equity curve (R)</div>`+recCurveSvg(rx.curve);
+    }
   }
   if(d&&d.confluence&&(d.confluence.confN||d.confluence.soloN)){
     const c=d.confluence;
@@ -1999,6 +2048,7 @@ function renderSignals(){
   s+='</div>'+sigRecordHtml(d);
   box.innerHTML=s;
   bindSigControls(box);
+  attachLineHover();
 }
 function bindSigControls(box){
   box.querySelectorAll('.sig-tick').forEach(t=>t.addEventListener('click',(ev)=>{ ev.stopPropagation(); openDetail(t.dataset.coin); }));
