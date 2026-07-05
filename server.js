@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.04-6";
+const VERSION = "2026.07.04-9";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -20,6 +20,12 @@ const SITE_USER = process.env.SITE_USER || "friend";
 function log(msg) { console.log(new Date().toISOString() + " " + msg); }
 
 const store = openStore(DATA_DIR);
+// Definitive volume-persistence check: boot #1 on every deploy = the data dir is ephemeral
+// (DATA_DIR not pointing at the volume mount, or no volume attached). Boot #N, first boot
+// dating back days = the volume is fine and every warm cache above it can be trusted.
+const HEARTBEAT = store.heartbeat();
+log(`Volume heartbeat: boot #${HEARTBEAT.boots} on this data dir (first boot ${new Date(HEARTBEAT.firstBoot).toISOString()}) — ` +
+  (HEARTBEAT.boots > 1 ? "volume IS persisting" : "if this says boot #1 again next deploy, the volume is NOT persisting (check DATA_DIR vs the mount path)"));
 const poller = createPoller({ dex: DEX, store, log, version: VERSION });
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
@@ -95,7 +101,7 @@ async function main() {
     const days = req.query && req.query.days;
     return { coin, candles: poller.getCandles(coin, days) };
   });
-  fastify.get("/api/health", () => ({ ok: true, version: VERSION, ...poller.stats(), ts: Date.now() }));
+  fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR }, ...poller.stats(), ts: Date.now() }));
 
   await fastify.listen({ port: PORT, host: HOST });
   log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
