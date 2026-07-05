@@ -278,19 +278,22 @@ function createPoller({ dex, store, log, version }) {
     if (!r) return;
     const now = Date.now();
     if (r.px == null) { r.hourlyTs = now; return; }
-    // Cold start: one wide 180d pull. Steady state: fetch only the last ~48h tail and merge it
-    // into the retained spine — the old design re-pulled the full window every refresh, which
-    // at 180d would consume the entire rate budget; the merge makes the window depth free.
-    const have = Array.isArray(r.hourlyRaw) && r.hourlyRaw.length > 48;
-    if (!have) {
-      const c = await fetchCandles(coin, "1h", now - HOURLY_HISTORY_DAYS * DAY, now, HOURLY_FETCH_WEIGHT);
-      r.hourlyRaw = Array.isArray(c) ? c : null;
+    // Cold start OR a spine restored from an older, shallower build: one wide 180d pull.
+    // Steady state: fetch only the last ~48h tail and merge — the old design re-pulled the
+    // full window every refresh, which at 180d would consume the entire rate budget.
+    const spine = Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null;
+    const firstT = spine && spine.length ? +spine[0].t : Infinity;
+    const deep = spine && spine.length > 48 && firstT <= now - (HOURLY_HISTORY_DAYS - 30) * DAY;
+    if (!deep) {
+      const wide = await fetchCandles(coin, "1h", now - HOURLY_HISTORY_DAYS * DAY, now, HOURLY_FETCH_WEIGHT);
+      if (Array.isArray(wide)) r.hourlyRaw = wide;
+      else if (!spine) r.hourlyRaw = null;           // keep a shallow spine over nothing if the wide pull fails
     } else {
-      const lastT = +r.hourlyRaw[r.hourlyRaw.length - 1].t || 0;
-      const c = await fetchCandles(coin, "1h", Math.max(lastT - 2 * HOUR, now - 2 * DAY), now, HOURLY_TAIL_WEIGHT);
-      if (Array.isArray(c) && c.length) {
-        const firstNew = +c[0].t;
-        r.hourlyRaw = r.hourlyRaw.filter((k) => +k.t < firstNew).concat(c);
+      const lastT = +spine[spine.length - 1].t || 0;
+      const tail = await fetchCandles(coin, "1h", Math.max(lastT - 2 * HOUR, now - 2 * DAY), now, HOURLY_TAIL_WEIGHT);
+      if (Array.isArray(tail) && tail.length) {
+        const firstNew = +tail[0].t;
+        r.hourlyRaw = spine.filter((k) => +k.t < firstNew).concat(tail);
       }
     }
     { const cutOld = now - HOURLY_HISTORY_DAYS * DAY;
@@ -298,7 +301,7 @@ function createPoller({ dex, store, log, version }) {
     // Features are computed from ONLY the last 31 days so hi30/lo30, volH and volD are byte-identical
     // to the previous 31d fetch — the wider window must not leak into the feature math.
     const cut = now - HOURLY_FEAT_DAYS * DAY;
-    const featWin = Array.isArray(c) ? c.filter((k) => k.t >= cut) : [];
+    const featWin = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.filter((k) => +k.t >= cut) : [];
     const { ref, feat } = featuresFromHourly(featWin, now, HOUR, DAY);
     r.ref = ref; r.feat = feat; r.hourlyTs = Date.now(); r.isNew = false;
   }
@@ -1217,6 +1220,7 @@ function createPoller({ dex, store, log, version }) {
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     hydrateLedger();
+    log(`Restored signal ledger: ${ledgerOpen.size} open, ${ledgerClosed.length} resolved — track record carries across this deploy`);
     const restoredHourly = hydrateHourly();
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     await pollUniverse();
@@ -1293,6 +1297,7 @@ function createPoller({ dex, store, log, version }) {
         backfill: { hourlyPending: pendH, dailyPending: pendD },
         failing: { hourly: hFailing, daily: dFailing, funding: fFailing },
         signals: signalsCache ? signalsCache.count : 0,
+        ledger: { open: ledgerOpen.size, resolved: ledgerClosed.length },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };
