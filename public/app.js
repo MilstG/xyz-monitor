@@ -1849,12 +1849,21 @@ function playRow(g){
     +(p.watch?`<span class="sp-watch" data-tip="the one corroborating condition that confirms or kills this setup">watch: ${esc(p.watch)}</span>`:'')
     +`</span>`;
 }
+function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date();
+  const hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+  return (d.getDate()===n.getDate()&&d.getMonth()===n.getMonth())?hm:(d.getMonth()+1)+'/'+d.getDate()+' '+hm; }
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
+function sigViewPref(){ try{ return localStorage.getItem('xyz-sigview')||'detail'; }catch(_){ return 'detail'; } }
+function setSigView(v){ try{ localStorage.setItem('xyz-sigview',v); }catch(_){} renderSignals(); }
+function trigChip(g){
+  if(g.t0==null) return '';
+  return `<span class="sig-age" data-tip="${esc(`first fired ${new Date(g.t0).toLocaleString()} (your local time) \u2014 the score decays once a signal outlives its claimed horizon and it drops entirely at 2\u00d7`)}">${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}</span>`;
+}
 function renderSignals(){
   const box=el('signals-body'); if(!box) return;
-  const d=state.signals;
-  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction.">Live conditions ranked by <b>unusualness \u00d7 historical edge</b>, self-audited: every fired signal is ledgered and resolved at its horizon, and the live record below is <b>out-of-sample</b> \u2014 the engine keeps score on itself. Click a ticker for the drawer.</div>`;
-  // track record strip: claimed (in-sample study) vs live (resolved ledger), per event type
+  const d=state.signals, view=sigViewPref();
+  const seg=`<span class="cdtf-seg" style="margin-left:auto"><button type="button" class="cdtf${view==='detail'?' on':''}" data-sv="detail" data-tip="full cards: readings, base rates, playbooks">detailed</button><button type="button" class="cdtf${view==='compact'?' on':''}" data-sv="compact" data-tip="one row per market \u2014 hover the chips for the full reading and base rate">compact</button></span>`;
+  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction."><span>Live conditions ranked by <b>unusualness \u00d7 historical edge</b>, self-audited: every fired signal is ledgered and resolved at its horizon \u2014 the record below is <b>out-of-sample</b>. Click a ticker for the drawer.</span>${seg}</div>`;
   let rec='';
   if(d&&d.record&&Object.keys(d.record).length){
     rec='<div class="recstrip">';
@@ -1864,47 +1873,74 @@ function renderSignals(){
         : `${r.open||0} open, none resolved yet`;
       const bad = r.resolved>=10 && r.hit<0.5 && r.med<=0;
       const good = r.resolved>=10 && r.hit>=0.55 && r.med>0;
-      rec+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`Out-of-sample record for '${(EV_TIP[ev]||ev).split('.')[0]}'. Every firing is ledgered at its mark and resolved at the stated horizon under the study's own sign convention \u2014 this is what actually happened after the signals we showed you, not the in-sample base rate. ${bad?'No live edge \u2014 scores for this event type are being capped.':(good?'Live record confirms the edge.':'Sample still building.')}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
+      rec+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`Out-of-sample record for '${(EV_TIP[ev]||ev).split('.')[0]}'. Every firing is ledgered at its mark and resolved at the stated horizon under the study's own sign convention \u2014 what actually happened after the signals we showed you. ${bad?'No live edge \u2014 scores for this event type are being capped.':(good?'Live record confirms the edge.':'Sample still building.')}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
     }
     rec+='</div>';
   }
   if(!d||!d.signals||!d.signals.length){
     box.innerHTML=intro+rec+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`;
-    return;
+    bindSigControls(box); return;
   }
-  // confluence grouping: one card per market, its conditions stacked
   const groups=[], byCoin={};
   for(const g of d.signals){ if(byCoin[g.coin]){ byCoin[g.coin].sigs.push(g); byCoin[g.coin].score=Math.max(byCoin[g.coin].score,g.score); }
     else { byCoin[g.coin]={coin:g.coin,ticker:g.ticker,score:g.score,sigs:[g]}; groups.push(byCoin[g.coin]); } }
-  let s=intro+rec+'<div class="siglist">';
-  let rank=0;
-  for(const gr of groups){ rank++;
-    s+=`<div class="sigcard${gr.sigs.length>1?' conf':''}">`;
-    s+=`<div class="sigcard-h"><span class="sig-rank">${rank}</span><b class="sig-tick" data-coin="${esc(gr.coin)}">${esc(gr.ticker)}</b>`
-      +(gr.sigs.length>1?`<span class="sig-conf" data-tip="confluence: ${gr.sigs.length} independent conditions firing on the same name \u2014 each condition's score gets a confluence bonus because agreement is itself the signal">${gr.sigs.length} conditions</span>`:'')
-      +`<span class="sig-score" data-tip="best condition's score: unusualness + historical edge + confluence bonus, 0\u2013100"><span class="sig-bar"><span style="width:${Math.min(100,gr.score)}%"></span></span>${gr.score}</span></div>`;
-    for(const g of gr.sigs){
-      const ownOk = g.study && g.study.n>=8;
-      const hist = ownOk
-        ? `on ${esc(g.ticker)} (n=${g.study.n}): median <b class="${g.study.med>=0?'pos':'neg'}">${g.study.med>=0?'+':''}${g.study.med}%</b> \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
-        : (g.pooled
-          ? `${g.study?`on ${esc(g.ticker)}: n=${g.study.n} \u00b7 `:''}pooled across its asset class (n=${g.pooled.n}): median <b class="${g.pooled.med>=0?'pos':'neg'}">${g.pooled.med>=0?'+':''}${g.pooled.med}%</b> \u00b7 ${Math.round(g.pooled.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
-          : (g.study
-            ? `on ${esc(g.ticker)} (n=${g.study.n}): median ${g.study.med>=0?'+':''}${g.study.med}% \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
-            : `${esc(g.horizon||'no historical study yet')}`));
-      s+=`<div class="sig">`
-        +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
-        +(g.age!=null?`<span class="sig-age" data-tip="how long this condition has been firing \u2014 the score decays once it outlives its claimed horizon and the signal drops entirely at 2\u00d7">${fmtAge(g.age)}</span>`:'')
-        +`<span class="sig-read">${esc(g.reading)}</span>`
-        +`<span class="sig-hist" data-tip="${esc(g.study?"This market's own base rate: median forward return and share of past occurrences that resolved positive over the stated horizon.":(g.pooled?'Fewer than 8 occurrences on this market, so the base rate is pooled across every market in its asset class \u2014 broader evidence, applied at a 30% score discount.':EV_TIP[g.ev]||''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}</span>`
-        +(g.play?playRow(g):'')
+  let s=intro+rec;
+  if(view==='compact'){
+    // one scannable row per market: side pill of the top condition, chips (hover = full detail), trigger time, score
+    s+='<div class="siglist">';
+    let rank=0;
+    for(const gr of groups){ rank++;
+      const top=gr.sigs[0], sd=SP_SIDE[(top.play&&top.play.side)||'watch']||SP_SIDE.watch;
+      const chips=gr.sigs.map(g=>{
+        const hist=g.study&&g.study.n>=8?` \u00b7 on ${g.ticker} (n=${g.study.n}): med ${g.study.med>=0?'+':''}${g.study.med}%, ${Math.round(g.study.hit*100)}% hit`
+          :(g.pooled?` \u00b7 pooled (n=${g.pooled.n}): med ${g.pooled.med>=0?'+':''}${g.pooled.med}%, ${Math.round(g.pooled.hit*100)}% hit`:'');
+        return `<span class="sig-chip" data-tip="${esc(g.reading+hist+(g.play&&g.play.bias?` \u00b7 play: ${g.play.bias}`:''))}">${esc(g.label)}${g.noedge?' \u26a0':''}</span>`;
+      }).join('');
+      s+=`<div class="sigc">`
+        +`<span class="sig-rank">${rank}</span>`
+        +`<b class="sig-tick" data-coin="${esc(gr.coin)}">${esc(gr.ticker)}</b>`
+        +`<b class="sp-side ${sd.c}" data-tip="${esc('top condition: '+((top.play&&top.play.bias)||sd.tip))}">${sd.t}</b>`
+        +chips
+        +trigChip(top)
+        +`<span class="sig-score" data-tip="best condition's score + confluence bonus, 0\u2013100"><span class="sig-bar"><span style="width:${Math.min(100,gr.score)}%"></span></span>${gr.score}</span>`
         +`</div>`;
     }
     s+='</div>';
+  } else {
+    s+='<div class="siglist">';
+    let rank=0;
+    for(const gr of groups){ rank++;
+      s+=`<div class="sigcard${gr.sigs.length>1?' conf':''}">`;
+      s+=`<div class="sigcard-h"><span class="sig-rank">${rank}</span><b class="sig-tick" data-coin="${esc(gr.coin)}">${esc(gr.ticker)}</b>`
+        +(gr.sigs.length>1?`<span class="sig-conf" data-tip="confluence: ${gr.sigs.length} independent conditions firing on the same name \u2014 each condition's score gets a confluence bonus because agreement is itself the signal">${gr.sigs.length} conditions</span>`:'')
+        +`<span class="sig-score" data-tip="best condition's score: unusualness + historical edge + confluence bonus, 0\u2013100"><span class="sig-bar"><span style="width:${Math.min(100,gr.score)}%"></span></span>${gr.score}</span></div>`;
+      for(const g of gr.sigs){
+        const ownOk = g.study && g.study.n>=8;
+        const hist = ownOk
+          ? `on ${esc(g.ticker)} (n=${g.study.n}): median <b class="${g.study.med>=0?'pos':'neg'}">${g.study.med>=0?'+':''}${g.study.med}%</b> \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
+          : (g.pooled
+            ? `${g.study?`on ${esc(g.ticker)}: n=${g.study.n} \u00b7 `:''}pooled across its asset class (n=${g.pooled.n}): median <b class="${g.pooled.med>=0?'pos':'neg'}">${g.pooled.med>=0?'+':''}${g.pooled.med}%</b> \u00b7 ${Math.round(g.pooled.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
+            : (g.study
+              ? `on ${esc(g.ticker)} (n=${g.study.n}): median ${g.study.med>=0?'+':''}${g.study.med}% \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
+              : `${esc(g.horizon||'no historical study yet')}`));
+        s+=`<div class="sig">`
+          +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
+          +trigChip(g)
+          +`<span class="sig-read">${esc(g.reading)}</span>`
+          +`<span class="sig-hist" data-tip="${esc(ownOk?"This market's own base rate: median forward return and share of past occurrences that resolved positive over the stated horizon.":(g.pooled?'Fewer than 8 occurrences on this market, so the base rate is pooled across every market in its asset class \u2014 broader evidence, applied at a 30% score discount.':EV_TIP[g.ev]||''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}</span>`
+          +(g.play?playRow(g):'')
+          +`</div>`;
+      }
+      s+='</div>';
+    }
+    s+='</div>';
   }
-  s+='</div>';
   box.innerHTML=s;
+  bindSigControls(box);
+}
+function bindSigControls(box){
   box.querySelectorAll('.sig-tick').forEach(t=>t.addEventListener('click',()=>openDetail(t.dataset.coin)));
+  box.querySelectorAll('[data-sv]').forEach(b=>b.addEventListener('click',()=>setSigView(b.dataset.sv)));
 }
 
 // ===== sectors tab =====
