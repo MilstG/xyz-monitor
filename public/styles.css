@@ -414,3 +414,21 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sig-score{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px;min-width:96px;justify-content:flex-end;margin-left:auto}
 .sig-bar{width:56px;height:5px;border-radius:3px;background:var(--grid);overflow:hidden;display:inline-block}
 .sig-bar span{display:block;height:100%;background:var(--accent)}
+
+/* signals v2: track-record strip + confluence cards + playbook lines */
+.recstrip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.recstrip .rec{border:1px solid var(--border);background:var(--panel);border-radius:6px;padding:5px 10px;
+  font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.recstrip .rec b{color:var(--text);margin-right:5px}
+.recstrip .rec.good{border-color:var(--up)}
+.recstrip .rec.bad{border-color:var(--down)}
+.recstrip .rec i{font-style:normal;color:var(--down)}
+.sigcard{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 14px 10px;margin-bottom:6px}
+.sigcard.conf{border-color:var(--accent-dim)}
+.sigcard-h{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:13px;padding:2px 0 6px}
+.sig-conf{border:1px solid var(--accent-dim);color:var(--accent);border-radius:5px;padding:1px 8px;font-size:10px}
+.sigcard .sig{border:none;background:none;padding:5px 0;border-radius:0;border-top:1px solid var(--grid)}
+.sigcard .sig:hover{border-color:var(--grid)}
+.sig-age{color:var(--faint);font-size:10px;border:1px solid var(--grid);border-radius:4px;padding:1px 5px}
+.sig-play{flex-basis:100%;color:var(--muted);font-size:11px;line-height:1.5;padding-left:2px}
+.sig-play b{color:var(--blue);font-weight:600}
