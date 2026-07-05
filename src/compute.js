@@ -510,10 +510,17 @@ function playbook(ev, ctx) {
         bias: ctx.dir >= 0 ? "crowd flipped long \u2014 drift with them short-term" : "crowd flipped short \u2014 drift with them short-term",
         target: null, stop: null,
         watch: "funding flipping straight back voids it; funding STAYING flipped for 2+ days is the confirmation" };
-    case "squeeze":
+    case "squeeze": {
+      // Target is a measured-move EXTENSION above the range (hi30 + 0.382 x range), not the
+      // range top: the trigger rewards price already near the high, so targeting hi30 itself
+      // produced structurally inverted R/R at exactly the moments the signal fired. Squeezes
+      // resolve through the range, not to it.
+      const rng = ctx.hi30 != null && ctx.lo30 != null ? ctx.hi30 - ctx.lo30 : null;
       return { side: "long", bias: "squeeze-biased while shorts keep paying AND \u0394OI holds",
-        target: f2(ctx.hi30), stop: f2(ctx.lo30 != null && ctx.hi30 != null ? ctx.lo30 + 0.25 * (ctx.hi30 - ctx.lo30) : null),
+        target: f2(rng != null ? ctx.hi30 + 0.382 * rng : null),
+        stop: f2(rng != null ? ctx.lo30 + 0.25 * rng : null),
         watch: "\u0394OI(7d) turning negative = shorts covering, spring released \u2014 the setup is spent" };
+    }
     case "prem":
       return { side: ctx.prem >= 0 ? "short" : "long",
         bias: ctx.prem >= 0 ? "perp rich \u2014 reversion toward oracle (short the perp side)" : "perp cheap \u2014 reversion toward oracle (long the perp side)",
