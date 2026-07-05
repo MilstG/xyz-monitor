@@ -604,7 +604,7 @@ function createPoller({ dex, store, log, version }) {
   // and records the realized outcome UNDER THE SAME SIGN CONVENTION the study claims, so the
   // in-sample base rate and the live out-of-sample record are directly comparable. Event types
   // whose live record shows no edge get their evidence score capped automatically.
-  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null;
+  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null, recordXCache = null;
   const unitOf = (ev) => ev === "prem" ? "bp" : (ev === "bigmove" || ev === "breakout" || ev === "fundflip" || ev === "volshift" ? "R" : "%");
   const seenAt = new Map();   // coin|ev -> first-seen ms, for events with no ledger entry (no directional claim)
   function hydrateLedger() {
@@ -687,8 +687,13 @@ function createPoller({ dex, store, log, version }) {
     const out = {};
     for (const ev in per) {
       const b = per[ev], sm = summarizeEvents(b.rets);
+      const w = b.rets.filter((x) => x > 0), l = b.rets.filter((x) => x <= 0);
+      const wSum = w.reduce((a, c) => a + c, 0), lSum = l.reduce((a, c) => a + c, 0);
       out[ev] = { resolved: b.resolved, hit: b.resolved ? +(b.wins / b.resolved).toFixed(2) : null,
         med: sm.n ? sm.med : null, avg: sm.n ? sm.avg : null,
+        avgWin: w.length ? +(wSum / w.length).toFixed(2) : null,
+        avgLoss: l.length ? +(lSum / l.length).toFixed(2) : null,
+        pf: w.length && l.length && lSum !== 0 ? +(wSum / Math.abs(lSum)).toFixed(2) : null,   // profit factor: gross wins / gross losses
         claimMed: b.claims.length ? +(b.claims.reduce((a, c) => a + c, 0) / b.claims.length).toFixed(2) : null,
         open: 0, unit: unitOf(ev) };
     }
@@ -702,6 +707,31 @@ function createPoller({ dex, store, log, version }) {
     }
     confCache = { confN: cf.confN, confHit: cf.confN ? +(cf.confW / cf.confN).toFixed(2) : null,
       soloN: cf.soloN, soloHit: cf.soloN ? +(cf.soloW / cf.soloN).toFixed(2) : null };
+    // ---- cross-cuts of the same resolutions: calibration, side, ticker form, equity curve ----
+    const res = ledgerClosed.filter((e) => e.status === "resolved");
+    const hitOf = (v) => (v.length ? +(v.filter((e) => e.win).length / v.length).toFixed(2) : null);
+    // does the score at fire time actually rank outcomes? hit rate by score bucket
+    const buckets = [{ k: "<35", lo: 0, hi: 35 }, { k: "35\u201354", lo: 35, hi: 55 }, { k: "55+", lo: 55, hi: 1e9 }]
+      .map((b) => { const v = res.filter((e) => Number.isFinite(e.score0) && e.score0 >= b.lo && e.score0 < b.hi); return { k: b.k, n: v.length, hit: hitOf(v) }; });
+    const side = { long: null, short: null };
+    { const L = res.filter((e) => e.dir >= 0), S = res.filter((e) => e.dir < 0);
+      side.long = { n: L.length, hit: hitOf(L) }; side.short = { n: S.length, hit: hitOf(S) }; }
+    const byT = {};
+    for (const e of res) { const b = byT[e.ticker] || (byT[e.ticker] = { n: 0, w: 0 }); b.n++; if (e.win) b.w++; }
+    const tl = Object.keys(byT).filter((t) => byT[t].n >= 5)
+      .map((t) => ({ t, n: byT[t].n, hit: +(byT[t].w / byT[t].n).toFixed(2) }))
+      .sort((a, b) => b.hit - a.hit);
+    const last20 = res.slice(-20);
+    // equity curve of the engine's claims, R-united events only (mixed units cannot be summed honestly)
+    let cum = 0;
+    const curve = res.filter((e) => unitOf(e.ev) === "R" && Number.isFinite(e.realized)).slice(-200)
+      .map((e) => { cum = +(cum + e.realized).toFixed(2); return [e.tR, cum, e.ticker, e.ev, e.realized]; });
+    recordXCache = {
+      buckets, side,
+      tickers: tl.length ? { best: tl.slice(0, 3), worst: tl.slice(-3).reverse() } : null,
+      form: { recentN: last20.length, recentHit: hitOf(last20), allHit: hitOf(res), allN: res.length },
+      curve,
+    };
   }
   function liveNoEdge(ev) {
     const rec = recordCache && recordCache[ev];
@@ -949,7 +979,7 @@ function createPoller({ dex, store, log, version }) {
     const recent = ledgerClosed.filter((e) => e.status === "resolved").slice(-10).reverse()
       .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: e.ev === "prem" ? "bp" : "%" }));
     signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {},
-      confluence: confCache ? Object.assign({ bonus: confUnit }, confCache) : null, recent };
+      confluence: confCache ? Object.assign({ bonus: confUnit }, confCache) : null, recordX: recordXCache, recent };
     persistLedger();
   }
 
