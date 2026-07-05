@@ -367,6 +367,8 @@ function dailyRets(closes) {   // closes: [[t, c], ...] ascending
   }
   return out;
 }
+// trailing-30 daily sigma ending just before index i (unit for R-normalized outcomes)
+function sdAt(rets, i) { return retStd(rets.slice(Math.max(0, i - 30), i), 15); }
 function fwdRet(closes, i, k) {
   if (i + k >= closes.length) return null;
   const a = closes[i][1], b = closes[i + k][1];
@@ -377,27 +379,29 @@ function fwdRet(closes, i, k) {
 function studyBigMove(closes) {
   const rets = dailyRets(closes), d1 = [], d3 = [];
   for (let i = 30; i < rets.length; i++) {
-    const sd = retStd(rets.slice(i - 30, i), 15);
+    const sd = sdAt(rets, i);
     if (sd == null || sd <= 0 || !Number.isFinite(rets[i]) || Math.abs(rets[i]) < 2 * sd) continue;
     const dir = rets[i] > 0 ? 1 : -1, ci = i + 1;   // rets[i] is the move into closes[ci]
     const f1 = fwdRet(closes, ci, 1), f3 = fwdRet(closes, ci, 3);
-    if (f1 != null) d1.push(dir * f1);
-    if (f3 != null) d3.push(dir * f3);
+    if (f1 != null) d1.push(+(dir * f1 / sd).toFixed(3));   // R units: outcome / own sigma at event time
+    if (f3 != null) d3.push(+(dir * f3 / sd).toFixed(3));
   }
-  return { d1: summarizeEvents(d1), d3: summarizeEvents(d3), raw: { d1, d3 } };
+  return { d1: summarizeEvents(d1), d3: summarizeEvents(d3), raw: { d1, d3 }, unit: "R" };
 }
 // 30d-high breakout: close crosses above the max of the prior 30 closes. Forward 1d / 5d.
 function studyBreakout(closes) {
-  const d1 = [], d5 = [];
+  const rets = dailyRets(closes), d1 = [], d5 = [];
   for (let i = 31; i < closes.length; i++) {
     let hi = -Infinity;
     for (let j = i - 30; j < i; j++) if (closes[j][1] > hi) hi = closes[j][1];
     if (!(closes[i][1] > hi) || closes[i - 1][1] > hi) continue;   // first cross only
+    const sd = sdAt(rets, i - 1);
+    if (sd == null || sd <= 0) continue;
     const f1 = fwdRet(closes, i, 1), f5 = fwdRet(closes, i, 5);
-    if (f1 != null) d1.push(f1);
-    if (f5 != null) d5.push(f5);
+    if (f1 != null) d1.push(+(f1 / sd).toFixed(3));
+    if (f5 != null) d5.push(+(f5 / sd).toFixed(3));
   }
-  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 } };
+  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
 }
 // Vol-regime shift: 10d realized vol crossing above the 90th percentile of its trailing 120
 // observations. Forward 5d return (does an expansion resolve up or down for this market?).
@@ -411,10 +415,12 @@ function studyVolShift(closes) {
     const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
     if (!(vols[i] > p90) || vols[i - 1] > p90) continue;           // first cross only
     const ci = i + 10;                                              // vols[i] ends at closes[ci]
+    const sd = sdAt(rets, ci - 1);
+    if (sd == null || sd <= 0) continue;
     const f5 = fwdRet(closes, ci, 5);
-    if (f5 != null) d5.push(f5);
+    if (f5 != null) d5.push(+(f5 / sd).toFixed(3));
   }
-  return { d5: summarizeEvents(d5), raw: { d5 } };
+  return { d5: summarizeEvents(d5), raw: { d5 }, unit: "R" };
 }
 // Gap fade/continuation: for each closed-window hold with |gap| >= 0.75 sigma of this market's
 // own gap distribution, measure the NEXT cash session (open -> close), signed by gap direction:
@@ -448,11 +454,15 @@ function studyFundFlip(dayFunding, closes) {
     const s = Math.sign(dayFunding[i][1]);
     if (s !== 0 && prevSign !== 0 && s !== prevSign && run >= 3) {
       const ci = byDay.get(Math.floor(dayFunding[i][0] / DAY) * DAY);
-      if (ci != null) { const f3 = fwdRet(closes, ci, 3); if (f3 != null) d3.push(s * f3); }
+      if (ci != null) {
+        const sd = sdAt(dailyRets(closes), Math.max(0, ci - 1));
+        const f3 = fwdRet(closes, ci, 3);
+        if (f3 != null && sd > 0) d3.push(+(s * f3 / sd).toFixed(3));
+      }
     }
     if (s === prevSign) run++; else { run = s === 0 ? run : 1; if (s !== 0) prevSign = s; }
   }
-  return { d3: summarizeEvents(d3), raw: { d3 } };
+  return { d3: summarizeEvents(d3), raw: { d3 }, unit: "R" };
 }
 
 // ---- signal metadata + playbooks ----------------------------------------------------------

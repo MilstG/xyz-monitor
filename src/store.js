@@ -40,13 +40,19 @@ function openStore(dataDir) {
     // whole thing into memory or blocks the event loop) and atomically renames it into place
     // (so a crash mid-prune can't leave a half-written log). Appends are held in `buf` while
     // this runs and flushed to the new file afterward. Async: callers should await it.
-    async prune(before) {
+    // Two-tier retention: everything newer than keepFullAfter stays at full (~5 min) resolution;
+    // between `before` and keepFullAfter one sample per (coin, hour) survives; older than
+    // `before` is dropped. A year of positioning history at ~30x less disk/RAM than full res —
+    // this is what the squeeze/fundflip studies and OI-conditioned branches feed on.
+    async prune(before, keepFullAfter) {
       if (pruning) return 0;
       flush();                              // fold buffered samples into the file first
       if (!fs.existsSync(file)) return 0;
       pruning = true;
       const tmp = file + ".tmp";
       let removed = 0;
+      const full = Number.isFinite(keepFullAfter) ? keepFullAfter : before;
+      const lastHour = new Map();           // coin -> last hourly bucket kept in the thinned band
       try {
         await new Promise((resolve, reject) => {
           const input = fs.createReadStream(file, { encoding: "utf8" });
@@ -57,8 +63,12 @@ function openStore(dataDir) {
             const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
             if (i1 < 0 || i2 < 0) return;
             const t = +ln.slice(i1 + 1, i2);
-            if (Number.isFinite(t) && t >= before) output.write(ln + "\n");
-            else removed++;
+            if (!Number.isFinite(t) || t < before) { removed++; return; }
+            if (t >= full) { output.write(ln + "\n"); return; }
+            const coin = ln.slice(0, i1), hb = Math.floor(t / 3600000);
+            if (lastHour.get(coin) === hb) { removed++; return; }
+            lastHour.set(coin, hb);
+            output.write(ln + "\n");
           });
           rl.on("close", () => output.end());
           rl.on("error", reject);

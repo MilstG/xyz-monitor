@@ -16,7 +16,8 @@ const TF = { h1: HOUR, h4: 4 * HOUR, d1: DAY, d7: 7 * DAY, d30: 30 * DAY };
 const SP_ALIASES = ["SPX", "SPX500", "SP500", "US500", "USSPX500", "SP500USD", "SPXUSD", "GSPC", "SP", "US500USD"];
 
 const OI_MIN_GAP = 4.5 * 60 * 1000;   // store at most one OI sample per ~5 min
-const OI_RETENTION = 31 * DAY;        // keep 31 days of OI history
+const OI_RETENTION = 365 * DAY;       // keep a YEAR of OI history (hourly-thinned past 31d) — the raw material for squeeze/fundflip base rates
+const OI_FULL_RES = 31 * DAY;         // full ~5-min resolution window; older samples thin to one per hour
 const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const HOURLY_HISTORY_DAYS = 180;      // rolling hourly-OHLCV window (API serves ~5000 most-recent candles = ~208d hard cap; 180d fits one call and triples the gap-study samples)
 const HOURLY_FEAT_DAYS = 31;          // window actually fed to featuresFromHourly (keep features identical to before)
@@ -603,7 +604,8 @@ function createPoller({ dex, store, log, version }) {
   // and records the realized outcome UNDER THE SAME SIGN CONVENTION the study claims, so the
   // in-sample base rate and the live out-of-sample record are directly comparable. Event types
   // whose live record shows no edge get their evidence score capped automatically.
-  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null;
+  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null;
+  const unitOf = (ev) => ev === "prem" ? "bp" : (ev === "bigmove" || ev === "breakout" || ev === "fundflip" || ev === "volshift" ? "R" : "%");
   const seenAt = new Map();   // coin|ev -> first-seen ms, for events with no ledger entry (no directional claim)
   function hydrateLedger() {
     const d = store.loadLedger();
@@ -658,7 +660,11 @@ function createPoller({ dex, store, log, version }) {
         const hs = getHourly(e.coin);
         const p0 = priceAsOf(hs, e.t0, 3 * HOUR) || e.mark0;
         const p1 = priceAsOf(hs, e.resolveAt, 3 * HOUR);
-        if (p0 > 0 && p1 > 0) realized = +((e.dir >= 0 ? 1 : -1) * (p1 / p0 - 1) * 100).toFixed(2);
+        if (p0 > 0 && p1 > 0) {
+          realized = +((e.dir >= 0 ? 1 : -1) * (p1 / p0 - 1) * 100).toFixed(2);
+          if ((e.ev === "bigmove" || e.ev === "breakout" || e.ev === "fundflip") && e.sd0 > 0)
+            realized = +(realized / e.sd0).toFixed(2);   // same R units the study claims — claimed vs live stays apples-to-apples
+        }
       }
       if (realized == null) {
         if (now > e.resolveAt + 2 * DAY) { e.status = "void"; ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true; }
@@ -684,30 +690,66 @@ function createPoller({ dex, store, log, version }) {
       out[ev] = { resolved: b.resolved, hit: b.resolved ? +(b.wins / b.resolved).toFixed(2) : null,
         med: sm.n ? sm.med : null, avg: sm.n ? sm.avg : null,
         claimMed: b.claims.length ? +(b.claims.reduce((a, c) => a + c, 0) / b.claims.length).toFixed(2) : null,
-        open: 0, unit: ev === "prem" ? "bp" : "%" };
+        open: 0, unit: unitOf(ev) };
     }
-    for (const e of ledgerOpen.values()) { (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: e.ev === "prem" ? "bp" : "%" })).open++; }
+    for (const e of ledgerOpen.values()) { (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++; }
     recordCache = out;
+    // Earned-confluence split: resolved claims by whether they fired with company or alone.
+    const cf = { confN: 0, confW: 0, soloN: 0, soloW: 0 };
+    for (const e of ledgerClosed) {
+      if (e.status !== "resolved" || typeof e.conf !== "boolean") continue;
+      if (e.conf) { cf.confN++; if (e.win) cf.confW++; } else { cf.soloN++; if (e.win) cf.soloW++; }
+    }
+    confCache = { confN: cf.confN, confHit: cf.confN ? +(cf.confW / cf.confN).toFixed(2) : null,
+      soloN: cf.soloN, soloHit: cf.soloN ? +(cf.soloW / cf.soloN).toFixed(2) : null };
   }
   function liveNoEdge(ev) {
     const rec = recordCache && recordCache[ev];
     return !!(rec && rec.resolved >= 10 && rec.hit != null && rec.hit < 0.5 && rec.med != null && rec.med <= 0);
   }
-  function evidence(st, ev, pooled) {   // 0..50: this-market study first, pooled fallback, live-record capped
+  // 0..50 evidence, EXPECTANCY-centered: only base rates that actually paid (mean direction-
+  // signed outcome > 0) earn points; a negative-expectancy base rate earns ZERO and flags the
+  // signal, no matter how unusual the live condition looks. Hit rate only adds on top of
+  // positive expectancy. This is the main noise gate: "weird but historically unprofitable"
+  // now sinks instead of riding its intensity score.
+  function evPts(st, unit) {
+    const scale = unit === "R" ? 0.5 : 0.8;   // +0.5R/event is strong edge; +0.8%/event was the % calibration
+    if (st.avg == null) return Math.min(1, Math.abs(st.med) / (unit === "R" ? 1 : 1.5)) * 30 + Math.abs(st.hit - 0.5) * 2 * 20;
+    if (st.avg <= 0) return 0;
+    return Math.min(1, st.avg / scale) * 30 + Math.max(0, st.hit - 0.5) * 2 * 20;
+  }
+  // Evidence with Bayesian shrinkage toward the LIVE out-of-sample record: once an event type
+  // has >=5 resolutions, the stats driving the score become a blend of the in-sample base rate
+  // and the live record, weighted w = resolved/(resolved+25) — at 5 resolutions the study still
+  // dominates (w=0.17), at 50 the live record does (w=0.67). Trust migrates continuously from
+  // backtest to reality, in both directions: a live record BETTER than claimed now earns more.
+  // Units align because the resolver scores ledgered events in the units the studies claim.
+  function evidence(st, ev, pooled, unit) {
+    const rec = recordCache && recordCache[ev];
+    const scored = (stats, discount) => {
+      if (rec && rec.resolved >= 5 && rec.hit != null && rec.avg != null && stats.avg != null) {
+        const w = rec.resolved / (rec.resolved + 25);
+        return { pts: evPts({ avg: (1 - w) * stats.avg + w * rec.avg, hit: (1 - w) * stats.hit + w * rec.hit }, unit) * discount,
+          liveW: Math.round(w * 100) };
+      }
+      return { pts: evPts(stats, unit) * discount, liveW: null };
+    };
     let base;
-    if (st && st.n >= 8) base = { pts: Math.min(1, Math.abs(st.med) / 1.5) * 30 + Math.abs(st.hit - 0.5) * 2 * 20, unproven: false, st };
-    else if (pooled && pooled.n >= 12) base = { pts: (Math.min(1, Math.abs(pooled.med) / 1.5) * 30 + Math.abs(pooled.hit - 0.5) * 2 * 20) * 0.7, unproven: true, st: st && st.n ? st : null, pooled };
+    if (st && st.n >= 8) { const b = scored(st, 1); base = { pts: b.pts, liveW: b.liveW, unproven: false, st, negexp: st.avg != null && st.avg <= 0 }; }
+    else if (pooled && pooled.n >= 12) { const b = scored(pooled, 0.7); base = { pts: b.pts, liveW: b.liveW, unproven: true, st: st && st.n ? st : null, pooled, negexp: pooled.avg != null && pooled.avg <= 0 }; }
     else base = { pts: st && st.n ? 8 : 6, unproven: true, st: st && st.n ? st : null };
-    if (ev && liveNoEdge(ev)) { base.pts = Math.min(base.pts, 8); base.noedge = true; }
+    base.unit = unit || "%";
+    if (ev && liveNoEdge(ev)) { base.pts = Math.min(base.pts, 8); base.noedge = true; }   // hard guard stays on top of the blend
     return base;
   }
   function mkSignal(r, ev, valTxt, intensity, evd, extra) {
     return Object.assign({
       coin: r.coin, ticker: r.ticker, ev, label: EV_LABEL[ev], reading: valTxt,
       score: Math.round(Math.min(50, Math.max(0, intensity)) + evd.pts),
-      unproven: !!evd.unproven, noedge: !!evd.noedge,
-      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit, avg: evd.st.avg } : null,
-      pooled: evd.pooled ? { n: evd.pooled.n, med: evd.pooled.med, hit: evd.pooled.hit, avg: evd.pooled.avg } : null,
+      unproven: !!evd.unproven, noedge: !!evd.noedge, negexp: !!evd.negexp,
+      liveW: evd.liveW || null,
+      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit, avg: evd.st.avg, unit: evd.unit } : null,
+      pooled: evd.pooled ? { n: evd.pooled.n, med: evd.pooled.med, hit: evd.pooled.hit, avg: evd.pooled.avg, unit: evd.unit } : null,
     }, extra || {});
   }
 
@@ -749,21 +791,23 @@ function createPoller({ dex, store, log, version }) {
 
       if (sd30 > 0 && r.d1 != null && Math.abs(r.d1) >= 2 * sd30) {
         const dir = r.d1 > 0 ? 1 : -1;
-        const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"));
+        const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"), "R");
         const sig = mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${(Math.abs(r.d1) / sd30).toFixed(1)}\u03c3 ${dir > 0 ? "up" : "down"})`,
           (Math.abs(r.d1) / sd30 - 2) * 20 + 20, evd, { horizon: EV_META.bigmove.horizon });
-        sig.play = playbook("bigmove", { px: r.px, dir, sd30, med: sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null) });
-        out.push(sig); openLedger(r, "bigmove", sig, dir);
+        { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);   // R -> % via this market's own sigma
+          sig.play = playbook("bigmove", { px: r.px, dir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+        out.push(sig); if (sd30 > 0) openLedger(r, "bigmove", sig, dir, { sd0: +sd30.toFixed(3) });
       }
       if (closes && closes.length >= 31) {
         let hi = -Infinity;
         for (let j = closes.length - 31; j < closes.length - 1; j++) if (closes[j][1] > hi) hi = closes[j][1];
         if (hi > 0 && r.px > hi && closes[closes.length - 2][1] <= hi) {
-          const evd = evidence(st.breakout && st.breakout.d5, "breakout", pooledFor(ac, "breakout", "d5"));
+          const evd = evidence(st.breakout && st.breakout.d5, "breakout", pooledFor(ac, "breakout", "d5"), "R");
           const sig = mkSignal(r, "breakout", `mark ${((r.px / hi - 1) * 100).toFixed(1)}% above the prior 30d high`,
             ((r.px / hi - 1) * 100) * 12 + 15, evd, { horizon: EV_META.breakout.horizon });
-          sig.play = playbook("breakout", { px: r.px, level: hi, med: sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null) });
-          out.push(sig); openLedger(r, "breakout", sig, 1);
+          { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
+            sig.play = playbook("breakout", { px: r.px, level: hi, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+          out.push(sig); if (sd30 > 0) openLedger(r, "breakout", sig, 1, { sd0: +sd30.toFixed(3) });
         }
       }
       if (rets.length >= 130) {
@@ -773,7 +817,7 @@ function createPoller({ dex, store, log, version }) {
         if (cur != null && hist.length >= 60) {
           const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
           if (cur > p90) {
-            const evd = evidence(st.volshift && st.volshift.d5, "volshift", pooledFor(ac, "volshift", "d5"));
+            const evd = evidence(st.volshift && st.volshift.d5, "volshift", pooledFor(ac, "volshift", "d5"), "R");
             const sig = mkSignal(r, "volshift", `10d vol ${cur.toFixed(1)}%/d vs p90 ${p90.toFixed(1)}%/d`,
               (cur / p90 - 1) * 60 + 12, evd, { horizon: EV_META.volshift.horizon });
             sig.play = playbook("volshift", {});
@@ -787,7 +831,7 @@ function createPoller({ dex, store, log, version }) {
           const g = (r.px / pc - 1) * 100;
           if (Math.abs(g) >= 0.75 * st.gap.sd) {
             const exc = gBench != null && r.coin !== benchCoin ? g - gBench : null;
-            const evd = evidence(st.gap.session, "gap", pooledFor(ac, "gap", "session"));
+            const evd = evidence(st.gap.session, "gap", pooledFor(ac, "gap", "session"), "%");
             const reading = `${g >= 0 ? "+" : ""}${g.toFixed(2)}% since the last close (${(Math.abs(g) / st.gap.sd).toFixed(1)}\u03c3 of its gaps)`
               + (exc != null ? ` \u00b7 S&P ${gBench >= 0 ? "+" : ""}${gBench.toFixed(2)}%, excess ${exc >= 0 ? "+" : ""}${exc.toFixed(2)}%` : "");
             const sig = mkSignal(r, "gap", reading,
@@ -803,11 +847,11 @@ function createPoller({ dex, store, log, version }) {
         let run = 0;
         for (let i = dayFunding.length - 2; i >= 0; i--) { const sg = Math.sign(dayFunding[i][1]); if (sg === 0 || sg === s0) break; run++; if (run >= 3) break; }
         if (s0 !== 0 && run >= 3) {
-          const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"));
+          const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"), "R");
           const sig = mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
             22, evd, { horizon: EV_META.fundflip.horizon });
           sig.play = playbook("fundflip", { dir: s0 });
-          out.push(sig); openLedger(r, "fundflip", sig, s0);
+          out.push(sig); if (sd30 > 0) openLedger(r, "fundflip", sig, s0, { sd0: +sd30.toFixed(3) });
         }
       }
       const fw = computeFundWin(r), doi = computeDoi(r), f = r.feat;
@@ -851,6 +895,21 @@ function createPoller({ dex, store, log, version }) {
     // the rest use a light first-seen map. Past its horizon a signal decays, past 2x it drops.
     const kept = [], live = new Set();
     for (const g of out) {
+      // structure: median-target vs invalidation R/R, folded into the score. Poor structure
+      // (rr < 0.8) costs 20%; clean structure (rr >= 1.5) earns a nudge. Then `prime` marks
+      // setups clearing EVERY bar: hit >= 60%, positive expectancy, sound structure, not
+      // unproven/decayed/no-edge — the ones worth emphasizing.
+      const rr0 = rows.get(g.coin);
+      if (g.play && g.play.target != null && g.play.stop != null && rr0 && rr0.px > 0) {
+        const dn = Math.abs(g.play.stop - rr0.px);
+        if (dn > 0) {
+          g.rr = +(Math.abs(g.play.target - rr0.px) / dn).toFixed(2);
+          if (g.rr < 0.8) { g.score = Math.round(g.score * 0.8); g.poorRR = true; }
+          else if (g.rr >= 1.5) g.score += 4;
+        }
+      }
+      const bs = g.study && g.study.n >= 8 ? g.study : g.pooled;
+      if (bs && bs.hit >= 0.6 && bs.avg > 0 && !g.noedge && !g.negexp && (g.rr == null || g.rr >= 1.2)) { g.prime = true; g.score += 6; }
       const key = g.coin + "|" + g.ev;
       live.add(key);
       const e = ledgerOpen.get(key);
@@ -858,7 +917,7 @@ function createPoller({ dex, store, log, version }) {
         g.t0 = e.t0; g.age = now - e.t0;
         const span = Math.max(1, e.resolveAt - e.t0);
         if (g.age > 2 * span) continue;
-        if (g.age > span) { g.score = Math.round(g.score * 0.6); g.decayed = true; }   // client shows the amber decaying state
+        if (g.age > span) { g.score = Math.round(g.score * 0.6); g.decayed = true; g.prime = false; }   // client shows the amber decaying state
       } else {
         if (!seenAt.has(key)) seenAt.set(key, now);
         g.t0 = seenAt.get(key); g.age = now - g.t0;
@@ -869,14 +928,28 @@ function createPoller({ dex, store, log, version }) {
     // confluence: several independent conditions on one name compound
     const byCoin = {};
     for (const g of kept) (byCoin[g.coin] || (byCoin[g.coin] = [])).push(g);
-    for (const c in byCoin) { const k = byCoin[c].length; if (k > 1) for (const g of byCoin[c]) { g.conf = k; g.score = Math.min(100, g.score + Math.min(16, 8 * (k - 1))); } }
+    // Earned confluence: the bonus starts at the default 8/condition, but once the ledger has
+    // >=15 resolutions on each side it scales to the MEASURED hit-rate lift of with-company
+    // firings over solo ones — and drops to zero if agreement doesn't prove out.
+    let confUnit = 8;
+    if (confCache && confCache.confN >= 15 && confCache.soloN >= 15)
+      confUnit = Math.max(0, Math.round((confCache.confHit - confCache.soloHit) * 40));
+    for (const c in byCoin) {
+      const k = byCoin[c].length;
+      for (const g of byCoin[c]) {
+        const e = ledgerOpen.get(g.coin + "|" + g.ev);
+        if (e && e.conf == null) { e.conf = k > 1; ledgerDirty = true; }   // stamped once, at first observation
+        if (k > 1) { g.conf = k; g.score = Math.min(100, g.score + Math.min(16, confUnit * (k - 1))); }
+      }
+    }
     kept.sort((a, b) => b.score - a.score);
     const top = kept.slice(0, 40);
     const sig = top.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",");
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
     const recent = ledgerClosed.filter((e) => e.status === "resolved").slice(-10).reverse()
       .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: e.ev === "prem" ? "bp" : "%" }));
-    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {}, recent };
+    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {},
+      confluence: confCache ? Object.assign({ bonus: confUnit }, confCache) : null, recent };
     persistLedger();
   }
 
@@ -1202,8 +1275,20 @@ function createPoller({ dex, store, log, version }) {
 
   async function maintenance() {
     try {
-      const n = await store.prune(Date.now() - OI_RETENTION);
-      if (n) log(`Pruned ${n} OI sample(s) older than 31d`);
+      const n = await store.prune(Date.now() - OI_RETENTION, Date.now() - OI_FULL_RES);
+      if (n) log(`OI retention pass: ${n} sample(s) dropped/thinned (full res 31d, hourly to 365d)`);
+      // mirror the same thinning in memory so the hist arrays track the on-disk shape
+      { const full = Date.now() - OI_FULL_RES;
+        for (const [coin, arr] of hist) {
+          if (!arr.length || arr[0][0] >= full) continue;
+          const out = []; let lastHb = -1;
+          for (const k of arr) {
+            if (k[0] >= full) { out.push(k); continue; }
+            const hb = Math.floor(k[0] / HOUR);
+            if (hb !== lastHb) { out.push(k); lastHb = hb; }
+          }
+          if (out.length !== arr.length) hist.set(coin, out);
+        } }
     } catch (e) { log("prune failed: " + (e && e.message)); }
     // Heavy-data GC for markets delisted > 7d. They stay in Hyperliquid's meta forever (so the
     // row itself must survive to keep the universe index-aligned for the WS feed), but there's
