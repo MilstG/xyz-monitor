@@ -40,6 +40,7 @@
   <button class="tab" data-view="sectors">Sectors</button>
   <button class="tab" data-view="corr">Correlation</button>
   <button class="tab" data-view="sessions">Sessions</button>
+  <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
 </nav>
 
@@ -190,6 +191,10 @@
 
 <section id="view-sessions" hidden>
   <div id="sessions-body"><div class="msg">Loading…</div></div>
+</section>
+
+<section id="view-signals" hidden>
+  <div id="signals-body"><div class="msg">Loading…</div></div>
 </section>
 
 <section id="view-backtest" hidden>

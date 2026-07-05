@@ -205,6 +205,8 @@ function applySnapshot(s){
   if(s.dataTs) state.dataTs=s.dataTs;
   if(s.regime) state.regimeSrv=s.regime;
   if(s.warm) state.warm=s.warm;
+  { const vis=el('view-signals')&&!el('view-signals').hidden;
+    if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
   if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
@@ -1789,12 +1791,64 @@ function showView(v){
   setHidden('view-sectors', v!=='sectors');
   setHidden('view-corr', v!=='corr');
   setHidden('view-sessions', v!=='sessions');
+  setHidden('view-signals', v!=='signals');
   setHidden('view-backtest', v!=='backtest');
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
+  if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
+}
+
+// ===== signals tab =====
+// Server-ranked live conditions. Each row = a condition on one market + that market's OWN
+// historical base rate for the same event (median forward return, hit rate, n). Anything with
+// n < 8 wears an "unproven" badge instead of being hidden or oversold.
+let _sigLast=0;
+async function loadSignals(){
+  try{ const d=await fetchJSON('/api/signals'); _sigLast=Date.now();
+    if(d&&Array.isArray(d.signals)){ state.signals=d;
+      const tb=el('tab-signals'); if(tb) tb.textContent = d.count>0 ? `Signals (${d.count})` : 'Signals';
+      if(!el('view-signals').hidden) renderSignals(); }
+  }catch(_){}
+}
+function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
+const EV_TIP={
+  bigmove:'Today\u2019s move is \u22652\u03c3 of this market\u2019s own trailing 30d daily returns. History measures whether such moves continued (positive) or faded (negative) the next day, signed with the move.',
+  breakout:'First close/mark above the prior 30-day high. History: forward 5d return after past first-crosses on this market.',
+  volshift:'10d realized vol crossed above the 90th percentile of its own trailing ~6 months. History: forward 5d return after past expansions.',
+  gap:'The live move since the last cash close is outsized vs this market\u2019s own gap distribution. History: did the next cash session continue (positive) or fade (negative) such gaps?',
+  fundflip:'Day-summed funding changed sign after \u22653 days pinned the other way \u2014 the crowd switched sides. History: 3d move toward the new crowd.',
+  squeeze:'Crowded shorts (negative 7d funding) \u00d7 OI building \u00d7 price pressing the range \u2014 the squeeze spring is loaded. No historical study yet: needs longer OI history.',
+  prem:'Perp price dislocated from oracle vs its own 7-day premium baseline. During closed cash sessions this IS the live price discovery for the synthetic.',
+  volume:'24h volume is a multiple of this market\u2019s own 30d norm \u2014 a context flag that amplifies whatever else is firing.',
+};
+function renderSignals(){
+  const box=el('signals-body'); if(!box) return;
+  const d=state.signals;
+  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:12px" data-tip="Scoring: how unusual the condition is right now (0\u201350) + how much historical edge this market\u2019s own base rate shows for the same event (0\u201350). Nothing here is a prediction \u2014 every line shows its sample size.">Live conditions across all markets, ranked by <b>unusualness \u00d7 this market\u2019s own historical base rate</b>. Refreshes every 10 minutes server-side. Click a ticker for the full drawer.</div>`;
+  if(!d||!d.signals||!d.signals.length){
+    box.innerHTML=intro+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines and event studies accrue server-side; early after a cold start this list is naturally sparse.</span></div>`;
+    return;
+  }
+  let s=intro+'<div class="siglist">';
+  d.signals.forEach((g,i)=>{
+    const hist = g.study
+      ? `historically on ${esc(g.ticker)} (n=${g.study.n}): median <b class="${g.study.med>=0?'pos':'neg'}">${g.study.med>=0?'+':''}${g.study.med}%</b> \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
+      : `${esc(g.horizon||'no historical study yet')}`;
+    s+=`<div class="sig${g.unproven?' unp':''}">`
+      +`<span class="sig-rank">${i+1}</span>`
+      +`<b class="sig-tick" data-coin="${esc(g.coin)}">${esc(g.ticker)}</b>`
+      +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
+      +`<span class="sig-read">${esc(g.reading)}</span>`
+      +`<span class="sig-hist" data-tip="${esc(g.study?'Median forward return and share of past occurrences that resolved positive, over the stated horizon. n is every occurrence found in this market\u2019s own history \u2014 small n means weak evidence, and it says so.':EV_TIP[g.ev]||'')}">${hist}${g.unproven?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences (or the study needs data still accruing) \u2014 treat as a flag, not an edge">unproven</i>':''}</span>`
+      +`<span class="sig-score" data-tip="unusualness + historical edge, 0\u2013100"><span class="sig-bar"><span style="width:${Math.min(100,g.score)}%"></span></span>${g.score}</span>`
+      +`</div>`;
+  });
+  s+='</div>';
+  box.innerHTML=s;
+  box.querySelectorAll('.sig-tick').forEach(t=>t.addEventListener('click',()=>openDetail(t.dataset.coin)));
 }
 
 // ===== sectors tab =====

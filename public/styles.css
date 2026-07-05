@@ -395,3 +395,22 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .lc-tick{font-size:9px;fill:var(--muted)}
 .lc-ax{font-size:9px;fill:var(--muted)}
 .lc-end{font-size:9px;font-weight:700}
+
+/* ===== signals tab ===== */
+.siglist{display:flex;flex-direction:column;gap:6px}
+.sig{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;background:var(--panel);border:1px solid var(--border);
+  border-radius:8px;padding:9px 14px;font-family:var(--mono);font-size:12.5px}
+.sig:hover{border-color:var(--faint)}
+.sig-rank{color:var(--faint);font-size:11px;min-width:18px;text-align:right}
+.sig-tick{color:var(--accent);cursor:pointer;min-width:56px}
+.sig-tick:hover{text-decoration:underline}
+.sig-chip{border:1px solid var(--border);background:var(--panel2);color:var(--muted);border-radius:5px;
+  padding:2px 8px;font-size:10.5px;white-space:nowrap}
+.sig-read{color:var(--text)}
+.sig-hist{color:var(--muted);font-size:11.5px;flex:1 1 260px;line-height:1.45}
+.sig-unp{font-style:normal;color:var(--accent-dim);border:1px solid var(--accent-dim);border-radius:4px;
+  padding:0 5px;font-size:9.5px;text-transform:uppercase;letter-spacing:.5px;margin-left:6px}
+.sig.unp .sig-bar span{background:var(--faint)}
+.sig-score{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px;min-width:96px;justify-content:flex-end;margin-left:auto}
+.sig-bar{width:56px;height:5px;border-radius:3px;background:var(--grid);overflow:hidden;display:inline-block}
+.sig-bar span{display:block;height:100%;background:var(--accent)}
