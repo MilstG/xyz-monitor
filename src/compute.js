@@ -384,7 +384,7 @@ function studyBigMove(closes) {
     if (f1 != null) d1.push(dir * f1);
     if (f3 != null) d3.push(dir * f3);
   }
-  return { d1: summarizeEvents(d1), d3: summarizeEvents(d3) };
+  return { d1: summarizeEvents(d1), d3: summarizeEvents(d3), raw: { d1, d3 } };
 }
 // 30d-high breakout: close crosses above the max of the prior 30 closes. Forward 1d / 5d.
 function studyBreakout(closes) {
@@ -397,7 +397,7 @@ function studyBreakout(closes) {
     if (f1 != null) d1.push(f1);
     if (f5 != null) d5.push(f5);
   }
-  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5) };
+  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 } };
 }
 // Vol-regime shift: 10d realized vol crossing above the 90th percentile of its trailing 120
 // observations. Forward 5d return (does an expansion resolve up or down for this market?).
@@ -414,7 +414,7 @@ function studyVolShift(closes) {
     const f5 = fwdRet(closes, ci, 5);
     if (f5 != null) d5.push(f5);
   }
-  return { d5: summarizeEvents(d5) };
+  return { d5: summarizeEvents(d5), raw: { d5 } };
 }
 // Gap fade/continuation: for each closed-window hold with |gap| >= 0.75 sigma of this market's
 // own gap distribution, measure the NEXT cash session (open -> close), signed by gap direction:
@@ -435,7 +435,7 @@ function studyGapFade(hourly, windows, tol) {
     if (!(open > 0) || !(close > 0)) continue;
     dirRets.push((gp.g > 0 ? 1 : -1) * (close / open - 1) * 100);
   }
-  return { session: summarizeEvents(dirRets), nGaps: gaps.length, sd: +sd.toFixed(3) };
+  return { session: summarizeEvents(dirRets), nGaps: gaps.length, sd: +sd.toFixed(3), raw: { session: dirRets } };
 }
 // Funding flip: the day-summed funding changes sign after >= 3 consecutive same-sign days.
 // Forward 3d return signed TOWARD the new funding side (funding flips positive = longs now
@@ -452,7 +452,63 @@ function studyFundFlip(dayFunding, closes) {
     }
     if (s === prevSign) run++; else { run = s === 0 ? run : 1; if (s !== 0) prevSign = s; }
   }
-  return { d3: summarizeEvents(d3) };
+  return { d3: summarizeEvents(d3), raw: { d3 } };
+}
+
+// ---- signal metadata + playbooks ----------------------------------------------------------
+// Per-event resolution conventions for the live ledger: which horizon the claim covers and how
+// the realized outcome is signed (identical to the study's sign convention, so claimed vs live
+// records are directly comparable).
+const EV_META = {
+  bigmove:  { horizonMs: DAY,      horizon: "next 1d, signed with the move", studyKey: "d1" },
+  breakout: { horizonMs: 5 * DAY,  horizon: "next 5d",                        studyKey: "d5" },
+  volshift: { horizonMs: 5 * DAY,  horizon: "next 5d",                        studyKey: "d5" },
+  gap:      { horizonMs: null,     horizon: "next cash session, signed with the gap", studyKey: "session" },  // resolveAt = next session close
+  fundflip: { horizonMs: 3 * DAY,  horizon: "next 3d, toward the new crowd",  studyKey: "d3" },
+  squeeze:  { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
+  prem:     { horizonMs: 12 * HOUR, horizon: "reversion toward oracle",       studyKey: null },
+  volume:   { horizonMs: null,     horizon: "context flag",                   studyKey: null },
+};
+// Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
+// market's own stats, and the one corroborating thing to watch. A description of the setup —
+// explicitly NOT advice; the ledger decides which event types have earned any trust.
+function playbook(ev, ctx) {
+  const f2 = (x) => (x == null || !Number.isFinite(x) ? null : +x.toPrecision(6));
+  switch (ev) {
+    case "bigmove": {
+      const dir = ctx.dir >= 0 ? "up" : "down", sgn = ctx.dir >= 0 ? 1 : -1;
+      return { bias: "continuation " + dir,
+        target: f2(ctx.px * (1 + sgn * Math.abs(ctx.med != null ? ctx.med : 0.5) / 100)),
+        stop: f2(ctx.px * (1 - sgn * (ctx.sd30 || 1) / 100)),
+        watch: "volume staying elevated — a thrust on fading volume is the fade setup instead" };
+    }
+    case "breakout":
+      return { bias: "continuation up while above the breakout level",
+        target: f2(ctx.px * (1 + Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        stop: f2(ctx.level),
+        watch: "a close back below the prior 30d high = failed breakout, the signal is void" };
+    case "gap": {
+      const fade = ctx.med != null && ctx.med < 0 && ctx.n >= 8;
+      return { bias: fade ? "this market historically FADES its gaps — reversion into the session" : (ctx.n >= 8 ? "this market historically continues its gaps" : "unproven — watch the open"),
+        target: fade ? f2(ctx.closePx) : f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * Math.abs(ctx.med != null ? ctx.med : 0.3) / 100)),
+        stop: f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * (ctx.gapSd || 0.5) / 100)),
+        watch: "whether the S&P confirms — an excess gap (beyond beta) carries the information" };
+    }
+    case "fundflip":
+      return { bias: ctx.dir >= 0 ? "crowd flipped long — drift with them short-term" : "crowd flipped short — drift with them short-term",
+        target: null, stop: null,
+        watch: "funding flipping straight back voids it; funding STAYING flipped for 2+ days is the confirmation" };
+    case "squeeze":
+      return { bias: "long-biased while shorts keep paying AND ΔOI holds",
+        target: f2(ctx.hi30), stop: f2(ctx.lo30 != null && ctx.hi30 != null ? ctx.lo30 + 0.25 * (ctx.hi30 - ctx.lo30) : null),
+        watch: "ΔOI(7d) turning negative = shorts covering, spring released — the setup is spent" };
+    case "prem":
+      return { bias: ctx.prem >= 0 ? "perp rich — reversion toward oracle" : "perp cheap — reversion toward oracle",
+        target: f2(ctx.oracle), stop: null,
+        watch: ctx.closed ? "whether the cash open confirms the perp's level or snaps it back to the oracle" : "persistence — a dislocation that survives arb for hours is information, not noise" };
+    default:
+      return { bias: "context only", target: null, stop: null, watch: "pairs with whatever else is firing on this name" };
+  }
 }
 
 // ---- hold math over the hourly spines ----
@@ -715,4 +771,5 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
+  EV_META, playbook,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };

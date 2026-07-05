@@ -4,6 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip, retStd, dailyRets,
+  EV_META, playbook, marketSessions, summarizeEvents,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -17,9 +18,10 @@ const SP_ALIASES = ["SPX", "SPX500", "SP500", "US500", "USSPX500", "SP500USD", "
 const OI_MIN_GAP = 4.5 * 60 * 1000;   // store at most one OI sample per ~5 min
 const OI_RETENTION = 31 * DAY;        // keep 31 days of OI history
 const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
-const HOURLY_HISTORY_DAYS = 60;       // rolling hourly-OHLCV window retained for time-of-day / session analytics
+const HOURLY_HISTORY_DAYS = 180;      // rolling hourly-OHLCV window (API serves ~5000 most-recent candles = ~208d hard cap; 180d fits one call and triples the gap-study samples)
 const HOURLY_FEAT_DAYS = 31;          // window actually fed to featuresFromHourly (keep features identical to before)
-const HOURLY_FETCH_WEIGHT = 50;       // rate-limit weight for the wider hourly candle pull
+const HOURLY_FETCH_WEIGHT = 130;      // rate-limit weight for the cold 180d hourly pull (one-time per market)
+const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
 const FUNDING_HISTORY_DAYS = 60;      // rolling hourly funding-rate window (aligned with the price spine)
 const FUNDING_FETCH_WEIGHT = 20;      // rate-limit weight for a fundingHistory pull
 const FUNDING_PROBE_MIN = 8;          // if the first N (highest-vol) backfills all return nothing, treat
@@ -276,9 +278,23 @@ function createPoller({ dex, store, log, version }) {
     if (!r) return;
     const now = Date.now();
     if (r.px == null) { r.hourlyTs = now; return; }
-    // Pull the wider spine window in one call; retain it raw for time-of-day / session / boundary analytics.
-    const c = await fetchCandles(coin, "1h", now - HOURLY_HISTORY_DAYS * DAY, now, HOURLY_FETCH_WEIGHT);
-    r.hourlyRaw = Array.isArray(c) ? c : null;
+    // Cold start: one wide 180d pull. Steady state: fetch only the last ~48h tail and merge it
+    // into the retained spine — the old design re-pulled the full window every refresh, which
+    // at 180d would consume the entire rate budget; the merge makes the window depth free.
+    const have = Array.isArray(r.hourlyRaw) && r.hourlyRaw.length > 48;
+    if (!have) {
+      const c = await fetchCandles(coin, "1h", now - HOURLY_HISTORY_DAYS * DAY, now, HOURLY_FETCH_WEIGHT);
+      r.hourlyRaw = Array.isArray(c) ? c : null;
+    } else {
+      const lastT = +r.hourlyRaw[r.hourlyRaw.length - 1].t || 0;
+      const c = await fetchCandles(coin, "1h", Math.max(lastT - 2 * HOUR, now - 2 * DAY), now, HOURLY_TAIL_WEIGHT);
+      if (Array.isArray(c) && c.length) {
+        const firstNew = +c[0].t;
+        r.hourlyRaw = r.hourlyRaw.filter((k) => +k.t < firstNew).concat(c);
+      }
+    }
+    { const cutOld = now - HOURLY_HISTORY_DAYS * DAY;
+      if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = r.hourlyRaw.filter((k) => +k.t >= cutOld); }
     // Features are computed from ONLY the last 31 days so hi30/lo30, volH and volD are byte-identical
     // to the previous 31d fetch — the wider window must not leak into the feature math.
     const cut = now - HOURLY_FEAT_DAYS * DAY;
@@ -577,76 +593,216 @@ function createPoller({ dex, store, log, version }) {
     r._stSig = sig; r._st = st;
     return st;
   }
-  function evidence(st) {   // 0..50 from a study summary; small-n gets a flat token score
-    if (!st || !st.n) return { pts: 6, unproven: true };
-    if (st.n < 8) return { pts: 8, unproven: true, st };
-    const edge = Math.min(1, Math.abs(st.med) / 1.5) * 30 + Math.abs(st.hit - 0.5) * 2 * 20;
-    return { pts: edge, unproven: false, st };
+
+  // ---- signal ledger: the honesty loop -----------------------------------------------------
+  // Every first firing of (coin, event) opens a ledger entry with the mark, the direction the
+  // event implies, and when the claim resolves. The resolver revisits each entry at its horizon
+  // and records the realized outcome UNDER THE SAME SIGN CONVENTION the study claims, so the
+  // in-sample base rate and the live out-of-sample record are directly comparable. Event types
+  // whose live record shows no edge get their evidence score capped automatically.
+  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null;
+  function hydrateLedger() {
+    const d = store.loadLedger();
+    if (!d) return;
+    if (Array.isArray(d.open)) for (const e of d.open) if (e && e.key) ledgerOpen.set(e.key, e);
+    if (Array.isArray(d.closed)) ledgerClosed = d.closed.slice(-1500);
+    recomputeRecord();
+  }
+  function persistLedger() {
+    if (!ledgerDirty) return;
+    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-1500) });
+    ledgerDirty = false;
+  }
+  function resolveAtFor(ev, t0) {
+    if (ev === "gap") {   // resolves at the close of the next cash session after firing
+      for (const ses of marketSessions(t0, t0 + 6 * DAY)) if (ses.close > t0 && ses.open > t0) return ses.close;
+      return t0 + 3 * DAY;
+    }
+    const m = EV_META[ev];
+    return t0 + ((m && m.horizonMs) || DAY);
+  }
+  function openLedger(r, ev, sigEntry, dir, extra) {
+    const key = r.coin + "|" + ev;
+    let e = ledgerOpen.get(key);
+    if (!e) {
+      const t0 = Date.now();
+      e = Object.assign({
+        key, coin: r.coin, ticker: r.ticker, ev, t0,
+        mark0: r.px, dir: dir == null ? 1 : dir,
+        score0: sigEntry.score, reading0: sigEntry.reading,
+        claim: sigEntry.study || null,
+        resolveAt: resolveAtFor(ev, Date.now()),
+      }, extra || {});
+      ledgerOpen.set(key, e); ledgerDirty = true;
+    }
+    return e;
+  }
+  function resolveLedger() {
+    const now = Date.now();
+    for (const [key, e] of ledgerOpen) {
+      if (now < e.resolveAt) continue;
+      let realized = null;
+      if (e.ev === "prem") {
+        const r = rows.get(e.coin);
+        if (r && r.premH && r.premH.length && e.prem0 != null) {
+          let best = null;
+          for (const p of r.premH) if (!best || Math.abs(p[0] - e.resolveAt) < Math.abs(best[0] - e.resolveAt)) best = p;
+          if (best && Math.abs(best[0] - e.resolveAt) < 3 * HOUR)
+            realized = +(Math.sign(e.prem0) * (e.prem0 - best[1])).toFixed(1);   // bp recovered toward oracle
+        }
+      } else {
+        const hs = getHourly(e.coin);
+        const p0 = priceAsOf(hs, e.t0, 3 * HOUR) || e.mark0;
+        const p1 = priceAsOf(hs, e.resolveAt, 3 * HOUR);
+        if (p0 > 0 && p1 > 0) realized = +((e.dir >= 0 ? 1 : -1) * (p1 / p0 - 1) * 100).toFixed(2);
+      }
+      if (realized == null) {
+        if (now > e.resolveAt + 2 * DAY) { e.status = "void"; ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true; }
+        continue;
+      }
+      e.status = "resolved"; e.realized = realized; e.win = realized > 0; e.tR = now;
+      ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true;
+    }
+    if (ledgerClosed.length > 1500) ledgerClosed = ledgerClosed.slice(-1500);
+    if (ledgerDirty) recomputeRecord();
+  }
+  function recomputeRecord() {
+    const per = {};
+    for (const e of ledgerClosed) {
+      if (e.status !== "resolved") continue;
+      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [] });
+      b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
+    }
+    const out = {};
+    for (const ev in per) {
+      const b = per[ev], sm = summarizeEvents(b.rets);
+      out[ev] = { resolved: b.resolved, hit: b.resolved ? +(b.wins / b.resolved).toFixed(2) : null,
+        med: sm.n ? sm.med : null, open: 0, unit: ev === "prem" ? "bp" : "%" };
+    }
+    for (const e of ledgerOpen.values()) { (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, open: 0, unit: e.ev === "prem" ? "bp" : "%" })).open++; }
+    recordCache = out;
+  }
+  function liveNoEdge(ev) {
+    const rec = recordCache && recordCache[ev];
+    return !!(rec && rec.resolved >= 10 && rec.hit != null && rec.hit < 0.5 && rec.med != null && rec.med <= 0);
+  }
+  function evidence(st, ev, pooled) {   // 0..50: this-market study first, pooled fallback, live-record capped
+    let base;
+    if (st && st.n >= 8) base = { pts: Math.min(1, Math.abs(st.med) / 1.5) * 30 + Math.abs(st.hit - 0.5) * 2 * 20, unproven: false, st };
+    else if (pooled && pooled.n >= 12) base = { pts: (Math.min(1, Math.abs(pooled.med) / 1.5) * 30 + Math.abs(pooled.hit - 0.5) * 2 * 20) * 0.7, unproven: true, st: st && st.n ? st : null, pooled };
+    else base = { pts: st && st.n ? 8 : 6, unproven: true, st: st && st.n ? st : null };
+    if (ev && liveNoEdge(ev)) { base.pts = Math.min(base.pts, 8); base.noedge = true; }
+    return base;
   }
   function mkSignal(r, ev, valTxt, intensity, evd, extra) {
     return Object.assign({
       coin: r.coin, ticker: r.ticker, ev, label: EV_LABEL[ev], reading: valTxt,
-      score: Math.round(Math.min(50, intensity) + evd.pts),
-      unproven: !!evd.unproven,
+      score: Math.round(Math.min(50, Math.max(0, intensity)) + evd.pts),
+      unproven: !!evd.unproven, noedge: !!evd.noedge,
       study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit } : null,
+      pooled: evd.pooled ? { n: evd.pooled.n, med: evd.pooled.med, hit: evd.pooled.hit } : null,
     }, extra || {});
   }
+
   function buildSignals() {
+    resolveLedger();
     const out = [], now = Date.now();
     const dc = dailyCache || { daily: {}, funding: {}, liveClose: {}, offHours: { closed: false } };
+    // pooled raw outcomes per assetClass x event (the small-n rescue for funding flips etc.)
+    const pool = {};
+    const pooledFor = (ac, ev, key) => { const b = pool[ac] && pool[ac][ev + ":" + key]; return b && b.length >= 12 ? summarizeEvents(b) : null; };
+    const feed = (ac, ev, key, raws) => {
+      if (!raws || !raws.length) return;
+      const g = pool[ac] || (pool[ac] = {});
+      (g[ev + ":" + key] || (g[ev + ":" + key] = [])).push(...raws);
+    };
+    const acOf = (r) => classifyCached(r.ticker).assetClass || "Other";
+    // pass 1: studies + pooling feed
+    const prepped = [];
     for (const r of activeMarkets()) {
       if (r.delisted || r.px == null) continue;
       const closes = dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;
       const st = studiesFor(r, closes, dayFunding);
+      const ac = acOf(r);
+      if (st.bigmove && st.bigmove.raw) { feed(ac, "bigmove", "d1", st.bigmove.raw.d1); }
+      if (st.breakout && st.breakout.raw) { feed(ac, "breakout", "d5", st.breakout.raw.d5); }
+      if (st.volshift && st.volshift.raw) { feed(ac, "volshift", "d5", st.volshift.raw.d5); }
+      if (st.gap && st.gap.raw) { feed(ac, "gap", "session", st.gap.raw.session); }
+      if (st.fundflip && st.fundflip.raw) { feed(ac, "fundflip", "d3", st.fundflip.raw.d3); }
+      prepped.push({ r, closes, dayFunding, st, ac });
+    }
+    // benchmark live gap (for excess-gap readings)
+    let gBench = null;
+    { const b = benchCoin ? rows.get(benchCoin) : null, pc = benchCoin ? dc.liveClose[benchCoin] : null;
+      if (dc.offHours && dc.offHours.closed && b && b.px != null && pc > 0) gBench = (b.px / pc - 1) * 100; }
+    // pass 2: live detection
+    for (const { r, closes, dayFunding, st, ac } of prepped) {
       const rets = closes ? dailyRets(closes) : [];
       const sd30 = retStd(rets.slice(-30), 15);
 
-      // big move (uses live d1 vs the market's own 30d daily sigma)
       if (sd30 > 0 && r.d1 != null && Math.abs(r.d1) >= 2 * sd30) {
-        const dir = r.d1 > 0 ? "up" : "down";
-        out.push(mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${(Math.abs(r.d1) / sd30).toFixed(1)}\u03c3 ${dir})`,
-          Math.min(50, (Math.abs(r.d1) / sd30 - 2) * 20 + 20), evidence(st.bigmove && st.bigmove.d1), { horizon: "next 1d, signed with the move" }));
+        const dir = r.d1 > 0 ? 1 : -1;
+        const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"));
+        const sig = mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${(Math.abs(r.d1) / sd30).toFixed(1)}\u03c3 ${dir > 0 ? "up" : "down"})`,
+          (Math.abs(r.d1) / sd30 - 2) * 20 + 20, evd, { horizon: EV_META.bigmove.horizon });
+        sig.play = playbook("bigmove", { px: r.px, dir, sd30, med: sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null) });
+        out.push(sig); openLedger(r, "bigmove", sig, dir);
       }
-      // 30d-high breakout (live: mark above the max of the prior 30 completed closes)
       if (closes && closes.length >= 31) {
         let hi = -Infinity;
         for (let j = closes.length - 31; j < closes.length - 1; j++) if (closes[j][1] > hi) hi = closes[j][1];
-        if (hi > 0 && r.px > hi && closes[closes.length - 2][1] <= hi)
-          out.push(mkSignal(r, "breakout", `mark ${((r.px / hi - 1) * 100).toFixed(1)}% above the prior 30d high`,
-            Math.min(50, ((r.px / hi - 1) * 100) * 12 + 15), evidence(st.breakout && st.breakout.d5), { horizon: "next 5d" }));
+        if (hi > 0 && r.px > hi && closes[closes.length - 2][1] <= hi) {
+          const evd = evidence(st.breakout && st.breakout.d5, "breakout", pooledFor(ac, "breakout", "d5"));
+          const sig = mkSignal(r, "breakout", `mark ${((r.px / hi - 1) * 100).toFixed(1)}% above the prior 30d high`,
+            ((r.px / hi - 1) * 100) * 12 + 15, evd, { horizon: EV_META.breakout.horizon });
+          sig.play = playbook("breakout", { px: r.px, level: hi, med: sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null) });
+          out.push(sig); openLedger(r, "breakout", sig, 1);
+        }
       }
-      // vol expansion (current 10d realized vol above its own 90th percentile)
       if (rets.length >= 130) {
         const vols = [];
         for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
         const cur = vols[vols.length - 1], hist = vols.slice(-121, -1).filter((x) => x != null);
         if (cur != null && hist.length >= 60) {
           const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
-          if (cur > p90)
-            out.push(mkSignal(r, "volshift", `10d vol ${cur.toFixed(1)}%/d vs p90 ${p90.toFixed(1)}%/d`,
-              Math.min(50, (cur / p90 - 1) * 60 + 12), evidence(st.volshift && st.volshift.d5), { horizon: "next 5d" }));
+          if (cur > p90) {
+            const evd = evidence(st.volshift && st.volshift.d5, "volshift", pooledFor(ac, "volshift", "d5"));
+            const sig = mkSignal(r, "volshift", `10d vol ${cur.toFixed(1)}%/d vs p90 ${p90.toFixed(1)}%/d`,
+              (cur / p90 - 1) * 60 + 12, evd, { horizon: EV_META.volshift.horizon });
+            sig.play = playbook("volshift", {});
+            out.push(sig);   // no ledger: no directional claim to resolve
+          }
         }
       }
-      // outsized live gap (only while the cash market is closed)
       if (dc.offHours && dc.offHours.closed && st.gap && st.gap.sd > 0) {
         const pc = dc.liveClose[r.coin];
         if (pc > 0) {
           const g = (r.px / pc - 1) * 100;
-          if (Math.abs(g) >= 0.75 * st.gap.sd)
-            out.push(mkSignal(r, "gap", `${g >= 0 ? "+" : ""}${g.toFixed(2)}% since the last close (${(Math.abs(g) / st.gap.sd).toFixed(1)}\u03c3 of its gaps)`,
-              Math.min(50, (Math.abs(g) / st.gap.sd) * 18), evidence(st.gap.session), { horizon: "next cash session, signed with the gap" }));
+          if (Math.abs(g) >= 0.75 * st.gap.sd) {
+            const exc = gBench != null && r.coin !== benchCoin ? g - gBench : null;
+            const evd = evidence(st.gap.session, "gap", pooledFor(ac, "gap", "session"));
+            const reading = `${g >= 0 ? "+" : ""}${g.toFixed(2)}% since the last close (${(Math.abs(g) / st.gap.sd).toFixed(1)}\u03c3 of its gaps)`
+              + (exc != null ? ` \u00b7 S&P ${gBench >= 0 ? "+" : ""}${gBench.toFixed(2)}%, excess ${exc >= 0 ? "+" : ""}${exc.toFixed(2)}%` : "");
+            const sig = mkSignal(r, "gap", reading,
+              (Math.abs(g) / st.gap.sd) * 14 + (exc != null ? Math.min(16, Math.abs(exc) / st.gap.sd * 12) : 0),
+              evd, { horizon: EV_META.gap.horizon });
+            sig.play = playbook("gap", { px: r.px, closePx: pc, gapDir: g >= 0 ? 1 : -1, gapSd: st.gap.sd, med: sig.study ? sig.study.med : null, n: sig.study ? sig.study.n : 0 });
+            out.push(sig); openLedger(r, "gap", sig, g >= 0 ? 1 : -1);
+          }
         }
       }
-      // funding flip (yesterday's day-sum flipped sign after >= 3 same-sign days)
       if (dayFunding && dayFunding.length >= 5) {
         const last = dayFunding[dayFunding.length - 1], s0 = Math.sign(last[1]);
         let run = 0;
-        for (let i = dayFunding.length - 2; i >= 0; i--) { const s = Math.sign(dayFunding[i][1]); if (s === 0 || s === s0) break; run++; if (run >= 3) break; }
-        if (s0 !== 0 && run >= 3)
-          out.push(mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
-            22, evidence(st.fundflip && st.fundflip.d3), { horizon: "next 3d, toward the new crowd" }));
+        for (let i = dayFunding.length - 2; i >= 0; i--) { const sg = Math.sign(dayFunding[i][1]); if (sg === 0 || sg === s0) break; run++; if (run >= 3) break; }
+        if (s0 !== 0 && run >= 3) {
+          const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"));
+          const sig = mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
+            22, evd, { horizon: EV_META.fundflip.horizon });
+          sig.play = playbook("fundflip", { dir: s0 });
+          out.push(sig); openLedger(r, "fundflip", sig, s0);
+        }
       }
-      // squeeze setup (same formula the table column uses, on the stable 7d window)
       const fw = computeFundWin(r), doi = computeDoi(r), f = r.feat;
       const fw7 = fw ? fw.d7 : null;
       if (fw7 != null && isFinite(fw7)) {
@@ -656,30 +812,56 @@ function createPoller({ dex, store, log, version }) {
           let trig = 0.5;
           if (f && f.hi30 > f.lo30 && r.px != null) trig = Math.min(1, Math.max(0, (r.px - f.lo30) / (f.hi30 - f.lo30)));
           const sqz = Math.round(100 * crowd * (0.45 + 0.30 * fuel + 0.25 * trig));
-          if (sqz >= 60)
-            out.push(mkSignal(r, "squeeze", `score ${sqz} \u2014 shorts paying ${Math.abs(fAPR).toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
-              Math.min(50, (sqz - 60) * 1.1 + 15), { pts: 8, unproven: true }, { horizon: "no historical study yet (needs longer OI history)" }));
+          if (sqz >= 60) {
+            const evd = evidence(null, "squeeze", null);
+            const sig = mkSignal(r, "squeeze", `score ${sqz} \u2014 shorts paying ${Math.abs(fAPR).toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
+              (sqz - 60) * 1.1 + 15, evd, { horizon: EV_META.squeeze.horizon });
+            sig.play = playbook("squeeze", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
+            out.push(sig); openLedger(r, "squeeze", sig, 1);
+          }
         }
       }
-      // premium dislocation vs the market's own 7d baseline
       const pb = premBaseline(r);
       if (pb && r.oracle > 0) {
         const prem = (r.px / r.oracle - 1) * 1e4, z = (prem - pb.m) / pb.sd;
-        if (Math.abs(z) >= 2 && Math.abs(prem) >= 5)
-          out.push(mkSignal(r, "prem", `${prem >= 0 ? "+" : ""}${prem.toFixed(1)}bp vs oracle (${z >= 0 ? "+" : ""}${z.toFixed(1)}\u03c3 of its 7d baseline)`,
-            Math.min(50, (Math.abs(z) - 2) * 12 + 18), { pts: 8, unproven: true },
-            { horizon: dc.offHours && dc.offHours.closed ? "cash market closed \u2014 this is live off-hours price discovery" : "baseline study accrues as premium history builds" }));
+        if (Math.abs(z) >= 2 && Math.abs(prem) >= 5) {
+          const evd = evidence(null, "prem", null);
+          const sig = mkSignal(r, "prem", `${prem >= 0 ? "+" : ""}${prem.toFixed(1)}bp vs oracle (${z >= 0 ? "+" : ""}${z.toFixed(1)}\u03c3 of its 7d baseline)`,
+            (Math.abs(z) - 2) * 12 + 18, evd,
+            { horizon: dc.offHours && dc.offHours.closed ? "cash market closed \u2014 live off-hours price discovery" : EV_META.prem.horizon });
+          sig.play = playbook("prem", { prem, oracle: r.oracle, closed: !!(dc.offHours && dc.offHours.closed) });
+          out.push(sig); openLedger(r, "prem", sig, prem >= 0 ? -1 : 1, { prem0: +prem.toFixed(1) });
+        }
       }
-      // volume surge vs the market's own norm
-      if (f && f.volBase > 0 && r.vol != null && r.vol / f.volBase >= 2.5)
-        out.push(mkSignal(r, "volume", `24h volume ${(r.vol / f.volBase).toFixed(1)}\u00d7 its 30d norm`,
-          Math.min(50, (r.vol / f.volBase - 2.5) * 10 + 12), { pts: 6, unproven: true }, { horizon: "context flag \u2014 pairs with whatever else is firing" }));
+      if (f && f.volBase > 0 && r.vol != null && r.vol / f.volBase >= 2.5) {
+        const sig = mkSignal(r, "volume", `24h volume ${(r.vol / f.volBase).toFixed(1)}\u00d7 its 30d norm`,
+          (r.vol / f.volBase - 2.5) * 10 + 12, { pts: 6, unproven: true }, { horizon: EV_META.volume.horizon });
+        sig.play = playbook("volume", {});
+        out.push(sig);
+      }
     }
-    out.sort((a, b) => b.score - a.score);
-    const top = out.slice(0, 40);
-    const sig = top.length + "|" + top.map((s) => s.coin + s.ev + s.score).join(",");
+    // freshness: age from the ledger; a signal past its own horizon decays, past 2x it drops
+    const kept = [];
+    for (const g of out) {
+      const e = ledgerOpen.get(g.coin + "|" + g.ev);
+      if (e) {
+        g.age = now - e.t0;
+        const span = Math.max(1, e.resolveAt - e.t0);
+        if (g.age > 2 * span) continue;
+        if (g.age > span) g.score = Math.round(g.score * 0.6);
+      }
+      kept.push(g);
+    }
+    // confluence: several independent conditions on one name compound
+    const byCoin = {};
+    for (const g of kept) (byCoin[g.coin] || (byCoin[g.coin] = [])).push(g);
+    for (const c in byCoin) { const k = byCoin[c].length; if (k > 1) for (const g of byCoin[c]) { g.conf = k; g.score = Math.min(100, g.score + Math.min(16, 8 * (k - 1))); } }
+    kept.sort((a, b) => b.score - a.score);
+    const top = kept.slice(0, 40);
+    const sig = top.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",");
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
-    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top };
+    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {} };
+    persistLedger();
   }
 
   // ---- session / time-of-day analytics (served at /api/analytics) ----
@@ -1034,6 +1216,7 @@ function createPoller({ dex, store, log, version }) {
   async function start() {
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
+    hydrateLedger();
     const restoredHourly = hydrateHourly();
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     await pollUniverse();
@@ -1088,6 +1271,7 @@ function createPoller({ dex, store, log, version }) {
     getCandles,
     getSignals: () => signalsCache,
     persistFeatures,
+    persistLedger: () => { ledgerDirty = true; persistLedger(); },
     // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
     // WS status make "it looks stale" diagnosable from /api/health instead of Railway logs.
     stats: () => {

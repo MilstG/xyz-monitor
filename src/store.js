@@ -15,6 +15,7 @@ function openStore(dataDir) {
   const featFile = path.join(dataDir, "features.json");
   const regimeFile = path.join(dataDir, "regime.json");
   const hourlyFile = path.join(dataDir, "hourly.json");
+  const ledgerFile = path.join(dataDir, "ledger.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
 
@@ -117,6 +118,18 @@ function openStore(dataDir) {
         }
       } catch (_) {}
       return [];
+    },
+    // Signal ledger: every fired signal + its resolved out-of-sample outcome. Written atomically —
+    // this file IS the track record; a truncated write would silently erase the honesty loop.
+    saveLedger(data) {
+      try {
+        const tmp = ledgerFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, ledgerFile);
+      } catch (_) {}
+    },
+    loadLedger() {
+      try { return JSON.parse(fs.readFileSync(ledgerFile, "utf8")); } catch (_) { return null; }
     },
     saveRegime(arr) {
       try {
