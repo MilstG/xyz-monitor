@@ -1838,6 +1838,14 @@ function playDist(g, lvl){
   const pc=(lvl/r.px-1)*100;
   return ` <i class="${pc>=0?'pos':'neg'}">(${pc>=0?'+':''}${pc.toFixed(1)}%)</i>`;
 }
+function rrChip(g){
+  const p=g.play, r=state.rows.get(g.coin);
+  if(!p||p.target==null||p.stop==null||!r||!(r.px>0)) return '';
+  const up=Math.abs(p.target-r.px), dn=Math.abs(p.stop-r.px);
+  if(!(dn>0)) return '';
+  const rr=up/dn, c=rr>=1.5?'pos':(rr<0.8?'neg':'sec');
+  return `<span class="sp-lvl" data-tip="median-target distance \u00f7 invalidation distance from the live mark. CAVEAT: the target is the MEDIAN outcome (50th percentile drift) and the void level is premise-invalidation, not a risk-sized stop \u2014 so this ratio screens structure, it does not measure trade expectancy. A low ratio only works with a high hit rate; the expectancy figure and the live track record are the real arbiters.">R/R <b class="${c}">${rr.toFixed(1)}</b></span>`;
+}
 function playRow(g){
   const p=g.play, sd=SP_SIDE[p.side]||SP_SIDE.watch;
   return `<span class="sig-play" data-tip="Mechanical description of the setup with levels computed from this market's own stats \u2014 NOT advice. Distances are measured from the live mark. The track record strip above decides which event types deserve any trust.">`
@@ -1846,6 +1854,7 @@ function playRow(g){
     +`<span class="sp-bias">${esc(p.bias||'')}</span>`
     +(p.target!=null?`<span class="sp-lvl" data-tip="level implied by this market's own historical median for the event \u2014 where the base rate says the move resolves">target <b>${fmtPrice(p.target)}</b>${playDist(g,p.target)}</span>`:'')
     +(p.stop!=null?`<span class="sp-lvl" data-tip="invalidation \u2014 beyond this level the setup's premise is broken and the signal should be treated as void">void <b>${fmtPrice(p.stop)}</b>${playDist(g,p.stop)}</span>`:'')
+    +rrChip(g)
     +(p.watch?`<span class="sp-watch" data-tip="the one corroborating condition that confirms or kills this setup">watch: ${esc(p.watch)}</span>`:'')
     +`</span>`;
 }
@@ -1858,7 +1867,10 @@ function setSigView(v){ try{ localStorage.setItem('xyz-sigview',v); }catch(_){} 
 const sigExpanded=new Set();   // coins expanded inline while in compact mode (session-only)
 function trigChip(g){
   if(g.t0==null) return '';
-  return `<span class="sig-age" data-tip="${esc(`first fired ${new Date(g.t0).toLocaleString()} (your local time) \u2014 the score decays once a signal outlives its claimed horizon and it drops entirely at 2\u00d7`)}">${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}</span>`;
+  const tip = g.decayed
+    ? `first fired ${new Date(g.t0).toLocaleString()} (your local time) \u2014 this signal has OUTLIVED its claimed horizon: its score is decayed (\u00d70.6) and it drops entirely at 2\u00d7 the horizon. The original claim is already in the ledger awaiting resolution.`
+    : `first fired ${new Date(g.t0).toLocaleString()} (your local time) \u2014 the score decays once a signal outlives its claimed horizon and it drops entirely at 2\u00d7`;
+  return `<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(tip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${g.decayed?' \u00b7 decaying':''}</span>`;
 }
 function sigCardHtml(gr, rank, collapsible){
   let s=`<div class="sigcard${gr.sigs.length>1?' conf':''}"${collapsible?` data-coll="${esc(gr.coin)}"`:''}>`;
@@ -1869,10 +1881,11 @@ function sigCardHtml(gr, rank, collapsible){
     +`<span class="sig-score" data-tip="best condition's score: unusualness + historical edge + confluence bonus, 0\u2013100"><span class="sig-bar"><span style="width:${Math.min(100,gr.score)}%"></span></span>${gr.score}</span></div>`;
   for(const g of gr.sigs){
     const ownOk = g.study && g.study.n>=8;
+    const exp = (st)=>st&&st.avg!=null?` \u00b7 <span data-tip="expectancy: the MEAN direction-signed outcome per event \u2014 hit rate and payoff sizes folded into one number. This, not the R/R screen, is what decides whether the setup pays over many occurrences.">exp <b class="${st.avg>=0?'pos':'neg'}">${st.avg>=0?'+':''}${st.avg}%</b>/ev</span>`:'';
     const hist = ownOk
-      ? `on ${esc(g.ticker)} (n=${g.study.n}): median <b class="${g.study.med>=0?'pos':'neg'}">${g.study.med>=0?'+':''}${g.study.med}%</b> \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
+      ? `on ${esc(g.ticker)} (n=${g.study.n}): median <b class="${g.study.med>=0?'pos':'neg'}">${g.study.med>=0?'+':''}${g.study.med}%</b> \u00b7 ${Math.round(g.study.hit*100)}% hit${exp(g.study)} \u2014 ${esc(g.horizon||'')}`
       : (g.pooled
-        ? `${g.study?`on ${esc(g.ticker)}: n=${g.study.n} \u00b7 `:''}pooled across its asset class (n=${g.pooled.n}): median <b class="${g.pooled.med>=0?'pos':'neg'}">${g.pooled.med>=0?'+':''}${g.pooled.med}%</b> \u00b7 ${Math.round(g.pooled.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
+        ? `${g.study?`on ${esc(g.ticker)}: n=${g.study.n} \u00b7 `:''}pooled across its asset class (n=${g.pooled.n}): median <b class="${g.pooled.med>=0?'pos':'neg'}">${g.pooled.med>=0?'+':''}${g.pooled.med}%</b> \u00b7 ${Math.round(g.pooled.hit*100)}% hit${exp(g.pooled)} \u2014 ${esc(g.horizon||'')}`
         : (g.study
           ? `on ${esc(g.ticker)} (n=${g.study.n}): median ${g.study.med>=0?'+':''}${g.study.med}% \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
           : `${esc(g.horizon||'no historical study yet')}`));
