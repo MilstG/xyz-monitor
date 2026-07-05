@@ -432,3 +432,16 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sig-age{color:var(--faint);font-size:10px;border:1px solid var(--grid);border-radius:4px;padding:1px 5px}
 .sig-play{flex-basis:100%;color:var(--muted);font-size:11px;line-height:1.5;padding-left:2px}
 .sig-play b{color:var(--blue);font-weight:600}
+
+/* structured playbook row */
+.sig-play{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px}
+.sp-k{color:var(--faint);font-size:9.5px;text-transform:uppercase;letter-spacing:.8px}
+.sp-side{font-size:10px;letter-spacing:.6px;border-radius:4px;padding:1px 7px;font-weight:700}
+.sp-long{color:var(--up);border:1px solid var(--up)}
+.sp-short{color:var(--down);border:1px solid var(--down)}
+.sp-watch-pill{color:var(--muted);border:1px solid var(--border)}
+.sp-bias{color:var(--blue);font-weight:600;font-size:11px}
+.sp-lvl{color:var(--muted);font-size:11px}
+.sp-lvl b{color:var(--text);font-weight:600}
+.sp-lvl i{font-style:normal;font-size:10px}
+.sp-watch{color:var(--faint);font-size:10.5px;flex-basis:100%;padding-left:2px}

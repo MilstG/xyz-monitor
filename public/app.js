@@ -1825,6 +1825,30 @@ const EV_TIP={
   prem:'Perp price dislocated from oracle vs its own 7-day premium baseline. During closed cash sessions this IS the live price discovery for the synthetic.',
   volume:'24h volume is a multiple of this market\u2019s own 30d norm \u2014 a context flag that amplifies whatever else is firing.',
 };
+// Structured playbook row: side pill (LONG/SHORT/FADE/WATCH), levels with live distance from
+// the current mark, and the corroborating watch condition. Mechanical setup description — the
+// track record strip is what decides whether the event type deserves any trust.
+const SP_SIDE={long:{t:'LONG',c:'sp-long',tip:'the setup implies upside on this perp over the stated horizon'},
+  short:{t:'SHORT',c:'sp-short',tip:'the setup implies downside on this perp over the stated horizon'},
+  watch:{t:'WATCH',c:'sp-watch-pill',tip:'no directional edge claimed \u2014 a condition to monitor, not to trade'}};
+function playDist(g, lvl){
+  const r=state.rows.get(g.coin);
+  if(!r||r.px==null||!(r.px>0)||lvl==null) return '';
+  if(g.ev==='prem'){ const bp=(lvl/r.px-1)*1e4; return ` <i class="${bp>=0?'pos':'neg'}">(${bp>=0?'+':''}${bp.toFixed(0)}bp away)</i>`; }
+  const pc=(lvl/r.px-1)*100;
+  return ` <i class="${pc>=0?'pos':'neg'}">(${pc>=0?'+':''}${pc.toFixed(1)}%)</i>`;
+}
+function playRow(g){
+  const p=g.play, sd=SP_SIDE[p.side]||SP_SIDE.watch;
+  return `<span class="sig-play" data-tip="Mechanical description of the setup with levels computed from this market's own stats \u2014 NOT advice. Distances are measured from the live mark. The track record strip above decides which event types deserve any trust.">`
+    +`<span class="sp-k">play</span>`
+    +`<b class="sp-side ${sd.c}" data-tip="${esc(sd.tip)}">${sd.t}</b>`
+    +`<span class="sp-bias">${esc(p.bias||'')}</span>`
+    +(p.target!=null?`<span class="sp-lvl" data-tip="level implied by this market's own historical median for the event \u2014 where the base rate says the move resolves">target <b>${fmtPrice(p.target)}</b>${playDist(g,p.target)}</span>`:'')
+    +(p.stop!=null?`<span class="sp-lvl" data-tip="invalidation \u2014 beyond this level the setup's premise is broken and the signal should be treated as void">void <b>${fmtPrice(p.stop)}</b>${playDist(g,p.stop)}</span>`:'')
+    +(p.watch?`<span class="sp-watch" data-tip="the one corroborating condition that confirms or kills this setup">watch: ${esc(p.watch)}</span>`:'')
+    +`</span>`;
+}
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
 function renderSignals(){
   const box=el('signals-body'); if(!box) return;
@@ -1873,7 +1897,7 @@ function renderSignals(){
         +(g.age!=null?`<span class="sig-age" data-tip="how long this condition has been firing \u2014 the score decays once it outlives its claimed horizon and the signal drops entirely at 2\u00d7">${fmtAge(g.age)}</span>`:'')
         +`<span class="sig-read">${esc(g.reading)}</span>`
         +`<span class="sig-hist" data-tip="${esc(g.study?"This market's own base rate: median forward return and share of past occurrences that resolved positive over the stated horizon.":(g.pooled?'Fewer than 8 occurrences on this market, so the base rate is pooled across every market in its asset class \u2014 broader evidence, applied at a 30% score discount.':EV_TIP[g.ev]||''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}</span>`
-        +(g.play?`<span class="sig-play" data-tip="Mechanical description of the setup with levels computed from this market's own stats \u2014 NOT advice. The track record above decides which event types deserve any trust.">\u2192 <b>${esc(g.play.bias||'')}</b>${g.play.target!=null?` \u00b7 target ~${fmtPrice(g.play.target)}`:''}${g.play.stop!=null?` \u00b7 void beyond ${fmtPrice(g.play.stop)}`:''}${g.play.watch?` \u00b7 watch: ${esc(g.play.watch)}`:''}</span>`:'')
+        +(g.play?playRow(g):'')
         +`</div>`;
     }
     s+='</div>';
