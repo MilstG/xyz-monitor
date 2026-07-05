@@ -706,8 +706,8 @@ function createPoller({ dex, store, log, version }) {
       coin: r.coin, ticker: r.ticker, ev, label: EV_LABEL[ev], reading: valTxt,
       score: Math.round(Math.min(50, Math.max(0, intensity)) + evd.pts),
       unproven: !!evd.unproven, noedge: !!evd.noedge,
-      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit } : null,
-      pooled: evd.pooled ? { n: evd.pooled.n, med: evd.pooled.med, hit: evd.pooled.hit } : null,
+      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit, avg: evd.st.avg } : null,
+      pooled: evd.pooled ? { n: evd.pooled.n, med: evd.pooled.med, hit: evd.pooled.hit, avg: evd.pooled.avg } : null,
     }, extra || {});
   }
 
@@ -858,7 +858,7 @@ function createPoller({ dex, store, log, version }) {
         g.t0 = e.t0; g.age = now - e.t0;
         const span = Math.max(1, e.resolveAt - e.t0);
         if (g.age > 2 * span) continue;
-        if (g.age > span) g.score = Math.round(g.score * 0.6);
+        if (g.age > span) { g.score = Math.round(g.score * 0.6); g.decayed = true; }   // client shows the amber decaying state
       } else {
         if (!seenAt.has(key)) seenAt.set(key, now);
         g.t0 = seenAt.get(key); g.age = now - g.t0;
