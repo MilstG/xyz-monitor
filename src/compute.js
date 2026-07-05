@@ -476,38 +476,52 @@ function playbook(ev, ctx) {
   const f2 = (x) => (x == null || !Number.isFinite(x) ? null : +x.toPrecision(6));
   switch (ev) {
     case "bigmove": {
-      const dir = ctx.dir >= 0 ? "up" : "down", sgn = ctx.dir >= 0 ? 1 : -1;
-      return { bias: "continuation " + dir,
+      const up = ctx.dir >= 0, sgn = up ? 1 : -1;
+      return { side: up ? "long" : "short", bias: "continuation " + (up ? "up" : "down"),
         target: f2(ctx.px * (1 + sgn * Math.abs(ctx.med != null ? ctx.med : 0.5) / 100)),
         stop: f2(ctx.px * (1 - sgn * (ctx.sd30 || 1) / 100)),
-        watch: "volume staying elevated — a thrust on fading volume is the fade setup instead" };
+        watch: "volume staying elevated \u2014 a thrust on fading volume is the fade setup instead" };
     }
     case "breakout":
-      return { bias: "continuation up while above the breakout level",
+      return { side: "long", bias: "continuation while above the breakout level",
         target: f2(ctx.px * (1 + Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
         stop: f2(ctx.level),
         watch: "a close back below the prior 30d high = failed breakout, the signal is void" };
     case "gap": {
-      const fade = ctx.med != null && ctx.med < 0 && ctx.n >= 8;
-      return { bias: fade ? "this market historically FADES its gaps — reversion into the session" : (ctx.n >= 8 ? "this market historically continues its gaps" : "unproven — watch the open"),
-        target: fade ? f2(ctx.closePx) : f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * Math.abs(ctx.med != null ? ctx.med : 0.3) / 100)),
-        stop: f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * (ctx.gapSd || 0.5) / 100)),
-        watch: "whether the S&P confirms — an excess gap (beyond beta) carries the information" };
+      const proven = ctx.n >= 8, fade = proven && ctx.med != null && ctx.med < 0;
+      if (fade)
+        return { side: ctx.gapDir >= 0 ? "short" : "long",
+          bias: "this market historically FADES its gaps \u2014 " + (ctx.gapDir >= 0 ? "short the up-gap" : "long the down-gap") + " into the session, reversion toward the prior close",
+          target: f2(ctx.closePx),
+          stop: f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * (ctx.gapSd || 0.5) / 100)),
+          watch: "whether the S&P confirms \u2014 an excess gap (beyond beta) carries the information" };
+      if (proven)
+        return { side: ctx.gapDir >= 0 ? "long" : "short",
+          bias: "this market historically continues its gaps \u2014 ride the direction into the session",
+          target: f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * Math.abs(ctx.med != null ? ctx.med : 0.3) / 100)),
+          stop: f2(ctx.closePx),
+          watch: "whether the S&P confirms \u2014 an excess gap (beyond beta) carries the information" };
+      return { side: "watch", bias: "gap behavior unproven on this market \u2014 watch the open",
+        target: null, stop: null,
+        watch: "which way the first cash hour resolves; the pooled asset-class record is the prior until this market has its own" };
     }
     case "fundflip":
-      return { bias: ctx.dir >= 0 ? "crowd flipped long — drift with them short-term" : "crowd flipped short — drift with them short-term",
+      return { side: ctx.dir >= 0 ? "long" : "short",
+        bias: ctx.dir >= 0 ? "crowd flipped long \u2014 drift with them short-term" : "crowd flipped short \u2014 drift with them short-term",
         target: null, stop: null,
         watch: "funding flipping straight back voids it; funding STAYING flipped for 2+ days is the confirmation" };
     case "squeeze":
-      return { bias: "long-biased while shorts keep paying AND ΔOI holds",
+      return { side: "long", bias: "squeeze-biased while shorts keep paying AND \u0394OI holds",
         target: f2(ctx.hi30), stop: f2(ctx.lo30 != null && ctx.hi30 != null ? ctx.lo30 + 0.25 * (ctx.hi30 - ctx.lo30) : null),
-        watch: "ΔOI(7d) turning negative = shorts covering, spring released — the setup is spent" };
+        watch: "\u0394OI(7d) turning negative = shorts covering, spring released \u2014 the setup is spent" };
     case "prem":
-      return { bias: ctx.prem >= 0 ? "perp rich — reversion toward oracle" : "perp cheap — reversion toward oracle",
+      return { side: ctx.prem >= 0 ? "short" : "long",
+        bias: ctx.prem >= 0 ? "perp rich \u2014 reversion toward oracle (short the perp side)" : "perp cheap \u2014 reversion toward oracle (long the perp side)",
         target: f2(ctx.oracle), stop: null,
-        watch: ctx.closed ? "whether the cash open confirms the perp's level or snaps it back to the oracle" : "persistence — a dislocation that survives arb for hours is information, not noise" };
+        watch: ctx.closed ? "whether the cash open confirms the perp's level or snaps it back to the oracle" : "persistence \u2014 a dislocation that survives arb for hours is information, not noise" };
     default:
-      return { bias: "context only", target: null, stop: null, watch: "pairs with whatever else is firing on this name" };
+      return { side: "watch", bias: "context only", target: null, stop: null,
+        watch: "pairs with whatever else is firing on this name" };
   }
 }
 
