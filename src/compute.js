@@ -258,36 +258,201 @@ function nextEtDate(et, days) {
 
 // ---- anchor generators: [{enter, exit, tag}] ----
 // Cash session: 09:30 -> 16:00 ET, weekdays.
+// ---- US equity market calendar ----------------------------------------------------------
+// Full-day closures and 13:00 ET early closes, computed algorithmically (no yearly table):
+// New Year's, MLK, Presidents, Good Friday, Memorial, Juneteenth, Independence, Labor,
+// Thanksgiving, Christmas, with Sat->Fri / Sun->Mon observance. Early closes: Jul 3 (when
+// Jul 4 falls Tue-Fri), the Friday after Thanksgiving, and Christmas Eve on a weekday.
+// This is what makes the gap/off-hours engine correct on weeks like Jul 4 2026 (Saturday,
+// observed Friday Jul 3): without it the boundary engine thinks Friday had a cash session.
+function wallWd(y, mo, d) { return new Date(Date.UTC(y, mo - 1, d)).getUTCDay(); }
+function shiftWall(y, mo, d, days) { const x = new Date(Date.UTC(y, mo - 1, d) + days * DAY); return { y: x.getUTCFullYear(), mo: x.getUTCMonth() + 1, d: x.getUTCDate() }; }
+function nthWd(y, mo, wd, n) { const first = wallWd(y, mo, 1); return { y, mo, d: 1 + ((wd - first + 7) % 7) + (n - 1) * 7 }; }
+function lastWd(y, mo, wd) { const dim = new Date(Date.UTC(y, mo, 0)).getUTCDate(); return { y, mo, d: dim - ((wallWd(y, mo, dim) - wd + 7) % 7) }; }
+function easterSunday(y) {   // Anonymous Gregorian computus
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, dd = Math.floor(b / 4), e = b % 4,
+    f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - dd - g + 15) % 30,
+    i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7,
+    m = Math.floor((a + 11 * h + 22 * l) / 451), mo = Math.floor((h + l - 7 * m + 114) / 31),
+    d = ((h + l - 7 * m + 114) % 31) + 1;
+  return { y, mo, d };
+}
+function observedHol(y, mo, d) { const wd = wallWd(y, mo, d); if (wd === 6) return shiftWall(y, mo, d, -1); if (wd === 0) return shiftWall(y, mo, d, 1); return { y, mo, d }; }
+const _calCache = new Map();
+function usMarketCalendar(y) {
+  let m = _calCache.get(y); if (m) return m;
+  m = new Map(); const K = (w) => w.y + "-" + w.mo + "-" + w.d;
+  const es = easterSunday(y);
+  const closed = [
+    observedHol(y, 1, 1), nthWd(y, 1, 1, 3), nthWd(y, 2, 1, 3), shiftWall(es.y, es.mo, es.d, -2),
+    lastWd(y, 5, 1), observedHol(y, 6, 19), observedHol(y, 7, 4), nthWd(y, 9, 1, 1),
+    nthWd(y, 11, 4, 4), observedHol(y, 12, 25),
+  ];
+  for (const w of closed) if (w.y === y) m.set(K(w), 2);
+  const ny = observedHol(y + 1, 1, 1); if (ny.y === y) m.set(K(ny), 2);   // next New Year observed Fri Dec 31
+  const early = [];
+  const j4wd = wallWd(y, 7, 4);
+  if (j4wd >= 2 && j4wd <= 5) early.push({ y, mo: 7, d: 3 });             // Jul 3 early when Jul 4 is Tue..Fri
+  early.push(shiftWall(y, 11, nthWd(y, 11, 4, 4).d, 1));                  // Friday after Thanksgiving
+  if (wallWd(y, 12, 24) >= 1 && wallWd(y, 12, 24) <= 5) early.push({ y, mo: 12, d: 24 });
+  for (const w of early) { const k = K(w), wd = wallWd(w.y, w.mo, w.d); if (!m.has(k) && wd >= 1 && wd <= 5) m.set(k, 1); }
+  _calCache.set(y, m); return m;
+}
+// 0 = regular trading day, 1 = early close (13:00 ET), 2 = closed (weekend or holiday)
+function usDayStatus(y, mo, d) {
+  const wd = wallWd(y, mo, d);
+  if (wd === 0 || wd === 6) return 2;
+  return usMarketCalendar(y).get(y + "-" + mo + "-" + d) || 0;
+}
+// All cash sessions overlapping [startMs, endMs] (padded so callers can derive edge windows):
+// { open: 09:30 ET, close: 16:00 or 13:00 ET }.
+function marketSessions(startMs, endMs) {
+  const out = [];
+  for (const et of etDays(startMs - DAY, endMs + DAY)) {
+    const st = usDayStatus(et.y, et.mo, et.d);
+    if (st === 2) continue;
+    out.push({ open: etWallToUtc(et.y, et.mo, et.d, 9, 30), close: etWallToUtc(et.y, et.mo, et.d, st === 1 ? 13 : 16, 0) });
+  }
+  return out;
+}
+// Cash sessions as hold anchors (respects holidays and early closes).
 function cashAnchors(startMs, endMs) {
   const out = [];
-  for (const et of etDays(startMs, endMs)) {
-    if (et.wd < 1 || et.wd > 5) continue;
-    const enter = etWallToUtc(et.y, et.mo, et.d, 9, 30), exit = etWallToUtc(et.y, et.mo, et.d, 16, 0);
-    if (enter >= startMs && exit <= endMs) out.push({ enter, exit, tag: "cash" });
+  for (const s of marketSessions(startMs, endMs))
+    if (s.open >= startMs && s.close <= endMs) out.push({ enter: s.open, exit: s.close, tag: "cash" });
+  return out;
+}
+// Every closed window between consecutive sessions. Tagging keeps the two historical buckets:
+// < 40h = "overnight" (single nights, incl. early-close afternoons), >= 40h = "weekend"
+// (true weekends, holiday weekends, and midweek-holiday spans — they behave like one hold).
+function closedWindows(startMs, endMs) {
+  const ses = marketSessions(startMs - 6 * DAY, endMs + 6 * DAY), out = [];
+  for (let i = 0; i + 1 < ses.length; i++) {
+    const enter = ses[i].close, exit = ses[i + 1].open;
+    if (enter >= startMs && exit <= endMs)
+      out.push({ enter, exit, tag: exit - enter < 40 * HOUR ? "overnight" : "weekend" });
   }
   return out;
 }
-// Overnight: Mon-Thu 16:00 ET -> next day 09:30 ET (single-night holds; Fri handled by weekend).
-function overnightAnchors(startMs, endMs) {
+function overnightAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "overnight"); }
+function weekendAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "weekend"); }
+
+// ---- event studies -----------------------------------------------------------------------
+// For each defined event, scan a market's OWN history, find every occurrence, and measure what
+// happened next. The output is an honest conditional base rate — median forward return, hit
+// rate, and (crucially) sample size — not a prediction. n < 8 is reported, never hidden.
+function summarizeEvents(rets) {
+  const v = rets.filter(Number.isFinite);
+  if (!v.length) return { n: 0 };
+  const s = [...v].sort((a, b) => a - b);
+  const med = s[Math.floor(s.length / 2)];
+  return {
+    n: v.length,
+    med: +med.toFixed(2),
+    hit: +(v.filter((x) => x > 0).length / v.length).toFixed(2),
+    avg: +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2),
+  };
+}
+function retStd(rets, min) {
+  const v = rets.filter(Number.isFinite);
+  if (v.length < (min || 15)) return null;
+  const m = v.reduce((a, b) => a + b, 0) / v.length;
+  return Math.sqrt(v.reduce((a, b) => a + (b - m) * (b - m), 0) / (v.length - 1));
+}
+function dailyRets(closes) {   // closes: [[t, c], ...] ascending
   const out = [];
-  for (const et of etDays(startMs, endMs)) {
-    if (et.wd < 1 || et.wd > 4) continue;            // Mon..Thu
-    const nx = nextEtDate(et, 1);
-    const enter = etWallToUtc(et.y, et.mo, et.d, 16, 0), exit = etWallToUtc(nx.y, nx.mo, nx.d, 9, 30);
-    if (enter >= startMs && exit <= endMs) out.push({ enter, exit, tag: "overnight" });
+  for (let i = 1; i < closes.length; i++) {
+    const a = closes[i - 1][1], b = closes[i][1];
+    out.push(a > 0 && b > 0 ? (b / a - 1) * 100 : NaN);
   }
   return out;
 }
-// Weekend: Fri 16:00 ET -> Mon 09:30 ET (the longest unanchored stretch).
-function weekendAnchors(startMs, endMs) {
-  const out = [];
-  for (const et of etDays(startMs, endMs)) {
-    if (et.wd !== 5) continue;                        // Fri
-    const mon = nextEtDate(et, 3);
-    const enter = etWallToUtc(et.y, et.mo, et.d, 16, 0), exit = etWallToUtc(mon.y, mon.mo, mon.d, 9, 30);
-    if (enter >= startMs && exit <= endMs) out.push({ enter, exit, tag: "weekend" });
+function fwdRet(closes, i, k) {
+  if (i + k >= closes.length) return null;
+  const a = closes[i][1], b = closes[i + k][1];
+  return a > 0 && b > 0 ? (b / a - 1) * 100 : null;
+}
+// Big-move continuation: |1d return| >= 2 sigma of the trailing 30 daily returns. Forward
+// returns are SIGNED IN THE DIRECTION of the move: positive = continuation, negative = fade.
+function studyBigMove(closes) {
+  const rets = dailyRets(closes), d1 = [], d3 = [];
+  for (let i = 30; i < rets.length; i++) {
+    const sd = retStd(rets.slice(i - 30, i), 15);
+    if (sd == null || sd <= 0 || !Number.isFinite(rets[i]) || Math.abs(rets[i]) < 2 * sd) continue;
+    const dir = rets[i] > 0 ? 1 : -1, ci = i + 1;   // rets[i] is the move into closes[ci]
+    const f1 = fwdRet(closes, ci, 1), f3 = fwdRet(closes, ci, 3);
+    if (f1 != null) d1.push(dir * f1);
+    if (f3 != null) d3.push(dir * f3);
   }
-  return out;
+  return { d1: summarizeEvents(d1), d3: summarizeEvents(d3) };
+}
+// 30d-high breakout: close crosses above the max of the prior 30 closes. Forward 1d / 5d.
+function studyBreakout(closes) {
+  const d1 = [], d5 = [];
+  for (let i = 31; i < closes.length; i++) {
+    let hi = -Infinity;
+    for (let j = i - 30; j < i; j++) if (closes[j][1] > hi) hi = closes[j][1];
+    if (!(closes[i][1] > hi) || closes[i - 1][1] > hi) continue;   // first cross only
+    const f1 = fwdRet(closes, i, 1), f5 = fwdRet(closes, i, 5);
+    if (f1 != null) d1.push(f1);
+    if (f5 != null) d5.push(f5);
+  }
+  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5) };
+}
+// Vol-regime shift: 10d realized vol crossing above the 90th percentile of its trailing 120
+// observations. Forward 5d return (does an expansion resolve up or down for this market?).
+function studyVolShift(closes) {
+  const rets = dailyRets(closes), vols = [];
+  for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
+  const d5 = [];
+  for (let i = 120; i < vols.length; i++) {
+    const hist = vols.slice(i - 120, i).filter((x) => x != null);
+    if (hist.length < 60 || vols[i] == null || vols[i - 1] == null) continue;
+    const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
+    if (!(vols[i] > p90) || vols[i - 1] > p90) continue;           // first cross only
+    const ci = i + 10;                                              // vols[i] ends at closes[ci]
+    const f5 = fwdRet(closes, ci, 5);
+    if (f5 != null) d5.push(f5);
+  }
+  return { d5: summarizeEvents(d5) };
+}
+// Gap fade/continuation: for each closed-window hold with |gap| >= 0.75 sigma of this market's
+// own gap distribution, measure the NEXT cash session (open -> close), signed by gap direction:
+// positive = the session continued the gap, negative = it faded it.
+function studyGapFade(hourly, windows, tol) {
+  const gaps = [];
+  for (const a of windows) {
+    const pIn = priceAsOf(hourly, a.enter, tol), pOut = priceAsOf(hourly, a.exit, tol);
+    if (pIn > 0 && pOut > 0) gaps.push({ exit: a.exit, g: (pOut / pIn - 1) * 100 });
+  }
+  const sd = retStd(gaps.map((x) => x.g), 10);
+  if (sd == null || sd <= 0) return { session: { n: 0 }, nGaps: gaps.length, sd: null };
+  const dirRets = [];
+  for (const gp of gaps) {
+    if (Math.abs(gp.g) < 0.75 * sd) continue;
+    const open = priceAsOf(hourly, gp.exit, tol);
+    const close = priceAsOf(hourly, gp.exit + 6.5 * HOUR, tol);
+    if (!(open > 0) || !(close > 0)) continue;
+    dirRets.push((gp.g > 0 ? 1 : -1) * (close / open - 1) * 100);
+  }
+  return { session: summarizeEvents(dirRets), nGaps: gaps.length, sd: +sd.toFixed(3) };
+}
+// Funding flip: the day-summed funding changes sign after >= 3 consecutive same-sign days.
+// Forward 3d return signed TOWARD the new funding side (funding flips positive = longs now
+// crowding in; positive result = price followed the new crowd).
+function studyFundFlip(dayFunding, closes) {
+  const byDay = new Map(closes.map((k, i) => [Math.floor(k[0] / DAY) * DAY, i]));
+  const d3 = [];
+  let run = 0, prevSign = 0;
+  for (let i = 0; i < dayFunding.length; i++) {
+    const s = Math.sign(dayFunding[i][1]);
+    if (s !== 0 && prevSign !== 0 && s !== prevSign && run >= 3) {
+      const ci = byDay.get(Math.floor(dayFunding[i][0] / DAY) * DAY);
+      if (ci != null) { const f3 = fwdRet(closes, ci, 3); if (f3 != null) d3.push(s * f3); }
+    }
+    if (s === prevSign) run++; else { run = s === 0 ? run : 1; if (s !== 0) prevSign = s; }
+  }
+  return { d3: summarizeEvents(d3) };
 }
 
 // ---- hold math over the hourly spines ----
@@ -548,4 +713,6 @@ function sessionComposite(perTickerHolds) {
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
+  usDayStatus, marketSessions, closedWindows,
+  summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };

@@ -2,6 +2,9 @@
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
+const {
+  studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip, retStd, dailyRets,
+} = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson } = require("./compute");
@@ -49,6 +52,7 @@ function createPoller({ dex, store, log, version }) {
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
   let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics
+  let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
@@ -88,6 +92,7 @@ function createPoller({ dex, store, log, version }) {
 
   function sampleOI() {
     const now = Date.now(), cut = now - OI_RETENTION;
+    samplePrem(now);
     for (const r of rows.values()) {
       if (r.delisted || r.oiBase == null || !isFinite(r.oiBase)) continue;
       let h = hist.get(r.coin);
@@ -157,6 +162,32 @@ function createPoller({ dex, store, log, version }) {
       if (r.fundH.size) seeded++;
     }
     if (seeded) log(`Seeded hourly funding from oi.log for ${seeded} market(s)`);
+  }
+
+  // Premium history: (mark - oracle) / oracle in bp, sampled every ~10 min, 7 days retained in
+  // memory (~1k points/market). This is the baseline that turns "premium is +18bp" into
+  // "premium is 2.6 sigma rich vs its own week" — the surveillance signal for HIP-3 synthetics.
+  // Persisted (downsampled) inside features.json so redeploys keep the baseline.
+  let lastPremSample = 0;
+  function samplePrem(now) {
+    if (now - lastPremSample < 10 * 60 * 1000) return;
+    lastPremSample = now;
+    const cut = now - 7 * DAY;
+    for (const r of rows.values()) {
+      if (r.delisted || r.px == null || !(r.oracle > 0)) continue;
+      if (!r.premH) r.premH = [];
+      r.premH.push([now, +((r.px / r.oracle - 1) * 1e4).toFixed(2)]);
+      while (r.premH.length && r.premH[0][0] < cut) r.premH.shift();
+    }
+  }
+  function premBaseline(r) {
+    const h = r.premH;
+    if (!h || h.length < 100) return null;   // ~17h of samples minimum before we trust a z-score
+    let s = 0; for (const [, v] of h) s += v;
+    const m = s / h.length;
+    let q = 0; for (const [, v] of h) q += (v - m) * (v - m);
+    const sd = Math.sqrt(q / (h.length - 1));
+    return sd > 0.5 ? { m, sd, n: h.length } : null;   // degenerate flat baselines are useless
   }
 
   function computeDoi(r) {
@@ -517,6 +548,140 @@ function createPoller({ dex, store, log, version }) {
     dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, liveClose };
   }
 
+  // ---- signal engine (served at /api/signals) ---------------------------------------------
+  // Two layers. (1) Event studies: per market, per event, every historical occurrence and its
+  // forward outcome — an honest conditional base rate with sample sizes, memoized to the data
+  // version and recomputed only when history changes. (2) Live surveillance: which events are
+  // active RIGHT NOW, ranked by unusualness x historical edge. No prediction, no composite
+  // black box — every line is "this condition, this market's own base rate, this n."
+  const EV_LABEL = {
+    bigmove: "Big move", breakout: "30d-high breakout", volshift: "Vol expansion",
+    gap: "Outsized gap", fundflip: "Funding flip", squeeze: "Squeeze setup",
+    prem: "Premium dislocation", volume: "Volume surge",
+  };
+  function studiesFor(r, closes, dayFunding) {
+    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0);
+    if (r._stSig === sig && r._st) return r._st;
+    const st = {};
+    if (closes && closes.length >= 40) {
+      st.bigmove = studyBigMove(closes);
+      st.breakout = studyBreakout(closes);
+      if (closes.length >= 140) st.volshift = studyVolShift(closes);
+    }
+    const hs = getHourly(r.coin);
+    if (hs.length > 48) {
+      const wins = overnightAnchors(hs[0][0], hs[hs.length - 1][0]).concat(weekendAnchors(hs[0][0], hs[hs.length - 1][0]));
+      st.gap = studyGapFade(hs, wins, 3 * HOUR);
+    }
+    if (dayFunding && dayFunding.length >= 8 && closes && closes.length >= 10) st.fundflip = studyFundFlip(dayFunding, closes);
+    r._stSig = sig; r._st = st;
+    return st;
+  }
+  function evidence(st) {   // 0..50 from a study summary; small-n gets a flat token score
+    if (!st || !st.n) return { pts: 6, unproven: true };
+    if (st.n < 8) return { pts: 8, unproven: true, st };
+    const edge = Math.min(1, Math.abs(st.med) / 1.5) * 30 + Math.abs(st.hit - 0.5) * 2 * 20;
+    return { pts: edge, unproven: false, st };
+  }
+  function mkSignal(r, ev, valTxt, intensity, evd, extra) {
+    return Object.assign({
+      coin: r.coin, ticker: r.ticker, ev, label: EV_LABEL[ev], reading: valTxt,
+      score: Math.round(Math.min(50, intensity) + evd.pts),
+      unproven: !!evd.unproven,
+      study: evd.st ? { n: evd.st.n, med: evd.st.med, hit: evd.st.hit } : null,
+    }, extra || {});
+  }
+  function buildSignals() {
+    const out = [], now = Date.now();
+    const dc = dailyCache || { daily: {}, funding: {}, liveClose: {}, offHours: { closed: false } };
+    for (const r of activeMarkets()) {
+      if (r.delisted || r.px == null) continue;
+      const closes = dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;
+      const st = studiesFor(r, closes, dayFunding);
+      const rets = closes ? dailyRets(closes) : [];
+      const sd30 = retStd(rets.slice(-30), 15);
+
+      // big move (uses live d1 vs the market's own 30d daily sigma)
+      if (sd30 > 0 && r.d1 != null && Math.abs(r.d1) >= 2 * sd30) {
+        const dir = r.d1 > 0 ? "up" : "down";
+        out.push(mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${(Math.abs(r.d1) / sd30).toFixed(1)}\u03c3 ${dir})`,
+          Math.min(50, (Math.abs(r.d1) / sd30 - 2) * 20 + 20), evidence(st.bigmove && st.bigmove.d1), { horizon: "next 1d, signed with the move" }));
+      }
+      // 30d-high breakout (live: mark above the max of the prior 30 completed closes)
+      if (closes && closes.length >= 31) {
+        let hi = -Infinity;
+        for (let j = closes.length - 31; j < closes.length - 1; j++) if (closes[j][1] > hi) hi = closes[j][1];
+        if (hi > 0 && r.px > hi && closes[closes.length - 2][1] <= hi)
+          out.push(mkSignal(r, "breakout", `mark ${((r.px / hi - 1) * 100).toFixed(1)}% above the prior 30d high`,
+            Math.min(50, ((r.px / hi - 1) * 100) * 12 + 15), evidence(st.breakout && st.breakout.d5), { horizon: "next 5d" }));
+      }
+      // vol expansion (current 10d realized vol above its own 90th percentile)
+      if (rets.length >= 130) {
+        const vols = [];
+        for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
+        const cur = vols[vols.length - 1], hist = vols.slice(-121, -1).filter((x) => x != null);
+        if (cur != null && hist.length >= 60) {
+          const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
+          if (cur > p90)
+            out.push(mkSignal(r, "volshift", `10d vol ${cur.toFixed(1)}%/d vs p90 ${p90.toFixed(1)}%/d`,
+              Math.min(50, (cur / p90 - 1) * 60 + 12), evidence(st.volshift && st.volshift.d5), { horizon: "next 5d" }));
+        }
+      }
+      // outsized live gap (only while the cash market is closed)
+      if (dc.offHours && dc.offHours.closed && st.gap && st.gap.sd > 0) {
+        const pc = dc.liveClose[r.coin];
+        if (pc > 0) {
+          const g = (r.px / pc - 1) * 100;
+          if (Math.abs(g) >= 0.75 * st.gap.sd)
+            out.push(mkSignal(r, "gap", `${g >= 0 ? "+" : ""}${g.toFixed(2)}% since the last close (${(Math.abs(g) / st.gap.sd).toFixed(1)}\u03c3 of its gaps)`,
+              Math.min(50, (Math.abs(g) / st.gap.sd) * 18), evidence(st.gap.session), { horizon: "next cash session, signed with the gap" }));
+        }
+      }
+      // funding flip (yesterday's day-sum flipped sign after >= 3 same-sign days)
+      if (dayFunding && dayFunding.length >= 5) {
+        const last = dayFunding[dayFunding.length - 1], s0 = Math.sign(last[1]);
+        let run = 0;
+        for (let i = dayFunding.length - 2; i >= 0; i--) { const s = Math.sign(dayFunding[i][1]); if (s === 0 || s === s0) break; run++; if (run >= 3) break; }
+        if (s0 !== 0 && run >= 3)
+          out.push(mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
+            22, evidence(st.fundflip && st.fundflip.d3), { horizon: "next 3d, toward the new crowd" }));
+      }
+      // squeeze setup (same formula the table column uses, on the stable 7d window)
+      const fw = computeFundWin(r), doi = computeDoi(r), f = r.feat;
+      const fw7 = fw ? fw.d7 : null;
+      if (fw7 != null && isFinite(fw7)) {
+        const fAPR = fw7 * 24 * 365 * 100, crowd = fAPR < 0 ? Math.tanh(-fAPR / 35) : 0;
+        if (crowd > 0) {
+          const fuel = doi && doi.d7 != null ? Math.tanh(Math.max(0, doi.d7) / 8) : 0;
+          let trig = 0.5;
+          if (f && f.hi30 > f.lo30 && r.px != null) trig = Math.min(1, Math.max(0, (r.px - f.lo30) / (f.hi30 - f.lo30)));
+          const sqz = Math.round(100 * crowd * (0.45 + 0.30 * fuel + 0.25 * trig));
+          if (sqz >= 60)
+            out.push(mkSignal(r, "squeeze", `score ${sqz} \u2014 shorts paying ${Math.abs(fAPR).toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
+              Math.min(50, (sqz - 60) * 1.1 + 15), { pts: 8, unproven: true }, { horizon: "no historical study yet (needs longer OI history)" }));
+        }
+      }
+      // premium dislocation vs the market's own 7d baseline
+      const pb = premBaseline(r);
+      if (pb && r.oracle > 0) {
+        const prem = (r.px / r.oracle - 1) * 1e4, z = (prem - pb.m) / pb.sd;
+        if (Math.abs(z) >= 2 && Math.abs(prem) >= 5)
+          out.push(mkSignal(r, "prem", `${prem >= 0 ? "+" : ""}${prem.toFixed(1)}bp vs oracle (${z >= 0 ? "+" : ""}${z.toFixed(1)}\u03c3 of its 7d baseline)`,
+            Math.min(50, (Math.abs(z) - 2) * 12 + 18), { pts: 8, unproven: true },
+            { horizon: dc.offHours && dc.offHours.closed ? "cash market closed \u2014 this is live off-hours price discovery" : "baseline study accrues as premium history builds" }));
+      }
+      // volume surge vs the market's own norm
+      if (f && f.volBase > 0 && r.vol != null && r.vol / f.volBase >= 2.5)
+        out.push(mkSignal(r, "volume", `24h volume ${(r.vol / f.volBase).toFixed(1)}\u00d7 its 30d norm`,
+          Math.min(50, (r.vol / f.volBase - 2.5) * 10 + 12), { pts: 6, unproven: true }, { horizon: "context flag \u2014 pairs with whatever else is firing" }));
+    }
+    out.sort((a, b) => b.score - a.score);
+    const top = out.slice(0, 40);
+    const sig = top.length + "|" + top.map((s) => s.coin + s.ev + s.score).join(",");
+    if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
+    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top };
+  }
+
   // ---- session / time-of-day analytics (served at /api/analytics) ----
   // The hourly-price and funding spines live only in poller memory (60d x ~100 markets), so the math
   // runs here on a slow interval and the browser is handed one compact, pre-aggregated payload rather
@@ -786,6 +951,7 @@ function createPoller({ dex, store, log, version }) {
       if (typeof m.hourlyTs === "number") r.hourlyTs = m.hourlyTs;
       if (typeof m.dailyTs === "number") r.dailyTs = m.dailyTs;
       if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c]) => ({ t, c }));
+      if (Array.isArray(m.ph) && m.ph.length) { const cut = Date.now() - 7 * DAY; r.premH = m.ph.filter((x) => Array.isArray(x) && x[0] >= cut); }
       r.isNew = false;
       n++;
     }
@@ -795,10 +961,14 @@ function createPoller({ dex, store, log, version }) {
     const markets = {};
     for (const r of rows.values()) {
       if (r.delisted || (!r.feat && !r.dailyRaw)) continue;
+      const ph = r.premH && r.premH.length
+        ? (r.premH.length > 350 ? r.premH.filter((_, i) => i % Math.ceil(r.premH.length / 350) === 0) : r.premH)
+        : null;
       markets[r.coin] = {
         ref: r.ref || null, feat: r.feat || null,
         hourlyTs: r.hourlyTs || 0, dailyTs: r.dailyTs || 0,
         daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c]) : null,
+        ph,   // downsampled 7d premium baseline, so redeploys keep the dislocation z-scores warm
       };
     }
     store.saveFeatures({ ts: Date.now(), markets });
@@ -884,6 +1054,8 @@ function createPoller({ dex, store, log, version }) {
     fundingWorker();
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
+    setInterval(buildSignals, 10 * 60 * 1000);
+    setTimeout(buildSignals, 2 * 60 * 1000);   // first pass once early backfill has something to chew on
     setInterval(buildAnalytics, ANALYTICS_MS);
     setInterval(() => store.flush(), 30 * 1000);
     setInterval(persistFeatures, 120 * 1000);
@@ -914,6 +1086,7 @@ function createPoller({ dex, store, log, version }) {
     getHourly,
     getFunding,
     getCandles,
+    getSignals: () => signalsCache,
     persistFeatures,
     // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
     // WS status make "it looks stale" diagnosable from /api/health instead of Railway logs.
@@ -935,6 +1108,7 @@ function createPoller({ dex, store, log, version }) {
         hourly: hourlyCoverage(), funding: fundingCoverage(), lastPoll,
         backfill: { hourlyPending: pendH, dailyPending: pendD },
         failing: { hourly: hFailing, daily: dFailing, funding: fFailing },
+        signals: signalsCache ? signalsCache.count : 0,
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };
