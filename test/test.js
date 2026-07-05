@@ -152,16 +152,21 @@ test("event studies: continuation series shows continuation; sample sizes honest
   assert.deepEqual(C.summarizeEvents([]), { n: 0 }, "empty in, honest zero out");
 });
 
-test("playbook: computed levels are mechanical and sane", () => {
+test("playbook: explicit sides and mechanical levels", () => {
   const bo = C.playbook("breakout", { px: 105, level: 100, med: 2.1 });
-  assert.ok(/continuation up/.test(bo.bias));
+  assert.equal(bo.side, "long");
   assert.equal(bo.stop, 100);                       // failed breakout = back below the level
   assert.ok(Math.abs(bo.target - 105 * 1.021) < 0.01);
   const pr = C.playbook("prem", { prem: 18, oracle: 250, closed: true });
+  assert.equal(pr.side, "short");                   // perp rich -> reversion means short the perp
   assert.equal(pr.target, 250);                     // reversion target IS the oracle
   assert.ok(/rich/.test(pr.bias));
   const gp = C.playbook("gap", { px: 101, closePx: 100, gapDir: 1, gapSd: 0.8, med: -0.4, n: 12 });
-  assert.ok(/FADES/.test(gp.bias) && gp.target === 100, "n>=8 negative median means fade toward the close");
+  assert.equal(gp.side, "short");                   // proven fader + up-gap = short into the session
+  assert.ok(/FADES/.test(gp.bias) && gp.target === 100);
+  assert.equal(C.playbook("gap", { px: 101, closePx: 100, gapDir: 1, gapSd: 0.8, med: -0.4, n: 3 }).side, "watch"); // unproven never picks a side
+  assert.equal(C.playbook("fundflip", { dir: -1 }).side, "short");
+  assert.equal(C.playbook("volume", {}).side, "watch");
 });
 
 test("EV_META horizons align with the studies' sign conventions", () => {
