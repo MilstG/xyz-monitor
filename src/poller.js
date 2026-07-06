@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip, retStd, dailyRets,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -650,6 +650,8 @@ function createPoller({ dex, store, log, version }) {
     // sliced by actionable magnitude, matching the client's move filter exactly.
     const mv = vi == null && sigEntry.play && sigEntry.play.target != null && r.px > 0
       ? +(Math.abs(sigEntry.play.target / r.px - 1) * 100).toFixed(2) : null;
+    const stp = vi == null && sigEntry.play && sigEntry.play.stop != null && sigEntry.play.stop > 0
+      ? +(+sigEntry.play.stop).toPrecision(6) : null;   // void level frozen at fire — the stop-aware track resolves against it
     let e = ledgerOpen.get(key);
     if (!e) {
       const t0 = Date.now();
@@ -659,7 +661,7 @@ function createPoller({ dex, store, log, version }) {
         score0: sigEntry.score, reading0: sigEntry.reading,
         claim: sigEntry.study || null,
         resolveAt: resolveAtFor(ev, Date.now()),
-      }, vi != null ? { vi } : null, mv != null ? { mv } : null, extra || {});
+      }, vi != null ? { vi } : null, mv != null ? { mv } : null, stp != null ? { stp } : null, extra || {});
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -683,15 +685,27 @@ function createPoller({ dex, store, log, version }) {
         const p1 = priceAsOf(hs, e.resolveAt, 3 * HOUR);
         if (p0 > 0 && p1 > 0) {
           realized = +((e.dir >= 0 ? 1 : -1) * (p1 / p0 - 1) * 100).toFixed(2);
-          if ((e.ev === "bigmove" || e.ev === "breakout" || e.ev === "fundflip") && e.sd0 > 0)
+          // stop-aware parallel track: if the void level was touched before horizon, the claim's
+          // stop-disciplined outcome is the (dir-signed) stop distance instead of the at-horizon
+          // move. Same units as `realized`. Claims without a stop keep realizedS === realized.
+          if (e.vi == null && e.stp != null) {
+            const touched = stopTouched(hs, e.t0, e.resolveAt, e.dir, e.stp);
+            if (touched === true) { e.stopped = true; e.realizedS = +((e.dir >= 0 ? 1 : -1) * (e.stp / p0 - 1) * 100).toFixed(2); }
+            else if (touched === false) { e.stopped = false; e.realizedS = realized; }
+          }
+          if ((e.ev === "bigmove" || e.ev === "breakout" || e.ev === "fundflip") && e.sd0 > 0) {
             realized = +(realized / e.sd0).toFixed(2);   // same R units the study claims — claimed vs live stays apples-to-apples
+            if (e.realizedS != null) e.realizedS = e.stopped ? +(e.realizedS / e.sd0).toFixed(2) : realized;
+          }
         }
       }
       if (realized == null) {
         if (now > e.resolveAt + 2 * DAY) { e.status = "void"; ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true; }
         continue;
       }
+      if (e.realizedS == null && e.vi == null) e.realizedS = realized;   // no stop / unknowable touch -> tracks coincide
       e.status = "resolved"; e.realized = realized; e.win = realized > 0; e.tR = now;
+      if (e.realizedS != null) e.winS = e.realizedS > 0;
       ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true;
     }
     if (ledgerClosed.length > 4000) ledgerClosed = ledgerClosed.slice(-4000);
@@ -704,8 +718,9 @@ function createPoller({ dex, store, log, version }) {
   function buildRecordSet(res, openEntries) {
     const per = {};
     for (const e of res) {
-      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [] });
+      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [], retsS: [], winsS: 0, stopped: 0, nS: 0 });
       b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
+      if (e.realizedS != null) { b.nS++; b.retsS.push(e.realizedS); if (e.winS) b.winsS++; if (e.stopped) b.stopped++; }
       if (e.claim && Number.isFinite(e.claim.med)) b.claims.push(e.claim.med);
     }
     const out = {};
@@ -720,6 +735,14 @@ function createPoller({ dex, store, log, version }) {
         pf: w.length && l.length && lSum !== 0 ? +(wSum / Math.abs(lSum)).toFixed(2) : null,   // profit factor: gross wins / gross losses
         claimMed: b.claims.length ? +(b.claims.reduce((a, c) => a + c, 0) / b.claims.length).toFixed(2) : null,
         open: 0, unit: unitOf(ev) };
+      if (b.nS) {   // stop-aware parallel track: outcome had the void level been honored as a stop
+        const smS = summarizeEvents(b.retsS);
+        const wS = b.retsS.filter((x) => x > 0), lS = b.retsS.filter((x) => x <= 0);
+        const wsSum = wS.reduce((a, c) => a + c, 0), lsSum = lS.reduce((a, c) => a + c, 0);
+        Object.assign(out[ev], { nS: b.nS, hitS: +(b.winsS / b.nS).toFixed(2), medS: smS.n ? smS.med : null,
+          avgS: smS.n ? smS.avg : null, pfS: wS.length && lS.length && lsSum !== 0 ? +(wsSum / Math.abs(lsSum)).toFixed(2) : null,
+          stopped: b.stopped });
+      }
     }
     for (const e of openEntries) (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++;
     const cf = { confN: 0, confW: 0, soloN: 0, soloW: 0 };
@@ -742,11 +765,14 @@ function createPoller({ dex, store, log, version }) {
       .map((t) => ({ t, n: byT[t].n, hit: +(byT[t].w / byT[t].n).toFixed(2) }))
       .sort((a, b) => b.hit - a.hit);
     const last20 = res.slice(-20);
-    let cum = 0;
+    let cum = 0, cumS = 0;
     const curve = res.filter((e) => unitOf(e.ev) === "R" && Number.isFinite(e.realized)).slice(-200)
-      .map((e) => { cum = +(cum + e.realized).toFixed(2); return [e.tR, cum, e.ticker, e.ev, e.realized]; });
+      .map((e) => { cum = +(cum + e.realized).toFixed(2);
+        cumS = +(cumS + (e.realizedS != null ? e.realizedS : e.realized)).toFixed(2);
+        return [e.tR, cum, e.ticker, e.ev, e.realized, cumS, e.realizedS != null ? e.realizedS : e.realized, !!e.stopped]; });
     const recent = res.slice(-10).reverse()
-      .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: unitOf(e.ev) }));
+      .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: unitOf(e.ev),
+        realizedS: e.realizedS != null ? e.realizedS : null, stopped: !!e.stopped }));
     return { record: out, confluence: conf,
       recordX: { buckets, side, tickers: tl.length ? { best: tl.slice(0, 3), worst: tl.slice(-3).reverse() } : null,
         form: { recentN: last20.length, recentHit: hitOf(last20), allHit: hitOf(res), allN: res.length }, curve },

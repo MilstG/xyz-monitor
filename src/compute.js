@@ -542,6 +542,25 @@ function playbook(ev, ctx) {
   }
 }
 
+// ---- stop-touch detection --------------------------------------------------------------------
+// Walks hourly candles in (t0, tEnd] and reports whether the void/stop level was touched:
+// a long claim (dir >= 0) is stopped when any candle LOW <= stp; a short claim when any
+// candle HIGH >= stp. Hourly granularity means intra-candle ordering is unknowable, so a
+// candle that touches the stop counts as stopped even if it also recovered — conservative
+// by construction. Candles are [t, o, h, l, c, v].
+function stopTouched(candles, t0, tEnd, dir, stp) {
+  if (!Array.isArray(candles) || stp == null || !(stp > 0)) return null;
+  let seen = false;
+  for (const k of candles) {
+    const t = k[0];
+    if (t <= t0) continue;
+    if (t > tEnd) break;
+    seen = true;
+    if (dir >= 0 ? k[3] <= stp : k[2] >= stp) return true;
+  }
+  return seen ? false : null;   // null = no candles in window, touch state unknowable
+}
+
 // ---- shadow-variant promotion rule ---------------------------------------------------------
 // A challenger threshold replaces the incumbent ONLY when, on out-of-sample shadow claims the
 // engine gathered itself: both sides have >= 30 resolutions; the challenger's live expectancy
@@ -817,5 +836,5 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote,
+  EV_META, playbook, shouldPromote, stopTouched,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
