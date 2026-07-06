@@ -174,3 +174,13 @@ test("EV_META horizons align with the studies' sign conventions", () => {
   assert.equal(C.EV_META.breakout.horizonMs, 5 * DAY);
   assert.equal(C.EV_META.gap.horizonMs, null);      // gap resolves at the next session close, calendar-aware
 });
+
+test("shadow-variant promotion: strict out-of-sample gates", () => {
+  const inc = { n: 40, hit: 0.55, avg: 0.20 };
+  assert.ok(C.shouldPromote(inc, { n: 34, hit: 0.58, avg: 0.31 }), "clear beat promotes");
+  assert.ok(!C.shouldPromote(inc, { n: 22, hit: 0.60, avg: 0.40 }), "n<30 never promotes");
+  assert.ok(!C.shouldPromote({ n: 12, hit: 0.5, avg: 0.1 }, { n: 40, hit: 0.6, avg: 0.4 }), "incumbent must also have 30");
+  assert.ok(!C.shouldPromote(inc, { n: 40, hit: 0.57, avg: 0.25 }), "margin below 0.08 does not promote");
+  assert.ok(!C.shouldPromote(inc, { n: 40, hit: 0.40, avg: 0.35 }), "hit collapse blocks tail-riders");
+  assert.ok(!C.shouldPromote({ n: 40, hit: 0.45, avg: -0.10 }, { n: 40, hit: 0.46, avg: -0.01 }), "challenger expectancy must be positive");
+});
