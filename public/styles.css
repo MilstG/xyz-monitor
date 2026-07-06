@@ -489,3 +489,6 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sigrec-k{color:var(--faint);font-size:9.5px;text-transform:uppercase;letter-spacing:.6px;min-width:78px}
 .sigrec-chip{border:1px solid var(--border);background:var(--panel);border-radius:5px;padding:3px 9px;font-size:11px;color:var(--muted)}
 .sigrec-chip i{font-style:normal;color:var(--faint);font-size:10px}
+
+/* shadow-variant incumbent chip */
+.sigrec-chip.inc{border-color:var(--accent);color:var(--text)}

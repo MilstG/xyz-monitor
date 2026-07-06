@@ -2002,6 +2002,18 @@ function sigRecordHtml(d){
       +` vs `+(c.soloN&&c.soloHit!=null?`<b>${Math.round(c.soloHit*100)}%</b> solo (n=${c.soloN})`:`n=${c.soloN||0} solo`)
       +` \u2014 bonus ${c.confN>=15&&c.soloN>=15?`<b>${c.bonus}</b>/condition (earned from the measured lift)`:`8/condition (default until 15+ resolutions per side)`}</div>`;
   }
+  if(d&&d.variants&&d.variants.length){
+    s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="Bounded self-improvement: each gated event runs 2\u20133 candidate thresholds. Only the incumbent emits visible signals \u2014 but ALL variants (incumbent included) silently ledger shadow claims on identical bookkeeping, so the comparison is out-of-sample and apples-to-apples. A challenger is promoted only with \u226530 resolutions on BOTH sides, expectancy beating the incumbent by \u22650.08 native units and positive, and no hit-rate collapse. Promotions are logged, persisted, and reversible by the same rule. This searches a small fixed hypothesis space under out-of-sample discipline \u2014 it cannot re-fit freely.">self-tuning (shadow variants)</div>`;
+    for(const v of d.variants){
+      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="${esc('trigger parameter: '+v.param+' \u2014 live signals currently fire at '+v.param+v.cur)}">${esc(EV_LABELS[v.ev]||v.ev)}</span>`;
+      for(const x of v.vals){
+        s+=`<span class="sigrec-chip${x.inc?' inc':''}" data-tip="${esc(`${v.param}${x.v} \u2014 ${x.inc?'INCUMBENT: the threshold live signals use':'shadow challenger: ledgered silently, never shown as a signal'}. ${x.n} resolved shadow claim${x.n===1?'':'s'}${x.n<30?' (promotion needs 30 on both sides)':''}.`)}">${x.inc?'\u2605 ':''}${esc(v.param)}${x.v}${x.hit!=null?` <b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b>`:''}${x.avg!=null?` <span class="${x.avg>=0?'pos':'neg'}">${x.avg>=0?'+':''}${x.avg}${v.unit}</span>`:''} <i>(n=${x.n})</i></span>`;
+      }
+      if(v.hist&&v.hist.length){ const h=v.hist[v.hist.length-1];
+        s+=`<span class="sec" style="font-size:10px" data-tip="${esc(`most recent promotion: incumbent ${h.incAvg}${v.unit} on n=${h.incN} vs challenger ${h.chAvg}${v.unit} on n=${h.chN} \u2014 out-of-sample shadow claims only`)}">promoted ${h.from}\u2192${h.to} on n=${h.chN} out-of-sample</span>`; }
+      s+='</div>';
+    }
+  }
   if(d&&d.recent&&d.recent.length){
     s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 4px" data-tip="the most recent claims to reach their horizon and get scored">recent resolutions</div><div class="sigrec-recent">`;
     for(const e of d.recent){
