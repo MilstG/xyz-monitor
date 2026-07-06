@@ -44,7 +44,7 @@ function openStore(dataDir) {
     // between `before` and keepFullAfter one sample per (coin, hour) survives; older than
     // `before` is dropped. A year of positioning history at ~30x less disk/RAM than full res —
     // this is what the squeeze/fundflip studies and OI-conditioned branches feed on.
-    async prune(before, keepFullAfter) {
+    async prune(before, keepFullAfter, shortFn, shortBefore) {
       if (pruning) return 0;
       flush();                              // fold buffered samples into the file first
       if (!fs.existsSync(file)) return 0;
@@ -63,9 +63,16 @@ function openStore(dataDir) {
             const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
             if (i1 < 0 || i2 < 0) return;
             const t = +ln.slice(i1 + 1, i2);
-            if (!Number.isFinite(t) || t < before) { removed++; return; }
+            if (!Number.isFinite(t)) { removed++; return; }
+            const coin = ln.slice(0, i1);
+            if (shortFn && shortFn(coin)) {   // short-retention universe: flat cutoff, full resolution, no thinning band
+              if (t < (Number.isFinite(shortBefore) ? shortBefore : before)) removed++;
+              else output.write(ln + "\n");
+              return;
+            }
+            if (t < before) { removed++; return; }
             if (t >= full) { output.write(ln + "\n"); return; }
-            const coin = ln.slice(0, i1), hb = Math.floor(t / 3600000);
+            const hb = Math.floor(t / 3600000);
             if (lastHour.get(coin) === hb) { removed++; return; }
             lastHour.set(coin, hb);
             output.write(ln + "\n");

@@ -22,6 +22,17 @@ const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const HOURLY_HISTORY_DAYS = 180;      // rolling hourly-OHLCV window (API serves ~5000 most-recent candles = ~208d hard cap; 180d fits one call and triples the gap-study samples)
 const HOURLY_FEAT_DAYS = 31;          // window actually fed to featuresFromHourly (keep features identical to before)
 const HOURLY_FETCH_WEIGHT = 130;      // rate-limit weight for the cold 180d hourly pull (one-time per market)
+// ---- crypto (Hyperliquid main dex) ----------------------------------------------------------
+// Top-N main-dex perps ride the same machinery with a LIGHTER footprint: 31d retention across
+// the board (hourly spine, dailies, OI — no 365d tier: that exists to feed studies crypto does
+// not participate in). Crypto rows NEVER enter signals, studies, the ledger, pooling, or the
+// regime aggregate — enforced by keeping activeMarkets() xyz-pure and giving main its own list.
+const MAIN_DEX = "";                  // Hyperliquid main perp universe
+const MAIN_BENCH = "BTC";
+const MAIN_TOP_N = 60;                // selected by 24h notional volume, recomputed once per UTC day
+const MAIN_HIST_DAYS = 31;
+const MAIN_HOURLY_WEIGHT = 35;        // 31d spine pull
+const MAIN_DAILY_WEIGHT = 8;          // 40d daily pull
 const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
 const FUNDING_HISTORY_DAYS = 60;      // rolling hourly funding-rate window (aligned with the price spine)
 const FUNDING_FETCH_WEIGHT = 20;      // rate-limit weight for a fundingHistory pull
@@ -47,11 +58,12 @@ function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Nu
 function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 
-function createPoller({ dex, store, log, version }) {
+function createPoller({ dex, store, log, version, crypto }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
   let benchCoin = null;
+  let mainOrder = [], mainList = [], mainSel = new Set(), mainDay = 0;   // main-dex universe order / today's selection
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
   let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics
@@ -74,6 +86,7 @@ function createPoller({ dex, store, log, version }) {
     if (!r) {
       r = {
         coin, ticker: coin.includes(":") ? coin.split(":")[1] : coin,
+        uni: coin.includes(":") ? "xyz" : "main",
         px: null, prevDay: null, funding: null, vol: null, oi: null, oiBase: null, oracle: null, d1: null,
         ref: null, feat: null, dailyRaw: null, hourlyRaw: null, fundH: new Map(), fundBackfilled: false,
         hourlyTs: 0, dailyTs: 0, isNew: true, delisted: false,
@@ -84,12 +97,15 @@ function createPoller({ dex, store, log, version }) {
   }
 
   function detectBenchmark() {
+    // xyz rows ONLY: the main dex lists SPX-style memecoin tickers (SPX6900 trades as "SPX"),
+    // which would match the alias/regex below and silently hijack the equity benchmark —
+    // poisoning beta, RS, gap-excess and the regime aggregate against a memecoin.
     for (const a of SP_ALIASES)
-      for (const r of rows.values()) if (!r.delisted && r.ticker.toUpperCase() === a) return r.coin;
+      for (const r of rows.values()) if (r.uni === "xyz" && !r.delisted && r.ticker.toUpperCase() === a) return r.coin;
     // Fallback for unseen variants: the token must END after optional digits (SPX, SPX500,
     // SPX-mini) — a trailing letter (SPXW, SPYDER) is a different instrument, not the index.
     for (const r of rows.values())
-      if (!r.delisted && /(?:^|[^A-Z])(?:SPX|SP500|S&P)\d*(?![A-Z0-9])/i.test(r.ticker)) return r.coin;
+      if (r.uni === "xyz" && !r.delisted && /(?:^|[^A-Z])(?:SPX|SP500|S&P)\d*(?![A-Z0-9])/i.test(r.ticker)) return r.coin;
     return null;
   }
 
@@ -223,17 +239,10 @@ function createPoller({ dex, store, log, version }) {
       r.delisted = !!u.isDelisted;
       if (r.delisted && !wasDelisted) r.delistedAt = Date.now();   // starts the heavy-data GC clock (see maintenance)
       if (!r.delisted) r.delistedAt = 0;
-      const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
-      if (px != null) r.px = px;
-      const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
-      const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); }  // forward-fill the current hour
-      const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
-      const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
-      const oi = num(ctx.openInterest);
-      if (oi != null) { r.oiBase = oi; r.oi = r.px != null ? oi * r.px : null; }
-      r.d1 = (r.px != null && r.prevDay) ? (r.px - r.prevDay) / r.prevDay * 100 : r.d1;
+      foldCtx(r, ctx, hourNow);
       seen.add(coin);
     });
+    if (crypto) await pollMainUniverse(seen, hourNow, (n) => { newCount += n; });
     let removed = 0;
     for (const k of [...rows.keys()]) if (!seen.has(k)) { rows.delete(k); hist.delete(k); removed++; }
     if (newCount || removed || benchCoin == null) benchCoin = detectBenchmark();
@@ -242,6 +251,58 @@ function createPoller({ dex, store, log, version }) {
     if (newCount || removed) buildSnapshot();
   }
 
+  function foldCtx(r, ctx, hourNow) {
+    const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
+    if (px != null) r.px = px;
+    const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
+    const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); }  // forward-fill the current hour
+    const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
+    const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
+    const oi = num(ctx.openInterest);
+    if (oi != null) { r.oiBase = oi; r.oi = r.px != null ? oi * r.px : null; }
+    r.d1 = (r.px != null && r.prevDay) ? (r.px - r.prevDay) / r.prevDay * 100 : r.d1;
+  }
+  // Main-dex universe: fetch, select top-N by volume once per UTC day, fold contexts.
+  // Deselected/delisted coins with existing rows are marked delisted (existing GC trims their
+  // heavy data) and kept in `seen` so the removal sweep never deletes their warm state mid-day.
+  async function pollMainUniverse(seen, hourNow, addNew) {
+    let md = null;
+    try { md = await fetchMetaAndCtxs(MAIN_DEX); }
+    catch (e) { log("main-dex poll failed: " + e.message); }
+    if (!md) { for (const k of rows.keys()) if (!k.includes(":")) seen.add(k); return; }   // failed poll must not delete crypto rows
+    const mUni = (md[0] && md[0].universe) || [], mCtxs = md[1] || [];
+    mainOrder = mUni.map((u) => u.name);
+    const dayUTC = Math.floor(Date.now() / DAY);
+    if (mainDay !== dayUTC || !mainSel.size) {
+      const cand = [];
+      mUni.forEach((u, i) => { if (!u.isDelisted) cand.push([u.name, num((mCtxs[i] || {}).dayNtlVlm) || 0]); });
+      cand.sort((a, b) => b[1] - a[1]);
+      const list = cand.slice(0, MAIN_TOP_N).map((c) => c[0]);
+      if (!list.includes(MAIN_BENCH) && mUni.some((u) => u.name === MAIN_BENCH && !u.isDelisted)) list.unshift(MAIN_BENCH);
+      const next = new Set(list);
+      if (mainSel.size) {
+        let j = 0, l = 0;
+        for (const c of next) if (!mainSel.has(c)) j++;
+        for (const c of mainSel) if (!next.has(c)) l++;
+        if (j || l) log(`Crypto universe refresh: ${next.size} selected (+${j}/-${l})`);
+      } else log(`Crypto universe: top ${next.size} main-dex perps by 24h volume`);
+      mainSel = next; mainList = list; mainDay = dayUTC;
+    }
+    mUni.forEach((u, i) => {
+      const coin = u.name;
+      if (!mainSel.has(coin) || u.isDelisted) {
+        const ex = rows.get(coin);
+        if (ex) { if (!ex.delisted) { ex.delisted = true; ex.delistedAt = Date.now(); } seen.add(coin); }
+        return;
+      }
+      const existed = rows.has(coin), r = getRow(coin);
+      if (!existed) { addNew(1); log("NEW crypto market: " + coin + " — queued for history backfill"); }
+      if (r.delisted) { r.delisted = false; r.delistedAt = 0; }
+      foldCtx(r, mCtxs[i] || {}, hourNow);
+      seen.add(coin);
+    });
+  }
+  function mainMarkets() { return mainList.map((c) => rows.get(c)).filter((r) => r && !r.delisted); }
   // Fold a WebSocket allDexsAssetCtxs event into rows. The ctx array for our dex is
   // index-aligned with its universe order — the exact alignment metaAndAssetCtxs uses — so
   // we map by position against the `order` captured on the last REST poll. If lengths
@@ -270,6 +331,15 @@ function createPoller({ dex, store, log, version }) {
       if (oi != null) { r.oiBase = oi; r.oi = r.px != null ? oi * r.px : null; }
       r.d1 = (r.px != null && r.prevDay) ? (r.px - r.prevDay) / r.prevDay * 100 : r.d1;
     }
+    if (crypto && mainOrder.length) {
+      let ma = null;
+      for (const t of tuples) if (Array.isArray(t) && t[0] === MAIN_DEX && Array.isArray(t[1])) { ma = t[1]; break; }
+      if (ma && ma.length === mainOrder.length)
+        for (let i = 0; i < mainOrder.length; i++) {
+          const r = rows.get(mainOrder[i]);
+          if (r && !r.delisted) foldCtx(r, ma[i] || {}, hourNow);
+        }
+    }
     sampleOI();
     lastPoll = now; lastWsApply = now; wsApplied++;
   }
@@ -282,11 +352,12 @@ function createPoller({ dex, store, log, version }) {
     // Cold start OR a spine restored from an older, shallower build: one wide 180d pull.
     // Steady state: fetch only the last ~48h tail and merge — the old design re-pulled the
     // full window every refresh, which at 180d would consume the entire rate budget.
+    const histDays = r.uni === "main" ? MAIN_HIST_DAYS : HOURLY_HISTORY_DAYS;
     const spine = Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null;
     const firstT = spine && spine.length ? +spine[0].t : Infinity;
-    const deep = spine && spine.length > 48 && firstT <= now - (HOURLY_HISTORY_DAYS - 30) * DAY;
+    const deep = spine && spine.length > 48 && firstT <= now - (histDays - (r.uni === "main" ? 7 : 30)) * DAY;
     if (!deep) {
-      const wide = await fetchCandles(coin, "1h", now - HOURLY_HISTORY_DAYS * DAY, now, HOURLY_FETCH_WEIGHT);
+      const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, r.uni === "main" ? MAIN_HOURLY_WEIGHT : HOURLY_FETCH_WEIGHT);
       if (Array.isArray(wide)) r.hourlyRaw = wide;
       else if (!spine) r.hourlyRaw = null;           // keep a shallow spine over nothing if the wide pull fails
     } else {
@@ -297,7 +368,7 @@ function createPoller({ dex, store, log, version }) {
         r.hourlyRaw = spine.filter((k) => +k.t < firstNew).concat(tail);
       }
     }
-    { const cutOld = now - HOURLY_HISTORY_DAYS * DAY;
+    { const cutOld = now - histDays * DAY;
       if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = r.hourlyRaw.filter((k) => +k.t >= cutOld); }
     // Features are computed from ONLY the last 31 days so hi30/lo30, volH and volD are byte-identical
     // to the previous 31d fetch — the wider window must not leak into the feature math.
@@ -310,7 +381,9 @@ function createPoller({ dex, store, log, version }) {
     const r = rows.get(coin);
     if (!r) return;
     const now = Date.now();
-    const c = await fetchCandles(coin, "1d", now - 370 * DAY, now, 27);
+    const c = r.uni === "main"
+      ? await fetchCandles(coin, "1d", now - 40 * DAY, now, MAIN_DAILY_WEIGHT)
+      : await fetchCandles(coin, "1d", now - 370 * DAY, now, 27);
     r.dailyRaw = c; r.dailyTs = Date.now(); r.isNew = false;
     buildDaily();
   }
@@ -393,7 +466,8 @@ function createPoller({ dex, store, log, version }) {
   async function backfillFunding(coin) {
     const r = rows.get(coin); if (!r) return 0;
     const now = Date.now();
-    const data = await fetchFundingHistory(coin, now - FUNDING_HISTORY_DAYS * DAY, now, FUNDING_FETCH_WEIGHT);
+    const days = r && r.uni === "main" ? MAIN_HIST_DAYS : FUNDING_HISTORY_DAYS;
+    const data = await fetchFundingHistory(coin, now - days * DAY, now, FUNDING_FETCH_WEIGHT);
     let n = 0;
     if (Array.isArray(data)) for (const e of data) {
       const t = num(e && (e.time ?? e.t)), rate = num(e && (e.fundingRate ?? e.funding));
@@ -496,10 +570,10 @@ function createPoller({ dex, store, log, version }) {
 
   function buildSnapshot() {
     sampleRegime();
-    const markets = activeMarkets().map((r) => {
+    const mapMarket = (r) => {
       const cl = classifyCached(r.ticker);
       return {
-        coin: r.coin, ticker: r.ticker, delisted: !!r.delisted,
+        coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
         oracle: sig(r.oracle, 9), d1: rnd(r.d1, 4),
@@ -507,9 +581,14 @@ function createPoller({ dex, store, log, version }) {
         doi: trimWin(computeDoi(r)), fundByWin: trimWin(computeFundWin(r), 6),
         sector: cl.sector, assetClass: cl.assetClass,
       };
-    });
+    };
+    const markets = activeMarkets().map(mapMarket);
+    // Crypto ships under its OWN key: snapshot.markets stays xyz-pure so every existing consumer
+    // (tabs, studies, treemap, leaders) is untouched until the scope switcher lands in Build B.
+    const mainMkts = crypto ? mainMarkets().map(mapMarket) : [];
     snapshotCache = {
-      ts: Date.now(), dataTs: lastPoll, dex, benchCoin, markets,
+      ts: Date.now(), dataTs: lastPoll, dex, benchCoin,
+      benchMain: crypto ? MAIN_BENCH : null, mainMarkets: mainMkts, markets,
       v: version || null,
       offHours: computeOffHours(Date.now()),
       // live warmup counts: h = markets without hourly features yet, d = markets with no daily
@@ -532,6 +611,21 @@ function createPoller({ dex, store, log, version }) {
     return [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => [v[0] - (v[0] % DAY), v[1]]);
   }
 
+  function buildDailyMain(daily, funding) {
+    for (const r of mainMarkets()) {
+      const hs = getHourly(r.coin);
+      let dr = null;
+      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c]);
+      else if (hs.length > 24) dr = deriveDailyClose(hs);   // UTC-floored by construction — correct for 24/7 markets
+      if (dr && dr.length) daily[r.coin] = dr.slice(-MAIN_HIST_DAYS - 2);
+      const fh = getFunding(r.coin);
+      if (fh.length) {
+        const byDay = new Map();
+        for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
+        funding[r.coin] = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
+      }
+    }
+  }
   function buildDaily() {
     const daily = {}, funding = {}, overnight = {}, liveClose = {};
     const nowMs = Date.now();
@@ -565,6 +659,7 @@ function createPoller({ dex, store, log, version }) {
     }
     const sig = coins + ":" + lens;
     if (sig !== dailySig) { dailySig = sig; dailyVer = Date.now(); }   // content changed -> new ETag
+    if (crypto) buildDailyMain(daily, funding);
     dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, liveClose };
   }
 
@@ -1409,12 +1504,18 @@ function createPoller({ dex, store, log, version }) {
 
   async function maintenance() {
     try {
-      const n = await store.prune(Date.now() - OI_RETENTION, Date.now() - OI_FULL_RES);
-      if (n) log(`OI retention pass: ${n} sample(s) dropped/thinned (full res 31d, hourly to 365d)`);
-      // mirror the same thinning in memory so the hist arrays track the on-disk shape
-      { const full = Date.now() - OI_FULL_RES;
+      const isMain = (coin) => !coin.includes(":");
+      const n = await store.prune(Date.now() - OI_RETENTION, Date.now() - OI_FULL_RES, isMain, Date.now() - MAIN_HIST_DAYS * DAY);
+      if (n) log(`OI retention pass: ${n} sample(s) dropped/thinned (xyz: full 31d + hourly to 365d; crypto: flat 31d)`);
+      // mirror the same shape in memory so the hist arrays track the on-disk store
+      { const full = Date.now() - OI_FULL_RES, mainCut = Date.now() - MAIN_HIST_DAYS * DAY;
         for (const [coin, arr] of hist) {
-          if (!arr.length || arr[0][0] >= full) continue;
+          if (!arr.length) continue;
+          if (isMain(coin)) {   // crypto: flat 31d, full resolution, nothing older
+            if (arr[0][0] < mainCut) { const i = arr.findIndex((k) => k[0] >= mainCut); hist.set(coin, i > 0 ? arr.slice(i) : (i === 0 ? arr : [])); }
+            continue;
+          }
+          if (arr[0][0] >= full) continue;
           const out = []; let lastHb = -1;
           for (const k of arr) {
             if (k[0] >= full) { out.push(k); continue; }
@@ -1525,6 +1626,7 @@ function createPoller({ dex, store, log, version }) {
       return {
         version: version || null,
         markets: rows.size, active, bench: benchCoin, oiCoins: hist.size,
+        crypto: crypto ? { selected: mainList.length, active: mainMarkets().length, bench: MAIN_BENCH } : null,
         hourly: hourlyCoverage(), funding: fundingCoverage(), lastPoll,
         backfill: { hourlyPending: pendH, dailyPending: pendD },
         failing: { hourly: hFailing, daily: dFailing, funding: fFailing },
