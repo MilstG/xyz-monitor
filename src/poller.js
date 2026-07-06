@@ -572,7 +572,18 @@ function createPoller({ dex, store, log, version, crypto }) {
     sampleRegime();
     const mapMarket = (r) => {
       const cl = classifyCached(r.ticker, r.uni);
+      // Funding percentile: where the CURRENT rate sits in this market's own 31d hourly funding
+      // distribution. 96 = the crowd is paying near its monthly extreme — the classic crypto
+      // mean-reversion zone. Computed for every universe; extremes are just rarer on equities.
+      let fundPct = null;
+      if (r.funding != null && isFinite(r.funding)) {
+        const fh = getFunding(r.coin), cut = Date.now() - 31 * DAY;
+        let n = 0, le = 0;
+        for (const [t, rate] of fh) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
+        if (n >= 96) fundPct = Math.round((100 * le) / n);   // >=4 days of hourly samples before we claim a percentile
+      }
       return {
+        fundPct,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
