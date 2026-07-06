@@ -1863,6 +1863,8 @@ function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date()
   return (d.getDate()===n.getDate()&&d.getMonth()===n.getMonth())?hm:(d.getMonth()+1)+'/'+d.getDate()+' '+hm; }
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
 function sigViewPref(){ try{ return localStorage.getItem('xyz-sigview')||'detail'; }catch(_){ return 'detail'; } }
+function sigPrimePref(){ try{ return localStorage.getItem('xyz-sigprime')==='1'; }catch(_){ return false; } }
+function setSigPrime(v){ try{ localStorage.setItem('xyz-sigprime',v?'1':'0'); }catch(_){} renderSignals(); }
 function sigMovePref(){ try{ return +localStorage.getItem('xyz-sigmove')||0; }catch(_){ return 0; } }
 function setSigMove(v){ try{ localStorage.setItem('xyz-sigmove',String(v)); }catch(_){} renderSignals(); }
 // Actionable magnitude of a signal: distance from the live mark to its playbook target, in %.
@@ -1950,12 +1952,14 @@ function recCurveSvg(curve){
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function sigRecordHtml(d){
-  const rc=d&&d.record?d.record:{};
+  const thr=sigMovePref(), pr=sigPrimePref();
+  const rs=(d&&d.records&&d.records[String(thr)+(pr?'p':'')])||d||{};
+  const rc=rs.record||{};
   const evs=Object.keys(rc);
   let fired=0,resolved=0,wins=0,open=0;
   for(const ev of evs){ const r=rc[ev]; resolved+=r.resolved||0; open+=r.open||0; wins+=Math.round((r.hit||0)*(r.resolved||0)); }
   fired=resolved+open;
-  let s=`<div class="dsec" style="margin-top:22px" data-tip="Out-of-sample accuracy: every fired signal is ledgered at its mark and resolved at its stated horizon under the study's own sign convention. This section is what actually happened after the signals shown on this tab \u2014 the in-sample base rates above are the claim, this is the verdict.">Signal accuracy \u2014 live track record</div>`;
+  let s=`<div class="dsec" style="margin-top:22px" data-tip="Out-of-sample accuracy: every fired signal is ledgered at its mark and resolved at its stated horizon under the study's own sign convention. This section is what actually happened after the signals shown on this tab \u2014 the in-sample base rates above are the claim, this is the verdict.${thr>0||pr?' FILTERED: only claims that'+(pr?' were \u2605 prime at fire time (\u226560% hit, positive expectancy, sound structure)':'')+(thr>0&&pr?' AND':'')+(thr>0?' promised a target \u2265'+thr+'% from the mark at fire time':'')+' \u2014 the record of what you would actually trade. Claims ledgered before this tracking are excluded from filtered views.':''}">Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
   if(!fired){
     return s+`<div class="sec" style="font-size:11.5px;padding:4px 2px">No claims ledgered yet \u2014 the record starts accruing from the first signals this deploy fires. First resolutions land at their horizons (12h\u20135d).</div>`;
   }
@@ -1979,7 +1983,7 @@ function sigRecordHtml(d){
     }
     s+='</tbody></table>';
   }
-  const rx=d&&d.recordX;
+  const rx=rs.recordX;
   if(rx){
     if(rx.buckets&&rx.buckets.some(b=>b.n>0)){
       s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="calibration: does the score at fire time actually rank outcomes? If higher buckets don't hit more often, the scoring \u2014 not the events \u2014 needs work.">calibration</span>`;
@@ -2005,8 +2009,8 @@ function sigRecordHtml(d){
       s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="equal-weight cumulative realized outcome of every resolved R-united claim (big move, breakout, funding flip), in sigma units \u2014 the equity curve of the engine's claims. Premium (bp) and gap (%) claims are excluded because mixed units cannot be summed honestly.">claim equity curve (R)</div>`+recCurveSvg(rx.curve);
     }
   }
-  if(d&&d.confluence&&(d.confluence.confN||d.confluence.soloN)){
-    const c=d.confluence;
+  if(rs.confluence&&(rs.confluence.confN||rs.confluence.soloN)){
+    const c=rs.confluence;
     s+=`<div class="sec" style="font-size:11.5px;margin:8px 0 2px" data-tip="Does agreement actually help? Resolved claims split by whether they fired WITH other conditions on the same name or alone. Once both sides have 15+ resolutions, the confluence score bonus scales to this measured lift \u2014 and drops to zero if agreement doesn't prove out.">confluence: `
       +(c.confN&&c.confHit!=null?`<b class="${c.confHit>=(c.soloHit||0)?'pos':'neg'}">${Math.round(c.confHit*100)}%</b> hit with company (n=${c.confN})`:`n=${c.confN||0} with company`)
       +` vs `+(c.soloN&&c.soloHit!=null?`<b>${Math.round(c.soloHit*100)}%</b> solo (n=${c.soloN})`:`n=${c.soloN||0} solo`)
@@ -2024,9 +2028,9 @@ function sigRecordHtml(d){
       s+='</div>';
     }
   }
-  if(d&&d.recent&&d.recent.length){
+  if(rs.recent&&rs.recent.length){
     s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 4px" data-tip="the most recent claims to reach their horizon and get scored">recent resolutions</div><div class="sigrec-recent">`;
-    for(const e of d.recent){
+    for(const e of rs.recent){
       s+=`<span class="recr ${e.win?'w':'l'}" data-tip="${esc(`${e.ticker} \u00b7 ${EV_LABELS[e.ev]||e.ev} \u00b7 fired ${new Date(e.t0).toLocaleString()}, resolved ${new Date(e.tR).toLocaleString()} \u2014 realized ${e.realized>=0?'+':''}${e.realized}${e.unit} under the event's sign convention`)}">${esc(e.ticker)} <b class="${e.win?'pos':'neg'}">${e.realized>=0?'+':''}${e.realized}${e.unit}</b></span>`;
     }
     s+='</div>';
@@ -2035,15 +2039,18 @@ function sigRecordHtml(d){
 }
 function renderSignals(){
   const box=el('signals-body'); if(!box) return;
-  const d=state.signals, view=sigViewPref(), mvThr=sigMovePref();
+  const d=state.signals, view=sigViewPref(), mvThr=sigMovePref(), prOn=sigPrimePref();
   const mvBtn=(v,lbl)=>`<button type="button" class="cdtf${mvThr===v?' on':''}" data-mv="${v}" data-tip="${v===0?'show every signal regardless of target distance':`hide setups whose playbook target sits closer than ${lbl} from the live mark \u2014 statistically fine, but a few bp of expected move is not hand-tradeable. Signals with no computable target are hidden too while a threshold is active.`}">${v===0?'any':'\u2265'+lbl}</button>`;
-  const seg=`<span class="cdtf-seg" style="margin-left:auto" data-tip="minimum actionable move: distance from live mark to the playbook target">${mvBtn(0,'')}${mvBtn(0.5,'0.5%')}${mvBtn(1,'1%')}${mvBtn(2,'2%')}</span>`
+  const seg=`<span class="cdtf-seg" style="margin-left:auto"><button type="button" class="cdtf${prOn?' on':''}" data-pr="1" data-tip="show only \u2605 prime setups \u2014 \u226560% hit, positive expectancy, sound structure at fire time \u2014 and switch the stats below to the record of prime claims only">\u2605 prime</button></span>`
+    +`<span class="cdtf-seg" data-tip="minimum actionable move: distance from live mark to the playbook target">${mvBtn(0,'')}${mvBtn(0.5,'0.5%')}${mvBtn(1,'1%')}${mvBtn(2,'2%')}</span>`
     +`<span class="cdtf-seg"><button type="button" class="cdtf${view==='detail'?' on':''}" data-sv="detail" data-tip="full cards: readings, base rates, playbooks">detailed</button><button type="button" class="cdtf${view==='compact'?' on':''}" data-sv="compact" data-tip="one row per market \u2014 hover the chips for the full reading and base rate, click a row to expand it">compact</button></span>`;
   const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction."><span>Live conditions ranked by <b>unusualness \u00d7 historical edge</b>, self-audited: every fired signal is ledgered and resolved at its horizon \u2014 the record below is <b>out-of-sample</b>. Click a ticker for the drawer.</span>${seg}</div>`;
   let rec='';
-  if(d&&d.record&&Object.keys(d.record).length){
+  const rsTop=(d&&d.records&&d.records[String(mvThr)+(prOn?'p':'')])||d||{};
+  const recSrc=rsTop.record||{};
+  if(Object.keys(recSrc).length){
     rec='<div class="recstrip">';
-    for(const ev in d.record){ const r=d.record[ev]; if(!r) continue;
+    for(const ev in recSrc){ const r=recSrc[ev]; if(!r) continue;
       const live = r.resolved>0
         ? `${Math.round((r.hit||0)*100)}% hit \u00b7 med ${r.med>=0?'+':''}${r.med}${r.unit} (n=${r.resolved})`
         : `${r.open||0} open, none resolved yet`;
@@ -2058,12 +2065,15 @@ function renderSignals(){
     bindSigControls(box); return;
   }
   let hiddenN=0;
-  const sigs = mvThr>0 ? d.signals.filter(g=>{ const m=sigMove(g); const ok=m!=null&&m>=mvThr; if(!ok)hiddenN++; return ok; }) : d.signals;
+  const sigs = (mvThr>0||prOn) ? d.signals.filter(g=>{
+    const m=sigMove(g);
+    const ok=(mvThr===0||(m!=null&&m>=mvThr))&&(!prOn||g.prime);
+    if(!ok)hiddenN++; return ok; }) : d.signals;
   const groups=[], byCoin={};
   for(const g of sigs){ if(byCoin[g.coin]){ byCoin[g.coin].sigs.push(g); byCoin[g.coin].score=Math.max(byCoin[g.coin].score,g.score); }
     else { byCoin[g.coin]={coin:g.coin,ticker:g.ticker,score:g.score,sigs:[g]}; groups.push(byCoin[g.coin]); } }
-  if(mvThr>0&&!groups.length){
-    box.innerHTML=intro+rec+`<div class="msg">All ${hiddenN} live signal${hiddenN===1?'':'s'} hidden by the move filter (target closer than ${mvThr}% or no target).</div>`+sigRecordHtml(d);
+  if((mvThr>0||prOn)&&!groups.length){
+    box.innerHTML=intro+rec+`<div class="msg">All ${hiddenN} live signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (no prime setups firing'+(mvThr>0?' at this size':'')+')':''}.</div>`+sigRecordHtml(d);
     bindSigControls(box); attachLineHover(); return;
   }
   const main=groups.filter(g=>g.score>=35), low=groups.filter(g=>g.score<35);
@@ -2076,7 +2086,7 @@ function renderSignals(){
     if(state._sigLow) for(const gr of low){ rank++; s+=rowOf(gr,rank); }
   }
   s+='</div>';
-  if(hiddenN>0) s+=`<div class="sec" style="font-size:10.5px;padding:6px 2px" data-tip="signals whose playbook target is closer than the active threshold, or which have no computable target">${hiddenN} signal${hiddenN===1?'':'s'} hidden by the move filter</div>`;
+  if(hiddenN>0) s+=`<div class="sec" style="font-size:10.5px;padding:6px 2px" data-tip="signals whose playbook target is closer than the active threshold, or which have no computable target">${hiddenN} signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (prime-only)':''}</div>`;
   s+=sigRecordHtml(d);
   box.innerHTML=s;
   bindSigControls(box);
@@ -2086,6 +2096,7 @@ function bindSigControls(box){
   box.querySelectorAll('.sig-tick').forEach(t=>t.addEventListener('click',(ev)=>{ ev.stopPropagation(); openDetail(t.dataset.coin); }));
   box.querySelectorAll('[data-sv]').forEach(b=>b.addEventListener('click',()=>setSigView(b.dataset.sv)));
   box.querySelectorAll('[data-mv]').forEach(b=>b.addEventListener('click',()=>setSigMove(+b.dataset.mv)));
+  box.querySelectorAll('[data-pr]').forEach(b=>b.addEventListener('click',()=>setSigPrime(!sigPrimePref())));
   box.querySelectorAll('.sigc[data-exp]').forEach(r=>r.addEventListener('click',()=>{ sigExpanded.add(r.dataset.exp); renderSignals(); }));
   box.querySelectorAll('.sigcard[data-coll] .sigcard-h').forEach(h=>h.addEventListener('click',(ev)=>{ if(ev.target.closest('.sig-tick'))return; sigExpanded.delete(h.parentNode.dataset.coll); renderSignals(); }));
   box.querySelectorAll('[data-lowx]').forEach(b=>b.addEventListener('click',()=>{ state._sigLow=!state._sigLow; renderSignals(); }));
