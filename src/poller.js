@@ -503,7 +503,7 @@ function createPoller({ dex, store, log, version, crypto }) {
   function activeMarkets() { return order.map((c) => rows.get(c)).filter(Boolean); }
 
   const _clsCache = new Map();
-  function classifyCached(t) { let v = _clsCache.get(t); if (!v) { v = classify(t); _clsCache.set(t, v); } return v; }
+  function classifyCached(t, uni) { const k = (uni || "xyz") + "|" + t; let v = _clsCache.get(k); if (!v) { v = classify(t, uni); _clsCache.set(k, v); } return v; }
 
   // ---- market regime: mean pairwise correlation across the top markets, percentiled vs history ----
   function computeCorrNow() {
@@ -571,7 +571,7 @@ function createPoller({ dex, store, log, version, crypto }) {
   function buildSnapshot() {
     sampleRegime();
     const mapMarket = (r) => {
-      const cl = classifyCached(r.ticker);
+      const cl = classifyCached(r.ticker, r.uni);
       return {
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),

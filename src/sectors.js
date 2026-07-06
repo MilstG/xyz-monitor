@@ -37,7 +37,28 @@ for (const [sector, arr] of Object.entries(SECTOR_TICKERS)) for (const t of arr)
 
 function norm(t) { return String(t || "").toUpperCase().replace(/[^A-Z0-9.]/g, ""); }
 
-function classify(ticker) {
+// Crypto taxonomy for the Hyperliquid main dex (Build B): curated, same shape as the GICS
+// map. Unknowns fall to "Other" — still classed Crypto, so scope filtering stays airtight.
+const CRYPTO_SECTORS = {
+  BTC: "Majors", ETH: "Majors", SOL: "Majors", XRP: "Majors", BNB: "Majors", DOGE: "Meme",
+  ADA: "L1", AVAX: "L1", SUI: "L1", APT: "L1", SEI: "L1", TIA: "L1", NEAR: "L1", TON: "L1",
+  DOT: "L1", ATOM: "L1", TRX: "L1", LTC: "L1", BCH: "L1", ETC: "L1", KAS: "L1", INJ: "L1",
+  ARB: "L2", OP: "L2", STRK: "L2", ZK: "L2", BLAST: "L2", MNT: "L2", POL: "L2", MATIC: "L2",
+  HYPE: "DeFi", LINK: "DeFi", UNI: "DeFi", AAVE: "DeFi", MKR: "DeFi", CRV: "DeFi", LDO: "DeFi",
+  ENA: "DeFi", PENDLE: "DeFi", JUP: "DeFi", DYDX: "DeFi", GMX: "DeFi", SNX: "DeFi", COMP: "DeFi",
+  ONDO: "DeFi", EIGEN: "DeFi", ETHFI: "DeFi", MORPHO: "DeFi", AERO: "DeFi",
+  WIF: "Meme", PEPE: "Meme", BONK: "Meme", SHIB: "Meme", FLOKI: "Meme", MEME: "Meme",
+  POPCAT: "Meme", MEW: "Meme", BRETT: "Meme", MOODENG: "Meme", PNUT: "Meme", FARTCOIN: "Meme",
+  SPX: "Meme", GOAT: "Meme", TRUMP: "Meme", MELANIA: "Meme", DOGS: "Meme", NEIRO: "Meme",
+  WLD: "AI", FET: "AI", RENDER: "AI", TAO: "AI", AI16Z: "AI", VIRTUAL: "AI", GRIFFAIN: "AI", ARC: "AI",
+  FIL: "Infra", AR: "Infra", GRT: "Infra", PYTH: "Infra", W: "Infra", JTO: "Infra", ICP: "Infra",
+  STX: "Infra", IMX: "Infra", GALA: "Gaming", SAND: "Gaming", AXS: "Gaming", APE: "Gaming",
+};
+function classify(ticker, uni) {
+  if (uni === "main") {
+    const T = String(ticker || "").toUpperCase();
+    return { assetClass: "Crypto", sector: CRYPTO_SECTORS[T] || "Other" };
+  }
   const T = norm(ticker), Td = T.replace(/\./g, "");
   if (EQ[T]) return { assetClass: "Equity", sector: EQ[T] };
   if (EQ[Td]) return { assetClass: "Equity", sector: EQ[Td] };
