@@ -492,3 +492,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 
 /* shadow-variant incumbent chip */
 .sigrec-chip.inc{border-color:var(--accent);color:var(--text)}
+
+/* stop-aware column group */
+.sigrec-t th.ss,.sigrec-t td.ss{border-left:1px solid var(--grid);padding-left:14px}
+.sigrec-t td.ss+td.ss,.sigrec-t th.ss+th.ss{border-left:none;padding-left:0}

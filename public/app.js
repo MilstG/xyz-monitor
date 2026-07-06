@@ -1932,7 +1932,7 @@ function sigRowHtml(gr, rank){
 // Cumulative-R claim curve with the shared crosshair/readout (standing rule: every chart hovers).
 function recCurveSvg(curve){
   const W=430,H=120, pl=4,pr=44,pt=8,pb=16;
-  let lo=0,hi=0; for(const p of curve){ if(p[1]<lo)lo=p[1]; if(p[1]>hi)hi=p[1]; }
+  let lo=0,hi=0; for(const p of curve){ if(p[1]<lo)lo=p[1]; if(p[1]>hi)hi=p[1]; if(p[5]!=null){ if(p[5]<lo)lo=p[5]; if(p[5]>hi)hi=p[5]; } }
   if(hi===lo) hi=lo+1;
   const pad=(hi-lo)*0.08; hi+=pad; lo-=pad;
   const n=curve.length, X=i=>pl+(n<2?0.5:i/(n-1))*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
@@ -1943,12 +1943,15 @@ function recCurveSvg(curve){
   if(lo<0&&hi>0) s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--faint)" stroke-width="1" stroke-dasharray="3 3"/>`;
   let dpath=''; curve.forEach((p,i)=>dpath+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[1]).toFixed(1)+' ');
   const last=curve[curve.length-1][1];
+  const hasS=curve.some(p=>p[5]!=null);
+  if(hasS){ let sp=''; curve.forEach((p,i)=>sp+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[5]!=null?p[5]:p[1]).toFixed(1)+' ');
+    s+=`<path d="${sp}" fill="none" stroke="var(--blue)" stroke-width="1.3" stroke-dasharray="4 3" opacity="0.9"/>`; }
   s+=`<path d="${dpath}" fill="none" stroke="${last>=0?'var(--up)':'var(--down)'}" stroke-width="1.6"/>`;
   const dfmt=t=>{ const x=new Date(t); return (x.getMonth()+1)+'/'+x.getDate(); };
   s+=`<text x="${pl}" y="${H-4}" class="lc-tick">${dfmt(curve[0][0])}</text>`;
   s+=`<text x="${W-pr}" y="${H-4}" text-anchor="end" class="lc-tick">${dfmt(curve[n-1][0])}</text>`;
   const xs=curve.map((_,i)=>X(i));
-  const rows=curve.map(p=>`<b style="color:var(--text)">${esc(p[2])}</b> \u00b7 ${esc(EV_LABELS[p[3]]||p[3])}<br>${dfmt(p[0])}: realized <span style="color:${p[4]>=0?'var(--up)':'var(--down)'}">${p[4]>=0?'+':''}${p[4]}R</span> \u2192 cum ${p[1]>=0?'+':''}${p[1]}R`);
+  const rows=curve.map(p=>`<b style="color:var(--text)">${esc(p[2])}</b> \u00b7 ${esc(EV_LABELS[p[3]]||p[3])}${p[7]?' \u00b7 <span style="color:var(--accent)">\u26d4 stopped</span>':''}<br>${dfmt(p[0])}: at-horizon <span style="color:${p[4]>=0?'var(--up)':'var(--down)'}">${p[4]>=0?'+':''}${p[4]}R</span> \u2192 cum ${p[1]>=0?'+':''}${p[1]}R${p[5]!=null?`<br>stop-aware ${p[6]>=0?'+':''}${p[6]}R \u2192 cum ${p[5]>=0?'+':''}${p[5]}R`:''}`);
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function sigRecordHtml(d){
@@ -1956,8 +1959,9 @@ function sigRecordHtml(d){
   const rs=(d&&d.records&&d.records[String(thr)+(pr?'p':'')])||d||{};
   const rc=rs.record||{};
   const evs=Object.keys(rc);
-  let fired=0,resolved=0,wins=0,open=0;
-  for(const ev of evs){ const r=rc[ev]; resolved+=r.resolved||0; open+=r.open||0; wins+=Math.round((r.hit||0)*(r.resolved||0)); }
+  let fired=0,resolved=0,wins=0,open=0,nS=0,winsS=0;
+  for(const ev of evs){ const r=rc[ev]; resolved+=r.resolved||0; open+=r.open||0; wins+=Math.round((r.hit||0)*(r.resolved||0));
+    nS+=r.nS||0; winsS+=Math.round((r.hitS||0)*(r.nS||0)); }
   fired=resolved+open;
   let s=`<div class="dsec" style="margin-top:22px" data-tip="Out-of-sample accuracy: every fired signal is ledgered at its mark and resolved at its stated horizon under the study's own sign convention. This section is what actually happened after the signals shown on this tab \u2014 the in-sample base rates above are the claim, this is the verdict.${thr>0||pr?' FILTERED: only claims that'+(pr?' were \u2605 prime at fire time (\u226560% hit, positive expectancy, sound structure)':'')+(thr>0&&pr?' AND':'')+(thr>0?' promised a target \u2265'+thr+'% from the mark at fire time':'')+' \u2014 the record of what you would actually trade. Claims ledgered before this tracking are excluded from filtered views.':''}">Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
   if(!fired){
@@ -1968,10 +1972,11 @@ function sigRecordHtml(d){
     +`<span data-tip="every distinct (market, event) claim ledgered since launch">fired <b>${fired}</b></span>`
     +`<span data-tip="claims that reached their horizon and were scored">resolved <b>${resolved}</b></span>`
     +`<span data-tip="claims still inside their horizon, awaiting resolution">open <b>${open}</b></span>`
-    +(hitAll!=null&&resolved?`<span data-tip="share of resolved claims that moved the way the signal implied, across all event types"><b class="${hitAll>=50?'pos':'neg'}">${hitAll}%</b> overall hit</span>`:'')
+    +(hitAll!=null&&resolved?`<span data-tip="AT-HORIZON track: share of resolved claims that moved the way the signal implied, held to the stated horizon with NO stop \u2014 this is what the studies claim and what the engine learns from"><b class="${hitAll>=50?'pos':'neg'}">${hitAll}%</b> at-horizon hit</span>`:'')
+    +(nS?`<span data-tip="STOP-AWARE track: the same claims, but if the void level was touched before horizon (hourly candle walk, touch counts even on recovery \u2014 conservative) the outcome is capped at the stop distance. This is what trading the playbook with its void as a hard stop would have done."><b class="${Math.round(100*winsS/nS)>=50?'pos':'neg'}">${Math.round(100*winsS/nS)}%</b> stop-aware <i style="font-style:normal;color:var(--faint)">(n=${nS})</i></span>`:'')
     +`</div>`;
   if(resolved){
-    s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th></th></tr></thead><tbody>';
+    s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="STOP-AWARE hit: same claims, outcome capped at the void level when it was touched before horizon">\u26d4 hit</th><th class="ss" data-tip="stop-aware median realized">\u26d4 med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s \u26d4 hit for how many claims were stopped out">\u26d4 pf</th><th></th></tr></thead><tbody>';
     for(const ev of evs){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
       const bad=r.resolved>=10&&r.hit<0.5&&r.med<=0, good=r.resolved>=10&&r.hit>=0.55&&r.med>0;
       s+=`<tr><td>${esc(EV_LABELS[ev]||ev)}</td><td>${r.resolved}${r.open?` <span class="sec">/${r.open}</span>`:''}</td>`
@@ -1979,6 +1984,9 @@ function sigRecordHtml(d){
         +`<td>${r.med!=null?`<span class="${r.med>=0?'pos':'neg'}">${r.med>=0?'+':''}${r.med}${r.unit}</span>`:'\u2014'}</td>`
         +`<td>${r.pf!=null?`<span class="${r.pf>=1?'pos':'neg'}" data-tip="${esc(`avg win ${r.avgWin!=null?'+'+r.avgWin+r.unit:'\u2014'} vs avg loss ${r.avgLoss!=null?r.avgLoss+r.unit:'\u2014'}`)}">${r.pf}</span>`:'\u2014'}</td>`
         +`<td>${r.claimMed!=null?`${r.claimMed>=0?'+':''}${r.claimMed}${r.unit}`:'\u2014'}</td>`
+        +`<td class="ss">${r.nS?`<span class="${r.hitS>=0.5?'pos':'neg'}" data-tip="${esc(`${r.stopped||0} of ${r.nS} claims (${Math.round(100*(r.stopped||0)/r.nS)}%) touched their void level before horizon`)}">${Math.round(r.hitS*100)}%</span>`:'\u2014'}</td>`
+        +`<td class="ss">${r.medS!=null?`<span class="${r.medS>=0?'pos':'neg'}">${r.medS>=0?'+':''}${r.medS}${r.unit}</span>`:'\u2014'}</td>`
+        +`<td class="ss">${r.pfS!=null?`<span class="${r.pfS>=1?'pos':'neg'}">${r.pfS}</span>`:'\u2014'}</td>`
         +`<td>${bad?'<i class="sig-unp" style="color:var(--down);border-color:var(--down)">no live edge</i>':(good?'<i class="sig-unp" style="color:var(--up);border-color:var(--up)">confirmed</i>':'')}</td></tr>`;
     }
     s+='</tbody></table>';
@@ -2006,7 +2014,7 @@ function sigRecordHtml(d){
         +`<span class="sigrec-k" style="margin-left:14px">worst</span>${rx.tickers.worst.map(chip).join('')}</div>`;
     }
     if(rx.curve&&rx.curve.length>=5){
-      s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="equal-weight cumulative realized outcome of every resolved R-united claim (big move, breakout, funding flip), in sigma units \u2014 the equity curve of the engine's claims. Premium (bp) and gap (%) claims are excluded because mixed units cannot be summed honestly.">claim equity curve (R)</div>`+recCurveSvg(rx.curve);
+      s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="equal-weight cumulative realized outcome of every resolved R-united claim (big move, breakout, funding flip), in sigma units \u2014 the equity curve of the engine's claims. Premium (bp) and gap (%) claims are excluded because mixed units cannot be summed honestly.">claim equity curve (R) <span style="text-transform:none;letter-spacing:0">\u2014 solid: at-horizon \u00b7 <span style="color:var(--blue)">dashed: stop-aware</span></span></div>`+recCurveSvg(rx.curve);
     }
   }
   if(rs.confluence&&(rs.confluence.confN||rs.confluence.soloN)){
@@ -2031,7 +2039,7 @@ function sigRecordHtml(d){
   if(rs.recent&&rs.recent.length){
     s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 4px" data-tip="the most recent claims to reach their horizon and get scored">recent resolutions</div><div class="sigrec-recent">`;
     for(const e of rs.recent){
-      s+=`<span class="recr ${e.win?'w':'l'}" data-tip="${esc(`${e.ticker} \u00b7 ${EV_LABELS[e.ev]||e.ev} \u00b7 fired ${new Date(e.t0).toLocaleString()}, resolved ${new Date(e.tR).toLocaleString()} \u2014 realized ${e.realized>=0?'+':''}${e.realized}${e.unit} under the event's sign convention`)}">${esc(e.ticker)} <b class="${e.win?'pos':'neg'}">${e.realized>=0?'+':''}${e.realized}${e.unit}</b></span>`;
+      s+=`<span class="recr ${e.win?'w':'l'}" data-tip="${esc(`${e.ticker} \u00b7 ${EV_LABELS[e.ev]||e.ev} \u00b7 fired ${new Date(e.t0).toLocaleString()}, resolved ${new Date(e.tR).toLocaleString()} \u2014 at-horizon ${e.realized>=0?'+':''}${e.realized}${e.unit}${e.realizedS!=null?`; stop-aware ${e.realizedS>=0?'+':''}${e.realizedS}${e.unit}${e.stopped?' (void level touched before horizon)':''}`:''}`)}">${e.stopped?'\u26d4 ':''}${esc(e.ticker)} <b class="${e.win?'pos':'neg'}">${e.realized>=0?'+':''}${e.realized}${e.unit}</b></span>`;
     }
     s+='</div>';
   }
