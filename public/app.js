@@ -18,7 +18,11 @@ const COLS=[
   {key:'px', label:'Price', type:'num',
     td:r=>`<td class="px${r.flash?' flash-'+r.flash:''}">${fmtPrice(r.px)}</td>`},
   {key:'funding', label:'Funding (APR)', type:'num',
-    td:r=>{ const f=fmtFunding(r.funding); return `<td class="${f.c}" title="${f.title}">${f.t}</td>`; }},
+    td:r=>{ const f=fmtFunding(r.funding);
+      const p=r.fundPct, ext=p!=null&&(p>=90||p<=10);
+      const flag=ext?`<i class="fpx ${p>=90?'hi':'lo'}" title="${p}th percentile of this market's OWN 31d hourly funding distribution — the crowd's payment is at a monthly extreme (${p>=90?'longs paying near their monthly max: crowded long, classic mean-reversion zone':'shorts paying near their monthly max: crowded short, squeeze fuel'})">${p>=90?'\u25b4':'\u25be'}${p}</i>`:'';
+      const t2=p!=null?`${f.title} \u00b7 ${p}th pctile of its own 31d funding`:f.title;
+      return `<td class="${f.c}" title="${t2}">${f.t}${flag}</td>`; }},
   {key:'prem', label:'Prem', type:'num', tip:'Perp vs oracle dislocation in basis points: (mark \u2212 oracle) / oracle. When the cash market is closed the oracle sits near the last print, so a persistent premium (perp rich) or discount (perp cheap) IS the live off-hours price discovery \u2014 the tradeable dislocation. Hover a cell for the exact mark vs oracle prices.',
     td:r=>premCell(r)},
   {key:'h1', label:'1h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h1,2.5)}>${pctInner(r.h1)}</td>`},
@@ -46,10 +50,15 @@ const COLS=[
     td:r=>carryCell(r)},
   {key:'vol', label:'24h Vol', type:'num', td:r=>`<td class="sec">${fmtUsd(r.vol)}</td>`},
   {key:'oi', label:'OI', type:'num', td:r=>`<td class="sec">${fmtUsd(r.oi)}</td>`},
+  {key:'turn', label:'OI/Vol', type:'num', def:'desc', tip:'Open interest \u00f7 24h volume: how large standing positioning is relative to the flow that could move it. High (\u22652) = stale, crowded positioning \u2014 fragile to squeezes and unwinds, reads well next to the Squeeze and \u0394OI columns. Low (<0.5) = fresh churn, positions turn over within the day.',
+    td:r=>turnCell(r)},
 ];
+function turnCell(r){ if(r.turn==null||!isFinite(r.turn)) return '<td><span class="na">\u2014</span></td>';
+  const c=r.turn>=2?'accent':(r.turn<0.5?'sec':'');
+  return `<td${c?` class="${c}"`:''} title="OI ${fmtUsd(r.oi)} \u00f7 24h vol ${fmtUsd(r.vol)} \u2014 positioning is ${r.turn.toFixed(1)}\u00d7 the daily flow">\u00d7${r.turn>=10?r.turn.toFixed(0):r.turn.toFixed(1)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','sqz','carry','oi'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','sqz','carry','oi','turn'];
 const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
@@ -199,6 +208,7 @@ function applySnapshot(s){
     if(m.doi) r.doiByWin=m.doi;
     if(m.fundByWin) r.fundByWin=m.fundByWin;
     if(m.sector) r.sector=m.sector;
+    r.fundPct=(m.fundPct!=null)?m.fundPct:r.fundPct;
     if(m.assetClass) r.assetClass=m.assetClass;
     r.d1=(r.px!=null&&r.prevDay)?(r.px-r.prevDay)/r.prevDay*100:r.d1;
     recomputeChanges(r);
@@ -306,6 +316,7 @@ function computeDerived(){
     r.carry=(r._carryF!=null&&r.vol30!=null&&isFinite(r.vol30)&&r.vol30>5)?r._carryF/r.vol30:undefined;
     r.gap = r.uni==='main' ? undefined : ((state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone);   // crypto never gaps (24/7); else live in-progress gap when the cash market is closed, else the last completed gap
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
+    r.turn=(r.oi>0&&r.vol>0)?r.oi/r.vol:undefined;
     if(!benchC) r.beta=undefined;
     else if(r.coin===benchC){ r.beta=1; r.betaR2=1; }
     else if(bench&&bench.daily&&r.daily){ const bt=computeBeta(r,bench,90); if(bt){ r.beta=bt.beta; r.betaR2=bt.r2; } else r.beta=undefined; }
@@ -517,8 +528,37 @@ function regimeLabel(g){
     : {t:'mixed',cls:'sec',tip:'no dominant direction; correlation baseline still building'};
   return {t:'mixed',cls:'sec',tip:`correlation mid-range (${ordinal(p)} pct of 90d)`};
 }
+// Crypto regime strip: the five numbers that describe a crypto tape, all from row data.
+function renderCryptoStrip(box){
+  const rows=activeRows().filter(r=>!r.delisted);
+  if(rows.length<5){ box.hidden=true; return; }
+  const btc=state.benchMain?state.rows.get(state.benchMain):null;
+  let oiSum=0,fW=0,up=0,n=0,doiW=0,doiOi=0;
+  for(const r of rows){
+    if(r.d1!=null&&isFinite(r.d1)){ n++; if(r.d1>0)up++; }
+    if(r.oi>0){ oiSum+=r.oi;
+      if(r.funding!=null&&isFinite(r.funding)) fW+=r.funding*r.oi;
+      const d=r.doiByWin?r.doiByWin.d1:null;
+      if(d!=null&&isFinite(d)){ doiW+=d*r.oi; doiOi+=r.oi; } }
+  }
+  const fAPR=oiSum>0?(fW/oiSum)*24*365*100:null;
+  const breadth=n?up/n:null;
+  const doi1=doiOi>0?doiW/doiOi:null;
+  let altUp=0,altN=0;
+  if(btc&&btc.d7!=null&&isFinite(btc.d7)) for(const r of rows){ if(r.coin===btc.coin||r.d7==null||!isFinite(r.d7))continue; altN++; if(r.d7>btc.d7)altUp++; }
+  const alt=altN>=10?altUp/altN:null;
+  const fCls=fAPR==null?'sec':(fAPR>=15?'pos':(fAPR<=-5?'blue':'sec'));
+  box.hidden=false;
+  box.innerHTML=
+    `<span class="rs-lab" data-tip="Crypto-scope regime: the aggregate state of the top-60 main-dex perps. All figures computed from the live table rows.">CRYPTO TAPE</span>`
+    +`<span class="rs-m" data-tip="open-interest-weighted average funding APR across the universe \u2014 the single cleanest crowd-positioning number in crypto. Strongly positive: the crowd pays to be long (euphoria tax). Negative: shorts pay \u2014 squeeze fuel builds."><span class="rs-k">crowd pays</span><b class="${fCls}">${fAPR!=null?(fAPR>=0?'+':'')+fAPR.toFixed(1)+'% APR':'\u2014'}</b><span class="sec">${fAPR!=null?(fAPR>=0?'to be long':'to be short'):''}</span></span>`
+    +`<span class="rs-m" data-tip="share of the crypto universe up on the day"><span class="rs-k">breadth</span><b class="${breadth!=null&&breadth>=0.5?'pos':'neg'}">${breadth!=null?Math.round(breadth*100)+'%':'\u2014'}</b><span class="sec">up${n?` of ${n}`:''}</span></span>`
+    +`<span class="rs-m" data-tip="total open interest across the universe, with the OI-weighted 1d change \u2014 positioning building or leaving"><span class="rs-k">total OI</span><b>${fmtUsd(oiSum)}</b>${doi1!=null?`<span class="${doi1>=0?'pos':'neg'}">${doi1>=0?'+':''}${doi1.toFixed(1)}% 1d</span>`:''}</span>`
+    +(btc&&btc.d1!=null?`<span class="rs-m" data-tip="the benchmark's own day \u2014 everything in this scope is measured against it"><span class="rs-k">BTC</span><b class="${btc.d1>=0?'pos':'neg'}">${btc.d1>=0?'+':''}${btc.d1.toFixed(1)}%</b></span>`:'')
+    +`<span class="rs-m" data-tip="alt-season gauge: share of non-BTC markets beating BTC over 7d. \u226565% = broad alt outperformance (alt season); \u226435% = BTC dominance regime, alts bleeding against it. Needs \u226510 markets with 7d history."><span class="rs-k">alts &gt; BTC 7d</span><b class="${alt==null?'sec':(alt>=0.65?'pos':(alt<=0.35?'blue':'sec'))}">${alt!=null?Math.round(alt*100)+'%':'\u2014'}</b>${alt!=null?`<span class="sec">${alt>=0.65?'alt season':(alt<=0.35?'BTC regime':'mixed')}</span>`:''}</span>`;
+}
 function renderRegimeStrip(){
-  if(state.scope==='crypto'){ const rg=el('regime'); if(rg) rg.hidden=true; return; }
+  if(state.scope==='crypto'){ const rg=el('regime'); if(rg) renderCryptoStrip(rg); return; }
   const box=el('regime'); if(!box) return;
   if(!state.rows.size){ box.hidden=true; return; }
   const g=computeRegime();
@@ -1809,10 +1849,9 @@ function applyScope(){
   const cr=state.scope==='crypto';
   document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  const rg=el('regime'); if(rg&&cr) rg.hidden=true;   // the regime strip is an equities-universe aggregate
   if(cr && state.view!=='markets') { showView('markets'); }
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
-  if(!cr) renderRegimeStrip();
+  renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
   if(state.scope==='crypto' && v!=='markets') v='markets';   // crypto scope is Markets-only by design

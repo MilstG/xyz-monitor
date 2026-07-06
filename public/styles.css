@@ -504,3 +504,9 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
   padding:7px 14px;cursor:pointer;text-transform:uppercase}
 .scope:hover{color:var(--muted)}
 .scope.on{color:var(--accent);background:var(--panel);font-weight:700;box-shadow:inset 0 0 0 1px var(--accent)}
+
+
+/* funding percentile extreme flag */
+.fpx{font-style:normal;font-size:9px;margin-left:4px;padding:0 3px;border-radius:3px;vertical-align:1px}
+.fpx.hi{color:var(--down);border:1px solid var(--down)}
+.fpx.lo{color:var(--up);border:1px solid var(--up)}
