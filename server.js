@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.04-22";
+const VERSION = "2026.07.04-24";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -26,7 +26,10 @@ const store = openStore(DATA_DIR);
 const HEARTBEAT = store.heartbeat();
 log(`Volume heartbeat: boot #${HEARTBEAT.boots} on this data dir (first boot ${new Date(HEARTBEAT.firstBoot).toISOString()}) — ` +
   (HEARTBEAT.boots > 1 ? "volume IS persisting" : "if this says boot #1 again next deploy, the volume is NOT persisting (check DATA_DIR vs the mount path)"));
-const poller = createPoller({ dex: DEX, store, log, version: VERSION });
+// Kill-switch: CRYPTO=0 disables main-dex polling entirely — one-variable rollback on Railway.
+const CRYPTO = process.env.CRYPTO !== "0";
+const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
+log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d retention" : "disabled via CRYPTO=0"}`);
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
