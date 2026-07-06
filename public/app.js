@@ -53,7 +53,7 @@ const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','g
 const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
-const state={ rows:new Map(), order:[], sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null,
+const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
@@ -101,7 +101,9 @@ function recomputeChanges(r){ const cur=r.px, ref=r.ref; if(cur==null||!ref)retu
   r.h1=ref.p1h?(cur-ref.p1h)/ref.p1h*100:null; r.h4=ref.p4h?(cur-ref.p4h)/ref.p4h*100:null;
   r.d7=ref.p7d?(cur-ref.p7d)/ref.p7d*100:null;  r.d30=ref.p30d?(cur-ref.p30d)/ref.p30d*100:null; }
 function setPrice(r,px){ if(px==null)return; if(r.px!=null&&px!==r.px) r.flash=px>r.px?'up':'down'; r.px=px; }
-function activeRows(){ const a=[]; for(const r of state.rows.values()) if(!r.delisted)a.push(r); return a; }
+function inScope(r){ return (r.uni==='main')===(state.scope==='crypto'); }
+function scopeBench(){ return state.scope==='crypto'?state.benchMain:state.benchCoin; }
+function activeRows(){ const a=[]; for(const r of state.rows.values()) if(!r.delisted&&inScope(r))a.push(r); return a; }
 // ===== ΔOI regime =====
 // Category (price×OI signs, with a noise dead-zone) + conviction (magnitude, OI-led) +
 // funding corroboration (does the crowded/paying side agree with the story?).
@@ -161,8 +163,8 @@ function regimeReadout(r){ const rg=r.regime; if(!rg) return '';
   const body=esc(`${RG_STORY[rg.l]}. Price ${pctTxt(pPct)} · OI ${pctTxt(r.doi)} over ${state.tf}.${rg.fnote?' '+rg.fnote+'.':''}`);
   return `${head}<br><span style="opacity:.8">${body}</span>`; }
 function detectBenchmark(){
-  for(const a of SP_ALIASES){ for(const r of state.rows.values()) if(!r.delisted&&r.ticker.toUpperCase()===a) return r.coin; }
-  for(const r of state.rows.values()){ if(!r.delisted&&/(?:^|[^A-Z])(SPX|SP500|S&P)/i.test(r.ticker)) return r.coin; }
+  for(const a of SP_ALIASES){ for(const r of state.rows.values()) if(r.uni!=='main'&&!r.delisted&&r.ticker.toUpperCase()===a) return r.coin; }
+  for(const r of state.rows.values()){ if(r.uni!=='main'&&!r.delisted&&/(?:^|[^A-Z])(SPX|SP500|S&P)/i.test(r.ticker)) return r.coin; }
   return null; }
 
 // ===== data ingestion (server snapshots) =====
@@ -175,13 +177,16 @@ async function loadDaily(){ try{ applyDaily(await fetchJSON('/api/daily')); }cat
 function applySnapshot(s){
   if(!s||!Array.isArray(s.markets)) return;
   state.order=s.markets.map(m=>m.coin);
+  const mainM=Array.isArray(s.mainMarkets)?s.mainMarkets:[];
+  state.mainOrder=mainM.map(m=>m.coin);
+  state.benchMain=s.benchMain||null;
   const seen=new Set();
-  for(const m of s.markets){
+  for(const m of s.markets.concat(mainM)){
     let r=state.rows.get(m.coin);
     if(!r){ r={coin:m.coin, ticker:m.ticker||(m.coin.includes(':')?m.coin.split(':')[1]:m.coin),
       ref:null, feat:null, daily:null, candleTs:0,
       h1:undefined,h4:undefined,d7:undefined,d30:undefined}; state.rows.set(m.coin,r); }
-    r.ticker=m.ticker||r.ticker; r.delisted=!!m.delisted;
+    r.ticker=m.ticker||r.ticker; r.delisted=!!m.delisted; r.uni=m.uni||'xyz';
     if(m.px!=null) setPrice(r,m.px);
     if(m.prevDay!=null) r.prevDay=m.prevDay;
     if(m.funding!=null) r.funding=m.funding;
@@ -216,7 +221,7 @@ function applySnapshot(s){
     const cl=!!s.offHours.closed;
     if(prev!=null&&prev!==cl) loadDaily();
     state._ohClosed=cl; }
-  const bn=el('benchnote'); if(bn) bn.textContent=(state.benchCoin&&state.rows.get(state.benchCoin))?state.rows.get(state.benchCoin).ticker:'not found';
+  updateBenchNote();
   updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
 }
 function applyDaily(d){ if(!d||!d.daily) return;
@@ -275,16 +280,18 @@ function computeMomentum(r){
 }
 function computeDerived(){
   const tfKey=TF_MAP[state.tf]||'d1';
-  const bench=state.benchCoin?state.rows.get(state.benchCoin):null, benchRet=bench?bench[tfKey]:null;
+  const bX=state.benchCoin?state.rows.get(state.benchCoin):null, bM=state.benchMain?state.rows.get(state.benchMain):null;
   for(const r of state.rows.values()){ if(r.delisted)continue;
+    const benchC=r.uni==='main'?state.benchMain:state.benchCoin;   // BTC anchors crypto; SP500 anchors equities
+    const bench=r.uni==='main'?bM:bX, benchRet=bench?bench[tfKey]:null;
     r.doi=r.doiByWin?(r.doiByWin[tfKey]??null):null;
     r.regime=regimeDetail(r[tfKey], r.doi, (r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding), (r.feat&&r.feat.volH), (TF_MS[state.tf]||DAY)/HOUR);
     r.mom=computeMomentum(r);
     const prem=(r.px!=null&&r.oracle)?Math.abs((r.px-r.oracle)/r.oracle):0;
     const vs=(r.vol!=null&&r.feat&&r.feat.volBase>0)?r.vol/r.feat.volBase:null;
     r.hot=(vs!=null&&vs>=1.8)||prem>=0.004;
-    if(!state.benchCoin) r.rs=undefined;
-    else if(r.coin===state.benchCoin) r.rs=0;
+    if(!benchC) r.rs=undefined;
+    else if(r.coin===benchC) r.rs=0;
     else if(benchRet==null) r.rs=null;
     else { const a=r[tfKey]; r.rs=(a!=null&&isFinite(a))?a-benchRet:null; }
     r.vol30=(r.feat&&r.feat.volH>0)?r.feat.volH*Math.sqrt(24*365)*100:undefined;
@@ -297,10 +304,10 @@ function computeDerived(){
     r.sqz=computeSqueeze(r,fw);
     r._carryF=(fw!=null&&isFinite(fw))?fw*24*365*100:null;
     r.carry=(r._carryF!=null&&r.vol30!=null&&isFinite(r.vol30)&&r.vol30>5)?r._carryF/r.vol30:undefined;
-    r.gap = (state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone;   // live in-progress gap when the cash market is closed, else the last completed gap
+    r.gap = r.uni==='main' ? undefined : ((state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone);   // crypto never gaps (24/7); else live in-progress gap when the cash market is closed, else the last completed gap
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
-    if(!state.benchCoin) r.beta=undefined;
-    else if(r.coin===state.benchCoin){ r.beta=1; r.betaR2=1; }
+    if(!benchC) r.beta=undefined;
+    else if(r.coin===benchC){ r.beta=1; r.betaR2=1; }
     else if(bench&&bench.daily&&r.daily){ const bt=computeBeta(r,bench,90); if(bt){ r.beta=bt.beta; r.betaR2=bt.r2; } else r.beta=undefined; }
     else r.beta=undefined;
   }
@@ -317,8 +324,9 @@ function computeBeta(r, bench, Ldays){
   return {beta:cov/vx, r2: vy>0?(cov*cov)/(vx*vy):0};
 }
 function betaCell(r){
-  if(!state.benchCoin) return '<td><span class="na" title="no S&amp;P benchmark detected">—</span></td>';
-  if(r.coin===state.benchCoin) return '<td><span class="sec" title="the benchmark itself">1.00</span></td>';
+  const bC=r.uni==='main'?state.benchMain:state.benchCoin;
+  if(!bC) return '<td><span class="na" title="no benchmark detected">—</span></td>';
+  if(r.coin===bC) return '<td><span class="sec" title="the benchmark itself">1.00</span></td>';
   if(r.beta==null||!isFinite(r.beta)) return '<td><span class="na" title="loading daily history…">·</span></td>';
   const c=r.beta<0?'neg':(r.beta>1.15?'pos':'sec');
   return `<td><span class="${c}" title="R²=${(r.betaR2||0).toFixed(2)} — fit quality vs the S&amp;P">${r.beta.toFixed(2)}</span></td>`;
@@ -328,7 +336,8 @@ function betaCell(r){
 let renderQueued=false;
 function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); updateMovers();}); }
 function scCls(r){ return (r.candleTs && (Date.now()-r.candleTs>2*state.refreshMs+60000)) ? 'stale':''; }
-function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key)); }
+const XYZ_ONLY_COLS=new Set(['gap']);   // session-anchored concepts — a 24/7 market has none
+function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key) && !(state.scope==='crypto'&&XYZ_ONLY_COLS.has(c.key))); }
 let dragKey=null;
 function clearDropMarks(){ document.querySelectorAll('#head th').forEach(t=>t.classList.remove('drop-before','drop-after')); }
 function moveColumn(src, dst, after){
@@ -340,7 +349,7 @@ function moveColumn(src, dst, after){
 }
 function buildHead(){ const tr=el('head'); tr.innerHTML='';
   visibleCols().forEach(c=>{ const th=document.createElement('th'); th.tabIndex=0; th.dataset.key=c.key; th.setAttribute('role','columnheader'); th.draggable=true;
-    let label=c.label; if(c.key==='rs')label=`vs S&amp;P (${state.tf})`; if(c.key==='doi')label=`ΔOI (${state.tf})`;
+    let label=c.label; if(c.key==='rs')label=`vs ${state.scope==='crypto'?'BTC':'S&amp;P'} (${state.tf})`; if(c.key==='doi')label=`ΔOI (${state.tf})`;
     if(c.key==='adr')label=`Avg Range (${state.tf==='30d'?'30d':'7d'})`;
     const active=state.sortKey===c.key; th.setAttribute('aria-sort', active?(state.sortDir==='asc'?'ascending':'descending'):'none');
     if(c.tip) th.title=c.tip;
@@ -386,8 +395,9 @@ function gapCell(r){ const g=r.gap;
 function momCell(r){ if(r.mom===undefined)return '<span class="ph">·</span>'; if(r.mom===null)return '<span class="na">—</span>';
   const sign=r.mom>0?'+':'';
   return `<span style="color:${momColor(r.mom)};font-weight:600">${sign}${Math.round(r.mom)}</span>`+(r.hot?'<span class="hotdot" title="volume / activity well above this market\u2019s own norm">●</span>':''); }
-function rsCell(r){ if(!state.benchCoin)return '<span class="na" title="no S&amp;P market detected">—</span>';
-  if(r.coin===state.benchCoin)return '<span class="sec" title="this is the S&amp;P benchmark">S&amp;P</span>';
+function rsCell(r){ const bC=r.uni==='main'?state.benchMain:state.benchCoin;
+  if(!bC)return '<span class="na" title="no benchmark detected">—</span>';
+  if(r.coin===bC)return `<span class="sec" title="this is the benchmark">${r.uni==='main'?'BTC':'S&amp;P'}</span>`;
   const p=fmtPct(r.rs); return `<span class="${p.c}">${p.t}</span>`; }
 function oiCell(r){ if(r.doi==null)return '<span class="na" title="collecting OI history (server-side, accrues over time)">—</span>';
   const oc=r.doi>0?'pos':(r.doi<0?'neg':'sec'), sign=r.doi>0?'+':'';
@@ -459,7 +469,8 @@ function render(){
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
   if(!rows.length){ body.innerHTML=`<tr><td colspan="${vc.length}"><div class="msg"><span class="big">No matches</span>Clear the filters to see all markets.</div></td></tr>`; return; }
   const out=[];
-  for(const r of rows){ const cls=(r.coin===state.benchCoin)?' class="benchrow"':'';
+  const bScope=scopeBench();
+  for(const r of rows){ const cls=(r.coin===bScope)?' class="benchrow"':'';
     let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>'; r.flash=null; out.push(row); }
   body.innerHTML=out.join('');
 }
@@ -507,6 +518,7 @@ function regimeLabel(g){
   return {t:'mixed',cls:'sec',tip:`correlation mid-range (${ordinal(p)} pct of 90d)`};
 }
 function renderRegimeStrip(){
+  if(state.scope==='crypto'){ const rg=el('regime'); if(rg) rg.hidden=true; return; }
   const box=el('regime'); if(!box) return;
   if(!state.rows.size){ box.hidden=true; return; }
   const g=computeRegime();
@@ -820,7 +832,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   const bar=v=>`<span class="cbar" style="width:${Math.round(Math.abs(v)*64)}px;background:${corrColor(v)}"></span>`;
   const li=(t,v)=>`<div class="crow"><span class="ct">${esc(t)}</span>${bar(v)}<span class="cv ${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span></div>`;
   const starred=state.watch.has(coin);
-  const split=sessionSplit30(r);
+  const split=r.uni==='main'?null:sessionSplit30(r);   // no cash session exists to decompose against
   const splitHtml = split
     ? `<div class="dsec" data-tip="30d return split into what accrued off-hours (overnight + weekend close\u2192open holds) vs during the US cash session. When most of the return lives in the off-hours leg, the name moves while the cash market sleeps \u2014 the classic overnight-effect pattern.">Where the 30d return happened</div>`+
       `<div class="dsplit">`+
@@ -834,7 +846,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div class="dhead">${esc(r.ticker)}
       <span class="star${starred?' on':''}" id="dstar" style="font-size:16px;cursor:pointer">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
-    <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}</div>
+    <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 31d history':''}</div>
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>
     ${splitHtml}
@@ -1550,6 +1562,7 @@ const BT_SIGNALS={ mom:'Momentum', rev:'Short-term reversion', res:'Residual mom
 function btUniverse(){
   const u=state.backtest.universe;
   return [...state.rows.values()].filter(r=>{
+    if(r.uni==='main') return false;
     if(r.delisted || !r.daily || r.coin===state.benchCoin) return false;
     const m=dailyReturns(r); if(!m || m.size<BT_MIN_DAYS) return false;
     if(u==='eq') return r.assetClass==='Equity';
@@ -1783,7 +1796,26 @@ function attachBtControls(){
 function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); }
 async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values()].some(r=>r.daily)){ await loadDaily(); if(state.view==='backtest') drawBacktest(); } }
 
+function updateBenchNote(){ const bn=el('benchnote'); if(!bn) return;
+  const bc=scopeBench(); bn.textContent=(bc&&state.rows.get(bc))?state.rows.get(bc).ticker:'not found'; }
+function setScope(v){
+  if(v!=='stocks'&&v!=='crypto') return;
+  if(state.scope===v) return;
+  state.scope=v;
+  try{ localStorage.setItem('xyz-scope',v); }catch(_){}
+  applyScope();
+}
+function applyScope(){
+  const cr=state.scope==='crypto';
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets'; });
+  document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
+  const rg=el('regime'); if(rg&&cr) rg.hidden=true;   // the regime strip is an equities-universe aggregate
+  if(cr && state.view!=='markets') { showView('markets'); }
+  buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
+  if(!cr) renderRegimeStrip();
+}
 function showView(v){
+  if(state.scope==='crypto' && v!=='markets') v='markets';   // crypto scope is Markets-only by design
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
@@ -2585,6 +2617,8 @@ document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state
   b.addEventListener('click',()=>{ document.querySelectorAll('#rfseg button').forEach(x=>x.classList.toggle('active',x===b));
     setRefresh(+b.dataset.ms); savePrefs(); }); });
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));
+document.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>setScope(b.dataset.scope)));
+applyScope();
 (function(){ const isAmber=()=>document.documentElement.getAttribute('data-theme')==='amber';
   const setLabel=()=>{ const b=el('themeBtn'); if(b) b.textContent = isAmber()?'◐ dark':'◐ amber'; };
   setLabel();
