@@ -604,7 +604,7 @@ function createPoller({ dex, store, log, version }) {
   // and records the realized outcome UNDER THE SAME SIGN CONVENTION the study claims, so the
   // in-sample base rate and the live out-of-sample record are directly comparable. Event types
   // whose live record shows no edge get their evidence score capped automatically.
-  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null, recordXCache = null;
+  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null, recordXCache = null, recordSets = null;
   // ---- shadow variants: bounded self-improvement --------------------------------------------
   // Each gated event carries 2-3 candidate thresholds. Only the INCUMBENT emits visible signals;
   // every variant (incumbent included) silently ledgers shadow claims on identical bookkeeping,
@@ -646,6 +646,10 @@ function createPoller({ dex, store, log, version }) {
   }
   function openLedger(r, ev, sigEntry, dir, extra, vi) {
     const key = r.coin + "|" + ev + (vi != null ? "#" + vi : "");
+    // mv = playbook-target distance from the mark at fire time, in % — lets the record be
+    // sliced by actionable magnitude, matching the client's move filter exactly.
+    const mv = vi == null && sigEntry.play && sigEntry.play.target != null && r.px > 0
+      ? +(Math.abs(sigEntry.play.target / r.px - 1) * 100).toFixed(2) : null;
     let e = ledgerOpen.get(key);
     if (!e) {
       const t0 = Date.now();
@@ -655,7 +659,7 @@ function createPoller({ dex, store, log, version }) {
         score0: sigEntry.score, reading0: sigEntry.reading,
         claim: sigEntry.study || null,
         resolveAt: resolveAtFor(ev, Date.now()),
-      }, vi != null ? { vi } : null, extra || {});
+      }, vi != null ? { vi } : null, mv != null ? { mv } : null, extra || {});
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -693,15 +697,13 @@ function createPoller({ dex, store, log, version }) {
     if (ledgerClosed.length > 4000) ledgerClosed = ledgerClosed.slice(-4000);
     if (ledgerDirty) recomputeRecord();
   }
-  function recomputeRecord() {
-    const per = {}, vagg = {};
-    for (const e of ledgerClosed) {
-      if (e.status !== "resolved") continue;
-      if (e.vi != null) {   // shadow claim: feeds only the variant standings
-        const a = vagg[e.ev] || (vagg[e.ev] = []);
-        (a[e.vi] || (a[e.vi] = [])).push(e.realized);
-        continue;
-      }
+  // Aggregates one entry set into {record, recordX, confluence, recent}. Run once unfiltered
+  // and once per move-filter threshold, so the accuracy panel can show the record of ONLY the
+  // claims whose target magnitude you'd actually trade. Pre-filter entries lack mv and are
+  // excluded from thresholded sets (they age out of the ledger naturally).
+  function buildRecordSet(res, openEntries) {
+    const per = {};
+    for (const e of res) {
       const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [] });
       b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
       if (e.claim && Number.isFinite(e.claim.med)) b.claims.push(e.claim.med);
@@ -719,26 +721,16 @@ function createPoller({ dex, store, log, version }) {
         claimMed: b.claims.length ? +(b.claims.reduce((a, c) => a + c, 0) / b.claims.length).toFixed(2) : null,
         open: 0, unit: unitOf(ev) };
     }
-    for (const e of ledgerOpen.values()) { if (e.vi != null) continue; (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++; }
-    recordCache = out;
-    variantStats = {};
-    for (const ev in vagg) variantStats[ev] = vagg[ev].map((rets) => {
-      if (!rets || !rets.length) return { n: 0, hit: null, avg: null };
-      const sm = summarizeEvents(rets);
-      return { n: sm.n, hit: +(rets.filter((x) => x > 0).length / rets.length).toFixed(2), avg: sm.avg };
-    });
-    // Earned-confluence split: resolved claims by whether they fired with company or alone.
+    for (const e of openEntries) (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++;
     const cf = { confN: 0, confW: 0, soloN: 0, soloW: 0 };
-    for (const e of ledgerClosed) {
-      if (e.status !== "resolved" || typeof e.conf !== "boolean") continue;
+    for (const e of res) {
+      if (typeof e.conf !== "boolean") continue;
       if (e.conf) { cf.confN++; if (e.win) cf.confW++; } else { cf.soloN++; if (e.win) cf.soloW++; }
     }
-    confCache = { confN: cf.confN, confHit: cf.confN ? +(cf.confW / cf.confN).toFixed(2) : null,
+    const conf = { confN: cf.confN, confHit: cf.confN ? +(cf.confW / cf.confN).toFixed(2) : null,
       soloN: cf.soloN, soloHit: cf.soloN ? +(cf.soloW / cf.soloN).toFixed(2) : null };
-    // ---- cross-cuts of the same resolutions: calibration, side, ticker form, equity curve ----
-    const res = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null);
+    conf.bonus = conf.confN >= 15 && conf.soloN >= 15 ? Math.max(0, Math.round((conf.confHit - conf.soloHit) * 40)) : 8;
     const hitOf = (v) => (v.length ? +(v.filter((e) => e.win).length / v.length).toFixed(2) : null);
-    // does the score at fire time actually rank outcomes? hit rate by score bucket
     const buckets = [{ k: "<35", lo: 0, hi: 35 }, { k: "35\u201354", lo: 35, hi: 55 }, { k: "55+", lo: 55, hi: 1e9 }]
       .map((b) => { const v = res.filter((e) => Number.isFinite(e.score0) && e.score0 >= b.lo && e.score0 < b.hi); return { k: b.k, n: v.length, hit: hitOf(v) }; });
     const side = { long: null, short: null };
@@ -750,16 +742,40 @@ function createPoller({ dex, store, log, version }) {
       .map((t) => ({ t, n: byT[t].n, hit: +(byT[t].w / byT[t].n).toFixed(2) }))
       .sort((a, b) => b.hit - a.hit);
     const last20 = res.slice(-20);
-    // equity curve of the engine's claims, R-united events only (mixed units cannot be summed honestly)
     let cum = 0;
     const curve = res.filter((e) => unitOf(e.ev) === "R" && Number.isFinite(e.realized)).slice(-200)
       .map((e) => { cum = +(cum + e.realized).toFixed(2); return [e.tR, cum, e.ticker, e.ev, e.realized]; });
-    recordXCache = {
-      buckets, side,
-      tickers: tl.length ? { best: tl.slice(0, 3), worst: tl.slice(-3).reverse() } : null,
-      form: { recentN: last20.length, recentHit: hitOf(last20), allHit: hitOf(res), allN: res.length },
-      curve,
-    };
+    const recent = res.slice(-10).reverse()
+      .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: unitOf(e.ev) }));
+    return { record: out, confluence: conf,
+      recordX: { buckets, side, tickers: tl.length ? { best: tl.slice(0, 3), worst: tl.slice(-3).reverse() } : null,
+        form: { recentN: last20.length, recentHit: hitOf(last20), allHit: hitOf(res), allN: res.length }, curve },
+      recent };
+  }
+  const MV_THRESHOLDS = [0, 0.5, 1, 2];
+  function recomputeRecord() {
+    const resolved = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null);
+    const openReal = [...ledgerOpen.values()].filter((e) => e.vi == null);
+    recordSets = {};
+    for (const t of MV_THRESHOLDS) for (const pr of [false, true]) {
+      const f = (x) => (t === 0 || (x.mv != null && x.mv >= t)) && (!pr || x.pr === true);
+      recordSets[String(t) + (pr ? "p" : "")] = buildRecordSet(resolved.filter(f), openReal.filter(f));
+    }
+    recordCache = recordSets["0"].record;       // evidence blend + no-edge cap always use the FULL record
+    confCache = recordSets["0"].confluence;
+    recordXCache = recordSets["0"].recordX;
+    const vagg = {};
+    for (const e of ledgerClosed) {
+      if (e.status !== "resolved" || e.vi == null) continue;
+      const a = vagg[e.ev] || (vagg[e.ev] = []);
+      (a[e.vi] || (a[e.vi] = [])).push(e.realized);
+    }
+    variantStats = {};
+    for (const ev in vagg) variantStats[ev] = vagg[ev].map((rets) => {
+      if (!rets || !rets.length) return { n: 0, hit: null, avg: null };
+      const sm = summarizeEvents(rets);
+      return { n: sm.n, hit: +(rets.filter((x) => x > 0).length / rets.length).toFixed(2), avg: sm.avg };
+    });
   }
   function liveNoEdge(ev) {
     const rec = recordCache && recordCache[ev];
@@ -997,6 +1013,8 @@ function createPoller({ dex, store, log, version }) {
       const bs = g.study && g.study.n >= 8 ? g.study : g.pooled;
       if (bs && bs.hit >= 0.6 && bs.avg > 0 && !g.noedge && !g.negexp && (g.rr == null || g.rr >= 1.2)) { g.prime = true; g.score += 6; }
       const key = g.coin + "|" + g.ev;
+      { const e0 = ledgerOpen.get(key);   // fire-time prime quality on the claim, stamped once
+        if (e0 && e0.pr == null) { e0.pr = !!g.prime; ledgerDirty = true; } }
       live.add(key);
       const e = ledgerOpen.get(key);
       if (e) {
@@ -1017,9 +1035,7 @@ function createPoller({ dex, store, log, version }) {
     // Earned confluence: the bonus starts at the default 8/condition, but once the ledger has
     // >=15 resolutions on each side it scales to the MEASURED hit-rate lift of with-company
     // firings over solo ones — and drops to zero if agreement doesn't prove out.
-    let confUnit = 8;
-    if (confCache && confCache.confN >= 15 && confCache.soloN >= 15)
-      confUnit = Math.max(0, Math.round((confCache.confHit - confCache.soloHit) * 40));
+    const confUnit = confCache && confCache.bonus != null ? confCache.bonus : 8;
     for (const c in byCoin) {
       const k = byCoin[c].length;
       for (const g of byCoin[c]) {
@@ -1032,16 +1048,16 @@ function createPoller({ dex, store, log, version }) {
     const top = kept.slice(0, 40);
     const sig = top.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",");
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
-    const recent = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null).slice(-10).reverse()
-      .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: e.ev === "prem" ? "bp" : "%" }));
     const variants = Object.keys(VARIANTS).map((ev) => ({
       ev, param: VARIANTS[ev].param, unit: unitOf(ev), cur: incVal(ev),
       vals: VARIANTS[ev].vals.map((v, vi) => Object.assign({ v, inc: vi === variantState[ev].inc },
         (variantStats[ev] && variantStats[ev][vi]) || { n: 0, hit: null, avg: null })),
       hist: variantState[ev].hist.slice(-3),
     }));
-    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {},
-      confluence: confCache ? Object.assign({ bonus: confUnit }, confCache) : null, recordX: recordXCache, variants, recent };
+    const rs0 = recordSets && recordSets["0"];
+    signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top,
+      record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
+      records: recordSets, variants, recent: rs0 ? rs0.recent : [] };
     persistLedger();
   }
 
