@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip, retStd, dailyRets,
-  EV_META, playbook, marketSessions, summarizeEvents,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -605,18 +605,35 @@ function createPoller({ dex, store, log, version }) {
   // in-sample base rate and the live out-of-sample record are directly comparable. Event types
   // whose live record shows no edge get their evidence score capped automatically.
   let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null, recordXCache = null;
+  // ---- shadow variants: bounded self-improvement --------------------------------------------
+  // Each gated event carries 2-3 candidate thresholds. Only the INCUMBENT emits visible signals;
+  // every variant (incumbent included) silently ledgers shadow claims on identical bookkeeping,
+  // so incumbent-vs-challenger comparisons are apples-to-apples out-of-sample. Promotion is by
+  // shouldPromote() in compute.js — strict gates, logged, reversible, persisted with the ledger.
+  const VARIANTS = {
+    bigmove:  { param: "\u03c3\u2265", vals: [1.5, 2, 2.5] },
+    gap:      { param: "gate \u03c3\u2265", vals: [0.5, 0.75, 1] },
+    squeeze:  { param: "score\u2265", vals: [50, 60, 70] },
+    fundflip: { param: "run\u2265", vals: [2, 3, 5] },
+  };
+  let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] } };
+  let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
+  const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
   const unitOf = (ev) => ev === "prem" ? "bp" : (ev === "bigmove" || ev === "breakout" || ev === "fundflip" || ev === "volshift" ? "R" : "%");
   const seenAt = new Map();   // coin|ev -> first-seen ms, for events with no ledger entry (no directional claim)
   function hydrateLedger() {
     const d = store.loadLedger();
     if (!d) return;
     if (Array.isArray(d.open)) for (const e of d.open) if (e && e.key) ledgerOpen.set(e.key, e);
-    if (Array.isArray(d.closed)) ledgerClosed = d.closed.slice(-1500);
+    if (Array.isArray(d.closed)) ledgerClosed = d.closed.slice(-4000);
+    if (d.variants) for (const ev in variantState)
+      if (d.variants[ev] && Number.isInteger(d.variants[ev].inc) && d.variants[ev].inc >= 0 && d.variants[ev].inc < VARIANTS[ev].vals.length)
+        variantState[ev] = { inc: d.variants[ev].inc, hist: Array.isArray(d.variants[ev].hist) ? d.variants[ev].hist.slice(-20) : [] };
     recomputeRecord();
   }
   function persistLedger() {
     if (!ledgerDirty) return;
-    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-1500) });
+    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState });
     ledgerDirty = false;
   }
   function resolveAtFor(ev, t0) {
@@ -627,8 +644,8 @@ function createPoller({ dex, store, log, version }) {
     const m = EV_META[ev];
     return t0 + ((m && m.horizonMs) || DAY);
   }
-  function openLedger(r, ev, sigEntry, dir, extra) {
-    const key = r.coin + "|" + ev;
+  function openLedger(r, ev, sigEntry, dir, extra, vi) {
+    const key = r.coin + "|" + ev + (vi != null ? "#" + vi : "");
     let e = ledgerOpen.get(key);
     if (!e) {
       const t0 = Date.now();
@@ -638,7 +655,7 @@ function createPoller({ dex, store, log, version }) {
         score0: sigEntry.score, reading0: sigEntry.reading,
         claim: sigEntry.study || null,
         resolveAt: resolveAtFor(ev, Date.now()),
-      }, extra || {});
+      }, vi != null ? { vi } : null, extra || {});
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -673,13 +690,18 @@ function createPoller({ dex, store, log, version }) {
       e.status = "resolved"; e.realized = realized; e.win = realized > 0; e.tR = now;
       ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true;
     }
-    if (ledgerClosed.length > 1500) ledgerClosed = ledgerClosed.slice(-1500);
+    if (ledgerClosed.length > 4000) ledgerClosed = ledgerClosed.slice(-4000);
     if (ledgerDirty) recomputeRecord();
   }
   function recomputeRecord() {
-    const per = {};
+    const per = {}, vagg = {};
     for (const e of ledgerClosed) {
       if (e.status !== "resolved") continue;
+      if (e.vi != null) {   // shadow claim: feeds only the variant standings
+        const a = vagg[e.ev] || (vagg[e.ev] = []);
+        (a[e.vi] || (a[e.vi] = [])).push(e.realized);
+        continue;
+      }
       const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [] });
       b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
       if (e.claim && Number.isFinite(e.claim.med)) b.claims.push(e.claim.med);
@@ -697,8 +719,14 @@ function createPoller({ dex, store, log, version }) {
         claimMed: b.claims.length ? +(b.claims.reduce((a, c) => a + c, 0) / b.claims.length).toFixed(2) : null,
         open: 0, unit: unitOf(ev) };
     }
-    for (const e of ledgerOpen.values()) { (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++; }
+    for (const e of ledgerOpen.values()) { if (e.vi != null) continue; (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++; }
     recordCache = out;
+    variantStats = {};
+    for (const ev in vagg) variantStats[ev] = vagg[ev].map((rets) => {
+      if (!rets || !rets.length) return { n: 0, hit: null, avg: null };
+      const sm = summarizeEvents(rets);
+      return { n: sm.n, hit: +(rets.filter((x) => x > 0).length / rets.length).toFixed(2), avg: sm.avg };
+    });
     // Earned-confluence split: resolved claims by whether they fired with company or alone.
     const cf = { confN: 0, confW: 0, soloN: 0, soloW: 0 };
     for (const e of ledgerClosed) {
@@ -708,7 +736,7 @@ function createPoller({ dex, store, log, version }) {
     confCache = { confN: cf.confN, confHit: cf.confN ? +(cf.confW / cf.confN).toFixed(2) : null,
       soloN: cf.soloN, soloHit: cf.soloN ? +(cf.soloW / cf.soloN).toFixed(2) : null };
     // ---- cross-cuts of the same resolutions: calibration, side, ticker form, equity curve ----
-    const res = ledgerClosed.filter((e) => e.status === "resolved");
+    const res = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null);
     const hitOf = (v) => (v.length ? +(v.filter((e) => e.win).length / v.length).toFixed(2) : null);
     // does the score at fire time actually rank outcomes? hit rate by score bucket
     const buckets = [{ k: "<35", lo: 0, hi: 35 }, { k: "35\u201354", lo: 35, hi: 55 }, { k: "55+", lo: 55, hi: 1e9 }]
@@ -783,8 +811,28 @@ function createPoller({ dex, store, log, version }) {
     }, extra || {});
   }
 
+  function checkPromotions() {
+    for (const ev in VARIANTS) {
+      const stats = variantStats[ev]; if (!stats) continue;
+      const inc = variantState[ev].inc, incStats = stats[inc];
+      let best = null;
+      for (let vi = 0; vi < VARIANTS[ev].vals.length; vi++) {
+        if (vi === inc || !stats[vi]) continue;
+        if (shouldPromote(incStats, stats[vi]) && (!best || stats[vi].avg > stats[best].avg)) best = vi;
+      }
+      if (best != null) {
+        const h = { t: Date.now(), from: VARIANTS[ev].vals[inc], to: VARIANTS[ev].vals[best],
+          incN: incStats.n, incAvg: incStats.avg, chN: stats[best].n, chAvg: stats[best].avg };
+        variantState[ev].inc = best;
+        variantState[ev].hist.push(h); if (variantState[ev].hist.length > 20) variantState[ev].hist.shift();
+        ledgerDirty = true;
+        log(`Variant promotion: ${ev} threshold ${h.from} -> ${h.to} (incumbent ${h.incAvg} on n=${h.incN} vs challenger ${h.chAvg} on n=${h.chN}, out-of-sample)`);
+      }
+    }
+  }
   function buildSignals() {
     resolveLedger();
+    checkPromotions();
     const out = [], now = Date.now();
     const dc = dailyCache || { daily: {}, funding: {}, liveClose: {}, offHours: { closed: false } };
     // pooled raw outcomes per assetClass x event (the small-n rescue for funding flips etc.)
@@ -819,14 +867,18 @@ function createPoller({ dex, store, log, version }) {
       const rets = closes ? dailyRets(closes) : [];
       const sd30 = retStd(rets.slice(-30), 15);
 
-      if (sd30 > 0 && r.d1 != null && Math.abs(r.d1) >= 2 * sd30) {
-        const dir = r.d1 > 0 ? 1 : -1;
-        const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"), "R");
-        const sig = mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${(Math.abs(r.d1) / sd30).toFixed(1)}\u03c3 ${dir > 0 ? "up" : "down"})`,
-          (Math.abs(r.d1) / sd30 - 2) * 20 + 20, evd, { horizon: EV_META.bigmove.horizon });
-        { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);   // R -> % via this market's own sigma
-          sig.play = playbook("bigmove", { px: r.px, dir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
-        out.push(sig); if (sd30 > 0) openLedger(r, "bigmove", sig, dir, { sd0: +sd30.toFixed(3) });
+      if (sd30 > 0 && r.d1 != null) {
+        const zMove = Math.abs(r.d1) / sd30, dir = r.d1 > 0 ? 1 : -1, vBM = incVal("bigmove");
+        // shadow-ledger every variant the measure clears (incumbent included — identical bookkeeping)
+        VARIANTS.bigmove.vals.forEach((v, vi) => { if (zMove >= v) openLedger(r, "bigmove", { score: 0, reading: "" }, dir, { sd0: +sd30.toFixed(3) }, vi); });
+        if (zMove >= vBM) {
+          const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"), "R");
+          const sig = mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${zMove.toFixed(1)}\u03c3 ${dir > 0 ? "up" : "down"})`,
+            (zMove - vBM) * 20 + 20, evd, { horizon: EV_META.bigmove.horizon });
+          { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);   // R -> % via this market's own sigma
+            sig.play = playbook("bigmove", { px: r.px, dir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+          out.push(sig); openLedger(r, "bigmove", sig, dir, { sd0: +sd30.toFixed(3) });
+        }
       }
       if (closes && closes.length >= 31) {
         let hi = -Infinity;
@@ -858,8 +910,9 @@ function createPoller({ dex, store, log, version }) {
       if (dc.offHours && dc.offHours.closed && st.gap && st.gap.sd > 0) {
         const pc = dc.liveClose[r.coin];
         if (pc > 0) {
-          const g = (r.px / pc - 1) * 100;
-          if (Math.abs(g) >= 0.75 * st.gap.sd) {
+          const g = (r.px / pc - 1) * 100, gz = Math.abs(g) / st.gap.sd;
+          VARIANTS.gap.vals.forEach((v, vi) => { if (gz >= v) openLedger(r, "gap", { score: 0, reading: "" }, g >= 0 ? 1 : -1, null, vi); });
+          if (gz >= incVal("gap")) {
             const exc = gBench != null && r.coin !== benchCoin ? g - gBench : null;
             const evd = evidence(st.gap.session, "gap", pooledFor(ac, "gap", "session"), "%");
             const reading = `${g >= 0 ? "+" : ""}${g.toFixed(2)}% since the last close (${(Math.abs(g) / st.gap.sd).toFixed(1)}\u03c3 of its gaps)`
@@ -872,11 +925,13 @@ function createPoller({ dex, store, log, version }) {
           }
         }
       }
-      if (dayFunding && dayFunding.length >= 5) {
+      if (dayFunding && dayFunding.length >= 4) {
         const last = dayFunding[dayFunding.length - 1], s0 = Math.sign(last[1]);
         let run = 0;
-        for (let i = dayFunding.length - 2; i >= 0; i--) { const sg = Math.sign(dayFunding[i][1]); if (sg === 0 || sg === s0) break; run++; if (run >= 3) break; }
-        if (s0 !== 0 && run >= 3) {
+        for (let i = dayFunding.length - 2; i >= 0; i--) { const sg = Math.sign(dayFunding[i][1]); if (sg === 0 || sg === s0) break; run++; if (run >= 10) break; }
+        if (s0 !== 0 && sd30 > 0)
+          VARIANTS.fundflip.vals.forEach((v, vi) => { if (run >= v) openLedger(r, "fundflip", { score: 0, reading: "" }, s0, { sd0: +sd30.toFixed(3) }, vi); });
+        if (s0 !== 0 && run >= incVal("fundflip")) {
           const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"), "R");
           const sig = mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
             22, evd, { horizon: EV_META.fundflip.horizon });
@@ -893,10 +948,11 @@ function createPoller({ dex, store, log, version }) {
           let trig = 0.5;
           if (f && f.hi30 > f.lo30 && r.px != null) trig = Math.min(1, Math.max(0, (r.px - f.lo30) / (f.hi30 - f.lo30)));
           const sqz = Math.round(100 * crowd * (0.45 + 0.30 * fuel + 0.25 * trig));
-          if (sqz >= 60) {
-            const evd = evidence(null, "squeeze", null);
+          VARIANTS.squeeze.vals.forEach((v, vi) => { if (sqz >= v) openLedger(r, "squeeze", { score: 0, reading: "" }, 1, null, vi); });
+          if (sqz >= incVal("squeeze")) {
+            const evd = evidence(null, "squeeze", null, "%");
             const sig = mkSignal(r, "squeeze", `score ${sqz} \u2014 shorts paying ${Math.abs(fAPR).toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
-              (sqz - 60) * 1.1 + 15, evd, { horizon: EV_META.squeeze.horizon });
+              (sqz - incVal("squeeze")) * 1.1 + 15, evd, { horizon: EV_META.squeeze.horizon });
             sig.play = playbook("squeeze", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
             out.push(sig); openLedger(r, "squeeze", sig, 1);
           }
@@ -976,10 +1032,16 @@ function createPoller({ dex, store, log, version }) {
     const top = kept.slice(0, 40);
     const sig = top.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",");
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
-    const recent = ledgerClosed.filter((e) => e.status === "resolved").slice(-10).reverse()
+    const recent = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null).slice(-10).reverse()
       .map((e) => ({ ticker: e.ticker, ev: e.ev, t0: e.t0, tR: e.tR, realized: e.realized, win: !!e.win, unit: e.ev === "prem" ? "bp" : "%" }));
+    const variants = Object.keys(VARIANTS).map((ev) => ({
+      ev, param: VARIANTS[ev].param, unit: unitOf(ev), cur: incVal(ev),
+      vals: VARIANTS[ev].vals.map((v, vi) => Object.assign({ v, inc: vi === variantState[ev].inc },
+        (variantStats[ev] && variantStats[ev][vi]) || { n: 0, hit: null, avg: null })),
+      hist: variantState[ev].hist.slice(-3),
+    }));
     signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top, record: recordCache || {},
-      confluence: confCache ? Object.assign({ bonus: confUnit }, confCache) : null, recordX: recordXCache, recent };
+      confluence: confCache ? Object.assign({ bonus: confUnit }, confCache) : null, recordX: recordXCache, variants, recent };
     persistLedger();
   }
 

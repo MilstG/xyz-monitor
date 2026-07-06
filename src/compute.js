@@ -542,6 +542,21 @@ function playbook(ev, ctx) {
   }
 }
 
+// ---- shadow-variant promotion rule ---------------------------------------------------------
+// A challenger threshold replaces the incumbent ONLY when, on out-of-sample shadow claims the
+// engine gathered itself: both sides have >= 30 resolutions; the challenger's live expectancy
+// beats the incumbent's by a real margin (0.08 native units) AND is positive; and its hit rate
+// hasn't collapsed (>= incumbent - 0.02, i.e. it isn't a pure tail-rider). Strict on purpose:
+// with samples this small, promotion churn IS the failure mode. Reversible by the same rule.
+function shouldPromote(inc, ch) {
+  if (!inc || !ch || !(inc.n >= 30) || !(ch.n >= 30)) return false;
+  if (ch.avg == null || inc.avg == null || ch.hit == null || inc.hit == null) return false;
+  if (!(ch.avg > 0)) return false;
+  if (!(ch.avg >= inc.avg + 0.08)) return false;
+  if (!(ch.hit >= inc.hit - 0.02)) return false;
+  return true;
+}
+
 // ---- hold math over the hourly spines ----
 // Price "as of" t: close of the latest candle at or before t, within tol (hourly resolution snaps to
 // the hour, so a 09:30 boundary uses the ~09:00 candle — an acknowledged approximation).
@@ -802,5 +817,5 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook,
+  EV_META, playbook, shouldPromote,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
