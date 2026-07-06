@@ -1863,6 +1863,16 @@ function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date()
   return (d.getDate()===n.getDate()&&d.getMonth()===n.getMonth())?hm:(d.getMonth()+1)+'/'+d.getDate()+' '+hm; }
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
 function sigViewPref(){ try{ return localStorage.getItem('xyz-sigview')||'detail'; }catch(_){ return 'detail'; } }
+function sigMovePref(){ try{ return +localStorage.getItem('xyz-sigmove')||0; }catch(_){ return 0; } }
+function setSigMove(v){ try{ localStorage.setItem('xyz-sigmove',String(v)); }catch(_){} renderSignals(); }
+// Actionable magnitude of a signal: distance from the live mark to its playbook target, in %.
+// Signals with no computable target (context flags, funding drift) have no magnitude — a
+// statistically fine setup with nothing to reach for is not hand-tradeable by this definition.
+function sigMove(g){
+  const p=g.play, r=state.rows.get(g.coin);
+  if(!p||p.target==null||!r||!(r.px>0)) return null;
+  return Math.abs(p.target/r.px-1)*100;
+}
 function setSigView(v){ try{ localStorage.setItem('xyz-sigview',v); }catch(_){} renderSignals(); }
 const sigExpanded=new Set();   // coins expanded inline while in compact mode (session-only)
 function trigChip(g){
@@ -2025,8 +2035,10 @@ function sigRecordHtml(d){
 }
 function renderSignals(){
   const box=el('signals-body'); if(!box) return;
-  const d=state.signals, view=sigViewPref();
-  const seg=`<span class="cdtf-seg" style="margin-left:auto"><button type="button" class="cdtf${view==='detail'?' on':''}" data-sv="detail" data-tip="full cards: readings, base rates, playbooks">detailed</button><button type="button" class="cdtf${view==='compact'?' on':''}" data-sv="compact" data-tip="one row per market \u2014 hover the chips for the full reading and base rate, click a row to expand it">compact</button></span>`;
+  const d=state.signals, view=sigViewPref(), mvThr=sigMovePref();
+  const mvBtn=(v,lbl)=>`<button type="button" class="cdtf${mvThr===v?' on':''}" data-mv="${v}" data-tip="${v===0?'show every signal regardless of target distance':`hide setups whose playbook target sits closer than ${lbl} from the live mark \u2014 statistically fine, but a few bp of expected move is not hand-tradeable. Signals with no computable target are hidden too while a threshold is active.`}">${v===0?'any':'\u2265'+lbl}</button>`;
+  const seg=`<span class="cdtf-seg" style="margin-left:auto" data-tip="minimum actionable move: distance from live mark to the playbook target">${mvBtn(0,'')}${mvBtn(0.5,'0.5%')}${mvBtn(1,'1%')}${mvBtn(2,'2%')}</span>`
+    +`<span class="cdtf-seg"><button type="button" class="cdtf${view==='detail'?' on':''}" data-sv="detail" data-tip="full cards: readings, base rates, playbooks">detailed</button><button type="button" class="cdtf${view==='compact'?' on':''}" data-sv="compact" data-tip="one row per market \u2014 hover the chips for the full reading and base rate, click a row to expand it">compact</button></span>`;
   const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction."><span>Live conditions ranked by <b>unusualness \u00d7 historical edge</b>, self-audited: every fired signal is ledgered and resolved at its horizon \u2014 the record below is <b>out-of-sample</b>. Click a ticker for the drawer.</span>${seg}</div>`;
   let rec='';
   if(d&&d.record&&Object.keys(d.record).length){
@@ -2045,9 +2057,15 @@ function renderSignals(){
     box.innerHTML=intro+rec+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d);
     bindSigControls(box); return;
   }
+  let hiddenN=0;
+  const sigs = mvThr>0 ? d.signals.filter(g=>{ const m=sigMove(g); const ok=m!=null&&m>=mvThr; if(!ok)hiddenN++; return ok; }) : d.signals;
   const groups=[], byCoin={};
-  for(const g of d.signals){ if(byCoin[g.coin]){ byCoin[g.coin].sigs.push(g); byCoin[g.coin].score=Math.max(byCoin[g.coin].score,g.score); }
+  for(const g of sigs){ if(byCoin[g.coin]){ byCoin[g.coin].sigs.push(g); byCoin[g.coin].score=Math.max(byCoin[g.coin].score,g.score); }
     else { byCoin[g.coin]={coin:g.coin,ticker:g.ticker,score:g.score,sigs:[g]}; groups.push(byCoin[g.coin]); } }
+  if(mvThr>0&&!groups.length){
+    box.innerHTML=intro+rec+`<div class="msg">All ${hiddenN} live signal${hiddenN===1?'':'s'} hidden by the move filter (target closer than ${mvThr}% or no target).</div>`+sigRecordHtml(d);
+    bindSigControls(box); attachLineHover(); return;
+  }
   const main=groups.filter(g=>g.score>=35), low=groups.filter(g=>g.score<35);
   const rowOf=(gr,rank)=> view==='compact' ? (sigExpanded.has(gr.coin) ? sigCardHtml(gr, rank, true) : sigRowHtml(gr, rank)) : sigCardHtml(gr, rank, false);
   let s=intro+rec+'<div class="siglist">';
@@ -2057,7 +2075,9 @@ function renderSignals(){
     s+=`<div class="sig-lowx" data-lowx data-tip="markets whose best condition scores below 35 \u2014 weak evidence, poor structure, decayed, or negative-expectancy base rates. Collapsed by default to keep the list high signal; nothing is deleted.">${state._sigLow?'\u25be':'\u25b8'} ${low.length} low-conviction market${low.length===1?'':'s'} (score &lt; 35)</div>`;
     if(state._sigLow) for(const gr of low){ rank++; s+=rowOf(gr,rank); }
   }
-  s+='</div>'+sigRecordHtml(d);
+  s+='</div>';
+  if(hiddenN>0) s+=`<div class="sec" style="font-size:10.5px;padding:6px 2px" data-tip="signals whose playbook target is closer than the active threshold, or which have no computable target">${hiddenN} signal${hiddenN===1?'':'s'} hidden by the move filter</div>`;
+  s+=sigRecordHtml(d);
   box.innerHTML=s;
   bindSigControls(box);
   attachLineHover();
@@ -2065,6 +2085,7 @@ function renderSignals(){
 function bindSigControls(box){
   box.querySelectorAll('.sig-tick').forEach(t=>t.addEventListener('click',(ev)=>{ ev.stopPropagation(); openDetail(t.dataset.coin); }));
   box.querySelectorAll('[data-sv]').forEach(b=>b.addEventListener('click',()=>setSigView(b.dataset.sv)));
+  box.querySelectorAll('[data-mv]').forEach(b=>b.addEventListener('click',()=>setSigMove(+b.dataset.mv)));
   box.querySelectorAll('.sigc[data-exp]').forEach(r=>r.addEventListener('click',()=>{ sigExpanded.add(r.dataset.exp); renderSignals(); }));
   box.querySelectorAll('.sigcard[data-coll] .sigcard-h').forEach(h=>h.addEventListener('click',(ev)=>{ if(ev.target.closest('.sig-tick'))return; sigExpanded.delete(h.parentNode.dataset.coll); renderSignals(); }));
   box.querySelectorAll('[data-lowx]').forEach(b=>b.addEventListener('click',()=>{ state._sigLow=!state._sigLow; renderSignals(); }));
