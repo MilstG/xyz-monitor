@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { classify } = require("../src/sectors");
-const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, studyBreakdown, playbook, confSplit } = require("../src/compute");
+const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats } = require("../src/compute");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 
@@ -237,4 +237,49 @@ test("confSplit: direction-aware company, conflict kills all bonuses", () => {
   // solo directional: no company
   r=confSplit([S]);
   assert.equal(r.conflict,false); assert.equal(r.companyFor(S),1);
+});
+
+
+test("oiflush study: flush into decline scores long-signed; needs trailing stats", () => {
+  const DAY=86400000, closes=[], oi=[];
+  for(let i=0;i<80;i++){ closes.push([i*DAY, 100+(i%5)*0.3]); oi.push([i*DAY, 1000+(i%7)*5]); }
+  // engineered flush at day 70: OI -30% over 7d, price -4% over 7d, then a bounce
+  for(let i=64;i<=70;i++){ oi[i]=[i*DAY, 1000-(i-63)*45]; closes[i]=[i*DAY, 100-(i-63)*0.6]; }
+  for(let i=71;i<80;i++) closes[i]=[i*DAY, 96.4+(i-70)*0.5];
+  const st=studyOIFlush(closes, oi);
+  assert.ok(st && st.raw.d5.length>=1, "flush detected");
+  assert.ok(st.raw.d5[st.raw.d5.length-1]>0, "bounce after the final flush day scores positive (long-signed)");
+  assert.ok(st.cur && st.cur.sd>0, "current trailing stats exposed for live z-scoring");
+});
+
+test("fpdiv study: weakness + rising funding scores short-signed on continued decline", () => {
+  const DAY=86400000, closes=[], df=[];
+  for(let i=0;i<40;i++){ closes.push([i*DAY, 100+(i%4)*0.25]); df.push([i*DAY, 0.0002]); }
+  // days 23-30: price slides 5%, funding RISES (longs paying up into weakness), then keeps falling
+  for(let i=23;i<=30;i++){ closes[i]=[i*DAY, 100-(i-22)*0.7]; df[i]=[i*DAY, 0.0002+(i-22)*0.0002]; }
+  for(let i=31;i<40;i++){ closes[i]=[i*DAY, 94.4-(i-30)*0.5]; df[i]=[i*DAY, 0.0018]; }
+  const st=studyFPDiv(closes, df);
+  assert.ok(st && st.raw.d3.length>=1, "divergence detected");
+  assert.ok(st.raw.d3[st.raw.d3.length-1]>0, "continued decline scores positive under the SHORT claim sign");
+});
+
+
+test("offDriftStats: sums close->open windows; positive overnight drift detected", () => {
+  const HOUR=3600000, hs=[], wins=[];
+  // 30 synthetic days: price gains 0.2% each "overnight" (22:00->10:00), flat in "session"
+  let px=100;
+  for(let d=0;d<30;d++){
+    const base=d*24*HOUR;
+    for(let h=0;h<24;h++){ hs.push([base+h*HOUR, px, px, px, px, 0]); if(h===22) px*=1.002; }
+    wins.push({ enter: base+22*HOUR, exit: base+34*HOUR, tag:"overnight" });
+  }
+  const st=offDriftStats(hs.map(k=>[k[0],k[1],k[2],k[3],k[4],k[5]]), wins, 3*HOUR);
+  assert.ok(st && st.nWin===21, "uses the last 21 windows");
+  assert.ok(st.drift30>3 && st.drift30<5, "≈+4.2% summed drift detected, got "+(st&&st.drift30));
+});
+
+test("ondrift playbook: windowed-hold claim, no levels", () => {
+  const pLong=playbook("ondrift",{dir:1}), pShort=playbook("ondrift",{dir:-1});
+  assert.equal(pLong.side,"long"); assert.equal(pShort.side,"short");
+  assert.equal(pLong.target,null); assert.equal(pLong.stop,null);
 });
