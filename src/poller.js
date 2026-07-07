@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
-  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, retStd, dailyRets,
+  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, retStd, dailyRets,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
@@ -1234,10 +1234,12 @@ function createPoller({ dex, store, log, version, crypto }) {
     // firings over solo ones — and drops to zero if agreement doesn't prove out.
     const confUnit = confCache && confCache.bonus != null ? confCache.bonus : 8;
     for (const c in byCoin) {
-      const k = byCoin[c].length;
+      const { conflict, companyFor } = confSplit(byCoin[c]);
       for (const g of byCoin[c]) {
+        const k = companyFor(g);   // direction-aware: only same-side + context signals are company
         const e = ledgerOpen.get(g.coin + "|" + g.ev);
         if (e && e.conf == null) { e.conf = k > 1; ledgerDirty = true; }   // stamped once, at first observation
+        if (conflict) g.confl = true;   // long AND short fired on this coin — flagged, no bonus for anyone
         if (k > 1) { g.conf = k; g.score = Math.min(100, g.score + Math.min(16, confUnit * (k - 1))); }
       }
     }

@@ -575,6 +575,26 @@ function playbook(ev, ctx) {
   }
 }
 
+// Direction-aware confluence split: context events (no playbook side, or "watch") count as
+// company for EITHER direction; directional events only agree with their own side. If both
+// long and short directional signals fire on one coin, that is CONFLICT, not confluence —
+// nobody gets an agreement bonus for being contradicted.
+function confSplit(sigs) {
+  let nL = 0, nS = 0, nCtx = 0;
+  for (const g of sigs) {
+    const sd = g.play && (g.play.side === "long" || g.play.side === "short") ? g.play.side : null;
+    if (sd === "long") nL++; else if (sd === "short") nS++; else nCtx++;
+  }
+  const conflict = nL > 0 && nS > 0;
+  const companyFor = (g) => {
+    if (conflict) return 1;   // contradiction: everyone stands alone
+    const sd = g.play && (g.play.side === "long" || g.play.side === "short") ? g.play.side : null;
+    if (sd === "long") return nL + nCtx;
+    if (sd === "short") return nS + nCtx;
+    return Math.max(nL, nS) + nCtx;   // context signal: company = the directional camp it corroborates
+  };
+  return { conflict, companyFor };
+}
 // ---- stop-touch detection --------------------------------------------------------------------
 // Walks hourly candles in (t0, tEnd] and reports whether the void/stop level was touched:
 // a long claim (dir >= 0) is stopped when any candle LOW <= stp; a short claim when any
@@ -869,5 +889,5 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, studyBreakdown,
+  EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
