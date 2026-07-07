@@ -1902,15 +1902,15 @@ async function loadSignals(){
   }catch(_){}
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
-const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',prem:'Premium dislocation',volume:'Volume surge'};
+const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',prem:'Premium dislocation',volume:'Volume surge'};
 const EV_TIP={
   bigmove:'Today\u2019s move is \u22652\u03c3 of this market\u2019s own trailing 30d daily returns. History measures whether such moves continued (positive) or faded (negative) the next day, signed with the move.',
   breakout:'First close/mark above the prior 30-day high. History: forward 5d return after past first-crosses on this market.',
   volshift:'10d realized vol crossed above the 90th percentile of its own trailing ~6 months. History: forward 5d return after past expansions.',
-  gap:'The live move since the last cash close is outsized vs this market\u2019s own gap distribution. History: did the next cash session continue (positive) or fade (negative) such gaps?',
+  breakdown:'Close crossed below the prior 30d low. Forward 5d study, signed with the breakdown \u2014 the bearish mirror of the breakout.',gap:'The live move since the last cash close is outsized vs this market\u2019s own gap distribution. History: did the next cash session continue (positive) or fade (negative) such gaps?',
   fundflip:'Day-summed funding changed sign after \u22653 days pinned the other way \u2014 the crowd switched sides. History: 3d move toward the new crowd.',
   squeeze:'Crowded shorts (negative 7d funding) \u00d7 OI building \u00d7 price pressing the range \u2014 the squeeze spring is loaded. No historical study yet: needs longer OI history.',
-  prem:'Perp price dislocated from oracle vs its own 7-day premium baseline. During closed cash sessions this IS the live price discovery for the synthetic.',
+  unwind:'Crowded longs paying funding while OI builds and price sits near range lows \u2014 the bearish mirror of the squeeze. Their liquidation is the seller of last resort.',prem:'Perp price dislocated from oracle vs its own 7-day premium baseline. During closed cash sessions this IS the live price discovery for the synthetic.',
   volume:'24h volume is a multiple of this market\u2019s own 30d norm \u2014 a context flag that amplifies whatever else is firing.',
 };
 // Structured playbook row: side pill (LONG/SHORT/FADE/WATCH), levels with live distance from
