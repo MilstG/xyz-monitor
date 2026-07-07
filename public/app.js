@@ -550,12 +550,12 @@ function renderCryptoStrip(box){
   const fCls=fAPR==null?'sec':(fAPR>=15?'pos':(fAPR<=-5?'blue':'sec'));
   box.hidden=false;
   box.innerHTML=
-    `<span class="rs-lab" data-tip="Crypto-scope regime: the aggregate state of the top-60 main-dex perps. All figures computed from the live table rows.">CRYPTO TAPE</span>`
-    +`<span class="rs-m" data-tip="open-interest-weighted average funding APR across the universe \u2014 the single cleanest crowd-positioning number in crypto. Strongly positive: the crowd pays to be long (euphoria tax). Negative: shorts pay \u2014 squeeze fuel builds."><span class="rs-k">crowd pays</span><b class="${fCls}">${fAPR!=null?(fAPR>=0?'+':'')+fAPR.toFixed(1)+'% APR':'\u2014'}</b><span class="sec">${fAPR!=null?(fAPR>=0?'to be long':'to be short'):''}</span></span>`
-    +`<span class="rs-m" data-tip="share of the crypto universe up on the day"><span class="rs-k">breadth</span><b class="${breadth!=null&&breadth>=0.5?'pos':'neg'}">${breadth!=null?Math.round(breadth*100)+'%':'\u2014'}</b><span class="sec">up${n?` of ${n}`:''}</span></span>`
-    +`<span class="rs-m" data-tip="total open interest across the universe, with the OI-weighted 1d change \u2014 positioning building or leaving"><span class="rs-k">total OI</span><b>${fmtUsd(oiSum)}</b>${doi1!=null?`<span class="${doi1>=0?'pos':'neg'}">${doi1>=0?'+':''}${doi1.toFixed(1)}% 1d</span>`:''}</span>`
-    +(btc&&btc.d1!=null?`<span class="rs-m" data-tip="the benchmark's own day \u2014 everything in this scope is measured against it"><span class="rs-k">BTC</span><b class="${btc.d1>=0?'pos':'neg'}">${btc.d1>=0?'+':''}${btc.d1.toFixed(1)}%</b></span>`:'')
-    +`<span class="rs-m" data-tip="alt-season gauge: share of non-BTC markets beating BTC over 7d. \u226565% = broad alt outperformance (alt season); \u226435% = BTC dominance regime, alts bleeding against it. Needs \u226510 markets with 7d history."><span class="rs-k">alts &gt; BTC 7d</span><b class="${alt==null?'sec':(alt>=0.65?'pos':(alt<=0.35?'blue':'sec'))}">${alt!=null?Math.round(alt*100)+'%':'\u2014'}</b>${alt!=null?`<span class="sec">${alt>=0.65?'alt season':(alt<=0.35?'BTC regime':'mixed')}</span>`:''}</span>`;
+    `<span class="rs-lab" data-tip="crypto tape \u00b7 aggregate state of the selected main-dex perps \u00b7 computed live from the table rows">CRYPTO TAPE</span>`
+    +`<span class="rs-m" data-tip="crowd pays \u00b7 OI-weighted average funding APR across the universe \u00b7 strongly positive: longs pay to hold (euphoria tax) \u00b7 negative: shorts pay \u2014 squeeze fuel builds"><span class="rs-k">crowd pays</span><b class="${fCls}">${fAPR!=null?(fAPR>=0?'+':'')+fAPR.toFixed(1)+'% APR':'\u2014'}</b><span class="sec">${fAPR!=null?(fAPR>=0?'to be long':'to be short'):''}</span></span>`
+    +`<span class="rs-m" data-tip="breadth \u00b7 share of the crypto universe up on the day"><span class="rs-k">breadth</span><b class="${breadth!=null&&breadth>=0.5?'pos':'neg'}">${breadth!=null?Math.round(breadth*100)+'%':'\u2014'}</b><span class="sec">up${n?` of ${n}`:''}</span></span>`
+    +`<span class="rs-m" data-tip="total OI \u00b7 open interest summed across the universe \u00b7 with the OI-weighted 1d change: positioning building or leaving"><span class="rs-k">total OI</span><b>${fmtUsd(oiSum)}</b>${doi1!=null?`<span class="${doi1>=0?'pos':'neg'}">${doi1>=0?'+':''}${doi1.toFixed(1)}% 1d</span>`:''}</span>`
+    +(btc&&btc.d1!=null?`<span class="rs-m" data-tip="BTC \u00b7 the benchmark\u2019s own day \u00b7 everything in this scope is measured against it"><span class="rs-k">BTC</span><b class="${btc.d1>=0?'pos':'neg'}">${btc.d1>=0?'+':''}${btc.d1.toFixed(1)}%</b></span>`:'')
+    +`<span class="rs-m" data-tip="alt-season gauge \u00b7 share of non-BTC markets beating BTC over 7d \u00b7 \u226565% broad alt outperformance (alt season) \u00b7 \u226435% BTC dominance \u2014 alts bleeding against it \u00b7 needs \u226510 markets with 7d history"><span class="rs-k">alts &gt; BTC 7d</span><b class="${alt==null?'sec':(alt>=0.65?'pos':(alt<=0.35?'blue':'sec'))}">${alt!=null?Math.round(alt*100)+'%':'\u2014'}</b>${alt!=null?`<span class="sec">${alt>=0.65?'alt season':(alt<=0.35?'BTC regime':'mixed')}</span>`:''}</span>`;
 }
 function renderRegimeStrip(){
   if(state.scope==='crypto'){ const rg=el('regime'); if(rg) renderCryptoStrip(rg); return; }
@@ -568,8 +568,8 @@ function renderRegimeStrip(){
   const pctTxt=g.corrPct!=null?` <span class="sec">\u00b7 ${ordinal(g.corrPct)} pct</span>`:'';
   const corrCls=g.corrPct==null?'sec':(g.corrPct>=75?'pos':(g.corrPct<=25?'blue':'sec'));
   const corrTxt=g.corr==null?'<span class="na">loading\u2026</span>':`<b class="${corrCls}">${g.corr.toFixed(2)}</b>${pctTxt}`;
-  const corrTip=g.corr==null?'mean pairwise 30d correlation across the top markets by volume (loading)'
-    :`mean pairwise 30d correlation across the top ${g.corrN} by volume`+(g.corrPct!=null?`, ranked against the last 90 days (${g.corrSamples} samples)`:` \u2014 baseline still building (${g.corrSamples} samples)`);
+  const corrTip=g.corr==null?'mean 30d correlation \u00b7 pairwise across the top markets by volume (loading)'
+    :`mean 30d correlation \u00b7 pairwise across the top ${g.corrN} by volume`+(g.corrPct!=null?` \u00b7 ranked against the last 90 days (${g.corrSamples} samples)`:` \u00b7 baseline still building (${g.corrSamples} samples)`);
   // OI-weighted positioning mix: stacked bar of regime shares + the dominant directional read
   const RG_CLS={'longs+':'rg-long','squeeze':'rg-sqz','shorts+':'rg-short','unwind':'rg-unw','flat':'rg-flat'};
   const RG_ORDER=['longs+','squeeze','shorts+','unwind','flat'];
@@ -578,8 +578,8 @@ function renderRegimeStrip(){
     for(const l of RG_ORDER){ const m=g.mix[l]; if(!m||!(m.oi>0)) continue;
       const sh=m.oi/g.mixOI;
       if(l!=='flat'&&sh>domV){domV=sh;domL=l;}
-      segs+=`<span class="rs-mix-seg" data-tip="${esc(`${l} \u2014 ${Math.round(sh*100)}% of open interest (${m.n} market${m.n===1?'':'s'}, ${fmtUsd(m.oi)}). ${RG_STORY[l]||''}`)}" style="width:${(sh*100).toFixed(1)}%;background:${RG_COLOR[RG_CLS[l]]||'var(--faint)'}"></span>`; }
-    mixHtml=`<span class="rs-m"><span class="rs-k" data-tip="Share of total open interest sitting in each price\u00d7OI regime over ${state.tf} \u2014 is new money entering the complex (longs+/shorts+) or is this positioning unwinding (squeeze/unwind)? Hover each segment for the breakdown.">positioning</span>`+
+      segs+=`<span class="rs-mix-seg" data-tip="${esc(`${l} \u00b7 ${Math.round(sh*100)}% of open interest \u00b7 ${m.n} market${m.n===1?'':'s'}, ${fmtUsd(m.oi)} \u00b7 ${RG_STORY[l]||''}`)}" style="width:${(sh*100).toFixed(1)}%;background:${RG_COLOR[RG_CLS[l]]||'var(--faint)'}"></span>`; }
+    mixHtml=`<span class="rs-m"><span class="rs-k" data-tip="positioning mix \u00b7 share of total OI in each price\u00d7OI regime over ${state.tf} \u00b7 is new money entering the complex (longs+/shorts+) or is positioning unwinding (squeeze/unwind)? \u00b7 hover each segment for detail">positioning</span>`+
       `<span class="rs-mix">${segs}</span>`+
       (domL?`<b class="${RG_CLS[domL]}" style="font-size:11px" data-tip="largest non-flat regime by OI share">${Math.round(domV*100)}% ${esc(domL)}</b>`:'')+`</span>`; }
   box.innerHTML=
@@ -874,7 +874,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   const starred=state.watch.has(coin);
   const split=r.uni==='main'?null:sessionSplit30(r);   // no cash session exists to decompose against
   const splitHtml = split
-    ? `<div class="dsec" data-tip="30d return split into what accrued off-hours (overnight + weekend close\u2192open holds) vs during the US cash session. When most of the return lives in the off-hours leg, the name moves while the cash market sleeps \u2014 the classic overnight-effect pattern.">Where the 30d return happened</div>`+
+    ? `<div class="dsec" data-tip="30d off-hours split \u00b7 return decomposed into what accrued off-hours (overnight + weekend close\u2192open) vs during cash sessions \u00b7 a persistent off-hours drift is the overnight-effect edge this panel exists to expose">Where the 30d return happened</div>`+
       `<div class="dsplit">`+
         `<span data-tip="total 30d price return">total <b class="${split.total>=0?'pos':'neg'}">${split.total>=0?'+':''}${split.total.toFixed(1)}%</b></span>`+
         `<span data-tip="compounded across ${split.n} close\u2192open holds (overnight + weekend)">off-hours <b class="${split.off>=0?'pos':'neg'}">${split.off>=0?'+':''}${split.off.toFixed(1)}%</b></span>`+
@@ -1976,7 +1976,7 @@ function sigCardHtml(gr, rank, collapsible){
     s+=`<div class="sig${g.prime?' prime':''}">`
       +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
       +`<span class="sig-line1">${g.prime?'<i class="sig-prime" data-tip="prime setup: \u226560% hit, positive expectancy, sound structure (R/R \u22651.2 where levels exist), not unproven/decayed/no-edge \u2014 the bars this signal clears to earn emphasis">\u2605 prime</i>':''}${trigChip(g)}<span class="sig-read">${esc(g.reading)}</span></span>`
-      +`<span class="sig-hist" data-tip="${esc((ownOk?"This market's own base rate: median forward return and share of past occurrences that resolved positive over the stated horizon.":(g.pooled?'Fewer than 8 occurrences on this market, so the base rate is pooled across every market in its asset class \u2014 broader evidence, applied at a 30% score discount.':EV_TIP[g.ev]||''))+(g.liveW?` Evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality.`:''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.negexp?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}</span>`
+      +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality`:''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.negexp?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}</span>`
       +(g.play?playRow(g):'')
       +`</div>`;
   }
@@ -2034,7 +2034,7 @@ function sigRecordHtml(d){
   for(const ev of evs){ const r=rc[ev]; resolved+=r.resolved||0; open+=r.open||0; wins+=Math.round((r.hit||0)*(r.resolved||0));
     nS+=r.nS||0; winsS+=Math.round((r.hitS||0)*(r.nS||0)); }
   fired=resolved+open;
-  let s=`<div class="dsec" style="margin-top:22px" data-tip="Out-of-sample accuracy: every fired signal is ledgered at its mark and resolved at its stated horizon under the study's own sign convention. This section is what actually happened after the signals shown on this tab \u2014 the in-sample base rates above are the claim, this is the verdict.${thr>0||pr?' FILTERED: only claims that'+(pr?' were \u2605 prime at fire time (\u226560% hit, positive expectancy, sound structure)':'')+(thr>0&&pr?' AND':'')+(thr>0?' promised a target \u2265'+thr+'% from the mark at fire time':'')+' \u2014 the record of what you would actually trade. Claims ledgered before this tracking are excluded from filtered views.':''}">Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
+  let s=`<div class="dsec" style="margin-top:22px" data-tip="out-of-sample accuracy \u00b7 every fired signal is ledgered at its mark and resolved at its stated horizon under the study\u2019s own sign convention \u00b7 this section is what actually happened after the engine spoke \u2014 the record it must answer to">Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
   if(!fired){
     return s+`<div class="sec" style="font-size:11.5px;padding:4px 2px">No claims ledgered yet \u2014 the record starts accruing from the first signals this deploy fires. First resolutions land at their horizons (12h\u20135d).</div>`;
   }
@@ -2044,10 +2044,10 @@ function sigRecordHtml(d){
     +`<span data-tip="claims that reached their horizon and were scored">resolved <b>${resolved}</b></span>`
     +`<span data-tip="claims still inside their horizon, awaiting resolution">open <b>${open}</b></span>`
     +(hitAll!=null&&resolved?`<span data-tip="AT-HORIZON track: share of resolved claims that moved the way the signal implied, held to the stated horizon with NO stop \u2014 this is what the studies claim and what the engine learns from"><b class="${hitAll>=50?'pos':'neg'}">${hitAll}%</b> at-horizon hit</span>`:'')
-    +(nS?`<span data-tip="STOP-AWARE track: the same claims, but if the void level was touched before horizon (hourly candle walk, touch counts even on recovery \u2014 conservative) the outcome is capped at the stop distance. This is what trading the playbook with its void as a hard stop would have done. Covers claims resolved since stop-tracking began; older claims have no frozen void level, so n is smaller than the resolved total."><b class="${Math.round(100*winsS/nS)>=50?'pos':'neg'}">${Math.round(100*winsS/nS)}%</b> stop-aware <i style="font-style:normal;color:var(--faint)">(n=${nS})</i></span>`:'')
+    +(nS?`<span data-tip="stop-aware record \u00b7 same claims, but the outcome is capped at the void level when it was touched before horizon \u00b7 what trading the playbook with its void as a hard stop would have done \u00b7 covers claims resolved since stop-tracking began \u2014 older claims carry no frozen void, so n trails the resolved total"><b class="${Math.round(100*winsS/nS)>=50?'pos':'neg'}">${Math.round(100*winsS/nS)}%</b> stop-aware <i style="font-style:normal;color:var(--faint)">(n=${nS})</i></span>`:'')
     +`</div>`;
   if(resolved){
-    s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="STOP-AWARE track: outcomes capped at the void level when it was touched before horizon. Covers claims resolved since stop-tracking began (build -22) \u2014 older claims have no frozen void, so this n can be smaller than the live column\u2019s.">\u26d4 hit</th><th class="ss" data-tip="stop-aware median realized">\u26d4 med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s \u26d4 hit for how many claims were stopped out">\u26d4 pf</th><th></th></tr></thead><tbody>';
+    s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="stop-aware hit \u00b7 outcomes capped at the void when touched before horizon \u00b7 covers claims resolved since stop-tracking began (build -22) \u2014 n can trail the live column\u2019s">\u26d4 hit</th><th class="ss" data-tip="stop-aware median realized">\u26d4 med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s \u26d4 hit for how many claims were stopped out">\u26d4 pf</th><th></th></tr></thead><tbody>';
     for(const ev of evs){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
       const bad=r.resolved>=10&&r.hit<0.5&&r.med<=0, good=r.resolved>=10&&r.hit>=0.55&&r.med>0;
       s+=`<tr><td>${esc(EV_LABELS[ev]||ev)}</td><td>${r.resolved}${r.open?` <span class="sec">/${r.open}</span>`:''}</td>`
@@ -2055,7 +2055,7 @@ function sigRecordHtml(d){
         +`<td>${r.med!=null?`<span class="${r.med>=0?'pos':'neg'}">${r.med>=0?'+':''}${r.med}${r.unit}</span>`:'\u2014'}</td>`
         +`<td>${r.pf!=null?`<span class="${r.pf>=1?'pos':'neg'}" data-tip="${esc(`avg win ${r.avgWin!=null?'+'+r.avgWin+r.unit:'\u2014'} vs avg loss ${r.avgLoss!=null?r.avgLoss+r.unit:'\u2014'}`)}">${r.pf}</span>`:'\u2014'}</td>`
         +`<td>${r.claimMed!=null?`${r.claimMed>=0?'+':''}${r.claimMed}${r.unit}`:'\u2014'}</td>`
-        +`<td class="ss">${r.nS?`<span class="${r.hitS>=0.5?'pos':'neg'}" data-tip="${esc(`${EV_LABELS[ev]||ev}, stop-aware: hit = share of stop-disciplined outcomes that were positive, over n=${r.nS}. Separately: ${r.stopped||0} of ${r.nS} (${Math.round(100*(r.stopped||0)/r.nS)}%) were stopped out en route \u2014 a claim can lose at horizon WITHOUT ever touching its void. n is smaller than the live column when claims resolved before stop-tracking began (no frozen void level on older claims).`)}">${Math.round(r.hitS*100)}% <i style="font-style:normal;color:var(--faint);font-size:10px">(n=${r.nS})</i></span>`:'\u2014'}</td>`
+        +`<td class="ss">${r.nS?`<span class="${r.hitS>=0.5?'pos':'neg'}" data-tip="${esc(`${EV_LABELS[ev]||ev} \u2014 stop-aware hit (n=${r.nS}) \u00b7 share of stop-disciplined outcomes that resolved positive \u00b7 stopped en route: ${r.stopped||0} of ${r.nS} (${Math.round(100*(r.stopped||0)/r.nS)}%) \u2014 separate fact: a claim can lose at horizon without ever touching its void \u00b7 n trails the live column when claims predate stop-tracking (no frozen void on older claims)`)}">${Math.round(r.hitS*100)}% <i style="font-style:normal;color:var(--faint);font-size:10px">(n=${r.nS})</i></span>`:'\u2014'}</td>`
         +`<td class="ss">${r.medS!=null?`<span class="${r.medS>=0?'pos':'neg'}">${r.medS>=0?'+':''}${r.medS}${r.unit}</span>`:'\u2014'}</td>`
         +`<td class="ss">${r.pfS!=null?`<span class="${r.pfS>=1?'pos':'neg'}">${r.pfS}</span>`:'\u2014'}</td>`
         +`<td>${bad?'<i class="sig-unp" style="color:var(--down);border-color:var(--down)">no live edge</i>':(good?'<i class="sig-unp" style="color:var(--up);border-color:var(--up)">confirmed</i>':'')}</td></tr>`;
@@ -2085,7 +2085,7 @@ function sigRecordHtml(d){
         +`<span class="sigrec-k" style="margin-left:14px">worst</span>${rx.tickers.worst.map(chip).join('')}</div>`;
     }
     if(rx.curve&&rx.curve.length>=5){
-      s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="equal-weight cumulative realized outcome of every resolved R-united claim (big move, breakout, funding flip), in sigma units \u2014 the equity curve of the engine's claims. Premium (bp) and gap (%) claims are excluded because mixed units cannot be summed honestly.">claim equity curve (R) <span style="text-transform:none;letter-spacing:0">\u2014 solid: at-horizon \u00b7 <span style="color:var(--blue)">dashed: stop-aware</span></span></div>`+recCurveSvg(rx.curve);
+      s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="cumulative R curve \u00b7 equal-weight running sum of every resolved R-united claim in fired order \u00b7 solid: at-horizon outcomes \u00b7 dashed: stop-aware outcomes \u00b7 hover for the claim behind each step">claim equity curve (R) <span style="text-transform:none;letter-spacing:0">\u2014 solid: at-horizon \u00b7 <span style="color:var(--blue)">dashed: stop-aware</span></span></div>`+recCurveSvg(rx.curve);
     }
   }
   if(rs.confluence&&(rs.confluence.confN||rs.confluence.soloN)){
@@ -2135,7 +2135,7 @@ function renderSignals(){
         : `${r.open||0} open, none resolved yet`;
       const bad = r.resolved>=10 && r.hit<0.5 && r.med<=0;
       const good = r.resolved>=10 && r.hit>=0.55 && r.med>0;
-      rec+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`Out-of-sample record for '${(EV_TIP[ev]||ev).split('.')[0]}'. Every firing is ledgered at its mark and resolved at the stated horizon under the study's own sign convention \u2014 what actually happened after the signals we showed you. ${bad?'No live edge \u2014 scores for this event type are being capped.':(good?'Live record confirms the edge.':'Sample still building.')}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
+      rec+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 out-of-sample record: every firing ledgered at its mark, resolved at the stated horizon under the study\u2019s own sign convention \u00b7 what actually happened after the engine spoke`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
     }
     rec+='</div>';
   }
@@ -2952,7 +2952,17 @@ function renderTreemap(){
     var txt=t.textContent||''; node.setAttribute('data-tip',txt); t.parentNode.removeChild(t); return txt;
   }
   function fmtTitle(raw){
-    var parts=raw.split(' \u00b7 '), h='<b>'+esc(parts[0])+'</b>';
+    var parts=raw.split(' \u00b7 ');
+    if(parts.length===1 && raw.length>90){
+      // Unstructured long tip: bold-heading the whole paragraph is unreadable. Split a short
+      // head at the first sentence/em-dash boundary; failing that, render as plain body text.
+      var cut=-1, dot=raw.indexOf('. '), q=raw.indexOf('? '), dash=raw.indexOf(' \u2014 ');
+      if(q>0&&(dot<0||q<dot)) dot=q;
+      if(dot>0&&dot<=90) cut=dot+1; else if(dash>0&&dash<=90) cut=dash;
+      if(cut>0) return '<b>'+esc(raw.slice(0,cut))+'</b><div class="k">'+esc(raw.slice(cut).replace(/^[\s\u2014]+/,''))+'</div>';
+      return '<div class="k">'+esc(raw)+'</div>';
+    }
+    var h='<b>'+esc(parts[0])+'</b>';
     for(var i=1;i<parts.length;i++) h+='<div class="k">'+esc(parts[i])+'</div>';
     return h;
   }
