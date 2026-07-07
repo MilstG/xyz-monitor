@@ -50,16 +50,24 @@ const COLS=[
     td:r=>carryCell(r)},
   {key:'vol', label:'24h Vol', type:'num', td:r=>`<td class="sec">${fmtUsd(r.vol)}</td>`},
   {key:'oi', label:'OI', type:'num', td:r=>`<td class="sec">${fmtUsd(r.oi)}</td>`},
+  {key:'ma20', label:'MA 20', type:'num', tip:'20-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 fills in once daily history loads \u00b7 hover for distance', td:r=>maCell(r,'ma20',20)},
+  {key:'ma50', label:'MA 50', type:'num', tip:'50-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention holds fewer than 50 closes)', td:r=>maCell(r,'ma50',50)},
+  {key:'ma100', label:'MA 100', type:'num', tip:'100-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention)', td:r=>maCell(r,'ma100',100)},
+  {key:'ma200', label:'MA 200', type:'num', tip:'200-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention)', td:r=>maCell(r,'ma200',200)},
   {key:'turn', label:'OI/Vol', type:'num', def:'desc', tip:'Open interest \u00f7 24h volume: how large standing positioning is relative to the flow that could move it. High (\u22652) = stale, crowded positioning \u2014 fragile to squeezes and unwinds, reads well next to the Squeeze and \u0394OI columns. Low (<0.5) = fresh churn, positions turn over within the day.',
     td:r=>turnCell(r)},
 ];
+function maCell(r,key,nD){ const v=r[key];
+  if(v==null||!isFinite(v)) return `<td><span class="na" title="needs ${nD} daily closes \u2014 ${r.uni==='main'&&nD>20?'crypto retention is 31d, so this MA is out of reach by design':'fills in as daily history loads'}">\u2014</span></td>`;
+  const above=r.px!=null&&isFinite(r.px)?r.px>=v:null, d=above!=null&&v>0?((r.px/v-1)*100):null;
+  return `<td class="${above==null?'sec':(above?'pos':'neg')}" title="SMA${nD} ${fmtPrice(v)}${d!=null?` \u00b7 price ${d>=0?'+':''}${d.toFixed(1)}% ${d>=0?'above':'below'}`:''}">${fmtPrice(v)}</td>`; }
 function turnCell(r){ if(r.turn==null||!isFinite(r.turn)) return '<td><span class="na">\u2014</span></td>';
   const c=r.turn>=2?'accent':(r.turn<0.5?'sec':'');
   return `<td${c?` class="${c}"`:''} title="OI ${fmtUsd(r.oi)} \u00f7 24h vol ${fmtUsd(r.vol)} \u2014 positioning is ${r.turn.toFixed(1)}\u00d7 the daily flow">\u00d7${r.turn>=10?r.turn.toFixed(0):r.turn.toFixed(1)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','sqz','carry','oi','turn'];
-const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
+const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null,
@@ -317,6 +325,13 @@ function computeDerived(){
     r.gap = r.uni==='main' ? undefined : ((state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone);   // crypto never gaps (24/7); else live in-progress gap when the cash market is closed, else the last completed gap
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
     r.turn=(r.oi>0&&r.vol>0)?r.oi/r.vol:undefined;
+    // Simple moving averages of DAILY closes. null until enough history: crypto (31d retention)
+    // supports MA20 only — the longer MAs stay honest dashes rather than fabricated values.
+    { const cl=r.daily; let m=null;
+      if(Array.isArray(cl)&&cl.length){ m={}; for(const nD of [20,50,100,200]){
+        if(cl.length>=nD){ let t=0,k=0; for(let i=cl.length-nD;i<cl.length;i++){ const c=+cl[i].c; if(isFinite(c)){t+=c;k++;} }
+          m[nD]=k===nD?t/k:null; } else m[nD]=null; } }
+      r.ma20=m?m[20]:undefined; r.ma50=m?m[50]:undefined; r.ma100=m?m[100]:undefined; r.ma200=m?m[200]:undefined; }
     if(!benchC) r.beta=undefined;
     else if(r.coin===benchC){ r.beta=1; r.betaR2=1; }
     else if(bench&&bench.daily&&r.daily){ const bt=computeBeta(r,bench,90); if(bt){ r.beta=bt.beta; r.betaR2=bt.r2; } else r.beta=undefined; }
@@ -1006,7 +1021,9 @@ function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PK
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} })); }, 250); }
 function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(_){ p=null; } if(!p) return;
   if(p.layoutV===LAYOUT_V){ // otherwise a one-time migration leaves the new default layout in place
-    if(Array.isArray(p.colOrder)){ const v=p.colOrder.filter(k=>COL_BY_KEY[k]); for(const c of COLS) if(!v.includes(c.key)) v.push(c.key); state.colOrder=v; }
+    if(Array.isArray(p.colOrder)){ const v=p.colOrder.filter(k=>COL_BY_KEY[k]);
+      for(const c of COLS) if(!v.includes(c.key)){ v.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) state.colHidden.add(c.key); }
+      state.colOrder=v; }
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
   if(p.tf&&TF_MAP[p.tf]) state.tf=p.tf;
