@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
-  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets,
+  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
@@ -1763,9 +1763,10 @@ function createPoller({ dex, store, log, version, crypto }) {
     fundingWorker();
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
-    setInterval(buildSignals, 10 * 60 * 1000);
-    setTimeout(buildSignals, 2 * 60 * 1000);   // first pass once early backfill has something to chew on
-    setInterval(buildAnalytics, ANALYTICS_MS);
+    const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
+    setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
+    setTimeout(safeTick(buildSignals, "buildSignals"), 2 * 60 * 1000);   // first pass once early backfill has something to chew on
+    setInterval(safeTick(buildAnalytics, "buildAnalytics"), ANALYTICS_MS);
     setInterval(() => store.flush(), 30 * 1000);
     setInterval(persistFeatures, 120 * 1000);
     setInterval(persistHourly, HOURLY_PERSIST_MS);
@@ -1797,6 +1798,8 @@ function createPoller({ dex, store, log, version, crypto }) {
     getCandles,
     getSignals: () => signalsCache,
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
+    buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
+    buildDailyNow: buildDaily,       // harness: populate daily closes so the signals loop has inputs
     persistFeatures,
     persistLedger: () => { ledgerDirty = true; persistLedger(); },
     // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
