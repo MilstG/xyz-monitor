@@ -495,6 +495,10 @@ const EV_META = {
   squeeze:  { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
   breakdown:{ horizonMs: 5 * DAY,  horizon: "next 5d, signed with the breakdown", studyKey: "d5" },
   unwind:   { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
+  oiflush:  { horizonMs: 5 * DAY,  horizon: "next 5d (bottoming thesis)",     studyKey: "d5" },
+  fpdiv:    { horizonMs: 3 * DAY,  horizon: "next 3d, with the divergence",   studyKey: "d3" },
+  coil:     { horizonMs: null,     horizon: "context flag \u2014 expansion pending, direction unknown", studyKey: null },
+  ondrift:  { horizonMs: null,     horizon: "next 5 overnight windows, held close\u2192open", studyKey: null },
   prem:     { horizonMs: 12 * HOUR, horizon: "reversion toward oracle",       studyKey: null },
   volume:   { horizonMs: null,     horizon: "context flag",                   studyKey: null },
 };
@@ -548,6 +552,27 @@ function playbook(ev, ctx) {
         stop: f2(rngU != null ? ctx.hi30 - 0.25 * rngU : null),
         watch: "\u0394OI(7d) rolling negative = longs already liquidating; funding flipping negative = the crowd has left \u2014 the setup is spent" };
     }
+    case "oiflush": {
+      const sgn = 1;
+      return { side: "long", bias: "capitulation \u2014 forced deleveraging exhausting into a decline",
+        target: f2(ctx.px * (1 + Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        stop: f2(ctx.px * (1 - (ctx.sd30 || 1) / 100)),
+        watch: "\u0394OI stabilizing or turning up = the flush is complete; continued OI bleed = the knife is still falling" };
+    }
+    case "fpdiv": {
+      const up = ctx.dir >= 0, sg = up ? 1 : -1;
+      return { side: up ? "long" : "short",
+        bias: up ? "price strength while funding falls \u2014 shorts pressing into a rising tape (stubborn crowd, squeeze-adjacent)"
+                 : "price weakness while funding rises \u2014 longs averaging down into a falling tape (fragile crowd)",
+        target: f2(ctx.px * (1 + sg * Math.abs(ctx.med != null ? ctx.med : 0.8) / 100)),
+        stop: f2(ctx.px * (1 - sg * (ctx.sd30 || 1) / 100)),
+        watch: "funding re-converging with price = the divergence resolved \u2014 the setup is spent" };
+    }
+    case "ondrift":
+      return { side: ctx.dir >= 0 ? "long" : "short",
+        bias: (ctx.dir >= 0 ? "persistent positive" : "persistent negative") + " off-hours drift \u2014 the claim covers ONLY the overnight windows, held close\u2192open, not a continuous position",
+        target: null, stop: null,
+        watch: "the drift sign flipping in the live windows = the regime is gone; cash-session performance is irrelevant to this claim" };
     case "fundflip":
       return { side: ctx.dir >= 0 ? "long" : "short",
         bias: ctx.dir >= 0 ? "crowd flipped long \u2014 drift with them short-term" : "crowd flipped short \u2014 drift with them short-term",
@@ -575,6 +600,101 @@ function playbook(ev, ctx) {
   }
 }
 
+// OI flush / capitulation: 7d ΔOI collapsing below −2σ of this market's OWN trailing ΔOI7d
+// distribution while price is down over the window — forced deleveraging exhausting itself.
+// Trailing stats only (no lookahead): each event's σ comes from the ≤60 samples before it,
+// minimum 30. Outcomes are LONG-signed forward 5d returns in R (the bottoming thesis).
+function studyOIFlush(closes, oiDaily) {
+  if (!closes || !oiDaily || oiDaily.length < 45 || closes.length < 45) return null;
+  const rets = dailyRets(closes);
+  const oiByDay = new Map(oiDaily.map((k) => [k[0], k[1]]));
+  const doi7 = [];   // [dayTs, ΔOI7d%]
+  for (const [d, v] of oiDaily) {
+    const prev = oiByDay.get(d - 7 * 86400000);
+    if (prev > 0 && v > 0) doi7.push([d, (v / prev - 1) * 100]);
+  }
+  if (doi7.length < 35) return null;
+  const closeByDay = new Map(closes.map((k, i) => [Math.floor(k[0] / 86400000), i]));
+  const d5 = [];
+  let mu = null, sd = null;
+  for (let i = 30; i < doi7.length; i++) {
+    const win = doi7.slice(Math.max(0, i - 60), i).map((k) => k[1]);
+    mu = win.reduce((a, b) => a + b, 0) / win.length;
+    sd = stdev(win);
+    if (!(sd > 0)) continue;
+    const z = (doi7[i][1] - mu) / sd;
+    if (z > -2) continue;
+    const ci = closeByDay.get(Math.floor(doi7[i][0] / 86400000));
+    if (ci == null || ci < 8 || ci >= closes.length) continue;
+    const px7 = (closes[ci][1] / closes[ci - 7][1] - 1) * 100;
+    if (!(px7 < 0)) continue;   // flush INTO a decline — the capitulation configuration
+    const s = sdAt(rets, ci - 1);
+    if (s == null || s <= 0) continue;
+    const f5 = fwdRet(closes, ci, 5);
+    if (f5 != null) d5.push(+(f5 / s).toFixed(3));
+  }
+  return { d5: summarizeEvents(d5), raw: { d5 }, cur: { mu, sd }, unit: "R" };
+}
+// Funding–price divergence: trajectory against tape. Price pressing 7d strength while funding
+// FALLS (shorts pressing into a rising tape) claims LONG; price at 7d weakness while funding
+// RISES (longs averaging down into a falling tape) claims SHORT. Outcomes are claim-signed
+// forward 3d returns in R. EPS is on day-summed funding (≈4% APR equivalent).
+function studyFPDiv(closes, dayFunding) {
+  if (!closes || closes.length < 20 || !dayFunding || dayFunding.length < 12) return null;
+  const rets = dailyRets(closes), EPS = 1.2e-4;
+  const fByDay = new Map(dayFunding.map((k) => [Math.floor(k[0] / 86400000), k[1]]));
+  const d3 = [];
+  for (let i = 10; i < closes.length; i++) {
+    const day = Math.floor(closes[i][0] / 86400000);
+    let f7 = 0, n7 = 0, f2 = 0, n2 = 0;
+    for (let b = 1; b <= 7; b++) { const v = fByDay.get(day - b); if (v != null) { f7 += v; n7++; if (b <= 2) { f2 += v; n2++; } } }
+    if (n7 < 5 || n2 < 2) continue;
+    f7 /= n7; f2 /= n2;
+    const s = sdAt(rets, i - 1);
+    if (s == null || s <= 0) continue;
+    const z7 = ((closes[i][1] / closes[i - 7][1] - 1) * 100) / (s * Math.sqrt(7));
+    let dir = 0;
+    if (z7 >= 0.8 && f2 < f7 - EPS) dir = 1;
+    else if (z7 <= -0.8 && f2 > f7 + EPS) dir = -1;
+    if (!dir) continue;
+    const f3 = fwdRet(closes, i, 3);
+    if (f3 != null) d3.push(+((dir * f3) / s).toFixed(3));
+  }
+  return { d3: summarizeEvents(d3), raw: { d3 }, unit: "R" };
+}
+// Range compression: 10d realized vol in its own bottom decile of the trailing 120
+// observations. Direction is deliberately NOT claimed — expansion is coming, which way is not
+// knowable from compression alone. Returns the live reading for the context flag.
+function compressionNow(closes) {
+  if (!closes || closes.length < 140) return null;
+  const rets = dailyRets(closes), vols = [];
+  for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
+  const i = vols.length - 1;
+  if (i < 120 || vols[i] == null) return null;
+  const histW = vols.slice(i - 120, i).filter((x) => x != null);
+  if (histW.length < 60) return null;
+  const sorted = [...histW].sort((a, b) => a - b);
+  const p10 = sorted[Math.floor(sorted.length * 0.1)];
+  const rank = sorted.filter((x) => x <= vols[i]).length / sorted.length;
+  return { vol10: vols[i], p10, pct: Math.round(rank * 100), coiled: vols[i] <= p10 };
+}
+// Off-hours drift stats: per-window close→open returns from the hourly spine over the given
+// closed windows (overnight + weekend, each counted as ONE holdable window). The venue's
+// structural quirk: these cash-hours assets trade 24/7 here, so the overnight session — where
+// the equity literature puts most of the drift — is directly holdable.
+function offDriftStats(hs, wins, tol) {
+  if (!hs || !hs.length || !wins || !wins.length) return null;
+  const rets = [];
+  const sorted = [...wins].sort((a, b) => a.enter - b.enter);
+  for (const w of sorted) {
+    const pc = priceAsOf(hs, w.enter, tol), po = priceAsOf(hs, w.exit, tol);
+    if (pc > 0 && po > 0) rets.push([w.exit, +((po / pc - 1) * 100).toFixed(4)]);
+  }
+  if (rets.length < 15) return null;
+  const last21 = rets.slice(-21);
+  const drift30 = +last21.reduce((a, k) => a + k[1], 0).toFixed(3);   // ~1 month of windows, summed
+  return { drift30, nWin: last21.length, total: rets.length };
+}
 // Direction-aware confluence split: context events (no playbook side, or "watch") count as
 // company for EITHER direction; directional events only agree with their own side. If both
 // long and short directional signals fire on one coin, that is CONFLICT, not confluence —
@@ -889,5 +1009,5 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit,
+  EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };

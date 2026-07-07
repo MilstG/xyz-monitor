@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
-  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, retStd, dailyRets,
+  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
@@ -696,21 +696,41 @@ function createPoller({ dex, store, log, version, crypto }) {
     gap: "Outsized gap", fundflip: "Funding flip", squeeze: "Squeeze setup",
     prem: "Premium dislocation", volume: "Volume surge",
     breakdown: "30d-low breakdown", unwind: "Long unwind",
+    oiflush: "OI flush", fpdiv: "Funding\u2013price divergence", coil: "Range compression",
+    ondrift: "Overnight drift",
   };
+  // Daily-step OI series from the sampled history: nearest sample within 12h of each UTC
+  // midnight. Feeds the flush study; cheap because hist is already in memory.
+  function oiDailySeries(coin) {
+    const arr = hist.get(coin);
+    if (!arr || arr.length < 24) return null;
+    const out = []; let j = 0;
+    const d0 = Math.ceil(arr[0][0] / DAY) * DAY, d1 = Math.floor(arr[arr.length - 1][0] / DAY) * DAY;
+    for (let d = d0; d <= d1; d += DAY) {
+      while (j < arr.length - 1 && Math.abs(arr[j + 1][0] - d) <= Math.abs(arr[j][0] - d)) j++;
+      if (Math.abs(arr[j][0] - d) <= 12 * HOUR && arr[j][1] > 0) out.push([d, arr[j][1]]);
+    }
+    return out.length >= 10 ? out : null;
+  }
   function studiesFor(r, closes, dayFunding) {
-    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0);
+    const oiArr = hist.get(r.coin);
+    const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0) + ":" + (oiArr ? oiArr.length : 0);
     if (r._stSig === sig && r._st) return r._st;
     const st = {};
     if (closes && closes.length >= 40) {
       st.bigmove = studyBigMove(closes);
       st.breakout = studyBreakout(closes);
       st.breakdown = studyBreakdown(closes);
+      st.oiflush = studyOIFlush(closes, oiDailySeries(r.coin));
+      st.coil = closes.length >= 140 ? compressionNow(closes) : null;
+      st.fpdiv = studyFPDiv(closes, dayFunding);
       if (closes.length >= 140) st.volshift = studyVolShift(closes);
     }
     const hs = getHourly(r.coin);
     if (hs.length > 48) {
       const wins = overnightAnchors(hs[0][0], hs[hs.length - 1][0]).concat(weekendAnchors(hs[0][0], hs[hs.length - 1][0]));
       st.gap = studyGapFade(hs, wins, 3 * HOUR);
+      st.ondrift = offDriftStats(hs, wins, 3 * HOUR);
     }
     if (dayFunding && dayFunding.length >= 8 && closes && closes.length >= 10) st.fundflip = studyFundFlip(dayFunding, closes);
     r._stSig = sig; r._st = st;
@@ -741,11 +761,13 @@ function createPoller({ dex, store, log, version, crypto }) {
     squeeze:  { param: "score\u2265", vals: [50, 60, 70] },
     fundflip: { param: "run\u2265", vals: [2, 3, 5] },
     unwind:   { param: "score\u2265", vals: [50, 60, 70] },
+    oiflush:  { param: "\u03c3\u2264\u2212", vals: [1.5, 2, 2.5] },
   };
-  let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] } };
+  let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const unitOf = (ev) => ev === "prem" ? "bp" : (ev === "bigmove" || ev === "breakout" || ev === "breakdown" || ev === "fundflip" || ev === "volshift" ? "R" : "%");
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv"]);
+  const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   const seenAt = new Map();   // coin|ev -> first-seen ms, for events with no ledger entry (no directional claim)
   function hydrateLedger() {
     const d = store.loadLedger();
@@ -767,6 +789,11 @@ function createPoller({ dex, store, log, version, crypto }) {
     if (ev === "gap") {   // resolves at the close of the next cash session after firing
       for (const ses of marketSessions(t0, t0 + 6 * DAY)) if (ses.close > t0 && ses.open > t0) return ses.close;
       return t0 + 3 * DAY;
+    }
+    if (ev === "ondrift") {
+      let n = 0;
+      for (const ses of marketSessions(t0, t0 + 20 * DAY)) { if (ses.close <= t0) continue; n++; if (n === 6) return ses.open; }
+      return t0 + 10 * DAY;
     }
     const m = EV_META[ev];
     return t0 + ((m && m.horizonMs) || DAY);
@@ -802,7 +829,20 @@ function createPoller({ dex, store, log, version, crypto }) {
     for (const [key, e] of ledgerOpen) {
       if (now < e.resolveAt) continue;
       let realized = null;
-      if (e.ev === "prem") {
+      if (e.ev === "ondrift") {
+        const hs = getHourly(e.coin);
+        if (hs.length && now >= e.resolveAt) {
+          const ses = marketSessions(e.t0, e.resolveAt + DAY);
+          const parts = [];
+          for (let si = 0; si + 1 < ses.length && parts.length < 5; si++) {
+            if (ses[si].close <= e.t0) continue;
+            const pc = priceAsOf(hs, ses[si].close, 3 * HOUR), po = priceAsOf(hs, ses[si + 1].open, 3 * HOUR);
+            if (pc > 0 && po > 0) parts.push((po / pc - 1) * 100);
+          }
+          if (parts.length >= 3)
+            realized = +((e.dir >= 0 ? 1 : -1) * parts.reduce((a, b) => a + b, 0)).toFixed(2);
+        }
+      } else if (e.ev === "prem") {
         const r = rows.get(e.coin);
         if (r && r.premH && r.premH.length && e.prem0 != null) {
           let best = null;
@@ -916,7 +956,7 @@ function createPoller({ dex, store, log, version, crypto }) {
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1039,6 +1079,8 @@ function createPoller({ dex, store, log, version, crypto }) {
       if (st.bigmove && st.bigmove.raw) { feed(ac, "bigmove", "d1", st.bigmove.raw.d1); }
       if (st.breakout && st.breakout.raw) { feed(ac, "breakout", "d5", st.breakout.raw.d5); }
       if (st.breakdown && st.breakdown.raw) { feed(ac, "breakdown", "d5", st.breakdown.raw.d5); }
+      if (st.oiflush && st.oiflush.raw) { feed(ac, "oiflush", "d5", st.oiflush.raw.d5); }
+      if (st.fpdiv && st.fpdiv.raw) { feed(ac, "fpdiv", "d3", st.fpdiv.raw.d3); }
       if (st.volshift && st.volshift.raw) { feed(ac, "volshift", "d5", st.volshift.raw.d5); }
       if (st.gap && st.gap.raw) { feed(ac, "gap", "session", st.gap.raw.session); }
       if (st.fundflip && st.fundflip.raw) { feed(ac, "fundflip", "d3", st.fundflip.raw.d3); }
@@ -1086,6 +1128,40 @@ function createPoller({ dex, store, log, version, crypto }) {
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
             sig.play = playbook("breakdown", { px: r.px, level: lo, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
           out.push(sig); if (sd30 > 0) openLedger(r, "breakdown", sig, -1, { sd0: +sd30.toFixed(3) });
+        }
+        // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
+        if (st.oiflush && st.oiflush.cur && st.oiflush.cur.sd > 0) {
+          const doiNow = computeDoi(r);
+          if (doiNow && doiNow.d7 != null && r.d7 != null && isFinite(r.d7)) {
+            const zF = (doiNow.d7 - st.oiflush.cur.mu) / st.oiflush.cur.sd;
+            VARIANTS.oiflush.vals.forEach((v, vi) => { if (zF <= -v && r.d7 < 0 && sd30 > 0) openLedger(r, "oiflush", { score: 0, reading: "" }, 1, { sd0: +sd30.toFixed(3) }, vi); });
+            if (zF <= -incVal("oiflush") && r.d7 < 0) {
+              const evd = evidence(st.oiflush.d5, "oiflush", pooledFor(ac, "oiflush", "d5"), "R");
+              const sig = mkSignal(r, "oiflush", `\u0394OI7d ${doiNow.d7.toFixed(1)}% (${zF.toFixed(1)}\u03c3 flush) into a ${r.d7.toFixed(1)}% decline`,
+                (-zF - incVal("oiflush")) * 18 + 18, evd, { horizon: EV_META.oiflush.horizon });
+              { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
+                sig.play = playbook("oiflush", { px: r.px, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+              out.push(sig); if (sd30 > 0) openLedger(r, "oiflush", sig, 1, { sd0: +sd30.toFixed(3) });
+            }
+          }
+        }
+        // Funding–price divergence: trajectory against tape, both directions
+        if (st.fpdiv && sd30 > 0 && r.d7 != null && isFinite(r.d7)) {
+          const fwD = computeFundWin(r);
+          if (fwD && fwD.d1 != null && fwD.d7 != null) {
+            const EPS_H = 5e-6, z7 = r.d7 / (sd30 * Math.sqrt(7));
+            let dDir = 0;
+            if (z7 >= 0.8 && fwD.d1 < fwD.d7 - EPS_H) dDir = 1;
+            else if (z7 <= -0.8 && fwD.d1 > fwD.d7 + EPS_H) dDir = -1;
+            if (dDir) {
+              const evd = evidence(st.fpdiv.d3, "fpdiv", pooledFor(ac, "fpdiv", "d3"), "R");
+              const sig = mkSignal(r, "fpdiv", `${dDir > 0 ? "strength" : "weakness"} (${z7.toFixed(1)}\u03c3 7d) while funding ${dDir > 0 ? "falls" : "rises"} \u2014 ${dDir > 0 ? "shorts pressing" : "longs averaging down"}`,
+                (Math.abs(z7) - 0.8) * 20 + 16, evd, { horizon: EV_META.fpdiv.horizon });
+              { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
+                sig.play = playbook("fpdiv", { px: r.px, dir: dDir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+              out.push(sig); openLedger(r, "fpdiv", sig, dDir, { sd0: +sd30.toFixed(3) });
+            }
+          }
         }
       }
       if (rets.length >= 130) {
@@ -1189,9 +1265,43 @@ function createPoller({ dex, store, log, version, crypto }) {
         sig.play = playbook("volume", {});
         out.push(sig);
       }
+      if (st.coil && st.coil.coiled) {
+        // Context only: no ledger claim, no direction. Feeds direction-aware confluence — a
+        // breakout/breakdown firing OUT of compression is the configuration worth extra score.
+        const sig = mkSignal(r, "coil", `10d realized vol at its ${st.coil.pct}th pctile of the trailing 120 \u2014 coiled`,
+          (10 - st.coil.pct) * 1.5 + 10, { pts: 6, unproven: true }, { horizon: EV_META.coil.horizon });
+        sig.play = playbook("coil", {});
+        out.push(sig);
+      }
     }
     // freshness: trigger time + age on every signal. Ledgered events use their ledger entry;
     // the rest use a light first-seen map. Past its horizon a signal decays, past 2x it drops.
+    // Overnight-drift anomaly: each market's summed off-hours drift over its last ~21 closed
+    // windows, z-scored ACROSS THE UNIVERSE. |z|>=2 with |drift|>=1% absolute fires a claim on
+    // the NEXT 5 overnight windows, held close->open — resolved by a dedicated branch, since
+    // the outcome is a sum of windows, not one span. Record-only evidence: this event ships
+    // without a per-market backtest (stated on the card) and earns trust purely out of sample.
+    {
+      const rowsD = [];
+      for (const r of activeMarkets()) {
+        if (r.delisted || !r._st || !r._st.ondrift) continue;
+        rowsD.push([r, r._st.ondrift.drift30]);
+      }
+      if (rowsD.length >= 25) {
+        const vals = rowsD.map((k) => k[1]);
+        const mu = vals.reduce((a, b) => a + b, 0) / vals.length, sdD = stdev(vals);
+        if (sdD > 0) for (const [r, d30] of rowsD) {
+          const z = (d30 - mu) / sdD;
+          if (Math.abs(z) < 2 || Math.abs(d30) < 1) continue;
+          const dir = d30 > 0 ? 1 : -1;
+          const evd = evidence(null, "ondrift", null, "%");
+          const sig = mkSignal(r, "ondrift", `${d30 >= 0 ? "+" : ""}${d30.toFixed(1)}% off-hours drift over ~21 windows (${z.toFixed(1)}\u03c3 vs universe)`,
+            (Math.abs(z) - 2) * 16 + 18, evd, { horizon: EV_META.ondrift.horizon });
+          sig.play = playbook("ondrift", { dir });
+          out.push(sig); openLedger(r, "ondrift", sig, dir);
+        }
+      }
+    }
     const kept = [], live = new Set();
     for (const g of out) {
       // structure: median-target vs invalidation R/R, folded into the score. Poor structure
