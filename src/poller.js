@@ -695,6 +695,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     bigmove: "Big move", breakout: "30d-high breakout", volshift: "Vol expansion",
     gap: "Outsized gap", fundflip: "Funding flip", squeeze: "Squeeze setup",
     prem: "Premium dislocation", volume: "Volume surge",
+    breakdown: "30d-low breakdown", unwind: "Long unwind",
   };
   function studiesFor(r, closes, dayFunding) {
     const sig = (r.hourlyTs || 0) + ":" + (closes ? closes.length : 0) + ":" + (dayFunding ? dayFunding.length : 0);
@@ -1153,7 +1154,8 @@ function createPoller({ dex, store, log, version, crypto }) {
           }
         }
         // Bearish mirror: crowded LONGS paying + OI building + price near range LOWS.
-        const crowdL = fAPR > 0 ? Math.tanh(fAPR / 35) : 0;
+        const CARRY_APR = 12;   // typical equity-perp long carry (%APR): crowding starts ABOVE the norm, not above zero
+        const crowdL = fAPR > CARRY_APR ? Math.tanh((fAPR - CARRY_APR) / 35) : 0;
         if (crowdL > 0) {
           const fuel = doi && doi.d7 != null ? Math.tanh(Math.max(0, doi.d7) / 8) : 0;
           let trigL = 0.5;
