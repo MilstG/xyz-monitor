@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { classify } = require("../src/sectors");
-const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, studyBreakdown, playbook } = require("../src/compute");
+const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, studyBreakdown, playbook, confSplit } = require("../src/compute");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 
@@ -218,4 +218,23 @@ test("playbook: breakdown is short with stop at the level; unwind mirrors squeez
   assert.equal(uw.side, "short");
   assert.ok(Math.abs(uw.target - (100 - 0.382 * 20)) < 1e-9, "measured-move extension BELOW the range");
   assert.ok(Math.abs(uw.stop - (120 - 0.25 * 20)) < 1e-9, "stop in the upper quarter");
+});
+
+
+test("confSplit: direction-aware company, conflict kills all bonuses", () => {
+  const L={play:{side:"long"}}, S={play:{side:"short"}}, C={play:{side:"watch"}};
+  // two longs + context: all three have company
+  let r=confSplit([L,L,C]);
+  assert.equal(r.conflict,false);
+  assert.equal(r.companyFor(L),3); assert.equal(r.companyFor(C),3);
+  // one long + context: the pair agrees
+  r=confSplit([L,C]);
+  assert.equal(r.companyFor(L),2);
+  // long + short = conflict: everyone stands alone
+  r=confSplit([L,S,C]);
+  assert.equal(r.conflict,true);
+  assert.equal(r.companyFor(L),1); assert.equal(r.companyFor(S),1); assert.equal(r.companyFor(C),1);
+  // solo directional: no company
+  r=confSplit([S]);
+  assert.equal(r.conflict,false); assert.equal(r.companyFor(S),1);
 });
