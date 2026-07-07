@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { classify } = require("../src/sectors");
-const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr } = require("../src/compute");
+const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, studyBreakdown, playbook } = require("../src/compute");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 
@@ -195,4 +195,27 @@ test("stop-touch: conservative hourly walk with direction semantics", () => {
   assert.equal(C.stopTouched(cs, t0, t0 + 4 * H, -1, 103.5), false, "short survives");
   assert.equal(C.stopTouched(cs, t0, t0 + 1 * H, 1, 98.5), false, "touch after window end does not count");
   assert.equal(C.stopTouched([], t0, t0 + 4 * H, 1, 98.5), null, "no candles = unknowable, not a verdict");
+});
+
+
+test("breakdown study: outcomes signed with the breakdown (falls = positive)", () => {
+  // 40 flat closes at 100, then a first cross below the 30d low followed by continued decline
+  const closes = [];
+  for (let i = 0; i < 40; i++) closes.push([i * 86400000, 100 + (i % 3) * 0.4]);
+  closes.push([40 * 86400000, 97]);    // first close below the prior-30 low
+  for (let i = 1; i <= 6; i++) closes.push([(40 + i) * 86400000, 97 - i * 1.5]);  // continues down
+  const st = studyBreakdown(closes);
+  assert.ok(st.raw.d5.length >= 1, "breakdown event detected");
+  assert.ok(st.raw.d5[0] > 0, "continued decline scores POSITIVE under the breakdown sign convention");
+});
+
+test("playbook: breakdown is short with stop at the level; unwind mirrors squeeze below the range", () => {
+  const bd = playbook("breakdown", { px: 95, level: 100, med: 2 });
+  assert.equal(bd.side, "short");
+  assert.equal(bd.stop, 100);
+  assert.ok(bd.target < 95, "target below entry");
+  const uw = playbook("unwind", { hi30: 120, lo30: 100 });
+  assert.equal(uw.side, "short");
+  assert.ok(Math.abs(uw.target - (100 - 0.382 * 20)) < 1e-9, "measured-move extension BELOW the range");
+  assert.ok(Math.abs(uw.stop - (120 - 0.25 * 20)) < 1e-9, "stop in the upper quarter");
 });
