@@ -270,6 +270,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     try { md = await fetchMetaAndCtxs(MAIN_DEX); }
     catch (e) { log("main-dex poll failed: " + e.message); }
     if (!md) { for (const k of rows.keys()) if (!k.includes(":")) seen.add(k); return; }   // failed poll must not delete crypto rows
+    try {
     const mUni = (md[0] && md[0].universe) || [], mCtxs = md[1] || [];
     mainOrder = mUni.map((u) => u.name);
     const dayUTC = Math.floor(Date.now() / DAY);
@@ -301,6 +302,12 @@ function createPoller({ dex, store, log, version, crypto }) {
       foldCtx(r, mCtxs[i] || {}, hourNow);
       seen.add(coin);
     });
+    } catch (e) {
+      // Isolation guarantee: a malformed main-dex payload must NEVER abort pollUniverse —
+      // that would stall lastPoll and the removal sweep and take the xyz universe down with it.
+      log("main-dex processing failed (isolated, xyz unaffected): " + e.message);
+      for (const k of rows.keys()) if (!k.includes(":")) seen.add(k);
+    }
   }
   function mainMarkets() { return mainList.map((c) => rows.get(c)).filter((r) => r && !r.delisted); }
   // Fold a WebSocket allDexsAssetCtxs event into rows. The ctx array for our dex is
@@ -332,13 +339,15 @@ function createPoller({ dex, store, log, version, crypto }) {
       r.d1 = (r.px != null && r.prevDay) ? (r.px - r.prevDay) / r.prevDay * 100 : r.d1;
     }
     if (crypto && mainOrder.length) {
-      let ma = null;
-      for (const t of tuples) if (Array.isArray(t) && t[0] === MAIN_DEX && Array.isArray(t[1])) { ma = t[1]; break; }
-      if (ma && ma.length === mainOrder.length)
-        for (let i = 0; i < mainOrder.length; i++) {
-          const r = rows.get(mainOrder[i]);
-          if (r && !r.delisted) foldCtx(r, ma[i] || {}, hourNow);
-        }
+      try {
+        let ma = null;
+        for (const t of tuples) if (Array.isArray(t) && t[0] === MAIN_DEX && Array.isArray(t[1])) { ma = t[1]; break; }
+        if (ma && ma.length === mainOrder.length)
+          for (let i = 0; i < mainOrder.length; i++) {
+            const r = rows.get(mainOrder[i]);
+            if (r && !r.delisted) foldCtx(r, ma[i] || {}, hourNow);
+          }
+      } catch (e) { log("main-dex WS fold failed (isolated): " + e.message); }
     }
     sampleOI();
     lastPoll = now; lastWsApply = now; wsApplied++;
@@ -576,12 +585,14 @@ function createPoller({ dex, store, log, version, crypto }) {
       // distribution. 96 = the crowd is paying near its monthly extreme — the classic crypto
       // mean-reversion zone. Computed for every universe; extremes are just rarer on equities.
       let fundPct = null;
-      if (r.funding != null && isFinite(r.funding)) {
-        const fh = getFunding(r.coin), cut = Date.now() - 31 * DAY;
-        let n = 0, le = 0;
-        for (const [t, rate] of fh) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
-        if (n >= 96) fundPct = Math.round((100 * le) / n);   // >=4 days of hourly samples before we claim a percentile
-      }
+      try {
+        if (r.funding != null && isFinite(r.funding)) {
+          const fh = getFunding(r.coin), cut = Date.now() - 31 * DAY;
+          let n = 0, le = 0;
+          for (const k of fh) { if (!Array.isArray(k) || k[0] < cut || !isFinite(k[1])) continue; n++; if (k[1] <= r.funding) le++; }
+          if (n >= 96) fundPct = Math.round((100 * le) / n);   // >=4 days of hourly samples before we claim a percentile
+        }
+      } catch (_) {}
       return {
         fundPct,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
@@ -711,6 +722,12 @@ function createPoller({ dex, store, log, version, crypto }) {
   // in-sample base rate and the live out-of-sample record are directly comparable. Event types
   // whose live record shows no edge get their evidence score capped automatically.
   let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null, recordXCache = null, recordSets = null;
+  // Episode re-arm gate: when a claim resolves while its condition is STILL firing, the key is
+  // parked here and openLedger refuses to re-open it until the condition lapses for at least one
+  // full build. Without this, one persistent episode (a premium dislocation across a closed
+  // weekend, a big move firing all day) resolves and re-opens serially — pseudo-replication that
+  // inflates n and over-feeds the blend. One episode, one claim. Applies to shadows too.
+  const rearm = new Set(), firedNow = new Set();
   // ---- shadow variants: bounded self-improvement --------------------------------------------
   // Each gated event carries 2-3 candidate thresholds. Only the INCUMBENT emits visible signals;
   // every variant (incumbent included) silently ledgers shadow claims on identical bookkeeping,
@@ -732,6 +749,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     if (!d) return;
     if (Array.isArray(d.open)) for (const e of d.open) if (e && e.key) ledgerOpen.set(e.key, e);
     if (Array.isArray(d.closed)) ledgerClosed = d.closed.slice(-4000);
+    if (Array.isArray(d.rearm)) for (const k of d.rearm) if (typeof k === "string") rearm.add(k);
     if (d.variants) for (const ev in variantState)
       if (d.variants[ev] && Number.isInteger(d.variants[ev].inc) && d.variants[ev].inc >= 0 && d.variants[ev].inc < VARIANTS[ev].vals.length)
         variantState[ev] = { inc: d.variants[ev].inc, hist: Array.isArray(d.variants[ev].hist) ? d.variants[ev].hist.slice(-20) : [] };
@@ -739,7 +757,7 @@ function createPoller({ dex, store, log, version, crypto }) {
   }
   function persistLedger() {
     if (!ledgerDirty) return;
-    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState });
+    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm] });
     ledgerDirty = false;
   }
   function resolveAtFor(ev, t0) {
@@ -758,6 +776,10 @@ function createPoller({ dex, store, log, version, crypto }) {
       ? +(Math.abs(sigEntry.play.target / r.px - 1) * 100).toFixed(2) : null;
     const stp = vi == null && sigEntry.play && sigEntry.play.stop != null && sigEntry.play.stop > 0
       ? +(+sigEntry.play.stop).toPrecision(6) : null;   // void level frozen at fire — the stop-aware track resolves against it
+    const psd = vi == null && sigEntry.play && (sigEntry.play.side === "long" || sigEntry.play.side === "short")
+      ? sigEntry.play.side : null;   // trade side per the playbook; e.dir is the EVENT sign (a gap-fader's dir is the gap, not the trade)
+    firedNow.add(key);
+    if (rearm.has(key)) return null;   // episode already scored — wait for the condition to lapse
     let e = ledgerOpen.get(key);
     if (!e) {
       const t0 = Date.now();
@@ -767,7 +789,7 @@ function createPoller({ dex, store, log, version, crypto }) {
         score0: sigEntry.score, reading0: sigEntry.reading,
         claim: sigEntry.study || null,
         resolveAt: resolveAtFor(ev, Date.now()),
-      }, vi != null ? { vi } : null, mv != null ? { mv } : null, stp != null ? { stp } : null, extra || {});
+      }, vi != null ? { vi } : null, mv != null ? { mv } : null, stp != null ? { stp } : null, psd ? { psd } : null, extra || {});
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -795,7 +817,11 @@ function createPoller({ dex, store, log, version, crypto }) {
           // stop-disciplined outcome is the (dir-signed) stop distance instead of the at-horizon
           // move. Same units as `realized`. Claims without a stop keep realizedS === realized.
           if (e.vi == null && e.stp != null) {
-            const touched = stopTouched(hs, e.t0, e.resolveAt, e.dir, e.stp);
+            // The touch side follows where the stop SITS relative to entry, not e.dir: a proven
+            // gap-FADER's void lies in the continuation direction (above entry on an up-gap,
+            // dir=+1) — keying on e.dir would call the stop "touched" on the first candle.
+            const below = e.stp < (e.mark0 || p0);
+            const touched = stopTouched(hs, e.t0, e.resolveAt, below ? 1 : -1, e.stp);
             if (touched === true) { e.stopped = true; e.realizedS = +((e.dir >= 0 ? 1 : -1) * (e.stp / p0 - 1) * 100).toFixed(2); }
             else if (touched === false) { e.stopped = false; e.realizedS = realized; }
           }
@@ -806,13 +832,14 @@ function createPoller({ dex, store, log, version, crypto }) {
         }
       }
       if (realized == null) {
-        if (now > e.resolveAt + 2 * DAY) { e.status = "void"; ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true; }
+        if (now > e.resolveAt + 2 * DAY) { e.status = "void"; ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true; rearm.add(key); }
         continue;
       }
       if (e.realizedS == null && e.vi == null) e.realizedS = realized;   // no stop / unknowable touch -> tracks coincide
       e.status = "resolved"; e.realized = realized; e.win = realized > 0; e.tR = now;
       if (e.realizedS != null) e.winS = e.realizedS > 0;
       ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true;
+      rearm.add(key);   // no re-entry until the condition lapses for a full build
     }
     if (ledgerClosed.length > 4000) ledgerClosed = ledgerClosed.slice(-4000);
     if (ledgerDirty) recomputeRecord();
@@ -863,7 +890,8 @@ function createPoller({ dex, store, log, version, crypto }) {
     const buckets = [{ k: "<35", lo: 0, hi: 35 }, { k: "35\u201354", lo: 35, hi: 55 }, { k: "55+", lo: 55, hi: 1e9 }]
       .map((b) => { const v = res.filter((e) => Number.isFinite(e.score0) && e.score0 >= b.lo && e.score0 < b.hi); return { k: b.k, n: v.length, hit: hitOf(v) }; });
     const side = { long: null, short: null };
-    { const L = res.filter((e) => e.dir >= 0), S = res.filter((e) => e.dir < 0);
+    { const sOf = (e) => e.psd ? (e.psd === "long" ? 1 : -1) : (e.dir >= 0 ? 1 : -1);
+      const L = res.filter((e) => sOf(e) > 0), S = res.filter((e) => sOf(e) < 0);
       side.long = { n: L.length, hit: hitOf(L) }; side.short = { n: S.length, hit: hitOf(S) }; }
     const byT = {};
     for (const e of res) { const b = byT[e.ticker] || (byT[e.ticker] = { n: 0, w: 0 }); b.n++; if (e.win) b.w++; }
@@ -885,8 +913,13 @@ function createPoller({ dex, store, log, version, crypto }) {
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "fundflip"]);
   function recomputeRecord() {
-    const resolved = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null);
+    // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
+    // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
+    // the claimed column, the curve, and the blend — so they are excluded from ALL aggregates.
+    const unitOk = (e) => !R_LEDGER_EVS.has(e.ev) || e.sd0 > 0;
+    const resolved = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null && unitOk(e));
     const openReal = [...ledgerOpen.values()].filter((e) => e.vi == null);
     recordSets = {};
     for (const t of MV_THRESHOLDS) for (const pr of [false, true]) {
@@ -979,6 +1012,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     }
   }
   function buildSignals() {
+    firedNow.clear();
     resolveLedger();
     checkPromotions();
     const out = [], now = Date.now();
@@ -1180,6 +1214,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     const top = kept.slice(0, 40);
     const sig = top.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",");
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
+    for (const k of rearm) if (!firedNow.has(k)) rearm.delete(k);   // condition lapsed -> episode over, key re-armed
     const variants = Object.keys(VARIANTS).map((ev) => ({
       ev, param: VARIANTS[ev].param, unit: unitOf(ev), cur: incVal(ev),
       vals: VARIANTS[ev].vals.map((v, vi) => Object.assign({ v, inc: vi === variantState[ev].inc },
@@ -1618,6 +1653,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     getFunding,
     getCandles,
     getSignals: () => signalsCache,
+    pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     persistFeatures,
     persistLedger: () => { ledgerDirty = true; persistLedger(); },
     // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
