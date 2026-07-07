@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
-  studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip, retStd, dailyRets,
+  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, retStd, dailyRets,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
@@ -703,6 +703,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     if (closes && closes.length >= 40) {
       st.bigmove = studyBigMove(closes);
       st.breakout = studyBreakout(closes);
+      st.breakdown = studyBreakdown(closes);
       if (closes.length >= 140) st.volshift = studyVolShift(closes);
     }
     const hs = getHourly(r.coin);
@@ -738,11 +739,12 @@ function createPoller({ dex, store, log, version, crypto }) {
     gap:      { param: "gate \u03c3\u2265", vals: [0.5, 0.75, 1] },
     squeeze:  { param: "score\u2265", vals: [50, 60, 70] },
     fundflip: { param: "run\u2265", vals: [2, 3, 5] },
+    unwind:   { param: "score\u2265", vals: [50, 60, 70] },
   };
-  let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] } };
+  let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const unitOf = (ev) => ev === "prem" ? "bp" : (ev === "bigmove" || ev === "breakout" || ev === "fundflip" || ev === "volshift" ? "R" : "%");
+  const unitOf = (ev) => ev === "prem" ? "bp" : (ev === "bigmove" || ev === "breakout" || ev === "breakdown" || ev === "fundflip" || ev === "volshift" ? "R" : "%");
   const seenAt = new Map();   // coin|ev -> first-seen ms, for events with no ledger entry (no directional claim)
   function hydrateLedger() {
     const d = store.loadLedger();
@@ -913,7 +915,7 @@ function createPoller({ dex, store, log, version, crypto }) {
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "fundflip"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1035,6 +1037,7 @@ function createPoller({ dex, store, log, version, crypto }) {
       const ac = acOf(r);
       if (st.bigmove && st.bigmove.raw) { feed(ac, "bigmove", "d1", st.bigmove.raw.d1); }
       if (st.breakout && st.breakout.raw) { feed(ac, "breakout", "d5", st.breakout.raw.d5); }
+      if (st.breakdown && st.breakdown.raw) { feed(ac, "breakdown", "d5", st.breakdown.raw.d5); }
       if (st.volshift && st.volshift.raw) { feed(ac, "volshift", "d5", st.volshift.raw.d5); }
       if (st.gap && st.gap.raw) { feed(ac, "gap", "session", st.gap.raw.session); }
       if (st.fundflip && st.fundflip.raw) { feed(ac, "fundflip", "d3", st.fundflip.raw.d3); }
@@ -1072,6 +1075,16 @@ function createPoller({ dex, store, log, version, crypto }) {
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
             sig.play = playbook("breakout", { px: r.px, level: hi, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
           out.push(sig); if (sd30 > 0) openLedger(r, "breakout", sig, 1, { sd0: +sd30.toFixed(3) });
+        }
+        let lo = Infinity;
+        for (let j = closes.length - 31; j < closes.length - 1; j++) if (closes[j][1] < lo) lo = closes[j][1];
+        if (isFinite(lo) && lo > 0 && r.px < lo && closes[closes.length - 2][1] >= lo) {
+          const evd = evidence(st.breakdown && st.breakdown.d5, "breakdown", pooledFor(ac, "breakdown", "d5"), "R");
+          const sig = mkSignal(r, "breakdown", `mark ${((1 - r.px / lo) * 100).toFixed(1)}% below the prior 30d low`,
+            ((1 - r.px / lo) * 100) * 12 + 15, evd, { horizon: EV_META.breakdown.horizon });
+          { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
+            sig.play = playbook("breakdown", { px: r.px, level: lo, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+          out.push(sig); if (sd30 > 0) openLedger(r, "breakdown", sig, -1, { sd0: +sd30.toFixed(3) });
         }
       }
       if (rets.length >= 130) {
@@ -1137,6 +1150,22 @@ function createPoller({ dex, store, log, version, crypto }) {
               (sqz - incVal("squeeze")) * 1.1 + 15, evd, { horizon: EV_META.squeeze.horizon });
             sig.play = playbook("squeeze", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
             out.push(sig); openLedger(r, "squeeze", sig, 1);
+          }
+        }
+        // Bearish mirror: crowded LONGS paying + OI building + price near range LOWS.
+        const crowdL = fAPR > 0 ? Math.tanh(fAPR / 35) : 0;
+        if (crowdL > 0) {
+          const fuel = doi && doi.d7 != null ? Math.tanh(Math.max(0, doi.d7) / 8) : 0;
+          let trigL = 0.5;
+          if (f && f.hi30 > f.lo30 && r.px != null) trigL = 1 - Math.min(1, Math.max(0, (r.px - f.lo30) / (f.hi30 - f.lo30)));
+          const unw = Math.round(100 * crowdL * (0.45 + 0.30 * fuel + 0.25 * trigL));
+          VARIANTS.unwind.vals.forEach((v, vi) => { if (unw >= v) openLedger(r, "unwind", { score: 0, reading: "" }, -1, null, vi); });
+          if (unw >= incVal("unwind")) {
+            const evd = evidence(null, "unwind", null, "%");
+            const sig = mkSignal(r, "unwind", `score ${unw} \u2014 longs paying ${fAPR.toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
+              (unw - incVal("unwind")) * 1.1 + 15, evd, { horizon: EV_META.unwind.horizon });
+            sig.play = playbook("unwind", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
+            out.push(sig); openLedger(r, "unwind", sig, -1);
           }
         }
       }

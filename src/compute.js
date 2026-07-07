@@ -403,6 +403,23 @@ function studyBreakout(closes) {
   }
   return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
 }
+// 30d-low breakdown: close crosses below the min of the prior 30 closes — the bearish mirror
+// of the breakout study. Outcomes are signed WITH the breakdown (positive = continued lower),
+// matching the ledger's dir=-1 convention, so "hit" means the breakdown followed through.
+function studyBreakdown(closes) {
+  const rets = dailyRets(closes), d1 = [], d5 = [];
+  for (let i = 31; i < closes.length; i++) {
+    let lo = Infinity;
+    for (let j = i - 30; j < i; j++) if (closes[j][1] < lo) lo = closes[j][1];
+    if (!(closes[i][1] < lo) || closes[i - 1][1] < lo) continue;   // first cross only
+    const sd = sdAt(rets, i - 1);
+    if (sd == null || sd <= 0) continue;
+    const f1 = fwdRet(closes, i, 1), f5 = fwdRet(closes, i, 5);
+    if (f1 != null) d1.push(+(-f1 / sd).toFixed(3));
+    if (f5 != null) d5.push(+(-f5 / sd).toFixed(3));
+  }
+  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
+}
 // Vol-regime shift: 10d realized vol crossing above the 90th percentile of its trailing 120
 // observations. Forward 5d return (does an expansion resolve up or down for this market?).
 function studyVolShift(closes) {
@@ -476,6 +493,8 @@ const EV_META = {
   gap:      { horizonMs: null,     horizon: "next cash session, signed with the gap", studyKey: "session" },  // resolveAt = next session close
   fundflip: { horizonMs: 3 * DAY,  horizon: "next 3d, toward the new crowd",  studyKey: "d3" },
   squeeze:  { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
+  breakdown:{ horizonMs: 5 * DAY,  horizon: "next 5d, signed with the breakdown", studyKey: "d5" },
+  unwind:   { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
   prem:     { horizonMs: 12 * HOUR, horizon: "reversion toward oracle",       studyKey: null },
   volume:   { horizonMs: null,     horizon: "context flag",                   studyKey: null },
 };
@@ -514,6 +533,20 @@ function playbook(ev, ctx) {
       return { side: "watch", bias: "gap behavior unproven on this market \u2014 watch the open",
         target: null, stop: null,
         watch: "which way the first cash hour resolves; the pooled asset-class record is the prior until this market has its own" };
+    }
+    case "breakdown":
+      return { side: "short", bias: "continuation while below the breakdown level",
+        target: f2(ctx.px * (1 - Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        stop: f2(ctx.level),
+        watch: "a close back above the prior 30d low = failed breakdown, the signal is void" };
+    case "unwind": {
+      // Bearish mirror of the squeeze: crowded LONGS paying funding + OI building + price near
+      // range LOWS. Target extends BELOW the range for the same reason squeeze extends above it.
+      const rngU = ctx.hi30 != null && ctx.lo30 != null ? ctx.hi30 - ctx.lo30 : null;
+      return { side: "short", bias: "unwind-biased while longs keep paying AND \u0394OI holds",
+        target: f2(rngU != null ? ctx.lo30 - 0.382 * rngU : null),
+        stop: f2(rngU != null ? ctx.hi30 - 0.25 * rngU : null),
+        watch: "\u0394OI(7d) rolling negative = longs already liquidating; funding flipping negative = the crowd has left \u2014 the setup is spent" };
     }
     case "fundflip":
       return { side: ctx.dir >= 0 ? "long" : "short",
@@ -836,5 +869,5 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched,
+  EV_META, playbook, shouldPromote, stopTouched, studyBreakdown,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
