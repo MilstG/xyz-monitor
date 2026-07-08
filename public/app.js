@@ -1012,56 +1012,96 @@ async function loadDrawerSeries(coin){
     box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:12px">collecting — the trend appears here as history accrues server-side</div>';
   }catch(_){}
 }
-// Per-ticker signal history — every visible claim the engine ever fired on this name, from
-// /api/ledger. Open claims show their countdown; resolved claims show the outcome in the unit
-// they resolved in (R for sigma-united events, % / bp otherwise; pre-epoch legacy entries are
-// labeled rather than silently mixed). Read-only audit trail: what the engine said, when, and
-// what happened.
+// ===== per-ticker signal record (drawer) + full history (Signals tab search) =====
+// The drawer shows only the compact record — hit rate, per-event fractions, open count — so it
+// stays scannable; the full claim-by-claim audit trail lives behind the ticker search on the
+// Signals tab (openSigHistory deep-links there). Both read /api/ledger. Outcomes are signed
+// with the claim, in the unit each claim resolved in (R for sigma-united events, % / bp
+// otherwise); pre-epoch legacy entries are labeled rather than silently mixed.
+function shDate(t){ try{ return new Date(t).toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+new Date(t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}); }catch(_){ return ''; } }
+function shVal(v,unit){ if(v==null) return '<span class="na">\u2014</span>';
+  const s=(v>=0?'+':'')+(unit==='bp'?v.toFixed(0):v.toFixed(2))+(unit==='R'?'R':unit);
+  return `<span class="${v>0?'pos':'neg'}">${s}</span>`; }
+function shLeft(resolveAt){ const left=resolveAt-Date.now(); return left>0?(left>=86400000?(left/86400000).toFixed(1)+'d':(left/3600000).toFixed(0)+'h'):'due'; }
 async function loadDrawerLedger(coin){
   const box=el('dledger'); if(!box) return;
   try{
     const d=await fetchJSON('/api/ledger?coin='+encodeURIComponent(coin));
     if(state.detail!==coin || !box.isConnected) return;
-    const total=(d.open?d.open.length:0)+(d.closed?d.closed.length:0);
-    if(!total){ box.innerHTML=''; return; }   // nothing ever fired here — the drawer just omits the section
-    const dt=t=>{ try{ return new Date(t).toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+new Date(t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}); }catch(_){ return ''; } };
-    const val=(v,unit)=>{ if(v==null) return '<span class="na">\u2014</span>';
-      const s=(v>=0?'+':'')+(unit==='bp'?v.toFixed(0):v.toFixed(2))+(unit==='R'?'R':unit);
-      return `<span class="${v>0?'pos':'neg'}">${s}</span>`; };
-    const sideChip=s=>s==='long'?'<span class="pos" style="font-size:10px">LONG</span>':s==='short'?'<span class="neg" style="font-size:10px">SHORT</span>':'';
-    const row=(e)=>{
-      const flags=(e.pr?' <span data-tip="fired as a \u2605 prime-quality claim">\u2605</span>':'')
-        +(e.conf?' <span data-tip="fired WITH same-side company on this name (confluence)" style="color:var(--blue)">\u29c9</span>':'')
-        +(e.legacy?' <i class="sig-unp" data-tip="resolved before sigma-normalization \u2014 outcome is in raw % and excluded from the R aggregates">legacy %</i>':'');
-      if(e.status==='open'){
-        const left=e.resolveAt-Date.now(), lh=left>0?(left>=86400000?(left/86400000).toFixed(1)+'d':(left/3600000).toFixed(0)+'h'):'due';
-        return `<div class="crow" data-tip="${esc(`fired ${dt(e.t0)} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire \u00b7 mark ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'}${e.claimMed!=null?` \u00b7 claimed med ${(e.claimMed>=0?'+':'')+e.claimMed.toFixed(2)}${e.unit}`:''} \u00b7 resolves in ${lh}`)}">`+
-          `<span class="ct" style="width:118px">${esc(e.label)}</span>${sideChip(e.side)}`+
-          `<span class="sec" style="font-size:10.5px;margin-left:auto">${dt(e.t0)}</span>`+
-          `<span class="sec" style="width:76px;text-align:right;font-size:10.5px" data-tip="claim is on the books \u2014 resolves at its stated horizon">open \u00b7 ${lh}</span></div>`;
-      }
-      if(e.status==='void')
-        return `<div class="crow" data-tip="${esc(`fired ${dt(e.t0)} \u00b7 could not be resolved (no usable price at horizon) \u2014 scored as void, excluded from the record`)}">`+
-          `<span class="ct" style="width:118px">${esc(e.label)}</span>${sideChip(e.side)}`+
-          `<span class="sec" style="font-size:10.5px;margin-left:auto">${dt(e.t0)}</span>`+
-          `<span class="na" style="width:76px;text-align:right;font-size:10.5px">void</span></div>`;
-      const stopNote=e.realizedS!=null&&e.realizedS!==e.realized?` \u00b7 stop-aware ${(e.realizedS>=0?'+':'')+e.realizedS.toFixed(2)}${e.unit}${e.stopped?' (stopped en route)':''}`:'';
-      return `<div class="crow" data-tip="${esc(`fired ${dt(e.t0)} \u00b7 resolved ${dt(e.tR)} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire \u00b7 mark ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'}${e.claimMed!=null?` \u00b7 claimed med ${(e.claimMed>=0?'+':'')+e.claimMed.toFixed(2)}${e.unit}`:''}${stopNote} \u00b7 outcome is signed with the claim: positive = it went the way the signal implied`)}">`+
-        `<span class="ct" style="width:118px">${esc(e.label)}${flags}</span>${sideChip(e.side)}`+
-        `<span class="sec" style="font-size:10.5px;margin-left:auto">${dt(e.t0)}</span>`+
-        `<span style="width:76px;text-align:right">${val(e.realized,e.unit)}${e.stopped?' <span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':''}</span></div>`;
-    };
+    const res=d.closed.filter(e=>e.status==='resolved'), open=d.open.length;
+    if(!res.length&&!open&&!d.closed.length){ box.innerHTML=''; return; }   // nothing ever fired here
+    const wins=res.filter(e=>e.win).length;
+    const per={}; for(const e of res){ const b=per[e.ev]||(per[e.ev]={n:0,w:0,label:e.label}); b.n++; if(e.win)b.w++; }
+    const chips=Object.keys(per).sort((a,b)=>per[b].n-per[a].n).map(ev=>{ const b=per[ev];
+      return `<span class="sigrec-chip" data-tip="${esc(`${b.label}: ${b.w} of ${b.n} resolved claim${b.n===1?'':'s'} on this name went the way the signal implied`)}">${esc(b.label)} <b class="${b.w/b.n>=0.5?'pos':'neg'}">${b.w}/${b.n}</b></span>`; }).join('');
+    const head=res.length?`<b class="${wins/res.length>=0.5?'pos':'neg'}">${Math.round(100*wins/res.length)}%</b> hit <span style="color:var(--faint)">(n=${res.length})</span>`:'<span class="sec">no resolutions yet</span>';
+    const canJump=state.scope!=='crypto';
+    box.innerHTML=`<div class="dsec" data-tip="out-of-sample record of every visible claim the engine ever fired on this name \u2014 hit = share of resolved claims that went the way the signal implied. The claim-by-claim history lives behind the ticker search on the Signals tab.">Signal record</div>`
+      +`<div class="dsplit" style="flex-wrap:wrap">`
+      +`<span>${head}</span>`
+      +(open?`<span data-tip="claims on the books, awaiting their horizon">open <b>${open}</b></span>`:'')
+      +(canJump?`<span id="dledger-full" class="sec" style="cursor:pointer;font-size:11px;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Signals tab with this ticker\u2019s full claim-by-claim history loaded">full history \u2192</span>`:'')
+      +`</div>`
+      +(chips?`<div class="dsplit" style="flex-wrap:wrap;gap:6px">${chips}</div>`:'');
+    const fb=el('dledger-full');
+    if(fb) fb.onclick=()=>{ const t=d.ticker||coin; closeDetail(); openSigHistory(t); };
+  }catch(_){ box.innerHTML=''; }
+}
+// Full history panel on the Signals tab, driven by the static #sighist-q search input.
+let _shSeq=0, _shTimer=null;
+function sigHistRow(e){
+  const side=e.side==='long'?'<span class="pos">LONG</span>':e.side==='short'?'<span class="neg">SHORT</span>':'<span class="sec">\u2014</span>';
+  const flags=(e.pr?' <span data-tip="fired as a \u2605 prime-quality claim">\u2605</span>':'')
+    +(e.conf?' <span data-tip="fired WITH same-side company on this name (confluence)" style="color:var(--blue)">\u29c9</span>':'')
+    +(e.legacy?' <i class="sig-unp" data-tip="resolved before sigma-normalization \u2014 outcome is in raw % and excluded from the R aggregates">legacy %</i>':'');
+  const tip=`fired ${shDate(e.t0)} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire \u00b7 mark ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'}`
+    +(e.claimMed!=null?` \u00b7 claimed med ${(e.claimMed>=0?'+':'')+e.claimMed.toFixed(2)}${e.unit}`:'')
+    +(e.status==='resolved'?' \u00b7 outcome is signed with the claim: positive = it went the way the signal implied':'');
+  if(e.status==='open')
+    return `<tr data-tip="${esc(tip+` \u00b7 resolves in ${shLeft(e.resolveAt)}`)}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${shDate(e.t0)}</td><td class="sec">in ${shLeft(e.resolveAt)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="sec">open</td><td></td></tr>`;
+  if(e.status==='void')
+    return `<tr data-tip="${esc(tip+' \u00b7 could not be resolved (no usable price at horizon) \u2014 excluded from the record')}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${shDate(e.t0)}</td><td>${shDate(e.tR||e.t0)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="na">void</td><td></td></tr>`;
+  const sa=e.realizedS!=null&&e.realizedS!==e.realized
+    ?`${shVal(e.realizedS,e.unit)}${e.stopped?' <span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':''}`
+    :(e.stopped?'<span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':'<span class="sec">\u2014</span>');
+  return `<tr data-tip="${esc(tip)}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${shDate(e.t0)}</td><td>${shDate(e.tR)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td>${shVal(e.realized,e.unit)}</td><td>${sa}</td></tr>`;
+}
+async function loadSigHistory(coin,ticker){
+  const p=el('sighist-panel'); if(!p) return;
+  const seq=++_shSeq;
+  p.hidden=false; p.innerHTML='<div class="msg">Loading\u2026</div>';
+  try{
+    const d=await fetchJSON('/api/ledger?coin='+encodeURIComponent(coin));
+    if(seq!==_shSeq||!p.isConnected) return;
     const res=d.closed.filter(e=>e.status==='resolved'), wins=res.filter(e=>e.win).length;
     const rec=res.length?` \u00b7 <b class="${wins/res.length>=0.5?'pos':'neg'}">${Math.round(100*wins/res.length)}%</b> hit <span style="color:var(--faint)">(n=${res.length})</span>`:'';
-    const LIM=12, more=d.closed.length>LIM;
-    let html=`<div class="dsec" data-tip="every visible claim the engine ever fired on this name \u2014 the per-ticker audit trail behind the aggregate record. Outcomes are signed with the claim (positive = followed through) in the unit the study claims. Hover a row for the full story.">Signal history${rec}</div>`;
-    html+=d.open.map(row).join('');
-    html+=d.closed.slice(0,LIM).map(row).join('');
-    if(more) html+=`<div class="crow dledger-more" style="cursor:pointer"><span class="sec" style="font-size:11px">show ${d.closed.length-LIM} more\u2026</span></div>`;
-    box.innerHTML=html;
-    const mb=box.querySelector('.dledger-more');
-    if(mb) mb.onclick=()=>{ mb.outerHTML=d.closed.slice(LIM).map(row).join(''); };
-  }catch(_){ box.innerHTML=''; }
+    const rows=d.open.map(sigHistRow).join('')+d.closed.map(sigHistRow).join('');
+    p.innerHTML=`<div class="cp-head">${esc(d.ticker||ticker)} <span class="sec" style="font-weight:400">\u2014 signal history${rec}${d.open.length?` \u00b7 ${d.open.length} open`:''}</span> <button class="btn xtiny" id="sighist-close" title="close" style="float:right">\u2715</button></div>`
+      +(rows?`<table class="sigrec-t"><thead><tr><th>event</th><th>side</th><th data-tip="when the claim was fired (your local time)">fired</th><th data-tip="when it reached its horizon and was scored \u00b7 open claims show time remaining">resolved</th><th data-tip="signal score at fire time">score</th><th data-tip="at-horizon outcome, signed with the claim (positive = followed through), in the unit the study claims">outcome</th><th data-tip="stop-aware outcome: capped at the frozen void level when it was touched before horizon \u00b7 \u2014 when it coincides with at-horizon">\u26d4</th></tr></thead><tbody>${rows}</tbody></table>`
+      :`<div class="sec" style="font-size:11.5px;padding:6px 2px">No claims ever fired on ${esc(d.ticker||ticker)} \u2014 the history starts with its first signal.</div>`);
+    const cb=el('sighist-close'); if(cb) cb.onclick=()=>{ p.hidden=true; const q=el('sighist-q'); if(q) q.value=''; };
+  }catch(_){ if(seq===_shSeq) p.innerHTML='<div class="msg">Could not load the history \u2014 try again.</div>'; }
+}
+function sigHistQuery(q){
+  const p=el('sighist-panel'); if(!p) return;
+  q=(q||'').trim().toUpperCase();
+  if(!q){ p.hidden=true; return; }
+  const cand=[]; let exact=null;
+  for(const r of state.rows.values()){ if(r.delisted||!inScope(r)) continue; const t=(r.ticker||'').toUpperCase();
+    if(t===q){ exact=r; break; } if(t.startsWith(q)) cand.push(r); }
+  const pick=exact||(cand.length===1?cand[0]:null);
+  if(pick){ loadSigHistory(pick.coin, pick.ticker); return; }
+  p.hidden=false;
+  p.innerHTML=cand.length
+    ? `<div class="cp-head">matches <span class="sec" style="font-weight:400">\u2014 pick a ticker</span></div><div class="dsplit" style="flex-wrap:wrap;gap:6px">${cand.slice(0,12).map(r=>`<span class="sigrec-chip" style="cursor:pointer" data-shc="${esc(r.coin)}" data-sht="${esc(r.ticker)}">${esc(r.ticker)}</span>`).join('')}</div>`
+    : `<div class="sec" style="font-size:11.5px;padding:6px 2px">No ticker matching \u201c${esc(q)}\u201d in this scope.</div>`;
+  p.querySelectorAll('[data-shc]').forEach(c=>c.addEventListener('click',()=>{ const qi=el('sighist-q'); if(qi) qi.value=c.dataset.sht; loadSigHistory(c.dataset.shc, c.dataset.sht); }));
+}
+function openSigHistory(ticker){
+  showView('signals');
+  const q=el('sighist-q'); if(q) q.value=ticker;
+  sigHistQuery(ticker);
+  const p=el('sighist-panel'); if(p) try{ p.scrollIntoView({block:'nearest'}); }catch(_){}
 }
 function closeDetail(){ state.detail=null; el('drawer').classList.remove('show'); el('drawerbg').classList.remove('show'); el('drawer').setAttribute('aria-hidden','true'); setHash(state.view==='markets'?'':state.view); }
 function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); else state.watch.add(coin); savePrefs(); render(); }
@@ -2750,6 +2790,8 @@ document.querySelectorAll('#corrn button').forEach(b=>{ if(+b.dataset.n===state.
 document.querySelectorAll('#corrtop button').forEach(b=>{ if(+b.dataset.k===state.corr.topPairs)b.classList.add('active');
   b.addEventListener('click',()=>{ state.corr.topPairs=+b.dataset.k; document.querySelectorAll('#corrtop button').forEach(x=>x.classList.toggle('active',x===b)); renderCorrPairs(); }); });
 let corrSearchT=null;
+{ const shq=el('sighist-q');   // ticker-history search on the Signals tab (static markup — survives signals-body re-renders)
+  if(shq) shq.addEventListener('input',e=>{ clearTimeout(_shTimer); _shTimer=setTimeout(()=>sigHistQuery(e.target.value),250); }); }
 el('corrsearch').addEventListener('input',e=>{ state.corr.search=e.target.value; state.corr.selected=null; state.corr.pair=null;
   clearTimeout(corrSearchT); corrSearchT=setTimeout(()=>{ if(!el('view-corr').hidden) openCorr(); },300); });
 el('mktExport').addEventListener('click', exportMarkets);
