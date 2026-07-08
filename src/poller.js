@@ -774,6 +774,24 @@ function createPoller({ dex, store, log, version, crypto }) {
     if (!d) return;
     if (Array.isArray(d.open)) for (const e of d.open) if (e && e.key) ledgerOpen.set(e.key, e);
     if (Array.isArray(d.closed)) ledgerClosed = d.closed.slice(-4000);
+    // Unit repair: breakdown/oiflush/fpdiv claims resolved before the normalization fix carry
+    // raw-% outcomes despite an R-united claim — sd0 was stamped at fire but never applied at
+    // resolution. sd0 survives on the entry, so the stored record is repaired in place rather
+    // than discarded. Scoped to exactly these three events (the original three were always
+    // normalized, just never rn-stamped) and keyed on the rn marker, so it is idempotent
+    // across boots and inert once every stored entry has passed through.
+    {
+      const REPAIR_EVS = new Set(["breakdown", "oiflush", "fpdiv"]);
+      let repaired = 0;
+      for (const e of ledgerClosed) {
+        if (!REPAIR_EVS.has(e.ev) || e.rn || !(e.sd0 > 0) || e.status !== "resolved" || !Number.isFinite(e.realized)) continue;
+        e.realized = +(e.realized / e.sd0).toFixed(2);
+        if (e.realizedS != null) e.realizedS = e.stopped ? +(e.realizedS / e.sd0).toFixed(2) : e.realized;
+        e.win = e.realized > 0; if (e.realizedS != null) e.winS = e.realizedS > 0;
+        e.rn = 1; repaired++;
+      }
+      if (repaired) { ledgerDirty = true; log(`Ledger unit repair: sigma-normalized ${repaired} stored breakdown/oiflush/fpdiv outcome(s) to R`); }
+    }
     if (Array.isArray(d.rearm)) for (const k of d.rearm) if (typeof k === "string") rearm.add(k);
     if (d.variants) for (const ev in variantState)
       if (d.variants[ev] && Number.isInteger(d.variants[ev].inc) && d.variants[ev].inc >= 0 && d.variants[ev].inc < VARIANTS[ev].vals.length)
@@ -784,6 +802,41 @@ function createPoller({ dex, store, log, version, crypto }) {
     if (!ledgerDirty) return;
     store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm] });
     ledgerDirty = false;
+  }
+  // Per-ticker signal history for the drawer: every VISIBLE claim the engine ever made on one
+  // name — shadow-variant claims (vi) are internal bookkeeping and never surface here. Outcomes
+  // ship in the unit they actually resolved in: R for sd0-stamped R-events (post-repair this is
+  // all of them), legacy % for pre-normalization-epoch entries, which are flagged so the client
+  // can label them honestly instead of mixing units silently.
+  function getLedgerFor(coin) {
+    if (!coin) return { coin: "", ticker: "", open: [], closed: [], ts: Date.now() };
+    const pub = (e, status) => ({
+      ev: e.ev, label: EV_LABEL[e.ev] || e.ev, t0: e.t0,
+      tR: status === "resolved" ? (e.tR || null) : null, status,
+      side: e.psd || (e.dir >= 0 ? "long" : "short"),
+      score0: Number.isFinite(e.score0) ? e.score0 : null,
+      mark0: e.mark0 != null && isFinite(e.mark0) ? e.mark0 : null,
+      mv: e.mv != null ? e.mv : null,
+      pr: e.pr === true, conf: e.conf === true,
+      claimMed: e.claim && Number.isFinite(e.claim.med) ? e.claim.med : null,
+      realized: status === "resolved" && Number.isFinite(e.realized) ? e.realized : null,
+      realizedS: status === "resolved" && e.realizedS != null && isFinite(e.realizedS) ? e.realizedS : null,
+      stopped: e.stopped === true,
+      win: status === "resolved" && Number.isFinite(e.realized) ? e.realized > 0 : null,
+      unit: R_LEDGER_EVS.has(e.ev) ? (e.sd0 > 0 ? "R" : "%") : unitOf(e.ev),
+      legacy: R_LEDGER_EVS.has(e.ev) && !(e.sd0 > 0),   // pre-sigma-epoch: excluded from aggregates, shown here labeled
+      resolveAt: status === "open" ? e.resolveAt : undefined,
+    });
+    let ticker = coin;
+    const open = [], closed = [];
+    for (const e of ledgerOpen.values())
+      if (e.coin === coin && e.vi == null) { open.push(pub(e, "open")); ticker = e.ticker || ticker; }
+    for (const e of ledgerClosed)
+      if (e.coin === coin && e.vi == null) { closed.push(pub(e, e.status === "void" ? "void" : "resolved")); ticker = e.ticker || ticker; }
+    const r = rows.get(coin); if (r && r.ticker) ticker = r.ticker;
+    open.sort((a, b) => b.t0 - a.t0);
+    closed.sort((a, b) => (b.tR || b.t0) - (a.tR || a.t0));
+    return { coin, ticker, open, closed: closed.slice(0, 150), ts: Date.now() };
   }
   function resolveAtFor(ev, t0) {
     if (ev === "gap") {   // resolves at the close of the next cash session after firing
@@ -868,9 +921,16 @@ function createPoller({ dex, store, log, version, crypto }) {
             if (touched === true) { e.stopped = true; e.realizedS = +((e.dir >= 0 ? 1 : -1) * (e.stp / p0 - 1) * 100).toFixed(2); }
             else if (touched === false) { e.stopped = false; e.realizedS = realized; }
           }
-          if ((e.ev === "bigmove" || e.ev === "breakout" || e.ev === "fundflip") && e.sd0 > 0) {
+          // Sigma-normalize EVERY R-united claim: the studies claim in R, so the ledger must
+          // resolve in R. The original condition listed only bigmove/breakout/fundflip —
+          // breakdown/oiflush/fpdiv joined the roster later with sd0 stamped but never applied,
+          // so their raw-% outcomes contaminated the R aggregates, the claim curve, and the
+          // study↔live Bayesian blend. rn=1 marks the entry as resolved-normalized (the epoch
+          // marker the hydrate-time repair of stored entries keys on).
+          if (R_LEDGER_EVS.has(e.ev) && e.sd0 > 0) {
             realized = +(realized / e.sd0).toFixed(2);   // same R units the study claims — claimed vs live stays apples-to-apples
             if (e.realizedS != null) e.realizedS = e.stopped ? +(e.realizedS / e.sd0).toFixed(2) : realized;
+            e.rn = 1;
           }
         }
       }
@@ -1797,6 +1857,8 @@ function createPoller({ dex, store, log, version, crypto }) {
     getFunding,
     getCandles,
     getSignals: () => signalsCache,
+    getLedgerFor,
+    hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
     buildDailyNow: buildDaily,       // harness: populate daily closes so the signals loop has inputs
