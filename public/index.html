@@ -45,6 +45,7 @@
   <button class="tab" data-view="sessions">Sessions</button>
   <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
+  <button class="btn" id="helpBtn" style="align-self:center;padding:6px 12px;font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
 </nav>
 
 <div class="regimestrip" id="regime" hidden></div>
@@ -214,6 +215,8 @@
 
 <div class="drawer-bg" id="drawerbg"></div>
 <aside class="drawer" id="drawer" aria-hidden="true"></aside>
+<div class="help-bg" id="helpbg" hidden></div>
+<div class="help-modal" id="helpmodal" hidden role="dialog" aria-modal="true" aria-label="How to read this tab"></div>
 <div class="toast-wrap" id="toastwrap"></div>
 
 <footer>

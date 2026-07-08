@@ -2009,6 +2009,7 @@ function applyScope(){
 }
 function showView(v){
   if(state.scope==='crypto' && v!=='markets') v='markets';   // crypto scope is Markets-only by design
+  { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
@@ -2834,6 +2835,81 @@ document.querySelectorAll('#corrn button').forEach(b=>{ if(+b.dataset.n===state.
 document.querySelectorAll('#corrtop button').forEach(b=>{ if(+b.dataset.k===state.corr.topPairs)b.classList.add('active');
   b.addEventListener('click',()=>{ state.corr.topPairs=+b.dataset.k; document.querySelectorAll('#corrtop button').forEach(x=>x.classList.toggle('active',x===b)); renderCorrPairs(); }); });
 let corrSearchT=null;
+// ===== per-tab help ("?" in the nav): how to READ each view, not just what it shows =====
+const HELP={
+markets:`
+<div class="hlp-h">The table</div>
+<p>One row per market, one column per lens. The <b>window selector</b> (1h–30d) re-anchors every windowed column at once: <b>vs S&amp;P</b>, <b>ΔOI</b>, <b>Squeeze</b>, <b>Carry</b>, and Avg Range all answer "over this window". Click any header to sort; drag in the column menu (⚙) to reorder or hide. Cell shading scales with the size of the move — a wall of deep red 7d cells IS the market breadth read. <b>★</b> pins a name to the top. Everything deep-links: the URL carries your view, so a layout can be shared.</p>
+<div class="hlp-h">Funding — the crowd's payment</div>
+<p>Annualized APR: <b class="pos">green = longs pay</b> to hold (crowded long), <b class="neg">red = shorts pay</b> (crowded short — squeeze fuel). The ▴/▾ percentile flag fires when today's funding sits at a monthly extreme of that market's <i>own</i> 31d distribution — the crowd is paying near its max, the classic mean-reversion zone. <b>Carry</b> divides window funding by realized vol: how much you're paid per unit of risk just for taking the unpopular side.</p>
+<div class="hlp-h">ΔOI and the regime tag</div>
+<p>Open-interest change answers "is money entering or leaving?" — but only <i>with price</i> does it tell a story. The four tags: <b class="pos">longs+</b> price↑/OI↑ (new money confirming), <b>squeeze</b> price↑/OI↓ (shorts covering, NOT fresh demand), <b class="neg">shorts+</b> price↓/OI↑ (new money pressing lower), <b>unwind</b> price↓/OI↓ (longs deleveraging, not fresh shorting). Hover for conviction and whether funding corroborates the story. Caveat that matters: OI is symmetric — long/short attribution is always an inference, never an observation.</p>
+<div class="hlp-h">Momentum, levels, structure</div>
+<p><b>Momentum</b> (−100…+100) is self-normalizing: risk-adjusted multi-horizon returns × trend quality, tilted by range position, modulated by OI conviction — comparable across a quiet FX pair and a violent pre-IPO synthetic. The ● dot means volume above the market's own norm. <b>vs 30d hi / vs YTD hi</b> are distance below the high (0% = at it now). <b>Y open / M open</b> show the level the period opened at — on a 24/7 perp that IS the prior day's close — green when price is above. MAs are daily-close SMAs; dashes are honest (not enough history), never fabricated.</p>
+<div class="hlp-h">Prem and Gap — the off-hours edge</div>
+<p><b>Prem</b> is the perp vs oracle dislocation in bp. When the cash market is <i>closed</i>, the oracle freezes near the last print — so a persistent premium or discount is the live off-hours price discovery, and the tradeable reversion. <b>Gap</b> is the last close→open move (live while the market is closed); its hover carries the cumulative 30d off-hours drift — a persistent sign there is the overnight effect.</p>
+<div class="hlp-h">Squeeze &amp; OI/Vol</div>
+<p><b>Squeeze</b> (0–100) is how loaded the spring is: crowding (shorts paying) × fuel (OI building) × trigger (price pressing the 30d high). Zero whenever funding is positive — no crowded shorts, no squeeze. <b>OI/Vol</b> is standing positioning ÷ daily flow: ≥2× means stale, crowded positioning that can't exit quickly — fragile to squeezes and unwinds. High squeeze + negative funding + rising OI + high OI/Vol is the full configuration.</p>
+<div class="hlp-h">Crypto scope</div>
+<p>The Stocks|Crypto switch is a hard wall: separate universes, separate benchmark (BTC, not S&amp;P), no mixing anywhere. Crypto adds the tape strip up top — <b>crowd pays</b> (OI-weighted funding APR: euphoria tax vs squeeze fuel), <b>breadth</b>, total OI with its weighted delta, BTC's day, and the alt-season gauge. Session concepts (gap) vanish: a 24/7 market has none. Crypto history is 31d by design, so long MAs and YTD columns show honest dashes.</p>`,
+sectors:`
+<div class="hlp-h">Flow map (default)</div>
+<p>Each bubble is a sector. <b>Horizontal = capital direction</b>: a blend of return and OI-conviction — right means money flowing in <i>with</i> conviction, left means flowing out. <b>Vertical = heat</b>: activity from volume and volatility. So <b>top-right = accumulation</b> (in, loudly), <b>top-left = distribution</b> (out, loudly), and the bottom half is simply quiet. Bubble size = 24h volume. Click a bubble for the sector's members.</p>
+<div class="hlp-h">Leadership map</div>
+<p>Positioning vs the S&amp;P over the window. <b>Right of center = beating it, left = behind</b>. <b>Up = the lead is growing, down = shrinking</b>. That yields four regimes: <b class="pos">Leaders</b> (ahead &amp; pulling away), <b>Catching up</b> (behind but gaining — early rotation candidates), <b>Cooling</b> (ahead but fading — where leadership goes to die), <b class="neg">Laggards</b>. The interesting cells are the off-diagonal ones: a sector migrating from Catching-up toward Leaders is rotation happening in front of you. Intraday windows floor to 7d — leadership needs multi-day evidence.</p>
+<div class="hlp-h">Rotation board &amp; cohesion</div>
+<p>The board ranks sectors by capital direction with the same inputs as the flow map. <b>Cohesion</b> is the average pairwise correlation <i>inside</i> a sector: high cohesion means the sector trades as one macro block (own the theme, any name); low cohesion means it's a stock-picker's sector where the label tells you little.</p>
+<div class="hlp-h">Sector × sector correlation</div>
+<p>Average pairwise daily-return correlation between members of each pair of sectors (90d). Deep co-movement between two sectors means they're one risk factor wearing two names — diversifying across them is cosmetic.</p>`,
+corr:`
+<div class="hlp-h">The matrix</div>
+<p>Pairwise correlation of <b>daily log returns</b> over the chosen lookback. Rows/columns are <b>cluster-ordered</b> (UPGMA on correlation distance), so blocks along the diagonal are real co-movement families — the visual structure IS the finding. Color runs inverse→co-moving; the number of overlapping days (n) is in every hover — a ±0.9 on 12 overlapping days is noise wearing a costume. Use the focus search to isolate tickers, and the top-by-vol selector to widen or tighten the universe.</p>
+<div class="hlp-h">Pair view (click a cell)</div>
+<p>Three reads on one pair. <b>Hedge β</b>: units of B per unit of A for a beta-neutral pair. The <b>beta-adjusted spread</b> ln(A) − β·ln(B) with its mean ±1σ band — the <b>z-score</b> says how stretched the pair is <i>relative to its own history</i>: beyond ±1.5–2, A is rich or cheap vs B, the mean-reversion trade. The <b>rolling correlation</b> tells you whether the relationship is stable enough to trust: a spread z-score on a pair whose correlation is disintegrating is not a signal, it's a divorce.</p>
+<div class="hlp-h">Co-movers &amp; hedges (click a ticker label)</div>
+<p>The names that move with it (proxies, contagion map) and against it (natural hedges). Strongest-pairs below surfaces the tightest relationships across the whole set. ↓ CSV exports the matrix.</p>`,
+sessions:`
+<div class="hlp-h">Session decomposition — the flagship</div>
+<p>What an <b>overnight</b> (close→open), <b>weekend</b> (Fri→Mon), and <b>cash</b> (open→close) hold actually pays, pooled one equal-weight bet per calendar boundary across the equity class, compounded into equity curves. <b>Gross</b> vs <b>net</b>: the shaded band is the running funding drag — an edge that dies net-of-funding is not an edge, it's a donation. A persistently rising overnight curve while the cash curve is flat is the classic overnight effect; the drawer's "where the 30d return happened" split is the per-name version of the same question.</p>
+<div class="hlp-h">The clocks</div>
+<p><b>Hour-of-day activity</b>: when each market is actually alive, in its own volume norm — trade the loud hours, mistrust prints from the dead ones. <b>Funding clock</b>: when the payment concentrates. <b>Day-of-week 7×24 heatmap</b> and <b>return seasonality by hour</b>: where returns systematically cluster in the week — read these with sample-size humility, seasonality is the easiest pattern to hallucinate.</p>
+<div class="hlp-h">Structure panels</div>
+<p><b>Cross-ticker clustering</b> groups markets by the shape of their trading day; <b>asset-class overlays</b> compare the composite day of equities vs FX vs commodities. Panels unlock as the 60-day hourly spine accrues — an empty panel means insufficient coverage, not a bug.</p>
+<div class="hlp-h">Every chart hovers</div>
+<p>Crosshair + readout on all curves: date, value, and breadth (how many names stood behind that point). Points built on thin breadth deserve less trust.</p>`,
+signals:`
+<div class="hlp-h">What a signal is</div>
+<p>An unusual condition, ranked — <b>never a prediction</b>. Score = unusualness now (0–50) + historical edge: the market's <b>own base rate</b> when it has ≥8 occurrences, else the <b>asset-class pooled</b> rate at a 30% discount, else a token score. Every base rate shows n, median forward outcome, and hit — evidence, not adjectives. <i>unproven</i> = flag without history; <i>neg exp</i> = past occurrences lost money on average (shown for awareness, ranked as noise).</p>
+<div class="hlp-h">Self-audit — the part to trust</div>
+<p>Every fired signal is <b>ledgered at its mark and resolved at its horizon</b>, out-of-sample. The record blends back into scoring (weight grows with resolved count — trust migrates from backtest to reality), and event types whose live record shows no edge get capped automatically. In the accuracy panel: <b>live hit/med vs claimed</b> is the honesty gap; <b>pf</b> (profit factor) catches the 55%-hit event that still loses money; <b>calibration buckets</b> audit the scorer itself — if 55+ scores don't hit more than &lt;35 scores, the ranking is broken; <b>⛔ stop-aware</b> re-scores every claim as if the void level had been a hard stop.</p>
+<div class="hlp-h">Playbooks, prime, decay</div>
+<p>Each signal states a side, a mechanical level that voids it, and a target from the historical median — the <b>R:R</b> is scored (poor structure is penalized). <b>★ prime</b> = ≥60% hit, positive expectancy, sound structure at fire time. Signals <b>decay</b> past their claimed horizon (amber) and drop at 2× — a stale signal is not a signal.</p>
+<div class="hlp-h">Confluence — direction-aware</div>
+<p>Multiple <i>same-side</i> conditions on one name compound (the bonus is <b>earned</b>: once 15+ resolutions exist on each side, it scales to the measured lift of with-company firings, and drops to zero if agreement doesn't prove out). <b>⇄</b> means long AND short fired on one name — flagged, no bonus for anyone, each claim resolves on its own.</p>
+<div class="hlp-h">Ticker history</div>
+<p>The search bar loads any name's full claim-by-claim audit trail: what fired, at what score and mark, what it claimed, and what actually happened — including open claims counting down to their horizon. The drawer's Signal record is the compact version of the same ledger.</p>
+<div class="hlp-h">Self-tuning (shadow variants)</div>
+<p>Each gated event runs 2–3 candidate thresholds; only the incumbent emits visible signals, but ALL variants silently ledger shadow claims on identical bookkeeping. A challenger is promoted only on ≥30 out-of-sample resolutions per side with a real expectancy beat — bounded self-improvement, not free re-fitting.</p>`,
+backtest:`
+<div class="hlp-h">What it is</div>
+<p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>
+<div class="hlp-h">How to read the curve</div>
+<p>Four lines: <b>net</b> (after funding), <b>gross</b>, <b>benchmark</b>, <b>equal-weight universe</b>. The shaded split is <b>in-sample | out-of-sample</b>: a strategy that only works left of the line was curve-fit by your eyeballs. Judge on OOS net vs equal-weight — beating the benchmark with a long/short book is table stakes; beating naive equal-weight is the actual bar.</p>`,
+};
+function openHelp(){
+  const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
+  const v=state.scope==='crypto'?'markets':state.view;
+  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',backtest:'Backtest'};
+  m.innerHTML=`<div class="hlp-head">How to read: ${TITLES[v]||v}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
+    +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
+    +(HELP[v]||HELP.markets);
+  bg.hidden=false; m.hidden=false; m.scrollTop=0;
+  const cb=el('helpclose'); if(cb) cb.onclick=closeHelp;
+}
+function closeHelp(){ const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=true; if(m)m.hidden=true; }
+{ const hb=el('helpBtn'); if(hb) hb.addEventListener('click',openHelp);
+  const bg=el('helpbg'); if(bg) bg.addEventListener('click',closeHelp);
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('helpmodal'); if(m&&!m.hidden) closeHelp(); } }); }
 { const shq=el('sighist-q');   // ticker-history search on the Signals tab (static markup — survives signals-body re-renders)
   if(shq) shq.addEventListener('input',e=>{ clearTimeout(_shTimer); _shTimer=setTimeout(()=>sigHistQuery(e.target.value),250); }); }
 el('corrsearch').addEventListener('input',e=>{ state.corr.search=e.target.value; state.corr.selected=null; state.corr.pair=null;
