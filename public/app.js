@@ -43,6 +43,8 @@ const COLS=[
   {key:'adr', label:'Avg Range', type:'num', tip:'Average daily range: mean of each completed day\u2019s (high − low) / close, over the window (7d, or 30d when the 30d window is selected). Reads as "on a typical day this moves X%."', td:r=>adrCell(r)},
   {key:'dd', label:'vs 30d hi', type:'num', tip:'Distance below the 30-day high (0% = sitting at the high).', td:r=>ddCell(r)},
   {key:'ddy', label:'vs YTD hi', type:'num', tip:'Distance below the year\u2019s highest DAILY CLOSE (0% = making the YTD high now). Closes-based \u2014 intraday highs aren\u2019t retained at daily granularity, so this is the honest computable basis, same convention as the MA columns. Names listed this year use their full-life high (which IS their YTD high). Crypto: 31d retention only reaches Jan 1 in January \u2014 outside that, an honest dash.', td:r=>ddyCell(r)},
+  {key:'yopen', label:'Y open', type:'num', tip:'Open of the first UTC day of the year. Perps trade continuously, so the yearly open IS the prior day\u2019s close, taken from the daily-close series. Names listed this year use their first close \u2014 their true opening level. Green when price is above it, red below; hover for the distance. Crypto: 31d retention only reaches Jan 1 in January.', td:r=>openCell(r,'yopen','yearly open')},
+  {key:'mopen', label:'M open', type:'num', tip:'Open of the first UTC day of the current month \u2014 the prior day\u2019s close on a continuously-traded perp. Names listed this month use their first close. Green when price is above it, red below; hover for the distance.', td:r=>openCell(r,'mopen','monthly open')},
   {key:'doi', label:'ΔOI', type:'num', tip:'Open-interest change over the window, with a price-vs-OI regime tag. Stored server-side and persistent.',
     td:r=>`<td>${oiCell(r)}</td>`},
   {key:'sqz', label:'Squeeze', type:'num', def:'desc', tip:'Squeeze susceptibility 0\u2013100: how loaded the short-squeeze spring is over the window. Crowding (how hard shorts pay via window-avg negative funding) \u00d7 fuel (OI building) \u00d7 trigger (price pressing toward the 30d high). 0 whenever funding is positive \u2014 no crowded shorts, no squeeze. Sort descending to screen. Hover for the components.',
@@ -67,7 +69,7 @@ function turnCell(r){ if(r.turn==null||!isFinite(r.turn)) return '<td><span clas
   return `<td${c?` class="${c}"`:''} title="OI ${fmtUsd(r.oi)} \u00f7 24h vol ${fmtUsd(r.vol)} \u2014 positioning is ${r.turn.toFixed(1)}\u00d7 the daily flow">\u00d7${r.turn>=10?r.turn.toFixed(0):r.turn.toFixed(1)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','ddy','vol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','ddy','yopen','mopen','vol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
 const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
@@ -331,6 +333,26 @@ function computeDerived(){
       }
       if(hy!=null&&r.px!=null&&isFinite(r.px)&&r.px>hy) hy=r.px;
       r.ddy=(r.px!=null&&isFinite(r.px)&&hy>0)?(r.px-hy)/hy*100:undefined; }
+    // Yearly / monthly open: these perps trade continuously, so the open of the first UTC day
+    // of a period IS the prior day's close — which the daily-close series already carries, so
+    // no new payload is needed. A name with no close before the boundary (listed inside the
+    // period) uses its first close within it: its true opening level. The yearly open reuses
+    // the vs-YTD-hi coverage guard (a truncated series that merely starts after Jan 1 must
+    // dash, not masquerade as a new listing); the monthly boundary is always within reach of
+    // both retention windows, so only genuine new listings ever hit the fallback there.
+    { const cl=r.daily; let yo=null, mo=null;
+      if(Array.isArray(cl)&&cl.length){
+        const nowD=new Date(), y0=Date.UTC(nowD.getUTCFullYear(),0,1), m0=Date.UTC(nowD.getUTCFullYear(),nowD.getUTCMonth(),1);
+        const openAt=(b)=>{ let prev=null;
+          for(const k of cl){ const c=+k.c; if(!isFinite(c)) continue;
+            if(k.t<b) prev=c; else return prev!=null?prev:c; }
+          return prev; };   // series entirely before the boundary: stale, but the last close is still the level carried in
+        const coveredY = cl[0].t<=y0+3*DAY || (r.uni!=='main' ? cl[0].t>y0 : cl.length<28);
+        if(coveredY) yo=openAt(y0);
+        mo=openAt(m0);
+      }
+      r.yopen=(yo!=null&&yo>0)?yo:undefined;
+      r.mopen=(mo!=null&&mo>0)?mo:undefined; }
     // premium / squeeze / carry — all off data already in the row (oracle, window funding, ΔOI, vol)
     const fw=(r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding);
     r.prem=(r.px!=null&&r.oracle>0)?(r.px/r.oracle-1)*1e4:undefined;
@@ -473,6 +495,10 @@ function ddCell(r){ if(r.dd==null||!isFinite(r.dd)) return '<td><span class="na"
 function ddyCell(r){ if(r.ddy==null||!isFinite(r.ddy)) return '<td><span class="na" title="needs daily history reaching Jan 1 \u2014 crypto retention is 31d, so outside January this is out of reach by design; equities fill in as the daily backfill loads">\u2014</span></td>';
   const c=r.ddy>=-0.5?'pos':(r.ddy<=-25?'neg':'sec');
   return `<td class="${c}" title="distance below the year\u2019s highest daily close (0% = making the YTD high now)">${r.ddy.toFixed(1)}%</td>`; }
+function openCell(r,key,lbl){ const v=r[key];
+  if(v==null||!isFinite(v)) return `<td><span class="na" title="needs daily history reaching the ${key==='yopen'?'start of the year \u2014 crypto retention is 31d, so outside January this is out of reach by design; equities fill in as the daily backfill loads':'start of the month \u2014 fills in as daily history loads'}">\u2014</span></td>`;
+  const above=r.px!=null&&isFinite(r.px)?r.px>=v:null, d=above!=null&&v>0?((r.px/v-1)*100):null;
+  return `<td class="${above==null?'sec':(above?'pos':'neg')}" title="${lbl} ${fmtPrice(v)}${d!=null?` \u00b7 price ${d>=0?'+':''}${d.toFixed(1)}% ${d>=0?'above':'below'}`:''}">${fmtPrice(v)}</td>`; }
 function premCell(r){ if(r.prem==null||!isFinite(r.prem)) return '<td><span class="na" title="needs both mark and oracle prices">·</span></td>';
   const v=r.prem, c=v>0.5?'pos':(v<-0.5?'neg':'sec');
   const t=`mark ${fmtPrice(r.px)} vs oracle ${fmtPrice(r.oracle)} \u2014 perp ${v>=0?'rich (premium)':'cheap (discount)'} ${Math.abs(v).toFixed(1)}bp`+
