@@ -510,3 +510,18 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .fpx{font-style:normal;font-size:9px;margin-left:4px;padding:0 3px;border-radius:3px;vertical-align:1px}
 .fpx.hi{color:var(--down);border:1px solid var(--down)}
 .fpx.lo{color:var(--up);border:1px solid var(--up)}
+
+/* ---- per-tab help modal ---- */
+.help-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:120}
+.help-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:121;
+  width:min(760px,94vw);max-height:min(82vh,860px);overflow-y:auto;background:var(--panel);
+  border:1px solid var(--border);border-radius:8px;padding:20px 24px;box-shadow:0 18px 60px rgba(0,0,0,.6)}
+.help-modal .hlp-head{font-family:var(--disp);font-size:16px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:10px}
+.help-modal .hlp-head .btn{margin-left:auto}
+.help-modal .hlp-sub{color:var(--muted);font-size:12px;margin-bottom:14px;line-height:1.5}
+.help-modal .hlp-h{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--accent);margin:16px 0 5px}
+.help-modal .hlp-h:first-of-type{margin-top:8px}
+.help-modal p{font-size:12.5px;line-height:1.62;color:var(--text);margin:0 0 8px}
+.help-modal p b{color:var(--text)}
+.help-modal p .k{color:var(--muted)}
+.help-modal code{font-family:var(--mono);font-size:11.5px;color:var(--accent)}
