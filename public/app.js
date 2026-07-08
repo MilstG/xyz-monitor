@@ -906,6 +906,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div id="dcandles"></div>
     ${splitHtml}
     <div id="dseries"></div>
+    <div id="dledger"></div>
     <div class="dsec">Metrics</div>
     <div class="dgrid">
       ${st('Funding (APR)',`<span class="${fu.c}">${fu.t}</span>`)}
@@ -931,6 +932,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   setHash('t='+encodeURIComponent(coin));
   loadDrawerSeries(coin);
   loadDrawerCandles(coin);
+  loadDrawerLedger(coin);
 }
 // 30d overnight-effect decomposition for one name: total return vs the compounded off-hours
 // (close→open) leg, session = the residual. Built entirely from data already shipped to the
@@ -1009,6 +1011,57 @@ async function loadDrawerSeries(coin){
       html+=`<div class="dsec">Funding APR ${span(s.funding)} · now ${(last>=0?'+':'')+last.toFixed(1)}%</div>${sparkline(v,{zero:true,color:'var(--blue)'})}`; }
     box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:12px">collecting — the trend appears here as history accrues server-side</div>';
   }catch(_){}
+}
+// Per-ticker signal history — every visible claim the engine ever fired on this name, from
+// /api/ledger. Open claims show their countdown; resolved claims show the outcome in the unit
+// they resolved in (R for sigma-united events, % / bp otherwise; pre-epoch legacy entries are
+// labeled rather than silently mixed). Read-only audit trail: what the engine said, when, and
+// what happened.
+async function loadDrawerLedger(coin){
+  const box=el('dledger'); if(!box) return;
+  try{
+    const d=await fetchJSON('/api/ledger?coin='+encodeURIComponent(coin));
+    if(state.detail!==coin || !box.isConnected) return;
+    const total=(d.open?d.open.length:0)+(d.closed?d.closed.length:0);
+    if(!total){ box.innerHTML=''; return; }   // nothing ever fired here — the drawer just omits the section
+    const dt=t=>{ try{ return new Date(t).toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+new Date(t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}); }catch(_){ return ''; } };
+    const val=(v,unit)=>{ if(v==null) return '<span class="na">\u2014</span>';
+      const s=(v>=0?'+':'')+(unit==='bp'?v.toFixed(0):v.toFixed(2))+(unit==='R'?'R':unit);
+      return `<span class="${v>0?'pos':'neg'}">${s}</span>`; };
+    const sideChip=s=>s==='long'?'<span class="pos" style="font-size:10px">LONG</span>':s==='short'?'<span class="neg" style="font-size:10px">SHORT</span>':'';
+    const row=(e)=>{
+      const flags=(e.pr?' <span data-tip="fired as a \u2605 prime-quality claim">\u2605</span>':'')
+        +(e.conf?' <span data-tip="fired WITH same-side company on this name (confluence)" style="color:var(--blue)">\u29c9</span>':'')
+        +(e.legacy?' <i class="sig-unp" data-tip="resolved before sigma-normalization \u2014 outcome is in raw % and excluded from the R aggregates">legacy %</i>':'');
+      if(e.status==='open'){
+        const left=e.resolveAt-Date.now(), lh=left>0?(left>=86400000?(left/86400000).toFixed(1)+'d':(left/3600000).toFixed(0)+'h'):'due';
+        return `<div class="crow" data-tip="${esc(`fired ${dt(e.t0)} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire \u00b7 mark ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'}${e.claimMed!=null?` \u00b7 claimed med ${(e.claimMed>=0?'+':'')+e.claimMed.toFixed(2)}${e.unit}`:''} \u00b7 resolves in ${lh}`)}">`+
+          `<span class="ct" style="width:118px">${esc(e.label)}</span>${sideChip(e.side)}`+
+          `<span class="sec" style="font-size:10.5px;margin-left:auto">${dt(e.t0)}</span>`+
+          `<span class="sec" style="width:76px;text-align:right;font-size:10.5px" data-tip="claim is on the books \u2014 resolves at its stated horizon">open \u00b7 ${lh}</span></div>`;
+      }
+      if(e.status==='void')
+        return `<div class="crow" data-tip="${esc(`fired ${dt(e.t0)} \u00b7 could not be resolved (no usable price at horizon) \u2014 scored as void, excluded from the record`)}">`+
+          `<span class="ct" style="width:118px">${esc(e.label)}</span>${sideChip(e.side)}`+
+          `<span class="sec" style="font-size:10.5px;margin-left:auto">${dt(e.t0)}</span>`+
+          `<span class="na" style="width:76px;text-align:right;font-size:10.5px">void</span></div>`;
+      const stopNote=e.realizedS!=null&&e.realizedS!==e.realized?` \u00b7 stop-aware ${(e.realizedS>=0?'+':'')+e.realizedS.toFixed(2)}${e.unit}${e.stopped?' (stopped en route)':''}`:'';
+      return `<div class="crow" data-tip="${esc(`fired ${dt(e.t0)} \u00b7 resolved ${dt(e.tR)} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire \u00b7 mark ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'}${e.claimMed!=null?` \u00b7 claimed med ${(e.claimMed>=0?'+':'')+e.claimMed.toFixed(2)}${e.unit}`:''}${stopNote} \u00b7 outcome is signed with the claim: positive = it went the way the signal implied`)}">`+
+        `<span class="ct" style="width:118px">${esc(e.label)}${flags}</span>${sideChip(e.side)}`+
+        `<span class="sec" style="font-size:10.5px;margin-left:auto">${dt(e.t0)}</span>`+
+        `<span style="width:76px;text-align:right">${val(e.realized,e.unit)}${e.stopped?' <span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':''}</span></div>`;
+    };
+    const res=d.closed.filter(e=>e.status==='resolved'), wins=res.filter(e=>e.win).length;
+    const rec=res.length?` \u00b7 <b class="${wins/res.length>=0.5?'pos':'neg'}">${Math.round(100*wins/res.length)}%</b> hit <span style="color:var(--faint)">(n=${res.length})</span>`:'';
+    const LIM=12, more=d.closed.length>LIM;
+    let html=`<div class="dsec" data-tip="every visible claim the engine ever fired on this name \u2014 the per-ticker audit trail behind the aggregate record. Outcomes are signed with the claim (positive = followed through) in the unit the study claims. Hover a row for the full story.">Signal history${rec}</div>`;
+    html+=d.open.map(row).join('');
+    html+=d.closed.slice(0,LIM).map(row).join('');
+    if(more) html+=`<div class="crow dledger-more" style="cursor:pointer"><span class="sec" style="font-size:11px">show ${d.closed.length-LIM} more\u2026</span></div>`;
+    box.innerHTML=html;
+    const mb=box.querySelector('.dledger-more');
+    if(mb) mb.onclick=()=>{ mb.outerHTML=d.closed.slice(LIM).map(row).join(''); };
+  }catch(_){ box.innerHTML=''; }
 }
 function closeDetail(){ state.detail=null; el('drawer').classList.remove('show'); el('drawerbg').classList.remove('show'); el('drawer').setAttribute('aria-hidden','true'); setHash(state.view==='markets'?'':state.view); }
 function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); else state.watch.add(coin); savePrefs(); render(); }
@@ -2019,6 +2072,8 @@ function sigRowHtml(gr, rank){
 }
 // Accuracy panel below the list: overall record + per-event claimed-vs-live table + last resolutions.
 // Cumulative-R claim curve with the shared crosshair/readout (standing rule: every chart hovers).
+// Hidden for now — flip SHOW_CLAIM_CURVE to true to bring the section back; all code stays intact.
+const SHOW_CLAIM_CURVE=false;
 function recCurveSvg(curve){
   const W=430,H=120, pl=4,pr=44,pt=8,pb=16;
   let lo=0,hi=0; for(const p of curve){ if(p[1]<lo)lo=p[1]; if(p[1]>hi)hi=p[1]; if(p[5]!=null){ if(p[5]<lo)lo=p[5]; if(p[5]>hi)hi=p[5]; } }
@@ -2102,7 +2157,7 @@ function sigRecordHtml(d){
       s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="which markets this engine actually reads well (\u22655 resolutions each) \u2014 signal quality is not uniform across the universe">reads best</span>${rx.tickers.best.map(chip).join('')}`
         +`<span class="sigrec-k" style="margin-left:14px">worst</span>${rx.tickers.worst.map(chip).join('')}</div>`;
     }
-    if(rx.curve&&rx.curve.length>=5){
+    if(SHOW_CLAIM_CURVE&&rx.curve&&rx.curve.length>=5){
       s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="cumulative R curve \u00b7 equal-weight running sum of every resolved R-united claim in fired order \u00b7 solid: at-horizon outcomes \u00b7 dashed: stop-aware outcomes \u00b7 hover for the claim behind each step">claim equity curve (R) <span style="text-transform:none;letter-spacing:0">\u2014 solid: at-horizon \u00b7 <span style="color:var(--blue)">dashed: stop-aware</span></span></div>`+recCurveSvg(rx.curve);
     }
   }
