@@ -42,6 +42,7 @@ const COLS=[
   {key:'vol30', label:'Vol (ann)', type:'num', tip:'Annualized realized volatility from hourly returns over ~30 days.', td:r=>volCell(r)},
   {key:'adr', label:'Avg Range', type:'num', tip:'Average daily range: mean of each completed day\u2019s (high − low) / close, over the window (7d, or 30d when the 30d window is selected). Reads as "on a typical day this moves X%."', td:r=>adrCell(r)},
   {key:'dd', label:'vs 30d hi', type:'num', tip:'Distance below the 30-day high (0% = sitting at the high).', td:r=>ddCell(r)},
+  {key:'ddy', label:'vs YTD hi', type:'num', tip:'Distance below the year\u2019s highest DAILY CLOSE (0% = making the YTD high now). Closes-based \u2014 intraday highs aren\u2019t retained at daily granularity, so this is the honest computable basis, same convention as the MA columns. Names listed this year use their full-life high (which IS their YTD high). Crypto: 31d retention only reaches Jan 1 in January \u2014 outside that, an honest dash.', td:r=>ddyCell(r)},
   {key:'doi', label:'ΔOI', type:'num', tip:'Open-interest change over the window, with a price-vs-OI regime tag. Stored server-side and persistent.',
     td:r=>`<td>${oiCell(r)}</td>`},
   {key:'sqz', label:'Squeeze', type:'num', def:'desc', tip:'Squeeze susceptibility 0\u2013100: how loaded the short-squeeze spring is over the window. Crowding (how hard shorts pay via window-avg negative funding) \u00d7 fuel (OI building) \u00d7 trigger (price pressing toward the 30d high). 0 whenever funding is positive \u2014 no crowded shorts, no squeeze. Sort descending to screen. Hover for the components.',
@@ -66,7 +67,7 @@ function turnCell(r){ if(r.turn==null||!isFinite(r.turn)) return '<td><span clas
   return `<td${c?` class="${c}"`:''} title="OI ${fmtUsd(r.oi)} \u00f7 24h vol ${fmtUsd(r.vol)} \u2014 positioning is ${r.turn.toFixed(1)}\u00d7 the daily flow">\u00d7${r.turn>=10?r.turn.toFixed(0):r.turn.toFixed(1)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','vol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','ddy','vol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
 const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
@@ -316,6 +317,20 @@ function computeDerived(){
     const adrN=state.tf==='30d'?30:7;
     r.adr=(r.feat&&r.feat.dr&&r.feat.dr.length)?(()=>{ const s=r.feat.dr.slice(-adrN); return s.reduce((p,q)=>p+q,0)/s.length; })():undefined;
     r.dd=(r.px!=null&&r.feat&&r.feat.hi30>0)?(r.px-r.feat.hi30)/r.feat.hi30*100:undefined;
+    // vs YTD high: distance below the year's highest DAILY CLOSE. Honest only when the daily
+    // history actually covers the year: series reaching ~Jan 1, or a name listed this year
+    // (xyz 370d retention means a late first point IS a new listing; crypto's flat 31d buffer
+    // can't distinguish new listing from truncation unless the series is shorter than the
+    // retention window). The live mark participates in the max, so 0% = making the high now.
+    { let hy=null;
+      const cl=r.daily;
+      if(Array.isArray(cl)&&cl.length){
+        const y0=Date.UTC(new Date().getUTCFullYear(),0,1);
+        const covered = cl[0].t<=y0+3*DAY || (r.uni!=='main' ? cl[0].t>y0 : cl.length<28);
+        if(covered) for(const k of cl){ if(k.t>=y0){ const c=+k.c; if(isFinite(c)&&(hy==null||c>hy)) hy=c; } }
+      }
+      if(hy!=null&&r.px!=null&&isFinite(r.px)&&r.px>hy) hy=r.px;
+      r.ddy=(r.px!=null&&isFinite(r.px)&&hy>0)?(r.px-hy)/hy*100:undefined; }
     // premium / squeeze / carry — all off data already in the row (oracle, window funding, ΔOI, vol)
     const fw=(r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding);
     r.prem=(r.px!=null&&r.oracle>0)?(r.px/r.oracle-1)*1e4:undefined;
@@ -455,6 +470,9 @@ function adrCell(r){ if(r.adr==null||!isFinite(r.adr)) return '<td><span class="
   return `<td class="sec" style="background:rgba(227,165,60,${t.toFixed(3)})" title="avg daily high−low as % of close, over ${state.tf==='30d'?'30d':'7d'}">${r.adr.toFixed(2)}%</td>`; }
 function ddCell(r){ if(r.dd==null||!isFinite(r.dd)) return '<td><span class="na">·</span></td>';
   const c=r.dd>=-0.5?'pos':(r.dd<=-15?'neg':'sec'); return `<td class="${c}" title="distance below the 30-day high">${r.dd.toFixed(1)}%</td>`; }
+function ddyCell(r){ if(r.ddy==null||!isFinite(r.ddy)) return '<td><span class="na" title="needs daily history reaching Jan 1 \u2014 crypto retention is 31d, so outside January this is out of reach by design; equities fill in as the daily backfill loads">\u2014</span></td>';
+  const c=r.ddy>=-0.5?'pos':(r.ddy<=-25?'neg':'sec');
+  return `<td class="${c}" title="distance below the year\u2019s highest daily close (0% = making the YTD high now)">${r.ddy.toFixed(1)}%</td>`; }
 function premCell(r){ if(r.prem==null||!isFinite(r.prem)) return '<td><span class="na" title="needs both mark and oracle prices">·</span></td>';
   const v=r.prem, c=v>0.5?'pos':(v<-0.5?'neg':'sec');
   const t=`mark ${fmtPrice(r.px)} vs oracle ${fmtPrice(r.oracle)} \u2014 perp ${v>=0?'rich (premium)':'cheap (discount)'} ${Math.abs(v).toFixed(1)}bp`+
