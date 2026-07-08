@@ -283,3 +283,60 @@ test("ondrift playbook: windowed-hold claim, no levels", () => {
   assert.equal(pLong.side,"long"); assert.equal(pShort.side,"short");
   assert.equal(pLong.target,null); assert.equal(pLong.stop,null);
 });
+
+test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow exclusion", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const fixture = { ts: now, rearm: [], variants: null,
+    open: [
+      { key: "AAPL|breakout", coin: "AAPL", ticker: "AAPL", ev: "breakout", t0: now - 3600000,
+        mark0: 200, dir: 1, score0: 61, sd0: 1.8, resolveAt: now + 86400000, psd: "long" },
+      { key: "AAPL|bigmove#1", coin: "AAPL", ticker: "AAPL", ev: "bigmove", t0: now - 3600000,
+        mark0: 200, dir: 1, score0: 0, sd0: 1.8, resolveAt: now + 86400000, vi: 1 },   // shadow — must never surface
+    ],
+    closed: [
+      // breakdown resolved pre-fix: raw % despite sd0 stamped -> must repair to R (-4.4/2.2 = -2)
+      { key: "AAPL|breakdown", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 5 * 86400000,
+        mark0: 210, dir: -1, score0: 55, sd0: 2.2, status: "resolved", tR: now - 86400000,
+        realized: -4.4, realizedS: -4.4, win: false, winS: false, psd: "short" },
+      // stopped oiflush pre-fix: realized and the stop-capped leg both repair independently
+      { key: "AAPL|oiflush", coin: "AAPL", ticker: "AAPL", ev: "oiflush", t0: now - 9 * 86400000,
+        mark0: 190, dir: 1, score0: 48, sd0: 3, status: "resolved", tR: now - 4 * 86400000,
+        realized: 6.6, realizedS: -3, stopped: true, win: true, winS: false },
+      // breakout resolved under the OLD code: already R, no rn stamp -> must NOT be touched
+      { key: "AAPL|breakout", coin: "AAPL", ticker: "AAPL", ev: "breakout", t0: now - 12 * 86400000,
+        mark0: 180, dir: 1, score0: 70, sd0: 2, status: "resolved", tR: now - 7 * 86400000,
+        realized: 1.5, realizedS: 1.5, win: true, winS: true, psd: "long" },
+      // pre-sigma-epoch breakdown (no sd0): untouched, surfaces as legacy %
+      { key: "AAPL|breakdown#old", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 40 * 86400000,
+        mark0: 250, dir: -1, score0: 40, status: "resolved", tR: now - 35 * 86400000,
+        realized: 3.1, realizedS: 3.1, win: true, winS: true },
+      // different coin — must not leak into AAPL's history
+      { key: "NVDA|breakdown", coin: "NVDA", ticker: "NVDA", ev: "breakdown", t0: now - 5 * 86400000,
+        mark0: 100, dir: -1, score0: 50, sd0: 2, status: "resolved", tR: now - 86400000,
+        realized: -2, realizedS: -2, win: false, winS: false },
+    ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  p.hydrateLedgerNow();   // idempotency: the rn stamp must make a second pass a no-op
+  const h = p.getLedgerFor("AAPL");
+  assert.equal(h.open.length, 1, "shadow-variant claims never surface");
+  assert.equal(h.open[0].status, "open");
+  assert.ok(h.open[0].resolveAt > now, "open claim carries its horizon");
+  assert.equal(h.closed.length, 4, "only this coin's visible closed claims");
+  const by = {}; for (const e of h.closed) by[e.ev + (e.legacy ? ":legacy" : "")] = e;
+  assert.equal(by.breakdown.realized, -2, "raw-% breakdown repaired to R (-4.4/2.2)");
+  assert.equal(by.breakdown.realizedS, -2, "non-stopped stop-aware leg tracks the repaired outcome");
+  assert.equal(by.breakdown.unit, "R");
+  assert.equal(by.oiflush.realized, 2.2, "stopped oiflush repaired (6.6/3)");
+  assert.equal(by.oiflush.realizedS, -1, "stop-capped leg repaired independently (-3/3)");
+  assert.equal(by.oiflush.stopped, true);
+  assert.equal(by.breakout.realized, 1.5, "already-normalized original-three entry untouched");
+  assert.equal(by["breakdown:legacy"].realized, 3.1, "pre-sigma-epoch entry untouched");
+  assert.equal(by["breakdown:legacy"].unit, "%", "legacy entry labeled in its true unit");
+  assert.equal(by["breakdown:legacy"].legacy, true);
+  assert.equal(p.getLedgerFor("NVDA").closed.length, 1, "history is per-coin");
+  assert.equal(p.getLedgerFor("").open.length, 0, "empty coin -> empty history");
+});
