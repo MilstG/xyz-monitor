@@ -768,7 +768,12 @@ function createPoller({ dex, store, log, version, crypto }) {
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
   const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
-  const seenAt = new Map();   // coin|ev -> first-seen ms, for events with no ledger entry (no directional claim)
+  // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
+  // present in the builds (b = stamped on the first build after a restart, where the condition
+  // may predate the stamp). Resets the moment the condition lapses for a build. This is the
+  // DISPLAY time; the ledger claim keeps its own t0/mark0 — the two legitimately differ when a
+  // still-resolving claim's condition lapses and returns within one episode.
+  const presentSince = new Map();
   function hydrateLedger() {
     const d = store.loadLedger();
     if (!d) return;
@@ -817,7 +822,7 @@ function createPoller({ dex, store, log, version, crypto }) {
       score0: Number.isFinite(e.score0) ? e.score0 : null,
       mark0: e.mark0 != null && isFinite(e.mark0) ? e.mark0 : null,
       mv: e.mv != null ? e.mv : null,
-      pr: e.pr === true, conf: e.conf === true,
+      pr: e.pr === true, conf: e.conf === true, boot: e.bt === 1,
       claimMed: e.claim && Number.isFinite(e.claim.med) ? e.claim.med : null,
       realized: status === "resolved" && Number.isFinite(e.realized) ? e.realized : null,
       realizedS: status === "resolved" && e.realizedS != null && isFinite(e.realizedS) ? e.realizedS : null,
@@ -872,7 +877,8 @@ function createPoller({ dex, store, log, version, crypto }) {
         score0: sigEntry.score, reading0: sigEntry.reading,
         claim: sigEntry.study || null,
         resolveAt: resolveAtFor(ev, Date.now()),
-      }, vi != null ? { vi } : null, mv != null ? { mv } : null, stp != null ? { stp } : null, psd ? { psd } : null, extra || {});
+      }, signalsBuildCount <= 1 ? { bt: 1 } : null,   // opened on the FIRST build after a restart/deploy: the condition may predate this stamp — flagged so identical boot-time timestamps explain themselves
+      vi != null ? { vi } : null, mv != null ? { mv } : null, stp != null ? { stp } : null, psd ? { psd } : null, extra || {});
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -1114,8 +1120,10 @@ function createPoller({ dex, store, log, version, crypto }) {
       }
     }
   }
+  let signalsBuildCount = 0;   // builds since process start — build #1 is the post-boot catch-up where in-force conditions all open at once
   function buildSignals() {
     firedNow.clear();
+    signalsBuildCount++;
     resolveLedger();
     checkPromotions();
     const out = [], now = Date.now();
@@ -1383,19 +1391,21 @@ function createPoller({ dex, store, log, version, crypto }) {
       { const e0 = ledgerOpen.get(key);   // fire-time prime quality on the claim, stamped once
         if (e0 && e0.pr == null) { e0.pr = !!g.prime; ledgerDirty = true; } }
       live.add(key);
+      // Card time = condition presence (this episode); claim details ship separately. Decay
+      // stays on CLAIM age — the accounting object is what expires, not the display stamp.
+      if (!presentSince.has(key)) presentSince.set(key, { t: now, b: signalsBuildCount <= 1 });
+      const ps = presentSince.get(key);
+      g.t0 = ps.t; g.age = now - ps.t; if (ps.b) g.sinceBoot = true;
       const e = ledgerOpen.get(key);
       if (e) {
-        g.t0 = e.t0; g.age = now - e.t0;
-        const span = Math.max(1, e.resolveAt - e.t0);
-        if (g.age > 2 * span) continue;
-        if (g.age > span) { g.score = Math.round(g.score * 0.6); g.decayed = true; g.prime = false; }   // client shows the amber decaying state
-      } else {
-        if (!seenAt.has(key)) seenAt.set(key, now);
-        g.t0 = seenAt.get(key); g.age = now - g.t0;
+        g.claim0 = { t: e.t0, px: e.mark0 != null && isFinite(e.mark0) ? e.mark0 : null, resolveAt: e.resolveAt, boot: e.bt === 1 };
+        const claimAge = now - e.t0, span = Math.max(1, e.resolveAt - e.t0);
+        if (claimAge > 2 * span) continue;
+        if (claimAge > span) { g.score = Math.round(g.score * 0.6); g.decayed = true; g.prime = false; }   // client shows the amber decaying state
       }
       kept.push(g);
     }
-    for (const [k, t] of seenAt) if (!live.has(k) && now - t > 12 * HOUR) seenAt.delete(k);
+    for (const k of presentSince.keys()) if (!live.has(k)) presentSince.delete(k);   // condition lapsed for a build -> this episode's presence ends; next fire restamps
     // confluence: several independent conditions on one name compound
     const byCoin = {};
     for (const g of kept) (byCoin[g.coin] || (byCoin[g.coin] = [])).push(g);
@@ -1409,7 +1419,16 @@ function createPoller({ dex, store, log, version, crypto }) {
         const k = companyFor(g);   // direction-aware: only same-side + context signals are company
         const e = ledgerOpen.get(g.coin + "|" + g.ev);
         if (e && e.conf == null) { e.conf = k > 1; ledgerDirty = true; }   // stamped once, at first observation
-        if (conflict) g.confl = true;   // long AND short fired on this coin — flagged, no bonus for anyone
+        if (conflict) {
+          g.confl = true;   // long AND short fired on this coin — flagged, no bonus for anyone
+          const gs = g.play && (g.play.side === "long" || g.play.side === "short") ? g.play.side : null;
+          // Name the counterpart(s): the opposing signal can rank below the visible list or be
+          // filtered out client-side — the chip must cite what it is conflicting with, or it
+          // reads as a phantom.
+          g.conflWith = byCoin[c]
+            .filter((o) => o !== g && o.play && (o.play.side === "long" || o.play.side === "short") && o.play.side !== gs)
+            .map((o) => ({ label: EV_LABEL[o.ev] || o.ev, side: o.play.side, score: o.score }));
+        }
         if (k > 1) { g.conf = k; g.score = Math.min(100, g.score + Math.min(16, confUnit * (k - 1))); }
       }
     }
