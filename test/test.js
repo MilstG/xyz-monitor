@@ -290,7 +290,7 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   const fixture = { ts: now, rearm: [], variants: null,
     open: [
       { key: "AAPL|breakout", coin: "AAPL", ticker: "AAPL", ev: "breakout", t0: now - 3600000,
-        mark0: 200, dir: 1, score0: 61, sd0: 1.8, resolveAt: now + 86400000, psd: "long" },
+        mark0: 200, dir: 1, score0: 61, sd0: 1.8, resolveAt: now + 86400000, psd: "long", bt: 1 },
       { key: "AAPL|bigmove#1", coin: "AAPL", ticker: "AAPL", ev: "bigmove", t0: now - 3600000,
         mark0: 200, dir: 1, score0: 0, sd0: 1.8, resolveAt: now + 86400000, vi: 1 },   // shadow — must never surface
     ],
@@ -325,6 +325,8 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(h.open.length, 1, "shadow-variant claims never surface");
   assert.equal(h.open[0].status, "open");
   assert.ok(h.open[0].resolveAt > now, "open claim carries its horizon");
+  assert.equal(h.open[0].boot, true, "first-build-after-restart flag surfaces");
+  assert.equal(h.open[0].mark0, 200, "per-instance trigger mark surfaces");
   assert.equal(h.closed.length, 4, "only this coin's visible closed claims");
   const by = {}; for (const e of h.closed) by[e.ev + (e.legacy ? ":legacy" : "")] = e;
   assert.equal(by.breakdown.realized, -2, "raw-% breakdown repaired to R (-4.4/2.2)");
