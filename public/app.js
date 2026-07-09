@@ -1098,17 +1098,19 @@ function sigHistRow(e){
   const flags=(e.pr?' <span data-tip="fired as a \u2605 prime-quality claim">\u2605</span>':'')
     +(e.conf?' <span data-tip="fired WITH same-side company on this name (confluence)" style="color:var(--blue)">\u29c9</span>':'')
     +(e.legacy?' <i class="sig-unp" data-tip="resolved before sigma-normalization \u2014 outcome is in raw % and excluded from the R aggregates">legacy %</i>':'');
-  const tip=`fired ${shDate(e.t0)} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire \u00b7 mark ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'}`
+  const fired=shDate(e.t0)+(e.boot?' <span class="sec" style="cursor:help" data-tip="claim opened on the FIRST build after a server restart or deploy \u2014 the condition may have been in force before this stamp. The mark and outcome are measured from this moment, so the record is honest; only the onset time is a floor, not the true trigger time. Identical timestamps across events on one boot are this, not shared bookkeeping.">\u27f2</span>':'');
+  const mark=e.mark0!=null?fmtPrice(e.mark0):'<span class="na">\u2014</span>';
+  const tip=`fired ${shDate(e.t0)} at ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire`
     +(e.claimMed!=null?` \u00b7 claimed med ${(e.claimMed>=0?'+':'')+e.claimMed.toFixed(2)}${e.unit}`:'')
     +(e.status==='resolved'?' \u00b7 outcome is signed with the claim: positive = it went the way the signal implied':'');
   if(e.status==='open')
-    return `<tr data-tip="${esc(tip+` \u00b7 resolves in ${shLeft(e.resolveAt)}`)}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${shDate(e.t0)}</td><td class="sec">in ${shLeft(e.resolveAt)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="sec">open</td><td></td></tr>`;
+    return `<tr data-tip="${esc(tip+` \u00b7 resolves in ${shLeft(e.resolveAt)}`)}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td><td class="sec">in ${shLeft(e.resolveAt)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="sec">open</td><td></td></tr>`;
   if(e.status==='void')
-    return `<tr data-tip="${esc(tip+' \u00b7 could not be resolved (no usable price at horizon) \u2014 excluded from the record')}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${shDate(e.t0)}</td><td>${shDate(e.tR||e.t0)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="na">void</td><td></td></tr>`;
+    return `<tr data-tip="${esc(tip+' \u00b7 could not be resolved (no usable price at horizon) \u2014 excluded from the record')}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td><td>${shDate(e.tR||e.t0)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="na">void</td><td></td></tr>`;
   const sa=e.realizedS!=null&&e.realizedS!==e.realized
     ?`${shVal(e.realizedS,e.unit)}${e.stopped?' <span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':''}`
     :(e.stopped?'<span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':'<span class="sec">\u2014</span>');
-  return `<tr data-tip="${esc(tip)}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${shDate(e.t0)}</td><td>${shDate(e.tR)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td>${shVal(e.realized,e.unit)}</td><td>${sa}</td></tr>`;
+  return `<tr data-tip="${esc(tip)}"><td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td><td>${shDate(e.tR)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td>${shVal(e.realized,e.unit)}</td><td>${sa}</td></tr>`;
 }
 async function loadSigHistory(coin,ticker){
   const p=el('sighist-panel'); if(!p) return;
@@ -1121,7 +1123,7 @@ async function loadSigHistory(coin,ticker){
     const rec=res.length?` \u00b7 <b class="${wins/res.length>=0.5?'pos':'neg'}">${Math.round(100*wins/res.length)}%</b> hit <span style="color:var(--faint)">(n=${res.length})</span>`:'';
     const rows=d.open.map(sigHistRow).join('')+d.closed.map(sigHistRow).join('');
     p.innerHTML=`<div class="cp-head">${esc(d.ticker||ticker)} <span class="sec" style="font-weight:400">\u2014 signal history${rec}${d.open.length?` \u00b7 ${d.open.length} open`:''}</span> <button class="btn xtiny" id="sighist-close" title="close" style="float:right">\u2715</button></div>`
-      +(rows?`<table class="sigrec-t"><thead><tr><th>event</th><th>side</th><th data-tip="when the claim was fired (your local time)">fired</th><th data-tip="when it reached its horizon and was scored \u00b7 open claims show time remaining">resolved</th><th data-tip="signal score at fire time">score</th><th data-tip="at-horizon outcome, signed with the claim (positive = followed through), in the unit the study claims">outcome</th><th data-tip="stop-aware outcome: capped at the frozen void level when it was touched before horizon \u00b7 \u2014 when it coincides with at-horizon">\u26d4</th></tr></thead><tbody>${rows}</tbody></table>`
+      +(rows?`<table class="sigrec-t"><thead><tr><th>event</th><th>side</th><th data-tip="when THIS claim opened its own entry in the ledger (your local time) \u2014 every event instance stamps its own time. \u27f2 marks claims opened on the first build after a restart/deploy, where the condition may predate the stamp">fired</th><th data-tip="the mark THIS instance was triggered at \u2014 outcomes are measured from this price">mark</th><th data-tip="when it reached its horizon and was scored \u00b7 open claims show time remaining">resolved</th><th data-tip="signal score at fire time">score</th><th data-tip="at-horizon outcome, signed with the claim (positive = followed through), in the unit the study claims">outcome</th><th data-tip="stop-aware outcome: capped at the frozen void level when it was touched before horizon \u00b7 \u2014 when it coincides with at-horizon">\u26d4</th></tr></thead><tbody>${rows}</tbody></table>`
       :`<div class="sec" style="font-size:11.5px;padding:6px 2px">No claims ever fired on ${esc(d.ticker||ticker)} \u2014 the history starts with its first signal.</div>`);
     const cb=el('sighist-close'); if(cb) cb.onclick=()=>{ p.hidden=true; const q=el('sighist-q'); if(q) q.value=''; };
   }catch(_){ if(seq===_shSeq) p.innerHTML='<div class="msg">Could not load the history \u2014 try again.</div>'; }
@@ -2105,10 +2107,22 @@ function setSigView(v){ try{ localStorage.setItem('xyz-sigview',v); }catch(_){} 
 const sigExpanded=new Set();   // coins expanded inline while in compact mode (session-only)
 function trigChip(g){
   if(g.t0==null) return '';
-  const tip = g.decayed
-    ? `first fired ${new Date(g.t0).toLocaleString()} (your local time) \u2014 this signal has OUTLIVED its claimed horizon: its score is decayed (\u00d70.6) and it drops entirely at 2\u00d7 the horizon. The original claim is already in the ledger awaiting resolution.`
-    : `first fired ${new Date(g.t0).toLocaleString()} (your local time) \u2014 the score decays once a signal outlives its claimed horizon and it drops entirely at 2\u00d7`;
-  return `<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(tip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${g.decayed?' \u00b7 decaying':''}</span>`;
+  const c=g.claim0, merged=c&&c.t!=null&&Math.abs(c.t-g.t0)<=90000;   // presence stamp == claim stamp (fired fresh): one chip carrying the price
+  const baseTip=`condition present since ${new Date(g.t0).toLocaleString()} (your local time) \u2014 this stamp tracks the CURRENT episode and resets whenever the condition lapses for a build`
+    +(g.sinceBoot?' \u00b7 \u27f2 stamped on the first build after a restart/deploy, so the condition may predate it':'')
+    +(g.decayed?' \u00b7 the open CLAIM has outlived its horizon: score decayed (\u00d70.6), drops entirely at 2\u00d7':'');
+  if(merged){
+    const left=c.resolveAt!=null?c.resolveAt-Date.now():null;
+    const tip=baseTip+` \u00b7 claim opened at ${c.px!=null?fmtPrice(c.px):'\u2014'}${c.boot?' on the first build after a restart/deploy (\u27f2)':''} \u2014 the outcome is measured from this mark${left!=null&&left>0?` \u00b7 resolves in ${fmtAge(left)}`:' \u00b7 resolution due'}`;
+    return `<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(tip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${c.px!=null?' @ '+fmtPrice(c.px):''}${(g.sinceBoot||c.boot)?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`;
+  }
+  let s=`<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(baseTip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${g.sinceBoot?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`;
+  if(c&&c.t!=null){
+    const left=c.resolveAt!=null?c.resolveAt-Date.now():null;
+    const tip=`the LEDGER CLAIM this signal is scored against: opened ${new Date(c.t).toLocaleString()} at ${c.px!=null?fmtPrice(c.px):'\u2014'}${c.boot?' \u2014 \u27f2 on the first build after a restart/deploy (the condition may predate the stamp)':''}. One episode carries ONE claim even if the condition lapses and returns, so the claim can be older than the condition you are looking at \u2014 the outcome is measured from the claim's own mark and time.${left!=null?(left>0?` Resolves in ${fmtAge(left)}.`:' Resolution due.'):''}`;
+    s+=`<span class="sig-age" data-tip="${esc(tip)}">claim ${fmtTrig(c.t)} @ ${c.px!=null?fmtPrice(c.px):'\u2014'}${c.boot?' \u27f2':''}</span>`;
+  }
+  return s;
 }
 function sigCardHtml(gr, rank, collapsible){
   let s=`<div class="sigcard${gr.sigs.length>1?' conf':''}${gr.sigs.some(x=>x.prime)?' prime':''}"${collapsible?` data-coll="${esc(gr.coin)}"`:''}>`;
@@ -2130,7 +2144,7 @@ function sigCardHtml(gr, rank, collapsible){
           : `${esc(g.horizon||'no historical study yet')}`));
     s+=`<div class="sig${g.prime?' prime':''}">`
       +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
-      +(g.confl?`<span class="sig-chip" style="color:var(--down);border-color:var(--down)" data-tip="conflicting signals \u00b7 a long-side and a short-side event are BOTH live on this name \u00b7 no confluence bonus is granted amid contradiction \u00b7 each claim resolves independently on its own record \u2014 the ledger, not the dashboard, decides which side was right">\u21c4 conflict</span>`:'')
+      +(g.confl?`<span class="sig-chip" style="color:var(--down);border-color:var(--down)" data-tip="${esc(`conflicting signals \u00b7 a long-side and a short-side event are BOTH live on this name${(g.conflWith&&g.conflWith.length)?` \u00b7 opposing: ${g.conflWith.map(o=>`${o.label} (${(o.side||'').toUpperCase()}, score ${o.score})`).join('; ')} \u2014 the counterpart may rank below the visible list or be hidden by your filters; the conflict stands because both are live and both claims are on the books`:''} \u00b7 no confluence bonus is granted amid contradiction \u00b7 each claim resolves independently on its own record \u2014 the ledger, not the dashboard, decides which side was right`)}">\u21c4 conflict</span>`:'')
       +`<span class="sig-line1">${g.prime?'<i class="sig-prime" data-tip="prime setup: \u226560% hit, positive expectancy, sound structure (R/R \u22651.2 where levels exist), not unproven/decayed/no-edge \u2014 the bars this signal clears to earn emphasis">\u2605 prime</i>':''}${trigChip(g)}<span class="sig-read">${esc(g.reading)}</span></span>`
       +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality`:''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.negexp?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}</span>`
       +(g.play?playRow(g):'')
