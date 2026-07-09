@@ -2067,21 +2067,35 @@ function playDist(g, lvl){
   return ` <i class="${pc>=0?'pos':'neg'}">(${pc>=0?'+':''}${pc.toFixed(1)}%)</i>`;
 }
 function rrChip(g){
+  const c=g.claim0, frozen=!!(c&&c.tgt!=null&&c.stop!=null);
   const p=g.play, r=state.rows.get(g.coin);
-  if(!p||p.target==null||p.stop==null||!r||!(r.px>0)) return '';
-  const up=Math.abs(p.target-r.px), dn=Math.abs(p.stop-r.px);
+  // Frozen claim: R/R measured from the CLAIMED mark against the frozen levels — the geometry
+  // the ledger scores. Live-only signals keep the live-mark geometry.
+  const px=frozen?(c.px>0?c.px:null):(r&&r.px>0?r.px:null);
+  const tgt=frozen?c.tgt:(p&&p.target), stp=frozen?c.stop:(p&&p.stop);
+  if(px==null||tgt==null||stp==null) return '';
+  const up=Math.abs(tgt-px), dn=Math.abs(stp-px);
   if(!(dn>0)) return '';
-  const rr=up/dn, c=rr>=1.5?'pos':(rr<0.8?'neg':'sec');
-  return `<span class="sp-lvl" data-tip="median-target distance \u00f7 invalidation distance from the live mark. CAVEAT: the target is the MEDIAN outcome (50th percentile drift) and the void level is premise-invalidation, not a risk-sized stop \u2014 so this ratio screens structure, it does not measure trade expectancy. A low ratio only works with a high hit rate; the expectancy figure and the live track record are the real arbiters.">R/R <b class="${c}">${rr.toFixed(1)}</b></span>`;
+  const rr=up/dn, cl=rr>=1.5?'pos':(rr<0.8?'neg':'sec');
+  return `<span class="sp-lvl" data-tip="median-target distance \u00f7 invalidation distance${frozen?' from the CLAIMED mark \u2014 the frozen geometry the ledger scores':' from the live mark'}. CAVEAT: the target is the MEDIAN outcome (50th percentile drift) and the void level is premise-invalidation, not a risk-sized stop \u2014 so this ratio screens structure, it does not measure trade expectancy. A low ratio only works with a high hit rate; the expectancy figure and the live track record are the real arbiters.">R/R <b class="${cl}">${rr.toFixed(1)}</b></span>`;
 }
 function playRow(g){
-  const p=g.play, sd=SP_SIDE[p.side]||SP_SIDE.watch;
-  return `<span class="sig-play" data-tip="Mechanical description of the setup with levels computed from this market's own stats \u2014 NOT advice. Distances are measured from the live mark. The track record strip above decides which event types deserve any trust.">`
+  const p=g.play, c=g.claim0, frozen=!!(c&&(c.side||c.stop!=null||c.tgt!=null));
+  // When an open claim exists, the side and levels are the CLAIM'S — stamped at fire, the exact
+  // things the ledger resolves against. They do not drift with the market; only the shown
+  // distance-from-here moves, because the live mark does. Without a claim (context flags),
+  // the live-computed playbook renders as before.
+  const side=frozen&&c.side?c.side:p.side, sd=SP_SIDE[side]||SP_SIDE.watch;
+  const tgt=frozen&&c.tgt!=null?c.tgt:p.target, stp=frozen&&c.stop!=null?c.stop:p.stop;
+  const wrapTip=frozen
+    ? `Mechanical description of the setup \u2014 NOT advice. Side and levels are FROZEN from the claim opened ${new Date(c.t).toLocaleString()}${c.px!=null?` at ${fmtPrice(c.px)}`:''}: the ledger resolves against exactly these, so they never move while the claim is open. Distances are measured from the live mark, so they change as price does. The track record strip above decides which event types deserve any trust.`
+    : `Mechanical description of the setup with levels computed from this market's own stats \u2014 NOT advice. Distances are measured from the live mark. The track record strip above decides which event types deserve any trust.`;
+  return `<span class="sig-play" data-tip="${esc(wrapTip)}">`
     +`<span class="sp-k">play</span>`
-    +`<b class="sp-side ${sd.c}" data-tip="${esc(sd.tip)}">${sd.t}</b>`
+    +`<b class="sp-side ${sd.c}" data-tip="${esc(sd.tip+(frozen&&c.side?' \u2014 side stamped on the claim at fire; it cannot flip while the claim is open':''))}">${sd.t}</b>`
     +`<span class="sp-bias">${esc(p.bias||'')}</span>`
-    +(p.target!=null?`<span class="sp-lvl" data-tip="level implied by this market's own historical median for the event \u2014 where the base rate says the move resolves">target <b>${fmtPrice(p.target)}</b>${playDist(g,p.target)}</span>`:'')
-    +(p.stop!=null?`<span class="sp-lvl" data-tip="invalidation \u2014 beyond this level the setup's premise is broken and the signal should be treated as void">void <b>${fmtPrice(p.stop)}</b>${playDist(g,p.stop)}</span>`:'')
+    +(tgt!=null?`<span class="sp-lvl" data-tip="${esc(frozen?'target implied by the historical median AT FIRE \u2014 frozen on the claim; where the base rate said the move resolves, measured from the claimed mark':'level implied by this market\u2019s own historical median for the event \u2014 where the base rate says the move resolves')}">target <b>${fmtPrice(tgt)}</b>${playDist(g,tgt)}</span>`:'')
+    +(stp!=null?`<span class="sp-lvl" data-tip="${esc(frozen?'invalidation FROZEN at fire \u2014 the stop-aware track resolves against exactly this level; beyond it the setup\u2019s premise is broken':'invalidation \u2014 beyond this level the setup\u2019s premise is broken and the signal should be treated as void')}">void <b>${fmtPrice(stp)}</b>${playDist(g,stp)}</span>`:'')
     +rrChip(g)
     +(p.watch?`<span class="sp-watch" data-tip="the one corroborating condition that confirms or kills this setup">watch: ${esc(p.watch)}</span>`:'')
     +`</span>`;
@@ -2153,7 +2167,7 @@ function sigCardHtml(gr, rank, collapsible){
   return s+'</div>';
 }
 function sigRowHtml(gr, rank){
-  const top=gr.sigs[0], sd=SP_SIDE[(top.play&&top.play.side)||'watch']||SP_SIDE.watch;
+  const top=gr.sigs[0], sd=SP_SIDE[(top.claim0&&top.claim0.side)||(top.play&&top.play.side)||'watch']||SP_SIDE.watch;
   const chips=gr.sigs.map(g=>{
     const cu=(st)=>st&&st.unit==='R'?'R':'%';
     const hist=g.study&&g.study.n>=8?` \u00b7 on ${g.ticker} (n=${g.study.n}): med ${g.study.med>=0?'+':''}${g.study.med}${cu(g.study)}, ${Math.round(g.study.hit*100)}% hit`
