@@ -798,6 +798,12 @@ function createPoller({ dex, store, log, version, crypto }) {
       if (repaired) { ledgerDirty = true; log(`Ledger unit repair: sigma-normalized ${repaired} stored breakdown/oiflush/fpdiv outcome(s) to R`); }
     }
     if (Array.isArray(d.rearm)) for (const k of d.rearm) if (typeof k === "string") rearm.add(k);
+    // Presence timelines: a restart must not restamp "since when this condition has been true".
+    // Restored entries resume their episode; keys whose condition no longer holds are GC'd on
+    // the first build. Only a key with NO saved timeline (first deploy of this feature, or a
+    // lost volume) starts observation at boot, and that one is flagged in the payload.
+    if (Array.isArray(d.present)) for (const p of d.present)
+      if (Array.isArray(p) && typeof p[0] === "string" && Number.isFinite(p[1])) presentSince.set(p[0], { t: p[1], b: false });
     if (d.variants) for (const ev in variantState)
       if (d.variants[ev] && Number.isInteger(d.variants[ev].inc) && d.variants[ev].inc >= 0 && d.variants[ev].inc < VARIANTS[ev].vals.length)
         variantState[ev] = { inc: d.variants[ev].inc, hist: Array.isArray(d.variants[ev].hist) ? d.variants[ev].hist.slice(-20) : [] };
@@ -805,7 +811,8 @@ function createPoller({ dex, store, log, version, crypto }) {
   }
   function persistLedger() {
     if (!ledgerDirty) return;
-    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm] });
+    store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm],
+      present: [...presentSince].map(([k, v]) => [k, v.t]) });   // presence timelines survive restarts — a deploy is not a lapse
     ledgerDirty = false;
   }
   // Per-ticker signal history for the drawer: every VISIBLE claim the engine ever made on one
@@ -1398,7 +1405,15 @@ function createPoller({ dex, store, log, version, crypto }) {
       g.t0 = ps.t; g.age = now - ps.t; if (ps.b) g.sinceBoot = true;
       const e = ledgerOpen.get(key);
       if (e) {
-        g.claim0 = { t: e.t0, px: e.mark0 != null && isFinite(e.mark0) ? e.mark0 : null, resolveAt: e.resolveAt, boot: e.bt === 1 };
+        // The FROZEN claim: the ledger resolves against exactly these — mark, side, void, and
+        // the target implied by the target-distance stamped at fire. The card must render
+        // these, not a per-build recompute, or the display drifts while the accounting stands
+        // still (moving targets on a frozen claim destroy trust in the record).
+        const fTgt = e.mv != null && e.mark0 > 0 && (e.psd === "long" || e.psd === "short")
+          ? +( e.mark0 * (1 + (e.psd === "long" ? 1 : -1) * e.mv / 100) ).toPrecision(6) : null;
+        g.claim0 = { t: e.t0, px: e.mark0 != null && isFinite(e.mark0) ? e.mark0 : null,
+          resolveAt: e.resolveAt, boot: e.bt === 1,
+          side: e.psd || null, stop: e.stp != null ? e.stp : null, tgt: fTgt };
         const claimAge = now - e.t0, span = Math.max(1, e.resolveAt - e.t0);
         if (claimAge > 2 * span) continue;
         if (claimAge > span) { g.score = Math.round(g.score * 0.6); g.decayed = true; g.prime = false; }   // client shows the amber decaying state
