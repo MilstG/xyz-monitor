@@ -35,6 +35,14 @@ const COLS=[
   {key:'trend', label:'30d trend', type:'num', tip:'30-day price path (sparkline). Sorts by 30-day % change.', td:r=>trendCell(r)},
   {key:'rs', label:'vs S&P', type:'num', tip:'Excess return vs the S&P 500 perp over the window (this market % − S&P %).',
     td:r=>`<td${shade(r.rs,8)}>${rsCell(r)}</td>`},
+  {key:'vstape', label:'vs tape', type:'num', def:'desc', tip:'This market\u2019s window return minus the UNIVERSE MEDIAN return \u2014 relative strength against the whole tape, not a benchmark. On a red tape, sort descending: the names above zero are holding stronger than the rest. Same reference as DownCap/Hit%, so today\u2019s read and the 31d character read line up one-to-one.',
+    td:r=>`<td${shade(r.vstape,8)}>${vsTapeCell(r)}</td>`},
+  {key:'dcap', label:'DownCap 31d', type:'num', def:'asc', tip:'Down-capture vs the tape: over the last 31 days, on 4h bars where the whole scope was red (\u226570% of names down, negative median), how much of the tape\u2019s move this name ate. <100 = dumps less than the typical name, negative = net GREEN on red bars, >100 amplifies red tape. Sum-ratio vs the universe median, cascade bars winsorized. Fixed 31d/4h \u2014 does not follow the window selector. Dash below 20 matched bars.',
+    td:r=>dcapCell(r)},
+  {key:'hitr', label:'Hit%', type:'num', def:'desc', tip:'On those same red-tape 4h bars: the share where this name beat the universe median. The consistency check on DownCap \u2014 a good DownCap with a low Hit% means the average is carried by a couple of lucky bars; both strong means the resilience is character, not one print. Dash below 20 matched bars.',
+    td:r=>hitCell(r)},
+  {key:'rvol', label:'RVOL', type:'num', def:'desc', tip:'Relative volume, clock-hour matched: notional traded over the selected window (1h/4h/1d) \u00f7 the median notional of the SAME clock hours across the prior month. 1.0\u00d7 = normal for this time of day, \u22652\u00d7 = genuinely elevated. Clock matching means the quiet overnight hours are judged against prior overnights, not against the open \u2014 so an off-hours reading is real, just noisier. Defined up to the 1d window; 7d/30d show a dash.',
+    td:r=>rvolCell(r)},
   {key:'beta', label:'β', type:'num', tip:'Beta to the S&P perp (90d daily returns): sensitivity to the benchmark. >1 amplifies it, 0–1 dampens, <0 moves inverse. Fills in once daily history loads in the background.',
     td:r=>betaCell(r)},
   {key:'mom', label:'Momentum', type:'num', def:'desc', tip:'Self-normalizing momentum −100…+100: risk-adjusted multi-horizon return × 7d trend quality + range position, modulated by OI conviction.',
@@ -69,8 +77,8 @@ function turnCell(r){ if(r.turn==null||!isFinite(r.turn)) return '<td><span clas
   return `<td${c?` class="${c}"`:''} title="OI ${fmtUsd(r.oi)} \u00f7 24h vol ${fmtUsd(r.vol)} \u2014 positioning is ${r.turn.toFixed(1)}\u00d7 the daily flow">\u00d7${r.turn>=10?r.turn.toFixed(0):r.turn.toFixed(1)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','mom','dd','ddy','yopen','mopen','vol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
-const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
+const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dcap','hitr','rvol'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null,
@@ -220,6 +228,8 @@ function applySnapshot(s){
     if(m.fundByWin) r.fundByWin=m.fundByWin;
     if(m.sector) r.sector=m.sector;
     r.fundPct=(m.fundPct!=null)?m.fundPct:r.fundPct;
+    if(m.red!==undefined) r.red=m.red;             // {dcap,hit,n} or null — fixed 31d/4h red-tape resilience, server-computed
+    if(m.rvol!==undefined) r.rvolByWin=m.rvol;     // {h1,h4,d1} clock-hour-matched relative volume, server-computed
     if(m.assetClass) r.assetClass=m.assetClass;
     r.d1=(r.px!=null&&r.prevDay)?(r.px-r.prevDay)/r.prevDay*100:r.d1;
     recomputeChanges(r);
@@ -230,6 +240,7 @@ function applySnapshot(s){
   state.benchCoin=s.benchCoin||detectBenchmark();
   if(s.dataTs) state.dataTs=s.dataTs;
   if(s.regime) state.regimeSrv=s.regime;
+  if(s.redBars) state.redBars=s.redBars;
   if(s.warm) state.warm=s.warm;
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
@@ -302,7 +313,23 @@ function computeMomentum(r){
 function computeDerived(){
   const tfKey=TF_MAP[state.tf]||'d1';
   const bX=state.benchCoin?state.rows.get(state.benchCoin):null, bM=state.benchMain?state.rows.get(state.benchMain):null;
+  // Universe-median return over the selected window, per scope — the reference for "vs tape".
+  // Median, not mean: one violent name must not move the tape's definition of itself.
+  const tapeMed={xyz:null,main:null};
+  { const acc={xyz:[],main:[]};
+    for(const r of state.rows.values()){ if(r.delisted)continue; const v=r[tfKey];
+      if(v!=null&&isFinite(v)) acc[r.uni==='main'?'main':'xyz'].push(v); }
+    for(const u of ['xyz','main']){ const a=acc[u]; if(a.length>=5){ a.sort((x,y)=>x-y);
+      tapeMed[u]=a.length%2?a[(a.length-1)/2]:(a[a.length/2-1]+a[a.length/2])/2; } } }
+  state._tapeMed=tapeMed;
   for(const r of state.rows.values()){ if(r.delisted)continue;
+    // vs tape: this market's window return minus the universe median — the live counterpart of
+    // DownCap/Hit% (same reference), and the direct read for "holding stronger than the rest".
+    { const tm=tapeMed[r.uni==='main'?'main':'xyz'], a=r[tfKey];
+      r.vstape=(tm!=null&&a!=null&&isFinite(a))?a-tm:null; }
+    r.dcap=(r.red&&r.red.dcap!=null)?r.red.dcap:null;
+    r.hitr=(r.red&&r.red.hit!=null)?r.red.hit:null;
+    r.rvol=(r.rvolByWin&&(tfKey==='h1'||tfKey==='h4'||tfKey==='d1'))?(r.rvolByWin[tfKey]??null):null;
     const benchC=r.uni==='main'?state.benchMain:state.benchCoin;   // BTC anchors crypto; SP500 anchors equities
     const bench=r.uni==='main'?bM:bX, benchRet=bench?bench[tfKey]:null;
     r.doi=r.doiByWin?(r.doiByWin[tfKey]??null):null;
@@ -413,6 +440,7 @@ function moveColumn(src, dst, after){
 function buildHead(){ const tr=el('head'); tr.innerHTML='';
   visibleCols().forEach(c=>{ const th=document.createElement('th'); th.tabIndex=0; th.dataset.key=c.key; th.setAttribute('role','columnheader'); th.draggable=true;
     let label=c.label; if(c.key==='rs')label=`vs ${state.scope==='crypto'?'BTC':'S&amp;P'} (${state.tf})`; if(c.key==='doi')label=`ΔOI (${state.tf})`;
+    if(c.key==='vstape')label=`vs tape (${state.tf})`; if(c.key==='rvol')label=`RVOL (${['1h','4h','1d'].includes(state.tf)?state.tf:'—'})`;
     if(c.key==='adr')label=`Avg Range (${state.tf==='30d'?'30d':'7d'})`;
     const active=state.sortKey===c.key; th.setAttribute('aria-sort', active?(state.sortDir==='asc'?'ascending':'descending'):'none');
     if(c.tip) th.title=c.tip;
@@ -462,6 +490,24 @@ function rsCell(r){ const bC=r.uni==='main'?state.benchMain:state.benchCoin;
   if(!bC)return '<span class="na" title="no benchmark detected">—</span>';
   if(r.coin===bC)return `<span class="sec" title="this is the benchmark">${r.uni==='main'?'BTC':'S&amp;P'}</span>`;
   const p=fmtPct(r.rs); return `<span class="${p.c}">${p.t}</span>`; }
+function vsTapeCell(r){ if(r.vstape==null)return '<span class="na" title="needs the window return and at least 5 reporting names in the scope">—</span>';
+  const p=fmtPct(r.vstape), tm=state._tapeMed?state._tapeMed[r.uni==='main'?'main':'xyz']:null;
+  return `<span class="${p.c}" title="return ${pctTxt(r[TF_MAP[state.tf]||'d1'])} \u2212 universe median ${pctTxt(tm)} over ${state.tf}">${p.t}</span>`; }
+function redTitle(r,extra){ const n=r.red?r.red.n:0, tot=state.redBars?(state.redBars[r.uni==='main'?'main':'xyz']||0):0;
+  return `${extra} \u00b7 ${n} matched red-tape 4h bars (scope had ${tot} in 31d) \u00b7 red = \u226570% of names down with a negative median \u00b7 reference = universe median, winsorized`; }
+function dcapCell(r){ if(r.dcap==null||!isFinite(r.dcap)){ const n=r.red?r.red.n:0;
+    return `<td><span class="na" title="${n?`only ${n} matched red-tape bars \u2014 below the 20-bar gate`:'needs ~a day of hourly history and enough red-tape bars in the scope'}">\u2014</span></td>`; }
+  const c=r.dcap<0?'pos':(r.dcap<85?'pos':(r.dcap>120?'neg':'sec'));
+  const story=r.dcap<0?'net GREEN on red-tape bars':(r.dcap<100?`eats ${r.dcap}% of the tape\u2019s red move \u2014 dumps less than the typical name`:(r.dcap>100?`amplifies red tape (${r.dcap}% of the typical move)`:'moves with the tape'));
+  return `<td class="${c}" title="${redTitle(r,story)}">${r.dcap}%</td>`; }
+function hitCell(r){ if(r.hitr==null||!isFinite(r.hitr)) return '<td><span class="na" title="below the 20 matched-bar gate">\u2014</span></td>';
+  const c=r.hitr>=60?'pos':(r.hitr<=40?'neg':'sec');
+  return `<td class="${c}" title="${redTitle(r,`beat the universe median on ${r.hitr}% of matched red-tape bars`)}">${r.hitr}%</td>`; }
+function rvolCell(r){ const tfKey=TF_MAP[state.tf]||'d1';
+  if(!(tfKey==='h1'||tfKey==='h4'||tfKey==='d1')) return '<td><span class="na" title="RVOL is defined up to the 1d window \u2014 clock-hour matching has no meaning beyond a day">\u2014</span></td>';
+  if(r.rvol==null||!isFinite(r.rvol)) return '<td><span class="na" title="needs enough hourly history for a same-clock-hours baseline (\u22657 prior days with coverage)">\u2014</span></td>';
+  const c=r.rvol>=2?'accent':(r.rvol<0.5?'sec':''), t=Math.min(Math.max(r.rvol-1,0)/4,1)*0.20;
+  return `<td${c?` class="${c}"`:''} style="background:rgba(251,139,30,${t.toFixed(3)})" title="notional over the last ${state.tf} \u00f7 median of the same clock hours across the prior month \u2014 ${r.rvol>=2?'genuinely elevated for this time of day':(r.rvol<0.5?'well below its norm for this time of day':'in line with its norm for this time of day')}${state.offHours&&state.offHours.closed&&r.uni!=='main'?' \u00b7 cash market closed: judged against prior off-hours, real but thinner':''}">\u00d7${r.rvol>=10?r.rvol.toFixed(0):r.rvol.toFixed(1)}</td>`; }
 function oiCell(r){ if(r.doi==null)return '<span class="na" title="collecting OI history (server-side, accrues over time)">—</span>';
   const oc=r.doi>0?'pos':(r.doi<0?'neg':'sec'), sign=r.doi>0?'+':'';
   let s=`<span class="${oc}">${sign}${r.doi.toFixed(2)}%</span>`;
@@ -2891,6 +2937,9 @@ markets:`
 <p><b>Prem</b> is the perp vs oracle dislocation in bp. When the cash market is <i>closed</i>, the oracle freezes near the last print — so a persistent premium or discount is the live off-hours price discovery, and the tradeable reversion. <b>Gap</b> is the last close→open move (live while the market is closed); its hover carries the cumulative 30d off-hours drift — a persistent sign there is the overnight effect.</p>
 <div class="hlp-h">Squeeze &amp; OI/Vol</div>
 <p><b>Squeeze</b> (0–100) is how loaded the spring is: crowding (shorts paying) × fuel (OI building) × trigger (price pressing the 30d high). Zero whenever funding is positive — no crowded shorts, no squeeze. <b>OI/Vol</b> is standing positioning ÷ daily flow: ≥2× means stale, crowded positioning that can't exit quickly — fragile to squeezes and unwinds. High squeeze + negative funding + rising OI + high OI/Vol is the full configuration.</p>
+<div class="hlp-h">Red-tape resilience &amp; RVOL (hidden by default — column menu ⚙)</div>
+<p>The setup these serve: on a red tape, the names that dump least tend to keep leading once the market stabilizes. <b>vs tape</b> is the live read — this market's window return minus the <i>universe median</i>, not a benchmark, so BTC-green-while-alts-bleed days are measured correctly and the benchmark is just another row. <b>DownCap 31d</b> is the character read: over the last month's 4h bars where the whole scope was red (≥70% of names down, negative median), how much of the tape's move this name ate — &lt;100% dumps less than the typical name, negative means net green on red bars, &gt;100% amplifies. <b>Hit%</b> is the consistency check: the share of those bars where it beat the median — good DownCap with low Hit% means a couple of lucky bars carried the average. Both are fixed 31d/4h and don't follow the window selector. The workflow: red tape → sort vs tape → confirm the strength is character (DownCap low, Hit% high) and being <i>bought</i> (RVOL up). Honest caveats: one month of character, not a regime; cascade bars are winsorized so a single liquidation event can't dominate the ratio; dashes below 20 matched bars, always.</p>
+<p><b>RVOL</b> is relative volume, clock-hour matched: notional over the selected window (1h/4h/1d) ÷ the median of the <i>same clock hours</i> across the prior month. 1.0× = normal for this time of day; ≥2× = genuinely elevated. Clock matching is the point — overnight hours are judged against prior overnights, the open against prior opens, so the session shape doesn't masquerade as a volume signal. Positive vs-tape on ~1× RVOL is drift; on 2×+ it's demand. Weekends read slightly cold by construction (the baseline mixes weekday hours); 7d/30d windows show a dash — clock matching has no meaning beyond a day.</p>
 <div class="hlp-h">Crypto scope</div>
 <p>The Stocks|Crypto switch is a hard wall: separate universes, separate benchmark (BTC, not S&amp;P), no mixing anywhere. Crypto adds the tape strip up top — <b>crowd pays</b> (OI-weighted funding APR: euphoria tax vs squeeze fuel), <b>breadth</b>, total OI with its weighted delta, BTC's day, and the alt-season gauge. Session concepts (gap) vanish: a 24/7 market has none. Crypto history is 31d by design, so long MAs and YTD columns show honest dashes.</p>`,
 sectors:`
