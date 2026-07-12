@@ -348,3 +348,31 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(p.getLedgerFor("AAPL", "breakdown").closed.length, 2, "coin+event filters combine");
   assert.equal(p.getLedgerFor("AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
 });
+
+test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
+  // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
+  // lines and still passed node --check (valid JS) and this suite (which never read the client).
+  // This test makes structural damage to the client a suite failure.
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(s.length > 250000, `app.js suspiciously small: ${s.length} bytes`);
+  const defs = {};
+  for (const m of s.matchAll(/^(?:async )?function ([A-Za-z0-9_]+)\(/gm)) defs[m[1]] = (defs[m[1]] || 0) + 1;
+  const need = ["closeDetail", "showView", "openDetail", "renderSignals", "sigCardHtml", "sigRowHtml",
+    "trigChip", "playRow", "rrChip", "recCurveSvg", "openHelp", "closeHelp",
+    "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
+    "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge"];
+  for (const n of need) {
+    assert.ok(defs[n] >= 1, `missing client function: ${n}`);
+    assert.equal(defs[n], 1, `duplicate client function: ${n}`);
+  }
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev"]) {
+    const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
+    assert.ok(ok, `missing client feature marker: ${frag}`);
+  }
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger"]) {
+    if (id === "dledger") continue;   // dledger is injected by JS, not static markup
+    assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
+  }
+});
