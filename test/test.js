@@ -370,6 +370,12 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
+  // Labels are labels: a tooltip sentence welded onto EV_LABELS broke every chip and table
+  // row once. Each label must stay a short display string.
+  const lm = s.match(/const EV_LABELS=\{[^\n]*\}/);
+  assert.ok(lm, "EV_LABELS missing");
+  for (const em of lm[0].matchAll(/:'([^']*)'/g))
+    assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
