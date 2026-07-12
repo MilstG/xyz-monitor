@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
-  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev,
+  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
@@ -797,6 +797,53 @@ function createPoller({ dex, store, log, version, crypto }) {
       }
       if (repaired) { ledgerDirty = true; log(`Ledger unit repair: sigma-normalized ${repaired} stored breakdown/oiflush/fpdiv outcome(s) to R`); }
     }
+    // Stop-geometry repair: stored claims whose stop sat on the WRONG side of entry (e.g. a
+    // squeeze firing near the range bottom, "stop" mechanically landing above a long's mark).
+    // Their stop-aware legs are fabrications — the first candle "touched" the level and a loss
+    // got capped into a positive realizedS and a false winS. Repair: the stop never validly
+    // existed, so the stop-aware leg falls back to the at-horizon truth. gv=1 marks the entry
+    // geometry-void (kept for forensics); idempotent — repaired entries carry no stp.
+    {
+      let gfix = 0;
+      for (const e of ledgerClosed) {
+        if (e.gv || e.stp == null) continue;
+        if (stopGeometryOk(e.psd || (e.dir >= 0 ? "long" : "short"), e.mark0, e.stp)) continue;
+        e.gv = 1; e.stp = null;
+        if (e.status === "resolved" && Number.isFinite(e.realized)) { e.realizedS = e.realized; e.winS = e.win; }
+        else { e.realizedS = null; delete e.winS; }
+        e.stopped = false; gfix++;
+      }
+      for (const e of ledgerOpen.values()) {
+        if (e.gv || e.stp == null) continue;
+        if (stopGeometryOk(e.psd || (e.dir >= 0 ? "long" : "short"), e.mark0, e.stp)) continue;
+        e.gv = 1; e.stp = null; gfix++;   // open claim keeps resolving, just without a stop-aware leg
+      }
+      if (gfix) { ledgerDirty = true; log(`Ledger stop-geometry repair: voided ${gfix} inverted stop(s); stop-aware legs reverted to at-horizon truth`); }
+    }
+    // Play-sign repair: stored claims whose playbook side OPPOSES the event sign (gap faders)
+    // were resolved event-signed — successful fades ledgered as losses, failed ones as wins,
+    // and the stamped claim median carried the study's event sign. Flip outcomes, wins, and the
+    // claim median (shallow copy — study objects are shared) into the units of the published
+    // play. pn=1 marks play-signed entries; idempotent across boots.
+    {
+      const oppose = (e) => e.psd && ((e.psd === "long" ? 1 : -1) !== (e.dir >= 0 ? 1 : -1));
+      let pfix = 0;
+      for (const e of ledgerClosed) {
+        if (e.pn || !oppose(e)) continue;
+        if (e.status === "resolved" && Number.isFinite(e.realized)) {
+          e.realized = +(-e.realized).toFixed(2); e.win = e.realized > 0;
+          if (e.realizedS != null && isFinite(e.realizedS)) { e.realizedS = +(-e.realizedS).toFixed(2); e.winS = e.realizedS > 0; }
+        }
+        if (e.claim && Number.isFinite(e.claim.med)) e.claim = Object.assign({}, e.claim, { med: +(-e.claim.med).toFixed(2), fade: true });
+        e.pn = 1; pfix++;
+      }
+      for (const e of ledgerOpen.values()) {
+        if (e.pn || !oppose(e)) continue;
+        if (e.claim && Number.isFinite(e.claim.med)) e.claim = Object.assign({}, e.claim, { med: +(-e.claim.med).toFixed(2), fade: true });
+        e.pn = 1; pfix++;   // outcome will be play-signed at resolution regardless — psd drives the sign statelessly
+      }
+      if (pfix) { ledgerDirty = true; log(`Ledger play-sign repair: flipped ${pfix} fader claim(s) into the units of the published play`); }
+    }
     if (Array.isArray(d.rearm)) for (const k of d.rearm) if (typeof k === "string") rearm.add(k);
     // Presence timelines: a restart must not restamp "since when this condition has been true".
     // Restored entries resume their episode; keys whose condition no longer holds are GC'd on
@@ -890,7 +937,15 @@ function createPoller({ dex, store, log, version, crypto }) {
         claim: sigEntry.study || null,
         resolveAt: resolveAtFor(ev, Date.now()),
       }, signalsBuildCount <= 1 ? { bt: 1 } : null,   // opened on the FIRST build after a restart/deploy: the condition may predate this stamp — flagged so identical boot-time timestamps explain themselves
-      vi != null ? { vi } : null, mv != null ? { mv } : null, stp != null ? { stp } : null, psd ? { psd } : null, extra || {});
+      vi != null ? { vi } : null, mv != null ? { mv } : null,
+      // Geometry gate: a stop is only stamped when it sits on the LOSS side of entry for the
+      // claim's effective side. A composite firing away from its assumed range edge produces
+      // mechanically inverted levels; stamping one turns the stop-aware track into a win
+      // fabricator (see the MINIMAX squeeze: -20.79% at horizon, "stopped" at +10.68%). An
+      // invalid stop means this claim simply has no stop-aware leg — at-horizon only.
+      stp != null && stopGeometryOk(psd || (dir >= 0 ? "long" : "short"), r.px, stp) ? { stp } : null,
+      psd ? { psd, pn: 1 } : null,   // pn: play-signed regime — outcomes/claim are in the units of the published play; hydrate repair keys on its absence
+      extra || {});
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -926,7 +981,12 @@ function createPoller({ dex, store, log, version, crypto }) {
         const p0 = priceAsOf(hs, e.t0, 3 * HOUR) || e.mark0;
         const p1 = priceAsOf(hs, e.resolveAt, 3 * HOUR);
         if (p0 > 0 && p1 > 0) {
-          realized = +((e.dir >= 0 ? 1 : -1) * (p1 / p0 - 1) * 100).toFixed(2);
+          // Outcomes are signed with the PLAY the engine published (psd, stamped at fire), not
+          // the event: for the one family where they differ — proven gap faders — event-signing
+          // recorded successful fades as losses and stopped-out fades as green stop-aware wins.
+          // Claims without a side keep the event sign (identical for every aligned event).
+          const sgn = e.psd ? (e.psd === "long" ? 1 : -1) : (e.dir >= 0 ? 1 : -1);
+          realized = +(sgn * (p1 / p0 - 1) * 100).toFixed(2);
           // stop-aware parallel track: if the void level was touched before horizon, the claim's
           // stop-disciplined outcome is the (dir-signed) stop distance instead of the at-horizon
           // move. Same units as `realized`. Claims without a stop keep realizedS === realized.
@@ -935,9 +995,12 @@ function createPoller({ dex, store, log, version, crypto }) {
             // gap-FADER's void lies in the continuation direction (above entry on an up-gap,
             // dir=+1) — keying on e.dir would call the stop "touched" on the first candle.
             const below = e.stp < (e.mark0 || p0);
+            if (!stopGeometryOk(e.psd || (e.dir >= 0 ? "long" : "short"), e.mark0, e.stp)) { e.gv = 1; e.stp = null; e.stopped = false; e.realizedS = realized; }
+            else {
             const touched = stopTouched(hs, e.t0, e.resolveAt, below ? 1 : -1, e.stp);
-            if (touched === true) { e.stopped = true; e.realizedS = +((e.dir >= 0 ? 1 : -1) * (e.stp / p0 - 1) * 100).toFixed(2); }
+            if (touched === true) { e.stopped = true; e.realizedS = +(sgn * (e.stp / p0 - 1) * 100).toFixed(2); }
             else if (touched === false) { e.stopped = false; e.realizedS = realized; }
+            }
           }
           // Sigma-normalize EVERY R-united claim: the studies claim in R, so the ledger must
           // resolve in R. The original condition listed only bigmove/breakout/fundflip —
@@ -1266,13 +1329,20 @@ function createPoller({ dex, store, log, version, crypto }) {
           VARIANTS.gap.vals.forEach((v, vi) => { if (gz >= v) openLedger(r, "gap", { score: 0, reading: "" }, g >= 0 ? 1 : -1, null, vi); });
           if (gz >= incVal("gap")) {
             const exc = gBench != null && r.coin !== benchCoin ? g - gBench : null;
-            const evd = evidence(st.gap.session, "gap", pooledFor(ac, "gap", "session"), "%");
+            // Play units for faders: when this market's own record says gaps FADE (the exact
+            // condition the playbook keys on), the study handed to scoring — and therefore the
+            // claim stamped on the ledger — is flipped into the units of the play the engine
+            // actually publishes. Without this, proven faders were tagged `neg exp` (evidence
+            // zeroed, never prime) while the card simultaneously told you to fade the gap.
+            const gs0 = st.gap.session;
+            const gs = gs0 && gs0.n >= 8 && gs0.med != null && gs0.med < 0 ? fadeStats(gs0) : gs0;
+            const evd = evidence(gs, "gap", pooledFor(ac, "gap", "session"), "%");
             const reading = `${g >= 0 ? "+" : ""}${g.toFixed(2)}% since the last close (${(Math.abs(g) / st.gap.sd).toFixed(1)}\u03c3 of its gaps)`
               + (exc != null ? ` \u00b7 S&P ${gBench >= 0 ? "+" : ""}${gBench.toFixed(2)}%, excess ${exc >= 0 ? "+" : ""}${exc.toFixed(2)}%` : "");
             const sig = mkSignal(r, "gap", reading,
               (Math.abs(g) / st.gap.sd) * 14 + (exc != null ? Math.min(16, Math.abs(exc) / st.gap.sd * 12) : 0),
               evd, { horizon: EV_META.gap.horizon });
-            sig.play = playbook("gap", { px: r.px, closePx: pc, gapDir: g >= 0 ? 1 : -1, gapSd: st.gap.sd, med: sig.study ? sig.study.med : null, n: sig.study ? sig.study.n : 0 });
+            sig.play = playbook("gap", { px: r.px, closePx: pc, gapDir: g >= 0 ? 1 : -1, gapSd: st.gap.sd, med: gs0 ? gs0.med : null, n: gs0 ? gs0.n : 0 });   // playbook detects the fade from the EVENT-signed record
             out.push(sig); openLedger(r, "gap", sig, g >= 0 ? 1 : -1);
           }
         }

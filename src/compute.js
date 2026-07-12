@@ -1004,10 +1004,42 @@ function sessionComposite(perTickerHolds) {
   };
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr,
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
+
+// ---- stop geometry validation ----------------------------------------------------------------
+// An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it
+// for a short. A composite signal can legitimately fire away from the range edge its playbook
+// levels assume (e.g. a squeeze firing on crowding + fuel with the trigger term ~0, price near
+// the range BOTTOM) — mechanically computed levels then land on the wrong side of entry, and a
+// stop above a long's entry turns the stop-aware track into a win fabricator: the first candle
+// "touches" it and a crash gets capped at +X%. Every stop must pass this gate before it is
+// stamped, resolved against, or kept.
+function stopGeometryOk(side, mark0, stp) {
+  if (stp == null || !(mark0 > 0)) return false;
+  if (side === "long") return stp < mark0;
+  if (side === "short") return stp > mark0;
+  return false;
+}
+
+// ---- play-signed stats for fade playbooks ------------------------------------------------------
+// The gap study is EVENT-signed: positive = the gap continued. For a market whose record says
+// gaps FADE (proven, median < 0), the playbook trades the OTHER side — so every consumer of the
+// stats must flip into play units or three things break at once: the evidence scorer tags the
+// engine's best fade setups `neg exp` and suppresses them, prime can never fire on them, and the
+// ledgered claim/outcome audit runs inverted (a successful fade recorded as a loss). Returns a
+// shallow play-signed copy: med/avg negated, hit complemented, `fade: true` stamped. Never
+// mutates the study object (it is shared with feature/display state).
+function fadeStats(st) {
+  if (!st) return st;
+  const c = Object.assign({}, st, { fade: true });
+  if (Number.isFinite(st.med)) c.med = +(-st.med).toFixed(2);
+  if (Number.isFinite(st.avg)) c.avg = +(-st.avg).toFixed(2);
+  if (Number.isFinite(st.hit)) c.hit = +(1 - st.hit).toFixed(2);
+  return c;
+}
