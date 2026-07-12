@@ -361,7 +361,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   const need = ["closeDetail", "showView", "openDetail", "renderSignals", "sigCardHtml", "sigRowHtml",
     "trigChip", "playRow", "rrChip", "recCurveSvg", "openHelp", "closeHelp",
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
-    "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge"];
+    "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
+    "vsTapeCell", "dcapCell", "hitCell", "rvolCell"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -469,4 +470,97 @@ test("play-signed results: fadeStats, resolver sign, and hydrate repair of inver
   const co = p.getLedgerFor("COIN").closed[0];
   assert.equal(co.realized, 1.4, "aligned claim untouched");
   assert.equal(co.win, true);
+});
+
+// ---- red-tape resilience (fourHourReturns / tapeRedStats) + RVOL ---------------------------
+const { fourHourReturns, tapeRedStats, rvolMulti } = require("../src/compute");
+
+// Build an hourly spine [[t,o,h,l,c,v],...] from a per-4h-bucket return schedule, so the 4h
+// close-to-close returns reconstructed by fourHourReturns are exactly the schedule.
+function spineFrom4h(rets4h, endMs, hourlyVol) {
+  const B = 4 * HOUR, n = rets4h.length;
+  const startB = Math.floor(endMs / B) - n - 1;   // last block = curB-1: fully completed
+  let px = 100; const closes = [px];
+  for (const r of rets4h) { px = px * (1 + r); closes.push(px); }
+  const out = [];
+  for (let i = 0; i <= n; i++) {
+    const b = startB + i, c = closes[i];
+    for (let h = 0; h < 4; h++) out.push([b * B + h * HOUR, c, c, c, c, hourlyVol == null ? 1 : hourlyVol]);
+  }
+  return out;
+}
+
+test("fourHourReturns: bucketing, completed-only, gap tolerance", () => {
+  const now = Math.floor(Date.now() / (4 * HOUR)) * 4 * HOUR + 2 * HOUR;   // mid-bucket "now"
+  const hs = spineFrom4h([0.01, -0.02, 0.005], now);
+  const rets = fourHourReturns(hs, now, null);
+  const vals = [...rets.values()].map((x) => +x.toFixed(6));
+  assert.deepEqual(vals, [0.01, -0.02, 0.005], "reconstructs the schedule");
+  const curB = Math.floor(now / (4 * HOUR));
+  assert.ok(![...rets.keys()].some((b) => b >= curB), "in-progress bucket excluded");
+  // A hole in the spine must not create a synthetic multi-bucket return
+  const hs2 = hs.filter((k) => Math.floor(k[0] / (4 * HOUR)) !== curB - 2);
+  const rets2 = fourHourReturns(hs2, now, null);
+  assert.ok(!rets2.has(curB - 2) && !rets2.has(curB - 1), "no return across a gap");
+});
+
+test("tapeRedStats: breadth gate, resilient/amplifier capture, negative dcap, min-bar gate", () => {
+  // 12-coin universe, 30 bars. Bars 0..24: true red tape (median -1%, 11/12 red).
+  // Bars 25..29: median negative but only 6/12 red -> breadth gate must exclude them.
+  const N = 30, series = new Map();
+  const mk = (fn) => { const m = new Map(); for (let b = 0; b < N; b++) m.set(1000 + b, fn(b)); return m; };
+  const redBar = (b) => b < 25;
+  for (let i = 0; i < 9; i++) series.set("MID" + i, mk((b) => redBar(b) ? -0.01 : (i < 6 ? -0.001 : 0.002)));
+  series.set("RES", mk((b) => redBar(b) ? -0.005 : 0));       // half the tape's move
+  series.set("AMP", mk((b) => redBar(b) ? -0.015 : 0));       // 1.5x the tape's move
+  series.set("GRN", mk((b) => redBar(b) ? +0.002 : 0));       // net green on red bars
+  const { redBars, stats } = tapeRedStats(series, { breadth: 0.7, minBars: 20, minCross: 10 });
+  assert.equal(redBars, 25, "only true-breadth bars count as red");
+  assert.equal(stats.get("RES").dcap, 50, "resilient name captures half");
+  assert.equal(stats.get("AMP").dcap, 150, "amplifier captures 1.5x");
+  assert.ok(stats.get("GRN").dcap < 0, "net green on red bars -> negative dcap");
+  assert.equal(stats.get("GRN").hit, 100, "green name beat the median on every red bar");
+  assert.equal(stats.get("RES").n, 25, "matched-bar count shipped");
+  // Min-bar gate: a coin present on only 10 red bars gets null, never a thin read
+  const thin = new Map(); for (let b = 0; b < 10; b++) thin.set(1000 + b, -0.005);
+  series.set("THIN", thin);
+  const g2 = tapeRedStats(series, { breadth: 0.7, minBars: 20, minCross: 10 });
+  assert.equal(g2.stats.get("THIN"), null, "below the gate -> null");
+});
+
+test("tapeRedStats: cascade bar is winsorized, not dominant", () => {
+  // 24 ordinary red bars (median -1%) + 1 cascade bar (median -20%).
+  // CRASH only underperforms on the cascade (-40% there, tape-median elsewhere). Unweighted,
+  // the cascade would dominate: dcap ~ (24+40)/(24+20) = 145. Winsorized (bar capped to 2x the
+  // median |move| = 2%), dcap = (24*1 + 2*2)/(24*1 + 2*1) = 28/26 ~ 108: above 100, not extreme.
+  const series = new Map();
+  const mk = (fn) => { const m = new Map(); for (let b = 0; b < 25; b++) m.set(2000 + b, fn(b)); return m; };
+  for (let i = 0; i < 11; i++) series.set("M" + i, mk((b) => b === 24 ? -0.20 : -0.01));
+  series.set("CRASH", mk((b) => b === 24 ? -0.40 : -0.01));
+  const { stats } = tapeRedStats(series, { breadth: 0.7, minBars: 20, minCross: 10 });
+  const d = stats.get("CRASH").dcap;
+  assert.ok(d > 100 && d < 115, `cascade capped: dcap ${d} stays near 108, not 145`);
+});
+
+test("rvolMulti: clock-hour matching, elevation, and the min-samples gate", () => {
+  // 12 days of hourly candles at price 100: volume 100 at hour-of-day 12, else 10.
+  // "Now" is 14:30 on the last day -> RVOL(1h) judges hour 13 (volume 10) against prior
+  // hour-13s (all 10) = 1.0x even though hour 12 traded 10x more — the session shape must
+  // NOT read as a signal. Then triple the final day's hours 10-13 and RVOL(4h) reads 3x.
+  const dayStart = Math.floor(Date.now() / DAY) * DAY - 12 * DAY;
+  const hs = [];
+  for (let d = 0; d < 12; d++) for (let h = 0; h < 24; h++)
+    hs.push([dayStart + d * DAY + h * HOUR, 100, 100, 100, 100, h === 12 ? 100 : 10]);
+  const now = dayStart + 11 * DAY + 14 * HOUR + 30 * 60 * 1000;
+  const r1 = rvolMulti(hs, { h1: HOUR, h4: 4 * HOUR, d1: DAY }, now);
+  assert.equal(r1.h1, 1, "quiet hour vs prior quiet hours = 1.0x, session shape neutralized");
+  assert.equal(r1.d1, 1, "normal day = 1.0x");
+  const hs2 = hs.map((k) => { const h = Math.floor((k[0] - dayStart) / HOUR);
+    return (h >= 11 * 24 + 10 && h <= 11 * 24 + 13) ? [k[0], k[1], k[2], k[3], k[4], k[5] * 3] : k; });
+  const r2 = rvolMulti(hs2, { h4: 4 * HOUR }, now);
+  assert.equal(r2.h4, 3, "tripled volume in the live 4h span reads 3x against the same-clock baseline");
+  // Gate: 4 days of history cannot support a baseline
+  const short = hs.filter((k) => k[0] >= dayStart + 8 * DAY);
+  const r3 = rvolMulti(short, { h1: HOUR }, now);
+  assert.equal(r3.h1, null, "fewer than 7 baseline days -> null");
 });
