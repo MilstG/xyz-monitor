@@ -8,7 +8,8 @@ const {
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
-  pca2, hourReturnMeans, hourReturnStats, pearson } = require("./compute");
+  pca2, hourReturnMeans, hourReturnStats, pearson,
+  fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -22,6 +23,11 @@ const HOURLY_STALE = 10 * 60 * 1000;  // refresh hourly features every 10 min
 const HOURLY_HISTORY_DAYS = 180;      // rolling hourly-OHLCV window (API serves ~5000 most-recent candles = ~208d hard cap; 180d fits one call and triples the gap-study samples)
 const HOURLY_FEAT_DAYS = 31;          // window actually fed to featuresFromHourly (keep features identical to before)
 const HOURLY_FETCH_WEIGHT = 130;      // rate-limit weight for the cold 180d hourly pull (one-time per market)
+// ---- red-tape resilience + RVOL (tunables) ---------------------------------------------------
+const RED_LOOKBACK = 31 * DAY;        // fixed 31d sample on BOTH scopes so "DownCap 31d" means the same thing everywhere
+const RED_BREADTH = 0.70;             // a 4h bar is "red tape" when >=70% of the scope's reporting names printed red...
+const RED_MIN_CROSS = 10;             // ...among at least this many reporting names, with a negative cross-sectional median
+const RED_MIN_BARS = 20;              // per-market gate: fewer matched red bars than this -> dash, never a thin character read
 // ---- crypto (Hyperliquid main dex) ----------------------------------------------------------
 // Top-N main-dex perps ride the same machinery with a LIGHTER footprint: 31d retention across
 // the board (hourly spine, dailies, OI — no 365d tier: that exists to feed studies crypto does
@@ -577,8 +583,32 @@ function createPoller({ dex, store, log, version, crypto }) {
     return out;
   }
 
+  // ---- red-tape resilience: per-universe DownCap/Hit% off the retained hourly spines --------
+  // Memoized to the set of (coin, hourlyTs) pairs in each universe — spines refresh every ~10 min
+  // per market, so this recomputes at most that often, never on every 15s snapshot rebuild.
+  let tapeCache = { xyz: { sig: "", redBars: 0, stats: new Map() }, main: { sig: "", redBars: 0, stats: new Map() } };
+  function tapeStatsFor(uniKey, list) {
+    const c = tapeCache[uniKey];
+    let sig = "";
+    for (const r of list) sig += r.coin + ":" + (r.hourlyTs || 0) + ";";
+    if (sig === c.sig) return c;
+    const now = Date.now(), cut = now - RED_LOOKBACK;
+    const series = new Map();
+    for (const r of list) {
+      const hs = getHourly(r.coin);
+      if (hs.length > 24) series.set(r.coin, fourHourReturns(hs, now, cut));
+    }
+    const { redBars, stats } = tapeRedStats(series, { breadth: RED_BREADTH, minBars: RED_MIN_BARS, minCross: RED_MIN_CROSS });
+    tapeCache[uniKey] = { sig, redBars, stats };
+    return tapeCache[uniKey];
+  }
+
   function buildSnapshot() {
     sampleRegime();
+    const tapeXyz = tapeStatsFor("xyz", activeMarkets());
+    const tapeMain = crypto ? tapeStatsFor("main", mainMarkets()) : tapeCache.main;
+    const RVOL_WINS = { h1: HOUR, h4: 4 * HOUR, d1: DAY };
+    const nowMs = Date.now();
     const mapMarket = (r) => {
       const cl = classifyCached(r.ticker, r.uni);
       // Funding percentile: where the CURRENT rate sits in this market's own 31d hourly funding
@@ -593,8 +623,15 @@ function createPoller({ dex, store, log, version, crypto }) {
           if (n >= 96) fundPct = Math.round((100 * le) / n);   // >=4 days of hourly samples before we claim a percentile
         }
       } catch (_) {}
+      // Red-tape resilience (fixed 31d, 4h bars, breadth-defined red, universe-median reference)
+      // + clock-hour-matched relative volume for the 1h/4h/1d windows. Both derive entirely from
+      // the retained hourly spine — zero additional API weight.
+      const tape = r.uni === "main" ? tapeMain : tapeXyz;
+      const red = tape.stats.get(r.coin) || null;
+      let rvol = null;
+      try { const hs = getHourly(r.coin); if (hs.length > 24) rvol = rvolMulti(hs, RVOL_WINS, nowMs); } catch (_) {}
       return {
-        fundPct,
+        fundPct, red, rvol,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
@@ -611,6 +648,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     snapshotCache = {
       ts: Date.now(), dataTs: lastPoll, dex, benchCoin,
       benchMain: crypto ? MAIN_BENCH : null, mainMarkets: mainMkts, markets,
+      redBars: { xyz: tapeXyz.redBars, main: crypto ? tapeMain.redBars : 0 },
       v: version || null,
       offHours: computeOffHours(Date.now()),
       // live warmup counts: h = markets without hourly features yet, d = markets with no daily

@@ -1004,7 +1004,120 @@ function sessionComposite(perTickerHolds) {
   };
 }
 
+// ---- Red-tape resilience (DownCap / Hit%) + relative volume --------------------------------
+// The setup these serve: on a red tape, the names that dump least tend to keep leading once the
+// market stabilizes. "Red" is BREADTH-defined, not benchmark-defined — BTC green while alts bleed
+// is a red tape; BTC red while the tape shrugs is not. Reference is the UNIVERSE MEDIAN return
+// per bar, never a benchmark, so the stat is self-normalizing and the benchmark is just a row.
+
+// 4h close-to-close returns from an hourly spine, keyed by 4h bucket index (floor(t/4h)).
+// Completed buckets only (a partial bucket's "close" is a moving target); a return exists only
+// between CONSECUTIVE buckets — gaps in the spine produce no synthetic multi-bucket return.
+function fourHourReturns(hs, now, cutMs) {
+  const B = 4 * 3600 * 1000, curB = Math.floor(now / B);
+  const close = new Map();
+  for (const k of hs) {
+    const t = k[0], c = k[4];
+    if (!Number.isFinite(t) || !Number.isFinite(c) || c <= 0) continue;
+    if (cutMs != null && t < cutMs) continue;
+    const b = Math.floor(t / B);
+    if (b >= curB) continue;                       // in-progress bucket: skip
+    const cur = close.get(b);
+    if (!cur || t >= cur[0]) close.set(b, [t, c]);
+  }
+  const rets = new Map();
+  for (const [b, [, c]] of close) {
+    const prev = close.get(b - 1);
+    if (prev && prev[1] > 0) rets.set(b, c / prev[1] - 1);
+  }
+  return rets;
+}
+
+// Red-tape stats for one universe. seriesByCoin: Map(coin -> Map(bucket -> ret)).
+// A bar is red when the cross-sectional MEDIAN return is negative AND >= `breadth` of reporting
+// names are red — pure breadth, no benchmark. One liquidation-cascade bar must not dominate the
+// Σ ratio, so bars are winsorized by WEIGHT: m* = median(|median-ret|) over red bars, and a bar
+// whose |median-ret| exceeds 2·m* is scaled down to count as exactly 2·m* of tape move (the
+// ticker's return on that bar scales by the same factor — ratio semantics preserved).
+// Per coin: DownCap = 100·Σ(w·ret)/Σ(w·med) on matched red bars (<100 dumps less than the tape,
+// negative = net green on red bars), Hit = share of matched red bars where the coin beat the
+// median. Below `minBars` matched bars: null — a dash, never a fabricated character read.
+function tapeRedStats(seriesByCoin, opts) {
+  const { breadth = 0.7, minBars = 20, minCross = 10 } = opts || {};
+  const byBar = new Map();
+  for (const [, rets] of seriesByCoin)
+    for (const [b, ret] of rets) {
+      let a = byBar.get(b);
+      if (!a) { a = []; byBar.set(b, a); }
+      a.push(ret);
+    }
+  const red = [];                                  // [bucket, medianRet]
+  for (const [b, a] of byBar) {
+    if (a.length < minCross) continue;
+    const med = median(a);
+    if (!(med < 0)) continue;
+    let neg = 0; for (const x of a) if (x < 0) neg++;
+    if (neg / a.length >= breadth) red.push([b, med]);
+  }
+  red.sort((x, y) => x[0] - y[0]);
+  const mstar = median(red.map(([, m]) => Math.abs(m)));
+  const wOf = (m) => (mstar > 0 && Math.abs(m) > 2 * mstar) ? (2 * mstar) / Math.abs(m) : 1;
+  const stats = new Map();
+  for (const [coin, rets] of seriesByCoin) {
+    let sr = 0, sm = 0, n = 0, hit = 0;
+    for (const [b, med] of red) {
+      const ret = rets.get(b);
+      if (ret == null) continue;
+      const w = wOf(med);
+      sr += w * ret; sm += w * med; n++;
+      if (ret > med) hit++;
+    }
+    if (n < minBars || !(sm < 0)) { stats.set(coin, null); continue; }
+    stats.set(coin, { dcap: Math.round((100 * sr) / sm), hit: Math.round((100 * hit) / n), n });
+  }
+  return { redBars: red.length, stats };
+}
+
+// Relative volume, clock-hour matched. For each requested window W (ms, a whole number of
+// hours): notional traded over the last W COMPLETED hourly candles ÷ the median notional of the
+// SAME clock-hour span on prior days. Clock matching is what makes the number honest across the
+// session shape — 3am is judged against prior 3ams, the US open against prior opens — and it is
+// why an off-hours reading is a real signal rather than a guaranteed ~0x. Coverage guards: the
+// current span needs >=75% of its candles present; each baseline sample the same; and at least
+// `minSamples` baseline days must qualify, else null.
+function rvolMulti(hs, windowsMs, now, minSamples) {
+  const HOUR = 3600 * 1000, minS = minSamples == null ? 7 : minSamples;
+  const ntl = new Map();                           // hour bucket -> notional
+  for (const k of hs) {
+    const t = k[0], c = k[4], v = k[5];
+    if (!Number.isFinite(t) || !Number.isFinite(c) || !Number.isFinite(v) || v < 0) continue;
+    ntl.set(Math.floor(t / HOUR), c * v);
+  }
+  const endH = Math.floor(now / HOUR);             // exclusive: candles endH-1 and older are complete
+  const span = (lastH, W) => {                     // sum of W hourly notionals ending AT lastH (inclusive)
+    let s = 0, have = 0;
+    for (let h = lastH - W + 1; h <= lastH; h++) { const x = ntl.get(h); if (x != null) { s += x; have++; } }
+    return have >= Math.ceil(0.75 * W) ? s : null;
+  };
+  const out = {};
+  for (const key in windowsMs) {
+    const W = Math.max(1, Math.round(windowsMs[key] / HOUR));
+    const cur = span(endH - 1, W);
+    if (cur == null) { out[key] = null; continue; }
+    const base = [];
+    for (let d = 1; d <= 31; d++) {
+      const s = span(endH - 1 - 24 * d, W);
+      if (s != null && s > 0) base.push(s);
+    }
+    if (base.length < minS) { out[key] = null; continue; }
+    const m = median(base);
+    out[key] = m > 0 ? +(cur / m).toFixed(2) : null;
+  }
+  return out;
+}
+
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
+  fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
