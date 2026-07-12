@@ -97,11 +97,12 @@ async function main() {
     const coin = (req.query && req.query.coin) || "";
     return poller.getSeries(coin) || { oi: [], funding: [] };
   });
-  // Per-ticker signal history for the drawer: every visible claim ever fired on one name.
+  // Claim-history browser: filter by ticker (coin=), by event type (ev=), or both.
   fastify.get("/api/ledger", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
-    return poller.getLedgerFor(coin);
+    const ev = (req.query && req.query.ev) || "";
+    return poller.getLedgerFor(coin, ev);
   });
   // Hourly OHLCV for the drawer candle chart. days: 1..60, default 14.
   fastify.get("/api/candles", (req, reply) => {
