@@ -2052,7 +2052,7 @@ async function loadSignals(){
   }catch(_){}
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
-const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge'};
+const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap For markets whose own record says gaps FADE, the study numbers shown (and the ledgered claim) are in the units of the FADE play \u2014 positive = the fade paid.',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge'};
 const EV_TIP={
   bigmove:'Today\u2019s move is \u22652\u03c3 of this market\u2019s own trailing 30d daily returns. History measures whether such moves continued (positive) or faded (negative) the next day, signed with the move.',
   breakout:'First close/mark above the prior 30-day high. History: forward 5d return after past first-crosses on this market.',
@@ -2077,7 +2077,7 @@ function playDist(g, lvl){
   return ` <i class="${pc>=0?'pos':'neg'}">(${pc>=0?'+':''}${pc.toFixed(1)}%)</i>`;
 }
 function rrChip(g){
-  const c=g.claim0, frozen=!!(c&&c.tgt!=null&&c.stop!=null);
+  const c=g.claim0, frozen=!!c;   // claim present => claim geometry exclusively; its nulls mean "no such level" (e.g. geometry-voided stop)
   const p=g.play, r=state.rows.get(g.coin);
   // Frozen claim: R/R measured from the CLAIMED mark against the frozen levels — the geometry
   // the ledger scores. Live-only signals keep the live-mark geometry.
@@ -2096,7 +2096,10 @@ function playRow(g){
   // distance-from-here moves, because the live mark does. Without a claim (context flags),
   // the live-computed playbook renders as before.
   const side=frozen&&c.side?c.side:p.side, sd=SP_SIDE[side]||SP_SIDE.watch;
-  const tgt=frozen&&c.tgt!=null?c.tgt:p.target, stp=frozen&&c.stop!=null?c.stop:p.stop;
+  // A claim's nulls are meaningful: a geometry-voided stop means this claim HAS no stop-aware
+  // leg — falling back to the live level would re-display the exact inverted number the gate
+  // just refused to stamp. Claim present => claim values, exclusively.
+  const tgt=frozen?c.tgt:p.target, stp=frozen?c.stop:p.stop;
   const wrapTip=frozen
     ? `Mechanical description of the setup \u2014 NOT advice. Side and levels are FROZEN from the claim opened ${new Date(c.t).toLocaleString()}${c.px!=null?` at ${fmtPrice(c.px)}`:''}: the ledger resolves against exactly these, so they never move while the claim is open. Distances are measured from the live mark, so they change as price does. The track record strip above decides which event types deserve any trust.`
     : `Mechanical description of the setup with levels computed from this market's own stats \u2014 NOT advice. Distances are measured from the live mark. The track record strip above decides which event types deserve any trust.`;
