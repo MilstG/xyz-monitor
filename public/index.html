@@ -203,7 +203,8 @@
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input id="sighist-q" type="text" placeholder="Ticker history… e.g. MSTR" autocomplete="off" spellcheck="false"/>
     </div>
-    <span class="sec" style="font-size:11px" data-tip="the per-ticker audit trail behind the aggregate record: every visible claim the engine ever fired on one name — open, resolved, and void — with the outcome each resolved to">full claim history by ticker</span>
+    <select id="sighist-ev" class="btn" title="Browse the claim history by signal type — every claim of that kind ever fired, across all tickers (or combined with the ticker search)"><option value="">any signal type…</option></select>
+    <span class="sec" style="font-size:11px" data-tip="the audit trail behind the aggregate record: every visible claim the engine ever fired — filter by ticker, by signal type, or both. Outcomes shown in the unit each claim resolved in">full claim history — by ticker and/or signal type</span>
   </div>
   <div id="sighist-panel" class="corrpanel" hidden></div>
   <div id="signals-body"><div class="msg">Loading…</div></div>
