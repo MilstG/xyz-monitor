@@ -820,10 +820,14 @@ function createPoller({ dex, store, log, version, crypto }) {
   // ship in the unit they actually resolved in: R for sd0-stamped R-events (post-repair this is
   // all of them), legacy % for pre-normalization-epoch entries, which are flagged so the client
   // can label them honestly instead of mixing units silently.
-  function getLedgerFor(coin) {
-    if (!coin) return { coin: "", ticker: "", open: [], closed: [], ts: Date.now() };
+  // Claim-history query for the Signals-tab browser and the drawer: filter by coin, by event
+  // type, or both — every VISIBLE claim matching (shadow variants never surface). At least one
+  // filter is required; an unfiltered dump has no consumer and would only invite misuse.
+  // Outcomes ship in the unit they actually resolved in; pre-epoch legacy entries are flagged.
+  function getLedgerFor(coin, ev) {
+    if (!coin && !ev) return { coin: "", ev: "", ticker: "", open: [], closed: [], ts: Date.now() };
     const pub = (e, status) => ({
-      ev: e.ev, label: EV_LABEL[e.ev] || e.ev, t0: e.t0,
+      ev: e.ev, label: EV_LABEL[e.ev] || e.ev, tk: e.ticker || e.coin, coin: e.coin, t0: e.t0,
       tR: status === "resolved" ? (e.tR || null) : null, status,
       side: e.psd || (e.dir >= 0 ? "long" : "short"),
       score0: Number.isFinite(e.score0) ? e.score0 : null,
@@ -839,16 +843,17 @@ function createPoller({ dex, store, log, version, crypto }) {
       legacy: R_LEDGER_EVS.has(e.ev) && !(e.sd0 > 0),   // pre-sigma-epoch: excluded from aggregates, shown here labeled
       resolveAt: status === "open" ? e.resolveAt : undefined,
     });
-    let ticker = coin;
+    const match = (e) => e.vi == null && (!coin || e.coin === coin) && (!ev || e.ev === ev);
+    let ticker = coin || "";
     const open = [], closed = [];
     for (const e of ledgerOpen.values())
-      if (e.coin === coin && e.vi == null) { open.push(pub(e, "open")); ticker = e.ticker || ticker; }
+      if (match(e)) { open.push(pub(e, "open")); if (coin) ticker = e.ticker || ticker; }
     for (const e of ledgerClosed)
-      if (e.coin === coin && e.vi == null) { closed.push(pub(e, e.status === "void" ? "void" : "resolved")); ticker = e.ticker || ticker; }
-    const r = rows.get(coin); if (r && r.ticker) ticker = r.ticker;
+      if (match(e)) { closed.push(pub(e, e.status === "void" ? "void" : "resolved")); if (coin) ticker = e.ticker || ticker; }
+    if (coin) { const r = rows.get(coin); if (r && r.ticker) ticker = r.ticker; }
     open.sort((a, b) => b.t0 - a.t0);
     closed.sort((a, b) => (b.tR || b.t0) - (a.tR || a.t0));
-    return { coin, ticker, open, closed: closed.slice(0, 150), ts: Date.now() };
+    return { coin: coin || "", ev: ev || "", ticker, open, closed: closed.slice(0, 150), ts: Date.now() };
   }
   function resolveAtFor(ev, t0) {
     if (ev === "gap") {   // resolves at the close of the next cash session after firing
