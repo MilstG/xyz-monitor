@@ -376,3 +376,91 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
 });
+
+test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, open-claim voiding", () => {
+  const { stopGeometryOk } = require("../src/compute");
+  // the validator itself
+  assert.equal(stopGeometryOk("long", 45.694, 50.57), false, "stop above a long's entry is invalid (the MINIMAX case)");
+  assert.equal(stopGeometryOk("long", 45.694, 41.2), true, "stop below a long's entry is valid");
+  assert.equal(stopGeometryOk("short", 97.9, 102.9), true, "stop above a short's entry is valid");
+  assert.equal(stopGeometryOk("short", 97.9, 92.0), false, "stop below a short's entry is invalid");
+  assert.equal(stopGeometryOk("long", 0, 10), false, "no mark, no stop");
+  assert.equal(stopGeometryOk(null, 100, 90), false, "no side, no stop");
+
+  // hydrate repair
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const fixture = { ts: now, rearm: [], variants: null,
+    open: [
+      // open long with inverted stop: keeps resolving, loses its stop-aware leg
+      { key: "NATGAS|squeeze", coin: "NATGAS", ticker: "NATGAS", ev: "squeeze", t0: now - 3600000,
+        mark0: 2.959, dir: 1, score0: 21, resolveAt: now + 86400000, psd: "long", stp: 3.4 },
+    ],
+    closed: [
+      // the MINIMAX shape: long, stop ABOVE entry, "stopped" into a fabricated +10.68% win
+      { key: "MINIMAX|squeeze", coin: "MINIMAX", ticker: "MINIMAX", ev: "squeeze", t0: now - 5 * 86400000,
+        mark0: 45.694, dir: 1, psd: "long", stp: 50.57, status: "resolved", tR: now - 2 * 86400000,
+        realized: -20.79, realizedS: 10.68, stopped: true, win: false, winS: true, score0: 42 },
+      // a VALID stopped short: stop above entry, genuinely touched — must be untouched by repair
+      { key: "MSTR|breakdown2", coin: "MSTR", ticker: "MSTR", ev: "breakdown", t0: now - 6 * 86400000,
+        mark0: 97.9, dir: -1, psd: "short", stp: 102.9, sd0: 2, rn: 1, status: "resolved", tR: now - 86400000,
+        realized: 1.2, realizedS: -2.55, stopped: true, win: true, winS: false },
+    ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  p.hydrateLedgerNow();   // idempotent
+  const mm = p.getLedgerFor("MINIMAX").closed[0];
+  assert.equal(mm.realizedS, -20.79, "fabricated stop-aware outcome reverted to at-horizon truth");
+  assert.equal(mm.stopped, false, "false stop cleared");
+  const ms = p.getLedgerFor("MSTR").closed[0];
+  assert.equal(ms.realizedS, -2.55, "valid stopped short untouched");
+  assert.equal(ms.stopped, true, "valid stop kept");
+  const ng = p.getLedgerFor("NATGAS").open[0];
+  assert.equal(ng.status, "open", "open claim still resolving");
+  assert.equal(ng.stopped, false);
+});
+
+test("play-signed results: fadeStats, resolver sign, and hydrate repair of inverted fader claims", () => {
+  const { fadeStats } = require("../src/compute");
+  const st = { n: 20, med: -0.9, avg: -0.62, hit: 0.28, unit: "%" };
+  const f = fadeStats(st);
+  assert.deepEqual([f.med, f.avg, f.hit, f.fade, f.n], [0.9, 0.62, 0.72, true, 20], "fadeStats flips into play units");
+  assert.equal(st.med, -0.9, "source study never mutated");
+
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const fixture = { ts: now, rearm: [], variants: null,
+    open: [
+      // legacy open fader: claim med must flip; outcome sign comes from psd at resolution
+      { key: "MSTR|gap", coin: "MSTR", ticker: "MSTR", ev: "gap", t0: now - 3600000, mark0: 100,
+        dir: 1, psd: "short", score0: 30, resolveAt: now + 86400000, claim: { n: 12, med: -0.8 } },
+    ],
+    closed: [
+      // the observed shape: up-gap (dir +1), FADE play (psd short), stopped, event-signed
+      // realizedS +0.73 displayed as a green stop-aware "win" — in play units this fade LOST
+      { key: "MSTR|gap#c", coin: "MSTR", ticker: "MSTR", ev: "gap", t0: now - 5 * 86400000, mark0: 100,
+        dir: 1, psd: "short", stp: 101.2, status: "resolved", tR: now - 4 * 86400000,
+        realized: 0.73, realizedS: 0.73, stopped: true, win: true, winS: true, claim: { n: 12, med: -0.8 } },
+      // aligned continuation gap (psd long, dir +1): must be untouched
+      { key: "COIN|gap", coin: "COIN", ticker: "COIN", ev: "gap", t0: now - 6 * 86400000, mark0: 50,
+        dir: 1, psd: "long", status: "resolved", tR: now - 5 * 86400000,
+        realized: 1.4, realizedS: 1.4, win: true, winS: true, claim: { n: 15, med: 0.6 } },
+    ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  p.hydrateLedgerNow();   // idempotent — pn guards the second pass
+  const mm = p.getLedgerFor("MSTR");
+  const cl = mm.closed[0];
+  assert.equal(cl.realized, -0.73, "failed fade now a LOSS in play units");
+  assert.equal(cl.win, false, "win flag follows the play");
+  assert.equal(cl.realizedS, -0.73, "stop-aware leg flipped too");
+  assert.equal(cl.claimMed, 0.8, "claim median flipped into play units");
+  assert.equal(mm.open[0].claimMed, 0.8, "open fader claim median flipped");
+  const co = p.getLedgerFor("COIN").closed[0];
+  assert.equal(co.realized, 1.4, "aligned claim untouched");
+  assert.equal(co.win, true);
+});
