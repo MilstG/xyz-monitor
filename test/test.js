@@ -340,5 +340,11 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(by["breakdown:legacy"].unit, "%", "legacy entry labeled in its true unit");
   assert.equal(by["breakdown:legacy"].legacy, true);
   assert.equal(p.getLedgerFor("NVDA").closed.length, 1, "history is per-coin");
-  assert.equal(p.getLedgerFor("").open.length, 0, "empty coin -> empty history");
+  assert.equal(p.getLedgerFor("").open.length, 0, "no filter -> empty history");
+  const byEv = p.getLedgerFor("", "breakdown");
+  assert.equal(byEv.closed.length, 3, "event filter crosses tickers (2 AAPL + 1 NVDA)");
+  assert.ok(byEv.closed.every(e => e.ev === "breakdown"), "event filter is exact");
+  assert.ok(byEv.closed.some(e => e.tk === "NVDA"), "cross-ticker rows carry their ticker");
+  assert.equal(p.getLedgerFor("AAPL", "breakdown").closed.length, 2, "coin+event filters combine");
+  assert.equal(p.getLedgerFor("AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
 });
