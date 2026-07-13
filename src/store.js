@@ -17,7 +17,6 @@ function openStore(dataDir) {
   const hourlyFile = path.join(dataDir, "hourly.json");
   const ledgerFile = path.join(dataDir, "ledger.json");
   const earnFile = path.join(dataDir, "earnings.json");
-  const unlockFile = path.join(dataDir, "unlocks.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
@@ -178,20 +177,6 @@ function openStore(dataDir) {
     },
     loadEarnings() {
       try { if (fs.existsSync(earnFile)) return JSON.parse(fs.readFileSync(earnFile, "utf8")); }
-      catch (_) {}
-      return null;
-    },
-    // Token-unlock calendar warm cache — same contract as earnings: atomic write, hydrate on
-    // boot so a redeploy inside the daily refresh window serves the last good schedule.
-    saveUnlocks(data) {
-      try {
-        const tmp = unlockFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, unlockFile);
-      } catch (_) {}
-    },
-    loadUnlocks() {
-      try { if (fs.existsSync(unlockFile)) return JSON.parse(fs.readFileSync(unlockFile, "utf8")); }
       catch (_) {}
       return null;
     },
