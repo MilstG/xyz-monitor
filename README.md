@@ -20,6 +20,12 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **`/api/earnings`** — upcoming earnings (next 14 days, ET) for the xyz equity universe,
   Finnhub-fed, refreshed server-side every ~6h and warm-cached on the volume. Powers the
   Earnings tab and the E badge on the markets table (solid = reports today, hollow = tomorrow).
+  Reported rows carry EPS actual vs estimate (beat/miss + surprise); past print dates persist
+  to the volume (one-time ~1y backfill, then self-accruing) and feed a per-ticker earnings
+  reaction study — avg |next-session move|, up/down split, gap behavior, expansion vs the
+  name's usual range — shown on the tab and in the drawer. Session-spanning ledger claims in
+  force within 1 day of a print are tagged (E in claim history) so the earnings-conditioned
+  base-rate split accrues out of sample.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
