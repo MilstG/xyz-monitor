@@ -79,6 +79,22 @@ test("featuresFromHourly: produces ref, px30 and dr", () => {
   assert.equal(feat.volD, null); // <5 completed daily returns -> not enough for a daily-vol estimate
 });
 
+test("featuresFromHourly: vwap30 is the exact volume-weighted typical price; zero-volume windows are null", () => {
+  const now = Date.now();
+  // Two candles, hand-checkable: typ1=(12+8+10)/3=10 w=100, typ2=(22+18+20)/3=20 w=300
+  // -> vwap = (10*100 + 20*300) / 400 = 17.5. A zero-volume candle must contribute nothing.
+  const c = [
+    { t: now - 3 * HOUR, c: "10", h: "12", l: "8", v: "100" },
+    { t: now - 2 * HOUR, c: "20", h: "22", l: "18", v: "300" },
+    { t: now - 1 * HOUR, c: "999", h: "999", l: "999", v: "0" },
+  ];
+  const { feat } = featuresFromHourly(c, now, HOUR, DAY);
+  assert.ok(Math.abs(feat.vwap30 - 17.5) < 1e-9);
+  // an entirely volume-less window has no VWAP -> null (honest dash), never a fabricated level
+  const dead = [{ t: now - 2 * HOUR, c: "10", h: "11", l: "9", v: "0" }, { t: now - 1 * HOUR, c: "10", h: "11", l: "9", v: "0" }];
+  assert.equal(featuresFromHourly(dead, now, HOUR, DAY).feat.vwap30, null);
+});
+
 test("featuresFromHourly: volD is a measured daily vol once enough days exist", () => {
   const now = Date.now(), c = [];
   for (let t = now - 25 * DAY; t <= now; t += HOUR) {
