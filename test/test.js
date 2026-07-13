@@ -462,8 +462,11 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(html.includes('id="view-backtest"'), "backtest view section missing");
   assert.ok(s.includes("xyzmon.tabs.v1"), "tab-order persistence key missing from client");
   // Auth surface: the login flow lives inline in server.js — pin its load-bearing pieces.
+  // "return reply.code(401)" is load-bearing, not style: an async hook that send()s WITHOUT
+  // returning the reply does not stop the lifecycle — @fastify/static double-sends and the
+  // response hangs (the production outage of 2026.07.13: /api/health fine, "/" a body-less 401).
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  for (const frag of ["xyzsess", "xyzauth", "/logout", "timingSafeEqual", "createHmac", "LOGIN_HTML", "/api/health"])
+  for (const frag of ["xyzsess", "xyzauth", "/logout", "timingSafeEqual", "createHmac", "LOGIN_HTML", "/api/health", "return reply.code(401)"])
     assert.ok(srv.includes(frag), `missing server auth marker: ${frag}`);
 });
 
