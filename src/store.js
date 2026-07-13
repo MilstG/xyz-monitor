@@ -16,6 +16,7 @@ function openStore(dataDir) {
   const regimeFile = path.join(dataDir, "regime.json");
   const hourlyFile = path.join(dataDir, "hourly.json");
   const ledgerFile = path.join(dataDir, "ledger.json");
+  const earnFile = path.join(dataDir, "earnings.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
@@ -164,6 +165,20 @@ function openStore(dataDir) {
     },
     loadLedger() {
       try { return JSON.parse(fs.readFileSync(ledgerFile, "utf8")); } catch (_) { return null; }
+    },
+    // Earnings calendar warm cache (small, atomic like the rest): a redeploy inside the 6h
+    // refresh window serves the last good fetch instead of blanking badges until Finnhub answers.
+    saveEarnings(data) {
+      try {
+        const tmp = earnFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, earnFile);
+      } catch (_) {}
+    },
+    loadEarnings() {
+      try { if (fs.existsSync(earnFile)) return JSON.parse(fs.readFileSync(earnFile, "utf8")); }
+      catch (_) {}
+      return null;
     },
     saveRegime(arr) {
       try {

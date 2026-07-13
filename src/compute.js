@@ -1166,3 +1166,45 @@ function fadeStats(st) {
   if (Number.isFinite(st.hit)) c.hit = +(1 - st.hit).toFixed(2);
   return c;
 }
+
+// ---- earnings calendar helpers -----------------------------------------------------------------
+// BMO/AMC are ET concepts, so "today"/"tomorrow" for earnings proximity are ET CALENDAR DAYS —
+// never the browser's or server's local day. Reuses the same Intl-backed ET clock as the session
+// calendar above, so a report never flips days at the wrong hour for a non-US viewer.
+function etDayStr(ms) {
+  const p = etParts(ms != null ? ms : Date.now());
+  return p.y + "-" + String(p.mo).padStart(2, "0") + "-" + String(p.d).padStart(2, "0");
+}
+// Whole-day distance of a YYYY-MM-DD report date from the CURRENT ET day: 0 = today, 1 = tomorrow,
+// negative = already passed. Both sides anchored to UTC midnight of their calendar date, so DST
+// transitions can never produce a fractional day.
+function earnDayDiff(dateStr, nowMs) {
+  if (typeof dateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const a = Date.UTC(+dateStr.slice(0, 4), +dateStr.slice(5, 7) - 1, +dateStr.slice(8, 10));
+  const t = etDayStr(nowMs);
+  const b = Date.UTC(+t.slice(0, 4), +t.slice(5, 7) - 1, +t.slice(8, 10));
+  return Math.round((a - b) / DAY);
+}
+// Finnhub /calendar/earnings -> compact entries for OUR universe only. symMap: UPPERCASED api
+// symbol -> { coin, ticker } (the alias map is applied by the caller when building symMap, so a
+// BRK.B report lands back on the BRKB row). Everything outside the map is discarded — the payload
+// never claims coverage it doesn't have. Sessions normalize to BMO / DMH / AMC / TBD and entries
+// sort by (date, session order within the day, ticker) so "first per ticker" = nearest report.
+const EARN_SESS = { bmo: "BMO", amc: "AMC", dmh: "DMH" };
+const EARN_SESS_ORD = { BMO: 0, DMH: 1, AMC: 2, TBD: 3 };
+function parseEarningsCalendar(json, symMap) {
+  const arr = json && Array.isArray(json.earningsCalendar) ? json.earningsCalendar : [];
+  const out = [];
+  for (const e of arr) {
+    if (!e || typeof e.symbol !== "string" || typeof e.date !== "string") continue;
+    const m = symMap.get(e.symbol.toUpperCase());
+    if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) continue;
+    const eps = typeof e.epsEstimate === "number" && isFinite(e.epsEstimate) ? +e.epsEstimate.toFixed(2) : null;
+    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps });
+  }
+  out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (EARN_SESS_ORD[a.s] - EARN_SESS_ORD[b.s]) || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+  return out;
+}
+module.exports.etDayStr = etDayStr;
+module.exports.earnDayDiff = earnDayDiff;
+module.exports.parseEarningsCalendar = parseEarningsCalendar;
