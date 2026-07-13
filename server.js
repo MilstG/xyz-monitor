@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.13-42";
+const VERSION = "2026.07.13-44";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -16,6 +16,13 @@ const HOST = "0.0.0.0";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const SITE_PASSWORD = process.env.SITE_PASSWORD || ""; // set to require a shared password
 const SITE_USER = process.env.SITE_USER || "friend";
+const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
+// Session-signing secret. Derived from the credentials unless overridden, so changing the
+// password on Railway invalidates every outstanding session with zero extra config, while
+// plain restarts/redeploys keep everyone logged in.
+const SESSION_SECRET = process.env.SESSION_SECRET
+  ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
+  : crypto.createHash("sha256").update(`xyzmon-session|${SITE_USER}|${SITE_PASSWORD}`).digest();
 
 function log(msg) { console.log(new Date().toISOString() + " " + msg); }
 
@@ -53,25 +60,150 @@ function credsOk(u, p) {
   return (uOk & pOk) === 1;   // bitwise: both comparisons always execute (no short-circuit timing)
 }
 
+// ===== Session cookies (HMAC-signed, stateless) =====
+// Token = "<expiryMs>.<base64url hmac(secret, expiryMs)>". Nothing stored server-side: verify =
+// recompute the signature and constant-time compare, then check expiry. 30 days by default.
+function signSession(expMs) {
+  return expMs + "." + crypto.createHmac("sha256", SESSION_SECRET).update(String(expMs)).digest("base64url");
+}
+function sessionOk(tok) {
+  if (!tok || tok.length > 128) return false;
+  const dot = tok.indexOf(".");
+  if (dot < 1) return false;
+  const exp = Number(tok.slice(0, dot));
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const a = Buffer.from(tok), b = Buffer.from(signSession(exp));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function getCookie(req, name) {
+  const h = req.headers.cookie || "";
+  for (const part of h.split(";")) {
+    const p = part.trim();
+    if (p.startsWith(name + "=")) return p.slice(name.length + 1);
+  }
+  return null;
+}
+function cookieAttrs(req, maxAgeSec) {
+  // Railway terminates TLS and forwards proto — mark Secure whenever the client came over https.
+  const secure = (req.headers["x-forwarded-proto"] || req.protocol) === "https" ? "; Secure" : "";
+  return `; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`;
+}
+function setSessionCookies(reply, req, maxAgeSec, token) {
+  reply.header("set-cookie", [
+    // The real session — HttpOnly, invisible to page JS.
+    "xyzsess=" + (token || "x") + cookieAttrs(req, maxAgeSec) + "; HttpOnly",
+    // JS-visible marker with the same lifetime, so the UI knows to show the logout button.
+    // Carries no secret: forging it gets you a logout button, not access.
+    "xyzauth=1" + cookieAttrs(req, maxAgeSec),
+  ]);
+}
+
+// Brute-force damper for /login: 8 wrong passwords from one IP = 15 min lockout. In-memory —
+// a restart clears it, which is fine; this is a speed bump, not a vault. Map is size-capped
+// so a spoofed-IP flood can't grow it unbounded.
+const loginFails = new Map();
+const LOCK_AFTER = 8, LOCK_MS = 15 * 60e3;
+function loginLockedFor(ip) {
+  const e = loginFails.get(ip);
+  return (e && e.until > Date.now()) ? Math.ceil((e.until - Date.now()) / 60e3) : 0;
+}
+function loginFail(ip) {
+  if (loginFails.size > 5000) loginFails.clear();
+  const e = loginFails.get(ip) || { n: 0, until: 0 };
+  e.n++;
+  if (e.n >= LOCK_AFTER) { e.until = Date.now() + LOCK_MS; e.n = 0; }
+  loginFails.set(ip, e);
+}
+
+// The login page, served inline for any unauthenticated navigation (no extra file, no native
+// Basic-auth popup). Styling mirrors the app's dark palette.
+const LOGIN_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>xyz-monitor — sign in</title>
+<style>
+:root{--bg:#0E1116;--panel:#151A21;--border:#262E39;--text:#E8E3D7;--muted:#7E8794;--accent:#E3A53C;--down:#E5604D;
+--mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;--disp:'Space Grotesk',system-ui,sans-serif}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--disp)}
+body{display:flex;align-items:center;justify-content:center;padding:20px}
+.card{width:100%;max-width:360px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:28px 26px 22px}
+.wm{font-size:24px;font-weight:700;letter-spacing:-.5px}.wm b{color:var(--accent)}
+.sub{color:var(--muted);font-size:12.5px;margin:4px 0 22px}
+label{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin-bottom:6px}
+input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);
+font-family:var(--mono);font-size:15px;padding:10px 12px;outline:none}
+input:focus{border-color:var(--accent)}
+button{width:100%;margin-top:14px;background:var(--accent);border:none;border-radius:6px;color:#000;
+font-family:var(--disp);font-size:14px;font-weight:600;padding:11px;cursor:pointer}
+button:disabled{opacity:.55;cursor:default}
+.err{color:var(--down);font-size:12.5px;min-height:17px;margin-top:10px;font-family:var(--mono)}
+</style></head><body>
+<div class="card">
+  <div class="wm">xyz<b>·</b>monitor</div>
+  <div class="sub">private terminal — enter the shared password</div>
+  <label for="pw">password</label>
+  <input id="pw" type="password" autocomplete="current-password" autofocus>
+  <button id="go">Enter</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+var pw=document.getElementById('pw'),go=document.getElementById('go'),err=document.getElementById('err');
+async function submit(){ if(!pw.value||go.disabled) return; go.disabled=true; err.textContent='';
+  try{ var r=await fetch('/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw.value})});
+    var d=await r.json().catch(function(){return {};});
+    if(r.ok&&d.ok){ location.replace('/'); return; }
+    err.textContent=(d&&d.error)||('HTTP '+r.status); }
+  catch(e){ err.textContent='network error — try again'; }
+  go.disabled=false; pw.select(); }
+go.addEventListener('click',submit);
+pw.addEventListener('keydown',function(e){ if(e.key==='Enter') submit(); });
+</script></body></html>`;
+
 async function main() {
   const fastify = Fastify({ logger: false });
 
-  // Optional shared-password gate (HTTP Basic). Disabled unless SITE_PASSWORD is set.
+  // Optional shared-password gate. Disabled unless SITE_PASSWORD is set. Two ways in:
+  //   1. Session cookie from the login page (30-day HMAC token) — the normal browser path.
+  //   2. HTTP Basic — kept so curl/scripts can still hit the API without a cookie jar.
   // NOTE: /api/health must stay open or Railway's healthcheck 401s and the deploy is
-  // marked unhealthy (restart loop).
+  // marked unhealthy (restart loop). /login (POST) and /logout must pass or nobody could
+  // ever authenticate.
   if (SITE_PASSWORD) {
     fastify.addHook("onRequest", async (req, reply) => {
-      if (req.url === "/api/health") return;
+      const u = req.url.split("?")[0];
+      if (u === "/api/health" || u === "/logout" || (u === "/login" && req.method === "POST")) return;
+      if (sessionOk(getCookie(req, "xyzsess"))) return;
       const hdr = req.headers.authorization || "";
       const [scheme, enc] = hdr.split(" ");
       if (scheme === "Basic" && enc) {
-        const [u, p] = Buffer.from(enc, "base64").toString().split(":");
-        if (credsOk(u, p)) return;
+        const s = Buffer.from(enc, "base64").toString();
+        const i = s.indexOf(":");   // split on the FIRST colon only — passwords may contain colons
+        if (i >= 0 && credsOk(s.slice(0, i), s.slice(i + 1))) return;
       }
-      reply.header("WWW-Authenticate", 'Basic realm="xyz-monitor"').code(401).send("Authentication required");
+      if (u.startsWith("/api/")) { reply.code(401).send({ error: "unauthorized" }); return; }
+      reply.code(401).header("cache-control", "no-store").type("text/html; charset=utf-8").send(LOGIN_HTML);
     });
-    log("Access control: shared-password protection ENABLED");
+    log(`Access control: shared-password protection ENABLED (login page + ${SESSION_DAYS}d sessions; Basic auth still accepted for scripts)`);
   }
+
+  // Login/logout exist regardless of the gate so a stale xyzauth cookie can always be cleared.
+  fastify.post("/login", async (req, reply) => {
+    if (!SITE_PASSWORD) return { ok: true };   // gate disabled — nothing to check
+    const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
+    const lockedMin = loginLockedFor(ip);
+    if (lockedMin) { reply.code(429); return { ok: false, error: `too many attempts — locked for ${lockedMin} min` }; }
+    const b = req.body || {};
+    const user = (b.user == null || b.user === "") ? SITE_USER : String(b.user);   // page sends password only; SITE_USER is implied
+    if (!credsOk(user, String(b.password == null ? "" : b.password))) {
+      loginFail(ip); reply.code(401); return { ok: false, error: "wrong password" };
+    }
+    loginFails.delete(ip);
+    setSessionCookies(reply, req, SESSION_DAYS * 86400, signSession(Date.now() + SESSION_DAYS * 864e5));
+    return { ok: true };
+  });
+  fastify.get("/logout", async (req, reply) => {
+    setSessionCookies(reply, req, 0, null);   // Max-Age=0 deletes both cookies
+    reply.redirect(303, "/");
+  });
 
   await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"] });
   await fastify.register(require("@fastify/static"), {

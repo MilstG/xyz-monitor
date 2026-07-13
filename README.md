@@ -131,9 +131,15 @@ and have their evidence contribution capped — a stated prior, labeled as such 
 
 ## Optional: shared-password access
 
-By default the site is public to anyone with the link. To require a shared password,
-set `SITE_PASSWORD` (and optionally `SITE_USER`, default `friend`) as Railway variables —
-the server then gates every request with HTTP Basic auth. Leave it unset to stay open.
+By default the site is public to anyone with the link. To require a shared password, set
+`SITE_PASSWORD` (and optionally `SITE_USER`, default `friend`) as Railway variables. The
+server then shows a dark-themed login page to anyone without a session; the correct
+password sets a signed 30-day cookie (`SESSION_DAYS` to change), and a `⎋` button appears
+in the nav to sign out (`/logout`). Changing `SITE_PASSWORD` invalidates every outstanding
+session; plain redeploys don't. Eight wrong passwords from one IP lock that IP out for
+15 minutes. Scripts and `curl` can skip the cookie and use HTTP Basic
+(`curl -u friend:PASSWORD .../api/snapshot`), which is still accepted. `/api/health` stays
+open for Railway's healthcheck. Leave `SITE_PASSWORD` unset to stay open.
 
 ## Tuning (optional)
 
