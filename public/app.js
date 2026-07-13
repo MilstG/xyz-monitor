@@ -15,7 +15,7 @@ const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, windo
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
-    td:r=>`<td><span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.coin)}">${esc(r.ticker)}</span></td>`},
+    td:r=>`<td><span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}</td>`},
   {key:'px', label:'Price', type:'num',
     td:r=>`<td class="px${r.flash?' flash-'+r.flash:''}">${fmtPrice(r.px)}</td>`},
   {key:'funding', label:'Funding (APR)', type:'num',
@@ -98,6 +98,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
   watch:new Set(), watchOnly:false, detail:null,
+  earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
@@ -255,6 +256,7 @@ function applySnapshot(s){
   if(s.warm) state.warm=s.warm;
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
+  if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
   if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
@@ -1407,7 +1409,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
-  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest') showView(h); }
+  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings') showView(h); }
 let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
@@ -2166,10 +2168,12 @@ function showView(v){
   setHidden('view-corr', v!=='corr');
   setHidden('view-sessions', v!=='sessions');
   setHidden('view-signals', v!=='signals');
+  setHidden('view-earnings', v!=='earnings');
   setHidden('view-backtest', v!=='backtest');
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
+  if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
@@ -2188,6 +2192,81 @@ async function loadSignals(){
   }catch(_){}
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
+
+// ===== earnings calendar =====
+// Server-fetched (Finnhub, 6h refresh, /data warm cache) and filtered server-side to the xyz
+// equity universe. "Today"/"tomorrow" are ET CALENDAR DAYS — BMO/AMC are ET concepts, so the
+// bucket must not flip at the viewer's local midnight.
+let _earnLast=0;
+const _etDayFmt=new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'});
+function etDayStrC(ms){ return _etDayFmt.format(ms!=null?ms:Date.now()); }
+function earnDiffC(dateStr){ if(!/^\d{4}-\d{2}-\d{2}$/.test(dateStr||'')) return null;
+  const a=Date.UTC(+dateStr.slice(0,4),+dateStr.slice(5,7)-1,+dateStr.slice(8,10));
+  const t=etDayStrC(); const b=Date.UTC(+t.slice(0,4),+t.slice(5,7)-1,+t.slice(8,10));
+  return Math.round((a-b)/DAY); }
+function earnSessLbl(s){ return s==='BMO'?'pre-market (BMO)':s==='AMC'?'after close (AMC)':s==='DMH'?'during market hours':'time TBD'; }
+async function loadEarnings(){
+  _earnLast=Date.now();
+  try{ const d=await fetchJSON('/api/earnings');
+    if(d&&Array.isArray(d.entries)){ state.earnPayload=d;
+      const m=new Map();
+      for(const e of d.entries){ let a=m.get(e.t); if(!a){a=[];m.set(e.t,a);} a.push(e); }   // server ships date-sorted
+      state.earn=m;
+      if(el('view-earnings')&&!el('view-earnings').hidden) renderEarnings();
+      render();   // paint/refresh the E badges without waiting for the next snapshot cycle
+    }
+  }catch(_){}
+}
+// Nearest upcoming report for a ticker: {diff, e}. Past entries (stale cache mid-window) skipped.
+function earnNext(t){ const a=state.earn&&state.earn.get(t); if(!a) return null;
+  for(const e of a){ const d=earnDiffC(e.d); if(d!=null&&d>=0) return {diff:d,e}; } return null; }
+// Markets-table badge: solid = reports TODAY, hollow = tomorrow (ET). Nothing beyond that —
+// the tab carries the full window; the table only flags what can hit the next session.
+function earnBadge(r){
+  if(state.scope==='crypto'||!state.earn) return '';
+  const p=earnNext(r.ticker); if(!p||p.diff>1) return '';
+  const eps=p.e.eps!=null?` \u00b7 EPS est ${p.e.eps}`:'';
+  return `<i class="eb ${p.diff===0?'eb0':'eb1'}" title="Earnings ${p.diff===0?'TODAY':'tomorrow'} \u00b7 ${earnSessLbl(p.e.s)}${eps} \u00b7 ${p.e.d} (ET calendar day)">E</i>`;
+}
+function openEarnings(){ renderEarnings(); if(Date.now()-_earnLast>60*1000) loadEarnings(); }
+function renderEarnings(){
+  const box=el('earnings-body'); if(!box) return;
+  const d=state.earnPayload;
+  if(!d){ box.innerHTML='<div class="msg">Loading\u2026</div>'; return; }
+  const asOf=d.asOf?new Date(d.asOf):null;
+  const ageMin=d.asOf?Math.round((Date.now()-d.asOf)/60000):null;
+  const stale=ageMin!=null&&ageMin>8*60;   // > 8h without a good fetch = the 6h cadence is failing
+  const src=`<span class="sec" style="font-size:11px">${d.error
+    ?`<span style="color:var(--down)">feed error: ${esc(d.error)}</span>${asOf?` \u00b7 showing last good fetch (${ageMin>=60?Math.round(ageMin/60)+'h':ageMin+'m'} old)`:''}`
+    :(asOf?`as of ${asOf.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}${stale?` <span style="color:var(--accent)">\u00b7 ${Math.round(ageMin/60)}h stale</span>`:''} \u00b7 source: ${esc(d.source||'finnhub')}`:'never fetched')}</span>`;
+  const head=`<div class="controls" style="margin-bottom:10px"><span style="font-weight:600">Earnings calendar <span class="sec" style="font-weight:400">\u00b7 next ${d.windowDays||14} days, ET</span></span><span style="margin-left:auto"></span>${src}</div>`;
+  const covered=new Set((d.entries||[]).map(e=>e.t)).size;
+  const cov=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:12px" data-tip="eligibility = live xyz EQUITIES; indices, ETFs, FX, commodities, thematics and pre-IPO synthetics never report. Foreign listings without a US symbol are eligible but absent from the feed \u2014 shown as uncovered, never guessed. A name missing here means the feed has no report scheduled in the window OR does not cover it.">${d.entries&&d.entries.length?`<b>${d.entries.length}</b> report${d.entries.length===1?'':'s'} across <b>${covered}</b> ticker${covered===1?'':'s'}`:'No reports in the window'} \u00b7 ${d.eligible||0} eligible equities in the universe \u00b7 names the feed doesn\u2019t cover simply don\u2019t appear</div>`;
+  if(d.error&&!(d.entries&&d.entries.length)){
+    box.innerHTML=head+cov+`<div class="msg">No earnings data.<br><span class="sec" style="font-size:11px">${d.error==='FINNHUB_TOKEN not set'?'Set <b>FINNHUB_TOKEN</b> in the Railway service variables (free key from finnhub.io) and redeploy.':'The feed is unreachable \u2014 the server retries every 30 minutes.'}</span></div>`;
+    return;
+  }
+  const groups=new Map();
+  for(const e of d.entries||[]){ const diff=earnDiffC(e.d); if(diff==null||diff<0) continue;
+    let g=groups.get(e.d); if(!g){g={d:e.d,diff,rows:[]};groups.set(e.d,g);} g.rows.push(e); }
+  if(!groups.size){ box.innerHTML=head+cov+'<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>'; return; }
+  let html=head+cov;
+  for(const g of groups.values()){
+    const dt=new Date(g.d+'T12:00:00Z');
+    const lbl=dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}).toUpperCase();
+    const tag=g.diff===0?'TODAY \u00b7 ':g.diff===1?'TOMORROW \u00b7 ':'';
+    html+=`<div class="earn-day${g.diff<=1?' hot':''}">${tag}${lbl}<span class="sec" style="margin-left:8px;text-transform:none;letter-spacing:0">${g.diff===0?'':g.diff===1?'in 1 day':'in '+g.diff+' days'}</span></div>`;
+    for(const e of g.rows){
+      html+=`<div class="earn-row${g.diff<=1?' hot':''}" data-coin="${esc(e.coin)}" title="open the ${esc(e.t)} drawer">`
+        +`<span class="earn-tk">${esc(e.t)}</span>`
+        +`<span class="earn-sess ${e.s==='BMO'?'bmo':e.s==='AMC'?'amc':''}" data-tip="${e.s==='TBD'?'the feed has the date but not the session \u2014 confirm before trading around it':'session per the feed \u2014 BMO reports land before the 09:30 ET open, AMC after the 16:00 ET close'}">${esc(earnSessLbl(e.s))}</span>`
+        +`<span class="earn-eps sec">${e.eps!=null?'EPS est '+e.eps:'\u2014'}</span></div>`;
+    }
+  }
+  html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst.</div>`;
+  box.innerHTML=html;
+  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+}
 const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge'};
 const EV_TIP={
   bigmove:'Today\u2019s move is \u22652\u03c3 of this market\u2019s own trailing 30d daily returns. History measures whether such moves continued (positive) or faded (negative) the next day, signed with the move.',
@@ -2309,7 +2388,7 @@ function sigCardHtml(gr, rank, collapsible){
       +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
       +(g.confl?`<span class="sig-chip" style="color:var(--down);border-color:var(--down)" data-tip="${esc(`conflicting signals \u00b7 a long-side and a short-side event are BOTH live on this name${(g.conflWith&&g.conflWith.length)?` \u00b7 opposing: ${g.conflWith.map(o=>`${o.label} (${(o.side||'').toUpperCase()}, score ${o.score})`).join('; ')} \u2014 the counterpart may rank below the visible list or be hidden by your filters; the conflict stands because both are live and both claims are on the books`:''} \u00b7 no confluence bonus is granted amid contradiction \u00b7 each claim resolves independently on its own record \u2014 the ledger, not the dashboard, decides which side was right`)}">\u21c4 conflict</span>`:'')
       +`<span class="sig-line1">${g.prime?'<i class="sig-prime" data-tip="prime setup: \u226560% hit, positive expectancy, sound structure (R/R \u22651.2 where levels exist), not unproven/decayed/no-edge \u2014 the bars this signal clears to earn emphasis">\u2605 prime</i>':''}${trigChip(g)}<span class="sig-read">${esc(g.reading)}</span></span>`
-      +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality`:''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.negexp?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}</span>`
+      +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality`:''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.negexp?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}${g.earn?` <i class="sig-unp" style="color:var(--accent);border-color:var(--accent)" data-tip="earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${esc(g.earn.s)} ${esc(g.earn.d)}, ET) \u2014 a known binary catalyst inside this claim's horizon. The base rate wasn't sampled around scheduled prints, so this is a stated PRIOR, not measured expectancy: evidence contribution capped at 8 (same mechanism as the no-live-edge guard), prime disabled. Condition intensity untouched.">earnings ${g.earn.prox===0?'today':'\u22641d'}</i>`:''}</span>`
       +(g.play?playRow(g):'')
       +`</div>`;
   }
@@ -2321,7 +2400,7 @@ function sigRowHtml(gr, rank){
     const cu=(st)=>st&&st.unit==='R'?'R':'%';
     const hist=g.study&&g.study.n>=8?` \u00b7 on ${g.ticker} (n=${g.study.n}): med ${g.study.med>=0?'+':''}${g.study.med}${cu(g.study)}, ${Math.round(g.study.hit*100)}% hit`
       :(g.pooled?` \u00b7 pooled (n=${g.pooled.n}): med ${g.pooled.med>=0?'+':''}${g.pooled.med}${cu(g.pooled)}, ${Math.round(g.pooled.hit*100)}% hit`:'');
-    return `<span class="sig-chip" data-tip="${esc(g.reading+hist+(g.play&&g.play.bias?` \u00b7 play: ${g.play.bias}`:''))}">${esc(g.label)}${g.noedge?' \u26a0':''}</span>`;
+    return `<span class="sig-chip" data-tip="${esc(g.reading+hist+(g.play&&g.play.bias?` \u00b7 play: ${g.play.bias}`:'')+(g.earn?` \u00b7 earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${g.earn.s})`:''))}">${esc(g.label)}${g.noedge||g.earn?' \u26a0':''}</span>`;
   }).join('');
   const anyPrime=gr.sigs.some(x=>x.prime);
   return `<div class="sigc${anyPrime?' prime':''}" data-exp="${esc(gr.coin)}" data-tip="click to expand the full card \u2014 readings, base rates, playbook">`
@@ -3077,6 +3156,15 @@ signals:`
 <p>The search bar loads any name's full claim-by-claim audit trail: what fired, at what score and mark, what it claimed, and what actually happened — including open claims counting down to their horizon. The drawer's Signal record is the compact version of the same ledger.</p>
 <div class="hlp-h">Self-tuning (shadow variants)</div>
 <p>Each gated event runs 2–3 candidate thresholds; only the incumbent emits visible signals, but ALL variants silently ledger shadow claims on identical bookkeeping. A challenger is promoted only on ≥30 out-of-sample resolutions per side with a real expectancy beat — bounded self-improvement, not free re-fitting.</p>`,
+earnings:`
+<div class="hlp-h">What it shows</div>
+<p>Scheduled earnings reports over the next 14 days for the <b>equity</b> names in the universe, grouped by <b>ET calendar day</b> with the session: <b>BMO</b> = before the 09:30 ET open, <b>AMC</b> = after the 16:00 ET close, <b>DMH</b> = during market hours, <b>TBD</b> = date known, session not. Click a row to open that ticker's drawer. Data is Finnhub's schedule, refreshed server-side every ~6h — companies reschedule, so treat dates as scheduled, not guaranteed.</p>
+<div class="hlp-h">The E badge on Markets</div>
+<p>A <b>solid E</b> next to a ticker = reports <b>today</b>; a <b>hollow E</b> = <b>tomorrow</b> (ET days, since BMO/AMC are ET concepts — the badge doesn't flip at your local midnight). Hover it for the session and EPS estimate. Nothing shows beyond one day out — the table flags only what can hit the next session; the full window lives here.</p>
+<div class="hlp-h">Coverage — what's honestly absent</div>
+<p>Indices, ETFs, FX, commodities, thematic baskets and pre-IPO synthetics never report earnings. Foreign listings without a US symbol (SMSN, KIOXIA, SOFTBANK…) are real companies with real earnings, but this feed doesn't carry them — they're <b>absent, never guessed</b>. A missing name means "no report scheduled in the window OR not covered", and the coverage line states how many eligible equities exist so absence is auditable.</p>
+<div class="hlp-h">Interaction with Signals</div>
+<p>Session-spanning claims (breakout, breakdown, outsized gap, overnight drift) firing on a name that reports ≤1 day out wear an <i>earnings</i> flag and have their <b>evidence contribution capped</b> (same 8-point cap as the no-live-edge guard) and can't be ★ prime. Why: the historical base rates weren't conditioned on a known binary catalyst sitting inside the horizon — this is a stated <b>prior</b>, not a measured expectancy, and it's labeled as such on the card. The condition's intensity is untouched; only borrowed statistical confidence is trimmed.</p>`,
 backtest:`
 <div class="hlp-h">What it is</div>
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>
@@ -3086,7 +3174,7 @@ backtest:`
 function openHelp(){
   const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
   const v=state.scope==='crypto'?'markets':state.view;
-  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',backtest:'Backtest'};
+  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest'};
   m.innerHTML=`<div class="hlp-head">How to read: ${TITLES[v]||v}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
     +(HELP[v]||HELP.markets);
