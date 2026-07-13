@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -88,6 +88,7 @@ function createPoller({ dex, store, log, version, crypto }) {
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
+  let earnPrints = [], earnHistDone = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
@@ -932,7 +933,7 @@ function createPoller({ dex, store, log, version, crypto }) {
       score0: Number.isFinite(e.score0) ? e.score0 : null,
       mark0: e.mark0 != null && isFinite(e.mark0) ? e.mark0 : null,
       mv: e.mv != null ? e.mv : null,
-      pr: e.pr === true, conf: e.conf === true, boot: e.bt === 1,
+      pr: e.pr === true, conf: e.conf === true, boot: e.bt === 1, eg: e.eg === 1,
       claimMed: e.claim && Number.isFinite(e.claim.med) ? e.claim.med : null,
       realized: status === "resolved" && Number.isFinite(e.realized) ? e.realized : null,
       realizedS: status === "resolved" && e.realizedS != null && isFinite(e.realizedS) ? e.realizedS : null,
@@ -1517,6 +1518,11 @@ function createPoller({ dex, store, log, version, crypto }) {
         if (ep && ep.diff <= 1) {
           g.earn = { d: ep.e.d, s: ep.e.s, prox: ep.diff };
           if (g.evp > 8) { g.score = Math.max(0, Math.round(g.score - (g.evp - 8))); g.earnguard = true; }
+          // Ledger accounting for the earnings-conditioned split: the claim is stamped when it
+          // was in force within 1 ET day of a scheduled print (stamped once; a claim opened
+          // earlier that lives into the window earns the tag — its horizon contains the print).
+          const eG = ledgerOpen.get(g.coin + "|" + g.ev);
+          if (eG && eG.eg == null) { eG.eg = 1; ledgerDirty = true; }
         }
       }
       delete g.evp;
@@ -1600,9 +1606,21 @@ function createPoller({ dex, store, log, version, crypto }) {
       hist: variantState[ev].hist.slice(-3),
     }));
     const rs0 = recordSets && recordSets["0"];
+    // Earnings-conditioned split for the guarded events: resolved outcomes partitioned by the
+    // eg stamp. Sample sizes will be thin for months — shipped with honest n and rendered only
+    // past a floor; this is the accounting groundwork, not a claim of significance.
+    const earnSplit = {};
+    for (const ev of EARN_GUARD) {
+      const eg = [], reg = [];
+      for (const e of ledgerClosed) {
+        if (e.ev !== ev || e.status !== "resolved" || !Number.isFinite(e.realized)) continue;
+        (e.eg === 1 ? eg : reg).push(e.realized);
+      }
+      if (eg.length) earnSplit[ev] = { eg: summarizeEvents(eg), reg: reg.length ? summarizeEvents(reg) : null };
+    }
     signalsCache = { ts: now, dataTs: signalsVer, count: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
-      records: recordSets, variants, recent: rs0 ? rs0.recent : [] };
+      records: recordSets, variants, recent: rs0 ? rs0.recent : [], earnSplit };
     persistLedger();
   }
 
@@ -1920,10 +1938,38 @@ function createPoller({ dex, store, log, version, crypto }) {
     earnSig = data.entries.map((e) => e.t + e.d + e.s).join(",");
     earnVer = data.ts || Date.now();
     lastEarnOk = data.ts || 0;   // honest: staleness counts from the fetch that produced it
+    earnPrints = Array.isArray(data.prints) ? data.prints : [];
+    earnHistDone = data.histDone === true;
+    refreshEarnStudy(false);
     earnCache = { ts: Date.now(), dataTs: earnVer, asOf: data.ts || null, windowDays: EARN_WINDOW_DAYS,
-      source: "finnhub", error: null, entries: data.entries, eligible: data.eligible || 0 };
+      source: "finnhub", error: null, entries: data.entries, eligible: data.eligible || 0,
+      study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
     rebuildEarnMap(data.entries);
     return true;
+  }
+  // Recompute the per-ticker reaction study from persisted prints against the CURRENT daily
+  // spines. Cheap (a few dozen tickers x <=40 prints), so it reruns on every earnings tick and
+  // once ~10 min after boot when the daily backfill has had time to land opens. Bumps the ETag
+  // only when the stats actually changed.
+  function refreshEarnStudy(bump) {
+    const byTicker = new Map();
+    for (const p of earnPrints) { let a = byTicker.get(p.t); if (!a) { a = []; byTicker.set(p.t, a); } a.push(p); }
+    const next = {};
+    for (const [tk, prints] of byTicker) {
+      let row = null;
+      for (const r of rows.values()) if (r.uni === "xyz" && !r.delisted && r.ticker === tk) { row = r; break; }
+      if (!row || !Array.isArray(row.dailyRaw) || row.dailyRaw.length < 3) continue;
+      const st = earnReactionsFor(prints, row.dailyRaw);
+      if (st) next[tk] = st;
+    }
+    const sigS = JSON.stringify(next);
+    const changed = sigS !== JSON.stringify(earnStudy);
+    earnStudy = next;
+    if (changed && bump && earnCache) {
+      earnVer = Date.now();
+      earnCache = Object.assign({}, earnCache, { dataTs: earnVer, study: earnStudy, printsN: earnPrints.length });
+    }
+    return changed;
   }
   async function fetchEarnings() {
     const token = process.env.FINNHUB_TOKEN || "";
@@ -1936,20 +1982,45 @@ function createPoller({ dex, store, log, version, crypto }) {
     }
     const elig = earnEligible();
     if (!elig.size) return;   // universe not reconciled yet — the next tick will have it
-    const from = etDayStr(now), to = etDayStr(now + EARN_WINDOW_DAYS * DAY);
-    try {
-      const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${from}&to=${to}&token=${encodeURIComponent(token)}`,
+    // Window reaches 5 days BACK so a print stays in the payload while its actual lands (the
+    // feed fills epsActual/revenueActual on the same calendar row after the report) and then
+    // graduates into the persisted print history.
+    const from = etDayStr(now - 5 * DAY), to = etDayStr(now + EARN_WINDOW_DAYS * DAY);
+    const getCal = async (f, t) => {
+      const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}&token=${encodeURIComponent(token)}`,
         { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
       if (!res.ok) throw new Error("HTTP " + res.status);
-      const entries = parseEarningsCalendar(await res.json(), elig);
+      return parseEarningsCalendar(await res.json(), elig);
+    };
+    try {
+      const parsed = await getCal(from, to);
+      // One-time historical backfill for the reaction study: a single ~1y pull, flagged done on
+      // the first HTTP success even if thin — free-tier depth is whatever the feed honestly
+      // returns, and the study self-accrues forward from here regardless. HTTP failure leaves
+      // the flag unset, so the 30-min retry keeps trying.
+      if (!earnHistDone) {
+        try {
+          const hist = await getCal(etDayStr(now - 370 * DAY), etDayStr(now - 6 * DAY));
+          earnPrints = mergeEarnPrints(earnPrints, hist, now);
+          earnHistDone = true;
+          log(`Earnings history backfill: ${hist.length} past print(s) retrieved (feed depth is whatever the free tier serves — study self-accrues from here)`);
+        } catch (he) { log("Earnings history backfill failed (will retry): " + (he && he.message)); }
+      }
+      const entries = [], past = [];
+      for (const e of parsed) ((earnDayDiff(e.d, now) >= 0) ? entries : past).push(e);
+      // Today's reported rows stay in `entries` (diff 0) with actuals; anything older folds
+      // into the print history. Upcoming entries with a schedule change simply re-ship.
+      earnPrints = mergeEarnPrints(earnPrints, past.concat(entries.filter((e) => e.epsA != null)), now);
       lastEarnOk = now; earnErr = null;
-      const sigE = entries.map((e) => e.t + e.d + e.s).join(",");
+      refreshEarnStudy(false);
+      const sigE = entries.map((e) => e.t + e.d + e.s + (e.epsA != null ? "a" : "")).join(",") + "|" + JSON.stringify(earnStudy).length;
       if (sigE !== earnSig) { earnSig = sigE; earnVer = now; }
       earnCache = { ts: now, dataTs: earnVer, asOf: now, windowDays: EARN_WINDOW_DAYS,
-        source: "finnhub", error: null, entries, eligible: elig.size };
+        source: "finnhub", error: null, entries, eligible: elig.size,
+        study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
       rebuildEarnMap(entries);
-      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size });
-      log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d (${elig.size} eligible equities)`);
+      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone: earnHistDone });
+      log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d (${elig.size} eligible equities; ${earnPrints.length} print(s) in history, study covers ${Object.keys(earnStudy).length})`);
     } catch (e) {
       // Failure keeps the last good entries and stamps the error — the tab shows the cache age
       // in amber instead of pretending freshness or blanking a working list.
@@ -2094,6 +2165,9 @@ function createPoller({ dex, store, log, version, crypto }) {
     // 30 min while a healthy one refreshes 4x/day. One HTTP GET each time; zero HL rate budget.
     setTimeout(earnTick, 20 * 1000);
     setInterval(() => { if (Date.now() - lastEarnOk > EARN_STALE) earnTick(); }, EARN_RETRY_MS);
+    // Reaction study rerun after the daily backfill has had time to land full candles (opens
+    // arrive with the live pull; the warm cache only carries closes) — bumps the ETag on change.
+    setTimeout(() => { try { refreshEarnStudy(true); } catch (_) {} }, 10 * 60 * 1000);
   }
 
   // Per-market hourly OHLCV for the drawer candle chart: [[t,o,h,l,c,v], ...] over the last
@@ -2149,7 +2223,9 @@ function createPoller({ dex, store, log, version, crypto }) {
         failing: { hourly: hFailing, daily: dFailing, funding: fFailing },
         signals: signalsCache ? signalsCache.count : 0,
         ledger: { open: ledgerOpen.size, resolved: ledgerClosed.length },
-        earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null, error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
+        earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null,
+          prints: earnPrints.length, histDone: earnHistDone, studyTickers: Object.keys(earnStudy).length,
+          error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };

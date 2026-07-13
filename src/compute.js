@@ -1199,8 +1199,13 @@ function parseEarningsCalendar(json, symMap) {
     if (!e || typeof e.symbol !== "string" || typeof e.date !== "string") continue;
     const m = symMap.get(e.symbol.toUpperCase());
     if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) continue;
-    const eps = typeof e.epsEstimate === "number" && isFinite(e.epsEstimate) ? +e.epsEstimate.toFixed(2) : null;
-    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps });
+    const q2 = (x) => typeof x === "number" && isFinite(x) ? +x.toFixed(2) : null;
+    const eps = q2(e.epsEstimate), epsA = q2(e.epsActual);
+    // Revenue ships in raw units (feed reports dollars); quantize to 3 significant figures —
+    // the display only ever shows "$41.2B", full doubles are payload weight for nothing.
+    const q3 = (x) => typeof x === "number" && isFinite(x) && x !== 0 ? +x.toPrecision(3) : null;
+    const rev = q3(e.revenueEstimate), revA = q3(e.revenueActual);
+    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps, epsA, rev, revA });
   }
   out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (EARN_SESS_ORD[a.s] - EARN_SESS_ORD[b.s]) || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   return out;
@@ -1208,3 +1213,77 @@ function parseEarningsCalendar(json, symMap) {
 module.exports.etDayStr = etDayStr;
 module.exports.earnDayDiff = earnDayDiff;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
+
+// ---- earnings print history + reaction study ---------------------------------------------------
+// Past prints are the raw material for the per-ticker reaction study. Like the OI log, they
+// accrue and can't be re-fetched reliably (the feed's historical depth is not guaranteed), so
+// every print that passes is persisted. Merge prefers the record that carries ACTUALS — a print
+// first seen as a schedule entry gets upgraded in place when the actual lands on a later fetch.
+function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
+  const cut = (nowMs != null ? nowMs : Date.now()) - (maxAgeDays || 1100) * DAY;
+  const m = new Map();
+  const fill = (arr) => {
+    if (!Array.isArray(arr)) return;
+    for (const p of arr) {
+      if (!p || typeof p.t !== "string" || typeof p.d !== "string") continue;
+      if (Date.UTC(+p.d.slice(0, 4), +p.d.slice(5, 7) - 1, +p.d.slice(8, 10)) < cut) continue;
+      const k = p.t + "|" + p.d;
+      const old = m.get(k);
+      // newer wins field-by-field ONLY where it actually has data — an actual, once stored,
+      // can never be blanked by a later fetch that dropped it.
+      m.set(k, old ? { t: p.t, coin: p.coin || old.coin, d: p.d, s: p.s !== "TBD" ? p.s : old.s,
+        eps: p.eps != null ? p.eps : old.eps, epsA: p.epsA != null ? p.epsA : old.epsA,
+        rev: p.rev != null ? p.rev : old.rev, revA: p.revA != null ? p.revA : old.revA } : p);
+    }
+  };
+  fill(prev); fill(incoming);
+  const out = [...m.values()];
+  out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : 1));
+  return out;
+}
+// Per-ticker earnings reaction study, computed on the perp's OWN daily closes (UTC days — the
+// perp trades through weekends, so an AMC Friday print's reaction is honestly captured by the
+// Saturday candle). Reaction day: BMO/DMH/TBD = the print's own candle vs the prior close;
+// AMC = the NEXT candle. Candles may be warm-cache [{t,c}] without opens — the gap metrics
+// (open vs prior close, held-to-close) compute only where opens exist and report their own n.
+// Expansion = |reaction| / mean |daily move| over the 20 candles before the print (>=8 required).
+function earnReactionsFor(prints, daily) {
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 3) return null;
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  const idxByDay = new Map();
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  const moves = [], exps = [], gaps = [];
+  for (const p of prints) {
+    const pi = idxByDay.get(p.d);
+    if (pi == null) continue;                                    // print predates the retained daily window
+    const ri = p.s === "AMC" ? pi + 1 : pi;
+    if (ri <= 0 || ri >= daily.length) continue;
+    const c1 = daily[ri].c, c0 = daily[ri - 1].c;
+    if (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0) continue;
+    const mv = (c1 - c0) / c0 * 100;
+    moves.push(mv);
+    let base = 0, bn = 0;
+    for (let k = Math.max(1, ri - 20); k < ri; k++) {
+      const a = daily[k].c, b = daily[k - 1].c;
+      if (Number.isFinite(a) && Number.isFinite(b) && b > 0) { base += Math.abs((a - b) / b * 100); bn++; }
+    }
+    if (bn >= 8 && base > 0) exps.push(Math.abs(mv) / (base / bn));
+    const o = daily[ri].o;
+    if (Number.isFinite(o) && o > 0) {
+      const g = (o - c0) / c0 * 100;
+      if (Math.abs(g) > 0.05) gaps.push({ up: g > 0, held: (c1 - o) * g > 0 });
+    }
+  }
+  if (!moves.length) return null;
+  const abs = moves.map(Math.abs);
+  return {
+    n: moves.length,
+    avgAbs: +(abs.reduce((a, b) => a + b, 0) / abs.length).toFixed(2),
+    medAbs: +median(abs).toFixed(2),
+    up: moves.filter((m) => m > 0).length,
+    xMed: exps.length ? +median(exps).toFixed(1) : null, xN: exps.length,
+    gapN: gaps.length, gapUp: gaps.filter((g) => g.up).length, gapHeld: gaps.filter((g) => g.held).length,
+  };
+}
+module.exports.mergeEarnPrints = mergeEarnPrints;
+module.exports.earnReactionsFor = earnReactionsFor;
