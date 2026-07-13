@@ -1014,6 +1014,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
       <span class="star${starred?' on':''}" id="dstar" style="font-size:16px;cursor:pointer">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 31d history':''}</div>
+    ${earnDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>
     ${splitHtml}
@@ -1164,6 +1165,7 @@ let _shSeq=0, _shTimer=null;
 function sigHistRow(e,withTicker){
   const side=e.side==='long'?'<span class="pos">LONG</span>':e.side==='short'?'<span class="neg">SHORT</span>':'<span class="sec">\u2014</span>';
   const flags=(e.pr?' <span data-tip="fired as a \u2605 prime-quality claim">\u2605</span>':'')
+    +(e.eg?' <span style="color:var(--accent)" data-tip="claim was in force within 1 ET day of a scheduled earnings print \u2014 tagged for the earnings-conditioned base-rate split (an earnings gap is a different animal than an overnight-drift gap)">E</span>':'')
     +(e.conf?' <span data-tip="fired WITH same-side company on this name (confluence)" style="color:var(--blue)">\u29c9</span>':'')
     +(e.legacy?' <i class="sig-unp" data-tip="resolved before sigma-normalization \u2014 outcome is in raw % and excluded from the R aggregates">legacy %</i>':'');
   const fired=shDate(e.t0)+(e.boot?' <span class="sec" style="cursor:help" data-tip="claim opened on the FIRST build after a server restart or deploy \u2014 the condition may have been in force before this stamp. The mark and outcome are measured from this moment, so the record is honest; only the onset time is a floor, not the true trigger time. Identical timestamps across events on one boot are this, not shared bookkeeping.">\u27f2</span>':'');
@@ -2229,10 +2231,58 @@ function earnNext(t){ const a=state.earn&&state.earn.get(t); if(!a) return null;
 function earnBadge(r){
   if(state.scope==='crypto'||!state.earn) return '';
   const p=earnNext(r.ticker); if(!p||p.diff>1) return '';
+  if(p.diff===0&&p.e.epsA!=null){
+    // Reported: the badge flips from schedule to scoreboard \u2014 verdict + the tape's reaction.
+    const beat=p.e.eps!=null?(p.e.epsA>p.e.eps?'beat':'missed'):null;
+    const dm=r.d1!=null&&isFinite(r.d1)?` \u00b7 day ${r.d1>=0?'+':''}${r.d1.toFixed(1)}%`:'';
+    return `<i class="eb eb0" title="Reported TODAY (${earnSessLbl(p.e.s)}) \u00b7 EPS ${p.e.epsA}${p.e.eps!=null?` vs ${p.e.eps} est (${beat})`:''}${dm}">E</i>`;
+  }
   const eps=p.e.eps!=null?` \u00b7 EPS est ${p.e.eps}`:'';
   return `<i class="eb ${p.diff===0?'eb0':'eb1'}" title="Earnings ${p.diff===0?'TODAY':'tomorrow'} \u00b7 ${earnSessLbl(p.e.s)}${eps} \u00b7 ${p.e.d} (ET calendar day)">E</i>`;
 }
 function openEarnings(){ renderEarnings(); if(Date.now()-_earnLast>60*1000) loadEarnings(); }
+// EPS segment: schedule estimate before the print; estimate vs ACTUAL with a beat/miss verdict
+// and surprise % once the feed fills the actual (same calendar row updates after the report).
+function earnEpsHtml(e){
+  if(e.epsA!=null&&e.eps!=null){
+    const beat=e.epsA>e.eps, sur=e.eps!==0?((e.epsA-e.eps)/Math.abs(e.eps)*100):null;
+    const tip=`reported · EPS ${e.epsA} vs ${e.eps} est${sur!=null?` (${sur>=0?'+':''}${sur.toFixed(1)}% surprise)`:''}${e.rev!=null||e.revA!=null?` · revenue ${e.revA!=null?fmtUsd(e.revA):'—'} vs ${e.rev!=null?fmtUsd(e.rev):'—'} est`:''} · verdict is EPS-only — the tape's verdict is the day column`;
+    return `<span class="earn-eps" data-tip="${esc(tip)}">EPS ${e.epsA} vs ${e.eps} <b class="${beat?'pos':'neg'}">${beat?'beat':'miss'}${sur!=null?' '+(sur>=0?'+':'')+sur.toFixed(1)+'%':''}</b></span>`;
+  }
+  if(e.epsA!=null) return `<span class="earn-eps sec" data-tip="actual reported; the feed carries no estimate to compare against">EPS ${e.epsA} · no est</span>`;
+  const revTip=e.rev!=null?` · revenue est ${fmtUsd(e.rev)}`:'';
+  return `<span class="earn-eps sec"${e.rev!=null?` data-tip="${esc('EPS est '+(e.eps!=null?e.eps:'—')+revTip)}"`:''}>${e.eps!=null?'EPS est '+e.eps:'—'}</span>`;
+}
+// Live context from the snapshot already in the browser: today's move, live volume, ADR.
+// Null-honest — a row still backfilling shows dashes, never zeros.
+function earnLiveHtml(e){
+  const r=state.rows.get(e.coin); if(!r) return '<span class="earn-live sec">—</span>';
+  const d1=r.d1!=null&&isFinite(r.d1)?`<b class="${r.d1>=0?'pos':'neg'}">${r.d1>=0?'+':''}${r.d1.toFixed(1)}%</b>`:'—';
+  const vol=r.vol>0?fmtUsd(r.vol):'—';
+  const adr=r.adr!=null&&isFinite(r.adr)?r.adr.toFixed(1)+'%':'—';
+  return `<span class="earn-live sec" data-tip="live context from the markets snapshot · day move · 24h notional volume · average daily range — which of today's prints actually matter for the book">${d1} · ${vol} · ADR ${adr}</span>`;
+}
+// Per-ticker reaction study chip. History = this name's own past prints measured on the perp's
+// daily closes (UTC — trades through weekends); n is whatever the feed's depth plus accrual
+// honestly provides. Never a prediction — a base rate for sizing expectations.
+function earnStudyHtml(t){
+  const st=state.earnPayload&&state.earnPayload.study&&state.earnPayload.study[t];
+  if(!st) return '<span class="earn-study sec" data-tip="no reaction history yet — the study needs past print dates matched to retained daily candles; it accrues automatically as prints pass">no history</span>';
+  const gap=st.gapN>0?` · gapped ${st.gapUp}/${st.gapN} up, ${st.gapHeld}/${st.gapN} held to close`:'';
+  const x=st.xMed!=null?` · median ${st.xMed}x the usual daily move (n=${st.xN})`:'';
+  const tip=`this name's own earnings reaction base rate over ${st.n} print(s): avg |${st.avgAbs}%| next-session move (median |${st.medAbs}%|), ${st.up}/${st.n} up${gap}${x}. Reaction = BMO/DMH prints score their own UTC daily candle, AMC prints the next one; the perp trades through weekends so Friday AMC lands on Saturday's candle. Gap stats need opens — they cover the live-fetched candle window only. A base rate, not a prediction.`;
+  return `<span class="earn-study" data-tip="${esc(tip)}">${st.n} print${st.n===1?'':'s'} · avg |${st.avgAbs}%| · ${st.up}↑${st.n-st.up}↓${st.xMed!=null?' · '+st.xMed+'x':''}</span>`;
+}
+// Drawer line: upcoming print inside the window + the study one-liner.
+function earnDrawerHtml(r){
+  if(!r||r.uni!=='xyz'||!state.earn) return '';
+  const p=earnNext(r.ticker);
+  const st=state.earnPayload&&state.earnPayload.study&&state.earnPayload.study[r.ticker];
+  if(!p&&!st) return '';
+  const up=p?`Earnings ${p.diff===0?'<b style="color:var(--accent)">TODAY</b>':p.diff===1?'<b style="color:var(--accent)">tomorrow</b>':'in '+p.diff+'d'} · ${esc(earnSessLbl(p.e.s))}${p.e.eps!=null?' · EPS est '+p.e.eps:''}`:'';
+  const hist=st?`${up?' · ':''}<span class="sec" data-tip="own reaction base rate — hover the Earnings tab row for the full breakdown">${st.n} print${st.n===1?'':'s'}, avg |${st.avgAbs}%|</span>`:'';
+  return `<div class="dsub" style="margin-top:2px">${up}${hist}</div>`;
+}
 function renderEarnings(){
   const box=el('earnings-body'); if(!box) return;
   const d=state.earnPayload;
@@ -2260,11 +2310,16 @@ function renderEarnings(){
     const lbl=dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}).toUpperCase();
     const tag=g.diff===0?'TODAY \u00b7 ':g.diff===1?'TOMORROW \u00b7 ':'';
     html+=`<div class="earn-day${g.diff<=1?' hot':''}">${tag}${lbl}<span class="sec" style="margin-left:8px;text-transform:none;letter-spacing:0">${g.diff===0?'':g.diff===1?'in 1 day':'in '+g.diff+' days'}</span></div>`;
+    g.rows.sort((a,b)=>{ const wa=state.watch.has(a.coin)?0:1, wb=state.watch.has(b.coin)?0:1; return wa-wb; });   // stable: watchlist floats up, session order preserved within each half
     for(const e of g.rows){
+      const starred=state.watch.has(e.coin);
       html+=`<div class="earn-row${g.diff<=1?' hot':''}" data-coin="${esc(e.coin)}" title="open the ${esc(e.t)} drawer">`
-        +`<span class="earn-tk">${esc(e.t)}</span>`
+        +`<span class="earn-tk">${starred?'<span class="star on" style="margin-right:4px">\u2605</span>':''}${esc(e.t)}</span>`
         +`<span class="earn-sess ${e.s==='BMO'?'bmo':e.s==='AMC'?'amc':''}" data-tip="${e.s==='TBD'?'the feed has the date but not the session \u2014 confirm before trading around it':'session per the feed \u2014 BMO reports land before the 09:30 ET open, AMC after the 16:00 ET close'}">${esc(earnSessLbl(e.s))}</span>`
-        +`<span class="earn-eps sec">${e.eps!=null?'EPS est '+e.eps:'\u2014'}</span></div>`;
+        +earnEpsHtml(e)
+        +earnStudyHtml(e.t)
+        +earnLiveHtml(e)
+        +`</div>`;
     }
   }
   html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst.</div>`;
@@ -2557,6 +2612,18 @@ function renderSignals(){
       rec+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 out-of-sample record: every firing ledgered at its mark, resolved at the stated horizon under the study\u2019s own sign convention \u00b7 what actually happened after the engine spoke`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
     }
     rec+='</div>';
+    // Earnings-conditioned split: shown only past n>=5 resolved earnings-window claims per
+    // event — below that it's accounting, not evidence. Both halves shown so the comparison
+    // is honest; units are the event's own (gap %, others R).
+    const es=d&&d.earnSplit;
+    if(es){
+      let chips='';
+      for(const ev in es){ const sp=es[ev]; if(!sp||!sp.eg||sp.eg.n<5) continue;
+        const f=(x)=>x?`${Math.round((x.hit||0)*100)}% hit · avg ${x.avg>=0?'+':''}${x.avg} (n=${x.n})`:'no ordinary sample yet';
+        chips+=`<span class="rec" data-tip="resolved claims split by the earnings tag: claims in force within 1 ET day of a scheduled print vs all other claims of the same event. Same sign convention and units as the main record. Thin samples — a sizing prior in the making, not yet a proven split.">· <b>${esc(EV_LABELS[ev]||ev)}</b> thru earnings: ${f(sp.eg)} vs ordinary ${f(sp.reg)}</span>`;
+      }
+      if(chips) rec+=`<div class="recstrip" style="margin-top:4px">${chips}</div>`;
+    }
   }
   if(!d||!d.signals||!d.signals.length){
     box.innerHTML=intro+rec+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d);
@@ -3199,8 +3266,14 @@ earnings:`
 <p>A <b>solid E</b> next to a ticker = reports <b>today</b>; a <b>hollow E</b> = <b>tomorrow</b> (ET days, since BMO/AMC are ET concepts — the badge doesn't flip at your local midnight). Hover it for the session and EPS estimate. Nothing shows beyond one day out — the table flags only what can hit the next session; the full window lives here.</p>
 <div class="hlp-h">Coverage — what's honestly absent</div>
 <p>Indices, ETFs, FX, commodities, thematic baskets and pre-IPO synthetics never report earnings. Foreign listings without a US symbol (SMSN, KIOXIA, SOFTBANK…) are real companies with real earnings, but this feed doesn't carry them — they're <b>absent, never guessed</b>. A missing name means "no report scheduled in the window OR not covered", and the coverage line states how many eligible equities exist so absence is auditable.</p>
+<div class="hlp-h">Reported rows — beat/miss</div>
+<p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the day column next to it, and they disagree often enough to be interesting.</p>
+<div class="hlp-h">The reaction study</div>
+<p>Each name's <b>own earnings base rate</b>, measured on the perp's daily closes (UTC — it trades through weekends, so a Friday AMC print scores Saturday's candle): number of prints, average and median |next-session move|, up/down split, gap behavior where opens are retained, and the move as a multiple of that name's usual daily range. History starts from a one-time ~1y feed backfill (depth = whatever the free tier honestly returns) and <b>self-accrues</b> from there — every print that passes is persisted like the OI log. n is shown always; "no history" means exactly that, never a hidden zero.</p>
+<div class="hlp-h">Live context columns</div>
+<p>Day move, 24h volume and ADR on each row come from the live snapshot already in your browser — so a Thursday with eight prints reads at a glance as one that matters and seven that don't. ★ watchlist names float to the top of each day.</p>
 <div class="hlp-h">Interaction with Signals</div>
-<p>Session-spanning claims (breakout, breakdown, outsized gap, overnight drift) firing on a name that reports ≤1 day out wear an <i>earnings</i> flag and have their <b>evidence contribution capped</b> (same 8-point cap as the no-live-edge guard) and can't be ★ prime. Why: the historical base rates weren't conditioned on a known binary catalyst sitting inside the horizon — this is a stated <b>prior</b>, not a measured expectancy, and it's labeled as such on the card. The condition's intensity is untouched; only borrowed statistical confidence is trimmed.</p>`,
+<p>Session-spanning claims (breakout, breakdown, outsized gap, overnight drift) firing on a name that reports ≤1 day out wear an <i>earnings</i> flag and have their <b>evidence contribution capped</b> (same 8-point cap as the no-live-edge guard) and can't be ★ prime. Why: the historical base rates weren't conditioned on a known binary catalyst sitting inside the horizon — this is a stated <b>prior</b>, not a measured expectancy, and it's labeled as such on the card. The condition's intensity is untouched; only borrowed statistical confidence is trimmed. Every such claim is also <b>tagged in the ledger</b> (E in the claim history), and once ≥5 tagged claims resolve per event, the Signals tab shows the earnings-window record next to the ordinary one — over time the guard stops being a prior and becomes a measured base rate.</p>`,
 backtest:`
 <div class="hlp-h">What it is</div>
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>

@@ -563,3 +563,9 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .earn-sess.bmo{color:var(--blue)}
 .earn-sess.amc{color:var(--accent)}
 .earn-eps{margin-left:auto;font-family:var(--mono);font-size:11px}
+
+/* ===== earnings tab: beat/miss, live context, reaction study (build -46) ===== */
+.earn-eps{margin-left:0;font-family:var(--mono);font-size:11px;min-width:190px;cursor:help}
+.earn-study{font-family:var(--mono);font-size:11px;color:var(--accent);min-width:180px;cursor:help}
+.earn-study.sec{color:var(--faint)}
+.earn-live{margin-left:auto;font-family:var(--mono);font-size:11px;cursor:help;white-space:nowrap}
