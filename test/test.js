@@ -421,6 +421,78 @@ test("earnings: feed parse filters to OUR symbols, applies aliases, normalizes s
   assert.deepEqual(parseEarningsCalendar({}, symMap), [], "missing calendar array is empty, not a throw");
 });
 
+test("earnings: parser carries actuals and revenue for beat/miss", () => {
+  const { parseEarningsCalendar } = require("../src/compute");
+  const symMap = new Map([["NVDA", { coin: "xyz:NVDA", ticker: "NVDA" }]]);
+  const out = parseEarningsCalendar({ earningsCalendar: [
+    { symbol: "NVDA", date: "2026-07-13", hour: "amc", epsEstimate: 5.6234, epsActual: 5.712, revenueEstimate: 41234000000, revenueActual: 42891000000 },
+    { symbol: "NVDA", date: "2026-10-14", hour: "amc", epsEstimate: 6.1 },
+  ] }, symMap);
+  assert.equal(out[0].epsA, 5.71, "actual quantized to 2dp");
+  assert.equal(out[0].rev, 41200000000, "revenue estimate at 3 significant figures");
+  assert.equal(out[0].revA, 42900000000);
+  assert.equal(out[1].epsA, null, "future print has no actual — null, never 0");
+  assert.equal(out[1].rev, null);
+});
+
+test("earnings: print merge dedupes, upgrades in place with actuals, never blanks them", () => {
+  const { mergeEarnPrints } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 13);
+  const prev = [
+    { coin: "xyz:NVDA", t: "NVDA", d: "2026-04-15", s: "AMC", eps: 5.2, epsA: 5.44 },
+    { coin: "xyz:JPM", t: "JPM", d: "2026-04-11", s: "TBD", eps: 4.0, epsA: null },
+    { coin: "xyz:OLD", t: "OLD", d: "2022-01-01", s: "BMO", eps: 1, epsA: 1 },      // beyond retention -> dropped
+  ];
+  const incoming = [
+    { coin: "xyz:NVDA", t: "NVDA", d: "2026-04-15", s: "AMC", eps: 5.2, epsA: null },   // re-fetch WITHOUT actual — must not blank it
+    { coin: "xyz:JPM", t: "JPM", d: "2026-04-11", s: "BMO", eps: 4.0, epsA: 4.3 },      // actual arrives + session firms up from TBD
+    { coin: "xyz:JPM", t: "JPM", d: "2026-07-14", s: "BMO", eps: 4.11, epsA: null },     // new print
+  ];
+  const out = mergeEarnPrints(prev, incoming, now);
+  assert.equal(out.length, 3, "deduped by ticker+date, retention applied");
+  const nv = out.find((p) => p.t === "NVDA");
+  assert.equal(nv.epsA, 5.44, "stored actual survives a later fetch that lacks it");
+  const jp = out.find((p) => p.t === "JPM" && p.d === "2026-04-11");
+  assert.equal(jp.epsA, 4.3, "actual upgrades in place");
+  assert.equal(jp.s, "BMO", "TBD session firms up when a later fetch knows it");
+  assert.ok(out[0].d <= out[1].d && out[1].d <= out[2].d, "date-sorted ascending");
+});
+
+test("earnings: reaction study — BMO same-day, AMC next-day, expansion, gaps, honest gaps in coverage", () => {
+  const { earnReactionsFor } = require("../src/compute");
+  // 60 daily candles, 1%-magnitude alternating base tape, UTC-day timestamps
+  const day0 = Date.UTC(2026, 3, 1);   // Apr 1 2026
+  const daily = [];
+  let px = 100;
+  for (let i = 0; i < 60; i++) {
+    const prev = px;
+    px = i === 30 ? px * 1.08                      // print-day pop: +8% on Apr 31? -> May 1 candle (i=30)
+       : i === 45 ? px * 0.95                      // second print: -5% next day after AMC (see below)
+       : px * (i % 2 ? 1.01 : 0.99);               // ordinary tape: |1%| alternating
+    daily.push({ t: day0 + i * DAY, o: prev * (i === 30 ? 1.05 : 1.0), c: px });
+  }
+  const dstr = (i) => { const x = new Date(day0 + i * DAY); return x.toISOString().slice(0, 10); };
+  const prints = [
+    { t: "NVDA", d: dstr(30), s: "BMO" },   // BMO: reaction = candle 30 itself (+8%), gap +5% held
+    { t: "NVDA", d: dstr(44), s: "AMC" },   // AMC: reaction = candle 45 (-5%)
+    { t: "NVDA", d: "2019-01-01", s: "BMO" },   // predates the window -> skipped, not fabricated
+  ];
+  const st = earnReactionsFor(prints, daily);
+  assert.equal(st.n, 2, "only prints matched to retained candles count");
+  assert.equal(st.up, 1, "one up reaction, one down");
+  assert.ok(st.avgAbs > 6 && st.avgAbs < 7, `avg |move| ~6.5, got ${st.avgAbs}`);
+  assert.ok(st.xMed > 4, `both reactions are multiples of the ~1% base tape, got ${st.xMed}x`);
+  assert.equal(st.gapN, 1, "gap stats only where the reaction candle carries a real gap open");
+  assert.equal(st.gapUp, 1);
+  assert.equal(st.gapHeld, 1, "gapped up +5%, closed +8% — held");
+  // closes-only candles (warm cache shape): move stats compute, gap stats honestly absent
+  const co = daily.map((k) => ({ t: k.t, c: k.c }));
+  const st2 = earnReactionsFor(prints, co);
+  assert.equal(st2.n, 2);
+  assert.equal(st2.gapN, 0, "no opens -> no gap claims");
+  assert.equal(earnReactionsFor([], daily), null, "no prints -> null, not zeros");
+});
+
 test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
   // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
@@ -441,7 +513,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
