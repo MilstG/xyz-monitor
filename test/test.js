@@ -365,6 +365,62 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(p.getLedgerFor("AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
 });
 
+test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
+  const { etDayStr } = require("../src/compute");
+  // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
+  assert.equal(etDayStr(Date.UTC(2026, 6, 13, 2, 0)), "2026-07-12", "late-UTC evening rolls back to the prior ET day");
+  assert.equal(etDayStr(Date.UTC(2026, 6, 13, 12, 0)), "2026-07-13", "midday UTC is the same ET day");
+  assert.equal(etDayStr(Date.UTC(2026, 6, 13, 3, 59)), "2026-07-12", "23:59 ET is still the old day");
+  assert.equal(etDayStr(Date.UTC(2026, 6, 13, 4, 0)), "2026-07-13", "00:00 ET flips the day at exactly UTC-4");
+  // January = EST (UTC-5): the flip moves to 05:00Z — the helper must track the offset, not hardcode it.
+  assert.equal(etDayStr(Date.UTC(2026, 0, 10, 4, 59)), "2026-01-09", "EST: 04:59Z is 23:59 ET the prior day");
+  assert.equal(etDayStr(Date.UTC(2026, 0, 10, 5, 0)), "2026-01-10", "EST: day flips at 05:00Z");
+});
+
+test("earnings: day distance is whole ET days — 0 today, 1 tomorrow, negative past, garbage null", () => {
+  const { earnDayDiff } = require("../src/compute");
+  const noon = Date.UTC(2026, 6, 13, 16, 0);   // 12:00 ET, Mon Jul 13
+  assert.equal(earnDayDiff("2026-07-13", noon), 0, "report today");
+  assert.equal(earnDayDiff("2026-07-14", noon), 1, "report tomorrow");
+  assert.equal(earnDayDiff("2026-07-12", noon), -1, "yesterday's report is past, never re-flagged");
+  assert.equal(earnDayDiff("2026-07-27", noon), 14, "window edge");
+  // The trap this exists to avoid: at 22:00 ET Sunday it is already Monday in UTC — a report
+  // dated Monday must read as TOMORROW (diff 1), not today.
+  const lateSun = Date.UTC(2026, 6, 13, 2, 0);   // 22:00 ET Sun Jul 12
+  assert.equal(earnDayDiff("2026-07-13", lateSun), 1, "UTC has rolled over but ET has not");
+  assert.equal(earnDayDiff("garbage", noon), null);
+  assert.equal(earnDayDiff("2026-7-13", noon), null, "malformed date is rejected, not misparsed");
+});
+
+test("earnings: feed parse filters to OUR symbols, applies aliases, normalizes sessions, sorts", () => {
+  const { parseEarningsCalendar } = require("../src/compute");
+  const symMap = new Map([
+    ["NVDA", { coin: "xyz:NVDA", ticker: "NVDA" }],
+    ["JPM", { coin: "xyz:JPM", ticker: "JPM" }],
+    ["BRK.B", { coin: "xyz:BRKB", ticker: "BRKB" }],   // alias applied by the caller: feed symbol -> our row
+  ]);
+  const feed = { earningsCalendar: [
+    { symbol: "JPM", date: "2026-07-14", hour: "bmo", epsEstimate: 4.1123 },
+    { symbol: "NVDA", date: "2026-07-14", hour: "amc", epsEstimate: 5.62 },
+    { symbol: "brk.b", date: "2026-07-14", hour: "", epsEstimate: null },        // lowercase symbol, unknown session
+    { symbol: "ZZZZ", date: "2026-07-14", hour: "bmo", epsEstimate: 1 },          // not in universe -> dropped
+    { symbol: "NVDA", date: "2026-07-13", hour: "dmh", epsEstimate: 3 },          // earlier date sorts first
+    { symbol: "JPM", date: "14-07-2026", hour: "bmo" },                            // malformed date -> dropped
+    { symbol: 42, date: "2026-07-14" }, null,                                      // garbage rows tolerated
+  ] };
+  const out = parseEarningsCalendar(feed, symMap);
+  assert.equal(out.length, 4, "universe filter + malformed rows dropped");
+  assert.deepEqual(out.map((e) => e.t), ["NVDA", "JPM", "NVDA", "BRKB"], "sorted by date, then BMO < DMH < AMC < TBD within a day");
+  assert.equal(out[0].s, "DMH");
+  assert.equal(out[1].s, "BMO");
+  assert.equal(out[2].s, "AMC");
+  assert.equal(out[3].s, "TBD", "unknown hour is TBD, never guessed");
+  assert.equal(out[3].coin, "xyz:BRKB", "BRK.B report lands on the BRKB row");
+  assert.equal(out[1].eps, 4.11, "EPS estimate quantized to 2dp");
+  assert.equal(out[3].eps, null, "missing estimate stays null");
+  assert.deepEqual(parseEarningsCalendar({}, symMap), [], "missing calendar array is empty, not a throw");
+});
+
 test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
   // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
@@ -378,12 +434,13 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "trigChip", "playRow", "rrChip", "recCurveSvg", "openHelp", "closeHelp",
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
-    "vsTapeCell", "dcapCell", "hitCell", "rvolCell"];
+    "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
+    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -394,7 +451,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
