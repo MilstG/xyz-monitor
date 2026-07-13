@@ -421,6 +421,78 @@ test("earnings: feed parse filters to OUR symbols, applies aliases, normalizes s
   assert.deepEqual(parseEarningsCalendar({}, symMap), [], "missing calendar array is empty, not a throw");
 });
 
+test("unlocks: UTC day math — crypto events bucket on UTC days, not ET or local", () => {
+  const { utcDayStr, utcDayDiff } = require("../src/compute");
+  assert.equal(utcDayStr(Date.UTC(2026, 6, 13, 0, 0)), "2026-07-13", "UTC midnight starts the UTC day");
+  assert.equal(utcDayStr(Date.UTC(2026, 6, 13, 23, 59)), "2026-07-13");
+  // The deliberate divergence from earnings: 02:00Z is July 13 UTC but still July 12 in ET.
+  assert.equal(utcDayStr(Date.UTC(2026, 6, 13, 2, 0)), "2026-07-13", "UTC bucketing ignores ET");
+  const noon = Date.UTC(2026, 6, 13, 12, 0);
+  assert.equal(utcDayDiff("2026-07-13", noon), 0);
+  assert.equal(utcDayDiff("2026-07-20", noon), 7, "solid-badge boundary");
+  assert.equal(utcDayDiff("2026-08-12", noon), 30, "hollow-badge boundary");
+  assert.equal(utcDayDiff("2027-01-09", noon), 180, "window edge crosses the year");
+  assert.equal(utcDayDiff("2026-07-12", noon), -1, "past events never re-flag");
+  assert.equal(utcDayDiff("garbage", noon), null);
+});
+
+test("unlocks: protocol matching — symbol match, gecko alias, memecoin blocklist, dedupe", () => {
+  const { matchLlamaProtocols } = require("../src/compute");
+  const symToTk = new Map([
+    ["ARB", { coin: "ARB", ticker: "ARB" }],
+    ["TIA", { coin: "TIA", ticker: "TIA" }],
+    ["SPX", { coin: "SPX", ticker: "SPX" }],     // SPX6900 memecoin — must never match
+    ["JUP", { coin: "JUP", ticker: "JUP" }],
+  ]);
+  const aliasIdx = new Map([["jupiter-exchange-solana", { coin: "JUP", ticker: "JUP" }]]);
+  const blocked = new Set(["SPX"]);
+  const list = [
+    { name: "Arbitrum", symbol: "ARB", gecko_id: "arbitrum", circSupply: 5.15e9 },
+    { name: "Celestia", tSymbol: "TIA", gecko_id: "celestia", circSupply: 0 },      // tSymbol variant; zero circ -> null
+    { name: "SPX Protocol", symbol: "SPX", gecko_id: "spx-something" },              // collision -> blocked
+    { name: "Jupiter", gecko_id: "jupiter-exchange-solana" },                         // no symbol -> alias path
+    { name: "Arbitrum Duplicate", symbol: "ARB", gecko_id: "arbitrum2" },             // dedupe: first match wins
+    { symbol: "TIA" },                                                                 // no name/gecko -> unusable, dropped
+    null, "junk",                                                                      // garbage tolerated
+  ];
+  const out = matchLlamaProtocols(list, symToTk, aliasIdx, blocked);
+  assert.deepEqual(out.map((m) => m.ticker).sort(), ["ARB", "JUP", "TIA"], "SPX blocked, dupe dropped, alias matched");
+  assert.equal(out.find((m) => m.ticker === "ARB").circ, 5.15e9);
+  assert.equal(out.find((m) => m.ticker === "TIA").circ, null, "zero/invalid circulating supply is null, not 0");
+  assert.equal(out.find((m) => m.ticker === "ARB").proto, "Arbitrum", "protocol name kept for the follow-up fetch");
+  assert.deepEqual(matchLlamaProtocols(null, symToTk, aliasIdx, blocked), [], "non-array summary is empty, not a throw");
+});
+
+test("unlocks: event parse — body-string wrapper, cliff/linear split, horizon, sec-vs-ms, amounts", () => {
+  const { parseLlamaEvents } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 13, 12, 0);
+  const secs = (ms) => Math.floor(ms / 1000);
+  const inner = { metadata: { events: [
+    { timestamp: secs(now + 5 * DAY), noOfTokens: [50e6, 42.6e6], description: "Team + investors", unlockType: "cliff" },
+    { timestamp: secs(now + 40 * DAY), noOfTokens: 14.2e6 },                              // scalar amount, no type -> cliff
+    { timestamp: now + 100 * DAY, noOfTokens: [1e6] },                                     // already ms -> not re-scaled
+    { timestamp: secs(now + 10 * DAY), noOfTokens: [3e6], unlockType: "linear" },          // drip -> excluded
+    { timestamp: secs(now + 200 * DAY), noOfTokens: [9e6] },                               // beyond 180d -> excluded
+    { timestamp: secs(now - 3 * DAY), noOfTokens: [9e6] },                                 // past -> excluded
+    { timestamp: secs(now + 2 * DAY), noOfTokens: [] }, { noOfTokens: [5e6] },             // no amount / no ts -> dropped
+  ] } };
+  // the { body: "<json string>" } wrapper the endpoint has shipped
+  const r1 = parseLlamaEvents({ body: JSON.stringify(inner) }, now, 180);
+  assert.equal(r1.events.length, 3, "3 cliffs inside the horizon");
+  assert.equal(r1.events[0].amt, 92.6e6, "per-allocation amounts summed");
+  assert.equal(r1.events[0].d, "2026-07-18", "UTC day derived from the timestamp");
+  assert.ok(r1.events[0].ts < r1.events[1].ts && r1.events[1].ts < r1.events[2].ts, "sorted ascending");
+  assert.equal(r1.linear, false, "cliffs exist -> not linear-only");
+  // raw-object shape (no wrapper) must parse identically
+  const r2 = parseLlamaEvents(inner, now, 180);
+  assert.equal(r2.events.length, 3);
+  // linear-only token: events present, none of them cliffs
+  const r3 = parseLlamaEvents({ events: [{ timestamp: secs(now + 5 * DAY), noOfTokens: [1e6], unlockType: "linear" }] }, now, 180);
+  assert.equal(r3.events.length, 0);
+  assert.equal(r3.linear, true, "flagged linear-only, not silently empty");
+  assert.equal(parseLlamaEvents({ body: "{not json" }, now, 180).events.length, 0, "corrupt body is empty, not a throw");
+});
+
 test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
   // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
@@ -435,12 +507,13 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
-    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext"];
+    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext",
+    "loadUnlocks", "renderUnlocks", "openUnlocks", "unlockBadge", "unlockNext", "unlockSizes"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "/api/unlocks", "u30"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -451,7 +524,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "unlocks-body", "view-unlocks"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
