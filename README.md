@@ -17,6 +17,9 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **`/api/health`** — liveness + basic stats (used as the Railway healthcheck).
 - **`/api/series?coin=<coin>`** — per-market OI and funding history (powers the ticker drawer sparklines).
 - **`/api/candles?coin=<coin>&days=N`** — per-market hourly OHLCV (1–60d, default 14; powers the drawer candle chart).
+- **`/api/earnings`** — upcoming earnings (next 14 days, ET) for the xyz equity universe,
+  Finnhub-fed, refreshed server-side every ~6h and warm-cached on the volume. Powers the
+  Earnings tab and the E badge on the markets table (solid = reports today, hollow = tomorrow).
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
@@ -116,6 +119,15 @@ npm test
 ```
 
 Runs the classifier + compute regression tests (Node's built-in runner, no deps).
+
+## Optional: earnings calendar (Finnhub)
+
+The Earnings tab and the markets-table E badges need a free Finnhub API key: sign up at
+finnhub.io and set `FINNHUB_TOKEN` as a Railway variable. Without it the app runs exactly as
+before — the tab explains what's missing and no badges render. One HTTP GET per refresh
+(~4/day) covers the whole window; the Hyperliquid rate budget is untouched. Session-spanning
+signals (breakout, breakdown, gap, overnight drift) on names reporting ≤1 day out are flagged
+and have their evidence contribution capped — a stated prior, labeled as such on the card.
 
 ## Optional: shared-password access
 
