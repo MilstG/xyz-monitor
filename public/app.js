@@ -208,7 +208,11 @@ function detectBenchmark(){
   return null; }
 
 // ===== data ingestion (server snapshots) =====
-async function fetchJSON(url){ const r=await fetch(url,{headers:{accept:'application/json'}}); if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }
+async function fetchJSON(url){ const r=await fetch(url,{headers:{accept:'application/json'}});
+  // Session expired mid-use (the app polls for days): reload once — the unauthenticated
+  // navigation lands on the server's login page instead of a silently dead dashboard.
+  if(r.status===401){ if(!window.__reauth){ window.__reauth=1; location.reload(); } throw new Error('HTTP 401'); }
+  if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }
 async function loadSnapshot(){
   try{ const s=await fetchJSON('/api/snapshot'); applySnapshot(s); setStatus(true); }
   catch(e){ setStatus(false); if(!activeRows().some(r=>r.px!=null)) el('body').innerHTML=errRow(e.message); }
@@ -3079,6 +3083,37 @@ document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state
     setRefresh(+b.dataset.ms); savePrefs(); }); });
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));
 document.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>setScope(b.dataset.scope)));
+// ===== nav tabs: drag to reorder, order persisted per browser =====
+// Tabs live between the scope switcher and the theme button; themeBtn is the insertion anchor
+// so a moved tab can never land in the right-side button cluster.
+const TABKEY='xyzmon.tabs.v1';
+function saveTabOrder(){ try{ const nav=document.querySelector('nav.tabs');
+  store.set(TABKEY, JSON.stringify([...nav.querySelectorAll('.tab')].map(t=>t.dataset.view))); }catch(_){} }
+function applyTabOrder(){ let ord; try{ ord=JSON.parse(store.get(TABKEY)||'null'); }catch(_){ ord=null; }
+  const nav=document.querySelector('nav.tabs'); if(!nav||!Array.isArray(ord)||!ord.length) return;
+  const anchor=el('themeBtn');
+  const byView={}; nav.querySelectorAll('.tab').forEach(t=>{ byView[t.dataset.view]=t; });
+  for(const v of ord){ const t=byView[v]; if(t){ nav.insertBefore(t,anchor); delete byView[v]; } }
+  for(const v in byView) nav.insertBefore(byView[v],anchor);   // tabs shipped AFTER the order was saved still show, appended in default order
+}
+function wireTabDrag(){ const nav=document.querySelector('nav.tabs'); if(!nav) return;
+  // Idempotent: safe to re-run after a tab is injected at runtime (the self-installing
+  // Treemap tab arrives on DOMContentLoaded, after the initial wiring pass).
+  nav.querySelectorAll('.tab').forEach(t=>{ if(t.__dragWired) return; t.__dragWired=1; t.draggable=true;
+    t.addEventListener('dragstart',e=>{ t.classList.add('dragging');
+      try{ e.dataTransfer.setData('text/plain',t.dataset.view); e.dataTransfer.effectAllowed='move'; }catch(_){} });
+    t.addEventListener('dragend',()=>{ t.classList.remove('dragging'); saveTabOrder(); }); });
+  if(nav.__dragWired) return; nav.__dragWired=1;
+  nav.addEventListener('dragover',e=>{ const drag=nav.querySelector('.tab.dragging'); if(!drag) return;
+    e.preventDefault();
+    const over=(e.target&&e.target.closest)?e.target.closest('.tab'):null; if(!over||over===drag) return;
+    const r=over.getBoundingClientRect();
+    nav.insertBefore(drag, (e.clientX < r.left + r.width/2) ? over : over.nextSibling); });   // live reorder — the moving tab IS the drop indicator
+}
+applyTabOrder(); wireTabDrag();
+// Logout button: only meaningful when the server set the JS-visible auth marker at login.
+{ const lb=el('logoutBtn'); if(lb && /(^|;\s*)xyzauth=1/.test(document.cookie)){ lb.hidden=false;
+    lb.addEventListener('click',()=>{ location.href='/logout'; }); } }
 applyScope();
 (function(){ const isAmber=()=>document.documentElement.getAttribute('data-theme')==='amber';
   const setLabel=()=>{ const b=el('themeBtn'); if(b) b.textContent = isAmber()?'◐ dark':'◐ amber'; };
@@ -3377,7 +3412,16 @@ function renderTreemap(){
     const nav=document.querySelector('nav.tabs')||document.querySelector('.tabs');
     if(nav){ const btn=document.createElement('button'); btn.className='tab'; btn.dataset.view='treemap'; btn.textContent='Treemap';
       const theme=document.getElementById('themeBtn');
-      if(theme && theme.parentNode===nav) nav.insertBefore(btn,theme); else nav.appendChild(btn); }
+      if(theme && theme.parentNode===nav) nav.insertBefore(btn,theme); else nav.appendChild(btn);
+      // This installer runs on DOMContentLoaded — AFTER the boot applyScope() pass that hides
+      // non-markets tabs in crypto scope. Without this line a page loaded in crypto scope
+      // shows a stray Treemap tab until the next scope switch re-runs applyScope().
+      btn.hidden = (state.scope==='crypto');
+      // Join the systems that wired the static tabs before this one existed: saved tab order
+      // (so a persisted position for treemap applies on load) and drag-to-reorder (idempotent).
+      if(typeof applyTabOrder==='function') applyTabOrder();
+      if(typeof wireTabDrag==='function') wireTabDrag();
+    }
 
     // view section
     const sec=document.createElement('section'); sec.id='view-treemap'; sec.hidden=true;
@@ -3411,8 +3455,9 @@ function renderTreemap(){
     bindSeg('#mapsize','size', v=>{ state.map.size=v; renderTreemap(); });
     bindSeg('#mapscale','scale', v=>{ state.map.scale=v; renderTreemap(); });
 
-    // deep link (#treemap on load)
-    if((location.hash||'').replace(/^#/,'')==='treemap' && typeof showView==='function'){
+    // deep link (#treemap on load) — not in crypto scope, which is Markets-only by design;
+    // without the guard the treemap section would render on top of the markets table.
+    if((location.hash||'').replace(/^#/,'')==='treemap' && typeof showView==='function' && state.scope!=='crypto'){
       showView('treemap'); sec.hidden=false; renderTreemap(); }
   }
 

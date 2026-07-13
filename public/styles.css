@@ -225,6 +225,8 @@ footer code{font-family:var(--mono);color:var(--muted)}
 .tab:hover{color:var(--text)}
 .tab.active{color:var(--text);border-bottom-color:var(--accent)}
 .tab:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.tab{user-select:none;-webkit-user-select:none}
+.tab.dragging{opacity:.35}
 
 /* correlation heatmap */
 .corr-legend{display:flex;align-items:center;gap:8px;margin:2px 2px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);flex-wrap:wrap}

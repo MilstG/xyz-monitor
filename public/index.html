@@ -35,7 +35,7 @@
   <span class="st-item" title="server build — if this doesn't match the latest delivery, the deploy is stale">build <b id="ver">—</b></span>
 </div>
 
-<nav class="tabs">
+<nav class="tabs" title="Drag a tab to reorder — the order is saved in this browser">
   <span class="scopeseg" title="Scope: Stocks (xyz dex — equities, indices, commodities, FX, synthetics) vs Crypto (Hyperliquid main dex — top-60 perps by volume). Fully separated: no merged views, separate benchmarks (SP500 / BTC), and crypto never enters signals or the track record.">
     <button class="scope on" data-scope="stocks">Stocks</button><button class="scope" data-scope="crypto">Crypto</button>
   </span>
@@ -45,8 +45,10 @@
   <button class="tab" data-view="sessions">Sessions</button>
   <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
   <button class="tab" data-view="earnings" title="Upcoming earnings reports for the equity universe — dates and session (pre-market / after close), ET calendar">Earnings</button>
+  <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
   <button class="btn" id="helpBtn" style="align-self:center;padding:6px 12px;font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
+  <button class="btn" id="logoutBtn" hidden style="align-self:center;padding:6px 11px" title="Sign out — clears this browser's session; the shared password gets you back in">⎋</button>
 </nav>
 
 <div class="regimestrip" id="regime" hidden></div>
