@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.13-44";
+const VERSION = "2026.07.13-45";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -179,8 +179,13 @@ async function main() {
         const i = s.indexOf(":");   // split on the FIRST colon only — passwords may contain colons
         if (i >= 0 && credsOk(s.slice(0, i), s.slice(i + 1))) return;
       }
-      if (u.startsWith("/api/")) { reply.code(401).send({ error: "unauthorized" }); return; }
-      reply.code(401).header("cache-control", "no-store").type("text/html; charset=utf-8").send(LOGIN_HTML);
+      // CRITICAL: in an async hook, reply.send() alone does NOT stop the lifecycle — the
+      // route handler still runs and double-sends (here: @fastify/static also answered "/",
+      // corrupting the response into a body-less 401 that hangs the browser). Returning the
+      // reply is what short-circuits. This exact bug shipped in the original Basic-auth gate
+      // and lay dormant until the first deploy with SITE_PASSWORD actually set.
+      if (u.startsWith("/api/")) return reply.code(401).send({ error: "unauthorized" });
+      return reply.code(401).header("cache-control", "no-store").type("text/html; charset=utf-8").send(LOGIN_HTML);
     });
     log(`Access control: shared-password protection ENABLED (login page + ${SESSION_DAYS}d sessions; Basic auth still accepted for scripts)`);
   }
@@ -202,7 +207,7 @@ async function main() {
   });
   fastify.get("/logout", async (req, reply) => {
     setSessionCookies(reply, req, 0, null);   // Max-Age=0 deletes both cookies
-    reply.redirect(303, "/");
+    return reply.redirect("/", 303);   // v5-forward signature (url, code) — the old order is deprecated
   });
 
   await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"] });
