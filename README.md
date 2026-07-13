@@ -21,6 +21,9 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
 - **Deep links** — the URL reflects the current tab and open ticker (`#sectors`, `#t=<coin>`), so links are shareable.
+- **Saved layouts** — named views of the markets table (column order + visibility, sort,
+  analysis window, vol/OI filters, ★-only), saved and switched from the Layouts menu. Stored
+  per browser in localStorage; the active layout shows a • when the live view has unsaved changes.
 - **Persistent OI** — open interest accrues over time and can't be re-fetched, so every
   sample is written to an append-only log on a mounted volume (`$DATA_DIR/oi.log`) and
   reloaded on boot. It survives restarts and redeploys. Pruned to 31 days daily.
