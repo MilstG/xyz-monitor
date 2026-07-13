@@ -15,7 +15,7 @@ const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, windo
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
-    td:r=>`<td><span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${unlockBadge(r)}</td>`},
+    td:r=>`<td><span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}</td>`},
   {key:'px', label:'Price', type:'num',
     td:r=>`<td class="px${r.flash?' flash-'+r.flash:''}">${fmtPrice(r.px)}</td>`},
   {key:'funding', label:'Funding (APR)', type:'num',
@@ -99,7 +99,6 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
   watch:new Set(), watchOnly:false, detail:null,
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
-  unlk:null, unlkPayload:null,   // unlock calendar: ticker -> upcoming cliff events, and the raw /api/unlocks payload
   layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
@@ -258,7 +257,6 @@ function applySnapshot(s){
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
   if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
-  if(Date.now()-_unlkLast > 15*60*1000) loadUnlocks();     // daily server refresh — 15 min client pull is plenty
   if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
@@ -1411,7 +1409,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
-  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings'||h==='unlocks') showView(h); }
+  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings') showView(h); }
 let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
@@ -2153,17 +2151,14 @@ function setScope(v){
 }
 function applyScope(){
   const cr=state.scope==='crypto';
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ const bv=b.dataset.view;
-    b.hidden = cr ? (bv!=='markets'&&bv!=='unlocks') : bv==='unlocks'; });   // crypto: Markets + Unlocks only; stocks: everything except Unlocks
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(cr && state.view!=='markets' && state.view!=='unlocks') { showView('markets'); }
-  if(!cr && state.view==='unlocks') { showView('markets'); }
+  if(cr && state.view!=='markets') { showView('markets'); }
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='unlocks') v='markets';   // crypto scope is Markets + Unlocks by design
-  if(state.scope!=='crypto' && v==='unlocks') v='markets';                    // unlocks is crypto-only; a stocks-scope deep link falls back
+  if(state.scope==='crypto' && v!=='markets') v='markets';   // crypto scope is Markets-only by design
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -2174,13 +2169,11 @@ function showView(v){
   setHidden('view-sessions', v!=='sessions');
   setHidden('view-signals', v!=='signals');
   setHidden('view-earnings', v!=='earnings');
-  setHidden('view-unlocks', v!=='unlocks');
   setHidden('view-backtest', v!=='backtest');
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
-  if(v==='unlocks'){ if(el('view-unlocks')) openUnlocks(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
@@ -2275,102 +2268,6 @@ function renderEarnings(){
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
 }
 
-// ===== token unlocks (crypto scope) =====
-// Crypto counterpart of the earnings calendar: cliff unlocks for the main-dex top-60 over the
-// next 6 months, DefiLlama-fed. Days are UTC — a 24/7 market has no session to anchor to.
-// USD value and unlock-vs-24h-volume are computed HERE from the live mark and live volume, so
-// the sizes on screen are current even though the schedule refreshes daily.
-let _unlkLast=0, _unlkDust=false;
-function utcDiffC(dateStr){ if(!/^\d{4}-\d{2}-\d{2}$/.test(dateStr||'')) return null;
-  const a=Date.UTC(+dateStr.slice(0,4),+dateStr.slice(5,7)-1,+dateStr.slice(8,10));
-  const n=new Date(); const b=Date.UTC(n.getUTCFullYear(),n.getUTCMonth(),n.getUTCDate());
-  return Math.round((a-b)/DAY); }
-function fmtAmt(x){ if(x==null||!isFinite(x)) return '\u2014';
-  if(x>=1e9) return (x/1e9).toFixed(2).replace(/\.?0+$/,'')+'B';
-  if(x>=1e6) return (x/1e6).toFixed(1).replace(/\.0$/,'')+'M';
-  if(x>=1e3) return (x/1e3).toFixed(1).replace(/\.0$/,'')+'K';
-  return x.toFixed(0); }
-async function loadUnlocks(){
-  _unlkLast=Date.now();
-  try{ const d=await fetchJSON('/api/unlocks');
-    if(d&&Array.isArray(d.entries)){ state.unlkPayload=d;
-      const m=new Map();
-      for(const e of d.entries){ let a=m.get(e.t); if(!a){a=[];m.set(e.t,a);} a.push(e); }   // server ships ts-sorted
-      state.unlk=m;
-      if(el('view-unlocks')&&!el('view-unlocks').hidden) renderUnlocks();
-      if(state.scope==='crypto') render();   // paint/refresh U badges
-    }
-  }catch(_){}
-}
-function unlockNext(t){ const a=state.unlk&&state.unlk.get(t); if(!a) return null;
-  for(const e of a){ const d=utcDiffC(e.d); if(d!=null&&d>=0) return {diff:d,e}; } return null; }
-// Sizes for the tooltip/rows, from LIVE mark + volume. Null-honest: no px -> no USD, no vol -> no ratio.
-function unlockSizes(e){ const r=state.rows.get(e.coin);
-  const usd=r&&r.px!=null&&isFinite(r.px)?e.amt*r.px:null;
-  const vsVol=usd!=null&&r&&r.vol>0?usd/r.vol:null;
-  return {usd,vsVol}; }
-// Markets-table badge, crypto scope: solid = cliff unlock within 7 days, hollow = within 30.
-// Wider tiers than the earnings E (today/tomorrow) by design — unlocks are known far ahead and
-// positioning starts earlier; the exact day is in the tooltip and the tab.
-function unlockBadge(r){
-  if(state.scope!=='crypto'||!state.unlk) return '';
-  const p=unlockNext(r.ticker); if(!p||p.diff>30) return '';
-  const s=unlockSizes(p.e);
-  const bits=[`${fmtAmt(p.e.amt)} ${esc(r.ticker)}`];
-  if(s.usd!=null) bits.push('~$'+fmtAmt(s.usd));
-  if(p.e.pctCirc!=null) bits.push(p.e.pctCirc+'% of circ');
-  if(s.vsVol!=null) bits.push(s.vsVol.toFixed(1)+'x 24h vol');
-  return `<i class="ub ${p.diff<=7?'u7':'u30'}" title="Cliff unlock in ${p.diff}d \u00b7 ${p.e.d} (UTC) \u00b7 ${bits.join(' \u00b7 ')}">U</i>`;
-}
-function openUnlocks(){ renderUnlocks(); if(Date.now()-_unlkLast>60*1000) loadUnlocks(); }
-function renderUnlocks(){
-  const box=el('unlocks-body'); if(!box) return;
-  const d=state.unlkPayload;
-  if(!d){ box.innerHTML='<div class="msg">Loading\u2026</div>'; return; }
-  const asOf=d.asOf?new Date(d.asOf):null;
-  const ageH=d.asOf?Math.round((Date.now()-d.asOf)/3600000):null;
-  const stale=ageH!=null&&ageH>30;   // > 30h without a good fetch = the daily cadence is failing
-  const src=`<span class="sec" style="font-size:11px">${d.error
-    ?`<span style="color:var(--down)">feed error: ${esc(d.error)}</span>${asOf?` \u00b7 showing last good fetch (${ageH}h old)`:''}`
-    :(asOf?`as of ${asOf.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}${stale?` <span style="color:var(--accent)">\u00b7 ${ageH}h stale</span>`:''} \u00b7 source: DefiLlama${d.partialErrors?` <span style="color:var(--accent)" data-tip="some per-token schedule fetches failed on the last refresh \u2014 those tickers show their previous data or nothing; retries every 30 min">\u00b7 ${d.partialErrors} schedule(s) failed</span>`:''}`:'never fetched')}</span>`;
-  const head=`<div class="controls" style="margin-bottom:10px"><span style="font-weight:600">Token unlocks <span class="sec" style="font-weight:400">\u00b7 next ${d.windowDays||180} days, UTC \u00b7 cliff events only</span></span><span style="margin-left:auto"></span>${src}</div>`;
-  const cov=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:12px" data-tip="DefiLlama emissions are community-maintained: a missing name can mean NO unlock schedule (BTC, ETH, most majors), a linear drip with no cliffs, a symbol we deliberately refuse to match (memecoins whose symbols collide with unrelated protocols), or simply not tracked \u2014 absence is ambiguous by nature of the source and never resolved by guessing. Linear-only emitters are named below the list.">${d.entries&&d.entries.length?`<b>${d.entries.length}</b> cliff event${d.entries.length===1?'':'s'} across <b>${d.covered||0}</b> ticker${(d.covered||0)===1?'':'s'}`:'No cliff events found'} \u00b7 ${d.eligible||0} eligible tickers in the top-60 \u00b7 amounts from the schedule, $ and vol ratios from LIVE marks</div>`;
-  if(d.error&&!(d.entries&&d.entries.length)){
-    box.innerHTML=head+cov+`<div class="msg">No unlock data.<br><span class="sec" style="font-size:11px">DefiLlama is unreachable \u2014 the server retries every 30 minutes.</span></div>`;
-    return;
-  }
-  const DUST=0.05;
-  const groups=new Map(); let dustN=0;
-  for(const e of d.entries||[]){ const diff=utcDiffC(e.d); if(diff==null||diff<0) continue;
-    const dust=e.pctCirc!=null&&e.pctCirc<DUST;
-    if(dust&&!_unlkDust){ dustN++; continue; }
-    let g=groups.get(e.d); if(!g){g={d:e.d,diff,rows:[]};groups.set(e.d,g);} g.rows.push(Object.assign({dust},e)); }
-  if(!groups.size&&!dustN){ box.innerHTML=head+cov+'<div class="msg">No upcoming cliff unlocks in the next '+(d.windowDays||180)+' days for this universe.</div>'; return; }
-  let html=head+cov;
-  const nowY=new Date().getUTCFullYear();
-  for(const g of groups.values()){
-    const dt=new Date(g.d+'T12:00:00Z');
-    const y=dt.getUTCFullYear();
-    const lbl=dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}).toUpperCase()+(y!==nowY?' '+y:'');
-    const tag=g.diff===0?'TODAY \u00b7 ':g.diff===1?'TOMORROW \u00b7 ':'';
-    html+=`<div class="earn-day${g.diff<=7?' hot':''}">${tag}${lbl}<span class="sec" style="margin-left:8px;text-transform:none;letter-spacing:0">${g.diff===0?'':'in '+g.diff+' day'+(g.diff===1?'':'s')}</span></div>`;
-    for(const e of g.rows){
-      const s=unlockSizes(e);
-      const w=e.pctCirc!=null?Math.max(3,Math.min(100,Math.round(e.pctCirc/5*100))):0;
-      const barTip=e.pctCirc!=null?`${e.pctCirc}% of circulating supply hits the market in one tranche \u2014 bar scale caps at 5%${e.circ?` \u00b7 circ ${fmtAmt(e.circ)} ${esc(e.t)}`:''}`:'circulating supply unknown to the feed \u2014 % not computable, shown for date/amount only';
-      html+=`<div class="earn-row unlk${g.diff<=7?' hot':''}${e.dust?' dust':''}" data-coin="${esc(e.coin)}" title="open the ${esc(e.t)} drawer${e.desc?' \u00b7 '+esc(e.desc):''}">`
-        +`<span class="earn-tk">${esc(e.t)}</span>`
-        +`<span class="unlk-amt sec">${fmtAmt(e.amt)} ${esc(e.t)}${s.usd!=null?' \u00b7 ~$'+fmtAmt(s.usd):''}</span>`
-        +`<span class="unlk-bar" data-tip="${esc(barTip)}"><span class="unlk-track"><span class="unlk-fill" style="width:${w}%"></span></span> <span class="unlk-pct">${e.pctCirc!=null?e.pctCirc+'% circ':'\u2014'}</span></span>`
-        +`<span class="unlk-vol sec" data-tip="unlock value \u00f7 this ticker's LIVE 24h notional volume \u2014 how many days of normal turnover this tranche represents">${s.vsVol!=null?s.vsVol.toFixed(1)+'x 24h vol':'\u2014'}</span></div>`;
-    }
-  }
-  const linears=(d.linearOnly||[]).filter(t=>state.unlk&&!state.unlk.has(t));
-  html+=`<div class="sec" style="font-size:11px;margin-top:12px;line-height:1.6">${dustN?`${dustN} minor event${dustN===1?'':'s'} &lt;${DUST}% circ hidden \u00b7 <button class="btn xtiny" id="unlkDust">show</button> \u00b7 `:(_unlkDust?`showing minor events &lt;${DUST}% circ \u00b7 <button class="btn xtiny" id="unlkDust">hide</button> \u00b7 `:'')}${linears.length?`linear emission only (no cliffs): ${linears.map(esc).join(', ')} \u00b7 `:''}BTC, ETH and most majors have no unlock schedule \u2014 absent by design. Schedules are community-maintained and can lag reality; treat dates as scheduled, not guaranteed.</div>`;
-  box.innerHTML=html;
-  const db=el('unlkDust'); if(db) db.onclick=()=>{ _unlkDust=!_unlkDust; renderUnlocks(); };
-  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
-}
 const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge'};
 const EV_TIP={
   bigmove:'Today\u2019s move is \u22652\u03c3 of this market\u2019s own trailing 30d daily returns. History measures whether such moves continued (positive) or faded (negative) the next day, signed with the move.',
@@ -3269,17 +3166,6 @@ earnings:`
 <p>Indices, ETFs, FX, commodities, thematic baskets and pre-IPO synthetics never report earnings. Foreign listings without a US symbol (SMSN, KIOXIA, SOFTBANK…) are real companies with real earnings, but this feed doesn't carry them — they're <b>absent, never guessed</b>. A missing name means "no report scheduled in the window OR not covered", and the coverage line states how many eligible equities exist so absence is auditable.</p>
 <div class="hlp-h">Interaction with Signals</div>
 <p>Session-spanning claims (breakout, breakdown, outsized gap, overnight drift) firing on a name that reports ≤1 day out wear an <i>earnings</i> flag and have their <b>evidence contribution capped</b> (same 8-point cap as the no-live-edge guard) and can't be ★ prime. Why: the historical base rates weren't conditioned on a known binary catalyst sitting inside the horizon — this is a stated <b>prior</b>, not a measured expectancy, and it's labeled as such on the card. The condition's intensity is untouched; only borrowed statistical confidence is trimmed.</p>`,
-unlocks:`
-<div class="hlp-h">What it shows</div>
-<p>Scheduled <b>cliff unlocks</b> — dated tranches of locked tokens hitting the market — for the crypto top-60 over the next <b>6 months</b>, grouped by <b>UTC calendar day</b> (a 24/7 market has no session to anchor to). Amounts come from the schedule; <b>$ value and the vs-volume ratio are computed from the LIVE mark and live 24h volume</b>, so sizes stay current even though the schedule refreshes daily. Click a row to open the drawer.</p>
-<div class="hlp-h">Reading the size</div>
-<p><b>% circ</b> = the tranche as a share of circulating supply (bar caps at 5%); <b>x 24h vol</b> = unlock value ÷ live daily turnover — how many days of normal volume this supply represents. Both matter: 2% of circ into a liquid name is a different event than 2% into a thin one. Events under 0.05% circ are hidden as dust (toggle to show — they exist, they're just noise).</p>
-<div class="hlp-h">The U badge on Markets</div>
-<p>A <b>solid U</b> next to a crypto ticker = cliff unlock within <b>7 days</b>; a <b>hollow U</b> = within <b>30 days</b>. Wider than the earnings badge's today/tomorrow on purpose — unlocks are known far ahead and positioning starts earlier. Hover for the exact date and size.</p>
-<div class="hlp-h">Coverage — absence is ambiguous here</div>
-<p>DefiLlama emissions are <b>community-maintained</b>. A missing name can mean: no unlock schedule at all (BTC, ETH, most majors — correct absence), linear drip with no cliff events (named under the list), a memecoin whose symbol we deliberately refuse to match against unrelated protocols, or simply not tracked. Unlike the earnings feed, this source can't always distinguish "no unlocks" from "no data" — so this tab never claims completeness, and dates are <i>scheduled</i>, not guaranteed: teams reschedule and schedules lag reality.</p>
-<div class="hlp-h">No signals interaction</div>
-<p>By design crypto never enters signals, the ledger or the track record — so unlike earnings there is no evidence guard here. This tab is context for your own positioning, not an input to the engine.</p>`,
 backtest:`
 <div class="hlp-h">What it is</div>
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>
@@ -3288,8 +3174,8 @@ backtest:`
 };
 function openHelp(){
   const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
-  const v=state.scope==='crypto'?(state.view==='unlocks'?'unlocks':'markets'):state.view;
-  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',unlocks:'Unlocks',backtest:'Backtest'};
+  const v=state.scope==='crypto'?'markets':state.view;
+  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest'};
   m.innerHTML=`<div class="hlp-head">How to read: ${TITLES[v]||v}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
     +(HELP[v]||HELP.markets);
