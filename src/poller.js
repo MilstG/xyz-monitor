@@ -11,6 +11,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar } = require("./compute");
+const { utcDayDiff, matchLlamaProtocols, parseLlamaEvents } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -68,6 +69,26 @@ const EARN_ALIAS = { BRKB: "BRK.B" }; // xyz ticker -> US exchange symbol where 
 // print inside the horizon is a different return distribution than the study sample, so the
 // evidence contribution is capped — same mechanism and same cap as the no-live-edge guard.
 const EARN_GUARD = new Set(["breakout", "breakdown", "gap", "ondrift"]);
+// ---- token unlocks (DefiLlama emissions) ------------------------------------------------------
+// Crypto counterpart of the earnings calendar: cliff unlocks for the main-dex top-60 over the
+// next 6 MONTHS (schedules are known far ahead — the value is the runway). Community-maintained
+// data: absence can mean "no unlocks" OR "not tracked"; the payload separates the two where the
+// feed lets us. One summary GET + one per-matched-protocol GET, once a day — zero HL budget.
+const UNLOCK_WINDOW_DAYS = 180;
+const UNLOCK_STALE = 24 * 3600 * 1000;   // refetch when the last GOOD fetch is older than this
+const UNLOCK_RETRY_MS = 30 * 60 * 1000;  // staleness check cadence (doubles as failure retry)
+const UNLOCK_FETCH_GAP = 300;            // ms between per-protocol requests — polite, unhurried
+// Curated ticker -> gecko_id aliases for names whose feed symbol is unreliable/absent. Extend
+// here when a covered ticker goes missing on the tab — never fuzzy-match.
+const UNLOCK_ALIAS = { ARB: "arbitrum", OP: "optimism", TIA: "celestia", SUI: "sui", APT: "aptos",
+  SEI: "sei-network", JUP: "jupiter-exchange-solana", ENA: "ethena", W: "wormhole", STRK: "starknet",
+  ZK: "zksync", EIGEN: "eigenlayer", ETHFI: "ether-fi", PYTH: "pyth-network", JTO: "jito-governance-token",
+  WLD: "worldcoin-wld", ONDO: "ondo-finance", TAO: "bittensor", IMX: "immutable-x", GRT: "the-graph" };
+// Memecoin symbol collisions: these tickers have no vesting schedule, but their symbols shadow
+// unrelated llama entries (SPX -> SPX6900 vs anything named SPX, etc.). Hard-blocked from
+// matching so a false positive can never paint a badge on a memecoin.
+const UNLOCK_BLOCK = new Set(["SPX", "TRUMP", "MELANIA", "NEIRO", "DOGS", "MEME", "BRETT", "MEW",
+  "POPCAT", "MOODENG", "PNUT", "FARTCOIN", "WIF", "PEPE", "BONK", "SHIB", "FLOKI", "GOAT", "DOGE"]);
 
 function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Number.isFinite(v) ? v : null; }
 // Payload-trim helpers: the snapshot ships hundreds of derived floats per market at full
@@ -89,6 +110,7 @@ function createPoller({ dex, store, log, version, crypto }) {
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
+  let unlockCache = null, unlockVer = 0, unlockSig = "", lastUnlockOk = 0;           // /api/unlocks payload + freshness
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
@@ -1962,6 +1984,78 @@ function createPoller({ dex, store, log, version, crypto }) {
   }
   const earnTick = () => { fetchEarnings().catch((e) => log("earnings tick failed: " + (e && e.message))); };
 
+  // ---- token unlocks (DefiLlama) ---------------------------------------------------------------
+  // Entries ship amount + circulating supply + pct-of-circ; USD value and unlock-vs-24h-volume
+  // are computed CLIENT-side from the live mark and live volume — always current, and it keeps
+  // this payload free of prices that would be stale within minutes of the daily fetch.
+  function unlockEligible() {
+    const m = new Map();
+    for (const r of mainMarkets()) {
+      const T = String(r.ticker).toUpperCase();
+      if (UNLOCK_BLOCK.has(T)) continue;
+      m.set(T, { coin: r.coin, ticker: r.ticker });
+    }
+    return m;
+  }
+  function buildUnlockPayload(now, entries, meta) {
+    const sigU = entries.map((e) => e.t + e.d + e.amt).join(",");
+    if (sigU !== unlockSig) { unlockSig = sigU; unlockVer = now; }
+    return Object.assign({ ts: now, dataTs: unlockVer, windowDays: UNLOCK_WINDOW_DAYS, source: "defillama", entries }, meta);
+  }
+  function hydrateUnlocks() {
+    const data = store.loadUnlocks ? store.loadUnlocks() : null;
+    if (!data || !Array.isArray(data.entries)) return false;
+    lastUnlockOk = data.ts || 0;
+    unlockCache = buildUnlockPayload(Date.now(), data.entries, { asOf: data.ts || null, error: null,
+      eligible: data.eligible || 0, covered: data.covered || 0, linearOnly: data.linearOnly || [], partialErrors: data.partialErrors || 0 });
+    return true;
+  }
+  async function fetchUnlocks() {
+    const now = Date.now();
+    const elig = unlockEligible();
+    if (!elig.size) return;   // main universe not selected yet — next tick
+    const aliasIdx = new Map();
+    for (const tk in UNLOCK_ALIAS) if (elig.has(tk)) aliasIdx.set(UNLOCK_ALIAS[tk], elig.get(tk));
+    const get = async (url) => {
+      const res = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(25000) });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    };
+    try {
+      const summary = await get("https://api.llama.fi/emissions");
+      const matched = matchLlamaProtocols(summary, elig, aliasIdx, UNLOCK_BLOCK);
+      const entries = [], linearOnly = [];
+      let partialErrors = 0;
+      for (const m of matched) {
+        try {
+          const pj = await get("https://api.llama.fi/emission/" + encodeURIComponent(m.proto));
+          const parsed = parseLlamaEvents(pj, now, UNLOCK_WINDOW_DAYS);
+          if (parsed.linear) linearOnly.push(m.ticker);
+          for (const e of parsed.events) entries.push({ coin: m.coin, t: m.ticker, d: e.d, ts: e.ts, amt: e.amt,
+            circ: m.circ, pctCirc: m.circ ? +((e.amt / m.circ) * 100).toFixed(2) : null, desc: e.desc });
+        } catch (e) { partialErrors++; log(`unlock schedule fetch failed for ${m.ticker} (${m.proto}): ` + (e && e.message)); }
+        await sleep(UNLOCK_FETCH_GAP);
+      }
+      entries.sort((a, b) => a.ts - b.ts);
+      lastUnlockOk = now;
+      unlockCache = buildUnlockPayload(now, entries, { asOf: now, error: null,
+        eligible: elig.size, covered: new Set(entries.map((e) => e.t)).size, linearOnly, partialErrors });
+      if (store.saveUnlocks) store.saveUnlocks({ ts: now, entries, eligible: elig.size,
+        covered: unlockCache.covered, linearOnly, partialErrors });
+      log(`Unlock calendar: ${entries.length} cliff event(s) across ${unlockCache.covered} ticker(s) in the next ${UNLOCK_WINDOW_DAYS}d ` +
+        `(${matched.length} matched of ${elig.size} eligible; ${linearOnly.length} linear-only${partialErrors ? `; ${partialErrors} schedule fetch(es) failed` : ""})`);
+    } catch (e) {
+      // Summary fetch failed: keep the last good schedule, stamp the error — the tab shows the
+      // cache age instead of blanking a working list.
+      const msg = (e && e.message) || "fetch failed";
+      unlockCache = Object.assign({ windowDays: UNLOCK_WINDOW_DAYS, source: "defillama", entries: [],
+        eligible: elig.size, covered: 0, linearOnly: [], partialErrors: 0, asOf: null, dataTs: 0 },
+        unlockCache || {}, { ts: now, error: msg });
+      log("Unlock calendar fetch failed: " + msg);
+    }
+  }
+  const unlockTick = () => { fetchUnlocks().catch((e) => log("unlocks tick failed: " + (e && e.message))); };
+
   function persistFeatures() {
     const markets = {};
     for (const r of rows.values()) {
@@ -2062,6 +2156,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     const restoredHourly = hydrateHourly();
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
+    if (crypto && hydrateUnlocks()) log(`Restored unlock calendar: ${unlockCache.entries.length} cliff event(s) — badges warm while DefiLlama refreshes`);
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
@@ -2095,6 +2190,12 @@ function createPoller({ dex, store, log, version, crypto }) {
     // 30 min while a healthy one refreshes 4x/day. One HTTP GET each time; zero HL rate budget.
     setTimeout(earnTick, 20 * 1000);
     setInterval(() => { if (Date.now() - lastEarnOk > EARN_STALE) earnTick(); }, EARN_RETRY_MS);
+    // Unlocks: crypto-only by definition; first pull after the main-dex top-60 is selected,
+    // then a 30-min staleness check against the 24h cadence (retries failures at 30 min).
+    if (crypto) {
+      setTimeout(unlockTick, 35 * 1000);
+      setInterval(() => { if (Date.now() - lastUnlockOk > UNLOCK_STALE) unlockTick(); }, UNLOCK_RETRY_MS);
+    }
   }
 
   // Per-market hourly OHLCV for the drawer candle chart: [[t,o,h,l,c,v], ...] over the last
@@ -2120,6 +2221,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     getCandles,
     getSignals: () => signalsCache,
     getEarnings: () => earnCache,
+    getUnlocks: () => unlockCache,
     getLedgerFor,
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
@@ -2151,6 +2253,7 @@ function createPoller({ dex, store, log, version, crypto }) {
         signals: signalsCache ? signalsCache.count : 0,
         ledger: { open: ledgerOpen.size, resolved: ledgerClosed.length },
         earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null, error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
+        unlocks: crypto ? { entries: unlockCache ? unlockCache.entries.length : 0, asOf: unlockCache ? unlockCache.asOf : null, error: unlockCache ? unlockCache.error : "not fetched yet" } : null,
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };
