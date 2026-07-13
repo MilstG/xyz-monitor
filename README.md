@@ -20,6 +20,10 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **`/api/earnings`** — upcoming earnings (next 14 days, ET) for the xyz equity universe,
   Finnhub-fed, refreshed server-side every ~6h and warm-cached on the volume. Powers the
   Earnings tab and the E badge on the markets table (solid = reports today, hollow = tomorrow).
+- **`/api/unlocks`** — scheduled token unlocks (cliff events, next 180 days, UTC) for the
+  main-dex top-60, DefiLlama-fed, refreshed daily and warm-cached. Powers the Unlocks tab
+  (crypto scope) and the U badge on the crypto markets table (solid = ≤7d, hollow = ≤30d).
+  No key needed; $ values and vs-volume ratios are computed client-side from live marks.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).

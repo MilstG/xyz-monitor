@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.13-40";
+const VERSION = "2026.07.13-41";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -96,6 +96,10 @@ async function main() {
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
     serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], eligible: 0 }));
+  // Token-unlock calendar for the main-dex top-60 (DefiLlama-fed, daily server refresh, 180d
+  // window). Crypto counterpart of /api/earnings, same ETag contract.
+  fastify.get("/api/unlocks", (req, reply) =>
+    serveCached(req, reply, poller.getUnlocks(), { ts: 0, dataTs: 0, asOf: null, windowDays: 180, source: "defillama", error: "not fetched yet", entries: [], eligible: 0, covered: 0, linearOnly: [], partialErrors: 0 }));
   fastify.get("/api/series", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
