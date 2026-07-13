@@ -571,7 +571,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     if (!f) return f || null;
     return {
       volH: sig(f.volH, 6), volD: sig(f.volD, 6), r2: rnd(f.r2, 4),
-      hi30: sig(f.hi30, 9), lo30: sig(f.lo30, 9), volBase: rnd(f.volBase, 0),
+      hi30: sig(f.hi30, 9), lo30: sig(f.lo30, 9), volBase: rnd(f.volBase, 0), vwap30: sig(f.vwap30, 9),
       dr: Array.isArray(f.dr) ? f.dr.map((x) => rnd(x, 3)) : f.dr,
       px30: Array.isArray(f.px30) ? f.px30.map((x) => sig(x, 7)) : f.px30,
     };

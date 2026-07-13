@@ -43,11 +43,18 @@ function featuresFromHourly(c, now, HOUR, DAY) {
     p30d: priceAt(c, now - 30 * DAY, 6 * HOUR),
   };
   const rets = [], dayMap = new Map(), dayHLC = new Map();
-  let prev = null, hi = -Infinity, lo = Infinity;
+  let prev = null, hi = -Infinity, lo = Infinity, vwNum = 0, vwDen = 0;
   for (const k of c) {
     const cl = parseFloat(k.c), h = parseFloat(k.h), l = parseFloat(k.l), v = parseFloat(k.v);
     if (isFinite(h) && h > hi) hi = h;
     if (isFinite(l) && l < lo) lo = l;
+    // rolling VWAP over the full window: per-candle typical price (H+L+C)/3 weighted by
+    // base volume. An approximation of tick VWAP (no per-fill data in candles), but the
+    // volume weighting is real. Zero-volume candles contribute nothing by construction.
+    if (isFinite(v) && v > 0) {
+      const typ = (isFinite(h) && isFinite(l) && isFinite(cl)) ? (h + l + cl) / 3 : (isFinite(cl) ? cl : null);
+      if (typ != null && typ > 0) { vwNum += typ * v; vwDen += v; }
+    }
     if (isFinite(cl)) { if (prev != null && prev > 0) rets.push(Math.log(cl / prev)); prev = cl; }
     const day = Math.floor(k.t / DAY), ntl = (isFinite(v) && isFinite(cl)) ? v * cl : 0;
     dayMap.set(day, (dayMap.get(day) || 0) + ntl);
@@ -85,6 +92,9 @@ function featuresFromHourly(c, now, HOUR, DAY) {
     volBase: median([...dayMap.values()].filter((x) => x > 0)),
     dr,
     px30,
+    // volume-weighted average price over the whole hourly window (~31d); null when the
+    // window traded no volume — an honest dash beats a fabricated level.
+    vwap30: vwDen > 0 ? vwNum / vwDen : null,
   };
   return { ref, feat };
 }
