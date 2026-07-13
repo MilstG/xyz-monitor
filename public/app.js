@@ -11,6 +11,7 @@ const SP_ALIASES = ['SPX', 'SPX500', 'SP500', 'US500', 'USSPX500', 'SP500USD', '
 const store = { get(k){ try{ return localStorage.getItem(k); }catch(_){ return null; } },
                 set(k,v){ try{ localStorage.setItem(k,v); }catch(_){} } };
 const PKEY = 'xyzmon.prefs.v1';
+const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, window, filters
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
@@ -65,6 +66,8 @@ const COLS=[
   {key:'ma50', label:'MA 50', type:'num', tip:'50-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention holds fewer than 50 closes)', td:r=>maCell(r,'ma50',50)},
   {key:'ma100', label:'MA 100', type:'num', tip:'100-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention)', td:r=>maCell(r,'ma100',100)},
   {key:'ma200', label:'MA 200', type:'num', tip:'200-day simple moving average of daily closes \u00b7 green when price is above it, red below \u00b7 crypto scope shows \u2014 (31d retention)', td:r=>maCell(r,'ma200',200)},
+  {key:'vwap', label:'VWAP 30d', type:'num', tip:'Volume-weighted average price over the last ~31 days of hourly candles: \u03a3(typical price \u00d7 volume) \u00f7 \u03a3(volume), typical = (H+L+C)/3 per bar. The average holder\u2019s entry over the month, weighted by where the volume actually printed \u2014 unlike the MAs, which weight every day equally. Candle-level approximation of tick VWAP; slightly less exact on thin markets with gappy candles. Green when price is above it, red below; hover for distance. Both scopes.', td:r=>vwapCell(r)},
+  {key:'vsvwap', label:'vs VWAP', type:'num', def:'desc', tip:'Distance of the mark from the 30d rolling VWAP, in %. Positive = price above where the month\u2019s volume was done (average recent buyer in profit); negative = below it (trapped longs overhead). Stretch far from VWAP mean-reverts more often than it trends \u2014 read alongside Momentum and \u0394OI, not alone.', td:r=>vsvwapCell(r)},
   {key:'turn', label:'OI/Vol', type:'num', def:'desc', tip:'Open interest \u00f7 24h volume: how large standing positioning is relative to the flow that could move it. High (\u22652) = stale, crowded positioning \u2014 fragile to squeezes and unwinds, reads well next to the Squeeze and \u0394OI columns. Low (<0.5) = fresh churn, positions turn over within the day.',
     td:r=>turnCell(r)},
 ];
@@ -72,13 +75,20 @@ function maCell(r,key,nD){ const v=r[key];
   if(v==null||!isFinite(v)) return `<td><span class="na" title="needs ${nD} daily closes \u2014 ${r.uni==='main'&&nD>20?'crypto retention is 31d, so this MA is out of reach by design':'fills in as daily history loads'}">\u2014</span></td>`;
   const above=r.px!=null&&isFinite(r.px)?r.px>=v:null, d=above!=null&&v>0?((r.px/v-1)*100):null;
   return `<td class="${above==null?'sec':(above?'pos':'neg')}" title="SMA${nD} ${fmtPrice(v)}${d!=null?` \u00b7 price ${d>=0?'+':''}${d.toFixed(1)}% ${d>=0?'above':'below'}`:''}">${fmtPrice(v)}</td>`; }
+function vwapCell(r){ const v=r.vwap30;
+  if(v==null||!isFinite(v)) return '<td><span class="na" title="fills in once hourly history loads (\u226410 min after deploy)">\u2014</span></td>';
+  const above=r.px!=null&&isFinite(r.px)?r.px>=v:null, d=above!=null?((r.px/v-1)*100):null;
+  return `<td class="${above==null?'sec':(above?'pos':'neg')}" title="30d rolling VWAP ${fmtPrice(v)}${d!=null?` \u00b7 price ${d>=0?'+':''}${d.toFixed(1)}% ${d>=0?'above':'below'}`:''}">${fmtPrice(v)}</td>`; }
+function vsvwapCell(r){ const v=r.vsvwap;
+  if(v==null||!isFinite(v)) return '<td><span class="na" title="fills in once hourly history loads (\u226410 min after deploy)">\u2014</span></td>';
+  return `<td${shade(v,15)}><span class="${v>=0?'pos':'neg'}" title="mark ${v>=0?'above':'below'} the 30d VWAP (${fmtPrice(r.vwap30)})">${v>=0?'+':''}${v.toFixed(1)}%</span></td>`; }
 function turnCell(r){ if(r.turn==null||!isFinite(r.turn)) return '<td><span class="na">\u2014</span></td>';
   const c=r.turn>=2?'accent':(r.turn<0.5?'sec':'');
   return `<td${c?` class="${c}"`:''} title="OI ${fmtUsd(r.oi)} \u00f7 24h vol ${fmtUsd(r.vol)} \u2014 positioning is ${r.turn.toFixed(1)}\u00d7 the daily flow">\u00d7${r.turn>=10?r.turn.toFixed(0):r.turn.toFixed(1)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200'];
-const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dcap','hitr','rvol'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
+const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dcap','hitr','rvol','vwap','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null,
@@ -88,6 +98,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
   watch:new Set(), watchOnly:false, detail:null,
+  layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
@@ -346,6 +357,9 @@ function computeDerived(){
     const adrN=state.tf==='30d'?30:7;
     r.adr=(r.feat&&r.feat.dr&&r.feat.dr.length)?(()=>{ const s=r.feat.dr.slice(-adrN); return s.reduce((p,q)=>p+q,0)/s.length; })():undefined;
     r.dd=(r.px!=null&&r.feat&&r.feat.hi30>0)?(r.px-r.feat.hi30)/r.feat.hi30*100:undefined;
+    // 30d rolling VWAP (server-computed from the hourly spine; candle-typical-price approximation)
+    r.vwap30=(r.feat&&r.feat.vwap30>0)?r.feat.vwap30:undefined;
+    r.vsvwap=(r.vwap30!==undefined&&r.px!=null&&isFinite(r.px))?(r.px/r.vwap30-1)*100:undefined;
     // vs YTD high: distance below the year's highest DAILY CLOSE. Honest only when the daily
     // history actually covers the year: series reaching ~Jan 1, or a name listed this year
     // (xyz 370d retention means a late first point IS a new listing; crypto's flat 31d buffer
@@ -952,6 +966,8 @@ function csvCell(k,r){ switch(k){
   case 'adr': return r.adr!=null&&isFinite(r.adr)?r.adr.toFixed(3):'';
   case 'beta': return r.beta!=null&&isFinite(r.beta)?r.beta.toFixed(3):'';
   case 'doi': return r.doi!=null?r.doi.toFixed(2):'';
+  case 'vwap': return r.vwap30!=null&&isFinite(r.vwap30)?r.vwap30:'';
+  case 'vsvwap': return r.vsvwap!=null&&isFinite(r.vsvwap)?r.vsvwap.toFixed(3):'';
   case 'vol': return r.vol; case 'oi': return r.oi; default: return ''; } }
 function exportMarkets(){ const cols=visibleCols(); const head=cols.map(c=>c.label.replace(/&amp;/g,'&'));
   const body=sortedRows().map(r=>cols.map(c=>csvCell(c.key,r))); downloadCSV('xyz-markets.csv',[head,...body]); }
@@ -1213,7 +1229,8 @@ let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
   colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly,
-  filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} })); }, 250); }
+  filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
+  updateLayoutBtn(); }, 250); }
 function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(_){ p=null; } if(!p) return;
   if(p.layoutV===LAYOUT_V){ // otherwise a one-time migration leaves the new default layout in place
     if(Array.isArray(p.colOrder)){ const v=p.colOrder.filter(k=>COL_BY_KEY[k]);
@@ -1227,6 +1244,79 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(typeof p.filterText==='string') state.filter=p.filterText;
   if(Array.isArray(p.watch)) state.watch=new Set(p.watch);
   state.watchOnly=!!p.watchOnly; state._savedFilters=p.filters||null; }
+
+// ===== saved layouts (named views of the markets table) =====
+// A layout captures: column order + visibility, sort key/dir, analysis window, the vol/OI
+// threshold filters (raw input strings, so they round-trip exactly), and the ★-only toggle.
+// Deliberately NOT captured: the ticker search text (ephemeral), scope (a layout applies to
+// whichever scope you're in), and the refresh rate. localStorage, so per-browser — which
+// means the phone can hold different layouts than the desktop.
+function layoutSnapshot(){ return {
+  colOrder:[...state.colOrder], colHidden:[...state.colHidden],
+  sortKey:state.sortKey, sortDir:state.sortDir, tf:state.tf, watchOnly:!!state.watchOnly,
+  filters:{vMin:el('volMin').value||'', vMax:el('volMax').value||'', oMin:el('oiMin').value||'', oMax:el('oiMax').value||''} }; }
+function layoutSig(s){ if(!s) return '';
+  return JSON.stringify({o:s.colOrder||[], h:[...(s.colHidden||[])].sort(), k:s.sortKey, d:s.sortDir, t:s.tf, w:!!s.watchOnly,
+    f:{vMin:(s.filters&&s.filters.vMin)||'', vMax:(s.filters&&s.filters.vMax)||'', oMin:(s.filters&&s.filters.oMin)||'', oMax:(s.filters&&s.filters.oMax)||''}}); }
+function saveLayouts(){ store.set(LKEY, JSON.stringify({list:state.layouts.list, active:state.layouts.active})); }
+function loadLayouts(){ let d; try{ d=JSON.parse(store.get(LKEY)||'null'); }catch(_){ d=null; } if(!d) return;
+  if(d.list&&typeof d.list==='object'&&!Array.isArray(d.list)) state.layouts.list=d.list;
+  if(typeof d.active==='string'&&state.layouts.list[d.active]) state.layouts.active=d.active; }
+function layoutDirty(){ const a=state.layouts.active; if(!a||!state.layouts.list[a]) return false;
+  return layoutSig(state.layouts.list[a])!==layoutSig(layoutSnapshot()); }
+function updateLayoutBtn(){ const b=el('layBtn'); if(!b) return; const a=state.layouts.active;
+  const lbl=b.querySelector('.laylbl'); if(lbl) lbl.textContent=a?(a+(layoutDirty()?' \u2022':'')):'Layouts';
+  b.classList.toggle('on', !!a);
+  b.title=a?`Active layout: ${a}${layoutDirty()?' (unsaved changes \u2014 open to re-save)':''}`:'Save & switch table layouts \u2014 columns, sort, window, filters'; }
+// Apply a saved layout by name; name==null applies the factory default view.
+function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
+  const src=s||{colOrder:[...DEFAULT_ORDER], colHidden:[...DEFAULT_HIDDEN], sortKey:'vol', sortDir:'desc', tf:'1d', watchOnly:false, filters:{vMin:'',vMax:'',oMin:'',oMax:''}};
+  // Column merge, same rule as loadPrefs: drop keys that no longer exist, append columns
+  // added since the layout was saved (hidden if they're hidden in the default layout).
+  const ord=(Array.isArray(src.colOrder)?src.colOrder:[]).filter(k=>COL_BY_KEY[k]);
+  const hid=new Set((Array.isArray(src.colHidden)?src.colHidden:[]).filter(k=>COL_BY_KEY[k]));
+  for(const c of COLS) if(!ord.includes(c.key)){ ord.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) hid.add(c.key); }
+  state.colOrder=ord; state.colHidden=hid;
+  if(src.sortKey&&COL_BY_KEY[src.sortKey]){ state.sortKey=src.sortKey; state.sortDir=src.sortDir==='asc'?'asc':'desc'; }
+  state.watchOnly=!!src.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly);
+  const f=src.filters||{};
+  el('volMin').value=f.vMin||''; el('volMax').value=f.vMax||''; el('oiMin').value=f.oMin||''; el('oiMax').value=f.oMax||'';
+  state.layouts.active=(name!=null&&s)?name:null; saveLayouts();
+  if(src.tf&&TF_MAP[src.tf]) setWindow(src.tf);   // syncs the window segment UI + rebuilds
+  applyNumFilters();                              // syncs state.filters from the inputs + filter chip
+  buildHead(); render(); savePrefs(); updateLayoutBtn(); }
+function buildLayoutMenu(){ const pop=el('laypop'); const names=Object.keys(state.layouts.list).sort((a,b)=>a.localeCompare(b));
+  let h='<div class="cphead">Layouts \u00b7 columns, sort, window, filters</div>';
+  h+=`<div class="lrow2${state.layouts.active==null?' cur':''}" data-lay=""><span class="lname">Default</span><span class="lmut">factory</span></div>`;
+  for(const n of names){ const cur=state.layouts.active===n;
+    h+=`<div class="lrow2${cur?' cur':''}" data-lay="${esc(n)}"><span class="lname">${esc(n)}${cur&&layoutDirty()?' \u2022':''}</span>`+
+       `<button class="lact" data-ren="${esc(n)}" title="Rename">\u270e</button><button class="lact" data-del="${esc(n)}" title="Delete">\u2715</button></div>`; }
+  if(!names.length) h+='<div class="lmut" style="padding:4px 5px 8px;display:block">No saved layouts yet \u2014 arrange the table how you want it, then save it below.</div>';
+  h+='<div class="lsaverow"><input class="fnum lnamein" id="layName" placeholder="layout name" maxlength="24" autocomplete="off" spellcheck="false"/><button class="btn" id="laySaveAs">Save as</button></div>';
+  if(state.layouts.active&&state.layouts.list[state.layouts.active])
+    h+=`<button class="btn" id="laySave" style="margin-top:7px;width:100%;justify-content:center" title="Overwrite this layout with the current view">Save to \u2018${esc(state.layouts.active)}\u2019${layoutDirty()?' \u2022':''}</button>`;
+  pop.innerHTML=h;
+  pop.querySelectorAll('.lrow2').forEach(rw=>rw.addEventListener('click',e=>{ if(e.target.closest('.lact')) return;
+    applyLayout(rw.dataset.lay||null); buildLayoutMenu(); }));
+  pop.querySelectorAll('[data-ren]').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); const old=b.dataset.ren;
+    const nn=(prompt('Rename layout', old)||'').trim(); if(!nn||nn===old) return;
+    if(state.layouts.list[nn]&&!confirm(`\u2018${nn}\u2019 already exists \u2014 overwrite it?`)) return;
+    state.layouts.list[nn]=state.layouts.list[old]; delete state.layouts.list[old];
+    if(state.layouts.active===old) state.layouts.active=nn;
+    saveLayouts(); updateLayoutBtn(); buildLayoutMenu(); }));
+  pop.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); const n=b.dataset.del;
+    if(!confirm(`Delete layout \u2018${n}\u2019?`)) return;
+    delete state.layouts.list[n]; if(state.layouts.active===n) state.layouts.active=null;
+    saveLayouts(); updateLayoutBtn(); buildLayoutMenu(); }));
+  const sa=el('laySaveAs'); if(sa) sa.addEventListener('click',()=>{ const inp=el('layName'), n=(inp.value||'').trim();
+    if(!n){ inp.classList.add('bad'); inp.focus(); return; } inp.classList.remove('bad');
+    if(state.layouts.list[n]&&!confirm(`\u2018${n}\u2019 already exists \u2014 overwrite it?`)) return;
+    state.layouts.list[n]=layoutSnapshot(); state.layouts.active=n;
+    saveLayouts(); updateLayoutBtn(); buildLayoutMenu(); });
+  const sv=el('laySave'); if(sv) sv.addEventListener('click',()=>{ const a=state.layouts.active; if(!a) return;
+    state.layouts.list[a]=layoutSnapshot(); saveLayouts(); updateLayoutBtn(); buildLayoutMenu(); });
+  const inp=el('layName'); if(inp) inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); const b=el('laySaveAs'); if(b) b.click(); } });
+}
 
 // ===== alerts (in-tab, edge-triggered) =====
 const ALERT_METRICS=[
@@ -2825,12 +2915,14 @@ setInterval(()=>{ const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left
 
 // ===== init =====
 loadPrefs();
+loadLayouts();
 loadAlerts();
 buildHead();
 updateBell();
 el('filter').value=state.filter;
 if(state._savedFilters){ const sf=state._savedFilters; el('volMin').value=sf.vMin||''; el('volMax').value=sf.vMax||''; el('oiMin').value=sf.oMin||''; el('oiMax').value=sf.oMax||''; }
 el('watchOnly').classList.toggle('on', state.watchOnly);
+updateLayoutBtn();
 el('refresh').addEventListener('click', forceRefresh);
 el('filter').addEventListener('input', e=>{ state.filter=e.target.value; render(); savePrefs(); });
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
@@ -2878,6 +2970,11 @@ el('colsBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('c
   else { pop.hidden=true; el('colsBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('colpop');
   if(pop && !pop.hidden && !pop.contains(e.target) && !el('colsBtn').contains(e.target)){ pop.hidden=true; el('colsBtn').setAttribute('aria-expanded','false'); } });
+el('layBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('laypop');
+  if(pop.hidden){ buildLayoutMenu(); pop.hidden=false; el('layBtn').setAttribute('aria-expanded','true'); }
+  else { pop.hidden=true; el('layBtn').setAttribute('aria-expanded','false'); } });
+document.addEventListener('click',e=>{ const pop=el('laypop');
+  if(pop && !pop.hidden && !pop.contains(e.target) && !el('layBtn').contains(e.target)){ pop.hidden=true; el('layBtn').setAttribute('aria-expanded','false'); } });
 function setWindow(tf){ state.tf=tf;
   document.querySelectorAll('#tfseg button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
   document.querySelectorAll('#sectf button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
@@ -2926,13 +3023,13 @@ let corrSearchT=null;
 const HELP={
 markets:`
 <div class="hlp-h">The table</div>
-<p>One row per market, one column per lens. The <b>window selector</b> (1h–30d) re-anchors every windowed column at once: <b>vs S&amp;P</b>, <b>ΔOI</b>, <b>Squeeze</b>, <b>Carry</b>, and Avg Range all answer "over this window". Click any header to sort; drag in the column menu (⚙) to reorder or hide. Cell shading scales with the size of the move — a wall of deep red 7d cells IS the market breadth read. <b>★</b> pins a name to the top. Everything deep-links: the URL carries your view, so a layout can be shared.</p>
+<p>One row per market, one column per lens. The <b>window selector</b> (1h–30d) re-anchors every windowed column at once: <b>vs S&amp;P</b>, <b>ΔOI</b>, <b>Squeeze</b>, <b>Carry</b>, and Avg Range all answer "over this window". Click any header to sort; drag in the column menu (⚙) to reorder or hide. Cell shading scales with the size of the move — a wall of deep red 7d cells IS the market breadth read. <b>★</b> pins a name to the top. Everything deep-links: the URL carries your view, so a layout can be shared. <b>Layouts</b> saves the whole arrangement as a named view — columns + order, sort, window, vol/OI filters, ★-only — and switches between them in one click; there is no one-size-fits-all table. The active name shows on the button, with a • when the live view has drifted from the saved one (open the menu to re-save). Stored per browser, so the phone can hold different layouts than the desktop. The ticker search box and the scope toggle are deliberately not part of a layout.</p>
 <div class="hlp-h">Funding — the crowd's payment</div>
 <p>Annualized APR: <b class="pos">green = longs pay</b> to hold (crowded long), <b class="neg">red = shorts pay</b> (crowded short — squeeze fuel). The ▴/▾ percentile flag fires when today's funding sits at a monthly extreme of that market's <i>own</i> 31d distribution — the crowd is paying near its max, the classic mean-reversion zone. <b>Carry</b> divides window funding by realized vol: how much you're paid per unit of risk just for taking the unpopular side.</p>
 <div class="hlp-h">ΔOI and the regime tag</div>
 <p>Open-interest change answers "is money entering or leaving?" — but only <i>with price</i> does it tell a story. The four tags: <b class="pos">longs+</b> price↑/OI↑ (new money confirming), <b>squeeze</b> price↑/OI↓ (shorts covering, NOT fresh demand), <b class="neg">shorts+</b> price↓/OI↑ (new money pressing lower), <b>unwind</b> price↓/OI↓ (longs deleveraging, not fresh shorting). Hover for conviction and whether funding corroborates the story. Caveat that matters: OI is symmetric — long/short attribution is always an inference, never an observation.</p>
 <div class="hlp-h">Momentum, levels, structure</div>
-<p><b>Momentum</b> (−100…+100) is self-normalizing: risk-adjusted multi-horizon returns × trend quality, tilted by range position, modulated by OI conviction — comparable across a quiet FX pair and a violent pre-IPO synthetic. The ● dot means volume above the market's own norm. <b>vs 30d hi / vs YTD hi</b> are distance below the high (0% = at it now). <b>Y open / M open</b> show the level the period opened at — on a 24/7 perp that IS the prior day's close — green when price is above. MAs are daily-close SMAs; dashes are honest (not enough history), never fabricated.</p>
+<p><b>Momentum</b> (−100…+100) is self-normalizing: risk-adjusted multi-horizon returns × trend quality, tilted by range position, modulated by OI conviction — comparable across a quiet FX pair and a violent pre-IPO synthetic. The ● dot means volume above the market's own norm. <b>vs 30d hi / vs YTD hi</b> are distance below the high (0% = at it now). <b>Y open / M open</b> show the level the period opened at — on a 24/7 perp that IS the prior day's close — green when price is above. MAs are daily-close SMAs; dashes are honest (not enough history), never fabricated. <b>VWAP 30d / vs VWAP</b> (hidden by default) are the volume-weighted counterpart: Σ(typical price × volume) ÷ Σ(volume) over ~31 days of hourly candles, typical = (H+L+C)/3 per bar. Where the MAs weight every day equally, VWAP weights by where the volume actually printed — read it as the average recent holder's entry. Positive vs VWAP = the month's buyers are in profit; deeply negative = trapped supply overhead. Honest caveat: it's a candle-level approximation of tick VWAP (no per-fill data in candles), slightly less exact on thin markets. Both scopes, fills in as hourly history loads.</p>
 <div class="hlp-h">Prem and Gap — the off-hours edge</div>
 <p><b>Prem</b> is the perp vs oracle dislocation in bp. When the cash market is <i>closed</i>, the oracle freezes near the last print — so a persistent premium or discount is the live off-hours price discovery, and the tradeable reversion. <b>Gap</b> is the last close→open move (live while the market is closed); its hover carries the cumulative 30d off-hours drift — a persistent sign there is the overnight effect.</p>
 <div class="hlp-h">Squeeze &amp; OI/Vol</div>
