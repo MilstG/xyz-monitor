@@ -435,7 +435,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
-    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext"];
+    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext",
+    "applyTabOrder", "saveTabOrder", "wireTabDrag"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -451,10 +452,19 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
+  // The backtest tab was silently dropped from the nav once while every renderer behind it
+  // survived — pin both the button and the view section so the tab can't vanish again.
+  assert.ok(html.includes('data-view="backtest"'), "backtest tab button missing from nav");
+  assert.ok(html.includes('id="view-backtest"'), "backtest view section missing");
+  assert.ok(s.includes("xyzmon.tabs.v1"), "tab-order persistence key missing from client");
+  // Auth surface: the login flow lives inline in server.js — pin its load-bearing pieces.
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  for (const frag of ["xyzsess", "xyzauth", "/logout", "timingSafeEqual", "createHmac", "LOGIN_HTML", "/api/health"])
+    assert.ok(srv.includes(frag), `missing server auth marker: ${frag}`);
 });
 
 test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, open-claim voiding", () => {
