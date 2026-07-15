@@ -11,6 +11,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor } = require("./compute");
+const { bucketCandles, trendLadder, trendRead, TREND_TFS } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -87,6 +88,7 @@ function createPoller({ dex, store, log, version, crypto }) {
   let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
+  let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0;   // /api/trend — lazy, memoized, ETag rides content
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
   let earnPrints = [], earnHistDone = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
@@ -2182,6 +2184,64 @@ function createPoller({ dex, store, log, version, crypto }) {
     return out;
   }
 
+  // ---- trend leaderboard (served at /api/trend) ----
+  // EMA 13/21 ribbon ladder across D1 · H12 · H4 · H1 for every live market, ranked into long and
+  // short boards per universe. Assembly only — all math is in compute.js (unit-tested there).
+  // Timeframe sourcing: H1 = the hourly spine as-is; H4/H12 = UTC-aligned aggregation of that
+  // spine; D1 = the daily candle series (closes-only warm-cache shape degrades gracefully — the
+  // zone probe falls back to closes, EMAs are unaffected). The forming bar's close is replaced by
+  // the live mark inside trendLadder, so the board moves with price between candle refreshes.
+  // A market missing ANY rung (new listing, shallow spine) is excluded and counted, never guessed.
+  const TREND_MS = 3 * 60 * 1000;     // memo window — inputs only change on ~10-min candle refreshes anyway
+  const TREND_TOP = 10;               // rows per universe per side, like the source board
+  function buildTrend() {
+    const now = Date.now();
+    const sides = { long: { crypto: [], stocks: [] }, short: { crypto: [], stocks: [] } };
+    let scanned = 0, excluded = 0;
+    for (const r of rows.values()) {
+      if (r.delisted || r.px == null) continue;
+      if (!Array.isArray(r.hourlyRaw) || r.hourlyRaw.length < 26) { excluded++; continue; }
+      const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : null;
+      if (!d1 || d1.length < 26) { excluded++; continue; }
+      const lad = trendLadder(r.px, {
+        D1: d1,
+        H12: bucketCandles(r.hourlyRaw, 12, HOUR),
+        H4: bucketCandles(r.hourlyRaw, 4, HOUR),
+        H1: r.hourlyRaw.slice(-96),
+      });
+      if (!lad) { excluded++; continue; }
+      scanned++;
+      const uni = r.uni === "main" ? "crypto" : "stocks";
+      for (const side of ["long", "short"]) {
+        const read = trendRead(side, lad);
+        if (!read) continue;   // score < 2 — not board material on this side
+        const s = lad[side];
+        const tf = {};
+        for (const t of TREND_TFS) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21 };
+        sides[side][uni].push({ coin: r.coin, t: r.ticker, score: s.score, tf, read: read.text,
+          retest: read.retest, strength: +s.strength.toFixed(5), vol: r.vol || 0 });
+      }
+    }
+    for (const side of ["long", "short"]) for (const uni of ["crypto", "stocks"]) {
+      sides[side][uni].sort((a, b) => (b.score - a.score) || (b.strength - a.strength) || (b.vol - a.vol));
+      sides[side][uni] = sides[side][uni].slice(0, TREND_TOP).map(({ vol, ...e }) => e);
+    }
+    const sig = JSON.stringify([["long", "short"].map((s) => ["crypto", "stocks"].map((u) =>
+      sides[s][u].map((e) => [e.coin, e.score, e.retest, e.read])))]);
+    if (sig !== trendSig) { trendSig = sig; trendVer = Date.now(); }
+    trendBuilt = now;
+    trendCache = { ts: now, dataTs: trendVer,
+      params: { ema: [13, 21], tfs: TREND_TFS, retestBars: 3, top: TREND_TOP },
+      coverage: { included: scanned, excluded },
+      long: sides.long, short: sides.short };
+  }
+  function getTrend() {
+    if (!trendCache || Date.now() - trendBuilt > TREND_MS) {
+      try { buildTrend(); } catch (e) { log("buildTrend error: " + (e && e.message)); }
+    }
+    return trendCache;
+  }
+
   return {
     start,
     getSnapshot: () => snapshotCache,
@@ -2193,6 +2253,8 @@ function createPoller({ dex, store, log, version, crypto }) {
     getCandles,
     getSignals: () => signalsCache,
     getEarnings: () => earnCache,
+    getTrend,
+    buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
     getLedgerFor,
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation

@@ -1126,6 +1126,125 @@ function rvolMulti(hs, windowsMs, now, minSamples) {
   return out;
 }
 
+// ===== EMA trend ladder (Trend tab) ==========================================================
+// Reverse-engineered from the Metrik-style "Trend Leaderboard": an EMA 13/21 ribbon evaluated on
+// four timeframes (D1 · H12 · H4 · H1). Per timeframe, three honest states from two comparisons:
+//   up      — px > EMA13 > EMA21 (stacked ribbon, established uptrend)
+//   down    — px < EMA13 < EMA21 (stacked below, established downtrend)
+//   reclaim — above EMA21 but the ribbon isn't stacked up (repairing)
+//   roll    — below EMA21 but the ribbon isn't stacked down (rolling over)
+// Long score = count of 'up' TFs; short score = count of 'down'. A RETEST fires when a trending
+// timeframe's recent bars (last TREND_RETEST_BARS, forming bar included) probed into the 13/21
+// ribbon zone while the close held the EMA21 side of the trend — the classic continuation-entry
+// pullback (long) / rally (short). All approximations are stated, none hidden: the zone test uses
+// the CURRENT EMAs against recent extremes (not bar-by-bar historical EMAs), and the forming
+// bar's close is replaced by the live mark so the ladder tracks price, not a stale hourly close.
+
+const TREND_TFS = ["D1", "H12", "H4", "H1"];   // high -> low; the first retest found is the one reported
+const TREND_RETEST_BARS = 3;                    // recent-extreme window for the zone probe
+const TREND_MIN_BARS = 26;                      // EMA21 needs 21 seed bars + a few recursion steps to be honest
+
+// Last EMA value over `closes` (oldest -> newest). Seeded with the SMA of the first `span` bars —
+// the textbook construction — then recursed. Returns null when there isn't enough history for the
+// seed plus a handful of convergence steps; a dash is honest, a half-converged EMA is not.
+function emaLast(closes, span) {
+  if (!Array.isArray(closes) || closes.length < Math.max(span + 5, TREND_MIN_BARS)) return null;
+  let e = 0;
+  for (let i = 0; i < span; i++) { const v = +closes[i]; if (!isFinite(v)) return null; e += v; }
+  e /= span;
+  const a = 2 / (span + 1);
+  for (let i = span; i < closes.length; i++) { const v = +closes[i]; if (!isFinite(v)) return null; e = a * v + (1 - a) * e; }
+  return e;
+}
+
+// Aggregate the hourly spine into UTC-aligned N-hour buckets (forming bucket included). Only the
+// fields the ladder needs survive: t/o/h/l/c. Missing highs/lows (warm-cache closes-only candles)
+// degrade to the close so the zone test stays defined instead of poisoning Math.min with NaN.
+function bucketCandles(hourly, hours, HOUR) {
+  const W = hours * HOUR, out = [];
+  let cur = null;
+  for (const k of hourly || []) {
+    const t = +k.t; if (!isFinite(t)) continue;
+    const c = +k.c; if (!isFinite(c)) continue;
+    const h = k.h != null && isFinite(+k.h) ? +k.h : c;
+    const l = k.l != null && isFinite(+k.l) ? +k.l : c;
+    const b = Math.floor(t / W) * W;
+    if (!cur || cur.t !== b) { if (cur) out.push(cur); cur = { t: b, o: k.o != null ? +k.o : c, h, l, c }; }
+    else { cur.c = c; if (h > cur.h) cur.h = h; if (l < cur.l) cur.l = l; }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function trendState(px, e13, e21) {
+  if (px == null || e13 == null || e21 == null || !isFinite(px)) return null;
+  if (px > e13 && e13 > e21) return "up";
+  if (px < e13 && e13 < e21) return "down";
+  return px > e21 ? "reclaim" : "roll";
+}
+
+// Build the four-timeframe ladder for one market. `tfCandles` = { D1, H12, H4, H1 }, each an
+// array of {t,h?,l?,c} oldest -> newest with the FORMING bar last. Returns null when any
+// timeframe lacks enough history — a market missing one rung is excluded, not guessed at.
+function trendLadder(px, tfCandles) {
+  if (px == null || !isFinite(+px)) return null;
+  px = +px;
+  const out = { tf: {}, long: { score: 0, retest: null, strength: 0 }, short: { score: 0, retest: null, strength: 0 } };
+  for (const tf of TREND_TFS) {
+    const c = tfCandles[tf];
+    if (!Array.isArray(c) || c.length < TREND_MIN_BARS) return null;
+    const closes = c.map((k) => +k.c);
+    closes[closes.length - 1] = px;                    // live mark drives the forming bar
+    const e13 = emaLast(closes, 13), e21 = emaLast(closes, 21);
+    if (e13 == null || e21 == null || e21 === 0) return null;
+    const st = trendState(px, e13, e21);
+    const lastK = c.slice(-TREND_RETEST_BARS);
+    let lowK = Infinity, highK = -Infinity;
+    for (const k of lastK) {
+      const lo = k.l != null && isFinite(+k.l) ? +k.l : +k.c;
+      const hi = k.h != null && isFinite(+k.h) ? +k.h : +k.c;
+      if (lo < lowK) lowK = lo;
+      if (hi > highK) highK = hi;
+    }
+    // include the live mark itself in the probe window (it may sit past the last stored candle)
+    if (px < lowK) lowK = px; if (px > highK) highK = px;
+    const d21 = ((px - e21) / e21) * 100;
+    out.tf[tf] = { st, e13, e21, d21: +d21.toFixed(2) };
+    if (st === "up") {
+      out.long.score++; out.long.strength += (e13 - e21) / e21;
+      if (!out.long.retest && lowK <= e13 && px > e21) out.long.retest = tf;
+    } else if (st === "down") {
+      out.short.score++; out.short.strength += (e21 - e13) / e21;
+      if (!out.short.retest && highK >= e13 && px < e21) out.short.retest = tf;
+    }
+  }
+  return out;
+}
+
+// Read line for one side of the ladder. Mirrors the source board's language:
+//   retest (score>=3)  ->  "Pullback/Rally to {TF} EMA21 — continuation entry/short"
+//   4/4                ->  "Full up/downtrend — ... · x.x% over/under H1 EMA21"
+//   3/4                ->  "Strong (down) — {laggingTF} lagging"
+//   2/4                ->  "Mixed — {alignedTFs} up/down, wait for alignment"
+// Scores below 2 return null: the board only ranks names with at least higher-TF agreement.
+function trendRead(side, lad) {
+  const L = side === "long", s = L ? lad.long : lad.short;
+  if (s.score < 2) return null;
+  const want = L ? "up" : "down";
+  if (s.retest && s.score >= 3)
+    return { text: L ? `Pullback to ${s.retest} EMA21 — continuation entry` : `Rally to ${s.retest} EMA21 — continuation short`, retest: s.retest };
+  const d = lad.tf.H1 ? Math.abs(lad.tf.H1.d21) : null;
+  const pct = d != null ? `${d.toFixed(1)}%` : "—";
+  if (s.score === 4)
+    return { text: L ? `Full uptrend — long pullbacks · +${pct} over H1 EMA21` : `Full downtrend — short rallies · ${pct} under H1 EMA21`, retest: null };
+  if (s.score === 3) {
+    const lag = TREND_TFS.find((t) => lad.tf[t].st !== want);
+    return { text: L ? `Strong — ${lag} lagging` : `Strong down — ${lag} lagging`, retest: null };
+  }
+  const aligned = TREND_TFS.filter((t) => lad.tf[t].st === want).join("/");
+  return { text: `Mixed — ${aligned} ${L ? "up" : "down"}, wait for alignment`, retest: null };
+}
+
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
@@ -1133,6 +1252,8 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  // EMA trend ladder (Trend tab)
+  emaLast, bucketCandles, trendState, trendLadder, trendRead, TREND_TFS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
 
 // ---- stop geometry validation ----------------------------------------------------------------
