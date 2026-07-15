@@ -1245,6 +1245,20 @@ function trendRead(side, lad) {
   return { text: `Mixed — ${aligned} ${L ? "up" : "down"}, wait for alignment`, retest: null };
 }
 
+// Guard against the D1 staleness window: daily candles refresh every ~6h, so a fetch that
+// predates UTC midnight leaves the series ending at YESTERDAY'S completed candle. Overwriting
+// that close with the live mark would smear today's price into yesterday's bar and drop a bar
+// from the EMA. If the last bar belongs to a prior UTC day, append a synthetic forming bar at
+// today's day-start carrying the live mark instead; if the forming day is already present (the
+// normal case), return the series untouched and let the ladder's live-mark replacement handle it.
+function withFormingDaily(daily, px, now, DAY) {
+  if (!Array.isArray(daily) || !daily.length || px == null || !isFinite(+px)) return daily;
+  const dayStart = Math.floor(now / DAY) * DAY;
+  const lastT = +daily[daily.length - 1].t;
+  if (!isFinite(lastT) || lastT >= dayStart) return daily;
+  return daily.concat([{ t: dayStart, c: +px }]);
+}
+
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
@@ -1253,7 +1267,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
-  emaLast, bucketCandles, trendState, trendLadder, trendRead, TREND_TFS,
+  emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, TREND_TFS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
 
 // ---- stop geometry validation ----------------------------------------------------------------

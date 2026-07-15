@@ -11,7 +11,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor } = require("./compute");
-const { bucketCandles, trendLadder, trendRead, TREND_TFS } = require("./compute");
+const { bucketCandles, trendLadder, trendRead, withFormingDaily, TREND_TFS } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -2199,12 +2199,12 @@ function createPoller({ dex, store, log, version, crypto }) {
     const sides = { long: { crypto: [], stocks: [] }, short: { crypto: [], stocks: [] } };
     let scanned = 0, excluded = 0;
     for (const r of rows.values()) {
-      if (r.delisted || r.px == null) continue;
-      if (!Array.isArray(r.hourlyRaw) || r.hourlyRaw.length < 26) { excluded++; continue; }
+      if (r.delisted) continue;
+      if (r.px == null || !Array.isArray(r.hourlyRaw) || r.hourlyRaw.length < 26) { excluded++; continue; }
       const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : null;
       if (!d1 || d1.length < 26) { excluded++; continue; }
       const lad = trendLadder(r.px, {
-        D1: d1,
+        D1: withFormingDaily(d1, r.px, now, DAY),
         H12: bucketCandles(r.hourlyRaw, 12, HOUR),
         H4: bucketCandles(r.hourlyRaw, 4, HOUR),
         H1: r.hourlyRaw.slice(-96),
