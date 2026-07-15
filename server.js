@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.14-50";
+const VERSION = "2026.07.14-51";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -236,6 +236,27 @@ async function main() {
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
     serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], eligible: 0 }));
+  // Per-market OI + funding history — powers the drawer sparklines.
+  fastify.get("/api/series", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const coin = (req.query && req.query.coin) || "";
+    return poller.getSeries(coin) || { oi: [], funding: [] };
+  });
+  // Claim-history browser: filter by ticker (coin=), by event type (ev=), or both. Powers the
+  // drawer signal record and the Signals-tab full history search.
+  fastify.get("/api/ledger", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const coin = (req.query && req.query.coin) || "";
+    const ev = (req.query && req.query.ev) || "";
+    return poller.getLedgerFor(coin, ev);
+  });
+  // Hourly OHLCV for the drawer candle chart. days: 1..60, default 14.
+  fastify.get("/api/candles", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const coin = (req.query && req.query.coin) || "";
+    const days = req.query && req.query.days;
+    return { coin, candles: poller.getCandles(coin, days) };
+  });
   fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR }, ...poller.stats(), ts: Date.now() }));
 
   await fastify.listen({ port: PORT, host: HOST });
