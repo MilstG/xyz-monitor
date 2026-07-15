@@ -542,6 +542,34 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     assert.ok(srv.includes(frag), `missing server auth marker: ${frag}`);
 });
 
+test("server route manifest: every load-bearing API route is registered exactly once and backed by a real poller getter", () => {
+  // Regression guard for build 2026.07.13-42: one careless block deletion in server.js removed
+  // /api/series, /api/ledger and /api/candles — the three endpoints behind the drawer's candle
+  // chart, OI/funding sparklines and signal record. node --check passed, the client was intact,
+  // and every drawer loader swallows fetch errors, so the damage shipped silently for six
+  // builds. This pins the full route surface: dropping a registration (or registering it
+  // twice) is now a suite failure, and each poller.getX() a route calls must exist in poller.js.
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
+    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
+  for (const r of routes) {
+    const n = srv.split(`fastify.get("${r}"`).length - 1;
+    assert.ok(n >= 1, `server route missing: ${r}`);
+    assert.equal(n, 1, `server route registered ${n} times: ${r}`);
+  }
+  // Every poller getter the route layer references must be defined AND exported by the poller
+  // factory — a route bound to a phantom getter is a 500 the drawer's silent catch would eat.
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const getters = new Set([...srv.matchAll(/poller\.(get[A-Za-z0-9_]+)\(/g)].map((m) => m[1]));
+  assert.ok(getters.size >= 8, `suspiciously few poller getters referenced by routes: ${getters.size}`);
+  // Getters take two shapes in poller.js — `function getX(` hoisted then exported shorthand,
+  // or `getX: () =>` inline in the export object. Either counts; zero occurrences is a phantom
+  // (exactly what the removed /api/unlocks route was — bound to a getUnlocks that never existed).
+  for (const g of getters)
+    assert.ok(new RegExp(`(function ${g}\\(|${g}\\s*:)`).test(pol), `route references undefined poller getter: ${g}`);
+});
+
 test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, open-claim voiding", () => {
   const { stopGeometryOk } = require("../src/compute");
   // the validator itself
