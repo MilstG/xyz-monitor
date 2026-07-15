@@ -40,6 +40,7 @@
     <button class="scope on" data-scope="stocks">Stocks</button><button class="scope" data-scope="crypto">Crypto</button>
   </span>
   <button class="tab active" data-view="markets">Markets</button>
+  <button class="tab" data-view="trend" title="EMA 13/21 ribbon evaluated on D1 · H12 · H4 · H1 — ranked long &amp; short trend leaderboards for both universes, with continuation-entry retest flags">Trend</button>
   <button class="tab" data-view="sectors">Sectors</button>
   <button class="tab" data-view="corr">Correlation</button>
   <button class="tab" data-view="sessions">Sessions</button>
@@ -127,6 +128,18 @@
 </div>
 
 </div><!-- /view-markets -->
+
+<section id="view-trend" hidden>
+  <div class="controls">
+    <div class="seg" id="trendside" role="group" aria-label="Side">
+      <span class="seglbl">side</span>
+      <button type="button" data-side="long" class="active">Longs</button>
+      <button type="button" data-side="short">Shorts</button>
+    </div>
+    <span class="sec" id="trend-asof" style="align-self:center;font-size:12px"></span>
+  </div>
+  <div id="trend-body"><div class="msg">Loading…</div></div>
+</section>
 
 <section id="view-sectors" hidden>
   <div class="controls">

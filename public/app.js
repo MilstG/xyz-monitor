@@ -1415,7 +1415,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
-  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings') showView(h); }
+  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings'||h==='trend') showView(h); }
 let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
@@ -2157,25 +2157,30 @@ function setScope(v){
 }
 function applyScope(){
   const cr=state.scope==='crypto';
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets'; });
+  // Trend stays visible in crypto scope (the only tab besides Markets that does) — it follows
+  // the scope switcher, rendering the active universe's board like the Markets table does.
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(cr && state.view!=='markets') { showView('markets'); }
+  if(cr && state.view!=='markets' && state.view!=='trend') { showView('markets'); }
+  if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets') v='markets';   // crypto scope is Markets-only by design
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend') v='markets';   // crypto scope: Markets + Trend only (Trend carries both universes)
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
   setHidden('view-markets', v!=='markets');
+  setHidden('view-trend', v!=='trend');
   setHidden('view-sectors', v!=='sectors');
   setHidden('view-corr', v!=='corr');
   setHidden('view-sessions', v!=='sessions');
   setHidden('view-signals', v!=='signals');
   setHidden('view-earnings', v!=='earnings');
   setHidden('view-backtest', v!=='backtest');
+  if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
@@ -2325,6 +2330,76 @@ function renderEarnings(){
   html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst.</div>`;
   box.innerHTML=html;
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+}
+
+// ===== trend leaderboard tab =====
+// Server-built EMA 13/21 ribbon ladder (D1 · H12 · H4 · H1), ranked long/short boards. The tab
+// FOLLOWS THE SCOPE SWITCHER: stocks scope shows the xyz board, crypto scope shows the main-dex
+// board — one universe at a time, same as the Markets table. Dots: green = stacked up
+// (px>EMA13>EMA21), yellow = repairing (above EMA21, not stacked / rolling over on the shorts
+// lens), red = stacked down. RETEST = recent bars probed the 13/21 zone on a trending TF while
+// the close held EMA21 — the continuation-entry pullback. Rows click through to market detail.
+let _trend=null,_trendLast=0,_trendSide='long',_trendWired=false,_trendInflight=false;
+async function loadTrend(){
+  if(_trendInflight) return; _trendInflight=true;
+  try{ const d=await fetchJSON('/api/trend'); _trend=d; _trendLast=Date.now(); }
+  catch(_){ }
+  finally{ _trendInflight=false; }
+  if(state.view==='trend') renderTrend();
+}
+function openTrend(){
+  if(!_trendWired){ _trendWired=true;
+    const seg=el('trendside');
+    if(seg) seg.addEventListener('click',(e)=>{ const b=e.target.closest('button[data-side]'); if(!b) return;
+      _trendSide=b.dataset.side;
+      seg.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));
+      renderTrend(); });
+  }
+  renderTrend();
+  if(Date.now()-_trendLast>60*1000) loadTrend();
+}
+function trendDotHtml(tf,cell,side){
+  const st=cell&&cell.st, d=cell&&cell.d21!=null?cell.d21:null;
+  // long lens: up=green, reclaim=yellow, else red · short lens: down=red(aligned), roll=yellow, else green
+  const cls = st==='up'?'g' : st==='down'?'r' : st==='reclaim'?(side==='long'?'y':'g') : (side==='long'?'r':'y');
+  const stLbl = st==='up'?'trending — px > EMA13 > EMA21' : st==='down'?'downtrending — px < EMA13 < EMA21'
+    : st==='reclaim'?'reclaiming — above EMA21, ribbon not yet stacked' : 'rolling over — below EMA21, ribbon not yet stacked';
+  const tip=`${tf} \u00b7 ${stLbl}${d!=null?` \u00b7 px ${d>=0?'+':''}${d.toFixed(2)}% vs EMA21`:''}`;
+  return `<span class="tdot ${cls}" data-tip="${tip}"></span>`;
+}
+function trendSectionHtml(list,side,label,sub){
+  let rows='';
+  if(!list||!list.length) rows=`<tr><td colspan="8"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
+  else rows=list.map((e,i)=>{
+    const dots=['D1','H12','H4','H1'].map(t=>`<td class="tdc">${trendDotHtml(t,e.tf&&e.tf[t],side)}</td>`).join('');
+    const scCls=side==='long'?(e.score===4?'pos':e.score===3?'':'sec'):(e.score===4?'neg':e.score===3?'':'sec');
+    const badge=e.retest?`<span class="tretest" data-tip="price has pulled back to the EMA21 zone on a trending timeframe (${e.retest}) \u2014 prime continuation-entry zone">RETEST</span>`:'';
+    return `<tr data-coin="${esc(e.coin)}" class="${e.retest?'trow-hl':''}" data-tip="open ${esc(e.t)} in the market detail panel">`
+      +`<td class="sec" style="width:26px">${i+1}</td><td class="ttick">${esc(e.t)}</td>${dots}`
+      +`<td class="tscore ${scCls}">${e.score}/4</td><td class="tread">${esc(e.read||'')}${badge}</td></tr>`;
+  }).join('');
+  return `<div class="tsec-h">${label} <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">${sub}</span></div>`
+    +`<table class="trend-t"><thead><tr><th>#</th><th style="text-align:left">asset</th><th>D1</th><th>H12</th><th>H4</th><th>H1</th>`
+    +`<th data-tip="timeframes aligned with this side \u00b7 4/4 = established trend on every rung">score</th><th style="text-align:left">read</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderTrend(){
+  const box=el('trend-body'); if(!box) return;
+  const d=_trend;
+  const asof=el('trend-asof');
+  if(!d||(!d.long&&!d.short)){ box.innerHTML='<div class="msg"><span class="big">Loading\u2026</span>Building the trend ladder.</div>'; if(asof) asof.textContent=''; return; }
+  const side=_trendSide==='short'?'short':'long', b=d[side]||{};
+  const cov=d.coverage||{};
+  if(asof) asof.textContent=`EMA 13/21 \u00b7 D1 \u00b7 H12 \u00b7 H4 \u00b7 H1 \u00b7 ${cov.included||0} markets laddered${cov.excluded?` \u00b7 ${cov.excluded} excluded (insufficient history)`:''}`;
+  const L=side==='long';
+  const cr=state.scope==='crypto';
+  let html=cr?trendSectionHtml(b.crypto,side,'CRYPTO','Hyperliquid main dex \u00b7 top-60 by volume')
+             :trendSectionHtml(b.stocks,side,'STOCKS \u00b7 MACRO','Hyperliquid xyz dex');
+  html+=`<div class="corrpanel tlegend"><div class="cp-sub" style="margin:0 0 8px">How to read it</div>`
+    +(L?`<div><span class="tdot g"></span> <b>Trending</b> <span class="sec">\u2014 price &gt; EMA13 &gt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Reclaiming</b> <span class="sec">\u2014 above EMA21, not yet stacked</span> &nbsp; <span class="tdot r"></span> <b>Below trend</b></div>`
+       :`<div><span class="tdot r"></span> <b>Downtrending</b> <span class="sec">\u2014 price &lt; EMA13 &lt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Rolling over</b> <span class="sec">\u2014 below EMA21, not yet stacked</span> &nbsp; <span class="tdot g"></span> <b>Above trend</b></div>`)
+    +`<div class="sec" style="margin-top:8px;line-height:1.6"><b style="color:var(--text)">4/4 \u2014 all ${L?'green':'red'}:</b> established ${L?'up':'down'}trend; look for ${L?'longs on pullbacks':'shorts on rallies'} into the EMA21 zone. <b style="color:var(--text)">2\u20133/4 \u2014 mixed:</b> higher timeframes lead \u2014 wait for lower-TF alignment before entries; manage size. <b style="color:var(--blue)">RETEST</b> \u2014 price has pulled back to the EMA21 zone on a trending timeframe: prime continuation-entry zone. Click a row for the market's detail panel. Ranked by score, then ribbon separation (trend strength), then volume; only names with \u22652/4 alignment appear \u2014 top ${(d.params&&d.params.top)||10}. Flip the scope switcher for the other universe.</div></div>`;
+  box.innerHTML=html;
+  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
 }
 
 const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge'};
@@ -3221,6 +3296,13 @@ markets:`
 <p><b>RVOL</b> is relative volume, clock-hour matched: notional over the selected window (1h/4h/1d) ÷ the median of the <i>same clock hours</i> across the prior month. 1.0× = normal for this time of day; ≥2× = genuinely elevated. Clock matching is the point — overnight hours are judged against prior overnights, the open against prior opens, so the session shape doesn't masquerade as a volume signal. Positive vs-tape on ~1× RVOL is drift; on 2×+ it's demand. Weekends read slightly cold by construction (the baseline mixes weekday hours); 7d/30d windows show a dash — clock matching has no meaning beyond a day.</p>
 <div class="hlp-h">Crypto scope</div>
 <p>The Stocks|Crypto switch is a hard wall: separate universes, separate benchmark (BTC, not S&amp;P), no mixing anywhere. Crypto adds the tape strip up top — <b>crowd pays</b> (OI-weighted funding APR: euphoria tax vs squeeze fuel), <b>breadth</b>, total OI with its weighted delta, BTC's day, and the alt-season gauge. Session concepts (gap) vanish: a 24/7 market has none. Crypto history is 31d by design, so long MAs and YTD columns show honest dashes.</p>`,
+trend:`
+<div class="hlp-h">What this is</div>
+<p>An <b>EMA 13/21 ribbon</b> evaluated on four timeframes — <b>D1 · H12 · H4 · H1</b> — for every market in the active scope, ranked into long and short leaderboards. The tab follows the <b>scope switcher</b>: stocks scope shows the xyz board, crypto scope shows the main-dex board — flip it for the other universe. Per timeframe: <b class="pos">green</b> = price &gt; EMA13 &gt; EMA21 (stacked, trending), <b style="color:var(--accent)">yellow</b> = the middle state (above EMA21 but not stacked on the longs lens; below EMA21 but not stacked on the shorts lens), <b class="neg">red</b> = stacked down. The <b>score</b> counts aligned timeframes: 4/4 is an established trend on every rung; 2–3/4 means higher timeframes lead and you wait for the lower ones to agree.</p>
+<div class="hlp-h">RETEST — the entry flag</div>
+<p><b style="color:var(--blue)">RETEST</b> fires when the last few bars (forming bar included) probed into the 13/21 ribbon zone on a <i>trending</i> timeframe while the close held the EMA21 side — the classic continuation pullback (long) or rally-into-resistance (short). The highest timeframe showing it is the one named in the read. Honest approximation, stated plainly: the zone test compares recent bar extremes against the <i>current</i> EMAs, not bar-by-bar historical EMAs, and daily candles restored from the warm cache carry closes only, so their zone probe degrades to closes.</p>
+<div class="hlp-h">Sourcing & ranking</div>
+<p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then ribbon separation (a trend-strength proxy), then volume; only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>`,
 sectors:`
 <div class="hlp-h">Flow map (default)</div>
 <p>Each bubble is a sector. <b>Horizontal = capital direction</b>: a blend of return and OI-conviction — right means money flowing in <i>with</i> conviction, left means flowing out. <b>Vertical = heat</b>: activity from volume and volatility. So <b>top-right = accumulation</b> (in, loudly), <b>top-left = distribution</b> (out, loudly), and the bottom half is simply quiet. Bubble size = 24h volume. Click a bubble for the sector's members.</p>

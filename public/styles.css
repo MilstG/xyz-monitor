@@ -569,3 +569,33 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .earn-study{font-family:var(--mono);font-size:11px;color:var(--accent);min-width:180px;cursor:help}
 .earn-study.sec{color:var(--faint)}
 .earn-live{margin-left:auto;font-family:var(--mono);font-size:11px;cursor:help;white-space:nowrap}
+
+/* ===== trend leaderboard tab (build -47) ===== */
+.tsec-h{font-size:12px;text-transform:uppercase;letter-spacing:1.1px;font-weight:700;color:var(--text);
+  margin:22px 2px 8px}
+.tsec-h:first-child{margin-top:6px}
+.trend-t{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.trend-t th{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);
+  font-weight:500;text-align:center;padding:9px 10px;border-bottom:1px solid var(--border)}
+.trend-t td{padding:10px;border-bottom:1px solid var(--grid);font-size:13px;vertical-align:middle}
+.trend-t tbody tr{cursor:pointer;border-left:2px solid transparent}
+.trend-t tbody tr:hover{background:var(--panel2)}
+.trend-t tbody tr:last-child td{border-bottom:none}
+.trend-t tr.trow-hl{border-left-color:var(--blue);background:rgba(111,147,201,.06)}
+.trend-t .ttick{font-family:var(--mono);font-weight:700;letter-spacing:.3px}
+.trend-t .tdc{text-align:center;width:58px}
+.trend-t .tscore{font-family:var(--mono);font-weight:700;text-align:center;width:64px}
+.trend-t .tread{color:var(--muted);font-size:12.5px}
+.tdot{display:inline-block;width:11px;height:11px;border-radius:50%;vertical-align:middle;cursor:help}
+.tdot.g{background:var(--up);box-shadow:0 0 6px rgba(70,185,126,.45)}
+.tdot.y{background:var(--accent);box-shadow:0 0 6px rgba(227,165,60,.4)}
+.tdot.r{background:var(--down);box-shadow:0 0 6px rgba(229,96,77,.45)}
+.tretest{display:inline-block;margin-left:9px;padding:2px 9px;border-radius:10px;background:var(--blue);color:#0d1117;
+  font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.6px;cursor:help;vertical-align:middle}
+.tlegend{font-size:12.5px}
+.tlegend .tdot{margin-right:4px}
+@media (max-width:680px){
+  .trend-t .tdc{width:34px}
+  .trend-t td{padding:8px 6px;font-size:12px}
+  .trend-t .tread{font-size:11px}
+}
