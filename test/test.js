@@ -830,8 +830,10 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`"])
+  for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`", "tage", "td21", "fresh-first"])
     assert.ok(s.includes(frag), `missing client feature marker: ${frag}`);
+  assert.ok(fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8").includes("function stackedRun("),
+    "missing engine function: stackedRun");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(html.includes('data-view="trend"'), "trend tab button missing from nav");
   for (const id of ["view-trend", "trendside", "trend-body", "trend-asof"])
@@ -878,4 +880,38 @@ test("retest flip point: the wick boundary sits exactly at EMA13", () => {
   assert.equal(on.long.retest, "D1", "low exactly at EMA13 fires (<= boundary)");
   const just = trendLadder(100, { D1: mk(e13 + 1e-9), H12: mk(e13 + 1e-9), H4: mk(e13 + 1e-9), H1: mk(e13 + 1e-9) });
   assert.equal(just.long.retest, null, "a hair above EMA13 does not fire");
+});
+
+test("stackedRun: exact per-bar trend age — fresh stacks, breaks, caps, live-mark flips", () => {
+  const { stackedRun, trendLadder } = require("../src/compute");
+  const mk = (cl) => cl.map((c, i) => ({ t: i * DAY, c }));
+  // long steady from the first checkable bar -> run == checked -> capped
+  const rise = Array.from({ length: 60 }, (_, i) => 100 * Math.pow(1.01, i));
+  let sr = stackedRun(mk(rise), null, "long");
+  assert.equal(sr.run, 40, "60 bars, EMAs exist from index 20 -> 40 checkable, all stacked");
+  assert.equal(sr.capped, true, "stack extends past measurable history");
+  assert.equal(stackedRun(mk(rise), null, "short").run, 0, "never stacked short");
+  // long base then a fresh breakout: age counts only the young stack
+  const flat = new Array(50).fill(100);
+  const brk = flat.concat([103, 106, 109, 112]);   // 4 rising closes
+  sr = stackedRun(mk(brk), null, "long");
+  assert.ok(sr.run >= 1 && sr.run <= 4, `fresh stack is young, got ${sr.run}`);
+  assert.equal(sr.capped, false);
+  // a single bar breaking the stack resets the count
+  const broken = rise.slice(0, 55).concat([rise[54] * 0.80], rise.slice(55, 59));
+  sr = stackedRun(mk(broken), null, "long");
+  assert.ok(sr.run <= 4, `run restarts after the break, got ${sr.run}`);
+  // the live mark is the forming bar: a crash mark kills today's stack
+  sr = stackedRun(mk(rise), rise[59] * 0.5, "long");
+  assert.equal(sr.run, 0, "live mark below the ribbon -> not stacked today");
+  // consistency with the ladder: if the ladder says D1 is up, stackedRun must report run >= 1
+  const cands = mk(rise);
+  const lad = trendLadder(rise[59], { D1: cands, H12: cands, H4: cands, H1: cands });
+  assert.equal(lad.tf.D1.st, "up");
+  assert.ok(stackedRun(cands, rise[59], "long").run >= 1, "ladder-up implies age >= 1 (same EMA construction)");
+  // short mirror
+  const fall = Array.from({ length: 60 }, (_, i) => 100 * Math.pow(1.01, -i));
+  sr = stackedRun(mk(fall), null, "short");
+  assert.ok(sr.run > 30 && sr.capped, "steady downtrend: long capped short run");
+  assert.equal(stackedRun(mk(rise).slice(0, 20), null, "long"), null, "insufficient history is null");
 });
