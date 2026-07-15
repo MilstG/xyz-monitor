@@ -1245,6 +1245,30 @@ function trendRead(side, lad) {
   return { text: `Mixed — ${aligned} ${L ? "up" : "down"}, wait for alignment`, retest: null };
 }
 
+// Trend age: consecutive most-recent bars where the ribbon was stacked on `side`, computed from
+// an exact per-bar EMA walk (same SMA-seed construction as emaLast, so the final bar agrees with
+// the ladder to the last bit). The forming bar's close is replaced by the live mark, matching the
+// ladder. Bars are only checkable once BOTH EMAs exist (index >= 20), so on short histories the
+// run can hit the edge of what's measurable — `capped` says "at least this old", never "exactly".
+function stackedRun(candles, px, side) {
+  if (!Array.isArray(candles) || candles.length < TREND_MIN_BARS) return null;
+  const closes = candles.map((k) => +k.c);
+  if (px != null && isFinite(+px)) closes[closes.length - 1] = +px;
+  const n = closes.length, a13 = 2 / 14, a21 = 2 / 22;
+  let e13 = 0, e21 = 0, s13 = 0, s21 = 0, run = 0, checked = 0;
+  for (let i = 0; i < n; i++) {
+    const c = closes[i];
+    if (!isFinite(c)) return null;
+    if (i < 13) { s13 += c; if (i === 12) e13 = s13 / 13; } else e13 = a13 * c + (1 - a13) * e13;
+    if (i < 21) { s21 += c; if (i === 20) e21 = s21 / 21; } else e21 = a21 * c + (1 - a21) * e21;
+    if (i < 20) continue;
+    checked++;
+    const stacked = side === "long" ? (c > e13 && e13 > e21) : (c < e13 && e13 < e21);
+    run = stacked ? run + 1 : 0;
+  }
+  return { run, capped: run > 0 && run === checked };
+}
+
 // Guard against the D1 staleness window: daily candles refresh every ~6h, so a fetch that
 // predates UTC midnight leaves the series ending at YESTERDAY'S completed candle. Overwriting
 // that close with the live mark would smear today's price into yesterday's bar and drop a bar
@@ -1267,7 +1291,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
-  emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, TREND_TFS,
+  emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
 
 // ---- stop geometry validation ----------------------------------------------------------------

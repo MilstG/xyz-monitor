@@ -11,7 +11,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor } = require("./compute");
-const { bucketCandles, trendLadder, trendRead, withFormingDaily, TREND_TFS } = require("./compute");
+const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -2203,8 +2203,9 @@ function createPoller({ dex, store, log, version, crypto }) {
       if (r.px == null || !Array.isArray(r.hourlyRaw) || r.hourlyRaw.length < 26) { excluded++; continue; }
       const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : null;
       if (!d1 || d1.length < 26) { excluded++; continue; }
+      const d1g = withFormingDaily(d1, r.px, now, DAY);
       const lad = trendLadder(r.px, {
-        D1: withFormingDaily(d1, r.px, now, DAY),
+        D1: d1g,
         H12: bucketCandles(r.hourlyRaw, 12, HOUR),
         H4: bucketCandles(r.hourlyRaw, 4, HOUR),
         H1: r.hourlyRaw.slice(-96),
@@ -2218,16 +2219,30 @@ function createPoller({ dex, store, log, version, crypto }) {
         const s = lad[side];
         const tf = {};
         for (const t of TREND_TFS) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21 };
+        // Trend age: only meaningful when the D1 rung itself is aligned with this side — a 2/4
+        // carried by lower rungs has no D1 trend to age. Days, exact per-bar EMA walk; capped
+        // means the stack extends past available history ("at least", most relevant for crypto's
+        // 31d retention where the ceiling is ~11 measurable bars).
+        let age = null, ageCap = false;
+        if (lad.tf.D1.st === (side === "long" ? "up" : "down")) {
+          const sr = stackedRun(d1g, r.px, side);
+          if (sr) { age = sr.run; ageCap = sr.capped; }
+        }
         sides[side][uni].push({ coin: r.coin, t: r.ticker, score: s.score, tf, read: read.text,
-          retest: read.retest, strength: +s.strength.toFixed(5), vol: r.vol || 0 });
+          retest: read.retest, strength: +s.strength.toFixed(5), age, ageCap, vol: r.vol || 0 });
       }
     }
     for (const side of ["long", "short"]) for (const uni of ["crypto", "stocks"]) {
-      sides[side][uni].sort((a, b) => (b.score - a.score) || (b.strength - a.strength) || (b.vol - a.vol));
+      // Rank: score first, then FRESH-FIRST within it — a day-3 stack outranks a day-40 runner at
+      // the same score (the young trend is the entry; the old one is the chase). Ageless rows
+      // (D1 not aligned) sort after aged ones; volume settles the rest.
+      sides[side][uni].sort((a, b) => (b.score - a.score)
+        || ((a.age == null ? Infinity : a.age) - (b.age == null ? Infinity : b.age))
+        || (b.vol - a.vol));
       sides[side][uni] = sides[side][uni].slice(0, TREND_TOP).map(({ vol, ...e }) => e);
     }
     const sig = JSON.stringify([["long", "short"].map((s) => ["crypto", "stocks"].map((u) =>
-      sides[s][u].map((e) => [e.coin, e.score, e.retest, e.read])))]);
+      sides[s][u].map((e) => [e.coin, e.score, e.retest, e.read, e.age])))]);
     if (sig !== trendSig) { trendSig = sig; trendVer = Date.now(); }
     trendBuilt = now;
     trendCache = { ts: now, dataTs: trendVer,
