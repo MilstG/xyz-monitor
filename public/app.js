@@ -2369,18 +2369,41 @@ function trendDotHtml(tf,cell,side){
 }
 function trendSectionHtml(list,side,label,sub){
   let rows='';
-  if(!list||!list.length) rows=`<tr><td colspan="8"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
+  if(!list||!list.length) rows=`<tr><td colspan="10"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
   else rows=list.map((e,i)=>{
     const dots=['D1','H12','H4','H1'].map(t=>`<td class="tdc">${trendDotHtml(t,e.tf&&e.tf[t],side)}</td>`).join('');
     const scCls=side==='long'?(e.score===4?'pos':e.score===3?'':'sec'):(e.score===4?'neg':e.score===3?'':'sec');
     const badge=e.retest?`<span class="tretest" data-tip="price has pulled back to the EMA21 zone on a trending timeframe (${e.retest}) \u2014 prime continuation-entry zone">RETEST</span>`:'';
+    // per-scope context badge next to the ticker, reusing the markets-table machinery:
+    // crypto = funding-percentile extreme flag, stocks = imminent-earnings badge
+    let ctx='';
+    const rw=state.rows.get(e.coin);
+    if(rw){
+      if(state.scope==='crypto'){ const p=rw.fundPct;
+        if(p!=null&&(p>=90||p<=10)) ctx=` <i class="fpx ${p>=90?'hi':'lo'}" data-tip="${p}th percentile of this market's OWN 31d funding distribution \u2014 the crowd's payment is at a monthly extreme (${p>=90?'crowded long: a 4/4 uptrend here is a consensus trade, classic mean-reversion zone':'crowded short: squeeze fuel under any long thesis'})">${p>=90?'\u25b4':'\u25be'}${p}</i>`; }
+      else if(typeof earnBadge==='function') ctx=earnBadge(rw)||'';
+    }
+    // age: consecutive D1 bars stacked this side (days) · dash when D1 itself isn't aligned
+    const ageTxt=e.age==null?'\u2014':`${e.age}d${e.ageCap?'+':''}`;
+    const ageTip=e.age==null?'D1 rung not aligned with this side \u2014 no D1 trend to age'
+      :`ribbon stacked ${side==='long'?'up':'down'} on D1 for ${e.age} consecutive day${e.age===1?'':'s'}${e.ageCap?' \u2014 AT LEAST: the stack extends past available history':''} \u00b7 fresh trends rank first within a score`;
+    // Δ21: live H1 distance from EMA21 — proximity to the pullback entry zone
+    const d=e.tf&&e.tf.H1?e.tf.H1.d21:null;
+    const dTxt=d==null?'\u2014':`${d>=0?'+':''}${d.toFixed(1)}%`;
+    const dCls=d==null?'sec':(d>=0?'pos':'neg');
     return `<tr data-coin="${esc(e.coin)}" class="${e.retest?'trow-hl':''}" data-tip="open ${esc(e.t)} in the market detail panel">`
-      +`<td class="sec" style="width:26px">${i+1}</td><td class="ttick">${esc(e.t)}</td>${dots}`
-      +`<td class="tscore ${scCls}">${e.score}/4</td><td class="tread">${esc(e.read||'')}${badge}</td></tr>`;
+      +`<td class="sec" style="width:26px">${i+1}</td><td class="ttick">${esc(e.t)}${ctx}</td>${dots}`
+      +`<td class="tscore ${scCls}">${e.score}/4</td>`
+      +`<td class="tage" data-tip="${ageTip}">${ageTxt}</td>`
+      +`<td class="td21 ${dCls}" data-tip="live distance from the H1 EMA21 \u2014 proximity to the entry zone \u00b7 small = at the zone, large = extended (chasing)">${dTxt}</td>`
+      +`<td class="tread">${esc(e.read||'')}${badge}</td></tr>`;
   }).join('');
   return `<div class="tsec-h">${label} <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">${sub}</span></div>`
     +`<table class="trend-t"><thead><tr><th>#</th><th style="text-align:left">asset</th><th>D1</th><th>H12</th><th>H4</th><th>H1</th>`
-    +`<th data-tip="timeframes aligned with this side \u00b7 4/4 = established trend on every rung">score</th><th style="text-align:left">read</th></tr></thead><tbody>${rows}</tbody></table>`;
+    +`<th data-tip="timeframes aligned with this side \u00b7 4/4 = established trend on every rung">score</th>`
+    +`<th data-tip="days the D1 ribbon has been stacked this side \u00b7 N+ = at least (history cap) \u00b7 fresh trends rank first within a score">age</th>`
+    +`<th data-tip="live distance from the H1 EMA21 \u2014 how far from the pullback entry zone">\u039421</th>`
+    +`<th style="text-align:left">read</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 function renderTrend(){
   const box=el('trend-body'); if(!box) return;
@@ -2397,7 +2420,7 @@ function renderTrend(){
   html+=`<div class="corrpanel tlegend"><div class="cp-sub" style="margin:0 0 8px">How to read it</div>`
     +(L?`<div><span class="tdot g"></span> <b>Trending</b> <span class="sec">\u2014 price &gt; EMA13 &gt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Reclaiming</b> <span class="sec">\u2014 above EMA21, not yet stacked</span> &nbsp; <span class="tdot r"></span> <b>Below trend</b></div>`
        :`<div><span class="tdot r"></span> <b>Downtrending</b> <span class="sec">\u2014 price &lt; EMA13 &lt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Rolling over</b> <span class="sec">\u2014 below EMA21, not yet stacked</span> &nbsp; <span class="tdot g"></span> <b>Above trend</b></div>`)
-    +`<div class="sec" style="margin-top:8px;line-height:1.6"><b style="color:var(--text)">4/4 \u2014 all ${L?'green':'red'}:</b> established ${L?'up':'down'}trend; look for ${L?'longs on pullbacks':'shorts on rallies'} into the EMA21 zone. <b style="color:var(--text)">2\u20133/4 \u2014 mixed:</b> higher timeframes lead \u2014 wait for lower-TF alignment before entries; manage size. <b style="color:var(--blue)">RETEST</b> \u2014 price has pulled back to the EMA21 zone on a trending timeframe: prime continuation-entry zone. Click a row for the market's detail panel. Ranked by score, then ribbon separation (trend strength), then volume; only names with \u22652/4 alignment appear \u2014 top ${(d.params&&d.params.top)||10}. Flip the scope switcher for the other universe.</div></div>`;
+    +`<div class="sec" style="margin-top:8px;line-height:1.6"><b style="color:var(--text)">4/4 \u2014 all ${L?'green':'red'}:</b> established ${L?'up':'down'}trend; look for ${L?'longs on pullbacks':'shorts on rallies'} into the EMA21 zone. <b style="color:var(--text)">2\u20133/4 \u2014 mixed:</b> higher timeframes lead \u2014 wait for lower-TF alignment before entries; manage size. <b style="color:var(--blue)">RETEST</b> \u2014 price has pulled back to the EMA21 zone on a trending timeframe: prime continuation-entry zone. Click a row for the market's detail panel. Ranked by score, then <b style="color:var(--text)">fresh-first</b> \u2014 within a score the youngest D1 stack ranks highest (the young trend is the entry, the old one is the chase); <b style="color:var(--text)">age</b> counts consecutive D1 days stacked (N+ = at least, history-capped), <b style="color:var(--text)">\u039421</b> is the live distance from the H1 EMA21 (small = at the entry zone, large = extended). Only names with \u22652/4 alignment appear \u2014 top ${(d.params&&d.params.top)||10}. Flip the scope switcher for the other universe.</div></div>`;
   box.innerHTML=html;
   box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
 }
@@ -3302,7 +3325,7 @@ trend:`
 <div class="hlp-h">RETEST — the entry flag</div>
 <p><b style="color:var(--blue)">RETEST</b> fires when the last few bars (forming bar included) probed into the 13/21 ribbon zone on a <i>trending</i> timeframe while the close held the EMA21 side — the classic continuation pullback (long) or rally-into-resistance (short). The highest timeframe showing it is the one named in the read. Honest approximation, stated plainly: the zone test compares recent bar extremes against the <i>current</i> EMAs, not bar-by-bar historical EMAs, and daily candles restored from the warm cache carry closes only, so their zone probe degrades to closes.</p>
 <div class="hlp-h">Sourcing & ranking</div>
-<p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then ribbon separation (a trend-strength proxy), then volume; only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>`,
+<p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then <b>fresh-first</b>: within a score, the youngest D1 stack ranks highest — a day-3 trend is the entry, a day-40 trend is the chase. <b>Age</b> is an exact per-bar EMA walk counting consecutive D1 days the ribbon has been stacked this side (N+ means "at least" — the stack extends past available history, most common on crypto's 31d retention; a dash means the D1 rung itself isn't aligned). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number: a 4/4 at +0.4% is at the zone, at +6% it's extended. Ticker badges carry per-scope context from the machinery the Markets table already uses: crypto shows the ▴/▾ funding-percentile flag when the crowd's payment is at a monthly extreme (a 4/4 uptrend on a ▴ is a consensus trade), stocks show the earnings badge when a report is imminent (a retest two days before earnings is a different trade). Only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>`,
 sectors:`
 <div class="hlp-h">Flow map (default)</div>
 <p>Each bubble is a sector. <b>Horizontal = capital direction</b>: a blend of return and OI-conviction — right means money flowing in <i>with</i> conviction, left means flowing out. <b>Vertical = heat</b>: activity from volume and volatility. So <b>top-right = accumulation</b> (in, loudly), <b>top-left = distribution</b> (out, loudly), and the bottom half is simply quiet. Bubble size = 24h volume. Click a bubble for the sector's members.</p>
