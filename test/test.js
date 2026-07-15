@@ -722,3 +722,123 @@ test("rvolMulti: clock-hour matching, elevation, and the min-samples gate", () =
   const r3 = rvolMulti(short, { h1: HOUR }, now);
   assert.equal(r3.h1, null, "fewer than 7 baseline days -> null");
 });
+
+// ===== trend leaderboard (build -47) =====
+test("emaLast: SMA-seeded EMA — constants, convergence direction, honest nulls", () => {
+  const { emaLast } = require("../src/compute");
+  // a constant series has EMA == the constant, exactly
+  assert.equal(emaLast(new Array(40).fill(7), 13), 7);
+  assert.equal(emaLast(new Array(40).fill(7), 21), 7);
+  // rising series: EMA lags below the last close; the faster EMA sits closer to price
+  const up = Array.from({ length: 60 }, (_, i) => 100 * Math.pow(1.01, i));
+  const e13 = emaLast(up, 13), e21 = emaLast(up, 21), last = up[up.length - 1];
+  assert.ok(e13 < last && e21 < last, "both EMAs lag a rising series");
+  assert.ok(e13 > e21, "the 13 tracks a rising price more closely than the 21");
+  // hand-check against an independent reference construction (seed SMA, recurse)
+  const ref = (cl, n) => { let e = cl.slice(0, n).reduce((a, b) => a + b) / n, a = 2 / (n + 1);
+    for (let i = n; i < cl.length; i++) e = a * cl[i] + (1 - a) * e; return e; };
+  assert.ok(Math.abs(e13 - ref(up, 13)) < 1e-9);
+  assert.ok(Math.abs(e21 - ref(up, 21)) < 1e-9);
+  // insufficient history is a null, never a half-converged number
+  assert.equal(emaLast(up.slice(0, 20), 21), null);
+  assert.equal(emaLast(up.slice(0, 25), 13), null, "TREND_MIN_BARS floor applies even to the 13");
+  assert.equal(emaLast([1, 2, "x", 4].concat(new Array(30).fill(5)), 13), null, "a NaN anywhere poisons honestly to null");
+});
+
+test("bucketCandles: UTC-aligned aggregation, forming bucket, closes-only degradation", () => {
+  const { bucketCandles } = require("../src/compute");
+  // 11 hourly candles starting at t=1h -> 4h buckets [0,4), [4,8), [8,12): first bucket partial
+  const hrs = [];
+  for (let i = 1; i <= 11; i++) hrs.push({ t: i * HOUR, o: 10 + i, h: 20 + i, l: 5 + i, c: 10 + i });
+  const b4 = bucketCandles(hrs, 4, HOUR);
+  assert.equal(b4.length, 3);
+  assert.deepEqual(b4.map((k) => k.t), [0, 4 * HOUR, 8 * HOUR], "buckets are UTC-aligned to the width");
+  assert.equal(b4[0].c, 13, "bucket close = last hourly close inside it");
+  assert.equal(b4[1].h, 27, "bucket high = max hourly high (h4..h7 -> 24..27)");
+  assert.equal(b4[1].l, 9, "bucket low = min hourly low (l4..l7 -> 9..12)");
+  assert.equal(b4[2].c, 21, "forming bucket carries the latest close");
+  // closes-only candles (warm-cache daily shape) degrade h/l to the close instead of NaN
+  const co = bucketCandles([{ t: HOUR, c: 5 }, { t: 2 * HOUR, c: 6 }], 4, HOUR);
+  assert.equal(co.length, 1);
+  assert.equal(co[0].h, 6); assert.equal(co[0].l, 5);
+});
+
+test("trendState: the four-state matrix from two comparisons", () => {
+  const { trendState } = require("../src/compute");
+  assert.equal(trendState(110, 105, 100), "up");
+  assert.equal(trendState(90, 95, 100), "down");
+  assert.equal(trendState(103, 105, 100), "reclaim", "above EMA21, ribbon not stacked");
+  assert.equal(trendState(98, 95, 100), "roll", "below EMA21, ribbon not stacked");
+  assert.equal(trendState(null, 105, 100), null);
+  assert.equal(trendState(100, null, 100), null);
+});
+
+test("trend ladder + reads: full trend, retest, lagging rung, mixed, and exclusion", () => {
+  const { trendLadder, trendRead } = require("../src/compute");
+  const mk = (closes, lowMul, highMul) => closes.map((c, i) => ({ t: i * HOUR, h: c * (highMul || 1.002), l: c * (lowMul || 0.998), c }));
+  const rise = Array.from({ length: 60 }, (_, i) => 100 * Math.pow(1.01, i - 59));   // ascends to 100
+  const fall = Array.from({ length: 60 }, (_, i) => 100 * Math.pow(1.01, 59 - i));   // descends to 100
+  // 4/4 uptrend, shallow recent lows -> no retest -> "Full uptrend" with the H1 distance
+  const upC = mk(rise);
+  let lad = trendLadder(100, { D1: upC, H12: upC, H4: upC, H1: upC });
+  assert.ok(lad, "ladder computes");
+  assert.equal(lad.long.score, 4);
+  assert.equal(lad.short.score, 0);
+  assert.equal(lad.long.retest, null, "a 0.2% wick never reaches an EMA13 lagging ~6% back");
+  let read = trendRead("long", lad);
+  assert.ok(/^Full uptrend — long pullbacks · \+\d/.test(read.text), read.text);
+  assert.equal(trendRead("short", lad), null, "0/4 shorts is not board material");
+  // deep recent wick into the ribbon while price holds -> RETEST on the highest TF (D1 first)
+  const wick = mk(rise, 0.90);
+  lad = trendLadder(100, { D1: wick, H12: wick, H4: wick, H1: wick });
+  assert.equal(lad.long.score, 4);
+  assert.equal(lad.long.retest, "D1", "highest trending TF that probed the zone is the one reported");
+  read = trendRead("long", lad);
+  assert.equal(read.text, "Pullback to D1 EMA21 — continuation entry");
+  assert.equal(read.retest, "D1");
+  // shorts mirror: rally wick into a stacked-down ribbon
+  const fallWick = mk(fall, undefined, 1.10);
+  lad = trendLadder(100, { D1: fallWick, H12: fallWick, H4: fallWick, H1: fallWick });
+  assert.equal(lad.short.score, 4);
+  assert.equal(lad.short.retest, "D1");
+  read = trendRead("short", lad);
+  assert.equal(read.text, "Rally to D1 EMA21 — continuation short");
+  // 3/4 with one repairing rung -> "Strong — {TF} lagging"
+  const flatDip = mk(new Array(50).fill(100).concat(new Array(10).fill(98)));   // e13 dragged under e21, px back at 100
+  lad = trendLadder(100, { D1: upC, H12: upC, H4: upC, H1: flatDip });
+  assert.equal(lad.long.score, 3);
+  assert.equal(lad.tf.H1.st, "reclaim");
+  read = trendRead("long", lad);
+  assert.equal(read.text, "Strong — H1 lagging");
+  // 2/4 split -> "Mixed — {aligned} up/down, wait for alignment" on BOTH lenses
+  lad = trendLadder(100, { D1: upC, H12: upC, H4: mk(fall), H1: mk(fall) });
+  assert.equal(lad.long.score, 2);
+  assert.equal(lad.short.score, 2);
+  assert.equal(trendRead("long", lad).text, "Mixed — D1/H12 up, wait for alignment");
+  assert.equal(trendRead("short", lad).text, "Mixed — H4/H1 down, wait for alignment");
+  // any rung short on history -> the whole market is excluded, never guessed
+  assert.equal(trendLadder(100, { D1: upC.slice(-20), H12: upC, H4: upC, H1: upC }), null);
+  assert.equal(trendLadder(null, { D1: upC, H12: upC, H4: upC, H1: upC }), null);
+});
+
+test("trend leaderboard integrity: client, markup and server carry the tab end to end", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const defs = {};
+  for (const m of s.matchAll(/^(?:async )?function ([A-Za-z0-9_]+)\(/gm)) defs[m[1]] = (defs[m[1]] || 0) + 1;
+  for (const n of ["loadTrend", "openTrend", "renderTrend", "trendDotHtml", "trendSectionHtml"]) {
+    assert.ok(defs[n] >= 1, `missing client function: ${n}`);
+    assert.equal(defs[n], 1, `duplicate client function: ${n}`);
+  }
+  for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`"])
+    assert.ok(s.includes(frag), `missing client feature marker: ${frag}`);
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(html.includes('data-view="trend"'), "trend tab button missing from nav");
+  for (const id of ["view-trend", "trendside", "trend-body", "trend-asof"])
+    assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes("/api/trend"), "server route missing: /api/trend");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl"])
+    assert.ok(css.includes(cls), `missing style: ${cls}`);
+});
