@@ -842,3 +842,40 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
   for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl"])
     assert.ok(css.includes(cls), `missing style: ${cls}`);
 });
+
+test("withFormingDaily: stale daily series gets a synthetic forming bar, fresh series untouched", () => {
+  const { withFormingDaily, trendLadder } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 14, 19, 0, 0), dayStart = Date.UTC(2026, 6, 14);
+  const stale = Array.from({ length: 40 }, (_, i) => ({ t: dayStart - (40 - i) * DAY, c: 100 + i }));
+  const g = withFormingDaily(stale, 150, now, DAY);
+  assert.equal(g.length, 41, "one synthetic bar appended");
+  assert.equal(g[40].t, dayStart, "appended at today's UTC day start");
+  assert.equal(g[40].c, 150, "carries the live mark");
+  assert.equal(stale.length, 40, "source series never mutated");
+  // fresh series (forming day already present) passes through by reference
+  const fresh = stale.concat([{ t: dayStart, c: 141 }]);
+  assert.equal(withFormingDaily(fresh, 150, now, DAY), fresh);
+  assert.equal(withFormingDaily(null, 150, now, DAY), null);
+  assert.equal(withFormingDaily(stale, null, now, DAY), stale, "no mark, no synthesis");
+  // the failure mode the guard exists for: WITHOUT it, the ladder overwrites yesterday's close
+  // with the live mark (one bar smeared away); WITH it, yesterday's close survives intact
+  const mk = (cl) => cl.map((k) => ({ t: k.t, c: k.c }));
+  const ladStale = trendLadder(150, { D1: mk(stale), H12: mk(stale), H4: mk(stale), H1: mk(stale) });
+  const ladGuard = trendLadder(150, { D1: mk(g), H12: mk(g), H4: mk(g), H1: mk(g) });
+  assert.ok(ladGuard.tf.D1.e21 > ladStale.tf.D1.e21,
+    "guarded EMA carries one extra bar of the live mark's weight — the smear is gone");
+});
+
+test("retest flip point: the wick boundary sits exactly at EMA13", () => {
+  const { trendLadder } = require("../src/compute");
+  const rise = Array.from({ length: 60 }, (_, i) => 100 * Math.pow(1.01, i - 59));
+  // shallow lows everywhere; only the LAST bar's low is controlled, so it is the binding probe
+  const mk = (lastLow) => rise.map((c, i) => ({ t: i * HOUR, h: c * 1.001, l: i === 59 ? lastLow : c * 0.9999, c }));
+  const base = trendLadder(100, { D1: mk(99.99), H12: mk(99.99), H4: mk(99.99), H1: mk(99.99) });
+  const e13 = base.tf.D1.e13;
+  assert.equal(base.long.retest, null, "low above EMA13: no retest");
+  const on = trendLadder(100, { D1: mk(e13), H12: mk(e13), H4: mk(e13), H1: mk(e13) });
+  assert.equal(on.long.retest, "D1", "low exactly at EMA13 fires (<= boundary)");
+  const just = trendLadder(100, { D1: mk(e13 + 1e-9), H12: mk(e13 + 1e-9), H4: mk(e13 + 1e-9), H1: mk(e13 + 1e-9) });
+  assert.equal(just.long.retest, null, "a hair above EMA13 does not fire");
+});
