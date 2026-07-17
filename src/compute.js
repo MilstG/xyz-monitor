@@ -1461,38 +1461,6 @@ function twapTaker(tr) {
   const u = tr.side === "B" ? tr.users[0] : tr.users[1];
   return typeof u === "string" && u.startsWith("0x") ? u.toLowerCase() : null;
 }
-// Fold one WsTrade into the episode map (key user|coin|side). Consecutive slices from the same
-// account on the same market+side are ONE episode; a gap longer than the sweep's goneMs ends it.
-// Returns the episode touched, or null when the trade isn't a TWAP slice / is malformed.
-function foldTwapTrade(map, tr, now) {
-  if (!tr || !isTwapFill(tr.hash)) return null;
-  const user = twapTaker(tr);
-  if (!user || typeof tr.coin !== "string" || !tr.coin) return null;
-  const px = +tr.px, sz = +tr.sz;
-  if (!(px > 0) || !(sz > 0) || !isFinite(px) || !isFinite(sz)) return null;
-  const side = tr.side === "B" ? "buy" : "sell";
-  const t = Number.isFinite(tr.time) ? tr.time : now;
-  const key = user + "|" + tr.coin + "|" + side;
-  let e = map.get(key);
-  if (!e) { e = { key, user, coin: tr.coin, side, t0: t, tLast: 0, slices: 0, sz: 0, ntl: 0, lastPx: px }; map.set(key, e); }
-  e.slices++; e.sz += sz; e.ntl += sz * px; e.lastPx = px;
-  if (t > e.tLast) e.tLast = t;
-  if (t < e.t0) e.t0 = t;
-  return e;
-}
-// Split the episode map into still-active vs ended (no slice for > goneMs). Ended episodes are
-// REMOVED from the map — the caller owns archiving them. TWAP slices land ~every 30s (randomize
-// jitters that), so a multi-minute silence is an ended/finished order, not a slow one.
-function sweepTwaps(map, now, goneMs) {
-  const active = [], ended = [];
-  for (const e of map.values()) {
-    if (now - e.tLast > goneMs) { ended.push(e); map.delete(e.key); }
-    else active.push(e);
-  }
-  active.sort((a, b) => b.ntl - a.ntl);
-  ended.sort((a, b) => b.tLast - a.tLast);
-  return { active, ended };
-}
 // Signed distance from mark to the liquidation price, in % of mark. Positive = still alive
 // (long: mark above liq; short: mark below liq). Zero/negative = the mark is AT or THROUGH the
 // liquidation price. Null on malformed inputs — never a fabricated distance.
@@ -1527,11 +1495,34 @@ function pruneWhales(map, max, now, halfLifeMs) {
   for (let i = max; i < scored.length; i++) { map.delete(scored[i][0]); dropped++; }
   return dropped;
 }
+// Cascade ladder: cumulative liquidatable notional per coin within each distance band of the
+// live mark, split by side. entries: [{coin, side: "long"|"short", dist (live %, may be <=0 when
+// the mark is at/through the level), ntl}]. Bands ascending; a position through its level counts
+// in EVERY band (it is liquidating now). Output is per-coin cumulative arrays aligned to bands —
+// the "if price moves X%, $Y of tracked positions force-liquidate" read, long side liquidating
+// DOWN (forced selling), short side liquidating UP (forced buying).
+function ladderBands(entries, bands) {
+  const out = new Map();
+  if (!Array.isArray(entries) || !Array.isArray(bands) || !bands.length) return [];
+  const maxB = bands[bands.length - 1];
+  for (const e of entries) {
+    if (!e || e.dist == null || !Number.isFinite(e.dist) || !Number.isFinite(e.ntl) || e.ntl <= 0) continue;
+    if (e.dist > maxB) continue;
+    if (e.side !== "long" && e.side !== "short") continue;
+    let c = out.get(e.coin);
+    if (!c) { c = { coin: e.coin, long: bands.map(() => 0), short: bands.map(() => 0), nLong: 0, nShort: 0 }; out.set(e.coin, c); }
+    const arr = e.side === "long" ? c.long : c.short;
+    for (let i = 0; i < bands.length; i++) if (e.dist <= bands[i]) arr[i] += e.ntl;
+    if (e.side === "long") c.nLong++; else c.nShort++;
+  }
+  const rows = [...out.values()];
+  rows.sort((a, b) => (b.long[b.long.length - 1] + b.short[b.short.length - 1]) - (a.long[a.long.length - 1] + a.short[a.short.length - 1]));
+  return rows;
+}
 module.exports.isTwapFill = isTwapFill;
 module.exports.twapTaker = twapTaker;
-module.exports.foldTwapTrade = foldTwapTrade;
-module.exports.sweepTwaps = sweepTwaps;
 module.exports.liqDistancePct = liqDistancePct;
 module.exports.decayScore = decayScore;
 module.exports.foldWhale = foldWhale;
 module.exports.pruneWhales = pruneWhales;
+module.exports.ladderBands = ladderBands;
