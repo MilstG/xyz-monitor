@@ -425,14 +425,17 @@ test("earnings: parser carries actuals and revenue for beat/miss", () => {
   const { parseEarningsCalendar } = require("../src/compute");
   const symMap = new Map([["NVDA", { coin: "xyz:NVDA", ticker: "NVDA" }]]);
   const out = parseEarningsCalendar({ earningsCalendar: [
-    { symbol: "NVDA", date: "2026-07-13", hour: "amc", epsEstimate: 5.6234, epsActual: 5.712, revenueEstimate: 41234000000, revenueActual: 42891000000 },
+    { symbol: "NVDA", date: "2026-07-13", hour: "amc", epsEstimate: 5.6234, epsActual: 5.712, revenueEstimate: 41234000000, revenueActual: 42891000000, quarter: 2, year: 2026 },
     { symbol: "NVDA", date: "2026-10-14", hour: "amc", epsEstimate: 6.1 },
   ] }, symMap);
   assert.equal(out[0].epsA, 5.71, "actual quantized to 2dp");
   assert.equal(out[0].rev, 41200000000, "revenue estimate at 3 significant figures");
   assert.equal(out[0].revA, 42900000000);
+  assert.equal(out[0].q, 2, "fiscal quarter captured — the reschedule discriminator");
+  assert.equal(out[0].y, 2026);
   assert.equal(out[1].epsA, null, "future print has no actual — null, never 0");
   assert.equal(out[1].rev, null);
+  assert.equal(out[1].q, null, "missing quarter is unknown, never guessed");
 });
 
 test("earnings: print merge dedupes, upgrades in place with actuals, never blanks them", () => {
@@ -456,6 +459,11 @@ test("earnings: print merge dedupes, upgrades in place with actuals, never blank
   assert.equal(jp.epsA, 4.3, "actual upgrades in place");
   assert.equal(jp.s, "BMO", "TBD session firms up when a later fetch knows it");
   assert.ok(out[0].d <= out[1].d && out[1].d <= out[2].d, "date-sorted ascending");
+  // quarter/year upgrade in place, never blanked by a later fetch that lacks them
+  const q1 = mergeEarnPrints([{ coin: "c", t: "T", d: "2026-04-15", s: "AMC", q: 1, y: 2026 }],
+    [{ coin: "c", t: "T", d: "2026-04-15", s: "AMC", epsA: 2 }], now);
+  assert.equal(q1[0].q, 1, "stored quarter survives a later fetch without it");
+  assert.equal(q1[0].epsA, 2, "while the actual still lands");
 });
 
 test("earnings: reaction study — BMO same-day, AMC next-day, expansion, gaps, honest gaps in coverage", () => {
@@ -491,6 +499,62 @@ test("earnings: reaction study — BMO same-day, AMC next-day, expansion, gaps, 
   assert.equal(st2.n, 2);
   assert.equal(st2.gapN, 0, "no opens -> no gap claims");
   assert.equal(earnReactionsFor([], daily), null, "no prints -> null, not zeros");
+});
+
+test("earnings: chunked calendar windows are disjoint, covering, near-first — the truncation fix", () => {
+  const { earnChunks, etDayStr } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 16, 16, 0);   // Thu Jul 16 noon ET
+  const ch = earnChunks(now - 5 * DAY, now + 14 * DAY, 3);
+  assert.equal(ch[0][0], "2026-07-11", "coverage starts 5 days back");
+  assert.equal(ch[ch.length - 1][1], "2026-07-30", "coverage ends at the window edge");
+  // every ET day in [from, to] falls inside exactly one chunk — no gap can silently drop a
+  // report date, no overlap can double-count (dedupe guards DST-edge overlap anyway)
+  for (let d = -5; d <= 14; d++) {
+    const day = etDayStr(now + d * DAY);
+    const hits = ch.filter(([f, t]) => f <= day && day <= t).length;
+    assert.equal(hits, 1, `ET day ${day} covered exactly once, got ${hits}`);
+  }
+  assert.ok(ch[0][1] < ch[1][0], "chunks ordered near-first and disjoint");
+  assert.ok(ch.every(([f, t]) => f <= t), "no inverted chunk");
+  assert.deepEqual(earnChunks(now, now, 3), [[etDayStr(now), etDayStr(now)]], "single-day window is one single-day chunk");
+});
+
+test("earnings: stale-schedule purge drops placeholder-date phantoms, never deletes on absence", () => {
+  const { purgeStalePrints } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 16, 16, 0);   // Thu Jul 16 noon ET
+  const prints = [
+    // the live phantom: IBM persisted at Jul 14 "with actuals" while IBM's real date is Jul 22.
+    // Legacy record — no quarter captured — so the 10-day proximity fallback must catch it.
+    { coin: "xyz:IBM", t: "IBM", d: "2026-07-14", s: "BMO", eps: 3.05, epsA: 2.93 },
+    // real print, reported today-ish, no future row -> untouchable
+    { coin: "xyz:NFLX", t: "NFLX", d: "2026-07-15", s: "AMC", eps: 0.8, epsA: 0.8, q: 2, y: 2026 },
+    // same-quarter phantom WITH quarter captured -> exact-match drop
+    { coin: "xyz:AAA", t: "AAA", d: "2026-07-13", s: "AMC", eps: 1, epsA: 1.2, q: 2, y: 2026 },
+    // past print whose ticker has a future row for the NEXT fiscal quarter -> kept (legit history)
+    { coin: "xyz:BBB", t: "BBB", d: "2026-07-12", s: "BMO", eps: 2, epsA: 2.1, q: 2, y: 2026 },
+    // old print far outside any proximity window -> kept even without quarter info
+    { coin: "xyz:IBM", t: "IBM", d: "2026-04-22", s: "AMC", eps: 2.9, epsA: 3.0 },
+  ];
+  const parsed = [
+    { coin: "xyz:IBM", t: "IBM", d: "2026-07-22", s: "AMC", eps: 2.96, epsA: null, q: 2, y: 2026 },
+    { coin: "xyz:AAA", t: "AAA", d: "2026-07-24", s: "AMC", eps: 1, epsA: null, q: 2, y: 2026 },
+    { coin: "xyz:BBB", t: "BBB", d: "2026-07-20", s: "BMO", eps: 2, epsA: null, q: 3, y: 2026 },
+  ];
+  const out = purgeStalePrints(prints, parsed, now);
+  assert.deepEqual(out.map((p) => p.t + "|" + p.d).sort(),
+    ["BBB|2026-07-12", "IBM|2026-04-22", "NFLX|2026-07-15"].sort(),
+    "phantoms dropped (legacy proximity + same-quarter), real and historical prints kept");
+  // absence is never deletion evidence: a window that simply lacks a ticker changes nothing
+  assert.equal(purgeStalePrints(prints, [{ coin: "xyz:ZZZ", t: "ZZZ", d: "2026-07-25", s: "AMC" }], now).length, prints.length,
+    "no future row for a ticker -> its past prints are untouched");
+  assert.equal(purgeStalePrints(prints, [], now).length, prints.length, "empty window purges nothing");
+  // wiring pins: BOTH calendar pulls go through the chunked fetch, the purge runs before merge,
+  // and the backfill flag is versioned so truncated-v1 volumes re-pull chunked once.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok((pol.match(/await getCalChunked\(/g) || []).length >= 2, "chunked fetch used for live window AND backfill");
+  assert.ok(pol.indexOf("purgeStalePrints(earnPrints, parsed") < pol.indexOf("mergeEarnPrints(earnPrints, past.concat"), "purge runs before the merge");
+  assert.ok(pol.includes("data.histDone2 === true") && pol.includes("histDone2: earnHistDone"), "backfill flag versioned in hydrate and persist");
 });
 
 test("earnings: recently-reported window keeps the two prior ET days, drops today and older, sorts most-recent first", () => {
