@@ -45,6 +45,7 @@
   <button class="tab" data-view="corr">Correlation</button>
   <button class="tab" data-view="sessions">Sessions</button>
   <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
+  <button class="tab" data-view="liqs" title="Liquidation monitor — tracked positions within 1% of liquidation, the per-market cascade ladder, and mark-crossed-liquidation events">Liqs</button>
   <button class="tab" data-view="earnings" title="Upcoming earnings reports for the equity universe — dates and session (pre-market / after close), ET calendar">Earnings</button>
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
@@ -230,6 +231,10 @@
   </div>
   <div id="sighist-panel" class="corrpanel" hidden></div>
   <div id="signals-body"><div class="msg">Loading…</div></div>
+</section>
+
+<section id="view-liqs" hidden>
+  <div id="liqs-body"><div class="msg">Loading…</div></div>
 </section>
 
 <section id="view-earnings" hidden>

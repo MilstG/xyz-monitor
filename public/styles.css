@@ -605,3 +605,23 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .trend-t .td21{font-family:var(--mono);font-size:12px;text-align:center;width:62px;cursor:help}
 .trend-t .ttick .fpx{margin-left:7px}
 @media (max-width:680px){ .trend-t .tage,.trend-t .td21{width:44px;font-size:11px} }
+
+/* ===== flows: liquidation monitor tab ===== */
+.flowstrip{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 12px}
+.flowstrip .fm{border:1px solid var(--border);background:var(--panel);border-radius:6px;padding:6px 11px;font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:7px}
+.flowstrip .fm b{color:var(--text)}
+.sidepill{display:inline-block;border-radius:4px;padding:1px 7px;font-size:10.5px;font-weight:600;letter-spacing:.4px}
+.sidepill.long{color:var(--up);border:1px solid var(--up)}
+.sidepill.short{color:var(--down);border:1px solid var(--down)}
+.lqst{display:inline-block;border-radius:4px;padding:1px 7px;font-size:10.5px;font-weight:600}
+.lqst.triggered{color:var(--down);border:1px solid var(--down)}
+.lqst.confirmed{color:var(--text);background:var(--down);border:1px solid var(--down)}
+.lqst.partial{color:var(--accent);border:1px solid var(--accent)}
+.lqst.averted{color:var(--muted);border:1px solid var(--border)}
+.lqst.unresolved{color:var(--faint);border:1px dashed var(--border)}
+.dngr-hot{color:var(--down);font-weight:700}
+.dngr-warm{color:var(--accent);font-weight:600}
+.flowaddr{color:var(--blue);text-decoration:none;border-bottom:1px dotted var(--blue)}
+.flowaddr:hover{opacity:.8}
+.flowlive{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);box-shadow:0 0 6px var(--up);vertical-align:middle}
+.flowlive.stale{background:var(--accent);box-shadow:none}
