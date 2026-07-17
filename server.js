@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.16-55";
+const VERSION = "2026.07.16-56";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -239,6 +239,14 @@ async function main() {
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
     serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], recent: [], eligible: 0 }));
+  // Operator surgery for feed-garbage earnings prints (e.g. a phantom report date the feed
+  // asserted and never corrected): removes the print from history and the reaction study and
+  // tombstones it so no future fetch can resurrect it. Session-gated like every route.
+  fastify.post("/api/earnings/void", (req, reply) => {
+    const b = req.body || {};
+    const r = poller.voidEarnPrint(b.t, b.d);
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
   // Liquidation monitor — tracked-cohort positions ranked by distance to their liquidation
   // price, the per-market cascade ladder, and mark-crossed-liq events with sweep-confirmed
   // outcomes (hot lane re-sweeps at-risk books every ~15s).
