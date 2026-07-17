@@ -2244,7 +2244,7 @@ function earnBadge(r){
   const p=earnNext(r.ticker); if(!p||p.diff>1) return '';
   if(p.diff===0&&p.e.epsA!=null){
     // Reported: the badge flips from schedule to scoreboard \u2014 verdict + the tape's reaction.
-    const beat=p.e.eps!=null?(p.e.epsA>p.e.eps?'beat':'missed'):null;
+    const beat=p.e.eps!=null?(p.e.epsA>p.e.eps?'beat':p.e.epsA<p.e.eps?'missed':'in line'):null;
     const dm=r.d1!=null&&isFinite(r.d1)?` \u00b7 day ${r.d1>=0?'+':''}${r.d1.toFixed(1)}%`:'';
     return `<i class="eb eb0" title="Reported TODAY (${earnSessLbl(p.e.s)}) \u00b7 EPS ${p.e.epsA}${p.e.eps!=null?` vs ${p.e.eps} est (${beat})`:''}${dm}">E</i>`;
   }
@@ -2252,13 +2252,28 @@ function earnBadge(r){
   return `<i class="eb ${p.diff===0?'eb0':'eb1'}" title="Earnings ${p.diff===0?'TODAY':'tomorrow'} \u00b7 ${earnSessLbl(p.e.s)}${eps} \u00b7 ${p.e.d} (ET calendar day)">E</i>`;
 }
 function openEarnings(){ renderEarnings(); if(Date.now()-_earnLast>60*1000) loadEarnings(); }
-// EPS segment: schedule estimate before the print; estimate vs ACTUAL with a beat/miss verdict
-// and surprise % once the feed fills the actual (same calendar row updates after the report).
+// Adaptive EPS display precision: expand decimals (2 -> 4) until actual and estimate render as
+// DIFFERENT numbers whenever they ARE different. "0.8 vs 0.8 miss +0.0%" (the live NFLX print:
+// 0.8000 actual vs 0.8042 est collapsed at 2dp) is a display contradicting its own verdict —
+// never acceptable. Trailing zeros trimmed after the distinction is secured.
+function epsPairFmt(a,b){
+  let dp=2;
+  while(dp<4&&a!==b&&a.toFixed(dp)===b.toFixed(dp)) dp++;
+  const tr=(x)=>x.toFixed(dp).replace(/(\.\d*?)0+$/,'$1').replace(/\.$/,'');
+  return [tr(a),tr(b)];
+}
+// EPS segment: schedule estimate before the print; estimate vs ACTUAL with a beat/miss/in-line
+// verdict and surprise % once the feed fills the actual (same calendar row updates after the
+// report). Verdict is computed on the stored 4dp values, tri-state — equal values are IN LINE,
+// never a miss. Surprise gains a decimal when it would otherwise round to a signless 0.0%.
 function earnEpsHtml(e){
   if(e.epsA!=null&&e.eps!=null){
-    const beat=e.epsA>e.eps, sur=e.eps!==0?((e.epsA-e.eps)/Math.abs(e.eps)*100):null;
-    const tip=`reported · EPS ${e.epsA} vs ${e.eps} est${sur!=null?` (${sur>=0?'+':''}${sur.toFixed(1)}% surprise)`:''}${e.rev!=null||e.revA!=null?` · revenue ${e.revA!=null?fmtUsd(e.revA):'—'} vs ${e.rev!=null?fmtUsd(e.rev):'—'} est`:''} · verdict is EPS-only — the tape's verdict is the day column`;
-    return `<span class="earn-eps" data-tip="${esc(tip)}">EPS ${e.epsA} vs ${e.eps} <b class="${beat?'pos':'neg'}">${beat?'beat':'miss'}${sur!=null?' '+(sur>=0?'+':'')+sur.toFixed(1)+'%':''}</b></span>`;
+    const v=e.epsA>e.eps?'beat':e.epsA<e.eps?'miss':'in line';
+    const sur=e.eps!==0?((e.epsA-e.eps)/Math.abs(e.eps)*100):null;
+    const surStr=sur!=null&&sur!==0?(sur>=0?'+':'')+sur.toFixed(Math.abs(sur)<0.95?2:1)+'%':null;
+    const [fa,fe]=epsPairFmt(e.epsA,e.eps);
+    const tip=`reported · EPS ${e.epsA} vs ${e.eps} est${surStr!=null?` (${surStr} surprise)`:''}${e.rev!=null||e.revA!=null?` · revenue ${e.revA!=null?fmtUsd(e.revA):'—'} vs ${e.rev!=null?fmtUsd(e.rev):'—'} est`:''} · verdict is EPS-only, vs the FEED's estimate (consensus differs by source) — the tape's verdict is the move next to it`;
+    return `<span class="earn-eps" data-tip="${esc(tip)}">EPS ${fa} vs ${fe} <b class="${v==='beat'?'pos':v==='miss'?'neg':'sec'}">${v}${v!=='in line'&&surStr!=null?' '+surStr:''}</b></span>`;
   }
   if(e.epsA!=null) return `<span class="earn-eps sec" data-tip="actual reported; the feed carries no estimate to compare against">EPS ${e.epsA} · no est</span>`;
   const revTip=e.rev!=null?` · revenue est ${fmtUsd(e.rev)}`:'';
@@ -2331,6 +2346,21 @@ function earnReactHtml(e){
   const tip=`the print's own reaction move — ${e.s==='AMC'?'the daily candle AFTER the report (AMC prints land after the close)':'the report day\u2019s own daily candle'} vs the prior close, same convention as the reaction study (UTC candles; the perp trades through weekends)${live?'. That candle is STILL OPEN \u2014 this is the move so far, not a settled print':''}`;
   return `<span class="earn-live" data-tip="${esc(tip)}"><b class="${mv>=0?'pos':'neg'}">${mv>=0?'+':''}${mv.toFixed(1)}%</b><span class="sec"> reaction${live?' so far':''}</span></span>`;
 }
+// Void-control wiring for reported rows: confirm, POST the tombstone, reload the payload (the
+// server bumps the ETag so the repaint is immediate). stopPropagation keeps the row's
+// open-drawer click out of it.
+function wireEarnVoid(box){
+  box.querySelectorAll('.earn-void').forEach(b=>b.addEventListener('click',async(ev)=>{
+    ev.stopPropagation();
+    const t=b.dataset.vt,d=b.dataset.vd;
+    if(!confirm('Void '+t+' '+d+'?\n\nRemoves this print from history and the reaction study, permanently (tombstoned \u2014 the feed cannot re-add it). For feed garbage only.')) return;
+    b.disabled=true;
+    try{
+      const r=await fetch('/api/earnings/void',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({t,d})});
+      if(r.ok){ await loadEarnings(); } else { b.disabled=false; alert('void failed ('+r.status+')'); }
+    }catch(_){ b.disabled=false; alert('void failed (network)'); }
+  }));
+}
 function renderEarnings(){
   const box=el('earnings-body'); if(!box) return;
   const d=state.earnPayload;
@@ -2370,6 +2400,7 @@ function renderEarnings(){
           +earnEpsHtml(e)
           +earnReactHtml(e)
           +earnStudyHtml(e.t)
+          +`<button class="earn-void" data-vt="${esc(e.t)}" data-vd="${esc(e.d)}" style="background:none;border:0;color:var(--faint);cursor:pointer;font-size:14px;line-height:1;padding:0 2px" data-tip="void this print \u2014 operator override for feed garbage: removes it from history and the reaction study and tombstones it so the feed cannot re-add it. Permanent.">\u00d7</button>`
           +`</div>`;
       }
     }
@@ -2383,6 +2414,7 @@ function renderEarnings(){
     html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
     box.innerHTML=html;
     box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  wireEarnVoid(box);
     return;
   }
   for(const g of groups.values()){
@@ -2405,6 +2437,7 @@ function renderEarnings(){
   html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst.</div>`;
   box.innerHTML=html;
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  wireEarnVoid(box);
 }
 
 // ===== trend leaderboard tab =====
@@ -3596,7 +3629,7 @@ earnings:`
 <div class="hlp-h">Coverage — what's honestly absent</div>
 <p>Indices, ETFs, FX, commodities, thematic baskets and pre-IPO synthetics never report earnings. Foreign listings without a US symbol (SMSN, KIOXIA, SOFTBANK…) are real companies with real earnings, but this feed doesn't carry them — they're <b>absent, never guessed</b>. A missing name means "no report scheduled in the window OR not covered", and the coverage line states how many eligible equities exist so absence is auditable.</p>
 <div class="hlp-h">Reported rows — beat/miss, kept for 48h</div>
-<p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the move next to it, and they disagree often enough to be interesting. Reports don't vanish at midnight: a <b>Reported</b> section at the top keeps the two prior ET days on the tab with their beat/miss and a <b>reaction</b> move — the print's own reaction candle per the study convention (BMO/DMH scores its own UTC daily candle, AMC the next one), never today's unrelated move. A reaction candle still forming reads "so far"; one not opened yet says so instead of showing zero. Rows come from the persisted print history, so a late-landing actual upgrades the row in place and the section survives redeploys.</p>
+<p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the move next to it, and they disagree often enough to be interesting. Reports don't vanish at midnight: a <b>Reported</b> section at the top keeps the two prior ET days on the tab with their beat/miss and a <b>reaction</b> move — the print's own reaction candle per the study convention (BMO/DMH scores its own UTC daily candle, AMC the next one), never today's unrelated move. A reaction candle still forming reads "so far"; one not opened yet says so instead of showing zero. Rows come from the persisted print history, so a late-landing actual upgrades the row in place and the section survives redeploys. Two hygiene rules run against every (chunked, complete) fetch: a print the feed retracted from the refetched 5-day back window is dropped, and a past print whose ticker is still scheduled ahead for the same fiscal quarter is a placeholder-date phantom, dropped. For garbage neither rule can reach — a feed asserting a report that never happened, with no corrected row anywhere — the <b>×</b> on a reported row voids the print permanently (tombstoned; no future fetch can re-add it). The verdict is beat / miss / <b>in line</b> vs the feed's own estimate, with display precision expanding until actual and estimate read as different numbers whenever they are.</p>
 <div class="hlp-h">The reaction study</div>
 <p>Each name's <b>own earnings base rate</b>, measured on the perp's daily closes (UTC — it trades through weekends, so a Friday AMC print scores Saturday's candle): number of prints, average and median |next-session move|, up/down split, gap behavior where opens are retained, and the move as a multiple of that name's usual daily range. History starts from a one-time ~1y feed backfill (depth = whatever the free tier honestly returns) and <b>self-accrues</b> from there — every print that passes is persisted like the OI log. n is shown always; "no history" means exactly that, never a hidden zero.</p>
 <div class="hlp-h">Live context columns</div>
