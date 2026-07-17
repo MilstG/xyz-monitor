@@ -2159,15 +2159,20 @@ function applyScope(){
   const cr=state.scope==='crypto';
   // Trend stays visible in crypto scope (the only tab besides Markets that does) — it follows
   // the scope switcher, rendering the active universe's board like the Markets table does.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend'; });
+  // Dual-universe tabs stay visible in crypto scope: Trend, TWAPs and Liqs all follow the
+  // scope switcher and render the active universe, exactly like the Markets table.
+  const CRYPTO_TABS = new Set(['markets','trend','twaps','liqs']);
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && !CRYPTO_TABS.has(b.dataset.view); });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(cr && state.view!=='markets' && state.view!=='trend') { showView('markets'); }
+  if(cr && !CRYPTO_TABS.has(state.view)) { showView('markets'); }
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
+  if(state.view==='twaps') renderTwaps();
+  if(state.view==='liqs') renderLiqs();
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend') v='markets';   // crypto scope: Markets + Trend only (Trend carries both universes)
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='twaps' && v!=='liqs') v='markets';   // crypto scope: only the dual-universe tabs
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -2178,12 +2183,16 @@ function showView(v){
   setHidden('view-corr', v!=='corr');
   setHidden('view-sessions', v!=='sessions');
   setHidden('view-signals', v!=='signals');
+  setHidden('view-twaps', v!=='twaps');
+  setHidden('view-liqs', v!=='liqs');
   setHidden('view-earnings', v!=='earnings');
   setHidden('view-backtest', v!=='backtest');
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
+  if(v==='twaps'){ if(el('view-twaps')) openTwaps(); else { showView('markets'); return; } }
+  if(v==='liqs'){ if(el('view-liqs')) openLiqs(); else { showView('markets'); return; } }
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
@@ -2421,6 +2430,180 @@ function renderTrend(){
     +(L?`<div><span class="tdot g"></span> <b>Trending</b> <span class="sec">\u2014 price &gt; EMA13 &gt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Reclaiming</b> <span class="sec">\u2014 above EMA21, not yet stacked</span> &nbsp; <span class="tdot r"></span> <b>Below trend</b></div>`
        :`<div><span class="tdot r"></span> <b>Downtrending</b> <span class="sec">\u2014 price &lt; EMA13 &lt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Rolling over</b> <span class="sec">\u2014 below EMA21, not yet stacked</span> &nbsp; <span class="tdot g"></span> <b>Above trend</b></div>`)
     +`<div class="sec" style="margin-top:8px;line-height:1.6"><b style="color:var(--text)">4/4 \u2014 all ${L?'green':'red'}:</b> established ${L?'up':'down'}trend; look for ${L?'longs on pullbacks':'shorts on rallies'} into the EMA21 zone. <b style="color:var(--text)">2\u20133/4 \u2014 mixed:</b> higher timeframes lead \u2014 wait for lower-TF alignment before entries; manage size. <b style="color:var(--blue)">RETEST</b> \u2014 price has pulled back to the EMA21 zone on a trending timeframe: prime continuation-entry zone. Click a row for the market's detail panel. Ranked by score, then <b style="color:var(--text)">fresh-first</b> \u2014 within a score the youngest D1 stack ranks highest (the young trend is the entry, the old one is the chase); <b style="color:var(--text)">age</b> counts consecutive D1 days stacked (N+ = at least, history-capped), <b style="color:var(--text)">\u039421</b> is the live distance from the H1 EMA21 (small = at the entry zone, large = extended). Only names with \u22652/4 alignment appear \u2014 top ${(d.params&&d.params.top)||10}. Flip the scope switcher for the other universe.</div></div>`;
+  box.innerHTML=html;
+  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+}
+
+// ===== flows: TWAPs tab + Liqs tab =====
+// BOTH FOLLOW THE SCOPE SWITCHER, like Markets and Trend: stocks scope shows the xyz universe,
+// crypto scope the main dex. Data is server-detected from Hyperliquid's own public tape (TWAP
+// slice fills carry an all-zero hash; the TWAPing account is the taker) and from tracked-cohort
+// clearinghouse sweeps (per-position liquidation prices). Distances on the Liqs tab are
+// recomputed here against the LIVE mark from the snapshot — the server ships the frozen
+// liquidation price, the client owns the moving part.
+let _twaps=null,_twapsLast=0,_twapsInflight=false;
+let _liqs=null,_liqsLast=0,_liqsInflight=false;
+async function loadTwaps(){
+  if(_twapsInflight) return; _twapsInflight=true;
+  try{ const d=await fetchJSON('/api/twaps'); if(d){ _twaps=d; _twapsLast=Date.now(); } }
+  catch(_){ }
+  finally{ _twapsInflight=false; }
+  if(state.view==='twaps') renderTwaps();
+}
+function openTwaps(){ renderTwaps(); if(Date.now()-_twapsLast>10*1000) loadTwaps(); }
+async function loadLiqs(){
+  if(_liqsInflight) return; _liqsInflight=true;
+  try{ const d=await fetchJSON('/api/liqs'); if(d){ _liqs=d; _liqsLast=Date.now(); } }
+  catch(_){ }
+  finally{ _liqsInflight=false; }
+  if(state.view==='liqs') renderLiqs();
+}
+function openLiqs(){ renderLiqs(); if(Date.now()-_liqsLast>10*1000) loadLiqs(); }
+// Auto-refresh only while the tab is actually visible — background tabs cost nothing.
+setInterval(()=>{ const v=el('view-twaps'); if(v&&!v.hidden) loadTwaps(); },12*1000);
+setInterval(()=>{ const v=el('view-liqs'); if(v&&!v.hidden) loadLiqs(); },15*1000);
+
+function flowAddr(a){
+  if(!a) return '\u2014';
+  const s=a.slice(0,6)+'\u2026'+a.slice(-4);
+  return `<a class="flowaddr" href="https://hypurrscan.io/address/${esc(a)}" target="_blank" rel="noopener" data-tip="open ${esc(a)} on Hypurrscan (address explorer) \u2014 positions, fills, transfers">${esc(s)}</a>`;
+}
+function fmtDur(ms){ if(ms==null||!isFinite(ms)||ms<0) return '\u2014'; const m=ms/60000;
+  if(m<1) return Math.max(1,Math.round(ms/1000))+'s'; if(m<90) return Math.round(m)+'m';
+  const h=m/60; if(h<48) return h.toFixed(1)+'h'; return (h/24).toFixed(1)+'d'; }
+function flowUniNow(){ return state.scope==='crypto'?'crypto':'stocks'; }
+
+function renderTwaps(){
+  const box=el('twaps-body'); if(!box) return;
+  const d=_twaps;
+  if(!d||!Array.isArray(d.active)){ box.innerHTML='<div class="msg"><span class="big">Loading\u2026</span>Reading the tape.</div>'; return; }
+  const uni=flowUniNow();
+  const act=d.active.filter(e=>e.uni===uni);
+  const done=(d.done||[]).filter(e=>e.uni===uni);
+  const agg=(d.agg&&d.agg[uni])||{buy:0,sell:0,n:0};
+  const tot=(agg.buy||0)+(agg.sell||0);
+  const net=(agg.buy||0)-(agg.sell||0);
+  const ws=(d.coverage&&d.coverage.ws)||{};
+  const live=!!ws.connected && ws.lastMsgAgoS!=null && ws.lastMsgAgoS<90;
+  const now=Date.now();
+  let html=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px" data-tip="${esc((d.coverage&&d.coverage.note)||'')}">`
+    +`Every <b>TWAP</b> executing right now in this universe, detected live from the public tape \u2014 TWAP slice fills are the only fills Hyperliquid publishes with an all-zero hash, and the TWAPing account is the taker on each slice. This is <b>executed flow</b>: an order's total size and duration are not public globally, so there is no %-complete \u2014 an episode is live while slices keep landing and rolls to \u201crecently completed\u201d after ~4 min of silence. Hover anything for detail; click a row for the market drawer.</div>`;
+  html+=`<div class="flowstrip">`
+    +`<span class="fm" data-tip="tape feed status \u2014 the dedicated trades socket behind this tab \u00b7 ${esc(`${ws.subs||0} market subscriptions, ${ws.trades||0} trades seen, ${d.coverage&&d.coverage.twapFills||0} TWAP slices detected since boot`)}"><span class="flowlive${live?'':' stale'}"></span> tape <b>${live?'live':'stale'}</b></span>`
+    +`<span class="fm" data-tip="TWAP episodes currently executing in this universe (\u2265$1k executed)">active <b>${act.length}</b></span>`
+    +`<span class="fm" data-tip="executed notional of the active BUY TWAPs in this universe"><span class="sidepill buy">BUY</span> <b>${fmtUsd(agg.buy)}</b></span>`
+    +`<span class="fm" data-tip="executed notional of the active SELL TWAPs in this universe"><span class="sidepill sell">SELL</span> <b>${fmtUsd(agg.sell)}</b></span>`
+    +`<span class="fm" data-tip="buy minus sell executed notional across the active episodes \u2014 which way the systematic flow leans right now">net <b class="${net>=0?'pos':'neg'}">${net>=0?'+':''}${fmtUsd(Math.abs(net)).replace('$',(net>=0?'$':'-$'))}</b></span>`
+    +(tot>0?`<span class="fm" data-tip="buy vs sell split of active executed notional \u2014 hover each segment"><span class="flowbar"><span class="fb fb-buy" style="width:${(agg.buy/tot*100).toFixed(1)}%" data-tip="${esc(`buy side \u00b7 ${Math.round(agg.buy/tot*100)}% \u00b7 ${fmtUsd(agg.buy)}`)}"></span><span class="fb fb-sell" style="width:${(agg.sell/tot*100).toFixed(1)}%" data-tip="${esc(`sell side \u00b7 ${Math.round(agg.sell/tot*100)}% \u00b7 ${fmtUsd(agg.sell)}`)}"></span></span></span>`:'')
+    +`</div>`;
+  const row=(e,doneRow)=>{
+    const dur=(e.tLast||now)-(e.t0||now);
+    const rate=dur>60000?e.ntl/(dur/3600000):null;
+    const ago=now-(e.tLast||now);
+    const liveDot=!doneRow&&ago<70*1000;
+    const known=state.rows.has(e.coin);
+    return `<tr ${known?`data-coin="${esc(e.coin)}"`:''} ${known?`data-tip="open ${esc(e.ticker)} in the market detail panel"`:''}>`
+      +`<td class="ttick">${esc(e.ticker)}</td>`
+      +`<td><span class="sidepill ${e.side}" data-tip="${e.side==='buy'?'the account is accumulating \u2014 taker-bought every slice':'the account is distributing \u2014 taker-sold every slice'}">${e.side.toUpperCase()}</span></td>`
+      +`<td data-tip="notional executed so far by this episode (\u03a3 slice size \u00d7 price) \u2014 NOT the order's total: that is not public">${fmtUsd(e.ntl)}</td>`
+      +`<td class="sec" data-tip="volume-weighted average fill price across the episode's slices">${e.vwap!=null?fmtPrice(e.vwap):'\u2014'}</td>`
+      +`<td data-tip="executed notional \u00f7 elapsed time \u2014 the flow rate this account is pushing into the book">${rate!=null?fmtUsd(rate)+'/h':'\u2014'}</td>`
+      +`<td class="sec" data-tip="slice fills observed \u2014 TWAP sends an aggressive slice roughly every 30s (randomize jitters it)">${e.slices}</td>`
+      +`<td class="sec" data-tip="first slice observed \u00b7 elapsed ${esc(fmtDur(dur))}">${fmtTrig(e.t0)}</td>`
+      +(doneRow
+        ?`<td class="sec" data-tip="episode ended \u2014 no slice for ~4 min">${fmtAge(ago)} ago</td>`
+        :`<td data-tip="time since the last slice landed \u2014 an episode goes \u2018completed\u2019 after ~4 min of silence">${liveDot?'<span class="flowlive"></span> ':''}${fmtAge(ago)} ago</td>`)
+      +`<td>${flowAddr(e.user)}</td></tr>`;
+  };
+  const head=`<thead><tr><th style="text-align:left">asset</th><th>side</th>`
+    +`<th data-tip="notional executed so far \u2014 not the order's total">executed</th>`
+    +`<th data-tip="volume-weighted average fill price of the episode">vwap</th>`
+    +`<th data-tip="executed notional per hour of episode elapsed time">rate</th>`
+    +`<th data-tip="slice fills observed">slices</th><th>started</th><th>last slice</th>`
+    +`<th data-tip="the executing account \u2014 links to the address explorer">account</th></tr></thead>`;
+  html+=`<div class="tsec-h">ACTIVE <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">\u2014 slices landing now \u00b7 sorted by executed notional</span></div>`;
+  html+=act.length
+    ?`<table class="trend-t">${head}<tbody>${act.map(e=>row(e,false)).join('')}</tbody></table>`
+    :`<div class="msg" style="padding:14px 0">No active TWAPs above $1k executing in this universe right now \u2014 honest emptiness, not a bug.${live?'':' (tape feed is not live \u2014 check /api/health flows)'}</div>`;
+  html+=`<div class="tsec-h" style="margin-top:18px">RECENTLY COMPLETED <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">\u2014 last 48h \u00b7 episode = consecutive slices from one account on one market+side</span></div>`;
+  html+=done.length
+    ?`<table class="trend-t">${head}<tbody>${done.slice(0,40).map(e=>row(e,true)).join('')}</tbody></table>`
+    :`<div class="msg" style="padding:14px 0">Nothing completed in this universe in the last 48h of tape.</div>`;
+  box.innerHTML=html;
+  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+}
+
+function liqDistLive(e){
+  // Live distance from mark to the FROZEN liq price. The server ships its as-of-build distance;
+  // the client recomputes against the freshest mark it has so the column moves with the tape.
+  const r=state.rows.get(e.coin);
+  const mark=r&&r.px!=null?r.px:e.mark;
+  if(mark==null||!(mark>0)||e.liqPx==null||!(e.liqPx>0)) return {d:e.dist!=null?e.dist:null,mark};
+  const d=e.side==='long'?(mark-e.liqPx)/mark*100:(e.liqPx-mark)/mark*100;
+  return {d,mark};
+}
+function renderLiqs(){
+  const box=el('liqs-body'); if(!box) return;
+  const d=_liqs;
+  if(!d||!Array.isArray(d.danger)){ box.innerHTML='<div class="msg"><span class="big">Loading\u2026</span>Sweeping the cohort.</div>'; return; }
+  const uni=flowUniNow();
+  const cov=d.coverage||{};
+  const now=Date.now();
+  const dng=d.danger.filter(e=>e.uni===uni).map(e=>{ const {d:dist,mark}=liqDistLive(e); return Object.assign({},e,{distL:dist,markL:mark}); })
+    .filter(e=>e.distL!=null&&e.distL<=10).sort((a,b)=>a.distL-b.distL);
+  const evs=(d.events||[]).filter(e=>e.uni===uni);
+  let html=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px" data-tip="${esc(cov.note||'')}">`
+    +`Positions of the <b>tracked cohort</b> \u2014 the largest accounts observed on the live tape, positions re-swept round-robin via their clearinghouse state \u2014 ranked by <b>live distance to their liquidation price</b>. This is a cohort monitor, not the whole venue: retail dust is invisible by design; the size that moves markets is not. <b>Cross</b>-margin liq prices drift with the whole account between sweeps \u2014 the swept column is that honesty. An <b>event</b> fires the moment the live mark crosses a position's last-known liq price, and the next sweep of that account confirms it (position gone), marks it partial (shrunk), or averts it (margin added / liq moved away).</div>`;
+  html+=`<div class="flowstrip">`
+    +`<span class="fm" data-tip="addresses on the watchlist \u2014 harvested from large prints and TWAP activity on the live tape, exponential-decay score (3d half-life), self-refreshing">cohort <b>${cov.tracked||0}</b></span>`
+    +`<span class="fm" data-tip="accounts with a swept clearinghouse state on book \u00b7 ${esc(String(cov.positions||0))} open positions across them">books <b>${cov.books||0}</b></span>`
+    +`<span class="fm" data-tip="one account is swept every ~1.6s \u2014 a full lap of the cohort takes about this long; each row's \u2018swept\u2019 column is its own age">lap <b>~${cov.lapMin!=null?cov.lapMin+'m':'\u2014'}</b></span>`
+    +`<span class="fm" data-tip="time since the last completed sweep call \u2014 if this grows, the rate limiter is prioritizing candle backfills (by design)">last sweep <b>${cov.lastSweepMs!=null?fmtAge(cov.lastSweepMs)+' ago':'\u2014'}</b></span>`
+    +`<span class="fm" data-tip="positions currently within 10% of their liquidation price in this universe">in danger <b class="${dng.length?'neg':''}">${dng.length}</b></span>`
+    +`</div>`;
+  const dRow=(e)=>{
+    const cls=e.distL<=1.5?'dngr-hot':(e.distL<=4?'dngr-warm':'');
+    const known=state.rows.has(e.coin);
+    const swAgo=e.asOf?now-e.asOf:null;
+    return `<tr ${known?`data-coin="${esc(e.coin)}"`:''} ${known?`data-tip="open ${esc(e.ticker)} in the market detail panel"`:''}>`
+      +`<td class="ttick">${esc(e.ticker)}</td>`
+      +`<td><span class="sidepill ${e.side}" data-tip="${e.side==='long'?'liquidates DOWN \u2014 forced selling if the mark falls to the liq price':'liquidates UP \u2014 forced buying if the mark rises to the liq price'}">${e.side.toUpperCase()}</span></td>`
+      +`<td data-tip="position notional at the last sweep of this account">${fmtUsd(e.ntl)}</td>`
+      +`<td class="sec" data-tip="account leverage on this position \u00b7 ${e.levType==='isolated'?'ISOLATED: the liq price is firm \u2014 only this position\u2019s margin backs it':'CROSS: the whole account backs it \u2014 the liq price drifts with every other position\u2019s PnL between sweeps'}">${e.lev!=null?e.lev+'\u00d7':'\u2014'} ${e.levType==='isolated'?'iso':'cross'}</td>`
+      +`<td class="sec" data-tip="position entry price (as of sweep)">${e.entry!=null?fmtPrice(e.entry):'\u2014'}</td>`
+      +`<td data-tip="liquidation price from the account's clearinghouse state at the last sweep \u2014 ${e.levType==='isolated'?'firm (isolated margin)':'estimate that drifts with the whole account between sweeps (cross margin)'}">${fmtPrice(e.liqPx)}</td>`
+      +`<td class="sec" data-tip="live mark from the snapshot feed">${e.markL!=null?fmtPrice(e.markL):'\u2014'}</td>`
+      +`<td class="${cls}" data-tip="LIVE distance from mark to the liq price, in % of mark \u2014 recomputed in this browser against the streaming mark; the liq price itself is as of the sweep">${e.distL.toFixed(2)}%</td>`
+      +`<td>${flowAddr(e.user)}</td>`
+      +`<td class="sec" data-tip="age of this account's last clearinghouse sweep \u2014 the liq price and notional are this old">${swAgo!=null?fmtAge(swAgo):'\u2014'}</td></tr>`;
+  };
+  html+=`<div class="tsec-h">IN DANGER <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">\u2014 tracked positions within 10% of liquidation \u00b7 sorted by live distance</span></div>`;
+  html+=dng.length
+    ?`<table class="trend-t"><thead><tr><th style="text-align:left">asset</th><th>side</th>`
+      +`<th data-tip="position notional at last sweep">notional</th><th data-tip="leverage \u00b7 isolated = firm liq price, cross = drifts with the account">lev</th>`
+      +`<th>entry</th><th data-tip="liquidation price as of the last sweep of this account">liq px</th><th>mark</th>`
+      +`<th data-tip="live % distance from mark to liq \u2014 red \u22641.5%, amber \u22644%">dist</th><th>account</th>`
+      +`<th data-tip="sweep age \u2014 how old this row's liq price and notional are">swept</th></tr></thead><tbody>${dng.map(dRow).join('')}</tbody></table>`
+    :`<div class="msg" style="padding:14px 0">No tracked position within 10% of its liquidation price in this universe right now${(cov.books||0)<5?' \u2014 the cohort is still building: books fill in as the tape reveals accounts and the sweep laps them':''}. Honest emptiness, not a bug.</div>`;
+  const eRow=(e)=>{
+    const st=(e.status||'').split(' ')[0];
+    const stTip={triggered:'the live mark crossed this position\u2019s last-known liq price \u2014 awaiting the next sweep of the account to confirm',
+      confirmed:'the next sweep found the position GONE \u2014 liquidation (or a same-window close) at the crossed level',
+      partial:'the next sweep found the position shrunk \u226530% \u2014 partially de-risked at/through the level',
+      averted:'the next sweep found the liq price moved away (margin added or other positions\u2019 PnL) \u2014 no liquidation',
+      unresolved:'the server restarted before the confirming sweep \u2014 outcome unknown, stated as such'}[st]||'';
+    return `<tr><td class="sec" data-tip="when the mark crossed the level">${fmtTrig(e.t)}</td>`
+      +`<td class="ttick">${esc(e.ticker)}</td>`
+      +`<td><span class="sidepill ${e.side}">${e.side.toUpperCase()}</span></td>`
+      +`<td data-tip="position notional at the last sweep BEFORE the cross \u2014 the size at risk, not a measured fill">${fmtUsd(e.ntl)}</td>`
+      +`<td class="sec" data-tip="the crossed liquidation price (last-known${e.asOfS?`, swept ${fmtDur(e.asOfS*1000)} before the cross`:''})">${fmtPrice(e.liqPx)}</td>`
+      +`<td><span class="lqst ${esc(st)}" data-tip="${esc(stTip)}">${esc(e.status)}</span></td>`
+      +`<td>${flowAddr(e.user)}</td></tr>`;
+  };
+  html+=`<div class="tsec-h" style="margin-top:18px">EVENTS <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">\u2014 mark crossed a tracked position's liq price \u00b7 last 7d \u00b7 newest first</span></div>`;
+  html+=evs.length
+    ?`<table class="trend-t"><thead><tr><th>time</th><th style="text-align:left">asset</th><th>side</th><th data-tip="size at risk at the last sweep before the cross">notional</th><th>liq px</th><th data-tip="triggered \u2192 confirmed / partial / averted by the next sweep of that account">status</th><th>account</th></tr></thead><tbody>${evs.slice(0,60).map(eRow).join('')}</tbody></table>`
+    :`<div class="msg" style="padding:14px 0">No tracked-cohort liquidation events in this universe in the last 7 days.</div>`;
   box.innerHTML=html;
   box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
 }
@@ -2695,7 +2878,7 @@ function renderSignals(){
   const seg=`<span class="cdtf-seg" style="margin-left:auto"><button type="button" class="cdtf${prOn?' on':''}" data-pr="1" data-tip="show only \u2605 prime setups \u2014 \u226560% hit, positive expectancy, sound structure at fire time \u2014 and switch the stats below to the record of prime claims only">\u2605 prime</button></span>`
     +`<span class="cdtf-seg" data-tip="minimum actionable move: distance from live mark to the playbook target">${mvBtn(0,'')}${mvBtn(0.5,'0.5%')}${mvBtn(1,'1%')}${mvBtn(2,'2%')}</span>`
     +`<span class="cdtf-seg"><button type="button" class="cdtf${view==='detail'?' on':''}" data-sv="detail" data-tip="full cards: readings, base rates, playbooks">detailed</button><button type="button" class="cdtf${view==='compact'?' on':''}" data-sv="compact" data-tip="one row per market \u2014 hover the chips for the full reading and base rate, click a row to expand it">compact</button></span>`;
-  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction."><span>Live conditions ranked by <b>unusualness \u00d7 historical edge</b>, self-audited: every fired signal is ledgered and resolved at its horizon \u2014 the record below is <b>out-of-sample</b>. Click a ticker for the drawer.</span>${seg}</div>`;
+  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction."><span>Live conditions ranked by <b>unusualness \u00d7 historical edge</b>, self-audited: every fired signal is ledgered and resolved at its horizon \u2014 the record below is <b>out-of-sample</b>. Click a ticker for the drawer.${d&&d.count>(d.signals||[]).length?` <span data-tip="the server evaluates every live condition but ships only the highest-scored ${(d.signals||[]).length} \u2014 the tab count is the true number of live conditions right now, this list is its top slice">Top <b>${(d.signals||[]).length}</b> of <b>${d.count}</b> live conditions shown.</span>`:''}</span>${seg}</div>`;
   let rec='';
   const rsTop=(d&&d.records&&d.records[String(mvThr)+(prOn?'p':'')])||d||{};
   const recSrc=rsTop.record||{};
@@ -3326,6 +3509,22 @@ trend:`
 <p><b style="color:var(--blue)">RETEST</b> fires when the last few bars (forming bar included) probed into the 13/21 ribbon zone on a <i>trending</i> timeframe while the close held the EMA21 side — the classic continuation pullback (long) or rally-into-resistance (short). The highest timeframe showing it is the one named in the read. Honest approximation, stated plainly: the zone test compares recent bar extremes against the <i>current</i> EMAs, not bar-by-bar historical EMAs, and daily candles restored from the warm cache carry closes only, so their zone probe degrades to closes.</p>
 <div class="hlp-h">Sourcing & ranking</div>
 <p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then <b>fresh-first</b>: within a score, the youngest D1 stack ranks highest — a day-3 trend is the entry, a day-40 trend is the chase. <b>Age</b> is an exact per-bar EMA walk counting consecutive D1 days the ribbon has been stacked this side (N+ means "at least" — the stack extends past available history, most common on crypto's 31d retention; a dash means the D1 rung itself isn't aligned). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number: a 4/4 at +0.4% is at the zone, at +6% it's extended. Ticker badges carry per-scope context from the machinery the Markets table already uses: crypto shows the ▴/▾ funding-percentile flag when the crowd's payment is at a monthly extreme (a 4/4 uptrend on a ▴ is a consensus trade), stocks show the earnings badge when a report is imminent (a retest two days before earnings is a different trade). Only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>`,
+twaps:`
+<div class="hlp-h">What this is</div>
+<p>Every <b>TWAP order executing right now</b>, in both universes, detected live from Hyperliquid's own public tape. The mechanism: TWAP slice fills are the <i>only</i> public fills the venue publishes with an all-zero transaction hash, and the TWAPing account is always the <b>taker</b> (TWAP sends an aggressive slice roughly every 30 seconds). So the tape itself is a complete, global feed of systematic flow — no per-account subscriptions, no third-party indexer, and it covers the xyz dex identically to the main dex, which explorer dashboards do not. Consecutive slices from one account on one market+side are grouped into an <b>episode</b>; an episode is live while slices keep landing and rolls to “recently completed” after ~4 minutes of silence.</p>
+<div class="hlp-h">Reading it</div>
+<p><b>Executed</b> is Σ slice size × price — what has actually hit the book. <b>Rate</b> is executed ÷ elapsed: the pressure per hour this account is applying. <b>VWAP</b> is the episode's own average fill — the TWAPer's cost basis for this leg. The strip up top nets active buy vs sell executed notional: which way the systematic flow leans in this universe right now. A large SELL TWAP grinding a thin xyz name is exactly the overhead-supply context the Markets table can't see; a cluster of BUY TWAPs on one crypto name is accumulation you can time against.</p>
+<div class="hlp-h">Honest limits</div>
+<p>The order's <b>total size and duration are not public</b> globally — the venue only exposes them per-account, and per-account WebSocket subscriptions are capped at 10 unique addresses venue-wide, a budget too scarce to spend here. So there is no %-complete bar: this tab shows what has executed and how fast, never how much remains. Taker-side attribution means the rare maker-side coincidence (two TWAPs crossing each other) attributes the slice to the aggressor — correct for the flow read. Episodes survive server restarts only in the completed list (the live map rebuilds from the tape within a minute).</p>`,
+liqs:`
+<div class="hlp-h">What this is</div>
+<p>A <b>liquidation monitor built on a tracked cohort</b>: the largest accounts observed on the live tape (big prints and TWAP activity earn watchlist credit; a 3-day-half-life score keeps the cohort self-refreshing) have their clearinghouse state swept round-robin, one account every ~1.6s. The venue publishes each position's <b>liquidation price</b> in that state — the danger table ranks tracked positions by live distance to it, and the events feed fires the moment the streaming mark <b>crosses</b> a position's last-known liq price.</p>
+<div class="hlp-h">In danger</div>
+<p><b>Dist</b> is recomputed in your browser against the live mark on every repaint — the liq price is as-of that account's last sweep (the <b>swept</b> column is its age). <b>Isolated</b> positions have firm liq prices; <b>cross</b> positions are backed by the whole account, so their liq price drifts with every other position's PnL between sweeps — treat a cross row's distance as an estimate with the stated staleness. LONG rows liquidate <i>down</i> (forced selling into weakness); SHORT rows liquidate <i>up</i> (forced buying into strength) — a stack of same-side rows near one price is a cascade zone, the raw material for the cascade-exhaustion signal on the roster.</p>
+<div class="hlp-h">Events</div>
+<p><b>Triggered</b> = mark crossed the last-known level. The next sweep of that account settles it: <b>confirmed</b> (position gone — liquidated, or closed in the same window; the tape can't distinguish and the label doesn't pretend to), <b>partial</b> (shrunk ≥30%), <b>averted</b> (margin added or the account's other PnL moved the level away — the classic cross-margin save). A restart before the confirming sweep leaves “unresolved (restart)” — stated, never guessed.</p>
+<div class="hlp-h">Honest limits</div>
+<p>This is a <b>cohort</b>, not the venue: retail dust is invisible by design — there is no public global position feed, and only a full chain indexer sees everything. The claim this tab makes is narrower and more useful: <i>the size that matters is tracked, and its distance to forced flow is measured</i>. Coverage is printed in the strip (cohort size, books swept, lap time) — if those are thin, the read is thin, and the tab says so rather than dressing it up.</p>`,
 sectors:`
 <div class="hlp-h">Flow map (default)</div>
 <p>Each bubble is a sector. <b>Horizontal = capital direction</b>: a blend of return and OI-conviction — right means money flowing in <i>with</i> conviction, left means flowing out. <b>Vertical = heat</b>: activity from volume and volatility. So <b>top-right = accumulation</b> (in, loudly), <b>top-left = distribution</b> (out, loudly), and the bottom half is simply quiet. Bubble size = 24h volume. Click a bubble for the sector's members.</p>
@@ -3388,7 +3587,7 @@ backtest:`
 function openHelp(){
   const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
   const v=state.scope==='crypto'?'markets':state.view;
-  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest'};
+  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',twaps:'TWAPs',liqs:'Liqs',earnings:'Earnings',backtest:'Backtest'};
   m.innerHTML=`<div class="hlp-head">How to read: ${TITLES[v]||v}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
     +(HELP[v]||HELP.markets);
