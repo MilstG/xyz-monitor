@@ -1,7 +1,7 @@
 "use strict";
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
-const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createFlowSocket, infoPost } = require("./hyperliquid");
+const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
@@ -12,7 +12,6 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS } = require("./compute");
-const { isTwapFill, twapTaker, liqDistancePct, foldWhale, pruneWhales, decayScore, ladderBands } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -70,27 +69,6 @@ const EARN_ALIAS = { BRKB: "BRK.B" }; // xyz ticker -> US exchange symbol where 
 // print inside the horizon is a different return distribution than the study sample, so the
 // evidence contribution is capped — same mechanism and same cap as the no-live-edge guard.
 const EARN_GUARD = new Set(["breakout", "breakdown", "gap", "ondrift"]);
-// ---- flows: liquidation monitor (both universes) ----------------------------------------------
-// Sourced NATIVELY from Hyperliquid: the public tape harvests the tracked cohort (large prints
-// and TWAP takers — slice fills carry an all-zero hash), and clearinghouseState carries
-// per-position liquidation prices. No third-party indexer: Hypurrscan's public REST doesn't
-// cover a global liquidation feed and sees only the main dex — this approach covers xyz
-// identically. Honest coverage limits, surfaced in the payload: this is a COHORT monitor (the
-// size that moves markets), not every retail account on the venue.
-const WHALE_HALF_LIFE = 3 * DAY;         // watchlist score half-life — the cohort self-refreshes
-const WHALE_MAX = 200;                   // tracked addresses, both universes combined
-const WHALE_MIN_NTL = { main: 50000, xyz: 10000 };   // single-trade notional that earns watchlist credit
-const SWEEP_STEP_MS = 1500;              // one clearinghouseState call per step (weight 2 -> ~80/min worst case)
-const SWEEP_RATE_CEILING = 78;           // skip sweep steps while the limiter is above this % (backfills first)
-const HOT_PCT = 3;                       // a book holding a position within this % of its liq price is HOT
-const HOT_RESWEEP_MS = 15 * 1000;        // hot books re-sweep this often instead of waiting out the lap
-const DANGER_SHOW_PCT = 1;               // the danger table: positions within 1% of liquidation
-const LADDER_BANDS = [1, 2, 5, 10];      // cascade ladder: cumulative liquidatable notional within each band
-const LADDER_COINS = 20;                 // ladder rows per universe
-const LIQ_EVENT_KEEP_MS = 7 * DAY;
-const LIQ_EVENT_MAX = 400;
-const FLOWS_MEMO_MS = 4 * 1000;          // payload builder memoizes this long (tab polls every ~10s)
-const FLOWS_PERSIST_MS = 3 * 60 * 1000;
 function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Number.isFinite(v) ? v : null; }
 // Payload-trim helpers: the snapshot ships hundreds of derived floats per market at full
 // double precision (17 digits) — quantizing to what the UI can actually display cuts the
@@ -99,7 +77,7 @@ function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Nu
 function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 
-function createPoller({ dex, store, log, version, crypto, flows = true }) {
+function createPoller({ dex, store, log, version, crypto }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -2269,20 +2247,6 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     // 30 min while a healthy one refreshes 4x/day. One HTTP GET each time; zero HL rate budget.
     setTimeout(earnTick, 20 * 1000);
     setInterval(() => { if (Date.now() - lastEarnOk > EARN_STALE) earnTick(); }, EARN_RETRY_MS);
-    // Flows: liquidation cohort fed by the public tape. Second socket comes up after the first universe
-    // reconciliation so the subscription list is real; the sync tick tracks membership changes
-    // (daily crypto top-60 refresh, new xyz listings). FLOWS=0 on Railway is the one-variable
-    // rollback, mirroring the CRYPTO kill switch.
-    if (flows) {
-      const restoredFlows = hydrateFlows();
-      if (restoredFlows) log(`Restored flows cache: ${whales.size} tracked account(s), ${liqEvents.length} liq event(s)`);
-      flowSock = createFlowSocket({ onTrades: onFlowTrades, log });
-      flowSyncSubs();
-      setInterval(flowSyncSubs, 60 * 1000);
-      setInterval(() => { sweepStep().catch(() => {}); }, SWEEP_STEP_MS);
-      setInterval(safeTick(dangerTick, "dangerTick"), 5 * 1000);
-      setInterval(safeTick(persistFlows, "persistFlows"), FLOWS_PERSIST_MS);
-    } else log("Flows (liquidation monitor): disabled via FLOWS=0");
     // Reaction study rerun after the daily backfill has had time to land full candles (opens
     // arrive with the live pull; the warm cache only carries closes) — bumps the ETag on change.
     setTimeout(() => { try { refreshEarnStudy(true); } catch (_) {} }, 10 * 60 * 1000);
@@ -2373,279 +2337,6 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     return trendCache;
   }
 
-  // ---- flows: liquidation monitor (served at /api/liqs) ---------------------------------------
-  // TAPE: a dedicated WebSocket streams public trades for every monitored coin in both universes.
-  // It exists to HARVEST THE COHORT: every large print (both sides — the resting maker with size
-  // is exactly the position holder this monitor exists to track) and every TWAP taker (slice
-  // fills carry an all-zero hash; systematic flow marks a relevant account) earns watchlist
-  // credit under an exponential-decay score, so the cohort self-refreshes toward whoever is
-  // actually active. SWEEPS: each tracked account's clearinghouseState — which carries
-  // per-position LIQUIDATION PRICES — is pulled round-robin, with a HOT lane: any book holding a
-  // position within HOT_PCT of its liq price (or with an open event) re-sweeps every
-  // HOT_RESWEEP_MS instead of waiting out the lap, so staleness collapses exactly where it
-  // matters. OUTPUTS: the danger table (positions within DANGER_SHOW_PCT of liquidation, live
-  // distance recomputed client-side against the streaming mark), the CASCADE LADDER (cumulative
-  // liquidatable notional per coin within each band of the mark — the "if price moves X%, $Y
-  // force-liquidates" read, built from ALL tracked positions, not just the imminent ones), and
-  // the events feed (mark crossed a last-known liq price; the hot lane confirms/averts it within
-  // seconds). Honest limits, stated in the payload: cross-margin liq prices drift with the whole
-  // account between sweeps (every row carries its sweep age), and this is a tracked COHORT — the
-  // size that moves markets — not every retail account on the venue.
-  let flowSock = null, liqsCache = null, liqsBuilt = 0, liqsVer = 0, liqsSig = "";
-  const whales = new Map();          // addr -> { ntl (decayed score), last, dexs: {main?, xyz?} }
-  const posBook = new Map();         // addr|uniKey -> { ts, av, hot, positions: [...] }
-  const openLiqEv = new Map();       // addr|uniKey|coin -> live event (also present in liqEvents)
-  let liqEvents = [];                // newest first
-  let sweepQ = [], sweepBusy = false, lastSweepAt = 0, sweeps = 0, hotSweeps = 0;
-  let flowTrades = 0, flowTwapFills = 0, flowsDirty = false;
-
-  const uniKeyOf = (coin) => (coin.includes(":") ? "xyz" : "main");
-  const uniName = (k) => (k === "xyz" ? "stocks" : "crypto");
-  const tickerOf = (coin) => (coin.includes(":") ? coin.split(":")[1] : coin);
-
-  function onFlowTrades(arr) {
-    const now = Date.now();
-    for (const tr of arr) {
-      if (!tr || typeof tr.coin !== "string") continue;
-      flowTrades++;
-      const px = num(tr.px), sz = num(tr.sz);
-      const uk = uniKeyOf(tr.coin);
-      const ntl = (px > 0 && sz > 0) ? px * sz : 0;
-      if (isTwapFill(tr.hash)) {
-        // A TWAPer is watchlist-relevant regardless of slice size — systematic flow is the point.
-        const u = twapTaker(tr);
-        if (u) {
-          flowTwapFills++;
-          const w = foldWhale(whales, u, Math.max(ntl, WHALE_MIN_NTL[uk] / 10), now, WHALE_HALF_LIFE);
-          if (w) w.dexs[uk] = 1;
-        }
-      }
-      if (ntl >= WHALE_MIN_NTL[uk] && Array.isArray(tr.users)) {
-        for (const u of tr.users) {
-          if (typeof u !== "string" || !u.startsWith("0x")) continue;
-          const w = foldWhale(whales, u.toLowerCase(), ntl, now, WHALE_HALF_LIFE);
-          if (w) w.dexs[uk] = 1;
-        }
-      }
-    }
-    if (whales.size > WHALE_MAX * 2) pruneWhales(whales, WHALE_MAX, now, WHALE_HALF_LIFE);
-  }
-
-  function flowSyncSubs() {
-    if (!flowSock || !flowSock.enabled) return;
-    const coins = [];
-    for (const r of activeMarkets()) if (!r.delisted) coins.push(r.coin);
-    if (crypto) for (const r of mainMarkets()) coins.push(r.coin);
-    flowSock.sync(coins);
-  }
-
-  // One clearinghouseState call per step. The HOT lane preempts the lap: the stalest hot book
-  // past its re-sweep interval goes first, so an account pinned against its liq price is
-  // re-read every ~HOT_RESWEEP_MS while the calm majority cycles on lap cadence. Weight 2 at a
-  // 1.5s cadence is ~80/min worst case against the 1150 budget, and the step yields entirely
-  // while the limiter is busy with candle backfills — flows must never starve the core pipeline.
-  function rebuildSweepQ() {
-    const now = Date.now();
-    pruneWhales(whales, WHALE_MAX, now, WHALE_HALF_LIFE);
-    sweepQ = [];
-    const scored = [...whales.entries()].sort((a, b) => decayScore(b[1], now, WHALE_HALF_LIFE) - decayScore(a[1], now, WHALE_HALF_LIFE));
-    for (const [addr, w] of scored) {
-      if (w.dexs.xyz) sweepQ.push([addr, "xyz"]);
-      if (w.dexs.main && crypto) sweepQ.push([addr, "main"]);
-    }
-  }
-  function sweepPick(now) {
-    let hotKey = null, hotAge = 0;
-    for (const [key, book] of posBook) {
-      if (!book.hot) continue;
-      const age = now - book.ts;
-      if (age >= HOT_RESWEEP_MS && age > hotAge) { hotAge = age; hotKey = key; }
-    }
-    if (hotKey) { hotSweeps++; return hotKey.split("|"); }
-    if (!sweepQ.length) rebuildSweepQ();
-    while (sweepQ.length) { const e = sweepQ.shift(); if (whales.has(e[0])) return e; }
-    return null;
-  }
-  async function sweepStep() {
-    if (sweepBusy) return;
-    if (limiterUsage().pct > SWEEP_RATE_CEILING) return;
-    const pick = sweepPick(Date.now());
-    if (!pick) return;
-    const [addr, uk] = pick;
-    sweepBusy = true;
-    try {
-      const d = await infoPost({ type: "clearinghouseState", user: addr, dex: uk === "xyz" ? dex : MAIN_DEX }, 2);
-      foldBook(addr, uk, d);
-      sweeps++; lastSweepAt = Date.now();
-    } catch (_) { /* transient — the hot lane or the next lap retries this address */ }
-    finally { sweepBusy = false; }
-  }
-  function bookHot(key, positions) {
-    // Hot = any position within HOT_PCT of its liq price at the CURRENT mark, or an open event
-    // on this book awaiting its confirming sweep.
-    for (const ek of openLiqEv.keys()) if (ek.startsWith(key + "|")) return true;
-    for (const p of positions) {
-      if (p.liqPx == null) continue;
-      const r = rows.get(p.coin);
-      const dd = liqDistancePct(p.szi, p.liqPx, r && !r.delisted ? r.px : null);
-      if (dd != null && dd <= HOT_PCT) return true;
-    }
-    return false;
-  }
-  function foldBook(addr, uk, d) {
-    const key = addr + "|" + uk, now = Date.now();
-    const ms = d && d.marginSummary ? d.marginSummary : {};
-    const av = num(ms.accountValue);
-    const positions = [];
-    const aps = d && Array.isArray(d.assetPositions) ? d.assetPositions : [];
-    for (const ap of aps) {
-      const p = ap && ap.position;
-      if (!p || typeof p.coin !== "string") continue;
-      const szi = num(p.szi);
-      if (szi == null || szi === 0) continue;
-      positions.push({
-        coin: p.coin, szi,
-        entry: num(p.entryPx), liqPx: num(p.liquidationPx),
-        ntl: Math.abs(num(p.positionValue) ?? 0), uPnl: num(p.unrealizedPnl),
-        lev: p.leverage ? num(p.leverage.value) : null,
-        levType: p.leverage && p.leverage.type === "isolated" ? "isolated" : "cross",
-      });
-    }
-    // Resolve open liquidation events against the fresh book BEFORE storing it, so the
-    // confirming sweep's latency (tEnd - t) is honest.
-    for (const [ek, ev] of openLiqEv) {
-      if (!ek.startsWith(key + "|")) continue;
-      const cur = positions.find((p) => p.coin === ev.coin && (p.szi > 0) === (ev.side === "long"));
-      if (!cur) { ev.status = "confirmed"; ev.tEnd = now; openLiqEv.delete(ek); flowsDirty = true; continue; }
-      const mark = rows.has(ev.coin) ? rows.get(ev.coin).px : null;
-      const dist = liqDistancePct(cur.szi, cur.liqPx, mark);
-      if (Math.abs(cur.szi) <= Math.abs(ev.szi0 || cur.szi) * 0.7) { ev.status = "partial"; ev.ntl = cur.ntl; flowsDirty = true; }
-      else if (dist != null && dist > 1) { ev.status = "averted"; ev.tEnd = now; openLiqEv.delete(ek); flowsDirty = true; }
-    }
-    if (!positions.length && !(av > 1000)) posBook.delete(key);
-    else posBook.set(key, { ts: now, av, positions, hot: bookHot(key, positions) });
-    // Standing size keeps an address tracked even after it stops printing on the tape: a small
-    // keep-alive credit per sweep (0.5% of gross position notional) offsets the score decay.
-    const gross = positions.reduce((s, p) => s + (p.ntl || 0), 0);
-    if (gross > 0) { const w = foldWhale(whales, addr, gross * 0.005, now, WHALE_HALF_LIFE); if (w) w.dexs[uk] = 1; }
-  }
-  // 5s checker: the live mark (WS-fed) against every tracked position's last-known liq price.
-  // Opens events on a cross, and refreshes each book's HOT flag so the sweep lane reprioritizes
-  // as price moves — a book can go hot purely because the market came to it.
-  function dangerTick() {
-    const now = Date.now();
-    for (const [key, book] of posBook) {
-      const [addr, uk] = key.split("|");
-      for (const p of book.positions) {
-        if (p.liqPx == null) continue;
-        const r = rows.get(p.coin);
-        const mark = r && !r.delisted ? r.px : null;
-        const dist = liqDistancePct(p.szi, p.liqPx, mark);
-        if (dist == null || dist > 0) continue;   // alive (or unpriceable) — no event
-        const ek = key + "|" + p.coin;
-        if (openLiqEv.has(ek)) continue;
-        const ev = { t: now, uni: uniName(uk), coin: p.coin, ticker: tickerOf(p.coin),
-          side: p.szi > 0 ? "long" : "short", ntl: p.ntl, szi0: p.szi, lev: p.lev, levType: p.levType,
-          liqPx: p.liqPx, markX: mark, user: addr, status: "triggered", asOfMs: now - book.ts };
-        openLiqEv.set(ek, ev);
-        liqEvents.unshift(ev);
-        flowsDirty = true;
-        log(`LIQ event: ${ev.ticker} ${ev.side} ~${Math.round((p.ntl || 0) / 1000)}k crossed liq ${p.liqPx} (${uk}, book ${Math.round(ev.asOfMs / 1000)}s old)`);
-      }
-      book.hot = bookHot(key, book.positions);
-    }
-    const cut = now - LIQ_EVENT_KEEP_MS;
-    if (liqEvents.length > LIQ_EVENT_MAX || (liqEvents.length && liqEvents[liqEvents.length - 1].t < cut))
-      liqEvents = liqEvents.filter((e) => e.t >= cut).slice(0, LIQ_EVENT_MAX);
-  }
-
-  function buildLiqs() {
-    const now = Date.now();
-    const danger = [], ladderIn = { crypto: [], stocks: [] };
-    let positions = 0, oldestBook = null, hotBooks = 0;
-    for (const [key, book] of posBook) {
-      const [addr, uk] = key.split("|");
-      if (book.hot) hotBooks++;
-      if (oldestBook == null || book.ts < oldestBook) oldestBook = book.ts;
-      for (const p of book.positions) {
-        positions++;
-        if (p.liqPx == null) continue;
-        const r = rows.get(p.coin);
-        const mark = r && !r.delisted ? r.px : null;
-        const dist = liqDistancePct(p.szi, p.liqPx, mark);
-        if (dist == null) continue;
-        const side = p.szi > 0 ? "long" : "short";
-        if (dist <= LADDER_BANDS[LADDER_BANDS.length - 1])
-          ladderIn[uniName(uk)].push({ coin: p.coin, side, dist, ntl: p.ntl });
-        // Ship a margin past the display cut — the client recomputes distance against the LIVE
-        // mark, so a row at 1.3% here can be inside 1% by the time it renders.
-        if (dist > DANGER_SHOW_PCT * 1.5) continue;
-        danger.push({ uni: uniName(uk), coin: p.coin, ticker: tickerOf(p.coin),
-          side, ntl: rnd(p.ntl, 0), lev: p.lev, levType: p.levType,
-          entry: sig(p.entry, 6), liqPx: sig(p.liqPx, 6), mark: sig(mark, 6), dist: rnd(dist, 2),
-          user: addr, asOf: book.ts, hot: book.hot || undefined });
-      }
-    }
-    danger.sort((a, b) => a.dist - b.dist);
-    const dTop = danger.slice(0, 60);
-    const ladder = {};
-    for (const un of ["crypto", "stocks"]) {
-      const rowsL = ladderBands(ladderIn[un], LADDER_BANDS).slice(0, LADDER_COINS);
-      const total = { long: LADDER_BANDS.map(() => 0), short: LADDER_BANDS.map(() => 0) };
-      for (const rw of rowsL) for (let i = 0; i < LADDER_BANDS.length; i++) { total.long[i] += rw.long[i]; total.short[i] += rw.short[i]; }
-      ladder[un] = {
-        coins: rowsL.map((rw) => ({ coin: rw.coin, ticker: tickerOf(rw.coin),
-          long: rw.long.map((x) => rnd(x, 0)), short: rw.short.map((x) => rnd(x, 0)), nLong: rw.nLong, nShort: rw.nShort })),
-        total: { long: total.long.map((x) => rnd(x, 0)), short: total.short.map((x) => rnd(x, 0)) },
-      };
-    }
-    // ETag rides POSITIONS, LADDER MASS and EVENTS — not the raw live distance (mark moves every
-    // second and the client recomputes display distance; a sig on it would defeat every 304).
-    // Danger buckets at 0.25% (quarter of the 1% display bar), ladder mass at $10k.
-    const s = dTop.map((e) => e.user + e.coin + Math.round((e.dist || 0) * 4) + Math.round((e.ntl || 0) / 1000)).join(",")
-      + "|" + ["crypto", "stocks"].map((un) => ladder[un].total.long.concat(ladder[un].total.short).map((x) => Math.round(x / 10000)).join(".")).join("/")
-      + "|" + liqEvents.length + "|" + (liqEvents[0] ? liqEvents[0].t + liqEvents[0].status : "");
-    if (s !== liqsSig) { liqsSig = s; liqsVer = now; }
-    liqsCache = { ts: now, dataTs: liqsVer, bands: LADDER_BANDS,
-      coverage: { tracked: whales.size, books: posBook.size, hotBooks, positions,
-        lastSweepMs: lastSweepAt ? now - lastSweepAt : null, oldestBookMin: oldestBook ? Math.round((now - oldestBook) / 60000) : null,
-        sweeps, hotSweeps, lapMin: whales.size ? Math.round(whales.size * SWEEP_STEP_MS / 60000 * 10) / 10 : null,
-        hotResweepS: Math.round(HOT_RESWEEP_MS / 1000), hotPct: HOT_PCT,
-        note: "tracked COHORT, not the whole venue: the " + WHALE_MAX + " largest accounts observed on the live tape (decayed score, self-refreshing), positions swept round-robin with a HOT lane — any book holding a position within " + HOT_PCT + "% of its liq price re-sweeps every " + Math.round(HOT_RESWEEP_MS / 1000) + "s instead of waiting out the lap. Cross-margin liquidation prices drift with the whole account between sweeps — every row carries its sweep age. Events fire when the live mark crosses a position's last-known liq price and are confirmed/averted by the hot lane within seconds." },
-      danger: dTop,
-      ladder,
-      events: liqEvents.slice(0, 120).map((e) => ({ t: e.t, uni: e.uni, coin: e.coin, ticker: e.ticker, side: e.side,
-        ntl: rnd(e.ntl, 0), lev: e.lev, levType: e.levType, liqPx: sig(e.liqPx, 6), markX: sig(e.markX, 6),
-        status: e.status, user: e.user, asOfS: Math.round((e.asOfMs || 0) / 1000), tEnd: e.tEnd || null })) };
-    liqsBuilt = now;
-  }
-  function getLiqs() {
-    if (!liqsCache || Date.now() - liqsBuilt > FLOWS_MEMO_MS) {
-      try { buildLiqs(); } catch (e) { log("buildLiqs error: " + (e && e.message)); }
-    }
-    return liqsCache;
-  }
-
-  function hydrateFlows() {
-    const d = store.loadFlows ? store.loadFlows() : null;
-    if (!d) return false;
-    try {
-      if (Array.isArray(d.whales)) for (const [a, w] of d.whales)
-        if (typeof a === "string" && w && Number.isFinite(w.ntl)) whales.set(a, { ntl: w.ntl, last: w.last || d.ts || 0, dexs: w.dexs || {} });
-      if (Array.isArray(d.events)) liqEvents = d.events.filter((e) => e && Number.isFinite(e.t)).slice(0, LIQ_EVENT_MAX);
-      // Restored "triggered" events can't be confirmed against a dead book — close them honestly.
-      for (const e of liqEvents) if (e.status === "triggered") e.status = "unresolved (restart)";
-      return whales.size > 0 || liqEvents.length > 0;
-    } catch (_) { return false; }
-  }
-  function persistFlows() {
-    if (!store.saveFlows) return;
-    if (!flowsDirty && whales.size === 0) return;
-    flowsDirty = false;
-    store.saveFlows({ ts: Date.now(), whales: [...whales.entries()],
-      events: liqEvents.slice(0, LIQ_EVENT_MAX) });
-  }
-
   return {
     start,
     getSnapshot: () => snapshotCache,
@@ -2659,8 +2350,6 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     getEarnings: () => earnCache,
     voidEarnPrint,
     getTrend,
-    getLiqs,
-    persistFlows,
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
     getLedgerFor,
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
@@ -2697,12 +2386,6 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
-        flows: flows ? { tape: flowSock ? flowSock.status() : { enabled: false },
-          twapFillsSeen: flowTwapFills,
-          tracked: whales.size, books: posBook.size, hotBooks: [...posBook.values()].filter((b) => b.hot).length,
-          sweeps, hotSweeps,
-          lastSweepAgoS: lastSweepAt ? Math.round((Date.now() - lastSweepAt) / 1000) : null,
-          liqEvents: liqEvents.length } : { enabled: false },
       };
     },
   };
