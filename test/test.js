@@ -416,7 +416,7 @@ test("earnings: feed parse filters to OUR symbols, applies aliases, normalizes s
   assert.equal(out[2].s, "AMC");
   assert.equal(out[3].s, "TBD", "unknown hour is TBD, never guessed");
   assert.equal(out[3].coin, "xyz:BRKB", "BRK.B report lands on the BRKB row");
-  assert.equal(out[1].eps, 4.11, "EPS estimate quantized to 2dp");
+  assert.equal(out[1].eps, 4.1123, "EPS estimate keeps 4dp — 2dp collapsed real beat/miss margins");
   assert.equal(out[3].eps, null, "missing estimate stays null");
   assert.deepEqual(parseEarningsCalendar({}, symMap), [], "missing calendar array is empty, not a throw");
 });
@@ -425,14 +425,17 @@ test("earnings: parser carries actuals and revenue for beat/miss", () => {
   const { parseEarningsCalendar } = require("../src/compute");
   const symMap = new Map([["NVDA", { coin: "xyz:NVDA", ticker: "NVDA" }]]);
   const out = parseEarningsCalendar({ earningsCalendar: [
-    { symbol: "NVDA", date: "2026-07-13", hour: "amc", epsEstimate: 5.6234, epsActual: 5.712, revenueEstimate: 41234000000, revenueActual: 42891000000 },
+    { symbol: "NVDA", date: "2026-07-13", hour: "amc", epsEstimate: 5.6234, epsActual: 5.712, revenueEstimate: 41234000000, revenueActual: 42891000000, quarter: 2, year: 2026 },
     { symbol: "NVDA", date: "2026-10-14", hour: "amc", epsEstimate: 6.1 },
   ] }, symMap);
-  assert.equal(out[0].epsA, 5.71, "actual quantized to 2dp");
+  assert.equal(out[0].epsA, 5.712, "actual keeps 4dp");
   assert.equal(out[0].rev, 41200000000, "revenue estimate at 3 significant figures");
   assert.equal(out[0].revA, 42900000000);
+  assert.equal(out[0].q, 2, "fiscal quarter captured — the reschedule discriminator");
+  assert.equal(out[0].y, 2026);
   assert.equal(out[1].epsA, null, "future print has no actual — null, never 0");
   assert.equal(out[1].rev, null);
+  assert.equal(out[1].q, null, "missing quarter is unknown, never guessed");
 });
 
 test("earnings: print merge dedupes, upgrades in place with actuals, never blanks them", () => {
@@ -456,6 +459,11 @@ test("earnings: print merge dedupes, upgrades in place with actuals, never blank
   assert.equal(jp.epsA, 4.3, "actual upgrades in place");
   assert.equal(jp.s, "BMO", "TBD session firms up when a later fetch knows it");
   assert.ok(out[0].d <= out[1].d && out[1].d <= out[2].d, "date-sorted ascending");
+  // quarter/year upgrade in place, never blanked by a later fetch that lacks them
+  const q1 = mergeEarnPrints([{ coin: "c", t: "T", d: "2026-04-15", s: "AMC", q: 1, y: 2026 }],
+    [{ coin: "c", t: "T", d: "2026-04-15", s: "AMC", epsA: 2 }], now);
+  assert.equal(q1[0].q, 1, "stored quarter survives a later fetch without it");
+  assert.equal(q1[0].epsA, 2, "while the actual still lands");
 });
 
 test("earnings: reaction study — BMO same-day, AMC next-day, expansion, gaps, honest gaps in coverage", () => {
@@ -493,6 +501,141 @@ test("earnings: reaction study — BMO same-day, AMC next-day, expansion, gaps, 
   assert.equal(earnReactionsFor([], daily), null, "no prints -> null, not zeros");
 });
 
+test("earnings: chunked calendar windows are disjoint, covering, near-first — the truncation fix", () => {
+  const { earnChunks, etDayStr } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 16, 16, 0);   // Thu Jul 16 noon ET
+  const ch = earnChunks(now - 5 * DAY, now + 14 * DAY, 3);
+  assert.equal(ch[0][0], "2026-07-11", "coverage starts 5 days back");
+  assert.equal(ch[ch.length - 1][1], "2026-07-30", "coverage ends at the window edge");
+  // every ET day in [from, to] falls inside exactly one chunk — no gap can silently drop a
+  // report date, no overlap can double-count (dedupe guards DST-edge overlap anyway)
+  for (let d = -5; d <= 14; d++) {
+    const day = etDayStr(now + d * DAY);
+    const hits = ch.filter(([f, t]) => f <= day && day <= t).length;
+    assert.equal(hits, 1, `ET day ${day} covered exactly once, got ${hits}`);
+  }
+  assert.ok(ch[0][1] < ch[1][0], "chunks ordered near-first and disjoint");
+  assert.ok(ch.every(([f, t]) => f <= t), "no inverted chunk");
+  assert.deepEqual(earnChunks(now, now, 3), [[etDayStr(now), etDayStr(now)]], "single-day window is one single-day chunk");
+});
+
+test("earnings: stale-schedule purge drops placeholder-date phantoms, never deletes on absence", () => {
+  const { purgeStalePrints } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 16, 16, 0);   // Thu Jul 16 noon ET
+  const prints = [
+    // the live phantom: IBM persisted at Jul 14 "with actuals" while IBM's real date is Jul 22.
+    // Legacy record — no quarter captured — so the 10-day proximity fallback must catch it.
+    { coin: "xyz:IBM", t: "IBM", d: "2026-07-14", s: "BMO", eps: 3.05, epsA: 2.93 },
+    // real print, reported today-ish, no future row -> untouchable
+    { coin: "xyz:NFLX", t: "NFLX", d: "2026-07-15", s: "AMC", eps: 0.8, epsA: 0.8, q: 2, y: 2026 },
+    // same-quarter phantom WITH quarter captured -> exact-match drop
+    { coin: "xyz:AAA", t: "AAA", d: "2026-07-13", s: "AMC", eps: 1, epsA: 1.2, q: 2, y: 2026 },
+    // past print whose ticker has a future row for the NEXT fiscal quarter -> kept (legit history)
+    { coin: "xyz:BBB", t: "BBB", d: "2026-07-12", s: "BMO", eps: 2, epsA: 2.1, q: 2, y: 2026 },
+    // old print far outside any proximity window -> kept even without quarter info
+    { coin: "xyz:IBM", t: "IBM", d: "2026-04-22", s: "AMC", eps: 2.9, epsA: 3.0 },
+  ];
+  const parsed = [
+    { coin: "xyz:IBM", t: "IBM", d: "2026-07-22", s: "AMC", eps: 2.96, epsA: null, q: 2, y: 2026 },
+    { coin: "xyz:AAA", t: "AAA", d: "2026-07-24", s: "AMC", eps: 1, epsA: null, q: 2, y: 2026 },
+    { coin: "xyz:BBB", t: "BBB", d: "2026-07-20", s: "BMO", eps: 2, epsA: null, q: 3, y: 2026 },
+  ];
+  const out = purgeStalePrints(prints, parsed, now);
+  assert.deepEqual(out.map((p) => p.t + "|" + p.d).sort(),
+    ["BBB|2026-07-12", "IBM|2026-04-22", "NFLX|2026-07-15"].sort(),
+    "phantoms dropped (legacy proximity + same-quarter), real and historical prints kept");
+  // absence is never deletion evidence: a window that simply lacks a ticker changes nothing
+  assert.equal(purgeStalePrints(prints, [{ coin: "xyz:ZZZ", t: "ZZZ", d: "2026-07-25", s: "AMC" }], now).length, prints.length,
+    "no future row for a ticker -> its past prints are untouched");
+  assert.equal(purgeStalePrints(prints, [], now).length, prints.length, "empty window purges nothing");
+  // wiring pins: BOTH calendar pulls go through the chunked fetch, the purge runs before merge,
+  // and the backfill flag is versioned so truncated-v1 volumes re-pull chunked once.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok((pol.match(/await getCalChunked\(/g) || []).length >= 2, "chunked fetch used for live window AND backfill");
+  assert.ok(pol.indexOf("purgeStalePrints(earnPrints, parsed") < pol.indexOf("mergeEarnPrints(earnPrints, past.concat"), "purge runs before the merge");
+  assert.ok(pol.includes("data.histDone2 === true") && pol.includes("histDone2: earnHistDone"), "backfill flag versioned in hydrate and persist");
+});
+
+test("earnings: back-window reconciliation mirrors the feed's current claim, never touches deep history", () => {
+  const { reconcileEarnPrints, parseEarningsCalendar } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 16, 16, 0);   // Thu Jul 16 noon ET
+  const prints = [
+    { coin: "xyz:IBM", t: "IBM", d: "2026-07-14", s: "BMO", eps: 3.05, epsA: 2.93 },   // phantom: feed no longer lists it ANYWHERE
+    { coin: "xyz:NFLX", t: "NFLX", d: "2026-07-15", s: "AMC", eps: 0.8042, epsA: 0.8 }, // real: feed still serves the back-window row
+    { coin: "xyz:GOOGL", t: "GOOGL", d: "2026-04-24", s: "AMC", eps: 2.1, epsA: 2.3 },  // deep history: outside the back window, untouchable
+    { coin: "xyz:TSLA", t: "TSLA", d: "2026-07-22", s: "AMC", eps: 0.51 },              // future-dated record: not reconciliation's business
+  ];
+  const parsed = [
+    { coin: "xyz:NFLX", t: "NFLX", d: "2026-07-15", s: "AMC", eps: 0.8042, epsA: 0.8 },
+    { coin: "xyz:TSLA", t: "TSLA", d: "2026-07-22", s: "AMC", eps: 0.51 },
+  ];
+  const out = reconcileEarnPrints(prints, parsed, now);
+  assert.deepEqual(out.map((p) => p.t).sort(), ["GOOGL", "NFLX", "TSLA"],
+    "back-window phantom dropped; back-window real, deep history and future records kept");
+  assert.equal(reconcileEarnPrints(prints, [], now).length, prints.length,
+    "an empty parse is a broken fetch, not evidence — purges nothing");
+  assert.equal(reconcileEarnPrints(prints, parsed, now, 1).length, 4,
+    "IBM at diff -2 is outside a 1-day back window — untouched when not refetched");
+  // the NFLX display regression, at the parser: 2dp quantization collapsed a real -0.5% miss
+  // into "0.8 vs 0.8" — 4dp must preserve the margin the verdict is computed from
+  const symMap = new Map([["NFLX", { coin: "xyz:NFLX", ticker: "NFLX" }]]);
+  const p = parseEarningsCalendar({ earningsCalendar: [
+    { symbol: "NFLX", date: "2026-07-16", hour: "amc", epsEstimate: 0.8042, epsActual: 0.8, quarter: 2, year: 2026 },
+  ] }, symMap);
+  assert.equal(p[0].eps, 0.8042, "estimate margin preserved at 4dp");
+  assert.equal(p[0].epsA, 0.8);
+  assert.ok(p[0].epsA < p[0].eps, "the verdict-bearing inequality survives quantization");
+  // wiring pins: tombstones filter at the pipe mouth AND the post-merge choke point, the void
+  // function exists and is exported, the route is registered, and the client carries the control.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("parsed = parsed.filter((e) => !earnVoids.has(e.t"), "tombstones filter the fresh parse");
+  assert.ok(pol.includes("earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t"), "tombstones filter the merged prints (choke point)");
+  assert.ok(pol.includes("function voidEarnPrint(") && pol.includes("voidEarnPrint,"), "void function defined and exported");
+  assert.ok(pol.indexOf("reconcileEarnPrints(earnPrints, parsed") < pol.indexOf("purgeStalePrints(earnPrints, parsed"), "reconcile runs before the reschedule purge");
+  assert.ok(pol.includes("voids: [...earnVoids]"), "tombstones persist to the volume");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.equal(srv.split('fastify.post("/api/earnings/void"').length - 1, 1, "void route registered exactly once");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const frag of ["earn-void", "/api/earnings/void", "in line"])
+    assert.ok(app.includes(frag), `missing client void/verdict marker: ${frag}`);
+});
+
+test("earnings: recently-reported window keeps the two prior ET days, drops today and older, sorts most-recent first", () => {
+  const { recentEarnPrints } = require("../src/compute");
+  const noon = Date.UTC(2026, 6, 16, 16, 0);   // 12:00 ET, Thu Jul 16
+  const prints = [
+    { coin: "xyz:AAA", t: "AAA", d: "2026-07-16", s: "BMO", eps: 1, epsA: 1.1 },   // TODAY -> lives in entries, not here
+    { coin: "xyz:BBB", t: "BBB", d: "2026-07-15", s: "AMC", eps: 2, epsA: 2.2 },   // yesterday -> kept
+    { coin: "xyz:CCC", t: "CCC", d: "2026-07-15", s: "BMO", eps: 3, epsA: 2.9 },   // yesterday -> kept
+    { coin: "xyz:DDD", t: "DDD", d: "2026-07-14", s: "AMC", eps: 4, epsA: null },  // 2 days ago, actual pending -> kept, never fabricated
+    { coin: "xyz:EEE", t: "EEE", d: "2026-07-13", s: "BMO", eps: 5, epsA: 5.5 },   // 3 days ago -> outside the window
+    { coin: "xyz:FFF", t: "FFF", d: "2026-07-20", s: "BMO", eps: 6 },              // upcoming -> never here
+    null, { t: "GGG" },                                                             // garbage tolerated
+  ];
+  const out = recentEarnPrints(prints, noon);
+  assert.deepEqual(out.map((p) => p.t), ["CCC", "BBB", "DDD"],
+    "diff -1 and -2 only; most recent day first; BMO before AMC within a day");
+  assert.equal(out[2].epsA, null, "pending actual ships as null, never zeroed");
+  assert.equal(out[0].epsA, 2.9, "actuals ride through untouched");
+  // The ET-day trap this window inherits: at 22:00 ET Wed it is already Thursday in UTC — a
+  // Wednesday print must read diff 0 (still today, still in entries), NOT roll into recent early.
+  const lateWed = Date.UTC(2026, 6, 16, 2, 0);   // 22:00 ET Wed Jul 15
+  assert.deepEqual(recentEarnPrints([{ coin: "xyz:BBB", t: "BBB", d: "2026-07-15", s: "AMC" }], lateWed), [],
+    "a print reported tonight stays out of the reported window until the ET day actually rolls");
+  assert.deepEqual(recentEarnPrints(null, noon), [], "no prints -> empty, not a throw");
+  // wiring pins — the reported window is derived in BOTH poller paths (fetch + hydrate), the
+  // route fallback declares the field, and the client renders/merges it. A silent deletion of
+  // any link in that chain must be a suite failure, not a blank section discovered by eye.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok((pol.match(/recentEarnPrints\(earnPrints/g) || []).length >= 2, "poller derives recent in fetch AND hydrate paths");
+  assert.ok(pol.includes("p.epsA != null ? \"a\" : \"\""), "ETag signature covers recent actuals");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes("recent: []"), "/api/earnings fallback declares the recent field");
+});
+
 test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
   // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
@@ -507,13 +650,14 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
-    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext",
+    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
+    "loadLiqs", "renderLiqs", "openLiqs", "flowAddr", "liqDistLive", "ladderCell",
     "applyTabOrder", "saveTabOrder", "wireTabDrag"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7", "/api/liqs", "CASCADE LADDER"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -524,7 +668,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "view-liqs", "liqs-body", "logoutBtn"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
@@ -552,7 +696,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
+    "/api/earnings", "/api/liqs", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
@@ -942,4 +1086,104 @@ test("stackedRun: exact per-bar trend age — fresh stacks, breaks, caps, live-m
   sr = stackedRun(mk(fall), null, "short");
   assert.ok(sr.run > 30 && sr.capped, "steady downtrend: long capped short run");
   assert.equal(stackedRun(mk(rise).slice(0, 20), null, "long"), null, "insufficient history is null");
+});
+
+test("flows: TWAP-taker detection for watchlist credit — zero-hash gate, taker attribution", () => {
+  const { isTwapFill, twapTaker } = require("../src/compute");
+  const Z = "0x" + "0".repeat(64);
+  const REAL = "0x9a1c" + "b".repeat(60);
+  assert.equal(isTwapFill(Z), true, "all-zero hash is a TWAP slice");
+  assert.equal(isTwapFill(REAL), false, "a real L1 hash is NOT a TWAP slice");
+  assert.equal(isTwapFill("0x0"), false, "too-short zero string must not pass (malformed input)");
+  assert.equal(isTwapFill(null), false);
+  // taker attribution: users = [buyer, seller]; side B => taker bought => users[0]
+  assert.equal(twapTaker({ side: "B", users: ["0xAAA1", "0xBBB2"] }), "0xaaa1", "buy slice attributes to the buyer");
+  assert.equal(twapTaker({ side: "A", users: ["0xAAA1", "0xBBB2"] }), "0xbbb2", "sell slice attributes to the seller");
+  assert.equal(twapTaker({ side: "B", users: ["nothex", "0xBBB2"] }), null, "malformed address -> null, never a fabricated key");
+});
+
+test("flows: cascade ladder — cumulative bands, side split, through-the-level, deterministic order", () => {
+  const { ladderBands } = require("../src/compute");
+  const bands = [1, 2, 5, 10];
+  const rows = ladderBands([
+    { coin: "BTC", side: "long", dist: 0.8, ntl: 100 },   // in every band
+    { coin: "BTC", side: "long", dist: 4.0, ntl: 300 },   // <=5, <=10
+    { coin: "BTC", side: "short", dist: 1.5, ntl: 50 },   // <=2, <=5, <=10
+    { coin: "BTC", side: "long", dist: -0.2, ntl: 40 },   // THROUGH the level -> every band (liquidating now)
+    { coin: "BTC", side: "long", dist: 11, ntl: 9999 },   // beyond the last band -> excluded
+    { coin: "xyz:AAPL", side: "short", dist: 9.9, ntl: 700 },
+    { coin: "xyz:AAPL", side: "long", dist: null, ntl: 700 },   // no distance -> excluded, never guessed
+    { coin: "xyz:AAPL", side: "watch", dist: 1, ntl: 700 },     // malformed side -> excluded
+  ], bands);
+  assert.equal(rows.length, 2);
+  const btc = rows.find((r) => r.coin === "BTC"), aapl = rows.find((r) => r.coin === "xyz:AAPL");
+  assert.deepEqual(btc.long, [140, 140, 440, 440], "long bands are CUMULATIVE; through-the-level counts everywhere");
+  assert.deepEqual(btc.short, [0, 50, 50, 50]);
+  assert.equal(btc.nLong, 3); assert.equal(btc.nShort, 1);
+  assert.deepEqual(aapl.short, [0, 0, 0, 700]);
+  assert.equal(rows[0].coin, "xyz:AAPL", "sorted by total notional in the widest band (700 > 490)");
+  assert.deepEqual(ladderBands([], bands), [], "empty in, empty out");
+  assert.deepEqual(ladderBands(null, bands), [], "malformed in, empty out");
+});
+
+test("flows: liquidation distance — sign conventions, through-the-level, malformed inputs", () => {
+  const { liqDistancePct } = require("../src/compute");
+  // long: liq below mark -> positive distance; mark AT/THROUGH liq -> <= 0
+  assert.ok(Math.abs(liqDistancePct(10, 90, 100) - 10) < 1e-9, "long 10% above its liq price");
+  assert.ok(liqDistancePct(10, 100, 100) === 0, "long at the level");
+  assert.ok(liqDistancePct(10, 105, 100) < 0, "long through the level");
+  // short: liq above mark -> positive distance; mark AT/THROUGH -> <= 0
+  assert.ok(Math.abs(liqDistancePct(-5, 110, 100) - 10) < 1e-9, "short 10% below its liq price");
+  assert.ok(liqDistancePct(-5, 95, 100) < 0, "short through the level");
+  // malformed -> null, never fabricated
+  assert.equal(liqDistancePct(0, 90, 100), null, "no position, no distance");
+  assert.equal(liqDistancePct(10, null, 100), null, "no liq price (venue omits it sometimes)");
+  assert.equal(liqDistancePct(10, 90, null), null, "no mark");
+  assert.equal(liqDistancePct(10, -1, 100), null, "nonsense liq price");
+});
+
+test("flows: whale watchlist — exponential decay, credit accrual, deterministic prune", () => {
+  const { foldWhale, decayScore, pruneWhales } = require("../src/compute");
+  const HL = 3 * 86400000, t0 = 1000000;
+  const m = new Map();
+  foldWhale(m, "0xaaa", 100000, t0, HL);
+  // one half-life later the score has halved
+  assert.ok(Math.abs(decayScore(m.get("0xaaa"), t0 + HL, HL) - 50000) < 1, "score halves after one half-life");
+  // a credit at +HL decays the old score first, then adds
+  foldWhale(m, "0xaaa", 10000, t0 + HL, HL);
+  assert.ok(Math.abs(m.get("0xaaa").ntl - 60000) < 1, "decay-then-add accounting");
+  // malformed inputs never enter the map
+  assert.equal(foldWhale(m, "nothex", 5000, t0, HL), null);
+  assert.equal(foldWhale(m, "0xbbb", -5, t0, HL), null);
+  assert.equal(m.size, 1);
+  // prune keeps the top N by decayed score, deterministically
+  for (let i = 0; i < 10; i++) foldWhale(m, "0xw" + i, (i + 1) * 1000, t0, HL);
+  const dropped = pruneWhales(m, 4, t0, HL);
+  assert.equal(dropped, 7);
+  assert.equal(m.size, 4);
+  assert.ok(m.has("0xaaa") && m.has("0xw9") && m.has("0xw8") && m.has("0xw7"), "top scores survive");
+});
+
+test("flows: getLiqs payload contract on a cold poller — the route can never 500 on boot", () => {
+  // The route layer binds serveCached to this getter at listen time, before start() has run and
+  // before the tape has produced anything. A throw or a malformed shape here is the exact
+  // silent-drawer failure class the route manifest exists to prevent — pin the empty contract.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadFlows: () => null, saveFlows: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const lq = p.getLiqs();
+  assert.ok(lq && Number.isFinite(lq.ts), "liqs payload exists cold");
+  assert.deepEqual(lq.bands, [1, 2, 5, 10], "ladder bands shipped so the client never hardcodes them");
+  assert.ok(Array.isArray(lq.danger) && lq.danger.length === 0, "no fabricated danger rows");
+  assert.ok(Array.isArray(lq.events) && lq.events.length === 0);
+  for (const un of ["crypto", "stocks"]) {
+    assert.ok(lq.ladder && lq.ladder[un] && Array.isArray(lq.ladder[un].coins) && lq.ladder[un].coins.length === 0, un + " ladder present and empty");
+    assert.equal(lq.ladder[un].total.long.length, 4, un + " totals aligned to bands even when empty");
+    assert.equal(lq.ladder[un].total.long.reduce((a, b) => a + b, 0), 0);
+  }
+  assert.ok(lq.coverage && lq.coverage.tracked === 0 && typeof lq.coverage.note === "string", "coverage is stated, even when empty");
+  // ETag discipline: identical content on a rebuild must NOT bump dataTs (would defeat every 304)
+  const v1 = lq.dataTs;
+  assert.equal(p.getLiqs().dataTs, v1, "unchanged content keeps its data version (memo window)");
 });
