@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.16-52";
+const VERSION = "2026.07.16-53";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -35,11 +35,11 @@ log(`Volume heartbeat: boot #${HEARTBEAT.boots} on this data dir (first boot ${n
   (HEARTBEAT.boots > 1 ? "volume IS persisting" : "if this says boot #1 again next deploy, the volume is NOT persisting (check DATA_DIR vs the mount path)"));
 // Kill-switch: CRYPTO=0 disables main-dex polling entirely — one-variable rollback on Railway.
 const CRYPTO = process.env.CRYPTO !== "0";
-// Kill-switch: FLOWS=0 disables the TWAP/liquidation monitor (tape socket + cohort sweeps).
+// Kill-switch: FLOWS=0 disables the liquidation monitor (tape socket + cohort sweeps).
 const FLOWS = process.env.FLOWS !== "0";
 const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO, flows: FLOWS });
 log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d retention" : "disabled via CRYPTO=0"}`);
-log(`Flows (TWAP + liquidation monitor): ${FLOWS ? "ENABLED — public-tape TWAP detection + tracked-cohort liq sweeps, both universes" : "disabled via FLOWS=0"}`);
+log(`Flows (liquidation monitor): ${FLOWS ? "ENABLED — tape-harvested cohort + hot-lane liq sweeps, both universes" : "disabled via FLOWS=0"}`);
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -239,14 +239,11 @@ async function main() {
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
     serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], eligible: 0 }));
-  // Active TWAP monitor — global TWAP flow detected from the public tape (zero-hash slice
-  // fills), both universes. Executed flow only; totals aren't public. See poller flows section.
-  fastify.get("/api/twaps", (req, reply) =>
-    serveCached(req, reply, poller.getTwaps(), { ts: 0, dataTs: 0, coverage: {}, active: [], done: [], agg: { crypto: { buy: 0, sell: 0, n: 0 }, stocks: { buy: 0, sell: 0, n: 0 } } }));
   // Liquidation monitor — tracked-cohort positions ranked by distance to their liquidation
-  // price, plus mark-crossed-liq events with sweep-confirmed outcomes.
+  // price, the per-market cascade ladder, and mark-crossed-liq events with sweep-confirmed
+  // outcomes (hot lane re-sweeps at-risk books every ~15s).
   fastify.get("/api/liqs", (req, reply) =>
-    serveCached(req, reply, poller.getLiqs(), { ts: 0, dataTs: 0, coverage: {}, danger: [], events: [] }));
+    serveCached(req, reply, poller.getLiqs(), { ts: 0, dataTs: 0, bands: [1, 2, 5, 10], coverage: {}, danger: [], ladder: { crypto: { coins: [], total: { long: [], short: [] } }, stocks: { coins: [], total: { long: [], short: [] } } }, events: [] }));
   // Per-market OI + funding history — powers the drawer sparklines.
   fastify.get("/api/series", (req, reply) => {
     reply.header("cache-control", "no-store");
