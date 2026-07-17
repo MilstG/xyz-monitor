@@ -493,6 +493,40 @@ test("earnings: reaction study — BMO same-day, AMC next-day, expansion, gaps, 
   assert.equal(earnReactionsFor([], daily), null, "no prints -> null, not zeros");
 });
 
+test("earnings: recently-reported window keeps the two prior ET days, drops today and older, sorts most-recent first", () => {
+  const { recentEarnPrints } = require("../src/compute");
+  const noon = Date.UTC(2026, 6, 16, 16, 0);   // 12:00 ET, Thu Jul 16
+  const prints = [
+    { coin: "xyz:AAA", t: "AAA", d: "2026-07-16", s: "BMO", eps: 1, epsA: 1.1 },   // TODAY -> lives in entries, not here
+    { coin: "xyz:BBB", t: "BBB", d: "2026-07-15", s: "AMC", eps: 2, epsA: 2.2 },   // yesterday -> kept
+    { coin: "xyz:CCC", t: "CCC", d: "2026-07-15", s: "BMO", eps: 3, epsA: 2.9 },   // yesterday -> kept
+    { coin: "xyz:DDD", t: "DDD", d: "2026-07-14", s: "AMC", eps: 4, epsA: null },  // 2 days ago, actual pending -> kept, never fabricated
+    { coin: "xyz:EEE", t: "EEE", d: "2026-07-13", s: "BMO", eps: 5, epsA: 5.5 },   // 3 days ago -> outside the window
+    { coin: "xyz:FFF", t: "FFF", d: "2026-07-20", s: "BMO", eps: 6 },              // upcoming -> never here
+    null, { t: "GGG" },                                                             // garbage tolerated
+  ];
+  const out = recentEarnPrints(prints, noon);
+  assert.deepEqual(out.map((p) => p.t), ["CCC", "BBB", "DDD"],
+    "diff -1 and -2 only; most recent day first; BMO before AMC within a day");
+  assert.equal(out[2].epsA, null, "pending actual ships as null, never zeroed");
+  assert.equal(out[0].epsA, 2.9, "actuals ride through untouched");
+  // The ET-day trap this window inherits: at 22:00 ET Wed it is already Thursday in UTC — a
+  // Wednesday print must read diff 0 (still today, still in entries), NOT roll into recent early.
+  const lateWed = Date.UTC(2026, 6, 16, 2, 0);   // 22:00 ET Wed Jul 15
+  assert.deepEqual(recentEarnPrints([{ coin: "xyz:BBB", t: "BBB", d: "2026-07-15", s: "AMC" }], lateWed), [],
+    "a print reported tonight stays out of the reported window until the ET day actually rolls");
+  assert.deepEqual(recentEarnPrints(null, noon), [], "no prints -> empty, not a throw");
+  // wiring pins — the reported window is derived in BOTH poller paths (fetch + hydrate), the
+  // route fallback declares the field, and the client renders/merges it. A silent deletion of
+  // any link in that chain must be a suite failure, not a blank section discovered by eye.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok((pol.match(/recentEarnPrints\(earnPrints/g) || []).length >= 2, "poller derives recent in fetch AND hydrate paths");
+  assert.ok(pol.includes("p.epsA != null ? \"a\" : \"\""), "ETag signature covers recent actuals");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes("recent: []"), "/api/earnings fallback declares the recent field");
+});
+
 test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
   // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
@@ -507,14 +541,14 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
-    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext",
+    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml",
     "loadLiqs", "renderLiqs", "openLiqs", "flowAddr", "liqDistLive", "ladderCell",
     "applyTabOrder", "saveTabOrder", "wireTabDrag"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "/api/liqs", "CASCADE LADDER"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7", "/api/liqs", "CASCADE LADDER"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
