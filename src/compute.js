@@ -1446,3 +1446,92 @@ function earnReactionsFor(prints, daily) {
 }
 module.exports.mergeEarnPrints = mergeEarnPrints;
 module.exports.earnReactionsFor = earnReactionsFor;
+
+// ===== flows: TWAP tape detection + liquidation-danger math (pure, unit-tested) ================
+// TWAP slice fills are the ONLY fills Hyperliquid publishes with an all-zero L1 hash (documented
+// in the info-endpoint docs), so the public trades tape is a complete, global feed of TWAP
+// executions — no per-user subscription, no third-party indexer, and it works identically on
+// the main dex and on HIP-3 builder dexs like xyz. The TWAPing account is the TAKER (TWAP sends
+// aggressive IOC slices): side "B" means the taker bought -> users[0] (buyer); anything else
+// means the taker sold -> users[1] (seller).
+const ZERO_HASH = /^0x0+$/;
+function isTwapFill(hash) { return typeof hash === "string" && hash.length >= 10 && ZERO_HASH.test(hash); }
+function twapTaker(tr) {
+  if (!tr || !Array.isArray(tr.users) || tr.users.length < 2) return null;
+  const u = tr.side === "B" ? tr.users[0] : tr.users[1];
+  return typeof u === "string" && u.startsWith("0x") ? u.toLowerCase() : null;
+}
+// Fold one WsTrade into the episode map (key user|coin|side). Consecutive slices from the same
+// account on the same market+side are ONE episode; a gap longer than the sweep's goneMs ends it.
+// Returns the episode touched, or null when the trade isn't a TWAP slice / is malformed.
+function foldTwapTrade(map, tr, now) {
+  if (!tr || !isTwapFill(tr.hash)) return null;
+  const user = twapTaker(tr);
+  if (!user || typeof tr.coin !== "string" || !tr.coin) return null;
+  const px = +tr.px, sz = +tr.sz;
+  if (!(px > 0) || !(sz > 0) || !isFinite(px) || !isFinite(sz)) return null;
+  const side = tr.side === "B" ? "buy" : "sell";
+  const t = Number.isFinite(tr.time) ? tr.time : now;
+  const key = user + "|" + tr.coin + "|" + side;
+  let e = map.get(key);
+  if (!e) { e = { key, user, coin: tr.coin, side, t0: t, tLast: 0, slices: 0, sz: 0, ntl: 0, lastPx: px }; map.set(key, e); }
+  e.slices++; e.sz += sz; e.ntl += sz * px; e.lastPx = px;
+  if (t > e.tLast) e.tLast = t;
+  if (t < e.t0) e.t0 = t;
+  return e;
+}
+// Split the episode map into still-active vs ended (no slice for > goneMs). Ended episodes are
+// REMOVED from the map — the caller owns archiving them. TWAP slices land ~every 30s (randomize
+// jitters that), so a multi-minute silence is an ended/finished order, not a slow one.
+function sweepTwaps(map, now, goneMs) {
+  const active = [], ended = [];
+  for (const e of map.values()) {
+    if (now - e.tLast > goneMs) { ended.push(e); map.delete(e.key); }
+    else active.push(e);
+  }
+  active.sort((a, b) => b.ntl - a.ntl);
+  ended.sort((a, b) => b.tLast - a.tLast);
+  return { active, ended };
+}
+// Signed distance from mark to the liquidation price, in % of mark. Positive = still alive
+// (long: mark above liq; short: mark below liq). Zero/negative = the mark is AT or THROUGH the
+// liquidation price. Null on malformed inputs — never a fabricated distance.
+function liqDistancePct(szi, liqPx, mark) {
+  if (!Number.isFinite(szi) || szi === 0) return null;
+  if (!Number.isFinite(liqPx) || liqPx <= 0 || !Number.isFinite(mark) || mark <= 0) return null;
+  return szi > 0 ? (mark - liqPx) / mark * 100 : (liqPx - mark) / mark * 100;
+}
+// Whale watchlist accounting: exponential-decay notional score (half-life in ms). Decay is
+// applied lazily at credit/prune time so idle addresses cost nothing per trade.
+function decayScore(w, now, halfLifeMs) {
+  if (!w || !Number.isFinite(w.ntl)) return 0;
+  const dt = now - (w.last || now);
+  if (dt <= 0) return w.ntl;
+  return w.ntl * Math.pow(0.5, dt / halfLifeMs);
+}
+function foldWhale(map, addr, ntl, now, halfLifeMs) {
+  if (typeof addr !== "string" || !addr.startsWith("0x") || !Number.isFinite(ntl) || ntl <= 0) return null;
+  let w = map.get(addr);
+  if (!w) { w = { ntl: 0, last: now, dexs: {} }; map.set(addr, w); }
+  w.ntl = decayScore(w, now, halfLifeMs) + ntl;
+  w.last = now;
+  return w;
+}
+// Keep the top `max` addresses by decayed score; everything else is dropped. Deterministic
+// tie-break on address so tests (and persistence diffs) are stable.
+function pruneWhales(map, max, now, halfLifeMs) {
+  if (map.size <= max) return 0;
+  const scored = [...map.entries()].map(([a, w]) => [a, decayScore(w, now, halfLifeMs)]);
+  scored.sort((x, y) => (y[1] - x[1]) || (x[0] < y[0] ? -1 : 1));
+  let dropped = 0;
+  for (let i = max; i < scored.length; i++) { map.delete(scored[i][0]); dropped++; }
+  return dropped;
+}
+module.exports.isTwapFill = isTwapFill;
+module.exports.twapTaker = twapTaker;
+module.exports.foldTwapTrade = foldTwapTrade;
+module.exports.sweepTwaps = sweepTwaps;
+module.exports.liqDistancePct = liqDistancePct;
+module.exports.decayScore = decayScore;
+module.exports.foldWhale = foldWhale;
+module.exports.pruneWhales = pruneWhales;
