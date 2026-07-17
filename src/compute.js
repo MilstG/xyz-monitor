@@ -1358,20 +1358,117 @@ function parseEarningsCalendar(json, symMap) {
     if (!e || typeof e.symbol !== "string" || typeof e.date !== "string") continue;
     const m = symMap.get(e.symbol.toUpperCase());
     if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) continue;
-    const q2 = (x) => typeof x === "number" && isFinite(x) ? +x.toFixed(2) : null;
+    // 4 decimal places, NOT 2: the feed's estimates carry real information in the 3rd/4th
+    // decimal for low-EPS names. 2dp collapsed the live NFLX print (actual 0.8000 vs est 0.8042,
+    // a genuine -0.5% miss) into "0.8 vs 0.8 miss +0.0%" — a display contradicting its own
+    // verdict. Verdict and surprise must be computed from values that preserve the difference.
+    const q2 = (x) => typeof x === "number" && isFinite(x) ? +x.toFixed(4) : null;
     const eps = q2(e.epsEstimate), epsA = q2(e.epsActual);
     // Revenue ships in raw units (feed reports dollars); quantize to 3 significant figures —
     // the display only ever shows "$41.2B", full doubles are payload weight for nothing.
     const q3 = (x) => typeof x === "number" && isFinite(x) && x !== 0 ? +x.toPrecision(3) : null;
     const rev = q3(e.revenueEstimate), revA = q3(e.revenueActual);
-    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps, epsA, rev, revA });
+    // Fiscal print identity (quarter/year) rides along: it is the ONLY safe way to tell "this
+    // ticker's report moved to a later date" (drop the stale placeholder) from "this ticker
+    // reports twice in the window" (keep both). Absent from old persisted prints — consumers
+    // must treat missing q/y as unknown, never as a match.
+    const q = Number.isInteger(e.quarter) ? e.quarter : null, y = Number.isInteger(e.year) ? e.year : null;
+    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps, epsA, rev, revA, q, y });
   }
   out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (EARN_SESS_ORD[a.s] - EARN_SESS_ORD[b.s]) || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   return out;
 }
+// Recently-reported window for the Earnings tab: prints whose ET calendar day is in the past
+// `backDays` days (default 2 — "yesterday" and "2 days ago"; today's reported rows already live
+// in the upcoming entries with diff 0). Sorted most-recent day FIRST, chronological session
+// order within a day, ticker as tiebreak. Pure — the poller derives this from the persisted
+// print history at cache-build time, so a report keeps its beat/miss on the tab for two full
+// days after the print instead of vanishing at the ET midnight rollover.
+function recentEarnPrints(prints, nowMs, backDays) {
+  const bd = backDays != null ? backDays : 2;
+  const out = [];
+  if (Array.isArray(prints)) for (const p of prints) {
+    if (!p || typeof p.d !== "string") continue;
+    const df = earnDayDiff(p.d, nowMs);
+    if (df != null && df < 0 && df >= -bd) out.push(p);
+  }
+  out.sort((a, b) => a.d > b.d ? -1 : a.d < b.d ? 1
+    : ((EARN_SESS_ORD[a.s] != null ? EARN_SESS_ORD[a.s] : 3) - (EARN_SESS_ORD[b.s] != null ? EARN_SESS_ORD[b.s] : 3))
+    || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+  return out;
+}
+// Disjoint inclusive [from, to] ET-day chunks covering [fromMs, toMs]. The free-tier calendar
+// TRUNCATES long windows served far-end-first (observed live 2026-07-16: a 19-day earnings-season
+// window returned only Jul 22–30 and silently dropped a same-day NFLX report carrying actuals),
+// so every calendar pull must walk small date slices. Chunks may overlap by one day across a DST
+// boundary — callers dedupe by ticker+date, so overlap is harmless and coverage gaps are not.
+function earnChunks(fromMs, toMs, chunkDays) {
+  const cd = Math.max(1, chunkDays || 3), out = [];
+  for (let a = fromMs; a <= toMs; a += cd * DAY) out.push([etDayStr(a), etDayStr(Math.min(a + (cd - 1) * DAY, toMs))]);
+  return out;
+}
+// A past print is STALE-SCHEDULE GARBAGE when the fresh feed still shows the same ticker
+// scheduled at a FUTURE date for the same fiscal print: the feed dated the row from an estimate,
+// the company picked a later real date, and the placeholder scrolled behind today wearing numbers
+// it never earned (observed live: IBM persisted at 2026-07-14 "with actuals" while IBM's real Q2
+// date is 2026-07-22 per IBM IR — and the phantom fed the reaction study). Drop rule: past print
+// + future schedule for the same ticker + (same quarter/year, or, for legacy prints stored before
+// quarter capture, future date within 10 days of the print date — no quarterly reporter prints
+// twice in 10 days). ABSENCE is never evidence: a symbol missing from one fetch (the truncation
+// failure mode that motivated chunking) must not delete history.
+function purgeStalePrints(prints, parsed, nowMs) {
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(parsed) || !parsed.length) return prints || [];
+  const fut = new Map();
+  for (const e of parsed) {
+    const df = earnDayDiff(e.d, nowMs);
+    if (df != null && df > 0) { let a = fut.get(e.t); if (!a) { a = []; fut.set(e.t, a); } a.push(e); }
+  }
+  if (!fut.size) return prints;
+  const dUtc = (ds) => Date.UTC(+ds.slice(0, 4), +ds.slice(5, 7) - 1, +ds.slice(8, 10));
+  return prints.filter((p) => {
+    const df = earnDayDiff(p.d, nowMs);
+    if (df == null || df >= 0) return true;
+    const a = fut.get(p.t);
+    if (!a) return true;
+    for (const e of a) {
+      if (p.q != null && p.y != null && e.q != null && e.y != null) {
+        if (e.q === p.q && e.y === p.y) return false;
+      } else {
+        const gap = Math.round((dUtc(e.d) - dUtc(p.d)) / DAY);
+        if (gap > 0 && gap <= 10) return false;
+      }
+    }
+    return true;
+  });
+}
+// Back-window existence reconciliation. With chunked pulls the fetched window is complete by
+// construction, so within the REFETCHED back range [now-backDays, now-1] the feed's current
+// claim is authoritative for which prints EXIST: a persisted print the feed no longer lists
+// there was retracted or corrected upstream — dropped. This catches the phantom class where the
+// feed carries NO corrected future row for the reschedule rule to fire on (the live IBM case:
+// phantom at Jul 14, and Finnhub lists nothing for IBM at its real Jul 22 date either).
+// Self-healing both ways — a print the feed re-asserts on a later pull is simply re-merged.
+// Prints OLDER than the back window are NEVER touched: history that can no longer be re-fetched
+// is never deleted on absence. An empty parse purges nothing (a zero-row 19-day window is a
+// broken fetch, not evidence).
+function reconcileEarnPrints(prints, parsed, nowMs, backDays) {
+  const bd = backDays != null ? backDays : 5;
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(parsed) || !parsed.length) return prints || [];
+  const have = new Set();
+  for (const e of parsed) have.add(e.t + "|" + e.d);
+  return prints.filter((p) => {
+    const df = earnDayDiff(p.d, nowMs);
+    if (df == null || df >= 0 || df < -bd) return true;
+    return have.has(p.t + "|" + p.d);
+  });
+}
 module.exports.etDayStr = etDayStr;
 module.exports.earnDayDiff = earnDayDiff;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
+module.exports.recentEarnPrints = recentEarnPrints;
+module.exports.earnChunks = earnChunks;
+module.exports.purgeStalePrints = purgeStalePrints;
+module.exports.reconcileEarnPrints = reconcileEarnPrints;
 
 // ---- earnings print history + reaction study ---------------------------------------------------
 // Past prints are the raw material for the per-ticker reaction study. Like the OI log, they
@@ -1392,7 +1489,8 @@ function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
       // can never be blanked by a later fetch that dropped it.
       m.set(k, old ? { t: p.t, coin: p.coin || old.coin, d: p.d, s: p.s !== "TBD" ? p.s : old.s,
         eps: p.eps != null ? p.eps : old.eps, epsA: p.epsA != null ? p.epsA : old.epsA,
-        rev: p.rev != null ? p.rev : old.rev, revA: p.revA != null ? p.revA : old.revA } : p);
+        rev: p.rev != null ? p.rev : old.rev, revA: p.revA != null ? p.revA : old.revA,
+        q: p.q != null ? p.q : old.q, y: p.y != null ? p.y : old.y } : p);
     }
   };
   fill(prev); fill(incoming);
@@ -1446,3 +1544,83 @@ function earnReactionsFor(prints, daily) {
 }
 module.exports.mergeEarnPrints = mergeEarnPrints;
 module.exports.earnReactionsFor = earnReactionsFor;
+
+// ===== flows: TWAP tape detection + liquidation-danger math (pure, unit-tested) ================
+// TWAP slice fills are the ONLY fills Hyperliquid publishes with an all-zero L1 hash (documented
+// in the info-endpoint docs), so the public trades tape is a complete, global feed of TWAP
+// executions — no per-user subscription, no third-party indexer, and it works identically on
+// the main dex and on HIP-3 builder dexs like xyz. The TWAPing account is the TAKER (TWAP sends
+// aggressive IOC slices): side "B" means the taker bought -> users[0] (buyer); anything else
+// means the taker sold -> users[1] (seller).
+const ZERO_HASH = /^0x0+$/;
+function isTwapFill(hash) { return typeof hash === "string" && hash.length >= 10 && ZERO_HASH.test(hash); }
+function twapTaker(tr) {
+  if (!tr || !Array.isArray(tr.users) || tr.users.length < 2) return null;
+  const u = tr.side === "B" ? tr.users[0] : tr.users[1];
+  return typeof u === "string" && u.startsWith("0x") ? u.toLowerCase() : null;
+}
+// Signed distance from mark to the liquidation price, in % of mark. Positive = still alive
+// (long: mark above liq; short: mark below liq). Zero/negative = the mark is AT or THROUGH the
+// liquidation price. Null on malformed inputs — never a fabricated distance.
+function liqDistancePct(szi, liqPx, mark) {
+  if (!Number.isFinite(szi) || szi === 0) return null;
+  if (!Number.isFinite(liqPx) || liqPx <= 0 || !Number.isFinite(mark) || mark <= 0) return null;
+  return szi > 0 ? (mark - liqPx) / mark * 100 : (liqPx - mark) / mark * 100;
+}
+// Whale watchlist accounting: exponential-decay notional score (half-life in ms). Decay is
+// applied lazily at credit/prune time so idle addresses cost nothing per trade.
+function decayScore(w, now, halfLifeMs) {
+  if (!w || !Number.isFinite(w.ntl)) return 0;
+  const dt = now - (w.last || now);
+  if (dt <= 0) return w.ntl;
+  return w.ntl * Math.pow(0.5, dt / halfLifeMs);
+}
+function foldWhale(map, addr, ntl, now, halfLifeMs) {
+  if (typeof addr !== "string" || !addr.startsWith("0x") || !Number.isFinite(ntl) || ntl <= 0) return null;
+  let w = map.get(addr);
+  if (!w) { w = { ntl: 0, last: now, dexs: {} }; map.set(addr, w); }
+  w.ntl = decayScore(w, now, halfLifeMs) + ntl;
+  w.last = now;
+  return w;
+}
+// Keep the top `max` addresses by decayed score; everything else is dropped. Deterministic
+// tie-break on address so tests (and persistence diffs) are stable.
+function pruneWhales(map, max, now, halfLifeMs) {
+  if (map.size <= max) return 0;
+  const scored = [...map.entries()].map(([a, w]) => [a, decayScore(w, now, halfLifeMs)]);
+  scored.sort((x, y) => (y[1] - x[1]) || (x[0] < y[0] ? -1 : 1));
+  let dropped = 0;
+  for (let i = max; i < scored.length; i++) { map.delete(scored[i][0]); dropped++; }
+  return dropped;
+}
+// Cascade ladder: cumulative liquidatable notional per coin within each distance band of the
+// live mark, split by side. entries: [{coin, side: "long"|"short", dist (live %, may be <=0 when
+// the mark is at/through the level), ntl}]. Bands ascending; a position through its level counts
+// in EVERY band (it is liquidating now). Output is per-coin cumulative arrays aligned to bands —
+// the "if price moves X%, $Y of tracked positions force-liquidate" read, long side liquidating
+// DOWN (forced selling), short side liquidating UP (forced buying).
+function ladderBands(entries, bands) {
+  const out = new Map();
+  if (!Array.isArray(entries) || !Array.isArray(bands) || !bands.length) return [];
+  const maxB = bands[bands.length - 1];
+  for (const e of entries) {
+    if (!e || e.dist == null || !Number.isFinite(e.dist) || !Number.isFinite(e.ntl) || e.ntl <= 0) continue;
+    if (e.dist > maxB) continue;
+    if (e.side !== "long" && e.side !== "short") continue;
+    let c = out.get(e.coin);
+    if (!c) { c = { coin: e.coin, long: bands.map(() => 0), short: bands.map(() => 0), nLong: 0, nShort: 0 }; out.set(e.coin, c); }
+    const arr = e.side === "long" ? c.long : c.short;
+    for (let i = 0; i < bands.length; i++) if (e.dist <= bands[i]) arr[i] += e.ntl;
+    if (e.side === "long") c.nLong++; else c.nShort++;
+  }
+  const rows = [...out.values()];
+  rows.sort((a, b) => (b.long[b.long.length - 1] + b.short[b.short.length - 1]) - (a.long[a.long.length - 1] + a.short[a.short.length - 1]));
+  return rows;
+}
+module.exports.isTwapFill = isTwapFill;
+module.exports.twapTaker = twapTaker;
+module.exports.liqDistancePct = liqDistancePct;
+module.exports.decayScore = decayScore;
+module.exports.foldWhale = foldWhale;
+module.exports.pruneWhales = pruneWhales;
+module.exports.ladderBands = ladderBands;

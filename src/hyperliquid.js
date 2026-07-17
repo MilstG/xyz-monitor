@@ -129,4 +129,80 @@ function createUniverseSocket({ onCtxs, log }) {
   };
 }
 
-module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket };
+// ---- WebSocket trades feed (flows) -----------------------------------------------------
+// Second socket, dedicated to public `trades` subscriptions for the monitored coins in BOTH
+// universes (main-dex coins are bare, xyz coins carry the dex prefix — the exact strings the
+// meta universe returns). sync(coins) reconciles the live subscription set against the desired
+// one with sub/unsub diffs; a reconnect resubscribes everything. Budget: hard-capped at 400
+// coin subscriptions — well inside the 1000-per-IP limit shared with the universe socket.
+// Trades are DATA ONLY here: batches are forwarded raw to onTrades and all interpretation
+// (TWAP detection, whale harvesting) lives in the poller/compute layer.
+function createFlowSocket({ onTrades, log }) {
+  if (typeof globalThis.WebSocket !== "function") {
+    log("Flow socket unavailable (needs Node >= 22) — TWAP/liquidation tape disabled");
+    return { enabled: false, healthy: () => false, status: () => ({ enabled: false }), sync() {}, close() {} };
+  }
+  const MAX_SUBS = 400;
+  let ws = null, pingT = null, closed = false;
+  let desired = new Set(), live = new Set();
+  let lastMsg = 0, batches = 0, trades = 0, reconnects = 0, backoff = 1000, loggedUp = false;
+
+  function sendSub(method, coin) {
+    try { if (ws && ws.readyState === 1) { ws.send(JSON.stringify({ method, subscription: { type: "trades", coin } })); return true; } } catch (_) {}
+    return false;
+  }
+  // Reconcile live vs desired. Called on sync() and on (re)open; paced in one pass — the server
+  // allows 2000 WS messages/min, and a full cold sync is ~150 subs, well under it.
+  function reconcile() {
+    if (!ws || ws.readyState !== 1) return;
+    for (const c of live) if (!desired.has(c)) { if (sendSub("unsubscribe", c)) live.delete(c); }
+    for (const c of desired) if (!live.has(c)) { if (sendSub("subscribe", c)) live.add(c); }
+  }
+  function connect() {
+    if (closed) return;
+    try { ws = new WebSocket(WS_URL); } catch (_) { retry(); return; }
+    ws.onopen = () => {
+      backoff = 1000; live = new Set();   // server-side subs died with the old connection
+      reconcile();
+      clearInterval(pingT);
+      pingT = setInterval(() => { try { if (ws && ws.readyState === 1) ws.send('{"method":"ping"}'); } catch (_) {} }, 45000);
+    };
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+      if (!m || typeof m !== "object") return;
+      if (m.channel === "pong" || m.channel === "subscriptionResponse") { lastMsg = Date.now(); return; }
+      if (m.channel !== "trades" || !Array.isArray(m.data)) return;
+      lastMsg = Date.now(); batches++; trades += m.data.length;
+      if (!loggedUp) { loggedUp = true; log("Flow socket LIVE — public trades tape streaming (TWAP + whale detection armed)"); }
+      try { onTrades(m.data); } catch (_) {}
+    };
+    ws.onclose = () => { clearInterval(pingT); retry(); };
+    ws.onerror = () => { try { ws.close(); } catch (_) {} };
+  }
+  function retry() {
+    if (closed) return;
+    reconnects++;
+    setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, 60000);
+  }
+  connect();
+  log("Flow socket: connecting to " + WS_URL);
+  return {
+    enabled: true,
+    sync(coins) {
+      desired = new Set((coins || []).filter((c) => typeof c === "string" && c).slice(0, MAX_SUBS));
+      reconcile();
+    },
+    healthy: () => batches > 0 && Date.now() - lastMsg < 90000,
+    status: () => ({
+      enabled: true,
+      connected: !!(ws && ws.readyState === 1),
+      subs: live.size, wanted: desired.size,
+      lastMsgAgoS: lastMsg ? Math.round((Date.now() - lastMsg) / 1000) : null,
+      batches, trades, reconnects,
+    }),
+    close() { closed = true; clearInterval(pingT); try { if (ws) ws.close(); } catch (_) {} },
+  };
+}
+
+module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createFlowSocket };

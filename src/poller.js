@@ -1,7 +1,7 @@
 "use strict";
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
-const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
+const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createFlowSocket, infoPost } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
@@ -10,8 +10,9 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS } = require("./compute");
+const { isTwapFill, twapTaker, liqDistancePct, foldWhale, pruneWhales, decayScore, ladderBands } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -69,6 +70,27 @@ const EARN_ALIAS = { BRKB: "BRK.B" }; // xyz ticker -> US exchange symbol where 
 // print inside the horizon is a different return distribution than the study sample, so the
 // evidence contribution is capped — same mechanism and same cap as the no-live-edge guard.
 const EARN_GUARD = new Set(["breakout", "breakdown", "gap", "ondrift"]);
+// ---- flows: liquidation monitor (both universes) ----------------------------------------------
+// Sourced NATIVELY from Hyperliquid: the public tape harvests the tracked cohort (large prints
+// and TWAP takers — slice fills carry an all-zero hash), and clearinghouseState carries
+// per-position liquidation prices. No third-party indexer: Hypurrscan's public REST doesn't
+// cover a global liquidation feed and sees only the main dex — this approach covers xyz
+// identically. Honest coverage limits, surfaced in the payload: this is a COHORT monitor (the
+// size that moves markets), not every retail account on the venue.
+const WHALE_HALF_LIFE = 3 * DAY;         // watchlist score half-life — the cohort self-refreshes
+const WHALE_MAX = 200;                   // tracked addresses, both universes combined
+const WHALE_MIN_NTL = { main: 50000, xyz: 10000 };   // single-trade notional that earns watchlist credit
+const SWEEP_STEP_MS = 1500;              // one clearinghouseState call per step (weight 2 -> ~80/min worst case)
+const SWEEP_RATE_CEILING = 78;           // skip sweep steps while the limiter is above this % (backfills first)
+const HOT_PCT = 3;                       // a book holding a position within this % of its liq price is HOT
+const HOT_RESWEEP_MS = 15 * 1000;        // hot books re-sweep this often instead of waiting out the lap
+const DANGER_SHOW_PCT = 1;               // the danger table: positions within 1% of liquidation
+const LADDER_BANDS = [1, 2, 5, 10];      // cascade ladder: cumulative liquidatable notional within each band
+const LADDER_COINS = 20;                 // ladder rows per universe
+const LIQ_EVENT_KEEP_MS = 7 * DAY;
+const LIQ_EVENT_MAX = 400;
+const FLOWS_MEMO_MS = 4 * 1000;          // payload builder memoizes this long (tab polls every ~10s)
+const FLOWS_PERSIST_MS = 3 * 60 * 1000;
 function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Number.isFinite(v) ? v : null; }
 // Payload-trim helpers: the snapshot ships hundreds of derived floats per market at full
 // double precision (17 digits) — quantizing to what the UI can actually display cuts the
@@ -77,7 +99,7 @@ function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Nu
 function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 
-function createPoller({ dex, store, log, version, crypto }) {
+function createPoller({ dex, store, log, version, crypto, flows = true }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -91,6 +113,7 @@ function createPoller({ dex, store, log, version, crypto }) {
   let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0;   // /api/trend — lazy, memoized, ETag rides content
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
   let earnPrints = [], earnHistDone = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
+  let earnVoids = new Set();   // operator tombstones (ticker|date): feed-garbage prints, permanently ignored at every ingest point
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
@@ -1945,10 +1968,15 @@ function createPoller({ dex, store, log, version, crypto }) {
     earnVer = data.ts || Date.now();
     lastEarnOk = data.ts || 0;   // honest: staleness counts from the fetch that produced it
     earnPrints = Array.isArray(data.prints) ? data.prints : [];
-    earnHistDone = data.histDone === true;
+    earnVoids = new Set(Array.isArray(data.voids) ? data.voids.filter((v) => typeof v === "string") : []);
+    if (earnVoids.size) earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t + "|" + p.d));
+    earnHistDone = data.histDone2 === true;   // versioned: the truncated v1 backfill does not count
     refreshEarnStudy(false);
+    // No eligibility filter here — the universe may not be reconciled yet at boot, and an empty
+    // eligible set must not blank the reported window. The first real fetch re-derives filtered.
     earnCache = { ts: Date.now(), dataTs: earnVer, asOf: data.ts || null, windowDays: EARN_WINDOW_DAYS,
-      source: "finnhub", error: null, entries: data.entries, eligible: data.eligible || 0,
+      source: "finnhub", error: null, entries: data.entries, recent: recentEarnPrints(earnPrints, Date.now()),
+      eligible: data.eligible || 0,
       study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
     rebuildEarnMap(data.entries);
     return true;
@@ -1977,61 +2005,131 @@ function createPoller({ dex, store, log, version, crypto }) {
     }
     return changed;
   }
+  // Operator surgery for feed-garbage prints: removes ticker|date from the print history and
+  // the reaction study, rebuilds the payload immediately (ETag bumped), and TOMBSTONES the key
+  // so no future fetch — live window or backfill — can resurrect it. For phantoms the automatic
+  // rules cannot reach: a feed that keeps asserting a report that never happened, with no
+  // corrected row anywhere for reconciliation or the reschedule purge to fire on.
+  function voidEarnPrint(ticker, dateStr) {
+    const t = String(ticker || "").trim(), d = String(dateStr || "").trim();
+    if (!t || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return { ok: false, error: "need t (ticker) and d (YYYY-MM-DD)" };
+    const k = t + "|" + d;
+    const before = earnPrints.length;
+    earnVoids.add(k);
+    earnPrints = earnPrints.filter((p) => p.t + "|" + p.d !== k);
+    const removed = before - earnPrints.length;
+    refreshEarnStudy(false);
+    if (earnCache) {
+      earnVer = Date.now();
+      const entries = (earnCache.entries || []).filter((e) => e.t + "|" + e.d !== k);
+      earnCache = Object.assign({}, earnCache, { dataTs: earnVer, entries,
+        recent: recentEarnPrints(earnPrints, Date.now()), study: earnStudy, printsN: earnPrints.length });
+      rebuildEarnMap(entries);
+    }
+    if (store.saveEarnings) store.saveEarnings({ ts: lastEarnOk || Date.now(),
+      entries: (earnCache && earnCache.entries) || [], eligible: (earnCache && earnCache.eligible) || 0,
+      prints: earnPrints, histDone2: earnHistDone, voids: [...earnVoids] });
+    log(`Earnings print VOIDED by operator: ${k} (${removed} history record(s) removed, tombstoned against feed re-assertion)`);
+    return { ok: true, removed, tombstoned: k, printsN: earnPrints.length };
+  }
   async function fetchEarnings() {
     const token = process.env.FINNHUB_TOKEN || "";
     const now = Date.now();
     if (!token) {
       // No token, no feed — say so once in the payload instead of silently serving nothing.
       if (!earnCache) earnCache = { ts: now, dataTs: 0, asOf: null, windowDays: EARN_WINDOW_DAYS,
-        source: "finnhub", error: "FINNHUB_TOKEN not set", entries: [], eligible: earnEligible().size };
+        source: "finnhub", error: "FINNHUB_TOKEN not set", entries: [], recent: [], eligible: earnEligible().size };
       return;
     }
     const elig = earnEligible();
     if (!elig.size) return;   // universe not reconciled yet — the next tick will have it
-    // Window reaches 5 days BACK so a print stays in the payload while its actual lands (the
-    // feed fills epsActual/revenueActual on the same calendar row after the report) and then
+    // Window reaches 5 days BACK so a print stays available while its actual lands (the feed
+    // fills epsActual/revenueActual on the same calendar row after the report) and then
     // graduates into the persisted print history.
-    const from = etDayStr(now - 5 * DAY), to = etDayStr(now + EARN_WINDOW_DAYS * DAY);
     const getCal = async (f, t) => {
       const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}&token=${encodeURIComponent(token)}`,
         { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       return parseEarningsCalendar(await res.json(), elig);
     };
+    // The free-tier calendar TRUNCATES long windows, serving the FAR end first — a 19-day
+    // earnings-season pull returned only its last 9 days and silently dropped a same-day NFLX
+    // report (observed 2026-07-16, confirmed by a single-day pull that returned the row with
+    // actuals). Every pull therefore walks small disjoint date chunks, near dates first, paced
+    // under the 60/min budget, deduped by ticker+date preferring the record with the actual.
+    // Any chunk failing fails the whole pull — a PARTIAL window must never masquerade as the
+    // feed's complete view (the purge below treats the window as authoritative for reschedules).
+    const getCalChunked = async (fromMs, toMs, chunkDays, paceMs) => {
+      const seen = new Map();
+      for (const [f, t] of earnChunks(fromMs, toMs, chunkDays)) {
+        const rows = await getCal(f, t);
+        for (const e of rows) {
+          const k = e.t + "|" + e.d, old = seen.get(k);
+          if (!old || (e.epsA != null && old.epsA == null)) seen.set(k, e);
+        }
+        await sleep(paceMs);
+      }
+      const out = [...seen.values()];
+      out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+      return out;
+    };
     try {
-      const parsed = await getCal(from, to);
-      // One-time historical backfill for the reaction study: a single ~1y pull, flagged done on
-      // the first HTTP success even if thin — free-tier depth is whatever the feed honestly
-      // returns, and the study self-accrues forward from here regardless. HTTP failure leaves
-      // the flag unset, so the 30-min retry keeps trying.
+      let parsed = await getCalChunked(now - 5 * DAY, now + EARN_WINDOW_DAYS * DAY, 3, 200);
+      // Operator tombstones apply at the mouth of the pipe: a voided print never re-enters
+      // entries, the reported window, or the print history, no matter what the feed asserts.
+      if (earnVoids.size) parsed = parsed.filter((e) => !earnVoids.has(e.t + "|" + e.d));
+      // One-time historical backfill for the reaction study — chunked for the same reason (the
+      // original single ~1y pull was truncated to a sliver, which is why the study sat at "no
+      // history" across the board). Flag is VERSIONED (histDone2): volumes that completed the
+      // truncated v1 backfill re-run it chunked once; the print merge dedupes and upgrades in
+      // place, so re-pulling is idempotent. Flagged done only on full chunk success.
       if (!earnHistDone) {
         try {
-          const hist = await getCal(etDayStr(now - 370 * DAY), etDayStr(now - 6 * DAY));
+          const hist = await getCalChunked(now - 370 * DAY, now - 6 * DAY, 7, 300);
           earnPrints = mergeEarnPrints(earnPrints, hist, now);
           earnHistDone = true;
-          log(`Earnings history backfill: ${hist.length} past print(s) retrieved (feed depth is whatever the free tier serves — study self-accrues from here)`);
+          log(`Earnings history backfill (chunked): ${hist.length} past print(s) retrieved (feed depth is whatever the free tier serves — study self-accrues from here)`);
         } catch (he) { log("Earnings history backfill failed (will retry): " + (he && he.message)); }
       }
       const entries = [], past = [];
       for (const e of parsed) ((earnDayDiff(e.d, now) >= 0) ? entries : past).push(e);
+      // Stale-print hygiene BEFORE merge, two independent rules against the fetched window
+      // (complete by construction — any chunk failure aborts the whole parse):
+      // 1) back-window existence: a print in the refetched [now-5d, now-1d] range the feed no
+      //    longer lists was retracted upstream (the IBM phantom with NO corrected row anywhere);
+      // 2) reschedule: a past print whose ticker is still scheduled AHEAD for the same fiscal
+      //    print is a placeholder-date phantom.
+      earnPrints = reconcileEarnPrints(earnPrints, parsed, now);
+      earnPrints = purgeStalePrints(earnPrints, parsed, now);
       // Today's reported rows stay in `entries` (diff 0) with actuals; anything older folds
       // into the print history. Upcoming entries with a schedule change simply re-ship.
       earnPrints = mergeEarnPrints(earnPrints, past.concat(entries.filter((e) => e.epsA != null)), now);
+      if (earnVoids.size) earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t + "|" + p.d));   // choke point: covers the backfill merge too
       lastEarnOk = now; earnErr = null;
       refreshEarnStudy(false);
-      const sigE = entries.map((e) => e.t + e.d + e.s + (e.epsA != null ? "a" : "")).join(",") + "|" + JSON.stringify(earnStudy).length;
+      // Recently-reported window (past 2 ET days): derived from the persisted print history, not
+      // the raw fetch — so it survives restarts for free and a late-landing actual upgrades the
+      // row in place. Filtered to the CURRENT eligible universe so a delisted name can't linger.
+      const eligT = new Set(); for (const v of elig.values()) eligT.add(v.ticker);
+      const recent = recentEarnPrints(earnPrints, now).filter((p) => eligT.has(p.t));
+      // The signature covers recent rows AND their actuals: a print rolling past midnight into
+      // the reported window, or an actual filling in later, must bump the ETag or the client
+      // revalidates to a 304 and never repaints the scoreboard.
+      const sigE = entries.map((e) => e.t + e.d + e.s + (e.epsA != null ? "a" : "")).join(",")
+        + "|" + recent.map((p) => p.t + p.d + (p.epsA != null ? "a" : "")).join(",")
+        + "|" + JSON.stringify(earnStudy).length;
       if (sigE !== earnSig) { earnSig = sigE; earnVer = now; }
       earnCache = { ts: now, dataTs: earnVer, asOf: now, windowDays: EARN_WINDOW_DAYS,
-        source: "finnhub", error: null, entries, eligible: elig.size,
+        source: "finnhub", error: null, entries, recent, eligible: elig.size,
         study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
       rebuildEarnMap(entries);
-      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone: earnHistDone });
-      log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d (${elig.size} eligible equities; ${earnPrints.length} print(s) in history, study covers ${Object.keys(earnStudy).length})`);
+      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone2: earnHistDone, voids: [...earnVoids] });
+      log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d, ${recent.length} reported in the past 2d (${elig.size} eligible equities; ${earnPrints.length} print(s) in history, study covers ${Object.keys(earnStudy).length})`);
     } catch (e) {
       // Failure keeps the last good entries and stamps the error — the tab shows the cache age
       // in amber instead of pretending freshness or blanking a working list.
       earnErr = (e && e.message) || "fetch failed";
-      earnCache = Object.assign({ windowDays: EARN_WINDOW_DAYS, source: "finnhub", entries: [], eligible: elig.size, asOf: null, dataTs: 0 },
+      earnCache = Object.assign({ windowDays: EARN_WINDOW_DAYS, source: "finnhub", entries: [], recent: [], eligible: elig.size, asOf: null, dataTs: 0 },
         earnCache || {}, { ts: now, error: earnErr });
       log("Earnings fetch failed: " + earnErr);
     }
@@ -2171,6 +2269,20 @@ function createPoller({ dex, store, log, version, crypto }) {
     // 30 min while a healthy one refreshes 4x/day. One HTTP GET each time; zero HL rate budget.
     setTimeout(earnTick, 20 * 1000);
     setInterval(() => { if (Date.now() - lastEarnOk > EARN_STALE) earnTick(); }, EARN_RETRY_MS);
+    // Flows: liquidation cohort fed by the public tape. Second socket comes up after the first universe
+    // reconciliation so the subscription list is real; the sync tick tracks membership changes
+    // (daily crypto top-60 refresh, new xyz listings). FLOWS=0 on Railway is the one-variable
+    // rollback, mirroring the CRYPTO kill switch.
+    if (flows) {
+      const restoredFlows = hydrateFlows();
+      if (restoredFlows) log(`Restored flows cache: ${whales.size} tracked account(s), ${liqEvents.length} liq event(s)`);
+      flowSock = createFlowSocket({ onTrades: onFlowTrades, log });
+      flowSyncSubs();
+      setInterval(flowSyncSubs, 60 * 1000);
+      setInterval(() => { sweepStep().catch(() => {}); }, SWEEP_STEP_MS);
+      setInterval(safeTick(dangerTick, "dangerTick"), 5 * 1000);
+      setInterval(safeTick(persistFlows, "persistFlows"), FLOWS_PERSIST_MS);
+    } else log("Flows (liquidation monitor): disabled via FLOWS=0");
     // Reaction study rerun after the daily backfill has had time to land full candles (opens
     // arrive with the live pull; the warm cache only carries closes) — bumps the ETag on change.
     setTimeout(() => { try { refreshEarnStudy(true); } catch (_) {} }, 10 * 60 * 1000);
@@ -2261,6 +2373,279 @@ function createPoller({ dex, store, log, version, crypto }) {
     return trendCache;
   }
 
+  // ---- flows: liquidation monitor (served at /api/liqs) ---------------------------------------
+  // TAPE: a dedicated WebSocket streams public trades for every monitored coin in both universes.
+  // It exists to HARVEST THE COHORT: every large print (both sides — the resting maker with size
+  // is exactly the position holder this monitor exists to track) and every TWAP taker (slice
+  // fills carry an all-zero hash; systematic flow marks a relevant account) earns watchlist
+  // credit under an exponential-decay score, so the cohort self-refreshes toward whoever is
+  // actually active. SWEEPS: each tracked account's clearinghouseState — which carries
+  // per-position LIQUIDATION PRICES — is pulled round-robin, with a HOT lane: any book holding a
+  // position within HOT_PCT of its liq price (or with an open event) re-sweeps every
+  // HOT_RESWEEP_MS instead of waiting out the lap, so staleness collapses exactly where it
+  // matters. OUTPUTS: the danger table (positions within DANGER_SHOW_PCT of liquidation, live
+  // distance recomputed client-side against the streaming mark), the CASCADE LADDER (cumulative
+  // liquidatable notional per coin within each band of the mark — the "if price moves X%, $Y
+  // force-liquidates" read, built from ALL tracked positions, not just the imminent ones), and
+  // the events feed (mark crossed a last-known liq price; the hot lane confirms/averts it within
+  // seconds). Honest limits, stated in the payload: cross-margin liq prices drift with the whole
+  // account between sweeps (every row carries its sweep age), and this is a tracked COHORT — the
+  // size that moves markets — not every retail account on the venue.
+  let flowSock = null, liqsCache = null, liqsBuilt = 0, liqsVer = 0, liqsSig = "";
+  const whales = new Map();          // addr -> { ntl (decayed score), last, dexs: {main?, xyz?} }
+  const posBook = new Map();         // addr|uniKey -> { ts, av, hot, positions: [...] }
+  const openLiqEv = new Map();       // addr|uniKey|coin -> live event (also present in liqEvents)
+  let liqEvents = [];                // newest first
+  let sweepQ = [], sweepBusy = false, lastSweepAt = 0, sweeps = 0, hotSweeps = 0;
+  let flowTrades = 0, flowTwapFills = 0, flowsDirty = false;
+
+  const uniKeyOf = (coin) => (coin.includes(":") ? "xyz" : "main");
+  const uniName = (k) => (k === "xyz" ? "stocks" : "crypto");
+  const tickerOf = (coin) => (coin.includes(":") ? coin.split(":")[1] : coin);
+
+  function onFlowTrades(arr) {
+    const now = Date.now();
+    for (const tr of arr) {
+      if (!tr || typeof tr.coin !== "string") continue;
+      flowTrades++;
+      const px = num(tr.px), sz = num(tr.sz);
+      const uk = uniKeyOf(tr.coin);
+      const ntl = (px > 0 && sz > 0) ? px * sz : 0;
+      if (isTwapFill(tr.hash)) {
+        // A TWAPer is watchlist-relevant regardless of slice size — systematic flow is the point.
+        const u = twapTaker(tr);
+        if (u) {
+          flowTwapFills++;
+          const w = foldWhale(whales, u, Math.max(ntl, WHALE_MIN_NTL[uk] / 10), now, WHALE_HALF_LIFE);
+          if (w) w.dexs[uk] = 1;
+        }
+      }
+      if (ntl >= WHALE_MIN_NTL[uk] && Array.isArray(tr.users)) {
+        for (const u of tr.users) {
+          if (typeof u !== "string" || !u.startsWith("0x")) continue;
+          const w = foldWhale(whales, u.toLowerCase(), ntl, now, WHALE_HALF_LIFE);
+          if (w) w.dexs[uk] = 1;
+        }
+      }
+    }
+    if (whales.size > WHALE_MAX * 2) pruneWhales(whales, WHALE_MAX, now, WHALE_HALF_LIFE);
+  }
+
+  function flowSyncSubs() {
+    if (!flowSock || !flowSock.enabled) return;
+    const coins = [];
+    for (const r of activeMarkets()) if (!r.delisted) coins.push(r.coin);
+    if (crypto) for (const r of mainMarkets()) coins.push(r.coin);
+    flowSock.sync(coins);
+  }
+
+  // One clearinghouseState call per step. The HOT lane preempts the lap: the stalest hot book
+  // past its re-sweep interval goes first, so an account pinned against its liq price is
+  // re-read every ~HOT_RESWEEP_MS while the calm majority cycles on lap cadence. Weight 2 at a
+  // 1.5s cadence is ~80/min worst case against the 1150 budget, and the step yields entirely
+  // while the limiter is busy with candle backfills — flows must never starve the core pipeline.
+  function rebuildSweepQ() {
+    const now = Date.now();
+    pruneWhales(whales, WHALE_MAX, now, WHALE_HALF_LIFE);
+    sweepQ = [];
+    const scored = [...whales.entries()].sort((a, b) => decayScore(b[1], now, WHALE_HALF_LIFE) - decayScore(a[1], now, WHALE_HALF_LIFE));
+    for (const [addr, w] of scored) {
+      if (w.dexs.xyz) sweepQ.push([addr, "xyz"]);
+      if (w.dexs.main && crypto) sweepQ.push([addr, "main"]);
+    }
+  }
+  function sweepPick(now) {
+    let hotKey = null, hotAge = 0;
+    for (const [key, book] of posBook) {
+      if (!book.hot) continue;
+      const age = now - book.ts;
+      if (age >= HOT_RESWEEP_MS && age > hotAge) { hotAge = age; hotKey = key; }
+    }
+    if (hotKey) { hotSweeps++; return hotKey.split("|"); }
+    if (!sweepQ.length) rebuildSweepQ();
+    while (sweepQ.length) { const e = sweepQ.shift(); if (whales.has(e[0])) return e; }
+    return null;
+  }
+  async function sweepStep() {
+    if (sweepBusy) return;
+    if (limiterUsage().pct > SWEEP_RATE_CEILING) return;
+    const pick = sweepPick(Date.now());
+    if (!pick) return;
+    const [addr, uk] = pick;
+    sweepBusy = true;
+    try {
+      const d = await infoPost({ type: "clearinghouseState", user: addr, dex: uk === "xyz" ? dex : MAIN_DEX }, 2);
+      foldBook(addr, uk, d);
+      sweeps++; lastSweepAt = Date.now();
+    } catch (_) { /* transient — the hot lane or the next lap retries this address */ }
+    finally { sweepBusy = false; }
+  }
+  function bookHot(key, positions) {
+    // Hot = any position within HOT_PCT of its liq price at the CURRENT mark, or an open event
+    // on this book awaiting its confirming sweep.
+    for (const ek of openLiqEv.keys()) if (ek.startsWith(key + "|")) return true;
+    for (const p of positions) {
+      if (p.liqPx == null) continue;
+      const r = rows.get(p.coin);
+      const dd = liqDistancePct(p.szi, p.liqPx, r && !r.delisted ? r.px : null);
+      if (dd != null && dd <= HOT_PCT) return true;
+    }
+    return false;
+  }
+  function foldBook(addr, uk, d) {
+    const key = addr + "|" + uk, now = Date.now();
+    const ms = d && d.marginSummary ? d.marginSummary : {};
+    const av = num(ms.accountValue);
+    const positions = [];
+    const aps = d && Array.isArray(d.assetPositions) ? d.assetPositions : [];
+    for (const ap of aps) {
+      const p = ap && ap.position;
+      if (!p || typeof p.coin !== "string") continue;
+      const szi = num(p.szi);
+      if (szi == null || szi === 0) continue;
+      positions.push({
+        coin: p.coin, szi,
+        entry: num(p.entryPx), liqPx: num(p.liquidationPx),
+        ntl: Math.abs(num(p.positionValue) ?? 0), uPnl: num(p.unrealizedPnl),
+        lev: p.leverage ? num(p.leverage.value) : null,
+        levType: p.leverage && p.leverage.type === "isolated" ? "isolated" : "cross",
+      });
+    }
+    // Resolve open liquidation events against the fresh book BEFORE storing it, so the
+    // confirming sweep's latency (tEnd - t) is honest.
+    for (const [ek, ev] of openLiqEv) {
+      if (!ek.startsWith(key + "|")) continue;
+      const cur = positions.find((p) => p.coin === ev.coin && (p.szi > 0) === (ev.side === "long"));
+      if (!cur) { ev.status = "confirmed"; ev.tEnd = now; openLiqEv.delete(ek); flowsDirty = true; continue; }
+      const mark = rows.has(ev.coin) ? rows.get(ev.coin).px : null;
+      const dist = liqDistancePct(cur.szi, cur.liqPx, mark);
+      if (Math.abs(cur.szi) <= Math.abs(ev.szi0 || cur.szi) * 0.7) { ev.status = "partial"; ev.ntl = cur.ntl; flowsDirty = true; }
+      else if (dist != null && dist > 1) { ev.status = "averted"; ev.tEnd = now; openLiqEv.delete(ek); flowsDirty = true; }
+    }
+    if (!positions.length && !(av > 1000)) posBook.delete(key);
+    else posBook.set(key, { ts: now, av, positions, hot: bookHot(key, positions) });
+    // Standing size keeps an address tracked even after it stops printing on the tape: a small
+    // keep-alive credit per sweep (0.5% of gross position notional) offsets the score decay.
+    const gross = positions.reduce((s, p) => s + (p.ntl || 0), 0);
+    if (gross > 0) { const w = foldWhale(whales, addr, gross * 0.005, now, WHALE_HALF_LIFE); if (w) w.dexs[uk] = 1; }
+  }
+  // 5s checker: the live mark (WS-fed) against every tracked position's last-known liq price.
+  // Opens events on a cross, and refreshes each book's HOT flag so the sweep lane reprioritizes
+  // as price moves — a book can go hot purely because the market came to it.
+  function dangerTick() {
+    const now = Date.now();
+    for (const [key, book] of posBook) {
+      const [addr, uk] = key.split("|");
+      for (const p of book.positions) {
+        if (p.liqPx == null) continue;
+        const r = rows.get(p.coin);
+        const mark = r && !r.delisted ? r.px : null;
+        const dist = liqDistancePct(p.szi, p.liqPx, mark);
+        if (dist == null || dist > 0) continue;   // alive (or unpriceable) — no event
+        const ek = key + "|" + p.coin;
+        if (openLiqEv.has(ek)) continue;
+        const ev = { t: now, uni: uniName(uk), coin: p.coin, ticker: tickerOf(p.coin),
+          side: p.szi > 0 ? "long" : "short", ntl: p.ntl, szi0: p.szi, lev: p.lev, levType: p.levType,
+          liqPx: p.liqPx, markX: mark, user: addr, status: "triggered", asOfMs: now - book.ts };
+        openLiqEv.set(ek, ev);
+        liqEvents.unshift(ev);
+        flowsDirty = true;
+        log(`LIQ event: ${ev.ticker} ${ev.side} ~${Math.round((p.ntl || 0) / 1000)}k crossed liq ${p.liqPx} (${uk}, book ${Math.round(ev.asOfMs / 1000)}s old)`);
+      }
+      book.hot = bookHot(key, book.positions);
+    }
+    const cut = now - LIQ_EVENT_KEEP_MS;
+    if (liqEvents.length > LIQ_EVENT_MAX || (liqEvents.length && liqEvents[liqEvents.length - 1].t < cut))
+      liqEvents = liqEvents.filter((e) => e.t >= cut).slice(0, LIQ_EVENT_MAX);
+  }
+
+  function buildLiqs() {
+    const now = Date.now();
+    const danger = [], ladderIn = { crypto: [], stocks: [] };
+    let positions = 0, oldestBook = null, hotBooks = 0;
+    for (const [key, book] of posBook) {
+      const [addr, uk] = key.split("|");
+      if (book.hot) hotBooks++;
+      if (oldestBook == null || book.ts < oldestBook) oldestBook = book.ts;
+      for (const p of book.positions) {
+        positions++;
+        if (p.liqPx == null) continue;
+        const r = rows.get(p.coin);
+        const mark = r && !r.delisted ? r.px : null;
+        const dist = liqDistancePct(p.szi, p.liqPx, mark);
+        if (dist == null) continue;
+        const side = p.szi > 0 ? "long" : "short";
+        if (dist <= LADDER_BANDS[LADDER_BANDS.length - 1])
+          ladderIn[uniName(uk)].push({ coin: p.coin, side, dist, ntl: p.ntl });
+        // Ship a margin past the display cut — the client recomputes distance against the LIVE
+        // mark, so a row at 1.3% here can be inside 1% by the time it renders.
+        if (dist > DANGER_SHOW_PCT * 1.5) continue;
+        danger.push({ uni: uniName(uk), coin: p.coin, ticker: tickerOf(p.coin),
+          side, ntl: rnd(p.ntl, 0), lev: p.lev, levType: p.levType,
+          entry: sig(p.entry, 6), liqPx: sig(p.liqPx, 6), mark: sig(mark, 6), dist: rnd(dist, 2),
+          user: addr, asOf: book.ts, hot: book.hot || undefined });
+      }
+    }
+    danger.sort((a, b) => a.dist - b.dist);
+    const dTop = danger.slice(0, 60);
+    const ladder = {};
+    for (const un of ["crypto", "stocks"]) {
+      const rowsL = ladderBands(ladderIn[un], LADDER_BANDS).slice(0, LADDER_COINS);
+      const total = { long: LADDER_BANDS.map(() => 0), short: LADDER_BANDS.map(() => 0) };
+      for (const rw of rowsL) for (let i = 0; i < LADDER_BANDS.length; i++) { total.long[i] += rw.long[i]; total.short[i] += rw.short[i]; }
+      ladder[un] = {
+        coins: rowsL.map((rw) => ({ coin: rw.coin, ticker: tickerOf(rw.coin),
+          long: rw.long.map((x) => rnd(x, 0)), short: rw.short.map((x) => rnd(x, 0)), nLong: rw.nLong, nShort: rw.nShort })),
+        total: { long: total.long.map((x) => rnd(x, 0)), short: total.short.map((x) => rnd(x, 0)) },
+      };
+    }
+    // ETag rides POSITIONS, LADDER MASS and EVENTS — not the raw live distance (mark moves every
+    // second and the client recomputes display distance; a sig on it would defeat every 304).
+    // Danger buckets at 0.25% (quarter of the 1% display bar), ladder mass at $10k.
+    const s = dTop.map((e) => e.user + e.coin + Math.round((e.dist || 0) * 4) + Math.round((e.ntl || 0) / 1000)).join(",")
+      + "|" + ["crypto", "stocks"].map((un) => ladder[un].total.long.concat(ladder[un].total.short).map((x) => Math.round(x / 10000)).join(".")).join("/")
+      + "|" + liqEvents.length + "|" + (liqEvents[0] ? liqEvents[0].t + liqEvents[0].status : "");
+    if (s !== liqsSig) { liqsSig = s; liqsVer = now; }
+    liqsCache = { ts: now, dataTs: liqsVer, bands: LADDER_BANDS,
+      coverage: { tracked: whales.size, books: posBook.size, hotBooks, positions,
+        lastSweepMs: lastSweepAt ? now - lastSweepAt : null, oldestBookMin: oldestBook ? Math.round((now - oldestBook) / 60000) : null,
+        sweeps, hotSweeps, lapMin: whales.size ? Math.round(whales.size * SWEEP_STEP_MS / 60000 * 10) / 10 : null,
+        hotResweepS: Math.round(HOT_RESWEEP_MS / 1000), hotPct: HOT_PCT,
+        note: "tracked COHORT, not the whole venue: the " + WHALE_MAX + " largest accounts observed on the live tape (decayed score, self-refreshing), positions swept round-robin with a HOT lane — any book holding a position within " + HOT_PCT + "% of its liq price re-sweeps every " + Math.round(HOT_RESWEEP_MS / 1000) + "s instead of waiting out the lap. Cross-margin liquidation prices drift with the whole account between sweeps — every row carries its sweep age. Events fire when the live mark crosses a position's last-known liq price and are confirmed/averted by the hot lane within seconds." },
+      danger: dTop,
+      ladder,
+      events: liqEvents.slice(0, 120).map((e) => ({ t: e.t, uni: e.uni, coin: e.coin, ticker: e.ticker, side: e.side,
+        ntl: rnd(e.ntl, 0), lev: e.lev, levType: e.levType, liqPx: sig(e.liqPx, 6), markX: sig(e.markX, 6),
+        status: e.status, user: e.user, asOfS: Math.round((e.asOfMs || 0) / 1000), tEnd: e.tEnd || null })) };
+    liqsBuilt = now;
+  }
+  function getLiqs() {
+    if (!liqsCache || Date.now() - liqsBuilt > FLOWS_MEMO_MS) {
+      try { buildLiqs(); } catch (e) { log("buildLiqs error: " + (e && e.message)); }
+    }
+    return liqsCache;
+  }
+
+  function hydrateFlows() {
+    const d = store.loadFlows ? store.loadFlows() : null;
+    if (!d) return false;
+    try {
+      if (Array.isArray(d.whales)) for (const [a, w] of d.whales)
+        if (typeof a === "string" && w && Number.isFinite(w.ntl)) whales.set(a, { ntl: w.ntl, last: w.last || d.ts || 0, dexs: w.dexs || {} });
+      if (Array.isArray(d.events)) liqEvents = d.events.filter((e) => e && Number.isFinite(e.t)).slice(0, LIQ_EVENT_MAX);
+      // Restored "triggered" events can't be confirmed against a dead book — close them honestly.
+      for (const e of liqEvents) if (e.status === "triggered") e.status = "unresolved (restart)";
+      return whales.size > 0 || liqEvents.length > 0;
+    } catch (_) { return false; }
+  }
+  function persistFlows() {
+    if (!store.saveFlows) return;
+    if (!flowsDirty && whales.size === 0) return;
+    flowsDirty = false;
+    store.saveFlows({ ts: Date.now(), whales: [...whales.entries()],
+      events: liqEvents.slice(0, LIQ_EVENT_MAX) });
+  }
+
   return {
     start,
     getSnapshot: () => snapshotCache,
@@ -2272,7 +2657,10 @@ function createPoller({ dex, store, log, version, crypto }) {
     getCandles,
     getSignals: () => signalsCache,
     getEarnings: () => earnCache,
+    voidEarnPrint,
     getTrend,
+    getLiqs,
+    persistFlows,
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
     getLedgerFor,
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
@@ -2309,6 +2697,12 @@ function createPoller({ dex, store, log, version, crypto }) {
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
+        flows: flows ? { tape: flowSock ? flowSock.status() : { enabled: false },
+          twapFillsSeen: flowTwapFills,
+          tracked: whales.size, books: posBook.size, hotBooks: [...posBook.values()].filter((b) => b.hot).length,
+          sweeps, hotSweeps,
+          lastSweepAgoS: lastSweepAt ? Math.round((Date.now() - lastSweepAt) / 1000) : null,
+          liqEvents: liqEvents.length } : { enabled: false },
       };
     },
   };
