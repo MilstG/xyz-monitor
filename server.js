@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.17-59";
+const VERSION = "2026.07.17-60";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -258,11 +258,16 @@ async function main() {
     const ev = (req.query && req.query.ev) || "";
     return poller.getLedgerFor(coin, ev);
   });
-  // Hourly OHLCV for the drawer candle chart. days: 1..60, default 14.
+  // Hourly OHLCV for the drawer candle chart. days: 1..60, default 14. With tf=1h|4h|12h|1d the
+  // response is instead the EXACT per-rung series the trend ladder consumes (Trend-tab chart
+  // modal) — [t,o,h,l,c] bars plus the live mark, so the client's plotted EMAs reproduce the
+  // board's to the last bit. Unknown tf values fall through to the legacy hourly shape.
   fastify.get("/api/candles", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
     const days = req.query && req.query.days;
+    const tf = req.query && req.query.tf;
+    if (tf) { const r = poller.getTfCandles(coin, tf); if (r) return r; }
     return { coin, candles: poller.getCandles(coin, days) };
   });
   fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR }, ...poller.stats(), ts: Date.now() }));
