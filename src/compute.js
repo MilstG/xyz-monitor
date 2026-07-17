@@ -1364,7 +1364,12 @@ function parseEarningsCalendar(json, symMap) {
     // the display only ever shows "$41.2B", full doubles are payload weight for nothing.
     const q3 = (x) => typeof x === "number" && isFinite(x) && x !== 0 ? +x.toPrecision(3) : null;
     const rev = q3(e.revenueEstimate), revA = q3(e.revenueActual);
-    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps, epsA, rev, revA });
+    // Fiscal print identity (quarter/year) rides along: it is the ONLY safe way to tell "this
+    // ticker's report moved to a later date" (drop the stale placeholder) from "this ticker
+    // reports twice in the window" (keep both). Absent from old persisted prints — consumers
+    // must treat missing q/y as unknown, never as a match.
+    const q = Number.isInteger(e.quarter) ? e.quarter : null, y = Number.isInteger(e.year) ? e.year : null;
+    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps, epsA, rev, revA, q, y });
   }
   out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (EARN_SESS_ORD[a.s] - EARN_SESS_ORD[b.s]) || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   return out;
@@ -1388,10 +1393,56 @@ function recentEarnPrints(prints, nowMs, backDays) {
     || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   return out;
 }
+// Disjoint inclusive [from, to] ET-day chunks covering [fromMs, toMs]. The free-tier calendar
+// TRUNCATES long windows served far-end-first (observed live 2026-07-16: a 19-day earnings-season
+// window returned only Jul 22–30 and silently dropped a same-day NFLX report carrying actuals),
+// so every calendar pull must walk small date slices. Chunks may overlap by one day across a DST
+// boundary — callers dedupe by ticker+date, so overlap is harmless and coverage gaps are not.
+function earnChunks(fromMs, toMs, chunkDays) {
+  const cd = Math.max(1, chunkDays || 3), out = [];
+  for (let a = fromMs; a <= toMs; a += cd * DAY) out.push([etDayStr(a), etDayStr(Math.min(a + (cd - 1) * DAY, toMs))]);
+  return out;
+}
+// A past print is STALE-SCHEDULE GARBAGE when the fresh feed still shows the same ticker
+// scheduled at a FUTURE date for the same fiscal print: the feed dated the row from an estimate,
+// the company picked a later real date, and the placeholder scrolled behind today wearing numbers
+// it never earned (observed live: IBM persisted at 2026-07-14 "with actuals" while IBM's real Q2
+// date is 2026-07-22 per IBM IR — and the phantom fed the reaction study). Drop rule: past print
+// + future schedule for the same ticker + (same quarter/year, or, for legacy prints stored before
+// quarter capture, future date within 10 days of the print date — no quarterly reporter prints
+// twice in 10 days). ABSENCE is never evidence: a symbol missing from one fetch (the truncation
+// failure mode that motivated chunking) must not delete history.
+function purgeStalePrints(prints, parsed, nowMs) {
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(parsed) || !parsed.length) return prints || [];
+  const fut = new Map();
+  for (const e of parsed) {
+    const df = earnDayDiff(e.d, nowMs);
+    if (df != null && df > 0) { let a = fut.get(e.t); if (!a) { a = []; fut.set(e.t, a); } a.push(e); }
+  }
+  if (!fut.size) return prints;
+  const dUtc = (ds) => Date.UTC(+ds.slice(0, 4), +ds.slice(5, 7) - 1, +ds.slice(8, 10));
+  return prints.filter((p) => {
+    const df = earnDayDiff(p.d, nowMs);
+    if (df == null || df >= 0) return true;
+    const a = fut.get(p.t);
+    if (!a) return true;
+    for (const e of a) {
+      if (p.q != null && p.y != null && e.q != null && e.y != null) {
+        if (e.q === p.q && e.y === p.y) return false;
+      } else {
+        const gap = Math.round((dUtc(e.d) - dUtc(p.d)) / DAY);
+        if (gap > 0 && gap <= 10) return false;
+      }
+    }
+    return true;
+  });
+}
 module.exports.etDayStr = etDayStr;
 module.exports.earnDayDiff = earnDayDiff;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
 module.exports.recentEarnPrints = recentEarnPrints;
+module.exports.earnChunks = earnChunks;
+module.exports.purgeStalePrints = purgeStalePrints;
 
 // ---- earnings print history + reaction study ---------------------------------------------------
 // Past prints are the raw material for the per-ticker reaction study. Like the OI log, they
@@ -1412,7 +1463,8 @@ function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
       // can never be blanked by a later fetch that dropped it.
       m.set(k, old ? { t: p.t, coin: p.coin || old.coin, d: p.d, s: p.s !== "TBD" ? p.s : old.s,
         eps: p.eps != null ? p.eps : old.eps, epsA: p.epsA != null ? p.epsA : old.epsA,
-        rev: p.rev != null ? p.rev : old.rev, revA: p.revA != null ? p.revA : old.revA } : p);
+        rev: p.rev != null ? p.rev : old.rev, revA: p.revA != null ? p.revA : old.revA,
+        q: p.q != null ? p.q : old.q, y: p.y != null ? p.y : old.y } : p);
     }
   };
   fill(prev); fill(incoming);

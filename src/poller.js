@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS } = require("./compute");
 const { isTwapFill, twapTaker, liqDistancePct, foldWhale, pruneWhales, decayScore, ladderBands } = require("./compute");
 const { classify } = require("./sectors");
@@ -1967,7 +1967,7 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     earnVer = data.ts || Date.now();
     lastEarnOk = data.ts || 0;   // honest: staleness counts from the fetch that produced it
     earnPrints = Array.isArray(data.prints) ? data.prints : [];
-    earnHistDone = data.histDone === true;
+    earnHistDone = data.histDone2 === true;   // versioned: the truncated v1 backfill does not count
     refreshEarnStudy(false);
     // No eligibility filter here — the universe may not be reconciled yet at boot, and an empty
     // eligible set must not blank the reported window. The first real fetch re-derives filtered.
@@ -2013,32 +2013,58 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     }
     const elig = earnEligible();
     if (!elig.size) return;   // universe not reconciled yet — the next tick will have it
-    // Window reaches 5 days BACK so a print stays in the payload while its actual lands (the
-    // feed fills epsActual/revenueActual on the same calendar row after the report) and then
+    // Window reaches 5 days BACK so a print stays available while its actual lands (the feed
+    // fills epsActual/revenueActual on the same calendar row after the report) and then
     // graduates into the persisted print history.
-    const from = etDayStr(now - 5 * DAY), to = etDayStr(now + EARN_WINDOW_DAYS * DAY);
     const getCal = async (f, t) => {
       const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}&token=${encodeURIComponent(token)}`,
         { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       return parseEarningsCalendar(await res.json(), elig);
     };
+    // The free-tier calendar TRUNCATES long windows, serving the FAR end first — a 19-day
+    // earnings-season pull returned only its last 9 days and silently dropped a same-day NFLX
+    // report (observed 2026-07-16, confirmed by a single-day pull that returned the row with
+    // actuals). Every pull therefore walks small disjoint date chunks, near dates first, paced
+    // under the 60/min budget, deduped by ticker+date preferring the record with the actual.
+    // Any chunk failing fails the whole pull — a PARTIAL window must never masquerade as the
+    // feed's complete view (the purge below treats the window as authoritative for reschedules).
+    const getCalChunked = async (fromMs, toMs, chunkDays, paceMs) => {
+      const seen = new Map();
+      for (const [f, t] of earnChunks(fromMs, toMs, chunkDays)) {
+        const rows = await getCal(f, t);
+        for (const e of rows) {
+          const k = e.t + "|" + e.d, old = seen.get(k);
+          if (!old || (e.epsA != null && old.epsA == null)) seen.set(k, e);
+        }
+        await sleep(paceMs);
+      }
+      const out = [...seen.values()];
+      out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+      return out;
+    };
     try {
-      const parsed = await getCal(from, to);
-      // One-time historical backfill for the reaction study: a single ~1y pull, flagged done on
-      // the first HTTP success even if thin — free-tier depth is whatever the feed honestly
-      // returns, and the study self-accrues forward from here regardless. HTTP failure leaves
-      // the flag unset, so the 30-min retry keeps trying.
+      const parsed = await getCalChunked(now - 5 * DAY, now + EARN_WINDOW_DAYS * DAY, 3, 200);
+      // One-time historical backfill for the reaction study — chunked for the same reason (the
+      // original single ~1y pull was truncated to a sliver, which is why the study sat at "no
+      // history" across the board). Flag is VERSIONED (histDone2): volumes that completed the
+      // truncated v1 backfill re-run it chunked once; the print merge dedupes and upgrades in
+      // place, so re-pulling is idempotent. Flagged done only on full chunk success.
       if (!earnHistDone) {
         try {
-          const hist = await getCal(etDayStr(now - 370 * DAY), etDayStr(now - 6 * DAY));
+          const hist = await getCalChunked(now - 370 * DAY, now - 6 * DAY, 7, 300);
           earnPrints = mergeEarnPrints(earnPrints, hist, now);
           earnHistDone = true;
-          log(`Earnings history backfill: ${hist.length} past print(s) retrieved (feed depth is whatever the free tier serves — study self-accrues from here)`);
+          log(`Earnings history backfill (chunked): ${hist.length} past print(s) retrieved (feed depth is whatever the free tier serves — study self-accrues from here)`);
         } catch (he) { log("Earnings history backfill failed (will retry): " + (he && he.message)); }
       }
       const entries = [], past = [];
       for (const e of parsed) ((earnDayDiff(e.d, now) >= 0) ? entries : past).push(e);
+      // Stale-schedule purge BEFORE merge: the chunked window is complete by construction, so a
+      // persisted past print whose ticker is still scheduled AHEAD for the same fiscal print is
+      // a placeholder-date phantom (the live IBM 2026-07-14 case) — dropped before it can feed
+      // the reaction study or the reported window. Absence alone never deletes anything.
+      earnPrints = purgeStalePrints(earnPrints, parsed, now);
       // Today's reported rows stay in `entries` (diff 0) with actuals; anything older folds
       // into the print history. Upcoming entries with a schedule change simply re-ship.
       earnPrints = mergeEarnPrints(earnPrints, past.concat(entries.filter((e) => e.epsA != null)), now);
@@ -2060,7 +2086,7 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
         source: "finnhub", error: null, entries, recent, eligible: elig.size,
         study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
       rebuildEarnMap(entries);
-      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone: earnHistDone });
+      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone2: earnHistDone });
       log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d, ${recent.length} reported in the past 2d (${elig.size} eligible equities; ${earnPrints.length} print(s) in history, study covers ${Object.keys(earnStudy).length})`);
     } catch (e) {
       // Failure keeps the last good entries and stamps the error — the tab shows the cache age
