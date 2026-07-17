@@ -1001,10 +1001,13 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`", "tage", "td21", "fresh-first"])
+  for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`", "tage", "td21", "fresh-first", "twidth", "rrv"])
     assert.ok(s.includes(frag), `missing client feature marker: ${frag}`);
-  assert.ok(fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8").includes("function stackedRun("),
-    "missing engine function: stackedRun");
+  const eng = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const fn of ["function stackedRun(", "function ribbonWidth(", "TREND_TF_MS"])
+    assert.ok(eng.includes(fn), `missing engine symbol: ${fn}`);
+  assert.ok(fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8").includes("seedRowNow"),
+    "missing poller harness: seedRowNow");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(html.includes('data-view="trend"'), "trend tab button missing from nav");
   for (const id of ["view-trend", "trendside", "trend-body", "trend-asof"])
@@ -1012,8 +1015,65 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(srv.includes("/api/trend"), "server route missing: /api/trend");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl"])
+  for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl", ".twidth"])
     assert.ok(css.includes(cls), `missing style: ${cls}`);
+});
+
+test("ribbonWidth: per-rung average spread, null guards, and consistency with the ladder", () => {
+  const { ribbonWidth, trendLadder, TREND_TF_MS } = require("../src/compute");
+  // guards: no side, no aligned rungs, broken strength — all null, never 0
+  assert.equal(ribbonWidth(null), null, "no side object");
+  assert.equal(ribbonWidth({ score: 0, strength: 0 }), null, "zero aligned rungs is meaningless, not 0-wide");
+  assert.equal(ribbonWidth({ score: 2, strength: NaN }), null, "non-finite strength");
+  assert.equal(ribbonWidth({ score: 4, strength: 0.04 }), 1, "4% accumulated over 4 rungs = 1%/rung");
+  assert.equal(ribbonWidth({ score: 2, strength: 0.0032 }), 0.16, "rounds to 2dp");
+  // consistency: width must equal the MEAN of the per-rung spreads the ladder accumulated
+  const mk = (cl) => cl.map((c, i) => ({ t: i * HOUR, h: c * 1.002, l: c * 0.998, c }));
+  const rise = Array.from({ length: 60 }, (_, i) => 100 * Math.pow(1.01, i - 59));
+  const c = mk(rise);
+  const lad = trendLadder(100, { D1: c, H12: c, H4: c, H1: c });
+  assert.equal(lad.long.score, 4);
+  const per = ["D1", "H12", "H4", "H1"].map((t) => (100 * (lad.tf[t].e13 - lad.tf[t].e21)) / lad.tf[t].e21);
+  const want = +(per.reduce((a, b) => a + b, 0) / 4).toFixed(2);
+  assert.equal(ribbonWidth(lad.long), want, "width is the mean per-rung EMA13–EMA21 spread");
+  assert.ok(ribbonWidth(lad.long) > 0, "always positive by construction on aligned rungs");
+  assert.equal(ribbonWidth(lad.short), null, "the unaligned side has no width");
+  // the retest-volume window map: exactly one bar of each ladder timeframe
+  assert.deepEqual(TREND_TF_MS, { D1: 86400e3, H12: 43200e3, H4: 14400e3, H1: 3600e3 });
+});
+
+test("trend board ships width + retest volume (rrv) end to end via the seed harness", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), endH = Math.floor(now / HOUR);
+  // 16 days of hourly bars: enough for >=26 H12 buckets AND a ~15-day clock-matched RVOL
+  // baseline. Gently rising closes, unit volume — except the last 24 COMPLETED hours, which
+  // trade 2x. Lows are shallow so no intraday rung fires the retest; the D1 wick below owns it.
+  const N = 16 * 24, hourly = [];
+  for (let i = 0; i < N; i++) {
+    const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+    hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: i >= N - 24 ? 2 : 1 });
+  }
+  const px = hourly[N - 1].c * 1.0005;
+  // 60 daily bars rising 1%/day with deep lows: the recent daily wicks probe the D1 ribbon
+  // while price holds above EMA21 — the canonical D1 RETEST.
+  const daily = [];
+  for (let i = 0; i < 60; i++)
+    daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c: px * Math.pow(1.01, i - 59), l: px * Math.pow(1.01, i - 59) * 0.90, h: px * Math.pow(1.01, i - 59) * 1.002 });
+  p.seedRowNow("TREND1", { px, uni: "xyz", vol: 1e6, hourlyRaw: hourly, dailyRaw: daily });
+  p.buildTrendNow();
+  const row = p.getTrend().long.stocks.find((e) => e.coin === "TREND1");
+  assert.ok(row, "seeded market reaches the long board");
+  assert.ok(row.score >= 3, `score qualifies for a retest read, got ${row.score}`);
+  assert.equal(row.retest, "D1", "the deep daily wick owns the retest (highest TF reported first)");
+  assert.ok(row.width != null && row.width > 0, `width ships and is positive, got ${row.width}`);
+  assert.ok(Math.abs(row.width - +((100 * row.strength) / row.score).toFixed(2)) < 0.011,
+    "shipped width is the shipped strength normalized per aligned rung");
+  assert.ok(row.rrv != null && row.rrv > 1.6 && row.rrv < 2.6,
+    `retest volume reads ~2x for a doubled final day, got ${row.rrv}`);
+  for (const e of p.getTrend().long.stocks) if (!e.retest) assert.ok(e.rrv == null, "rrv only rides a retest");
 });
 
 test("withFormingDaily: stale daily series gets a synthetic forming bar, fresh series untouched", () => {
