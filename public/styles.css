@@ -627,10 +627,11 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .tcm-badge.sc{font-weight:700}
 .tcm-x{padding:4px 10px;margin-left:6px}
 .tcm-chart{min-height:120px}
-.tcm-leg{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;color:var(--muted);padding:7px 2px 9px}
+.tcm-leg{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;color:var(--muted);padding:7px 2px 4px}
 .tcm-leg i{font-style:normal}
 .tcm-zsw{display:inline-block;width:11px;height:9px;background:rgba(111,147,201,.14);border:1px solid var(--blue);vertical-align:-1px}
 .tcm-d21{margin-left:auto;color:var(--text);cursor:help}
+.tcm-note{font-family:var(--mono);font-size:10.5px;color:var(--muted);line-height:1.6;padding:0 2px 9px}
 .tcm-read{border-top:1px solid var(--grid);padding-top:9px;font-size:12.5px;line-height:1.6;color:var(--text)}
 .tcm-read .tdot{width:9px;height:9px}
 @media (max-width:680px){

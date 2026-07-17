@@ -2601,13 +2601,14 @@ function tcCandleSvg(cd,px,tfc,retesting,side){
     const sw=pl+(Math.min(seedVis,n))/n*(W-pl-pr);
     s+=`<rect x="${pl}" y="${pt}" width="${(sw-pl).toFixed(1)}" height="${H-pt-pb}" fill="var(--panel2)" fill-opacity="0.55"/>`+
        `<line x1="${sw.toFixed(1)}" y1="${pt}" x2="${sw.toFixed(1)}" y2="${H-pb}" stroke="var(--border)" stroke-dasharray="3 3"/>`+
-       `<text x="${pl+5}" y="${pt+13}" class="lc-tick">EMA seed window \u2014 no honest ribbon</text>`; }
+       `<text x="${pl+5}" y="${pt+13}" class="lc-tick" style="paint-order:stroke;stroke:var(--panel);stroke-width:3px">EMA seed window \u2014 no honest ribbon</text>`; }
   // retest zone band: the LADDER'S e13/e21 for this rung, shipped in /api/trend \u2014 never recomputed here
   if(tfc&&tfc.e13!=null&&tfc.e21!=null){
     let zt=Y(tfc.e13), zb=Y(tfc.e21); if(zb<zt){const t=zt;zt=zb;zb=t;}
     const zx=seedVis>0?pl+(Math.min(seedVis,n))/n*(W-pl-pr):pl;
     s+=`<rect x="${zx.toFixed(1)}" y="${zt.toFixed(1)}" width="${(W-pr-zx).toFixed(1)}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--blue)" fill-opacity="0.09" stroke="var(--blue)" stroke-opacity="0.4" stroke-dasharray="3 3"/>`;
-    if(retesting) s+=`<text x="${(zx+5).toFixed(1)}" y="${(zb+14).toFixed(1)}" class="lc-tick" fill="var(--blue)">retest zone \u2014 ${side==='long'?'probe held, dips here are the continuation entry while closes hold EMA21':'rally into the zone \u2014 continuation short while closes hold below EMA21'}</text>`;
+    // label stays two words — the guidance sentence lives in the read strip, not smeared across candles
+    if(retesting) s+=`<text x="${(zx+5).toFixed(1)}" y="${(zb+14).toFixed(1)}" class="lc-tick" fill="var(--blue)" style="paint-order:stroke;stroke:var(--panel);stroke-width:3px">retest zone</text>`;
   }
   // ribbon fill between the walks, only where BOTH EMAs exist
   let up='',dn='';
@@ -2684,8 +2685,8 @@ function renderTrendChart(res){
     `<div class="tcm-chart">${tcCandleSvg(cd,res?res.px:null,tfc,retesting,_tc.side)}</div>`+
     `<div class="tcm-leg"><span><i style="color:var(--blue)">\u2501</i> EMA13</span><span><i style="color:var(--accent)">\u2501</i> EMA21</span>`+
     `<span><i class="tcm-zsw"></i> 13/21 retest zone (ladder levels)</span>`+
-    `<span class="sec">${tcDepthNote(cd,tfDef.lad,closesOnly)}</span>`+
     (d21?`<span class="tcm-d21" data-tip="live distance from this rung's EMA21 at the last board build \u2014 small = at the entry zone, large = extended">${d21}</span>`:'')+`</div>`+
+    `<div class="tcm-note">${tcDepthNote(cd,tfDef.lad,closesOnly)}</div>`+
     `<div class="tcm-read">${st?`<span class="tdot ${st.cls}" style="margin-right:7px"></span>`:''}${esc(e.read||'')}${rrv?`<span class="sec">${rrv}</span>`:''}`+
     `<div class="sec" style="margin-top:5px;font-size:11.5px;line-height:1.55">Badges, zone levels and the read are the Trend board's own values (\u22643 min old); candles are the exact series that board's ladder consumed for this rung, so the plotted ribbon reproduces its EMAs. Nothing here is re-derived client-side.</div></div>`;
   m.querySelectorAll('.cdtf').forEach(b=>b.addEventListener('click',()=>{ if(b.dataset.tf!==_tc.tf){ _tc.tf=b.dataset.tf; loadTrendChart(); } }));
