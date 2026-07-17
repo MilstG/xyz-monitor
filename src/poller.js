@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS } = require("./compute");
 const { isTwapFill, twapTaker, liqDistancePct, foldWhale, pruneWhales, decayScore, ladderBands } = require("./compute");
 const { classify } = require("./sectors");
@@ -1969,8 +1969,11 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     earnPrints = Array.isArray(data.prints) ? data.prints : [];
     earnHistDone = data.histDone === true;
     refreshEarnStudy(false);
+    // No eligibility filter here — the universe may not be reconciled yet at boot, and an empty
+    // eligible set must not blank the reported window. The first real fetch re-derives filtered.
     earnCache = { ts: Date.now(), dataTs: earnVer, asOf: data.ts || null, windowDays: EARN_WINDOW_DAYS,
-      source: "finnhub", error: null, entries: data.entries, eligible: data.eligible || 0,
+      source: "finnhub", error: null, entries: data.entries, recent: recentEarnPrints(earnPrints, Date.now()),
+      eligible: data.eligible || 0,
       study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
     rebuildEarnMap(data.entries);
     return true;
@@ -2005,7 +2008,7 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     if (!token) {
       // No token, no feed — say so once in the payload instead of silently serving nothing.
       if (!earnCache) earnCache = { ts: now, dataTs: 0, asOf: null, windowDays: EARN_WINDOW_DAYS,
-        source: "finnhub", error: "FINNHUB_TOKEN not set", entries: [], eligible: earnEligible().size };
+        source: "finnhub", error: "FINNHUB_TOKEN not set", entries: [], recent: [], eligible: earnEligible().size };
       return;
     }
     const elig = earnEligible();
@@ -2041,19 +2044,29 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
       earnPrints = mergeEarnPrints(earnPrints, past.concat(entries.filter((e) => e.epsA != null)), now);
       lastEarnOk = now; earnErr = null;
       refreshEarnStudy(false);
-      const sigE = entries.map((e) => e.t + e.d + e.s + (e.epsA != null ? "a" : "")).join(",") + "|" + JSON.stringify(earnStudy).length;
+      // Recently-reported window (past 2 ET days): derived from the persisted print history, not
+      // the raw fetch — so it survives restarts for free and a late-landing actual upgrades the
+      // row in place. Filtered to the CURRENT eligible universe so a delisted name can't linger.
+      const eligT = new Set(); for (const v of elig.values()) eligT.add(v.ticker);
+      const recent = recentEarnPrints(earnPrints, now).filter((p) => eligT.has(p.t));
+      // The signature covers recent rows AND their actuals: a print rolling past midnight into
+      // the reported window, or an actual filling in later, must bump the ETag or the client
+      // revalidates to a 304 and never repaints the scoreboard.
+      const sigE = entries.map((e) => e.t + e.d + e.s + (e.epsA != null ? "a" : "")).join(",")
+        + "|" + recent.map((p) => p.t + p.d + (p.epsA != null ? "a" : "")).join(",")
+        + "|" + JSON.stringify(earnStudy).length;
       if (sigE !== earnSig) { earnSig = sigE; earnVer = now; }
       earnCache = { ts: now, dataTs: earnVer, asOf: now, windowDays: EARN_WINDOW_DAYS,
-        source: "finnhub", error: null, entries, eligible: elig.size,
+        source: "finnhub", error: null, entries, recent, eligible: elig.size,
         study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
       rebuildEarnMap(entries);
       if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone: earnHistDone });
-      log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d (${elig.size} eligible equities; ${earnPrints.length} print(s) in history, study covers ${Object.keys(earnStudy).length})`);
+      log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d, ${recent.length} reported in the past 2d (${elig.size} eligible equities; ${earnPrints.length} print(s) in history, study covers ${Object.keys(earnStudy).length})`);
     } catch (e) {
       // Failure keeps the last good entries and stamps the error — the tab shows the cache age
       // in amber instead of pretending freshness or blanking a working list.
       earnErr = (e && e.message) || "fetch failed";
-      earnCache = Object.assign({ windowDays: EARN_WINDOW_DAYS, source: "finnhub", entries: [], eligible: elig.size, asOf: null, dataTs: 0 },
+      earnCache = Object.assign({ windowDays: EARN_WINDOW_DAYS, source: "finnhub", entries: [], recent: [], eligible: elig.size, asOf: null, dataTs: 0 },
         earnCache || {}, { ts: now, error: earnErr });
       log("Earnings fetch failed: " + earnErr);
     }

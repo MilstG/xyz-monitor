@@ -1369,9 +1369,29 @@ function parseEarningsCalendar(json, symMap) {
   out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (EARN_SESS_ORD[a.s] - EARN_SESS_ORD[b.s]) || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   return out;
 }
+// Recently-reported window for the Earnings tab: prints whose ET calendar day is in the past
+// `backDays` days (default 2 — "yesterday" and "2 days ago"; today's reported rows already live
+// in the upcoming entries with diff 0). Sorted most-recent day FIRST, chronological session
+// order within a day, ticker as tiebreak. Pure — the poller derives this from the persisted
+// print history at cache-build time, so a report keeps its beat/miss on the tab for two full
+// days after the print instead of vanishing at the ET midnight rollover.
+function recentEarnPrints(prints, nowMs, backDays) {
+  const bd = backDays != null ? backDays : 2;
+  const out = [];
+  if (Array.isArray(prints)) for (const p of prints) {
+    if (!p || typeof p.d !== "string") continue;
+    const df = earnDayDiff(p.d, nowMs);
+    if (df != null && df < 0 && df >= -bd) out.push(p);
+  }
+  out.sort((a, b) => a.d > b.d ? -1 : a.d < b.d ? 1
+    : ((EARN_SESS_ORD[a.s] != null ? EARN_SESS_ORD[a.s] : 3) - (EARN_SESS_ORD[b.s] != null ? EARN_SESS_ORD[b.s] : 3))
+    || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+  return out;
+}
 module.exports.etDayStr = etDayStr;
 module.exports.earnDayDiff = earnDayDiff;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
+module.exports.recentEarnPrints = recentEarnPrints;
 
 // ---- earnings print history + reaction study ---------------------------------------------------
 // Past prints are the raw material for the per-ticker reaction study. Like the OI log, they
