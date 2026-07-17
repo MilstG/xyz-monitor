@@ -2473,7 +2473,7 @@ function trendDotHtml(tf,cell,side){
 }
 function trendSectionHtml(list,side,label,sub){
   let rows='';
-  if(!list||!list.length) rows=`<tr><td colspan="11"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
+  if(!list||!list.length) rows=`<tr><td colspan="12"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
   else rows=list.map((e,i)=>{
     const dots=['D1','H12','H4','H1'].map(t=>`<td class="tdc">${trendDotHtml(t,e.tf&&e.tf[t],side)}</td>`).join('');
     const scCls=side==='long'?(e.score===4?'pos':e.score===3?'':'sec'):(e.score===4?'neg':e.score===3?'':'sec');
@@ -2505,7 +2505,8 @@ function trendSectionHtml(list,side,label,sub){
       +`<td class="twidth" data-tip="ribbon width \u2014 average EMA13\u2013EMA21 spread across the rungs aligned with this side, % of EMA21 \u00b7 disambiguates equal scores: thin (\u22720.15%) = fragile stack one bad bar flips, wide = established separation">${wTxt}</td>`
       +`<td class="tage" data-tip="${ageTip}">${ageTxt}</td>`
       +`<td class="td21 ${dCls}" data-tip="live distance from the H1 EMA21 \u2014 proximity to the entry zone \u00b7 small = at the zone, large = extended (chasing)">${dTxt}</td>`
-      +`<td class="tread">${esc(e.read||'')}${badge}</td></tr>`;
+      +`<td class="tread">${esc(e.read||'')}${badge}</td>`
+      +`<td class="tcbtn-td"><button type="button" class="tchart-btn" data-coin="${esc(e.coin)}" aria-label="open candlestick chart for ${esc(e.t)}" data-tip="candlestick chart \u2014 1H / 4H / 12H / 1D with the EMA 13/21 ribbon, retest zone and the board's read">${TC_ICON}</button></td></tr>`;
   }).join('');
   return `<div class="tsec-h">${label} <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">${sub}</span></div>`
     +`<table class="trend-t"><thead><tr><th>#</th><th style="text-align:left">asset</th><th>D1</th><th>H12</th><th>H4</th><th>H1</th>`
@@ -2513,7 +2514,7 @@ function trendSectionHtml(list,side,label,sub){
     +`<th data-tip="ribbon width \u2014 avg EMA13\u2013EMA21 spread across aligned rungs \u00b7 thin = fragile stack, wide = established separation \u00b7 comparable across scores">width</th>`
     +`<th data-tip="days the D1 ribbon has been stacked this side \u00b7 N+ = at least (history cap) \u00b7 fresh trends rank first within a score">age</th>`
     +`<th data-tip="live distance from the H1 EMA21 \u2014 how far from the pullback entry zone">\u039421</th>`
-    +`<th style="text-align:left">read</th></tr></thead><tbody>${rows}</tbody></table>`;
+    +`<th style="text-align:left">read</th><th class="tcbtn-td"></th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 function renderTrend(){
   const box=el('trend-body'); if(!box) return;
@@ -2533,7 +2534,185 @@ function renderTrend(){
     +`<div class="sec" style="margin-top:8px;line-height:1.6"><b style="color:var(--text)">4/4 \u2014 all ${L?'green':'red'}:</b> established ${L?'up':'down'}trend; look for ${L?'longs on pullbacks':'shorts on rallies'} into the EMA21 zone. <b style="color:var(--text)">2\u20133/4 \u2014 mixed:</b> higher timeframes lead \u2014 wait for lower-TF alignment before entries; manage size. <b style="color:var(--blue)">RETEST</b> \u2014 price has pulled back to the EMA21 zone on a trending timeframe: prime continuation-entry zone. Click a row for the market's detail panel. Ranked by score, then <b style="color:var(--text)">fresh-first</b> \u2014 within a score the youngest D1 stack ranks highest (the young trend is the entry, the old one is the chase); <b style="color:var(--text)">age</b> counts consecutive D1 days stacked (N+ = at least, history-capped), <b style="color:var(--text)">\u039421</b> is the live distance from the H1 EMA21 (small = at the entry zone, large = extended). Only names with \u22652/4 alignment appear \u2014 top ${(d.params&&d.params.top)||10}. Flip the scope switcher for the other universe.</div></div>`;
   box.innerHTML=html;
   box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  // chart button: opens the ladder chart modal; stopPropagation so the row's drawer click is untouched
+  box.querySelectorAll('.tchart-btn').forEach(b=>b.addEventListener('click',(ev)=>{ ev.stopPropagation(); openTrendChart(b.dataset.coin,side); }));
 }
+
+// ===== trend chart modal =====
+// Candlestick chart for one board row, launched from the per-row chart button. One-code-path
+// contract, learned the hard way from a mockup that lied: EVERY annotation (state badge, retest
+// flag, zone band levels, \u039421, read line, rrv) comes from the /api/trend payload the board
+// itself rendered \u2014 the modal NEVER re-derives trend state client-side. The candles come from
+// /api/candles?tf=, which serves the EXACT series the ladder consumed for that rung, so the
+// plotted EMA walk (same SMA-seed construction, same live-mark-drives-the-forming-bar rule)
+// reproduces the ladder's EMAs bit-for-bit. If the plotted ribbon's right edge ever detached
+// from the payload's zone band, that gap would be a visible bug, not a hidden one.
+// Crypto D1 depth (option A): all retained candles are shown; bars inside the EMA seed window
+// (index < 20, before EMA21 exists) render dimmed with no ribbon over them \u2014 candles are real,
+// the ribbon there would not be, and a dash is honest where a half-converged EMA is not.
+const TC_ICON='<svg width="14" height="12" viewBox="0 0 14 12" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><line x1="3" y1="1" x2="3" y2="11"/><rect x="1.5" y="3" width="3" height="5" fill="currentColor" stroke="none"/><line x1="8" y1="0.5" x2="8" y2="9"/><rect x="6.5" y="2" width="3" height="4" fill="currentColor" stroke="none"/><line x1="12.5" y1="3" x2="12.5" y2="11.5"/><rect x="11" y="5" width="3" height="4" fill="currentColor" stroke="none"/></svg>';
+const TC_TFS=[{api:'1h',lad:'H1',lbl:'1H'},{api:'4h',lad:'H4',lbl:'4H'},{api:'12h',lad:'H12',lbl:'12H'},{api:'1d',lad:'D1',lbl:'1D'}];
+let _tc={coin:null,side:'long',tf:'4h',entry:null,inflight:false,seq:0};
+// Per-bar EMA over `closes` (oldest -> newest): SMA of the first `span` bars seeds, then the
+// textbook recursion \u2014 the SAME construction as the server's emaLast/stackedRun, so the final
+// bar agrees with the ladder to the last bit. null before the seed completes: no honest value
+// exists there, and the renderer draws nothing rather than a half-converged line.
+function tcEmaSeries(closes,span){
+  const n=closes.length,out=new Array(n).fill(null);
+  if(n<span) return out;
+  let s=0;
+  for(let i=0;i<span;i++){ const v=+closes[i]; if(!isFinite(v)) return out; s+=v; }
+  let e=s/span; out[span-1]=e;
+  const a=2/(span+1);
+  for(let i=span;i<n;i++){ const v=+closes[i]; if(!isFinite(v)) return out.fill(null,i); e=a*v+(1-a)*e; out[i]=e; }
+  return out;
+}
+function tcStateMeta(st,side){
+  // same color lens as the board dots \u2014 the modal restates the board, never re-decides it
+  const cls = st==='up'?'g' : st==='down'?'r' : st==='reclaim'?(side==='long'?'y':'g') : (side==='long'?'r':'y');
+  const lbl = st==='up'?'trending \u2014 px > EMA13 > EMA21' : st==='down'?'downtrending \u2014 px < EMA13 < EMA21'
+    : st==='reclaim'?'reclaiming \u2014 above EMA21, ribbon not stacked' : st==='roll'?'rolling over \u2014 below EMA21, ribbon not stacked':'\u2014';
+  return {cls,lbl};
+}
+function tcCandleSvg(cd,px,tfc,retesting,side){
+  const W=640,H=330, pl=6,pr=56,pt=10,pb=22, SHOW=64, SEED=20;
+  if(!cd||cd.length<2) return '<div class="msg" style="padding:18px 0">Not enough candles for this timeframe yet \u2014 the series is still filling server-side.</div>';
+  const closes=cd.map(k=>+k[4]);
+  if(px!=null&&isFinite(+px)) closes[closes.length-1]=+px;   // live mark drives the forming bar, matching trendLadder
+  const e13=tcEmaSeries(closes,13), e21=tcEmaSeries(closes,21);
+  const i0=Math.max(0,cd.length-SHOW), view=cd.slice(i0), n=view.length;
+  let lo=Infinity,hi=-Infinity;
+  for(let i=0;i<n;i++){ const k=view[i];
+    const l=k[3]!=null&&isFinite(+k[3])?+k[3]:+k[4], h=k[2]!=null&&isFinite(+k[2])?+k[2]:+k[4];
+    if(l<lo)lo=l; if(h>hi)hi=h; }
+  if(px!=null&&isFinite(+px)){ if(px<lo)lo=px; if(px>hi)hi=px; }
+  if(tfc&&tfc.e21!=null&&tfc.e21<lo)lo=tfc.e21; if(tfc&&tfc.e13!=null&&tfc.e13>hi)hi=tfc.e13;
+  if(!(hi>lo)) return '';
+  const pad=(hi-lo)*0.05; hi+=pad; lo-=pad;
+  const X=i=>pl+(i+0.5)/n*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
+  const bw=Math.max(1.4,Math.min(7,(W-pl-pr)/n*0.66));
+  let s='';
+  for(const v of lcTicks(lo,hi,4)){ const y=Y(v).toFixed(1);
+    s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`+
+       `<text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${fmtPrice(v)}</text>`; }
+  // EMA seed window (option A): candles are real, the ribbon over them would not be
+  const seedVis=SEED-i0;   // displayed bars before this index have no EMA21
+  if(seedVis>0){
+    const sw=pl+(Math.min(seedVis,n))/n*(W-pl-pr);
+    s+=`<rect x="${pl}" y="${pt}" width="${(sw-pl).toFixed(1)}" height="${H-pt-pb}" fill="var(--panel2)" fill-opacity="0.55"/>`+
+       `<line x1="${sw.toFixed(1)}" y1="${pt}" x2="${sw.toFixed(1)}" y2="${H-pb}" stroke="var(--border)" stroke-dasharray="3 3"/>`+
+       `<text x="${pl+5}" y="${pt+13}" class="lc-tick">EMA seed window \u2014 no honest ribbon</text>`; }
+  // retest zone band: the LADDER'S e13/e21 for this rung, shipped in /api/trend \u2014 never recomputed here
+  if(tfc&&tfc.e13!=null&&tfc.e21!=null){
+    let zt=Y(tfc.e13), zb=Y(tfc.e21); if(zb<zt){const t=zt;zt=zb;zb=t;}
+    const zx=seedVis>0?pl+(Math.min(seedVis,n))/n*(W-pl-pr):pl;
+    s+=`<rect x="${zx.toFixed(1)}" y="${zt.toFixed(1)}" width="${(W-pr-zx).toFixed(1)}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--blue)" fill-opacity="0.09" stroke="var(--blue)" stroke-opacity="0.4" stroke-dasharray="3 3"/>`;
+    if(retesting) s+=`<text x="${(zx+5).toFixed(1)}" y="${(zb+14).toFixed(1)}" class="lc-tick" fill="var(--blue)">retest zone \u2014 ${side==='long'?'probe held, dips here are the continuation entry while closes hold EMA21':'rally into the zone \u2014 continuation short while closes hold below EMA21'}</text>`;
+  }
+  // ribbon fill between the walks, only where BOTH EMAs exist
+  let up='',dn='';
+  for(let i=0;i<n;i++){ const a=i0+i; if(e13[a]!=null&&e21[a]!=null) up+=(up?'L':'M')+X(i).toFixed(1)+' '+Y(e13[a]).toFixed(1); }
+  for(let i=n-1;i>=0;i--){ const a=i0+i; if(e13[a]!=null&&e21[a]!=null) dn+='L'+X(i).toFixed(1)+' '+Y(e21[a]).toFixed(1); }
+  if(up&&dn) s+=`<path d="${up}${dn}Z" fill="var(--blue)" fill-opacity="0.07"/>`;
+  for(let i=0;i<n;i++){ const k=view[i], a=i0+i, x=X(i);
+    const o=k[1],h=k[2],l=k[3],c=k[4], dim=a<SEED;
+    const prev=i>0?+view[i-1][4]:c;
+    if(o==null||!isFinite(+o)){
+      // closes-only bar (warm-cache daily / synthetic forming bar): an honest close tick
+      const colT=c>=prev?'var(--up)':'var(--down)';
+      s+=`<line x1="${(x-bw/2).toFixed(1)}" y1="${Y(c).toFixed(1)}" x2="${(x+bw/2).toFixed(1)}" y2="${Y(c).toFixed(1)}" stroke="${colT}" stroke-width="1.5"${dim?' opacity="0.35"':''}/>`;
+      continue; }
+    const upB=c>=o, col=upB?'var(--up)':'var(--down)';
+    if(h!=null&&l!=null&&isFinite(+h)&&isFinite(+l))
+      s+=`<line x1="${x.toFixed(1)}" y1="${Y(h).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Y(l).toFixed(1)}" stroke="${col}" stroke-width="1"${dim?' opacity="0.35"':''}/>`;
+    const y0=Y(Math.max(o,c)), hgt=Math.max(1,Math.abs(Y(o)-Y(c)));
+    s+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" fill="${col}"${dim?' opacity="0.35"':upB?' fill-opacity="0.85"':''}/>`; }
+  let p13='',p21='';
+  for(let i=0;i<n;i++){ const a=i0+i;
+    if(e21[a]!=null) p21+=(p21?'L':'M')+X(i).toFixed(1)+' '+Y(e21[a]).toFixed(1);
+    if(e13[a]!=null) p13+=(p13?'L':'M')+X(i).toFixed(1)+' '+Y(e13[a]).toFixed(1); }
+  if(p21) s+=`<path d="${p21}" fill="none" stroke="var(--accent)" stroke-width="1.6"/>`;
+  if(p13) s+=`<path d="${p13}" fill="none" stroke="var(--blue)" stroke-width="1.6"/>`;
+  if(px!=null&&isFinite(+px)){ const py=Y(+px);
+    s+=`<line x1="${pl}" y1="${py.toFixed(1)}" x2="${W-pr}" y2="${py.toFixed(1)}" stroke="var(--blue)" stroke-width="1" stroke-dasharray="2 3"/>`+
+       `<rect x="${W-pr}" y="${(py-9).toFixed(1)}" width="${pr-2}" height="18" fill="var(--panel2)" stroke="var(--blue)"/>`+
+       `<text x="${W-pr+5}" y="${(py+3.5).toFixed(1)}" class="lc-tick" fill="var(--text)">${fmtPrice(+px)}</text>`; }
+  const isD=_tc.tf==='1d';
+  const dfmt=t=>{ const d=new Date(t); return isD?((d.getUTCMonth()+1)+'/'+d.getUTCDate()):((d.getMonth()+1)+'/'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':00'); };
+  s+=`<text x="${pl}" y="${H-6}" class="lc-tick">${dfmt(view[0][0])}</text>`;
+  s+=`<text x="${W-pr}" y="${H-6}" text-anchor="end" class="lc-tick">${dfmt(view[n-1][0])}</text>`;
+  const xs=view.map((_,i)=>X(i));
+  const rows=view.map((k,i)=>{ const a=i0+i, c=+k[4];
+    const f=v=>v==null||!isFinite(+v)?'\u2014':fmtPrice(+v);
+    const dd=e21[a]!=null?((c-e21[a])/e21[a]*100):null;
+    return `<b style="color:var(--text)">${dfmt(k[0])}${a<SEED?' \u00b7 seed':''}</b><br>O ${f(k[1])} \u00b7 H ${f(k[2])}<br>L ${f(k[3])} \u00b7 C ${f(c)}`+
+      `<br><span style="color:var(--blue)">EMA13</span> ${a>=SEED&&e13[a]!=null?fmtPrice(e13[a]):'\u2014'} \u00b7 <span style="color:var(--accent)">EMA21</span> ${a>=SEED&&e21[a]!=null?fmtPrice(e21[a]):'\u2014'}`+
+      (a>=SEED&&dd!=null?`<br>\u039421 <span style="color:${dd>=0?'var(--up)':'var(--down)'}">${dd>=0?'+':''}${dd.toFixed(2)}%</span>`:''); });
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+function tcDepthNote(cd,tfName){
+  if(!cd||!cd.length) return '';
+  const honest=Math.max(0,cd.length-20);
+  let t=`${cd.length} bars \u00b7 ribbon honest from bar 21 (${honest} ribbon bar${honest===1?'':'s'})`;
+  if(tfName==='D1'&&state.scope==='crypto') t+=' \u00b7 crypto retention is 31d \u2014 the D1 ribbon is young; converged enough to classify, thin enough to respect';
+  return t;
+}
+function renderTrendChart(res){
+  const m=el('tchartmodal'); if(!m||m.hidden) return;
+  const e=_tc.entry||{}, tfDef=TC_TFS.find(t=>t.api===_tc.tf)||TC_TFS[1];
+  const tfc=e.tf&&e.tf[tfDef.lad]?e.tf[tfDef.lad]:null;
+  const st=tfc?tcStateMeta(tfc.st,_tc.side):null;
+  const retesting=!!(e.retest&&e.retest===tfDef.lad);
+  const seg=TC_TFS.map(t=>{ const cell=e.tf&&e.tf[t.lad];
+    const dot=cell?`<span class="tdot ${tcStateMeta(cell.st,_tc.side).cls}" style="width:7px;height:7px;margin-right:5px;box-shadow:none"></span>`:'';
+    return `<button type="button" class="cdtf${t.api===_tc.tf?' on':''}" data-tf="${t.api}">${dot}${t.lbl}</button>`; }).join('');
+  const rrv=retesting&&e.rrv!=null?` \u00b7 zone volume ${e.rrv.toFixed(1)}\u00d7`:'';
+  const d21=tfc&&tfc.d21!=null?`\u039421 ${tfc.d21>=0?'+':''}${tfc.d21.toFixed(1)}%`:'';
+  const cd=(res&&Array.isArray(res.candles))?res.candles:[];
+  m.innerHTML=
+    `<div class="tcm-head"><span class="ttick" style="font-size:16px">${esc(e.t||_tc.coin)}</span>`+
+    (res&&res.px!=null?`<span class="tcm-px">${fmtPrice(res.px)}</span>`:'')+
+    (st?`<span class="tcm-badge ${st.cls}" data-tip="${tfDef.lad} \u00b7 ${st.lbl} \u2014 the board's own classification for this rung, restated">${tfDef.lad} ${tfc.st}</span>`:'')+
+    `<span class="tcm-badge sc" data-tip="timeframes aligned with the ${_tc.side} side, from the board">${e.score!=null?e.score+'/4':''}</span>`+
+    (e.retest?`<span class="tretest" data-tip="the board's retest flag \u2014 recent bars probed the 13/21 zone on ${e.retest} while the close held EMA21${e.rrv!=null?` \u00b7 volume through the zone ${e.rrv.toFixed(1)}\u00d7 the clock-matched norm`:''}">RETEST ${e.retest}</span>`:'')+
+    `<span class="cdtf-seg" style="margin-left:auto">${seg}</span>`+
+    `<button type="button" class="btn tcm-x" id="tchartx" aria-label="close">\u2715</button></div>`+
+    `<div class="tcm-chart">${tcCandleSvg(cd,res?res.px:null,tfc,retesting,_tc.side)}</div>`+
+    `<div class="tcm-leg"><span><i style="color:var(--blue)">\u2501</i> EMA13</span><span><i style="color:var(--accent)">\u2501</i> EMA21</span>`+
+    `<span><i class="tcm-zsw"></i> 13/21 retest zone (ladder levels)</span>`+
+    `<span class="sec">${tcDepthNote(cd,tfDef.lad)}</span>`+
+    (d21?`<span class="tcm-d21" data-tip="live distance from this rung's EMA21 at the last board build \u2014 small = at the entry zone, large = extended">${d21}</span>`:'')+`</div>`+
+    `<div class="tcm-read">${st?`<span class="tdot ${st.cls}" style="margin-right:7px"></span>`:''}${esc(e.read||'')}${rrv?`<span class="sec">${rrv}</span>`:''}`+
+    `<div class="sec" style="margin-top:5px;font-size:11.5px;line-height:1.55">Badges, zone levels and the read are the Trend board's own values (\u22643 min old); candles are the exact series that board's ladder consumed for this rung, so the plotted ribbon reproduces its EMAs. Nothing here is re-derived client-side.</div></div>`;
+  m.querySelectorAll('.cdtf').forEach(b=>b.addEventListener('click',()=>{ if(b.dataset.tf!==_tc.tf){ _tc.tf=b.dataset.tf; loadTrendChart(); } }));
+  const x=el('tchartx'); if(x) x.onclick=closeTrendChart;
+  attachLineHover();
+}
+async function loadTrendChart(){
+  const m=el('tchartmodal'); if(!m||m.hidden||!_tc.coin) return;
+  const seq=++_tc.seq;
+  renderTrendChart(null);   // header + seg paint immediately; the chart body says it's loading
+  const body=m.querySelector('.tcm-chart'); if(body) body.innerHTML='<div class="msg" style="padding:18px 0">Loading\u2026</div>';
+  try{
+    const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(_tc.coin)+'&tf='+encodeURIComponent(_tc.tf));
+    if(seq!==_tc.seq||m.hidden) return;   // a newer click or a close superseded this fetch
+    renderTrendChart(res);
+  }catch(_){ if(seq===_tc.seq&&!m.hidden&&body) body.innerHTML='<div class="msg" style="padding:18px 0">Chart unavailable \u2014 the candles endpoint did not answer. The board above is unaffected.</div>'; }
+}
+function openTrendChart(coin,side){
+  const bg=el('tchartbg'), m=el('tchartmodal'); if(!bg||!m) return;
+  const uni=state.scope==='crypto'?'crypto':'stocks';
+  const board=(_trend&&_trend[side]&&_trend[side][uni])||[];
+  const e=board.find(x=>x.coin===coin);
+  if(!e) return;   // board re-ranked under the click \u2014 nothing honest to show
+  _tc={coin,side,entry:e,inflight:false,seq:_tc.seq,
+    tf:(e.retest&&(TC_TFS.find(t=>t.lad===e.retest)||{}).api)||'4h'};   // open on the retesting rung when one fires
+  bg.hidden=false; m.hidden=false;
+  loadTrendChart();
+}
+function closeTrendChart(){ const bg=el('tchartbg'), m=el('tchartmodal'); if(bg)bg.hidden=true; if(m){m.hidden=true;m.innerHTML='';} _tc.coin=null; _tc.entry=null; }
+{ const bg=el('tchartbg'); if(bg) bg.addEventListener('click',closeTrendChart);
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('tchartmodal'); if(m&&!m.hidden) closeTrendChart(); } }); }
 
 const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge'};
 const EV_TIP={
@@ -3438,7 +3617,8 @@ trend:`
 <div class="hlp-h">Width — ribbon thickness</div>
 <p><b>Width</b> is the average EMA13–EMA21 spread across the rungs aligned with this side, as a percent — how far apart the ribbon actually is. It exists to disambiguate equal scores: two 4/4s are not the same trade when one holds a 0.08% ribbon (a stack one bad bar unwinds) and the other a 2% ribbon (established separation that takes real selling to flip). Per-rung, so it's comparable across scores; always positive by construction (it only measures aligned rungs). Pairs with age: young + thin = a breakout still proving itself, old + wide = the established trend you're late to.</p>
 <div class="hlp-h">Sourcing & ranking</div>
-<p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then <b>fresh-first</b>: within a score, the youngest D1 stack ranks highest — a day-3 trend is the entry, a day-40 trend is the chase. <b>Age</b> is an exact per-bar EMA walk counting consecutive D1 days the ribbon has been stacked this side (N+ means "at least" — the stack extends past available history, most common on crypto's 31d retention; a dash means the D1 rung itself isn't aligned). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number: a 4/4 at +0.4% is at the zone, at +6% it's extended. Ticker badges carry per-scope context from the machinery the Markets table already uses: crypto shows the ▴/▾ funding-percentile flag when the crowd's payment is at a monthly extreme (a 4/4 uptrend on a ▴ is a consensus trade), stocks show the earnings badge when a report is imminent (a retest two days before earnings is a different trade). Only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>`,
+<p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then <b>fresh-first</b>: within a score, the youngest D1 stack ranks highest — a day-3 trend is the entry, a day-40 trend is the chase. <b>Age</b> is an exact per-bar EMA walk counting consecutive D1 days the ribbon has been stacked this side (N+ means "at least" — the stack extends past available history, most common on crypto's 31d retention; a dash means the D1 rung itself isn't aligned). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number: a 4/4 at +0.4% is at the zone, at +6% it's extended. Ticker badges carry per-scope context from the machinery the Markets table already uses: crypto shows the ▴/▾ funding-percentile flag when the crowd's payment is at a monthly extreme (a 4/4 uptrend on a ▴ is a consensus trade), stocks show the earnings badge when a report is imminent (a retest two days before earnings is a different trade). Only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>
+<p><b>Chart button</b> (row end) opens a candlestick chart of any rung (1H · 4H · 12H · 1D) with the EMA 13/21 ribbon plotted, the retest zone banded at the ladder's own levels, and a crosshair OHLC + EMA readout. One-code-path honesty: every annotation — state badge, retest flag, zone levels, Δ21, the read — is the board's own payload restated, and the candles are the exact series the ladder consumed for that rung, so the plotted ribbon reproduces the board's EMAs to the last bit. Bars inside the EMA seed window (before EMA21 exists) render dimmed with no ribbon — real candles, no half-converged lines — which on crypto's 31-day retention is most visible on the D1 view. Closes-only daily bars (warm-cache restores, the forming day) draw as close ticks, never fabricated flat candles.</p>`,
 sectors:`
 <div class="hlp-h">Flow map (default)</div>
 <p>Each bubble is a sector. <b>Horizontal = capital direction</b>: a blend of return and OI-conviction — right means money flowing in <i>with</i> conviction, left means flowing out. <b>Vertical = heat</b>: activity from volume and volatility. So <b>top-right = accumulation</b> (in, loudly), <b>top-left = distribution</b> (out, loudly), and the bottom half is simply quiet. Bubble size = 24h volume. Click a bubble for the sector's members.</p>
