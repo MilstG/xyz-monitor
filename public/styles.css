@@ -605,3 +605,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .trend-t .td21{font-family:var(--mono);font-size:12px;text-align:center;width:62px;cursor:help}
 .trend-t .ttick .fpx{margin-left:7px}
 @media (max-width:680px){ .trend-t .tage,.trend-t .td21{width:44px;font-size:11px} }
+
+/* trend tab: ribbon-width column + retest-volume badge annotation (build -59) */
+.trend-t .twidth{font-family:var(--mono);font-size:12px;text-align:center;width:60px;color:var(--muted);cursor:help}
+@media (max-width:680px){ .trend-t .twidth{width:48px;font-size:11px} }

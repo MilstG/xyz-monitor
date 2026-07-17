@@ -2473,11 +2473,13 @@ function trendDotHtml(tf,cell,side){
 }
 function trendSectionHtml(list,side,label,sub){
   let rows='';
-  if(!list||!list.length) rows=`<tr><td colspan="10"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
+  if(!list||!list.length) rows=`<tr><td colspan="11"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
   else rows=list.map((e,i)=>{
     const dots=['D1','H12','H4','H1'].map(t=>`<td class="tdc">${trendDotHtml(t,e.tf&&e.tf[t],side)}</td>`).join('');
     const scCls=side==='long'?(e.score===4?'pos':e.score===3?'':'sec'):(e.score===4?'neg':e.score===3?'':'sec');
-    const badge=e.retest?`<span class="tretest" data-tip="price has pulled back to the EMA21 zone on a trending timeframe (${e.retest}) \u2014 prime continuation-entry zone">RETEST</span>`:'';
+    // rrv: volume through the retest, one bar of the retesting TF, clock-matched (server-built)
+    const rrv=e.retest&&e.rrv!=null?e.rrv:null;
+    const badge=e.retest?`<span class="tretest" data-tip="price has pulled back to the EMA21 zone on a trending timeframe (${e.retest}) \u2014 prime continuation-entry zone${rrv!=null?` \u00b7 volume through the zone: ${rrv.toFixed(1)}\u00d7 the clock-matched norm for one ${e.retest} bar \u2014 ~1\u00d7 or less = quiet pullback (healthy continuation character), \u22652\u00d7 = the level is being fought, not respected`:''}">RETEST${rrv!=null?` \u00b7 ${rrv.toFixed(1)}\u00d7`:''}</span>`:'';
     // per-scope context badge next to the ticker, reusing the markets-table machinery:
     // crypto = funding-percentile extreme flag, stocks = imminent-earnings badge
     let ctx='';
@@ -2495,9 +2497,12 @@ function trendSectionHtml(list,side,label,sub){
     const d=e.tf&&e.tf.H1?e.tf.H1.d21:null;
     const dTxt=d==null?'\u2014':`${d>=0?'+':''}${d.toFixed(1)}%`;
     const dCls=d==null?'sec':(d>=0?'pos':'neg');
+    // width: avg EMA13–EMA21 spread across this side's aligned rungs — the ribbon's thickness
+    const wTxt=e.width==null?'\u2014':`${e.width.toFixed(2)}%`;
     return `<tr data-coin="${esc(e.coin)}" class="${e.retest?'trow-hl':''}" data-tip="open ${esc(e.t)} in the market detail panel">`
       +`<td class="sec" style="width:26px">${i+1}</td><td class="ttick">${esc(e.t)}${ctx}</td>${dots}`
       +`<td class="tscore ${scCls}">${e.score}/4</td>`
+      +`<td class="twidth" data-tip="ribbon width \u2014 average EMA13\u2013EMA21 spread across the rungs aligned with this side, % of EMA21 \u00b7 disambiguates equal scores: thin (\u22720.15%) = fragile stack one bad bar flips, wide = established separation">${wTxt}</td>`
       +`<td class="tage" data-tip="${ageTip}">${ageTxt}</td>`
       +`<td class="td21 ${dCls}" data-tip="live distance from the H1 EMA21 \u2014 proximity to the entry zone \u00b7 small = at the zone, large = extended (chasing)">${dTxt}</td>`
       +`<td class="tread">${esc(e.read||'')}${badge}</td></tr>`;
@@ -2505,6 +2510,7 @@ function trendSectionHtml(list,side,label,sub){
   return `<div class="tsec-h">${label} <span class="sec" style="text-transform:none;letter-spacing:0;font-weight:400">${sub}</span></div>`
     +`<table class="trend-t"><thead><tr><th>#</th><th style="text-align:left">asset</th><th>D1</th><th>H12</th><th>H4</th><th>H1</th>`
     +`<th data-tip="timeframes aligned with this side \u00b7 4/4 = established trend on every rung">score</th>`
+    +`<th data-tip="ribbon width \u2014 avg EMA13\u2013EMA21 spread across aligned rungs \u00b7 thin = fragile stack, wide = established separation \u00b7 comparable across scores">width</th>`
     +`<th data-tip="days the D1 ribbon has been stacked this side \u00b7 N+ = at least (history cap) \u00b7 fresh trends rank first within a score">age</th>`
     +`<th data-tip="live distance from the H1 EMA21 \u2014 how far from the pullback entry zone">\u039421</th>`
     +`<th style="text-align:left">read</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -3428,6 +3434,9 @@ trend:`
 <p>An <b>EMA 13/21 ribbon</b> evaluated on four timeframes — <b>D1 · H12 · H4 · H1</b> — for every market in the active scope, ranked into long and short leaderboards. The tab follows the <b>scope switcher</b>: stocks scope shows the xyz board, crypto scope shows the main-dex board — flip it for the other universe. Per timeframe: <b class="pos">green</b> = price &gt; EMA13 &gt; EMA21 (stacked, trending), <b style="color:var(--accent)">yellow</b> = the middle state (above EMA21 but not stacked on the longs lens; below EMA21 but not stacked on the shorts lens), <b class="neg">red</b> = stacked down. The <b>score</b> counts aligned timeframes: 4/4 is an established trend on every rung; 2–3/4 means higher timeframes lead and you wait for the lower ones to agree.</p>
 <div class="hlp-h">RETEST — the entry flag</div>
 <p><b style="color:var(--blue)">RETEST</b> fires when the last few bars (forming bar included) probed into the 13/21 ribbon zone on a <i>trending</i> timeframe while the close held the EMA21 side — the classic continuation pullback (long) or rally-into-resistance (short). The highest timeframe showing it is the one named in the read. Honest approximation, stated plainly: the zone test compares recent bar extremes against the <i>current</i> EMAs, not bar-by-bar historical EMAs, and daily candles restored from the warm cache carry closes only, so their zone probe degrades to closes.</p>
+<p>The badge carries a <b>volume read</b> when the baseline qualifies: <b style="color:var(--blue)">RETEST · 0.8×</b> means the last completed bar-length of the retesting timeframe traded 0.8× its clock-matched norm — the same construction as the Markets-table RVOL, so overnight pullbacks are judged against prior overnights. The interpretation is the whole point: a pullback into the zone on <b>~1× or less</b> is quiet — sellers aren't pressing, the healthy continuation character. At <b>≥2×</b> the level is being <i>fought</i>, not respected — heavy tape into the zone reads as distribution (longs) or determined dip-buying against the short. No multiple shown = the volume baseline couldn't qualify (an honest dash, never a guess).</p>
+<div class="hlp-h">Width — ribbon thickness</div>
+<p><b>Width</b> is the average EMA13–EMA21 spread across the rungs aligned with this side, as a percent — how far apart the ribbon actually is. It exists to disambiguate equal scores: two 4/4s are not the same trade when one holds a 0.08% ribbon (a stack one bad bar unwinds) and the other a 2% ribbon (established separation that takes real selling to flip). Per-rung, so it's comparable across scores; always positive by construction (it only measures aligned rungs). Pairs with age: young + thin = a breakout still proving itself, old + wide = the established trend you're late to.</p>
 <div class="hlp-h">Sourcing & ranking</div>
 <p>H1 is the hourly spine; H4/H12 are UTC-aligned aggregations of it; D1 is the daily series with the live mark driving the forming bar — the board moves with price between candle refreshes. EMAs are SMA-seeded and require 26+ bars per rung; a market missing any rung is <b>excluded and counted</b> in the header line, never guessed at. Crypto's 31-day retention means its D1 EMA21 is young — converged enough to classify, but treat fresh listings' D1 rung with appropriate suspicion. Ranked by score, then <b>fresh-first</b>: within a score, the youngest D1 stack ranks highest — a day-3 trend is the entry, a day-40 trend is the chase. <b>Age</b> is an exact per-bar EMA walk counting consecutive D1 days the ribbon has been stacked this side (N+ means "at least" — the stack extends past available history, most common on crypto's 31d retention; a dash means the D1 rung itself isn't aligned). <b>Δ21</b> is the live distance from the H1 EMA21 — the proximity-to-entry number: a 4/4 at +0.4% is at the zone, at +6% it's extended. Ticker badges carry per-scope context from the machinery the Markets table already uses: crypto shows the ▴/▾ funding-percentile flag when the crowd's payment is at a monthly extreme (a 4/4 uptrend on a ▴ is a consensus trade), stocks show the earnings badge when a report is imminent (a retest two days before earnings is a different trade). Only names with ≥2/4 alignment on that side appear, top 10. This is a <i>screener lens</i>, not a ledger signal: nothing here carries frozen entry/stop/target geometry.</p>`,
 sectors:`
