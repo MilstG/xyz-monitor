@@ -2650,11 +2650,12 @@ function tcCandleSvg(cd,px,tfc,retesting,side){
       (a>=SEED&&dd!=null?`<br>\u039421 <span style="color:${dd>=0?'var(--up)':'var(--down)'}">${dd>=0?'+':''}${dd.toFixed(2)}%</span>`:''); });
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
-function tcDepthNote(cd,tfName){
+function tcDepthNote(cd,tfName,closesOnly){
   if(!cd||!cd.length) return '';
   const honest=Math.max(0,cd.length-20);
   let t=`${cd.length} bars \u00b7 ribbon honest from bar 21 (${honest} ribbon bar${honest===1?'':'s'})`;
   if(tfName==='D1'&&state.scope==='crypto') t+=' \u00b7 crypto retention is 31d \u2014 the D1 ribbon is young; converged enough to classify, thin enough to respect';
+  if(closesOnly) t+=' \u00b7 daily bars are closes-only right now (warm-cache restore) \u2014 drawn as close ticks, never fabricated bodies; full candles land as the daily refetch queue drains';
   return t;
 }
 function renderTrendChart(res){
@@ -2669,6 +2670,9 @@ function renderTrendChart(res){
   const rrv=retesting&&e.rrv!=null?` \u00b7 zone volume ${e.rrv.toFixed(1)}\u00d7`:'';
   const d21=tfc&&tfc.d21!=null?`\u039421 ${tfc.d21>=0?'+':''}${tfc.d21.toFixed(1)}%`:'';
   const cd=(res&&Array.isArray(res.candles))?res.candles:[];
+  // closes-only detection excludes the last bar: the synthetic forming daily bar is ALWAYS
+  // closes-only by construction and must not tag a healthy series
+  const closesOnly=_tc.tf==='1d'&&cd.length>1&&cd.slice(0,-1).every(b=>b[1]==null);
   m.innerHTML=
     `<div class="tcm-head"><span class="ttick" style="font-size:16px">${esc(e.t||_tc.coin)}</span>`+
     (res&&res.px!=null?`<span class="tcm-px">${fmtPrice(res.px)}</span>`:'')+
@@ -2680,7 +2684,7 @@ function renderTrendChart(res){
     `<div class="tcm-chart">${tcCandleSvg(cd,res?res.px:null,tfc,retesting,_tc.side)}</div>`+
     `<div class="tcm-leg"><span><i style="color:var(--blue)">\u2501</i> EMA13</span><span><i style="color:var(--accent)">\u2501</i> EMA21</span>`+
     `<span><i class="tcm-zsw"></i> 13/21 retest zone (ladder levels)</span>`+
-    `<span class="sec">${tcDepthNote(cd,tfDef.lad)}</span>`+
+    `<span class="sec">${tcDepthNote(cd,tfDef.lad,closesOnly)}</span>`+
     (d21?`<span class="tcm-d21" data-tip="live distance from this rung's EMA21 at the last board build \u2014 small = at the entry zone, large = extended">${d21}</span>`:'')+`</div>`+
     `<div class="tcm-read">${st?`<span class="tdot ${st.cls}" style="margin-right:7px"></span>`:''}${esc(e.read||'')}${rrv?`<span class="sec">${rrv}</span>`:''}`+
     `<div class="sec" style="margin-top:5px;font-size:11.5px;line-height:1.55">Badges, zone levels and the read are the Trend board's own values (\u22643 min old); candles are the exact series that board's ladder consumed for this rung, so the plotted ribbon reproduces its EMAs. Nothing here is re-derived client-side.</div></div>`;

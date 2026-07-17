@@ -610,7 +610,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .trend-t .twidth{font-family:var(--mono);font-size:12px;text-align:center;width:60px;color:var(--muted);cursor:help}
 @media (max-width:680px){ .trend-t .twidth{width:48px;font-size:11px} }
 
-/* trend tab: per-row chart button + ladder chart modal (build -60) */
+/* trend tab: per-row chart button + ladder chart modal (build -60, closes-only note -61) */
 .trend-t .tcbtn-td{width:42px;text-align:center}
 .tchart-btn{display:inline-flex;align-items:center;justify-content:center;background:var(--panel2);color:var(--muted);
   border:1px solid var(--border);border-radius:6px;padding:5px 8px;cursor:pointer;line-height:0}
