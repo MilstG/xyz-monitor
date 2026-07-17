@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS } = require("./compute");
 const { isTwapFill, twapTaker, liqDistancePct, foldWhale, pruneWhales, decayScore, ladderBands } = require("./compute");
 const { classify } = require("./sectors");
@@ -113,6 +113,7 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
   let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0;   // /api/trend — lazy, memoized, ETag rides content
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
   let earnPrints = [], earnHistDone = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
+  let earnVoids = new Set();   // operator tombstones (ticker|date): feed-garbage prints, permanently ignored at every ingest point
   const regimeHist = store.loadRegime(Date.now() - REGIME_RETENTION);   // [[ts, corr], ...]
   let curCorr = null, curCorrPct = null, curCorrN = 0, lastRegimeSample = 0;
   log(`Loaded ${regimeHist.length} regime-correlation sample(s)`);
@@ -1967,6 +1968,8 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     earnVer = data.ts || Date.now();
     lastEarnOk = data.ts || 0;   // honest: staleness counts from the fetch that produced it
     earnPrints = Array.isArray(data.prints) ? data.prints : [];
+    earnVoids = new Set(Array.isArray(data.voids) ? data.voids.filter((v) => typeof v === "string") : []);
+    if (earnVoids.size) earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t + "|" + p.d));
     earnHistDone = data.histDone2 === true;   // versioned: the truncated v1 backfill does not count
     refreshEarnStudy(false);
     // No eligibility filter here — the universe may not be reconciled yet at boot, and an empty
@@ -2001,6 +2004,33 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
       earnCache = Object.assign({}, earnCache, { dataTs: earnVer, study: earnStudy, printsN: earnPrints.length });
     }
     return changed;
+  }
+  // Operator surgery for feed-garbage prints: removes ticker|date from the print history and
+  // the reaction study, rebuilds the payload immediately (ETag bumped), and TOMBSTONES the key
+  // so no future fetch — live window or backfill — can resurrect it. For phantoms the automatic
+  // rules cannot reach: a feed that keeps asserting a report that never happened, with no
+  // corrected row anywhere for reconciliation or the reschedule purge to fire on.
+  function voidEarnPrint(ticker, dateStr) {
+    const t = String(ticker || "").trim(), d = String(dateStr || "").trim();
+    if (!t || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return { ok: false, error: "need t (ticker) and d (YYYY-MM-DD)" };
+    const k = t + "|" + d;
+    const before = earnPrints.length;
+    earnVoids.add(k);
+    earnPrints = earnPrints.filter((p) => p.t + "|" + p.d !== k);
+    const removed = before - earnPrints.length;
+    refreshEarnStudy(false);
+    if (earnCache) {
+      earnVer = Date.now();
+      const entries = (earnCache.entries || []).filter((e) => e.t + "|" + e.d !== k);
+      earnCache = Object.assign({}, earnCache, { dataTs: earnVer, entries,
+        recent: recentEarnPrints(earnPrints, Date.now()), study: earnStudy, printsN: earnPrints.length });
+      rebuildEarnMap(entries);
+    }
+    if (store.saveEarnings) store.saveEarnings({ ts: lastEarnOk || Date.now(),
+      entries: (earnCache && earnCache.entries) || [], eligible: (earnCache && earnCache.eligible) || 0,
+      prints: earnPrints, histDone2: earnHistDone, voids: [...earnVoids] });
+    log(`Earnings print VOIDED by operator: ${k} (${removed} history record(s) removed, tombstoned against feed re-assertion)`);
+    return { ok: true, removed, tombstoned: k, printsN: earnPrints.length };
   }
   async function fetchEarnings() {
     const token = process.env.FINNHUB_TOKEN || "";
@@ -2044,7 +2074,10 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
       return out;
     };
     try {
-      const parsed = await getCalChunked(now - 5 * DAY, now + EARN_WINDOW_DAYS * DAY, 3, 200);
+      let parsed = await getCalChunked(now - 5 * DAY, now + EARN_WINDOW_DAYS * DAY, 3, 200);
+      // Operator tombstones apply at the mouth of the pipe: a voided print never re-enters
+      // entries, the reported window, or the print history, no matter what the feed asserts.
+      if (earnVoids.size) parsed = parsed.filter((e) => !earnVoids.has(e.t + "|" + e.d));
       // One-time historical backfill for the reaction study — chunked for the same reason (the
       // original single ~1y pull was truncated to a sliver, which is why the study sat at "no
       // history" across the board). Flag is VERSIONED (histDone2): volumes that completed the
@@ -2060,14 +2093,18 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
       }
       const entries = [], past = [];
       for (const e of parsed) ((earnDayDiff(e.d, now) >= 0) ? entries : past).push(e);
-      // Stale-schedule purge BEFORE merge: the chunked window is complete by construction, so a
-      // persisted past print whose ticker is still scheduled AHEAD for the same fiscal print is
-      // a placeholder-date phantom (the live IBM 2026-07-14 case) — dropped before it can feed
-      // the reaction study or the reported window. Absence alone never deletes anything.
+      // Stale-print hygiene BEFORE merge, two independent rules against the fetched window
+      // (complete by construction — any chunk failure aborts the whole parse):
+      // 1) back-window existence: a print in the refetched [now-5d, now-1d] range the feed no
+      //    longer lists was retracted upstream (the IBM phantom with NO corrected row anywhere);
+      // 2) reschedule: a past print whose ticker is still scheduled AHEAD for the same fiscal
+      //    print is a placeholder-date phantom.
+      earnPrints = reconcileEarnPrints(earnPrints, parsed, now);
       earnPrints = purgeStalePrints(earnPrints, parsed, now);
       // Today's reported rows stay in `entries` (diff 0) with actuals; anything older folds
       // into the print history. Upcoming entries with a schedule change simply re-ship.
       earnPrints = mergeEarnPrints(earnPrints, past.concat(entries.filter((e) => e.epsA != null)), now);
+      if (earnVoids.size) earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t + "|" + p.d));   // choke point: covers the backfill merge too
       lastEarnOk = now; earnErr = null;
       refreshEarnStudy(false);
       // Recently-reported window (past 2 ET days): derived from the persisted print history, not
@@ -2086,7 +2123,7 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
         source: "finnhub", error: null, entries, recent, eligible: elig.size,
         study: earnStudy, printsN: earnPrints.length, histDone: earnHistDone };
       rebuildEarnMap(entries);
-      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone2: earnHistDone });
+      if (store.saveEarnings) store.saveEarnings({ ts: now, entries, eligible: elig.size, prints: earnPrints, histDone2: earnHistDone, voids: [...earnVoids] });
       log(`Earnings calendar: ${entries.length} report(s) across ${new Set(entries.map((e) => e.t)).size} ticker(s) in the next ${EARN_WINDOW_DAYS}d, ${recent.length} reported in the past 2d (${elig.size} eligible equities; ${earnPrints.length} print(s) in history, study covers ${Object.keys(earnStudy).length})`);
     } catch (e) {
       // Failure keeps the last good entries and stamps the error — the tab shows the cache age
@@ -2620,6 +2657,7 @@ function createPoller({ dex, store, log, version, crypto, flows = true }) {
     getCandles,
     getSignals: () => signalsCache,
     getEarnings: () => earnCache,
+    voidEarnPrint,
     getTrend,
     getLiqs,
     persistFlows,

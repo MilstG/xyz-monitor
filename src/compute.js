@@ -1358,7 +1358,11 @@ function parseEarningsCalendar(json, symMap) {
     if (!e || typeof e.symbol !== "string" || typeof e.date !== "string") continue;
     const m = symMap.get(e.symbol.toUpperCase());
     if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) continue;
-    const q2 = (x) => typeof x === "number" && isFinite(x) ? +x.toFixed(2) : null;
+    // 4 decimal places, NOT 2: the feed's estimates carry real information in the 3rd/4th
+    // decimal for low-EPS names. 2dp collapsed the live NFLX print (actual 0.8000 vs est 0.8042,
+    // a genuine -0.5% miss) into "0.8 vs 0.8 miss +0.0%" — a display contradicting its own
+    // verdict. Verdict and surprise must be computed from values that preserve the difference.
+    const q2 = (x) => typeof x === "number" && isFinite(x) ? +x.toFixed(4) : null;
     const eps = q2(e.epsEstimate), epsA = q2(e.epsActual);
     // Revenue ships in raw units (feed reports dollars); quantize to 3 significant figures —
     // the display only ever shows "$41.2B", full doubles are payload weight for nothing.
@@ -1437,12 +1441,34 @@ function purgeStalePrints(prints, parsed, nowMs) {
     return true;
   });
 }
+// Back-window existence reconciliation. With chunked pulls the fetched window is complete by
+// construction, so within the REFETCHED back range [now-backDays, now-1] the feed's current
+// claim is authoritative for which prints EXIST: a persisted print the feed no longer lists
+// there was retracted or corrected upstream — dropped. This catches the phantom class where the
+// feed carries NO corrected future row for the reschedule rule to fire on (the live IBM case:
+// phantom at Jul 14, and Finnhub lists nothing for IBM at its real Jul 22 date either).
+// Self-healing both ways — a print the feed re-asserts on a later pull is simply re-merged.
+// Prints OLDER than the back window are NEVER touched: history that can no longer be re-fetched
+// is never deleted on absence. An empty parse purges nothing (a zero-row 19-day window is a
+// broken fetch, not evidence).
+function reconcileEarnPrints(prints, parsed, nowMs, backDays) {
+  const bd = backDays != null ? backDays : 5;
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(parsed) || !parsed.length) return prints || [];
+  const have = new Set();
+  for (const e of parsed) have.add(e.t + "|" + e.d);
+  return prints.filter((p) => {
+    const df = earnDayDiff(p.d, nowMs);
+    if (df == null || df >= 0 || df < -bd) return true;
+    return have.has(p.t + "|" + p.d);
+  });
+}
 module.exports.etDayStr = etDayStr;
 module.exports.earnDayDiff = earnDayDiff;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
 module.exports.recentEarnPrints = recentEarnPrints;
 module.exports.earnChunks = earnChunks;
 module.exports.purgeStalePrints = purgeStalePrints;
+module.exports.reconcileEarnPrints = reconcileEarnPrints;
 
 // ---- earnings print history + reaction study ---------------------------------------------------
 // Past prints are the raw material for the per-ticker reaction study. Like the OI log, they
