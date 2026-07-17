@@ -2294,6 +2294,43 @@ function earnDrawerHtml(r){
   const hist=st?`${up?' · ':''}<span class="sec" data-tip="own reaction base rate — hover the Earnings tab row for the full breakdown">${st.n} print${st.n===1?'':'s'}, avg |${st.avgAbs}%|</span>`:'';
   return `<div class="dsub" style="margin-top:2px">${up}${hist}</div>`;
 }
+// Reported window for the tab: the server's `recent` (past 2 ET days, derived from the persisted
+// print history) MERGED with any upcoming entries that rolled past ET midnight since the last
+// fetch (the calendar refreshes 4x/day, so up to ~6h can pass where a print is negative-diff in
+// `entries` but not yet in `recent`). Dedupe by ticker+date, preferring whichever record carries
+// the ACTUAL — a report never blinks out of the tab at the rollover and never shows twice.
+function earnRecentList(){
+  const d=state.earnPayload; if(!d) return [];
+  const m=new Map();
+  const put=(e)=>{ const df=earnDiffC(e.d); if(df==null||df>=0||df<-2) return;
+    const k=e.t+'|'+e.d, old=m.get(k);
+    if(!old||(e.epsA!=null&&old.epsA==null)) m.set(k,e); };
+  for(const e of (d.recent||[])) put(e);
+  for(const e of (d.entries||[])) put(e);
+  return [...m.values()];
+}
+// Per-print reaction move for a reported row, computed from the daily closes already in the
+// browser and mirroring the reaction study's convention EXACTLY: BMO/DMH prints score their own
+// UTC daily candle, AMC prints the next one (the perp trades through weekends, so a Friday AMC
+// print lands on Saturday's candle). The live day-move column would be WRONG here — that is
+// today's move, not the reaction to a print one or two days old. Null-honest: a reaction candle
+// still forming reads "so far"; one not opened or not retained yet is stated, never zeroed.
+function earnReactHtml(e){
+  const r=state.rows.get(e.coin), cl=r&&r.daily;
+  const dash=(why)=>`<span class="earn-live sec" data-tip="${esc(why)}">reaction —</span>`;
+  if(!cl||cl.length<2) return dash('reaction pending — daily candles for this name are not loaded in the browser yet');
+  const dayOf=(t)=>{ const x=new Date(t); return x.getUTCFullYear()+'-'+String(x.getUTCMonth()+1).padStart(2,'0')+'-'+String(x.getUTCDate()).padStart(2,'0'); };
+  let pi=-1; for(let i=0;i<cl.length;i++){ if(dayOf(cl[i].t)===e.d){ pi=i; break; } }
+  if(pi<0) return dash('the print date is outside the retained daily candle window');
+  const ri=e.s==='AMC'?pi+1:pi;
+  if(ri<=0||ri>=cl.length) return dash('the reaction candle (the session after an AMC print) has not opened yet');
+  const c1=parseFloat(cl[ri].c), c0=parseFloat(cl[ri-1].c);
+  if(!isFinite(c1)||!isFinite(c0)||c0<=0) return dash('reaction candle retained but its closes are not usable yet');
+  const mv=(c1-c0)/c0*100;
+  const live=ri===cl.length-1&&dayOf(cl[ri].t)===dayOf(Date.now());
+  const tip=`the print's own reaction move — ${e.s==='AMC'?'the daily candle AFTER the report (AMC prints land after the close)':'the report day\u2019s own daily candle'} vs the prior close, same convention as the reaction study (UTC candles; the perp trades through weekends)${live?'. That candle is STILL OPEN \u2014 this is the move so far, not a settled print':''}`;
+  return `<span class="earn-live" data-tip="${esc(tip)}"><b class="${mv>=0?'pos':'neg'}">${mv>=0?'+':''}${mv.toFixed(1)}%</b><span class="sec"> reaction${live?' so far':''}</span></span>`;
+}
 function renderEarnings(){
   const box=el('earnings-body'); if(!box) return;
   const d=state.earnPayload;
@@ -2304,18 +2341,50 @@ function renderEarnings(){
   const src=`<span class="sec" style="font-size:11px">${d.error
     ?`<span style="color:var(--down)">feed error: ${esc(d.error)}</span>${asOf?` \u00b7 showing last good fetch (${ageMin>=60?Math.round(ageMin/60)+'h':ageMin+'m'} old)`:''}`
     :(asOf?`as of ${asOf.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}${stale?` <span style="color:var(--accent)">\u00b7 ${Math.round(ageMin/60)}h stale</span>`:''} \u00b7 source: ${esc(d.source||'finnhub')}`:'never fetched')}</span>`;
-  const head=`<div class="controls" style="margin-bottom:10px"><span style="font-weight:600">Earnings calendar <span class="sec" style="font-weight:400">\u00b7 next ${d.windowDays||14} days, ET</span></span><span style="margin-left:auto"></span>${src}</div>`;
+  const head=`<div class="controls" style="margin-bottom:10px"><span style="font-weight:600">Earnings calendar <span class="sec" style="font-weight:400">\u00b7 last 2 + next ${d.windowDays||14} days, ET</span></span><span style="margin-left:auto"></span>${src}</div>`;
   const covered=new Set((d.entries||[]).map(e=>e.t)).size;
   const cov=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:12px" data-tip="eligibility = live xyz EQUITIES; indices, ETFs, FX, commodities, thematics and pre-IPO synthetics never report. Foreign listings without a US symbol are eligible but absent from the feed \u2014 shown as uncovered, never guessed. A name missing here means the feed has no report scheduled in the window OR does not cover it.">${d.entries&&d.entries.length?`<b>${d.entries.length}</b> report${d.entries.length===1?'':'s'} across <b>${covered}</b> ticker${covered===1?'':'s'}`:'No reports in the window'} \u00b7 ${d.eligible||0} eligible equities in the universe \u00b7 names the feed doesn\u2019t cover simply don\u2019t appear</div>`;
   if(d.error&&!(d.entries&&d.entries.length)){
     box.innerHTML=head+cov+`<div class="msg">No earnings data.<br><span class="sec" style="font-size:11px">${d.error==='FINNHUB_TOKEN not set'?'Set <b>FINNHUB_TOKEN</b> in the Railway service variables (free key from finnhub.io) and redeploy.':'The feed is unreachable \u2014 the server retries every 30 minutes.'}</span></div>`;
     return;
   }
+  // Reported — last 48h: two prior ET days, most recent first, so the scoreboard survives the
+  // midnight rollover instead of vanishing hours after an AMC print. Today's reported rows keep
+  // living under TODAY below — the full picture reads reported → today → upcoming.
+  const rep=earnRecentList();
+  let repHtml='';
+  if(rep.length){
+    const rg=new Map();
+    for(const e of rep){ let g=rg.get(e.d); if(!g){g={d:e.d,diff:earnDiffC(e.d),rows:[]};rg.set(e.d,g);} g.rows.push(e); }
+    repHtml+=`<div class="sec" style="font-size:11.5px;margin:2px 0 6px" data-tip="prints from the two prior ET calendar days, kept on the tab with their beat/miss and reaction move; today\u2019s reports show under TODAY below. Rows come from the persisted print history \u2014 an actual that lands on a later feed pass upgrades the row in place."><b>${rep.length}</b> report${rep.length===1?'':'s'} in the past 2 days</div>`;
+    for(const g of rg.values()){
+      const dt=new Date(g.d+'T12:00:00Z');
+      const lbl=dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}).toUpperCase();
+      repHtml+=`<div class="earn-day">REPORTED \u00b7 ${g.diff===-1?'YESTERDAY \u00b7 ':''}${lbl}<span class="sec" style="margin-left:8px;text-transform:none;letter-spacing:0">${g.diff===-1?'1 day ago':(-g.diff)+' days ago'}</span></div>`;
+      g.rows.sort((a,b)=>{ const wa=state.watch.has(a.coin)?0:1, wb=state.watch.has(b.coin)?0:1; return wa-wb; });   // stable: watchlist floats up, session order preserved within each half
+      for(const e of g.rows){
+        const starred=state.watch.has(e.coin);
+        repHtml+=`<div class="earn-row" data-coin="${esc(e.coin)}" title="open the ${esc(e.t)} drawer">`
+          +`<span class="earn-tk">${starred?'<span class="star on" style="margin-right:4px">\u2605</span>':''}${esc(e.t)}</span>`
+          +`<span class="earn-sess ${e.s==='BMO'?'bmo':e.s==='AMC'?'amc':''}" data-tip="session per the feed \u2014 BMO reports land before the 09:30 ET open, AMC after the 16:00 ET close">${esc(earnSessLbl(e.s))}</span>`
+          +earnEpsHtml(e)
+          +earnReactHtml(e)
+          +earnStudyHtml(e.t)
+          +`</div>`;
+      }
+    }
+  }
   const groups=new Map();
   for(const e of d.entries||[]){ const diff=earnDiffC(e.d); if(diff==null||diff<0) continue;
     let g=groups.get(e.d); if(!g){g={d:e.d,diff,rows:[]};groups.set(e.d,g);} g.rows.push(e); }
-  if(!groups.size){ box.innerHTML=head+cov+'<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>'; return; }
-  let html=head+cov;
+  if(!groups.size&&!rep.length){ box.innerHTML=head+cov+'<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>'; return; }
+  let html=head+cov+repHtml;
+  if(!groups.size){
+    html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
+    box.innerHTML=html;
+    box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+    return;
+  }
   for(const g of groups.values()){
     const dt=new Date(g.d+'T12:00:00Z');
     const lbl=dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}).toUpperCase();
@@ -3526,8 +3595,8 @@ earnings:`
 <p>A <b>solid E</b> next to a ticker = reports <b>today</b>; a <b>hollow E</b> = <b>tomorrow</b> (ET days, since BMO/AMC are ET concepts — the badge doesn't flip at your local midnight). Hover it for the session and EPS estimate. Nothing shows beyond one day out — the table flags only what can hit the next session; the full window lives here.</p>
 <div class="hlp-h">Coverage — what's honestly absent</div>
 <p>Indices, ETFs, FX, commodities, thematic baskets and pre-IPO synthetics never report earnings. Foreign listings without a US symbol (SMSN, KIOXIA, SOFTBANK…) are real companies with real earnings, but this feed doesn't carry them — they're <b>absent, never guessed</b>. A missing name means "no report scheduled in the window OR not covered", and the coverage line states how many eligible equities exist so absence is auditable.</p>
-<div class="hlp-h">Reported rows — beat/miss</div>
-<p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the day column next to it, and they disagree often enough to be interesting.</p>
+<div class="hlp-h">Reported rows — beat/miss, kept for 48h</div>
+<p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the move next to it, and they disagree often enough to be interesting. Reports don't vanish at midnight: a <b>Reported</b> section at the top keeps the two prior ET days on the tab with their beat/miss and a <b>reaction</b> move — the print's own reaction candle per the study convention (BMO/DMH scores its own UTC daily candle, AMC the next one), never today's unrelated move. A reaction candle still forming reads "so far"; one not opened yet says so instead of showing zero. Rows come from the persisted print history, so a late-landing actual upgrades the row in place and the section survives redeploys.</p>
 <div class="hlp-h">The reaction study</div>
 <p>Each name's <b>own earnings base rate</b>, measured on the perp's daily closes (UTC — it trades through weekends, so a Friday AMC print scores Saturday's candle): number of prints, average and median |next-session move|, up/down split, gap behavior where opens are retained, and the move as a multiple of that name's usual daily range. History starts from a one-time ~1y feed backfill (depth = whatever the free tier honestly returns) and <b>self-accrues</b> from there — every print that passes is persisted like the OI log. n is shown always; "no history" means exactly that, never a hidden zero.</p>
 <div class="hlp-h">Live context columns</div>
