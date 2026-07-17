@@ -437,7 +437,15 @@ function createPoller({ dex, store, log, version, crypto }) {
     return best ? best.coin : null;
   }
   const needHourly = (r) => Date.now() - r.hourlyTs > HOURLY_STALE && Date.now() >= (r.hFailUntil || 0);
-  const needDaily = (r) => (!r.dailyRaw || Date.now() - r.dailyTs > DAILY_STALE) && Date.now() >= (r.dFailUntil || 0);
+  // Closes-only dailies (warm-cache restores are [t,c]; live pulls carry full OHLC) count as
+  // needing a fetch REGARDLESS of dailyTs. Without this, a warm restore brings back closes-only
+  // bars plus the persisted (recent) dailyTs, and the 6h staleness gate keeps every market's
+  // daily candles bodiless for up to 6h after each deploy — at a multiple-builds-per-day cadence
+  // that made the Trend chart modal's 1D view permanently close-ticks. A warm boot now behaves
+  // like a cold boot for the daily worker (the pre-warm-cache behavior); the warm closes still
+  // serve every consumer in the interim, and full candles land as the queue drains.
+  const dailyLacksOHLC = (r) => Array.isArray(r.dailyRaw) && r.dailyRaw.length > 0 && r.dailyRaw[r.dailyRaw.length - 1].o == null;
+  const needDaily = (r) => (!r.dailyRaw || dailyLacksOHLC(r) || Date.now() - r.dailyTs > DAILY_STALE) && Date.now() >= (r.dFailUntil || 0);
 
   async function hourlyWorker() {
     for (;;) {
@@ -2409,6 +2417,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     getTrend,
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
     seedRowNow: (coin, fields) => Object.assign(getRow(coin), fields),   // harness: seed a synthetic market (px/spines) so builds are testable without network
+    needDailyNow: (coin) => { const r = rows.get(coin); return !!(r && needDaily(r)); },   // harness: does the daily worker consider this market fetch-worthy right now
     getLedgerFor,
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
