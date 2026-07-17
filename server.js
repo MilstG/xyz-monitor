@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.16-54";
+const VERSION = "2026.07.16-57";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -35,8 +35,11 @@ log(`Volume heartbeat: boot #${HEARTBEAT.boots} on this data dir (first boot ${n
   (HEARTBEAT.boots > 1 ? "volume IS persisting" : "if this says boot #1 again next deploy, the volume is NOT persisting (check DATA_DIR vs the mount path)"));
 // Kill-switch: CRYPTO=0 disables main-dex polling entirely — one-variable rollback on Railway.
 const CRYPTO = process.env.CRYPTO !== "0";
-const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
+// Kill-switch: FLOWS=0 disables the liquidation monitor (tape socket + cohort sweeps).
+const FLOWS = process.env.FLOWS !== "0";
+const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO, flows: FLOWS });
 log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d retention" : "disabled via CRYPTO=0"}`);
+log(`Flows (liquidation monitor): ${FLOWS ? "ENABLED — tape-harvested cohort + hot-lane liq sweeps, both universes" : "disabled via FLOWS=0"}`);
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -235,7 +238,20 @@ async function main() {
   // Earnings calendar for the xyz equity universe (Finnhub-fed, 6h server refresh). ETag rides
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
-    serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], eligible: 0 }));
+    serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], recent: [], eligible: 0 }));
+  // Operator surgery for feed-garbage earnings prints (e.g. a phantom report date the feed
+  // asserted and never corrected): removes the print from history and the reaction study and
+  // tombstones it so no future fetch can resurrect it. Session-gated like every route.
+  fastify.post("/api/earnings/void", (req, reply) => {
+    const b = req.body || {};
+    const r = poller.voidEarnPrint(b.t, b.d);
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+  // Liquidation monitor — tracked-cohort positions ranked by distance to their liquidation
+  // price, the per-market cascade ladder, and mark-crossed-liq events with sweep-confirmed
+  // outcomes (hot lane re-sweeps at-risk books every ~15s).
+  fastify.get("/api/liqs", (req, reply) =>
+    serveCached(req, reply, poller.getLiqs(), { ts: 0, dataTs: 0, bands: [1, 2, 5, 10], coverage: {}, danger: [], ladder: { crypto: { coins: [], total: { long: [], short: [] } }, stocks: { coins: [], total: { long: [], short: [] } } }, events: [] }));
   // Per-market OI + funding history — powers the drawer sparklines.
   fastify.get("/api/series", (req, reply) => {
     reply.header("cache-control", "no-store");
@@ -266,6 +282,6 @@ async function main() {
 
 main().catch((e) => { console.error(e); process.exit(1); });
 
-function shutdown() { try { poller.persistFeatures(); } catch (_) {} try { poller.persistLedger(); } catch (_) {} store.close(); process.exit(0); }
+function shutdown() { try { poller.persistFeatures(); } catch (_) {} try { poller.persistLedger(); } catch (_) {} try { poller.persistFlows(); } catch (_) {} store.close(); process.exit(0); }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
