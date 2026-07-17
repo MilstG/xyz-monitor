@@ -11,7 +11,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints } = require("./compute");
-const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS } = require("./compute");
+const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -2309,7 +2309,7 @@ function createPoller({ dex, store, log, version, crypto }) {
           if (sr) { age = sr.run; ageCap = sr.capped; }
         }
         sides[side][uni].push({ coin: r.coin, t: r.ticker, score: s.score, tf, read: read.text,
-          retest: read.retest, strength: +s.strength.toFixed(5), age, ageCap, vol: r.vol || 0 });
+          retest: read.retest, strength: +s.strength.toFixed(5), width: ribbonWidth(s), age, ageCap, vol: r.vol || 0 });
       }
     }
     for (const side of ["long", "short"]) for (const uni of ["crypto", "stocks"]) {
@@ -2320,6 +2320,23 @@ function createPoller({ dex, store, log, version, crypto }) {
         || ((a.age == null ? Infinity : a.age) - (b.age == null ? Infinity : b.age))
         || (b.vol - a.vol));
       sides[side][uni] = sides[side][uni].slice(0, TREND_TOP).map(({ vol, ...e }) => e);
+      // Retest volume read (rrv) — computed only for the rows that actually shipped (<= TREND_TOP
+      // per board), so the extra work stays bounded regardless of universe size. The window is ONE
+      // bar of the retesting timeframe, clock-hour matched against the same span on prior days
+      // (rvolMulti, same construction as the Markets-table RVOL): ~1x or less = the pullback into
+      // the zone is quiet (healthy continuation character), >=2x = heavy tape INTO the zone — the
+      // level is being fought, not respected. Null when the volume baseline can't qualify — an
+      // honest dash, mirroring every other RVOL surface. Deliberately NOT in the content
+      // signature: like d21, it drifts with every completed hour, and versioning it would defeat
+      // the ETag; it is fresh at retest onset because `retest` itself IS in the signature.
+      for (const e of sides[side][uni]) {
+        if (!e.retest) continue;
+        try {
+          const W = TREND_TF_MS[e.retest];
+          const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now) : null;
+          e.rrv = rv && rv.w != null ? rv.w : null;
+        } catch (_) { e.rrv = null; }
+      }
     }
     const sig = JSON.stringify([["long", "short"].map((s) => ["crypto", "stocks"].map((u) =>
       sides[s][u].map((e) => [e.coin, e.score, e.retest, e.read, e.age])))]);
@@ -2351,6 +2368,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     voidEarnPrint,
     getTrend,
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
+    seedRowNow: (coin, fields) => Object.assign(getRow(coin), fields),   // harness: seed a synthetic market (px/spines) so builds are testable without network
     getLedgerFor,
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation

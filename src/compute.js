@@ -1283,6 +1283,20 @@ function withFormingDaily(daily, px, now, DAY) {
   return daily.concat([{ t: dayStart, c: +px }]);
 }
 
+// Ribbon width for one side of the ladder: the AVERAGE EMA13–EMA21 spread across the rungs
+// aligned with that side, as a percent of EMA21. This is the `strength` the ladder already
+// accumulates, normalized per rung — which is what makes it comparable across scores and lets it
+// disambiguate two rows at the same score: a 4/4 over a 0.1% ribbon is a stack one bad bar
+// unwinds; over 2% it's established separation. Null when the side has no aligned rungs — the
+// width of nothing is not zero, it's meaningless.
+function ribbonWidth(s) {
+  if (!s || !(s.score > 0) || !isFinite(s.strength)) return null;
+  return +((100 * s.strength) / s.score).toFixed(2);
+}
+
+// One bar of each ladder timeframe, in ms — the window for the retest-volume read (rrv).
+const TREND_TF_MS = { D1: 24 * 3600e3, H12: 12 * 3600e3, H4: 4 * 3600e3, H1: 3600e3 };
+
 module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
@@ -1291,7 +1305,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
-  emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS,
+  emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
 
 // ---- stop geometry validation ----------------------------------------------------------------
