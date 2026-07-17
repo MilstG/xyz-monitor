@@ -17,7 +17,6 @@ function openStore(dataDir) {
   const hourlyFile = path.join(dataDir, "hourly.json");
   const ledgerFile = path.join(dataDir, "ledger.json");
   const earnFile = path.join(dataDir, "earnings.json");
-  const flowsFile = path.join(dataDir, "flows.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
@@ -178,21 +177,6 @@ function openStore(dataDir) {
     },
     loadEarnings() {
       try { if (fs.existsSync(earnFile)) return JSON.parse(fs.readFileSync(earnFile, "utf8")); }
-      catch (_) {}
-      return null;
-    },
-    // Flows warm cache: the whale watchlist (accrues from the tape, can't be re-fetched), the
-    // liquidation-event feed and recently completed TWAP episodes. Atomic like the rest — a
-    // redeploy must not blank the cohort the liquidation monitor spent days building.
-    saveFlows(data) {
-      try {
-        const tmp = flowsFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, flowsFile);
-      } catch (_) {}
-    },
-    loadFlows() {
-      try { if (fs.existsSync(flowsFile)) return JSON.parse(fs.readFileSync(flowsFile, "utf8")); }
       catch (_) {}
       return null;
     },
