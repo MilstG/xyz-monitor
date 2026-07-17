@@ -508,13 +508,13 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext",
-    "loadTwaps", "renderTwaps", "openTwaps", "loadLiqs", "renderLiqs", "openLiqs", "flowAddr",
+    "loadLiqs", "renderLiqs", "openLiqs", "flowAddr", "liqDistLive", "ladderCell",
     "applyTabOrder", "saveTabOrder", "wireTabDrag"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "/api/twaps", "/api/liqs", "liqDistLive"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "/api/liqs", "CASCADE LADDER"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -525,7 +525,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "view-twaps", "twaps-body", "view-liqs", "liqs-body", "logoutBtn"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "view-liqs", "liqs-body", "logoutBtn"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
@@ -553,7 +553,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/twaps", "/api/liqs", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
+    "/api/earnings", "/api/liqs", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
@@ -945,8 +945,8 @@ test("stackedRun: exact per-bar trend age — fresh stacks, breaks, caps, live-m
   assert.equal(stackedRun(mk(rise).slice(0, 20), null, "long"), null, "insufficient history is null");
 });
 
-test("flows: TWAP tape detection — zero-hash gate, taker attribution, episode aggregation, sweep split", () => {
-  const { isTwapFill, twapTaker, foldTwapTrade, sweepTwaps } = require("../src/compute");
+test("flows: TWAP-taker detection for watchlist credit — zero-hash gate, taker attribution", () => {
+  const { isTwapFill, twapTaker } = require("../src/compute");
   const Z = "0x" + "0".repeat(64);
   const REAL = "0x9a1c" + "b".repeat(60);
   assert.equal(isTwapFill(Z), true, "all-zero hash is a TWAP slice");
@@ -957,32 +957,30 @@ test("flows: TWAP tape detection — zero-hash gate, taker attribution, episode 
   assert.equal(twapTaker({ side: "B", users: ["0xAAA1", "0xBBB2"] }), "0xaaa1", "buy slice attributes to the buyer");
   assert.equal(twapTaker({ side: "A", users: ["0xAAA1", "0xBBB2"] }), "0xbbb2", "sell slice attributes to the seller");
   assert.equal(twapTaker({ side: "B", users: ["nothex", "0xBBB2"] }), null, "malformed address -> null, never a fabricated key");
+});
 
-  const m = new Map();
-  const t0 = 1000000;
-  // three buy slices + one sell slice from the same user on the same coin = TWO episodes
-  foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "100", sz: "2", hash: Z, time: t0, users: ["0xu1", "0xmaker"] }, t0);
-  foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "101", sz: "2", hash: Z, time: t0 + 30000, users: ["0xu1", "0xmaker"] }, t0);
-  foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "102", sz: "1", hash: Z, time: t0 + 60000, users: ["0xu1", "0xmaker"] }, t0);
-  foldTwapTrade(m, { coin: "xyz:AAPL", side: "A", px: "100", sz: "5", hash: Z, time: t0 + 60000, users: ["0xbuyer", "0xu1"] }, t0);
-  // a REAL-hash trade must not create an episode
-  assert.equal(foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "100", sz: "9", hash: REAL, time: t0, users: ["0xu2", "0xm"] }, t0), null);
-  assert.equal(m.size, 2, "buy and sell legs are separate episodes; real-hash trades excluded");
-  const buy = m.get("0xu1|xyz:AAPL|buy");
-  assert.equal(buy.slices, 3);
-  assert.equal(buy.sz, 5);
-  assert.equal(buy.ntl, 100 * 2 + 101 * 2 + 102 * 1, "notional is sigma(sz*px), exact");
-  assert.equal(buy.tLast, t0 + 60000);
-  // sweep: 4-min silence ends an episode and REMOVES it from the map
-  const { active, ended } = sweepTwaps(m, t0 + 60000 + 5 * 60 * 1000, 4 * 60 * 1000);
-  assert.equal(active.length, 0);
-  assert.equal(ended.length, 2);
-  assert.equal(m.size, 0, "ended episodes leave the live map — the caller archives them");
-  // a fresh slice within the window stays active
-  foldTwapTrade(m, { coin: "BTC", side: "B", px: "50000", sz: "0.1", hash: Z, time: t0, users: ["0xw", "0xm"] }, t0);
-  const s2 = sweepTwaps(m, t0 + 60000, 4 * 60 * 1000);
-  assert.equal(s2.active.length, 1);
-  assert.equal(s2.ended.length, 0);
+test("flows: cascade ladder — cumulative bands, side split, through-the-level, deterministic order", () => {
+  const { ladderBands } = require("../src/compute");
+  const bands = [1, 2, 5, 10];
+  const rows = ladderBands([
+    { coin: "BTC", side: "long", dist: 0.8, ntl: 100 },   // in every band
+    { coin: "BTC", side: "long", dist: 4.0, ntl: 300 },   // <=5, <=10
+    { coin: "BTC", side: "short", dist: 1.5, ntl: 50 },   // <=2, <=5, <=10
+    { coin: "BTC", side: "long", dist: -0.2, ntl: 40 },   // THROUGH the level -> every band (liquidating now)
+    { coin: "BTC", side: "long", dist: 11, ntl: 9999 },   // beyond the last band -> excluded
+    { coin: "xyz:AAPL", side: "short", dist: 9.9, ntl: 700 },
+    { coin: "xyz:AAPL", side: "long", dist: null, ntl: 700 },   // no distance -> excluded, never guessed
+    { coin: "xyz:AAPL", side: "watch", dist: 1, ntl: 700 },     // malformed side -> excluded
+  ], bands);
+  assert.equal(rows.length, 2);
+  const btc = rows.find((r) => r.coin === "BTC"), aapl = rows.find((r) => r.coin === "xyz:AAPL");
+  assert.deepEqual(btc.long, [140, 140, 440, 440], "long bands are CUMULATIVE; through-the-level counts everywhere");
+  assert.deepEqual(btc.short, [0, 50, 50, 50]);
+  assert.equal(btc.nLong, 3); assert.equal(btc.nShort, 1);
+  assert.deepEqual(aapl.short, [0, 0, 0, 700]);
+  assert.equal(rows[0].coin, "xyz:AAPL", "sorted by total notional in the widest band (700 > 490)");
+  assert.deepEqual(ladderBands([], bands), [], "empty in, empty out");
+  assert.deepEqual(ladderBands(null, bands), [], "malformed in, empty out");
 });
 
 test("flows: liquidation distance — sign conventions, through-the-level, malformed inputs", () => {
@@ -1023,27 +1021,26 @@ test("flows: whale watchlist — exponential decay, credit accrual, deterministi
   assert.ok(m.has("0xaaa") && m.has("0xw9") && m.has("0xw8") && m.has("0xw7"), "top scores survive");
 });
 
-test("flows: getTwaps/getLiqs payload contract on a cold poller — routes can never 500 on boot", () => {
-  // The route layer binds serveCached to these getters at listen time, before start() has run
-  // and before the tape has produced anything. A throw or a malformed shape here is the exact
+test("flows: getLiqs payload contract on a cold poller — the route can never 500 on boot", () => {
+  // The route layer binds serveCached to this getter at listen time, before start() has run and
+  // before the tape has produced anything. A throw or a malformed shape here is the exact
   // silent-drawer failure class the route manifest exists to prevent — pin the empty contract.
   const { createPoller } = require("../src/poller");
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadFlows: () => null, saveFlows: () => {} };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
-  const tw = p.getTwaps();
-  assert.ok(tw && Number.isFinite(tw.ts), "twaps payload exists cold");
-  assert.ok(Array.isArray(tw.active) && tw.active.length === 0, "no fabricated episodes");
-  assert.ok(Array.isArray(tw.done) && tw.done.length === 0);
-  assert.ok(tw.agg && tw.agg.crypto && tw.agg.stocks, "both universes present in the aggregate, always");
-  assert.equal(tw.agg.crypto.buy + tw.agg.crypto.sell + tw.agg.stocks.buy + tw.agg.stocks.sell, 0);
   const lq = p.getLiqs();
   assert.ok(lq && Number.isFinite(lq.ts), "liqs payload exists cold");
+  assert.deepEqual(lq.bands, [1, 2, 5, 10], "ladder bands shipped so the client never hardcodes them");
   assert.ok(Array.isArray(lq.danger) && lq.danger.length === 0, "no fabricated danger rows");
   assert.ok(Array.isArray(lq.events) && lq.events.length === 0);
+  for (const un of ["crypto", "stocks"]) {
+    assert.ok(lq.ladder && lq.ladder[un] && Array.isArray(lq.ladder[un].coins) && lq.ladder[un].coins.length === 0, un + " ladder present and empty");
+    assert.equal(lq.ladder[un].total.long.length, 4, un + " totals aligned to bands even when empty");
+    assert.equal(lq.ladder[un].total.long.reduce((a, b) => a + b, 0), 0);
+  }
   assert.ok(lq.coverage && lq.coverage.tracked === 0 && typeof lq.coverage.note === "string", "coverage is stated, even when empty");
   // ETag discipline: identical content on a rebuild must NOT bump dataTs (would defeat every 304)
-  const v1 = tw.dataTs;
-  const tw2 = p.getTwaps();
-  assert.equal(tw2.dataTs, v1, "unchanged content keeps its data version (memo window)");
+  const v1 = lq.dataTs;
+  assert.equal(p.getLiqs().dataTs, v1, "unchanged content keeps its data version (memo window)");
 });
