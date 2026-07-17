@@ -2264,6 +2264,42 @@ function createPoller({ dex, store, log, version, crypto }) {
     return out;
   }
 
+  // Ladder-timeframe candles for the Trend-tab chart modal (tf = 1h | 4h | 12h | 1d): EXACTLY
+  // the series buildTrend feeds trendLadder for that rung — H1 is the spine's last 96 bars,
+  // H4/H12 are UTC-aligned bucketCandles aggregations of the full spine, D1 is the daily series
+  // through the withFormingDaily staleness guard. Same inputs means a client EMA walk over this
+  // payload reproduces the ladder's EMAs bit-for-bit — the chart CANNOT disagree with the board
+  // by construction (the modal's badges/read come from /api/trend either way; this guarantees
+  // the plotted ribbon lands where those badges claim it is). Bars are [t,o,h,l,c]; o/h/l ride
+  // through as null when the source bar carries closes only (warm-cache dailies, the synthetic
+  // forming daily bar) — the client draws an honest close tick, never a fabricated flat candle.
+  // `px` ships alongside so the client applies the SAME live-mark-drives-the-forming-bar
+  // substitution trendLadder does before walking its EMAs.
+  const TF_CANDLES = { "1h": 1, "4h": 4, "12h": 12, "1d": 0 };   // 0 = daily series, not a bucket width
+  function getTfCandles(coin, tf) {
+    const key = String(tf || "").toLowerCase();
+    if (!(key in TF_CANDLES)) return null;
+    const r = rows.get(coin);
+    if (!r) return { coin, tf: key, px: null, minBars: 26, candles: [] };
+    const q = (k) => [+k.t,
+      k.o != null && isFinite(+k.o) ? sig(+k.o, 9) : null,
+      k.h != null && isFinite(+k.h) ? sig(+k.h, 9) : null,
+      k.l != null && isFinite(+k.l) ? sig(+k.l, 9) : null,
+      sig(+k.c, 9)];
+    let src = [];
+    if (key === "1d") {
+      const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : [];
+      src = withFormingDaily(d1, r.px, Date.now(), DAY) || [];
+    } else if (key === "1h") {
+      src = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.slice(-96) : [];
+    } else {
+      src = Array.isArray(r.hourlyRaw) ? bucketCandles(r.hourlyRaw, TF_CANDLES[key], HOUR) : [];
+    }
+    const out = [];
+    for (const k of src) { if (isFinite(+k.t) && isFinite(+k.c)) out.push(q(k)); }
+    return { coin, tf: key, px: r.px != null && isFinite(+r.px) ? sig(+r.px, 9) : null, minBars: 26, candles: out };
+  }
+
   // ---- trend leaderboard (served at /api/trend) ----
   // EMA 13/21 ribbon ladder across D1 · H12 · H4 · H1 for every live market, ranked into long and
   // short boards per universe. Assembly only — all math is in compute.js (unit-tested there).
@@ -2297,8 +2333,11 @@ function createPoller({ dex, store, log, version, crypto }) {
         const read = trendRead(side, lad);
         if (!read) continue;   // score < 2 — not board material on this side
         const s = lad[side];
+        // e13/e21 ride along for the chart modal's retest-zone band — the band is the ladder's
+        // OWN values, never a client recompute (deliberately NOT in the content signature: like
+        // d21 they drift with price, and the modal's badges key off st/retest/read which are).
         const tf = {};
-        for (const t of TREND_TFS) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21 };
+        for (const t of TREND_TFS) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21, e13: sig(lad.tf[t].e13, 9), e21: sig(lad.tf[t].e21, 9) };
         // Trend age: only meaningful when the D1 rung itself is aligned with this side — a 2/4
         // carried by lower rungs has no D1 trend to age. Days, exact per-bar EMA walk; capped
         // means the stack extends past available history ("at least", most relevant for crypto's
@@ -2338,9 +2377,9 @@ function createPoller({ dex, store, log, version, crypto }) {
         } catch (_) { e.rrv = null; }
       }
     }
-    const sig = JSON.stringify([["long", "short"].map((s) => ["crypto", "stocks"].map((u) =>
+    const sigTrend = JSON.stringify([["long", "short"].map((s) => ["crypto", "stocks"].map((u) =>
       sides[s][u].map((e) => [e.coin, e.score, e.retest, e.read, e.age])))]);
-    if (sig !== trendSig) { trendSig = sig; trendVer = Date.now(); }
+    if (sigTrend !== trendSig) { trendSig = sigTrend; trendVer = Date.now(); }
     trendBuilt = now;
     trendCache = { ts: now, dataTs: trendVer,
       params: { ema: [13, 21], tfs: TREND_TFS, retestBars: 3, top: TREND_TOP },
@@ -2363,6 +2402,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     getHourly,
     getFunding,
     getCandles,
+    getTfCandles,
     getSignals: () => signalsCache,
     getEarnings: () => earnCache,
     voidEarnPrint,
