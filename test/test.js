@@ -1157,6 +1157,34 @@ test("candles tf param: the chart series IS the ladder series — the modal cann
   assert.deepEqual(p.getTfCandles("NOSUCH", "4h").candles, [], "unknown market: empty series, not a throw");
 });
 
+test("daily refetch predicate: closes-only warm restores refetch regardless of dailyTs — the 1D chart's bodiless-candle window closes itself", () => {
+  // Regression for the permanently-tick-marked 1D chart: the warm cache persists dailies as
+  // [t,c] AND persists dailyTs, so a redeploy restored closes-only bars behind a fresh-looking
+  // timestamp and the 6h staleness gate refused to refetch — at a multiple-builds-per-day
+  // cadence the D1 view never escaped the window. Closes-only bars must now count as
+  // fetch-worthy on their own; full-OHLC bars keep the normal staleness behavior.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), d0 = Math.floor(now / DAY) * DAY;
+  const closesOnly = Array.from({ length: 30 }, (_, i) => ({ t: d0 - (30 - i) * DAY, c: 100 + i }));
+  const fullOHLC = closesOnly.map((k) => ({ t: k.t, o: k.c * 0.99, h: k.c * 1.01, l: k.c * 0.985, c: k.c }));
+  p.seedRowNow("WARM", { px: 130, dailyRaw: closesOnly, dailyTs: now });        // fresh ts, bodiless bars
+  p.seedRowNow("LIVE", { px: 130, dailyRaw: fullOHLC, dailyTs: now });          // fresh ts, full bars
+  p.seedRowNow("STALE", { px: 130, dailyRaw: fullOHLC, dailyTs: now - 7 * 3600 * 1000 });   // full bars past the 6h gate
+  assert.equal(p.needDailyNow("WARM"), true, "closes-only restore is fetch-worthy despite a fresh dailyTs");
+  assert.equal(p.needDailyNow("LIVE"), false, "full-OHLC dailies inside the staleness window are left alone");
+  assert.equal(p.needDailyNow("STALE"), true, "full-OHLC dailies past the 6h gate still refresh normally");
+  assert.equal(p.needDailyNow("NOSUCH"), false, "unknown market: false, not a throw");
+  // and the modal's endpoint really does ship those bodiless bars as nulls (the close-tick
+  // path), never fabricated flat candles — the honesty this fix exists to make short-lived
+  const rd = p.getTfCandles("WARM", "1d");
+  assert.ok(rd.candles.length >= 30, "closes-only series still serves the chart");
+  assert.ok(rd.candles[0][1] == null && rd.candles[0][2] == null && rd.candles[0][3] == null,
+    "warm-restore bars ride through with null o/h/l");
+});
+
 test("withFormingDaily: stale daily series gets a synthetic forming bar, fresh series untouched", () => {
   const { withFormingDaily, trendLadder } = require("../src/compute");
   const now = Date.UTC(2026, 6, 14, 19, 0, 0), dayStart = Date.UTC(2026, 6, 14);
