@@ -651,7 +651,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
-    "applyTabOrder", "saveTabOrder", "wireTabDrag"];
+    "applyTabOrder", "saveTabOrder", "wireTabDrag",
+    "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1010,13 +1011,20 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
     "missing poller harness: seedRowNow");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(html.includes('data-view="trend"'), "trend tab button missing from nav");
-  for (const id of ["view-trend", "trendside", "trend-body", "trend-asof"])
+  for (const id of ["view-trend", "trendside", "trend-body", "trend-asof", "tchartbg", "tchartmodal"])
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(srv.includes("/api/trend"), "server route missing: /api/trend");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl", ".twidth"])
+  for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl", ".twidth", ".tchart-btn", ".tchart-modal", ".tcbtn-td"])
     assert.ok(css.includes(cls), `missing style: ${cls}`);
+  // chart modal contract markers: the button ships on rows, the fetch carries tf=, and the
+  // candles route branches to the ladder-series getter — drop any one and the modal quietly
+  // degrades (silent-fetch-swallowing is exactly how the -42 route deletion hid for six builds)
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const frag of ["tchart-btn", "&tf=", "tcbtn-td"])
+    assert.ok(app.includes(frag), `missing chart-modal client marker: ${frag}`);
+  assert.ok(srv.includes("getTfCandles"), "candles route does not branch to the ladder-series getter");
 });
 
 test("ribbonWidth: per-rung average spread, null guards, and consistency with the ladder", () => {
@@ -1074,6 +1082,79 @@ test("trend board ships width + retest volume (rrv) end to end via the seed harn
   assert.ok(row.rrv != null && row.rrv > 1.6 && row.rrv < 2.6,
     `retest volume reads ~2x for a doubled final day, got ${row.rrv}`);
   for (const e of p.getTrend().long.stocks) if (!e.retest) assert.ok(e.rrv == null, "rrv only rides a retest");
+});
+
+test("candles tf param: the chart series IS the ladder series — the modal cannot disagree with the board", () => {
+  // Regression class: the Trend-tab chart modal's design mockup once showed an "up 3/4 · retest"
+  // badge over candles whose close sat BELOW both EMAs — two sources of truth, one lying. The
+  // build's contract: /api/candles?tf= serves the EXACT series buildTrend fed trendLadder for
+  // that rung, and every modal annotation is the /api/trend payload restated. This test walks
+  // the contract end to end: for every rung, an EMA walk over the endpoint's series (with the
+  // same live-mark substitution) must land on the board's own state and the board's own shipped
+  // e13/e21 — if the endpoint ever drifts from the ladder's inputs, this fails before it ships.
+  const { createPoller } = require("../src/poller");
+  const { bucketCandles, withFormingDaily, emaLast, trendState } = require("../src/compute");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), endH = Math.floor(now / HOUR);
+  // same fixture family as the trend-board harness test: 16d rising hourly spine, 60 daily bars
+  // whose deep lows probe the D1 ribbon (closes-only opens, exercising the null-o passthrough)
+  const N = 16 * 24, hourly = [];
+  for (let i = 0; i < N; i++) {
+    const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+    hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 });
+  }
+  const px = hourly[N - 1].c * 1.0005;
+  const daily = [];
+  for (let i = 0; i < 60; i++)
+    daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c: px * Math.pow(1.01, i - 59), l: px * Math.pow(1.01, i - 59) * 0.90, h: px * Math.pow(1.01, i - 59) * 1.002 });
+  p.seedRowNow("TCHART", { px, uni: "xyz", vol: 1e6, hourlyRaw: hourly, dailyRaw: daily });
+  p.buildTrendNow();
+  const row = p.getTrend().long.stocks.find((e) => e.coin === "TCHART");
+  assert.ok(row, "seeded market reaches the long board");
+  const rel = (a, b) => Math.abs(a - b) / Math.abs(b);
+  // the modal's zone band rides the payload: per-TF e13/e21 must ship on every rung
+  for (const t of ["D1", "H12", "H4", "H1"])
+    assert.ok(row.tf[t].e13 > 0 && row.tf[t].e21 > 0, `board payload ships e13/e21 for ${t}`);
+  const map = { "1h": "H1", "4h": "H4", "12h": "H12", "1d": "D1" };
+  for (const [tf, lad] of Object.entries(map)) {
+    const res = p.getTfCandles("TCHART", tf);
+    assert.equal(res.tf, tf, `${tf}: tf echoed`);
+    assert.ok(res.px > 0, `${tf}: live mark ships`);
+    assert.ok(res.candles.length >= 26, `${tf}: enough bars for an honest ribbon, got ${res.candles.length}`);
+    const closes = res.candles.map((k) => k[4]);
+    closes[closes.length - 1] = res.px;   // the same live-mark-drives-the-forming-bar rule trendLadder applies
+    const e13 = emaLast(closes, 13), e21 = emaLast(closes, 21);
+    assert.equal(trendState(res.px, e13, e21), row.tf[lad].st,
+      `${tf}: state re-derived from the chart's own series equals the board's ${lad} state`);
+    assert.ok(rel(e13, row.tf[lad].e13) < 1e-6 && rel(e21, row.tf[lad].e21) < 1e-6,
+      `${tf}: an EMA walk over the endpoint series reproduces the shipped ladder EMAs`);
+  }
+  // series identity, not just same-answer: each tf is literally the ladder's input for that rung
+  const b4 = bucketCandles(hourly, 4, HOUR), b12 = bucketCandles(hourly, 12, HOUR);
+  const r4 = p.getTfCandles("TCHART", "4h"), r12 = p.getTfCandles("TCHART", "12h");
+  assert.equal(r4.candles.length, b4.length, "4h: bucket count matches bucketCandles");
+  assert.equal(r12.candles.length, b12.length, "12h: bucket count matches bucketCandles");
+  for (let i = 0; i < b4.length; i++) {
+    assert.equal(r4.candles[i][0], b4[i].t, "4h: bucket timestamps identical");
+    assert.ok(rel(r4.candles[i][4], b4[i].c) < 1e-8, "4h: bucket closes identical (mod quantization)");
+  }
+  const r1 = p.getTfCandles("TCHART", "1h");
+  assert.equal(r1.candles.length, 96, "1h: the ladder's 96-bar spine tail, not the drawer's days window");
+  assert.equal(r1.candles[95][0], hourly[N - 1].t, "1h: tail ends at the last spine bar");
+  const g = withFormingDaily(daily, px, Date.now(), DAY);
+  const rd = p.getTfCandles("TCHART", "1d");
+  assert.equal(rd.candles.length, g.length, "1d: through the withFormingDaily staleness guard");
+  const last = rd.candles[rd.candles.length - 1];
+  assert.ok(last[1] == null && last[2] == null && last[3] == null, "1d: the synthetic forming bar ships closes-only — a close tick, never a fabricated flat candle");
+  assert.ok(rd.candles[0][1] == null, "1d: closes-only source bars ride through with null opens");
+  // legacy surface untouched: no tf keeps the drawer's 6-tuple hourly shape; unknown tf is a
+  // null (the route falls through to legacy rather than guessing)
+  const leg = p.getCandles("TCHART", 7);
+  assert.ok(leg.length > 0 && leg[0].length === 6, "legacy days-windowed shape keeps its volume column");
+  assert.equal(p.getTfCandles("TCHART", "5m"), null, "unknown tf refuses rather than guesses");
+  assert.deepEqual(p.getTfCandles("NOSUCH", "4h").candles, [], "unknown market: empty series, not a throw");
 });
 
 test("withFormingDaily: stale daily series gets a synthetic forming bar, fresh series untouched", () => {
