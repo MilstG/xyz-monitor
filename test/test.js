@@ -508,12 +508,13 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext",
+    "loadTwaps", "renderTwaps", "openTwaps", "loadLiqs", "renderLiqs", "openLiqs", "flowAddr",
     "applyTabOrder", "saveTabOrder", "wireTabDrag"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "/api/twaps", "/api/liqs", "liqDistLive"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -524,7 +525,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "view-twaps", "twaps-body", "view-liqs", "liqs-body", "logoutBtn"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
@@ -552,7 +553,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
+    "/api/earnings", "/api/twaps", "/api/liqs", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
@@ -942,4 +943,107 @@ test("stackedRun: exact per-bar trend age — fresh stacks, breaks, caps, live-m
   sr = stackedRun(mk(fall), null, "short");
   assert.ok(sr.run > 30 && sr.capped, "steady downtrend: long capped short run");
   assert.equal(stackedRun(mk(rise).slice(0, 20), null, "long"), null, "insufficient history is null");
+});
+
+test("flows: TWAP tape detection — zero-hash gate, taker attribution, episode aggregation, sweep split", () => {
+  const { isTwapFill, twapTaker, foldTwapTrade, sweepTwaps } = require("../src/compute");
+  const Z = "0x" + "0".repeat(64);
+  const REAL = "0x9a1c" + "b".repeat(60);
+  assert.equal(isTwapFill(Z), true, "all-zero hash is a TWAP slice");
+  assert.equal(isTwapFill(REAL), false, "a real L1 hash is NOT a TWAP slice");
+  assert.equal(isTwapFill("0x0"), false, "too-short zero string must not pass (malformed input)");
+  assert.equal(isTwapFill(null), false);
+  // taker attribution: users = [buyer, seller]; side B => taker bought => users[0]
+  assert.equal(twapTaker({ side: "B", users: ["0xAAA1", "0xBBB2"] }), "0xaaa1", "buy slice attributes to the buyer");
+  assert.equal(twapTaker({ side: "A", users: ["0xAAA1", "0xBBB2"] }), "0xbbb2", "sell slice attributes to the seller");
+  assert.equal(twapTaker({ side: "B", users: ["nothex", "0xBBB2"] }), null, "malformed address -> null, never a fabricated key");
+
+  const m = new Map();
+  const t0 = 1000000;
+  // three buy slices + one sell slice from the same user on the same coin = TWO episodes
+  foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "100", sz: "2", hash: Z, time: t0, users: ["0xu1", "0xmaker"] }, t0);
+  foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "101", sz: "2", hash: Z, time: t0 + 30000, users: ["0xu1", "0xmaker"] }, t0);
+  foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "102", sz: "1", hash: Z, time: t0 + 60000, users: ["0xu1", "0xmaker"] }, t0);
+  foldTwapTrade(m, { coin: "xyz:AAPL", side: "A", px: "100", sz: "5", hash: Z, time: t0 + 60000, users: ["0xbuyer", "0xu1"] }, t0);
+  // a REAL-hash trade must not create an episode
+  assert.equal(foldTwapTrade(m, { coin: "xyz:AAPL", side: "B", px: "100", sz: "9", hash: REAL, time: t0, users: ["0xu2", "0xm"] }, t0), null);
+  assert.equal(m.size, 2, "buy and sell legs are separate episodes; real-hash trades excluded");
+  const buy = m.get("0xu1|xyz:AAPL|buy");
+  assert.equal(buy.slices, 3);
+  assert.equal(buy.sz, 5);
+  assert.equal(buy.ntl, 100 * 2 + 101 * 2 + 102 * 1, "notional is sigma(sz*px), exact");
+  assert.equal(buy.tLast, t0 + 60000);
+  // sweep: 4-min silence ends an episode and REMOVES it from the map
+  const { active, ended } = sweepTwaps(m, t0 + 60000 + 5 * 60 * 1000, 4 * 60 * 1000);
+  assert.equal(active.length, 0);
+  assert.equal(ended.length, 2);
+  assert.equal(m.size, 0, "ended episodes leave the live map — the caller archives them");
+  // a fresh slice within the window stays active
+  foldTwapTrade(m, { coin: "BTC", side: "B", px: "50000", sz: "0.1", hash: Z, time: t0, users: ["0xw", "0xm"] }, t0);
+  const s2 = sweepTwaps(m, t0 + 60000, 4 * 60 * 1000);
+  assert.equal(s2.active.length, 1);
+  assert.equal(s2.ended.length, 0);
+});
+
+test("flows: liquidation distance — sign conventions, through-the-level, malformed inputs", () => {
+  const { liqDistancePct } = require("../src/compute");
+  // long: liq below mark -> positive distance; mark AT/THROUGH liq -> <= 0
+  assert.ok(Math.abs(liqDistancePct(10, 90, 100) - 10) < 1e-9, "long 10% above its liq price");
+  assert.ok(liqDistancePct(10, 100, 100) === 0, "long at the level");
+  assert.ok(liqDistancePct(10, 105, 100) < 0, "long through the level");
+  // short: liq above mark -> positive distance; mark AT/THROUGH -> <= 0
+  assert.ok(Math.abs(liqDistancePct(-5, 110, 100) - 10) < 1e-9, "short 10% below its liq price");
+  assert.ok(liqDistancePct(-5, 95, 100) < 0, "short through the level");
+  // malformed -> null, never fabricated
+  assert.equal(liqDistancePct(0, 90, 100), null, "no position, no distance");
+  assert.equal(liqDistancePct(10, null, 100), null, "no liq price (venue omits it sometimes)");
+  assert.equal(liqDistancePct(10, 90, null), null, "no mark");
+  assert.equal(liqDistancePct(10, -1, 100), null, "nonsense liq price");
+});
+
+test("flows: whale watchlist — exponential decay, credit accrual, deterministic prune", () => {
+  const { foldWhale, decayScore, pruneWhales } = require("../src/compute");
+  const HL = 3 * 86400000, t0 = 1000000;
+  const m = new Map();
+  foldWhale(m, "0xaaa", 100000, t0, HL);
+  // one half-life later the score has halved
+  assert.ok(Math.abs(decayScore(m.get("0xaaa"), t0 + HL, HL) - 50000) < 1, "score halves after one half-life");
+  // a credit at +HL decays the old score first, then adds
+  foldWhale(m, "0xaaa", 10000, t0 + HL, HL);
+  assert.ok(Math.abs(m.get("0xaaa").ntl - 60000) < 1, "decay-then-add accounting");
+  // malformed inputs never enter the map
+  assert.equal(foldWhale(m, "nothex", 5000, t0, HL), null);
+  assert.equal(foldWhale(m, "0xbbb", -5, t0, HL), null);
+  assert.equal(m.size, 1);
+  // prune keeps the top N by decayed score, deterministically
+  for (let i = 0; i < 10; i++) foldWhale(m, "0xw" + i, (i + 1) * 1000, t0, HL);
+  const dropped = pruneWhales(m, 4, t0, HL);
+  assert.equal(dropped, 7);
+  assert.equal(m.size, 4);
+  assert.ok(m.has("0xaaa") && m.has("0xw9") && m.has("0xw8") && m.has("0xw7"), "top scores survive");
+});
+
+test("flows: getTwaps/getLiqs payload contract on a cold poller — routes can never 500 on boot", () => {
+  // The route layer binds serveCached to these getters at listen time, before start() has run
+  // and before the tape has produced anything. A throw or a malformed shape here is the exact
+  // silent-drawer failure class the route manifest exists to prevent — pin the empty contract.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadFlows: () => null, saveFlows: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const tw = p.getTwaps();
+  assert.ok(tw && Number.isFinite(tw.ts), "twaps payload exists cold");
+  assert.ok(Array.isArray(tw.active) && tw.active.length === 0, "no fabricated episodes");
+  assert.ok(Array.isArray(tw.done) && tw.done.length === 0);
+  assert.ok(tw.agg && tw.agg.crypto && tw.agg.stocks, "both universes present in the aggregate, always");
+  assert.equal(tw.agg.crypto.buy + tw.agg.crypto.sell + tw.agg.stocks.buy + tw.agg.stocks.sell, 0);
+  const lq = p.getLiqs();
+  assert.ok(lq && Number.isFinite(lq.ts), "liqs payload exists cold");
+  assert.ok(Array.isArray(lq.danger) && lq.danger.length === 0, "no fabricated danger rows");
+  assert.ok(Array.isArray(lq.events) && lq.events.length === 0);
+  assert.ok(lq.coverage && lq.coverage.tracked === 0 && typeof lq.coverage.note === "string", "coverage is stated, even when empty");
+  // ETag discipline: identical content on a rebuild must NOT bump dataTs (would defeat every 304)
+  const v1 = tw.dataTs;
+  const tw2 = p.getTwaps();
+  assert.equal(tw2.dataTs, v1, "unchanged content keeps its data version (memo window)");
 });
