@@ -416,7 +416,7 @@ test("earnings: feed parse filters to OUR symbols, applies aliases, normalizes s
   assert.equal(out[2].s, "AMC");
   assert.equal(out[3].s, "TBD", "unknown hour is TBD, never guessed");
   assert.equal(out[3].coin, "xyz:BRKB", "BRK.B report lands on the BRKB row");
-  assert.equal(out[1].eps, 4.11, "EPS estimate quantized to 2dp");
+  assert.equal(out[1].eps, 4.1123, "EPS estimate keeps 4dp — 2dp collapsed real beat/miss margins");
   assert.equal(out[3].eps, null, "missing estimate stays null");
   assert.deepEqual(parseEarningsCalendar({}, symMap), [], "missing calendar array is empty, not a throw");
 });
@@ -428,7 +428,7 @@ test("earnings: parser carries actuals and revenue for beat/miss", () => {
     { symbol: "NVDA", date: "2026-07-13", hour: "amc", epsEstimate: 5.6234, epsActual: 5.712, revenueEstimate: 41234000000, revenueActual: 42891000000, quarter: 2, year: 2026 },
     { symbol: "NVDA", date: "2026-10-14", hour: "amc", epsEstimate: 6.1 },
   ] }, symMap);
-  assert.equal(out[0].epsA, 5.71, "actual quantized to 2dp");
+  assert.equal(out[0].epsA, 5.712, "actual keeps 4dp");
   assert.equal(out[0].rev, 41200000000, "revenue estimate at 3 significant figures");
   assert.equal(out[0].revA, 42900000000);
   assert.equal(out[0].q, 2, "fiscal quarter captured — the reschedule discriminator");
@@ -557,6 +557,51 @@ test("earnings: stale-schedule purge drops placeholder-date phantoms, never dele
   assert.ok(pol.includes("data.histDone2 === true") && pol.includes("histDone2: earnHistDone"), "backfill flag versioned in hydrate and persist");
 });
 
+test("earnings: back-window reconciliation mirrors the feed's current claim, never touches deep history", () => {
+  const { reconcileEarnPrints, parseEarningsCalendar } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 16, 16, 0);   // Thu Jul 16 noon ET
+  const prints = [
+    { coin: "xyz:IBM", t: "IBM", d: "2026-07-14", s: "BMO", eps: 3.05, epsA: 2.93 },   // phantom: feed no longer lists it ANYWHERE
+    { coin: "xyz:NFLX", t: "NFLX", d: "2026-07-15", s: "AMC", eps: 0.8042, epsA: 0.8 }, // real: feed still serves the back-window row
+    { coin: "xyz:GOOGL", t: "GOOGL", d: "2026-04-24", s: "AMC", eps: 2.1, epsA: 2.3 },  // deep history: outside the back window, untouchable
+    { coin: "xyz:TSLA", t: "TSLA", d: "2026-07-22", s: "AMC", eps: 0.51 },              // future-dated record: not reconciliation's business
+  ];
+  const parsed = [
+    { coin: "xyz:NFLX", t: "NFLX", d: "2026-07-15", s: "AMC", eps: 0.8042, epsA: 0.8 },
+    { coin: "xyz:TSLA", t: "TSLA", d: "2026-07-22", s: "AMC", eps: 0.51 },
+  ];
+  const out = reconcileEarnPrints(prints, parsed, now);
+  assert.deepEqual(out.map((p) => p.t).sort(), ["GOOGL", "NFLX", "TSLA"],
+    "back-window phantom dropped; back-window real, deep history and future records kept");
+  assert.equal(reconcileEarnPrints(prints, [], now).length, prints.length,
+    "an empty parse is a broken fetch, not evidence — purges nothing");
+  assert.equal(reconcileEarnPrints(prints, parsed, now, 1).length, 4,
+    "IBM at diff -2 is outside a 1-day back window — untouched when not refetched");
+  // the NFLX display regression, at the parser: 2dp quantization collapsed a real -0.5% miss
+  // into "0.8 vs 0.8" — 4dp must preserve the margin the verdict is computed from
+  const symMap = new Map([["NFLX", { coin: "xyz:NFLX", ticker: "NFLX" }]]);
+  const p = parseEarningsCalendar({ earningsCalendar: [
+    { symbol: "NFLX", date: "2026-07-16", hour: "amc", epsEstimate: 0.8042, epsActual: 0.8, quarter: 2, year: 2026 },
+  ] }, symMap);
+  assert.equal(p[0].eps, 0.8042, "estimate margin preserved at 4dp");
+  assert.equal(p[0].epsA, 0.8);
+  assert.ok(p[0].epsA < p[0].eps, "the verdict-bearing inequality survives quantization");
+  // wiring pins: tombstones filter at the pipe mouth AND the post-merge choke point, the void
+  // function exists and is exported, the route is registered, and the client carries the control.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("parsed = parsed.filter((e) => !earnVoids.has(e.t"), "tombstones filter the fresh parse");
+  assert.ok(pol.includes("earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t"), "tombstones filter the merged prints (choke point)");
+  assert.ok(pol.includes("function voidEarnPrint(") && pol.includes("voidEarnPrint,"), "void function defined and exported");
+  assert.ok(pol.indexOf("reconcileEarnPrints(earnPrints, parsed") < pol.indexOf("purgeStalePrints(earnPrints, parsed"), "reconcile runs before the reschedule purge");
+  assert.ok(pol.includes("voids: [...earnVoids]"), "tombstones persist to the volume");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.equal(srv.split('fastify.post("/api/earnings/void"').length - 1, 1, "void route registered exactly once");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const frag of ["earn-void", "/api/earnings/void", "in line"])
+    assert.ok(app.includes(frag), `missing client void/verdict marker: ${frag}`);
+});
+
 test("earnings: recently-reported window keeps the two prior ET days, drops today and older, sorts most-recent first", () => {
   const { recentEarnPrints } = require("../src/compute");
   const noon = Date.UTC(2026, 6, 16, 16, 0);   // 12:00 ET, Thu Jul 16
@@ -605,7 +650,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
-    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml",
+    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
     "loadLiqs", "renderLiqs", "openLiqs", "flowAddr", "liqDistLive", "ladderCell",
     "applyTabOrder", "saveTabOrder", "wireTabDrag"];
   for (const n of need) {
