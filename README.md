@@ -17,8 +17,11 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **`/api/health`** — liveness + basic stats (used as the Railway healthcheck).
 - **`/api/series?coin=<coin>`** — per-market OI and funding history (powers the ticker drawer sparklines).
 - **`/api/candles?coin=<coin>&days=N`** — per-market hourly OHLCV (1–60d, default 14; powers the drawer candle chart).
-- **`/api/earnings`** — upcoming earnings (next 14 days, ET) for the xyz equity universe,
-  Finnhub-fed, refreshed server-side every ~6h and warm-cached on the volume. Powers the
+- **`/api/earnings`** — earnings for the xyz equity universe: upcoming (next 14 days, ET) plus a
+  reported window (`recent`, the two prior ET days, derived from the persisted print history) so
+  a print keeps its beat/miss and reaction move on the tab for 48h instead of vanishing at the
+  ET midnight rollover. The schedule is Finnhub-fed, refreshed server-side every ~6h and
+  warm-cached on the volume. Powers the
   Earnings tab and the E badge on the markets table (solid = reports today, hollow = tomorrow).
   Reported rows carry EPS actual vs estimate (beat/miss + surprise); past print dates persist
   to the volume (one-time ~1y backfill, then self-accruing) and feed a per-ticker earnings
