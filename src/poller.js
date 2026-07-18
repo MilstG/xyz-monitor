@@ -2354,6 +2354,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (key === "1d") {
       const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : [];
       src = withFormingDaily(d1, r.px, Date.now(), DAY) || [];
+      // OHLC upgrade: warm-cache restores carry closes only, which renders as a bare close line.
+      // The retained hourly spine holds the TRUE open/high/low of every recent day — aggregate it
+      // (UTC-aligned, same bucketing the H12/H4 rungs use) and substitute into closes-only bars.
+      // The official close is kept (it's what the ladder's EMAs walked — the chart may never
+      // disagree with the board), with h/l clamped to include it. Real data, not a fallback.
+      if (Array.isArray(r.hourlyRaw) && r.hourlyRaw.length > 24 && src.some((k) => k.o == null)) {
+        const byDay = new Map();
+        for (const b of bucketCandles(r.hourlyRaw, 24, HOUR))
+          if (b && isFinite(+b.t) && b.o != null && isFinite(+b.o)) byDay.set(Math.floor(+b.t / DAY), b);
+        src = src.map((k) => {
+          if (k.o != null || !isFinite(+k.c)) return k;
+          const d = byDay.get(Math.floor(+k.t / DAY));
+          if (!d) return k;
+          const c = +k.c;
+          return { t: k.t, o: +d.o, h: Math.max(+d.h, c), l: Math.min(+d.l, c), c };
+        });
+      }
     } else if (key === "1h") {
       src = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.slice(-96) : [];
     } else {
@@ -2531,6 +2548,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   const AI_MODEL_FALLBACK = process.env.AI_MODEL_FALLBACK || AI_DEF.fb;
   const AI_KEY = () => AI_PROVIDER === "openai" ? (process.env.OPENAI_API_KEY || "") : (process.env.ANTHROPIC_API_KEY || "");
   const AI_TTL_MS = Math.max(5, Number(process.env.AI_REPORT_TTL_MIN) || 30) * 60 * 1000;
+  // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
+  // schema flip to "invalidated — report format updated" on the next read, so a deploy that
+  // fixes the report is visible on the first regenerate, never hidden behind a running TTL.
+  const AI_SCHEMA_V = 2;
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
@@ -2559,6 +2580,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     return { openN, closedN, lastPrintD };
   }
   function aiInvalidReason(rep) {
+    if ((rep.schemaV || 1) !== AI_SCHEMA_V) return "report format updated";
     const cur = aiStampFor(rep.coin, rep.ticker);
     const s = rep.ctxStamp || {};
     if (cur.openN > (s.openN || 0)) return "new signal claim opened";
@@ -2824,6 +2846,7 @@ Respond with ONLY a JSON object — no markdown fences, no preamble — with exa
  "eventRisk": string or null (equities with an upcoming print inside ~10 days: what the reaction study says and what holding through it means; otherwise null),
  "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. "target" scenarios are THESIS-DIRECTION only — an adverse recovery against the bias is the "void" scenario (through the void level) or "flat", never a target. If an earnings print falls inside the scenario horizon, the middle scenario must be kind "event" — the print decides, treat it as a coin flip scaled by the reaction study, and say so.
  "invalidations": array of 1-5 plain sentences — observable conditions that would change the read,
+ "action": {"stance": "enter_now"|"enter_on_pullback"|"take_profit"|"wait"|"no_trade", "entry": price or null, "note": one sentence on why this stance and what to watch}. The actionable read: offer an entry stance whenever the geometry supports one (a void and a target exist and the expected value at some entry is positive) — "enter_on_pullback" requires "entry" set to the pullback level (typically the zone), "enter_now" may leave entry null (the current price). When the honest answer is to stand aside — event about to decide, negative expected value, neutral read, thin data — say "wait" or "no_trade" and name the condition that would change it. Never invent a stance the scenario odds don't support.
  "levels": array of at most 4 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high", "label": <=60 chars} for chart annotation. Level discipline is strict: when bias is "long" or "short" you MUST include exactly one "void" level — the observable price where the read is dead (the frozen claim stop when claimAnchor exists, otherwise a structural level like the relevant swing low/high) — and exactly one "void" scenario resolving against it. At most one "target" level, optionally one zone_low+zone_high pair. NEVER annotate moving averages as levels (EMAs drift — the chart draws the live ribbon itself) and never annotate range bounds unless the bound IS the void or target. Levels must sit within roughly ±25% of the current price or they won't render.
 Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Use only levels derivable from the context (range structure, claim geometry, prior swings implied by the data). Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
   // Validate the model's JSON, correct the void to frozen-claim geometry when one exists, and
@@ -2906,12 +2929,44 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return o;
     });
     const ev = risk != null ? +scen.reduce((a, s) => a + s.p * (s.payoffR || 0), 0).toFixed(2) : null;
+    // The actionable read: stance + entry validated, then all money math computed HERE at that
+    // entry — including the improved pullback R/R the entry exists to capture. A stance the
+    // geometry can't support (enter with no void/target) is a validation failure, and negative-EV
+    // entries are downgraded to "wait" server-side rather than shipped as a plan.
+    const AI_STANCES = new Set(["enter_now", "enter_on_pullback", "take_profit", "wait", "no_trade"]);
+    const act = out.action;
+    if (!act || typeof act !== "object" || !AI_STANCES.has(act.stance)) return { ok: false, error: "bad action stance" };
+    if (act.note != null && !str(act.note, 300)) return { ok: false, error: "bad action note" };
+    if (act.entry != null && (!Number.isFinite(act.entry) || !(act.entry > px * 0.6 && act.entry < px * 1.6))) return { ok: false, error: "action entry outside sanity bounds" };
+    const targetL = levels.find((l) => l.kind === "target") || null;
+    let action = { stance: act.stance, note: act.note ? String(act.note).trim() : null };
+    if (act.stance === "enter_now" || act.stance === "enter_on_pullback") {
+      if (voidL == null || targetL == null) return { ok: false, error: "actionable stance without void/target geometry" };
+      if (act.stance === "enter_on_pullback" && act.entry == null) return { ok: false, error: "pullback stance without an entry level" };
+      const entry = act.entry != null ? +act.entry : px;
+      // entry must sit on the tradeable side of the void, same geometry class as everything else
+      if (out.bias === "long" && !(entry > voidL.value)) return { ok: false, error: "long entry at or below the void" };
+      if (out.bias === "short" && !(entry < voidL.value)) return { ok: false, error: "short entry at or above the void" };
+      const eRisk = Math.abs(entry - voidL.value);
+      if (!(eRisk > 0)) return { ok: false, error: "entry has zero risk distance" };
+      const eScen = out.scenarios.map((s) => s.kind === "target" ? (sideSign * ((s.target != null ? +s.target : targetL.value) - entry)) / eRisk
+        : s.kind === "void" ? -1 : 0);
+      const eEv = +out.scenarios.reduce((a, s, i) => a + s.p * eScen[i], 0).toFixed(2);
+      const eRR = +Math.abs((sideSign * (targetL.value - entry)) / eRisk).toFixed(2);
+      if (eEv <= 0) {
+        // the plan doesn't pay at this entry — an honest downgrade, stamped so the card can say why
+        action = { stance: "wait", note: (action.note ? action.note + " " : "") + "(downgraded from an entry stance: expected value at the proposed entry was not positive)", downgraded: true };
+      } else {
+        action = Object.assign(action, { side: out.bias, entry: sig(entry, 9), entryIsMarket: act.entry == null,
+          stop: voidL.value, target: targetL.value, riskPct: +((eRisk / entry) * 100).toFixed(2), rr: eRR, evR: eEv });
+      }
+    }
     return { ok: true, ai: { headline: out.headline.trim(), bias: out.bias, synthesis: out.synthesis.trim(),
       evidence: out.evidence.map((e) => ({ k: e.k.trim(), v: e.v.trim() })),
       eventRisk: out.eventRisk ? String(out.eventRisk).trim() : null,
       invalidations: out.invalidations.map((s) => s.trim()) },
       computed: { px0: sig(px, 9), levels, voidLevel: voidL ? voidL.value : null, riskAbs: risk != null ? sig(risk, 9) : null,
-        riskPct: risk != null ? +((risk / px) * 100).toFixed(2) : null, correctedVoid: corrected, scenarios: scen, evR: ev } };
+        riskPct: risk != null ? +((risk / px) * 100).toFixed(2) : null, correctedVoid: corrected, scenarios: scen, evR: ev, action } };
   }
   // Chart annotation marks, computed here from the ledger + prints — never model-invented.
   function aiMarks(coin, ticker, windowMs) {
@@ -2980,7 +3035,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   function aiAssemble(coin, ctx, validated, model) {
     const r = rows.get(coin);
     const rep = { coin, ticker: (r && r.ticker) || ctx.ticker || coin, uni: ctx.universe, ts: Date.now(),
-      model, ttlMs: AI_TTL_MS, ctxStamp: aiStampFor(coin, (r && r.ticker) || ctx.ticker),
+      model, ttlMs: AI_TTL_MS, schemaV: AI_SCHEMA_V, ctxStamp: aiStampFor(coin, (r && r.ticker) || ctx.ticker),
       ai: validated.ai, computed: Object.assign({}, validated.computed,
         { marks: aiMarks(coin, (r && r.ticker) || ctx.ticker, 92 * DAY), flags: ctx.flags || [], coverage: ctx.coverage || null,
           claimAnchor: ctx.claimAnchor || null }) };
@@ -3086,6 +3141,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const rep = aiReports.get(coin);
       if (rep) Object.assign(rep.ctxStamp, patch || {});
       return rep ? rep.ctxStamp : null;
+    },
+    aiPatchReport: (coin, patch) => {   // harness: mutate a stored report's top-level fields (e.g. schemaV)
+      const rep = aiReports.get(coin);
+      if (rep) Object.assign(rep, patch || {});
+      return !!rep;
     },
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
