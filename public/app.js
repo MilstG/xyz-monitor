@@ -4558,8 +4558,12 @@ async function aiReportChart(coin,c){
         `<span><i style="color:var(--down)">\u25bc</i> short signal (above bar)</span>`+
         `<span><i style="color:var(--accent)">\u25c6</i> context / positioning</span>`+
         `<span><i style="color:var(--blue)">\u25c7</i> earnings print</span>`+
-        `<span class="sec">\u00d7N = distinct signal types at onset \u00b7 first fires only \u2014 re-fires inside a run aren\u2019t re-marked</span></div>`+
-        `<table>${rows}</table></div>`;
+        `<span class="sec">\u00d7N = distinct signal types at onset \u00b7 first fires only \u00b7 proven-edge signals only</span></div>`+
+        `<table>${rows}</table>`+
+        (c&&c.marksSuppressed?`<div class="sec" style="font-size:10.5px;margin-top:5px">${c.marksSuppressed} fire(s) from unproven or negative-edge signal types not marked \u2014 the ledger records them all (full history \u2192 Signals tab)</div>`:'')+
+        `</div>`;
+    } else if(c&&c.marksSuppressed){
+      below+=`<div class="sec" style="font-size:10.5px;margin-top:6px">${c.marksSuppressed} signal fire(s) in the window, none from a proven-edge type \u2014 nothing marked; the ledger records them all</div>`;
     }
     if(offView.length)    if(offView.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
     if(lineMode) below+=`<div class="sec" style="font-size:11px;margin-top:4px">close-line mode — full candles return automatically as the daily backfill refreshes (warm-cache dailies carry closes only)</div>`;
