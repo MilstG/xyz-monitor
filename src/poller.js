@@ -11,7 +11,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints } = require("./compute");
-const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS } = require("./compute");
+const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -39,8 +39,12 @@ const MAIN_DEX = "";                  // Hyperliquid main perp universe
 const MAIN_BENCH = "BTC";
 const MAIN_TOP_N = 60;                // selected by 24h notional volume, recomputed once per UTC day
 const MAIN_HIST_DAYS = 31;
+const MAIN_DAILY_DAYS = 92;           // crypto DAILY-candle window: 90d of chart plus EMA21 seed headroom.
+                                      // Hourly stays 31d — the bump serves the D1 ladder rung, the drawer's
+                                      // 90d sparkline, and the AI report's daily chart; Hyperliquid backfills
+                                      // the whole window in one call, so it fills on the first refresh cycle.
 const MAIN_HOURLY_WEIGHT = 35;        // 31d spine pull
-const MAIN_DAILY_WEIGHT = 8;          // 40d daily pull
+const MAIN_DAILY_WEIGHT = 8;          // 92d daily pull (same request weight — one candleSnapshot either way)
 const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
 const FUNDING_HISTORY_DAYS = 60;      // rolling hourly funding-rate window (aligned with the price spine)
 const FUNDING_FETCH_WEIGHT = 20;      // rate-limit weight for a fundingHistory pull
@@ -77,7 +81,7 @@ function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Nu
 function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 
-function createPoller({ dex, store, log, version, crypto }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -415,7 +419,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     if (!r) return;
     const now = Date.now();
     const c = r.uni === "main"
-      ? await fetchCandles(coin, "1d", now - 40 * DAY, now, MAIN_DAILY_WEIGHT)
+      ? await fetchCandles(coin, "1d", now - MAIN_DAILY_DAYS * DAY, now, MAIN_DAILY_WEIGHT)
       : await fetchCandles(coin, "1d", now - 370 * DAY, now, 27);
     r.dailyRaw = c; r.dailyTs = Date.now(); r.isNew = false;
     buildDaily();
@@ -703,7 +707,7 @@ function createPoller({ dex, store, log, version, crypto }) {
       let dr = null;
       if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c]);
       else if (hs.length > 24) dr = deriveDailyClose(hs);   // UTC-floored by construction — correct for 24/7 markets
-      if (dr && dr.length) daily[r.coin] = dr.slice(-MAIN_HIST_DAYS - 2);
+      if (dr && dr.length) daily[r.coin] = dr.slice(-(MAIN_DAILY_DAYS + 2));
       const fh = getFunding(r.coin);
       if (fh.length) {
         const byDay = new Map();
@@ -1011,6 +1015,17 @@ function createPoller({ dex, store, log, version, crypto }) {
       stp != null && stopGeometryOk(psd || (dir >= 0 ? "long" : "short"), r.px, stp) ? { stp } : null,
       psd ? { psd, pn: 1 } : null,   // pn: play-signed regime — outcomes/claim are in the units of the published play; hydrate repair keys on its absence
       extra || {});
+      // Trend-alignment stamp (tal): was the DAILY ribbon stacked with the claim's side at fire?
+      // Read from the already-built trend board (never recomputed here — a per-fire ladder walk
+      // would be real work for a bookkeeping stamp). 1 = D1 aligned, 0 = on a board but D1 not
+      // aligned; absent = the name wasn't board material at fire (score < 2 on both sides) or
+      // the board wasn't built yet — an honest unknown, excluded from the split. Accrues out of
+      // sample from this build forward; the AI report's trend-conditioned base rate reads it.
+      if (vi == null && (psd || dir != null)) {
+        const side = psd || (dir >= 0 ? "long" : "short");
+        const tal = trendAlignAtFire(r.coin, side);
+        if (tal != null) e.tal = tal;
+      }
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -2262,6 +2277,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     const restoredHourly = hydrateHourly();
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
+    log(`AI reports: ${process.env.ANTHROPIC_API_KEY ? "ENABLED" : "disabled (ANTHROPIC_API_KEY not set)"} — model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
@@ -2473,6 +2489,511 @@ function createPoller({ dex, store, log, version, crypto }) {
     }
     return trendCache;
   }
+  // D1 alignment at claim open, read off the trend board already in memory. null = unknown
+  // (not board material, or no board yet) — never guessed.
+  function trendAlignAtFire(coin, side) {
+    const tc = trendCache;
+    if (!tc || !tc.long || !tc.short) return null;
+    for (const s of ["long", "short"]) for (const uni of ["crypto", "stocks"]) {
+      const list = (tc[s] && tc[s][uni]) || [];
+      for (const e of list) if (e.coin === coin && e.tf && e.tf.D1) {
+        const st = e.tf.D1.st;
+        return ((side === "long" && st === "up") || (side === "short" && st === "down")) ? 1 : 0;
+      }
+    }
+    return null;
+  }
+
+  // ===== AI analyst report (served at /api/ai-report) ============================================
+  // One ticker, everything this server holds on it, compiled into a compact context object and
+  // sent to the Anthropic API for a plain-language synthesis. Contract points, in order of
+  // importance: (1) this is a SYNTHESIS layer, not a signal source — it reads the ledger and can
+  // never write to it; (2) all arithmetic the card displays (R/R, EV, risk unit) is computed HERE
+  // from the validated levels, never trusted from the model; (3) when a live claim exists, its
+  // frozen stop IS the void level — a model that proposes a different one gets overwritten and
+  // flagged; (4) coverage gaps and divergence flags are detector output passed TO the model as
+  // facts — it narrates them, it cannot invent them; (5) generation is on-demand only and the
+  // shared cache is the rate limit: the TTL cooldown is enforced server-side for everyone, and a
+  // report invalidates early only on material change (new claim, claim resolved, earnings print).
+  const AI_MODEL = process.env.AI_MODEL || "claude-fable-5";
+  const AI_MODEL_FALLBACK = process.env.AI_MODEL_FALLBACK || "claude-opus-4-8";
+  const AI_TTL_MS = Math.max(5, Number(process.env.AI_REPORT_TTL_MIN) || 30) * 60 * 1000;
+  const AI_MAX_TOKENS = 3000;
+  const AI_TIMEOUT_MS = 120 * 1000;
+  const AI_KINDS = new Set(["target", "flat", "void", "event"]);
+  const AI_LEVEL_KINDS = new Set(["void", "target", "zone_low", "zone_high", "note"]);
+  let aiReports = new Map();    // coin -> stored report (successes only; errors are returned, not cached)
+  let aiGenerating = new Set();
+  const aiFetch = aiFetchOpt || null;   // test hook: injected transport (the suite never touches the network)
+  try {
+    const saved = store.loadAiReports ? store.loadAiReports() : null;
+    if (saved && Array.isArray(saved.reports))
+      for (const rep of saved.reports) if (rep && rep.coin) aiReports.set(rep.coin, rep);
+  } catch (_) {}
+  function persistAiReports() {
+    try { if (store.saveAiReports) store.saveAiReports({ ts: Date.now(), reports: [...aiReports.values()] }); } catch (_) {}
+  }
+  const pctOf = (px, ref) => (px != null && ref != null && isFinite(px) && isFinite(ref) && ref > 0)
+    ? +((px / ref - 1) * 100).toFixed(2) : null;
+  // Material-change stamp: claim counts + last earnings print for this name at generation time.
+  // Freshness is recomputed from the SAME sources on every read — stateless, no hooks, self-healing.
+  function aiStampFor(coin, ticker) {
+    let openN = 0, closedN = 0;
+    for (const e of ledgerOpen.values()) if (e.coin === coin && e.vi == null) openN++;
+    for (const e of ledgerClosed) if (e.coin === coin && e.vi == null) closedN++;
+    let lastPrintD = null;
+    if (ticker) for (const p of earnPrints) if (p.t === ticker && (!lastPrintD || p.d > lastPrintD)) lastPrintD = p.d;
+    return { openN, closedN, lastPrintD };
+  }
+  function aiInvalidReason(rep) {
+    const cur = aiStampFor(rep.coin, rep.ticker);
+    const s = rep.ctxStamp || {};
+    if (cur.openN > (s.openN || 0)) return "new signal claim opened";
+    if (cur.closedN > (s.closedN || 0)) return "claim resolved";
+    if ((cur.lastPrintD || null) !== (s.lastPrintD || null)) return "earnings print landed";
+    return null;
+  }
+  // Coverage honesty: gaps in the retained series inside the report window. Computed, never
+  // generated — the client renders these from the payload even if the model ignores them.
+  function aiCoverage(coin, windowMs) {
+    const now = Date.now(), cut = now - windowMs;
+    const gapScan = (pts, maxGapMs) => {
+      const gaps = []; let prev = null;
+      for (const t of pts) {
+        if (t < cut) { prev = t; continue; }
+        if (prev != null && t - prev > maxGapMs) gaps.push({ from: Math.max(prev, cut), to: t, hours: +((t - prev) / HOUR).toFixed(1) });
+        prev = t;
+      }
+      gaps.sort((a, b) => b.hours - a.hours);
+      return gaps.slice(0, 3);
+    };
+    const hs = getHourly(coin).map((k) => k[0]);
+    const oi = (hist.get(coin) || []).map((s) => s[0]);
+    return { windowDays: Math.round(windowMs / DAY), hourlyGaps: gapScan(hs, 3 * HOUR), oiGaps: gapScan(oi, 6 * HOUR) };
+  }
+  // Divergence detectors: explicit thresholds, timestamped, passed to the model as facts.
+  function aiFlags(r) {
+    const flags = [];
+    try {
+      const oid = oiDailySeries(r.coin);
+      const daily = Array.isArray(r.dailyRaw) ? r.dailyRaw.filter((k) => Number.isFinite(+k.c)) : [];
+      if (oid && oid.length >= 4 && daily.length >= 4) {
+        const o0 = oid[oid.length - 4][1], o1 = oid[oid.length - 1][1];
+        const c0 = +daily[daily.length - 4].c, c1 = r.px != null && isFinite(r.px) ? +r.px : +daily[daily.length - 1].c;
+        if (o0 > 0 && c0 > 0) {
+          const dOi = (o1 / o0 - 1) * 100, dPx = (c1 / c0 - 1) * 100;
+          if (dOi <= -6 && dPx >= -1)
+            flags.push({ kind: "oi_distribution", t: oid[oid.length - 1][0],
+              txt: `open interest fell ${Math.abs(dOi).toFixed(1)}% over 3 days while price held (${dPx >= 0 ? "+" : ""}${dPx.toFixed(1)}%) — positions leaving without price damage` });
+          if (dOi >= 6 && dPx <= 1 && dPx >= -6) {
+            const fh = getFunding(r.coin);
+            let f2 = 0, n2 = 0, f7 = 0, n7 = 0;
+            const now = Date.now();
+            for (const [t, rate] of fh) { if (!isFinite(rate)) continue; if (t >= now - 2 * DAY) { f2 += rate; n2++; } if (t >= now - 7 * DAY) { f7 += rate; n7++; } }
+            if (n2 >= 12 && n7 >= 48 && f2 / n2 < f7 / n7)
+              flags.push({ kind: "oi_building_against", t: oid[oid.length - 1][0],
+                txt: `open interest grew ${dOi.toFixed(1)}% over 3 days while price stalled and funding eased — positions building against the tape` });
+          }
+        }
+      }
+      if (signalsCache && Array.isArray(signalsCache.signals))
+        for (const g of signalsCache.signals)
+          if (g.coin === r.coin && (g.ev === "fpdiv" || g.ev === "oiflush"))
+            flags.push({ kind: g.ev, t: (g.claim0 && g.claim0.t) || g.t0 || Date.now(),
+              txt: (EV_LABEL[g.ev] || g.ev) + " signal live" + (g.play && g.play.side ? ` (${g.play.side})` : "") });
+    } catch (_) {}
+    return flags;
+  }
+  // The context compiler: everything the model sees, from data already in memory. D1/H12/H4 only —
+  // H1 is deliberately excluded so the synthesis can't anchor on noise.
+  function compileAiContext(coin) {
+    const r = rows.get(coin);
+    if (!r || r.delisted) return null;
+    const now = Date.now();
+    const uni = r.uni === "main" ? "crypto" : "stocks";
+    const windowMs = Math.min(uni === "crypto" ? MAIN_DAILY_DAYS * DAY : 370 * DAY, 92 * DAY);
+    const daily = Array.isArray(r.dailyRaw) ? r.dailyRaw.filter((k) => Number.isFinite(+k.t) && Number.isFinite(+k.c)) : [];
+    const closes = daily.map((k) => +k.c);
+    const px = r.px != null && isFinite(r.px) ? +r.px : (closes.length ? closes[closes.length - 1] : null);
+    if (px == null) return null;
+    const ctx = { coin, ticker: r.ticker || coin, universe: uni, asOf: now, px: sig(px, 9),
+      benchmark: uni === "crypto" ? MAIN_BENCH : "SP500" };
+    // -- market state ----------------------------------------------------------------------------
+    ctx.market = {
+      chg: { h1: pctOf(px, r.ref && r.ref.p1h), h4: pctOf(px, r.ref && r.ref.p4h),
+        d1: r.d1 != null && isFinite(r.d1) ? +(+r.d1).toFixed(2) : null,
+        d7: pctOf(px, r.ref && r.ref.p7d), d30: pctOf(px, r.ref && r.ref.p30d) },
+      fundingAprPct: r.funding != null && isFinite(r.funding) ? +(r.funding * 24 * 365 * 100).toFixed(2) : null,
+      vol24hUsd: r.vol != null ? Math.round(r.vol) : null, oiUsd: r.oi != null ? Math.round(r.oi) : null,
+    };
+    try {   // funding percentile in the name's own 31d hourly distribution (same construction as the table)
+      if (r.funding != null && isFinite(r.funding)) {
+        const fh = getFunding(r.coin), cut = now - 31 * DAY;
+        let n = 0, le = 0;
+        for (const k of fh) { if (!Array.isArray(k) || k[0] < cut || !isFinite(k[1])) continue; n++; if (k[1] <= r.funding) le++; }
+        if (n >= 96) ctx.market.fundingPctile31d = Math.round((100 * le) / n);
+      }
+    } catch (_) {}
+    try {   // OI deltas off the sampled history
+      const arr = hist.get(coin);
+      if (arr && arr.length > 4) {
+        const last = arr[arr.length - 1];
+        const at = (ms) => { for (let i = arr.length - 1; i >= 0; i--) if (arr[i][0] <= now - ms) return arr[i]; return null; };
+        const a24 = at(DAY), a7 = at(7 * DAY);
+        if (a24 && a24[1] > 0) ctx.market.oiChg24hPct = +((last[1] / a24[1] - 1) * 100).toFixed(2);
+        if (a7 && a7[1] > 0) ctx.market.oiChg7dPct = +((last[1] / a7[1] - 1) * 100).toFixed(2);
+      }
+    } catch (_) {}
+    // -- trend structure (D1 · H12 · H4 — H1 deliberately excluded) ------------------------------
+    try {
+      if (px != null && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= 26 && daily.length >= 26) {
+        const d1g = withFormingDaily(daily, px, now, DAY);
+        const lad = trendLadder(px, { D1: d1g, H12: bucketCandles(r.hourlyRaw, 12, HOUR),
+          H4: bucketCandles(r.hourlyRaw, 4, HOUR), H1: r.hourlyRaw.slice(-96) });
+        if (lad) {
+          const tf = {};
+          for (const t of ["D1", "H12", "H4"]) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21,
+            e13: sig(lad.tf[t].e13, 9), e21: sig(lad.tf[t].e21, 9) };
+          const trend = { tf };
+          for (const side of ["long", "short"]) {
+            const read = trendRead(side, lad);
+            if (read) { trend[side] = { score: lad[side].score, read: read.text, retest: read.retest }; }
+            if (lad.tf.D1.st === (side === "long" ? "up" : "down")) {
+              const sr = stackedRun(d1g, px, side);
+              if (sr) trend.d1AgeDays = sr.run, trend.d1AgeCapped = !!sr.capped;
+            }
+          }
+          ctx.trend = trend;
+        }
+      }
+    } catch (_) {}
+    // -- volatility regime + range position off daily closes -------------------------------------
+    try {
+      if (closes.length >= 20) {
+        const rets = [];
+        for (let i = 1; i < closes.length; i++) if (closes[i - 1] > 0) rets.push(Math.abs((closes[i] / closes[i - 1] - 1) * 100));
+        const recent = rets.slice(-5), base = rets.slice(-60);
+        if (recent.length >= 3 && base.length >= 20) {
+          const cur = recent.reduce((a, b) => a + b, 0) / recent.length;
+          let le = 0; for (const v of base) if (v <= cur) le++;
+          ctx.volRegime = { avgAbsDaily5dPct: +cur.toFixed(2), pctileVs60d: Math.round((100 * le) / base.length) };
+        }
+        const win = closes.slice(-Math.min(closes.length, uni === "crypto" ? 90 : 90)).concat([px]);
+        const lo = Math.min(...win), hi = Math.max(...win);
+        if (hi > lo) ctx.volRegime = Object.assign(ctx.volRegime || {}, {
+          rangePosPct: Math.round(((px - lo) / (hi - lo)) * 100), rangeLo: sig(lo, 9), rangeHi: sig(hi, 9) });
+      }
+    } catch (_) {}
+    // -- benchmark decomposition: how much of the 7d move is beta ---------------------------------
+    try {
+      const benchC = uni === "crypto" ? MAIN_BENCH : benchCoin;
+      const b = benchC != null ? rows.get(benchC) : null;
+      const bd = b && Array.isArray(b.dailyRaw) ? b.dailyRaw.filter((k) => Number.isFinite(+k.c)).map((k) => +k.c) : [];
+      if (bd.length >= 22 && closes.length >= 22) {
+        const n = Math.min(bd.length, closes.length, 61);
+        const ra = [], rb = [];
+        for (let i = 1; i < n; i++) {
+          const a0 = closes[closes.length - n + i - 1], a1 = closes[closes.length - n + i];
+          const b0 = bd[bd.length - n + i - 1], b1 = bd[bd.length - n + i];
+          if (a0 > 0 && b0 > 0) { ra.push(a1 / a0 - 1); rb.push(b1 / b0 - 1); }
+        }
+        if (ra.length >= 20) {
+          const mb = rb.reduce((a, x) => a + x, 0) / rb.length, ma = ra.reduce((a, x) => a + x, 0) / ra.length;
+          let cov = 0, varb = 0;
+          for (let i = 0; i < ra.length; i++) { cov += (ra[i] - ma) * (rb[i] - mb); varb += (rb[i] - mb) * (rb[i] - mb); }
+          if (varb > 0) {
+            const beta = cov / varb;
+            const own7 = pctOf(px, r.ref && r.ref.p7d);
+            const bch7 = pctOf(b.px, b.ref && b.ref.p7d);
+            if (own7 != null && bch7 != null)
+              ctx.vsBenchmark = { beta: +beta.toFixed(2), own7dPct: own7, bench7dPct: bch7,
+                betaExplainedPct: +(beta * bch7).toFixed(2), idiosyncraticPct: +(own7 - beta * bch7).toFixed(2) };
+          }
+        }
+      }
+    } catch (_) {}
+    // -- live signals + frozen claim anchors ------------------------------------------------------
+    try {
+      const live = [];
+      if (signalsCache && Array.isArray(signalsCache.signals))
+        for (const g of signalsCache.signals) if (g.coin === coin) {
+          const it = { ev: g.ev, label: EV_LABEL[g.ev] || g.ev, score: g.score };
+          if (g.play) it.play = { side: g.play.side || null, bias: g.play.bias || null,
+            target: g.play.target != null ? sig(+g.play.target, 9) : null,
+            stop: g.play.stop != null ? sig(+g.play.stop, 9) : null };
+          if (g.rr != null) it.rr = g.rr;
+          if (g.study) it.base = { n: g.study.n, med: g.study.med, hit: g.study.hit, avg: g.study.avg, unit: g.study.unit };
+          if (g.unproven) it.unproven = true;
+          if (g.claim0) it.claim = { t0: g.claim0.t, mark0: g.claim0.px, side: g.claim0.side,
+            stop: g.claim0.stop, target: g.claim0.tgt, resolveAt: g.claim0.resolveAt };
+          live.push(it);
+        }
+      ctx.liveSignals = live;
+      // The frozen geometry anchor: the highest-score live claim with a stop. The model MUST use
+      // this stop as the void level; the validator enforces it.
+      let anchor = null;
+      for (const s of live) if (s.claim && s.claim.stop != null && (!anchor || (s.score || 0) > (anchor.score || 0)))
+        anchor = { ev: s.ev, side: s.claim.side, stop: s.claim.stop, target: s.claim.target, t0: s.claim.t0, resolveAt: s.claim.resolveAt, score: s.score };
+      if (anchor) { delete anchor.score; ctx.claimAnchor = anchor; }
+    } catch (_) {}
+    // -- ledger record: per-event per-name hit rates, D1-conditioned split, recent autopsy --------
+    try {
+      const per = {}, tal = { aligned: [], other: [] }, autopsy = [];
+      for (const e of ledgerClosed) {
+        if (e.coin !== coin || e.vi != null || e.status !== "resolved" || !Number.isFinite(e.realized)) continue;
+        const inR = R_LEDGER_EVS.has(e.ev) && e.sd0 > 0;
+        const b = per[e.ev] || (per[e.ev] = { label: EV_LABEL[e.ev] || e.ev, n: 0, wins: 0, sumR: 0, nR: 0 });
+        b.n++; if (e.realized > 0) b.wins++;
+        if (inR) { b.sumR += e.realized; b.nR++; }
+        if (e.tal != null && inR) (e.tal === 1 ? tal.aligned : tal.other).push(e.realized);
+      }
+      for (const ev in per) { const b = per[ev];
+        b.hit = +(b.wins / b.n).toFixed(2);
+        if (b.nR >= 2) b.avgR = +(b.sumR / b.nR).toFixed(2);
+        delete b.sumR; delete b.nR; delete b.wins; }
+      ctx.record = per;
+      if (tal.aligned.length >= 3 || tal.other.length >= 3) {
+        const sum = (a) => ({ n: a.length, hit: a.length ? +(a.filter((x) => x > 0).length / a.length).toFixed(2) : null,
+          avgR: a.length ? +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(2) : null });
+        ctx.recordTrendSplit = { d1Aligned: sum(tal.aligned), d1NotAligned: sum(tal.other),
+          note: "accrues out of sample from the tal stamp epoch — thin n is honest, not hidden" };
+      }
+      const done = ledgerClosed.filter((e) => e.coin === coin && e.vi == null && e.status === "resolved" && Number.isFinite(e.realized))
+        .sort((a, b) => (b.tR || b.t0) - (a.tR || a.t0)).slice(0, 3);
+      for (const e of done) autopsy.push({ ev: e.ev, label: EV_LABEL[e.ev] || e.ev, t0: e.t0, tR: e.tR || null,
+        realized: +(+e.realized).toFixed(2), unit: (R_LEDGER_EVS.has(e.ev) && e.sd0 > 0) ? "R" : "%",
+        stopped: e.stopped === true, win: e.realized > 0, days: e.tR ? +(((e.tR - e.t0) / DAY).toFixed(1)) : null });
+      ctx.recentClaims = autopsy;
+      if (signalsCache && signalsCache.earnSplit) {
+        const relevant = {};
+        for (const ev in signalsCache.earnSplit) if (per[ev] || (ctx.liveSignals || []).some((s) => s.ev === ev)) relevant[ev] = signalsCache.earnSplit[ev];
+        if (Object.keys(relevant).length) ctx.earnSplitGlobal = { note: "roster-wide, not per-name", split: relevant };
+      }
+    } catch (_) {}
+    // -- equities extras: earnings event risk, filings note, sector context -----------------------
+    if (uni === "stocks") {
+      try {
+        const tk = r.ticker || coin, e = {};
+        if (earnCache && Array.isArray(earnCache.entries)) {
+          const up = earnCache.entries.filter((x) => x.t === tk).sort((a, b) => (a.d < b.d ? -1 : 1))[0];
+          if (up) e.next = { d: up.d, session: up.s || "TBD",
+            inDays: Math.max(0, Math.round((Date.UTC(+up.d.slice(0, 4), +up.d.slice(5, 7) - 1, +up.d.slice(8, 10)) - Date.now()) / DAY)) };
+        }
+        if (earnStudy && earnStudy[tk]) e.reaction = earnStudy[tk];
+        let last = null;
+        for (const p of earnPrints) if (p.t === tk && p.epsA != null && (!last || p.d > last.d)) last = p;
+        if (last) e.lastPrint = { d: last.d, session: last.s || null, eps: last.eps, epsA: last.epsA,
+          beat: last.eps != null && last.epsA != null ? last.epsA > last.eps : null };
+        if (e.next || e.reaction || e.lastPrint) ctx.earnings = e;
+      } catch (_) {}
+      try { const cl = classifyCached(r.ticker, r.uni);
+        if (cl && cl.sector) {
+          const peers = activeMarkets().filter((x) => !x.delisted && classifyCached(x.ticker, x.uni).sector === cl.sector);
+          const with7 = peers.map((x) => ({ t: x.ticker, d7: pctOf(x.px, x.ref && x.ref.p7d) })).filter((x) => x.d7 != null)
+            .sort((a, b) => b.d7 - a.d7);
+          const rank = with7.findIndex((x) => x.t === r.ticker);
+          ctx.sector = { name: cl.sector, assetClass: cl.assetClass || null,
+            rank7d: rank >= 0 ? rank + 1 : null, of: with7.length,
+            median7dPct: with7.length ? +median(with7.map((x) => x.d7)).toFixed(2) : null };
+        }
+      } catch (_) {}
+    }
+    ctx.flags = aiFlags(r);
+    ctx.coverage = aiCoverage(coin, windowMs);
+    return ctx;
+  }
+  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context.
+Respond with ONLY a JSON object — no markdown fences, no preamble — with exactly these keys:
+{"headline": string (<=60 chars, plain-language stance, e.g. "Constructive, leans long" or "Constructive, but earnings in 6 days"),
+ "bias": "long"|"short"|"neutral",
+ "synthesis": string (one paragraph, 3-6 sentences, plain human language a non-quant friend reads in 30 seconds; name the single dominant risk honestly),
+ "evidence": array of 3-8 {"k": short label (<=16 chars, lowercase), "v": one plain-language sentence grounded in a specific number from the context},
+ "eventRisk": string or null (equities with an upcoming print inside ~10 days: what the reaction study says and what holding through it means; otherwise null),
+ "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. Include exactly one "void" scenario when a void level exists. If an earnings print falls inside the scenario horizon, the middle scenario must be kind "event" — the print decides, treat it as a coin flip scaled by the reaction study, and say so.
+ "invalidations": array of 1-5 plain sentences — observable conditions that would change the read,
+ "levels": array of 0-6 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high"|"note", "label": <=60 chars} for chart annotation.
+Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Use only levels derivable from the context (EMAs, range bounds, claim geometry, prior swings implied by the data). Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
+  // Validate the model's JSON, correct the void to frozen-claim geometry when one exists, and
+  // compute every displayed number (risk unit, per-scenario R/R and payoff, EV) server-side.
+  function validateAiReport(rawText, ctx) {
+    let out;
+    try {
+      const clean = String(rawText || "").replace(/```json|```/g, "").trim();
+      out = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+    } catch (_) { return { ok: false, error: "model returned unparseable JSON" }; }
+    const px = ctx.px;
+    const str = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+    if (!str(out.headline, 80)) return { ok: false, error: "bad headline" };
+    if (!["long", "short", "neutral"].includes(out.bias)) return { ok: false, error: "bad bias" };
+    if (!str(out.synthesis, 2600) || out.synthesis.length < 120) return { ok: false, error: "bad synthesis" };
+    if (!Array.isArray(out.evidence) || out.evidence.length < 3 || out.evidence.length > 8
+      || !out.evidence.every((e) => e && str(e.k, 20) && str(e.v, 320))) return { ok: false, error: "bad evidence" };
+    if (out.eventRisk != null && !str(out.eventRisk, 500)) return { ok: false, error: "bad eventRisk" };
+    if (!Array.isArray(out.invalidations) || out.invalidations.length < 1 || out.invalidations.length > 5
+      || !out.invalidations.every((s) => str(s, 240))) return { ok: false, error: "bad invalidations" };
+    if (!Array.isArray(out.scenarios) || out.scenarios.length < 2 || out.scenarios.length > 4) return { ok: false, error: "bad scenarios" };
+    let psum = 0;
+    for (const s of out.scenarios) {
+      if (!s || !str(s.name, 90) || !AI_KINDS.has(s.kind) || typeof s.p !== "number" || !(s.p >= 0 && s.p <= 1)) return { ok: false, error: "bad scenario entry" };
+      if (s.kind === "target" && !(Number.isFinite(s.target) && s.target > 0)) return { ok: false, error: "target scenario without a target level" };
+      if (s.note != null && !str(s.note, 300)) return { ok: false, error: "bad scenario note" };
+      psum += s.p;
+    }
+    if (!(psum >= 0.85 && psum <= 1.15)) return { ok: false, error: "scenario probabilities do not sum to 1" };
+    for (const s of out.scenarios) s.p = +(s.p / psum).toFixed(3);
+    if (out.scenarios.filter((s) => s.kind === "void").length > 1) return { ok: false, error: "multiple void scenarios" };
+    const levels = [];
+    if (out.levels != null) {
+      if (!Array.isArray(out.levels) || out.levels.length > 6) return { ok: false, error: "bad levels" };
+      for (const l of out.levels) {
+        if (!l || !Number.isFinite(l.value) || !AI_LEVEL_KINDS.has(l.kind) || !str(l.label, 80)) return { ok: false, error: "bad level entry" };
+        if (!(l.value > px * 0.4 && l.value < px * 2.5)) return { ok: false, error: "level outside sanity bounds" };
+        levels.push({ value: sig(+l.value, 9), kind: l.kind, label: l.label });
+      }
+    }
+    // Frozen geometry wins: with a live claim, the void level IS the claim's stop. Model output
+    // that disagrees is overwritten and flagged — the chart may never contradict the ledger.
+    let corrected = false;
+    const anchorStop = ctx.claimAnchor && ctx.claimAnchor.stop != null ? +ctx.claimAnchor.stop : null;
+    let voidL = levels.find((l) => l.kind === "void") || null;
+    if (anchorStop != null) {
+      if (!voidL) { voidL = { value: sig(anchorStop, 9), kind: "void", label: "void — frozen claim stop" }; levels.push(voidL); corrected = true; }
+      else if (Math.abs(voidL.value - anchorStop) / anchorStop > 0.005) { voidL.value = sig(anchorStop, 9); voidL.label += " (corrected to frozen claim stop)"; corrected = true; }
+    }
+    // Server-side scenario math: risk unit = |px - void|; payoffs in R signed by the bias side.
+    const sideSign = out.bias === "short" ? -1 : 1;
+    const risk = voidL && Math.abs(px - voidL.value) > 0 ? Math.abs(px - voidL.value) : null;
+    const scen = out.scenarios.map((s) => {
+      const o = { name: s.name, kind: s.kind, p: s.p, target: s.kind === "target" ? sig(+s.target, 9) : null, note: s.note || null };
+      if (risk != null) {
+        if (s.kind === "target") { o.payoffR = +((sideSign * (o.target - px)) / risk).toFixed(2); o.rr = +Math.abs(o.payoffR).toFixed(2); }
+        else if (s.kind === "void") o.payoffR = -1;
+        else o.payoffR = 0;   // flat and event: no claimable edge — EV takes 0, the card says coin-flip for event
+      }
+      return o;
+    });
+    const ev = risk != null ? +scen.reduce((a, s) => a + s.p * (s.payoffR || 0), 0).toFixed(2) : null;
+    return { ok: true, ai: { headline: out.headline.trim(), bias: out.bias, synthesis: out.synthesis.trim(),
+      evidence: out.evidence.map((e) => ({ k: e.k.trim(), v: e.v.trim() })),
+      eventRisk: out.eventRisk ? String(out.eventRisk).trim() : null,
+      invalidations: out.invalidations.map((s) => s.trim()) },
+      computed: { px0: sig(px, 9), levels, voidLevel: voidL ? voidL.value : null, riskAbs: risk != null ? sig(risk, 9) : null,
+        riskPct: risk != null ? +((risk / px) * 100).toFixed(2) : null, correctedVoid: corrected, scenarios: scen, evR: ev } };
+  }
+  // Chart annotation marks, computed here from the ledger + prints — never model-invented.
+  function aiMarks(coin, ticker, windowMs) {
+    const now = Date.now(), cut = now - windowMs, marks = [];
+    const push = (t, kind, label) => { if (Number.isFinite(t) && t >= cut) marks.push({ t, kind, label }); };
+    for (const e of ledgerOpen.values()) if (e.coin === coin && e.vi == null) push(e.t0, "claim", (EV_LABEL[e.ev] || e.ev) + " fired");
+    for (const e of ledgerClosed) if (e.coin === coin && e.vi == null && e.status === "resolved") push(e.t0, "claim", (EV_LABEL[e.ev] || e.ev) + " fired");
+    if (ticker) for (const p of earnPrints) if (p.t === ticker) {
+      const t = Date.UTC(+p.d.slice(0, 4), +p.d.slice(5, 7) - 1, +p.d.slice(8, 10));
+      const beat = p.eps != null && p.epsA != null ? (p.epsA > p.eps ? " · beat" : " · miss") : "";
+      push(t, "earn", "earnings " + p.d + beat);
+    }
+    marks.sort((a, b) => a.t - b.t);
+    return marks.slice(-14);
+  }
+  async function callAnthropic(model, ctx) {
+    const doFetch = aiFetch || fetch;
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
+    try {
+      const res = await doFetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY || "",
+          "anthropic-version": "2023-06-01" },
+        // Deliberately minimal body: Fable rejects some sampling params other models accept, and
+        // its adaptive thinking must be left alone (an explicit thinking:disabled is a 400).
+        body: JSON.stringify({ model, max_tokens: AI_MAX_TOKENS, system: AI_SYSTEM,
+          messages: [{ role: "user", content: "Context:\n" + JSON.stringify(ctx) }] }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) { let msg = "HTTP " + res.status; try { const j = await res.json(); if (j && j.error && j.error.message) msg += " — " + j.error.message; } catch (_) {} return { ok: false, error: msg }; }
+      const data = await res.json();
+      // A refusal arrives as HTTP 200 with stop_reason "refusal" — a failure for our purposes,
+      // routed to the fallback model like any other.
+      if (data && data.stop_reason === "refusal") return { ok: false, error: "model refused" };
+      const text = data && Array.isArray(data.content)
+        ? data.content.filter((b) => b && b.type === "text").map((b) => b.text).join("\n") : "";
+      if (!text) return { ok: false, error: "empty model response" };
+      return { ok: true, text, usage: data.usage || null };
+    } catch (e) {
+      return { ok: false, error: e && e.name === "AbortError" ? "model call timed out" : ("fetch failed: " + (e && e.message)) };
+    } finally { clearTimeout(to); }
+  }
+  function aiAssemble(coin, ctx, validated, model) {
+    const r = rows.get(coin);
+    const rep = { coin, ticker: (r && r.ticker) || ctx.ticker || coin, uni: ctx.universe, ts: Date.now(),
+      model, ttlMs: AI_TTL_MS, ctxStamp: aiStampFor(coin, (r && r.ticker) || ctx.ticker),
+      ai: validated.ai, computed: Object.assign({}, validated.computed,
+        { marks: aiMarks(coin, (r && r.ticker) || ctx.ticker, 92 * DAY), flags: ctx.flags || [], coverage: ctx.coverage || null,
+          claimAnchor: ctx.claimAnchor || null }) };
+    aiReports.set(coin, rep);
+    persistAiReports();
+    return rep;
+  }
+  function aiPublic(rep) {
+    const age = Date.now() - rep.ts;
+    const invalid = aiInvalidReason(rep);
+    const fresh = age < (rep.ttlMs || AI_TTL_MS) && !invalid;
+    return Object.assign({}, rep, { status: invalid ? "invalidated" : (fresh ? "fresh" : "stale"),
+      invalidReason: invalid, ageMs: age, canRegen: !fresh,
+      regenInMs: fresh ? Math.max(0, (rep.ttlMs || AI_TTL_MS) - age) : 0 });
+  }
+  function aiUniverseOk(coin) {
+    const r = rows.get(coin);
+    return !!(r && !r.delisted && (r.uni !== "main" || crypto));
+  }
+  function getAiReport(coin) {
+    if (!coin || !aiUniverseOk(coin)) {
+      const rep = coin ? aiReports.get(coin) : null;
+      if (!rep) return { coin: coin || "", status: "none", error: coin ? "not in the live universe" : "coin required", ts: Date.now() };
+    }
+    const rep = aiReports.get(coin);
+    if (!rep) return { coin, status: "none", canRegen: true, ts: Date.now(),
+      enabled: !!(process.env.ANTHROPIC_API_KEY || aiFetch), model: AI_MODEL };
+    return aiPublic(rep);
+  }
+  function listAiReports() {
+    const out = [...aiReports.values()].map((rep) => {
+      const p = aiPublic(rep);
+      return { coin: p.coin, ticker: p.ticker, uni: p.uni, ts: p.ts, model: p.model,
+        headline: p.ai && p.ai.headline, bias: p.ai && p.ai.bias, status: p.status,
+        invalidReason: p.invalidReason, regenInMs: p.regenInMs, evR: p.computed && p.computed.evR };
+    });
+    out.sort((a, b) => b.ts - a.ts);
+    return { ts: Date.now(), ttlMs: AI_TTL_MS, model: AI_MODEL,
+      enabled: !!(process.env.ANTHROPIC_API_KEY || aiFetch), reports: out.slice(0, 30) };
+  }
+  async function generateAiReport(coin) {
+    if (!coin || !aiUniverseOk(coin)) return { ok: false, error: "not in the live universe" };
+    if (!process.env.ANTHROPIC_API_KEY && !aiFetch) return { ok: false, error: "ANTHROPIC_API_KEY not set on the server" };
+    const existing = aiReports.get(coin);
+    if (existing) {
+      const p = aiPublic(existing);
+      // The cooldown is the group's rate limit, enforced HERE — the client's disabled button is
+      // convenience, this check is the gate.
+      if (!p.canRegen) return { ok: false, error: "cooldown", regenInMs: p.regenInMs, report: p };
+    }
+    if (aiGenerating.has(coin)) return { ok: false, error: "generation already running for this ticker" };
+    aiGenerating.add(coin);
+    try {
+      const ctx = compileAiContext(coin);
+      if (!ctx) return { ok: false, error: "not enough data compiled for this ticker yet" };
+      let used = AI_MODEL, call = await callAnthropic(AI_MODEL, ctx);
+      let val = call.ok ? validateAiReport(call.text, ctx) : { ok: false, error: call.error };
+      if (!val.ok) {
+        log(`AI report ${coin}: ${AI_MODEL} failed (${val.error}) — falling back to ${AI_MODEL_FALLBACK}`);
+        used = AI_MODEL_FALLBACK; call = await callAnthropic(AI_MODEL_FALLBACK, ctx);
+        val = call.ok ? validateAiReport(call.text, ctx) : { ok: false, error: call.error };
+      }
+      if (!val.ok) { log(`AI report ${coin}: fallback failed too (${val.error})`); return { ok: false, error: val.error }; }
+      const rep = aiAssemble(coin, ctx, val, used);
+      log(`AI report generated: ${coin} via ${used} (bias ${rep.ai.bias}, ev ${rep.computed.evR != null ? rep.computed.evR + "R" : "n/a"})`);
+      return { ok: true, report: aiPublic(rep) };
+    } finally { aiGenerating.delete(coin); }
+  }
 
   return {
     start,
@@ -2492,6 +3013,25 @@ function createPoller({ dex, store, log, version, crypto }) {
     seedRowNow: (coin, fields) => Object.assign(getRow(coin), fields),   // harness: seed a synthetic market (px/spines) so builds are testable without network
     needDailyNow: (coin) => { const r = rows.get(coin); return !!(r && needDaily(r)); },   // harness: does the daily worker consider this market fetch-worthy right now
     getLedgerFor,
+    // AI analyst report: cached read, on-demand generation (TTL cooldown enforced inside), and
+    // the recent-reports list for the Report tab.
+    getAiReport,
+    generateAiReport,
+    listAiReports,
+    aiCompileNow: compileAiContext,   // harness: build the context object without any network
+    aiValidateNow: validateAiReport,  // harness: run model text through the validator + server math
+    aiIngestNow: (coin, rawText, model) => {   // harness: full ingest path minus the API call
+      const ctx = compileAiContext(coin);
+      if (!ctx) return { ok: false, error: "no context" };
+      const val = validateAiReport(rawText, ctx);
+      if (!val.ok) return val;
+      return { ok: true, report: aiPublic(aiAssemble(coin, ctx, val, model || "test")) };
+    },
+    aiTouchStamp: (coin, patch) => {   // harness: shift a stored report's material-change stamp
+      const rep = aiReports.get(coin);
+      if (rep) Object.assign(rep.ctxStamp, patch || {});
+      return rep ? rep.ctxStamp : null;
+    },
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
@@ -2524,6 +3064,8 @@ function createPoller({ dex, store, log, version, crypto }) {
         earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null,
           prints: earnPrints.length, histDone: earnHistDone, studyTickers: Object.keys(earnStudy).length,
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
+        ai: { enabled: !!(process.env.ANTHROPIC_API_KEY || aiFetch), model: AI_MODEL,
+          fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };

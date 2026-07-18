@@ -18,6 +18,7 @@ function openStore(dataDir) {
   const ledgerFile = path.join(dataDir, "ledger.json");
   const earnFile = path.join(dataDir, "earnings.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
+  const aiFile = path.join(dataDir, "ai-reports.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
 
@@ -177,6 +178,21 @@ function openStore(dataDir) {
     },
     loadEarnings() {
       try { if (fs.existsSync(earnFile)) return JSON.parse(fs.readFileSync(earnFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    // AI analyst report cache: the group-shared reports survive redeploys so the Report tab's
+    // recent list (and every cached read) comes back warm instead of blanking until someone
+    // regenerates. Small, atomic like the rest.
+    saveAiReports(data) {
+      try {
+        const tmp = aiFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, aiFile);
+      } catch (_) {}
+    },
+    loadAiReports() {
+      try { if (fs.existsSync(aiFile)) return JSON.parse(fs.readFileSync(aiFile, "utf8")); }
       catch (_) {}
       return null;
     },
