@@ -1166,9 +1166,24 @@ test("candles tf param: the chart series IS the ladder series — the modal cann
   const g = withFormingDaily(daily, px, Date.now(), DAY);
   const rd = p.getTfCandles("TCHART", "1d");
   assert.equal(rd.candles.length, g.length, "1d: through the withFormingDaily staleness guard");
+  // OHLC upgrade (build -73): closes-only bars — the synthetic forming bar included — take their
+  // o/h/l from the REAL hourly aggregation of that UTC day when the spine covers it. That is
+  // measured data, not fabrication: the invariant "never a fabricated flat candle" is preserved
+  // by construction (no coverage -> stays closes-only), and the CLOSES the ladder's EMAs walked
+  // ride through untouched, so the chart still cannot disagree with the board.
+  const b24 = new Map(bucketCandles(hourly, 24, HOUR).map((b) => [Math.floor(b.t / DAY), b]));
   const last = rd.candles[rd.candles.length - 1];
-  assert.ok(last[1] == null && last[2] == null && last[3] == null, "1d: the synthetic forming bar ships closes-only — a close tick, never a fabricated flat candle");
-  assert.ok(rd.candles[0][1] == null, "1d: closes-only source bars ride through with null opens");
+  const lastDayB = b24.get(Math.floor(last[0] / DAY));
+  if (lastDayB) {
+    assert.ok(last[1] != null && last[2] != null && last[3] != null, "1d: the forming bar upgrades to the day's real hourly OHLC when the spine covers it");
+    assert.ok(last[2] >= last[4] - 1e-9 && last[3] <= last[4] + 1e-9, "1d: upgraded h/l are clamped to include the official close");
+  }
+  for (let i = 0; i < rd.candles.length; i++) {
+    const gi = g[i];
+    if (gi && Number.isFinite(+gi.c)) assert.ok(rel(rd.candles[i][4], +gi.c) < 1e-8, "1d: closes byte-identical to the ladder's series — the upgrade may never touch them");
+    if (!b24.has(Math.floor(rd.candles[i][0] / DAY)))
+      assert.ok(rd.candles[i][1] == null, "1d: a day with no hourly coverage stays honestly closes-only — no coverage, no candle");
+  }
   // legacy surface untouched: no tf keeps the drawer's 6-tuple hourly shape; unknown tf is a
   // null (the route falls through to legacy rather than guessing)
   const leg = p.getCandles("TCHART", 7);
@@ -1376,6 +1391,7 @@ const AI_GOOD = (px, voidLv, tgt) => JSON.stringify({
     { name: "breaks the void", kind: "void", p: 0.2, target: null, note: "thesis dead below" },
   ],
   invalidations: ["A daily close below the EMA21 ribbon.", "Open interest falling while price stalls."],
+  action: { stance: "enter_now", entry: null, note: "Trend and positioning agree; the void is close enough for a fair risk unit." },
   levels: [
     { value: voidLv, kind: "void", label: "void — thesis dead below" },
     { value: tgt, kind: "target", label: "continuation target" },
@@ -1641,4 +1657,94 @@ test("client: report chart renderer ships the fixes — price-only domain, line 
   assert.ok(!app.includes("for(const l of levels){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; }"),
     "the level-driven y-domain (the squashed-chart bug) must be gone");
   assert.ok(css.includes(".ai-scen.norisk"), "styles.css missing the 3-column no-risk scenario grid");
+});
+
+test("ai report -73: schema bump invalidates cached reports immediately — a format fix is never hidden behind the TTL", async () => {
+  const { p, px } = aiTestPoller({ aiFetch: async () => ({ ok: true, json: async () => ({ stop_reason: "end_turn",
+    content: [{ type: "text", text: AI_GOOD(px2, +(px2 * 0.95).toPrecision(6), +(px2 * 1.10).toPrecision(6)) }] }) }) });
+  const px2 = px;
+  const g = await p.generateAiReport("xyz:NVDA");
+  assert.ok(g.ok, g.error || "");
+  assert.equal(p.getAiReport("xyz:NVDA").status, "fresh");
+  p.aiPatchReport("xyz:NVDA", { schemaV: 1 });   // simulate a report generated before a format change
+  const st = p.getAiReport("xyz:NVDA");
+  assert.equal(st.status, "invalidated");
+  assert.equal(st.invalidReason, "report format updated");
+  assert.equal(st.canRegen, true, "an old-format report must unlock regeneration before TTL expiry");
+});
+
+test("ai report -73: the action block — pullback entry improves R/R, EV computed at the entry, negative-EV entries are downgraded to wait", () => {
+  const { p, px } = aiTestPoller();
+  const ctx = () => p.aiCompileNow("xyz:NVDA");
+  const voidLv = +(px * 0.95).toPrecision(6), tgt = +(px * 1.10).toPrecision(6);
+  const mut = (fn) => { const o = JSON.parse(AI_GOOD(px, voidLv, tgt)); fn(o); return JSON.stringify(o); };
+  // enter_now: entry = market -> action rr equals the scenario-table rr at px
+  { const r = p.aiValidateNow(AI_GOOD(px, voidLv, tgt), ctx());
+    assert.ok(r.ok, r.error || "");
+    const a = r.computed.action;
+    assert.equal(a.stance, "enter_now"); assert.equal(a.entryIsMarket, true);
+    assert.ok(Math.abs(a.rr - (tgt - px) / (px - voidLv)) < 0.02, "market-entry R/R must match the raw geometry");
+    assert.ok(Math.abs(a.evR - r.computed.evR) < 0.02, "market-entry EV must equal the scenario EV"); }
+  // enter_on_pullback at a better price -> strictly better R/R and EV than at market
+  { const pull = +(px * 0.97).toPrecision(6);
+    const r = p.aiValidateNow(mut((o) => { o.action = { stance: "enter_on_pullback", entry: pull, note: "buy the dip into the zone" }; }), ctx());
+    assert.ok(r.ok, r.error || "");
+    const a = r.computed.action;
+    assert.ok(Math.abs(a.rr - (tgt - pull) / (pull - voidLv)) < 0.02, "pullback R/R must be computed at the ENTRY, not the mark");
+    assert.ok(a.rr > (tgt - px) / (px - voidLv), "a better entry must show a better R/R");
+    assert.ok(a.evR > r.computed.evR, "EV at the pullback must beat EV at market"); }
+  // a pullback stance without an entry level is a hard fail, not a guess
+  { const r = p.aiValidateNow(mut((o) => { o.action = { stance: "enter_on_pullback", entry: null, note: "x" }; }), ctx());
+    assert.equal(r.ok, false); assert.ok(/without an entry level/.test(r.error), r.error); }
+  // an entry the odds don't pay for: crank the void probability so EV at market goes negative ->
+  // server downgrades the stance to wait and says so, rather than shipping a losing plan
+  { const r = p.aiValidateNow(mut((o) => { o.scenarios = [
+      { name: "continuation", kind: "target", p: 0.15, target: tgt, note: "thin" },
+      { name: "chop", kind: "flat", p: 0.25, target: null },
+      { name: "breaks the void", kind: "void", p: 0.6, target: null }]; }), ctx());
+    assert.ok(r.ok, r.error || "");
+    assert.equal(r.computed.action.stance, "wait");
+    assert.equal(r.computed.action.downgraded, true, "the downgrade must be stamped, not silent"); }
+  // wait/no_trade stances need no geometry and pass through with the note
+  { const r = p.aiValidateNow(mut((o) => { o.action = { stance: "wait", entry: null, note: "the print decides in four days" }; }), ctx());
+    assert.ok(r.ok, r.error || "");
+    assert.equal(r.computed.action.stance, "wait"); }
+  // a missing action block is a schema failure now
+  { const r = p.aiValidateNow(mut((o) => { delete o.action; }), ctx());
+    assert.equal(r.ok, false); assert.ok(/action stance/.test(r.error), r.error); }
+});
+
+test("ai report -73: daily OHLC upgrade — a closes-only warm restore renders real candles from the hourly spine", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadAiReports: () => null, saveAiReports: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), N = 30 * 24;
+  const hourly = Array.from({ length: N }, (_, i) => {
+    const c = 100 + Math.sin(i / 9) * 4;
+    return { t: now - (N - 1 - i) * HOUR, o: c - 0.4, h: c + 0.9, l: c - 0.9, c, v: 500 };
+  });
+  // warm-cache shape: dailies restored as {t,c} ONLY — the exact state that rendered as confetti
+  const daily = Array.from({ length: 60 }, (_, i) => ({ t: now - (59 - i) * DAY, c: 100 + Math.sin(i / 4) * 6 }));
+  p.seedRowNow("xyz:WARM", { px: 101, dailyRaw: daily, hourlyRaw: hourly, dailyTs: now, hourlyTs: now, isNew: false });
+  const rd = p.getTfCandles("xyz:WARM", "1d");
+  const covered = rd.candles.filter((k) => k[0] >= now - 28 * DAY);
+  assert.ok(covered.length >= 20, "enough recent bars to judge");
+  for (const k of covered.slice(1))   // slice(1): the first covered day may be a partial hourly bucket
+    assert.ok(k[1] != null && isFinite(k[1]) && k[2] >= k[4] && k[3] <= k[4],
+      `recent closes-only bars must upgrade to real hourly-derived OHLC (bar ${new Date(k[0]).toISOString()})`);
+  const old = rd.candles.filter((k) => k[0] < now - 32 * DAY);
+  assert.ok(old.length && old.every((k) => k[1] == null), "days beyond the hourly spine stay honestly closes-only");
+});
+
+test("client -73: multi-timeframe chart + action panel ship end to end", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const frag of ["aiChartTfSeg", "data-aitf", "state.report.tf", "aiActionHtml", "enter_on_pullback", "entryIsMarket", "EMA13 ", "fill-opacity=\"0.08\""])
+    assert.ok(app.includes(frag), `app.js missing -73 marker: ${frag}`);
+  for (const cls of [".ai-act", ".ai-tf"]) assert.ok(css.includes(cls), `styles.css missing: ${cls}`);
+  for (const frag of ["AI_SCHEMA_V", "report format updated", "schemaV: AI_SCHEMA_V", "actionable stance without void/target geometry", "downgraded from an entry stance", "bucketCandles(r.hourlyRaw, 24, HOUR)"])
+    assert.ok(pol.includes(frag), `poller.js missing -73 marker: ${frag}`);
 });
