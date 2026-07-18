@@ -2574,7 +2574,7 @@ function tcStateMeta(st,side){
     : st==='reclaim'?'reclaiming \u2014 above EMA21, ribbon not stacked' : st==='roll'?'rolling over \u2014 below EMA21, ribbon not stacked':'\u2014';
   return {cls,lbl};
 }
-function tcCandleSvg(cd,px,tfc,retesting,side){
+function tcCandleSvg(cd,px,tfc,retesting,side,swing){
   const W=640,H=330, pl=6,pr=56,pt=10,pb=22, SHOW=64, SEED=20;
   if(!cd||cd.length<2) return '<div class="msg" style="padding:18px 0">Not enough candles for this timeframe yet \u2014 the series is still filling server-side.</div>';
   const closes=cd.map(k=>+k[4]);
@@ -2587,6 +2587,7 @@ function tcCandleSvg(cd,px,tfc,retesting,side){
     if(l<lo)lo=l; if(h>hi)hi=h; }
   if(px!=null&&isFinite(+px)){ if(px<lo)lo=px; if(px>hi)hi=px; }
   if(tfc&&tfc.e21!=null&&tfc.e21<lo)lo=tfc.e21; if(tfc&&tfc.e13!=null&&tfc.e13>hi)hi=tfc.e13;
+  if(retesting&&swing!=null&&isFinite(+swing)){ if(+swing<lo)lo=+swing; if(+swing>hi)hi=+swing; }
   if(!(hi>lo)) return '';
   const pad=(hi-lo)*0.05; hi+=pad; lo-=pad;
   const X=i=>pl+(i+0.5)/n*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
@@ -2609,6 +2610,15 @@ function tcCandleSvg(cd,px,tfc,retesting,side){
     s+=`<rect x="${zx.toFixed(1)}" y="${zt.toFixed(1)}" width="${(W-pr-zx).toFixed(1)}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--blue)" fill-opacity="0.09" stroke="var(--blue)" stroke-opacity="0.4" stroke-dasharray="3 3"/>`;
     // label stays two words — the guidance sentence lives in the read strip, not smeared across candles
     if(retesting) s+=`<text x="${(zx+5).toFixed(1)}" y="${(zb+14).toFixed(1)}" class="lc-tick" fill="var(--blue)" style="paint-order:stroke;stroke:var(--panel);stroke-width:3px">retest zone</text>`;
+  }
+  // prior-swing target: the level the read (and the tretest ledger claim) targets — shipped on
+  // the trend payload, computed server-side from the same rung series; never derived here
+  if(retesting&&swing!=null&&isFinite(+swing)&&+swing>lo&&+swing<hi){
+    const sy=Y(+swing), sc=side==='long'?'var(--up)':'var(--down)';
+    s+=`<line x1="${pl}" y1="${sy.toFixed(1)}" x2="${W-pr}" y2="${sy.toFixed(1)}" stroke="${sc}" stroke-width="1" stroke-dasharray="5 3" opacity="0.75"/>`+
+       `<text x="${pl+5}" y="${(sy-4).toFixed(1)}" class="lc-tick" fill="${sc}" style="paint-order:stroke;stroke:var(--panel);stroke-width:3px">prior swing \u2014 target</text>`+
+       `<rect x="${W-pr}" y="${(sy-9).toFixed(1)}" width="${pr-2}" height="18" fill="var(--panel2)" stroke="${sc}" opacity="0.9"/>`+
+       `<text x="${W-pr+5}" y="${(sy+3.5).toFixed(1)}" class="lc-tick" fill="var(--text)">${fmtPrice(+swing)}</text>`;
   }
   // ribbon fill between the walks, only where BOTH EMAs exist
   let up='',dn='';
@@ -2682,7 +2692,7 @@ function renderTrendChart(res){
     (e.retest?`<span class="tretest" data-tip="the board's retest flag \u2014 recent bars probed the 13/21 zone on ${e.retest} while the close held EMA21${e.rrv!=null?` \u00b7 volume through the zone ${e.rrv.toFixed(1)}\u00d7 the clock-matched norm`:''}">RETEST ${e.retest}</span>`:'')+
     `<span class="cdtf-seg" style="margin-left:auto">${seg}</span>`+
     `<button type="button" class="btn tcm-x" id="tchartx" aria-label="close">\u2715</button></div>`+
-    `<div class="tcm-chart">${tcCandleSvg(cd,res?res.px:null,tfc,retesting,_tc.side)}</div>`+
+    `<div class="tcm-chart">${tcCandleSvg(cd,res?res.px:null,tfc,retesting,_tc.side,(_tc.entry&&_tc.entry.swing!=null)?_tc.entry.swing:null)}</div>`+
     `<div class="tcm-leg"><span><i style="color:var(--blue)">\u2501</i> EMA13</span><span><i style="color:var(--accent)">\u2501</i> EMA21</span>`+
     `<span><i class="tcm-zsw"></i> 13/21 retest zone (ladder levels)</span>`+
     (d21?`<span class="tcm-d21" data-tip="live distance from this rung's EMA21 at the last board build \u2014 small = at the entry zone, large = extended">${d21}</span>`:'')+`</div>`+
@@ -2719,7 +2729,7 @@ function closeTrendChart(){ const bg=el('tchartbg'), m=el('tchartmodal'); if(bg)
 { const bg=el('tchartbg'); if(bg) bg.addEventListener('click',closeTrendChart);
   document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('tchartmodal'); if(m&&!m.hidden) closeTrendChart(); } }); }
 
-const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge'};
+const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge',tretest:'Trend retest (long)',tretestdn:'Trend retest (short)'};
 const EV_TIP={
   bigmove:'Today\u2019s move is \u22652\u03c3 of this market\u2019s own trailing 30d daily returns. History measures whether such moves continued (positive) or faded (negative) the next day, signed with the move.',
   breakout:'First close/mark above the prior 30-day high. History: forward 5d return after past first-crosses on this market.',
@@ -2729,6 +2739,8 @@ const EV_TIP={
   squeeze:'Crowded shorts (negative 7d funding) \u00d7 OI building \u00d7 price pressing the range \u2014 the squeeze spring is loaded. No historical study yet: needs longer OI history.',
   unwind:'Crowded longs paying funding while OI builds and price sits near range lows \u2014 the bearish mirror of the squeeze. Their liquidation is the seller of last resort.',oiflush:'7d \u0394OI collapsed below \u22122\u03c3 of this market\u2019s own distribution while price fell \u2014 forced deleveraging exhausting itself. Flushes measure positions destroyed, not price traveled; the claim is a 5d bottoming thesis.',fpdiv:'Funding trajectory diverging from the tape: strength while funding falls = shorts pressing into a rising market (squeeze-adjacent, long); weakness while funding rises = longs averaging down into a falling one (fragile, short). 3d horizon, with the divergence.',coil:'10d realized vol in the bottom decile of its own trailing 120 observations \u2014 the spring is loaded, direction unknown. Context only: it never claims a side; it exists to corroborate a breakout or breakdown firing OUT of the compression.',ondrift:'This market\u2019s summed off-hours drift over ~21 closed windows sits \u22652\u03c3 from the universe. The claim covers ONLY the next 5 overnight windows held close\u2192open \u2014 the structural edge of a venue where cash-hours assets trade 24/7. Ships without a backtest study by design: it earns trust purely out of sample.',prem:'Perp price dislocated from oracle vs its own 7-day premium baseline. During closed cash sessions this IS the live price discovery for the synthetic.',
   volume:'24h volume is a multiple of this market\u2019s own 30d norm \u2014 a context flag that amplifies whatever else is firing.',
+  tretest:'The Trend board\u2019s RETEST badge, promoted to a ledgered claim: a \u22653/4 stacked uptrend whose retesting rung probed the 13/21 EMA zone while the close held EMA21. Frozen at fire \u2014 entry = mark, void = that rung\u2019s EMA21, target = the rung\u2019s prior swing high. 5d horizon. Ships without a backtest study by design: the record is earned purely out of sample.',
+  tretestdn:'The short mirror of the trend retest: a \u22653/4 stacked downtrend whose rung rallied into the 13/21 zone while the close held below EMA21. Void = that rung\u2019s EMA21, target = prior swing low, 5d horizon, record earned out of sample.',
 };
 // Structured playbook row: side pill (LONG/SHORT/FADE/WATCH), levels with live distance from
 // the current mark, and the corroborating watch condition. Mechanical setup description — the
