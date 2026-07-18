@@ -2789,13 +2789,15 @@ function playRow(g){
     +(tgt!=null?`<span class="sp-lvl" data-tip="${esc(frozen?'target implied by the historical median AT FIRE \u2014 frozen on the claim; where the base rate said the move resolves, measured from the claimed mark':'level implied by this market\u2019s own historical median for the event \u2014 where the base rate says the move resolves')}">target <b>${fmtPrice(tgt)}</b>${playDist(g,tgt)}</span>`:'')
     +(stp!=null?`<span class="sp-lvl" data-tip="${esc(frozen?'invalidation FROZEN at fire \u2014 the stop-aware track resolves against exactly this level; beyond it the setup\u2019s premise is broken':'invalidation \u2014 beyond this level the setup\u2019s premise is broken and the signal should be treated as void')}">void <b>${fmtPrice(stp)}</b>${playDist(g,stp)}</span>`:'')
     +rrChip(g)
-    +(p.watch?`<span class="sp-watch" data-tip="the one corroborating condition that confirms or kills this setup">watch: ${esc(p.watch)}</span>`:'')
-    +`</span>`;
+    +`</span>`
+    +(p.watch?`<span class="sp-watchline" data-tip="${esc('the one corroborating condition that confirms or kills this setup \u2014 '+p.watch)}">watch \u2014 ${esc(p.watch)}</span>`:'');
 }
 function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date();
   const hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
   return (d.getDate()===n.getDate()&&d.getMonth()===n.getMonth())?hm:(d.getMonth()+1)+'/'+d.getDate()+' '+hm; }
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
+function sigRecFullPref(){ try{ return localStorage.getItem('xyz-sigrecfull')==='1'; }catch(_){ return false; } }
+function setSigRecFull(v){ try{ localStorage.setItem('xyz-sigrecfull',v?'1':'0'); }catch(_){} renderSignals(); }
 function sigViewPref(){ try{ return localStorage.getItem('xyz-sigview')||'detail'; }catch(_){ return 'detail'; } }
 function sigPrimePref(){ try{ return localStorage.getItem('xyz-sigprime')==='1'; }catch(_){ return false; } }
 function setSigPrime(v){ try{ localStorage.setItem('xyz-sigprime',v?'1':'0'); }catch(_){} renderSignals(); }
@@ -2831,28 +2833,40 @@ function trigChip(g){
   return s;
 }
 function sigCardHtml(gr, rank, collapsible){
+  // Card anatomy, one visual grammar per line (build -67): header = rank/ticker/side/score;
+  // per condition: [event chip | reading ......... age/claim meta], then the evidence line in
+  // one fixed grammar (scope \u00b7 n \u00b7 med \u00b7 hit \u00b7 exp \u00b7 horizon, flags as uniform pills),
+  // then the play line (side \u00b7 target \u00b7 void \u00b7 R/R), then watch on its own truncated line.
+  // The ticker never repeats inside its own card; timestamps live at the line's right edge.
+  const top=gr.sigs[0], hsd=SP_SIDE[(top.claim0&&top.claim0.side)||(top.play&&top.play.side)||'watch']||SP_SIDE.watch;
   let s=`<div class="sigcard${gr.sigs.length>1?' conf':''}${gr.sigs.some(x=>x.prime)?' prime':''}"${collapsible?` data-coll="${esc(gr.coin)}"`:''}>`;
   s+=`<div class="sigcard-h"${collapsible?' style="cursor:pointer" data-tip="click to collapse back to the compact row"':''}><span class="sig-rank">${rank}</span>`
     +(collapsible?`<span class="sig-caret">\u25be</span>`:'')
     +`<b class="sig-tick" data-coin="${esc(gr.coin)}">${esc(gr.ticker)}</b>`
+    +`<b class="sp-side ${hsd.c}" data-tip="${esc('top condition: '+((top.play&&top.play.bias)||hsd.tip))}">${hsd.t}</b>`
     +(gr.sigs.length>1?`<span class="sig-conf" data-tip="confluence: ${gr.sigs.length} independent conditions firing on the same name \u2014 each condition's score gets a confluence bonus because agreement is itself the signal">${gr.sigs.length} conditions</span>`:'')
     +`<span class="sig-score" data-tip="best condition's score: unusualness + historical edge + confluence bonus, 0\u2013100"><span class="sig-bar"><span style="width:${Math.min(100,gr.score)}%"></span></span>${gr.score}</span></div>`;
   for(const g of gr.sigs){
     const ownOk = g.study && g.study.n>=8;
-    const U = (st)=>st&&st.unit==='R'?'R':'%';   // R = sigma units (outcome / the market's own vol at event time) — apples-to-apples across names
+    const U = (st)=>st&&st.unit==='R'?'R':'%';   // R = sigma units (outcome / the market's own vol at event time) \u2014 apples-to-apples across names
     const exp = (st)=>st&&st.avg!=null?` \u00b7 <span data-tip="expectancy: the MEAN direction-signed outcome per event \u2014 hit rate and payoff sizes folded into one number. ${st.unit==='R'?'Measured in R (sigma units \u2014 the outcome divided by the market\u2019s own volatility at event time), so it compares fairly across quiet and wild names and pools cleanly. ':''}This, not the R/R screen, is what decides whether the setup pays over many occurrences.">exp <b class="${st.avg>=0?'pos':'neg'}">${st.avg>=0?'+':''}${st.avg}${U(st)}</b>/ev</span>`:'';
+    const stLine=(st,scope)=>`<i class="sig-scope">${scope}</i> n=${st.n} \u00b7 med <b class="${st.med>=0?'pos':'neg'}">${st.med>=0?'+':''}${st.med}${U(st)}</b> \u00b7 ${Math.round(st.hit*100)}% hit${exp(st)} \u00b7 ${esc(g.horizon||'')}`;
     const hist = ownOk
-      ? `on ${esc(g.ticker)} (n=${g.study.n}): median <b class="${g.study.med>=0?'pos':'neg'}">${g.study.med>=0?'+':''}${g.study.med}${U(g.study)}</b> \u00b7 ${Math.round(g.study.hit*100)}% hit${exp(g.study)} \u2014 ${esc(g.horizon||'')}`
+      ? stLine(g.study,'own base rate')
       : (g.pooled
-        ? `${g.study?`on ${esc(g.ticker)}: n=${g.study.n} \u00b7 `:''}pooled across its asset class (n=${g.pooled.n}): median <b class="${g.pooled.med>=0?'pos':'neg'}">${g.pooled.med>=0?'+':''}${g.pooled.med}${U(g.pooled)}</b> \u00b7 ${Math.round(g.pooled.hit*100)}% hit${exp(g.pooled)} \u2014 ${esc(g.horizon||'')}`
+        ? `${g.study?`own n=${g.study.n} \u00b7 `:''}${stLine(g.pooled,'class-pooled')}`
         : (g.study
-          ? `on ${esc(g.ticker)} (n=${g.study.n}): median ${g.study.med>=0?'+':''}${g.study.med}${U(g.study)} \u00b7 ${Math.round(g.study.hit*100)}% hit \u2014 ${esc(g.horizon||'')}`
+          ? stLine(g.study,'own \u00b7 thin')
           : `${esc(g.horizon||'no historical study yet')}`));
+    const flags=(g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':'')
+      +(g.negexp?' <i class="sig-unp bad" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':'')
+      +(g.noedge?' <i class="sig-unp bad" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':'')
+      +(g.earn?` <i class="sig-unp warn" data-tip="earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${esc(g.earn.s)} ${esc(g.earn.d)}, ET) \u2014 a known binary catalyst inside this claim's horizon. The base rate wasn't sampled around scheduled prints, so this is a stated PRIOR, not measured expectancy: evidence contribution capped at 8 (same mechanism as the no-live-edge guard), prime disabled. Condition intensity untouched.">earnings ${g.earn.prox===0?'today':'\u22641d'}</i>`:'');
     s+=`<div class="sig${g.prime?' prime':''}">`
       +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
-      +(g.confl?`<span class="sig-chip" style="color:var(--down);border-color:var(--down)" data-tip="${esc(`conflicting signals \u00b7 a long-side and a short-side event are BOTH live on this name${(g.conflWith&&g.conflWith.length)?` \u00b7 opposing: ${g.conflWith.map(o=>`${o.label} (${(o.side||'').toUpperCase()}, score ${o.score})`).join('; ')} \u2014 the counterpart may rank below the visible list or be hidden by your filters; the conflict stands because both are live and both claims are on the books`:''} \u00b7 no confluence bonus is granted amid contradiction \u00b7 each claim resolves independently on its own record \u2014 the ledger, not the dashboard, decides which side was right`)}">\u21c4 conflict</span>`:'')
-      +`<span class="sig-line1">${g.prime?'<i class="sig-prime" data-tip="prime setup: \u226560% hit, positive expectancy, sound structure (R/R \u22651.2 where levels exist), not unproven/decayed/no-edge \u2014 the bars this signal clears to earn emphasis">\u2605 prime</i>':''}${trigChip(g)}<span class="sig-read">${esc(g.reading)}</span></span>`
-      +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality`:''))}">${hist}${g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':''}${g.negexp?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':''}${g.noedge?' <i class="sig-unp" style="color:var(--down);border-color:var(--down)" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':''}${g.earn?` <i class="sig-unp" style="color:var(--accent);border-color:var(--accent)" data-tip="earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${esc(g.earn.s)} ${esc(g.earn.d)}, ET) \u2014 a known binary catalyst inside this claim's horizon. The base rate wasn't sampled around scheduled prints, so this is a stated PRIOR, not measured expectancy: evidence contribution capped at 8 (same mechanism as the no-live-edge guard), prime disabled. Condition intensity untouched.">earnings ${g.earn.prox===0?'today':'\u22641d'}</i>`:''}</span>`
+      +`<span class="sig-line1">${g.prime?'<i class="sig-prime" data-tip="prime setup: \u226560% hit, positive expectancy, sound structure (R/R \u22651.2 where levels exist), not unproven/decayed/no-edge \u2014 the bars this signal clears to earn emphasis">\u2605 prime</i>':''}<span class="sig-read">${esc(g.reading)}</span>`
+      +`<span class="sig-meta">${g.confl?`<span class="sig-chip bad" data-tip="${esc(`conflicting signals \u00b7 a long-side and a short-side event are BOTH live on this name${(g.conflWith&&g.conflWith.length)?` \u00b7 opposing: ${g.conflWith.map(o=>`${o.label} (${(o.side||'').toUpperCase()}, score ${o.score})`).join('; ')} \u2014 the counterpart may rank below the visible list or be hidden by your filters; the conflict stands because both are live and both claims are on the books`:''} \u00b7 no confluence bonus is granted amid contradiction \u00b7 each claim resolves independently on its own record \u2014 the ledger, not the dashboard, decides which side was right`)}">\u21c4 conflict</span>`:''}${trigChip(g)}</span></span>`
+      +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality`:''))}">${hist}${flags}</span>`
       +(g.play?playRow(g):'')
       +`</div>`;
   }
@@ -2912,7 +2926,11 @@ function sigRecordHtml(d){
   for(const ev of evs){ const r=rc[ev]; resolved+=r.resolved||0; open+=r.open||0; wins+=Math.round((r.hit||0)*(r.resolved||0));
     nS+=r.nS||0; winsS+=Math.round((r.hitS||0)*(r.nS||0)); }
   fired=resolved+open;
-  let s=`<div class="dsec" style="margin-top:22px" data-tip="out-of-sample accuracy \u00b7 every fired signal is ledgered at its mark and resolved at its stated horizon under the study\u2019s own sign convention \u00b7 this section is what actually happened after the engine spoke \u2014 the record it must answer to">Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
+  const recOpen=sigRecFullPref();
+  // The audit block (per-event table, calibration, self-tuning, recent resolutions) is
+  // retrospective \u2014 collapsed by default behind this header, which carries the headline
+  // numbers either way. The "Record by event" strip above stays as the always-visible summary.
+  let s=`<div class="dsec sigrec-tgl" data-recx style="margin-top:22px;cursor:pointer" data-tip="out-of-sample accuracy \u00b7 every fired signal is ledgered at its mark and resolved at its stated horizon under the study\u2019s own sign convention \u00b7 this section is what actually happened after the engine spoke \u2014 the record it must answer to \u00b7 click to ${recOpen?'collapse':'expand the full audit: per-event table, calibration, self-tuning, recent resolutions'}">${recOpen?'\u25be':'\u25b8'} Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
   if(!fired){
     return s+`<div class="sec" style="font-size:11.5px;padding:4px 2px">No claims ledgered yet \u2014 the record starts accruing from the first signals this deploy fires. First resolutions land at their horizons (12h\u20135d).</div>`;
   }
@@ -2924,7 +2942,9 @@ function sigRecordHtml(d){
     +(hitAll!=null&&resolved?`<span data-tip="AT-HORIZON track: share of resolved claims that moved the way the signal implied, held to the stated horizon with NO stop \u2014 this is what the studies claim and what the engine learns from"><b class="${hitAll>=50?'pos':'neg'}">${hitAll}%</b> at-horizon hit</span>`:'')
     +(nS?`<span data-tip="stop-aware record \u00b7 same claims, but the outcome is capped at the void level when it was touched before horizon \u00b7 what trading the playbook with its void as a hard stop would have done \u00b7 covers claims resolved since stop-tracking began \u2014 older claims carry no frozen void, so n trails the resolved total"><b class="${Math.round(100*winsS/nS)>=50?'pos':'neg'}">${Math.round(100*winsS/nS)}%</b> stop-aware <i style="font-style:normal;color:var(--faint)">(n=${nS})</i></span>`:'')
     +`</div>`;
+  if(!recOpen) return s;   // collapsed: header + headline totals only; the strip above is the summary
   if(resolved){
+    s+='<div class="sigrec-sub" data-tip="claimed-vs-live per event type \u2014 the honesty gap, with the stop-aware parallel track">by event</div>';
     s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="stop-aware hit \u00b7 outcomes capped at the void when touched before horizon \u00b7 covers claims resolved since stop-tracking began (build -22) \u2014 n can trail the live column\u2019s">stop hit</th><th class="ss" data-tip="stop-aware median realized">stop med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s stop hit for how many claims were stopped out">stop pf</th><th></th></tr></thead><tbody>';
     for(const ev of [...evs].sort((a,b)=>((rc[b].resolved||0)-(rc[a].resolved||0))||((rc[b].open||0)-(rc[a].open||0)))){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
       const bad=r.resolved>=10&&r.hit<0.5&&r.med<=0, good=r.resolved>=10&&r.hit>=0.55&&r.med>0;
@@ -2948,6 +2968,7 @@ function sigRecordHtml(d){
   }
   const rx=rs.recordX;
   if(rx){
+    s+='<div class="sigrec-sub" data-tip="the record cut along the axes that matter: does the score rank outcomes, does the engine read one side better, is form improving, where does it read best">slices</div>';
     if(rx.buckets&&rx.buckets.some(b=>b.n>0)){
       s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="calibration: does the score at fire time actually rank outcomes? If higher buckets don't hit more often, the scoring \u2014 not the events \u2014 needs work.">calibration</span>`;
       for(const b of rx.buckets) s+=`<span class="sigrec-chip" data-tip="claims fired with score ${esc(b.k)}: ${b.n} resolved">score ${esc(b.k)}: ${b.hit!=null?`<b class="${b.hit>=0.5?'pos':'neg'}">${Math.round(b.hit*100)}%</b>`:'\u2014'} <i>(n=${b.n})</i></span>`;
@@ -2974,10 +2995,10 @@ function sigRecordHtml(d){
   }
   if(rs.confluence&&(rs.confluence.confN||rs.confluence.soloN)){
     const c=rs.confluence;
-    s+=`<div class="sec" style="font-size:11.5px;margin:8px 0 2px" data-tip="Does agreement actually help? Resolved claims split by whether they fired WITH other conditions on the same name or alone. Once both sides have 15+ resolutions, the confluence score bonus scales to this measured lift \u2014 and drops to zero if agreement doesn't prove out.">confluence: `
-      +(c.confN&&c.confHit!=null?`<b class="${c.confHit>=(c.soloHit||0)?'pos':'neg'}">${Math.round(c.confHit*100)}%</b> hit with company (n=${c.confN})`:`n=${c.confN||0} with company`)
-      +` vs `+(c.soloN&&c.soloHit!=null?`<b>${Math.round(c.soloHit*100)}%</b> solo (n=${c.soloN})`:`n=${c.soloN||0} solo`)
-      +` \u2014 bonus ${c.confN>=15&&c.soloN>=15?`<b>${c.bonus}</b>/condition (earned from the measured lift)`:`8/condition (default until 15+ resolutions per side)`}</div>`;
+    s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="Does agreement actually help? Resolved claims split by whether they fired WITH other conditions on the same name or alone. Once both sides have 15+ resolutions, the confluence score bonus scales to this measured lift \u2014 and drops to zero if agreement doesn't prove out.">confluence</span>`
+      +`<span class="sigrec-chip">with company ${c.confN&&c.confHit!=null?`<b class="${c.confHit>=(c.soloHit||0)?'pos':'neg'}">${Math.round(c.confHit*100)}%</b>`:'\u2014'} <i>(n=${c.confN||0})</i></span>`
+      +`<span class="sigrec-chip">solo ${c.soloN&&c.soloHit!=null?`<b>${Math.round(c.soloHit*100)}%</b>`:'\u2014'} <i>(n=${c.soloN||0})</i></span>`
+      +`<span class="sigrec-chip" data-tip="${c.confN>=15&&c.soloN>=15?'earned from the measured lift':'default until 15+ resolutions per side'}">bonus <b>${c.confN>=15&&c.soloN>=15?c.bonus:8}</b>/condition</span></div>`;
   }
   if(d&&d.variants&&d.variants.length){
     s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="Bounded self-improvement: each gated event runs 2\u20133 candidate thresholds. Only the incumbent emits visible signals \u2014 but ALL variants (incumbent included) silently ledger shadow claims on identical bookkeeping, so the comparison is out-of-sample and apples-to-apples. A challenger is promoted only with \u226530 resolutions on BOTH sides, expectancy beating the incumbent by \u22650.08 native units and positive, and no hit-rate collapse. Promotions are logged, persisted, and reversible by the same rule. This searches a small fixed hypothesis space under out-of-sample discipline \u2014 it cannot re-fit freely.">self-tuning (shadow variants)</div>`;
@@ -3007,7 +3028,7 @@ function renderSignals(){
   const seg=`<span class="sig-segs"><span class="cdtf-seg"><button type="button" class="cdtf${prOn?' on':''}" data-pr="1" data-tip="show only \u2605 prime setups \u2014 \u226560% hit, positive expectancy, sound structure at fire time \u2014 and switch the stats below to the record of prime claims only">\u2605 prime</button></span>`
     +`<span class="cdtf-seg" data-tip="minimum actionable move: distance from live mark to the playbook target">${mvBtn(0,'')}${mvBtn(0.5,'0.5%')}${mvBtn(1,'1%')}${mvBtn(2,'2%')}</span>`
     +`<span class="cdtf-seg"><button type="button" class="cdtf${view==='detail'?' on':''}" data-sv="detail" data-tip="full cards: readings, base rates, playbooks">detailed</button><button type="button" class="cdtf${view==='compact'?' on':''}" data-sv="compact" data-tip="one row per market \u2014 hover the chips for the full reading and base rate, click a row to expand it">compact</button></span></span>`;
-  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction."><span>Live conditions ranked by <b>unusualness \u00d7 historical edge</b>, self-audited: every fired signal is ledgered and resolved at its horizon \u2014 the record below is <b>out-of-sample</b>. Click a ticker for the drawer.${d&&d.count>(d.signals||[]).length?` <span data-tip="the server evaluates every live condition but ships only the highest-scored ${(d.signals||[]).length} \u2014 the tab count is the true number of live conditions right now, this list is its top slice">Top <b>${(d.signals||[]).length}</b> of <b>${d.count}</b> live conditions shown.</span>`:''}</span>${seg}</div>`;
+  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?)."><span>Live conditions \u00b7 ranked by <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited, out-of-sample record below.${d&&d.count>(d.signals||[]).length?` <span data-tip="the server evaluates every live condition but ships only the highest-scored ${(d.signals||[]).length} \u2014 the tab count is the true number of live conditions right now, this list is its top slice">Top <b>${(d.signals||[]).length}</b> of <b>${d.count}</b> shown.</span>`:''}</span>${seg}</div>`;
   let rec='';
   const rsTop=(d&&d.records&&d.records[String(mvThr)+(prOn?'p':'')])||d||{};
   const recSrc=rsTop.record||{};
@@ -3086,6 +3107,7 @@ function bindSigControls(box){
   box.querySelectorAll('.sigc[data-exp]').forEach(r=>r.addEventListener('click',()=>{ sigExpanded.add(r.dataset.exp); renderSignals(); }));
   box.querySelectorAll('.sigcard[data-coll] .sigcard-h').forEach(h=>h.addEventListener('click',(ev)=>{ if(ev.target.closest('.sig-tick'))return; sigExpanded.delete(h.parentNode.dataset.coll); renderSignals(); }));
   box.querySelectorAll('[data-lowx]').forEach(b=>b.addEventListener('click',()=>{ state._sigLow=!state._sigLow; renderSignals(); }));
+  box.querySelectorAll('[data-recx]').forEach(b=>b.addEventListener('click',()=>{ setSigRecFull(!sigRecFullPref()); }));
 }
 
 // ===== sectors tab =====
@@ -3681,6 +3703,8 @@ sessions:`
 signals:`
 <div class="hlp-h">What a signal is</div>
 <p>An unusual condition, ranked — <b>never a prediction</b>. Score = unusualness now (0–50) + historical edge: the market's <b>own base rate</b> when it has ≥8 occurrences, else the <b>asset-class pooled</b> rate at a 30% discount, else a token score. Every base rate shows n, median forward outcome, and hit — evidence, not adjectives. <i>unproven</i> = flag without history; <i>neg exp</i> = past occurrences lost money on average (shown for awareness, ranked as noise).</p>
+<div class="hlp-h">How to read a card</div>
+<p>Every condition renders in the same four-line grammar. <b>Line 1</b>: the event chip, the plain-language reading, and — at the right edge — when the condition appeared and the ledger claim it’s scored against (@ the frozen mark, with time to resolution). <b>Line 2</b>: the evidence in one fixed format — scope (own base rate / class-pooled / thin) · n · median · hit · expectancy · horizon — with any qualifier pills (unproven, neg exp, no live edge, earnings proximity) at the end. <b>Line 3</b>: the mechanical play — side, target, void, R/R — frozen from the claim when one is open, live-computed otherwise. <b>Line 4</b>: the single corroborating thing to watch. Same information, same tooltips; the grammar is fixed so your eye lands on the same fact in the same place on every card.</p>
 <div class="hlp-h">Self-audit — the part to trust</div>
 <p>Every fired signal is <b>ledgered at its mark and resolved at its horizon</b>, out-of-sample. The record blends back into scoring (weight grows with resolved count — trust migrates from backtest to reality), and event types whose live record shows no edge get capped automatically. In the accuracy panel: <b>live hit/med vs claimed</b> is the honesty gap; <b>pf</b> (profit factor) catches the 55%-hit event that still loses money; <b>calibration buckets</b> audit the scorer itself — if 55+ scores don't hit more than &lt;35 scores, the ranking is broken; <b>⛔ stop-aware</b> re-scores every claim as if the void level had been a hard stop.</p>
 <div class="hlp-h">Playbooks, prime, decay</div>

@@ -427,6 +427,13 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sig-hist{color:var(--muted);font-size:11.5px;flex:1 1 260px;line-height:1.45}
 .sig-unp{font-style:normal;color:var(--accent-dim);border:1px solid var(--accent-dim);border-radius:4px;
   padding:0 5px;font-size:9.5px;text-transform:uppercase;letter-spacing:.5px;margin-left:6px}
+.sig-unp.bad{color:var(--down);border-color:var(--down)}
+.sig-unp.warn{color:var(--accent);border-color:var(--accent)}
+.sig-chip.bad{color:var(--down);border-color:var(--down)}
+.sig-scope{font-style:normal;color:var(--faint);text-transform:uppercase;font-size:9.5px;letter-spacing:.5px;margin-right:2px}
+.sig-meta{margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.sp-watchline{grid-column:2;color:var(--faint);font-size:10.5px;line-height:1.4;padding:1px 2px 0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help;max-width:100%}
 .sig.unp .sig-bar span{background:var(--faint)}
 .sig-score{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px;min-width:96px;justify-content:flex-end;margin-left:auto}
 .sig-bar{width:56px;height:5px;border-radius:3px;background:var(--grid);overflow:hidden;display:inline-block}
@@ -444,7 +451,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .recstrip .rec.good{border-color:var(--up)}
 .recstrip .rec.bad{border-color:var(--down)}
 .recstrip .rec i{font-style:normal;color:var(--down)}
-.sigcard{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 14px 10px;margin-bottom:6px}
+.sigcard{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 16px 12px;margin-bottom:8px}
 .sigcard.conf{border-color:var(--accent-dim)}
 .sigcard-h{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:13px;padding:2px 0 6px}
 .sig-conf{border:1px solid var(--accent-dim);color:var(--accent);border-radius:5px;padding:1px 8px;font-size:10px}
@@ -478,6 +485,8 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sigc[data-exp]{cursor:pointer}
 .sigrec-top{display:flex;flex-wrap:wrap;gap:8px 22px;font-family:var(--mono);font-size:12px;color:var(--muted);margin:6px 0 10px}
 .sigrec-top b{color:var(--text);margin-left:4px}
+.sigrec-tgl:hover{color:var(--text)}
+.sigrec-sub{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);margin:14px 0 5px;cursor:help}
 .sigrec-t{border-collapse:collapse;font-family:var(--mono);font-size:11.5px;margin-bottom:6px}
 .sigrec-t th{color:var(--faint);font-weight:400;text-transform:uppercase;font-size:9.5px;letter-spacing:.6px;text-align:left;padding:3px 22px 5px 0}
 .sigrec-t td{color:var(--muted);padding:4px 22px 4px 0;border-top:1px solid var(--grid)}
@@ -492,7 +501,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sig-age.dk{color:var(--accent);border-color:var(--accent-dim)}
 
 /* signal card cleanup: aligned chip column, 3-line rhythm, inset play row */
-.sigcard .sig{display:grid;grid-template-columns:158px 1fr;column-gap:14px;row-gap:4px;
+.sigcard .sig{display:grid;grid-template-columns:158px 1fr;column-gap:14px;row-gap:5px;
   align-items:baseline;padding:8px 0 9px}
 .sigcard .sig-chip{grid-column:1;justify-self:start;max-width:158px;overflow:hidden;text-overflow:ellipsis}
 .sig-line1{grid-column:2;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}
