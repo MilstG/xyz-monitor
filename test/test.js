@@ -696,12 +696,14 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/health"];
+    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/ai-report", "/api/ai-reports", "/api/health"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
     assert.equal(n, 1, `server route registered ${n} times: ${r}`);
   }
+  // Generation is a POST with its own registration — pinned separately from the GET reads.
+  assert.equal(srv.split('fastify.post("/api/ai-report"').length - 1, 1, "POST /api/ai-report must be registered exactly once");
   // Every poller getter the route layer references must be defined AND exported by the poller
   // factory — a route bound to a phantom getter is a 500 the drawer's silent catch would eat.
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
@@ -1327,4 +1329,201 @@ test("stackedRun: exact per-bar trend age — fresh stacks, breaks, caps, live-m
   sr = stackedRun(mk(fall), null, "short");
   assert.ok(sr.run > 30 && sr.capped, "steady downtrend: long capped short run");
   assert.equal(stackedRun(mk(rise).slice(0, 20), null, "long"), null, "insufficient history is null");
+});
+
+// ===== AI analyst report ========================================================================
+// The engine has three separable responsibilities, each tested without any network: (1) the
+// context compiler builds an honest, universe-tagged payload from data in memory; (2) the
+// validator accepts only schema-conforming model output, pins the void to frozen claim geometry,
+// and computes every displayed number server-side; (3) the cache enforces the TTL cooldown for
+// everyone and unlocks on material change. The transport is injected (aiFetch), so the suite
+// exercises the full generate path — including the Fable→Opus fallback — offline.
+
+function aiTestPoller(extra) {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+    loadAiReports: () => null, saveAiReports: () => {} };
+  const p = createPoller(Object.assign({ dex: "xyz", store, log: () => {}, version: "test", crypto: false }, extra || {}));
+  // A synthetic equity with enough daily + hourly history for the ladder, features and compiler.
+  const now = Date.now(), DAY_ = 86400000, HOUR_ = 3600000;
+  const daily = Array.from({ length: 80 }, (_, i) => {
+    const c = 100 * Math.pow(1.008, i);
+    return { t: now - (79 - i) * DAY_, o: c * 0.995, h: c * 1.01, l: c * 0.99, c };
+  });
+  const hourly = Array.from({ length: 40 * 24 }, (_, i) => {
+    const c = 100 * Math.pow(1.0003, i);
+    return { t: now - (40 * 24 - 1 - i) * HOUR_, o: c * 0.999, h: c * 1.002, l: c * 0.998, c, v: 1000 };
+  });
+  const px = daily[daily.length - 1].c * 1.002;
+  p.seedRowNow("xyz:NVDA", { px, d1: 1.2, funding: 0.00001, vol: 5e7, oi: 2e7,
+    ref: { p1h: px * 0.999, p4h: px * 0.996, p7d: px * 0.94, p30d: px * 0.85 },
+    dailyRaw: daily, hourlyRaw: hourly, dailyTs: now, hourlyTs: now, isNew: false });
+  return { p, px, now };
+}
+const AI_GOOD = (px, voidLv, tgt) => JSON.stringify({
+  headline: "Constructive, leans long", bias: "long",
+  synthesis: "This name has been trending higher for weeks on the daily chart, with the 12-hour and 4-hour structure agreeing. Money is entering rather than leaving, and the move is its own strength rather than benchmark beta. The main risk is a pullback toward the ribbon; the thesis holds above the void level.",
+  evidence: [
+    { k: "structure", v: "Uptrend on all three timeframes that matter, roughly three weeks old." },
+    { k: "positioning", v: "Open interest grew alongside price this week — buyers initiating." },
+    { k: "vs benchmark", v: "Most of the 7-day move is name-specific strength, not index beta." },
+  ],
+  eventRisk: null,
+  scenarios: [
+    { name: "continuation to the target", kind: "target", p: 0.5, target: tgt, note: "trend persists" },
+    { name: "chop, then resolve", kind: "flat", p: 0.3, target: null, note: "sideways digestion" },
+    { name: "breaks the void", kind: "void", p: 0.2, target: null, note: "thesis dead below" },
+  ],
+  invalidations: ["A daily close below the EMA21 ribbon.", "Open interest falling while price stalls."],
+  levels: [
+    { value: voidLv, kind: "void", label: "void — thesis dead below" },
+    { value: tgt, kind: "target", label: "continuation target" },
+  ],
+});
+
+test("ai report: context compiler builds a universe-tagged payload with D1/H12/H4 only, coverage, and flags", () => {
+  const { p, px } = aiTestPoller();
+  const ctx = p.aiCompileNow("xyz:NVDA");
+  assert.ok(ctx, "compiler returned nothing for a seeded market");
+  assert.equal(ctx.universe, "stocks");
+  assert.equal(ctx.ticker, "NVDA");
+  assert.ok(Math.abs(ctx.px - px) / px < 1e-6, "px mismatch");
+  assert.equal(ctx.benchmark, "SP500");
+  assert.ok(ctx.trend && ctx.trend.tf, "trend ladder missing");
+  for (const t of ["D1", "H12", "H4"]) assert.ok(ctx.trend.tf[t], `trend rung missing: ${t}`);
+  assert.ok(!("H1" in ctx.trend.tf), "H1 must be excluded from the AI context");
+  assert.equal(ctx.trend.tf.D1.st, "up", "a steady riser must read D1 up");
+  assert.ok(ctx.coverage && Array.isArray(ctx.coverage.hourlyGaps) && Array.isArray(ctx.coverage.oiGaps), "coverage block missing");
+  assert.ok(Array.isArray(ctx.flags), "flags must be an array (possibly empty)");
+  assert.ok(ctx.market && typeof ctx.market.chg === "object", "market state missing");
+  assert.ok(ctx.volRegime && ctx.volRegime.rangePosPct >= 90, "a fresh-high riser must sit at the top of its range");
+  assert.equal(p.aiCompileNow("xyz:NOPE"), null, "unknown coin must compile to null, never a fabricated context");
+});
+
+test("ai report: validator accepts a conforming payload, normalizes probabilities, and computes R/R + EV server-side", () => {
+  const { p, px } = aiTestPoller();
+  const voidLv = +(px * 0.95).toPrecision(6), tgt = +(px * 1.10).toPrecision(6);
+  const r = p.aiIngestNow("xyz:NVDA", AI_GOOD(px, voidLv, tgt), "test-model");
+  assert.ok(r.ok, "conforming payload rejected: " + (r.error || ""));
+  const c = r.report.computed;
+  assert.ok(Math.abs(c.voidLevel - voidLv) / voidLv < 1e-4, "void level not carried through");
+  const risk = px - voidLv;
+  const scT = c.scenarios.find((s) => s.kind === "target");
+  assert.ok(Math.abs(scT.payoffR - (tgt - px) / risk) < 0.02, `target payoff wrong: ${scT.payoffR}`);
+  assert.equal(scT.rr, Math.abs(scT.payoffR), "rr must be |payoff| for the target scenario");
+  assert.equal(c.scenarios.find((s) => s.kind === "void").payoffR, -1, "void scenario is -1R by construction");
+  assert.equal(c.scenarios.find((s) => s.kind === "flat").payoffR, 0, "flat scenario contributes 0");
+  const ev = +(0.5 * scT.payoffR + 0.3 * 0 + 0.2 * -1).toFixed(2);
+  assert.equal(c.evR, ev, `EV must be the exact probability-weighted sum, got ${c.evR} want ${ev}`);
+  const psum = c.scenarios.reduce((a, s) => a + s.p, 0);
+  assert.ok(Math.abs(psum - 1) < 0.01, "probabilities must normalize to 1");
+  assert.equal(r.report.status, "fresh", "a just-generated report is fresh");
+});
+
+test("ai report: validator rejects garbage — bad bias, broken probabilities, fences survive, silly levels", () => {
+  const { p, px } = aiTestPoller();
+  const voidLv = +(px * 0.95).toPrecision(6), tgt = +(px * 1.10).toPrecision(6);
+  const mut = (fn) => { const o = JSON.parse(AI_GOOD(px, voidLv, tgt)); fn(o); return JSON.stringify(o); };
+  assert.equal(p.aiValidateNow(mut((o) => { o.bias = "moon"; }), p.aiCompileNow("xyz:NVDA")).ok, false, "bad bias must fail");
+  assert.equal(p.aiValidateNow(mut((o) => { o.scenarios[0].p = 0.9; }), p.aiCompileNow("xyz:NVDA")).ok, false, "probability sum far from 1 must fail");
+  assert.equal(p.aiValidateNow(mut((o) => { o.levels[1].value = px * 5; }), p.aiCompileNow("xyz:NVDA")).ok, false, "level outside sanity bounds must fail");
+  assert.equal(p.aiValidateNow(mut((o) => { o.synthesis = "too short"; }), p.aiCompileNow("xyz:NVDA")).ok, false, "one-liner synthesis must fail");
+  assert.equal(p.aiValidateNow("the market feels bullish, roughly", p.aiCompileNow("xyz:NVDA")).ok, false, "prose instead of JSON must fail");
+  // markdown fences around valid JSON must survive (models do this even when told not to)
+  assert.equal(p.aiValidateNow("```json\n" + AI_GOOD(px, voidLv, tgt) + "\n```", p.aiCompileNow("xyz:NVDA")).ok, true, "fenced JSON must parse");
+});
+
+test("ai report: TTL cooldown gates regeneration for everyone; material change unlocks it with the reason", async () => {
+  const { p, px } = aiTestPoller({ aiFetch: async () => ({ ok: true, json: async () => ({ stop_reason: "end_turn",
+    content: [{ type: "text", text: AI_GOOD(px, +(px * 0.95).toPrecision(6), +(px * 1.10).toPrecision(6)) }] }) }) });
+  const g1 = await p.generateAiReport("xyz:NVDA");
+  assert.ok(g1.ok, "first generation must succeed: " + (g1.error || ""));
+  const g2 = await p.generateAiReport("xyz:NVDA");
+  assert.equal(g2.ok, false); assert.equal(g2.error, "cooldown", "second generation inside TTL must be refused server-side");
+  assert.ok(g2.regenInMs > 0, "cooldown must report time remaining");
+  assert.equal(p.getAiReport("xyz:NVDA").status, "fresh");
+  // material change: a claim resolving on this name flips the report to invalidated + unlocks
+  p.aiTouchStamp("xyz:NVDA", { closedN: -1 });   // stored stamp now BELOW the live count → "claim resolved"
+  const st = p.getAiReport("xyz:NVDA");
+  assert.equal(st.status, "invalidated");
+  assert.equal(st.invalidReason, "claim resolved");
+  assert.equal(st.canRegen, true, "invalidation must unlock regeneration before TTL");
+  const g3 = await p.generateAiReport("xyz:NVDA");
+  assert.ok(g3.ok, "regeneration after material change must be allowed: " + (g3.error || ""));
+});
+
+test("ai report: frozen claim geometry wins — a model void that disagrees with the live claim stop is overwritten", async () => {
+  const { p, px } = aiTestPoller({ aiFetch: async () => ({ ok: true, json: async () => ({ stop_reason: "end_turn",
+    content: [{ type: "text", text: AI_GOOD(px, +(px * 0.90).toPrecision(6), +(px * 1.10).toPrecision(6)) }] }) }) });
+  // fabricate a live claim anchor by compiling, then validating against a ctx that carries one
+  const ctx = p.aiCompileNow("xyz:NVDA");
+  const stop = +(px * 0.95).toPrecision(6);
+  ctx.claimAnchor = { ev: "breakout", side: "long", stop, target: null, t0: Date.now(), resolveAt: Date.now() + 86400000 };
+  const val = p.aiValidateNow(AI_GOOD(px, +(px * 0.90).toPrecision(6), +(px * 1.10).toPrecision(6)), ctx);
+  assert.ok(val.ok, "payload must validate: " + (val.error || ""));
+  assert.ok(Math.abs(val.computed.voidLevel - stop) / stop < 1e-6, "void must be pinned to the frozen claim stop");
+  assert.equal(val.computed.correctedVoid, true, "the correction must be flagged, not silent");
+  // and the risk/EV math must follow the CORRECTED void, not the model's
+  const risk = px - stop, scT = val.computed.scenarios.find((s) => s.kind === "target");
+  assert.ok(Math.abs(scT.payoffR - (+(px * 1.10).toPrecision(6) - px) / risk) < 0.02, "payoff must use the corrected risk unit");
+});
+
+test("ai report: Fable failure falls back to Opus; both failing surfaces an honest error and caches nothing", async () => {
+  let calls = [];
+  const { p, px } = aiTestPoller({ aiFetch: async (url, opts) => {
+    const body = JSON.parse(opts.body); calls.push(body.model);
+    if (calls.length === 1) return { ok: true, json: async () => ({ stop_reason: "refusal", content: [] }) };   // Fable refuses (HTTP 200!)
+    return { ok: true, json: async () => ({ stop_reason: "end_turn",
+      content: [{ type: "text", text: AI_GOOD(px, +(px * 0.95).toPrecision(6), +(px * 1.10).toPrecision(6)) }] }) };
+  } });
+  const g = await p.generateAiReport("xyz:NVDA");
+  assert.ok(g.ok, "fallback must rescue a primary refusal: " + (g.error || ""));
+  assert.equal(calls[0], "claude-fable-5", "primary must be Fable");
+  assert.equal(calls[1], "claude-opus-4-8", "fallback must be Opus");
+  assert.equal(g.report.model, "claude-opus-4-8", "the report must name the model that actually produced it");
+  // both failing: error out, cache stays empty
+  const { p: p2 } = aiTestPoller({ aiFetch: async () => ({ ok: false, status: 500, json: async () => ({}) }) });
+  const g2 = await p2.generateAiReport("xyz:NVDA");
+  assert.equal(g2.ok, false, "double failure must not fabricate a report");
+  assert.equal(p2.getAiReport("xyz:NVDA").status, "none", "a failed generation must cache nothing");
+});
+
+test("ai report: universe gate — unknown coins and disabled-crypto rows are refused at both read and generate", async () => {
+  const { p } = aiTestPoller();
+  assert.equal(p.getAiReport("xyz:GHOST").status, "none");
+  const g = await p.generateAiReport("xyz:GHOST");
+  assert.equal(g.ok, false, "generation for a non-universe coin must be refused");
+  // crypto:false poller — a main-dex coin (no colon → uni main) is outside the live universe
+  const g2 = await p.generateAiReport("SOL");
+  assert.equal(g2.ok, false, "crypto-disabled server must refuse main-dex generation");
+});
+
+test("client + server integrity: the Report tab ships end to end (markers, styles, retention bump)", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const sto = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  for (const frag of ['data-view="report"', 'id="view-report"', 'id="ai-q"', 'id="ai-sug"', 'id="ai-report"', 'id="ai-recent"'])
+    assert.ok(html.includes(frag), `index.html missing report marker: ${frag}`);
+  for (const frag of ["openAiReport", "openReportView", "aiReportChart", "loadAiRecent", "aiRegenerate", "aiMatches", "HELP.report", "setHidden('view-report'"])
+    assert.ok(app.includes(frag), `app.js missing report marker: ${frag}`);
+  assert.ok(app.includes("v!=='report'"), "crypto-scope whitelist must include the report view");
+  assert.ok(app.includes("openAiReport(coin)"), "drawer deep link must route into the report view");
+  for (const cls of [".ai-sug", ".ai-head", ".ai-badge", ".ai-scen", ".ai-foot", ".ai-rec", ".ai-flag"])
+    assert.ok(css.includes(cls), `styles.css missing report style: ${cls}`);
+  for (const frag of ["/api/ai-report", "/api/ai-reports", "generateAiReport", "429"])
+    assert.ok(srv.includes(frag), `server.js missing report marker: ${frag}`);
+  for (const frag of ["claude-fable-5", "claude-opus-4-8", "ANTHROPIC_API_KEY", "anthropic-version", "stop_reason", "validateAiReport", "compileAiContext", "trendAlignAtFire"])
+    assert.ok(pol.includes(frag), `poller.js missing AI engine marker: ${frag}`);
+  for (const frag of ["saveAiReports", "loadAiReports", "ai-reports.json"])
+    assert.ok(sto.includes(frag), `store.js missing AI persistence marker: ${frag}`);
+  // The 90d crypto daily retention is a constant, and BOTH the fetch and the payload cap must ride it —
+  // a bare "40" or "MAIN_HIST_DAYS" left behind in either spot silently shrinks the window back.
+  assert.ok(/const MAIN_DAILY_DAYS = 9\d;/.test(pol), "crypto daily retention must be ~90d via MAIN_DAILY_DAYS");
+  assert.ok(pol.includes("now - MAIN_DAILY_DAYS * DAY"), "crypto daily fetch must use MAIN_DAILY_DAYS");
+  assert.ok(pol.includes("dr.slice(-(MAIN_DAILY_DAYS + 2))"), "crypto daily payload cap must ride MAIN_DAILY_DAYS");
 });
