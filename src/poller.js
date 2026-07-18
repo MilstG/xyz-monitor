@@ -2551,7 +2551,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
   // schema flip to "invalidated — report format updated" on the next read, so a deploy that
   // fixes the report is visible on the first regenerate, never hidden behind a running TTL.
-  const AI_SCHEMA_V = 2;
+  const AI_SCHEMA_V = 3;
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
@@ -2969,18 +2969,40 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         riskPct: risk != null ? +((risk / px) * 100).toFixed(2) : null, correctedVoid: corrected, scenarios: scen, evR: ev, action } };
   }
   // Chart annotation marks, computed here from the ledger + prints — never model-invented.
+  // FIRST FIRES ONLY: same-event entries chaining within 2 days of the prior entry's span are
+  // one episode run (the same boundary the rearm machinery scores by) — only the run's first
+  // entry marks the chart; the ledger underneath still records every fire. Each mark carries
+  // its trade side (from the frozen psd — a gap-fader shorting an up-gap marks SHORT), its
+  // status, and its resolved outcome, so the chart legend renders the same audit trail the
+  // drawer shows without a second fetch.
+  const AI_CTX_EVS = new Set(["coil", "volume", "prem"]);
   function aiMarks(coin, ticker, windowMs) {
     const now = Date.now(), cut = now - windowMs, marks = [];
-    const push = (t, kind, label) => { if (Number.isFinite(t) && t >= cut) marks.push({ t, kind, label }); };
-    for (const e of ledgerOpen.values()) if (e.coin === coin && e.vi == null) push(e.t0, "claim", (EV_LABEL[e.ev] || e.ev) + " fired");
-    for (const e of ledgerClosed) if (e.coin === coin && e.vi == null && e.status === "resolved") push(e.t0, "claim", (EV_LABEL[e.ev] || e.ev) + " fired");
+    const ents = [];
+    for (const e of ledgerOpen.values()) if (e.coin === coin && e.vi == null) ents.push({ e, st: "open" });
+    for (const e of ledgerClosed) if (e.coin === coin && e.vi == null && (e.status === "resolved" || e.status === "void"))
+      ents.push({ e, st: e.status });
+    ents.sort((a, b) => a.e.t0 - b.e.t0);
+    const lastEnd = new Map();   // ev -> end of the last seen entry's span
+    for (const { e, st } of ents) {
+      const prev = lastEnd.get(e.ev);
+      const runsOn = prev != null && e.t0 - prev <= 2 * DAY;
+      lastEnd.set(e.ev, Math.max(prev || 0, e.tR || e.resolveAt || e.t0));
+      if (runsOn || e.t0 < cut) continue;   // re-fire inside a live run — recorded, not re-marked
+      const kind = AI_CTX_EVS.has(e.ev) ? "ctx" : (e.psd || (e.dir >= 0 ? "long" : "short"));
+      marks.push({ t: e.t0, kind, ev: e.ev, label: EV_LABEL[e.ev] || e.ev, status: st,
+        realized: st === "resolved" && Number.isFinite(e.realized) ? +(+e.realized).toFixed(2) : null,
+        unit: st === "resolved" ? ((R_LEDGER_EVS.has(e.ev) && e.sd0 > 0) ? "R" : unitOf(e.ev)) : null,
+        days: e.tR ? +(((e.tR - e.t0) / DAY).toFixed(1)) : null });
+    }
     if (ticker) for (const p of earnPrints) if (p.t === ticker) {
       const t = Date.UTC(+p.d.slice(0, 4), +p.d.slice(5, 7) - 1, +p.d.slice(8, 10));
-      const beat = p.eps != null && p.epsA != null ? (p.epsA > p.eps ? " · beat" : " · miss") : "";
-      push(t, "earn", "earnings " + p.d + beat);
+      if (t < cut) continue;
+      const beat = p.eps != null && p.epsA != null ? (p.epsA > p.eps ? "beat" : "miss") : null;
+      marks.push({ t, kind: "earn", ev: "earnings", label: "Earnings print" + (beat ? " — " + beat : ""), status: null });
     }
     marks.sort((a, b) => a.t - b.t);
-    return marks.slice(-14);
+    return marks.slice(-20);
   }
   async function callModel(model, ctx) {
     const doFetch = aiFetch || fetch;
@@ -3130,6 +3152,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     listAiReports,
     aiCompileNow: compileAiContext,   // harness: build the context object without any network
     aiValidateNow: validateAiReport,  // harness: run model text through the validator + server math
+    aiMarksNow: aiMarks,              // harness: first-fire chart marks without a full generation
     aiIngestNow: (coin, rawText, model) => {   // harness: full ingest path minus the API call
       const ctx = compileAiContext(coin);
       if (!ctx) return { ok: false, error: "no context" };
