@@ -4497,21 +4497,41 @@ async function aiReportChart(coin,c){
         s+=`<text x="${pl+6}" y="${ty.toFixed(1)}" class="lc-tick" style="fill:${col};paint-order:stroke;stroke:var(--panel);stroke-width:3.5px">${fmtPrice(l.value)} — ${esc(l.label)}</text>`; } }
     const tfMs=tf==='1d'?86400000:tf==='12h'?43200000:14400000;
     const nearIdx=t=>{ let bi=0,bd=Infinity; for(let i=0;i<n;i++){ const dd=Math.abs(+cd[i][0]-t); if(dd<bd){bd=dd;bi=i;} } return bd<=2*tfMs?bi:null; };
-    const noteAt={}, glyphs=[];
-    const addGlyph=(i,kind,label)=>{ noteAt[i]=(noteAt[i]?noteAt[i]+' · ':'')+label;
-      const near=glyphs.find(g=>g.kind===kind&&Math.abs(g.i-i)<=1);
-      if(near){ near.count++; if(i>near.i) near.i=i; } else glyphs.push({i,kind,count:1}); };
-    for(const m of marks){ const i=nearIdx(m.t); if(i!=null) addGlyph(i,m.kind==='earn'?'earn':'claim',m.label); }
-    for(const f of flags){ if(!f.t) continue; const i=nearIdx(f.t); if(i!=null) addGlyph(i,'flag',f.txt); }
-    for(const g of glyphs){ const x=X(g.i), k=cd[g.i];
+    // ===== side-typed first-fire markers + legend =====
+    // Server ships first-fires only (episode-run filtered) with side, status and outcome on each
+    // mark. Here: same-kind marks within a bar of each other collapse into ONE lettered glyph
+    // whose ×N counts DISTINCT signal types at onset; the legend below decodes every letter with
+    // names, dates and ledger outcomes. Placement is semantic — longs under the low, shorts
+    // above the high — so the glyph itself points at the trade.
+    const AI_MK={ long:{col:'var(--up)'}, short:{col:'var(--down)'}, ctx:{col:'var(--accent)'}, flag:{col:'var(--accent)'}, earn:{col:'var(--blue)'} };
+    const noteAt={}, items=[];
+    for(const m of marks){ const i=nearIdx(m.t); if(i!=null) items.push(Object.assign({i},m)); }
+    for(const f of flags){ if(!f.t) continue; const i=nearIdx(f.t); if(i!=null) items.push({i,t:f.t,kind:'flag',ev:f.kind,label:f.txt,status:null}); }
+    items.sort((a,b)=>a.t-b.t);
+    const groups=[];
+    for(const it of items){
+      noteAt[it.i]=(noteAt[it.i]?noteAt[it.i]+' · ':'')+it.label;
+      const g=groups.find(x=>x.kind===it.kind&&Math.abs(x.i-it.i)<=1);
+      if(g){ g.items.push(it); if(it.i>g.i) g.i=it.i; } else groups.push({kind:it.kind,i:it.i,t:it.t,items:[it]});
+    }
+    const LETTERS='ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    groups.forEach((g,gi)=>{ g.key=LETTERS[gi]||('#'+(gi+1)); });
+    for(const g of groups){ const x=X(g.i), k=cd[g.i];
       const lowV=k[3]!=null&&isFinite(+k[3])?+k[3]:+k[4], hiV=k[2]!=null&&isFinite(+k[2])?+k[2]:+k[4];
-      if(g.kind==='earn'){ const y=Math.min(H-pb-12,Y(lowV)+10);
-        s+=`<rect x="${(x-4.5).toFixed(1)}" y="${y.toFixed(1)}" width="9" height="9" fill="var(--panel)" stroke="var(--blue)" transform="rotate(45 ${x.toFixed(1)} ${(y+4.5).toFixed(1)})"/>`; }
-      else if(g.kind==='flag'){ const y=Math.max(pt+12,Y(hiV)-7);
-        s+=`<text x="${(x-4).toFixed(1)}" y="${y.toFixed(1)}" style="fill:var(--accent);font-size:11px">\u25c6</text>`; }
+      const col=(AI_MK[g.kind]||AI_MK.ctx).col, cnt=g.items.length;
+      const tag=g.key+(cnt>1?' \u00d7'+cnt:'');
+      if(g.kind==='short'){ const y=Math.max(pt+12,Y(hiV)-10);
+        s+=`<path d="M${x.toFixed(1)} ${(y+8).toFixed(1)} l-4.4 -8 l8.8 0 z" fill="${col}"/>`+
+           `<text x="${(x+6).toFixed(1)}" y="${(y+6).toFixed(1)}" class="lc-tick" style="fill:${col}">${tag}</text>`; }
+      else if(g.kind==='earn'){ const y=Math.min(H-pb-14,Y(lowV)+10);
+        s+=`<rect x="${(x-4.5).toFixed(1)}" y="${y.toFixed(1)}" width="9" height="9" fill="var(--panel)" stroke="${col}" transform="rotate(45 ${x.toFixed(1)} ${(y+4.5).toFixed(1)})"/>`+
+           `<text x="${(x+8).toFixed(1)}" y="${(y+9).toFixed(1)}" class="lc-tick" style="fill:${col}">${tag}</text>`; }
+      else if(g.kind==='flag'||g.kind==='ctx'){ const y=Math.max(pt+12,Y(hiV)-7);
+        s+=`<text x="${(x-4).toFixed(1)}" y="${y.toFixed(1)}" style="fill:${col};font-size:11px">\u25c6</text>`+
+           `<text x="${(x+7).toFixed(1)}" y="${y.toFixed(1)}" class="lc-tick" style="fill:${col}">${tag}</text>`; }
       else { const y=Math.min(H-pb-12,Y(lowV)+9);
-        s+=`<path d="M${x.toFixed(1)} ${y.toFixed(1)} l-4.4 8 l8.8 0 z" fill="var(--blue)"/>`; }
-      if(g.count>1) s+=`<text x="${(x+6).toFixed(1)}" y="${Math.min(H-pb-4,Y(lowV)+19).toFixed(1)}" class="lc-tick" style="fill:var(--blue)">\u00d7${g.count}</text>`; }
+        s+=`<path d="M${x.toFixed(1)} ${y.toFixed(1)} l-4.4 8 l8.8 0 z" fill="${col}"/>`+
+           `<text x="${(x+6).toFixed(1)}" y="${(y+8).toFixed(1)}" class="lc-tick" style="fill:${col}">${tag}</text>`; } }
     const xs=cd.map((_,i)=>X(i));
     const dfmt=t=>{ const dd=new Date(+t); const base=(dd.getUTCMonth()+1)+'/'+dd.getUTCDate();
       return tf==='1d'?base:base+' '+String(dd.getUTCHours()).padStart(2,'0')+':00'; };
@@ -4521,7 +4541,27 @@ async function aiReportChart(coin,c){
         (noteAt[i]?`<br><span style="color:var(--accent)">${esc(noteAt[i])}</span>`:''); });
     s+=`<text x="${pl}" y="${H-6}" class="lc-tick">${dfmt(cd[0][0])}</text><text x="${W-pr}" y="${H-6}" text-anchor="end" class="lc-tick">${dfmt(cd[n-1][0])}</text>`;
     let below='';
-    if(offView.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
+    if(groups.length){
+      const dshort=t=>{ const dd=new Date(+t); return (dd.getUTCMonth()+1)+'/'+dd.getUTCDate(); };
+      const outTxt=it=>{ if(it.kind==='flag'||it.kind==='ctx'||it.kind==='earn') return '';
+        if(it.status==='resolved'&&it.realized!=null){ const u=it.unit==='R'?'R':(it.unit||'');
+          return `<span class="${it.realized>0?'pos':'neg'}">${it.realized>0?'+':''}${it.realized.toFixed(1)}${u}</span>${it.days?` in ${it.days}d`:''}`; }
+        if(it.status==='void') return '<span class="sec">voided</span>';
+        return '<span class="sec">open</span>'; };
+      const rows=groups.map(g=>{ const col=(AI_MK[g.kind]||AI_MK.ctx).col;
+        const gl=g.kind==='short'?'\u25bc':g.kind==='earn'?'\u25c7':(g.kind==='flag'||g.kind==='ctx')?'\u25c6':'\u25b2';
+        const cnt=g.items.length;
+        const body=g.items.map(it=>{ const o=outTxt(it); return esc(it.label)+(o?' \u2014 '+o:''); }).join(' · ');
+        return `<tr><td style="white-space:nowrap;padding:2px 10px 2px 0;color:${col}">${g.key} ${gl} ${dshort(g.t)}${cnt>1?' \u00d7'+cnt:''}</td><td style="padding:2px 0">${body}</td></tr>`; }).join('');
+      below+=`<div class="ai-mkleg">`+
+        `<div class="keys"><span><i style="color:var(--up)">\u25b2</i> long signal (below bar)</span>`+
+        `<span><i style="color:var(--down)">\u25bc</i> short signal (above bar)</span>`+
+        `<span><i style="color:var(--accent)">\u25c6</i> context / positioning</span>`+
+        `<span><i style="color:var(--blue)">\u25c7</i> earnings print</span>`+
+        `<span class="sec">\u00d7N = distinct signal types at onset \u00b7 first fires only \u2014 re-fires inside a run aren\u2019t re-marked</span></div>`+
+        `<table>${rows}</table></div>`;
+    }
+    if(offView.length)    if(offView.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
     if(lineMode) below+=`<div class="sec" style="font-size:11px;margin-top:4px">close-line mode — full candles return automatically as the daily backfill refreshes (warm-cache dailies carry closes only)</div>`;
     box.innerHTML=hoverChart(s,{w:W,h:H,pt,pb,xs,rows})+below;
     attachLineHover();
