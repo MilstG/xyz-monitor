@@ -433,9 +433,13 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sig-bar span{display:block;height:100%;background:var(--accent)}
 
 /* signals v2: track-record strip + confluence cards + playbook lines */
-.recstrip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.recstrip{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:6px;margin-bottom:14px}
 .recstrip .rec{border:1px solid var(--border);background:var(--panel);border-radius:6px;padding:5px 10px;
   font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.recstrip .rec.await{color:var(--faint);border-style:dashed}
+.sig-segs{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-left:auto;flex-shrink:0}
+.sigrec-t tr.await td{color:var(--faint)}
+@media (max-width:680px){ .recstrip{grid-template-columns:1fr} .sig-segs{margin-left:0;justify-content:flex-start} }
 .recstrip .rec b{color:var(--text);margin-right:5px}
 .recstrip .rec.good{border-color:var(--up)}
 .recstrip .rec.bad{border-color:var(--down)}
