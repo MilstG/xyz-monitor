@@ -1014,7 +1014,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div class="dhead">${esc(r.ticker)}
       <span class="star${starred?' on':''}" id="dstar" style="font-size:16px;cursor:pointer">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
-    <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized by Claude into a plain-language read with scenarios and R/R">AI report →</span></div>
+    <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized into a plain-language read with scenarios and R/R">AI report →</span></div>
     ${earnDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>
@@ -4231,7 +4231,7 @@ function renderTreemap(){
 // server-side — the disabled button is convenience, the 429 is the gate.
 HELP.report=`
 <div class="hlp-h">What this is</div>
-<p>One ticker, everything this server holds on it — trend ladder (D1 · H12 · H4), live signals with their frozen claim geometry, this name's own out-of-sample track record, positioning (OI, funding), benchmark decomposition, volatility regime, divergence flags, coverage gaps, and (equities) earnings event risk and sector context — compiled into one context object and synthesized by <b>Claude</b> (Fable, Opus fallback) into a plain-language read.</p>
+<p>One ticker, everything this server holds on it — trend ladder (D1 · H12 · H4), live signals with their frozen claim geometry, this name's own out-of-sample track record, positioning (OI, funding), benchmark decomposition, volatility regime, divergence flags, coverage gaps, and (equities) earnings event risk and sector context — compiled into one context object and synthesized by the configured model — <b>Claude Fable 5</b> or <b>GPT-5.6 Sol</b> depending on which provider key the server carries, with an automatic same-family fallback — into a plain-language read. The card footer names the model that actually produced each report.</p>
 <div class="hlp-h">What the numbers are</div>
 <p>The <b>risk unit</b> is the distance from the price at generation to the void level — when a live claim exists, the void IS that claim's frozen stop (the model cannot move it). Per-scenario <b>R/R</b> and the <b>expected value</b> are computed server-side from the validated levels and probabilities, never taken from the model's prose. Scenario odds are anchored on the name's own base rates; where n is thin, the card says so.</p>
 <div class="hlp-h">Cache &amp; regenerate</div>
@@ -4462,7 +4462,7 @@ async function loadAiRecent(){
     if(!box.isConnected) return;
     state.report.list=d;
     if(!d.reports||!d.reports.length){
-      box.innerHTML=`<div class="dsec">Recent reports · cached for everyone</div><div class="sec" style="font-size:12px">none yet — search a ticker above and generate the first one${d.enabled===false?' (ANTHROPIC_API_KEY is not set on the server)':''}</div>`;
+      box.innerHTML=`<div class="dsec">Recent reports · cached for everyone</div><div class="sec" style="font-size:12px">none yet — search a ticker above and generate the first one${d.enabled===false?' (no AI API key set on the server)':''}</div>`;
       return; }
     const rows=d.reports.map(rep=>{
       const st=rep.status==='fresh'?`fresh · ${aiFmtLeft(rep.regenInMs)} left`:rep.status==='invalidated'?`invalidated — ${esc(rep.invalidReason||'')}`:'stale';
