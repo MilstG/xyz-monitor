@@ -3028,7 +3028,12 @@ function renderSignals(){
   const seg=`<span class="sig-segs"><span class="cdtf-seg"><button type="button" class="cdtf${prOn?' on':''}" data-pr="1" data-tip="show only \u2605 prime setups \u2014 \u226560% hit, positive expectancy, sound structure at fire time \u2014 and switch the stats below to the record of prime claims only">\u2605 prime</button></span>`
     +`<span class="cdtf-seg" data-tip="minimum actionable move: distance from live mark to the playbook target">${mvBtn(0,'')}${mvBtn(0.5,'0.5%')}${mvBtn(1,'1%')}${mvBtn(2,'2%')}</span>`
     +`<span class="cdtf-seg"><button type="button" class="cdtf${view==='detail'?' on':''}" data-sv="detail" data-tip="full cards: readings, base rates, playbooks">detailed</button><button type="button" class="cdtf${view==='compact'?' on':''}" data-sv="compact" data-tip="one row per market \u2014 hover the chips for the full reading and base rate, click a row to expand it">compact</button></span></span>`;
-  const intro=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap" data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge (\u226510 resolved, <50% hit, \u22640 median) get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?)."><span>Live conditions \u00b7 ranked by <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited, out-of-sample record below.${d&&d.count>(d.signals||[]).length?` <span data-tip="the server evaluates every live condition but ships only the highest-scored ${(d.signals||[]).length} \u2014 the tab count is the true number of live conditions right now, this list is its top slice">Top <b>${(d.signals||[]).length}</b> of <b>${d.count}</b> shown.</span>`:''}</span>${seg}</div>`;
+  // One control row (build -69): the static history search/dropdown, the intro text, and the
+  // prime/move/view segments all share the line — rendered into static slots so the inputs
+  // keep their state across re-renders.
+  { const it=el('sig-introtxt'); if(it) it.innerHTML=`<span data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?).">Live conditions \u00b7 <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited${d&&d.count>(d.signals||[]).length?` \u00b7 top <b>${(d.signals||[]).length}</b> of <b>${d.count}</b>`:''}</span>`;
+    const sl=el('sig-segslot'); if(sl&&sl.innerHTML!==seg){ sl.innerHTML=seg; bindSigControls(sl); } }
+  const intro='';
   let rec='';
   const rsTop=(d&&d.records&&d.records[String(mvThr)+(prOn?'p':'')])||d||{};
   const recSrc=rsTop.record||{};
@@ -3068,7 +3073,7 @@ function renderSignals(){
     }
   }
   if(!d||!d.signals||!d.signals.length){
-    box.innerHTML=intro+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+rec+sigRecordHtml(d);
+    box.innerHTML=intro+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
     bindSigControls(box); return;
   }
   let hiddenN=0;
@@ -3080,7 +3085,7 @@ function renderSignals(){
   for(const g of sigs){ if(byCoin[g.coin]){ byCoin[g.coin].sigs.push(g); byCoin[g.coin].score=Math.max(byCoin[g.coin].score,g.score); }
     else { byCoin[g.coin]={coin:g.coin,ticker:g.ticker,score:g.score,sigs:[g]}; groups.push(byCoin[g.coin]); } }
   if((mvThr>0||prOn)&&!groups.length){
-    box.innerHTML=intro+`<div class="msg">All ${hiddenN} live signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (no prime setups firing'+(mvThr>0?' at this size':'')+')':''}.</div>`+rec+sigRecordHtml(d);
+    box.innerHTML=intro+`<div class="msg">All ${hiddenN} live signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (no prime setups firing'+(mvThr>0?' at this size':'')+')':''}.</div>`+sigRecordHtml(d)+rec;
     bindSigControls(box); attachLineHover(); return;
   }
   const main=groups.filter(g=>g.score>=35), low=groups.filter(g=>g.score<35);
@@ -3094,7 +3099,7 @@ function renderSignals(){
   }
   s+='</div>';
   if(hiddenN>0) s+=`<div class="sec" style="font-size:10.5px;padding:6px 2px" data-tip="signals whose playbook target is closer than the active threshold, or which have no computable target">${hiddenN} signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (prime-only)':''}</div>`;
-  s+=rec+sigRecordHtml(d);
+  s+=sigRecordHtml(d)+rec;
   box.innerHTML=s;
   bindSigControls(box);
   attachLineHover();
