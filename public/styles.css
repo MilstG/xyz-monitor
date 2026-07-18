@@ -696,3 +696,8 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 @media (max-width:680px){ .ai-scen{grid-template-columns:1fr auto auto;font-size:11px} .ai-scen .bar{display:none} .ai-scen .h.b{display:none} }
 .ai-scen.norisk{grid-template-columns:minmax(140px,auto) 1fr auto}
 @media (max-width:680px){ .ai-scen.norisk{grid-template-columns:1fr auto} }
+.ai-act{display:flex;gap:18px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--grid);border-radius:6px;padding:9px 14px;font-family:var(--mono);font-size:12.5px}
+.ai-act .cell{display:flex;flex-direction:column;gap:2px}
+.ai-act .cell .k{color:var(--faint);font-size:9.5px;text-transform:uppercase;letter-spacing:.8px}
+.ai-act.muted{background:transparent}
+.ai-tf{cursor:pointer}

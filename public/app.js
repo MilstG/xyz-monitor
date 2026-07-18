@@ -98,7 +98,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
   watch:new Set(), watchOnly:false, detail:null,
-  report:{ coin:null, data:null, list:null, gen:false, tick:null },   // AI analyst report tab
+  report:{ coin:null, data:null, list:null, gen:false, tick:null, tf:'1d' },   // AI analyst report tab
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
@@ -4360,7 +4360,7 @@ function renderAiReport(d,coin){
       ${aiBiasBadge(d)}</div>
     <div class="dsec">The picture in one paragraph</div>
     <div class="ai-syn">${esc(d.ai.synthesis)}</div>
-    <div class="dsec">Daily chart · key levels and events marked</div>
+    ${aiChartTfSeg(coin,c)}
     <div id="ai-chart"><div class="msg" style="padding:14px 0">loading candles…</div></div>
     <div class="dsec">What the data says</div>
     <table class="ai-ev">${ev}</table>
@@ -4368,6 +4368,7 @@ function renderAiReport(d,coin){
     <div class="dsec">Track record on this name</div>
     <div id="ai-claims" class="sec" style="font-size:12px">loading claim history…</div>
     ${(flags||covHtml)?`<div class="dsec">Flags</div>${flags}${covHtml}`:''}
+    ${aiActionHtml(c)}
     <div class="dsec">Scenarios${c.riskPct!=null?` · risk unit = distance to ${fmtPrice(c.voidLevel)} (\u2212${c.riskPct.toFixed(1)}%)`:''}</div>
     <div class="ai-scen${hasRisk?'':' norisk'}"><span class="h">scenario</span><span class="h b"></span><span class="h">odds</span>${hasRisk?'<span class="h">r/r</span><span class="h">payoff</span>':''}${scen}</div>
     <div class="ai-evbox">${evBox}</div>
@@ -4379,9 +4380,33 @@ function renderAiReport(d,coin){
       <button class="btn" id="ai-regen" ${d.canRegen?'':'disabled'} title="${d.canRegen?'compile fresh data and regenerate for everyone':'unlocks on TTL expiry or material change (new claim · claim resolved · earnings print)'}">regenerate</button>
     </div>`;
   const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
+  box.querySelectorAll('[data-aitf]').forEach(el2=>el2.addEventListener('click',()=>{
+    state.report.tf=el2.dataset.aitf;
+    box.querySelectorAll('[data-aitf]').forEach(x=>x.classList.toggle('on',x===el2));
+    const hd=el2.closest('.dsec'); if(hd) hd.firstChild.textContent=(state.report.tf==='1d'?'Daily':state.report.tf==='12h'?'12-hour':'4-hour')+' chart · key levels and events marked';
+    aiReportChart(coin,c); }));
   if(state.report.gen) renderAiGenState(coin,true);
   aiReportChart(coin,c);
   aiLoadClaims(coin);
+}
+function aiActionHtml(c){
+  const a=c&&c.action; if(!a) return '';
+  if(a.stance==='enter_now'||a.stance==='enter_on_pullback'){
+    const sideCol=a.side==='short'?'var(--down)':'var(--up)';
+    return `<div class="dsec">If you act on this · mechanical plan, not advice</div>
+    <div class="ai-act">
+      <span class="cell"><span class="k">side</span><b style="color:${sideCol}">${esc((a.side||'').toUpperCase())}</b></span>
+      <span class="cell"><span class="k">entry</span><b>${a.entryIsMarket?fmtPrice(a.entry)+' <i class="sec">(market)</i>':fmtPrice(a.entry)+' <i class="sec">(pullback)</i>'}</b></span>
+      <span class="cell"><span class="k">stop / void</span><b class="neg">${fmtPrice(a.stop)}</b> <i class="sec">(−${a.riskPct!=null?a.riskPct.toFixed(1):'—'}%)</i></span>
+      <span class="cell"><span class="k">target</span><b class="pos">${fmtPrice(a.target)}</b></span>
+      <span class="cell"><span class="k">r/r</span><b>${a.rr!=null?a.rr.toFixed(1)+' : 1':'—'}</b></span>
+      <span class="cell"><span class="k">ev</span><b class="${a.evR>0?'pos':'neg'}">${a.evR>0?'+':''}${a.evR!=null?a.evR.toFixed(2):'—'}R</b></span>
+    </div>${a.note?`<div class="sec" style="font-size:12px;line-height:1.6;margin-top:4px">${esc(a.note)}</div>`:''}`;
+  }
+  const lbl=a.stance==='take_profit'?'Take profit':a.stance==='no_trade'?'No trade':'Wait';
+  return `<div class="dsec">If you act on this · mechanical plan, not advice</div>
+    <div class="ai-act muted"><span class="cell"><span class="k">stance</span><b style="color:var(--accent)">${lbl.toUpperCase()}</b></span>
+    <span style="font-size:12px;line-height:1.6;align-self:center">${esc(a.note||'the odds and geometry don\u2019t support an entry here')}${a.downgraded?' <i class="sec" data-tip="the model proposed an entry, but the expected value at that entry was not positive — the server downgraded it rather than shipping a losing plan">(server-downgraded)</i>':''}</span></div>`;
 }
 async function aiLoadClaims(coin){
   const box=el('ai-claims'); if(!box) return;
@@ -4399,57 +4424,59 @@ async function aiLoadClaims(coin){
     const fh=el('ai-fullhist'); if(fh) fh.onclick=()=>openSigHistory(d.ticker||coin);
   }catch(_){ box.innerHTML='<span class="sec">claim history unavailable</span>'; }
 }
+function aiChartTfSeg(coin,c){
+  const cur=state.report.tf||'1d';
+  return `<div class="dsec" style="display:flex;align-items:center;gap:8px">${cur==='1d'?'Daily':cur==='12h'?'12-hour':'4-hour'} chart · key levels and events marked<span class="cdtf-seg" style="margin-left:auto">${['1d','12h','4h'].map(t=>`<button class="cdtf ai-tf${t===cur?' on':''}" data-aitf="${t}">${t.toUpperCase()}</button>`).join('')}</span></div>`;
+}
 async function aiReportChart(coin,c){
   const box=el('ai-chart'); if(!box) return;
+  const tf=state.report.tf||'1d';
   try{
-    const d=await fetchJSON('/api/candles?coin='+encodeURIComponent(coin)+'&tf=1d');
-    if(!box.isConnected) return;
-    const cd=(d.candles||[]).slice(-92);
-    if(cd.length<10){ box.innerHTML='<div class="msg" style="padding:14px 0">not enough daily candles yet — the series is still filling server-side</div>'; return; }
+    const d=await fetchJSON('/api/candles?coin='+encodeURIComponent(coin)+'&tf='+tf);
+    if(!box.isConnected||((state.report.tf||'1d')!==tf)) return;
+    const SHOW=tf==='1d'?92:tf==='12h'?110:120;
+    const cd=(d.candles||[]).slice(-SHOW);
+    if(cd.length<10){ box.innerHTML='<div class="msg" style="padding:14px 0">not enough '+tf+' candles yet — the series is still filling server-side</div>'; return; }
     const px=d.px!=null&&isFinite(d.px)?+d.px:null;
     const closes=cd.map(k=>+k[4]); if(px!=null) closes[closes.length-1]=px;   // live mark drives the forming bar, matching the ladder
-    const e21=[]; { const k2=2/22; let e=closes[0]; for(let i=0;i<closes.length;i++){ e=i===0?closes[0]:closes[i]*k2+e*(1-k2); e21.push(e); } }
+    const emaW=(N)=>{ const out=[],k2=2/(N+1); let e=closes[0]; for(let i=0;i<closes.length;i++){ e=i===0?closes[0]:closes[i]*k2+e*(1-k2); out.push(e); } return out; };
+    const e13=emaW(13), e21=emaW(21);
     const levels=(c&&c.levels)||[], marks=(c&&c.marks)||[], flags=(c&&c.flags)||[];
-    // Warm-cache detection: after a redeploy equity dailies restore as closes-only until the next
-    // backfill. Per-bar tick fallback on a WHOLE series reads as confetti — a close line is the
-    // honest, readable rendering of a closes-only series. Mixed series keep candles with per-bar ticks.
     const noOHLC=cd.filter(k=>k[1]==null||!isFinite(+k[1])).length;
-    const lineMode=noOHLC>cd.length/3;
+    const lineMode=noOHLC>cd.length/3;   // deep fallback only — the server now rebuilds daily OHLC from the hourly spine
     const W=640,H=300,pl=6,pr=56,pt=10,pb=20,n=cd.length;
-    // Domain from PRICE ACTION ONLY — a far level must never squash three months of candles into
-    // a corner (the 60d-range-low failure). Levels outside the padded domain are listed under the
-    // chart instead of stretching it.
+    // Domain from PRICE ACTION ONLY — a far level never squashes the candles; off-domain levels
+    // are listed under the chart instead of stretching it.
     let lo=Infinity,hi=-Infinity;
     for(const k of cd){ const l=k[3]!=null&&isFinite(+k[3])?+k[3]:+k[4], h=k[2]!=null&&isFinite(+k[2])?+k[2]:+k[4]; if(l<lo)lo=l; if(h>hi)hi=h; }
     if(px!=null){ if(px<lo)lo=px; if(px>hi)hi=px; }
     const span0=hi-lo;
-    for(const l of levels){ if(l.value>=lo-span0*0.12&&l.value<=hi+span0*0.12){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; } }   // near-domain levels may nudge, never stretch
+    for(const l of levels){ if(l.value>=lo-span0*0.12&&l.value<=hi+span0*0.12){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; } }
     const pad=(hi-lo)*0.05; hi+=pad; lo-=pad;
     const inView=v=>v>=lo&&v<=hi;
     const offView=levels.filter(l=>!inView(l.value));
     const X=i=>pl+(i+0.5)/n*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
-    // span-aware axis format: one precision for the whole axis, chosen from the tick step —
-    // never "80.000" next to "140.00"
     const ticks=lcTicks(lo,hi,4);
     const step=ticks.length>1?ticks[1]-ticks[0]:(hi-lo)/4;
     const axDec=step>=1?(step>=10?0:1):Math.min(6,Math.max(0,Math.ceil(-Math.log10(step))+1));
     const axf=v=>v.toFixed(axDec);
-    const bw=Math.max(2.4,Math.min(6,(W-pl-pr)/n*0.62));
+    const bw=Math.max(2.2,Math.min(6,(W-pl-pr)/n*0.62));
     let s='';
     for(const v of ticks){ const y=Y(v).toFixed(1);
       s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${axf(v)}</text>`; }
-    // zone band first (under everything)
     const zl=levels.find(l=>l.kind==='zone_low'), zh=levels.find(l=>l.kind==='zone_high');
     if(zl&&zh&&inView(zl.value)&&inView(zh.value)){ let zt=Y(Math.max(zl.value,zh.value)), zb=Y(Math.min(zl.value,zh.value));
       s+=`<rect x="${pl}" y="${zt.toFixed(1)}" width="${W-pl-pr}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--accent)" fill-opacity="0.06" stroke="var(--accent)" stroke-opacity="0.45" stroke-dasharray="3 3"/>`; }
-    // level LINES at their true y; LABELS collision-staggered afterward so clustered levels stay readable
     const lineLv=levels.filter(l=>l.kind!=='zone_low'&&l.kind!=='zone_high'&&inView(l.value));
     for(const l of lineLv){ const col=l.kind==='void'?'var(--down)':l.kind==='target'?'var(--up)':'var(--muted)';
       s+=`<line x1="${pl}" y1="${Y(l.value).toFixed(1)}" x2="${W-pr}" y2="${Y(l.value).toFixed(1)}" stroke="${col}" stroke-dasharray="5 4"/>`; }
-    // EMA21 ribbon line
-    s+=(()=>{ let p2=''; for(let i=0;i<n;i++){ p2+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(e21[i]).toFixed(1)+' '; } return `<path d="${p2}" fill="none" stroke="var(--blue)" stroke-width="1.4" stroke-opacity="0.85"/>`; })();
+    // EMA 13/21 ribbon: band fill between the two, then both lines — same visual language as the trend modal
+    { let up='',dn=''; for(let i=0;i<n;i++){ up+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(e13[i]).toFixed(1)+' '; }
+      for(let i=n-1;i>=0;i--){ dn+='L'+X(i).toFixed(1)+' '+Y(e21[i]).toFixed(1)+' '; }
+      s+=`<path d="${up}${dn}Z" fill="var(--blue)" fill-opacity="0.08"/>`;
+      let p13='',p21=''; for(let i=0;i<n;i++){ p13+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(e13[i]).toFixed(1)+' '; p21+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(e21[i]).toFixed(1)+' '; }
+      s+=`<path d="${p13}" fill="none" stroke="var(--blue)" stroke-width="1.1" stroke-opacity="0.75"/><path d="${p21}" fill="none" stroke="var(--blue)" stroke-width="1.4" stroke-opacity="0.9"/>`; }
     if(lineMode){
-      // closes-only warm state: a proper close polyline in the text color, EMA under it
       let p2=''; for(let i=0;i<n;i++){ const cc=i===n-1&&px!=null?px:closes[i]; p2+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(cc).toFixed(1)+' '; }
       s+=`<path d="${p2}" fill="none" stroke="var(--text)" stroke-width="1.6"/>`;
     } else {
@@ -4461,8 +4488,6 @@ async function aiReportChart(coin,c){
         const y0=Y(Math.max(+o,cc)), hh=Math.max(1.2,Math.abs(Y(+o)-Y(cc)));
         s+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"${up?' fill-opacity="0.85"':''}/>`; }
     }
-    // staggered level labels: sorted by y, pushed apart to a 15px minimum, clamped to the plot —
-    // four clustered levels render as four readable lines instead of a strikethrough pile
     { const labs=lineLv.map(l=>({l, y:Y(l.value)})).sort((a,b)=>a.y-b.y);
       for(let i=1;i<labs.length;i++) if(labs[i].y-labs[i-1].y<15) labs[i].y=labs[i-1].y+15;
       for(let i=labs.length-1;i>=0;i--){ const max=H-pb-4-(labs.length-1-i)*15; if(labs[i].y>max) labs[i].y=max; }
@@ -4470,8 +4495,8 @@ async function aiReportChart(coin,c){
       for(const {l,y} of labs){ const col=l.kind==='void'?'var(--down)':l.kind==='target'?'var(--up)':'var(--muted)';
         const ty=Math.max(pt+10,Math.min(H-pb-3,y-4));
         s+=`<text x="${pl+6}" y="${ty.toFixed(1)}" class="lc-tick" style="fill:${col};paint-order:stroke;stroke:var(--panel);stroke-width:3.5px">${fmtPrice(l.value)} — ${esc(l.label)}</text>`; } }
-    // marks: clustered — neighbouring fires collapse into one glyph with a count, details on hover
-    const nearIdx=t=>{ let bi=0,bd=Infinity; for(let i=0;i<n;i++){ const dd=Math.abs(+cd[i][0]-t); if(dd<bd){bd=dd;bi=i;} } return bd<=2*86400000?bi:null; };
+    const tfMs=tf==='1d'?86400000:tf==='12h'?43200000:14400000;
+    const nearIdx=t=>{ let bi=0,bd=Infinity; for(let i=0;i<n;i++){ const dd=Math.abs(+cd[i][0]-t); if(dd<bd){bd=dd;bi=i;} } return bd<=2*tfMs?bi:null; };
     const noteAt={}, glyphs=[];
     const addGlyph=(i,kind,label)=>{ noteAt[i]=(noteAt[i]?noteAt[i]+' · ':'')+label;
       const near=glyphs.find(g=>g.kind===kind&&Math.abs(g.i-i)<=1);
@@ -4486,12 +4511,13 @@ async function aiReportChart(coin,c){
         s+=`<text x="${(x-4).toFixed(1)}" y="${y.toFixed(1)}" style="fill:var(--accent);font-size:11px">\u25c6</text>`; }
       else { const y=Math.min(H-pb-12,Y(lowV)+9);
         s+=`<path d="M${x.toFixed(1)} ${y.toFixed(1)} l-4.4 8 l8.8 0 z" fill="var(--blue)"/>`; }
-      if(g.count>1) s+=`<text x="${(x+6).toFixed(1)}" y="${(g.kind==='flag'?Math.max(pt+12,Y(hiV)-7):Math.min(H-pb-4,Y(lowV)+19)).toFixed(1)}" class="lc-tick" style="fill:var(--blue)">\u00d7${g.count}</text>`; }
+      if(g.count>1) s+=`<text x="${(x+6).toFixed(1)}" y="${Math.min(H-pb-4,Y(lowV)+19).toFixed(1)}" class="lc-tick" style="fill:var(--blue)">\u00d7${g.count}</text>`; }
     const xs=cd.map((_,i)=>X(i));
-    const dfmt=t=>{ const dd=new Date(+t); return (dd.getUTCMonth()+1)+'/'+dd.getUTCDate(); };
+    const dfmt=t=>{ const dd=new Date(+t); const base=(dd.getUTCMonth()+1)+'/'+dd.getUTCDate();
+      return tf==='1d'?base:base+' '+String(dd.getUTCHours()).padStart(2,'0')+':00'; };
     const rows=cd.map((k,i)=>{ const o=k[1],cc=i===n-1&&px!=null?px:+k[4];
       const body=o!=null&&isFinite(+o)?`O ${fmtPrice(+o)} · H ${fmtPrice(+k[2])}<br>L ${fmtPrice(+k[3])} · C ${fmtPrice(cc)}`:`C ${fmtPrice(cc)} <span class="sec">(close-only bar)</span>`;
-      return `<b style="color:var(--text)">${dfmt(k[0])}</b><br>${body}<br><span style="color:var(--blue)">EMA21 ${fmtPrice(e21[i])}</span>`+
+      return `<b style="color:var(--text)">${dfmt(k[0])}</b><br>${body}<br><span style="color:var(--blue)">EMA13 ${fmtPrice(e13[i])} · EMA21 ${fmtPrice(e21[i])}</span>`+
         (noteAt[i]?`<br><span style="color:var(--accent)">${esc(noteAt[i])}</span>`:''); });
     s+=`<text x="${pl}" y="${H-6}" class="lc-tick">${dfmt(cd[0][0])}</text><text x="${W-pr}" y="${H-6}" text-anchor="end" class="lc-tick">${dfmt(cd[n-1][0])}</text>`;
     let below='';
