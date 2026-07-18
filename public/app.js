@@ -98,6 +98,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
   watch:new Set(), watchOnly:false, detail:null,
+  report:{ coin:null, data:null, list:null, gen:false, tick:null },   // AI analyst report tab
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
@@ -1013,7 +1014,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div class="dhead">${esc(r.ticker)}
       <span class="star${starred?' on':''}" id="dstar" style="font-size:16px;cursor:pointer">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
-    <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 31d history':''}</div>
+    <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized by Claude into a plain-language read with scenarios and R/R">AI report →</span></div>
     ${earnDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>
@@ -1046,6 +1047,13 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   loadDrawerSeries(coin);
   loadDrawerCandles(coin);
   loadDrawerLedger(coin);
+  { const dai=el('dai'); if(dai){ dai.onclick=()=>{ closeDetail(); openAiReport(coin); };
+    // state-aware label: annotate with the shared cache's age so the group knows a read exists
+    fetchJSON('/api/ai-report?coin='+encodeURIComponent(coin)).then(d=>{
+      if(state.detail!==coin||!dai.isConnected||!d||d.status==='none') return;
+      const age=d.ageMs!=null?(d.ageMs>=3600000?(d.ageMs/3600000).toFixed(0)+'h':(Math.max(1,Math.round(d.ageMs/60000)))+'m'):null;
+      dai.textContent='AI report'+(d.status==='fresh'&&age?` (cached ${age} ago)`:d.status==='invalidated'?' (outdated)':' (stale)')+' \u2192';
+    }).catch(()=>{}); } }
 }
 // 30d overnight-effect decomposition for one name: total return vs the compounded off-hours
 // (close→open) leg, session = the residual. Built entirely from data already shipped to the
@@ -1415,7 +1423,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
-  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings'||h==='trend') showView(h); }
+  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings'||h==='trend'||h==='report') showView(h); }
 let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
@@ -2157,19 +2165,18 @@ function setScope(v){
 }
 function applyScope(){
   const cr=state.scope==='crypto';
-  // Trend stays visible in crypto scope (the only tab besides Markets that does) — it follows
-  // the scope switcher, rendering the active universe's board like the Markets table does.
-  // Trend stays visible in crypto scope (the only tab besides Markets that does) — it follows
-  // the scope switcher, rendering the active universe's board like the Markets table does.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend'; });
+  // Trend and Report stay visible in crypto scope (the only tabs besides Markets that do) —
+  // Trend follows the scope switcher like the Markets table; Report is universe-tagged per
+  // ticker, so the same tab serves both universes regardless of scope.
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(cr && state.view!=='markets' && state.view!=='trend') { showView('markets'); }
+  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report') { showView('markets'); }
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend') v='markets';   // crypto scope: Markets + Trend only (Trend carries both universes)
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report') v='markets';   // crypto scope: Markets + Trend + Report (the latter two carry both universes)
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -2182,12 +2189,14 @@ function showView(v){
   setHidden('view-signals', v!=='signals');
   setHidden('view-earnings', v!=='earnings');
   setHidden('view-backtest', v!=='backtest');
+  setHidden('view-report', v!=='report');
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
   if(v==='corr') openCorr();
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
+  if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
 }
@@ -4212,3 +4221,258 @@ function renderTreemap(){
     if(UC_DEBUG){ updateBadge(); setInterval(updateBadge, 4000); }   // re-checks as snapshots refresh (~15s server-side)
   });
 })();
+
+// ===== AI analyst report (Report tab) ==========================================================
+// Client for /api/ai-report: universe-validated ticker search, the report card, an annotated
+// daily candle chart, and the shared recent-reports feed. Contract mirrors the server: this is a
+// synthesis layer that READS the ledger — every number on the card (R/R, EV, risk) arrives
+// pre-computed server-side from validated levels; the chart is drawn HERE from /api/candles and
+// the server's level list, so it cannot disagree with the data. Regenerate is cooldown-gated
+// server-side — the disabled button is convenience, the 429 is the gate.
+HELP.report=`
+<div class="hlp-h">What this is</div>
+<p>One ticker, everything this server holds on it — trend ladder (D1 · H12 · H4), live signals with their frozen claim geometry, this name's own out-of-sample track record, positioning (OI, funding), benchmark decomposition, volatility regime, divergence flags, coverage gaps, and (equities) earnings event risk and sector context — compiled into one context object and synthesized by <b>Claude</b> (Fable, Opus fallback) into a plain-language read.</p>
+<div class="hlp-h">What the numbers are</div>
+<p>The <b>risk unit</b> is the distance from the price at generation to the void level — when a live claim exists, the void IS that claim's frozen stop (the model cannot move it). Per-scenario <b>R/R</b> and the <b>expected value</b> are computed server-side from the validated levels and probabilities, never taken from the model's prose. Scenario odds are anchored on the name's own base rates; where n is thin, the card says so.</p>
+<div class="hlp-h">Cache &amp; regenerate</div>
+<p>Reports are cached for <i>everyone</i> — one generation serves the whole group. Regenerate unlocks when the TTL expires or on material change (a new claim opened, a claim resolved, an earnings print landed); the reason shows on the card. The cooldown is enforced server-side, so the cache is the group's rate limit by construction.</p>
+<div class="hlp-h">What this is not</div>
+<p>Not a ledger signal. The report has no frozen side/void/target geometry of its own and never enters the track record — it reads the ledger, it cannot write to it.</p>`;
+function aiFmtLeft(ms){ if(ms==null||ms<=0) return ''; return ms>=3600000?(ms/3600000).toFixed(1)+'h':Math.max(1,Math.round(ms/60000))+'m'; }
+function aiMatches(qs){ qs=(qs||'').trim().toUpperCase(); if(!qs) return [];
+  const out=[];
+  for(const r of state.rows.values()){ if(r.delisted) continue;
+    const tk=(r.ticker||'').toUpperCase(), cn=(r.coin||'').toUpperCase();
+    if(tk.startsWith(qs)||cn.startsWith(qs)) out.push({r,rank:0});
+    else if(tk.includes(qs)) out.push({r,rank:1}); }
+  out.sort((a,b)=>(a.rank-b.rank)||((b.r.vol||0)-(a.r.vol||0)));
+  return out.slice(0,8).map(x=>x.r); }
+function aiRenderSug(list){ const box=el('ai-sug'); if(!box) return;
+  if(!list.length){ box.innerHTML='<div class="none">no match in the live universe — only universe tickers can be searched</div>'; box.hidden=false; return; }
+  box.innerHTML=list.map((r,i)=>`<div class="row${i===0?' sel':''}" data-coin="${esc(r.coin)}"><span>${esc(r.ticker||r.coin)}</span><span class="u">${r.uni==='main'?'crypto':'stocks'}</span></div>`).join('');
+  box.hidden=false;
+  box.querySelectorAll('.row').forEach(el2=>el2.addEventListener('mousedown',ev=>{ ev.preventDefault(); aiPick(el2.dataset.coin); })); }
+function aiPick(coin){ const box=el('ai-sug'); if(box) box.hidden=true;
+  const r=state.rows.get(coin); const q=el('ai-q'); if(q&&r) q.value=r.ticker||coin;
+  state.report.coin=coin; loadAiReport(coin); }
+function openAiReport(coin){ state.report.coin=coin; showView('report');
+  const r=state.rows.get(coin), q=el('ai-q'); if(q&&r) q.value=r.ticker||coin;
+  loadAiReport(coin); }
+function openReportView(){
+  const q=el('ai-q');
+  if(q&&!q.dataset.wired){ q.dataset.wired='1';
+    q.addEventListener('input',()=>{ const v=q.value; if(!v.trim()){ el('ai-sug').hidden=true; return; } aiRenderSug(aiMatches(v)); });
+    q.addEventListener('keydown',e=>{
+      const box=el('ai-sug');
+      if(e.key==='Escape'){ box.hidden=true; return; }
+      if(e.key==='Enter'){ const sel=box&&!box.hidden?box.querySelector('.row.sel')||box.querySelector('.row'):null;
+        if(sel) aiPick(sel.dataset.coin);
+        else { const m=aiMatches(q.value); if(m.length) aiPick(m[0].coin); }
+        return; }
+      if((e.key==='ArrowDown'||e.key==='ArrowUp')&&box&&!box.hidden){ e.preventDefault();
+        const rows=[...box.querySelectorAll('.row')]; if(!rows.length) return;
+        let i=rows.findIndex(x=>x.classList.contains('sel')); i=(i+(e.key==='ArrowDown'?1:-1)+rows.length)%rows.length;
+        rows.forEach((x,j)=>x.classList.toggle('sel',j===i)); } });
+    q.addEventListener('blur',()=>{ setTimeout(()=>{ const b=el('ai-sug'); if(b) b.hidden=true; },150); }); }
+  const note=el('ai-note'); if(note) note.textContent='everything the server holds on one name, synthesized by Claude — cached for the whole group; regenerate unlocks on TTL or material change';
+  if(state.report.coin) loadAiReport(state.report.coin); else { const p=el('ai-report'); if(p) p.hidden=true; }
+  loadAiRecent();
+  if(!state.report.tick) state.report.tick=setInterval(()=>{ const v=el('view-report');
+    if(!v||v.hidden) return;
+    loadAiRecent();
+    if(state.report.coin&&!state.report.gen) loadAiReport(state.report.coin,true); },60000);
+}
+async function loadAiReport(coin,quiet){
+  const box=el('ai-report'); if(!box) return;
+  if(!quiet){ box.hidden=false; box.innerHTML='<div class="msg">Loading report…</div>'; }
+  try{ const d=await fetchJSON('/api/ai-report?coin='+encodeURIComponent(coin));
+    if(state.report.coin!==coin) return;
+    const prev=state.report.data;
+    state.report.data=d;
+    // quiet tick: repaint only when something the card shows actually changed (a new generation,
+    // or the freshness state flipping) — a full innerHTML swap mid-read resets chart hover/scroll
+    if(quiet&&prev&&prev.ts===d.ts&&prev.status===d.status) return;
+    renderAiReport(d,coin); }
+  catch(e){ if(!quiet) box.innerHTML=`<div class="msg err">report load failed — ${esc(e.message)}</div>`; }
+}
+async function aiRegenerate(coin){
+  if(state.report.gen) return; state.report.gen=true; renderAiGenState(coin,true);
+  try{
+    const r=await fetch('/api/ai-report',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({coin})});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok&&d.ok){ state.report.data=d.report; if(state.report.coin===coin) renderAiReport(d.report,coin); loadAiRecent(); pushToast('AI report generated — cached for everyone'); }
+    else if(r.status===429){ pushToast('On cooldown — regenerate unlocks in '+aiFmtLeft(d.regenInMs)+' (or on material change)'); if(d.report&&state.report.coin===coin){ state.report.data=d.report; renderAiReport(d.report,coin); } }
+    else pushToast('Generation failed — '+(d.error||('HTTP '+r.status)));
+  }catch(e){ pushToast('Generation failed — '+e.message); }
+  state.report.gen=false; if(state.report.coin===coin) renderAiGenState(coin,false);
+}
+function renderAiGenState(coin,on){ const b=el('ai-regen'); if(!b) return;
+  if(on){ b.disabled=true; b.innerHTML='<span class="ai-gen"><span class="sdot"></span>generating…</span>'; }
+  else { b.disabled=false; b.textContent='regenerate'; } }
+function aiBiasBadge(d){ const cls=d.ai.bias==='short'?'short':d.ai.bias==='neutral'?'neutral':'';
+  const warn=d.ai.eventRisk?' warn':'';
+  return `<span class="ai-badge ${cls}${warn}">${esc(d.ai.headline)}</span>`; }
+function renderAiReport(d,coin){
+  const box=el('ai-report'); if(!box) return; box.hidden=false;
+  const r=state.rows.get(coin);
+  const tk=(d&&d.ticker)||(r&&r.ticker)||coin;
+  const uni=(d&&d.uni)||(r&&r.uni==='main'?'crypto':'stocks');
+  if(!d||d.status==='none'){
+    box.innerHTML=`<div class="ai-head"><span class="tk">${esc(tk)}</span><span class="sec">${uni} universe</span>${r&&r.px!=null?`<span class="px">${fmtPrice(r.px)}</span>`:''}</div>`+
+      `<div class="msg" style="padding:26px 10px">No report for this name yet.${d&&d.enabled===false?'<br><span class="sec" style="font-size:12px">ANTHROPIC_API_KEY is not set on the server — generation is disabled.</span>':' The first generation is cached for the whole group.'}</div>`+
+      (d&&d.enabled!==false?`<div style="text-align:center;padding-bottom:12px"><button class="btn" id="ai-regen">generate report</button></div>`:'');
+    const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
+    return;
+  }
+  const c=d.computed||{}, livePx=r&&r.px!=null?r.px:c.px0;
+  const chg=r&&r.d1!=null&&isFinite(r.d1)?`<span class="${r.d1>=0?'pos':'neg'}">${r.d1>=0?'+':''}${(+r.d1).toFixed(2)}% today</span>`:'';
+  const stateLine=d.status==='fresh'?`<span class="pos">fresh</span> · regenerate in ${aiFmtLeft(d.regenInMs)}`
+    :d.status==='invalidated'?`<span style="color:var(--accent)">invalidated — ${esc(d.invalidReason||'material change')}</span>`
+    :'<span class="sec">stale</span>';
+  const ev=(d.ai.evidence||[]).map(e2=>`<tr><td class="k">${esc(e2.k)}</td><td>${esc(e2.v)}</td></tr>`).join('');
+  const scen=(c.scenarios||[]).map(s=>{
+    const col=s.kind==='target'?'var(--up)':s.kind==='void'?'var(--down)':'var(--accent)';
+    const rr=s.kind==='target'&&s.rr!=null?s.rr.toFixed(1)+' : 1':s.kind==='void'?'stop':'—';
+    const pay=s.payoffR==null?'—':s.kind==='event'?'<span class="sec" data-tip="the print decides — treated as a coin flip; contributes 0 to EV by construction">coin-flip</span>'
+      :`<span class="${s.payoffR>0?'pos':s.payoffR<0?'neg':'sec'}">${s.payoffR>0?'+':''}${s.payoffR.toFixed(1)}R</span>`;
+    const tip=esc((s.note||'')+(s.target!=null?` · level ${fmtPrice(s.target)}`:''));
+    return `<span class="nm" style="color:${col}" data-tip="${tip}">${esc(s.name)}</span>`+
+      `<div class="bar"><i style="width:${Math.round(s.p*100)}%;background:${col};opacity:.55"></i></div>`+
+      `<span>${Math.round(s.p*100)}%</span><span>${rr}</span><span>${pay}</span>`; }).join('');
+  const flags=(c.flags||[]).map(f=>`<div class="ai-flag"><b style="color:var(--accent)">\u25c6 ${esc(f.kind.replace(/_/g,' '))}</b> — ${esc(f.txt)}${f.t?` <span class="sec">(${shDate(f.t)})</span>`:''}</div>`).join('');
+  const cov=c.coverage||null;
+  const covGaps=cov?[].concat((cov.oiGaps||[]).map(g=>`OI sampling gap ${shDate(g.from)} \u2192 ${shDate(g.to)} (${g.hours}h) — positioning stats exclude it`),
+    (cov.hourlyGaps||[]).map(g=>`price-spine gap ${shDate(g.from)} \u2192 ${shDate(g.to)} (${g.hours}h)`)):[];
+  const covHtml=cov?`<div class="ai-flag">${covGaps.length?covGaps.map(t=>`<div><b class="sec">\u25c7 coverage</b> — ${esc(t)}</div>`).join(''):`<div><b class="sec">\u25c7 coverage</b> — no gaps in the ${cov.windowDays}d window</div>`}</div>`:'';
+  const inv=(d.ai.invalidations||[]).map(s=>`· ${esc(s)}`).join('<br>');
+  const evBox=c.evR!=null
+    ?`Expected value \u2248 <b class="${c.evR>0?'pos':c.evR<0?'neg':'sec'}">${c.evR>0?'+':''}${c.evR.toFixed(2)}R</b> per unit risked · risk unit = distance to the void at ${fmtPrice(c.voidLevel)} (${c.riskPct!=null?'\u2212'+c.riskPct.toFixed(1)+'%':'\u2014'} from the mark at generation)${c.correctedVoid?' · <span data-tip="the model proposed a different void; the server overwrote it with the live claim\u2019s frozen stop — geometry is never model-controlled">void pinned to the frozen claim stop</span>':''}`
+    :'<span class="sec">No frozen void level on this name right now — per-scenario R/R and EV are not computable, and the card won\u2019t fabricate them.</span>';
+  box.innerHTML=`
+    <div class="ai-head"><span class="tk">${esc(tk)}</span>
+      <span class="sec">${uni==='crypto'?'Hyperliquid perp · crypto':'xyz-dex perp · stocks'}</span>
+      <span class="px">${fmtPrice(livePx)}</span>${chg}
+      ${aiBiasBadge(d)}</div>
+    <div class="dsec">The picture in one paragraph</div>
+    <div class="ai-syn">${esc(d.ai.synthesis)}</div>
+    <div class="dsec">Daily chart · key levels and events marked</div>
+    <div id="ai-chart"><div class="msg" style="padding:14px 0">loading candles…</div></div>
+    <div class="dsec">What the data says</div>
+    <table class="ai-ev">${ev}</table>
+    ${d.ai.eventRisk?`<div class="dsec">Event risk</div><div class="ai-event">${esc(d.ai.eventRisk)}</div>`:''}
+    <div class="dsec">Track record on this name</div>
+    <div id="ai-claims" class="sec" style="font-size:12px">loading claim history…</div>
+    ${(flags||covHtml)?`<div class="dsec">Flags</div>${flags}${covHtml}`:''}
+    <div class="dsec">Scenarios${c.riskPct!=null?` · risk unit = distance to ${fmtPrice(c.voidLevel)} (\u2212${c.riskPct.toFixed(1)}%)`:''}</div>
+    <div class="ai-scen"><span class="h">scenario</span><span class="h b"></span><span class="h">odds</span><span class="h">r/r</span><span class="h">payoff</span>${scen}</div>
+    <div class="ai-evbox">${evBox}</div>
+    <div class="dsec">What would change the read</div>
+    <div class="ai-inv">${inv}</div>
+    <div class="ai-foot">
+      <span>${esc(d.model||'')} · generated ${shDate(d.ts)} · ${stateLine}</span>
+      <span class="contract" data-tip="no frozen side/void/target geometry of its own — the report reads the ledger and can never enter it">synthesis layer — not a ledger signal</span>
+      <button class="btn" id="ai-regen" ${d.canRegen?'':'disabled'} title="${d.canRegen?'compile fresh data and regenerate for everyone':'unlocks on TTL expiry or material change (new claim · claim resolved · earnings print)'}">regenerate</button>
+    </div>`;
+  const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
+  if(state.report.gen) renderAiGenState(coin,true);
+  aiReportChart(coin,c);
+  aiLoadClaims(coin);
+}
+async function aiLoadClaims(coin){
+  const box=el('ai-claims'); if(!box) return;
+  try{ const d=await fetchJSON('/api/ledger?coin='+encodeURIComponent(coin));
+    if(!box.isConnected) return;
+    const res=d.closed.filter(e=>e.status==='resolved');
+    if(!res.length&&!d.open.length){ box.innerHTML='<span class="sec">nothing ever fired on this name — the record starts with the first claim</span>'; return; }
+    const wins=res.filter(e=>e.win).length;
+    const head=res.length?`<b class="${wins/res.length>=0.5?'pos':'neg'}">${Math.round(100*wins/res.length)}%</b> hit across <b>${res.length}</b> resolved claim(s)${d.open.length?` · <b>${d.open.length}</b> open`:''}`:`<b>${d.open.length}</b> open claim(s), none resolved yet`;
+    const rows=res.slice(0,3).map(e=>{
+      const out=e.realized==null?'\u2014':`<span class="${e.realized>0?'pos':'neg'}">${e.realized>0?'+':''}${e.realized.toFixed(1)}${e.unit==='R'?'R':e.unit}</span>`;
+      const dur=e.tR?((e.tR-e.t0)/86400000).toFixed(1)+'d':'';
+      return `<tr><td class="d">${shDate(e.t0)}</td><td>${esc(e.label)} — ${out}${e.stopped?' <span class="sec" data-tip="resolved on the stop-aware track: the frozen void was touched before the horizon">(stopped)</span>':''}${dur?` in ${dur}`:''}</td></tr>`; }).join('');
+    box.className=''; box.innerHTML=`<div style="font-size:12px;margin-bottom:4px">${head} · <span class="sec" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" id="ai-fullhist">full history \u2192</span></div><table class="ai-claims">${rows}</table>`;
+    const fh=el('ai-fullhist'); if(fh) fh.onclick=()=>openSigHistory(d.ticker||coin);
+  }catch(_){ box.innerHTML='<span class="sec">claim history unavailable</span>'; }
+}
+async function aiReportChart(coin,c){
+  const box=el('ai-chart'); if(!box) return;
+  try{
+    const d=await fetchJSON('/api/candles?coin='+encodeURIComponent(coin)+'&tf=1d');
+    if(!box.isConnected) return;
+    const cd=(d.candles||[]).slice(-92);
+    if(cd.length<10){ box.innerHTML='<div class="msg" style="padding:14px 0">not enough daily candles yet — the series is still filling server-side</div>'; return; }
+    const px=d.px!=null&&isFinite(d.px)?+d.px:null;
+    const closes=cd.map(k=>+k[4]); if(px!=null) closes[closes.length-1]=px;   // live mark drives the forming bar, matching the ladder
+    const e21=[]; { const k2=2/22; let e=closes[0]; for(let i=0;i<closes.length;i++){ e=i===0?closes[0]:closes[i]*k2+e*(1-k2); e21.push(e); } }
+    const levels=(c&&c.levels)||[], marks=(c&&c.marks)||[], flags=(c&&c.flags)||[];
+    const W=640,H=300,pl=6,pr=56,pt=10,pb=20,n=cd.length;
+    let lo=Infinity,hi=-Infinity;
+    for(const k of cd){ const l=k[3]!=null&&isFinite(+k[3])?+k[3]:+k[4], h=k[2]!=null&&isFinite(+k[2])?+k[2]:+k[4]; if(l<lo)lo=l; if(h>hi)hi=h; }
+    if(px!=null){ if(px<lo)lo=px; if(px>hi)hi=px; }
+    for(const l of levels){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; }
+    const pad=(hi-lo)*0.05; hi+=pad; lo-=pad;
+    const X=i=>pl+(i+0.5)/n*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
+    const bw=Math.max(1.6,Math.min(6,(W-pl-pr)/n*0.62));
+    let s='';
+    for(const v of lcTicks(lo,hi,4)){ const y=Y(v).toFixed(1);
+      s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${fmtPrice(v)}</text>`; }
+    // zone band (paired zone_low/zone_high), then level lines UNDER the candles
+    const zl=levels.find(l=>l.kind==='zone_low'), zh=levels.find(l=>l.kind==='zone_high');
+    if(zl&&zh){ let zt=Y(Math.max(zl.value,zh.value)), zb=Y(Math.min(zl.value,zh.value));
+      s+=`<rect x="${pl}" y="${zt.toFixed(1)}" width="${W-pl-pr}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--accent)" fill-opacity="0.06" stroke="var(--accent)" stroke-opacity="0.45" stroke-dasharray="3 3"/>`+
+        `<text x="${pl+6}" y="${(zb-5).toFixed(1)}" class="lc-tick" style="fill:var(--accent);paint-order:stroke;stroke:var(--panel);stroke-width:3px">${esc(zl.label||zh.label||'zone')}</text>`; }
+    for(const l of levels){ if(l.kind==='zone_low'||l.kind==='zone_high') continue;
+      const col=l.kind==='void'?'var(--down)':l.kind==='target'?'var(--up)':'var(--muted)';
+      const y=Y(l.value).toFixed(1);
+      s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="${col}" stroke-dasharray="5 4"/>`+
+        `<text x="${pl+6}" y="${(l.kind==='void'?+y+13:+y-5).toFixed(1)}" class="lc-tick" style="fill:${col};paint-order:stroke;stroke:var(--panel);stroke-width:3px">${fmtPrice(l.value)} — ${esc(l.label)}</text>`; }
+    s+=(()=>{ let p=''; for(let i=0;i<n;i++){ p+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(e21[i]).toFixed(1)+' '; } return `<path d="${p}" fill="none" stroke="var(--blue)" stroke-width="1.4" stroke-opacity="0.85"/>`; })();
+    for(let i=0;i<n;i++){ const k=cd[i], o=k[1],h=k[2],l=k[3],cl=+k[4];
+      const cc=i===n-1&&px!=null?px:cl;
+      if(o==null||!isFinite(+o)){   // warm-cache closes-only bar: an honest close tick, never a fabricated candle
+        s+=`<line x1="${(X(i)-bw/2).toFixed(1)}" y1="${Y(cc).toFixed(1)}" x2="${(X(i)+bw/2).toFixed(1)}" y2="${Y(cc).toFixed(1)}" stroke="var(--muted)" stroke-width="1.4"/>`; continue; }
+      const up=cc>=+o, col=up?'var(--up)':'var(--down)', x=X(i);
+      if(h!=null&&l!=null&&isFinite(+h)&&isFinite(+l)) s+=`<line x1="${x.toFixed(1)}" y1="${Y(Math.max(+h,cc)).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Y(Math.min(+l,cc)).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
+      const y0=Y(Math.max(+o,cc)), hh=Math.max(1,Math.abs(Y(+o)-Y(cc)));
+      s+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"${up?' fill-opacity="0.85"':''}/>`; }
+    // marks: claims (▲), earnings prints (E diamond), divergence flags (◆) — nearest daily bar
+    const nearIdx=t=>{ let bi=0,bd=Infinity; for(let i=0;i<n;i++){ const dd=Math.abs(+cd[i][0]-t); if(dd<bd){bd=dd;bi=i;} } return bd<=2*86400000?bi:null; };
+    const noteAt={};
+    for(const m of marks){ const i=nearIdx(m.t); if(i==null) continue; noteAt[i]=(noteAt[i]?noteAt[i]+' · ':'')+m.label;
+      const x=X(i), l=cd[i][3]!=null&&isFinite(+cd[i][3])?+cd[i][3]:+cd[i][4];
+      if(m.kind==='earn') s+=`<rect x="${(x-4.5).toFixed(1)}" y="${(Y(l)+10).toFixed(1)}" width="9" height="9" fill="var(--panel)" stroke="var(--blue)" transform="rotate(45 ${x.toFixed(1)} ${(Y(l)+14.5).toFixed(1)})"/>`;
+      else s+=`<path d="M${x.toFixed(1)} ${(Y(l)+11).toFixed(1)} l-4.4 8 l8.8 0 z" fill="var(--blue)"/>`; }
+    for(const f of flags){ if(!f.t) continue; const i=nearIdx(f.t); if(i==null) continue; noteAt[i]=(noteAt[i]?noteAt[i]+' · ':'')+f.txt;
+      const x=X(i), h=cd[i][2]!=null&&isFinite(+cd[i][2])?+cd[i][2]:+cd[i][4];
+      s+=`<text x="${(x-4).toFixed(1)}" y="${(Y(h)-6).toFixed(1)}" style="fill:var(--accent);font-size:11px">\u25c6</text>`; }
+    const xs=cd.map((_,i)=>X(i));
+    const dfmt=t=>{ const dd=new Date(+t); return (dd.getUTCMonth()+1)+'/'+dd.getUTCDate(); };
+    const rows=cd.map((k,i)=>{ const o=k[1],cc=i===n-1&&px!=null?px:+k[4];
+      const body=o!=null&&isFinite(+o)?`O ${fmtPrice(+o)} · H ${fmtPrice(+k[2])}<br>L ${fmtPrice(+k[3])} · C ${fmtPrice(cc)}`:`C ${fmtPrice(cc)} <span class="sec">(close-only bar)</span>`;
+      return `<b style="color:var(--text)">${dfmt(k[0])}</b><br>${body}<br><span style="color:var(--blue)">EMA21 ${fmtPrice(e21[i])}</span>`+
+        (noteAt[i]?`<br><span style="color:var(--accent)">${esc(noteAt[i])}</span>`:''); });
+    s+=`<text x="${pl}" y="${H-6}" class="lc-tick">${dfmt(cd[0][0])}</text><text x="${W-pr}" y="${H-6}" text-anchor="end" class="lc-tick">${dfmt(cd[n-1][0])}</text>`;
+    box.innerHTML=hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+    attachLineHover();
+  }catch(e){ box.innerHTML=`<div class="msg" style="padding:14px 0">chart unavailable — ${esc(e.message)}</div>`; }
+}
+async function loadAiRecent(){
+  const box=el('ai-recent'); if(!box) return;
+  try{ const d=await fetchJSON('/api/ai-reports');
+    if(!box.isConnected) return;
+    state.report.list=d;
+    if(!d.reports||!d.reports.length){
+      box.innerHTML=`<div class="dsec">Recent reports · cached for everyone</div><div class="sec" style="font-size:12px">none yet — search a ticker above and generate the first one${d.enabled===false?' (ANTHROPIC_API_KEY is not set on the server)':''}</div>`;
+      return; }
+    const rows=d.reports.map(rep=>{
+      const st=rep.status==='fresh'?`fresh · ${aiFmtLeft(rep.regenInMs)} left`:rep.status==='invalidated'?`invalidated — ${esc(rep.invalidReason||'')}`:'stale';
+      return `<tr><td><span class="tk" data-aicoin="${esc(rep.coin)}">${esc(rep.ticker||rep.coin)}</span></td>`+
+        `<td class="sec">${rep.uni==='crypto'?'crypto':'stocks'}</td>`+
+        `<td>${esc(rep.headline||'')}</td>`+
+        `<td>${rep.evR!=null?`<span class="${rep.evR>0?'pos':rep.evR<0?'neg':'sec'}">${rep.evR>0?'+':''}${rep.evR.toFixed(2)}R</span>`:'<span class="na">\u2014</span>'}</td>`+
+        `<td class="sec">${shDate(rep.ts)}</td><td class="st-${rep.status}">${st}</td></tr>`; }).join('');
+    box.innerHTML=`<div class="dsec">Recent reports · cached for everyone · TTL ${Math.round(d.ttlMs/60000)} min</div>`+
+      `<table class="ai-rec"><tr><th>ticker</th><th>uni</th><th>read</th><th>ev</th><th>generated</th><th>state</th></tr>${rows}</table>`;
+    box.querySelectorAll('[data-aicoin]').forEach(el2=>el2.addEventListener('click',()=>{ aiPick(el2.dataset.aicoin); }));
+  }catch(_){}
+}

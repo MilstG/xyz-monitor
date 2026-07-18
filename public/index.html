@@ -47,6 +47,7 @@
   <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
   <button class="tab" data-view="earnings" title="Upcoming earnings reports for the equity universe — dates and session (pre-market / after close), ET calendar">Earnings</button>
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
+  <button class="tab" data-view="report" title="AI analyst report — everything this server holds on one ticker (trend ladder, signals &amp; track record, positioning, earnings, flags) compiled and synthesized by Claude into a plain-language read with scenarios, R/R and an annotated chart. Cached for everyone; regenerate unlocks on TTL expiry or material change.">Report</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
   <button class="btn" id="helpBtn" style="align-self:center;padding:6px 12px;font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
   <button class="btn" id="logoutBtn" hidden style="align-self:center;padding:6px 11px" title="Sign out — clears this browser's session; the shared password gets you back in">⎋</button>
@@ -239,6 +240,19 @@
 
 <section id="view-backtest" hidden>
   <div id="backtest-body"><div class="msg">Loading…</div></div>
+</section>
+
+<section id="view-report" hidden>
+  <div class="controls" style="flex-wrap:wrap">
+    <div class="search" style="position:relative" data-tip="type a ticker from either universe — only names in the live universe match; free text never reaches the API">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="ai-q" type="text" placeholder="Ticker… any universe" autocomplete="off" spellcheck="false"/>
+      <div class="ai-sug" id="ai-sug" hidden></div>
+    </div>
+    <span class="sec" id="ai-note" style="align-self:center;font-size:11.5px;line-height:1.5"></span>
+  </div>
+  <div id="ai-report" class="corrpanel" hidden></div>
+  <div id="ai-recent"></div>
 </section>
 
 <div class="drawer-bg" id="drawerbg"></div>
