@@ -2822,10 +2822,10 @@ Respond with ONLY a JSON object — no markdown fences, no preamble — with exa
  "synthesis": string (one paragraph, 3-6 sentences, plain human language a non-quant friend reads in 30 seconds; name the single dominant risk honestly),
  "evidence": array of 3-8 {"k": short label (<=16 chars, lowercase), "v": one plain-language sentence grounded in a specific number from the context},
  "eventRisk": string or null (equities with an upcoming print inside ~10 days: what the reaction study says and what holding through it means; otherwise null),
- "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. Include exactly one "void" scenario when a void level exists. If an earnings print falls inside the scenario horizon, the middle scenario must be kind "event" — the print decides, treat it as a coin flip scaled by the reaction study, and say so.
+ "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. "target" scenarios are THESIS-DIRECTION only — an adverse recovery against the bias is the "void" scenario (through the void level) or "flat", never a target. If an earnings print falls inside the scenario horizon, the middle scenario must be kind "event" — the print decides, treat it as a coin flip scaled by the reaction study, and say so.
  "invalidations": array of 1-5 plain sentences — observable conditions that would change the read,
- "levels": array of 0-6 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high"|"note", "label": <=60 chars} for chart annotation.
-Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Use only levels derivable from the context (EMAs, range bounds, claim geometry, prior swings implied by the data). Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
+ "levels": array of at most 4 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high", "label": <=60 chars} for chart annotation. Level discipline is strict: when bias is "long" or "short" you MUST include exactly one "void" level — the observable price where the read is dead (the frozen claim stop when claimAnchor exists, otherwise a structural level like the relevant swing low/high) — and exactly one "void" scenario resolving against it. At most one "target" level, optionally one zone_low+zone_high pair. NEVER annotate moving averages as levels (EMAs drift — the chart draws the live ribbon itself) and never annotate range bounds unless the bound IS the void or target. Levels must sit within roughly ±25% of the current price or they won't render.
+Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Use only levels derivable from the context (range structure, claim geometry, prior swings implied by the data). Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
   // Validate the model's JSON, correct the void to frozen-claim geometry when one exists, and
   // compute every displayed number (risk unit, per-scenario R/R and payoff, EV) server-side.
   function validateAiReport(rawText, ctx) {
@@ -2857,22 +2857,42 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (out.scenarios.filter((s) => s.kind === "void").length > 1) return { ok: false, error: "multiple void scenarios" };
     const levels = [];
     if (out.levels != null) {
-      if (!Array.isArray(out.levels) || out.levels.length > 6) return { ok: false, error: "bad levels" };
+      if (!Array.isArray(out.levels) || out.levels.length > 4) return { ok: false, error: "bad levels (max 4)" };
       for (const l of out.levels) {
         if (!l || !Number.isFinite(l.value) || !AI_LEVEL_KINDS.has(l.kind) || !str(l.label, 80)) return { ok: false, error: "bad level entry" };
-        if (!(l.value > px * 0.4 && l.value < px * 2.5)) return { ok: false, error: "level outside sanity bounds" };
+        // EMAs drift — a static dashed line labeled after one is stale the moment it's drawn, and
+        // the chart draws the live ribbon itself. Mechanical ban, not a style preference.
+        if (/\b(ema|sma)\d*\b|moving average/i.test(l.label)) return { ok: false, error: "moving averages are not chart levels" };
+        if (!(l.value > px * 0.6 && l.value < px * 1.6)) return { ok: false, error: "level outside sanity bounds" };
         levels.push({ value: sig(+l.value, 9), kind: l.kind, label: l.label });
       }
     }
+    if (levels.filter((l) => l.kind === "void").length > 1) return { ok: false, error: "multiple void levels" };
+    if (levels.filter((l) => l.kind === "target").length > 1) return { ok: false, error: "multiple target levels" };
     // Frozen geometry wins: with a live claim, the void level IS the claim's stop. Model output
     // that disagrees is overwritten and flagged — the chart may never contradict the ledger.
     let corrected = false;
-    const anchorStop = ctx.claimAnchor && ctx.claimAnchor.stop != null ? +ctx.claimAnchor.stop : null;
+    // The override applies only when the read agrees with the claim's side (or is neutral): a
+    // long claim's stop sits below price and is mechanically invalid as a SHORT read's void —
+    // an opposing read must carry its own structural void, with the claim still visible in the
+    // payload as context.
+    const anchorSide = ctx.claimAnchor && ctx.claimAnchor.side ? ctx.claimAnchor.side : null;
+    const anchorApplies = ctx.claimAnchor && ctx.claimAnchor.stop != null
+      && (anchorSide == null || out.bias === "neutral" || out.bias === anchorSide);
+    const anchorStop = anchorApplies ? +ctx.claimAnchor.stop : null;
     let voidL = levels.find((l) => l.kind === "void") || null;
     if (anchorStop != null) {
       if (!voidL) { voidL = { value: sig(anchorStop, 9), kind: "void", label: "void — frozen claim stop" }; levels.push(voidL); corrected = true; }
       else if (Math.abs(voidL.value - anchorStop) / anchorStop > 0.005) { voidL.value = sig(anchorStop, 9); voidL.label += " (corrected to frozen claim stop)"; corrected = true; }
     }
+    // A directional read without a void is an unfalsifiable read — the entire R/R and EV promise
+    // dies with it, so it fails validation instead of shipping dashes. Neutral reads may omit it.
+    if (out.bias !== "neutral" && !voidL) return { ok: false, error: "directional read without a void level" };
+    if (out.bias !== "neutral" && !out.scenarios.some((s) => s.kind === "void")) return { ok: false, error: "directional read without a void scenario" };
+    // Void must sit on the LOSS side of the bias — a "void" above price on a long read is
+    // mechanically inverted geometry, same class of bug as the stop-geometry gate on claims.
+    if (voidL && out.bias === "long" && !(voidL.value < px)) return { ok: false, error: "long void must sit below price" };
+    if (voidL && out.bias === "short" && !(voidL.value > px)) return { ok: false, error: "short void must sit above price" };
     // Server-side scenario math: risk unit = |px - void|; payoffs in R signed by the bias side.
     const sideSign = out.bias === "short" ? -1 : 1;
     const risk = voidL && Math.abs(px - voidL.value) > 0 ? Math.abs(px - voidL.value) : null;
