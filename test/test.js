@@ -1024,6 +1024,15 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const frag of ["tchart-btn", "&tf=", "tcbtn-td"])
     assert.ok(app.includes(frag), `missing chart-modal client marker: ${frag}`);
+  // signals card grammar (build -67): meta column, scope tag, watch line, unified pill classes
+  for (const frag of ["sig-meta", "sig-scope", "sp-watchline", "sig-unp bad", "sig-unp warn"])
+    assert.ok(app.includes(frag), `missing signals-card grammar marker: ${frag}`);
+  for (const cls of [".sig-meta", ".sig-scope", ".sp-watchline", ".sig-unp.bad", ".sig-chip.bad"])
+    assert.ok(css.includes(cls), `missing signals-card style: ${cls}`);
+  // audit block collapse (build -68): toggle + sub-section markers
+  for (const frag of ["sigRecFullPref", "data-recx", "sigrec-sub"])
+    assert.ok(app.includes(frag), `missing audit-collapse marker: ${frag}`);
+  assert.ok(css.includes(".sigrec-sub"), "missing style: .sigrec-sub");
   assert.ok(srv.includes("getTfCandles"), "candles route does not branch to the ladder-series getter");
   // trend-retest ledger signal: both event ids must exist end to end — server labels/meta,
   // playbook, and the client label/tip maps (a missing client label renders raw event ids)
