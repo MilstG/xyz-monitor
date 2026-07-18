@@ -1586,3 +1586,59 @@ test("ai report: provider auto-detection — OPENAI_API_KEY alone selects OpenAI
     if (prevA === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevA;
   }
 });
+
+test("ai report: level discipline — EMA annotations banned, directional reads require a correctly-sided void, opposing-bias anchors don't override", () => {
+  const { p, px } = aiTestPoller();
+  const ctx = () => p.aiCompileNow("xyz:NVDA");
+  const voidLv = +(px * 0.95).toPrecision(6), tgt = +(px * 1.10).toPrecision(6);
+  const mut = (fn) => { const o = JSON.parse(AI_GOOD(px, voidLv, tgt)); fn(o); return JSON.stringify(o); };
+  // EMAs drift — banned as static chart levels (this exact failure shipped in the first live report)
+  const r1 = p.aiValidateNow(mut((o) => { o.levels[1].label = "Daily EMA13 resistance"; }), ctx());
+  assert.equal(r1.ok, false); assert.ok(/moving averages/.test(r1.error), r1.error);
+  // a directional read with no void level is unfalsifiable — hard fail, not a card full of dashes
+  const r2 = p.aiValidateNow(mut((o) => { o.levels = [o.levels[1]]; o.scenarios = o.scenarios.filter((s) => s.kind !== "void").concat([{ name: "fades", kind: "flat", p: 0.2, target: null }]); }), ctx());
+  assert.equal(r2.ok, false); assert.ok(/without a void level/.test(r2.error), r2.error);
+  // ...and a void scenario is required too, not just the level
+  const r3 = p.aiValidateNow(mut((o) => { o.scenarios = [{ name: "up", kind: "target", p: 0.6, target: tgt }, { name: "chop", kind: "flat", p: 0.4, target: null }]; }), ctx());
+  assert.equal(r3.ok, false); assert.ok(/without a void scenario/.test(r3.error), r3.error);
+  // inverted geometry: a "void" ABOVE price on a long read is the stop-geometry bug class — rejected
+  const r4 = p.aiValidateNow(mut((o) => { o.levels[0].value = +(px * 1.05).toPrecision(6); }), ctx());
+  assert.equal(r4.ok, false); assert.ok(/long void must sit below/.test(r4.error), r4.error);
+  // max 4 levels, at most one target
+  const r5 = p.aiValidateNow(mut((o) => { o.levels.push({ value: +(px * 1.2).toPrecision(6), kind: "target", label: "second target" }); }), ctx());
+  assert.equal(r5.ok, false); assert.ok(/multiple target/.test(r5.error), r5.error);
+  // opposing-bias anchor: a LONG claim's stop must NOT be forced onto a SHORT read — the short
+  // read carries its own void above price and validates on its own geometry
+  const cx = ctx();
+  cx.claimAnchor = { ev: "breakout", side: "long", stop: +(px * 0.95).toPrecision(6), target: null, t0: Date.now(), resolveAt: Date.now() + 86400000 };
+  const shortPayload = JSON.stringify(Object.assign(JSON.parse(AI_GOOD(px, voidLv, tgt)), {
+    bias: "short", headline: "Rolling over, leans short",
+    scenarios: [
+      { name: "breakdown extends", kind: "target", p: 0.5, target: +(px * 0.90).toPrecision(6), note: "downtrend persists" },
+      { name: "chop", kind: "flat", p: 0.3, target: null },
+      { name: "reclaims the void", kind: "void", p: 0.2, target: null },
+    ],
+    levels: [
+      { value: +(px * 1.04).toPrecision(6), kind: "void", label: "void — reclaim kills the short" },
+      { value: +(px * 0.90).toPrecision(6), kind: "target", label: "breakdown target" },
+    ],
+  }));
+  const r6 = p.aiValidateNow(shortPayload, cx);
+  assert.ok(r6.ok, "opposing-bias read with its own void must validate: " + (r6.error || ""));
+  assert.ok(Math.abs(r6.computed.voidLevel - px * 1.04) / px < 0.001, "the short's OWN void must survive, not the long claim's stop");
+  assert.equal(r6.computed.correctedVoid, false, "no correction when the anchor doesn't apply");
+  // and short-side payoff math: target below price pays POSITIVE for a short
+  const scT = r6.computed.scenarios.find((s) => s.kind === "target");
+  assert.ok(scT.payoffR > 0, "thesis-direction short target must pay positive, got " + scT.payoffR);
+});
+
+test("client: report chart renderer ships the fixes — price-only domain, line mode, staggered labels, clustered marks, span-aware axis, norisk grid", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const frag of ["lineMode", "close-line mode", "off-chart:", "labs[i].y-labs[i-1].y<15", "addGlyph", "axDec", "hasRisk", "ai-scen${hasRisk?'':' norisk'}"])
+    assert.ok(app.includes(frag), `app.js missing chart-fix marker: ${frag}`);
+  assert.ok(!app.includes("for(const l of levels){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; }"),
+    "the level-driven y-domain (the squashed-chart bug) must be gone");
+  assert.ok(css.includes(".ai-scen.norisk"), "styles.css missing the 3-column no-risk scenario grid");
+});
