@@ -1517,7 +1517,7 @@ test("client + server integrity: the Report tab ships end to end (markers, style
     assert.ok(css.includes(cls), `styles.css missing report style: ${cls}`);
   for (const frag of ["/api/ai-report", "/api/ai-reports", "generateAiReport", "429"])
     assert.ok(srv.includes(frag), `server.js missing report marker: ${frag}`);
-  for (const frag of ["claude-fable-5", "claude-opus-4-8", "ANTHROPIC_API_KEY", "anthropic-version", "stop_reason", "validateAiReport", "compileAiContext", "trendAlignAtFire"])
+  for (const frag of ["claude-fable-5", "claude-opus-4-8", "gpt-5.6-sol", "gpt-5.6-terra", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "api.openai.com/v1/chat/completions", "max_completion_tokens", "anthropic-version", "stop_reason", "AI_PROVIDER", "validateAiReport", "compileAiContext", "trendAlignAtFire"])
     assert.ok(pol.includes(frag), `poller.js missing AI engine marker: ${frag}`);
   for (const frag of ["saveAiReports", "loadAiReports", "ai-reports.json"])
     assert.ok(sto.includes(frag), `store.js missing AI persistence marker: ${frag}`);
@@ -1526,4 +1526,63 @@ test("client + server integrity: the Report tab ships end to end (markers, style
   assert.ok(/const MAIN_DAILY_DAYS = 9\d;/.test(pol), "crypto daily retention must be ~90d via MAIN_DAILY_DAYS");
   assert.ok(pol.includes("now - MAIN_DAILY_DAYS * DAY"), "crypto daily fetch must use MAIN_DAILY_DAYS");
   assert.ok(pol.includes("dr.slice(-(MAIN_DAILY_DAYS + 2))"), "crypto daily payload cap must ride MAIN_DAILY_DAYS");
+});
+
+test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Sol→Terra fallback on refusal", async () => {
+  // Provider selection is read from env at construction — pin it for this test, restore after.
+  const prevProv = process.env.AI_PROVIDER, prevKey = process.env.OPENAI_API_KEY;
+  process.env.AI_PROVIDER = "openai"; process.env.OPENAI_API_KEY = "sk-test-openai";
+  try {
+    const calls = [];
+    let px0;
+    const mk = () => aiTestPoller({ aiFetch: async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      calls.push({ url, model: body.model, auth: opts.headers.authorization, body });
+      if (calls.length === 1) return { ok: true, json: async () => ({ choices: [{ message: { refusal: "declined" }, finish_reason: "stop" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: AI_GOOD(px0, +(px0 * 0.95).toPrecision(6), +(px0 * 1.10).toPrecision(6)) }, finish_reason: "stop" }] }) };
+    } });
+    const { p, px } = mk(); px0 = px;
+    const g = await p.generateAiReport("xyz:NVDA");
+    assert.ok(g.ok, "OpenAI path must generate: " + (g.error || ""));
+    assert.ok(calls[0].url.includes("api.openai.com/v1/chat/completions"), "must hit Chat Completions");
+    assert.equal(calls[0].auth, "Bearer sk-test-openai", "must authenticate with a Bearer token");
+    assert.equal(calls[0].model, "gpt-5.6-sol", "OpenAI primary must default to Sol");
+    assert.equal(calls[1].model, "gpt-5.6-terra", "OpenAI fallback must default to Terra");
+    assert.equal(g.report.model, "gpt-5.6-terra", "the report names the model that actually produced it");
+    assert.equal(calls[0].body.messages[0].role, "system", "system prompt rides as a system message");
+    assert.ok("max_completion_tokens" in calls[0].body && !("max_tokens" in calls[0].body),
+      "GPT-5.x requires max_completion_tokens, not max_tokens");
+    assert.ok(calls[0].body.max_completion_tokens >= 8000, "OpenAI budget must cover reasoning tokens on top of output");
+    // empty output with finish_reason length = the budget was eaten by reasoning — a NAMED error, not a mystery
+    const { p: p2 } = aiTestPoller({ aiFetch: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }) }) });
+    const g2 = await p2.generateAiReport("xyz:NVDA");
+    assert.equal(g2.ok, false);
+    assert.ok(/token budget/.test(g2.error), "budget exhaustion must be named in the error: " + g2.error);
+  } finally {
+    if (prevProv === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = prevProv;
+    if (prevKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = prevKey;
+  }
+});
+
+test("ai report: provider auto-detection — OPENAI_API_KEY alone selects OpenAI; no keys stays disabled with an honest error", async () => {
+  const prevProv = process.env.AI_PROVIDER, prevO = process.env.OPENAI_API_KEY, prevA = process.env.ANTHROPIC_API_KEY;
+  delete process.env.AI_PROVIDER; delete process.env.ANTHROPIC_API_KEY;
+  try {
+    process.env.OPENAI_API_KEY = "sk-test";
+    { const { p } = aiTestPoller();
+      const l = p.listAiReports();
+      assert.equal(l.provider, "openai", "OPENAI_API_KEY alone must auto-select the openai provider");
+      assert.equal(l.model, "gpt-5.6-sol");
+      assert.equal(l.enabled, true); }
+    delete process.env.OPENAI_API_KEY;
+    { const { p } = aiTestPoller();
+      assert.equal(p.listAiReports().enabled, false, "no keys = disabled");
+      const g = await p.generateAiReport("xyz:NVDA");
+      assert.equal(g.ok, false);
+      assert.ok(/ANTHROPIC_API_KEY or OPENAI_API_KEY/.test(g.error), "the error must name BOTH accepted variables: " + g.error); }
+  } finally {
+    if (prevProv === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = prevProv;
+    if (prevO === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = prevO;
+    if (prevA === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevA;
+  }
 });
