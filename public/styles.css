@@ -694,3 +694,5 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .ai-gen{display:inline-flex;align-items:center;gap:8px}
 .ai-gen .sdot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.1s infinite}
 @media (max-width:680px){ .ai-scen{grid-template-columns:1fr auto auto;font-size:11px} .ai-scen .bar{display:none} .ai-scen .h.b{display:none} }
+.ai-scen.norisk{grid-template-columns:minmax(140px,auto) 1fr auto}
+@media (max-width:680px){ .ai-scen.norisk{grid-template-columns:1fr auto} }

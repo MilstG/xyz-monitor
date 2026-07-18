@@ -4330,15 +4330,20 @@ function renderAiReport(d,coin){
     :d.status==='invalidated'?`<span style="color:var(--accent)">invalidated — ${esc(d.invalidReason||'material change')}</span>`
     :'<span class="sec">stale</span>';
   const ev=(d.ai.evidence||[]).map(e2=>`<tr><td class="k">${esc(e2.k)}</td><td>${esc(e2.v)}</td></tr>`).join('');
+  const hasRisk=c.riskAbs!=null;
   const scen=(c.scenarios||[]).map(s=>{
-    const col=s.kind==='target'?'var(--up)':s.kind==='void'?'var(--down)':'var(--accent)';
-    const rr=s.kind==='target'&&s.rr!=null?s.rr.toFixed(1)+' : 1':s.kind==='void'?'stop':'—';
+    // Color follows the MONEY, not the label: a "target" scenario that pays negative (an
+    // adverse-direction target the model mislabeled) renders red, the void renders red, the
+    // event coin-flip renders amber. Kind is the fallback only when no payoff exists.
+    const col=s.payoffR!=null?(s.payoffR>0?'var(--up)':s.payoffR<0?'var(--down)':'var(--accent)')
+      :(s.kind==='target'?'var(--up)':s.kind==='void'?'var(--down)':s.kind==='event'?'var(--accent)':'var(--muted)');
+    const rr=s.kind==='target'&&s.rr!=null&&s.payoffR>0?s.rr.toFixed(1)+' : 1':s.kind==='void'?'stop':'—';
     const pay=s.payoffR==null?'—':s.kind==='event'?'<span class="sec" data-tip="the print decides — treated as a coin flip; contributes 0 to EV by construction">coin-flip</span>'
       :`<span class="${s.payoffR>0?'pos':s.payoffR<0?'neg':'sec'}">${s.payoffR>0?'+':''}${s.payoffR.toFixed(1)}R</span>`;
     const tip=esc((s.note||'')+(s.target!=null?` · level ${fmtPrice(s.target)}`:''));
     return `<span class="nm" style="color:${col}" data-tip="${tip}">${esc(s.name)}</span>`+
       `<div class="bar"><i style="width:${Math.round(s.p*100)}%;background:${col};opacity:.55"></i></div>`+
-      `<span>${Math.round(s.p*100)}%</span><span>${rr}</span><span>${pay}</span>`; }).join('');
+      `<span>${Math.round(s.p*100)}%</span>`+(hasRisk?`<span>${rr}</span><span>${pay}</span>`:''); }).join('');
   const flags=(c.flags||[]).map(f=>`<div class="ai-flag"><b style="color:var(--accent)">\u25c6 ${esc(f.kind.replace(/_/g,' '))}</b> — ${esc(f.txt)}${f.t?` <span class="sec">(${shDate(f.t)})</span>`:''}</div>`).join('');
   const cov=c.coverage||null;
   const covGaps=cov?[].concat((cov.oiGaps||[]).map(g=>`OI sampling gap ${shDate(g.from)} \u2192 ${shDate(g.to)} (${g.hours}h) — positioning stats exclude it`),
@@ -4364,7 +4369,7 @@ function renderAiReport(d,coin){
     <div id="ai-claims" class="sec" style="font-size:12px">loading claim history…</div>
     ${(flags||covHtml)?`<div class="dsec">Flags</div>${flags}${covHtml}`:''}
     <div class="dsec">Scenarios${c.riskPct!=null?` · risk unit = distance to ${fmtPrice(c.voidLevel)} (\u2212${c.riskPct.toFixed(1)}%)`:''}</div>
-    <div class="ai-scen"><span class="h">scenario</span><span class="h b"></span><span class="h">odds</span><span class="h">r/r</span><span class="h">payoff</span>${scen}</div>
+    <div class="ai-scen${hasRisk?'':' norisk'}"><span class="h">scenario</span><span class="h b"></span><span class="h">odds</span>${hasRisk?'<span class="h">r/r</span><span class="h">payoff</span>':''}${scen}</div>
     <div class="ai-evbox">${evBox}</div>
     <div class="dsec">What would change the read</div>
     <div class="ai-inv">${inv}</div>
@@ -4405,46 +4410,83 @@ async function aiReportChart(coin,c){
     const closes=cd.map(k=>+k[4]); if(px!=null) closes[closes.length-1]=px;   // live mark drives the forming bar, matching the ladder
     const e21=[]; { const k2=2/22; let e=closes[0]; for(let i=0;i<closes.length;i++){ e=i===0?closes[0]:closes[i]*k2+e*(1-k2); e21.push(e); } }
     const levels=(c&&c.levels)||[], marks=(c&&c.marks)||[], flags=(c&&c.flags)||[];
+    // Warm-cache detection: after a redeploy equity dailies restore as closes-only until the next
+    // backfill. Per-bar tick fallback on a WHOLE series reads as confetti — a close line is the
+    // honest, readable rendering of a closes-only series. Mixed series keep candles with per-bar ticks.
+    const noOHLC=cd.filter(k=>k[1]==null||!isFinite(+k[1])).length;
+    const lineMode=noOHLC>cd.length/3;
     const W=640,H=300,pl=6,pr=56,pt=10,pb=20,n=cd.length;
+    // Domain from PRICE ACTION ONLY — a far level must never squash three months of candles into
+    // a corner (the 60d-range-low failure). Levels outside the padded domain are listed under the
+    // chart instead of stretching it.
     let lo=Infinity,hi=-Infinity;
     for(const k of cd){ const l=k[3]!=null&&isFinite(+k[3])?+k[3]:+k[4], h=k[2]!=null&&isFinite(+k[2])?+k[2]:+k[4]; if(l<lo)lo=l; if(h>hi)hi=h; }
     if(px!=null){ if(px<lo)lo=px; if(px>hi)hi=px; }
-    for(const l of levels){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; }
+    const span0=hi-lo;
+    for(const l of levels){ if(l.value>=lo-span0*0.12&&l.value<=hi+span0*0.12){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; } }   // near-domain levels may nudge, never stretch
     const pad=(hi-lo)*0.05; hi+=pad; lo-=pad;
+    const inView=v=>v>=lo&&v<=hi;
+    const offView=levels.filter(l=>!inView(l.value));
     const X=i=>pl+(i+0.5)/n*(W-pl-pr), Y=v=>pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
-    const bw=Math.max(1.6,Math.min(6,(W-pl-pr)/n*0.62));
+    // span-aware axis format: one precision for the whole axis, chosen from the tick step —
+    // never "80.000" next to "140.00"
+    const ticks=lcTicks(lo,hi,4);
+    const step=ticks.length>1?ticks[1]-ticks[0]:(hi-lo)/4;
+    const axDec=step>=1?(step>=10?0:1):Math.min(6,Math.max(0,Math.ceil(-Math.log10(step))+1));
+    const axf=v=>v.toFixed(axDec);
+    const bw=Math.max(2.4,Math.min(6,(W-pl-pr)/n*0.62));
     let s='';
-    for(const v of lcTicks(lo,hi,4)){ const y=Y(v).toFixed(1);
-      s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${fmtPrice(v)}</text>`; }
-    // zone band (paired zone_low/zone_high), then level lines UNDER the candles
+    for(const v of ticks){ const y=Y(v).toFixed(1);
+      s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${axf(v)}</text>`; }
+    // zone band first (under everything)
     const zl=levels.find(l=>l.kind==='zone_low'), zh=levels.find(l=>l.kind==='zone_high');
-    if(zl&&zh){ let zt=Y(Math.max(zl.value,zh.value)), zb=Y(Math.min(zl.value,zh.value));
-      s+=`<rect x="${pl}" y="${zt.toFixed(1)}" width="${W-pl-pr}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--accent)" fill-opacity="0.06" stroke="var(--accent)" stroke-opacity="0.45" stroke-dasharray="3 3"/>`+
-        `<text x="${pl+6}" y="${(zb-5).toFixed(1)}" class="lc-tick" style="fill:var(--accent);paint-order:stroke;stroke:var(--panel);stroke-width:3px">${esc(zl.label||zh.label||'zone')}</text>`; }
-    for(const l of levels){ if(l.kind==='zone_low'||l.kind==='zone_high') continue;
-      const col=l.kind==='void'?'var(--down)':l.kind==='target'?'var(--up)':'var(--muted)';
-      const y=Y(l.value).toFixed(1);
-      s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="${col}" stroke-dasharray="5 4"/>`+
-        `<text x="${pl+6}" y="${(l.kind==='void'?+y+13:+y-5).toFixed(1)}" class="lc-tick" style="fill:${col};paint-order:stroke;stroke:var(--panel);stroke-width:3px">${fmtPrice(l.value)} — ${esc(l.label)}</text>`; }
-    s+=(()=>{ let p=''; for(let i=0;i<n;i++){ p+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(e21[i]).toFixed(1)+' '; } return `<path d="${p}" fill="none" stroke="var(--blue)" stroke-width="1.4" stroke-opacity="0.85"/>`; })();
-    for(let i=0;i<n;i++){ const k=cd[i], o=k[1],h=k[2],l=k[3],cl=+k[4];
-      const cc=i===n-1&&px!=null?px:cl;
-      if(o==null||!isFinite(+o)){   // warm-cache closes-only bar: an honest close tick, never a fabricated candle
-        s+=`<line x1="${(X(i)-bw/2).toFixed(1)}" y1="${Y(cc).toFixed(1)}" x2="${(X(i)+bw/2).toFixed(1)}" y2="${Y(cc).toFixed(1)}" stroke="var(--muted)" stroke-width="1.4"/>`; continue; }
-      const up=cc>=+o, col=up?'var(--up)':'var(--down)', x=X(i);
-      if(h!=null&&l!=null&&isFinite(+h)&&isFinite(+l)) s+=`<line x1="${x.toFixed(1)}" y1="${Y(Math.max(+h,cc)).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Y(Math.min(+l,cc)).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
-      const y0=Y(Math.max(+o,cc)), hh=Math.max(1,Math.abs(Y(+o)-Y(cc)));
-      s+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"${up?' fill-opacity="0.85"':''}/>`; }
-    // marks: claims (▲), earnings prints (E diamond), divergence flags (◆) — nearest daily bar
+    if(zl&&zh&&inView(zl.value)&&inView(zh.value)){ let zt=Y(Math.max(zl.value,zh.value)), zb=Y(Math.min(zl.value,zh.value));
+      s+=`<rect x="${pl}" y="${zt.toFixed(1)}" width="${W-pl-pr}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--accent)" fill-opacity="0.06" stroke="var(--accent)" stroke-opacity="0.45" stroke-dasharray="3 3"/>`; }
+    // level LINES at their true y; LABELS collision-staggered afterward so clustered levels stay readable
+    const lineLv=levels.filter(l=>l.kind!=='zone_low'&&l.kind!=='zone_high'&&inView(l.value));
+    for(const l of lineLv){ const col=l.kind==='void'?'var(--down)':l.kind==='target'?'var(--up)':'var(--muted)';
+      s+=`<line x1="${pl}" y1="${Y(l.value).toFixed(1)}" x2="${W-pr}" y2="${Y(l.value).toFixed(1)}" stroke="${col}" stroke-dasharray="5 4"/>`; }
+    // EMA21 ribbon line
+    s+=(()=>{ let p2=''; for(let i=0;i<n;i++){ p2+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(e21[i]).toFixed(1)+' '; } return `<path d="${p2}" fill="none" stroke="var(--blue)" stroke-width="1.4" stroke-opacity="0.85"/>`; })();
+    if(lineMode){
+      // closes-only warm state: a proper close polyline in the text color, EMA under it
+      let p2=''; for(let i=0;i<n;i++){ const cc=i===n-1&&px!=null?px:closes[i]; p2+=(i===0?'M':'L')+X(i).toFixed(1)+' '+Y(cc).toFixed(1)+' '; }
+      s+=`<path d="${p2}" fill="none" stroke="var(--text)" stroke-width="1.6"/>`;
+    } else {
+      for(let i=0;i<n;i++){ const k=cd[i], o=k[1],h=k[2],l=k[3];
+        const cc=i===n-1&&px!=null?px:+k[4];
+        if(o==null||!isFinite(+o)){ s+=`<line x1="${(X(i)-bw/2).toFixed(1)}" y1="${Y(cc).toFixed(1)}" x2="${(X(i)+bw/2).toFixed(1)}" y2="${Y(cc).toFixed(1)}" stroke="var(--muted)" stroke-width="1.6"/>`; continue; }
+        const up=cc>=+o, col=up?'var(--up)':'var(--down)', x=X(i);
+        if(h!=null&&l!=null&&isFinite(+h)&&isFinite(+l)) s+=`<line x1="${x.toFixed(1)}" y1="${Y(Math.max(+h,cc)).toFixed(1)}" x2="${x.toFixed(1)}" y2="${Y(Math.min(+l,cc)).toFixed(1)}" stroke="${col}" stroke-width="1.1"/>`;
+        const y0=Y(Math.max(+o,cc)), hh=Math.max(1.2,Math.abs(Y(+o)-Y(cc)));
+        s+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"${up?' fill-opacity="0.85"':''}/>`; }
+    }
+    // staggered level labels: sorted by y, pushed apart to a 15px minimum, clamped to the plot —
+    // four clustered levels render as four readable lines instead of a strikethrough pile
+    { const labs=lineLv.map(l=>({l, y:Y(l.value)})).sort((a,b)=>a.y-b.y);
+      for(let i=1;i<labs.length;i++) if(labs[i].y-labs[i-1].y<15) labs[i].y=labs[i-1].y+15;
+      for(let i=labs.length-1;i>=0;i--){ const max=H-pb-4-(labs.length-1-i)*15; if(labs[i].y>max) labs[i].y=max; }
+      for(let i=1;i<labs.length;i++) if(labs[i].y-labs[i-1].y<15) labs[i].y=labs[i-1].y+15;
+      for(const {l,y} of labs){ const col=l.kind==='void'?'var(--down)':l.kind==='target'?'var(--up)':'var(--muted)';
+        const ty=Math.max(pt+10,Math.min(H-pb-3,y-4));
+        s+=`<text x="${pl+6}" y="${ty.toFixed(1)}" class="lc-tick" style="fill:${col};paint-order:stroke;stroke:var(--panel);stroke-width:3.5px">${fmtPrice(l.value)} — ${esc(l.label)}</text>`; } }
+    // marks: clustered — neighbouring fires collapse into one glyph with a count, details on hover
     const nearIdx=t=>{ let bi=0,bd=Infinity; for(let i=0;i<n;i++){ const dd=Math.abs(+cd[i][0]-t); if(dd<bd){bd=dd;bi=i;} } return bd<=2*86400000?bi:null; };
-    const noteAt={};
-    for(const m of marks){ const i=nearIdx(m.t); if(i==null) continue; noteAt[i]=(noteAt[i]?noteAt[i]+' · ':'')+m.label;
-      const x=X(i), l=cd[i][3]!=null&&isFinite(+cd[i][3])?+cd[i][3]:+cd[i][4];
-      if(m.kind==='earn') s+=`<rect x="${(x-4.5).toFixed(1)}" y="${(Y(l)+10).toFixed(1)}" width="9" height="9" fill="var(--panel)" stroke="var(--blue)" transform="rotate(45 ${x.toFixed(1)} ${(Y(l)+14.5).toFixed(1)})"/>`;
-      else s+=`<path d="M${x.toFixed(1)} ${(Y(l)+11).toFixed(1)} l-4.4 8 l8.8 0 z" fill="var(--blue)"/>`; }
-    for(const f of flags){ if(!f.t) continue; const i=nearIdx(f.t); if(i==null) continue; noteAt[i]=(noteAt[i]?noteAt[i]+' · ':'')+f.txt;
-      const x=X(i), h=cd[i][2]!=null&&isFinite(+cd[i][2])?+cd[i][2]:+cd[i][4];
-      s+=`<text x="${(x-4).toFixed(1)}" y="${(Y(h)-6).toFixed(1)}" style="fill:var(--accent);font-size:11px">\u25c6</text>`; }
+    const noteAt={}, glyphs=[];
+    const addGlyph=(i,kind,label)=>{ noteAt[i]=(noteAt[i]?noteAt[i]+' · ':'')+label;
+      const near=glyphs.find(g=>g.kind===kind&&Math.abs(g.i-i)<=1);
+      if(near){ near.count++; if(i>near.i) near.i=i; } else glyphs.push({i,kind,count:1}); };
+    for(const m of marks){ const i=nearIdx(m.t); if(i!=null) addGlyph(i,m.kind==='earn'?'earn':'claim',m.label); }
+    for(const f of flags){ if(!f.t) continue; const i=nearIdx(f.t); if(i!=null) addGlyph(i,'flag',f.txt); }
+    for(const g of glyphs){ const x=X(g.i), k=cd[g.i];
+      const lowV=k[3]!=null&&isFinite(+k[3])?+k[3]:+k[4], hiV=k[2]!=null&&isFinite(+k[2])?+k[2]:+k[4];
+      if(g.kind==='earn'){ const y=Math.min(H-pb-12,Y(lowV)+10);
+        s+=`<rect x="${(x-4.5).toFixed(1)}" y="${y.toFixed(1)}" width="9" height="9" fill="var(--panel)" stroke="var(--blue)" transform="rotate(45 ${x.toFixed(1)} ${(y+4.5).toFixed(1)})"/>`; }
+      else if(g.kind==='flag'){ const y=Math.max(pt+12,Y(hiV)-7);
+        s+=`<text x="${(x-4).toFixed(1)}" y="${y.toFixed(1)}" style="fill:var(--accent);font-size:11px">\u25c6</text>`; }
+      else { const y=Math.min(H-pb-12,Y(lowV)+9);
+        s+=`<path d="M${x.toFixed(1)} ${y.toFixed(1)} l-4.4 8 l8.8 0 z" fill="var(--blue)"/>`; }
+      if(g.count>1) s+=`<text x="${(x+6).toFixed(1)}" y="${(g.kind==='flag'?Math.max(pt+12,Y(hiV)-7):Math.min(H-pb-4,Y(lowV)+19)).toFixed(1)}" class="lc-tick" style="fill:var(--blue)">\u00d7${g.count}</text>`; }
     const xs=cd.map((_,i)=>X(i));
     const dfmt=t=>{ const dd=new Date(+t); return (dd.getUTCMonth()+1)+'/'+dd.getUTCDate(); };
     const rows=cd.map((k,i)=>{ const o=k[1],cc=i===n-1&&px!=null?px:+k[4];
@@ -4452,7 +4494,10 @@ async function aiReportChart(coin,c){
       return `<b style="color:var(--text)">${dfmt(k[0])}</b><br>${body}<br><span style="color:var(--blue)">EMA21 ${fmtPrice(e21[i])}</span>`+
         (noteAt[i]?`<br><span style="color:var(--accent)">${esc(noteAt[i])}</span>`:''); });
     s+=`<text x="${pl}" y="${H-6}" class="lc-tick">${dfmt(cd[0][0])}</text><text x="${W-pr}" y="${H-6}" text-anchor="end" class="lc-tick">${dfmt(cd[n-1][0])}</text>`;
-    box.innerHTML=hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+    let below='';
+    if(offView.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
+    if(lineMode) below+=`<div class="sec" style="font-size:11px;margin-top:4px">close-line mode — full candles return automatically as the daily backfill refreshes (warm-cache dailies carry closes only)</div>`;
+    box.innerHTML=hoverChart(s,{w:W,h:H,pt,pb,xs,rows})+below;
     attachLineHover();
   }catch(e){ box.innerHTML=`<div class="msg" style="padding:14px 0">chart unavailable — ${esc(e.message)}</div>`; }
 }
