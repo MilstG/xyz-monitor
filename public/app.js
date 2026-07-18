@@ -2926,7 +2926,7 @@ function sigRecordHtml(d){
     +`</div>`;
   if(resolved){
     s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="stop-aware hit \u00b7 outcomes capped at the void when touched before horizon \u00b7 covers claims resolved since stop-tracking began (build -22) \u2014 n can trail the live column\u2019s">stop hit</th><th class="ss" data-tip="stop-aware median realized">stop med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s stop hit for how many claims were stopped out">stop pf</th><th></th></tr></thead><tbody>';
-    for(const ev of evs){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
+    for(const ev of [...evs].sort((a,b)=>((rc[b].resolved||0)-(rc[a].resolved||0))||((rc[b].open||0)-(rc[a].open||0)))){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
       const bad=r.resolved>=10&&r.hit<0.5&&r.med<=0, good=r.resolved>=10&&r.hit>=0.55&&r.med>0;
       s+=`<tr><td>${esc(EV_LABELS[ev]||ev)}</td><td>${r.resolved}${r.open?` <span class="sec">/${r.open}</span>`:''}</td>`
         +`<td>${r.hit!=null?`<span class="${r.hit>=0.5?'pos':'neg'}">${Math.round(r.hit*100)}%</span>`:'\u2014'}</td>`
@@ -3016,8 +3016,12 @@ function renderSignals(){
   // are indistinguishable (exactly the question the tretest launch raised).
   const LEDGER_ROSTER=['bigmove','breakout','breakdown','gap','fundflip','squeeze','unwind','oiflush','fpdiv','prem','ondrift','tretest','tretestdn'];
   if(Object.keys(recSrc).length){
-    rec='<div class="recstrip">';
-    for(const ev in recSrc){ const r=recSrc[ev]; if(!r) continue;
+    rec='<div class="dsec" style="margin-top:22px" data-tip="compact per-event record \u2014 the same ledger the accuracy table details below, one chip per event type">Record by event</div><div class="recstrip">';
+    // record-first ordering: proven/measured entries (by sample size) up top, open-but-unresolved
+    // next, roster members awaiting their first claim at the bottom — informational rows never
+    // outrank rows with actual outcomes
+    const evOrder=Object.keys(recSrc).sort((a,b)=>((recSrc[b].resolved||0)-(recSrc[a].resolved||0))||((recSrc[b].open||0)-(recSrc[a].open||0)));
+    for(const ev of evOrder){ const r=recSrc[ev]; if(!r) continue;
       const live = r.resolved>0
         ? `${Math.round((r.hit||0)*100)}% hit \u00b7 med ${r.med>=0?'+':''}${r.med}${r.unit} (n=${r.resolved})`
         : `${r.open||0} open, none resolved yet`;
@@ -3043,7 +3047,7 @@ function renderSignals(){
     }
   }
   if(!d||!d.signals||!d.signals.length){
-    box.innerHTML=intro+rec+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d);
+    box.innerHTML=intro+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+rec+sigRecordHtml(d);
     bindSigControls(box); return;
   }
   let hiddenN=0;
@@ -3055,12 +3059,12 @@ function renderSignals(){
   for(const g of sigs){ if(byCoin[g.coin]){ byCoin[g.coin].sigs.push(g); byCoin[g.coin].score=Math.max(byCoin[g.coin].score,g.score); }
     else { byCoin[g.coin]={coin:g.coin,ticker:g.ticker,score:g.score,sigs:[g]}; groups.push(byCoin[g.coin]); } }
   if((mvThr>0||prOn)&&!groups.length){
-    box.innerHTML=intro+rec+`<div class="msg">All ${hiddenN} live signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (no prime setups firing'+(mvThr>0?' at this size':'')+')':''}.</div>`+sigRecordHtml(d);
+    box.innerHTML=intro+`<div class="msg">All ${hiddenN} live signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (no prime setups firing'+(mvThr>0?' at this size':'')+')':''}.</div>`+rec+sigRecordHtml(d);
     bindSigControls(box); attachLineHover(); return;
   }
   const main=groups.filter(g=>g.score>=35), low=groups.filter(g=>g.score<35);
   const rowOf=(gr,rank)=> view==='compact' ? (sigExpanded.has(gr.coin) ? sigCardHtml(gr, rank, true) : sigRowHtml(gr, rank)) : sigCardHtml(gr, rank, false);
-  let s=intro+rec+'<div class="siglist">';
+  let s=intro+'<div class="siglist">';
   let rank=0;
   for(const gr of main){ rank++; s+=rowOf(gr,rank); }
   if(low.length){
@@ -3069,7 +3073,7 @@ function renderSignals(){
   }
   s+='</div>';
   if(hiddenN>0) s+=`<div class="sec" style="font-size:10.5px;padding:6px 2px" data-tip="signals whose playbook target is closer than the active threshold, or which have no computable target">${hiddenN} signal${hiddenN===1?'':'s'} hidden by the active filter${prOn?' (prime-only)':''}</div>`;
-  s+=sigRecordHtml(d);
+  s+=rec+sigRecordHtml(d);
   box.innerHTML=s;
   bindSigControls(box);
   attachLineHover();
