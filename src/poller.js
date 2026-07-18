@@ -2277,7 +2277,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const restoredHourly = hydrateHourly();
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
-    log(`AI reports: ${process.env.ANTHROPIC_API_KEY ? "ENABLED" : "disabled (ANTHROPIC_API_KEY not set)"} — model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
+    log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
@@ -2515,10 +2515,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // facts — it narrates them, it cannot invent them; (5) generation is on-demand only and the
   // shared cache is the rate limit: the TTL cooldown is enforced server-side for everyone, and a
   // report invalidates early only on material change (new claim, claim resolved, earnings print).
-  const AI_MODEL = process.env.AI_MODEL || "claude-fable-5";
-  const AI_MODEL_FALLBACK = process.env.AI_MODEL_FALLBACK || "claude-opus-4-8";
+  // Provider is auto-detected from whichever key is set (AI_PROVIDER overrides): Anthropic when
+  // ANTHROPIC_API_KEY exists, else OpenAI when OPENAI_API_KEY exists. Per-provider defaults —
+  // model, fallback, and the output-token budget (GPT-5.x bills its reasoning tokens against
+  // max_completion_tokens, so the OpenAI budget is larger or reasoning can eat the whole
+  // allowance and return an empty message). Switching providers is a Railway variable, not a code change.
+  const AI_DEFAULTS = {
+    anthropic: { model: "claude-fable-5", fb: "claude-opus-4-8", maxTokens: 3000 },
+    openai: { model: "gpt-5.6-sol", fb: "gpt-5.6-terra", maxTokens: 8000 },
+  };
+  const AI_PROVIDER = (process.env.AI_PROVIDER
+    || (process.env.ANTHROPIC_API_KEY ? "anthropic" : (process.env.OPENAI_API_KEY ? "openai" : "anthropic"))).toLowerCase();
+  const AI_DEF = AI_DEFAULTS[AI_PROVIDER] || AI_DEFAULTS.anthropic;
+  const AI_MODEL = process.env.AI_MODEL || AI_DEF.model;
+  const AI_MODEL_FALLBACK = process.env.AI_MODEL_FALLBACK || AI_DEF.fb;
+  const AI_KEY = () => AI_PROVIDER === "openai" ? (process.env.OPENAI_API_KEY || "") : (process.env.ANTHROPIC_API_KEY || "");
   const AI_TTL_MS = Math.max(5, Number(process.env.AI_REPORT_TTL_MIN) || 30) * 60 * 1000;
-  const AI_MAX_TOKENS = 3000;
+  const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
   const AI_LEVEL_KINDS = new Set(["void", "target", "zone_low", "zone_high", "note"]);
@@ -2894,14 +2907,36 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     marks.sort((a, b) => a.t - b.t);
     return marks.slice(-14);
   }
-  async function callAnthropic(model, ctx) {
+  async function callModel(model, ctx) {
     const doFetch = aiFetch || fetch;
     const ctrl = new AbortController();
     const to = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
     try {
-      const res = await doFetch("https://api.anthropic.com/v1/messages", {
+      let res;
+      if (AI_PROVIDER === "openai") {
+        // OpenAI Chat Completions. max_completion_tokens (not max_tokens — GPT-5.x rejects the
+        // old name) covers reasoning + output together, hence the larger budget. Body stays
+        // minimal on purpose, same principle as the Anthropic path.
+        res = await doFetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer " + AI_KEY() },
+          body: JSON.stringify({ model, max_completion_tokens: AI_MAX_TOKENS,
+            messages: [{ role: "system", content: AI_SYSTEM },
+              { role: "user", content: "Context:\n" + JSON.stringify(ctx) }] }),
+          signal: ctrl.signal,
+        });
+        if (!res.ok) { let msg = "HTTP " + res.status; try { const j = await res.json(); if (j && j.error && j.error.message) msg += " — " + j.error.message; } catch (_) {} return { ok: false, error: msg }; }
+        const data = await res.json();
+        const m = data && Array.isArray(data.choices) && data.choices[0] ? data.choices[0].message : null;
+        if (m && m.refusal) return { ok: false, error: "model refused" };   // refusals ride a 200 here too
+        const text = m && typeof m.content === "string" ? m.content : "";
+        if (!text) return { ok: false, error: (data.choices && data.choices[0] && data.choices[0].finish_reason === "length")
+          ? "reasoning consumed the token budget — empty output" : "empty model response" };
+        return { ok: true, text, usage: data.usage || null };
+      }
+      res = await doFetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY || "",
+        headers: { "content-type": "application/json", "x-api-key": AI_KEY(),
           "anthropic-version": "2023-06-01" },
         // Deliberately minimal body: Fable rejects some sampling params other models accept, and
         // its adaptive thinking must be left alone (an explicit thinking:disabled is a 400).
@@ -2952,7 +2987,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     }
     const rep = aiReports.get(coin);
     if (!rep) return { coin, status: "none", canRegen: true, ts: Date.now(),
-      enabled: !!(process.env.ANTHROPIC_API_KEY || aiFetch), model: AI_MODEL };
+      enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL };
     return aiPublic(rep);
   }
   function listAiReports() {
@@ -2963,12 +2998,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         invalidReason: p.invalidReason, regenInMs: p.regenInMs, evR: p.computed && p.computed.evR };
     });
     out.sort((a, b) => b.ts - a.ts);
-    return { ts: Date.now(), ttlMs: AI_TTL_MS, model: AI_MODEL,
-      enabled: !!(process.env.ANTHROPIC_API_KEY || aiFetch), reports: out.slice(0, 30) };
+    return { ts: Date.now(), ttlMs: AI_TTL_MS, model: AI_MODEL, provider: AI_PROVIDER,
+      enabled: !!(AI_KEY() || aiFetch), reports: out.slice(0, 30) };
   }
   async function generateAiReport(coin) {
     if (!coin || !aiUniverseOk(coin)) return { ok: false, error: "not in the live universe" };
-    if (!process.env.ANTHROPIC_API_KEY && !aiFetch) return { ok: false, error: "ANTHROPIC_API_KEY not set on the server" };
+    if (!AI_KEY() && !aiFetch) return { ok: false, error: "no AI API key set on the server (ANTHROPIC_API_KEY or OPENAI_API_KEY)" };
     const existing = aiReports.get(coin);
     if (existing) {
       const p = aiPublic(existing);
@@ -2981,11 +3016,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     try {
       const ctx = compileAiContext(coin);
       if (!ctx) return { ok: false, error: "not enough data compiled for this ticker yet" };
-      let used = AI_MODEL, call = await callAnthropic(AI_MODEL, ctx);
+      let used = AI_MODEL, call = await callModel(AI_MODEL, ctx);
       let val = call.ok ? validateAiReport(call.text, ctx) : { ok: false, error: call.error };
       if (!val.ok) {
         log(`AI report ${coin}: ${AI_MODEL} failed (${val.error}) — falling back to ${AI_MODEL_FALLBACK}`);
-        used = AI_MODEL_FALLBACK; call = await callAnthropic(AI_MODEL_FALLBACK, ctx);
+        used = AI_MODEL_FALLBACK; call = await callModel(AI_MODEL_FALLBACK, ctx);
         val = call.ok ? validateAiReport(call.text, ctx) : { ok: false, error: call.error };
       }
       if (!val.ok) { log(`AI report ${coin}: fallback failed too (${val.error})`); return { ok: false, error: val.error }; }
@@ -3064,7 +3099,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null,
           prints: earnPrints.length, histDone: earnHistDone, studyTickers: Object.keys(earnStudy).length,
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
-        ai: { enabled: !!(process.env.ANTHROPIC_API_KEY || aiFetch), model: AI_MODEL,
+        ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
           fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
