@@ -762,6 +762,7 @@ function createPoller({ dex, store, log, version, crypto }) {
     breakdown: "30d-low breakdown", unwind: "Long unwind",
     oiflush: "OI flush", fpdiv: "Funding\u2013price divergence", coil: "Range compression",
     ondrift: "Overnight drift",
+    tretest: "Trend retest (long)", tretestdn: "Trend retest (short)",
   };
   // Daily-step OI series from the sampled history: nearest sample within 12h of each UTC
   // midnight. Feeds the flush study; cheap because hist is already in memory.
@@ -1487,6 +1488,45 @@ function createPoller({ dex, store, log, version, crypto }) {
           (10 - st.coil.pct) * 1.5 + 10, { pts: 6, unproven: true }, { horizon: EV_META.coil.horizon });
         sig.play = playbook("coil", {});
         out.push(sig);
+      }
+    }
+    // ---- trend retest -> ledger signal ------------------------------------------------------
+    // The Trend board's RETEST badge, promoted to a ledgered claim with frozen geometry. The
+    // condition IS the badge: a board-visible row (score >= 3 by trendRead's own gate, top-10 by
+    // rank) whose retesting rung probed the 13/21 zone while the close held EMA21. Everything is
+    // read from the SAME buildTrend output the tab renders — never re-derived here — so signal
+    // and board cannot disagree (the modal lesson, applied to the ledger). Frozen at fire:
+    // entry = mark, void = the rung's EMA21 (ladder value), target = the rung's prior swing
+    // (null-tolerant: no valid swing -> no target, mv stays null, the claim still ledgers with
+    // its stop-aware leg). Board score / rung / rrv / age ride along as recorded features —
+    // recorded, NOT gated: the ledger decides which slices earn trust, not the trigger.
+    // Stocks/macro universe only, like every ledgered event; crypto enrollment is the separate
+    // crypto-signals project. Outcomes in raw % (not sigma-R): there is no in-sample study to
+    // stay unit-compatible with — this event earns its record purely out of sample.
+    {
+      if (!trendCache || now - trendBuilt > TREND_MS) { try { buildTrend(); } catch (e) { log("buildTrend error in signals: " + (e && e.message)); } }
+      if (trendCache) {
+        for (const side of ["long", "short"]) {
+          const ev = side === "long" ? "tretest" : "tretestdn";
+          for (const e of (trendCache[side].stocks || [])) {
+            if (!e.retest) continue;
+            const r = rows.get(e.coin);
+            if (!r || r.delisted || !(r.px > 0)) continue;
+            const cell = e.tf && e.tf[e.retest];
+            if (!cell || !(cell.e21 > 0)) continue;
+            const dir = side === "long" ? 1 : -1;
+            const evd = evidence(null, ev, null, "%");
+            const reading = `${e.retest} retest \u2014 pullback into the 13/21 zone of a ${e.score}/4 stacked ${side === "long" ? "uptrend" : "downtrend"}, close holding EMA21`
+              + (e.rrv != null ? ` \u00b7 zone volume ${e.rrv.toFixed(1)}\u00d7` : "")
+              + (e.age != null ? ` \u00b7 trend age ${e.age}${e.ageCap ? "+" : ""}d` : "");
+            const sigT = mkSignal(r, ev, reading,
+              10 + 8 * e.score + (e.rrv != null && e.rrv <= 1 ? 6 : 0),   // quiet pullbacks (rrv <= 1x) read healthier than fought ones — small nudge, recorded either way
+              evd, { horizon: EV_META[ev].horizon });
+            sigT.play = playbook(ev, { tf: e.retest, score: e.score, e21: cell.e21, swing: e.swing != null ? e.swing : null, px: r.px });
+            out.push(sigT);
+            openLedger(r, ev, sigT, dir, { tf: e.retest, tsc: e.score, rrv: e.rrv != null ? +e.rrv.toFixed(2) : null, tage: e.age != null ? e.age : null });
+          }
+        }
       }
     }
     // freshness: trigger time + age on every signal. Ledgered events use their ledger entry;
@@ -2383,6 +2423,39 @@ function createPoller({ dex, store, log, version, crypto }) {
           const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now) : null;
           e.rrv = rv && rv.w != null ? rv.w : null;
         } catch (_) { e.rrv = null; }
+        // Prior-swing level for the retest: the target the read alludes to ("prior swing high"),
+        // computed from the SAME series builders the ladder consumed for that rung, for shipped
+        // retest rows only (bounded work, like rrv). Long: the highest high (close when the bar
+        // is closes-only) of the ~30 bars before the probe window; short: the lowest low. Null
+        // when the lookback is too thin or the level sits on the wrong side of the mark — an
+        // honest dash, never a fabricated target. Feeds the chart modal's target line and the
+        // tretest ledger claim's frozen target; NOT in the content signature (fires with retest,
+        // which is).
+        e.swing = null;
+        try {
+          const rr = rows.get(e.coin);
+          if (rr) {
+            let ser = null;
+            if (e.retest === "D1") ser = withFormingDaily(Array.isArray(rr.dailyRaw) ? rr.dailyRaw : [], rr.px, now, DAY);
+            else if (e.retest === "H1") ser = Array.isArray(rr.hourlyRaw) ? rr.hourlyRaw.slice(-96) : null;
+            else ser = Array.isArray(rr.hourlyRaw) ? bucketCandles(rr.hourlyRaw, e.retest === "H12" ? 12 : 4, HOUR) : null;
+            if (ser && ser.length >= 13) {
+              const win = ser.slice(Math.max(0, ser.length - 33), ser.length - 3);
+              if (win.length >= 10 && rr.px > 0) {
+                let lvl = null;
+                for (const k of win) {
+                  const v = side === "long"
+                    ? (k.h != null && isFinite(+k.h) ? +k.h : +k.c)
+                    : (k.l != null && isFinite(+k.l) ? +k.l : +k.c);
+                  if (!isFinite(v)) continue;
+                  lvl = lvl == null ? v : (side === "long" ? Math.max(lvl, v) : Math.min(lvl, v));
+                }
+                // target must sit on the PROFIT side of the mark, else it isn't a target
+                if (lvl != null && (side === "long" ? lvl > rr.px * 1.001 : lvl < rr.px * 0.999)) e.swing = sig(lvl, 9);
+              }
+            }
+          }
+        } catch (_) { e.swing = null; }
       }
     }
     const sigTrend = JSON.stringify([["long", "short"].map((s) => ["crypto", "stocks"].map((u) =>

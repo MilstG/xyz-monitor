@@ -507,6 +507,8 @@ const EV_META = {
   unwind:   { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
   oiflush:  { horizonMs: 5 * DAY,  horizon: "next 5d (bottoming thesis)",     studyKey: "d5" },
   fpdiv:    { horizonMs: 3 * DAY,  horizon: "next 3d, with the divergence",   studyKey: "d3" },
+  tretest:  { horizonMs: 5 * DAY,  horizon: "next 5d, with the stacked trend", studyKey: null },
+  tretestdn:{ horizonMs: 5 * DAY,  horizon: "next 5d, with the stacked downtrend", studyKey: null },
   coil:     { horizonMs: null,     horizon: "context flag \u2014 expansion pending, direction unknown", studyKey: null },
   ondrift:  { horizonMs: null,     horizon: "next 5 overnight windows, held close\u2192open", studyKey: null },
   prem:     { horizonMs: 12 * HOUR, horizon: "reversion toward oracle",       studyKey: null },
@@ -604,6 +606,18 @@ function playbook(ev, ctx) {
         bias: ctx.prem >= 0 ? "perp rich \u2014 reversion toward oracle (short the perp side)" : "perp cheap \u2014 reversion toward oracle (long the perp side)",
         target: f2(ctx.oracle), stop: null,
         watch: ctx.closed ? "whether the cash open confirms the perp's level or snaps it back to the oracle" : "persistence \u2014 a dislocation that survives arb for hours is information, not noise" };
+    case "tretest": case "tretestdn": {
+      // The trend board's retest, frozen into ledger geometry at fire time: entry = the mark,
+      // void = the retesting rung's EMA21 (the ladder's own level — a close beyond it is the
+      // board's own definition of the trend being damaged), target = the prior swing extreme of
+      // that rung's series. Everything is stamped from the SAME ladder build the board rendered;
+      // nothing is re-derived for the signal.
+      const L = ev === "tretest";
+      return { side: L ? "long" : "short",
+        bias: `continuation ${L ? "up" : "down"} off the ${ctx.tf} 13/21 zone (${ctx.score}/4 stack)`,
+        target: f2(ctx.swing), stop: f2(ctx.e21),
+        watch: `a ${ctx.tf} close ${L ? "below" : "above"} EMA21 = trend damaged, the claim is void` };
+    }
     default:
       return { side: "watch", bias: "context only", target: null, stop: null,
         watch: "pairs with whatever else is firing on this name" };
