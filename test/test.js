@@ -1652,7 +1652,7 @@ test("client: report chart renderer ships the fixes — price-only domain, line 
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const frag of ["lineMode", "close-line mode", "off-chart:", "labs[i].y-labs[i-1].y<15", "addGlyph", "axDec", "hasRisk", "ai-scen${hasRisk?'':' norisk'}"])
+  for (const frag of ["lineMode", "close-line mode", "off-chart:", "labs[i].y-labs[i-1].y<15", "groups.find", "axDec", "hasRisk", "ai-scen${hasRisk?'':' norisk'}"])
     assert.ok(app.includes(frag), `app.js missing chart-fix marker: ${frag}`);
   assert.ok(!app.includes("for(const l of levels){ if(l.value<lo)lo=l.value; if(l.value>hi)hi=l.value; }"),
     "the level-driven y-domain (the squashed-chart bug) must be gone");
@@ -1747,4 +1747,63 @@ test("client -73: multi-timeframe chart + action panel ship end to end", () => {
   for (const cls of [".ai-act", ".ai-tf"]) assert.ok(css.includes(cls), `styles.css missing: ${cls}`);
   for (const frag of ["AI_SCHEMA_V", "report format updated", "schemaV: AI_SCHEMA_V", "actionable stance without void/target geometry", "downgraded from an entry stance", "bucketCandles(r.hourlyRaw, 24, HOUR)"])
     assert.ok(pol.includes(frag), `poller.js missing -73 marker: ${frag}`);
+});
+
+test("ai report -74: first-fire marks — episode runs mark once, sides come from the frozen psd, outcomes ride the mark", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  // NVDA's story: a breakout run that re-fires daily (one mark), a separate breakout episode
+  // three weeks earlier (its own mark), a psd-short gap claim on an UP gap (must mark SHORT —
+  // the trade side, not the event sign), and a resolved unwind with its outcome.
+  const fixture = { ts: now, rearm: [], variants: null,
+    open: [
+      { key: "N|breakout", coin: "N", ticker: "N", ev: "breakout", t0: now - 1 * 86400000,
+        mark0: 100, dir: 1, score0: 60, sd0: 2, resolveAt: now + 4 * 86400000, psd: "long" },
+    ],
+    closed: [
+      // the same run, day before (chained: gap 1d <= 2d) — recorded, must NOT re-mark
+      { key: "N|breakout#r1", coin: "N", ticker: "N", ev: "breakout", t0: now - 2 * 86400000,
+        mark0: 99, dir: 1, score0: 55, sd0: 2, status: "resolved", tR: now - 1 * 86400000,
+        realized: 0.4, realizedS: 0.4, win: true, winS: true, psd: "long", rn: 1 },
+      // a genuinely separate episode 21 days earlier — must mark
+      { key: "N|breakout#old", coin: "N", ticker: "N", ev: "breakout", t0: now - 21 * 86400000,
+        mark0: 80, dir: 1, score0: 62, sd0: 2, status: "resolved", tR: now - 16 * 86400000,
+        realized: 2.0, realizedS: 2.0, win: true, winS: true, psd: "long", rn: 1 },
+      // gap-fader: EVENT dir is the up-gap (+1) but the PLAY shorts it — the mark must be short
+      { key: "N|gap", coin: "N", ticker: "N", ev: "gap", t0: now - 10 * 86400000,
+        mark0: 95, dir: 1, score0: 50, status: "resolved", tR: now - 9 * 86400000,
+        realized: 1.1, realizedS: 1.1, win: true, winS: true, psd: "short", rn: 1 },
+      // voided unwind — status must ride through
+      { key: "N|unwind", coin: "N", ticker: "N", ev: "unwind", t0: now - 6 * 86400000,
+        mark0: 92, dir: -1, score0: 45, sd0: 2, status: "void", tR: now - 5 * 86400000, rn: 1 },
+    ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadAiReports: () => null, saveAiReports: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  const marks = p.aiMarksNow("N", "N", 92 * 86400000);
+  const bo = marks.filter((m) => m.ev === "breakout");
+  assert.equal(bo.length, 2, `chained breakout run must mark once per episode (got ${bo.length}: ${JSON.stringify(bo.map((m) => m.t))})`);
+  assert.ok(bo.some((m) => Math.abs(m.t - (now - 21 * 86400000)) < 1000), "the separate old episode keeps its own mark");
+  assert.ok(bo.some((m) => Math.abs(m.t - (now - 2 * 86400000)) < 1000), "the current run marks at its ONSET (the first entry), not the live re-fire");
+  const gap = marks.find((m) => m.ev === "gap");
+  assert.equal(gap.kind, "short", "the gap-fader marks the TRADE side from psd, not the event sign");
+  const un = marks.find((m) => m.ev === "unwind");
+  assert.equal(un.status, "void", "void status rides the mark");
+  const oldBo = marks.find((m) => Math.abs(m.t - (now - 21 * 86400000)) < 1000);
+  assert.equal(oldBo.status, "resolved");
+  assert.equal(oldBo.realized, 2.0, "resolved outcome ships on the mark for the legend");
+  assert.equal(oldBo.unit, "R");
+});
+
+test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -73 reports invalidate", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const frag of ["AI_MK", "ai-mkleg", "first fires only", "g.kind==='short'", "distinct signal types at onset", "outTxt"])
+    assert.ok(app.includes(frag), `app.js missing -74 marker: ${frag}`);
+  assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
+  for (const frag of ["const AI_SCHEMA_V = 3;", "aiMarksNow", "AI_CTX_EVS", "runsOn", "lastEnd"])
+    assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
 });
