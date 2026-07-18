@@ -1011,7 +1011,7 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
     "missing poller harness: seedRowNow");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(html.includes('data-view="trend"'), "trend tab button missing from nav");
-  for (const id of ["view-trend", "trendside", "trend-body", "trend-asof", "tchartbg", "tchartmodal"])
+  for (const id of ["view-trend", "trendside", "trend-body", "trend-asof", "tchartbg", "tchartmodal", "sig-introtxt", "sig-segslot"])
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(srv.includes("/api/trend"), "server route missing: /api/trend");
