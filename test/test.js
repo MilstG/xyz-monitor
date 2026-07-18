@@ -1025,6 +1025,15 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
   for (const frag of ["tchart-btn", "&tf=", "tcbtn-td"])
     assert.ok(app.includes(frag), `missing chart-modal client marker: ${frag}`);
   assert.ok(srv.includes("getTfCandles"), "candles route does not branch to the ladder-series getter");
+  // trend-retest ledger signal: both event ids must exist end to end — server labels/meta,
+  // playbook, and the client label/tip maps (a missing client label renders raw event ids)
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const ev of ["tretest", "tretestdn"]) {
+    assert.ok(pol.includes(`${ev}:`) || pol.includes(`"${ev}"`), `poller missing event wiring: ${ev}`);
+    assert.ok(cmp.includes(ev), `compute missing event meta/playbook: ${ev}`);
+    assert.ok(app.includes(`${ev}:`), `client label/tip maps missing event: ${ev}`);
+  }
 });
 
 test("ribbonWidth: per-rung average spread, null guards, and consistency with the ladder", () => {
@@ -1183,6 +1192,61 @@ test("daily refetch predicate: closes-only warm restores refetch regardless of d
   assert.ok(rd.candles.length >= 30, "closes-only series still serves the chart");
   assert.ok(rd.candles[0][1] == null && rd.candles[0][2] == null && rd.candles[0][3] == null,
     "warm-restore bars ride through with null o/h/l");
+});
+
+test("trend retest -> ledger signal: the board's badge fires a claim with frozen ladder geometry", () => {
+  // The RETEST badge promoted to the ledger. Contract under test, end to end: the condition IS
+  // the board (score >= 3, board-visible, retest set by trendRead's own gate); the claim's void
+  // is the retesting rung's OWN EMA21 as shipped on the trend payload; the target is the
+  // rung-series prior swing, also shipped (the modal's target line and the ledger freeze are the
+  // same number); side/geometry are valid; horizon is 5d; features (rung, board score, rrv,
+  // age) are recorded on the entry — recorded, not gated.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), endH = Math.floor(now / HOUR);
+  const N = 16 * 24, hourly = [];
+  for (let i = 0; i < N; i++) {
+    const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+    hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 });
+  }
+  const px = hourly[N - 1].c * 1.0005;
+  // rising dailies whose recent LOWS probe the D1 EMA13 (the retest) while closes hold the
+  // stack, with one prior swing spike ABOVE the mark so a valid target exists
+  const daily = [];
+  for (let i = 0; i < 60; i++) {
+    const c = px * Math.pow(1.01, i - 59);
+    daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.90, h: c * (i === 50 ? 1.15 : 1.002) });
+  }
+  p.seedRowNow("TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, hourlyRaw: hourly, dailyRaw: daily });
+  p.buildTrendNow();
+  const row = p.getTrend().long.stocks.find((e) => e.coin === "TRSIG");
+  assert.ok(row && row.retest, "fixture produces a board-visible retest");
+  assert.ok(row.score >= 3, "retest rows carry trendRead's own >=3/4 gate");
+  assert.ok(row.swing != null && row.swing > px, "prior swing ships on the payload and sits on the profit side of the mark");
+  const zone = row.tf[row.retest];
+  assert.ok(zone && zone.e21 > 0 && zone.e21 < px, "retesting rung's EMA21 shipped, below the mark for a long");
+  p.buildSignalsNow();
+  const sigs = p.getSignals();
+  const s = sigs && sigs.signals ? sigs.signals.find((g) => g.coin === "TRSIG" && g.ev === "tretest") : null;
+  assert.ok(s, "tretest signal is visible in the signals payload");
+  assert.equal(s.play.side, "long", "play side follows the board side");
+  const rel = (a, b) => Math.abs(a - b) / Math.abs(b);
+  assert.ok(rel(s.play.stop, zone.e21) < 1e-5, "frozen void IS the ladder's own EMA21 for the retesting rung");
+  assert.ok(rel(s.play.target, row.swing) < 1e-5, "frozen target IS the shipped prior-swing level");
+  assert.ok(s.reading.includes(row.retest), "reading names the retesting rung");
+  const led = p.getLedgerFor("TRSIG", "tretest");
+  assert.equal(led.open.length, 1, "exactly one open claim — the episode gate holds");
+  const e = led.open[0];
+  assert.equal(e.side, "long", "claim side is play-signed");
+  assert.ok(Math.abs(e.resolveAt - e.t0 - 5 * DAY) < 1000, "5d horizon");
+  assert.ok(e.mv != null && e.mv > 0, "mv (target distance) stamped for the move-filtered record");
+  // second build inside the same episode: no serial re-open (the pseudo-replication guard)
+  p.buildSignalsNow();
+  assert.equal(p.getLedgerFor("TRSIG", "tretest").open.length, 1, "same episode never opens a second claim");
+  // and the short mirror stays silent on a long-side retest
+  assert.equal(p.getLedgerFor("TRSIG", "tretestdn").open.length, 0, "no phantom short claim");
 });
 
 test("withFormingDaily: stale daily series gets a synthetic forming bar, fresh series untouched", () => {
