@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.18-69";
+const VERSION = "2026.07.18-70";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -36,7 +36,7 @@ log(`Volume heartbeat: boot #${HEARTBEAT.boots} on this data dir (first boot ${n
 // Kill-switch: CRYPTO=0 disables main-dex polling entirely — one-variable rollback on Railway.
 const CRYPTO = process.env.CRYPTO !== "0";
 const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
-log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d retention" : "disabled via CRYPTO=0"}`);
+log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d hourly / 90d daily retention" : "disabled via CRYPTO=0"}`);
 
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
@@ -269,6 +269,27 @@ async function main() {
     const tf = req.query && req.query.tf;
     if (tf) { const r = poller.getTfCandles(coin, tf); if (r) return r; }
     return { coin, candles: poller.getCandles(coin, days) };
+  });
+  // AI analyst report: everything this server holds on one ticker, compiled and sent to the
+  // Anthropic API (Fable, Opus fallback), validated, and cached for the whole group. GET serves
+  // the cache with live freshness (fresh / stale / invalidated + reason); POST generates — the
+  // TTL cooldown is enforced server-side (429), so the shared cache IS the group's rate limit.
+  // Session-gated like every route; the API key never leaves the server.
+  fastify.get("/api/ai-report", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const coin = (req.query && req.query.coin) || "";
+    return poller.getAiReport(coin);
+  });
+  fastify.post("/api/ai-report", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const b = req.body || {};
+    const r = await poller.generateAiReport(String(b.coin || ""));
+    return reply.code(r.ok ? 200 : (r.error === "cooldown" ? 429 : 400)).send(r);
+  });
+  // Recent AI reports across all tickers — the Report tab's shared feed.
+  fastify.get("/api/ai-reports", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    return poller.listAiReports();
   });
   fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR }, ...poller.stats(), ts: Date.now() }));
 
