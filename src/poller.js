@@ -2551,7 +2551,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
   // schema flip to "invalidated — report format updated" on the next read, so a deploy that
   // fixes the report is visible on the first regenerate, never hidden behind a running TTL.
-  const AI_SCHEMA_V = 3;
+  const AI_SCHEMA_V = 4;
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
@@ -2976,19 +2976,43 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // status, and its resolved outcome, so the chart legend renders the same audit trail the
   // drawer shows without a second fetch.
   const AI_CTX_EVS = new Set(["coil", "volume", "prem"]);
+  // Proven edge, using the SAME floors the signals engine's honesty badges use — n>=8 resolved
+  // with positive average expectancy roster-wide (the "unproven" threshold), or this specific
+  // name carrying its own strong record (n>=5, hit >= 60%). Computed directly off ledgerClosed
+  // so the answer doesn't depend on whether a signals build has run yet. Legacy pre-sigma
+  // outcomes are excluded from the R aggregates, exactly as everywhere else.
+  const AI_MARK_MIN_N = 8, AI_MARK_NAME_N = 5, AI_MARK_NAME_HIT = 0.6;
+  function aiEvEdge(ev, coin) {
+    let n = 0, sum = 0, cn = 0, cw = 0;
+    for (const e of ledgerClosed) {
+      if (e.ev !== ev || e.vi != null || e.status !== "resolved" || !Number.isFinite(e.realized)) continue;
+      if (R_LEDGER_EVS.has(e.ev) && !(e.sd0 > 0)) continue;   // legacy % outcomes stay out of the aggregates
+      n++; sum += e.realized;
+      if (e.coin === coin) { cn++; if (e.realized > 0) cw++; }
+    }
+    if (cn >= AI_MARK_NAME_N && cw / cn >= AI_MARK_NAME_HIT) return true;   // name-specific edge
+    return n >= AI_MARK_MIN_N && sum / n > 0;                               // roster-wide proven edge
+  }
   function aiMarks(coin, ticker, windowMs) {
     const now = Date.now(), cut = now - windowMs, marks = [];
+    let suppressed = 0;
     const ents = [];
     for (const e of ledgerOpen.values()) if (e.coin === coin && e.vi == null) ents.push({ e, st: "open" });
     for (const e of ledgerClosed) if (e.coin === coin && e.vi == null && (e.status === "resolved" || e.status === "void"))
       ents.push({ e, st: e.status });
     ents.sort((a, b) => a.e.t0 - b.e.t0);
     const lastEnd = new Map();   // ev -> end of the last seen entry's span
+    const edgeMemo = new Map();
+    const hasEdge = (ev) => { if (!edgeMemo.has(ev)) edgeMemo.set(ev, aiEvEdge(ev, coin)); return edgeMemo.get(ev); };
     for (const { e, st } of ents) {
       const prev = lastEnd.get(e.ev);
       const runsOn = prev != null && e.t0 - prev <= 2 * DAY;
       lastEnd.set(e.ev, Math.max(prev || 0, e.tR || e.resolveAt || e.t0));
       if (runsOn || e.t0 < cut) continue;   // re-fire inside a live run — recorded, not re-marked
+      // Proven-edge gate: unproven / negative-expectancy event types don't mark the chart —
+      // they're noise on a price picture. Counted and disclosed, never silently dropped; the
+      // ledger and the Signals tab carry the full record regardless.
+      if (!hasEdge(e.ev)) { suppressed++; continue; }
       const kind = AI_CTX_EVS.has(e.ev) ? "ctx" : (e.psd || (e.dir >= 0 ? "long" : "short"));
       marks.push({ t: e.t0, kind, ev: e.ev, label: EV_LABEL[e.ev] || e.ev, status: st,
         realized: st === "resolved" && Number.isFinite(e.realized) ? +(+e.realized).toFixed(2) : null,
@@ -3002,7 +3026,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       marks.push({ t, kind: "earn", ev: "earnings", label: "Earnings print" + (beat ? " — " + beat : ""), status: null });
     }
     marks.sort((a, b) => a.t - b.t);
-    return marks.slice(-20);
+    return { marks: marks.slice(-20), suppressed };
   }
   async function callModel(model, ctx) {
     const doFetch = aiFetch || fetch;
@@ -3058,9 +3082,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const r = rows.get(coin);
     const rep = { coin, ticker: (r && r.ticker) || ctx.ticker || coin, uni: ctx.universe, ts: Date.now(),
       model, ttlMs: AI_TTL_MS, schemaV: AI_SCHEMA_V, ctxStamp: aiStampFor(coin, (r && r.ticker) || ctx.ticker),
-      ai: validated.ai, computed: Object.assign({}, validated.computed,
-        { marks: aiMarks(coin, (r && r.ticker) || ctx.ticker, 92 * DAY), flags: ctx.flags || [], coverage: ctx.coverage || null,
-          claimAnchor: ctx.claimAnchor || null }) };
+      ai: validated.ai, computed: (() => { const mk = aiMarks(coin, (r && r.ticker) || ctx.ticker, 92 * DAY);
+        return Object.assign({}, validated.computed,
+          { marks: mk.marks, marksSuppressed: mk.suppressed, flags: ctx.flags || [], coverage: ctx.coverage || null,
+            claimAnchor: ctx.claimAnchor || null }); })() };
     aiReports.set(coin, rep);
     persistAiReports();
     return rep;
