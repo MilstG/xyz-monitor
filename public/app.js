@@ -2915,7 +2915,19 @@ function renderNews(){
       +`</div>`;
   }
   let body;
-  if(!items.length) body=`<div class="msg">${newsMode==='telegram'?(tgChans&&tgChans.channels&&tgChans.channels.length?'no telegram posts in the last 72h \u2014 the channels are fetched every 10 minutes':'no channels configured \u2014 open \u2699 to add public channels')+'':'nothing matches the filter in the last 72h'}</div>`;
+  if(!items.length){
+    let msg;
+    if(newsMode==='telegram') msg=(tgChans&&tgChans.channels&&tgChans.channels.length?'no telegram posts in the last 72h \u2014 the channels are fetched every 10 minutes':'no channels configured \u2014 open \u2699 to add public channels');
+    else if(newsMode==='filings'){
+      const st=d&&d.flStat;
+      if(st&&st.lastErr&&!st.lastOk) msg='EDGAR fetches are failing: '+esc(st.lastErr)+' \u2014 the server retries every minute; if this persists the User-Agent or egress IP is being rejected';
+      else if(st&&!st.names) msg='the EDGAR rotation is warming up \u2014 2 names per minute, full roster in ~40 minutes';
+      else if(newsFl!=='all') msg='no '+(newsFl==='mat'?'material':'ownership')+' filings in the 7-day window for the covered names \u2014 try \u201call forms\u201d, or note the coverage stamp below';
+      else msg='no filings in the 7-day window for the covered names'+(st&&st.names<((st.roster||0))?' \u2014 rotation has covered '+st.names+' of '+st.roster+' names so far':'');
+    }
+    else msg='nothing matches the filter in the last 72h';
+    body=`<div class="msg">${msg}</div>`;
+  }
   else if(newsView==='sector'&&newsMode!=='filings'){
     // grouped view: sections keyed by sector (unclassified bucketed), ordered by newest item;
     // reverse-chron inside each — the "what's moving in energy today" reading mode
@@ -2928,7 +2940,7 @@ function renderNews(){
   } else body=`<div class="nlist">${items.map(a=>newsRow(a,now,false)).join('')}</div>`;
   box.innerHTML=head+tgPanel+flChips+body
     +(newsMode==='filings'
-      ?`<div class="sec" style="font-size:10.5px;margin-top:8px">filings live only in this lane \u2014 never mixed into universe/tape/telegram \u00b7 amber form = material \u00b7 ticker click \u2192 drawer \u00b7 form click \u2192 filter \u00b7 source: sec.gov EDGAR \u00b7 7d window</div>`
+      ?`<div class="sec" style="font-size:10.5px;margin-top:8px">filings live only in this lane \u2014 never mixed into universe/tape/telegram \u00b7 amber form = material \u00b7 ticker click \u2192 drawer \u00b7 form click \u2192 filter \u00b7 source: sec.gov EDGAR \u00b7 7d window${(()=>{const st=d&&d.flStat;if(!st)return'';return st.lastOk?` \u00b7 last EDGAR fetch ${fmtAge(Date.now()-st.lastOk)} ago \u00b7 ${st.names}${st.roster?'/'+st.roster:''} names covered`:(st.lastErr?` \u00b7 <b class=\"neg\">EDGAR: ${esc(st.lastErr)}</b>`:'');})()}</div>`
       :`<div class="sec" style="font-size:10.5px;margin-top:8px">universe = verified attribution only \u00b7 amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 off-topic dimmed in tape \u00b7 72h window</div>`);
   bindNews(box);
 }
