@@ -812,7 +812,7 @@ test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.seedRowNow("xyz:WDC", { px: 500, ticker: "WDC", uni: "xyz" });
-  const pay = p.newsIngestNow([mk(9, "WDC", 1), mk(10, null, 2)]);
+  const pay = p.newsIngestNow([mk(9, "WDC", 1, "WDC raises Q1 guidance"), mk(10, null, 2)]);
   assert.equal(pay.count, 2);
   const wdc = pay.items.find((a) => a.id === 9);
   assert.equal(wdc.coin, "xyz:WDC", "equity headlines carry the drawer deep-link coin");
@@ -823,7 +823,7 @@ test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["finnhub.io/api/v1/company-news", "finnhub.io/api/v1/news?category=general",
     "const NEWS_BATCH = 3", "buildNewsPayload();   // sig/ed badge stamps ride the signals cadence",
-    "FINNHUB_TOKEN not set", "store.saveNews({ ts: now, items: newsItems, secTape, secLearned })"])
+    "FINNHUB_TOKEN not set", "store.saveNews({ ts: now, items: newsItems, secTape, secLearned, nameLearned })"])
     assert.ok(pol.includes(pin), `news worker pin missing: ${pin}`);
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(srv.includes('error: "not fetched yet"') && srv.split('fastify.get("/api/news"').length - 1 === 1, "route registered once with an honest fallback");
@@ -956,6 +956,117 @@ test("AI sector classification: enum-validated, write-once, static map wins, thr
     assert.ok(app.includes(pin), `sector UI pin missing: ${pin}`);
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".nsec-badge{") && css.includes(".nsec-badge.ai{border-style:dashed}"), "provenance styling present");
+});
+
+test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-tag validation, alias learning", async () => {
+  const C = require("../src/compute");
+  // the pure gate: symbol-as-word, alias substring, 1-char symbols never match
+  assert.ok(C.newsRelevant("Strategy Pads Cash With MSTR Sale", null, "MSTR", ["MicroStrategy"]), "symbol word match");
+  assert.ok(C.newsRelevant("Western Digital raises guidance", "", "WDC", ["Western Digital"]), "alias match");
+  assert.ok(!C.newsRelevant("Meta Platforms Likely to Beat Q2", null, "AMZN", ["Amazon"]), "the screenshot bug: Meta under AMZN fails the gate");
+  assert.ok(!C.newsRelevant("Stock Market Today: Nasdaq Leads", null, "SNDK", ["Sandisk"]), "listicles fail the gate");
+  assert.ok(!C.newsRelevant("Fed holds rates", null, "F", null), "1-char symbols never word-match");
+  assert.ok(C.newsRelevant("Details inside", "NVDA beat expectations", "NVDA", null), "summary participates in the gate");
+
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const calls = [];
+  let nextResponse = null;
+  const respond = (obj) => ({ ok: true, json: async () => ({ content: [{ type: "text", text: JSON.stringify(obj) }], stop_reason: "end_turn" }) });
+  const aiFetch = async (url, opts) => { calls.push(JSON.parse(opts.body)); return nextResponse; };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+  p.seedRowNow("xyz:AMZN", { px: 200, ticker: "AMZN", uni: "xyz" });
+  p.seedRowNow("xyz:META", { px: 500, ticker: "META", uni: "xyz" });
+  p.seedRowNow("xyz:QQZX", { px: 5, ticker: "QQZX", uni: "xyz" });   // unseeded name -> alias learning path
+  p.newsIngestNow([
+    { id: 11, tk: "AMZN", h: "Amazon expands same-day delivery", src: "s", url: "u", pub: now - 3600e3 },
+    { id: 12, tk: "AMZN", h: "Meta Platforms Likely to Beat Q2 Estimates", src: "s", url: "u", pub: now - 3600e3 },
+    { id: 13, tk: "AMZN", h: "Stock Market Today: Nasdaq Leads On Peace Hopes", src: "s", url: "u", pub: now - 3600e3 },
+    { id: 14, tk: "AMZN", h: "Spain beat Argentina to win World Cup", src: "s", url: "u", pub: now - 3600e3 },
+    { id: 15, tk: "QQZX", h: "Quizzex Robotics lands defense contract", src: "s", url: "u", pub: now - 3600e3 },
+  ]);
+  // BEFORE any verdicts: only the gate-passing item is attributed; nothing else leaks
+  let d = p.getNews();
+  let by = Object.fromEntries(d.items.map((a) => [a.id, a]));
+  assert.equal(by[11].tk, "AMZN", "gate-passing item attributed deterministically");
+  for (const id of [12, 13, 14, 15]) {
+    assert.equal(by[id].tk, null, `item ${id} ships UNATTRIBUTED while pending — no leak into the universe feed`);
+    assert.equal(by[id].pend, 1, `item ${id} wears the pending marker`);
+  }
+  // verdicts: re-tag to META (in roster), market demotion, off-topic, plus an INVALID re-tag to a
+  // ticker outside the roster (must be a strike, not an attribution); QQZX aliases learned
+  nextResponse = respond({ tape: [], tickers: [],
+    rel: [{ i: "12", v: "other", t: "META" }, { i: "13", v: "market" }, { i: "14", v: "off" }, { i: "15", v: "other", t: "TSLA" }],
+    names: [{ t: "QQZX", names: ["Quizzex Robotics", "Quizzex"] }] });
+  const r = await p.classifySecNow();
+  assert.ok(r.ok && r.applied >= 4, `verdicts + aliases + re-gate applied, got ${JSON.stringify(r)}`);
+  d = p.getNews();
+  by = Object.fromEntries(d.items.map((a) => [a.id, a]));
+  assert.equal(by[12].tk, "META", "Meta story re-tagged to META");
+  assert.equal(by[12].relAi, 1, "re-tagged attribution wears the AI-verified marker");
+  assert.equal(by[12].sec, "Communication Services", "and picks up META's static sector");
+  assert.equal(by[13].tk, null); assert.ok(!by[13].pend, "market-general item demoted to plain tape");
+  assert.equal(by[14].sec, "off-topic"); assert.equal(by[14].secAi, 1, "World Cup -> off-topic, AI-marked");
+  assert.equal(by[15].tk, "QQZX", "learned alias re-gated the pending item DETERMINISTICALLY — the invalid TSLA re-tag was never applied");
+  assert.ok(!d.items.some((a) => a.tk === "TSLA"), "a re-tag outside the roster can never mint an attribution");
+  // the cascade continues correctly: the demoted item now needs a TAPE sector, and QQZX needs
+  // a learned ticker sector — but no relevance verdict is ever re-asked (write-once)
+  nextResponse = respond({ tape: [{ i: "13", sec: "macro" }], tickers: [{ t: "QQZX", sec: "Industrials" }], rel: [], names: [] });
+  const r2 = await p.classifySecNow();
+  assert.ok(r2.ok && r2.applied === 2, `demoted item sectored + QQZX learned, got ${JSON.stringify(r2)}`);
+  const relAsked2 = calls[1].messages[0].content;
+  assert.ok(!relAsked2.includes('"rel":[{'), "no relevance entries re-sent — verdicts are write-once");
+  // and only NOW is the pipeline fully drained
+  nextResponse = respond({ tape: [], tickers: [], rel: [], names: [] });
+  const r3 = await p.classifySecNow();
+  assert.ok(r3.idle, "fully classified store goes idle — nothing loops");
+  // wiring pins: lane semantics client-side, drawer guard, health counters
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["newsMode='universe'", "const inLane=(a)=>newsMode==='universe'?!!a.tk:true",
+    "relevance verdict pending", "a.sec==='off-topic'?' off'", "!a.tk&&a.sec!=='off-topic'&&!a.pend",
+    "attribution AI-verified"])
+    assert.ok(app.includes(pin), `lane pin missing: ${pin}`);
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".nrow.off{opacity:.45}"), "off-topic dimming present");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["function gateCompanyItems(", "function regatePending(", "uniSet.has(String(e.t).toUpperCase())",
+    "relevance: { verified:", "secTape, secLearned, nameLearned }"])
+    assert.ok(pol.includes(pin) || pol.includes(pin.trim()), `pipeline pin missing: ${pin}`);
+  const sec = fs.readFileSync(path.join(__dirname, "..", "src", "sectors.js"), "utf8");
+  assert.ok(sec.includes("const COMPANY_NAMES = {") && sec.includes("nameAliases"), "alias seed present and exported");
+});
+
+test("signal engine covers BOTH universes: crypto rows fire, ledger, and record — no harness patches", () => {
+  // Regression guard for the -87 discovery: buildSignals iterated the xyz-pure activeMarkets()
+  // alone, so production never fired, ledgered, or recorded a single crypto claim (4000/4000
+  // closed claims were xyz) while every other crypto surface looked healthy. Worse, the debug
+  // harness used to verify crypto wiring PATCHED activeMarkets to iterate all rows — the tests
+  // proved a code path production never ran. This test uses the real, unpatched iteration.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  const DAY_ = 86400e3, HOUR_ = 3600e3, now = Date.now();
+  const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100 * Math.pow(1.0005, 61 - i), o: 100, h: 103, l: 98, v: 1e6 }); return d; };
+  const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) { const c = 100 + Math.sin(i / 9); h.push({ t: now - i * HOUR_, o: c, h: c + 0.7, l: c - 0.7, c, v: 1e5 }); } return h; };
+  p.seedRowNow("ETH", { px: 112, ticker: "ETH", uni: "main", vol: 5e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
+  p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
+  p.buildDailyNow();
+  p.buildSignalsNow();
+  const d = p.getSignals();
+  const cryptoLive = d.signals.filter((s) => s.uni === "main");
+  assert.ok(cryptoLive.length > 0, "crypto conditions fire through the REAL iteration — no activeMarkets patch");
+  assert.ok(d.countU.main > 0, "and count into the crypto badge");
+  assert.ok(d.signals.some((s) => s.uni === "xyz"), "xyz signals unaffected");
+  const led = p.getLedgerFor("ETH");
+  assert.ok(led && led.open && led.open.length > 0, "crypto claims actually LEDGER — the record can finally accrue");
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("for (const r of activeMarkets().concat(mainMarkets())) {"), "both-universe iteration pinned");
+  assert.equal((pol.match(/order\.length \? order\.map/g) || []).length, 0, "no activeMarkets fallback patch lives in the shipped source");
 });
 
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
