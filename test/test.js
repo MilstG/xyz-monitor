@@ -597,6 +597,76 @@ test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext persistenc
   assert.ok((pol.match(/fundPctileNow\(/g) || []).length >= 4, "fireCtx and fundext both route through the shared percentile helper");
 });
 
+test("off-site ledger backup: disabled by default, pushes via contents API, blob-sha skip, raw store reads", async () => {
+  const fs = require("fs"), path = require("path"), os = require("os"), crypto = require("crypto");
+  const { createPoller } = require("../src/poller");
+  const { openStore } = require("../src/store");
+  // store reads the raw persisted bytes — existing files only, verbatim
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzbk-"));
+  const st = openStore(dir);
+  st.saveLedger({ ts: 1, open: [], closed: [], rearm: [] });
+  let files = st.readBackupFiles();
+  assert.equal(files.length, 1, "no archive yet -> ledger.json only, no phantom entries");
+  assert.equal(files[0].name, "ledger.json");
+  st.archiveClosed([{ key: "A|gap" }]);
+  files = st.readBackupFiles();
+  assert.equal(files.length, 2, "archive present -> both files ship");
+  assert.equal(files[1].name, "ledger-archive.jsonl");
+  assert.equal(files[0].content, fs.readFileSync(path.join(dir, "ledger.json"), "utf8"), "bytes verbatim, no re-serialization");
+  // disabled unless BOTH env vars are set — a token alone or a repo alone does nothing
+  const mkP = (storeArg) => createPoller({ dex: "xyz", store: storeArg, log: () => {}, version: "test", crypto: false });
+  delete process.env.LEDGER_BACKUP_REPO; delete process.env.LEDGER_BACKUP_TOKEN; delete process.env.GITHUB_TOKEN;
+  const calls = [];
+  const mockFetch = (notFound) => async (url, opts) => {
+    calls.push({ url, method: (opts && opts.method) || "GET", body: opts && opts.body ? JSON.parse(opts.body) : null, auth: opts && opts.headers && opts.headers.authorization });
+    if (!opts || !opts.method) return notFound ? { ok: false, status: 404, json: async () => ({}) }
+      : { ok: true, status: 200, json: async () => ({ sha: notFound === false ? mockFetch.sha : null }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  let r = await mkP(st).backupLedgerNow(mockFetch(true));
+  assert.deepEqual(r, { ok: false, disabled: true }, "no env -> disabled, zero network");
+  assert.equal(calls.length, 0);
+  // enabled: fresh repo (GETs 404) -> both files PUT with base64 content and auth header
+  process.env.LEDGER_BACKUP_REPO = "MilstG/xyz-ledger-backup"; process.env.LEDGER_BACKUP_TOKEN = "tok123";
+  try {
+    const p = mkP(st);
+    r = await p.backupLedgerNow(mockFetch(true));
+    assert.deepEqual({ ok: r.ok, pushed: r.pushed, skipped: r.skipped }, { ok: true, pushed: 2, skipped: 0 }, JSON.stringify(r));
+    const puts = calls.filter((c) => c.method === "PUT");
+    assert.equal(puts.length, 2);
+    assert.ok(puts.every((c) => c.url.startsWith("https://api.github.com/repos/MilstG/xyz-ledger-backup/contents/")), "contents API, right repo");
+    assert.ok(puts.every((c) => c.auth === "Bearer tok123"), "token rides the auth header");
+    assert.equal(Buffer.from(puts[0].body.content, "base64").toString("utf8"), files[0].content, "payload is the exact file bytes, base64d");
+    assert.ok(puts.every((c) => c.body.branch === "main" && !("sha" in c.body)), "create path: no prior sha, default branch");
+    // unchanged content: remote sha == git blob sha -> skipped, zero PUTs
+    calls.length = 0;
+    const blobSha = (s) => crypto.createHash("sha1").update("blob " + Buffer.byteLength(s, "utf8") + "\0").update(s, "utf8").digest("hex");
+    const already = async (url, opts) => {
+      calls.push({ method: (opts && opts.method) || "GET" });
+      if (!opts || !opts.method) {
+        const name = decodeURIComponent(url.split("/contents/")[1].split("?")[0]);
+        const f = st.readBackupFiles().find((x) => x.name === name);
+        return { ok: true, status: 200, json: async () => ({ sha: blobSha(f.content) }) };
+      }
+      throw new Error("PUT must not happen for unchanged content");
+    };
+    r = await p.backupLedgerNow(already);
+    assert.deepEqual({ ok: r.ok, pushed: r.pushed, skipped: r.skipped }, { ok: true, pushed: 0, skipped: 2 }, "byte-identical backup is a no-op commit-wise");
+    assert.equal(calls.filter((c) => c.method === "PUT").length, 0);
+    // a failed PUT reports, never throws out of the job
+    const broken = async (url, opts) => (!opts || !opts.method) ? { ok: false, status: 404, json: async () => ({}) } : { ok: false, status: 403 };
+    r = await p.backupLedgerNow(broken);
+    assert.equal(r.ok, false); assert.ok(/HTTP 403/.test(r.error), r.error);
+  } finally {
+    delete process.env.LEDGER_BACKUP_REPO; delete process.env.LEDGER_BACKUP_TOKEN;
+  }
+  // wiring pins: weekly schedule + post-boot kick + stats surface, all inside start()
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["const BK_MS = 7 * DAY", "setInterval(bkTick, BK_MS)", "setTimeout(bkTick, 10 * 60 * 1000)",
+    "backup: { enabled: !!(BK_REPO && BK_TOKEN)", "Ledger backup: disabled"])
+    assert.ok(pol.includes(pin), `backup wiring pin missing: ${pin}`);
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
