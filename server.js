@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.20-83";
+const VERSION = "2026.07.20-84";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -258,6 +258,10 @@ async function main() {
     const ev = (req.query && req.query.ev) || "";
     return poller.getLedgerFor(coin, ev);
   });
+  // News feed for the xyz universe: company headlines + macro tape, 72h retention, served
+  // whole (the drawer slices client-side from the same payload — one fetch, one source).
+  fastify.get("/api/news", (req, reply) =>
+    serveCached(req, reply, poller.getNews(), { ts: 0, dataTs: 0, items: [], count: 0, fetchedAt: null, ttlHours: 72, error: "not fetched yet" }));
   // One-shot raw ledger dump for offline analysis: every retained closed claim (shadow
   // variants and legacy entries included), open claims, variant state, and an embedded field
   // glossary so the file is self-describing months later. Served as a browser download;
