@@ -1263,13 +1263,31 @@ test("telegram feed: parser + drift, lane caps, single-name attribution through 
   assert.equal(pl.setTgChannels(["bad name!"]).ok, false, "invalid usernames rejected");
   assert.equal(pl.setTgChannels(Array.from({ length: 13 }, (_, i) => "chan" + (1000 + i))).ok, false, "cap enforced");
   assert.ok(pl.getTgChannels().channels.length === 2, "list state reflects the last valid save");
+  // parser identity gate: a typo'd username landing on ANOTHER channel's page injects nothing
+  const foreign = mkMsg("SomeOtherChannel", 77, "junk that should never enter the feed", iso);
+  const fr = C.parseTgPreview(foreign, "mistyped_chan", Date.now());
+  assert.equal(fr.items.length, 0, "posts from a channel we didn't ask for are rejected at parse — redirects and typos can't inject");
+  assert.equal(fr.blocks, 1, "…and it still counts as blocks, so drift detection keeps working");
+  // removal purges posts, not just config: junk from a bad channel dies at ✕, not at 72h
+  pl.setTgChannels(["chanA", "chanB"]);
+  pl.tgIngestNow(html, "chanA");   // re-ingest: the WatcherGuru config assert above already (correctly) purged chanA
+  pl.tgIngestNow(mkMsg("chanB", 501, "post from the channel about to be removed", iso), "chanB");
+  assert.ok(pl.getNews().items.some((a) => a.id === "tg:chanB:501"), "chanB post in the feed while configured");
+  pl.newsIngestNow([{ id: 900, tk: null, h: "a wire headline", src: "s", url: "u", pub: Date.now() - 3600e3 }]);
+  const res = pl.setTgChannels(["chanA"]);
+  assert.ok(res.purged >= 1, "removal reports the purge");
+  const after = pl.getNews().items;
+  assert.ok(!after.some((a) => a.id === "tg:chanB:501"), "the removed channel's posts leave the feed IMMEDIATELY");
+  assert.ok(after.some((a) => a.id === "tg:chanA:1"), "the surviving channel's posts stay");
+  assert.ok(after.some((a) => !a.tg), "non-telegram items untouched");
   // wiring pins
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.equal(srv.split('fastify.post("/api/news/channels"').length - 1, 1, "POST channels registered exactly once");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["markup drift: page fetched, nothing parsed", "store.saveTgChannels({ ts: Date.now(), channels: tgChannels })",
-    "telegram: { channels: tgChannels.length"])
+    "telegram: { channels: tgChannels.length", "function purgeTgOrphans()",
+    "cached posts from since-removed channels die at hydrate"])
     assert.ok(pol.includes(pin), `tg pin missing: ${pin}`);
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["'telegram'?!!a.tg", "id=\"ntg-gear\"", "function loadTgChannels()", "function saveTgChannels(", "data-rmch"])
