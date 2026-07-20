@@ -2213,7 +2213,7 @@ function showView(v){
 // historical base rate for the same event (median forward return, hit rate, n). Anything with
 // n < 8 wears an "unproven" badge instead of being hidden or oversold.
 let _sigLast=0;
-let _newsLast=0, newsFilter='', newsMode='universe', newsSec='', newsView='latest';
+let _newsLast=0, newsFilter='', newsMode='universe', newsSec='', newsView='latest', newsTgOpen=false, tgChans=null;
 const SEC_SHORT={'Information Technology':'Info Tech','Consumer Discretionary':'Cons Disc','Communication Services':'Comms','Consumer Staples':'Staples','Health Care':'Health','Real Estate':'Real Est'};
 function secShort(s){ return SEC_SHORT[s]||s; }
 async function loadNews(){
@@ -2222,6 +2222,19 @@ async function loadNews(){
   }catch(_){/* the tab shows the last good payload; the freshness stamp tells the truth */}
 }
 function openNews(){ renderNews(); if(Date.now()-_newsLast>60*1000) loadNews(); }
+async function loadTgChannels(){
+  try{ tgChans=await fetchJSON('/api/news/channels'); }catch(_){ tgChans={channels:[],max:12}; }
+  if(state.view==='news') renderNews();
+}
+async function saveTgChannels(list){
+  try{
+    const r=await fetch('/api/news/channels',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({channels:list})});
+    const d=await r.json();
+    if(!r.ok){ pushToast('channels: '+(d&&d.error||('HTTP '+r.status))); }
+    await loadTgChannels();
+    setTimeout(loadNews, 2500);   // the immediate server-side fetch lands within a couple of seconds
+  }catch(_){ pushToast('channels: save failed'); }
+}
 async function loadSignals(){
   try{ const d=await fetchJSON('/api/signals'); _sigLast=Date.now();
     if(d&&Array.isArray(d.signals)){ state.signals=d;
@@ -2845,7 +2858,7 @@ function newsRow(a,now,inDrawer){
 function renderNews(){
   const box=el('news-body'); if(!box) return;
   const d=state.news, now=Date.now();
-  const inLane=(a)=>newsMode==='universe'?!!a.tk:true;   // universe lane = verified-attributed only; tape lane = everything, unfiltered
+  const inLane=(a)=>newsMode==='universe'?!!a.tk:(newsMode==='telegram'?!!a.tg:true);   // universe = verified-attributed; telegram = TG-only cut; tape = everything, unfiltered
   const secCounts=new Map();
   if(d&&d.items) for(const a of d.items){ if(a.sec&&inLane(a)) secCounts.set(a.sec,(secCounts.get(a.sec)||0)+1); }
   const secOpts=[...secCounts.entries()].sort((x,y)=>y[1]-x[1]);
@@ -2858,7 +2871,8 @@ function renderNews(){
     +secOpts.map(([s,n])=>`<option value="${esc(s)}"${newsSec===s?' selected':''}>${esc(secShort(s))} (${n})</option>`).join('')
     +`</select>`
     +['latest','sector'].map(m=>`<button type="button" class="cdtf${newsView===m?' on':''}" data-nv="${m}" data-tip="${m==='latest'?'one reverse-chronological stream':'grouped by sector, sections ordered by newest headline'}">${m==='latest'?'latest':'by sector'}</button>`).join('')
-    +['universe','tape'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='universe'?'ONLY headlines verified to concern a universe name \u2014 the relevance gate (name match or AI verdict) has confirmed the attribution; nothing leaks in':'the unfiltered feed: macro tape, market-general items, unverified/pending headlines, and off-topic (dimmed) \u2014 everything the worker fetched'}">${m}</button>`).join('')
+    +['universe','tape','telegram'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='universe'?'ONLY headlines verified to concern a universe name \u2014 the relevance gate (name match, AI verdict, or a single-name telegram match) has confirmed the attribution; nothing leaks in':m==='tape'?'the consolidated unfiltered feed: Finnhub wire, macro tape, telegram posts, unverified/pending items, off-topic (dimmed) \u2014 all sources interleaved by publish time':'telegram posts only \u2014 the channels configured in \u2699, attributed and unattributed alike'}">${m}</button>`).join('')
+    +`<span class="cdtf" id="ntg-gear" data-tip="manage telegram channels \u2014 shared for the whole group, saved server-side">\u2699</span>`
     +(d&&d.fetchedAt?`<span class="sec" style="font-size:10.5px" data-tip="when the news worker last landed a fetch — per-name refresh rotates every few minutes">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:'')
     +`</div>`;
   if(!d||!d.items||!d.items.length){
@@ -2872,8 +2886,21 @@ function renderNews(){
     if(!f) return true;
     return (a.tk&&a.tk.toLowerCase().includes(f))||(a.h&&a.h.toLowerCase().includes(f));
   });
+  let tgPanel='';
+  if(newsTgOpen){
+    const chans=tgChans&&tgChans.channels?tgChans.channels:null;
+    tgPanel=`<div class="ntg-panel">`
+      +`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">telegram channels \u2014 shared, saved server-side</div>`
+      +(chans===null?`<div class="sec" style="font-size:11px">loading\u2026</div>`
+        :(chans.length?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${chans.map(ch=>
+          `<span class="ntg-chip">${esc(ch.c)} <b class="${ch.error?'neg':'pos'}" data-tip="${esc(ch.error?ch.error+' \u2014 kept in the list, retried every 10 min':(ch.lastOk?'last fetch '+fmtAge(Date.now()-ch.lastOk)+' ago \u00b7 '+ch.posts+' post(s) parsed':'not fetched yet'))}">\u25cf</b> <i data-rmch="${esc(ch.c)}" style="font-style:normal;cursor:pointer;color:var(--muted)" data-tip="remove this channel for the whole group">\u2715</i></span>`).join('')}</div>`
+        :`<div class="sec" style="font-size:11px;margin-bottom:8px">no channels yet \u2014 add a public channel below (its t.me/s/&lt;name&gt; page must load)</div>`))
+      +`<div style="display:flex;gap:6px"><input id="ntg-add" placeholder="channel username (t.me/\u2026)" style="flex:1"><button type="button" class="cdtf" id="ntg-addbtn">add</button></div>`
+      +`<div class="sec" style="font-size:10.5px;margin-top:6px">public channels only (reads the t.me preview \u2014 no bot, no credentials) \u00b7 max ${tgChans&&tgChans.max||12} \u00b7 changes apply for the whole group within seconds</div>`
+      +`</div>`;
+  }
   let body;
-  if(!items.length) body=`<div class="msg">nothing matches the filter in the last 72h</div>`;
+  if(!items.length) body=`<div class="msg">${newsMode==='telegram'?(tgChans&&tgChans.channels&&tgChans.channels.length?'no telegram posts in the last 72h \u2014 the channels are fetched every 10 minutes':'no channels configured \u2014 open \u2699 to add public channels')+'':'nothing matches the filter in the last 72h'}</div>`;
   else if(newsView==='sector'){
     // grouped view: sections keyed by sector (unclassified bucketed), ordered by newest item;
     // reverse-chron inside each — the "what's moving in energy today" reading mode
@@ -2884,7 +2911,7 @@ function renderNews(){
       `<div class="sec nsec-head" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;padding:8px 0 3px" data-tip="${esc(s==='unclassified'?'no sector yet — classification is write-once and catches up on its own cadence':'sections ordered by newest headline; newest first within')}">${esc(secShort(s))} \u00b7 ${list.length} headline${list.length===1?'':'s'} \u00b7 newest ${fmtAge(now-list[0].pub)}</div>`
       +`<div class="nlist">${list.map(a=>newsRow(a,now,false)).join('')}</div>`).join('');
   } else body=`<div class="nlist">${items.map(a=>newsRow(a,now,false)).join('')}</div>`;
-  box.innerHTML=head+body
+  box.innerHTML=head+tgPanel+body
     +`<div class="sec" style="font-size:10.5px;margin-top:8px">universe = verified attribution only \u00b7 amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 off-topic dimmed in tape \u00b7 72h window</div>`;
   bindNews(box);
 }
@@ -2893,6 +2920,12 @@ function bindNews(box){
   if(nf){ nf.oninput=()=>{ newsFilter=nf.value; renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } }; }
   box.querySelectorAll('[data-nm]').forEach(b=>b.onclick=()=>{ newsMode=b.dataset.nm; renderNews(); });
   box.querySelectorAll('[data-nv]').forEach(b=>b.onclick=()=>{ newsView=b.dataset.nv; renderNews(); });
+  { const g=box.querySelector('#ntg-gear'); if(g) g.onclick=()=>{ newsTgOpen=!newsTgOpen; if(newsTgOpen) loadTgChannels(); renderNews(); }; }
+  { const ab=box.querySelector('#ntg-addbtn'), ai=box.querySelector('#ntg-add');
+    const doAdd=()=>{ const v=ai&&ai.value.trim(); if(!v) return; const cur=(tgChans&&tgChans.channels?tgChans.channels.map(c=>c.c):[]); saveTgChannels(cur.concat(v)); };
+    if(ab) ab.onclick=doAdd;
+    if(ai) ai.onkeydown=(e)=>{ if(e.key==='Enter') doAdd(); }; }
+  box.querySelectorAll('[data-rmch]').forEach(b=>b.onclick=()=>{ const cur=(tgChans&&tgChans.channels?tgChans.channels.map(c=>c.c):[]); saveTgChannels(cur.filter(c=>c!==b.dataset.rmch)); });
   { const sel=box.querySelector('#nsec'); if(sel) sel.onchange=()=>{ newsSec=sel.value; renderNews(); }; }
   box.querySelectorAll('.nsec-badge[data-sec]').forEach(b=>b.onclick=()=>{ newsSec=b.dataset.sec; renderNews(); });
   box.querySelectorAll('.nbadge[data-coin]').forEach(b=>b.onclick=()=>{ const c=b.dataset.coin; if(c) openDetail(c); });
