@@ -3021,6 +3021,24 @@ function sigRecordHtml(d){
       s+='</div>';
     }
   }
+  if(d&&d.shadows&&d.shadows.length){
+    s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="Strategy shadows: whole candidate STRATEGIES (not threshold tweaks) earning an out-of-sample record before any promotion. Every claim carries frozen side/void/target at fire, resolves stop-aware, and is episode-deduped like everything else \u2014 and NONE of it touches the live board. This panel is the entire record; nothing is curated away. A strategy that never earns anything simply never surfaces.">strategy shadows (earning their record)</div>`;
+    for(const g of d.shadows){
+      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="${esc(g.tip)}">${esc(g.label)}</span>`;
+      for(const r of g.rows){
+        const pre=r.tag?esc(r.tag)+' ':'';
+        if(r.n){
+          s+=`<span class="sigrec-chip" data-tip="${esc(`${r.n} resolved out-of-sample claim${r.n===1?'':'s'}, outcomes in ${g.unit}${r.avgS!=null?' \u00b7 stop = disciplined leg, resolved against the frozen void':''}${r.open?` \u00b7 ${r.open} still open`:''}`)}">${pre}<b class="${r.hit>=0.5?'pos':'neg'}">${Math.round(r.hit*100)}%</b> <span class="${r.avg>=0?'pos':'neg'}">${r.avg>=0?'+':''}${r.avg}${g.unit}</span>${r.avgS!=null?` \u00b7 stop <span class="${r.avgS>=0?'pos':'neg'}">${r.avgS>=0?'+':''}${r.avgS}${g.unit}</span>`:''} <i>(n=${r.n}${r.open?` \u00b7 ${r.open} open`:''})</i></span>`;
+        } else if(r.open){
+          s+=`<span class="sigrec-chip" data-tip="claims are open and resolving \u2014 the first outcomes land at their horizons">${pre}<b>${r.open} open</b> <i>\u00b7 none resolved yet</i></span>`;
+        } else {
+          s+=`<span class="sigrec-chip" style="border-style:dashed" data-tip="wired and watching \u2014 no market has met the fire conditions yet">${pre}awaiting first fire</span>`;
+        }
+      }
+      s+='</div>';
+    }
+    s+=`<div class="sec" style="font-size:10.5px;margin-top:4px">shadow claims only \u2014 never shown as live signals \u00b7 promotion requires an earned record</div>`;
+  }
   if(rs.recent&&rs.recent.length){
     s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 4px" data-tip="the most recent claims to reach their horizon and get scored">recent resolutions</div><div class="sigrec-recent">`;
     for(const e of rs.recent){
