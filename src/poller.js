@@ -2394,9 +2394,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       const ed = a.tk ? edByTk.get(String(a.tk).toUpperCase()) : undefined;
       if (ed != null) o.ed = ed;
       if (a.tk && sigTickers.has(String(a.tk).toUpperCase())) o.sig = 1;
+      // sector, with provenance: the static GICS map wins outright (deterministic, no marker);
+      // the AI-learned map covers Unclassified tickers; tape items ride their content-based
+      // classification. Anything AI-derived wears secAi so the client can badge it honestly.
+      if (a.tk) {
+        const cs = classifyCached(a.tk).sector;
+        if (cs && cs !== "Unclassified") o.sec = cs;
+        else { const L = secLearned[String(a.tk).toUpperCase()]; if (L) { o.sec = L; o.secAi = 1; } }
+      } else if (secTape[String(a.id)] != null) { o.sec = secTape[String(a.id)]; o.secAi = 1; }
       return o;
     });
-    const sig = items.length + "|" + (items[0] ? items[0].id : "") + "|" + items.filter((x) => x.sig).length + "|" + items.filter((x) => x.ed != null).length + "|" + (newsErr || "");
+    const sig = items.length + "|" + (items[0] ? items[0].id : "") + "|" + items.filter((x) => x.sig).length + "|" + items.filter((x) => x.ed != null).length + "|" + items.filter((x) => x.sec).length + "|" + (newsErr || "");
     if (sig !== newsSig) { newsSig = sig; newsVer = Date.now(); }
     newsCache = { ts: Date.now(), dataTs: newsVer, items, fetchedAt: newsFetchedAt || null,
       ttlHours: 72, error: newsErr, count: items.length };
@@ -2424,7 +2432,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       newsItems = mergeNews(newsItems, got, now);
       newsFetchedAt = now;
       buildNewsPayload();
-      store.saveNews({ ts: now, items: newsItems });
+      store.saveNews({ ts: now, items: newsItems, secTape, secLearned });
     }
   }
   async function newsTapeTick() {
@@ -2435,16 +2443,110 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         { headers: { accept: "application/json" } });
       if (!res.ok) { newsErr = `Finnhub news: HTTP ${res.status}`; buildNewsPayload(); return; }
       newsItems = mergeNews(newsItems, newsParse(await res.json(), null), Date.now());
+      pruneSecTape();
       newsFetchedAt = Date.now(); newsErr = null;
       buildNewsPayload();
-      store.saveNews({ ts: Date.now(), items: newsItems });
+      store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned });
     } catch (e) { newsErr = "tape fetch failed: " + (e && e.message); buildNewsPayload(); }
   }
   function hydrateNews() {
     const d = store.loadNews && store.loadNews();
     if (d && Array.isArray(d.items)) { newsItems = mergeNews(d.items, [], Date.now()); newsFetchedAt = d.ts || 0; }
+    if (d && d.secTape && typeof d.secTape === "object") secTape = d.secTape;
+    if (d && d.secLearned && typeof d.secLearned === "object") secLearned = d.secLearned;
+    pruneSecTape();
     buildNewsPayload();
     return newsItems.length;
+  }
+  // ---- AI sector classification (write-once, enum-validated, fallback-model) ---------------
+  // Two jobs, one cheap batched call on the FALLBACK model (sector bucketing doesn't merit
+  // the expensive one): (a) tape headlines -> a GICS sector or "macro", by content; (b) any
+  // ticker the static map calls Unclassified -> a one-time learned sector, persisted forever.
+  // Everything is write-once: a classified id/ticker is NEVER re-sent. Answers outside the
+  // enum are rejected (three strikes on a tape item -> "macro", so nothing loops forever).
+  // Scope guard: learned sectors feed the NEWS badges/grouping ONLY — the signal engine, the
+  // Sectors tab and asset-class pooling stay on the deterministic static map; promoting a
+  // learned entry into sectors.js is a reviewed static edit, never automatic.
+  const GICS_SECTORS = ["Information Technology", "Health Care", "Financials", "Consumer Discretionary",
+    "Communication Services", "Industrials", "Consumer Staples", "Energy", "Utilities", "Real Estate", "Materials"];
+  const GICS_SET = new Set(GICS_SECTORS);
+  let secTape = {}, secLearned = {};           // articleId -> sector|"macro"; TICKER -> sector
+  const secTries = new Map();                  // articleId -> failed attempts
+  let secErr = null;
+  function pruneSecTape() {                    // ids age out of the store; their classifications follow
+    const live = new Set(newsItems.filter((a) => !a.tk).map((a) => String(a.id)));
+    for (const id of Object.keys(secTape)) if (!live.has(id)) delete secTape[id];
+    for (const id of [...secTries.keys()]) if (!live.has(id)) secTries.delete(id);
+  }
+  const SEC_CLASSIFY_SYSTEM = "You classify financial news headlines and stock tickers into GICS sectors. Respond ONLY with a JSON object, no prose, no markdown fences: {\"tape\":[{\"i\":<id>,\"sec\":<sector>}],\"tickers\":[{\"t\":<ticker>,\"sec\":<sector>}]}. Allowed sec values for tape: one of the 11 GICS sector names exactly as given, or \"macro\" for market-wide/central-bank/geopolitical items. Allowed for tickers: the 11 GICS names only. GICS names: " + GICS_SECTORS.join("; ") + ".";
+  function secStrikeSweep() {   // three strikes -> macro; returns how many were struck out (payload must rebuild)
+    let struck = 0;
+    for (const a of newsItems) {
+      if (a.tk) continue;
+      const id = String(a.id);
+      if (secTape[id] == null && (secTries.get(id) || 0) >= 3) { secTape[id] = "macro"; struck++; }
+    }
+    return struck;
+  }
+  function secPending() {
+    const tape = [];
+    for (const a of newsItems) {
+      if (a.tk || secTape[String(a.id)] != null) continue;
+      if ((secTries.get(String(a.id)) || 0) >= 3) continue;   // struck out — the sweep owns the macro conversion
+      tape.push({ i: String(a.id), h: a.h });
+      if (tape.length >= 20) break;
+    }
+    const tickers = [];
+    const seen = new Set();
+    for (const a of newsItems) {
+      if (!a.tk) continue;
+      const T = String(a.tk).toUpperCase();
+      if (seen.has(T)) continue; seen.add(T);
+      if (secLearned[T]) continue;
+      if (classifyCached(a.tk).sector !== "Unclassified") continue;
+      tickers.push(T);
+      if (tickers.length >= 10) break;
+    }
+    return { tape, tickers };
+  }
+  async function classifySecTick() {
+    if (!AI_KEY() && !aiFetch) return { ok: false, disabled: true };
+    const struck = secStrikeSweep();
+    if (struck) { buildNewsPayload(); store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned }); }
+    const pend = secPending();
+    if (!pend.tape.length && !pend.tickers.length) return { ok: true, idle: true, applied: struck };
+    const call = await callModel(AI_MODEL_FALLBACK, pend, { system: SEC_CLASSIFY_SYSTEM, maxTokens: 600 });
+    if (!call.ok) { secErr = call.error; return { ok: false, error: call.error }; }
+    let out = null;
+    try { out = JSON.parse(String(call.text).replace(/```json|```/g, "").trim()); } catch (_) {}
+    if (!out || typeof out !== "object") {
+      for (const t of pend.tape) secTries.set(t.i, (secTries.get(t.i) || 0) + 1);
+      secErr = "unparseable classification response";
+      return { ok: false, error: secErr };
+    }
+    let applied = 0;
+    const answered = new Set();
+    if (Array.isArray(out.tape)) for (const e of out.tape) {
+      if (!e || e.i == null) continue;
+      const id = String(e.i);
+      answered.add(id);
+      if (secTape[id] != null || !pend.tape.some((t) => t.i === id)) continue;   // write-once; ignore ids we never asked about
+      if (e.sec === "macro" || GICS_SET.has(e.sec)) { secTape[id] = e.sec; applied++; }
+      else secTries.set(id, (secTries.get(id) || 0) + 1);                        // off-enum answer = a strike
+    }
+    for (const t of pend.tape) if (!answered.has(t.i)) secTries.set(t.i, (secTries.get(t.i) || 0) + 1);
+    if (Array.isArray(out.tickers)) for (const e of out.tickers) {
+      if (!e || !e.t) continue;
+      const T = String(e.t).toUpperCase();
+      if (secLearned[T] || !pend.tickers.includes(T)) continue;                  // write-once, asked-only
+      if (GICS_SET.has(e.sec)) { secLearned[T] = e.sec; applied++; }             // tickers never get "macro"
+    }
+    secErr = null;
+    if (applied) {
+      buildNewsPayload();
+      store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned });
+    }
+    return { ok: true, applied };
   }
   async function fetchEarnings() {
     const token = process.env.FINNHUB_TOKEN || "";
@@ -2680,6 +2782,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     setInterval(() => { newsTapeTick().catch((e) => log("news tape failed (isolated): " + (e && e.message))); }, 15 * 60 * 1000);
     setTimeout(() => { newsTapeTick().catch(() => {}); }, 20 * 1000);
     setTimeout(() => { newsCompanyTick().catch(() => {}); }, 40 * 1000);
+    // Sector classifier: batched, write-once, fallback-model, ~a cent a day at current volume.
+    setInterval(() => { classifySecTick().catch((e) => log("sector classify failed (isolated): " + (e && e.message))); }, 10 * 60 * 1000);
+    setTimeout(() => { classifySecTick().catch(() => {}); }, 90 * 1000);
     log(process.env.FINNHUB_TOKEN ? `News feed: ENABLED — ${NEWS_BATCH} names/min rotation + macro tape/15min, 72h retention` : "News feed: disabled (FINNHUB_TOKEN not set)");
     // Off-site ledger backup: shortly after boot (the deploy IS the natural trigger — most
     // boots follow a build), then weekly. The blob-sha skip makes redundant runs free.
@@ -3464,7 +3569,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     marks.sort((a, b) => a.t - b.t);
     return { marks: marks.slice(-20), suppressed };
   }
-  async function callModel(model, ctx) {
+  async function callModel(model, ctx, opts) {
+    // opts.system / opts.maxTokens let lightweight tasks (sector classification) reuse this
+    // exact transport — provider switch, refusal handling, timeout — without inheriting the
+    // report prompt or its token budget. Absent opts = the report path, byte-identical.
+    const sys = (opts && opts.system) || AI_SYSTEM, maxTok = (opts && opts.maxTokens) || AI_MAX_TOKENS;
     const doFetch = aiFetch || fetch;
     const ctrl = new AbortController();
     const to = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
@@ -3477,8 +3586,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         res = await doFetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: { "content-type": "application/json", authorization: "Bearer " + AI_KEY() },
-          body: JSON.stringify({ model, max_completion_tokens: AI_MAX_TOKENS,
-            messages: [{ role: "system", content: AI_SYSTEM },
+          body: JSON.stringify({ model, max_completion_tokens: maxTok,
+            messages: [{ role: "system", content: sys },
               { role: "user", content: "Context:\n" + JSON.stringify(ctx) }] }),
           signal: ctrl.signal,
         });
@@ -3497,7 +3606,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
           "anthropic-version": "2023-06-01" },
         // Deliberately minimal body: Fable rejects some sampling params other models accept, and
         // its adaptive thinking must be left alone (an explicit thinking:disabled is a 400).
-        body: JSON.stringify({ model, max_tokens: AI_MAX_TOKENS, system: AI_SYSTEM,
+        body: JSON.stringify({ model, max_tokens: maxTok, system: sys,
           messages: [{ role: "user", content: "Context:\n" + JSON.stringify(ctx) }] }),
         signal: ctrl.signal,
       });
@@ -3609,6 +3718,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getLedgerExport,
     getNews: () => newsCache,
     newsIngestNow: (items) => { newsItems = mergeNews(newsItems, items || [], Date.now()); newsFetchedAt = Date.now(); buildNewsPayload(); return newsCache; },   // harness: feed + payload without network
+    classifySecNow: () => classifySecTick(),   // harness: one classifier pass through the injected aiFetch transport
     openLedgerNow: (coin, ev, sigEntry, dir, extra, vi) =>   // harness: fire a claim directly so the context stamp is testable without a full signals build
       openLedger(getRow(coin), ev, sigEntry || { score: 0, reading: "" }, dir, extra, vi),
     // AI analyst report: cached read, on-demand generation (TTL cooldown enforced inside), and
@@ -3670,7 +3780,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
           prints: earnPrints.length, histDone: earnHistDone, studyTickers: Object.keys(earnStudy).length,
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
         backup: { enabled: !!(BK_REPO && BK_TOKEN), repo: BK_REPO || null, lastOk: backupLast, error: backupErr },
-        news: { items: newsItems.length, fetchedAt: newsFetchedAt || null, error: newsErr },
+        news: { items: newsItems.length, fetchedAt: newsFetchedAt || null, error: newsErr,
+          sectors: { tapeClassified: Object.keys(secTape).length, learnedTickers: Object.keys(secLearned).length, error: secErr } },
         ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
           fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size },
         rate: limiterUsage(),
