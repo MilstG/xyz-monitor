@@ -2419,7 +2419,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // ed (days to earnings when <=7 — the amber badge), sig (a live kept signal is firing —
     // the red badge, refreshed each signals build so it can lag a build; the tooltip says so)
     const byTk = new Map();
-    for (const r of rows.values()) if (!r.delisted && r.ticker) byTk.set(String(r.ticker).toUpperCase(), r);   // both universes: telegram can attribute a crypto name
+    for (const r of rows.values()) if (!r.delisted && r.ticker && r.uni === "xyz") byTk.set(String(r.ticker).toUpperCase(), r);   // xyz only — telegram attribution is equities-only by policy
     const edByTk = new Map();
     if (earnCache && Array.isArray(earnCache.entries))
       for (const e of earnCache.entries) {
@@ -2506,9 +2506,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   const tgStatus = new Map();          // channel -> { lastOk, error, posts }
   const TG_MAX = 12, TG_RE = /^[A-Za-z0-9_]{4,32}$/;
   function tgRoster() {
+    // xyz universe ONLY. Crypto symbols are word-match landmines in telegram text — BTC, SOL,
+    // OP, APT appear in half the posts on any crypto channel — and attributing them floods the
+    // crypto drawers with channel chatter. A "MicroStrategy adds BTC" post belongs to MSTR;
+    // with crypto out of the roster, that's exactly what the single-name rule now yields.
     const m = new Map();
     for (const r of rows.values()) {
-      if (r.delisted || !r.ticker) continue;
+      if (r.delisted || !r.ticker || r.uni !== "xyz") continue;
       const T = String(r.ticker).toUpperCase();
       if (!m.has(T)) m.set(T, aliasesFor(T));
     }
