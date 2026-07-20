@@ -700,6 +700,71 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
   assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 3, "all three daily-close detectors coerce");
 });
 
+test("strategy-shadow record panel: payload aggregation, client render pins, ETag busting", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const fixture = { ts: now, rearm: [], variants: null,
+    open: [
+      { key: "A|gapfade#1", coin: "A", ticker: "A", ev: "gapfade", t0: now - 3600e3, mark0: 100, dir: 1,
+        score0: 0, psd: "short", pn: 1, stp: 101, vi: 1, resolveAt: now + 86400e3 },
+      { key: "B|fundext#0", coin: "B", ticker: "B", ev: "fundext", t0: now - 3600e3, mark0: 50, dir: 1,
+        score0: 0, sd0: 2, psd: "short", pn: 1, stp: 51.5, vi: 0, resolveAt: now + 86400e3 },
+    ],
+    closed: [
+      { key: "A|gapfade#0", coin: "A", ticker: "A", ev: "gapfade", t0: now - 5 * 86400e3, tR: now - 4 * 86400e3,
+        mark0: 100, dir: 1, psd: "short", pn: 1, vi: 0, status: "resolved", realized: 0.8, realizedS: 0.8 },
+      { key: "C|gapfade#0", coin: "C", ticker: "C", ev: "gapfade", t0: now - 4 * 86400e3, tR: now - 3 * 86400e3,
+        mark0: 20, dir: -1, psd: "long", pn: 1, vi: 0, status: "resolved", realized: -0.4, realizedS: -0.6, stopped: true },
+      { key: "D|reclaim#0", coin: "D", ticker: "D", ev: "reclaim", t0: now - 6 * 86400e3, tR: now - 86400e3,
+        mark0: 10, dir: 1, sd0: 2, psd: "long", pn: 1, vi: 0, status: "resolved", realized: 1.2, realizedS: 1.2, rn: 1 },
+    ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  p.buildSignalsNow();
+  const d = p.getSignals();
+  assert.ok(Array.isArray(d.shadows) && d.shadows.length === 7, "all seven strategies ship, fired or not");
+  const by = Object.fromEntries(d.shadows.map((g) => [g.ev, g]));
+  assert.equal(by.gapfade.rows.length, 2, "gapfade splits by void width");
+  assert.deepEqual({ n: by.gapfade.rows[0].n, hit: by.gapfade.rows[0].hit, avg: by.gapfade.rows[0].avg, avgS: by.gapfade.rows[0].avgS },
+    { n: 2, hit: 0.5, avg: 0.2, avgS: 0.1 }, "1.0σ width: both legs aggregated over its own claims only");
+  assert.deepEqual({ n: by.gapfade.rows[1].n, open: by.gapfade.rows[1].open }, { n: 0, open: 1 }, "1.5σ width: open-only state");
+  assert.equal(by.reclaim.rows[0].n, 1); assert.equal(by.reclaim.rows[0].avg, 1.2); assert.equal(by.reclaim.unit, "R");
+  assert.deepEqual({ n: by.fundext.rows[0].n, open: by.fundext.rows[0].open }, { n: 0, open: 1 });
+  assert.deepEqual({ n: by.pead.rows[0].n, open: by.pead.rows[0].open }, { n: 0, open: 0 }, "never-fired strategy ships as the awaiting state, not absence");
+  assert.ok(by.mapull.tip && by.failbrk.tip, "tips ship from the server — panel and engine can't drift");
+  assert.deepEqual({ n: by.liqflush.rows[0].n, open: by.liqflush.rows[0].open }, { n: 0, open: 0 }, "liqflush ships awaiting from day one");
+  // client + ETag pins
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["strategy shadows (earning their record)", "awaiting first fire", "none resolved yet",
+    "d&&d.shadows&&d.shadows.length", "shadow claims only \\u2014 never shown as live signals"])
+    assert.ok(app.includes(pin), `client shadow-panel pin missing: ${pin}`);
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("shadow record changes must bust the ETag"), "shadow counts fold into the signals ETag signature");
+});
+
+test("liqflush: cascade exhaustion needs BOTH legs, geometry is the exact half-retrace", () => {
+  const C = require("../src/compute");
+  // -10% day on a 3σ market with a -15% OI drain: fires, long
+  const lf = C.detectLiqFlush(-10, 3, 90, -15);
+  assert.ok(lf, "price leg + OI leg together fire");
+  const pre = 90 / 0.9;
+  assert.ok(Math.abs(lf.target - (90 + (pre - 90) / 2)) < 1e-6, "target is the EXACT half-retrace of the flush, not an approximation");
+  assert.ok(Math.abs(lf.stop - 90 * 0.97) < 1e-6, "stop 1σ below the post-flush mark");
+  assert.equal(C.detectLiqFlush(-10, 3, 90, -3), null, "a big drop WITHOUT the OI drain is information, not a cascade — no fire");
+  assert.equal(C.detectLiqFlush(-4, 3, 90, -15), null, "an OI drain without the >=2σ price leg never fires");
+  assert.equal(C.detectLiqFlush(10, 3, 110, -15), null, "up-moves never fire (long-cascade exhaustion only, for now)");
+  assert.equal(C.detectLiqFlush(-10, 3, 90, null), null, "no OI data -> honest null");
+  assert.equal(C.EV_META.liqflush.horizonMs, 3 * DAY);
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ['openLedger(r, "liqflush"', "oc24: oiChg24", 'r.uni === "main" && r.d1 != null'])
+    assert.ok(pol.includes(pin), `liqflush wiring pin missing: ${pin}`);
+  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush"])'), "liqflush resolves in R");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
