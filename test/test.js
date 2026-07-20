@@ -823,7 +823,7 @@ test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["finnhub.io/api/v1/company-news", "finnhub.io/api/v1/news?category=general",
     "const NEWS_BATCH = 3", "buildNewsPayload();   // sig/ed badge stamps ride the signals cadence",
-    "FINNHUB_TOKEN not set", "store.saveNews({ ts: now, items: newsItems })"])
+    "FINNHUB_TOKEN not set", "store.saveNews({ ts: now, items: newsItems, secTape, secLearned })"])
     assert.ok(pol.includes(pin), `news worker pin missing: ${pin}`);
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(srv.includes('error: "not fetched yet"') && srv.split('fastify.get("/api/news"').length - 1 === 1, "route registered once with an honest fallback");
@@ -901,6 +901,61 @@ test("per-universe transport cap + scoped tab badge: a stocks-heavy tape can't c
     "setSigTabBadge();   // the badge is scoped too"])
     assert.ok(app.includes(pin), `scoped-badge pin missing: ${pin}`);
   assert.ok(!app.includes("Signals (${d.count})"), "the global-count badge is gone — the badge speaks per scope");
+});
+
+test("AI sector classification: enum-validated, write-once, static map wins, three strikes to macro", async () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const calls = [];
+  // injected transport: default provider is anthropic when no env keys are set
+  const respond = (obj) => ({ ok: true, json: async () => ({ content: [{ type: "text", text: JSON.stringify(obj) }], stop_reason: "end_turn" }) });
+  let nextResponse = null;
+  const aiFetch = async (url, opts) => { calls.push(JSON.parse(opts.body)); return nextResponse; };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+  p.seedRowNow("xyz:AAPL", { px: 200, ticker: "AAPL", uni: "xyz" });   // static map knows AAPL
+  p.seedRowNow("xyz:ZZZQ", { px: 10, ticker: "ZZZQ", uni: "xyz" });    // static map does NOT
+  p.newsIngestNow([
+    { id: 1, tk: "AAPL", h: "Apple ships thing", src: "s", url: "u", pub: now - 3600e3 },
+    { id: 2, tk: "ZZZQ", h: "ZZZQ wins contract", src: "s", url: "u", pub: now - 3600e3 },
+    { id: 3, tk: null, h: "Nat gas slides on weather", src: "s", url: "u", pub: now - 3600e3 },
+    { id: 4, tk: null, h: "Fed holds rates", src: "s", url: "u", pub: now - 3600e3 },
+  ]);
+  // pass 1: valid energy, off-enum garbage for the Fed item, a ticker answer, and one HALLUCINATED id
+  nextResponse = respond({ tape: [{ i: "3", sec: "Energy" }, { i: "4", sec: "Memes" }, { i: "999", sec: "Energy" }],
+    tickers: [{ t: "ZZZQ", sec: "Industrials" }, { t: "AAPL", sec: "Utilities" }] });
+  let r = await p.classifySecNow();
+  assert.ok(r.ok && r.applied === 2, `energy tape + ZZZQ learned applied, got ${JSON.stringify(r)}`);
+  let d = p.getNews();
+  const by = Object.fromEntries(d.items.map((a) => [a.id, a]));
+  assert.equal(by[3].sec, "Energy"); assert.equal(by[3].secAi, 1, "tape classification wears the AI marker");
+  assert.equal(by[2].sec, "Industrials"); assert.equal(by[2].secAi, 1, "learned ticker sector wears the marker");
+  assert.equal(by[1].sec, "Information Technology"); assert.ok(!by[1].secAi, "static map wins, no marker — AAPL's hallucinated Utilities answer was never asked for and never applied");
+  assert.ok(!by[4].sec, "off-enum answer rejected — a strike, not a classification");
+  assert.ok(!d.items.some((a) => a.id === 999), "hallucinated ids change nothing");
+  // pass 2 + 3: the Fed item keeps striking out, then lands on macro; write-once means only pending items ship
+  nextResponse = respond({ tape: [{ i: "4", sec: "Garbage" }], tickers: [] });
+  await p.classifySecNow();
+  const userMsg = calls[1].messages[0].content;
+  assert.ok(userMsg.includes('"4"') && !userMsg.includes('"3"'), "write-once: the classified item is never re-sent");
+  nextResponse = respond({ tape: [{ i: "4", sec: "Nope" }], tickers: [] });
+  await p.classifySecNow();
+  r = await p.classifySecNow();   // pass 4: three strikes recorded -> macro without any model call for it
+  d = p.getNews();
+  assert.equal(Object.fromEntries(d.items.map((a) => [a.id, a]))[4].sec, "macro", "three strikes -> macro, nothing loops forever");
+  // wiring pins: schedule, fallback model, scope guard, client A+B surfaces
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["callModel(AI_MODEL_FALLBACK, pend, { system: SEC_CLASSIFY_SYSTEM", "const GICS_SECTORS = [",
+    "learned sectors feed the NEWS badges/grouping ONLY", "classifySecTick().catch", "sectors: { tapeClassified:"])
+    assert.ok(pol.includes(pin), `classifier pin missing: ${pin}`);
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["id=\"nsec\"", "data-nv=", "newsView==='sector'", "nsec-badge${a.secAi?' ai':''}",
+    "const SEC_SHORT=", "newsSec&&a.sec!==newsSec", "'unclassified'"])
+    assert.ok(app.includes(pin), `sector UI pin missing: ${pin}`);
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".nsec-badge{") && css.includes(".nsec-badge.ai{border-style:dashed}"), "provenance styling present");
 });
 
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
