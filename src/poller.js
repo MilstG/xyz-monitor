@@ -3187,7 +3187,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
   // schema flip to "invalidated — report format updated" on the next read, so a deploy that
   // fixes the report is visible on the first regenerate, never hidden behind a running TTL.
-  const AI_SCHEMA_V = 4;
+  const AI_SCHEMA_V = 5;   // v5: news grounding contract (news_read), crypto context, sector-relative
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
@@ -3463,17 +3463,61 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           const with7 = peers.map((x) => ({ t: x.ticker, d7: pctOf(x.px, x.ref && x.ref.p7d) })).filter((x) => x.d7 != null)
             .sort((a, b) => b.d7 - a.d7);
           const rank = with7.findIndex((x) => x.t === r.ticker);
+          const own7 = pctOf(px, r.ref && r.ref.p7d);
+          const with30 = peers.map((x) => ({ t: x.ticker, d30: pctOf(x.px, x.ref && x.ref.p30d) })).filter((x) => x.d30 != null);
+          const own30 = pctOf(px, r.ref && r.ref.p30d);
+          const med7 = with7.length ? +median(with7.map((x) => x.d7)).toFixed(2) : null;
+          const med30 = with30.length ? +median(with30.map((x) => x.d30)).toFixed(2) : null;
           ctx.sector = { name: cl.sector, assetClass: cl.assetClass || null,
             rank7d: rank >= 0 ? rank + 1 : null, of: with7.length,
-            median7dPct: with7.length ? +median(with7.map((x) => x.d7)).toFixed(2) : null };
+            median7dPct: med7, median30dPct: med30,
+            // the distinction the analyst can't otherwise make: the name's own move vs its
+            // sector's — "+4% while the sector did +1%" is a different fact from "+4% with it"
+            rel7dPct: own7 != null && med7 != null ? +(own7 - med7).toFixed(2) : null,
+            rel30dPct: own30 != null && med30 != null ? +(own30 - med30).toFixed(2) : null };
         }
+      } catch (_) {}
+    }
+    // -- verified news (the relevance pipeline's output ONLY) ---------------------------------
+    // An unverified attribution never reaches the analyst: rel=1 items for this name, plus a
+    // few macro tape items (off-topic excluded). ctx.news ALWAYS ships — an explicit empty
+    // with a note, never an absent field — so the no-invention contract has something to bind
+    // to: the model may reference only these headlines and must say when there are none.
+    try {
+      const tkU = String(r.ticker || "").toUpperCase();
+      const mine = newsItems.filter((a) => a.tk && a.rel === 1 && String(a.tk).toUpperCase() === tkU)
+        .sort((x, y) => y.pub - x.pub).slice(0, 6)
+        .map((a) => ({ h: a.h, src: a.src || null, ageH: +((now - a.pub) / 3600e3).toFixed(1) }));
+      const tape = newsItems.filter((a) => !a.tk && !a.rel && secTape[String(a.id)] && secTape[String(a.id)] !== "off-topic")
+        .sort((x, y) => y.pub - x.pub).slice(0, 4)
+        .map((a) => ({ h: a.h, sec: secTape[String(a.id)], ageH: +((now - a.pub) / 3600e3).toFixed(1) }));
+      ctx.news = { windowH: 72, verified: mine, tape };
+      if (!mine.length) ctx.news.note = "no verified headlines for this name in the window";
+    } catch (_) {}
+    // -- crypto-native state (main universe only) ---------------------------------------------
+    if (uni === "crypto") {
+      try {
+        const cr = {};
+        const fp = fundPctileNow(coin, r.funding, now);
+        if (fp != null) cr.fundingPctile31d = fp;
+        const oh = hist.get(coin);
+        if (oh && oh.length > 4) {
+          const t24 = now - DAY; let base = null;
+          for (const k of oh) if (Math.abs(k[0] - t24) <= 3 * HOUR && (base == null || Math.abs(k[0] - t24) < Math.abs(base[0] - t24))) base = k;
+          const last = oh[oh.length - 1];
+          if (base && base[1] > 0 && last && last[1] > 0) cr.oiChg24Pct = +((last[1] / base[1] - 1) * 100).toFixed(1);
+        }
+        const live = [];
+        for (const e of ledgerOpen.values()) if (e.coin === coin && (e.ev === "fundext" || e.ev === "liqflush")) live.push(e.ev);
+        if (live.length) cr.cryptoSetupsLive = [...new Set(live)];
+        if (Object.keys(cr).length) ctx.crypto = cr;
       } catch (_) {}
     }
     ctx.flags = aiFlags(r);
     ctx.coverage = aiCoverage(coin, windowMs);
     return ctx;
   }
-  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context.
+  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history, the 24h open-interest change, and any crypto-native setups currently live on the name (fundext = persistent funding extreme, liqflush = liquidation-cascade exhaustion) — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape).
 Respond with ONLY a JSON object — no markdown fences, no preamble — with exactly these keys:
 {"headline": string (<=60 chars, plain-language stance, e.g. "Constructive, leans long" or "Constructive, but earnings in 6 days"),
  "bias": "long"|"short"|"neutral",
@@ -3481,6 +3525,7 @@ Respond with ONLY a JSON object — no markdown fences, no preamble — with exa
  "evidence": array of 3-8 {"k": short label (<=16 chars, lowercase), "v": one plain-language sentence grounded in a specific number from the context},
  "eventRisk": string or null (equities with an upcoming print inside ~10 days: what the reaction study says and what holding through it means; otherwise null),
  "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. "target" scenarios are THESIS-DIRECTION only — an adverse recovery against the bias is the "void" scenario (through the void level) or "flat", never a target. If an earnings print falls inside the scenario horizon, the middle scenario must be kind "event" — the print decides, treat it as a coin flip scaled by the reaction study, and say so.
+ "news_read": {"used": true|false, "note": one sentence, <=200 chars} — REQUIRED. "used" is true only when the read materially leans on a headline from context.news.verified; the note names which (or states that no verified headlines exist / none were material). NEWS CONTRACT: catalyst or news statements anywhere in the report may reference ONLY headlines provided in context.news. If context.news.verified is empty you MUST NOT infer, recall, or invent any company news — state that no verified headlines exist in the window and read the tape on its own. context.news.tape items are market backdrop, never company catalysts.
  "invalidations": array of 1-5 plain sentences — observable conditions that would change the read,
  "action": {"stance": "enter_now"|"enter_on_pullback"|"take_profit"|"wait"|"no_trade", "entry": price or null, "note": one sentence on why this stance and what to watch}. The actionable read: offer an entry stance whenever the geometry supports one (a void and a target exist and the expected value at some entry is positive) — "enter_on_pullback" requires "entry" set to the pullback level (typically the zone), "enter_now" may leave entry null (the current price). When the honest answer is to stand aside — event about to decide, negative expected value, neutral read, thin data — say "wait" or "no_trade" and name the condition that would change it. Never invent a stance the scenario odds don't support.
  "levels": array of at most 4 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high", "label": <=60 chars} for chart annotation. Level discipline is strict: when bias is "long" or "short" you MUST include exactly one "void" level — the observable price where the read is dead (the frozen claim stop when claimAnchor exists, otherwise a structural level like the relevant swing low/high) — and exactly one "void" scenario resolving against it. At most one "target" level, optionally one zone_low+zone_high pair. NEVER annotate moving averages as levels (EMAs drift — the chart draws the live ribbon itself) and never annotate range bounds unless the bound IS the void or target. Levels must sit within roughly ±25% of the current price or they won't render.
@@ -3497,6 +3542,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const str = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max;
     if (!str(out.headline, 80)) return { ok: false, error: "bad headline" };
     if (!["long", "short", "neutral"].includes(out.bias)) return { ok: false, error: "bad bias" };
+    if (!out.news_read || typeof out.news_read.used !== "boolean" || !str(out.news_read.note, 200))
+      return { ok: false, error: "missing/bad news_read (required: {used, note})" };
+    if (out.news_read.used && !(ctx.news && Array.isArray(ctx.news.verified) && ctx.news.verified.length))
+      return { ok: false, error: "news_read claims a headline was used but no verified headlines were provided — invented news" };
     if (!str(out.synthesis, 2600) || out.synthesis.length < 120) return { ok: false, error: "bad synthesis" };
     if (!Array.isArray(out.evidence) || out.evidence.length < 3 || out.evidence.length > 8
       || !out.evidence.every((e) => e && str(e.k, 20) && str(e.v, 320))) return { ok: false, error: "bad evidence" };
@@ -3810,6 +3859,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);
       if (r.uni === "main") { if (!mainList.includes(coin)) mainList.push(coin); if (!mainOrder.includes(coin)) mainOrder.push(coin); }
+      else if (!order.includes(coin)) order.push(coin);   // xyz seeds join the xyz roster exactly as the universe refresh would place them
       return r;
     },
     needDailyNow: (coin) => { const r = rows.get(coin); return !!(r && needDaily(r)); },   // harness: does the daily worker consider this market fetch-worthy right now
