@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -835,7 +835,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -1011,6 +1011,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           oi5: "5d open-interest change % at fire", rngP: "position in the 30d range at fire (0=low, 1=high)",
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
           gw: "gapfade shadow only: void width as a multiple of the market's own gap σ (1.0 or 1.5)",
+          emv: "pead shadow only: the frozen earnings-reaction move, %",
+          fpx: "fundext shadow only: funding percentile at fire (the gate reading)",
           ses: "session bucket at fire, xyz only (rth / on / wknd)", dow: "UTC day-of-week at fire (0=Sun)",
         },
       },
@@ -1040,18 +1042,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // whole in try/catch: bookkeeping serves the ledger, a stamp failure must never block a
   // claim from opening. Accrues out of sample from the build that ships it; older entries
   // stay thin and the export's meta declares the coverage boundary (ctxStampSince).
+  // Funding percentile of `rate` within this market's own 31d hourly history, >=96-sample
+  // floor — the SAME window and floor as the screener's funding-percentile column, shared by
+  // the fire-time context stamp and the fundext gate so no two consumers can disagree.
+  function fundPctileNow(coin, rate, t0) {
+    if (rate == null || !isFinite(rate)) return null;
+    const fh = getFunding(coin), cut = t0 - 31 * DAY;
+    let n = 0, le = 0;
+    for (const k of fh) { if (!Array.isArray(k) || k[0] < cut || !isFinite(k[1])) continue; n++; if (k[1] <= rate) le++; }
+    return n >= 96 ? Math.round((100 * le) / n) : null;
+  }
   function fireCtx(r, t0) {
     const c = {};
     try {
       if (r.funding != null && isFinite(r.funding)) {
         c.fnd = +(+r.funding).toPrecision(6);
-        // percentile of the current rate inside this market's OWN 31d hourly funding history —
-        // same window and same >=96-sample floor as the screener's funding-percentile column,
-        // so the frozen stamp and the live column can never tell different stories
-        const fh = getFunding(r.coin), cut = t0 - 31 * DAY;
-        let n = 0, le = 0;
-        for (const k of fh) { if (!Array.isArray(k) || k[0] < cut || !isFinite(k[1])) continue; n++; if (k[1] <= r.funding) le++; }
-        if (n >= 96) c.fndP = Math.round((100 * le) / n);
+        const fp = fundPctileNow(r.coin, r.funding, t0);
+        if (fp != null) c.fndP = fp;
       }
       // 5d OI change % — from the same daily OI series the flush study consumes
       const oi = oiDailySeries(r.coin);
@@ -1290,7 +1297,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1406,6 +1413,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       (g[ev + ":" + key] || (g[ev + ":" + key] = [])).push(...raws);
     };
     const acOf = (r) => classifyCached(r.ticker).assetClass || "Other";
+    // per-ticker earnings prints for the pead shadow: built once per build, tiny array
+    const earnPrintsByTk = new Map();
+    for (const pr of earnPrints) { let a = earnPrintsByTk.get(pr.t); if (!a) { a = []; earnPrintsByTk.set(pr.t, a); } a.push(pr); }
     // pass 1: studies + pooling feed
     const prepped = [];
     for (const r of activeMarkets()) {
@@ -1476,11 +1486,51 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
             openLedger(r, "reclaim", { score: 0, reading: "" }, 1,
               { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: rc.stop,
                 mv: +(Math.abs(rc.target / r.px - 1) * 100).toFixed(2) }, 0);
+          // failed-breakout fade: the short mirror — same trap structure, inverted (finding F2)
+          const fb = detectFailBrk(closes, r.px);
+          if (fb && stopGeometryOk("short", r.px, fb.stop))
+            openLedger(r, "failbrk", { score: 0, reading: "" }, -1,
+              { sd0: +sd30.toFixed(3), psd: "short", pn: 1, stp: fb.stop,
+                mv: +(Math.abs(fb.target / r.px - 1) * 100).toFixed(2) }, 0);
           const mp = detectMAPull(closes, r.px, sd30);
           if (mp && stopGeometryOk("long", r.px, mp.stop))
             openLedger(r, "mapull", { score: 0, reading: "" }, 1,
               { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: mp.stop,
                 mv: +(Math.abs(mp.target / r.px - 1) * 100).toFixed(2) }, 0);
+          // post-earnings drift, xyz only: enter with a completed outsized reaction (the
+          // detector enforces completeness, freshness and the 1.5σ magnitude floor)
+          if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25) {
+            const prints = earnPrintsByTk.get(r.ticker);
+            const pd = prints ? detectPead(prints, r.dailyRaw, r.px, sd30) : null;
+            if (pd && stopGeometryOk(pd.side, r.px, pd.stop))
+              openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
+                { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,
+                  mv: +(Math.abs(pd.target / r.px - 1) * 100).toFixed(2), emv: pd.mv }, 0);
+          }
+          // persistent funding extreme, crypto only: the crowd has been paying near its own
+          // monthly extreme for a FULL DAY, not one spiky hour — fade it toward the range mid
+          if (r.uni === "main" && r.feat && r.feat.hi30 > r.feat.lo30) {
+            const pNow = fundPctileNow(r.coin, r.funding, now);
+            let rate24 = null;
+            { const fh = getFunding(r.coin), t24 = now - DAY;
+              for (const k of fh) if (Math.abs(k[0] - t24) <= 3 * HOUR && (rate24 == null || Math.abs(k[0] - t24) < Math.abs(rate24[0] - t24))) rate24 = k;
+            }
+            const pPrev = rate24 ? fundPctileNow(r.coin, rate24[1], now) : null;
+            if (pNow != null && pPrev != null) {
+              const crowdLong = pNow >= 95 && pPrev >= 95 && r.funding > 0;
+              const crowdShort = pNow <= 5 && pPrev <= 5 && r.funding < 0;
+              if (crowdLong || crowdShort) {
+                const side = crowdLong ? "short" : "long", sgn = crowdLong ? 1 : -1;
+                const stpX = +(r.px * (1 + sgn * (1.5 * sd30) / 100)).toPrecision(6);
+                const tgt = (r.feat.hi30 + r.feat.lo30) / 2;
+                const tgtOk = crowdLong ? tgt < r.px : tgt > r.px;   // range mid must sit on the profit side
+                if (tgtOk && stopGeometryOk(side, r.px, stpX))
+                  openLedger(r, "fundext", { score: 0, reading: "" }, crowdLong ? 1 : -1,
+                    { sd0: +sd30.toFixed(3), psd: side, pn: 1, stp: stpX,
+                      mv: +(Math.abs(tgt / r.px - 1) * 100).toFixed(2), fpx: pNow }, 0);
+              }
+            }
+          }
         }
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
         if (st.oiflush && st.oiflush.cur && st.oiflush.cur.sd > 0) {

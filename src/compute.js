@@ -516,6 +516,9 @@ const EV_META = {
   gapfade:  { horizonMs: null,     horizon: "next cash session, faded",       studyKey: null },  // shadow strategy — resolveAt = next session close, same calendar as gap
   reclaim:  { horizonMs: 5 * DAY,  horizon: "next 5d, off the failed breakdown", studyKey: null },  // shadow swing setup
   mapull:   { horizonMs: 10 * DAY, horizon: "next 10d, off the rising MA50",  studyKey: null },     // shadow swing setup
+  failbrk:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the failed breakout", studyKey: null }, // shadow swing setup
+  pead:     { horizonMs: 10 * DAY, horizon: "next 10d, drifting with the earnings reaction", studyKey: null },  // shadow swing setup (xyz)
+  fundext:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the persistent funding extreme", studyKey: null },  // shadow swing setup (crypto)
 };
 // Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
 // market's own stats, and the one corroborating thing to watch. A description of the setup —
@@ -809,6 +812,57 @@ function detectReclaim(closes, px) {
   const stop = flush, target = lo + (lo - flush);
   if (!(stop < px && target > px)) return null;
   return { level: +lo.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+// Failed-breakout fade: the short mirror of the reclaim, and the direct test of finding F2
+// (breakout continuation ran -0.73R / 39% hit — breaks in this tape fail). Prior 30d closing
+// HIGH (excluding the last 3 sessions) was broken by at least one of those closes, the break
+// is fresh (one of the last two still above), and the mark is back BELOW the level. Stop =
+// the flush high, target = level - 1x(flush - level): the same measured-move trap, inverted.
+function detectFailBrk(closes, px) {
+  if (!Array.isArray(closes) || closes.length < 40 || !(px > 0)) return null;
+  const c = closes.map((k) => k[1]);
+  let hi = -Infinity;
+  for (let i = c.length - 33; i < c.length - 3; i++) if (c[i] > hi) hi = c[i];
+  if (!isFinite(hi) || !(hi > 0)) return null;
+  const flush = Math.max(c[c.length - 3], c[c.length - 2], c[c.length - 1]);
+  if (!(flush > hi)) return null;                                      // the break actually happened
+  if (!(c[c.length - 1] > hi || c[c.length - 2] > hi)) return null;    // and it is fresh
+  if (!(px < hi)) return null;                                         // and the mark has lost the level
+  const stop = flush, target = hi - (flush - hi);
+  if (!(stop > px && target < px) || !(target > 0)) return null;
+  return { level: +hi.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+// Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
+// keep drifting its own way for weeks — entered AFTER the reaction session is complete (there
+// is at least one bar past the reaction index), within 3 sessions of it, drifting WITH the
+// move. Same print->reaction-index convention as earnReactionsFor (AMC books the next bar).
+// Stop = 1σ back through the reaction close against the drift; target = half the reaction
+// magnitude further, from the mark — drift scales with the surprise, mechanically.
+function detectPead(prints, daily, px, sd30) {
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 25) return null;
+  if (!(px > 0) || !(sd30 > 0)) return null;
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  const idxByDay = new Map();
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  let best = null;
+  for (const pr of prints) {
+    const pi = idxByDay.get(pr.d);
+    if (pi == null) continue;
+    const ri = pr.s === "AMC" ? pi + 1 : pi;
+    if (ri <= 0 || ri >= daily.length - 1) continue;      // reaction session must be COMPLETE
+    if (ri < daily.length - 4) continue;                   // and fresh: within 3 sessions of now
+    if (!best || ri > best.ri) best = { pr, ri };
+  }
+  if (!best) return null;
+  const c1 = best.ri < daily.length ? daily[best.ri].c : null, c0 = daily[best.ri - 1].c;
+  if (!Number.isFinite(c1) || !Number.isFinite(c0) || !(c0 > 0)) return null;
+  const mv = (c1 - c0) / c0 * 100;
+  if (!(Math.abs(mv) >= 1.5 * sd30)) return null;          // the reaction has to be a REACTION
+  const up = mv > 0, sgn = up ? 1 : -1;
+  const stop = c1 * (1 - sgn * sd30 / 100), target = px * (1 + sgn * Math.abs(mv) / 200);
+  if (up ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
+  return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: best.pr.d,
+    stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
 
 // ---- shadow-variant promotion rule ---------------------------------------------------------
@@ -1370,7 +1424,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
