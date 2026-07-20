@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify } = require("./sectors");
 
@@ -1937,7 +1937,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // conditions. Serving top.length as the count pinned the tab badge at "40" forever the
     // moment the universe produced >=40 concurrent conditions — the badge must move with
     // reality, the payload cap is a transport decision. `shown` carries the cap for the client.
-    const top = kept.slice(0, 40);
+    const top = capPerUniverse(kept, 40);   // per-universe lanes: a stocks-heavy tape can't crowd crypto out of the transport
     const shadows = shadowRecord();
     const countU = { main: 0, xyz: 0 };
     for (const g of kept) countU[g.uni === "main" ? "main" : "xyz"]++;

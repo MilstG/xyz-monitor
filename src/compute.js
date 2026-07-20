@@ -880,6 +880,35 @@ function detectLiqFlush(d1, sd30, px, oiChg24) {
   return { stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
 
+// ---- served-index cache busting (pure) -----------------------------------------------------
+// Stamps ?v=<build> on the two client asset tags so browsers refetch exactly when the build
+// changes and never otherwise. The -84 lesson: with bare asset tags, a deploy updates the
+// server while browsers silently keep running last week's client — the API served 281
+// headlines into a page that had no News tab to render them. Two versions of the truth.
+function bustAssetTags(html, v) {
+  const q = "?v=" + encodeURIComponent(String(v == null ? "" : v));
+  return String(html)
+    .replace('href="/styles.css"', 'href="/styles.css' + q + '"')
+    .replace('src="/app.js"', 'src="/app.js' + q + '"');
+}
+
+// ---- per-universe transport cap (pure) -----------------------------------------------------
+// The signals payload caps what ships, but a GLOBAL top-N is universe-blind: stocks signals
+// dominate scoring, so a global cap can ship zero crypto entries while crypto conditions are
+// live — the -85 "crypto tab shows 0" bug. Each universe gets its own lane of the cap.
+// `sorted` must already be score-desc; order is preserved within and across lanes.
+function capPerUniverse(sorted, per) {
+  const taken = new Map(), out = [];
+  for (const g of sorted) {
+    const u = g.uni === "main" ? "main" : "xyz";
+    const n = taken.get(u) || 0;
+    if (n >= per) continue;
+    taken.set(u, n + 1);
+    out.push(g);
+  }
+  return out;
+}
+
 // ---- news feed merge (pure) ----------------------------------------------------------------
 // Dedupe by article id (incoming wins — sources correct headlines), evict on PUBLISH time,
 // never fetch time (a late fetch earns no bonus lifetime), reject future-dated garbage, cap
@@ -1641,6 +1670,8 @@ function reconcileEarnPrints(prints, parsed, nowMs, backDays) {
 }
 module.exports.etDayStr = etDayStr;
 module.exports.mergeNews = mergeNews;
+module.exports.capPerUniverse = capPerUniverse;
+module.exports.bustAssetTags = bustAssetTags;
 module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
 module.exports.earnDayDiff = earnDayDiff;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
