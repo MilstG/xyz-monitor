@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant, parseTgPreview, attributeTg } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify, nameAliases } = require("./sectors");
 
@@ -2433,6 +2433,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       // Lane semantics (the no-leak policy): a ticker ships ONLY on verified items (rel=1).
       // Pending items ship unattributed with pend=1 — tape lane, honest tooltip — and demoted
       // items are plain tape. The internal fetch-ticker never reaches the client unverified.
+      if (a.fl) {   // filings: deterministically attributed, own lane, own fields — the rel machinery never applies
+        o.fl = 1; o.form = a.form;
+        if (a.mat) o.mat = 1;
+        if (a.own) o.own = 1;
+        const rr = byTk.get(String(a.tk).toUpperCase());
+        if (rr) o.coin = rr.coin;
+        return o;
+      }
       const verified = a.tk && a.rel === 1;
       if (!verified) { o.tk = null; if (a.tk) o.pend = 1; }
       if (verified && a.relAi) o.relAi = 1;
@@ -2451,7 +2459,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       return o;
     });
     const sig = items.length + "|" + (items[0] ? items[0].id : "") + "|" + items.filter((x) => x.sig).length + "|" + items.filter((x) => x.ed != null).length + "|" + items.filter((x) => x.sec).length
-      + "|" + items.filter((x) => x.tk).length + "|" + items.filter((x) => x.pend).length + "|" + (newsErr || "");
+      + "|" + items.filter((x) => x.tk).length + "|" + items.filter((x) => x.pend).length + "|" + items.filter((x) => x.fl).length + "|" + (newsErr || "");
     if (sig !== newsSig) { newsSig = sig; newsVer = Date.now(); }
     newsCache = { ts: Date.now(), dataTs: newsVer, items, fetchedAt: newsFetchedAt || null,
       ttlHours: 72, error: newsErr, count: items.length };
@@ -2565,6 +2573,37 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (purged) { pruneSecTape(); buildNewsPayload(); store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned }); }
     return purged;
   }
+  // ---- SEC EDGAR filings (per-company Atom feeds) -------------------------------------------
+  // sec.gov browse-edgar, rotated through the equity roster by staleness — 2 names/minute,
+  // far inside SEC fair-access limits, with the User-Agent contact they require. Attribution
+  // is deterministic by construction (each feed IS a company's). Filings live in their own
+  // lane end to end: 7d retention, per-name cap, never mixed into the news/tape/telegram
+  // lanes, never fed to the AI classifier, never part of the report's news context.
+  const edgarTkAt = new Map();
+  const SEC_UA = "xyz-monitor/" + version + " (" + (process.env.SEC_CONTACT || "ops@xyz-monitor.local") + ")";
+  async function edgarTick() {
+    const roster = [...earnEligible().values()];
+    if (!roster.length) return;
+    roster.sort((a, b) => (edgarTkAt.get(a.ticker) || 0) - (edgarTkAt.get(b.ticker) || 0));
+    const batch = roster.slice(0, 2), now = Date.now();
+    let got = [];
+    for (const m of batch) {
+      edgarTkAt.set(m.ticker, now);   // stamped before the call: a failing name must not wedge the rotation
+      try {
+        const res = await fetch(`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(m.ticker)}&type=&dateb=&owner=include&count=20&output=atom`,
+          { headers: { accept: "application/atom+xml", "user-agent": SEC_UA } });
+        if (!res.ok) continue;   // unknown-to-EDGAR names (foreign listings) 4xx or return empty — a quiet no-op either way
+        const { items } = parseEdgarAtom(await res.text(), m.ticker, now);
+        got = got.concat(items);
+      } catch (_) {}
+    }
+    if (got.length) {
+      newsItems = mergeNews(newsItems, got, now);
+      newsFetchedAt = now;
+      buildNewsPayload();
+      store.saveNews({ ts: now, items: newsItems, secTape, secLearned, nameLearned });
+    }
+  }
   function getTgChannels() {
     return { ts: Date.now(), max: TG_MAX, channels: tgChannels.map((c) => Object.assign({ c }, tgStatus.get(c) || { lastOk: null, error: null, posts: 0 })) };
   }
@@ -2636,7 +2675,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   function secPending() {
     const tape = [];
     for (const a of newsItems) {
-      if (a.tk || secTape[String(a.id)] != null) continue;
+      if (a.tk || a.fl || secTape[String(a.id)] != null) continue;
       if ((secTries.get(String(a.id)) || 0) >= 3) continue;   // struck out — the sweep owns the macro conversion
       tape.push({ i: String(a.id), h: a.h });
       if (tape.length >= 20) break;
@@ -2977,6 +3016,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     setTimeout(() => { classifySecTick().catch(() => {}); }, 90 * 1000);
     setInterval(() => { tgTick().catch((e) => log("telegram tick failed (isolated): " + (e && e.message))); }, 10 * 60 * 1000);
     setTimeout(() => { tgTick().catch(() => {}); }, 30 * 1000);
+    setInterval(() => { edgarTick().catch((e) => log("edgar tick failed (isolated): " + (e && e.message))); }, 60 * 1000);
+    setTimeout(() => { edgarTick().catch(() => {}); }, 50 * 1000);
+    log("EDGAR filings feed: 2 names/min rotation, 7d retention, own lane");
     log(`Telegram feed: ${tgChannels.length ? tgChannels.length + " channel(s) configured" : "no channels configured (add via the News tab \u2699)"}`);
     log(process.env.FINNHUB_TOKEN ? `News feed: ENABLED — ${NEWS_BATCH} names/min rotation + macro tape/15min, 72h retention` : "News feed: disabled (FINNHUB_TOKEN not set)");
     // Off-site ledger backup: shortly after boot (the deploy IS the natural trigger — most
@@ -3583,7 +3625,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // to: the model may reference only these headlines and must say when there are none.
     try {
       const tkU = String(r.ticker || "").toUpperCase();
-      const mine = newsItems.filter((a) => a.tk && a.rel === 1 && String(a.tk).toUpperCase() === tkU)
+      const mine = newsItems.filter((a) => !a.fl && a.tk && a.rel === 1 && String(a.tk).toUpperCase() === tkU)
         .sort((x, y) => y.pub - x.pub).slice(0, 6)
         .map((a) => ({ h: a.h, src: a.src || null, ageH: +((now - a.pub) / 3600e3).toFixed(1) }));
       const tape = newsItems.filter((a) => !a.tk && !a.rel && secTape[String(a.id)] && secTape[String(a.id)] !== "off-topic")
@@ -4089,6 +4131,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         backup: { enabled: !!(BK_REPO && BK_TOKEN), repo: BK_REPO || null, lastOk: backupLast, error: backupErr },
         news: { items: newsItems.length, fetchedAt: newsFetchedAt || null, error: newsErr,
           sectors: { tapeClassified: Object.keys(secTape).length, learnedTickers: Object.keys(secLearned).length, error: secErr },
+          filings: { items: newsItems.filter((a) => a.fl).length, material: newsItems.filter((a) => a.fl && a.mat).length },
           telegram: { channels: tgChannels.length, items: newsItems.filter((a) => a.tg).length,
             errors: [...tgStatus.entries()].filter(([, s]) => s.error).map(([c, s]) => c + ": " + s.error) },
           relevance: { verified: newsItems.filter((a) => a.tk && a.rel === 1).length,

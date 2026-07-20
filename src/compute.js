@@ -938,26 +938,66 @@ function capPerUniverse(sorted, per) {
 // per ticker and in total, newest first. `tk` = the company ticker a headline belongs to,
 // null = the general macro tape, which gets a wider lane than any single name.
 const NEWS_TTL_MS = 72 * HOUR, NEWS_PER_TK = 10, NEWS_CAP = 1200;
+const FILINGS_TTL_MS = 7 * 24 * HOUR, FILINGS_PER_TK = 10;   // a Tuesday 10-Q is still worth seeing Friday
 function mergeNews(existing, incoming, nowMs) {
-  const cut = nowMs - NEWS_TTL_MS, byId = new Map();
-  for (const a of (existing || [])) if (a && a.id != null && a.pub > cut) byId.set(String(a.id), a);
+  const cutOf = (a) => nowMs - (a && a.fl ? FILINGS_TTL_MS : NEWS_TTL_MS);   // filings: 7d; everything else: 72h
+  const byId = new Map();
+  for (const a of (existing || [])) if (a && a.id != null && a.pub > cutOf(a)) byId.set(String(a.id), a);
   for (const a of (incoming || [])) {
     if (!a || a.id == null || !a.h || !Number.isFinite(a.pub)) continue;
-    if (a.pub > nowMs + HOUR || a.pub <= cut) continue;
+    if (a.pub > nowMs + HOUR || a.pub <= cutOf(a)) continue;
     byId.set(String(a.id), a);
   }
   const all = [...byId.values()].sort((x, y) => y.pub - x.pub);
   const perTk = new Map(), out = [];
   for (const a of all) {
-    const k = a.tk || (a.tg ? "~tg" : "~tape");   // telegram rides its own lane: it can't evict the wire, the wire can't evict it
+    // filings ride their own per-ticker lane: a filing burst can't evict the name's headlines,
+    // headlines can't evict its filings
+    const k = a.fl ? "fl:" + (a.tk || "?") : (a.tk || (a.tg ? "~tg" : "~tape"));
     const n = perTk.get(k) || 0;
-    const cap = a.tk ? NEWS_PER_TK : (a.tg ? NEWS_PER_TK * 8 : NEWS_PER_TK * 6);
+    const cap = a.fl ? FILINGS_PER_TK : (a.tk ? NEWS_PER_TK : (a.tg ? NEWS_PER_TK * 8 : NEWS_PER_TK * 6));
     if (n >= cap) continue;
     perTk.set(k, n + 1);
     out.push(a);
     if (out.length >= NEWS_CAP) break;
   }
   return out;
+}
+
+// ---- SEC EDGAR per-company Atom parser (pure) ----------------------------------------------
+// browse-edgar's getcompany feed: <entry> with <title>FORM - description</title>, <updated>,
+// a link to the filing index, an accession number in the id/summary, and (for 8-Ks) the item
+// list in the summary. Zero dependencies, same posture as the telegram parser. Materiality
+// and ownership classes are stamped here so every consumer agrees on what "material" means.
+const SEC_MATERIAL = new Set(["8-K", "8-K/A", "10-K", "10-K/A", "10-Q", "10-Q/A", "S-1", "S-1/A", "S-3", "S-3/A", "SC 13D", "SC 13D/A", "6-K", "20-F", "DEF 14A", "425"]);
+const SEC_OWNERSHIP = new Set(["3", "3/A", "4", "4/A", "5", "5/A", "144", "SC 13G", "SC 13G/A"]);
+function parseEdgarAtom(xml, ticker, nowMs) {
+  const items = [];
+  if (typeof xml !== "string" || !xml) return { items, entries: 0 };
+  const entries = xml.split("<entry>").slice(1);
+  const deent = (s) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'");
+  for (const e of entries) {
+    const title = e.match(/<title[^>]*>([\s\S]*?)<\/title>/);
+    const upd = e.match(/<updated>([^<]+)<\/updated>/);
+    const link = e.match(/<link[^>]*href="([^"]+)"/);
+    const acc = e.match(/accession[^:>]*[:>][^0-9]*([0-9]{10}-[0-9]{2}-[0-9]{6})/i) || e.match(/([0-9]{10}-[0-9]{2}-[0-9]{6})/);
+    if (!title || !upd || !acc) continue;
+    const pub = Date.parse(upd[1]);
+    if (!Number.isFinite(pub)) continue;
+    const tRaw = deent(title[1]).trim();
+    const dash = tRaw.indexOf(" - ");
+    const form = (dash > 0 ? tRaw.slice(0, dash) : tRaw).trim();
+    let desc = dash > 0 ? tRaw.slice(dash + 3).trim() : "";
+    const sum = e.match(/<summary[^>]*>([\s\S]*?)<\/summary>/);
+    if (sum) {
+      const its = [...deent(sum[1]).matchAll(/Item\s+[0-9]+\.[0-9]+[^<\n.]*(?:\.[^<\n]*)?/g)].map((m) => m[0].replace(/\s+/g, " ").trim());
+      if (its.length) desc = its.slice(0, 4).join(" \u00b7 ");
+    }
+    items.push({ id: "sec:" + acc[1], tk: String(ticker).toUpperCase(), fl: 1, form,
+      h: (desc || form).slice(0, 220), src: "EDGAR", url: link ? link[1] : null, pub,
+      mat: SEC_MATERIAL.has(form) ? 1 : undefined, own: SEC_OWNERSHIP.has(form) ? 1 : undefined });
+  }
+  return { items, entries: entries.length };
 }
 
 // ---- telegram public-channel preview parser (pure) -----------------------------------------
@@ -1744,6 +1784,8 @@ module.exports.capPerUniverse = capPerUniverse;
 module.exports.newsRelevant = newsRelevant;
 module.exports.parseTgPreview = parseTgPreview;
 module.exports.attributeTg = attributeTg;
+module.exports.parseEdgarAtom = parseEdgarAtom;
+module.exports.FILINGS_TTL_MS = FILINGS_TTL_MS;
 module.exports.bustAssetTags = bustAssetTags;
 module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
 module.exports.earnDayDiff = earnDayDiff;
