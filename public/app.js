@@ -3036,6 +3036,11 @@ function recCurveSvg(curve){
   const rows=curve.map(p=>`<b style="color:var(--text)">${esc(p[2])}</b> \u00b7 ${esc(EV_LABELS[p[3]]||p[3])}${p[7]?' \u00b7 <span style="color:var(--accent)">\u26d4 stopped</span>':''}<br>${dfmt(p[0])}: at-horizon <span style="color:${p[4]>=0?'var(--up)':'var(--down)'}">${p[4]>=0?'+':''}${p[4]}R</span> \u2192 cum ${p[1]>=0?'+':''}${p[1]}R${p[5]!=null?`<br>stop-aware ${p[6]>=0?'+':''}${p[6]}R \u2192 cum ${p[5]>=0?'+':''}${p[5]}R`:''}`);
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
+const EV_XYZ_ONLY=new Set(['gap','prem','ondrift','tretest','tretestdn']);   // session/trend-board mechanics — structurally can't fire for 24/7 crypto
+function ledgerRosterScoped(){
+  const all=['bigmove','breakout','breakdown','gap','fundflip','squeeze','unwind','oiflush','fpdiv','prem','ondrift','tretest','tretestdn'];
+  return state.scope==='crypto'?all.filter(ev=>!EV_XYZ_ONLY.has(ev)):all;
+}
 function sigRecordHtml(d){
   const thr=sigMovePref(), pr=sigPrimePref();
   const rs=(d&&d.records&&(d.records[String(thr)+(pr?'p':'')+(state.scope==='crypto'?'m':'x')]||d.records[String(thr)+(pr?'p':'')]))||d||{};
@@ -3051,10 +3056,14 @@ function sigRecordHtml(d){
   // numbers either way. The "Record by event" strip above stays as the always-visible summary.
   let s=`<div class="dsec sigrec-tgl" data-recx style="margin-top:22px;cursor:pointer" data-tip="out-of-sample accuracy \u00b7 every fired signal is ledgered at its mark and resolved at its stated horizon under the study\u2019s own sign convention \u00b7 this section is what actually happened after the engine spoke \u2014 the record it must answer to \u00b7 click to ${recOpen?'collapse':'expand the full audit: per-event table, calibration, self-tuning, recent resolutions'}">${recOpen?'\u25be':'\u25b8'} Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
   if(!fired){
-    return s+`<div class="sec" style="font-size:11.5px;padding:4px 2px">No claims ledgered yet \u2014 the record starts accruing from the first signals this deploy fires. First resolutions land at their horizons (12h\u20135d).</div>`;
+    // no early return: the awaiting roster, strategy shadows and self-tuning variants must
+    // render even on a zero record — "never fired" is a fact the panel states, not a blank
+    // screen. This exact blank shipped the day the crypto universe joined the engine with an
+    // honestly-empty record and the whole audit vanished below this line.
+    s+=`<div class="sec" style="font-size:11.5px;padding:4px 2px">No ${state.scope==='crypto'?'crypto ':''}claims resolved yet \u2014 the record accrues from the signals this universe fires. First resolutions land at their horizons (12h\u20135d).</div>`;
   }
   const hitAll=resolved?Math.round(100*wins/resolved):null;
-  s+=`<div class="sigrec-top">`
+  if(fired) s+=`<div class="sigrec-top">`
     +`<span data-tip="every distinct (market, event) claim ledgered since launch">fired <b>${fired}</b></span>`
     +`<span data-tip="claims that reached their horizon and were scored">resolved <b>${resolved}</b></span>`
     +`<span data-tip="claims still inside their horizon, awaiting resolution">open <b>${open}</b></span>`
@@ -3062,7 +3071,8 @@ function sigRecordHtml(d){
     +(nS?`<span data-tip="stop-aware record \u00b7 same claims, but the outcome is capped at the void level when it was touched before horizon \u00b7 what trading the playbook with its void as a hard stop would have done \u00b7 covers claims resolved since stop-tracking began \u2014 older claims carry no frozen void, so n trails the resolved total"><b class="${Math.round(100*winsS/nS)>=50?'pos':'neg'}">${Math.round(100*winsS/nS)}%</b> stop-aware <i style="font-style:normal;color:var(--faint)">(n=${nS})</i></span>`:'')
     +`</div>`;
   if(!recOpen) return s;   // collapsed: header + headline totals only; the strip above is the summary
-  if(resolved){
+  {   // always render the by-event section when expanded: with zero resolved it is the roster
+      // itself — open-only rows plus explicit awaits ("never fired" vs "not wired", stated)
     s+='<div class="sigrec-sub" data-tip="claimed-vs-live per event type \u2014 the honesty gap, with the stop-aware parallel track">by event</div>';
     s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="stop-aware hit \u00b7 outcomes capped at the void when touched before horizon \u00b7 covers claims resolved since stop-tracking began (build -22) \u2014 n can trail the live column\u2019s">stop hit</th><th class="ss" data-tip="stop-aware median realized">stop med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s stop hit for how many claims were stopped out">stop pf</th><th></th></tr></thead><tbody>';
     for(const ev of [...evs].sort((a,b)=>((rc[b].resolved||0)-(rc[a].resolved||0))||((rc[b].open||0)-(rc[a].open||0)))){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
@@ -3079,8 +3089,7 @@ function sigRecordHtml(d){
     }
     // roster members with zero claims: an explicit greyed row, so the roster is always the
     // full roster — "never fired" reads as a fact, not an omission
-    const AWAIT_ROSTER=['bigmove','breakout','breakdown','gap','fundflip','squeeze','unwind','oiflush','fpdiv','prem','ondrift','tretest','tretestdn'];
-    for(const ev of AWAIT_ROSTER){ if(rc[ev]) continue;
+    for(const ev of ledgerRosterScoped()){ if(rc[ev]) continue;
       s+=`<tr class="await" data-tip="${esc(`in the ledger roster \u2014 no claim has fired yet under the current gates${ev==='tretest'||ev==='tretestdn'?' \u00b7 stocks/macro universe only: crypto retests never ledger; the next RETEST badge on the stocks Trend board opens the first claim':''}`)}"><td>${esc(EV_LABELS[ev]||ev)}</td><td>0</td><td colspan="7">awaiting first claim</td><td></td></tr>`;
     }
     s+='</tbody></table>';
@@ -3175,11 +3184,12 @@ function renderSignals(){
   let rec='';
   const rsTop=(d&&d.records&&(d.records[String(mvThr)+(prOn?'p':'')+(state.scope==='crypto'?'m':'x')]||d.records[String(mvThr)+(prOn?'p':'')]))||d||{};
   const recSrc=rsTop.record||{};
-  // Every event capable of ledgering a claim. Roster members with zero claims render as
-  // explicit "awaiting first claim" entries — without this, "never fired" and "not wired"
-  // are indistinguishable (exactly the question the tretest launch raised).
-  const LEDGER_ROSTER=['bigmove','breakout','breakdown','gap','fundflip','squeeze','unwind','oiflush','fpdiv','prem','ondrift','tretest','tretestdn'];
-  if(Object.keys(recSrc).length){
+  // Every event capable of ledgering a claim renders via ledgerRosterScoped(): zero-claim
+  // roster members appear as explicit "awaiting first claim" entries — without this,
+  // "never fired" and "not wired" are indistinguishable — and xyz-only events (gap, prem,
+  // ondrift, trend retests) are excluded in crypto scope, where "awaiting" would be a lie.
+  {   // always render the strip: on an empty scoped record it IS the roster — every applicable
+      // event as an explicit "awaiting first claim" chip, never a vanished section
     rec='<div class="dsec" style="margin-top:22px" data-tip="compact per-event record \u2014 the same ledger the accuracy table details below, one chip per event type">Record by event</div><div class="recstrip">';
     // record-first ordering: proven/measured entries (by sample size) up top, open-but-unresolved
     // next, roster members awaiting their first claim at the bottom — informational rows never
@@ -3193,7 +3203,7 @@ function renderSignals(){
       const good = r.resolved>=10 && r.hit>=0.55 && r.med>0;
       rec+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 out-of-sample record: every firing ledgered at its mark, resolved at the stated horizon under the study\u2019s own sign convention \u00b7 what actually happened after the engine spoke`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
     }
-    for(const ev of LEDGER_ROSTER){ if(recSrc[ev]) continue;
+    for(const ev of ledgerRosterScoped()){ if(recSrc[ev]) continue;
       rec+=`<span class="rec await" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 in the ledger roster \u2014 no claim has fired yet under the current gates${ev==='tretest'||ev==='tretestdn'?' (stocks/macro universe only: crypto retests never ledger)':''}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> awaiting first claim</span>`;
     }
     rec+='</div>';
