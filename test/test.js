@@ -1069,6 +1069,47 @@ test("signal engine covers BOTH universes: crypto rows fire, ledger, and record 
   assert.equal((pol.match(/order\.length \? order\.map/g) || []).length, 0, "no activeMarkets fallback patch lives in the shipped source");
 });
 
+test("empty scoped record still RENDERS: awaits, shadows, variants — executed, not string-pinned", () => {
+  // The -87 deploy blanked the crypto accuracy section: an honestly-empty record hit an early
+  // return that swallowed the awaiting-roster, the shadows panel and the variants. This test
+  // executes the REAL sigRecordHtml from the shipped client against an empty scoped record —
+  // rendering behavior, not source pins (the -85 lesson: existence is not wiring).
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => { const i = src.indexOf("function " + name); assert.ok(i >= 0, name + " missing");
+    let dep = 0, j = src.indexOf("{", i);
+    for (let k = j; k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
+  const cut = (s) => { const i = src.indexOf(s); assert.ok(i >= 0, "snippet missing: " + s); return; };
+  cut("const EV_XYZ_ONLY=new Set(['gap','prem','ondrift','tretest','tretestdn']);");
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const state = { scope: "crypto" };
+  const sigMovePref = () => 0, sigPrimePref = () => false, sigRecFullPref = () => true, fmtAge = () => "1m";
+  const EV_LABELS = {}, EV_TIP = {};
+  const EV_XYZ_ONLY = eval("(" + src.match(/const EV_XYZ_ONLY=(new Set\([^)]*\));/)[1] + ")");
+  const ledgerRosterScoped = eval("(" + grab("ledgerRosterScoped") + ")");
+  const sigRecordHtml = eval("(" + grab("sigRecordHtml") + ")");
+  // crypto scope, empty 'm' record, shadows shipping normally (server always ships all strategies)
+  const d = { records: { "0m": { record: {}, recent: [] }, "0": { record: { bigmove: { resolved: 5, open: 1, hit: 0.6, med: 0.2, unit: "R" } } } },
+    shadows: { main: [{ ev: "liqflush", label: "cascade exhaustion", unit: "R", tip: "t", rows: [{ tag: null, n: 0, open: 0 }] }], xyz: [] },
+    variants: [], count: 0 };
+  const html = sigRecordHtml(d);
+  assert.ok(html.includes("No crypto claims resolved yet"), "the honest notice renders");
+  assert.ok(html.includes("awaiting first claim"), "the awaiting roster renders BELOW the notice — no early return");
+  for (const ev of ["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "squeeze", "unwind"])
+    assert.ok(html.includes(">" + ev + "<") || html.includes(ev), `crypto-applicable event ${ev} awaits`);
+  for (const ev of ["prem", "gap", "ondrift", "tretest"])
+    assert.ok(!new RegExp('<td>' + ev + '</td>').test(html), `xyz-only event ${ev} must NOT show as awaiting in crypto scope — that would be a lie`);
+  assert.ok(html.includes("strategy shadows (earning their record)"), "shadows panel renders on an empty record");
+  assert.ok(html.includes("cascade exhaustion"), "with its strategies");
+  assert.ok(!html.includes("sigrec-top"), "headline stats stay hidden until something has actually fired");
+  // roster scoping is symmetric: stocks scope carries the full roster
+  state.scope = "stocks";
+  const full = ledgerRosterScoped();
+  assert.ok(full.includes("prem") && full.includes("gap") && full.includes("tretest"), "stocks roster keeps the session events");
+  state.scope = "crypto";
+  assert.equal(ledgerRosterScoped().length, full.length - 5, "crypto roster excludes exactly the five xyz-only events");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
