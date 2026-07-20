@@ -971,6 +971,50 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     closed.sort((a, b) => (b.tR || b.t0) - (a.tR || a.t0));
     return { coin: coin || "", ev: ev || "", ticker, open, closed: closed.slice(0, 150), ts: Date.now() };
   }
+  // One-shot raw dump for offline analysis (GET /api/export/ledger). Deliberately NOT the
+  // curated getLedgerFor shape: no 150-entry cap, no field pruning — shadow variants and
+  // legacy pre-sigma entries ship as-is, distinguishable but present. The export's job is
+  // completeness; exclusion is the analysis's call, made offline with the glossary in hand.
+  function getLedgerExport() {
+    const closed = ledgerClosed, open = [...ledgerOpen.values()];
+    let shadows = 0, legacy = 0, ctxFrom = null;
+    for (const e of closed) {
+      if (e.vi != null) shadows++;
+      if (R_LEDGER_EVS.has(e.ev) && !(e.sd0 > 0)) legacy++;
+      if (e.dow != null && (ctxFrom == null || e.t0 < ctxFrom)) ctxFrom = e.t0;
+    }
+    return {
+      meta: {
+        version: version || null, exportedAt: Date.now(),
+        counts: { closed: closed.length, open: open.length, shadowsClosed: shadows, legacyClosed: legacy },
+        retention: "closed entries are capped at the most recent 4000; older history is gone from this store",
+        // Earliest closed entry carrying the fire-time context stamp (fnd/fndP/oi5/rngP/mktR/
+        // ses/dow). Entries before this are thin — the analysis states its coverage boundary
+        // instead of pretending the features were always there. Null until one such entry closes.
+        ctxStampSince: ctxFrom,
+        glossary: {
+          ev: "event type", vi: "shadow-variant index (absent = the real, visible claim)",
+          t0: "fire time (ms)", tR: "resolve time (ms)", mark0: "mark at fire",
+          dir: "EVENT direction sign (a gap-fader's dir is the gap, not the trade)",
+          psd: "published play side (long/short) — outcome sign follows this when present",
+          sd0: "30d daily sigma at fire (R normalization); an R-united event WITHOUT sd0 is a legacy %-outcome entry",
+          stp: "void level frozen at fire (stop-aware track)", mv: "playbook-target distance from mark at fire, %",
+          score0: "signal score at fire", pr: "prime flag at fire", conf: "confluence flag at fire",
+          bt: "opened on the first post-boot build (condition may predate the stamp)", eg: "episode-gap flag",
+          tal: "daily trend ribbon aligned with the claim's side at fire (1/0; absent = unknown at fire)",
+          realized: "at-horizon outcome, play-signed, in the event's unit",
+          realizedS: "stop-aware outcome (void-level-capped)", stopped: "void level touched before horizon",
+          fnd: "funding rate at fire", fndP: "funding percentile vs this market's own 31d hourly history (>=96 samples)",
+          oi5: "5d open-interest change % at fire", rngP: "position in the 30d range at fire (0=low, 1=high)",
+          mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
+          ses: "session bucket at fire, xyz only (rth / on / wknd)", dow: "UTC day-of-week at fire (0=Sun)",
+        },
+      },
+      closed, open,
+      variants: { state: variantState, stats: variantStats },
+      ts: Date.now(),
+    };
+  }
   function resolveAtFor(ev, t0) {
     if (ev === "gap") {   // resolves at the close of the next cash session after firing
       for (const ses of marketSessions(t0, t0 + 6 * DAY)) if (ses.close > t0 && ses.open > t0) return ses.close;
@@ -983,6 +1027,57 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     const m = EV_META[ev];
     return t0 + ((m && m.horizonMs) || DAY);
+  }
+  // ---- fire-time context stamp -------------------------------------------------------------
+  // Frozen market state at the moment a claim opens, for post-hoc slicing of the record (the
+  // offline analysis pass and, later, the loss autopsy read these). Short additive keys,
+  // stamped ONLY when computable — an absent key is an honest unknown, never a null pad.
+  // Applies to real and shadow claims alike (variant slices want the same features). Wrapped
+  // whole in try/catch: bookkeeping serves the ledger, a stamp failure must never block a
+  // claim from opening. Accrues out of sample from the build that ships it; older entries
+  // stay thin and the export's meta declares the coverage boundary (ctxStampSince).
+  function fireCtx(r, t0) {
+    const c = {};
+    try {
+      if (r.funding != null && isFinite(r.funding)) {
+        c.fnd = +(+r.funding).toPrecision(6);
+        // percentile of the current rate inside this market's OWN 31d hourly funding history —
+        // same window and same >=96-sample floor as the screener's funding-percentile column,
+        // so the frozen stamp and the live column can never tell different stories
+        const fh = getFunding(r.coin), cut = t0 - 31 * DAY;
+        let n = 0, le = 0;
+        for (const k of fh) { if (!Array.isArray(k) || k[0] < cut || !isFinite(k[1])) continue; n++; if (k[1] <= r.funding) le++; }
+        if (n >= 96) c.fndP = Math.round((100 * le) / n);
+      }
+      // 5d OI change % — from the same daily OI series the flush study consumes
+      const oi = oiDailySeries(r.coin);
+      if (oi && oi.length >= 6) {
+        const base = oi[oi.length - 6][1];
+        if (base > 0) c.oi5 = +((oi[oi.length - 1][1] / base - 1) * 100).toFixed(1);
+      }
+      // position inside the 30d range, 0 (at the low) .. 1 (at the high)
+      const f = r.feat;
+      if (f && f.hi30 > f.lo30 && r.px != null)
+        c.rngP = +Math.min(1, Math.max(0, (r.px - f.lo30) / (f.hi30 - f.lo30))).toFixed(2);
+      // benchmark 24h move at fire: BTC for the crypto universe, the resolved SPX proxy for xyz
+      const b = r.uni === "main" ? rows.get(MAIN_BENCH) : (benchCoin ? rows.get(benchCoin) : null);
+      if (b && b.d1 != null && isFinite(b.d1)) c.mktR = +(+b.d1).toFixed(2);
+      c.dow = new Date(t0).getUTCDay();
+      // session bucket, xyz only (crypto trades a continuous week): rth = inside a cash
+      // session, wknd = the surrounding closed span exceeds a day (weekend/holiday), on = an
+      // ordinary overnight. Derived from the same calendar the resolver's horizons use.
+      if (r.uni === "xyz") {
+        const ses = marketSessions(t0 - 6 * DAY, t0 + 2 * DAY);
+        let inSes = false, prevClose = null, nextOpen = null;
+        for (const s of ses) {
+          if (s.open <= t0 && t0 < s.close) { inSes = true; break; }
+          if (s.close <= t0 && (prevClose == null || s.close > prevClose)) prevClose = s.close;
+          if (s.open > t0 && (nextOpen == null || s.open < nextOpen)) nextOpen = s.open;
+        }
+        c.ses = inSes ? "rth" : (prevClose != null && nextOpen != null && nextOpen - prevClose > DAY ? "wknd" : "on");
+      }
+    } catch (_) {}
+    return c;
   }
   function openLedger(r, ev, sigEntry, dir, extra, vi) {
     const key = r.coin + "|" + ev + (vi != null ? "#" + vi : "");
@@ -1026,6 +1121,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         const tal = trendAlignAtFire(r.coin, side);
         if (tal != null) e.tal = tal;
       }
+      // Fire-time context stamp (fnd/fndP/oi5/rngP/mktR/ses/dow) — assigned last so a stamp
+      // key could never mask a core claim field even if one were ever added carelessly; the
+      // stamp's keys are all novel today and the export glossary documents each.
+      Object.assign(e, fireCtx(r, t0));
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -3170,6 +3269,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     seedRowNow: (coin, fields) => Object.assign(getRow(coin), fields),   // harness: seed a synthetic market (px/spines) so builds are testable without network
     needDailyNow: (coin) => { const r = rows.get(coin); return !!(r && needDaily(r)); },   // harness: does the daily worker consider this market fetch-worthy right now
     getLedgerFor,
+    getLedgerExport,
+    openLedgerNow: (coin, ev, sigEntry, dir, extra, vi) =>   // harness: fire a claim directly so the context stamp is testable without a full signals build
+      openLedger(getRow(coin), ev, sigEntry || { score: 0, reading: "" }, dir, extra, vi),
     // AI analyst report: cached read, on-demand generation (TTL cooldown enforced inside), and
     // the recent-reports list for the Report tab.
     getAiReport,
