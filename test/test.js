@@ -1254,8 +1254,9 @@ test("telegram feed: parser + drift, lane caps, single-name attribution through 
   assert.equal(by["tg:chanA:1"].sec, "Information Technology", "sector rides the attribution");
   assert.equal(by["tg:chanA:3"].tk, null, "two-name post attributes to NEITHER — no leak");
   assert.equal(by["tg:chanA:4"].tk, null, "no-name post stays tape");
-  assert.equal(by["tg:chanA:5"].tk, null,
-    "documented behavior: 'MicroStrategy adds BTC' names two universe assets (MSTR and the BTC perp) — the conservative rule keeps it on tape rather than guessing which feed it belongs to");
+  assert.equal(by["tg:chanA:5"].tk, "MSTR",
+    "crypto symbols are OUT of the telegram roster by policy — 'MicroStrategy adds BTC' now has exactly one universe match and attributes to MSTR, the name it's actually about");
+  assert.ok(!pay.items.some((a) => a.tg && a.tk === "BTC"), "no telegram post ever wears a crypto ticker");
   assert.ok(pay.items.filter((a) => a.tg).length === 4, "tg marker survives to the payload");
   // channel management: normalization, validation, cap, dedupe
   assert.deepEqual(pl.setTgChannels(["@WatcherGuru", "https://t.me/s/markettwits", "watcherguru"]).channels,
@@ -1287,7 +1288,7 @@ test("telegram feed: parser + drift, lane caps, single-name attribution through 
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["markup drift: page fetched, nothing parsed", "store.saveTgChannels({ ts: Date.now(), channels: tgChannels })",
     "telegram: { channels: tgChannels.length", "function purgeTgOrphans()",
-    "cached posts from since-removed channels die at hydrate"])
+    "cached posts from since-removed channels die at hydrate", 'r.uni !== "xyz") continue;'])
     assert.ok(pol.includes(pin), `tg pin missing: ${pin}`);
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["'telegram'?!!a.tg", "id=\"ntg-gear\"", "function loadTgChannels()", "function saveTgChannels(", "data-rmch"])
