@@ -547,6 +547,56 @@ test("ledger archive: overflow is appended to the volume before the retention tr
     "resolver + hydrate trims archive before slicing, guarded");
 });
 
+test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext persistence gate", () => {
+  const C = require("../src/compute");
+  const now = Date.now();
+  // ---- failed-breakout fade: exact mirror of the reclaim trap
+  const flat = []; for (let i = 0; i < 45; i++) flat.push([now - (45 - i) * DAY, 100 + ((i * 7) % 5) * 0.3]);
+  const hi = Math.max(...flat.slice(-33, -3).map((k) => k[1]));
+  flat[flat.length - 3][1] = hi + 2; flat[flat.length - 2][1] = hi + 3; flat[flat.length - 1][1] = hi + 1;
+  const fb = C.detectFailBrk(flat, hi - 0.4);
+  assert.ok(fb, "fresh break above + mark back below the level fires");
+  assert.equal(fb.level, +hi.toPrecision(6), "level is the pre-flush 30d closing high");
+  assert.equal(fb.stop, +(hi + 3).toPrecision(6), "stop is the flush high");
+  assert.ok(Math.abs(fb.target - (hi - 3)) < 1e-9, "target is the inverted measured move");
+  assert.equal(C.detectFailBrk(flat, hi + 0.5), null, "mark still above the level: no fade");
+  const stale = flat.map((k) => [k[0], k[1]]);
+  stale[stale.length - 2][1] = hi - 1; stale[stale.length - 1][1] = hi - 1;
+  assert.equal(C.detectFailBrk(stale, hi - 0.4), null, "an aged-out break never fires");
+  // ---- pead: completed outsized reaction drifts; AMC convention matches earnReactionsFor
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  const daily = []; for (let i = 0; i < 30; i++) daily.push({ t: now - (30 - i) * DAY, c: 100, o: 100 });
+  daily[27].c = 106;   // +6% reaction bar
+  daily[28].c = 106.5; daily[29].c = 107;   // reaction session complete, drift underway
+  const printsB = [{ t: "X", d: dayOf(daily[27].t), s: "BMO" }];
+  const pd = C.detectPead(printsB, daily, 107, 2);
+  assert.ok(pd && pd.side === "long", "BMO reaction bar is the print day itself");
+  assert.equal(pd.mv, 6, "reaction magnitude frozen");
+  assert.ok(pd.stop < 107 && pd.target > 107, "long geometry: stop below, target above");
+  assert.ok(Math.abs(pd.stop - 106 * 0.98) < 1e-6, "stop 1σ back through the reaction close");
+  assert.ok(Math.abs(pd.target - 107 * 1.03) < 1e-6, "target = half the reaction further from the mark");
+  const printsA = [{ t: "X", d: dayOf(daily[26].t), s: "AMC" }];
+  assert.ok(C.detectPead(printsA, daily, 107, 2), "AMC books the NEXT bar as the reaction — same convention as earnReactionsFor");
+  assert.equal(C.detectPead(printsB, daily, 107, 5), null, "a reaction under 1.5σ is noise, not a REACTION");
+  const incomplete = daily.slice(0, 28);   // reaction bar is the LAST bar — session not complete
+  assert.equal(C.detectPead(printsB, incomplete, 106, 2), null, "no entry until the reaction session is complete");
+  const old = [{ t: "X", d: dayOf(daily[20].t), s: "BMO" }];
+  assert.equal(C.detectPead(old, daily, 107, 2), null, "a print older than 3 sessions has drifted without us — no chase");
+  // ---- EV_META + wiring pins
+  assert.equal(C.EV_META.failbrk.horizonMs, 5 * DAY);
+  assert.equal(C.EV_META.pead.horizonMs, 10 * DAY);
+  assert.equal(C.EV_META.fundext.horizonMs, 5 * DAY);
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ['openLedger(r, "failbrk"', 'openLedger(r, "pead"', 'openLedger(r, "fundext"',
+    'r.uni === "xyz" && r.dailyRaw', 'r.uni === "main" && r.feat',
+    "pNow >= 95 && pPrev >= 95 && r.funding > 0", "pNow <= 5 && pPrev <= 5 && r.funding < 0",
+    "function fundPctileNow"])
+    assert.ok(pol.includes(pin), `poller wiring pin missing: ${pin}`);
+  // fundext + the context stamp share ONE percentile code path (no two sources of truth)
+  assert.ok((pol.match(/fundPctileNow\(/g) || []).length >= 4, "fireCtx and fundext both route through the shared percentile helper");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
