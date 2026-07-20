@@ -721,3 +721,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .nhl a{color:var(--text);text-decoration:none}
 .nhl a:hover{text-decoration:underline;text-underline-offset:2px}
 .nsrc{color:var(--muted);font-size:11px;white-space:nowrap}
+.nhead select{background:var(--panel);border:1px solid var(--border);border-radius:5px;color:var(--text);font-family:var(--mono);font-size:11px;padding:4px 8px}
+.nsec-badge{border:1px solid var(--border);background:var(--panel);color:var(--muted);border-radius:4px;padding:1px 7px;font-size:10.5px;cursor:pointer;white-space:nowrap}
+.nsec-badge.ai{border-style:dashed}
+.nsec-head{border-bottom:none}
