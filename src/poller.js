@@ -10,9 +10,9 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
-const { classify } = require("./sectors");
+const { classify, nameAliases } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 const TF = { h1: HOUR, h4: 4 * HOUR, d1: DAY, d7: 7 * DAY, d30: 30 * DAY };
@@ -1473,9 +1473,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // per-ticker earnings prints for the pead shadow: built once per build, tiny array
     const earnPrintsByTk = new Map();
     for (const pr of earnPrints) { let a = earnPrintsByTk.get(pr.t); if (!a) { a = []; earnPrintsByTk.set(pr.t, a); } a.push(pr); }
-    // pass 1: studies + pooling feed
+    // pass 1: studies + pooling feed — BOTH universes. activeMarkets() is xyz-pure by design
+    // (tape aggregates and regime depend on that purity), so the signal engine concatenates
+    // the main-dex roster explicitly. Until 2026.07.20-87 this loop iterated activeMarkets()
+    // alone: the entire crypto universe was invisible to signals, studies, the ledger and
+    // every shadow strategy — zero crypto claims ever ledgered — while the Markets/Trend tabs
+    // (which read main their own way) looked perfectly healthy. Session-anchored events
+    // (gap, prem, ondrift) naturally no-op for main coins: their gates key off per-coin
+    // overnight/liveClose data that 24/7 markets never produce.
     const prepped = [];
-    for (const r of activeMarkets()) {
+    for (const r of activeMarkets().concat(mainMarkets())) {
       if (r.delisted || r.px == null) continue;
       const closes = dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;
       const st = studiesFor(r, closes, dayFunding);
@@ -2371,9 +2378,40 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (!a || a.id == null || !a.headline) continue;
       const pub = (typeof a.datetime === "number" ? a.datetime : 0) * 1000;
       out.push({ id: a.id, tk: tk || null, h: String(a.headline).slice(0, 220),
-        src: a.source ? String(a.source).slice(0, 40) : null, url: a.url || null, pub });
+        src: a.source ? String(a.source).slice(0, 40) : null, url: a.url || null, pub,
+        sm: a.summary ? String(a.summary).slice(0, 400) : null });   // transient: relevance gating only, stripped before merge
     }
     return out;
+  }
+  // ---- relevance pipeline -------------------------------------------------------------------
+  // Policy: the universe feed shows ONLY items verified to concern a universe name. An item
+  // fetched under ticker T is attributed to T iff the deterministic gate passes (symbol as a
+  // word, or a company alias — seeded map + AI-learned aliases). Everything else keeps its
+  // fetch-ticker internally but ships UNATTRIBUTED (rel=0, pending) into the tape lane until
+  // the AI verdict lands: about T after all (rel=1) / actually about another universe name
+  // (re-tagged, validated against the roster) / market-general (demoted to tape) / off-topic
+  // (tape + "off-topic" sector, hidden-by-default client-side). Verdicts are write-once and
+  // mutate the persisted item, so nothing is ever re-judged.
+  let nameLearned = {};                       // TICKER -> [aliases] (AI, write-once, persisted)
+  const relTries = new Map();                 // articleId -> failed verdict attempts
+  function aliasesFor(T) {
+    const seed = nameAliases(T), learned = nameLearned[T];
+    return seed && learned ? seed.concat(learned) : (seed || learned || null);
+  }
+  function gateCompanyItems(parsed) {
+    // mutates each parsed item: rel=1 verified, rel=0 pending; strips the transient summary
+    for (const a of parsed) {
+      if (a.tk) a.rel = newsRelevant(a.h, a.sm, a.tk, aliasesFor(String(a.tk).toUpperCase())) ? 1 : 0;
+      delete a.sm;
+    }
+    return parsed;
+  }
+  function regatePending() {
+    // fresh aliases can promote pending items deterministically — no model call needed
+    let promoted = 0;
+    for (const a of newsItems)
+      if (a.tk && a.rel === 0 && newsRelevant(a.h, null, a.tk, aliasesFor(String(a.tk).toUpperCase()))) { a.rel = 1; promoted++; }
+    return promoted;
   }
   function buildNewsPayload() {
     // per-item context stamps, all server-side so the tab stays dumb: coin (drawer deep-link),
@@ -2390,21 +2428,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const items = newsItems.map((a) => {
       const r = a.tk ? byTk.get(String(a.tk).toUpperCase()) : null;
       const o = { id: a.id, tk: a.tk, h: a.h, src: a.src, url: a.url, pub: a.pub };
-      if (r) o.coin = r.coin;
-      const ed = a.tk ? edByTk.get(String(a.tk).toUpperCase()) : undefined;
+      // Lane semantics (the no-leak policy): a ticker ships ONLY on verified items (rel=1).
+      // Pending items ship unattributed with pend=1 — tape lane, honest tooltip — and demoted
+      // items are plain tape. The internal fetch-ticker never reaches the client unverified.
+      const verified = a.tk && a.rel === 1;
+      if (!verified) { o.tk = null; if (a.tk) o.pend = 1; }
+      if (verified && a.relAi) o.relAi = 1;
+      if (verified && r) o.coin = r.coin;
+      const ed = verified ? edByTk.get(String(a.tk).toUpperCase()) : undefined;
       if (ed != null) o.ed = ed;
-      if (a.tk && sigTickers.has(String(a.tk).toUpperCase())) o.sig = 1;
+      if (verified && sigTickers.has(String(a.tk).toUpperCase())) o.sig = 1;
       // sector, with provenance: the static GICS map wins outright (deterministic, no marker);
       // the AI-learned map covers Unclassified tickers; tape items ride their content-based
       // classification. Anything AI-derived wears secAi so the client can badge it honestly.
-      if (a.tk) {
+      if (verified) {
         const cs = classifyCached(a.tk).sector;
         if (cs && cs !== "Unclassified") o.sec = cs;
         else { const L = secLearned[String(a.tk).toUpperCase()]; if (L) { o.sec = L; o.secAi = 1; } }
       } else if (secTape[String(a.id)] != null) { o.sec = secTape[String(a.id)]; o.secAi = 1; }
       return o;
     });
-    const sig = items.length + "|" + (items[0] ? items[0].id : "") + "|" + items.filter((x) => x.sig).length + "|" + items.filter((x) => x.ed != null).length + "|" + items.filter((x) => x.sec).length + "|" + (newsErr || "");
+    const sig = items.length + "|" + (items[0] ? items[0].id : "") + "|" + items.filter((x) => x.sig).length + "|" + items.filter((x) => x.ed != null).length + "|" + items.filter((x) => x.sec).length
+      + "|" + items.filter((x) => x.tk).length + "|" + items.filter((x) => x.pend).length + "|" + (newsErr || "");
     if (sig !== newsSig) { newsSig = sig; newsVer = Date.now(); }
     newsCache = { ts: Date.now(), dataTs: newsVer, items, fetchedAt: newsFetchedAt || null,
       ttlHours: 72, error: newsErr, count: items.length };
@@ -2424,7 +2469,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(m.ticker)}&from=${iso(now - 3 * DAY)}&to=${iso(now)}&token=${encodeURIComponent(token)}`,
           { headers: { accept: "application/json" } });
         if (!res.ok) { if (res.status === 401 || res.status === 403) { newsErr = `Finnhub company-news: HTTP ${res.status} (entitlement)`; } continue; }
-        got = got.concat(newsParse(await res.json(), m.ticker));
+        got = got.concat(gateCompanyItems(newsParse(await res.json(), m.ticker)));
         newsErr = null;
       } catch (e) { newsErr = "company-news fetch failed: " + (e && e.message); }
     }
@@ -2432,7 +2477,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       newsItems = mergeNews(newsItems, got, now);
       newsFetchedAt = now;
       buildNewsPayload();
-      store.saveNews({ ts: now, items: newsItems, secTape, secLearned });
+      store.saveNews({ ts: now, items: newsItems, secTape, secLearned, nameLearned });
     }
   }
   async function newsTapeTick() {
@@ -2446,7 +2491,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       pruneSecTape();
       newsFetchedAt = Date.now(); newsErr = null;
       buildNewsPayload();
-      store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned });
+      store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned });
     } catch (e) { newsErr = "tape fetch failed: " + (e && e.message); buildNewsPayload(); }
   }
   function hydrateNews() {
@@ -2454,6 +2499,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (d && Array.isArray(d.items)) { newsItems = mergeNews(d.items, [], Date.now()); newsFetchedAt = d.ts || 0; }
     if (d && d.secTape && typeof d.secTape === "object") secTape = d.secTape;
     if (d && d.secLearned && typeof d.secLearned === "object") secLearned = d.secLearned;
+    if (d && d.nameLearned && typeof d.nameLearned === "object") nameLearned = d.nameLearned;
+    for (const a of newsItems)   // pre-pipeline items carry no rel: gate on the headline we kept
+      if (a.tk && a.rel == null) a.rel = newsRelevant(a.h, null, a.tk, aliasesFor(String(a.tk).toUpperCase())) ? 1 : 0;
     pruneSecTape();
     buildNewsPayload();
     return newsItems.length;
@@ -2477,14 +2525,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const live = new Set(newsItems.filter((a) => !a.tk).map((a) => String(a.id)));
     for (const id of Object.keys(secTape)) if (!live.has(id)) delete secTape[id];
     for (const id of [...secTries.keys()]) if (!live.has(id)) secTries.delete(id);
+    const all = new Set(newsItems.map((a) => String(a.id)));
+    for (const id of [...relTries.keys()]) if (!all.has(id)) relTries.delete(id);
   }
-  const SEC_CLASSIFY_SYSTEM = "You classify financial news headlines and stock tickers into GICS sectors. Respond ONLY with a JSON object, no prose, no markdown fences: {\"tape\":[{\"i\":<id>,\"sec\":<sector>}],\"tickers\":[{\"t\":<ticker>,\"sec\":<sector>}]}. Allowed sec values for tape: one of the 11 GICS sector names exactly as given, or \"macro\" for market-wide/central-bank/geopolitical items. Allowed for tickers: the 11 GICS names only. GICS names: " + GICS_SECTORS.join("; ") + ".";
-  function secStrikeSweep() {   // three strikes -> macro; returns how many were struck out (payload must rebuild)
+  const SEC_CLASSIFY_SYSTEM = "You classify financial news for a trading dashboard. Respond ONLY with a JSON object, no prose, no markdown fences: {\"tape\":[{\"i\":<id>,\"sec\":<sector>}],\"tickers\":[{\"t\":<ticker>,\"sec\":<sector>}],\"rel\":[{\"i\":<id>,\"v\":<verdict>,\"t\":<ticker if v is other>}],\"names\":[{\"t\":<ticker>,\"names\":[<company name>,<short name>]}]}. TAPE task: sec is one of the 11 GICS sector names exactly as given, \"macro\" for market-wide/central-bank/economy items, or \"off-topic\" for items with no market relevance (sports, entertainment, pure politics without market impact). TICKERS task: the 11 GICS names only. REL task: each entry is a headline fetched under ticker t but not verifiably about that company — answer v=\"y\" if it IS chiefly about that company, v=\"other\" with t=<TICKER> if it is chiefly about a DIFFERENT company in the provided universe list, v=\"market\" for general market/multi-stock coverage, v=\"off\" for no market relevance. NAMES task: for each ticker, return the company's canonical name and common short names as they appear in headlines (2-4 strings). GICS names: " + GICS_SECTORS.join("; ") + ".";
+  function secStrikeSweep() {   // three strikes -> macro (tape) / demoted to tape (relevance); payload must rebuild
     let struck = 0;
     for (const a of newsItems) {
-      if (a.tk) continue;
       const id = String(a.id);
-      if (secTape[id] == null && (secTries.get(id) || 0) >= 3) { secTape[id] = "macro"; struck++; }
+      if (!a.tk && secTape[id] == null && (secTries.get(id) || 0) >= 3) { secTape[id] = "macro"; struck++; }
+      if (a.tk && a.rel === 0 && (relTries.get(id) || 0) >= 3) { a.tk = null; a.rel = undefined; relTries.delete(id); struck++; }   // unjudgeable -> plain tape, sector classifier picks it up
     }
     return struck;
   }
@@ -2507,14 +2557,32 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       tickers.push(T);
       if (tickers.length >= 10) break;
     }
-    return { tape, tickers };
+    // relevance verdicts for gated-out company items (three strikes -> demoted to tape)
+    const rel = [];
+    for (const a of newsItems) {
+      if (!a.tk || a.rel !== 0) continue;
+      if ((relTries.get(String(a.id)) || 0) >= 3) continue;   // struck out — the sweep demotes
+      rel.push({ i: String(a.id), t: String(a.tk).toUpperCase(), h: a.h });
+      if (rel.length >= 15) break;
+    }
+    // alias learning for equity tickers with neither seeded nor learned names
+    const names = [], nseen = new Set();
+    for (const a of newsItems) {
+      if (!a.tk) continue;
+      const T = String(a.tk).toUpperCase();
+      if (nseen.has(T) || nameLearned[T] || nameAliases(T)) continue;
+      nseen.add(T); names.push(T);
+      if (names.length >= 8) break;
+    }
+    const uniTickers = [...earnEligible().keys()];   // roster for re-tag validation and the model's universe list
+    return { tape, tickers, rel, names, universe: uniTickers };
   }
   async function classifySecTick() {
     if (!AI_KEY() && !aiFetch) return { ok: false, disabled: true };
     const struck = secStrikeSweep();
-    if (struck) { buildNewsPayload(); store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned }); }
+    if (struck) { buildNewsPayload(); store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned }); }
     const pend = secPending();
-    if (!pend.tape.length && !pend.tickers.length) return { ok: true, idle: true, applied: struck };
+    if (!pend.tape.length && !pend.tickers.length && !pend.rel.length && !pend.names.length) return { ok: true, idle: true, applied: struck };
     const call = await callModel(AI_MODEL_FALLBACK, pend, { system: SEC_CLASSIFY_SYSTEM, maxTokens: 600 });
     if (!call.ok) { secErr = call.error; return { ok: false, error: call.error }; }
     let out = null;
@@ -2541,10 +2609,37 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (secLearned[T] || !pend.tickers.includes(T)) continue;                  // write-once, asked-only
       if (GICS_SET.has(e.sec)) { secLearned[T] = e.sec; applied++; }             // tickers never get "macro"
     }
+    // relevance verdicts: write-once, asked-only, re-tags validated against the roster
+    const uniSet = new Set(pend.universe || []);
+    const byId = new Map(newsItems.map((a) => [String(a.id), a]));
+    const relAnswered = new Set();
+    if (Array.isArray(out.rel)) for (const e of out.rel) {
+      if (!e || e.i == null) continue;
+      const id = String(e.i);
+      relAnswered.add(id);
+      if (!pend.rel.some((x) => x.i === id)) continue;
+      const a = byId.get(id);
+      if (!a || a.rel !== 0) continue;
+      if (e.v === "y") { a.rel = 1; a.relAi = 1; applied++; }
+      else if (e.v === "other" && e.t && uniSet.has(String(e.t).toUpperCase())) { a.tk = String(e.t).toUpperCase(); a.rel = 1; a.relAi = 1; applied++; }
+      else if (e.v === "market") { a.tk = null; a.rel = undefined; applied++; }                       // plain tape; sector classifier picks it up next pass
+      else if (e.v === "off") { a.tk = null; a.rel = undefined; secTape[id] = "off-topic"; applied++; }
+      else relTries.set(id, (relTries.get(id) || 0) + 1);                                            // off-enum verdict (incl. invalid re-tag) = a strike
+    }
+    for (const x of pend.rel) if (!relAnswered.has(x.i)) relTries.set(x.i, (relTries.get(x.i) || 0) + 1);
+    // learned aliases: write-once, then re-gate pending items deterministically with them
+    if (Array.isArray(out.names)) for (const e of out.names) {
+      if (!e || !e.t || !Array.isArray(e.names)) continue;
+      const T = String(e.t).toUpperCase();
+      if (nameLearned[T] || !pend.names.includes(T)) continue;
+      const clean = e.names.filter((n) => typeof n === "string" && n.trim().length >= 3).map((n) => n.trim().slice(0, 60)).slice(0, 4);
+      if (clean.length) { nameLearned[T] = clean; applied++; }
+    }
+    applied += regatePending();
     secErr = null;
     if (applied) {
       buildNewsPayload();
-      store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned });
+      store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned });
     }
     return { ok: true, applied };
   }
@@ -3712,12 +3807,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     voidEarnPrint,
     getTrend,
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
-    seedRowNow: (coin, fields) => Object.assign(getRow(coin), fields),   // harness: seed a synthetic market (px/spines) so builds are testable without network
+    seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
+      const r = Object.assign(getRow(coin), fields);
+      if (r.uni === "main") { if (!mainList.includes(coin)) mainList.push(coin); if (!mainOrder.includes(coin)) mainOrder.push(coin); }
+      return r;
+    },
     needDailyNow: (coin) => { const r = rows.get(coin); return !!(r && needDaily(r)); },   // harness: does the daily worker consider this market fetch-worthy right now
     getLedgerFor,
     getLedgerExport,
     getNews: () => newsCache,
-    newsIngestNow: (items) => { newsItems = mergeNews(newsItems, items || [], Date.now()); newsFetchedAt = Date.now(); buildNewsPayload(); return newsCache; },   // harness: feed + payload without network
+    newsIngestNow: (items) => { newsItems = mergeNews(newsItems, gateCompanyItems(items || []), Date.now()); newsFetchedAt = Date.now(); buildNewsPayload(); return newsCache; },   // harness: feed + payload without network — company items pass the relevance gate exactly as in production
     classifySecNow: () => classifySecTick(),   // harness: one classifier pass through the injected aiFetch transport
     openLedgerNow: (coin, ev, sigEntry, dir, extra, vi) =>   // harness: fire a claim directly so the context stamp is testable without a full signals build
       openLedger(getRow(coin), ev, sigEntry || { score: 0, reading: "" }, dir, extra, vi),
@@ -3781,7 +3880,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
         backup: { enabled: !!(BK_REPO && BK_TOKEN), repo: BK_REPO || null, lastOk: backupLast, error: backupErr },
         news: { items: newsItems.length, fetchedAt: newsFetchedAt || null, error: newsErr,
-          sectors: { tapeClassified: Object.keys(secTape).length, learnedTickers: Object.keys(secLearned).length, error: secErr } },
+          sectors: { tapeClassified: Object.keys(secTape).length, learnedTickers: Object.keys(secLearned).length, error: secErr },
+          relevance: { verified: newsItems.filter((a) => a.tk && a.rel === 1).length,
+            pending: newsItems.filter((a) => a.tk && a.rel === 0).length,
+            offTopic: Object.values(secTape).filter((s) => s === "off-topic").length,
+            learnedAliases: Object.keys(nameLearned).length } },
         ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
           fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size },
         rate: limiterUsage(),

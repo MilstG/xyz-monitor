@@ -75,4 +75,36 @@ function classify(ticker, uni) {
   return { assetClass: "Unclassified", sector: "Unclassified" };
 }
 
-module.exports = { classify };
+// Company-name aliases for news relevance gating: a headline fetched under ticker T is only
+// ATTRIBUTED to T if it actually mentions the company (symbol as a word, or any alias,
+// case-insensitive). Seeded for the names most likely to appear in headlines; anything
+// unseeded gets AI-learned aliases at runtime (write-once, persisted) — this table is the
+// deterministic floor, not the ceiling. Aliases are substrings, so "Apple" covers
+// "Apple Inc." and "Apple's".
+const COMPANY_NAMES = {
+  AAPL:["Apple"], MSFT:["Microsoft"], NVDA:["Nvidia"], AMZN:["Amazon"], GOOGL:["Google","Alphabet"], GOOG:["Google","Alphabet"],
+  META:["Meta","Facebook","Instagram"], TSLA:["Tesla"], NFLX:["Netflix"], AMD:["AMD","Advanced Micro"], INTC:["Intel"],
+  MU:["Micron"], AVGO:["Broadcom"], QCOM:["Qualcomm"], TXN:["Texas Instruments"], ORCL:["Oracle"], CRM:["Salesforce"],
+  ADBE:["Adobe"], IBM:["IBM"], CSCO:["Cisco"], NOW:["ServiceNow"], PLTR:["Palantir"], SNOW:["Snowflake"], CRWD:["CrowdStrike"],
+  DDOG:["Datadog"], NET:["Cloudflare"], PANW:["Palo Alto"], ANET:["Arista"], MRVL:["Marvell"], SMCI:["Super Micro"],
+  WDC:["Western Digital"], STX:["Seagate"], SNDK:["Sandisk","SanDisk"], DELL:["Dell"], HPQ:["HP Inc","Hewlett"],
+  TSM:["TSMC","Taiwan Semi"], ASML:["ASML"], ARM:["Arm Holdings"], MSTR:["MicroStrategy","Strategy Inc","Strategy Pads","Michael Saylor"],
+  CRWV:["CoreWeave"], NBIS:["Nebius"], SKHX:["SK Hynix","SK hynix"], SMSN:["Samsung"], KIOXIA:["Kioxia"], IBIDEN:["Ibiden"],
+  ZHIPU:["Zhipu"], MINIMAX:["MiniMax"], BABA:["Alibaba"], SOFTBANK:["SoftBank"], HYUNDAI:["Hyundai"], GME:["GameStop"],
+  COIN:["Coinbase"], HOOD:["Robinhood"], PYPL:["PayPal"], SQ:["Block Inc","Square"], BX:["Blackstone"], CRCL:["Circle"],
+  JPM:["JPMorgan","JP Morgan"], GS:["Goldman"], MS:["Morgan Stanley"], BAC:["Bank of America"], WFC:["Wells Fargo"],
+  V:["Visa"], MA:["Mastercard"], AXP:["American Express"], BLK:["BlackRock"], SCHW:["Schwab"],
+  DIS:["Disney"], CMCSA:["Comcast"], TMUS:["T-Mobile"], VZ:["Verizon"], SPOT:["Spotify"], RBLX:["Roblox"], SNAP:["Snap "],
+  UNH:["UnitedHealth"], LLY:["Eli Lilly","Lilly"], PFE:["Pfizer"], JNJ:["Johnson & Johnson"], MRK:["Merck"], MRNA:["Moderna"],
+  ABBV:["AbbVie"], HIMS:["Hims"], XOM:["Exxon"], CVX:["Chevron"], COP:["ConocoPhillips"], SLB:["Schlumberger","SLB"],
+  OXY:["Occidental"], LNG:["Cheniere"], CAT:["Caterpillar"], BA:["Boeing"], GE:["GE Aerospace","General Electric"],
+  LMT:["Lockheed"], RTX:["RTX","Raytheon"], NOC:["Northrop"], DE:["Deere"], UPS:["UPS"], FDX:["FedEx"],
+  RKLB:["Rocket Lab"], BE:["Bloom Energy"], WMT:["Walmart"], COST:["Costco"], TGT:["Target"], KO:["Coca-Cola"],
+  PEP:["Pepsi"], PG:["Procter"], MCD:["McDonald"], SBUX:["Starbucks"], NKE:["Nike"], HD:["Home Depot"], LOW:["Lowe's"],
+  BKNG:["Booking"], ABNB:["Airbnb"], MAR:["Marriott"], RIVN:["Rivian"], LCID:["Lucid"], F:["Ford"], GM:["General Motors"],
+  NEE:["NextEra"], DUK:["Duke Energy"], VST:["Vistra"], NRG:["NRG"], FCX:["Freeport"], NEM:["Newmont"], NUE:["Nucor"],
+  ALB:["Albemarle"], LIN:["Linde"], PLD:["Prologis"], AMT:["American Tower"], EQIX:["Equinix"], SPG:["Simon Property"],
+};
+function nameAliases(t) { return COMPANY_NAMES[String(t || "").toUpperCase()] || null; }
+
+module.exports = { classify, nameAliases };

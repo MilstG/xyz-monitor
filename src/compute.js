@@ -892,6 +892,28 @@ function bustAssetTags(html, v) {
     .replace('src="/app.js"', 'src="/app.js' + q + '"');
 }
 
+// ---- news relevance gate (pure) ------------------------------------------------------------
+// Finnhub's company-news returns articles that merely MENTION or are loosely "related to" the
+// queried symbol — a Meta story arrives under AMZN's query, market listicles arrive under
+// whoever's rotation fetched them. An article is attributed to ticker T only if the headline
+// or summary actually names the company: the symbol as a standalone word (2+ chars — a
+// 1-char symbol like F matches everything), or any alias substring, case-insensitive.
+// Everything else is NOT dropped — it goes to the AI relevance verdict, and until verified it
+// lives in the unfiltered tape lane, never the universe feed.
+function newsRelevant(headline, summary, ticker, aliases) {
+  const T = String(ticker || "").toUpperCase();
+  const txt = String(headline || "") + " " + String(summary || "");
+  if (T.length >= 2) {
+    const re = new RegExp("(^|[^A-Za-z0-9])" + T.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "($|[^A-Za-z0-9])");
+    if (re.test(txt.toUpperCase())) return true;
+  }
+  if (Array.isArray(aliases)) {
+    const lo = txt.toLowerCase();
+    for (const a of aliases) if (a && lo.includes(String(a).toLowerCase())) return true;
+  }
+  return false;
+}
+
 // ---- per-universe transport cap (pure) -----------------------------------------------------
 // The signals payload caps what ships, but a GLOBAL top-N is universe-blind: stocks signals
 // dominate scoring, so a global cap can ship zero crypto entries while crypto conditions are
@@ -1671,6 +1693,7 @@ function reconcileEarnPrints(prints, parsed, nowMs, backDays) {
 module.exports.etDayStr = etDayStr;
 module.exports.mergeNews = mergeNews;
 module.exports.capPerUniverse = capPerUniverse;
+module.exports.newsRelevant = newsRelevant;
 module.exports.bustAssetTags = bustAssetTags;
 module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
 module.exports.earnDayDiff = earnDayDiff;
