@@ -2937,9 +2937,14 @@ function fillDrawerNews(){
   const d=state.news, now=Date.now();
   const isEq=(a)=>a.tk&&r.ticker&&a.tk.toUpperCase()===String(r.ticker).toUpperCase();
   const mine=d&&d.items?d.items.filter(isEq):[];
-  const tape=d&&d.items?d.items.filter(a=>!a.tk&&a.sec!=='off-topic'&&!a.pend).slice(0,5):[];
+  // The macro-tape fallback exists ONLY for macro instruments (FX, commodities, indices) —
+  // names that structurally can't have company news. An equity with a quiet 72h says "no
+  // headlines", full stop: filling a company's drawer with unrelated macro items dresses
+  // absence up as content.
+  const isMacroName=!!(r.assetClass&&r.assetClass!=='Equity');
+  const tape=(isMacroName&&d&&d.items)?d.items.filter(a=>!a.tk&&a.sec!=='off-topic'&&!a.pend).slice(0,5):[];
   const list=(mine.length?mine:tape).slice(0,5);
-  let s=`<div class="dsec" data-tip="${mine.length?'per-name headlines from the 72h store \u00b7 evicted on publish time':'this name has no company feed \u2014 showing the general macro tape instead'}">${mine.length?`News \u2014 last 72h \u00b7 ${Math.min(5,mine.length)} of ${mine.length}`:'News \u2014 macro tape'}</div>`;
+  let s=`<div class="dsec" data-tip="${mine.length?'per-name headlines from the 72h store \u00b7 evicted on publish time':(isMacroName?'this is a macro instrument with no company feed \u2014 showing the general macro tape':'no verified headlines for this name in the last 72h \u2014 coverage refreshes every few minutes')}">${mine.length?`News \u2014 last 72h \u00b7 ${Math.min(5,mine.length)} of ${mine.length}`:(isMacroName?'News \u2014 macro tape':'News \u2014 last 72h')}</div>`;
   if(!d||!d.items){ s+=`<div class="sec" style="font-size:11px">news feed loading\u2026</div>`; box.innerHTML=s; return; }
   if(!list.length){ s+=`<div class="nrow" style="border-style:dashed;border-width:1px 0"><span class="sec" style="font-size:11px">no headlines in the last 72h</span></div>`; }
   else s+=`<div class="nlist">${list.map(a=>newsRow(a,now,true)).join('')}</div>`;
