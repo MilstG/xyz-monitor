@@ -365,6 +365,89 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(p.getLedgerFor("AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
 });
 
+test("ledger export: raw completeness, shadow/legacy accounting, self-describing meta, route wiring", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const fixture = { ts: now, rearm: [], variants: null,
+    open: [
+      { key: "AAPL|breakout", coin: "AAPL", ticker: "AAPL", ev: "breakout", t0: now - 3600000,
+        mark0: 200, dir: 1, score0: 61, sd0: 1.8, resolveAt: now + 86400000, psd: "long" },
+    ],
+    closed: [
+      // real resolved claim — raw shape must survive intact (key included; pub() would drop it)
+      { key: "AAPL|breakdown", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 5 * 86400000,
+        mark0: 210, dir: -1, score0: 55, sd0: 2.2, status: "resolved", tR: now - 86400000,
+        realized: -2, realizedS: -2, rn: 1, win: false, winS: false, psd: "short" },
+      // shadow variant — getLedgerFor hides it; the export MUST include and count it
+      { key: "AAPL|bigmove#1", coin: "AAPL", ticker: "AAPL", ev: "bigmove", t0: now - 4 * 86400000,
+        mark0: 205, dir: 1, score0: 0, sd0: 1.8, status: "resolved", tR: now - 3 * 86400000,
+        realized: 0.4, vi: 1 },
+      // legacy pre-sigma entry (R-united event, no sd0) — included and counted as legacy
+      { key: "AAPL|breakdown#old", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 40 * 86400000,
+        mark0: 250, dir: -1, score0: 40, status: "resolved", tR: now - 35 * 86400000,
+        realized: 3.1, realizedS: 3.1, win: true, winS: true },
+    ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  const x = p.getLedgerExport();
+  assert.equal(x.meta.counts.closed, 3, "every retained closed entry ships — no 150 cap, no shadow pruning");
+  assert.equal(x.meta.counts.open, 1);
+  assert.equal(x.meta.counts.shadowsClosed, 1, "shadow variants counted");
+  assert.equal(x.meta.counts.legacyClosed, 1, "pre-sigma legacy entries counted");
+  assert.equal(x.meta.ctxStampSince, null, "no context-stamped entries yet -> honest null, not a fake epoch");
+  assert.ok(x.closed.some(e => e.vi === 1), "shadow entry present in the dump");
+  assert.ok(x.closed.every(e => typeof e.key === "string"), "raw internal shape — key survives (curated pub drops it)");
+  assert.ok(x.variants && x.variants.state && typeof x.variants.stats === "object", "variant state + stats ship for the variant slices");
+  for (const k of ["ev", "vi", "sd0", "stp", "realizedS", "fndP", "rngP", "mktR", "ses", "tal"])
+    assert.ok(typeof x.meta.glossary[k] === "string" && x.meta.glossary[k].length, `glossary documents ${k}`);
+  // route wiring: download header + no-store are pinned in server source (the manifest test
+  // already pins the registration itself and the getLedgerExport getter's existence)
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes('attachment; filename="xyz-ledger-'), "export route serves as a dated download");
+});
+
+test("fire-time context stamp: computable fields frozen at openLedger, absent fields stay honestly absent", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), HOURMS = 3600 * 1000;
+  // benchmark row for the crypto universe: mktR must read BTC's 24h move
+  p.seedRowNow("BTC", { px: 100000, d1: 2.5 });
+  // target: main-universe coin with a funding history rich enough to clear the >=96-sample
+  // percentile floor, a 30d range, and a live rate sitting at a known rank in its own history
+  const fundH = new Map();
+  for (let i = 0; i < 100; i++) fundH.set(now - (100 - i) * HOURMS, (i + 1) / 1e6);   // ranks 1..100
+  p.seedRowNow("ETH", { px: 3000, funding: 75 / 1e6, fundH, feat: { hi30: 3200, lo30: 2800 } });
+  const e = p.openLedgerNow("ETH", "bigmove", { score: 10, reading: "" }, 1, { sd0: 2 });
+  assert.ok(e, "claim opened");
+  assert.equal(e.fnd, 75 / 1e6, "funding rate frozen at fire");
+  assert.ok(e.fndP >= 73 && e.fndP <= 77, `funding percentile ~75 from the seeded ranks, got ${e.fndP}`);
+  assert.equal(e.rngP, 0.5, "px 3000 sits exactly mid-range 2800..3200");
+  assert.equal(e.mktR, 2.5, "benchmark 24h move stamped from BTC for a main-universe coin");
+  assert.ok(Number.isInteger(e.dow) && e.dow >= 0 && e.dow <= 6, "UTC day-of-week always stamped");
+  assert.equal(e.ses, undefined, "session bucket is xyz-only — absent on crypto, not null-padded");
+  assert.equal(e.oi5, undefined, "no OI history -> oi5 honestly absent");
+  assert.equal(e.sd0, 2, "extra fields untouched by the stamp");
+  // xyz claim: session bucket present and valid; thin row -> everything else absent except dow
+  p.seedRowNow("xyz:ACME", { px: 50, ticker: "ACME" });
+  const e2 = p.openLedgerNow("xyz:ACME", "breakout", { score: 5, reading: "" }, 1, { sd0: 1.5 });
+  assert.ok(["rth", "on", "wknd"].includes(e2.ses), `xyz claim carries a session bucket, got ${e2.ses}`);
+  assert.equal(e2.fnd, undefined, "no funding -> absent");
+  assert.equal(e2.rngP, undefined, "no features -> absent");
+  assert.ok(Number.isInteger(e2.dow), "dow stamped");
+  // shadow claims get the same stamp — variant slices need identical features
+  const e3 = p.openLedgerNow("ETH", "bigmove", { score: 0, reading: "" }, 1, { sd0: 2 }, 1);
+  assert.ok(e3 && e3.vi === 1 && e3.fnd === 75 / 1e6 && Number.isInteger(e3.dow), "shadow claim carries the stamp too");
+  // stamped claims surface in the export with a coverage epoch once closed
+  const x = p.getLedgerExport();
+  assert.equal(x.meta.counts.open, 3);
+  assert.ok(x.open.every(o => Number.isInteger(o.dow)), "export ships the raw stamped fields");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
@@ -696,7 +779,8 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/ai-report", "/api/ai-reports", "/api/health"];
+    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/ai-report", "/api/ai-reports", "/api/health",
+    "/api/export/ledger"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
