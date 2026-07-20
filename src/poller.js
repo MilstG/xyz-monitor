@@ -1307,9 +1307,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const resolved = ledgerClosed.filter((e) => e.status === "resolved" && e.vi == null && unitOk(e));
     const openReal = [...ledgerOpen.values()].filter((e) => e.vi == null);
     recordSets = {};
+    const uniOf = (x) => x.coin && x.coin.includes(":") ? "x" : "m";
     for (const t of MV_THRESHOLDS) for (const pr of [false, true]) {
       const f = (x) => (t === 0 || (x.mv != null && x.mv >= t)) && (!pr || x.pr === true);
-      recordSets[String(t) + (pr ? "p" : "")] = buildRecordSet(resolved.filter(f), openReal.filter(f));
+      const key = String(t) + (pr ? "p" : "");
+      recordSets[key] = buildRecordSet(resolved.filter(f), openReal.filter(f));
+      // per-universe splits (hard-separated tab views): identical machinery, filtered claims —
+      // by-event records, slices, confluence AND recent resolutions all fall out per universe
+      for (const u of ["m", "x"])
+        recordSets[key + u] = buildRecordSet(resolved.filter((e) => f(e) && uniOf(e) === u), openReal.filter((e) => f(e) && uniOf(e) === u));
     }
     recordCache = recordSets["0"].record;       // evidence blend + no-edge cap always use the FULL record
     confCache = recordSets["0"].confluence;
@@ -1368,7 +1374,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   }
   function mkSignal(r, ev, valTxt, intensity, evd, extra) {
     return Object.assign({
-      coin: r.coin, ticker: r.ticker, ev, label: EV_LABEL[ev], reading: valTxt,
+      coin: r.coin, ticker: r.ticker, uni: r.uni, ev, label: EV_LABEL[ev], reading: valTxt,
       score: Math.round(Math.min(50, Math.max(0, intensity)) + evd.pts),
       evp: evd.pts,   // raw evidence points — internal handle for the earnings guard, deleted before the payload ships
       unproven: !!evd.unproven, noedge: !!evd.noedge, negexp: !!evd.negexp,
@@ -1403,41 +1409,48 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // same ledger entries, computed server-side once per build — the client renders, never
   // re-derives. Labels/tips ship from here so the panel and the engine can't drift apart.
   const STRAT_DEFS = [
-    { ev: "gapfade", label: "universal gap fade", unit: "%",
+    { ev: "gapfade", uni: "both", label: "universal gap fade", unit: "%",
       split: [{ vi: 0, tag: "void 1.0\u03c3" }, { vi: 1, tag: "void 1.5\u03c3" }],
       tip: "every >=1\u03c3 gap, faded toward the prior close REGARDLESS of the per-name fade/continue record \u2014 the out-of-sample test of roster-wide gap mean reversion. Two void widths (1.0x and 1.5x this market's own gap \u03c3) run side by side on identical entries." },
-    { ev: "reclaim", label: "breakdown reclaim", unit: "R",
+    { ev: "reclaim", uni: "both", label: "breakdown reclaim", unit: "R",
       tip: "a fresh break of the prior 30d closing low that the mark has already reclaimed \u2014 long the sprung trap: stop at the flush low, target the measured move above the level. 5d horizon, R-united, stop-aware." },
-    { ev: "failbrk", label: "failed-breakout fade", unit: "R",
+    { ev: "failbrk", uni: "both", label: "failed-breakout fade", unit: "R",
       tip: "the short mirror: a fresh break ABOVE the prior 30d high that the mark has already lost \u2014 stop at the flush high, target the measured move below. 5d horizon. Motivated by the live record: breakout continuation ran negative expectancy." },
-    { ev: "mapull", label: "MA50 pullback", unit: "R",
+    { ev: "mapull", uni: "both", label: "MA50 pullback", unit: "R",
       tip: "rising 50d MA, price pulled back from >=4% above to touch it \u2014 long at the MA, stop 1\u03c3 below it, target the prior 30d closing high. 10d horizon." },
-    { ev: "pead", label: "post-earnings drift", unit: "R",
+    { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
       tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
-    { ev: "fundext", label: "funding extreme fade", unit: "R",
+    { ev: "fundext", uni: "main", label: "funding extreme fade", unit: "R",
       tip: "funding at the >=95th (or <=5th) percentile of this market's own 31d hourly history for a FULL day \u2014 fade the crowd toward the range mid, stop 1.5\u03c3 with them. 5d horizon, crypto only." },
-    { ev: "liqflush", label: "cascade exhaustion", unit: "R",
+    { ev: "liqflush", uni: "main", label: "cascade exhaustion", unit: "R",
       tip: "a >=2\u03c3 24h drop WITH a >=8% 24h open-interest drop \u2014 forced liquidations did the selling, not information. Long the exhaustion: stop 1\u03c3 below the post-flush mark, target the half-retrace of the flush. 3d horizon, crypto only. The frozen oc24 field records the OI leg for later slicing." },
   ];
   function shadowRecord() {
     const evs = new Set(STRAT_DEFS.map((d) => d.ev));
-    const agg = new Map();
-    const bucket = (ev, vi) => { const k = ev + "|" + (vi || 0); let b = agg.get(k); if (!b) { b = { r: [], s: [], open: 0 }; agg.set(k, b); } return b; };
+    const agg = new Map();   // ev|vi|universe -> legs; universe is structural (xyz coins carry ":")
+    const bucket = (ev, vi, coin) => {
+      const k = ev + "|" + (vi || 0) + "|" + (coin && coin.includes(":") ? "xyz" : "main");
+      let b = agg.get(k); if (!b) { b = { r: [], s: [], open: 0 }; agg.set(k, b); } return b;
+    };
     for (const e of ledgerClosed)
       if (evs.has(e.ev) && e.status === "resolved" && Number.isFinite(e.realized)) {
-        const b = bucket(e.ev, e.vi);
+        const b = bucket(e.ev, e.vi, e.coin);
         b.r.push(e.realized);
         if (e.realizedS != null && isFinite(e.realizedS)) b.s.push(e.realizedS);
       }
-    for (const e of ledgerOpen.values()) if (evs.has(e.ev)) bucket(e.ev, e.vi).open++;
+    for (const e of ledgerOpen.values()) if (evs.has(e.ev)) bucket(e.ev, e.vi, e.coin).open++;
     const stat = (b) => !b ? { n: 0, open: 0 } : {
       n: b.r.length, open: b.open,
       hit: b.r.length ? +(b.r.filter((x) => x > 0).length / b.r.length).toFixed(2) : null,
       avg: b.r.length ? +(b.r.reduce((a, x) => a + x, 0) / b.r.length).toFixed(2) : null,
       avgS: b.s.length ? +(b.s.reduce((a, x) => a + x, 0) / b.s.length).toFixed(2) : null,
     };
-    return STRAT_DEFS.map((d) => ({ ev: d.ev, label: d.label, unit: d.unit, tip: d.tip,
-      rows: (d.split || [{ vi: 0, tag: null }]).map((sp) => Object.assign({ tag: sp.tag || null }, stat(agg.get(d.ev + "|" + sp.vi)))) }));
+    // Two hard-separated panels: each universe sees only the strategies that live there, with
+    // stats aggregated over ITS claims only — a crypto edge can't borrow an equity record.
+    const panel = (u) => STRAT_DEFS.filter((d) => d.uni === "both" || d.uni === u)
+      .map((d) => ({ ev: d.ev, label: d.label, unit: d.unit, tip: d.tip,
+        rows: (d.split || [{ vi: 0, tag: null }]).map((sp) => Object.assign({ tag: sp.tag || null }, stat(agg.get(d.ev + "|" + sp.vi + "|" + u)))) }));
+    return { main: panel("main"), xyz: panel("xyz") };
   }
   let signalsBuildCount = 0;   // builds since process start — build #1 is the post-boot catch-up where in-force conditions all open at once
   function buildSignals() {
@@ -1926,8 +1939,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // reality, the payload cap is a transport decision. `shown` carries the cap for the client.
     const top = kept.slice(0, 40);
     const shadows = shadowRecord();
+    const countU = { main: 0, xyz: 0 };
+    for (const g of kept) countU[g.uni === "main" ? "main" : "xyz"]++;
+    const shSig = (a) => a.map((g) => g.rows.map((r) => r.n + ":" + r.open).join(".")).join(",");
     const sig = kept.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",")
-      + "|" + shadows.map((g) => g.rows.map((r) => r.n + ":" + r.open).join(".")).join(",");   // shadow record changes must bust the ETag too
+      + "|" + shSig(shadows.main) + "|" + shSig(shadows.xyz);   // shadow record changes must bust the ETag too
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
     for (const k of rearm) if (!firedNow.has(k)) rearm.delete(k);   // condition lapsed -> episode over, key re-armed
     const variants = Object.keys(VARIANTS).map((ev) => ({
@@ -1950,7 +1966,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (eg.length) earnSplit[ev] = { eg: summarizeEvents(eg), reg: reg.length ? summarizeEvents(reg) : null };
     }
     if (swingFails) log(`strategy shadows failed on ${swingFails} market(s) this build (isolated, board unaffected): ${swingErr}`);
-    signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, shown: top.length, signals: top,
+    signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, countU, shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
     persistLedger();
