@@ -18,6 +18,7 @@ function openStore(dataDir) {
   const ledgerFile = path.join(dataDir, "ledger.json");
   const archiveFile = path.join(dataDir, "ledger-archive.jsonl");
   const earnFile = path.join(dataDir, "earnings.json");
+  const newsFile = path.join(dataDir, "news.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
   let buf = [];
@@ -188,6 +189,18 @@ function openStore(dataDir) {
         try { out.push({ name: path.basename(f), content: fs.readFileSync(f, "utf8") }); } catch (_) {}
       }
       return out;
+    },
+    // News feed warm cache (atomic like the rest): a redeploy serves the last fetched
+    // headlines instead of a blank tab while the worker's first rotation completes.
+    saveNews(data) {
+      try {
+        const tmp = newsFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, newsFile);
+      } catch (_) {}
+    },
+    loadNews() {
+      try { return JSON.parse(fs.readFileSync(newsFile, "utf8")); } catch (_) { return null; }
     },
     // Earnings calendar warm cache (small, atomic like the rest): a redeploy inside the 6h
     // refresh window serves the last good fetch instead of blanking badges until Finnhub answers.

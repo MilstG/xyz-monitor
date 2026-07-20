@@ -880,6 +880,33 @@ function detectLiqFlush(d1, sd30, px, oiChg24) {
   return { stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
 
+// ---- news feed merge (pure) ----------------------------------------------------------------
+// Dedupe by article id (incoming wins — sources correct headlines), evict on PUBLISH time,
+// never fetch time (a late fetch earns no bonus lifetime), reject future-dated garbage, cap
+// per ticker and in total, newest first. `tk` = the company ticker a headline belongs to,
+// null = the general macro tape, which gets a wider lane than any single name.
+const NEWS_TTL_MS = 72 * HOUR, NEWS_PER_TK = 10, NEWS_CAP = 1200;
+function mergeNews(existing, incoming, nowMs) {
+  const cut = nowMs - NEWS_TTL_MS, byId = new Map();
+  for (const a of (existing || [])) if (a && a.id != null && a.pub > cut) byId.set(String(a.id), a);
+  for (const a of (incoming || [])) {
+    if (!a || a.id == null || !a.h || !Number.isFinite(a.pub)) continue;
+    if (a.pub > nowMs + HOUR || a.pub <= cut) continue;
+    byId.set(String(a.id), a);
+  }
+  const all = [...byId.values()].sort((x, y) => y.pub - x.pub);
+  const perTk = new Map(), out = [];
+  for (const a of all) {
+    const k = a.tk || "~tape";
+    const n = perTk.get(k) || 0;
+    if (n >= (a.tk ? NEWS_PER_TK : NEWS_PER_TK * 6)) continue;
+    perTk.set(k, n + 1);
+    out.push(a);
+    if (out.length >= NEWS_CAP) break;
+  }
+  return out;
+}
+
 // ---- shadow-variant promotion rule ---------------------------------------------------------
 // A challenger threshold replaces the incumbent ONLY when, on out-of-sample shadow claims the
 // engine gathered itself: both sides have >= 30 resolutions; the challenger's live expectancy
@@ -1613,6 +1640,8 @@ function reconcileEarnPrints(prints, parsed, nowMs, backDays) {
   });
 }
 module.exports.etDayStr = etDayStr;
+module.exports.mergeNews = mergeNews;
+module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
 module.exports.earnDayDiff = earnDayDiff;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
 module.exports.recentEarnPrints = recentEarnPrints;

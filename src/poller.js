@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify } = require("./sectors");
 
@@ -1966,6 +1966,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (eg.length) earnSplit[ev] = { eg: summarizeEvents(eg), reg: reg.length ? summarizeEvents(reg) : null };
     }
     if (swingFails) log(`strategy shadows failed on ${swingFails} market(s) this build (isolated, board unaffected): ${swingErr}`);
+    sigTickers.clear();
+    for (const g of kept) if (g.uni === "xyz") sigTickers.add(String(g.ticker).toUpperCase());
+    buildNewsPayload();   // sig/ed badge stamps ride the signals cadence; content hash gates the ETag bump
     signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, countU, shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
@@ -2351,6 +2354,98 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     log(`Earnings print VOIDED by operator: ${k} (${removed} history record(s) removed, tombstoned against feed re-assertion)`);
     return { ok: true, removed, tombstoned: k, printsN: earnPrints.length };
   }
+  // ---- news feed (Finnhub, xyz universe) ---------------------------------------------------
+  // Company headlines rotate through the equity roster (same Equity gate the earnings
+  // machinery uses) a few names per minute — well inside the free tier's 60/min — plus the
+  // general macro tape every 15 minutes for the non-company tickers. Fully degradable like
+  // earnings: no token or a dead endpoint means an error string on the payload, never a
+  // broken tab. Retention/dedupe/caps are pure (mergeNews); eviction keys on PUBLISH time.
+  let newsItems = [], newsCache = null, newsVer = 0, newsSig = "", newsErr = null, newsFetchedAt = 0;
+  const newsTkAt = new Map();          // ticker -> last company-news fetch ms (rotation order)
+  const NEWS_BATCH = 3;                // company tickers per minute tick
+  const sigTickers = new Set();        // tickers with a live kept signal, refreshed each signals build
+  function newsParse(raw, tk) {
+    const out = [];
+    if (!Array.isArray(raw)) return out;
+    for (const a of raw) {
+      if (!a || a.id == null || !a.headline) continue;
+      const pub = (typeof a.datetime === "number" ? a.datetime : 0) * 1000;
+      out.push({ id: a.id, tk: tk || null, h: String(a.headline).slice(0, 220),
+        src: a.source ? String(a.source).slice(0, 40) : null, url: a.url || null, pub });
+    }
+    return out;
+  }
+  function buildNewsPayload() {
+    // per-item context stamps, all server-side so the tab stays dumb: coin (drawer deep-link),
+    // ed (days to earnings when <=7 — the amber badge), sig (a live kept signal is firing —
+    // the red badge, refreshed each signals build so it can lag a build; the tooltip says so)
+    const byTk = new Map();
+    for (const r of rows.values()) if (r.uni === "xyz" && !r.delisted) byTk.set(String(r.ticker).toUpperCase(), r);
+    const edByTk = new Map();
+    if (earnCache && Array.isArray(earnCache.entries))
+      for (const e of earnCache.entries) {
+        const d = earnDayDiff(e.d, Date.now());
+        if (d != null && d >= 0 && d <= 7) { const T = String(e.t).toUpperCase(); if (!edByTk.has(T) || d < edByTk.get(T)) edByTk.set(T, d); }
+      }
+    const items = newsItems.map((a) => {
+      const r = a.tk ? byTk.get(String(a.tk).toUpperCase()) : null;
+      const o = { id: a.id, tk: a.tk, h: a.h, src: a.src, url: a.url, pub: a.pub };
+      if (r) o.coin = r.coin;
+      const ed = a.tk ? edByTk.get(String(a.tk).toUpperCase()) : undefined;
+      if (ed != null) o.ed = ed;
+      if (a.tk && sigTickers.has(String(a.tk).toUpperCase())) o.sig = 1;
+      return o;
+    });
+    const sig = items.length + "|" + (items[0] ? items[0].id : "") + "|" + items.filter((x) => x.sig).length + "|" + items.filter((x) => x.ed != null).length + "|" + (newsErr || "");
+    if (sig !== newsSig) { newsSig = sig; newsVer = Date.now(); }
+    newsCache = { ts: Date.now(), dataTs: newsVer, items, fetchedAt: newsFetchedAt || null,
+      ttlHours: 72, error: newsErr, count: items.length };
+  }
+  async function newsCompanyTick() {
+    const token = process.env.FINNHUB_TOKEN || "";
+    if (!token) { newsErr = "FINNHUB_TOKEN not set"; buildNewsPayload(); return; }
+    const roster = [...earnEligible().values()];
+    if (!roster.length) return;
+    roster.sort((a, b) => (newsTkAt.get(a.ticker) || 0) - (newsTkAt.get(b.ticker) || 0));
+    const batch = roster.slice(0, NEWS_BATCH), now = Date.now();
+    const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+    let got = [];
+    for (const m of batch) {
+      newsTkAt.set(m.ticker, now);   // stamped before the call: a failing name must not wedge the rotation
+      try {
+        const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(m.ticker)}&from=${iso(now - 3 * DAY)}&to=${iso(now)}&token=${encodeURIComponent(token)}`,
+          { headers: { accept: "application/json" } });
+        if (!res.ok) { if (res.status === 401 || res.status === 403) { newsErr = `Finnhub company-news: HTTP ${res.status} (entitlement)`; } continue; }
+        got = got.concat(newsParse(await res.json(), m.ticker));
+        newsErr = null;
+      } catch (e) { newsErr = "company-news fetch failed: " + (e && e.message); }
+    }
+    if (got.length || newsErr) {
+      newsItems = mergeNews(newsItems, got, now);
+      newsFetchedAt = now;
+      buildNewsPayload();
+      store.saveNews({ ts: now, items: newsItems });
+    }
+  }
+  async function newsTapeTick() {
+    const token = process.env.FINNHUB_TOKEN || "";
+    if (!token) { newsErr = "FINNHUB_TOKEN not set"; buildNewsPayload(); return; }
+    try {
+      const res = await fetch(`https://finnhub.io/api/v1/news?category=general&token=${encodeURIComponent(token)}`,
+        { headers: { accept: "application/json" } });
+      if (!res.ok) { newsErr = `Finnhub news: HTTP ${res.status}`; buildNewsPayload(); return; }
+      newsItems = mergeNews(newsItems, newsParse(await res.json(), null), Date.now());
+      newsFetchedAt = Date.now(); newsErr = null;
+      buildNewsPayload();
+      store.saveNews({ ts: Date.now(), items: newsItems });
+    } catch (e) { newsErr = "tape fetch failed: " + (e && e.message); buildNewsPayload(); }
+  }
+  function hydrateNews() {
+    const d = store.loadNews && store.loadNews();
+    if (d && Array.isArray(d.items)) { newsItems = mergeNews(d.items, [], Date.now()); newsFetchedAt = d.ts || 0; }
+    buildNewsPayload();
+    return newsItems.length;
+  }
   async function fetchEarnings() {
     const token = process.env.FINNHUB_TOKEN || "";
     const now = Date.now();
@@ -2555,6 +2650,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const restoredHourly = hydrateHourly();
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
+    { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
     log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     await pollUniverse();
     seedFundingFromOI();
@@ -2577,6 +2673,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
     setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
     setTimeout(safeTick(buildSignals, "buildSignals"), 2 * 60 * 1000);   // first pass once early backfill has something to chew on
+    // News feed: a few company names per minute (rotation ordered by staleness) + the macro
+    // tape every 15 min. Same degradation contract as earnings — token missing or endpoint
+    // dead surfaces on the payload, never breaks a tab.
+    setInterval(() => { newsCompanyTick().catch((e) => log("news tick failed (isolated): " + (e && e.message))); }, 60 * 1000);
+    setInterval(() => { newsTapeTick().catch((e) => log("news tape failed (isolated): " + (e && e.message))); }, 15 * 60 * 1000);
+    setTimeout(() => { newsTapeTick().catch(() => {}); }, 20 * 1000);
+    setTimeout(() => { newsCompanyTick().catch(() => {}); }, 40 * 1000);
+    log(process.env.FINNHUB_TOKEN ? `News feed: ENABLED — ${NEWS_BATCH} names/min rotation + macro tape/15min, 72h retention` : "News feed: disabled (FINNHUB_TOKEN not set)");
     // Off-site ledger backup: shortly after boot (the deploy IS the natural trigger — most
     // boots follow a build), then weekly. The blob-sha skip makes redundant runs free.
     if (BK_REPO && BK_TOKEN) {
@@ -3503,6 +3607,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     needDailyNow: (coin) => { const r = rows.get(coin); return !!(r && needDaily(r)); },   // harness: does the daily worker consider this market fetch-worthy right now
     getLedgerFor,
     getLedgerExport,
+    getNews: () => newsCache,
+    newsIngestNow: (items) => { newsItems = mergeNews(newsItems, items || [], Date.now()); newsFetchedAt = Date.now(); buildNewsPayload(); return newsCache; },   // harness: feed + payload without network
     openLedgerNow: (coin, ev, sigEntry, dir, extra, vi) =>   // harness: fire a claim directly so the context stamp is testable without a full signals build
       openLedger(getRow(coin), ev, sigEntry || { score: 0, reading: "" }, dir, extra, vi),
     // AI analyst report: cached read, on-demand generation (TTL cooldown enforced inside), and
@@ -3564,6 +3670,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
           prints: earnPrints.length, histDone: earnHistDone, studyTickers: Object.keys(earnStudy).length,
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
         backup: { enabled: !!(BK_REPO && BK_TOKEN), repo: BK_REPO || null, lastOk: backupLast, error: backupErr },
+        news: { items: newsItems.length, fetchedAt: newsFetchedAt || null, error: newsErr },
         ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
           fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size },
         rate: limiterUsage(),
