@@ -972,9 +972,14 @@ function parseTgPreview(html, channel, nowMs) {
   const blocks = html.split('class="tgme_widget_message_wrap').slice(1);
   const deent = (s) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&#0?36;/g, "$").replace(/&nbsp;/g, " ");
+  const want = String(channel || "").toLowerCase();
   for (const b of blocks) {
     const post = b.match(/data-post="([A-Za-z0-9_]+)\/(\d+)"/);
     if (!post) continue;
+    // Channel-identity gate: only accept posts belonging to the channel we ASKED for. A typo'd
+    // username can land on a redirect, a suggestion page, or a different real channel — and
+    // without this check its posts flood the feed under a name nobody configured.
+    if (post[1].toLowerCase() !== want) continue;
     const tm = b.match(/<time[^>]*datetime="([^"]+)"/);
     const pub = tm ? Date.parse(tm[1]) : NaN;
     if (!Number.isFinite(pub)) continue;

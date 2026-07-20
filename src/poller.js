@@ -2547,6 +2547,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned });
     }
   }
+  function purgeTgOrphans() {
+    // removing a channel removes its POSTS, not just its config entry — otherwise junk from a
+    // mistyped channel lives on for 72h after the ✕ and "remove" doesn't mean remove
+    const live = new Set(tgChannels.map((c) => c.toLowerCase()));
+    const before = newsItems.length;
+    newsItems = newsItems.filter((a) => {
+      if (!a.tg) return true;
+      const m = /^tg:([A-Za-z0-9_]+):/.exec(String(a.id));
+      return m ? live.has(m[1].toLowerCase()) : false;
+    });
+    const purged = before - newsItems.length;
+    if (purged) { pruneSecTape(); buildNewsPayload(); store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned }); }
+    return purged;
+  }
   function getTgChannels() {
     return { ts: Date.now(), max: TG_MAX, channels: tgChannels.map((c) => Object.assign({ c }, tgStatus.get(c) || { lastOk: null, error: null, posts: 0 })) };
   }
@@ -2563,8 +2577,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (clean.length > TG_MAX) return { ok: false, error: `at most ${TG_MAX} channels` };
     tgChannels = clean;
     store.saveTgChannels({ ts: Date.now(), channels: tgChannels });
+    const purged = purgeTgOrphans();   // a removed channel's posts leave the feed NOW, not at 72h eviction
     setTimeout(() => { tgTick().catch(() => {}); }, 500);   // apply for the whole group within seconds, not a cadence
-    return { ok: true, channels: tgChannels };
+    return { ok: true, channels: tgChannels, purged };
   }
   function hydrateNews() {
     const d = store.loadNews && store.loadNews();
@@ -2574,6 +2589,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (d && d.nameLearned && typeof d.nameLearned === "object") nameLearned = d.nameLearned;
     try { const tc = store.loadTgChannels && store.loadTgChannels();
       if (tc && Array.isArray(tc.channels)) tgChannels = tc.channels.filter((c) => TG_RE.test(c)).slice(0, TG_MAX); } catch (_) {}
+    { const live = new Set(tgChannels.map((c) => c.toLowerCase()));   // cached posts from since-removed channels die at hydrate
+      newsItems = newsItems.filter((a) => { if (!a.tg) return true; const m = /^tg:([A-Za-z0-9_]+):/.exec(String(a.id)); return m ? live.has(m[1].toLowerCase()) : false; }); }
     for (const a of newsItems)   // pre-pipeline items carry no rel: gate on the headline we kept
       if (a.tk && a.rel == null) a.rel = newsRelevant(a.h, null, a.tk, aliasesFor(String(a.tk).toUpperCase())) ? 1 : 0;
     pruneSecTape();
