@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant, parseTgPreview, attributeTg } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify, nameAliases } = require("./sectors");
 
@@ -2419,7 +2419,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // ed (days to earnings when <=7 — the amber badge), sig (a live kept signal is firing —
     // the red badge, refreshed each signals build so it can lag a build; the tooltip says so)
     const byTk = new Map();
-    for (const r of rows.values()) if (r.uni === "xyz" && !r.delisted) byTk.set(String(r.ticker).toUpperCase(), r);
+    for (const r of rows.values()) if (!r.delisted && r.ticker) byTk.set(String(r.ticker).toUpperCase(), r);   // both universes: telegram can attribute a crypto name
     const edByTk = new Map();
     if (earnCache && Array.isArray(earnCache.entries))
       for (const e of earnCache.entries) {
@@ -2429,6 +2429,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const items = newsItems.map((a) => {
       const r = a.tk ? byTk.get(String(a.tk).toUpperCase()) : null;
       const o = { id: a.id, tk: a.tk, h: a.h, src: a.src, url: a.url, pub: a.pub };
+      if (a.tg) o.tg = 1;
       // Lane semantics (the no-leak policy): a ticker ships ONLY on verified items (rel=1).
       // Pending items ship unattributed with pend=1 — tape lane, honest tooltip — and demoted
       // items are plain tape. The internal fetch-ticker never reaches the client unverified.
@@ -2495,12 +2496,84 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned });
     } catch (e) { newsErr = "tape fetch failed: " + (e && e.message); buildNewsPayload(); }
   }
+  // ---- telegram channels (public t.me previews — no bot, no credentials) -------------------
+  // Shared group config, persisted to its own volume file. Every channel fetches on a 10-min
+  // cadence; per-channel status (green/red dot in the manager) rides the payload. Degradation
+  // contract like Finnhub: a dead or preview-disabled channel is a red dot and a retry, never
+  // a broken tab. Markup drift (page fetched, blocks present, nothing parsed) logs a warning
+  // and surfaces as the channel's error.
+  let tgChannels = [];
+  const tgStatus = new Map();          // channel -> { lastOk, error, posts }
+  const TG_MAX = 12, TG_RE = /^[A-Za-z0-9_]{4,32}$/;
+  function tgRoster() {
+    const m = new Map();
+    for (const r of rows.values()) {
+      if (r.delisted || !r.ticker) continue;
+      const T = String(r.ticker).toUpperCase();
+      if (!m.has(T)) m.set(T, aliasesFor(T));
+    }
+    return m;
+  }
+  async function tgTick() {
+    if (!tgChannels.length) return;
+    const roster = tgRoster();
+    let got = [];
+    for (const ch of tgChannels) {
+      try {
+        const res = await fetch(`https://t.me/s/${encodeURIComponent(ch)}`, { headers: { accept: "text/html" } });
+        if (!res.ok) { tgStatus.set(ch, { lastOk: (tgStatus.get(ch) || {}).lastOk || null, error: "HTTP " + res.status, posts: 0 }); continue; }
+        const { items, blocks } = parseTgPreview(await res.text(), ch, Date.now());
+        if (!items.length && blocks > 0) {
+          tgStatus.set(ch, { lastOk: (tgStatus.get(ch) || {}).lastOk || null, error: "markup drift: page fetched, nothing parsed", posts: 0 });
+          log(`telegram ${ch}: WARN markup drift — ${blocks} block(s) fetched, zero messages parsed`);
+          continue;
+        }
+        for (const a of items) {
+          const T = attributeTg(a.h, roster);   // exactly-one-name rule: same trust as the deterministic gate
+          if (T) { a.tk = T; a.rel = 1; }
+        }
+        got = got.concat(items);
+        tgStatus.set(ch, { lastOk: Date.now(), error: null, posts: items.length });
+      } catch (e) {
+        tgStatus.set(ch, { lastOk: (tgStatus.get(ch) || {}).lastOk || null, error: "fetch failed: " + (e && e.message), posts: 0 });
+      }
+    }
+    for (const ch of [...tgStatus.keys()]) if (!tgChannels.includes(ch)) tgStatus.delete(ch);
+    if (got.length) {
+      newsItems = mergeNews(newsItems, got, Date.now());
+      pruneSecTape();
+      newsFetchedAt = Date.now();
+      buildNewsPayload();
+      store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned });
+    }
+  }
+  function getTgChannels() {
+    return { ts: Date.now(), max: TG_MAX, channels: tgChannels.map((c) => Object.assign({ c }, tgStatus.get(c) || { lastOk: null, error: null, posts: 0 })) };
+  }
+  function setTgChannels(list) {
+    if (!Array.isArray(list)) return { ok: false, error: "channels must be an array" };
+    const seen = new Set(), clean = [];
+    for (const raw of list) {
+      const c = String(raw || "").trim().replace(/^@/, "").replace(/^(https?:\/\/)?t\.me\/(s\/)?/i, "");
+      if (!TG_RE.test(c)) return { ok: false, error: `invalid channel username: ${String(raw).slice(0, 40)}` };
+      const k = c.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k); clean.push(c);
+    }
+    if (clean.length > TG_MAX) return { ok: false, error: `at most ${TG_MAX} channels` };
+    tgChannels = clean;
+    store.saveTgChannels({ ts: Date.now(), channels: tgChannels });
+    setTimeout(() => { tgTick().catch(() => {}); }, 500);   // apply for the whole group within seconds, not a cadence
+    return { ok: true, channels: tgChannels };
+  }
   function hydrateNews() {
     const d = store.loadNews && store.loadNews();
     if (d && Array.isArray(d.items)) { newsItems = mergeNews(d.items, [], Date.now()); newsFetchedAt = d.ts || 0; }
     if (d && d.secTape && typeof d.secTape === "object") secTape = d.secTape;
     if (d && d.secLearned && typeof d.secLearned === "object") secLearned = d.secLearned;
     if (d && d.nameLearned && typeof d.nameLearned === "object") nameLearned = d.nameLearned;
+    try { const tc = store.loadTgChannels && store.loadTgChannels();
+      if (tc && Array.isArray(tc.channels)) tgChannels = tc.channels.filter((c) => TG_RE.test(c)).slice(0, TG_MAX); } catch (_) {}
     for (const a of newsItems)   // pre-pipeline items carry no rel: gate on the headline we kept
       if (a.tk && a.rel == null) a.rel = newsRelevant(a.h, null, a.tk, aliasesFor(String(a.tk).toUpperCase())) ? 1 : 0;
     pruneSecTape();
@@ -2881,6 +2954,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // Sector classifier: batched, write-once, fallback-model, ~a cent a day at current volume.
     setInterval(() => { classifySecTick().catch((e) => log("sector classify failed (isolated): " + (e && e.message))); }, 10 * 60 * 1000);
     setTimeout(() => { classifySecTick().catch(() => {}); }, 90 * 1000);
+    setInterval(() => { tgTick().catch((e) => log("telegram tick failed (isolated): " + (e && e.message))); }, 10 * 60 * 1000);
+    setTimeout(() => { tgTick().catch(() => {}); }, 30 * 1000);
+    log(`Telegram feed: ${tgChannels.length ? tgChannels.length + " channel(s) configured" : "no channels configured (add via the News tab \u2699)"}`);
     log(process.env.FINNHUB_TOKEN ? `News feed: ENABLED — ${NEWS_BATCH} names/min rotation + macro tape/15min, 72h retention` : "News feed: disabled (FINNHUB_TOKEN not set)");
     // Off-site ledger backup: shortly after boot (the deploy IS the natural trigger — most
     // boots follow a build), then weekly. The blob-sha skip makes redundant runs free.
@@ -3917,6 +3993,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getNews: () => newsCache,
     newsIngestNow: (items) => { newsItems = mergeNews(newsItems, gateCompanyItems(items || []), Date.now()); newsFetchedAt = Date.now(); buildNewsPayload(); return newsCache; },   // harness: feed + payload without network — company items pass the relevance gate exactly as in production
     classifySecNow: () => classifySecTick(),   // harness: one classifier pass through the injected aiFetch transport
+    getTgChannels,
+    setTgChannels,
+    tgIngestNow: (html, ch) => {   // harness: the full per-item pipeline (parse -> attribute -> merge -> payload) without network
+      const { items } = parseTgPreview(html, ch, Date.now());
+      const roster = tgRoster();
+      for (const a of items) { const T = attributeTg(a.h, roster); if (T) { a.tk = T; a.rel = 1; } }
+      newsItems = mergeNews(newsItems, items, Date.now());
+      buildNewsPayload();
+      return newsCache;
+    },
     aireadClaimsNow: () => ({ open: [...ledgerOpen.values()].filter((e) => e.ev === "airead"),
       closed: ledgerClosed.filter((e) => e.ev === "airead") }),   // harness: the analyst bucket directly — vi-stamped claims are correctly invisible to the drawer payload
     openLedgerNow: (coin, ev, sigEntry, dir, extra, vi) =>   // harness: fire a claim directly so the context stamp is testable without a full signals build
@@ -3982,6 +4068,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         backup: { enabled: !!(BK_REPO && BK_TOKEN), repo: BK_REPO || null, lastOk: backupLast, error: backupErr },
         news: { items: newsItems.length, fetchedAt: newsFetchedAt || null, error: newsErr,
           sectors: { tapeClassified: Object.keys(secTape).length, learnedTickers: Object.keys(secLearned).length, error: secErr },
+          telegram: { channels: tgChannels.length, items: newsItems.filter((a) => a.tg).length,
+            errors: [...tgStatus.entries()].filter(([, s]) => s.error).map(([c, s]) => c + ": " + s.error) },
           relevance: { verified: newsItems.filter((a) => a.tk && a.rel === 1).length,
             pending: newsItems.filter((a) => a.tk && a.rel === 0).length,
             offTopic: Object.values(secTape).filter((s) => s === "off-topic").length,

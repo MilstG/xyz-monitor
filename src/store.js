@@ -19,6 +19,7 @@ function openStore(dataDir) {
   const archiveFile = path.join(dataDir, "ledger-archive.jsonl");
   const earnFile = path.join(dataDir, "earnings.json");
   const newsFile = path.join(dataDir, "news.json");
+  const tgFile = path.join(dataDir, "tgchannels.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
   let buf = [];
@@ -189,6 +190,18 @@ function openStore(dataDir) {
         try { out.push({ name: path.basename(f), content: fs.readFileSync(f, "utf8") }); } catch (_) {}
       }
       return out;
+    },
+    // Telegram channel list: shared group CONFIG (not cache) — its own file so a corrupt or
+    // trimmed news cache can never lose the channel list.
+    saveTgChannels(data) {
+      try {
+        const tmp = tgFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, tgFile);
+      } catch (_) {}
+    },
+    loadTgChannels() {
+      try { return JSON.parse(fs.readFileSync(tgFile, "utf8")); } catch (_) { return null; }
     },
     // News feed warm cache (atomic like the rest): a redeploy serves the last fetched
     // headlines instead of a blank tab while the worker's first rotation completes.

@@ -949,14 +949,56 @@ function mergeNews(existing, incoming, nowMs) {
   const all = [...byId.values()].sort((x, y) => y.pub - x.pub);
   const perTk = new Map(), out = [];
   for (const a of all) {
-    const k = a.tk || "~tape";
+    const k = a.tk || (a.tg ? "~tg" : "~tape");   // telegram rides its own lane: it can't evict the wire, the wire can't evict it
     const n = perTk.get(k) || 0;
-    if (n >= (a.tk ? NEWS_PER_TK : NEWS_PER_TK * 6)) continue;
+    const cap = a.tk ? NEWS_PER_TK : (a.tg ? NEWS_PER_TK * 8 : NEWS_PER_TK * 6);
+    if (n >= cap) continue;
     perTk.set(k, n + 1);
     out.push(a);
     if (out.length >= NEWS_CAP) break;
   }
   return out;
+}
+
+// ---- telegram public-channel preview parser (pure) -----------------------------------------
+// t.me/s/<channel> is plain HTML: message blocks carry data-post="channel/<id>", a
+// tgme_widget_message_text div, and a <time datetime="...">. Zero dependencies — regex over
+// the block markup, tags stripped, basic entities decoded. Returns {items, blocks} so the
+// caller can tell "page fetched but nothing parsed" (markup drift — warn) apart from an
+// empty channel. Sticker/media-only posts have no text div and are skipped by construction.
+function parseTgPreview(html, channel, nowMs) {
+  const items = [];
+  if (typeof html !== "string" || !html) return { items, blocks: 0 };
+  const blocks = html.split('class="tgme_widget_message_wrap').slice(1);
+  const deent = (s) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&#0?36;/g, "$").replace(/&nbsp;/g, " ");
+  for (const b of blocks) {
+    const post = b.match(/data-post="([A-Za-z0-9_]+)\/(\d+)"/);
+    if (!post) continue;
+    const tm = b.match(/<time[^>]*datetime="([^"]+)"/);
+    const pub = tm ? Date.parse(tm[1]) : NaN;
+    if (!Number.isFinite(pub)) continue;
+    const tx = b.match(/tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>/);
+    if (!tx) continue;   // media-only post — nothing to feed
+    const h = deent(tx[1].replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim().slice(0, 220);
+    if (!h) continue;
+    items.push({ id: "tg:" + post[1] + ":" + post[2], tk: null, h,
+      src: "t.me/" + post[1], url: "https://t.me/" + post[1] + "/" + post[2], pub, tg: 1 });
+  }
+  return { items, blocks: blocks.length };
+}
+
+// ---- telegram ticker attribution (pure) ----------------------------------------------------
+// Posts aren't fetched "under" a ticker, so the relevance gate runs inverted: scan the text
+// against the whole universe roster. EXACTLY ONE name matching -> attributed (same trust as
+// the deterministic gate); zero or several -> tape. Conservative by construction: a post
+// naming five tickers pollutes none of their feeds.
+function attributeTg(h, rosterMap) {
+  let hit = null, count = 0;
+  for (const [T, aliases] of rosterMap) {
+    if (newsRelevant(h, null, T, aliases)) { count++; if (count > 1) return null; hit = T; }
+  }
+  return count === 1 ? hit : null;
 }
 
 // ---- shadow-variant promotion rule ---------------------------------------------------------
@@ -1695,6 +1737,8 @@ module.exports.etDayStr = etDayStr;
 module.exports.mergeNews = mergeNews;
 module.exports.capPerUniverse = capPerUniverse;
 module.exports.newsRelevant = newsRelevant;
+module.exports.parseTgPreview = parseTgPreview;
+module.exports.attributeTg = attributeTg;
 module.exports.bustAssetTags = bustAssetTags;
 module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
 module.exports.earnDayDiff = earnDayDiff;
