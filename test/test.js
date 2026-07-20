@@ -1025,7 +1025,7 @@ test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-t
   // wiring pins: lane semantics client-side, drawer guard, health counters
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const pin of ["newsMode='universe'", "const inLane=(a)=>newsMode==='universe'?!!a.tk:(newsMode==='telegram'?!!a.tg:true)",
+  for (const pin of ["newsMode='universe'", "filings are exclusive BOTH ways",
     "relevance verdict pending", "a.sec==='off-topic'?' off'", "const isMacroName=!!(r.assetClass&&r.assetClass!=='Equity')",
     "attribution AI-verified", "no verified headlines for this name in the last 72h"])
     assert.ok(app.includes(pin), `lane pin missing: ${pin}`);
@@ -1295,6 +1295,57 @@ test("telegram feed: parser + drift, lane caps, single-name attribution through 
     assert.ok(app.includes(pin), `tg client pin missing: ${pin}`);
   const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
   assert.ok(st.includes("saveTgChannels(data)") && st.includes("loadTgChannels()"), "config persistence separate from the news cache");
+});
+
+test("EDGAR filings lane: parser, 7d retention, hard isolation from every other lane and from the report", () => {
+  const C = require("../src/compute");
+  const now = Date.now(), H = 3600e3;
+  const atomEntry = (form, desc, accn, iso, summary) => `<entry><title>${form} - ${desc}</title><updated>${iso}</updated>`
+    + `<link rel="alternate" href="https://www.sec.gov/idx-${accn}.htm"/><summary type="html">AccNo: ${accn} ${summary || ""}</summary></entry>`;
+  const iso = (agoH) => new Date(now - agoH * H).toISOString();
+  const xml = "<feed>"
+    + atomEntry("8-K", "Current report", "0001000000-26-000123", iso(2), "Item 2.02 Results of Operations Item 9.01 Exhibits")
+    + atomEntry("4", "Statement of changes in beneficial ownership", "0001000000-26-000124", iso(5))
+    + atomEntry("10-Q", "Quarterly report", "0001000000-26-000125", iso(100))   // 4+ days old: INSIDE the 7d filings window
+    + "</feed>";
+  const pr = C.parseEdgarAtom(xml, "wdc", now);
+  assert.equal(pr.items.length, 3);
+  assert.equal(pr.items[0].form, "8-K"); assert.equal(pr.items[0].mat, 1);
+  assert.ok(pr.items[0].h.includes("Item 2.02"), "8-K item list is the headline — the tradeable fact, no editorializing");
+  assert.equal(pr.items[1].own, 1); assert.ok(!pr.items[1].mat, "Form 4 is ownership, not material");
+  assert.equal(pr.items[0].id, "sec:0001000000-26-000123", "dedupe keys on the accession number");
+  // dual TTL: a 100h-old filing survives where a 100h-old headline dies
+  const m = C.mergeNews([], pr.items.concat([{ id: "w1", tk: null, h: "old wire", src: "s", url: "u", pub: now - 100 * H }]), now);
+  assert.ok(m.some((a) => a.id === "sec:0001000000-26-000125"), "filings live 7 days");
+  assert.ok(!m.some((a) => a.id === "w1"), "headlines still die at 72h");
+  // end-to-end: payload fields + hard lane isolation + report exclusion
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveTgChannels: () => {}, loadTgChannels: () => null, loadAiReports: () => null, saveAiReports: () => {} };
+  const pl = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  pl.seedRowNow("xyz:WDC", { px: 500, ticker: "WDC", uni: "xyz" });
+  const pay = pl.newsIngestNow(pr.items);
+  const fl = pay.items.find((a) => a.id === "sec:0001000000-26-000123");
+  assert.ok(fl.fl === 1 && fl.form === "8-K" && fl.mat === 1 && fl.tk === "WDC" && fl.coin === "xyz:WDC",
+    "filing ships attributed with form/materiality — no rel machinery, no pend");
+  assert.ok(!fl.pend && !fl.secAi, "…and never enters the relevance or AI-classification paths");
+  const ctx = pl.aiCompileNow("xyz:WDC");
+  assert.equal((ctx.news && ctx.news.verified || []).length, 0,
+    "filings are NOT headlines: the report's news context stays empty — the news contract never sees them");
+  // client pins: exclusive lane, sub-chips, form rows, grouped-view guard
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["newsMode==='filings'?!!a.fl:(a.fl?false:", "'universe','tape','telegram','filings'",
+    "data-nfl=", "newsFl==='mat'&&!a.mat", "class=\"nform", "newsView==='sector'&&newsMode!=='filings'",
+    "a.sec&&!a.fl&&inLane(a)"])
+    assert.ok(app.includes(pin), `filings client pin missing: ${pin}`);
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".nform.mat{"), "material form styling present");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["www.sec.gov/cgi-bin/browse-edgar", "\"user-agent\": SEC_UA", "!a.fl && a.tk && a.rel === 1",
+    "filings: { items:"])
+    assert.ok(pol.includes(pin), `filings poller pin missing: ${pin}`);
 });
 
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
