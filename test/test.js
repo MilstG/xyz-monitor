@@ -700,23 +700,30 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
   assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 3, "all three daily-close detectors coerce");
 });
 
-test("strategy-shadow record panel: payload aggregation, client render pins, ETag busting", () => {
+test("strategy-shadow record panel: per-universe aggregation, hard separation, client scope wiring", () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now();
   const fixture = { ts: now, rearm: [], variants: null,
     open: [
-      { key: "A|gapfade#1", coin: "A", ticker: "A", ev: "gapfade", t0: now - 3600e3, mark0: 100, dir: 1,
+      { key: "ETH|gapfade#1", coin: "ETH", ticker: "ETH", ev: "gapfade", t0: now - 3600e3, mark0: 100, dir: 1,
         score0: 0, psd: "short", pn: 1, stp: 101, vi: 1, resolveAt: now + 86400e3 },
-      { key: "B|fundext#0", coin: "B", ticker: "B", ev: "fundext", t0: now - 3600e3, mark0: 50, dir: 1,
+      { key: "BTC|fundext#0", coin: "BTC", ticker: "BTC", ev: "fundext", t0: now - 3600e3, mark0: 50, dir: 1,
         score0: 0, sd0: 2, psd: "short", pn: 1, stp: 51.5, vi: 0, resolveAt: now + 86400e3 },
+      { key: "xyz:NVDA|reclaim#0", coin: "xyz:NVDA", ticker: "NVDA", ev: "reclaim", t0: now - 3600e3, mark0: 10, dir: 1,
+        score0: 0, sd0: 2, psd: "long", pn: 1, stp: 9.5, vi: 0, resolveAt: now + 86400e3 },
     ],
     closed: [
-      { key: "A|gapfade#0", coin: "A", ticker: "A", ev: "gapfade", t0: now - 5 * 86400e3, tR: now - 4 * 86400e3,
+      { key: "ETH|gapfade#0", coin: "ETH", ticker: "ETH", ev: "gapfade", t0: now - 5 * 86400e3, tR: now - 4 * 86400e3,
         mark0: 100, dir: 1, psd: "short", pn: 1, vi: 0, status: "resolved", realized: 0.8, realizedS: 0.8 },
-      { key: "C|gapfade#0", coin: "C", ticker: "C", ev: "gapfade", t0: now - 4 * 86400e3, tR: now - 3 * 86400e3,
+      { key: "SOL|gapfade#0", coin: "SOL", ticker: "SOL", ev: "gapfade", t0: now - 4 * 86400e3, tR: now - 3 * 86400e3,
         mark0: 20, dir: -1, psd: "long", pn: 1, vi: 0, status: "resolved", realized: -0.4, realizedS: -0.6, stopped: true },
-      { key: "D|reclaim#0", coin: "D", ticker: "D", ev: "reclaim", t0: now - 6 * 86400e3, tR: now - 86400e3,
+      { key: "xyz:AAPL|reclaim#0", coin: "xyz:AAPL", ticker: "AAPL", ev: "reclaim", t0: now - 6 * 86400e3, tR: now - 86400e3,
         mark0: 10, dir: 1, sd0: 2, psd: "long", pn: 1, vi: 0, status: "resolved", realized: 1.2, realizedS: 1.2, rn: 1 },
+      // VISIBLE claims (no vi) — these are what the per-universe record sets aggregate
+      { key: "xyz:AAPL|breakdown", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 6 * 86400e3, tR: now - 86400e3,
+        mark0: 200, dir: -1, sd0: 2, psd: "short", pn: 1, status: "resolved", realized: 1.1, realizedS: 1.1, rn: 1 },
+      { key: "ETH|bigmove", coin: "ETH", ticker: "ETH", ev: "bigmove", t0: now - 5 * 86400e3, tR: now - 4 * 86400e3,
+        mark0: 3000, dir: 1, sd0: 3, psd: "long", pn: 1, status: "resolved", realized: -0.5, realizedS: -0.5, rn: 1 },
     ] };
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
@@ -724,24 +731,39 @@ test("strategy-shadow record panel: payload aggregation, client render pins, ETa
   p.hydrateLedgerNow();
   p.buildSignalsNow();
   const d = p.getSignals();
-  assert.ok(Array.isArray(d.shadows) && d.shadows.length === 7, "all seven strategies ship, fired or not");
-  const by = Object.fromEntries(d.shadows.map((g) => [g.ev, g]));
-  assert.equal(by.gapfade.rows.length, 2, "gapfade splits by void width");
-  assert.deepEqual({ n: by.gapfade.rows[0].n, hit: by.gapfade.rows[0].hit, avg: by.gapfade.rows[0].avg, avgS: by.gapfade.rows[0].avgS },
-    { n: 2, hit: 0.5, avg: 0.2, avgS: 0.1 }, "1.0σ width: both legs aggregated over its own claims only");
-  assert.deepEqual({ n: by.gapfade.rows[1].n, open: by.gapfade.rows[1].open }, { n: 0, open: 1 }, "1.5σ width: open-only state");
-  assert.equal(by.reclaim.rows[0].n, 1); assert.equal(by.reclaim.rows[0].avg, 1.2); assert.equal(by.reclaim.unit, "R");
-  assert.deepEqual({ n: by.fundext.rows[0].n, open: by.fundext.rows[0].open }, { n: 0, open: 1 });
-  assert.deepEqual({ n: by.pead.rows[0].n, open: by.pead.rows[0].open }, { n: 0, open: 0 }, "never-fired strategy ships as the awaiting state, not absence");
-  assert.ok(by.mapull.tip && by.failbrk.tip, "tips ship from the server — panel and engine can't drift");
-  assert.deepEqual({ n: by.liqflush.rows[0].n, open: by.liqflush.rows[0].open }, { n: 0, open: 0 }, "liqflush ships awaiting from day one");
-  // client + ETag pins
+  assert.ok(d.shadows && Array.isArray(d.shadows.main) && Array.isArray(d.shadows.xyz), "two hard-separated panels ship");
+  assert.equal(d.shadows.main.length, 6, "crypto panel: 4 universal + fundext + liqflush");
+  assert.equal(d.shadows.xyz.length, 5, "stocks panel: 4 universal + pead");
+  const m = Object.fromEntries(d.shadows.main.map((g) => [g.ev, g]));
+  const x = Object.fromEntries(d.shadows.xyz.map((g) => [g.ev, g]));
+  assert.ok(m.liqflush && m.fundext && !m.pead, "crypto-only strategies live on the crypto panel alone");
+  assert.ok(x.pead && !x.liqflush && !x.fundext, "pead lives on the stocks panel alone");
+  assert.deepEqual({ n: m.gapfade.rows[0].n, hit: m.gapfade.rows[0].hit, avg: m.gapfade.rows[0].avg, avgS: m.gapfade.rows[0].avgS },
+    { n: 2, hit: 0.5, avg: 0.2, avgS: 0.1 }, "crypto gapfade 1.0σ: aggregated over crypto claims only");
+  assert.deepEqual({ n: m.gapfade.rows[1].n, open: m.gapfade.rows[1].open }, { n: 0, open: 1 });
+  assert.deepEqual({ n: x.gapfade.rows[0].n, open: x.gapfade.rows[0].open }, { n: 0, open: 0 },
+    "the same strategy on the stocks panel shows ZERO — a crypto record can't leak across the separation");
+  assert.equal(x.reclaim.rows[0].n, 1); assert.equal(x.reclaim.rows[0].avg, 1.2);
+  assert.deepEqual({ n: m.reclaim.rows[0].n, open: m.reclaim.rows[0].open }, { n: 0, open: 0 }, "and the equity reclaim can't leak into crypto");
+  assert.equal(x.reclaim.rows[0].open, 1, "open counts split by universe too");
+  // per-universe record sets: same key, m/x suffix, global keys untouched
+  assert.ok(d.records["0"] && d.records["0m"] && d.records["0x"] && d.records["1p"] && d.records["1pm"], "universe-suffixed record sets ship alongside the global ones");
+  assert.ok(d.records["0x"].record.breakdown && d.records["0x"].record.breakdown.resolved === 1, "xyz set carries the xyz visible claim");
+  assert.ok(!d.records["0m"].record.breakdown || !d.records["0m"].record.breakdown.resolved, "the xyz claim never leaks into the crypto set");
+  assert.ok(d.records["0m"].record.bigmove && d.records["0m"].record.bigmove.resolved === 1, "crypto set carries the crypto visible claim");
+  assert.ok(!d.records["0x"].record.bigmove || !d.records["0x"].record.bigmove.resolved, "and it never leaks into the xyz set");
+  assert.equal(d.records["0"].record.breakdown.resolved, 1, "global sets keep their exact keys and totals — nothing downstream breaks");
+  assert.ok(d.countU && d.countU.main === 0 && d.countU.xyz === 0, "per-universe live counts ship");
+  // client wiring pins: scope-keyed records, scoped shadows, signals tab allowed in crypto scope
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const pin of ["strategy shadows (earning their record)", "awaiting first fire", "none resolved yet",
-    "d&&d.shadows&&d.shadows.length", "shadow claims only \\u2014 never shown as live signals"])
-    assert.ok(app.includes(pin), `client shadow-panel pin missing: ${pin}`);
+  for (const pin of ["(state.scope==='crypto'?'m':'x')", "state.scope==='crypto'?d.shadows.main:d.shadows.xyz",
+    "b.dataset.view!=='signals'", "v!=='signals') v='markets'", "(g.uni==='main')===(state.scope==='crypto')",
+    "if(state.view==='signals') renderSignals();", "strategy shadows (earning their record)", "awaiting first fire"])
+    assert.ok(app.includes(pin), `client scope pin missing: ${pin}`);
+  assert.equal((app.match(/\(state\.scope==='crypto'\?'m':'x'\)/g) || []).length, 2, "BOTH record-set selection sites are scope-keyed");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("uni: r.uni, ev, label: EV_LABEL[ev]"), "every live signal is universe-stamped server-side");
   assert.ok(pol.includes("shadow record changes must bust the ETag"), "shadow counts fold into the signals ETag signature");
 });
 
