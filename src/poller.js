@@ -835,7 +835,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush", "airead"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -1014,6 +1014,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           emv: "pead shadow only: the frozen earnings-reaction move, %",
           fpx: "fundext shadow only: funding percentile at fire (the gate reading)",
           oc24: "liqflush shadow only: the 24h open-interest change % at fire (the OI leg of the gate)",
+          rm: "airead only: the model that authored the read (analyst accountability claims)",
           ses: "session bucket at fire, xyz only (rth / on / wknd)", dow: "UTC day-of-week at fire (0=Sun)",
         },
       },
@@ -1298,7 +1299,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush", "airead"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -3513,11 +3514,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (Object.keys(cr).length) ctx.crypto = cr;
       } catch (_) {}
     }
+    try { const ar = analystRecordFor(coin); if (ar) ctx.analystRecord = ar; } catch (_) {}
     ctx.flags = aiFlags(r);
     ctx.coverage = aiCoverage(coin, windowMs);
     return ctx;
   }
-  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history, the 24h open-interest change, and any crypto-native setups currently live on the name (fundext = persistent funding extreme, liqflush = liquidation-cascade exhaustion) — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape).
+  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history, the 24h open-interest change, and any crypto-native setups currently live on the name (fundext = persistent funding extreme, liqflush = liquidation-cascade exhaustion) — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly.
 Respond with ONLY a JSON object — no markdown fences, no preamble — with exactly these keys:
 {"headline": string (<=60 chars, plain-language stance, e.g. "Constructive, leans long" or "Constructive, but earnings in 6 days"),
  "bias": "long"|"short"|"neutral",
@@ -3791,6 +3793,19 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const r = rows.get(coin);
     return !!(r && !r.delisted && (r.uni !== "main" || crypto));
   }
+  function analystRecordFor(coin) {
+    const rs = ledgerClosed.filter((e) => e.ev === "airead" && e.status === "resolved" && Number.isFinite(e.realized));
+    const openAll = [...ledgerOpen.values()].filter((e) => e.ev === "airead");
+    if (!rs.length && !openAll.length) return null;
+    const agg = (a) => a.length ? { n: a.length,
+      hit: +(a.filter((x) => x.realized > 0).length / a.length).toFixed(2),
+      avgR: +(a.reduce((s, x) => s + x.realized, 0) / a.length).toFixed(2),
+      avgRS: (() => { const s = a.filter((x) => x.realizedS != null && isFinite(x.realizedS)); return s.length ? +(s.reduce((q, x) => q + x.realizedS, 0) / s.length).toFixed(2) : null; })() }
+      : { n: 0 };
+    const mine = coin ? rs.filter((e) => e.coin === coin) : [];
+    return { overall: agg(rs), thisName: coin ? agg(mine) : undefined,
+      open: openAll.length, openOnName: coin ? openAll.some((e) => e.coin === coin) : undefined };
+  }
   function getAiReport(coin) {
     if (!coin || !aiUniverseOk(coin)) {
       const rep = coin ? aiReports.get(coin) : null;
@@ -3799,7 +3814,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const rep = aiReports.get(coin);
     if (!rep) return { coin, status: "none", canRegen: true, ts: Date.now(),
       enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL };
-    return aiPublic(rep);
+    const pub = aiPublic(rep);
+    const ar = analystRecordFor(coin);
+    if (ar) pub.analystRecord = ar;   // live, not cached with the report: the record moves as claims resolve, and the ETag moves with it
+    return pub;
   }
   function listAiReports() {
     const out = [...aiReports.values()].map((rep) => {
@@ -3836,6 +3854,37 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       }
       if (!val.ok) { log(`AI report ${coin}: fallback failed too (${val.error})`); return { ok: false, error: val.error }; }
       const rep = aiAssemble(coin, ctx, val, used);
+      // Analyst-read accountability: every validated DIRECTIONAL read becomes a frozen claim
+      // in its own ledger bucket — side, the report's own void, its target, mark at generation
+      // — resolved out of sample like everything else. vi=0 keeps it out of the visible record
+      // sets; absence from STRAT_DEFS keeps it off the shadows panel; the stop-aware resolver
+      // handles it like any stp claim. Episode: one open read per name — a same-bias regen
+      // never pseudo-replicates, and a bias flip leaves the frozen claim to resolve untouched
+      // (moving a claim because the analyst changed its mind is what frozen geometry forbids).
+      // Neutral reads don't ledger: "stand aside" contains nothing falsifiable.
+      try {
+        const bias = rep.ai && rep.ai.bias;
+        if ((bias === "long" || bias === "short") && !ledgerOpen.has(coin + "|airead#0")) {
+          const rr = rows.get(coin);
+          const lvs = (rep.computed && rep.computed.levels) || [];
+          const vdv = rep.computed && rep.computed.voidLevel;   // validator-corrected: frozen-claim stop when an anchor exists
+          const tg = lvs.find((l) => l && l.kind === "target" && l.value > 0);
+          const mk = ctx.px;
+          if (rr && vdv > 0 && mk > 0 && stopGeometryOk(bias, mk, vdv)) {
+            let sd0 = null;
+            try {
+              const cls = (rr.dailyRaw || []).map((k) => +k.c).filter(Number.isFinite);
+              const rets = []; for (let i = 1; i < cls.length; i++) rets.push((cls[i] / cls[i - 1] - 1) * 100);
+              sd0 = retStd(rets.slice(-30), 15);
+            } catch (_) {}
+            openLedger(rr, "airead", { score: 0, reading: "" }, bias === "long" ? 1 : -1,
+              { sd0: sd0 != null ? +sd0.toFixed(3) : undefined, psd: bias, pn: 1,
+                stp: +(+vdv).toPrecision(6),
+                mv: tg ? +(Math.abs(tg.value / mk - 1) * 100).toFixed(2) : undefined,
+                rm: used }, 0);
+          }
+        }
+      } catch (e) { log("airead claim open failed (isolated, report unaffected): " + (e && e.message)); }
       log(`AI report generated: ${coin} via ${used} (bias ${rep.ai.bias}, ev ${rep.computed.evR != null ? rep.computed.evR + "R" : "n/a"})`);
       return { ok: true, report: aiPublic(rep) };
     } finally { aiGenerating.delete(coin); }
@@ -3868,6 +3917,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getNews: () => newsCache,
     newsIngestNow: (items) => { newsItems = mergeNews(newsItems, gateCompanyItems(items || []), Date.now()); newsFetchedAt = Date.now(); buildNewsPayload(); return newsCache; },   // harness: feed + payload without network — company items pass the relevance gate exactly as in production
     classifySecNow: () => classifySecTick(),   // harness: one classifier pass through the injected aiFetch transport
+    aireadClaimsNow: () => ({ open: [...ledgerOpen.values()].filter((e) => e.ev === "airead"),
+      closed: ledgerClosed.filter((e) => e.ev === "airead") }),   // harness: the analyst bucket directly — vi-stamped claims are correctly invisible to the drawer payload
     openLedgerNow: (coin, ev, sigEntry, dir, extra, vi) =>   // harness: fire a claim directly so the context stamp is testable without a full signals build
       openLedger(getRow(coin), ev, sigEntry || { score: 0, reading: "" }, dir, extra, vi),
     // AI analyst report: cached read, on-demand generation (TTL cooldown enforced inside), and

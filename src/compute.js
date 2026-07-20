@@ -520,6 +520,7 @@ const EV_META = {
   pead:     { horizonMs: 10 * DAY, horizon: "next 10d, drifting with the earnings reaction", studyKey: null },  // shadow swing setup (xyz)
   fundext:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the persistent funding extreme", studyKey: null },  // shadow swing setup (crypto)
   liqflush: { horizonMs: 3 * DAY,  horizon: "next 3d, off the liquidation flush", studyKey: null },  // shadow swing setup (crypto)
+  airead:   { horizonMs: 5 * DAY,  horizon: "next 5d, the analyst report's own read", studyKey: null },  // AI analyst accountability claim
 };
 // Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
 // market's own stats, and the one corroborating thing to watch. A description of the setup —
