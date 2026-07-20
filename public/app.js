@@ -4498,6 +4498,10 @@ function renderAiReport(d,coin){
       <span class="sec">${uni==='crypto'?'Hyperliquid perp · crypto':'xyz-dex perp · stocks'}</span>
       <span class="px">${fmtPrice(livePx)}</span>${chg}
       ${aiBiasBadge(d)}</div>
+    ${(()=>{const ar=d.analystRecord;if(!ar)return'';const o=ar.overall||{},m=ar.thisName||{};
+      const f=(x)=>x&&x.n?`<b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b> hit \u00b7 <span class="${x.avgR>=0?'pos':'neg'}">${x.avgR>=0?'+':''}${x.avgR}R</span> <i style="font-style:normal;color:var(--faint);font-size:10px">(n=${x.n})</i>`:null;
+      const ov=f(o), mn=f(m);
+      return `<div class="sec" style="font-size:11px;margin:2px 0 8px" data-tip="the analyst's OWN out-of-sample record: every directional report read is frozen as a claim at generation — the report's void as the stop, its target, mark at generation — and resolved at a 5d horizon, stop-aware, in a bucket fully separate from the signal engine's record. Same discipline the signals answer to; a report that sounds authoritative earns it here or it doesn't.${ar.openOnName?' \u00b7 a read on this name is currently open and resolving':''}">analyst reads: ${ov||'first reads still open \u2014 resolutions land at 5d horizons'}${mn?` \u00b7 this name ${mn}`:''}${ar.open?` \u00b7 ${ar.open} open`:''}</div>`;})()}
     <div class="dsec">The picture in one paragraph</div>
     <div class="ai-syn">${esc(d.ai.synthesis)}</div>
     ${aiChartTfSeg(coin,c)}
