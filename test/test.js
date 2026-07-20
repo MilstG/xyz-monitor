@@ -667,6 +667,39 @@ test("off-site ledger backup: disabled by default, pushes via contents API, blob
     assert.ok(pol.includes(pin), `backup wiring pin missing: ${pin}`);
 });
 
+test("-80 regression: string-typed closes can't kill the board — detectors coerce, shadows are isolated", () => {
+  const C = require("../src/compute");
+  const now = Date.now();
+  // the exact -79 outage shape: every close a string (Hyperliquid serves prices as strings
+  // on some paths). Before the fix, detectFailBrk reached `hi.toPrecision` on a string and
+  // the throw took down the entire signals build, every 10 minutes, board blank.
+  const strs = []; for (let i = 0; i < 45; i++) strs.push([now - (45 - i) * DAY, String(100 + ((i * 7) % 5) * 0.3)]);
+  const hi = Math.max(...strs.slice(-33, -3).map((k) => +k[1]));
+  strs[strs.length - 3][1] = String(hi + 2); strs[strs.length - 2][1] = String(hi + 3); strs[strs.length - 1][1] = String(hi + 1);
+  let fb;
+  assert.doesNotThrow(() => { fb = C.detectFailBrk(strs, hi - 0.4); }, "string closes must never throw");
+  assert.ok(fb && typeof fb.level === "number" && typeof fb.stop === "number",
+    "coercion makes string closes WORK, not just fail closed — the setup still fires with numeric geometry");
+  assert.equal(fb.stop, +(hi + 3).toPrecision(6));
+  assert.doesNotThrow(() => C.detectReclaim(strs, hi - 0.4), "reclaim: same coercion");
+  const strTrend = []; for (let i = 0; i < 70; i++) strTrend.push([now - (70 - i) * DAY, String(100 * Math.pow(1.004, i))]);
+  assert.doesNotThrow(() => C.detectMAPull(strTrend, 130, 2), "mapull: same coercion");
+  // pure garbage fails CLOSED (null), never open
+  const junk = strs.map((k) => [k[0], "not-a-price"]);
+  assert.equal(C.detectFailBrk(junk, 100), null);
+  assert.equal(C.detectReclaim(junk, 100), null);
+  // blast-radius pins: both strategy-shadow blocks are try/catch-isolated with once-per-build
+  // logging — shadow bookkeeping can never take down the visible signal engine again
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.equal((pol.match(/swingFails\+\+; swingErr = \(e && e\.message\) \|\| String\(e\); \}/g) || []).length, 2,
+    "swing block AND gapfade block each catch into the per-build counter");
+  assert.ok(pol.includes("let swingFails = 0, swingErr = null;"), "counters reset per build");
+  assert.ok(pol.includes("strategy shadows failed on ${swingFails} market(s)"), "failures log once per build, visibly");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 3, "all three daily-close detectors coerce");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
