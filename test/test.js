@@ -1026,8 +1026,8 @@ test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-t
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["newsMode='universe'", "const inLane=(a)=>newsMode==='universe'?!!a.tk:(newsMode==='telegram'?!!a.tg:true)",
-    "relevance verdict pending", "a.sec==='off-topic'?' off'", "!a.tk&&a.sec!=='off-topic'&&!a.pend",
-    "attribution AI-verified"])
+    "relevance verdict pending", "a.sec==='off-topic'?' off'", "const isMacroName=!!(r.assetClass&&r.assetClass!=='Equity')",
+    "attribution AI-verified", "no verified headlines for this name in the last 72h"])
     assert.ok(app.includes(pin), `lane pin missing: ${pin}`);
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".nrow.off{opacity:.45}"), "off-topic dimming present");
