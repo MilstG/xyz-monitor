@@ -513,6 +513,9 @@ const EV_META = {
   ondrift:  { horizonMs: null,     horizon: "next 5 overnight windows, held close\u2192open", studyKey: null },
   prem:     { horizonMs: 12 * HOUR, horizon: "reversion toward oracle",       studyKey: null },
   volume:   { horizonMs: null,     horizon: "context flag",                   studyKey: null },
+  gapfade:  { horizonMs: null,     horizon: "next cash session, faded",       studyKey: null },  // shadow strategy — resolveAt = next session close, same calendar as gap
+  reclaim:  { horizonMs: 5 * DAY,  horizon: "next 5d, off the failed breakdown", studyKey: null },  // shadow swing setup
+  mapull:   { horizonMs: 10 * DAY, horizon: "next 10d, off the rising MA50",  studyKey: null },     // shadow swing setup
 };
 // Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
 // market's own stats, and the one corroborating thing to watch. A description of the setup —
@@ -588,7 +591,12 @@ function playbook(ev, ctx) {
     case "fundflip":
       return { side: ctx.dir >= 0 ? "long" : "short",
         bias: ctx.dir >= 0 ? "crowd flipped long \u2014 drift with them short-term" : "crowd flipped short \u2014 drift with them short-term",
-        target: null, stop: null,
+        target: null,
+        // 1σ against the flip direction: gives the event a stop-aware track for the first time
+        // (findings ops item 3 — every prior fundflip claim resolved at-horizon only). Null when
+        // the caller can't supply px/σ, preserving the legacy no-stop shape.
+        stop: ctx.px != null && ctx.px > 0 && ctx.sd30 > 0
+          ? f2(ctx.px * (1 - (ctx.dir >= 0 ? 1 : -1) * ctx.sd30 / 100)) : null,
         watch: "funding flipping straight back voids it; funding STAYING flipped for 2+ days is the confirmation" };
     case "squeeze": {
       // Target is a measured-move EXTENSION above the range (hi30 + 0.382 x range), not the
@@ -756,6 +764,51 @@ function stopTouched(candles, t0, tEnd, dir, stp) {
     if (dir >= 0 ? k[3] <= stp : k[2] >= stp) return true;
   }
   return seen ? false : null;   // null = no candles in window, touch state unknowable
+}
+
+// ---- swing setups (higher-timeframe, human-tradeable) --------------------------------------
+// Pure detectors over the daily close series [[t, close], ...]; the poller shadow-ledgers
+// fires with frozen geometry (vi=0 — invisible everywhere until the record earns promotion).
+// Both are LONG structures; short mirrors can earn shadow slots later if these prove out.
+//
+// 50d-MA pullback: the classic swing entry. MA50 rising (vs 5 sessions ago), price pulled
+// back from >=4% above the MA within the last 10 closes to now sit AT it (+1%/-0.5% band —
+// touching, not breaking), stop 1σ(30d) below the MA, target the prior 30d closing high.
+// Null unless every leg holds and the geometry is tradeable (stop < px < target).
+function detectMAPull(closes, px, sd30) {
+  if (!Array.isArray(closes) || closes.length < 60 || !(px > 0) || !(sd30 > 0)) return null;
+  const c = closes.map((k) => k[1]);
+  const ma = (end, n) => { let s = 0; for (let i = end - n; i < end; i++) s += c[i]; return s / n; };
+  const m0 = ma(c.length, 50), m5 = ma(c.length - 5, 50);
+  if (!(m0 > 0) || !(m0 > m5)) return null;                            // trend filter: MA50 rising
+  let hi10 = -Infinity;
+  for (let i = c.length - 10; i < c.length; i++) if (c[i] > hi10) hi10 = c[i];
+  if (!(hi10 >= m0 * 1.04)) return null;                               // there was something to pull back FROM
+  if (!(px <= m0 * 1.01 && px >= m0 * 0.995)) return null;             // at the MA, not through it
+  let hi30 = -Infinity;
+  for (let i = c.length - 30; i < c.length; i++) if (c[i] > hi30) hi30 = c[i];
+  const stop = m0 * (1 - sd30 / 100), target = hi30;
+  if (!(stop > 0 && stop < px && target > px)) return null;
+  return { ma: +m0.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+// Failed-breakdown reclaim: the direct out-of-sample test of the findings' failed-break
+// structure. The prior 30d closing low (measured EXCLUDING the last 3 sessions) was broken
+// by at least one of those 3 closes, the break is fresh (one of the last TWO closes still
+// below), and the mark is back above the level — the trap sprung and reversed. Stop = the
+// flush low, target = level + 1x(level - flush): the measured move of the trap.
+function detectReclaim(closes, px) {
+  if (!Array.isArray(closes) || closes.length < 40 || !(px > 0)) return null;
+  const c = closes.map((k) => k[1]);
+  let lo = Infinity;
+  for (let i = c.length - 33; i < c.length - 3; i++) if (c[i] < lo) lo = c[i];
+  if (!isFinite(lo) || !(lo > 0)) return null;
+  const flush = Math.min(c[c.length - 3], c[c.length - 2], c[c.length - 1]);
+  if (!(flush < lo)) return null;                                      // the break actually happened
+  if (!(c[c.length - 1] < lo || c[c.length - 2] < lo)) return null;    // and it is fresh, not an old wound
+  if (!(px > lo)) return null;                                         // and the mark has reclaimed the level
+  const stop = flush, target = lo + (lo - flush);
+  if (!(stop < px && target > px)) return null;
+  return { level: +lo.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
 
 // ---- shadow-variant promotion rule ---------------------------------------------------------
@@ -1317,7 +1370,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };

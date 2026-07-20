@@ -16,6 +16,7 @@ function openStore(dataDir) {
   const regimeFile = path.join(dataDir, "regime.json");
   const hourlyFile = path.join(dataDir, "hourly.json");
   const ledgerFile = path.join(dataDir, "ledger.json");
+  const archiveFile = path.join(dataDir, "ledger-archive.jsonl");
   const earnFile = path.join(dataDir, "earnings.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
@@ -166,6 +167,17 @@ function openStore(dataDir) {
     },
     loadLedger() {
       try { return JSON.parse(fs.readFileSync(ledgerFile, "utf8")); } catch (_) { return null; }
+    },
+    // Append-only archive for closed claims aged out of the in-memory retention cap: one JSON
+    // line per entry, appended (never rewritten) to ledger-archive.jsonl on the volume. The
+    // 4000-entry cap now bounds memory only — the record itself is permanent. Reads happen
+    // offline (the analysis pass pulls the file directly); nothing in the app depends on it,
+    // so a failed append degrades to the old behavior instead of breaking the resolver.
+    archiveClosed(entries) {
+      try {
+        if (!Array.isArray(entries) || !entries.length) return;
+        fs.appendFileSync(archiveFile, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      } catch (_) {}
     },
     // Earnings calendar warm cache (small, atomic like the rest): a redeploy inside the 6h
     // refresh window serves the last good fetch instead of blanking badges until Finnhub answers.

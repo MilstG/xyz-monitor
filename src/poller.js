@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -835,7 +835,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -847,7 +847,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const d = store.loadLedger();
     if (!d) return;
     if (Array.isArray(d.open)) for (const e of d.open) if (e && e.key) ledgerOpen.set(e.key, e);
-    if (Array.isArray(d.closed)) ledgerClosed = d.closed.slice(-4000);
+    if (Array.isArray(d.closed)) {
+      if (d.closed.length > 4000 && store.archiveClosed) store.archiveClosed(d.closed.slice(0, d.closed.length - 4000));
+      ledgerClosed = d.closed.slice(-4000);
+    }
     // Unit repair: breakdown/oiflush/fpdiv claims resolved before the normalization fix carry
     // raw-% outcomes despite an R-united claim — sd0 was stamped at fire but never applied at
     // resolution. sd0 survives on the entry, so the stored record is repaired in place rather
@@ -1007,6 +1010,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           fnd: "funding rate at fire", fndP: "funding percentile vs this market's own 31d hourly history (>=96 samples)",
           oi5: "5d open-interest change % at fire", rngP: "position in the 30d range at fire (0=low, 1=high)",
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
+          gw: "gapfade shadow only: void width as a multiple of the market's own gap σ (1.0 or 1.5)",
           ses: "session bucket at fire, xyz only (rth / on / wknd)", dow: "UTC day-of-week at fire (0=Sun)",
         },
       },
@@ -1016,7 +1020,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     };
   }
   function resolveAtFor(ev, t0) {
-    if (ev === "gap") {   // resolves at the close of the next cash session after firing
+    if (ev === "gap" || ev === "gapfade") {   // resolves at the close of the next cash session after firing
       for (const ses of marketSessions(t0, t0 + 6 * DAY)) if (ses.close > t0 && ses.open > t0) return ses.close;
       return t0 + 3 * DAY;
     }
@@ -1169,7 +1173,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           // stop-aware parallel track: if the void level was touched before horizon, the claim's
           // stop-disciplined outcome is the (dir-signed) stop distance instead of the at-horizon
           // move. Same units as `realized`. Claims without a stop keep realizedS === realized.
-          if (e.vi == null && e.stp != null) {
+          // Applies to ANY claim carrying a stop — strategy shadows (gapfade/reclaim/mapull)
+          // stamp one at fire; plain threshold-variant shadows never do, so nothing changes
+          // for them. This is what lets a shadow strategy accrue a stop-disciplined record.
+          if (e.stp != null) {
             // The touch side follows where the stop SITS relative to entry, not e.dir: a proven
             // gap-FADER's void lies in the continuation direction (above entry on an up-gap,
             // dir=+1) — keying on e.dir would call the stop "touched" on the first candle.
@@ -1204,7 +1211,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true;
       rearm.add(key);   // no re-entry until the condition lapses for a full build
     }
-    if (ledgerClosed.length > 4000) ledgerClosed = ledgerClosed.slice(-4000);
+    if (ledgerClosed.length > 4000) {
+      // Archive before trim (findings ops item 1): the retention cap was silently discarding
+      // the ledger's own history — the honesty loop's raw material. Overflow goes to the
+      // append-only archive on the volume first; the cap then only bounds MEMORY, not the
+      // record. Guarded so harness store mocks without the method keep working.
+      if (store.archiveClosed) store.archiveClosed(ledgerClosed.slice(0, ledgerClosed.length - 4000));
+      ledgerClosed = ledgerClosed.slice(-4000);
+    }
     if (ledgerDirty) recomputeRecord();
   }
   // Aggregates one entry set into {record, recordX, confluence, recent}. Run once unfiltered
@@ -1276,7 +1290,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1452,6 +1466,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
             sig.play = playbook("breakdown", { px: r.px, level: lo, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
           out.push(sig); if (sd30 > 0) openLedger(r, "breakdown", sig, -1, { sd0: +sd30.toFixed(3) });
         }
+        // ---- swing shadow setups (findings follow-on): higher-timeframe, human-tradeable
+        // structures earning their record invisibly (vi=0 never surfaces anywhere) before any
+        // UI promotion. Both R-united via sd0, both stop-stamped, both long-only for now —
+        // detection math is pure in compute.js, this is assembly only. -----------------------
+        if (sd30 > 0 && r.px != null) {
+          const rc = detectReclaim(closes, r.px);
+          if (rc && stopGeometryOk("long", r.px, rc.stop))
+            openLedger(r, "reclaim", { score: 0, reading: "" }, 1,
+              { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: rc.stop,
+                mv: +(Math.abs(rc.target / r.px - 1) * 100).toFixed(2) }, 0);
+          const mp = detectMAPull(closes, r.px, sd30);
+          if (mp && stopGeometryOk("long", r.px, mp.stop))
+            openLedger(r, "mapull", { score: 0, reading: "" }, 1,
+              { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: mp.stop,
+                mv: +(Math.abs(mp.target / r.px - 1) * 100).toFixed(2) }, 0);
+        }
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
         if (st.oiflush && st.oiflush.cur && st.oiflush.cur.sd > 0) {
           const doiNow = computeDoi(r);
@@ -1507,6 +1537,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (pc > 0) {
           const g = (r.px / pc - 1) * 100, gz = Math.abs(g) / st.gap.sd;
           VARIANTS.gap.vals.forEach((v, vi) => { if (gz >= v) openLedger(r, "gap", { score: 0, reading: "" }, g >= 0 ? 1 : -1, null, vi); });
+          // Universal size-conditioned fade (findings S1+S5): every >=1σ gap shadow-ledgers a
+          // fade claim in BOTH void widths — 1.0x and 1.5x this market's own gap σ — with the
+          // prior close as target, REGARDLESS of the per-name fade/continue record. This is the
+          // out-of-sample test of the roster-wide mean-reversion structure the analysis found;
+          // play-signed against the gap with a real stop so the stop-disciplined record accrues.
+          // vi != null keeps it invisible everywhere until it earns anything.
+          if (gz >= 1) {
+            const fsd = g >= 0 ? "short" : "long", fdir = g >= 0 ? 1 : -1;
+            const mvF = +(Math.abs(pc / r.px - 1) * 100).toFixed(2);
+            [1, 1.5].forEach((w, vi) => {
+              const stpF = +(r.px * (1 + fdir * (w * st.gap.sd) / 100)).toPrecision(6);
+              if (stopGeometryOk(fsd, r.px, stpF))
+                openLedger(r, "gapfade", { score: 0, reading: "" }, fdir,
+                  { psd: fsd, pn: 1, stp: stpF, mv: mvF, gw: w }, vi);
+            });
+          }
           if (gz >= incVal("gap")) {
             const exc = gBench != null && r.coin !== benchCoin ? g - gBench : null;
             // Play units for faders: when this market's own record says gaps FADE (the exact
@@ -1537,7 +1583,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"), "R");
           const sig = mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
             22, evd, { horizon: EV_META.fundflip.horizon });
-          sig.play = playbook("fundflip", { dir: s0 });
+          sig.play = playbook("fundflip", { dir: s0, px: r.px, sd30 });   // px + σ give the play its 1σ stop (findings ops item 3)
           out.push(sig); if (sd30 > 0) openLedger(r, "fundflip", sig, s0, { sd0: +sd30.toFixed(3) });
         }
       }
