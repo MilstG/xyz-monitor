@@ -2462,7 +2462,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       + "|" + items.filter((x) => x.tk).length + "|" + items.filter((x) => x.pend).length + "|" + items.filter((x) => x.fl).length + "|" + (newsErr || "");
     if (sig !== newsSig) { newsSig = sig; newsVer = Date.now(); }
     newsCache = { ts: Date.now(), dataTs: newsVer, items, fetchedAt: newsFetchedAt || null,
-      ttlHours: 72, error: newsErr, count: items.length };
+      ttlHours: 72, error: newsErr, count: items.length,
+      flStat: { lastOk: edgarStat.lastOk, lastErr: edgarStat.lastErr, names: edgarStat.names, roster: earnEligible().size } };
   }
   async function newsCompanyTick() {
     const token = process.env.FINNHUB_TOKEN || "";
@@ -2581,6 +2582,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // lanes, never fed to the AI classifier, never part of the report's news context.
   const edgarTkAt = new Map();
   const SEC_UA = "xyz-monitor/" + version + " (" + (process.env.SEC_CONTACT || "ops@xyz-monitor.local") + ")";
+  // Observability: silent catches made "no filings" and "SEC is rejecting us" indistinguishable
+  // from the UI — the exact question a user asks on a quiet Sunday. Every outcome is counted,
+  // the last error is kept verbatim, distinct errors log once, and the payload carries the
+  // coverage stamp the footer shows.
+  let edgarStat = { lastOk: null, lastErr: null, lastErrAt: null, ok: 0, http4: 0, http403: 0, fail: 0, names: 0, lastItems: 0 };
+  let edgarLastLogged = "";
   async function edgarTick() {
     const roster = [...earnEligible().values()];
     if (!roster.length) return;
@@ -2592,11 +2599,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       try {
         const res = await fetch(`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(m.ticker)}&type=&dateb=&owner=include&count=20&output=atom`,
           { headers: { accept: "application/atom+xml", "user-agent": SEC_UA } });
-        if (!res.ok) continue;   // unknown-to-EDGAR names (foreign listings) 4xx or return empty — a quiet no-op either way
+        if (!res.ok) {
+          // 4xx on a foreign listing is expected; 403 across the board means the UA or the
+          // egress IP is being rejected — the difference is exactly what the counters show
+          if (res.status === 403) edgarStat.http403++; else edgarStat.http4++;
+          edgarStat.lastErr = `HTTP ${res.status} (${m.ticker})`; edgarStat.lastErrAt = now;
+          if (edgarLastLogged !== "http" + res.status) { edgarLastLogged = "http" + res.status; log(`EDGAR: HTTP ${res.status} on ${m.ticker}${res.status === 403 ? " — UA or egress IP likely rejected; filings will stall until this clears" : ""}`); }
+          continue;
+        }
         const { items } = parseEdgarAtom(await res.text(), m.ticker, now);
+        edgarStat.ok++; edgarStat.lastOk = now; edgarStat.lastItems = items.length;
         got = got.concat(items);
-      } catch (_) {}
+      } catch (e) {
+        edgarStat.fail++; edgarStat.lastErr = "fetch failed: " + (e && e.message); edgarStat.lastErrAt = now;
+        if (edgarLastLogged !== "fetch") { edgarLastLogged = "fetch"; log("EDGAR: " + edgarStat.lastErr); }
+      }
     }
+    edgarStat.names = edgarTkAt.size;
     if (got.length) {
       newsItems = mergeNews(newsItems, got, now);
       newsFetchedAt = now;
@@ -4131,7 +4150,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         backup: { enabled: !!(BK_REPO && BK_TOKEN), repo: BK_REPO || null, lastOk: backupLast, error: backupErr },
         news: { items: newsItems.length, fetchedAt: newsFetchedAt || null, error: newsErr,
           sectors: { tapeClassified: Object.keys(secTape).length, learnedTickers: Object.keys(secLearned).length, error: secErr },
-          filings: { items: newsItems.filter((a) => a.fl).length, material: newsItems.filter((a) => a.fl && a.mat).length },
+          filings: { items: newsItems.filter((a) => a.fl).length, material: newsItems.filter((a) => a.fl && a.mat).length,
+            fetch: { lastOk: edgarStat.lastOk, lastErr: edgarStat.lastErr, lastErrAt: edgarStat.lastErrAt,
+              ok: edgarStat.ok, clientErr: edgarStat.http4, forbidden: edgarStat.http403, netFail: edgarStat.fail,
+              namesCovered: edgarStat.names } },
           telegram: { channels: tgChannels.length, items: newsItems.filter((a) => a.tg).length,
             errors: [...tgStatus.entries()].filter(([, s]) => s.error).map(([c, s]) => c + ": " + s.error) },
           relevance: { verified: newsItems.filter((a) => a.tk && a.rel === 1).length,
