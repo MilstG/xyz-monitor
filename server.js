@@ -1,5 +1,6 @@
 "use strict";
 const path = require("path");
+const fs = require("fs");
 const crypto = require("crypto");
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
@@ -8,7 +9,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.20-84";
+const VERSION = "2026.07.20-85";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -214,11 +215,28 @@ async function main() {
   await fastify.register(require("@fastify/static"), {
     root: path.join(__dirname, "public"),
     prefix: "/",
+    index: false,   // index.html is served by the explicit routes below, version-stamped
     // Force revalidation on every static asset. Without this, browsers heuristically cache
     // app.js/styles.css and a fresh deploy can look like nothing changed until a hard refresh —
     // the exact "I deployed but I don't see it" failure. ETags make revalidation a cheap 304.
     setHeaders(res) { res.setHeader("cache-control", "no-cache"); },
   });
+
+  // Version-stamped shell: index.html is read once at boot with ?v=BUILD stamped onto the two
+  // asset tags, so every deploy changes the asset URLs themselves — a browser can no longer
+  // run last build's app.js against this build's API, whatever its cache heuristics think
+  // (the -84 lesson: revalidation headers alone did not save a stale client). The shell is
+  // no-store; the stamped assets keep the ETag revalidation path.
+  const INDEX_HTML_STAMPED = (() => {
+    let h = fs.readFileSync(path.join(__dirname, "public", "index.html"), "utf8");
+    const a = h.includes('src="/app.js"'), c = h.includes('href="/styles.css"');
+    h = h.replace('src="/app.js"', `src="/app.js?v=${VERSION}"`).replace('href="/styles.css"', `href="/styles.css?v=${VERSION}"`);
+    if (!a || !c) log("WARN: index.html asset tags drifted — version stamp incomplete (cache-busting degraded, app still serves)");
+    return h;
+  })();
+  const serveIndex = (req, reply) => reply.header("cache-control", "no-store").type("text/html; charset=utf-8").send(INDEX_HTML_STAMPED);
+  fastify.get("/", serveIndex);
+  fastify.get("/index.html", serveIndex);
 
   fastify.get("/api/snapshot", (req, reply) =>
     serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] }));
