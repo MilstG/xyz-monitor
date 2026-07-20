@@ -1110,6 +1110,55 @@ test("empty scoped record still RENDERS: awaits, shadows, variants — executed,
   assert.equal(ledgerRosterScoped().length, full.length - 5, "crypto roster excludes exactly the five xyz-only events");
 });
 
+test("ai report v5: news-grounded context, no-invention rule, crypto enrichment, sector-relative", () => {
+  const { p, px, now } = aiTestPoller();   // seeded xyz:NVDA with spines (existing report harness)
+  // verified-only news reaches the analyst: verified, pending and off-topic seeded together
+  p.newsIngestNow([
+    { id: 71, tk: "NVDA", h: "Nvidia unveils next-gen accelerator", src: "Reuters", url: "u", pub: now - 2 * 3600e3 },
+    { id: 72, tk: "NVDA", h: "Stock Market Today: chips lead the tape", src: "Yahoo", url: "u", pub: now - 3600e3 },
+    { id: 73, tk: null, h: "Fed holds rates steady", src: "CNBC", url: "u", pub: now - 3600e3 },
+  ]);
+  p.buildDailyNow();   // populates the roster order — sector peers resolve through activeMarkets()
+  const ctx = p.aiCompileNow("xyz:NVDA");
+  assert.ok(ctx.news && Array.isArray(ctx.news.verified), "ctx.news always ships");
+  assert.equal(ctx.news.verified.length, 1, "ONLY the gate-verified headline reaches the analyst");
+  assert.ok(ctx.news.verified[0].h.includes("accelerator"), "and it is the right one — the listicle stayed out");
+  assert.equal(ctx.news.windowH, 72);
+  // sector-relative: the name-vs-sector distinction ships as explicit numbers
+  assert.ok(ctx.sector && ctx.sector.rel7dPct != null && ctx.sector.median7dPct != null,
+    "sector.rel7dPct present — '+4% while the sector did +1%' is now a fact, not a guess");
+  // validator: news_read is REQUIRED, and claiming usage with an empty verified set is invented news
+  const good = JSON.parse(AI_GOOD(px, px * 0.94, px * 1.1));
+  const noNews = Object.assign({}, ctx, { news: { windowH: 72, verified: [], tape: [], note: "none" } });
+  delete good.news_read;
+  assert.equal(p.aiValidateNow(JSON.stringify(good), noNews).ok, false, "missing news_read rejected");
+  good.news_read = { used: true, note: "leaning on the guidance headline" };
+  const rej = p.aiValidateNow(JSON.stringify(good), noNews);
+  assert.equal(rej.ok, false, "used:true with zero verified headlines = invented news, rejected");
+  assert.ok(/invented news/.test(rej.error));
+  good.news_read = { used: true, note: "accelerator launch supports the long" };
+  assert.equal(p.aiValidateNow(JSON.stringify(good), ctx).ok, true, "used:true WITH a verified headline passes");
+  good.news_read = { used: false, note: "no verified headlines in the window" };
+  assert.equal(p.aiValidateNow(JSON.stringify(good), noNews).ok, true, "honest empty-news read passes");
+  // crypto enrichment: main-universe context carries the crypto block
+  const DAY_ = 86400e3, HOUR_ = 3600e3;
+  const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100, o: 100, h: 101, l: 99, v: 1e6 }); return d; };
+  const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) h.push({ t: now - i * HOUR_, o: 100, h: 100.5, l: 99.5, c: 100, v: 1e5 }); return h; };
+  p.seedRowNow("ETH", { px: 100, ticker: "ETH", uni: "main", vol: 5e7, funding: 0.0001,
+    ref: { p7d: 95, p30d: 90 }, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 99, d1: 1 });
+  const cctx = p.aiCompileNow("ETH");
+  assert.equal(cctx.universe, "crypto");
+  assert.ok(!cctx.sector, "sector-relative stays an equities concept");
+  // funding percentile / OI need long sampled histories the harness doesn't build — the block is
+  // allowed to be absent-when-uncomputable; what must hold is the source wiring:
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["cr.fundingPctile31d = fp", "cr.oiChg24Pct", "cryptoSetupsLive",
+    "const AI_SCHEMA_V = 5;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
+    "invented news", "rel7dPct", "rel30dPct", "context.crypto"])
+    assert.ok(pol.includes(pin), `v5 pin missing: ${pin}`);
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
@@ -2124,6 +2173,7 @@ function aiTestPoller(extra) {
 }
 const AI_GOOD = (px, voidLv, tgt) => JSON.stringify({
   headline: "Constructive, leans long", bias: "long",
+  news_read: { used: false, note: "no verified headlines in the window" },
   synthesis: "This name has been trending higher for weeks on the daily chart, with the 12-hour and 4-hour structure agreeing. Money is entering rather than leaving, and the move is its own strength rather than benchmark beta. The main risk is a pullback toward the ribbon; the thesis holds above the void level.",
   evidence: [
     { k: "structure", v: "Uptrend on all three timeframes that matter, roughly three weeks old." },
@@ -2375,6 +2425,7 @@ test("ai report: level discipline — EMA annotations banned, directional reads 
   cx.claimAnchor = { ev: "breakout", side: "long", stop: +(px * 0.95).toPrecision(6), target: null, t0: Date.now(), resolveAt: Date.now() + 86400000 };
   const shortPayload = JSON.stringify(Object.assign(JSON.parse(AI_GOOD(px, voidLv, tgt)), {
     bias: "short", headline: "Rolling over, leans short",
+    news_read: { used: false, note: "no verified headlines in the window" },
     scenarios: [
       { name: "breakdown extends", kind: "target", p: 0.5, target: +(px * 0.90).toPrecision(6), note: "downtrend persists" },
       { name: "chop", kind: "flat", p: 0.3, target: null },
@@ -2576,6 +2627,6 @@ test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -
   for (const frag of ["AI_MK", "ai-mkleg", "proven-edge signals only", "g.kind==='short'", "distinct signal types at onset", "outTxt", "marksSuppressed"])
     assert.ok(app.includes(frag), `app.js missing -74 marker: ${frag}`);
   assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
-  for (const frag of ["const AI_SCHEMA_V = 4;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
+  for (const frag of ["const AI_SCHEMA_V = 5;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
     assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
 });
