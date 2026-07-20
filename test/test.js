@@ -784,7 +784,7 @@ test("liqflush: cascade exhaustion needs BOTH legs, geometry is the exact half-r
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ['openLedger(r, "liqflush"', "oc24: oiChg24", 'r.uni === "main" && r.d1 != null'])
     assert.ok(pol.includes(pin), `liqflush wiring pin missing: ${pin}`);
-  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush"])'), "liqflush resolves in R");
+  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush", "airead"])'), "liqflush and airead resolve in R");
 });
 
 test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
@@ -1157,6 +1157,55 @@ test("ai report v5: news-grounded context, no-invention rule, crypto enrichment,
     "const AI_SCHEMA_V = 5;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
     "invented news", "rel7dPct", "rel30dPct", "context.crypto"])
     assert.ok(pol.includes(pin), `v5 pin missing: ${pin}`);
+});
+
+test("analyst-read ledger: directional reports freeze claims, episodes hold, buckets stay isolated", async () => {
+  const { p, px, now } = aiTestPoller({ aiFetch: async () => ({ ok: true, json: async () => ({ stop_reason: "end_turn",
+    content: [{ type: "text", text: AI_GOOD(px, +(px * 0.95).toPrecision(6), +(px * 1.10).toPrecision(6)) }] }) }) });
+  const g1 = await p.generateAiReport("xyz:NVDA");
+  assert.ok(g1.ok, "generation succeeds: " + (g1.error || ""));
+  // the claim: frozen at the report's OWN geometry. Observed through the harness accessor —
+  // the drawer payload (getLedgerFor) correctly excludes vi-stamped claims, airead included:
+  // the analyst bucket is invisible to the signal surfaces BY DESIGN, and this test proves
+  // both the claim and the invisibility.
+  assert.ok(!(p.getLedgerFor("xyz:NVDA").open || []).some((e) => e.ev === "airead"),
+    "the drawer ledger slice never shows analyst claims — bucket isolation at the payload too");
+  const cl = p.aireadClaimsNow().open.find((e) => e.coin === "xyz:NVDA");
+  assert.ok(cl, "a validated long read opened an airead claim");
+  assert.equal(cl.psd, "long");
+  assert.equal(cl.stp, +(px * 0.95).toPrecision(6), "the report's void IS the frozen stop — exactly that number");
+  assert.ok(Math.abs(cl.mv - 10) < 0.2, "target distance frozen from the report's target level");
+  assert.equal(cl.vi, 0, "vi=0: outside the visible record sets by construction");
+  assert.ok(cl.rm, "the authoring model is stamped for later slicing");
+  // episode: a same-bias regeneration cannot pseudo-replicate (TTL blocks it here anyway, but
+  // the episode gate must hold independently of the cooldown)
+  p.aiTouchStamp("xyz:NVDA", { closedN: -1 });   // unlock regeneration via material change
+  const g2 = await p.generateAiReport("xyz:NVDA");
+  assert.ok(g2.ok, "regen after unlock succeeds");
+  assert.equal(p.aireadClaimsNow().open.filter((e) => e.coin === "xyz:NVDA").length, 1,
+    "still exactly ONE open analyst claim on the name");
+  // bucket isolation: the analyst record never leaks into the engine's record sets or shadows
+  p.buildSignalsNow();
+  const d = p.getSignals();
+  for (const key of ["0", "0x", "0m"])
+    assert.ok(!d.records[key] || !d.records[key].record.airead, `airead absent from record set ${key}`);
+  assert.ok(![...d.shadows.main, ...d.shadows.xyz].some((g) => g.ev === "airead"), "and absent from the shadows panel");
+  // the record surfaces: ctx + served report both carry analystRecord (open-only state here)
+  const ctx = p.aiCompileNow("xyz:NVDA");
+  assert.ok(ctx.analystRecord && ctx.analystRecord.openOnName, "the analyst sees its own open read in context");
+  const served = p.getAiReport("xyz:NVDA");
+  assert.ok(served.analystRecord && served.analystRecord.open === 1, "the served report carries the live record");
+  // client + wiring pins
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["analyst reads:", "first reads still open", "d.analystRecord"])
+    assert.ok(app.includes(pin), `client analyst-record pin missing: ${pin}`);
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["Neutral reads don't ledger", "!ledgerOpen.has(coin + \"|airead#0\")", "function analystRecordFor(",
+    "context.analystRecord, when present, is YOUR OWN out-of-sample record"])
+    assert.ok(pol.includes(pin), `airead pin missing: ${pin}`);
+  const C = require("../src/compute");
+  assert.equal(C.EV_META.airead.horizonMs, 5 * DAY, "5d horizon");
 });
 
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
