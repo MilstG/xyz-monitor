@@ -787,6 +787,60 @@ test("liqflush: cascade exhaustion needs BOTH legs, geometry is the exact half-r
   assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush"])'), "liqflush resolves in R");
 });
 
+test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
+  const C = require("../src/compute");
+  const now = Date.now(), H = 3600 * 1000;
+  const mk = (id, tk, agoH, h) => ({ id, tk, h: h || ("headline " + id), src: "src", url: "https://x/" + id, pub: now - agoH * H });
+  // dedupe: incoming wins (sources correct headlines)
+  let m = C.mergeNews([mk(1, "AAPL", 5, "old wording")], [mk(1, "AAPL", 5, "corrected wording")], now);
+  assert.equal(m.length, 1); assert.equal(m[0].h, "corrected wording");
+  // eviction on PUBLISH time — a stale article in the store dies even with no incoming
+  m = C.mergeNews([mk(2, "AAPL", 80), mk(3, "AAPL", 5)], [], now);
+  assert.deepEqual(m.map((a) => a.id), [3], "72h publish-time eviction, late fetch earns no bonus lifetime");
+  // future-dated garbage rejected, order newest-first
+  m = C.mergeNews([], [mk(4, null, -9, "from the future"), mk(5, "WDC", 2), mk(6, "WDC", 1)], now);
+  assert.deepEqual(m.map((a) => a.id), [6, 5], "future pub rejected; newest first");
+  // per-ticker cap 10, tape lane wider
+  const many = []; for (let i = 0; i < 15; i++) many.push(mk(100 + i, "NVDA", i * 0.1));
+  for (let i = 0; i < 15; i++) many.push(mk(200 + i, null, i * 0.1));
+  m = C.mergeNews([], many, now);
+  assert.equal(m.filter((a) => a.tk === "NVDA").length, 10, "per-name cap");
+  assert.equal(m.filter((a) => !a.tk).length, 15, "tape lane is wider than any single name");
+  // payload: coin + badge stamps ride server-side (harness, zero network)
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("xyz:WDC", { px: 500, ticker: "WDC", uni: "xyz" });
+  const pay = p.newsIngestNow([mk(9, "WDC", 1), mk(10, null, 2)]);
+  assert.equal(pay.count, 2);
+  const wdc = pay.items.find((a) => a.id === 9);
+  assert.equal(wdc.coin, "xyz:WDC", "equity headlines carry the drawer deep-link coin");
+  assert.ok(!pay.items.find((a) => a.id === 10).coin, "tape items carry no coin");
+  assert.equal(pay.ttlHours, 72);
+  // wiring pins: worker, route fallback, client tab + drawer slice + badge semantics
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["finnhub.io/api/v1/company-news", "finnhub.io/api/v1/news?category=general",
+    "const NEWS_BATCH = 3", "buildNewsPayload();   // sig/ed badge stamps ride the signals cadence",
+    "FINNHUB_TOKEN not set", "store.saveNews({ ts: now, items: newsItems })"])
+    assert.ok(pol.includes(pin), `news worker pin missing: ${pin}`);
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes('error: "not fetched yet"') && srv.split('fastify.get("/api/news"').length - 1 === 1, "route registered once with an honest fallback");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["function renderNews()", "function fillDrawerNews()", "function newsRow(",
+    "id=\"dnews\"", "all ${esc(r.ticker)} news", "no headlines in the last 72h",
+    "if(v==='news'){ if(el('view-news')) openNews();", "nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}"])
+    assert.ok(app.includes(pin), `news client pin missing: ${pin}`);
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(html.includes('data-view="news"') && html.includes('id="view-news"') && html.includes('id="news-body"'), "tab + view section in the markup");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const cls of [".nrow{", ".nbadge.earn{", ".nbadge.sig{", ".nbadge.tape{"])
+    assert.ok(css.includes(cls), `news css missing: ${cls}`);
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(st.includes("saveNews(data)") && st.includes("loadNews()"), "warm-cache persistence wired");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
@@ -1119,7 +1173,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/ai-report", "/api/ai-reports", "/api/health",
-    "/api/export/ledger"];
+    "/api/export/ledger", "/api/news"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
