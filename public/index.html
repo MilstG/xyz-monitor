@@ -46,6 +46,7 @@
   <button class="tab" data-view="sessions">Sessions</button>
   <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
   <button class="tab" data-view="earnings" title="Upcoming earnings reports for the equity universe — dates and session (pre-market / after close), ET calendar">Earnings</button>
+  <button class="tab" data-view="news" title="Headlines for the equity universe (per-name, Finnhub) plus the general macro tape — 72h rolling window, per-name refresh every few minutes. Badges cross-reference the app: amber = earnings within 7 days, red = a live signal is firing on that name.">News</button>
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
   <button class="tab" data-view="report" title="AI analyst report — everything this server holds on one ticker (trend ladder, signals &amp; track record, positioning, earnings, flags) compiled and synthesized by an AI analyst (Claude or GPT, per server config) into a plain-language read with scenarios, R/R and an annotated chart. Cached for everyone; regenerate unlocks on TTL expiry or material change.">Report</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
@@ -234,6 +235,9 @@
   <div id="signals-body"><div class="msg">Loading…</div></div>
 </section>
 
+<section id="view-news" hidden>
+  <div id="news-body"></div>
+</section>
 <section id="view-earnings" hidden>
   <div id="earnings-body"><div class="msg">Loading…</div></div>
 </section>

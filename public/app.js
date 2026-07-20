@@ -262,6 +262,7 @@ function applySnapshot(s){
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
   if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
+  if(Date.now()-_newsLast > 3*60*1000) loadNews();   // rotation lands new names every minute server-side
   if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
@@ -1021,6 +1022,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     ${splitHtml}
     <div id="dseries"></div>
     <div id="dledger"></div>
+    <div id="dnews"></div>
     <div class="dsec">Metrics</div>
     <div class="dgrid">
       ${st('Funding (APR)',`<span class="${fu.c}">${fu.t}</span>`)}
@@ -1047,6 +1049,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   loadDrawerSeries(coin);
   loadDrawerCandles(coin);
   loadDrawerLedger(coin);
+  fillDrawerNews(); if(!state.news) loadNews();   // slice from the shared payload; first open triggers the fetch
   { const dai=el('dai'); if(dai){ dai.onclick=()=>{ closeDetail(); openAiReport(coin); };
     // state-aware label: annotate with the shared cache's age so the group knows a read exists
     fetchJSON('/api/ai-report?coin='+encodeURIComponent(coin)).then(d=>{
@@ -2196,6 +2199,7 @@ function showView(v){
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
+  if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
@@ -2207,6 +2211,13 @@ function showView(v){
 // historical base rate for the same event (median forward return, hit rate, n). Anything with
 // n < 8 wears an "unproven" badge instead of being hidden or oversold.
 let _sigLast=0;
+let _newsLast=0, newsFilter='', newsMode='all';
+async function loadNews(){
+  try{ const d=await fetchJSON('/api/news'); _newsLast=Date.now();
+    if(d&&Array.isArray(d.items)){ state.news=d; if(state.view==='news') renderNews(); if(state.detail) fillDrawerNews(); }
+  }catch(_){/* the tab shows the last good payload; the freshness stamp tells the truth */}
+}
+function openNews(){ renderNews(); if(Date.now()-_newsLast>60*1000) loadNews(); }
 async function loadSignals(){
   try{ const d=await fetchJSON('/api/signals'); _sigLast=Date.now();
     if(d&&Array.isArray(d.signals)){ state.signals=d;
@@ -2805,6 +2816,66 @@ function playRow(g){
 function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date();
   const hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
   return (d.getDate()===n.getDate()&&d.getMonth()===n.getMonth())?hm:(d.getMonth()+1)+'/'+d.getDate()+' '+hm; }
+function newsRow(a,now,inDrawer){
+  const age=fmtAge(now-a.pub), old=now-a.pub>86400000;
+  const badge=inDrawer?'':(a.tk
+    ?`<span class="nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}" data-coin="${esc(a.coin||'')}" data-tip="${esc(a.sig?'a live signal is currently firing on '+a.tk+' — refreshed each signals build, may lag a few minutes; click for the drawer':(a.ed!=null?a.tk+' reports earnings in '+a.ed+' day'+(a.ed===1?'':'s')+'; click for the drawer':'click for the '+a.tk+' drawer'))}">${esc(a.tk)}</span>`
+    :`<span class="nbadge tape" data-tip="general macro tape — not tagged to a universe name">tape</span>`);
+  return `<div class="nrow${old?' old':''}">`
+    +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
+    +badge
+    +`<span class="nhl">${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
+    +(a.src?`<span class="nsrc">${esc(a.src)} \u2197</span>`:'')
+    +`</div>`;
+}
+function renderNews(){
+  const box=el('news-body'); if(!box) return;
+  const d=state.news, now=Date.now();
+  const head=`<div class="nhead">`
+    +`<span class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px" data-tip="per-name headlines (Finnhub company news) for the equity universe + the general macro tape \u00b7 72h rolling window, evicted on publish time \u00b7 this is a digest, not a live wire — the freshness stamp on the right is the coverage clock">news \u2014 xyz universe</span>`
+    +`<span style="flex:1"></span>`
+    +`<input id="nfilter" placeholder="filter: ticker or text" value="${esc(newsFilter)}" style="width:190px">`
+    +['all','tape'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='all'?'name-tagged headlines and the macro tape together':'the general macro tape only'}">${m}</button>`).join('')
+    +(d&&d.fetchedAt?`<span class="sec" style="font-size:10.5px" data-tip="when the news worker last landed a fetch — per-name refresh rotates every few minutes">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:'')
+    +`</div>`;
+  if(!d||!d.items||!d.items.length){
+    box.innerHTML=head+`<div class="msg">${d&&d.error?'News feed error: '+esc(d.error)+' \u2014 the server retries on its own cadence.':'No headlines yet \u2014 the rotation is warming up.'}</div>`;
+    bindNews(box); return;
+  }
+  const f=newsFilter.trim().toLowerCase();
+  const items=d.items.filter(a=>{
+    if(newsMode==='tape'&&a.tk) return false;
+    if(!f) return true;
+    return (a.tk&&a.tk.toLowerCase().includes(f))||(a.h&&a.h.toLowerCase().includes(f));
+  });
+  box.innerHTML=head
+    +(items.length?`<div class="nlist">${items.map(a=>newsRow(a,now,false)).join('')}</div>`:`<div class="msg">nothing matches the filter in the last 72h</div>`)
+    +`<div class="sec" style="font-size:10.5px;margin-top:8px">amber = earnings within 7d \u00b7 red = live signal firing \u00b7 headlines link out to the source \u00b7 72h window, publish-time eviction</div>`;
+  bindNews(box);
+}
+function bindNews(box){
+  const nf=box.querySelector('#nfilter');
+  if(nf){ nf.oninput=()=>{ newsFilter=nf.value; renderNews(); const el2=document.getElementById('nfilter'); if(el2){ el2.focus(); el2.setSelectionRange(el2.value.length,el2.value.length); } }; }
+  box.querySelectorAll('[data-nm]').forEach(b=>b.onclick=()=>{ newsMode=b.dataset.nm; renderNews(); });
+  box.querySelectorAll('.nbadge[data-coin]').forEach(b=>b.onclick=()=>{ const c=b.dataset.coin; if(c) openDetail(c); });
+}
+function fillDrawerNews(){
+  const box=el('dnews'); if(!box||!state.detail) return;
+  const r=state.rows.get(state.detail); if(!r) return;
+  if(r.uni==='main'){ box.innerHTML=''; return; }   // news is an xyz-universe feature
+  const d=state.news, now=Date.now();
+  const isEq=(a)=>a.tk&&r.ticker&&a.tk.toUpperCase()===String(r.ticker).toUpperCase();
+  const mine=d&&d.items?d.items.filter(isEq):[];
+  const tape=d&&d.items?d.items.filter(a=>!a.tk).slice(0,5):[];
+  const list=(mine.length?mine:tape).slice(0,5);
+  let s=`<div class="dsec" data-tip="${mine.length?'per-name headlines from the 72h store \u00b7 evicted on publish time':'this name has no company feed \u2014 showing the general macro tape instead'}">${mine.length?`News \u2014 last 72h \u00b7 ${Math.min(5,mine.length)} of ${mine.length}`:'News \u2014 macro tape'}</div>`;
+  if(!d||!d.items){ s+=`<div class="sec" style="font-size:11px">news feed loading\u2026</div>`; box.innerHTML=s; return; }
+  if(!list.length){ s+=`<div class="nrow" style="border-style:dashed;border-width:1px 0"><span class="sec" style="font-size:11px">no headlines in the last 72h</span></div>`; }
+  else s+=`<div class="nlist">${list.map(a=>newsRow(a,now,true)).join('')}</div>`;
+  s+=`<div style="display:flex;gap:10px;align-items:center;margin-top:5px"><span id="dnews-all" class="sec" style="cursor:pointer;font-size:11px;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the News tab filtered to this name">all ${esc(r.ticker)} news \u2192</span><span style="flex:1"></span>${d.fetchedAt?`<span class="sec" style="font-size:10.5px">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:''}</div>`;
+  box.innerHTML=s;
+  const fb=el('dnews-all'); if(fb) fb.onclick=()=>{ newsFilter=String(r.ticker); newsMode='all'; showView('news'); };
+}
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
 function sigRecFullPref(){ try{ return localStorage.getItem('xyz-sigrecfull')==='1'; }catch(_){ return false; } }
 function setSigRecFull(v){ try{ localStorage.setItem('xyz-sigrecfull',v?'1':'0'); }catch(_){} renderSignals(); }
