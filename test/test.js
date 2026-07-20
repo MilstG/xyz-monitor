@@ -448,6 +448,105 @@ test("fire-time context stamp: computable fields frozen at openLedger, absent fi
   assert.ok(x.open.every(o => Number.isInteger(o.dow)), "export ships the raw stamped fields");
 });
 
+test("swing shadow setups: detectors, geometry, fundflip stop, gapfade wiring, EV_META horizons", () => {
+  const C = require("../src/compute");
+  // ---- 50d-MA pullback: build an uptrend, then place the mark exactly at the MA
+  const now = Date.now(), closes = [];
+  for (let i = 0; i < 70; i++) closes.push([now - (70 - i) * DAY, 100 * Math.pow(1.004, i)]);
+  const c = closes.map((k) => k[1]);
+  const m0 = c.slice(-50).reduce((a, b) => a + b, 0) / 50;
+  const mp = C.detectMAPull(closes, m0 * 1.005, 2);
+  assert.ok(mp, "rising-MA pullback fires when the mark sits at the MA");
+  assert.ok(Math.abs(mp.ma - m0) / m0 < 1e-5, "MA frozen as computed (6-sig-fig quantized)");
+  assert.ok(mp.stop < m0 * 1.005 && mp.target > m0 * 1.005, "tradeable geometry: stop below, target above");
+  assert.ok(Math.abs(mp.stop - m0 * 0.98) / m0 < 1e-5, "stop is 1σ(30d) below the MA");
+  assert.equal(C.detectMAPull(closes, m0 * 1.05, 2), null, "mark far above the MA: no pullback, no fire");
+  assert.equal(C.detectMAPull(closes, m0 * 0.97, 2), null, "mark through the MA: broken, not touching");
+  const down = closes.map((k, i) => [k[0], 100 * Math.pow(0.996, i)]);
+  assert.equal(C.detectMAPull(down, down[down.length - 1][1], 2), null, "falling MA50 never fires");
+  assert.equal(C.detectMAPull(closes.slice(-40), m0, 2), null, "under 60 closes: honest null");
+  // ---- failed-breakdown reclaim: flat range, fresh 3-session flush below the 30d low, mark back above
+  const flat = []; for (let i = 0; i < 45; i++) flat.push([now - (45 - i) * DAY, 100 + ((i * 7) % 5) * 0.3]);
+  const lo = Math.min(...flat.slice(-33, -3).map((k) => k[1]));
+  flat[flat.length - 3][1] = lo - 2; flat[flat.length - 2][1] = lo - 3; flat[flat.length - 1][1] = lo - 1;
+  const rc = C.detectReclaim(flat, lo + 0.4);
+  assert.ok(rc, "fresh break + mark back above the level fires");
+  assert.equal(rc.level, +lo.toPrecision(6), "level is the pre-flush 30d closing low");
+  assert.equal(rc.stop, +(lo - 3).toPrecision(6), "stop is the flush low");
+  assert.ok(Math.abs(rc.target - (lo + 3)) < 1e-9, "target is the measured move: level + (level - flush)");
+  assert.equal(C.detectReclaim(flat, lo - 0.5), null, "mark still below the level: no reclaim");
+  const stale = flat.map((k) => [k[0], k[1]]);
+  stale[stale.length - 2][1] = lo + 1; stale[stale.length - 1][1] = lo + 1;   // break aged out: last two closes back above
+  assert.equal(C.detectReclaim(stale, lo + 0.4), null, "an old wound is not a fresh trap");
+  // ---- fundflip playbook stop (ops item 3): 1σ against the flip; legacy no-ctx shape unchanged
+  const ffL = C.playbook("fundflip", { dir: 1, px: 100, sd30: 2 });
+  assert.equal(ffL.side, "long"); assert.equal(ffL.stop, 98);
+  const ffS = C.playbook("fundflip", { dir: -1, px: 100, sd30: 2 });
+  assert.equal(ffS.side, "short"); assert.equal(ffS.stop, 102);
+  assert.equal(C.playbook("fundflip", { dir: -1 }).stop, null, "no px/σ context: legacy null stop");
+  // ---- EV_META: swing horizons + gapfade on the gap calendar
+  assert.equal(C.EV_META.reclaim.horizonMs, 5 * DAY);
+  assert.equal(C.EV_META.mapull.horizonMs, 10 * DAY);
+  assert.equal(C.EV_META.gapfade.horizonMs, null, "gapfade resolves at the next session close, like gap");
+  // ---- wiring pins: the fire sites and calendar branch exist in the poller
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes('openLedger(r, "gapfade"'), "gapfade shadow fire site present");
+  assert.ok(pol.includes("[1, 1.5].forEach"), "both void widths ledger");
+  assert.ok(pol.includes('ev === "gap" || ev === "gapfade"'), "gapfade rides the gap resolution calendar");
+  assert.ok(pol.includes('openLedger(r, "reclaim"') && pol.includes('openLedger(r, "mapull"'), "swing shadow fire sites present");
+  assert.ok(pol.includes('playbook("fundflip", { dir: s0, px: r.px, sd30 })'), "fundflip call site feeds the stop context");
+});
+
+test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisible to getLedgerFor", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  const mk = (coin, stp) => ({ key: coin + "|reclaim#0", coin, ticker: coin, ev: "reclaim", t0: now - 6 * DAY,
+    mark0: 100, dir: 1, score0: 0, sd0: 2, psd: "long", pn: 1, stp, vi: 0, resolveAt: now - DAY });
+  const fixture = { ts: now, rearm: [], variants: null, closed: [],
+    open: [mk("CLEAN", 95), mk("STOPPED", 99)] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  // hourly spines covering fire -> horizon: CLEAN never nears its stop and drifts to 104;
+  // STOPPED dips through 99 mid-window before closing at 104 — the touch must cap its leg
+  const spine = (dip) => { const hs = []; for (let i = 160; i >= 0; i--) {
+    const t = now - i * 3600e3; let px = 100 + (160 - i) * 0.025;
+    if (dip && i > 60 && i < 70) px = 98.5;
+    hs.push({ t, o: px, h: px + 0.2, l: px - 0.2, c: px, v: 1 }); } return hs; };
+  p.seedRowNow("CLEAN", { px: 104, hourlyRaw: spine(false), hourlyTs: now });
+  p.seedRowNow("STOPPED", { px: 104, hourlyRaw: spine(true), hourlyTs: now });
+  p.buildSignalsNow();   // runs resolveLedger
+  const x = p.getLedgerExport();
+  const done = Object.fromEntries(x.closed.filter((e) => e.ev === "reclaim").map((e) => [e.coin, e]));
+  assert.ok(done.CLEAN && done.CLEAN.status === "resolved", "clean claim resolved");
+  assert.ok(done.CLEAN.rn === 1 && Math.abs(done.CLEAN.realized - 1.5) < 0.3, `resolved in R (spine drifts ~3% over the hold / σ2 ≈ 1.5R), got ${done.CLEAN.realized}`);
+  assert.equal(done.CLEAN.stopped, false, "stop never touched");
+  assert.ok(Math.abs(done.CLEAN.realizedS - done.CLEAN.realized) < 1e-9, "untouched stop: legs coincide");
+  assert.ok(done.STOPPED && done.STOPPED.stopped === true, "dip through the void marks the claim stopped");
+  assert.ok(done.STOPPED.realizedS < 0 && done.STOPPED.realized > 0,
+    "stop-aware leg caps at the void while at-horizon rides to the target — the exact honesty split");
+  assert.equal(p.getLedgerFor("CLEAN").closed.length, 0, "strategy shadows never surface in the claim browser");
+});
+
+test("ledger archive: overflow is appended to the volume before the retention trim", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzarc-"));
+  const s = openStore(dir);
+  s.archiveClosed([{ key: "A|gap", realized: 1 }, { key: "B|gap", realized: -1 }]);
+  s.archiveClosed([{ key: "C|prem", realized: 2 }]);
+  s.archiveClosed([]);   // empty append is a no-op, not a blank line
+  const lines = fs.readFileSync(path.join(dir, "ledger-archive.jsonl"), "utf8").trim().split("\n");
+  assert.equal(lines.length, 3, "one JSON line per archived entry, append-only across calls");
+  assert.equal(JSON.parse(lines[2]).key, "C|prem", "order preserved");
+  // wiring pins: both trim sites archive first, guarded for mocks without the method
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.equal((pol.match(/store\.archiveClosed\(/g) || []).length >= 2 && pol.includes("if (store.archiveClosed)"), true,
+    "resolver + hydrate trims archive before slicing, guarded");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
