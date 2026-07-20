@@ -2176,6 +2176,7 @@ function applyScope(){
   if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='signals') { showView('markets'); }
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   if(state.view==='signals') renderSignals();   // signals tab is universe-scoped — repaint on flip
+  setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
@@ -2192,6 +2193,7 @@ function showView(v){
   setHidden('view-sessions', v!=='sessions');
   setHidden('view-signals', v!=='signals');
   setHidden('view-earnings', v!=='earnings');
+  setHidden('view-news', v!=='news');
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
@@ -2221,9 +2223,15 @@ function openNews(){ renderNews(); if(Date.now()-_newsLast>60*1000) loadNews(); 
 async function loadSignals(){
   try{ const d=await fetchJSON('/api/signals'); _sigLast=Date.now();
     if(d&&Array.isArray(d.signals)){ state.signals=d;
-      const tb=el('tab-signals'); if(tb) tb.textContent = d.count>0 ? `Signals (${d.count})` : 'Signals';
+      setSigTabBadge();
       if(!el('view-signals').hidden) renderSignals(); }
   }catch(_){}
+}
+function setSigTabBadge(){
+  const tb=el('tab-signals'), d=state.signals; if(!tb) return;
+  // per-scope count: the badge must speak for the universe you're looking at, not the union
+  const n=d?(d.countU?(state.scope==='crypto'?d.countU.main:d.countU.xyz):d.count):0;
+  tb.textContent = n>0 ? `Signals (${n})` : 'Signals';
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
 
