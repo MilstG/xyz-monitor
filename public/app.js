@@ -2213,7 +2213,7 @@ function showView(v){
 // historical base rate for the same event (median forward return, hit rate, n). Anything with
 // n < 8 wears an "unproven" badge instead of being hidden or oversold.
 let _sigLast=0;
-let _newsLast=0, newsFilter='', newsMode='universe', newsSec='', newsView='latest', newsTgOpen=false, tgChans=null;
+let _newsLast=0, newsFilter='', newsMode='universe', newsSec='', newsView='latest', newsTgOpen=false, tgChans=null, newsFl='mat', newsFlForm='';
 const SEC_SHORT={'Information Technology':'Info Tech','Consumer Discretionary':'Cons Disc','Communication Services':'Comms','Consumer Staples':'Staples','Health Care':'Health','Real Estate':'Real Est'};
 function secShort(s){ return SEC_SHORT[s]||s; }
 async function loadNews(){
@@ -2841,6 +2841,15 @@ function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date()
   return (d.getDate()===n.getDate()&&d.getMonth()===n.getMonth())?hm:(d.getMonth()+1)+'/'+d.getDate()+' '+hm; }
 function newsRow(a,now,inDrawer){
   const age=fmtAge(now-a.pub), old=now-a.pub>86400000;
+  if(a.fl){
+    return `<div class="nrow${old?' old':''}">`
+      +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
+      +`<span class="nform${a.mat?' mat':''}" data-form="${esc(a.form)}" data-tip="${esc((a.mat?'material form':'routine form')+' \u00b7 click to filter to '+a.form+' filings')}">${esc(a.form)}</span>`
+      +`<span class="nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}" data-coin="${esc(a.coin||'')}" data-tip="${esc('click for the '+a.tk+' drawer')}">${esc(a.tk)}</span>`
+      +`<span class="nhl">${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
+      +`<span class="nsrc">EDGAR \u2197</span>`
+      +`</div>`;
+  }
   const badge=inDrawer?'':(a.tk
     ?`<span class="nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}" data-coin="${esc(a.coin||'')}" data-tip="${esc(a.sig?'a live signal is currently firing on '+a.tk+' — refreshed each signals build, may lag a few minutes; click for the drawer':(a.ed!=null?a.tk+' reports earnings in '+a.ed+' day'+(a.ed===1?'':'s')+'; click for the drawer':'click for the '+a.tk+' drawer'))+(a.relAi?' \u00b7 attribution AI-verified (headline did not name the company directly)':'')}">${esc(a.tk)}</span>`
     :(a.pend
@@ -2858,9 +2867,9 @@ function newsRow(a,now,inDrawer){
 function renderNews(){
   const box=el('news-body'); if(!box) return;
   const d=state.news, now=Date.now();
-  const inLane=(a)=>newsMode==='universe'?!!a.tk:(newsMode==='telegram'?!!a.tg:true);   // universe = verified-attributed; telegram = TG-only cut; tape = everything, unfiltered
+  const inLane=(a)=>newsMode==='filings'?!!a.fl:(a.fl?false:(newsMode==='universe'?!!a.tk:(newsMode==='telegram'?!!a.tg:true)));   // filings are exclusive BOTH ways: only in their lane, never in universe/tape/telegram
   const secCounts=new Map();
-  if(d&&d.items) for(const a of d.items){ if(a.sec&&inLane(a)) secCounts.set(a.sec,(secCounts.get(a.sec)||0)+1); }
+  if(d&&d.items) for(const a of d.items){ if(a.sec&&!a.fl&&inLane(a)) secCounts.set(a.sec,(secCounts.get(a.sec)||0)+1); }
   const secOpts=[...secCounts.entries()].sort((x,y)=>y[1]-x[1]);
   const head=`<div class="nhead">`
     +`<span class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px" data-tip="per-name headlines (Finnhub company news) for the equity universe + the general macro tape \u00b7 72h rolling window, evicted on publish time \u00b7 this is a digest, not a live wire — the freshness stamp on the right is the coverage clock \u00b7 sectors: solid badge = static GICS map, ~ = AI-classified (write-once, fallback model)">news \u2014 xyz universe</span>`
@@ -2871,7 +2880,7 @@ function renderNews(){
     +secOpts.map(([s,n])=>`<option value="${esc(s)}"${newsSec===s?' selected':''}>${esc(secShort(s))} (${n})</option>`).join('')
     +`</select>`
     +['latest','sector'].map(m=>`<button type="button" class="cdtf${newsView===m?' on':''}" data-nv="${m}" data-tip="${m==='latest'?'one reverse-chronological stream':'grouped by sector, sections ordered by newest headline'}">${m==='latest'?'latest':'by sector'}</button>`).join('')
-    +['universe','tape','telegram'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='universe'?'ONLY headlines verified to concern a universe name \u2014 the relevance gate (name match, AI verdict, or a single-name telegram match) has confirmed the attribution; nothing leaks in':m==='tape'?'the consolidated unfiltered feed: Finnhub wire, macro tape, telegram posts, unverified/pending items, off-topic (dimmed) \u2014 all sources interleaved by publish time':'telegram posts only \u2014 the channels configured in \u2699, attributed and unattributed alike'}">${m}</button>`).join('')
+    +['universe','tape','telegram','filings'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='universe'?'ONLY headlines verified to concern a universe name \u2014 the relevance gate (name match, AI verdict, or a single-name telegram match) has confirmed the attribution; nothing leaks in':m==='tape'?'the consolidated unfiltered feed: Finnhub wire, macro tape, telegram posts, unverified/pending items, off-topic (dimmed) \u2014 all sources interleaved by publish time':m==='telegram'?'telegram posts only \u2014 the channels configured in \u2699, attributed and unattributed alike':'SEC EDGAR filings for the equity universe \u2014 a completely separate lane: regulatory events, not headlines. 7-day window, per-company Atom feeds from sec.gov'}">${m}</button>`).join('')
     +`<span class="cdtf" id="ntg-gear" data-tip="manage telegram channels \u2014 shared for the whole group, saved server-side">\u2699</span>`
     +(d&&d.fetchedAt?`<span class="sec" style="font-size:10.5px" data-tip="when the news worker last landed a fetch — per-name refresh rotates every few minutes">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:'')
     +`</div>`;
@@ -2882,10 +2891,16 @@ function renderNews(){
   const f=newsFilter.trim().toLowerCase();
   const items=d.items.filter(a=>{
     if(!inLane(a)) return false;
+    if(newsMode==='filings'){
+      if(newsFl==='mat'&&!a.mat) return false;
+      if(newsFl==='own'&&!a.own) return false;
+      if(newsFlForm&&a.form!==newsFlForm) return false;
+    }
     if(newsSec&&a.sec!==newsSec) return false;
     if(!f) return true;
-    return (a.tk&&a.tk.toLowerCase().includes(f))||(a.h&&a.h.toLowerCase().includes(f));
+    return (a.tk&&a.tk.toLowerCase().includes(f))||(a.h&&a.h.toLowerCase().includes(f))||(a.form&&a.form.toLowerCase().includes(f));
   });
+  const flChips=newsMode==='filings'?`<div style="display:flex;gap:6px;margin-bottom:8px">${[['mat','material','8-K, 10-K/Q, S-1/S-3, 13D, proxies \u2014 the forms that move marks'],['own','ownership','insider forms: 3/4/5, 144, 13G \u2014 the flow, not the events'],['all','all forms','every filing in the 7d window']].map(([k,l,tip])=>`<button type="button" class="cdtf${newsFl===k?' on':''}" data-nfl="${k}" data-tip="${tip}">${l}</button>`).join('')}${newsFlForm?`<button type="button" class="cdtf on" data-nflform="" data-tip="click to clear the form filter">${esc(newsFlForm)} \u2715</button>`:''}</div>`:'';
   let tgPanel='';
   if(newsTgOpen){
     const chans=tgChans&&tgChans.channels?tgChans.channels:null;
@@ -2901,7 +2916,7 @@ function renderNews(){
   }
   let body;
   if(!items.length) body=`<div class="msg">${newsMode==='telegram'?(tgChans&&tgChans.channels&&tgChans.channels.length?'no telegram posts in the last 72h \u2014 the channels are fetched every 10 minutes':'no channels configured \u2014 open \u2699 to add public channels')+'':'nothing matches the filter in the last 72h'}</div>`;
-  else if(newsView==='sector'){
+  else if(newsView==='sector'&&newsMode!=='filings'){
     // grouped view: sections keyed by sector (unclassified bucketed), ordered by newest item;
     // reverse-chron inside each — the "what's moving in energy today" reading mode
     const groups=new Map();
@@ -2911,8 +2926,10 @@ function renderNews(){
       `<div class="sec nsec-head" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;padding:8px 0 3px" data-tip="${esc(s==='unclassified'?'no sector yet — classification is write-once and catches up on its own cadence':'sections ordered by newest headline; newest first within')}">${esc(secShort(s))} \u00b7 ${list.length} headline${list.length===1?'':'s'} \u00b7 newest ${fmtAge(now-list[0].pub)}</div>`
       +`<div class="nlist">${list.map(a=>newsRow(a,now,false)).join('')}</div>`).join('');
   } else body=`<div class="nlist">${items.map(a=>newsRow(a,now,false)).join('')}</div>`;
-  box.innerHTML=head+tgPanel+body
-    +`<div class="sec" style="font-size:10.5px;margin-top:8px">universe = verified attribution only \u00b7 amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 off-topic dimmed in tape \u00b7 72h window</div>`;
+  box.innerHTML=head+tgPanel+flChips+body
+    +(newsMode==='filings'
+      ?`<div class="sec" style="font-size:10.5px;margin-top:8px">filings live only in this lane \u2014 never mixed into universe/tape/telegram \u00b7 amber form = material \u00b7 ticker click \u2192 drawer \u00b7 form click \u2192 filter \u00b7 source: sec.gov EDGAR \u00b7 7d window</div>`
+      :`<div class="sec" style="font-size:10.5px;margin-top:8px">universe = verified attribution only \u00b7 amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 off-topic dimmed in tape \u00b7 72h window</div>`);
   bindNews(box);
 }
 function bindNews(box){
@@ -2928,6 +2945,9 @@ function bindNews(box){
   box.querySelectorAll('[data-rmch]').forEach(b=>b.onclick=()=>{ const cur=(tgChans&&tgChans.channels?tgChans.channels.map(c=>c.c):[]); saveTgChannels(cur.filter(c=>c!==b.dataset.rmch)); });
   { const sel=box.querySelector('#nsec'); if(sel) sel.onchange=()=>{ newsSec=sel.value; renderNews(); }; }
   box.querySelectorAll('.nsec-badge[data-sec]').forEach(b=>b.onclick=()=>{ newsSec=b.dataset.sec; renderNews(); });
+  box.querySelectorAll('[data-nfl]').forEach(b=>b.onclick=()=>{ newsFl=b.dataset.nfl; newsFlForm=''; renderNews(); });
+  box.querySelectorAll('[data-nflform]').forEach(b=>b.onclick=()=>{ newsFlForm=''; renderNews(); });
+  box.querySelectorAll('.nform[data-form]').forEach(b=>b.onclick=()=>{ newsFlForm=b.dataset.form; renderNews(); });
   box.querySelectorAll('.nbadge[data-coin]').forEach(b=>b.onclick=()=>{ const c=b.dataset.coin; if(c) openDetail(c); });
 }
 function fillDrawerNews(){
