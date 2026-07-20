@@ -8,7 +8,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.18-75";
+const VERSION = "2026.07.20-76";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -257,6 +257,17 @@ async function main() {
     const coin = (req.query && req.query.coin) || "";
     const ev = (req.query && req.query.ev) || "";
     return poller.getLedgerFor(coin, ev);
+  });
+  // One-shot raw ledger dump for offline analysis: every retained closed claim (shadow
+  // variants and legacy entries included), open claims, variant state, and an embedded field
+  // glossary so the file is self-describing months later. Served as a browser download;
+  // session-gated by the global hook like every /api route (Basic auth works for curl).
+  // Deliberately under /api/export/ — NOT /api/ledger/export — so the route manifest's
+  // exactly-once string pin on "/api/ledger" keeps counting one registration.
+  fastify.get("/api/export/ledger", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    reply.header("content-disposition", `attachment; filename="xyz-ledger-${new Date().toISOString().slice(0, 10)}.json"`);
+    return poller.getLedgerExport();
   });
   // Hourly OHLCV for the drawer candle chart. days: 1..60, default 14. With tf=1h|4h|12h|1d the
   // response is instead the EXACT per-rung series the trend ladder consumes (Trend-tab chart
