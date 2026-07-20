@@ -780,7 +780,7 @@ function stopTouched(candles, t0, tEnd, dir, stp) {
 // Null unless every leg holds and the geometry is tradeable (stop < px < target).
 function detectMAPull(closes, px, sd30) {
   if (!Array.isArray(closes) || closes.length < 60 || !(px > 0) || !(sd30 > 0)) return null;
-  const c = closes.map((k) => k[1]);
+  const c = closes.map((k) => +k[1]);   // COERCE: string closes reach here on some feed paths; NaN math fails closed (null), never throws
   const ma = (end, n) => { let s = 0; for (let i = end - n; i < end; i++) s += c[i]; return s / n; };
   const m0 = ma(c.length, 50), m5 = ma(c.length - 5, 50);
   if (!(m0 > 0) || !(m0 > m5)) return null;                            // trend filter: MA50 rising
@@ -801,10 +801,10 @@ function detectMAPull(closes, px, sd30) {
 // flush low, target = level + 1x(level - flush): the measured move of the trap.
 function detectReclaim(closes, px) {
   if (!Array.isArray(closes) || closes.length < 40 || !(px > 0)) return null;
-  const c = closes.map((k) => k[1]);
+  const c = closes.map((k) => +k[1]);   // COERCE — see detectMAPull
   let lo = Infinity;
   for (let i = c.length - 33; i < c.length - 3; i++) if (c[i] < lo) lo = c[i];
-  if (!isFinite(lo) || !(lo > 0)) return null;
+  if (!Number.isFinite(lo) || !(lo > 0)) return null;
   const flush = Math.min(c[c.length - 3], c[c.length - 2], c[c.length - 1]);
   if (!(flush < lo)) return null;                                      // the break actually happened
   if (!(c[c.length - 1] < lo || c[c.length - 2] < lo)) return null;    // and it is fresh, not an old wound
@@ -820,10 +820,10 @@ function detectReclaim(closes, px) {
 // the flush high, target = level - 1x(flush - level): the same measured-move trap, inverted.
 function detectFailBrk(closes, px) {
   if (!Array.isArray(closes) || closes.length < 40 || !(px > 0)) return null;
-  const c = closes.map((k) => k[1]);
+  const c = closes.map((k) => +k[1]);   // COERCE — see detectMAPull (the -79 production outage: hi.toPrecision on a string close)
   let hi = -Infinity;
   for (let i = c.length - 33; i < c.length - 3; i++) if (c[i] > hi) hi = c[i];
-  if (!isFinite(hi) || !(hi > 0)) return null;
+  if (!Number.isFinite(hi) || !(hi > 0)) return null;
   const flush = Math.max(c[c.length - 3], c[c.length - 2], c[c.length - 1]);
   if (!(flush > hi)) return null;                                      // the break actually happened
   if (!(c[c.length - 1] > hi || c[c.length - 2] > hi)) return null;    // and it is fresh

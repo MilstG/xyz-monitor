@@ -1413,6 +1413,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       (g[ev + ":" + key] || (g[ev + ":" + key] = [])).push(...raws);
     };
     const acOf = (r) => classifyCached(r.ticker).assetClass || "Other";
+    let swingFails = 0, swingErr = null;   // strategy-shadow failures: counted per build, logged once, never fatal
     // per-ticker earnings prints for the pead shadow: built once per build, tiny array
     const earnPrintsByTk = new Map();
     for (const pr of earnPrints) { let a = earnPrintsByTk.get(pr.t); if (!a) { a = []; earnPrintsByTk.set(pr.t, a); } a.push(pr); }
@@ -1478,9 +1479,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         }
         // ---- swing shadow setups (findings follow-on): higher-timeframe, human-tradeable
         // structures earning their record invisibly (vi=0 never surfaces anywhere) before any
-        // UI promotion. Both R-united via sd0, both stop-stamped, both long-only for now —
-        // detection math is pure in compute.js, this is assembly only. -----------------------
-        if (sd30 > 0 && r.px != null) {
+        // UI promotion. R-united via sd0, stop-stamped — detection math is pure in compute.js,
+        // this is assembly only. ISOLATED per row: shadow bookkeeping must NEVER take down the
+        // visible signal engine (the -79 outage: one market's string-typed closes threw here
+        // and safeTick ate the whole build — board blank, claims half-opened, every 10 min).
+        try { if (sd30 > 0 && r.px != null) {
           const rc = detectReclaim(closes, r.px);
           if (rc && stopGeometryOk("long", r.px, rc.stop))
             openLedger(r, "reclaim", { score: 0, reading: "" }, 1,
@@ -1531,7 +1534,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
               }
             }
           }
-        }
+        } } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
         if (st.oiflush && st.oiflush.cur && st.oiflush.cur.sd > 0) {
           const doiNow = computeDoi(r);
@@ -1593,7 +1596,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           // out-of-sample test of the roster-wide mean-reversion structure the analysis found;
           // play-signed against the gap with a real stop so the stop-disciplined record accrues.
           // vi != null keeps it invisible everywhere until it earns anything.
-          if (gz >= 1) {
+          try { if (gz >= 1) {
             const fsd = g >= 0 ? "short" : "long", fdir = g >= 0 ? 1 : -1;
             const mvF = +(Math.abs(pc / r.px - 1) * 100).toFixed(2);
             [1, 1.5].forEach((w, vi) => {
@@ -1602,7 +1605,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
                 openLedger(r, "gapfade", { score: 0, reading: "" }, fdir,
                   { psd: fsd, pn: 1, stp: stpF, mv: mvF, gw: w }, vi);
             });
-          }
+          } } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
           if (gz >= incVal("gap")) {
             const exc = gBench != null && r.coin !== benchCoin ? g - gBench : null;
             // Play units for faders: when this market's own record says gaps FADE (the exact
@@ -1883,6 +1886,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       }
       if (eg.length) earnSplit[ev] = { eg: summarizeEvents(eg), reg: reg.length ? summarizeEvents(reg) : null };
     }
+    if (swingFails) log(`strategy shadows failed on ${swingFails} market(s) this build (isolated, board unaffected): ${swingErr}`);
     signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, recent: rs0 ? rs0.recent : [], earnSplit };
