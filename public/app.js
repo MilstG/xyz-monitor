@@ -2168,15 +2168,16 @@ function applyScope(){
   // Trend and Report stay visible in crypto scope (the only tabs besides Markets that do) —
   // Trend follows the scope switcher like the Markets table; Report is universe-tagged per
   // ticker, so the same tab serves both universes regardless of scope.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report'; });
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='signals'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report') { showView('markets'); }
+  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='signals') { showView('markets'); }
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
+  if(state.view==='signals') renderSignals();   // signals tab is universe-scoped — repaint on flip
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report') v='markets';   // crypto scope: Markets + Trend + Report (the latter two carry both universes)
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='signals') v='markets';   // crypto scope: Markets + Trend + Report + Signals (universe-scoped)
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -2928,7 +2929,7 @@ function recCurveSvg(curve){
 }
 function sigRecordHtml(d){
   const thr=sigMovePref(), pr=sigPrimePref();
-  const rs=(d&&d.records&&d.records[String(thr)+(pr?'p':'')])||d||{};
+  const rs=(d&&d.records&&(d.records[String(thr)+(pr?'p':'')+(state.scope==='crypto'?'m':'x')]||d.records[String(thr)+(pr?'p':'')]))||d||{};
   const rc=rs.record||{};
   const evs=Object.keys(rc);
   let fired=0,resolved=0,wins=0,open=0,nS=0,winsS=0;
@@ -3021,9 +3022,10 @@ function sigRecordHtml(d){
       s+='</div>';
     }
   }
-  if(d&&d.shadows&&d.shadows.length){
+  const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);
+  if(shPanel&&shPanel.length){
     s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="Strategy shadows: whole candidate STRATEGIES (not threshold tweaks) earning an out-of-sample record before any promotion. Every claim carries frozen side/void/target at fire, resolves stop-aware, and is episode-deduped like everything else \u2014 and NONE of it touches the live board. This panel is the entire record; nothing is curated away. A strategy that never earns anything simply never surfaces.">strategy shadows (earning their record)</div>`;
-    for(const g of d.shadows){
+    for(const g of shPanel){
       s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="${esc(g.tip)}">${esc(g.label)}</span>`;
       for(const r of g.rows){
         const pre=r.tag?esc(r.tag)+' ':'';
@@ -3058,11 +3060,11 @@ function renderSignals(){
   // One control row (build -69): the static history search/dropdown, the intro text, and the
   // prime/move/view segments all share the line — rendered into static slots so the inputs
   // keep their state across re-renders.
-  { const it=el('sig-introtxt'); if(it) it.innerHTML=`<span data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?).">Live conditions \u00b7 <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited${d&&d.count>(d.signals||[]).length?` \u00b7 top <b>${(d.signals||[]).length}</b> of <b>${d.count}</b>`:''}</span>`;
+  { const it=el('sig-introtxt'); if(it) it.innerHTML=`<span data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?).">Live conditions \u00b7 <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited${(()=>{const cu=d&&d.countU?(state.scope==='crypto'?d.countU.main:d.countU.xyz):d&&d.count;const sh=(d&&d.signals?d.signals.filter(g=>(g.uni==='main')===(state.scope==='crypto')).length:0);return cu>sh?` \u00b7 top <b>${sh}</b> of <b>${cu}</b>`:'';})()}</span>`;
     const sl=el('sig-segslot'); if(sl&&sl.innerHTML!==seg){ sl.innerHTML=seg; bindSigControls(sl); } }
   const intro='';
   let rec='';
-  const rsTop=(d&&d.records&&d.records[String(mvThr)+(prOn?'p':'')])||d||{};
+  const rsTop=(d&&d.records&&(d.records[String(mvThr)+(prOn?'p':'')+(state.scope==='crypto'?'m':'x')]||d.records[String(mvThr)+(prOn?'p':'')]))||d||{};
   const recSrc=rsTop.record||{};
   // Every event capable of ledgering a claim. Roster members with zero claims render as
   // explicit "awaiting first claim" entries — without this, "never fired" and "not wired"
@@ -3099,15 +3101,16 @@ function renderSignals(){
       if(chips) rec+=`<div class="recstrip" style="margin-top:4px">${chips}</div>`;
     }
   }
-  if(!d||!d.signals||!d.signals.length){
-    box.innerHTML=intro+`<div class="msg">No unusual conditions firing right now \u2014 the tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
+  if(!d||!d.signals||!d.signals.filter(g=>(g.uni==='main')===(state.scope==='crypto')).length){
+    box.innerHTML=intro+`<div class="msg">No unusual ${state.scope==='crypto'?'crypto':'stocks/macro'} conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
     bindSigControls(box); return;
   }
   let hiddenN=0;
-  const sigs = (mvThr>0||prOn) ? d.signals.filter(g=>{
+  const scoped = d.signals.filter(g=>(g.uni==='main')===(state.scope==='crypto'));   // hard-separated universes: the tab shows only the active scope's conditions
+  const sigs = (mvThr>0||prOn) ? scoped.filter(g=>{
     const m=sigMove(g);
     const ok=(mvThr===0||(m!=null&&m>=mvThr))&&(!prOn||g.prime);
-    if(!ok)hiddenN++; return ok; }) : d.signals;
+    if(!ok)hiddenN++; return ok; }) : scoped;
   const groups=[], byCoin={};
   for(const g of sigs){ if(byCoin[g.coin]){ byCoin[g.coin].sigs.push(g); byCoin[g.coin].score=Math.max(byCoin[g.coin].score,g.score); }
     else { byCoin[g.coin]={coin:g.coin,ticker:g.ticker,score:g.score,sigs:[g]}; groups.push(byCoin[g.coin]); } }
