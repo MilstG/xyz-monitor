@@ -9,7 +9,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.20-90";
+const VERSION = "2026.07.20-91";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -275,6 +275,14 @@ async function main() {
     const coin = (req.query && req.query.coin) || "";
     const ev = (req.query && req.query.ev) || "";
     return poller.getLedgerFor(coin, ev);
+  });
+  // Telegram channel management: shared group config. GET = list + per-channel status,
+  // POST = replace the list (validated server-side, persisted to the volume, applied within
+  // seconds). Small and mutable — served uncached.
+  fastify.get("/api/news/channels", (req, reply) => reply.header("cache-control", "no-store").send(poller.getTgChannels()));
+  fastify.post("/api/news/channels", (req, reply) => {
+    const r = poller.setTgChannels(req.body && req.body.channels);
+    return reply.code(r.ok ? 200 : 400).send(r);
   });
   // News feed for the xyz universe: company headlines + macro tape, 72h retention, served
   // whole (the drawer slices client-side from the same payload — one fetch, one source).
