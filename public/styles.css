@@ -725,3 +725,4 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .nsec-badge{border:1px solid var(--border);background:var(--panel);color:var(--muted);border-radius:4px;padding:1px 7px;font-size:10.5px;cursor:pointer;white-space:nowrap}
 .nsec-badge.ai{border-style:dashed}
 .nsec-head{border-bottom:none}
+.nrow.off{opacity:.45}

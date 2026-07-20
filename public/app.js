@@ -2213,7 +2213,7 @@ function showView(v){
 // historical base rate for the same event (median forward return, hit rate, n). Anything with
 // n < 8 wears an "unproven" badge instead of being hidden or oversold.
 let _sigLast=0;
-let _newsLast=0, newsFilter='', newsMode='all', newsSec='', newsView='latest';
+let _newsLast=0, newsFilter='', newsMode='universe', newsSec='', newsView='latest';
 const SEC_SHORT={'Information Technology':'Info Tech','Consumer Discretionary':'Cons Disc','Communication Services':'Comms','Consumer Staples':'Staples','Health Care':'Health','Real Estate':'Real Est'};
 function secShort(s){ return SEC_SHORT[s]||s; }
 async function loadNews(){
@@ -2829,10 +2829,12 @@ function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date()
 function newsRow(a,now,inDrawer){
   const age=fmtAge(now-a.pub), old=now-a.pub>86400000;
   const badge=inDrawer?'':(a.tk
-    ?`<span class="nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}" data-coin="${esc(a.coin||'')}" data-tip="${esc(a.sig?'a live signal is currently firing on '+a.tk+' — refreshed each signals build, may lag a few minutes; click for the drawer':(a.ed!=null?a.tk+' reports earnings in '+a.ed+' day'+(a.ed===1?'':'s')+'; click for the drawer':'click for the '+a.tk+' drawer'))}">${esc(a.tk)}</span>`
-    :`<span class="nbadge tape" data-tip="general macro tape — not tagged to a universe name">tape</span>`);
+    ?`<span class="nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}" data-coin="${esc(a.coin||'')}" data-tip="${esc(a.sig?'a live signal is currently firing on '+a.tk+' — refreshed each signals build, may lag a few minutes; click for the drawer':(a.ed!=null?a.tk+' reports earnings in '+a.ed+' day'+(a.ed===1?'':'s')+'; click for the drawer':'click for the '+a.tk+' drawer'))+(a.relAi?' \u00b7 attribution AI-verified (headline did not name the company directly)':'')}">${esc(a.tk)}</span>`
+    :(a.pend
+      ?`<span class="nbadge tape" data-tip="fetched under a universe name but the headline does not verifiably concern it \u2014 relevance verdict pending; until verified it lives here, never in the universe feed">tape \u2026</span>`
+      :`<span class="nbadge tape" data-tip="unfiltered feed \u2014 not attributed to a universe name">tape</span>`));
   const sec=(!inDrawer&&a.sec)?`<span class="nsec-badge${a.secAi?' ai':''}" data-sec="${esc(a.sec)}" data-tip="${esc(a.secAi?(a.tk?'not in the static sector map \u2014 AI-classified once, persisted, reused forever \u00b7 click to filter':'AI-classified from the headline text, not a ticker mapping \u00b7 click to filter'):'GICS sector from the static map \u00b7 click to filter')}">${esc(secShort(a.sec))}${a.secAi?' ~':''}</span>`:'';
-  return `<div class="nrow${old?' old':''}">`
+  return `<div class="nrow${old?' old':''}${a.sec==='off-topic'?' off':''}">`
     +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
     +badge
     +sec
@@ -2843,8 +2845,9 @@ function newsRow(a,now,inDrawer){
 function renderNews(){
   const box=el('news-body'); if(!box) return;
   const d=state.news, now=Date.now();
+  const inLane=(a)=>newsMode==='universe'?!!a.tk:true;   // universe lane = verified-attributed only; tape lane = everything, unfiltered
   const secCounts=new Map();
-  if(d&&d.items) for(const a of d.items){ if(a.sec&&(newsMode!=='tape'||!a.tk)) secCounts.set(a.sec,(secCounts.get(a.sec)||0)+1); }
+  if(d&&d.items) for(const a of d.items){ if(a.sec&&inLane(a)) secCounts.set(a.sec,(secCounts.get(a.sec)||0)+1); }
   const secOpts=[...secCounts.entries()].sort((x,y)=>y[1]-x[1]);
   const head=`<div class="nhead">`
     +`<span class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px" data-tip="per-name headlines (Finnhub company news) for the equity universe + the general macro tape \u00b7 72h rolling window, evicted on publish time \u00b7 this is a digest, not a live wire — the freshness stamp on the right is the coverage clock \u00b7 sectors: solid badge = static GICS map, ~ = AI-classified (write-once, fallback model)">news \u2014 xyz universe</span>`
@@ -2855,7 +2858,7 @@ function renderNews(){
     +secOpts.map(([s,n])=>`<option value="${esc(s)}"${newsSec===s?' selected':''}>${esc(secShort(s))} (${n})</option>`).join('')
     +`</select>`
     +['latest','sector'].map(m=>`<button type="button" class="cdtf${newsView===m?' on':''}" data-nv="${m}" data-tip="${m==='latest'?'one reverse-chronological stream':'grouped by sector, sections ordered by newest headline'}">${m==='latest'?'latest':'by sector'}</button>`).join('')
-    +['all','tape'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='all'?'name-tagged headlines and the macro tape together':'the general macro tape only'}">${m}</button>`).join('')
+    +['universe','tape'].map(m=>`<button type="button" class="cdtf${newsMode===m?' on':''}" data-nm="${m}" data-tip="${m==='universe'?'ONLY headlines verified to concern a universe name \u2014 the relevance gate (name match or AI verdict) has confirmed the attribution; nothing leaks in':'the unfiltered feed: macro tape, market-general items, unverified/pending headlines, and off-topic (dimmed) \u2014 everything the worker fetched'}">${m}</button>`).join('')
     +(d&&d.fetchedAt?`<span class="sec" style="font-size:10.5px" data-tip="when the news worker last landed a fetch — per-name refresh rotates every few minutes">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:'')
     +`</div>`;
   if(!d||!d.items||!d.items.length){
@@ -2864,7 +2867,7 @@ function renderNews(){
   }
   const f=newsFilter.trim().toLowerCase();
   const items=d.items.filter(a=>{
-    if(newsMode==='tape'&&a.tk) return false;
+    if(!inLane(a)) return false;
     if(newsSec&&a.sec!==newsSec) return false;
     if(!f) return true;
     return (a.tk&&a.tk.toLowerCase().includes(f))||(a.h&&a.h.toLowerCase().includes(f));
@@ -2882,7 +2885,7 @@ function renderNews(){
       +`<div class="nlist">${list.map(a=>newsRow(a,now,false)).join('')}</div>`).join('');
   } else body=`<div class="nlist">${items.map(a=>newsRow(a,now,false)).join('')}</div>`;
   box.innerHTML=head+body
-    +`<div class="sec" style="font-size:10.5px;margin-top:8px">amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 72h window, publish-time eviction</div>`;
+    +`<div class="sec" style="font-size:10.5px;margin-top:8px">universe = verified attribution only \u00b7 amber = earnings within 7d \u00b7 red = live signal firing \u00b7 sector: solid = static map, ~ = AI-classified \u00b7 off-topic dimmed in tape \u00b7 72h window</div>`;
   bindNews(box);
 }
 function bindNews(box){
@@ -2901,7 +2904,7 @@ function fillDrawerNews(){
   const d=state.news, now=Date.now();
   const isEq=(a)=>a.tk&&r.ticker&&a.tk.toUpperCase()===String(r.ticker).toUpperCase();
   const mine=d&&d.items?d.items.filter(isEq):[];
-  const tape=d&&d.items?d.items.filter(a=>!a.tk).slice(0,5):[];
+  const tape=d&&d.items?d.items.filter(a=>!a.tk&&a.sec!=='off-topic'&&!a.pend).slice(0,5):[];
   const list=(mine.length?mine:tape).slice(0,5);
   let s=`<div class="dsec" data-tip="${mine.length?'per-name headlines from the 72h store \u00b7 evicted on publish time':'this name has no company feed \u2014 showing the general macro tape instead'}">${mine.length?`News \u2014 last 72h \u00b7 ${Math.min(5,mine.length)} of ${mine.length}`:'News \u2014 macro tape'}</div>`;
   if(!d||!d.items){ s+=`<div class="sec" style="font-size:11px">news feed loading\u2026</div>`; box.innerHTML=s; return; }
