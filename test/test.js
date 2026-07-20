@@ -1025,7 +1025,7 @@ test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-t
   // wiring pins: lane semantics client-side, drawer guard, health counters
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const pin of ["newsMode='universe'", "const inLane=(a)=>newsMode==='universe'?!!a.tk:true",
+  for (const pin of ["newsMode='universe'", "const inLane=(a)=>newsMode==='universe'?!!a.tk:(newsMode==='telegram'?!!a.tg:true)",
     "relevance verdict pending", "a.sec==='off-topic'?' off'", "!a.tk&&a.sec!=='off-topic'&&!a.pend",
     "attribution AI-verified"])
     assert.ok(app.includes(pin), `lane pin missing: ${pin}`);
@@ -1206,6 +1206,76 @@ test("analyst-read ledger: directional reports freeze claims, episodes hold, buc
     assert.ok(pol.includes(pin), `airead pin missing: ${pin}`);
   const C = require("../src/compute");
   assert.equal(C.EV_META.airead.horizonMs, 5 * DAY, "5d horizon");
+});
+
+test("telegram feed: parser + drift, lane caps, single-name attribution through the real pipeline, channel management", () => {
+  const C = require("../src/compute");
+  // parser: entities decoded, media-only blocks skipped, permalinks built
+  const mkMsg = (ch, id, txt, iso) => `<div class="tgme_widget_message_wrap"><div data-post="${ch}/${id}">`
+    + (txt ? `<div class="tgme_widget_message_text js-message_text">${txt}</div>` : "")
+    + `<time datetime="${iso}"></time></div></div>`;
+  const iso = new Date(Date.now() - 3600e3).toISOString();
+  const html = mkMsg("chanA", 1, "MicroStrategy announces expanded buyback &amp; guidance at &#36;118", iso)
+    + mkMsg("chanA", 2, null, iso)   // sticker/media-only
+    + mkMsg("chanA", 3, "NVDA and AMD both ripping after the Azure news", iso)
+    + mkMsg("chanA", 4, "Spain wins the World Cup", iso)
+    + mkMsg("chanA", 5, "MicroStrategy adds 2,100 BTC to the stack", iso);   // names TWO universe assets
+  const pr = C.parseTgPreview(html, "chanA", Date.now());
+  assert.equal(pr.blocks, 5); assert.equal(pr.items.length, 4, "media-only block skipped");
+  assert.equal(pr.items[0].id, "tg:chanA:1");
+  assert.ok(pr.items[0].h.includes("& guidance at $118"), "entities decoded");
+  assert.equal(pr.items[0].url, "https://t.me/chanA/1");
+  assert.ok(pr.items.every((a) => a.tg === 1));
+  // drift: blocks present, nothing parseable
+  const drift = C.parseTgPreview('<div class="tgme_widget_message_wrap"><div>changed markup</div></div>', "x", Date.now());
+  assert.equal(drift.items.length, 0); assert.equal(drift.blocks, 1, "drift is distinguishable from an empty channel");
+  // merge: telegram rides its own lane — can't evict the wire, wire can't evict it
+  const now = Date.now();
+  const many = [];
+  for (let i = 0; i < 90; i++) many.push({ id: "tg:c:" + i, tk: null, tg: 1, h: "tg " + i, src: "t.me/c", url: "u", pub: now - i * 60e3 });
+  for (let i = 0; i < 10; i++) many.push({ id: "w" + i, tk: null, h: "wire " + i, src: "s", url: "u", pub: now - i * 60e3 });
+  const m = C.mergeNews([], many, now);
+  assert.equal(m.filter((a) => a.tg).length, 80, "telegram lane capped at its own width");
+  assert.equal(m.filter((a) => !a.tg).length, 10, "the wire survives a chatty channel intact");
+  // end-to-end through the REAL pipeline: parse -> attribute -> merge -> payload lanes
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveTgChannels: () => {}, loadTgChannels: () => null };
+  const pl = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  pl.seedRowNow("xyz:MSTR", { px: 300, ticker: "MSTR", uni: "xyz" });
+  pl.seedRowNow("xyz:NVDA", { px: 180, ticker: "NVDA", uni: "xyz" });
+  pl.seedRowNow("xyz:AMD", { px: 160, ticker: "AMD", uni: "xyz" });
+  pl.seedRowNow("BTC", { px: 100000, ticker: "BTC", uni: "main" });
+  const pay = pl.tgIngestNow(html, "chanA");
+  const by = Object.fromEntries(pay.items.map((a) => [a.id, a]));
+  assert.equal(by["tg:chanA:1"].tk, "MSTR", "single-name match attributes — alias hit");
+  assert.equal(by["tg:chanA:1"].coin, "xyz:MSTR", "and deep-links to the drawer");
+  assert.equal(by["tg:chanA:1"].sec, "Information Technology", "sector rides the attribution");
+  assert.equal(by["tg:chanA:3"].tk, null, "two-name post attributes to NEITHER — no leak");
+  assert.equal(by["tg:chanA:4"].tk, null, "no-name post stays tape");
+  assert.equal(by["tg:chanA:5"].tk, null,
+    "documented behavior: 'MicroStrategy adds BTC' names two universe assets (MSTR and the BTC perp) — the conservative rule keeps it on tape rather than guessing which feed it belongs to");
+  assert.ok(pay.items.filter((a) => a.tg).length === 4, "tg marker survives to the payload");
+  // channel management: normalization, validation, cap, dedupe
+  assert.deepEqual(pl.setTgChannels(["@WatcherGuru", "https://t.me/s/markettwits", "watcherguru"]).channels,
+    ["WatcherGuru", "markettwits"], "@ and t.me prefixes stripped, case-insensitive dedupe");
+  assert.equal(pl.setTgChannels(["bad name!"]).ok, false, "invalid usernames rejected");
+  assert.equal(pl.setTgChannels(Array.from({ length: 13 }, (_, i) => "chan" + (1000 + i))).ok, false, "cap enforced");
+  assert.ok(pl.getTgChannels().channels.length === 2, "list state reflects the last valid save");
+  // wiring pins
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.equal(srv.split('fastify.post("/api/news/channels"').length - 1, 1, "POST channels registered exactly once");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["markup drift: page fetched, nothing parsed", "store.saveTgChannels({ ts: Date.now(), channels: tgChannels })",
+    "telegram: { channels: tgChannels.length"])
+    assert.ok(pol.includes(pin), `tg pin missing: ${pin}`);
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["'telegram'?!!a.tg", "id=\"ntg-gear\"", "function loadTgChannels()", "function saveTgChannels(", "data-rmch"])
+    assert.ok(app.includes(pin), `tg client pin missing: ${pin}`);
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(st.includes("saveTgChannels(data)") && st.includes("loadTgChannels()"), "config persistence separate from the news cache");
 });
 
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
@@ -1540,7 +1610,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/ai-report", "/api/ai-reports", "/api/health",
-    "/api/export/ledger", "/api/news"];
+    "/api/export/ledger", "/api/news", "/api/news/channels"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
