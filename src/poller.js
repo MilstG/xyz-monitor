@@ -2494,6 +2494,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
     setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
     setTimeout(safeTick(buildSignals, "buildSignals"), 2 * 60 * 1000);   // first pass once early backfill has something to chew on
+    // Off-site ledger backup: shortly after boot (the deploy IS the natural trigger — most
+    // boots follow a build), then weekly. The blob-sha skip makes redundant runs free.
+    if (BK_REPO && BK_TOKEN) {
+      const bkTick = () => backupLedger().then((r) =>
+        log(r.ok ? `Ledger backup: pushed ${r.pushed}, skipped ${r.skipped} (unchanged) -> ${BK_REPO}` : `Ledger backup failed (retries next cycle): ${r.error || "disabled"}`))
+        .catch((e) => log("Ledger backup failed (isolated): " + (e && e.message)));
+      setTimeout(bkTick, 10 * 60 * 1000);
+      setInterval(bkTick, BK_MS);
+      log(`Ledger backup: ENABLED -> ${BK_REPO}@${BK_BRANCH}, weekly + post-boot`);
+    } else {
+      log("Ledger backup: disabled (set LEDGER_BACKUP_REPO + GITHUB_TOKEN to enable off-site snapshots)");
+    }
     setInterval(safeTick(buildAnalytics, "buildAnalytics"), ANALYTICS_MS);
     setInterval(() => store.flush(), 30 * 1000);
     setInterval(persistFeatures, 120 * 1000);
@@ -2736,6 +2748,48 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     anthropic: { model: "claude-fable-5", fb: "claude-opus-4-8", maxTokens: 3000 },
     openai: { model: "gpt-5.6-sol", fb: "gpt-5.6-terra", maxTokens: 8000 },
   };
+  // ---- off-site ledger backup (weekly, GitHub contents API) --------------------------------
+  // The volume is the only home of the track record; this pushes the raw persisted files
+  // (ledger.json + ledger-archive.jsonl, byte-identical) to a private repo so a volume loss
+  // can't erase the honesty loop. Disabled unless BOTH env vars are set; a failed push logs
+  // and retries next cycle — it can never block or break anything else. Unchanged content is
+  // detected via the git blob sha and skipped, so redeploy-driven runs don't spam commits.
+  const BK_REPO = process.env.LEDGER_BACKUP_REPO || "";                     // "owner/repo"
+  const BK_TOKEN = process.env.LEDGER_BACKUP_TOKEN || process.env.GITHUB_TOKEN || "";
+  const BK_BRANCH = process.env.LEDGER_BACKUP_BRANCH || "main";
+  const BK_MS = 7 * DAY;
+  let backupLast = null, backupErr = null;
+  const gitBlobSha = (content) =>
+    require("crypto").createHash("sha1").update("blob " + Buffer.byteLength(content, "utf8") + "\0").update(content, "utf8").digest("hex");
+  async function backupLedger(fetchImpl) {
+    if (!BK_REPO || !BK_TOKEN) return { ok: false, disabled: true };
+    const doFetch = fetchImpl || fetch;
+    const hdrs = { authorization: "Bearer " + BK_TOKEN, accept: "application/vnd.github+json", "user-agent": "xyz-monitor" };
+    try {
+      const files = store.readBackupFiles ? store.readBackupFiles() : [];
+      if (!files.length) return { ok: false, error: "nothing to back up (no persisted ledger yet)" };
+      let pushed = 0, skipped = 0;
+      for (const f of files) {
+        const url = `https://api.github.com/repos/${BK_REPO}/contents/${f.name}`;
+        const sha = gitBlobSha(f.content);
+        let existing = null;
+        const g = await doFetch(url + "?ref=" + encodeURIComponent(BK_BRANCH), { headers: hdrs });
+        if (g && g.ok) { const j = await g.json(); if (j && j.sha) existing = j.sha; }
+        if (existing === sha) { skipped++; continue; }   // byte-identical to what's already backed up
+        const body = { message: `ledger backup ${new Date().toISOString().slice(0, 10)} (${version || "?"})`,
+          content: Buffer.from(f.content, "utf8").toString("base64"), branch: BK_BRANCH };
+        if (existing) body.sha = existing;
+        const put = await doFetch(url, { method: "PUT", headers: hdrs, body: JSON.stringify(body) });
+        if (!put || !put.ok) throw new Error(`PUT ${f.name} -> HTTP ${put ? put.status : "?"}`);
+        pushed++;
+      }
+      backupLast = Date.now(); backupErr = null;
+      return { ok: true, pushed, skipped, files: files.length };
+    } catch (e) {
+      backupErr = (e && e.message) || String(e);
+      return { ok: false, error: backupErr };
+    }
+  }
   const AI_PROVIDER = (process.env.AI_PROVIDER
     || (process.env.ANTHROPIC_API_KEY ? "anthropic" : (process.env.OPENAI_API_KEY ? "openai" : "anthropic"))).toLowerCase();
   const AI_DEF = AI_DEFAULTS[AI_PROVIDER] || AI_DEFAULTS.anthropic;
@@ -3393,6 +3447,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (rep) Object.assign(rep, patch || {});
       return !!rep;
     },
+    backupLedgerNow: (f) => backupLedger(f),   // harness: run one backup cycle with an injected transport (the suite never touches the network)
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
@@ -3425,6 +3480,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null,
           prints: earnPrints.length, histDone: earnHistDone, studyTickers: Object.keys(earnStudy).length,
           error: earnCache ? earnCache.error : (earnErr || "not fetched yet") },
+        backup: { enabled: !!(BK_REPO && BK_TOKEN), repo: BK_REPO || null, lastOk: backupLast, error: backupErr },
         ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
           fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size },
         rate: limiterUsage(),

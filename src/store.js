@@ -179,6 +179,16 @@ function openStore(dataDir) {
         fs.appendFileSync(archiveFile, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
       } catch (_) {}
     },
+    // Raw persisted ledger files for the off-site backup job: name + content, existing files
+    // only. The backup pushes these bytes verbatim — no re-serialization, so the backup can
+    // never disagree with what the volume actually holds.
+    readBackupFiles() {
+      const out = [];
+      for (const f of [ledgerFile, archiveFile]) {
+        try { out.push({ name: path.basename(f), content: fs.readFileSync(f, "utf8") }); } catch (_) {}
+      }
+      return out;
+    },
     // Earnings calendar warm cache (small, atomic like the rest): a redeploy inside the 6h
     // refresh window serves the last good fetch instead of blanking badges until Finnhub answers.
     saveEarnings(data) {
