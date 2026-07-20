@@ -841,6 +841,68 @@ test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
   assert.ok(st.includes("saveNews(data)") && st.includes("loadNews()"), "warm-cache persistence wired");
 });
 
+test("view wiring invariant: every tab has a section, a visibility toggle, AND a dispatch — no orphans in any direction", () => {
+  // Regression guard for -84's News tab: the section existed, the dispatch existed, the
+  // renderer existed — and the tab still showed nothing, because showView unhides sections
+  // through a hardcoded setHidden list the new view was never added to. String pins verified
+  // the parts EXISTED; nothing verified they were WIRED. This test closes the class: the tab
+  // buttons in the markup, the view sections, the setHidden visibility list, and the showView
+  // dispatch lines must all describe the same set of views, or the suite fails.
+  const fs = require("fs"), path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const tabs = new Set([...html.matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]));
+  const sections = new Set([...html.matchAll(/id="view-([a-z]+)"/g)].map((m) => m[1]));
+  const toggles = new Set([...app.matchAll(/setHidden\('view-([a-z]+)'/g)].map((m) => m[1]));
+  assert.ok(tabs.size >= 10, `suspiciously few tabs parsed: ${tabs.size}`);
+  for (const v of tabs) {
+    assert.ok(sections.has(v), `tab "${v}" has no view section in index.html`);
+    assert.ok(toggles.has(v), `tab "${v}" is missing from showView's setHidden visibility list — it would render invisible (the -84 News bug)`);
+    assert.ok(app.includes(`v==='${v}'`) || v === "markets",
+      `tab "${v}" has no dispatch in showView — nothing would ever render it`);
+  }
+  for (const v of sections)
+    assert.ok(tabs.has(v), `section "view-${v}" has no tab button — dead markup`);
+  for (const v of toggles)
+    assert.ok(sections.has(v), `setHidden references "view-${v}" which does not exist in the markup`);
+});
+
+test("version-stamped shell: index served explicitly with ?v=BUILD asset tags, static index off", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  for (const pin of ['index: false,', 'src="/app.js?v=${VERSION}"', 'href="/styles.css?v=${VERSION}"',
+    'fastify.get("/", serveIndex);', 'fastify.get("/index.html", serveIndex);',
+    'reply.header("cache-control", "no-store").type("text/html', "WARN: index.html asset tags drifted"])
+    assert.ok(srv.includes(pin), `stamped-shell pin missing: ${pin}`);
+  // and the tags in the source markup stay in the exact form the stamper rewrites — if this
+  // fails, the boot-time drift warning would fire and cache-busting silently degrades
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(html.includes('src="/app.js"') && html.includes('href="/styles.css"'),
+    "index.html asset tags must match the stamper's expected form exactly");
+});
+
+test("per-universe transport cap + scoped tab badge: a stocks-heavy tape can't crowd crypto out", () => {
+  const C = require("../src/compute");
+  const mk = (uni, score) => ({ uni, score });
+  // 50 stocks signals outscore 5 crypto ones — the old global top-40 shipped ZERO crypto
+  const sorted = [];
+  for (let i = 0; i < 50; i++) sorted.push(mk("xyz", 100 - i));
+  for (let i = 0; i < 5; i++) sorted.push(mk("main", 10 - i));
+  const capped = C.capPerUniverse(sorted, 40);
+  assert.equal(capped.filter((g) => g.uni === "xyz").length, 40, "stocks lane capped at 40");
+  assert.equal(capped.filter((g) => g.uni === "main").length, 5, "every live crypto signal ships — the -85 bug");
+  assert.deepEqual(capped.slice(0, 3).map((g) => g.score), [100, 99, 98], "score order preserved");
+  assert.equal(C.capPerUniverse([], 40).length, 0);
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("const top = capPerUniverse(kept, 40);"), "payload cap routes through the per-universe lanes");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["function setSigTabBadge()", "state.scope==='crypto'?d.countU.main:d.countU.xyz",
+    "setSigTabBadge();   // the badge is scoped too"])
+    assert.ok(app.includes(pin), `scoped-badge pin missing: ${pin}`);
+  assert.ok(!app.includes("Signals (${d.count})"), "the global-count badge is gone — the badge speaks per scope");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
