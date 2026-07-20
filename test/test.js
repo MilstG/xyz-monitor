@@ -1344,8 +1344,11 @@ test("EDGAR filings lane: parser, 7d retention, hard isolation from every other 
   assert.ok(css.includes(".nform.mat{"), "material form styling present");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["www.sec.gov/cgi-bin/browse-edgar", "\"user-agent\": SEC_UA", "!a.fl && a.tk && a.rel === 1",
-    "filings: { items:"])
+    "filings: { items:", "let edgarStat = {", "UA or egress IP likely rejected", "flStat: { lastOk:"])
     assert.ok(pol.includes(pin), `filings poller pin missing: ${pin}`);
+  // the empty state and footer answer "is this working" from the UI itself
+  for (const pin of ["EDGAR fetches are failing:", "the EDGAR rotation is warming up", "last EDGAR fetch"])
+    assert.ok(app.includes(pin), `filings observability pin missing: ${pin}`);
 });
 
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
