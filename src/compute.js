@@ -519,6 +519,7 @@ const EV_META = {
   failbrk:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the failed breakout", studyKey: null }, // shadow swing setup
   pead:     { horizonMs: 10 * DAY, horizon: "next 10d, drifting with the earnings reaction", studyKey: null },  // shadow swing setup (xyz)
   fundext:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the persistent funding extreme", studyKey: null },  // shadow swing setup (crypto)
+  liqflush: { horizonMs: 3 * DAY,  horizon: "next 3d, off the liquidation flush", studyKey: null },  // shadow swing setup (crypto)
 };
 // Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
 // market's own stats, and the one corroborating thing to watch. A description of the setup —
@@ -863,6 +864,20 @@ function detectPead(prints, daily, px, sd30) {
   if (up ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
   return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: best.pr.d,
     stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+// Cascade exhaustion (crypto): a >=2σ 24h drop WITH a >=8% 24h open-interest drop — the
+// co-move that says forced liquidations did the selling, not information. Once the leverage
+// is flushed the pressure is gone: long the exhaustion, stop 1σ below the post-flush mark,
+// target the exact half-retrace of the flush. 3d horizon. Distinct from oiflush (a 7-day
+// daily-scale positioning drain); this is the violent same-day event.
+function detectLiqFlush(d1, sd30, px, oiChg24) {
+  if (!Number.isFinite(d1) || !(sd30 > 0) || !(px > 0) || !Number.isFinite(oiChg24)) return null;
+  if (!(d1 <= -2 * sd30)) return null;                    // the price leg: a real flush, in this market's own units
+  if (!(oiChg24 <= -8)) return null;                      // the OI leg: leverage actually left
+  const pre = px / (1 + d1 / 100);                        // the pre-flush mark implied by the 24h move
+  const stop = px * (1 - sd30 / 100), target = px + (pre - px) / 2;
+  if (!(stop > 0 && stop < px && target > px)) return null;
+  return { stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
 
 // ---- shadow-variant promotion rule ---------------------------------------------------------
@@ -1424,7 +1439,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectLiqFlush, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
