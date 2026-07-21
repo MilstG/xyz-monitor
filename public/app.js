@@ -1151,6 +1151,7 @@ function shVal(v,unit){ if(v==null) return '<span class="na">\u2014</span>';
 function shLeft(resolveAt){ const left=resolveAt-Date.now(); return left>0?(left>=86400000?(left/86400000).toFixed(1)+'d':(left/3600000).toFixed(0)+'h'):'due'; }
 async function loadDrawerLedger(coin){
   const box=el('dledger'); if(!box) return;
+  { const rw=state.rows.get(coin); if(rw&&rw.uni==='main'){ box.innerHTML=''; return; } }   // crypto: no signal engine (-101), no record section — same pattern as the news box
   try{
     const d=await fetchJSON('/api/ledger?coin='+encodeURIComponent(coin));
     if(state.detail!==coin || !box.isConnected) return;
@@ -2187,18 +2188,19 @@ function applyScope(){
   const cr=state.scope==='crypto';
   // Trend and Report stay visible in crypto scope (the only tabs besides Markets that do) —
   // Trend follows the scope switcher like the Markets table; Report is universe-tagged per
-  // ticker, so the same tab serves both universes regardless of scope.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='signals'; });
+  // ticker, so the same tab serves both universes regardless of scope. Signals left this
+  // list at -101: the crypto side of the signal engine was removed, so the tab has nothing
+  // true to show in crypto scope.
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='signals') { showView('markets'); }
+  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report') { showView('markets'); }
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
-  if(state.view==='signals') renderSignals();   // signals tab is universe-scoped — repaint on flip
   setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='signals') v='markets';   // crypto scope: Markets + Trend + Report + Signals (universe-scoped)
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report') v='markets';   // crypto scope: Markets + Trend + Report (the signal engine is xyz-only since -101)
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -2261,8 +2263,8 @@ async function loadSignals(){
 }
 function setSigTabBadge(){
   const tb=el('tab-signals'), d=state.signals; if(!tb) return;
-  // per-scope count: the badge must speak for the universe you're looking at, not the union
-  const n=d?(d.countU?(state.scope==='crypto'?d.countU.main:d.countU.xyz):d.count):0;
+  // count is the xyz universe's live-condition total — the only universe the engine serves (-101)
+  const n=d?(d.count||0):0;
   tb.textContent = n>0 ? `Signals (${n})` : 'Signals';
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
@@ -3129,14 +3131,14 @@ function recCurveSvg(curve){
   const rows=curve.map(p=>`<b style="color:var(--text)">${esc(p[2])}</b> \u00b7 ${esc(EV_LABELS[p[3]]||p[3])}${p[7]?' \u00b7 <span style="color:var(--accent)">\u26d4 stopped</span>':''}<br>${dfmt(p[0])}: at-horizon <span style="color:${p[4]>=0?'var(--up)':'var(--down)'}">${p[4]>=0?'+':''}${p[4]}R</span> \u2192 cum ${p[1]>=0?'+':''}${p[1]}R${p[5]!=null?`<br>stop-aware ${p[6]>=0?'+':''}${p[6]}R \u2192 cum ${p[5]>=0?'+':''}${p[5]}R`:''}`);
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
-const EV_XYZ_ONLY=new Set(['gap','prem','ondrift','tretest','tretestdn']);   // session/trend-board mechanics — structurally can't fire for 24/7 crypto
 function ledgerRosterScoped(){
-  const all=['bigmove','breakout','breakdown','gap','fundflip','squeeze','unwind','oiflush','fpdiv','prem','ondrift','tretest','tretestdn'];
-  return state.scope==='crypto'?all.filter(ev=>!EV_XYZ_ONLY.has(ev)):all;
+  // xyz-only roster: the crypto side of the signal engine was removed at -101, and this tab
+  // with it — the scope split this function used to serve no longer exists.
+  return ['bigmove','breakout','breakdown','gap','fundflip','squeeze','unwind','oiflush','fpdiv','prem','ondrift','tretest','tretestdn'];
 }
 function sigRecordHtml(d){
   const thr=sigMovePref(), pr=sigPrimePref();
-  const rs=(d&&d.records&&(d.records[String(thr)+(pr?'p':'')+(state.scope==='crypto'?'m':'x')]||d.records[String(thr)+(pr?'p':'')]))||d||{};
+  const rs=(d&&d.records&&(d.records[String(thr)+(pr?'p':'')+'x']||d.records[String(thr)+(pr?'p':'')]))||d||{};
   const rc=rs.record||{};
   const evs=Object.keys(rc);
   let fired=0,resolved=0,wins=0,open=0,nS=0,winsS=0;
@@ -3153,7 +3155,7 @@ function sigRecordHtml(d){
     // render even on a zero record — "never fired" is a fact the panel states, not a blank
     // screen. This exact blank shipped the day the crypto universe joined the engine with an
     // honestly-empty record and the whole audit vanished below this line.
-    s+=`<div class="sec" style="font-size:11.5px;padding:4px 2px">No ${state.scope==='crypto'?'crypto ':''}claims resolved yet \u2014 the record accrues from the signals this universe fires. First resolutions land at their horizons (12h\u20135d).</div>`;
+    s+=`<div class="sec" style="font-size:11.5px;padding:4px 2px">No claims resolved yet \u2014 the record accrues from the signals this universe fires. First resolutions land at their horizons (12h\u20135d).</div>`;
   }
   const hitAll=resolved?Math.round(100*wins/resolved):null;
   if(fired) s+=`<div class="sigrec-top">`
@@ -3233,7 +3235,7 @@ function sigRecordHtml(d){
       s+='</div>';
     }
   }
-  const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);
+  const shPanel=d&&d.shadows&&d.shadows.xyz;
   if(shPanel&&shPanel.length){
     s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="Strategy shadows: whole candidate STRATEGIES (not threshold tweaks) earning an out-of-sample record before any promotion. Every claim carries frozen side/void/target at fire, resolves stop-aware, and is episode-deduped like everything else \u2014 and NONE of it touches the live board. This panel is the entire record; nothing is curated away. A strategy that never earns anything simply never surfaces.">strategy shadows (earning their record)</div>`;
     for(const g of shPanel){
@@ -3271,11 +3273,11 @@ function renderSignals(){
   // One control row (build -69): the static history search/dropdown, the intro text, and the
   // prime/move/view segments all share the line — rendered into static slots so the inputs
   // keep their state across re-renders.
-  { const it=el('sig-introtxt'); if(it) it.innerHTML=`<span data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?).">Live conditions \u00b7 <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited${(()=>{const cu=d&&d.countU?(state.scope==='crypto'?d.countU.main:d.countU.xyz):d&&d.count;const sh=(d&&d.signals?d.signals.filter(g=>(g.uni==='main')===(state.scope==='crypto')).length:0);return cu>sh?` \u00b7 top <b>${sh}</b> of <b>${cu}</b>`:'';})()}</span>`;
+  { const it=el('sig-introtxt'); if(it) it.innerHTML=`<span data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?).">Live conditions \u00b7 <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited${(()=>{const cu=d&&d.count;const sh=(d&&d.signals?d.signals.length:0);return cu>sh?` \u00b7 top <b>${sh}</b> of <b>${cu}</b>`:'';})()}</span>`;
     const sl=el('sig-segslot'); if(sl&&sl.innerHTML!==seg){ sl.innerHTML=seg; bindSigControls(sl); } }
   const intro='';
   let rec='';
-  const rsTop=(d&&d.records&&(d.records[String(mvThr)+(prOn?'p':'')+(state.scope==='crypto'?'m':'x')]||d.records[String(mvThr)+(prOn?'p':'')]))||d||{};
+  const rsTop=(d&&d.records&&(d.records[String(mvThr)+(prOn?'p':'')+'x']||d.records[String(mvThr)+(prOn?'p':'')]))||d||{};
   const recSrc=rsTop.record||{};
   // Every event capable of ledgering a claim renders via ledgerRosterScoped(): zero-claim
   // roster members appear as explicit "awaiting first claim" entries — without this,
@@ -3313,12 +3315,12 @@ function renderSignals(){
       if(chips) rec+=`<div class="recstrip" style="margin-top:4px">${chips}</div>`;
     }
   }
-  if(!d||!d.signals||!d.signals.filter(g=>(g.uni==='main')===(state.scope==='crypto')).length){
-    box.innerHTML=intro+`<div class="msg">No unusual ${state.scope==='crypto'?'crypto':'stocks/macro'} conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
+  if(!d||!d.signals||!d.signals.length){
+    box.innerHTML=intro+`<div class="msg">No unusual stocks/macro conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
     bindSigControls(box); return;
   }
   let hiddenN=0;
-  const scoped = d.signals.filter(g=>(g.uni==='main')===(state.scope==='crypto'));   // hard-separated universes: the tab shows only the active scope's conditions
+  const scoped = d.signals;   // xyz-only payload: crypto left the signal engine at -101, and this tab left the crypto scope with it
   const sigs = (mvThr>0||prOn) ? scoped.filter(g=>{
     const m=sigMove(g);
     const ok=(mvThr===0||(m!=null&&m>=mvThr))&&(!prOn||g.prime);
