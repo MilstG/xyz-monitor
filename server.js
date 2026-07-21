@@ -9,7 +9,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.20-101";
+const VERSION = "2026.07.21-01";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -42,13 +42,34 @@ log(`Crypto (Hyperliquid main dex): ${CRYPTO ? "ENABLED — top-60 perps, 31d ho
 // Weak ETag from the payload's data version so an unchanged snapshot revalidates to 304
 // (browsers polling every 30s get a tiny empty response instead of the full table).
 function etagFor(body) { return 'W/"' + (body.dataTs != null ? body.dataTs : (body.ts || 0)) + '"'; }
+// Serialization cache keyed on the payload OBJECT itself (WeakMap): the poller replaces its cache
+// objects wholesale on each content change, so the same object reference implies the same JSON. This
+// turns the per-request JSON.stringify of the ~0.5 MB snapshot (once per polling client, every 30s)
+// into one stringify per content change. Keyed on identity, not the ETag string, so two routes that
+// happen to share a dataTs value can never serve each other's body. Auto-GC'd when the object is
+// replaced. Fallback literals are fresh objects (WeakMap miss) but tiny, so re-stringifying is free.
+const serialCache = new WeakMap();
+// Uniform-stride downsample of a [[t, v], ...] track to at most `cap` points, keeping the last
+// (live-edge) sample exact so the sparkline's right edge still reflects the current value.
+const SERIES_CAP = 1500;
+function downsampleSeries(arr, cap) {
+  if (!Array.isArray(arr) || arr.length <= cap) return arr || [];
+  const step = arr.length / cap, out = [];
+  for (let i = 0; i < cap; i++) out.push(arr[Math.floor(i * step)]);
+  const last = arr[arr.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
 function serveCached(req, reply, payload, fallback) {
   const body = payload || fallback;
   reply.header("cache-control", "no-cache");
   const tag = etagFor(body);
   reply.header("etag", tag);
   if (req.headers["if-none-match"] === tag) { reply.code(304).send(); return; }
-  return body;
+  let s = serialCache.get(body);
+  if (s === undefined) { s = JSON.stringify(body); serialCache.set(body, s); }
+  reply.header("content-type", "application/json; charset=utf-8");
+  return reply.send(s);   // send the pre-serialized string; @fastify/compress still gzips it (over threshold)
 }
 
 // Constant-time credential check: hash both sides to equal length, then timingSafeEqual.
@@ -227,7 +248,9 @@ async function main() {
   fastify.get("/icon.svg", async (req, reply) => reply.type("image/svg+xml").header("cache-control", "no-cache").send(PWA_ICON));
   fastify.get("/sw.js", async (req, reply) => reply.type("text/javascript").header("cache-control", "no-cache").send(PWA_SW));
 
-  await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"] });
+  // threshold: don't spend gzip CPU on bodies under 1 KB (health, channel lists, empty fallbacks) —
+  // the compressed result is no smaller and often larger. Big payloads (snapshot, analytics) still compress.
+  await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"], threshold: 1024 });
   await fastify.register(require("@fastify/static"), {
     root: path.join(__dirname, "public"),
     prefix: "/",
@@ -282,7 +305,11 @@ async function main() {
   fastify.get("/api/series", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
-    return poller.getSeries(coin) || { oi: [], funding: [] };
+    const s = poller.getSeries(coin) || { oi: [], funding: [] };
+    // The drawer sparklines are a few hundred px wide; shipping the full 31d full-resolution track
+    // (~9k points) is wasted bytes. Uniform-stride down to ~SERIES_CAP points, always keeping the
+    // last (live-edge) sample exact. Shape is preserved; nothing downstream reads raw point count.
+    return { oi: downsampleSeries(s.oi, SERIES_CAP), funding: downsampleSeries(s.funding, SERIES_CAP) };
   });
   // Claim-history browser: filter by ticker (coin=), by event type (ev=), or both. Powers the
   // drawer signal record and the Signals-tab full history search.
