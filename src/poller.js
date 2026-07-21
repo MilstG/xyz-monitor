@@ -167,23 +167,36 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Backs the time-of-day / session / boundary-hold analytics. Re-fetched wholesale on every hourly
   // refresh, so it self-heals after a restart (no separate persistence) — it just needs one refresh
   // cycle (<= HOURLY_STALE) to repopulate for markets that were serving warm from features.json.
-  function getHourly(coin) {
-    const r = rows.get(coin), c = r && r.hourlyRaw;
-    if (!Array.isArray(c)) return [];
-    // Memoize on the hourlyRaw ARRAY REFERENCE: every mutation of the spine (foldCtx concat/filter,
-    // hydrate, GC-null) reassigns r.hourlyRaw to a new array, so `r._hsRaw === c` is a bulletproof
-    // freshness check — it can never serve a normalized array that disagrees with the source. This
-    // is the hot path: getHourly is called from ~16 sites, several per-market on the 15s snapshot tick,
-    // and each call used to rebuild the full ~4k-element normalized array from scratch.
-    if (r._hsRaw === c && r._hs) return r._hs;
+  // Normalize any raw candle array into the packed numeric spine row shape [t,o,h,l,c,v]. Accepts
+  // both the Hyperliquid REST object shape ({t,o,h,l,c,v} strings) and already-packed rows (disk /
+  // re-normalization), so it's the one gate every hourlyRaw write passes through. o/h/l/v fall back
+  // to the close / 0 — exactly the coercion the old getHourly conversion did, now applied ONCE at
+  // write time instead of on every read.
+  function packHours(arr) {
     const out = [];
-    for (const k of c) {
-      const t = +k.t, o = +k.o, h = +k.h, l = +k.l, cl = +k.c, v = +k.v;
-      if (Number.isFinite(t) && Number.isFinite(cl))
-        out.push([t, Number.isFinite(o) ? o : cl, Number.isFinite(h) ? h : cl, Number.isFinite(l) ? l : cl, cl, Number.isFinite(v) ? v : 0]);
+    if (!Array.isArray(arr)) return out;
+    for (const k of arr) {
+      const isArr = Array.isArray(k);
+      const t = +(isArr ? k[0] : k.t), cl = +(isArr ? k[4] : k.c);
+      if (!Number.isFinite(t) || !Number.isFinite(cl)) continue;
+      const o = +(isArr ? k[1] : k.o), h = +(isArr ? k[2] : k.h), l = +(isArr ? k[3] : k.l), v = +(isArr ? k[5] : k.v);
+      out.push([t, Number.isFinite(o) ? o : cl, Number.isFinite(h) ? h : cl, Number.isFinite(l) ? l : cl, cl, Number.isFinite(v) ? v : 0]);
     }
-    r._hsRaw = c; r._hs = out;
     return out;
+  }
+  // Adapter back to the object shape [{t,o,h,l,c,v}] for the few remaining object-convention
+  // consumers — featuresFromHourly and the H1 ladder rung / 1h chart serializer. Kept transient at
+  // the call site and NEVER stored on a row, so the resident spine stays packed-only (the whole point
+  // of the packed spine: r.hourlyRaw held both an object array and getHourly's packed copy before).
+  function hoursToObj(arr) {
+    return Array.isArray(arr) ? arr.map((k) => ({ t: k[0], o: k[1], h: k[2], l: k[3], c: k[4], v: k[5] })) : [];
+  }
+  // The hourly spine IS the packed normalized array now (see packHours), so getHourly is a direct
+  // pass-through — no per-call rebuild, no second resident copy. Every array-indexed consumer
+  // (priceAsOf, runHolds, rvolMulti, fourHourReturns, tape) reads r.hourlyRaw's rows as [t,o,h,l,c,v].
+  function getHourly(coin) {
+    const r = rows.get(coin);
+    return r && Array.isArray(r.hourlyRaw) ? r.hourlyRaw : [];
   }
   function hourlyCoverage() {
     let coins = 0, candles = 0;
@@ -424,28 +437,29 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // Steady state: fetch only the last ~48h tail and merge — the old design re-pulled the
     // full window every refresh, which at 180d would consume the entire rate budget.
     const histDays = r.uni === "main" ? MAIN_HIST_DAYS : HOURLY_HISTORY_DAYS;
-    const spine = Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null;
-    const firstT = spine && spine.length ? +spine[0].t : Infinity;
+    const spine = Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null;   // packed [[t,o,h,l,c,v], ...]
+    const firstT = spine && spine.length ? +spine[0][0] : Infinity;
     const deep = spine && spine.length > 48 && firstT <= now - (histDays - (r.uni === "main" ? 7 : 30)) * DAY;
     if (!deep) {
       const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, r.uni === "main" ? MAIN_HOURLY_WEIGHT : HOURLY_FETCH_WEIGHT);
-      if (Array.isArray(wide)) r.hourlyRaw = wide;
+      if (Array.isArray(wide)) r.hourlyRaw = packHours(wide);
       else if (!spine) r.hourlyRaw = null;           // keep a shallow spine over nothing if the wide pull fails
     } else {
-      const lastT = +spine[spine.length - 1].t || 0;
+      const lastT = spine.length ? +spine[spine.length - 1][0] : 0;
       const tail = await fetchCandles(coin, "1h", Math.max(lastT - 2 * HOUR, now - 2 * DAY), now, HOURLY_TAIL_WEIGHT);
-      if (Array.isArray(tail) && tail.length) {
-        const firstNew = +tail[0].t;
-        r.hourlyRaw = spine.filter((k) => +k.t < firstNew).concat(tail);
+      const packedTail = packHours(tail);
+      if (packedTail.length) {
+        const firstNew = packedTail[0][0];
+        r.hourlyRaw = spine.filter((k) => k[0] < firstNew).concat(packedTail);
       }
     }
     { const cutOld = now - histDays * DAY;
-      if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = r.hourlyRaw.filter((k) => +k.t >= cutOld); }
+      if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = r.hourlyRaw.filter((k) => k[0] >= cutOld); }
     // Features are computed from ONLY the last 31 days so hi30/lo30, volH and volD are byte-identical
     // to the previous 31d fetch — the wider window must not leak into the feature math.
     const cut = now - HOURLY_FEAT_DAYS * DAY;
-    const featWin = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.filter((k) => +k.t >= cut) : [];
-    const { ref, feat } = featuresFromHourly(featWin, now, HOUR, DAY);
+    const featWin = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.filter((k) => k[0] >= cut) : [];
+    const { ref, feat } = featuresFromHourly(hoursToObj(featWin), now, HOUR, DAY);   // features read the object shape
     r.ref = ref; r.feat = feat; r.hourlyTs = Date.now(); r.isNew = false;
   }
   async function refreshDaily(coin) {
@@ -2981,7 +2995,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     for (const r of rows.values()) {
       if (r.delisted || !Array.isArray(r.hourlyRaw) || !r.hourlyRaw.length) continue;
       const packed = [];
-      for (const k of r.hourlyRaw) { const t = +k.t; if (Number.isFinite(t) && t >= cut) packed.push([t, +k.o, +k.h, +k.l, +k.c, +k.v]); }
+      for (const k of r.hourlyRaw) { const t = k[0]; if (Number.isFinite(t) && t >= cut) packed.push(k); }   // spine rows are already [t,o,h,l,c,v]
       if (packed.length) hourly[r.coin] = packed;
     }
     await store.saveHourly({ ts: Date.now(), hourly });   // async NDJSON stream — no longer blocks the event loop
@@ -2991,8 +3005,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     let n = 0;
     await store.streamHourly((coin, arr) => {
       if (!Array.isArray(arr) || !arr.length) return;
-      const out = [];
-      for (const a of arr) if (Array.isArray(a) && a.length >= 6 && Number.isFinite(a[0]) && a[0] >= cut) out.push({ t: a[0], o: a[1], h: a[2], l: a[3], c: a[4], v: a[5] });
+      const out = packHours(arr).filter((k) => k[0] >= cut);   // disk rows are packed; keep them packed (no object detour)
       if (out.length) { getRow(coin).hourlyRaw = out; n++; }
     });
     return n;
@@ -3193,7 +3206,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         });
       }
     } else if (key === "1h") {
-      src = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.slice(-96) : [];
+      src = Array.isArray(r.hourlyRaw) ? hoursToObj(r.hourlyRaw.slice(-96)) : [];   // chart serializer reads the object shape
     } else {
       src = Array.isArray(r.hourlyRaw) ? bucketsFor(r, TF_CANDLES[key]) : [];
     }
@@ -3226,7 +3239,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         D1: d1g,
         H12: bucketsFor(r, 12),
         H4: bucketsFor(r, 4),
-        H1: r.hourlyRaw.slice(-96),
+        H1: hoursToObj(r.hourlyRaw.slice(-96)),   // ladder rungs are object-shape ({t,h,l,c})
       });
       if (!lad) { excluded++; continue; }
       scanned++;
@@ -3291,7 +3304,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           if (rr) {
             let ser = null;
             if (e.retest === "D1") ser = withFormingDaily(Array.isArray(rr.dailyRaw) ? rr.dailyRaw : [], rr.px, now, DAY);
-            else if (e.retest === "H1") ser = Array.isArray(rr.hourlyRaw) ? rr.hourlyRaw.slice(-96) : null;
+            else if (e.retest === "H1") ser = Array.isArray(rr.hourlyRaw) ? hoursToObj(rr.hourlyRaw.slice(-96)) : null;   // uniform object shape with the H4/H12/D1 branches
             else ser = Array.isArray(rr.hourlyRaw) ? bucketsFor(rr, e.retest === "H12" ? 12 : 4) : null;
             if (ser && ser.length >= 13) {
               const win = ser.slice(Math.max(0, ser.length - 33), ser.length - 3);
@@ -3547,7 +3560,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (px != null && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= 26 && daily.length >= 26) {
         const d1g = withFormingDaily(daily, px, now, DAY);
         const lad = trendLadder(px, { D1: d1g, H12: bucketsFor(r, 12),
-          H4: bucketsFor(r, 4), H1: r.hourlyRaw.slice(-96) });
+          H4: bucketsFor(r, 4), H1: hoursToObj(r.hourlyRaw.slice(-96)) });
         if (lad) {
           const tf = {};
           for (const t of ["D1", "H12", "H4"]) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21,
@@ -4209,6 +4222,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);
+      if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = packHours(r.hourlyRaw);   // seed the packed spine exactly as refreshHourly/hydrate would (accepts object or packed input)
       if (r.uni === "main") { if (!mainList.includes(coin)) mainList.push(coin); if (!mainOrder.includes(coin)) mainOrder.push(coin); }
       else if (!order.includes(coin)) order.push(coin);   // xyz seeds join the xyz roster exactly as the universe refresh would place them
       return r;

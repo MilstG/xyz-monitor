@@ -1478,16 +1478,20 @@ function emaLast(closes, span) {
 // Aggregate the hourly spine into UTC-aligned N-hour buckets (forming bucket included). Only the
 // fields the ladder needs survive: t/o/h/l/c. Missing highs/lows (warm-cache closes-only candles)
 // degrade to the close so the zone test stays defined instead of poisoning Math.min with NaN.
+// Aggregate the packed hourly spine ([[t,o,h,l,c,v], ...]) into wider UTC-aligned buckets.
+// INPUT is the packed numeric spine (r.hourlyRaw); OUTPUT stays {t,o,h,l,c} objects — that's the
+// shape trendLadder, the chart serializer and the daily-OHLC upgrade all read, so only the input
+// convention changed when the spine went packed. o/h/l fall back to the close when absent.
 function bucketCandles(hourly, hours, HOUR) {
   const W = hours * HOUR, out = [];
   let cur = null;
   for (const k of hourly || []) {
-    const t = +k.t; if (!isFinite(t)) continue;
-    const c = +k.c; if (!isFinite(c)) continue;
-    const h = k.h != null && isFinite(+k.h) ? +k.h : c;
-    const l = k.l != null && isFinite(+k.l) ? +k.l : c;
+    const t = +k[0]; if (!isFinite(t)) continue;
+    const c = +k[4]; if (!isFinite(c)) continue;
+    const h = k[2] != null && isFinite(+k[2]) ? +k[2] : c;
+    const l = k[3] != null && isFinite(+k[3]) ? +k[3] : c;
     const b = Math.floor(t / W) * W;
-    if (!cur || cur.t !== b) { if (cur) out.push(cur); cur = { t: b, o: k.o != null ? +k.o : c, h, l, c }; }
+    if (!cur || cur.t !== b) { if (cur) out.push(cur); cur = { t: b, o: k[1] != null && isFinite(+k[1]) ? +k[1] : c, h, l, c }; }
     else { cur.c = c; if (h > cur.h) cur.h = h; if (l < cur.l) cur.l = l; }
   }
   if (cur) out.push(cur);
