@@ -9,7 +9,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.20-99";
+const VERSION = "2026.07.20-100";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -210,6 +210,22 @@ async function main() {
     setSessionCookies(reply, req, 0, null);   // Max-Age=0 deletes both cookies
     return reply.redirect("/", 303);   // v5-forward signature (url, code) — the old order is deprecated
   });
+
+  // ===== PWA shell: manifest + icon + service worker, all served inline (no new repo files) =====
+  // The service worker deliberately caches NOTHING: it exists only to satisfy installability
+  // (Chrome requires a fetch handler for the install prompt). Every request falls through to the
+  // network untouched — a caching SW is exactly the stale-client failure class the version-stamped
+  // shell was built to kill (-84), and we are not reintroducing it for offline support nobody asked for.
+  const PWA_MANIFEST = JSON.stringify({
+    name: "Trade[XYZ] Markets Monitor", short_name: "Trade[XYZ]",
+    start_url: "/", display: "standalone", background_color: "#0E1116", theme_color: "#0E1116",
+    icons: [{ src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }],
+  });
+  const PWA_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="#0E1116"/><rect x="24" y="24" width="464" height="464" rx="80" fill="none" stroke="#262E39" stroke-width="8"/><text x="256" y="300" text-anchor="middle" font-family="monospace" font-size="132" font-weight="700" fill="#E8B44B">[XYZ]</text></svg>`;
+  const PWA_SW = "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('fetch',()=>{});";
+  fastify.get("/manifest.webmanifest", async (req, reply) => reply.type("application/manifest+json").header("cache-control", "no-cache").send(PWA_MANIFEST));
+  fastify.get("/icon.svg", async (req, reply) => reply.type("image/svg+xml").header("cache-control", "no-cache").send(PWA_ICON));
+  fastify.get("/sw.js", async (req, reply) => reply.type("text/javascript").header("cache-control", "no-cache").send(PWA_SW));
 
   await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"] });
   await fastify.register(require("@fastify/static"), {
