@@ -40,6 +40,24 @@ test("ask-the-board 2C: analyst may use identity/business knowledge, scoped to t
   assert.ok(/companyName/.test(pol), "companyName must be imported/used in poller");
 });
 
+test("AI admin gate: checkAdminPassword fails closed, verifies constant-time, shares a lockout", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const prev = process.env.ADMIN_PASSWORD;
+  try {
+    delete process.env.ADMIN_PASSWORD;
+    let p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+    assert.equal(p.checkAdminPassword("anything").error, "not-configured", "unset ADMIN_PASSWORD fails closed (no unlock can be minted)");
+    process.env.ADMIN_PASSWORD = "s3cret-pw";
+    p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+    assert.equal(p.checkAdminPassword("s3cret-pw").ok, true, "correct password passes");
+    assert.equal(p.checkAdminPassword("wrong").error, "bad-password", "wrong password rejected");
+    for (let i = 0; i < 8; i++) p.checkAdminPassword("wrong");
+    assert.equal(p.checkAdminPassword("s3cret-pw").error, "rate", "lockout trips after repeated failures — even the correct password waits");
+  } finally { if (prev === undefined) delete process.env.ADMIN_PASSWORD; else process.env.ADMIN_PASSWORD = prev; }
+});
+
 test("classify: CL is WTI crude, not Colgate (collision regression)", () => {
   assert.equal(classify("CL").sector, "Commodity");
   assert.equal(classify("GOLD").sector, "Commodity");
@@ -1723,7 +1741,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openCmdk", "closeCmdk", "cmdkRender", "cmdkActivate", "aiFmtCountdown", "aiFmtAgo", "aiTickCountdown",
     "updateFreshTray", "renderFreshTray",
     "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
-    "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow"];
+    "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1795,6 +1813,14 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(/\.tp-wrap\{[^}]*min-width:0/.test(tcss), "tp-wrap needs min-width:0 or a long value overflows the panel (flexbox min-width:auto)");
   assert.ok(s.includes("function termAutoGrow") && s.includes("termAutoGrow(q)"), "textarea auto-grow helper missing/unwired");
   assert.ok(s.includes("!e.shiftKey&&!e.isComposing"), "Enter-to-run must yield to Shift+Enter (newline) and IME composition");
+  // AI admin gate (client): unlock/lock commands (redacted echo), the three endpoints, the
+  // ai-locked prompts on both AI surfaces, the lock indicator, and the help lines.
+  assert.ok(s.includes("admin\\s+unlock") && s.includes("admin\\s+lock"), "admin unlock/lock command parsing missing");
+  assert.ok(s.includes("/api/ai-unlock") && s.includes("/api/ai-lock") && s.includes("/api/ai-status"), "AI unlock/lock/status client calls missing");
+  assert.ok(s.includes("d.error==='ai-locked'") || s.includes('d.error==="ai-locked"'), "client must handle the ai-locked response");
+  assert.ok(s.includes("function termSetLock") && s.includes("function termRefreshLock") && s.includes("termRefreshLock()"), "lock indicator state helpers missing/unwired");
+  assert.ok(s.includes("admin unlock") && s.includes("admin lock"), "terminal help must list admin unlock/lock");
+  assert.ok(html.includes('id="termLock"'), "terminal AI lock indicator markup missing");
   // The backtest tab was silently dropped from the nav once while every renderer behind it
   // survived — pin both the button and the view section so the tab can't vanish again.
   assert.ok(html.includes('data-view="backtest"'), "backtest tab button missing from nav");
@@ -1846,7 +1872,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   // -11 security: the paid AI endpoints must be closed to unauthenticated callers regardless of
   // SITE_PASSWORD (never serve model budget to the open web), and both POSTs carry a body cap.
   assert.ok(srv.includes("const reqAuthed") && srv.includes('AI_COST_PATHS = new Set(["/api/ask", "/api/ai-report"])'), "always-on AI-cost auth guard missing");
-  assert.ok(srv.includes("!reqAuthed(req)") && /AI_COST_PATHS\.has\(u\) && !reqAuthed/.test(srv), "AI-cost guard must 401 unauthenticated callers");
+  assert.ok(srv.includes("!reqAuthed(req)") && /AI_COST_PATHS\.has\(u\)[\s\S]{0,120}!reqAuthed\(req\)/.test(srv), "AI-cost guard must 401 unauthenticated callers");
   assert.ok(/fastify\.post\("\/api\/ask", \{ bodyLimit: 256 \* 1024 \}/.test(srv), "/api/ask must carry a 256 KB body limit");
   assert.ok(/fastify\.post\("\/api\/ai-reset", \{ bodyLimit: 8 \* 1024 \}/.test(srv), "/api/ai-reset must carry an 8 KB body limit");
   // Every poller getter the route layer references must be defined AND exported by the poller
@@ -1861,6 +1887,34 @@ test("server route manifest: every load-bearing API route is registered exactly 
   // (exactly what the removed /api/unlocks route was — bound to a getUnlocks that never existed).
   for (const g of getters)
     assert.ok(new RegExp(`(function ${g}\\(|${g}\\s*:)`).test(pol), `route references undefined poller getter: ${g}`);
+});
+
+test("AI admin gate: server locks generation behind an unlock cookie, no script/header bypass", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // Signing: the unlock secret is DERIVED from ADMIN_PASSWORD (rotating it revokes every unlock),
+  // and both the signer and verifier exist.
+  assert.ok(srv.includes("xyzmon-ai-unlock|") && /const AI_UNLOCK_SECRET/.test(srv), "AI unlock secret must derive from ADMIN_PASSWORD");
+  assert.ok(srv.includes("function signAiUnlock") && srv.includes("function aiUnlockOk"), "AI unlock signer/verifier missing");
+  // Fail-closed: no admin password => no valid unlock, ever.
+  assert.ok(/aiUnlockOk[\s\S]{0,120}!ADMIN_PASSWORD/.test(srv), "aiUnlockOk must reject when ADMIN_PASSWORD is unset (fail closed)");
+  // Enforcement: the shared AI-cost hook must require the xyzai unlock on top of authentication,
+  // and emit the distinct 'ai-locked' code (so the client can prompt for the password vs a login).
+  assert.ok(srv.includes('error: "ai-locked"') && /aiUnlockOk\(getCookie\(req, "xyzai"\)\)/.test(srv), "AI-cost hook must gate on the xyzai unlock cookie with an ai-locked 401");
+  // Cookie is HttpOnly and browser-session-lived (no Max-Age on set); mint + clear helpers exist.
+  assert.ok(srv.includes("function setAiUnlockCookie") && srv.includes("function clearAiUnlockCookie"), "xyzai cookie set/clear helpers missing");
+  assert.ok(/aiCookieAttrs[\s\S]{0,400}HttpOnly/.test(srv), "xyzai must be HttpOnly");
+  // No header/Basic bypass: the ONLY unlock affordance is the password route (no X-Admin-Password).
+  assert.ok(!/x-admin-password/i.test(srv), "there must be no header bypass for the AI gate (browser+password only)");
+  // Routes registered exactly once, backed by the shared admin check.
+  assert.equal(srv.split('fastify.post("/api/ai-unlock"').length - 1, 1, "POST /api/ai-unlock registered exactly once");
+  assert.equal(srv.split('fastify.post("/api/ai-lock"').length - 1, 1, "POST /api/ai-lock registered exactly once");
+  assert.equal(srv.split('fastify.get("/api/ai-status"').length - 1, 1, "GET /api/ai-status registered exactly once");
+  assert.ok(srv.includes("poller.checkAdminPassword"), "unlock route must verify via poller.checkAdminPassword");
+  assert.ok(/function checkAdminPassword/.test(pol) && /checkAdminPassword,/.test(pol), "poller.checkAdminPassword missing or not exported");
+  // The reset route must still share that one check (one lockout surface, not two).
+  assert.ok(/function resetAiDay[\s\S]{0,160}checkAdminPassword\(password\)/.test(pol), "resetAiDay must route through checkAdminPassword (shared lockout)");
 });
 
 test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, open-claim voiding", () => {
