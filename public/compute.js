@@ -1,0 +1,1887 @@
+"use strict";
+// Math ported verbatim from the original client so server-computed features match exactly.
+
+function stdev(a) {
+  if (a.length < 2) return 0;
+  const m = a.reduce((p, q) => p + q, 0) / a.length;
+  let v = 0;
+  for (const x of a) v += (x - m) * (x - m);
+  return Math.sqrt(v / (a.length - 1));
+}
+function median(a) {
+  if (!a.length) return 0;
+  const s = [...a].sort((x, y) => x - y), n = s.length;
+  return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+}
+function linregR2(ys) {
+  const n = ys.length;
+  if (n < 3) return { slope: 0, r2: 0 };
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) { sx += i; sy += ys[i]; sxx += i * i; sxy += i * ys[i]; }
+  const d = n * sxx - sx * sx;
+  if (d === 0) return { slope: 0, r2: 0 };
+  const slope = (n * sxy - sx * sy) / d, b = (sy - slope * sx) / n, my = sy / n;
+  let sr = 0, st = 0;
+  for (let i = 0; i < n; i++) { const yh = slope * i + b; sr += (ys[i] - yh) ** 2; st += (ys[i] - my) ** 2; }
+  return { slope, r2: st > 0 ? 1 - sr / st : 0 };
+}
+function priceAt(c, target, tol) {
+  if (!c || !c.length) return null;
+  let best = null, bd = Infinity;
+  for (const k of c) { const d = Math.abs(k.t - target); if (d < bd) { bd = d; best = k; } }
+  if (!best || bd > tol) return null;
+  const v = parseFloat(best.c);
+  return isFinite(v) ? v : null;
+}
+
+// Reference prices (1h/4h/7d/30d) + momentum/vol features from ~30d of hourly candles.
+function featuresFromHourly(c, now, HOUR, DAY) {
+  const ref = {
+    p1h: priceAt(c, now - 1 * HOUR, 95 * 60 * 1000),
+    p4h: priceAt(c, now - 4 * HOUR, 3 * HOUR),
+    p7d: priceAt(c, now - 7 * DAY, 4 * HOUR),
+    p30d: priceAt(c, now - 30 * DAY, 6 * HOUR),
+  };
+  const rets = [], dayMap = new Map(), dayHLC = new Map();
+  let prev = null, hi = -Infinity, lo = Infinity, vwNum = 0, vwDen = 0;
+  for (const k of c) {
+    const cl = parseFloat(k.c), h = parseFloat(k.h), l = parseFloat(k.l), v = parseFloat(k.v);
+    if (isFinite(h) && h > hi) hi = h;
+    if (isFinite(l) && l < lo) lo = l;
+    // rolling VWAP over the full window: per-candle typical price (H+L+C)/3 weighted by
+    // base volume. An approximation of tick VWAP (no per-fill data in candles), but the
+    // volume weighting is real. Zero-volume candles contribute nothing by construction.
+    if (isFinite(v) && v > 0) {
+      const typ = (isFinite(h) && isFinite(l) && isFinite(cl)) ? (h + l + cl) / 3 : (isFinite(cl) ? cl : null);
+      if (typ != null && typ > 0) { vwNum += typ * v; vwDen += v; }
+    }
+    if (isFinite(cl)) { if (prev != null && prev > 0) rets.push(Math.log(cl / prev)); prev = cl; }
+    const day = Math.floor(k.t / DAY), ntl = (isFinite(v) && isFinite(cl)) ? v * cl : 0;
+    dayMap.set(day, (dayMap.get(day) || 0) + ntl);
+    // per-day high / low / last-close for the average daily range series
+    let d = dayHLC.get(day);
+    if (!d) { d = { hi: -Infinity, lo: Infinity, c: null, lastT: -Infinity }; dayHLC.set(day, d); }
+    if (isFinite(h) && h > d.hi) d.hi = h;
+    if (isFinite(l) && l < d.lo) d.lo = l;
+    if (isFinite(cl) && k.t >= d.lastT) { d.c = cl; d.lastT = k.t; }
+  }
+  const seg = c.slice(-Math.min(168, c.length)).map((k) => Math.log(parseFloat(k.c))).filter(Number.isFinite);
+  const { r2 } = linregR2(seg);
+  // average-daily-range series: (high − low) / close per COMPLETED day, oldest→newest
+  const today = Math.floor(now / DAY);
+  const dayEntries = [...dayHLC.entries()].sort((a, b) => a[0] - b[0]);
+  const dr = dayEntries
+    .filter(([day, d]) => day < today && d.hi > -Infinity && d.lo < Infinity && d.c > 0)
+    .map(([, d]) => (d.hi - d.lo) / d.c * 100);
+  // daily-close path (last ~31 days) so the 30d-trend sparkline needs no daily candles
+  const px30 = dayEntries.map(([, d]) => d.c).filter((v) => v != null && isFinite(v)).slice(-31);
+  // Daily-return volatility from completed-day closes. Momentum uses this to risk-adjust its
+  // day-plus horizons rather than extrapolating hourly vol by sqrt(t): the sqrt(t) rule assumes
+  // iid returns, which fits poorly for perps on closed-hours underlyings (session structure,
+  // overnight gaps), so a directly measured daily vol is the more trustworthy yardstick over 1d+.
+  const dCloses = dayEntries.filter(([day, d]) => day < today && d.c > 0).map(([, d]) => d.c);
+  const dRets = [];
+  for (let i = 1; i < dCloses.length; i++) if (dCloses[i - 1] > 0) dRets.push(Math.log(dCloses[i] / dCloses[i - 1]));
+  const volD = dRets.length >= 5 ? stdev(dRets) : null;
+  const feat = {
+    volH: stdev(rets),
+    volD,
+    r2,
+    hi30: hi > -Infinity ? hi : null,
+    lo30: lo < Infinity ? lo : null,
+    volBase: median([...dayMap.values()].filter((x) => x > 0)),
+    dr,
+    px30,
+    // volume-weighted average price over the whole hourly window (~31d); null when the
+    // window traded no volume — an honest dash beats a fabricated level.
+    vwap30: vwDen > 0 ? vwNum / vwDen : null,
+  };
+  return { ref, feat };
+}
+
+// Open-interest change over a window from a [[ts, oi], ...] history buffer.
+// Anchors by linear interpolation between the two samples that straddle `now - window`,
+// so the reference lands on the exact window boundary rather than on whichever stored
+// sample happens to be nearest. Tolerance is derived from the window and hard-capped at
+// 12h, so a long-window ΔOI can never be silently anchored days off-target; if no sample
+// lands within tolerance it returns null instead of a misleading number. A straddle wider
+// than 3× tolerance (i.e. a poller outage) uses the nearer sample instead of interpolating
+// across the void. The 4th argument (old per-call tolerance) is accepted and ignored for
+// backward compatibility with existing callers.
+// Binary-search helpers over a [[ts, ...], ...] array kept ASCENDING by ts (which every
+// caller here guarantees: store.loadAll sorts, live appends are monotonic). firstIndexGT
+// returns the first index whose ts is strictly greater than t; firstIndexGE the first index
+// whose ts is >= t. Both return a value in [0, arr.length]. These turn the OI/funding window
+// scans below from O(n) (a full walk of the ~9k-sample 31d spine, per timeframe, per market,
+// every 15s tick) into O(log n) — the single biggest per-tick cost in buildSnapshot.
+function firstIndexGT(arr, t) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m][0] > t) hi = m; else lo = m + 1; }
+  return lo;
+}
+function firstIndexGE(arr, t) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m][0] >= t) hi = m; else lo = m + 1; }
+  return lo;
+}
+function oiDeltaPct(hist, oiNow, windowMs) {
+  if (!hist || hist.length < 2 || !(oiNow > 0)) return null;
+  const MIN = 60 * 1000, HOUR = 60 * MIN, OI_MIN_GAP = 4.5 * MIN;
+  const tol = Math.min(Math.max(2 * OI_MIN_GAP, windowMs * 0.05), 12 * HOUR);
+  const target = Date.now() - windowMs;
+
+  // `before` = latest positive-OI sample at or before target; `after` = earliest positive-OI
+  // sample after target. Binary-search the split, then walk outward past any non-positive-OI
+  // samples (rare) — identical result to the old full linear scan, a couple of steps instead
+  // of thousands.
+  const split = firstIndexGT(hist, target);          // first index with ts > target
+  let before = null, after = null;
+  for (let i = split - 1; i >= 0; i--) if (hist[i][1] > 0) { before = hist[i]; break; }
+  for (let i = split; i < hist.length; i++) if (hist[i][1] > 0) { after = hist[i]; break; }
+  const dBefore = before ? target - before[0] : Infinity;
+  const dAfter  = after  ? after[0] - target  : Infinity;
+  if (Math.min(dBefore, dAfter) > tol) return null;
+
+  let base;
+  if (before && after && (after[0] - before[0]) <= 3 * tol) {
+    const span = after[0] - before[0];
+    base = before[1] + (after[1] - before[1]) * ((target - before[0]) / span);
+  } else {
+    base = (dBefore <= dAfter ? before : after)[1];  // one-sided, or straddle too wide
+  }
+  if (!(base > 0)) return null;
+  return (oiNow - base) / base * 100;
+}
+
+// Time-weighted average funding rate over the trailing window, from the OI/funding history
+// buffer ([[ts, oi, funding], ...], ascending). Trapezoidal integration, so it measures the
+// funding rate over the *same* interval as the price and OI legs of the regime and is robust
+// to uneven sampling and short gaps. Segments with missing funding break the integration
+// (so restored pre-funding history is simply skipped); falls back to a simple mean when the
+// span can't be integrated. Returns null when there is no funding data inside the window.
+function fundingAvg(hist, windowMs) {
+  if (!hist || hist.length < 1) return null;
+  const now = Date.now(), start = now - windowMs;
+  // Only samples from the one immediately before `start` onward can contribute: any earlier
+  // segment clips to zero width against `start` in the integration below, and simSum/simN only
+  // count t >= start. Binary-search to that sample and skip the (potentially thousands-long)
+  // dead prefix. The pT=null seed reproduces the old loop's state exactly at the boundary.
+  let pT = null, pF = null, area = 0, span = 0, simSum = 0, simN = 0;
+  const i0 = firstIndexGE(hist, start);              // first index with ts >= start
+  for (let i = Math.max(0, i0 - 1); i < hist.length; i++) {
+    const s = hist[i], t = s[0], f = s[2];
+    if (f == null || !isFinite(f)) { pT = null; pF = null; continue; }
+    if (t >= start) { simSum += f; simN++; }
+    if (pT != null && t > pT) {
+      const a = Math.max(pT, start);
+      if (t > a) {
+        const fa = a === pT ? pF : pF + (f - pF) * ((a - pT) / (t - pT)); // interp left edge if it crosses start
+        area += (fa + f) / 2 * (t - a);
+        span += (t - a);
+      }
+    }
+    pT = t; pF = f;
+  }
+  if (span > 0) return area / span;
+  return simN ? simSum / simN : null;
+}
+
+// Daily log-returns keyed by day-index, from a [[t, close], ...] or [{t, c}, ...] series.
+function dailyLogReturns(daily) {
+  const m = new Map(); let prev = null;
+  if (!daily) return m;
+  for (const k of daily) {
+    const t = Array.isArray(k) ? k[0] : k.t;
+    const c = parseFloat(Array.isArray(k) ? k[1] : k.c);
+    if (!Number.isFinite(c)) continue;
+    const day = Math.floor(t / 86400000);
+    if (prev != null && prev > 0) m.set(day, Math.log(c / prev));
+    prev = c;
+  }
+  return m;
+}
+function pearson(a, b) {
+  const n = a.length; if (n < 3) return null;
+  let sa = 0, sb = 0; for (let i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+  const ma = sa / n, mb = sb / n; let cov = 0, va = 0, vb = 0;
+  for (let i = 0; i < n; i++) { const da = a[i] - ma, db = b[i] - mb; cov += da * db; va += da * da; vb += db * db; }
+  if (va <= 0 || vb <= 0) return null;
+  return cov / Math.sqrt(va * vb);
+}
+// Mean pairwise daily-return correlation across a set of series over the trailing `Ldays`.
+// Same overlap rule as the client correlation tab (>= max(15, half the window)), so the strip's
+// number and the matrix agree. Returns { corr, pairs } — corr is null until enough pairs qualify.
+function meanPairwiseCorr(seriesList, Ldays) {
+  const cutoff = Math.floor(Date.now() / 86400000) - Ldays;
+  const minOv = Math.max(15, Math.floor(Ldays * 0.5));
+  const maps = seriesList.map((s) => {
+    const m = dailyLogReturns(s), f = new Map();
+    for (const [d, v] of m) if (d >= cutoff) f.set(d, v);
+    return f;
+  });
+  let sum = 0, n = 0;
+  for (let i = 0; i < maps.length; i++)
+    for (let j = i + 1; j < maps.length; j++) {
+      const A = maps[i], B = maps[j], small = A.size < B.size ? A : B, other = small === A ? B : A, xa = [], xb = [];
+      for (const [d, v] of small) { const w = other.get(d); if (w !== undefined) { xa.push(v); xb.push(w); } }
+      if (xa.length < minOv) continue;
+      const c = pearson(xa, xb);
+      if (c != null && Number.isFinite(c)) { sum += c; n++; }
+    }
+  return { corr: n ? sum / n : null, pairs: n };
+}
+
+
+
+// =====================================================================================
+// Boundary-backtest engine — evaluate "hold between two calendar-defined timestamps, net of
+// funding" over the hourly price + funding spines. Anchor presets (overnight / weekend / cash)
+// sit on a general primitive: give it enter/exit timestamps and it tabulates the long-side hold.
+// =====================================================================================
+// Boundary-backtest engine (pure, no I/O). Evaluates "hold between two calendar-defined timestamps,
+// net of funding" over the hourly price + funding spines. The named anchor generators (overnight /
+// weekend / cash) are just presets over a general primitive: give it enter/exit timestamps and it
+// tabulates the hold. Long-perspective P&L: buy at `enter`, sell at `exit`.
+//
+// Funding sign: Hyperliquid funding rate > 0 means longs pay shorts, so a long's net return over a
+// hold is grossReturn - sum(hourlyFundingRate) across the held hours.
+
+const HOUR = 3600 * 1000, DAY = 86400 * 1000;
+const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+// ---- ET (America/New_York) wall-clock, DST-correct via Intl (no hardcoded DST rules) ----
+const _etFmt = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short",
+});
+function etParts(ms) {
+  const p = _etFmt.formatToParts(new Date(ms));
+  const g = (t) => p.find((x) => x.type === t).value;
+  let h = +g("hour"); if (h === 24) h = 0;
+  return { y: +g("year"), mo: +g("month"), d: +g("day"), h, mi: +g("minute"), wd: WD[g("weekday")] };
+}
+// Offset (hours) of ET from UTC at instant ms: -4 during EDT, -5 during EST.
+function etOffsetAt(ms) {
+  const et = etParts(ms);
+  const asUtc = Date.UTC(et.y, et.mo - 1, et.d, et.h, et.mi);
+  return Math.round((asUtc - ms) / HOUR);
+}
+// UTC ms whose ET wall-clock is (y,mo,d,h,mi). Guess EST, then correct by the real offset in effect.
+function etWallToUtc(y, mo, d, h, mi) {
+  const base = Date.UTC(y, mo - 1, d, h, mi);
+  const off = etOffsetAt(base + 5 * HOUR);   // probe near the EST guess
+  return base - off * HOUR;
+}
+
+// Enumerate ET calendar days in [startMs, endMs] (12h steps + dedupe so DST never skips a day).
+function etDays(startMs, endMs) {
+  const out = [], seen = new Set();
+  for (let ms = startMs; ms <= endMs + DAY; ms += 12 * HOUR) {
+    const et = etParts(ms), key = et.y + "-" + et.mo + "-" + et.d;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(et);
+  }
+  return out;
+}
+function nextEtDate(et, days) {
+  const noon = etWallToUtc(et.y, et.mo, et.d, 12, 0) + days * DAY;
+  return etParts(noon);
+}
+
+// ---- anchor generators: [{enter, exit, tag}] ----
+// Cash session: 09:30 -> 16:00 ET, weekdays.
+// ---- US equity market calendar ----------------------------------------------------------
+// Full-day closures and 13:00 ET early closes, computed algorithmically (no yearly table):
+// New Year's, MLK, Presidents, Good Friday, Memorial, Juneteenth, Independence, Labor,
+// Thanksgiving, Christmas, with Sat->Fri / Sun->Mon observance. Early closes: Jul 3 (when
+// Jul 4 falls Tue-Fri), the Friday after Thanksgiving, and Christmas Eve on a weekday.
+// This is what makes the gap/off-hours engine correct on weeks like Jul 4 2026 (Saturday,
+// observed Friday Jul 3): without it the boundary engine thinks Friday had a cash session.
+function wallWd(y, mo, d) { return new Date(Date.UTC(y, mo - 1, d)).getUTCDay(); }
+function shiftWall(y, mo, d, days) { const x = new Date(Date.UTC(y, mo - 1, d) + days * DAY); return { y: x.getUTCFullYear(), mo: x.getUTCMonth() + 1, d: x.getUTCDate() }; }
+function nthWd(y, mo, wd, n) { const first = wallWd(y, mo, 1); return { y, mo, d: 1 + ((wd - first + 7) % 7) + (n - 1) * 7 }; }
+function lastWd(y, mo, wd) { const dim = new Date(Date.UTC(y, mo, 0)).getUTCDate(); return { y, mo, d: dim - ((wallWd(y, mo, dim) - wd + 7) % 7) }; }
+function easterSunday(y) {   // Anonymous Gregorian computus
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, dd = Math.floor(b / 4), e = b % 4,
+    f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - dd - g + 15) % 30,
+    i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7,
+    m = Math.floor((a + 11 * h + 22 * l) / 451), mo = Math.floor((h + l - 7 * m + 114) / 31),
+    d = ((h + l - 7 * m + 114) % 31) + 1;
+  return { y, mo, d };
+}
+function observedHol(y, mo, d) { const wd = wallWd(y, mo, d); if (wd === 6) return shiftWall(y, mo, d, -1); if (wd === 0) return shiftWall(y, mo, d, 1); return { y, mo, d }; }
+const _calCache = new Map();
+function usMarketCalendar(y) {
+  let m = _calCache.get(y); if (m) return m;
+  m = new Map(); const K = (w) => w.y + "-" + w.mo + "-" + w.d;
+  const es = easterSunday(y);
+  const closed = [
+    observedHol(y, 1, 1), nthWd(y, 1, 1, 3), nthWd(y, 2, 1, 3), shiftWall(es.y, es.mo, es.d, -2),
+    lastWd(y, 5, 1), observedHol(y, 6, 19), observedHol(y, 7, 4), nthWd(y, 9, 1, 1),
+    nthWd(y, 11, 4, 4), observedHol(y, 12, 25),
+  ];
+  for (const w of closed) if (w.y === y) m.set(K(w), 2);
+  const ny = observedHol(y + 1, 1, 1); if (ny.y === y) m.set(K(ny), 2);   // next New Year observed Fri Dec 31
+  const early = [];
+  const j4wd = wallWd(y, 7, 4);
+  if (j4wd >= 2 && j4wd <= 5) early.push({ y, mo: 7, d: 3 });             // Jul 3 early when Jul 4 is Tue..Fri
+  early.push(shiftWall(y, 11, nthWd(y, 11, 4, 4).d, 1));                  // Friday after Thanksgiving
+  if (wallWd(y, 12, 24) >= 1 && wallWd(y, 12, 24) <= 5) early.push({ y, mo: 12, d: 24 });
+  for (const w of early) { const k = K(w), wd = wallWd(w.y, w.mo, w.d); if (!m.has(k) && wd >= 1 && wd <= 5) m.set(k, 1); }
+  _calCache.set(y, m); return m;
+}
+// 0 = regular trading day, 1 = early close (13:00 ET), 2 = closed (weekend or holiday)
+function usDayStatus(y, mo, d) {
+  const wd = wallWd(y, mo, d);
+  if (wd === 0 || wd === 6) return 2;
+  return usMarketCalendar(y).get(y + "-" + mo + "-" + d) || 0;
+}
+// All cash sessions overlapping [startMs, endMs] (padded so callers can derive edge windows):
+// { open: 09:30 ET, close: 16:00 or 13:00 ET }.
+function marketSessions(startMs, endMs) {
+  const out = [];
+  for (const et of etDays(startMs - DAY, endMs + DAY)) {
+    const st = usDayStatus(et.y, et.mo, et.d);
+    if (st === 2) continue;
+    out.push({ open: etWallToUtc(et.y, et.mo, et.d, 9, 30), close: etWallToUtc(et.y, et.mo, et.d, st === 1 ? 13 : 16, 0) });
+  }
+  return out;
+}
+// Cash sessions as hold anchors (respects holidays and early closes).
+function cashAnchors(startMs, endMs) {
+  const out = [];
+  for (const s of marketSessions(startMs, endMs))
+    if (s.open >= startMs && s.close <= endMs) out.push({ enter: s.open, exit: s.close, tag: "cash" });
+  return out;
+}
+// Every closed window between consecutive sessions. Tagging keeps the two historical buckets:
+// < 40h = "overnight" (single nights, incl. early-close afternoons), >= 40h = "weekend"
+// (true weekends, holiday weekends, and midweek-holiday spans — they behave like one hold).
+function closedWindows(startMs, endMs) {
+  const ses = marketSessions(startMs - 6 * DAY, endMs + 6 * DAY), out = [];
+  for (let i = 0; i + 1 < ses.length; i++) {
+    const enter = ses[i].close, exit = ses[i + 1].open;
+    if (enter >= startMs && exit <= endMs)
+      out.push({ enter, exit, tag: exit - enter < 40 * HOUR ? "overnight" : "weekend" });
+  }
+  return out;
+}
+function overnightAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "overnight"); }
+function weekendAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "weekend"); }
+
+// ---- event studies -----------------------------------------------------------------------
+// For each defined event, scan a market's OWN history, find every occurrence, and measure what
+// happened next. The output is an honest conditional base rate — median forward return, hit
+// rate, and (crucially) sample size — not a prediction. n < 8 is reported, never hidden.
+function summarizeEvents(rets) {
+  const v = rets.filter(Number.isFinite);
+  if (!v.length) return { n: 0 };
+  const s = [...v].sort((a, b) => a - b);
+  const med = s[Math.floor(s.length / 2)];
+  return {
+    n: v.length,
+    med: +med.toFixed(2),
+    hit: +(v.filter((x) => x > 0).length / v.length).toFixed(2),
+    avg: +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2),
+  };
+}
+function retStd(rets, min) {
+  const v = rets.filter(Number.isFinite);
+  if (v.length < (min || 15)) return null;
+  const m = v.reduce((a, b) => a + b, 0) / v.length;
+  return Math.sqrt(v.reduce((a, b) => a + (b - m) * (b - m), 0) / (v.length - 1));
+}
+function dailyRets(closes) {   // closes: [[t, c], ...] ascending
+  const out = [];
+  for (let i = 1; i < closes.length; i++) {
+    const a = closes[i - 1][1], b = closes[i][1];
+    out.push(a > 0 && b > 0 ? (b / a - 1) * 100 : NaN);
+  }
+  return out;
+}
+// trailing-30 daily sigma ending just before index i (unit for R-normalized outcomes)
+function sdAt(rets, i) { return retStd(rets.slice(Math.max(0, i - 30), i), 15); }
+function fwdRet(closes, i, k) {
+  if (i + k >= closes.length) return null;
+  const a = closes[i][1], b = closes[i + k][1];
+  return a > 0 && b > 0 ? (b / a - 1) * 100 : null;
+}
+// Big-move continuation: |1d return| >= 2 sigma of the trailing 30 daily returns. Forward
+// returns are SIGNED IN THE DIRECTION of the move: positive = continuation, negative = fade.
+function studyBigMove(closes) {
+  const rets = dailyRets(closes), d1 = [], d3 = [];
+  for (let i = 30; i < rets.length; i++) {
+    const sd = sdAt(rets, i);
+    if (sd == null || sd <= 0 || !Number.isFinite(rets[i]) || Math.abs(rets[i]) < 2 * sd) continue;
+    const dir = rets[i] > 0 ? 1 : -1, ci = i + 1;   // rets[i] is the move into closes[ci]
+    const f1 = fwdRet(closes, ci, 1), f3 = fwdRet(closes, ci, 3);
+    if (f1 != null) d1.push(+(dir * f1 / sd).toFixed(3));   // R units: outcome / own sigma at event time
+    if (f3 != null) d3.push(+(dir * f3 / sd).toFixed(3));
+  }
+  return { d1: summarizeEvents(d1), d3: summarizeEvents(d3), raw: { d1, d3 }, unit: "R" };
+}
+// 30d-high breakout: close crosses above the max of the prior 30 closes. Forward 1d / 5d.
+function studyBreakout(closes) {
+  const rets = dailyRets(closes), d1 = [], d5 = [];
+  for (let i = 31; i < closes.length; i++) {
+    let hi = -Infinity;
+    for (let j = i - 30; j < i; j++) if (closes[j][1] > hi) hi = closes[j][1];
+    if (!(closes[i][1] > hi) || closes[i - 1][1] > hi) continue;   // first cross only
+    const sd = sdAt(rets, i - 1);
+    if (sd == null || sd <= 0) continue;
+    const f1 = fwdRet(closes, i, 1), f5 = fwdRet(closes, i, 5);
+    if (f1 != null) d1.push(+(f1 / sd).toFixed(3));
+    if (f5 != null) d5.push(+(f5 / sd).toFixed(3));
+  }
+  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
+}
+// 30d-low breakdown: close crosses below the min of the prior 30 closes — the bearish mirror
+// of the breakout study. Outcomes are signed WITH the breakdown (positive = continued lower),
+// matching the ledger's dir=-1 convention, so "hit" means the breakdown followed through.
+function studyBreakdown(closes) {
+  const rets = dailyRets(closes), d1 = [], d5 = [];
+  for (let i = 31; i < closes.length; i++) {
+    let lo = Infinity;
+    for (let j = i - 30; j < i; j++) if (closes[j][1] < lo) lo = closes[j][1];
+    if (!(closes[i][1] < lo) || closes[i - 1][1] < lo) continue;   // first cross only
+    const sd = sdAt(rets, i - 1);
+    if (sd == null || sd <= 0) continue;
+    const f1 = fwdRet(closes, i, 1), f5 = fwdRet(closes, i, 5);
+    if (f1 != null) d1.push(+(-f1 / sd).toFixed(3));
+    if (f5 != null) d5.push(+(-f5 / sd).toFixed(3));
+  }
+  return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
+}
+// Vol-regime shift: 10d realized vol crossing above the 90th percentile of its trailing 120
+// observations. Forward 5d return (does an expansion resolve up or down for this market?).
+function studyVolShift(closes) {
+  const rets = dailyRets(closes), vols = [];
+  for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
+  const d5 = [];
+  for (let i = 120; i < vols.length; i++) {
+    const hist = vols.slice(i - 120, i).filter((x) => x != null);
+    if (hist.length < 60 || vols[i] == null || vols[i - 1] == null) continue;
+    const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
+    if (!(vols[i] > p90) || vols[i - 1] > p90) continue;           // first cross only
+    const ci = i + 10;                                              // vols[i] ends at closes[ci]
+    const sd = sdAt(rets, ci - 1);
+    if (sd == null || sd <= 0) continue;
+    const f5 = fwdRet(closes, ci, 5);
+    if (f5 != null) d5.push(+(f5 / sd).toFixed(3));
+  }
+  return { d5: summarizeEvents(d5), raw: { d5 }, unit: "R" };
+}
+// Gap fade/continuation: for each closed-window hold with |gap| >= 0.75 sigma of this market's
+// own gap distribution, measure the NEXT cash session (open -> close), signed by gap direction:
+// positive = the session continued the gap, negative = it faded it.
+function studyGapFade(hourly, windows, tol) {
+  const gaps = [];
+  for (const a of windows) {
+    const pIn = priceAsOf(hourly, a.enter, tol), pOut = priceAsOf(hourly, a.exit, tol);
+    if (pIn > 0 && pOut > 0) gaps.push({ exit: a.exit, g: (pOut / pIn - 1) * 100 });
+  }
+  const sd = retStd(gaps.map((x) => x.g), 10);
+  if (sd == null || sd <= 0) return { session: { n: 0 }, nGaps: gaps.length, sd: null };
+  const dirRets = [];
+  for (const gp of gaps) {
+    if (Math.abs(gp.g) < 0.75 * sd) continue;
+    const open = priceAsOf(hourly, gp.exit, tol);
+    const close = priceAsOf(hourly, gp.exit + 6.5 * HOUR, tol);
+    if (!(open > 0) || !(close > 0)) continue;
+    dirRets.push((gp.g > 0 ? 1 : -1) * (close / open - 1) * 100);
+  }
+  return { session: summarizeEvents(dirRets), nGaps: gaps.length, sd: +sd.toFixed(3), raw: { session: dirRets } };
+}
+// Funding flip: the day-summed funding changes sign after >= 3 consecutive same-sign days.
+// Forward 3d return signed TOWARD the new funding side (funding flips positive = longs now
+// crowding in; positive result = price followed the new crowd).
+function studyFundFlip(dayFunding, closes) {
+  const byDay = new Map(closes.map((k, i) => [Math.floor(k[0] / DAY) * DAY, i]));
+  const d3 = [];
+  let run = 0, prevSign = 0;
+  for (let i = 0; i < dayFunding.length; i++) {
+    const s = Math.sign(dayFunding[i][1]);
+    if (s !== 0 && prevSign !== 0 && s !== prevSign && run >= 3) {
+      const ci = byDay.get(Math.floor(dayFunding[i][0] / DAY) * DAY);
+      if (ci != null) {
+        const sd = sdAt(dailyRets(closes), Math.max(0, ci - 1));
+        const f3 = fwdRet(closes, ci, 3);
+        if (f3 != null && sd > 0) d3.push(+(s * f3 / sd).toFixed(3));
+      }
+    }
+    if (s === prevSign) run++; else { run = s === 0 ? run : 1; if (s !== 0) prevSign = s; }
+  }
+  return { d3: summarizeEvents(d3), raw: { d3 }, unit: "R" };
+}
+
+// ---- signal metadata + playbooks ----------------------------------------------------------
+// Per-event resolution conventions for the live ledger: which horizon the claim covers and how
+// the realized outcome is signed (identical to the study's sign convention, so claimed vs live
+// records are directly comparable).
+const EV_META = {
+  bigmove:  { horizonMs: DAY,      horizon: "next 1d, signed with the move", studyKey: "d1" },
+  breakout: { horizonMs: 5 * DAY,  horizon: "next 5d",                        studyKey: "d5" },
+  volshift: { horizonMs: 5 * DAY,  horizon: "next 5d",                        studyKey: "d5" },
+  gap:      { horizonMs: null,     horizon: "next cash session, signed with the gap", studyKey: "session" },  // resolveAt = next session close
+  fundflip: { horizonMs: 3 * DAY,  horizon: "next 3d, toward the new crowd",  studyKey: "d3" },
+  squeeze:  { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
+  breakdown:{ horizonMs: 5 * DAY,  horizon: "next 5d, signed with the breakdown", studyKey: "d5" },
+  unwind:   { horizonMs: 3 * DAY,  horizon: "next 3d",                        studyKey: null },
+  oiflush:  { horizonMs: 5 * DAY,  horizon: "next 5d (bottoming thesis)",     studyKey: "d5" },
+  fpdiv:    { horizonMs: 3 * DAY,  horizon: "next 3d, with the divergence",   studyKey: "d3" },
+  tretest:  { horizonMs: 5 * DAY,  horizon: "next 5d, with the stacked trend", studyKey: null },
+  tretestdn:{ horizonMs: 5 * DAY,  horizon: "next 5d, with the stacked downtrend", studyKey: null },
+  coil:     { horizonMs: null,     horizon: "context flag \u2014 expansion pending, direction unknown", studyKey: null },
+  ondrift:  { horizonMs: null,     horizon: "next 5 overnight windows, held close\u2192open", studyKey: null },
+  prem:     { horizonMs: 12 * HOUR, horizon: "reversion toward oracle",       studyKey: null },
+  volume:   { horizonMs: null,     horizon: "context flag",                   studyKey: null },
+  gapfade:  { horizonMs: null,     horizon: "next cash session, faded",       studyKey: null },  // shadow strategy — resolveAt = next session close, same calendar as gap
+  reclaim:  { horizonMs: 5 * DAY,  horizon: "next 5d, off the failed breakdown", studyKey: null },  // shadow swing setup
+  mapull:   { horizonMs: 10 * DAY, horizon: "next 10d, off the rising MA50",  studyKey: null },     // shadow swing setup
+  failbrk:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the failed breakout", studyKey: null }, // shadow swing setup
+  pead:     { horizonMs: 10 * DAY, horizon: "next 10d, drifting with the earnings reaction", studyKey: null },  // shadow swing setup (xyz)
+  airead:   { horizonMs: 5 * DAY,  horizon: "next 5d, the analyst report's own read", studyKey: null },  // AI analyst accountability claim
+};
+// Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
+// market's own stats, and the one corroborating thing to watch. A description of the setup —
+// explicitly NOT advice; the ledger decides which event types have earned any trust.
+function playbook(ev, ctx) {
+  const f2 = (x) => (x == null || !Number.isFinite(x) ? null : +x.toPrecision(6));
+  switch (ev) {
+    case "bigmove": {
+      const up = ctx.dir >= 0, sgn = up ? 1 : -1;
+      return { side: up ? "long" : "short", bias: "continuation " + (up ? "up" : "down"),
+        target: f2(ctx.px * (1 + sgn * Math.abs(ctx.med != null ? ctx.med : 0.5) / 100)),
+        stop: f2(ctx.px * (1 - sgn * (ctx.sd30 || 1) / 100)),
+        watch: "volume staying elevated \u2014 a thrust on fading volume is the fade setup instead" };
+    }
+    case "breakout":
+      return { side: "long", bias: "continuation while above the breakout level",
+        target: f2(ctx.px * (1 + Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        stop: f2(ctx.level),
+        watch: "a close back below the prior 30d high = failed breakout, the signal is void" };
+    case "gap": {
+      const proven = ctx.n >= 8, fade = proven && ctx.med != null && ctx.med < 0;
+      if (fade)
+        return { side: ctx.gapDir >= 0 ? "short" : "long",
+          bias: "this market historically FADES its gaps \u2014 " + (ctx.gapDir >= 0 ? "short the up-gap" : "long the down-gap") + " into the session, reversion toward the prior close",
+          target: f2(ctx.closePx),
+          stop: f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * (ctx.gapSd || 0.5) / 100)),
+          watch: "whether the S&P confirms \u2014 an excess gap (beyond beta) carries the information" };
+      if (proven)
+        return { side: ctx.gapDir >= 0 ? "long" : "short",
+          bias: "this market historically continues its gaps \u2014 ride the direction into the session",
+          target: f2(ctx.px * (1 + (ctx.gapDir >= 0 ? 1 : -1) * Math.abs(ctx.med != null ? ctx.med : 0.3) / 100)),
+          stop: f2(ctx.closePx),
+          watch: "whether the S&P confirms \u2014 an excess gap (beyond beta) carries the information" };
+      return { side: "watch", bias: "gap behavior unproven on this market \u2014 watch the open",
+        target: null, stop: null,
+        watch: "which way the first cash hour resolves; the pooled asset-class record is the prior until this market has its own" };
+    }
+    case "breakdown":
+      return { side: "short", bias: "continuation while below the breakdown level",
+        target: f2(ctx.px * (1 - Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        stop: f2(ctx.level),
+        watch: "a close back above the prior 30d low = failed breakdown, the signal is void" };
+    case "unwind": {
+      // Bearish mirror of the squeeze: crowded LONGS paying funding + OI building + price near
+      // range LOWS. Target extends BELOW the range for the same reason squeeze extends above it.
+      const rngU = ctx.hi30 != null && ctx.lo30 != null ? ctx.hi30 - ctx.lo30 : null;
+      return { side: "short", bias: "unwind-biased while longs keep paying AND \u0394OI holds",
+        target: f2(rngU != null ? ctx.lo30 - 0.382 * rngU : null),
+        stop: f2(rngU != null ? ctx.hi30 - 0.25 * rngU : null),
+        watch: "\u0394OI(7d) rolling negative = longs already liquidating; funding flipping negative = the crowd has left \u2014 the setup is spent" };
+    }
+    case "oiflush": {
+      const sgn = 1;
+      return { side: "long", bias: "capitulation \u2014 forced deleveraging exhausting into a decline",
+        target: f2(ctx.px * (1 + Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        stop: f2(ctx.px * (1 - (ctx.sd30 || 1) / 100)),
+        watch: "\u0394OI stabilizing or turning up = the flush is complete; continued OI bleed = the knife is still falling" };
+    }
+    case "fpdiv": {
+      const up = ctx.dir >= 0, sg = up ? 1 : -1;
+      return { side: up ? "long" : "short",
+        bias: up ? "price strength while funding falls \u2014 shorts pressing into a rising tape (stubborn crowd, squeeze-adjacent)"
+                 : "price weakness while funding rises \u2014 longs averaging down into a falling tape (fragile crowd)",
+        target: f2(ctx.px * (1 + sg * Math.abs(ctx.med != null ? ctx.med : 0.8) / 100)),
+        stop: f2(ctx.px * (1 - sg * (ctx.sd30 || 1) / 100)),
+        watch: "funding re-converging with price = the divergence resolved \u2014 the setup is spent" };
+    }
+    case "ondrift":
+      return { side: ctx.dir >= 0 ? "long" : "short",
+        bias: (ctx.dir >= 0 ? "persistent positive" : "persistent negative") + " off-hours drift \u2014 the claim covers ONLY the overnight windows, held close\u2192open, not a continuous position",
+        target: null, stop: null,
+        watch: "the drift sign flipping in the live windows = the regime is gone; cash-session performance is irrelevant to this claim" };
+    case "fundflip":
+      return { side: ctx.dir >= 0 ? "long" : "short",
+        bias: ctx.dir >= 0 ? "crowd flipped long \u2014 drift with them short-term" : "crowd flipped short \u2014 drift with them short-term",
+        target: null,
+        // 1σ against the flip direction: gives the event a stop-aware track for the first time
+        // (findings ops item 3 — every prior fundflip claim resolved at-horizon only). Null when
+        // the caller can't supply px/σ, preserving the legacy no-stop shape.
+        stop: ctx.px != null && ctx.px > 0 && ctx.sd30 > 0
+          ? f2(ctx.px * (1 - (ctx.dir >= 0 ? 1 : -1) * ctx.sd30 / 100)) : null,
+        watch: "funding flipping straight back voids it; funding STAYING flipped for 2+ days is the confirmation" };
+    case "squeeze": {
+      // Target is a measured-move EXTENSION above the range (hi30 + 0.382 x range), not the
+      // range top: the trigger rewards price already near the high, so targeting hi30 itself
+      // produced structurally inverted R/R at exactly the moments the signal fired. Squeezes
+      // resolve through the range, not to it.
+      const rng = ctx.hi30 != null && ctx.lo30 != null ? ctx.hi30 - ctx.lo30 : null;
+      return { side: "long", bias: "squeeze-biased while shorts keep paying AND \u0394OI holds",
+        target: f2(rng != null ? ctx.hi30 + 0.382 * rng : null),
+        stop: f2(rng != null ? ctx.lo30 + 0.25 * rng : null),
+        watch: "\u0394OI(7d) turning negative = shorts covering, spring released \u2014 the setup is spent" };
+    }
+    case "prem":
+      return { side: ctx.prem >= 0 ? "short" : "long",
+        bias: ctx.prem >= 0 ? "perp rich \u2014 reversion toward oracle (short the perp side)" : "perp cheap \u2014 reversion toward oracle (long the perp side)",
+        target: f2(ctx.oracle), stop: null,
+        watch: ctx.closed ? "whether the cash open confirms the perp's level or snaps it back to the oracle" : "persistence \u2014 a dislocation that survives arb for hours is information, not noise" };
+    case "tretest": case "tretestdn": {
+      // The trend board's retest, frozen into ledger geometry at fire time: entry = the mark,
+      // void = the retesting rung's EMA21 (the ladder's own level — a close beyond it is the
+      // board's own definition of the trend being damaged), target = the prior swing extreme of
+      // that rung's series. Everything is stamped from the SAME ladder build the board rendered;
+      // nothing is re-derived for the signal.
+      const L = ev === "tretest";
+      return { side: L ? "long" : "short",
+        bias: `continuation ${L ? "up" : "down"} off the ${ctx.tf} 13/21 zone (${ctx.score}/4 stack)`,
+        target: f2(ctx.swing), stop: f2(ctx.e21),
+        watch: `a ${ctx.tf} close ${L ? "below" : "above"} EMA21 = trend damaged, the claim is void` };
+    }
+    default:
+      return { side: "watch", bias: "context only", target: null, stop: null,
+        watch: "pairs with whatever else is firing on this name" };
+  }
+}
+
+// OI flush / capitulation: 7d ΔOI collapsing below −2σ of this market's OWN trailing ΔOI7d
+// distribution while price is down over the window — forced deleveraging exhausting itself.
+// Trailing stats only (no lookahead): each event's σ comes from the ≤60 samples before it,
+// minimum 30. Outcomes are LONG-signed forward 5d returns in R (the bottoming thesis).
+function studyOIFlush(closes, oiDaily) {
+  if (!closes || !oiDaily || oiDaily.length < 45 || closes.length < 45) return null;
+  const rets = dailyRets(closes);
+  const oiByDay = new Map(oiDaily.map((k) => [k[0], k[1]]));
+  const doi7 = [];   // [dayTs, ΔOI7d%]
+  for (const [d, v] of oiDaily) {
+    const prev = oiByDay.get(d - 7 * 86400000);
+    if (prev > 0 && v > 0) doi7.push([d, (v / prev - 1) * 100]);
+  }
+  if (doi7.length < 35) return null;
+  const closeByDay = new Map(closes.map((k, i) => [Math.floor(k[0] / 86400000), i]));
+  const d5 = [];
+  let mu = null, sd = null;
+  for (let i = 30; i < doi7.length; i++) {
+    const win = doi7.slice(Math.max(0, i - 60), i).map((k) => k[1]);
+    mu = win.reduce((a, b) => a + b, 0) / win.length;
+    sd = stdev(win);
+    if (!(sd > 0)) continue;
+    const z = (doi7[i][1] - mu) / sd;
+    if (z > -2) continue;
+    const ci = closeByDay.get(Math.floor(doi7[i][0] / 86400000));
+    if (ci == null || ci < 8 || ci >= closes.length) continue;
+    const px7 = (closes[ci][1] / closes[ci - 7][1] - 1) * 100;
+    if (!(px7 < 0)) continue;   // flush INTO a decline — the capitulation configuration
+    const s = sdAt(rets, ci - 1);
+    if (s == null || s <= 0) continue;
+    const f5 = fwdRet(closes, ci, 5);
+    if (f5 != null) d5.push(+(f5 / s).toFixed(3));
+  }
+  return { d5: summarizeEvents(d5), raw: { d5 }, cur: { mu, sd }, unit: "R" };
+}
+// Funding–price divergence: trajectory against tape. Price pressing 7d strength while funding
+// FALLS (shorts pressing into a rising tape) claims LONG; price at 7d weakness while funding
+// RISES (longs averaging down into a falling tape) claims SHORT. Outcomes are claim-signed
+// forward 3d returns in R. EPS is on day-summed funding (≈4% APR equivalent).
+function studyFPDiv(closes, dayFunding) {
+  if (!closes || closes.length < 20 || !dayFunding || dayFunding.length < 12) return null;
+  const rets = dailyRets(closes), EPS = 1.2e-4;
+  const fByDay = new Map(dayFunding.map((k) => [Math.floor(k[0] / 86400000), k[1]]));
+  const d3 = [];
+  for (let i = 10; i < closes.length; i++) {
+    const day = Math.floor(closes[i][0] / 86400000);
+    let f7 = 0, n7 = 0, f2 = 0, n2 = 0;
+    for (let b = 1; b <= 7; b++) { const v = fByDay.get(day - b); if (v != null) { f7 += v; n7++; if (b <= 2) { f2 += v; n2++; } } }
+    if (n7 < 5 || n2 < 2) continue;
+    f7 /= n7; f2 /= n2;
+    const s = sdAt(rets, i - 1);
+    if (s == null || s <= 0) continue;
+    const z7 = ((closes[i][1] / closes[i - 7][1] - 1) * 100) / (s * Math.sqrt(7));
+    let dir = 0;
+    if (z7 >= 0.8 && f2 < f7 - EPS) dir = 1;
+    else if (z7 <= -0.8 && f2 > f7 + EPS) dir = -1;
+    if (!dir) continue;
+    const f3 = fwdRet(closes, i, 3);
+    if (f3 != null) d3.push(+((dir * f3) / s).toFixed(3));
+  }
+  return { d3: summarizeEvents(d3), raw: { d3 }, unit: "R" };
+}
+// Range compression: 10d realized vol in its own bottom decile of the trailing 120
+// observations. Direction is deliberately NOT claimed — expansion is coming, which way is not
+// knowable from compression alone. Returns the live reading for the context flag.
+function compressionNow(closes) {
+  if (!closes || closes.length < 140) return null;
+  const rets = dailyRets(closes), vols = [];
+  for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
+  const i = vols.length - 1;
+  if (i < 120 || vols[i] == null) return null;
+  const histW = vols.slice(i - 120, i).filter((x) => x != null);
+  if (histW.length < 60) return null;
+  const sorted = [...histW].sort((a, b) => a - b);
+  const p10 = sorted[Math.floor(sorted.length * 0.1)];
+  const rank = sorted.filter((x) => x <= vols[i]).length / sorted.length;
+  return { vol10: vols[i], p10, pct: Math.round(rank * 100), coiled: vols[i] <= p10 };
+}
+// Off-hours drift stats: per-window close→open returns from the hourly spine over the given
+// closed windows (overnight + weekend, each counted as ONE holdable window). The venue's
+// structural quirk: these cash-hours assets trade 24/7 here, so the overnight session — where
+// the equity literature puts most of the drift — is directly holdable.
+function offDriftStats(hs, wins, tol) {
+  if (!hs || !hs.length || !wins || !wins.length) return null;
+  const rets = [];
+  const sorted = [...wins].sort((a, b) => a.enter - b.enter);
+  for (const w of sorted) {
+    const pc = priceAsOf(hs, w.enter, tol), po = priceAsOf(hs, w.exit, tol);
+    if (pc > 0 && po > 0) rets.push([w.exit, +((po / pc - 1) * 100).toFixed(4)]);
+  }
+  if (rets.length < 15) return null;
+  const last21 = rets.slice(-21);
+  const drift30 = +last21.reduce((a, k) => a + k[1], 0).toFixed(3);   // ~1 month of windows, summed
+  return { drift30, nWin: last21.length, total: rets.length };
+}
+// Direction-aware confluence split: context events (no playbook side, or "watch") count as
+// company for EITHER direction; directional events only agree with their own side. If both
+// long and short directional signals fire on one coin, that is CONFLICT, not confluence —
+// nobody gets an agreement bonus for being contradicted.
+function confSplit(sigs) {
+  let nL = 0, nS = 0, nCtx = 0;
+  for (const g of sigs) {
+    const sd = g.play && (g.play.side === "long" || g.play.side === "short") ? g.play.side : null;
+    if (sd === "long") nL++; else if (sd === "short") nS++; else nCtx++;
+  }
+  const conflict = nL > 0 && nS > 0;
+  const companyFor = (g) => {
+    if (conflict) return 1;   // contradiction: everyone stands alone
+    const sd = g.play && (g.play.side === "long" || g.play.side === "short") ? g.play.side : null;
+    if (sd === "long") return nL + nCtx;
+    if (sd === "short") return nS + nCtx;
+    return Math.max(nL, nS) + nCtx;   // context signal: company = the directional camp it corroborates
+  };
+  return { conflict, companyFor };
+}
+// ---- stop-touch detection --------------------------------------------------------------------
+// Walks hourly candles in (t0, tEnd] and reports whether the void/stop level was touched:
+// a long claim (dir >= 0) is stopped when any candle LOW <= stp; a short claim when any
+// candle HIGH >= stp. Hourly granularity means intra-candle ordering is unknowable, so a
+// candle that touches the stop counts as stopped even if it also recovered — conservative
+// by construction. Candles are [t, o, h, l, c, v].
+function stopTouched(candles, t0, tEnd, dir, stp) {
+  if (!Array.isArray(candles) || stp == null || !(stp > 0)) return null;
+  let seen = false;
+  for (const k of candles) {
+    const t = k[0];
+    if (t <= t0) continue;
+    if (t > tEnd) break;
+    seen = true;
+    if (dir >= 0 ? k[3] <= stp : k[2] >= stp) return true;
+  }
+  return seen ? false : null;   // null = no candles in window, touch state unknowable
+}
+
+// ---- swing setups (higher-timeframe, human-tradeable) --------------------------------------
+// Pure detectors over the daily close series [[t, close], ...]; the poller shadow-ledgers
+// fires with frozen geometry (vi=0 — invisible everywhere until the record earns promotion).
+// Both are LONG structures; short mirrors can earn shadow slots later if these prove out.
+//
+// 50d-MA pullback: the classic swing entry. MA50 rising (vs 5 sessions ago), price pulled
+// back from >=4% above the MA within the last 10 closes to now sit AT it (+1%/-0.5% band —
+// touching, not breaking), stop 1σ(30d) below the MA, target the prior 30d closing high.
+// Null unless every leg holds and the geometry is tradeable (stop < px < target).
+function detectMAPull(closes, px, sd30) {
+  if (!Array.isArray(closes) || closes.length < 60 || !(px > 0) || !(sd30 > 0)) return null;
+  const c = closes.map((k) => +k[1]);   // COERCE: string closes reach here on some feed paths; NaN math fails closed (null), never throws
+  const ma = (end, n) => { let s = 0; for (let i = end - n; i < end; i++) s += c[i]; return s / n; };
+  const m0 = ma(c.length, 50), m5 = ma(c.length - 5, 50);
+  if (!(m0 > 0) || !(m0 > m5)) return null;                            // trend filter: MA50 rising
+  let hi10 = -Infinity;
+  for (let i = c.length - 10; i < c.length; i++) if (c[i] > hi10) hi10 = c[i];
+  if (!(hi10 >= m0 * 1.04)) return null;                               // there was something to pull back FROM
+  if (!(px <= m0 * 1.01 && px >= m0 * 0.995)) return null;             // at the MA, not through it
+  let hi30 = -Infinity;
+  for (let i = c.length - 30; i < c.length; i++) if (c[i] > hi30) hi30 = c[i];
+  const stop = m0 * (1 - sd30 / 100), target = hi30;
+  if (!(stop > 0 && stop < px && target > px)) return null;
+  return { ma: +m0.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+// Failed-breakdown reclaim: the direct out-of-sample test of the findings' failed-break
+// structure. The prior 30d closing low (measured EXCLUDING the last 3 sessions) was broken
+// by at least one of those 3 closes, the break is fresh (one of the last TWO closes still
+// below), and the mark is back above the level — the trap sprung and reversed. Stop = the
+// flush low, target = level + 1x(level - flush): the measured move of the trap.
+function detectReclaim(closes, px) {
+  if (!Array.isArray(closes) || closes.length < 40 || !(px > 0)) return null;
+  const c = closes.map((k) => +k[1]);   // COERCE — see detectMAPull
+  let lo = Infinity;
+  for (let i = c.length - 33; i < c.length - 3; i++) if (c[i] < lo) lo = c[i];
+  if (!Number.isFinite(lo) || !(lo > 0)) return null;
+  const flush = Math.min(c[c.length - 3], c[c.length - 2], c[c.length - 1]);
+  if (!(flush < lo)) return null;                                      // the break actually happened
+  if (!(c[c.length - 1] < lo || c[c.length - 2] < lo)) return null;    // and it is fresh, not an old wound
+  if (!(px > lo)) return null;                                         // and the mark has reclaimed the level
+  const stop = flush, target = lo + (lo - flush);
+  if (!(stop < px && target > px)) return null;
+  return { level: +lo.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+// Failed-breakout fade: the short mirror of the reclaim, and the direct test of finding F2
+// (breakout continuation ran -0.73R / 39% hit — breaks in this tape fail). Prior 30d closing
+// HIGH (excluding the last 3 sessions) was broken by at least one of those closes, the break
+// is fresh (one of the last two still above), and the mark is back BELOW the level. Stop =
+// the flush high, target = level - 1x(flush - level): the same measured-move trap, inverted.
+function detectFailBrk(closes, px) {
+  if (!Array.isArray(closes) || closes.length < 40 || !(px > 0)) return null;
+  const c = closes.map((k) => +k[1]);   // COERCE — see detectMAPull (the -79 production outage: hi.toPrecision on a string close)
+  let hi = -Infinity;
+  for (let i = c.length - 33; i < c.length - 3; i++) if (c[i] > hi) hi = c[i];
+  if (!Number.isFinite(hi) || !(hi > 0)) return null;
+  const flush = Math.max(c[c.length - 3], c[c.length - 2], c[c.length - 1]);
+  if (!(flush > hi)) return null;                                      // the break actually happened
+  if (!(c[c.length - 1] > hi || c[c.length - 2] > hi)) return null;    // and it is fresh
+  if (!(px < hi)) return null;                                         // and the mark has lost the level
+  const stop = flush, target = hi - (flush - hi);
+  if (!(stop > px && target < px) || !(target > 0)) return null;
+  return { level: +hi.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+// Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
+// keep drifting its own way for weeks — entered AFTER the reaction session is complete (there
+// is at least one bar past the reaction index), within 3 sessions of it, drifting WITH the
+// move. Same print->reaction-index convention as earnReactionsFor (AMC books the next bar).
+// Stop = 1σ back through the reaction close against the drift; target = half the reaction
+// magnitude further, from the mark — drift scales with the surprise, mechanically.
+function detectPead(prints, daily, px, sd30) {
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 25) return null;
+  if (!(px > 0) || !(sd30 > 0)) return null;
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  const idxByDay = new Map();
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  let best = null;
+  for (const pr of prints) {
+    const pi = idxByDay.get(pr.d);
+    if (pi == null) continue;
+    const ri = pr.s === "AMC" ? pi + 1 : pi;
+    if (ri <= 0 || ri >= daily.length - 1) continue;      // reaction session must be COMPLETE
+    if (ri < daily.length - 4) continue;                   // and fresh: within 3 sessions of now
+    if (!best || ri > best.ri) best = { pr, ri };
+  }
+  if (!best) return null;
+  const c1 = best.ri < daily.length ? daily[best.ri].c : null, c0 = daily[best.ri - 1].c;
+  if (!Number.isFinite(c1) || !Number.isFinite(c0) || !(c0 > 0)) return null;
+  const mv = (c1 - c0) / c0 * 100;
+  if (!(Math.abs(mv) >= 1.5 * sd30)) return null;          // the reaction has to be a REACTION
+  const up = mv > 0, sgn = up ? 1 : -1;
+  const stop = c1 * (1 - sgn * sd30 / 100), target = px * (1 + sgn * Math.abs(mv) / 200);
+  if (up ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
+  return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: best.pr.d,
+    stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+
+// ---- served-index cache busting (pure) -----------------------------------------------------
+// Stamps ?v=<build> on the two client asset tags so browsers refetch exactly when the build
+// changes and never otherwise. The -84 lesson: with bare asset tags, a deploy updates the
+// server while browsers silently keep running last week's client — the API served 281
+// headlines into a page that had no News tab to render them. Two versions of the truth.
+function bustAssetTags(html, v) {
+  const q = "?v=" + encodeURIComponent(String(v == null ? "" : v));
+  return String(html)
+    .replace('href="/styles.css"', 'href="/styles.css' + q + '"')
+    .replace('src="/app.js"', 'src="/app.js' + q + '"');
+}
+
+// ---- news relevance gate (pure) ------------------------------------------------------------
+// Finnhub's company-news returns articles that merely MENTION or are loosely "related to" the
+// queried symbol — a Meta story arrives under AMZN's query, market listicles arrive under
+// whoever's rotation fetched them. An article is attributed to ticker T only if the headline
+// or summary actually names the company: the symbol as a standalone word (2+ chars — a
+// 1-char symbol like F matches everything), or any alias substring, case-insensitive.
+// Everything else is NOT dropped — it goes to the AI relevance verdict, and until verified it
+// lives in the unfiltered tape lane, never the universe feed.
+function newsRelevant(headline, summary, ticker, aliases) {
+  const T = String(ticker || "").toUpperCase();
+  const txt = String(headline || "") + " " + String(summary || "");
+  if (T.length >= 2) {
+    const re = new RegExp("(^|[^A-Za-z0-9])" + T.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "($|[^A-Za-z0-9])");
+    if (re.test(txt.toUpperCase())) return true;
+  }
+  if (Array.isArray(aliases)) {
+    const lo = txt.toLowerCase();
+    for (const a of aliases) if (a && lo.includes(String(a).toLowerCase())) return true;
+  }
+  return false;
+}
+
+// ---- news feed merge (pure) ----------------------------------------------------------------
+// Dedupe by article id (incoming wins — sources correct headlines), evict on PUBLISH time,
+// never fetch time (a late fetch earns no bonus lifetime), reject future-dated garbage, cap
+// per ticker and in total, newest first. `tk` = the company ticker a headline belongs to,
+// null = the general macro tape, which gets a wider lane than any single name.
+const NEWS_TTL_MS = 72 * HOUR, NEWS_PER_TK = 10, NEWS_CAP = 1200;
+const FILINGS_TTL_MS = 7 * 24 * HOUR, FILINGS_PER_TK = 10;   // a Tuesday 10-Q is still worth seeing Friday
+function mergeNews(existing, incoming, nowMs) {
+  const cutOf = (a) => nowMs - (a && a.fl ? FILINGS_TTL_MS : NEWS_TTL_MS);   // filings: 7d; everything else: 72h
+  const byId = new Map();
+  for (const a of (existing || [])) if (a && a.id != null && a.pub > cutOf(a)) byId.set(String(a.id), a);
+  for (const a of (incoming || [])) {
+    if (!a || a.id == null || !a.h || !Number.isFinite(a.pub)) continue;
+    if (a.pub > nowMs + HOUR || a.pub <= cutOf(a)) continue;
+    byId.set(String(a.id), a);
+  }
+  const all = [...byId.values()].sort((x, y) => y.pub - x.pub);
+  const perTk = new Map(), out = [];
+  for (const a of all) {
+    // filings ride their own per-ticker lane: a filing burst can't evict the name's headlines,
+    // headlines can't evict its filings
+    const k = a.fl ? "fl:" + (a.tk || "?") : (a.tk || (a.tg ? "~tg" : "~tape"));
+    const n = perTk.get(k) || 0;
+    const cap = a.fl ? FILINGS_PER_TK : (a.tk ? NEWS_PER_TK : (a.tg ? NEWS_PER_TK * 8 : NEWS_PER_TK * 6));
+    if (n >= cap) continue;
+    perTk.set(k, n + 1);
+    out.push(a);
+    if (out.length >= NEWS_CAP) break;
+  }
+  return out;
+}
+
+// ---- SEC EDGAR per-company Atom parser (pure) ----------------------------------------------
+// browse-edgar's getcompany feed: <entry> with <title>FORM - description</title>, <updated>,
+// a link to the filing index, an accession number in the id/summary, and (for 8-Ks) the item
+// list in the summary. Zero dependencies, same posture as the telegram parser. Materiality
+// and ownership classes are stamped here so every consumer agrees on what "material" means.
+const SEC_MATERIAL = new Set(["8-K", "8-K/A", "10-K", "10-K/A", "10-Q", "10-Q/A", "S-1", "S-1/A", "S-3", "S-3/A", "SC 13D", "SC 13D/A", "6-K", "20-F", "DEF 14A", "425"]);
+const SEC_OWNERSHIP = new Set(["3", "3/A", "4", "4/A", "5", "5/A", "144", "SC 13G", "SC 13G/A"]);
+function parseEdgarAtom(xml, ticker, nowMs) {
+  const items = [];
+  if (typeof xml !== "string" || !xml) return { items, entries: 0 };
+  const entries = xml.split("<entry>").slice(1);
+  const deent = (s) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'");
+  for (const e of entries) {
+    const title = e.match(/<title[^>]*>([\s\S]*?)<\/title>/);
+    const upd = e.match(/<updated>([^<]+)<\/updated>/);
+    const link = e.match(/<link[^>]*href="([^"]+)"/);
+    const acc = e.match(/accession[^:>]*[:>][^0-9]*([0-9]{10}-[0-9]{2}-[0-9]{6})/i) || e.match(/([0-9]{10}-[0-9]{2}-[0-9]{6})/);
+    if (!title || !upd || !acc) continue;
+    const pub = Date.parse(upd[1]);
+    if (!Number.isFinite(pub)) continue;
+    const tRaw = deent(title[1]).trim();
+    const dash = tRaw.indexOf(" - ");
+    const form = (dash > 0 ? tRaw.slice(0, dash) : tRaw).trim();
+    let desc = dash > 0 ? tRaw.slice(dash + 3).trim() : "";
+    const sum = e.match(/<summary[^>]*>([\s\S]*?)<\/summary>/);
+    if (sum) {
+      const its = [...deent(sum[1]).matchAll(/Item\s+[0-9]+\.[0-9]+[^<\n.]*(?:\.[^<\n]*)?/g)].map((m) => m[0].replace(/\s+/g, " ").trim());
+      if (its.length) desc = its.slice(0, 4).join(" \u00b7 ");
+    }
+    items.push({ id: "sec:" + acc[1], tk: String(ticker).toUpperCase(), fl: 1, form,
+      h: (desc || form).slice(0, 220), src: "EDGAR", url: link ? link[1] : null, pub,
+      mat: SEC_MATERIAL.has(form) ? 1 : undefined, own: SEC_OWNERSHIP.has(form) ? 1 : undefined });
+  }
+  return { items, entries: entries.length };
+}
+
+// ---- telegram public-channel preview parser (pure) -----------------------------------------
+// t.me/s/<channel> is plain HTML: message blocks carry data-post="channel/<id>", a
+// tgme_widget_message_text div, and a <time datetime="...">. Zero dependencies — regex over
+// the block markup, tags stripped, basic entities decoded. Returns {items, blocks} so the
+// caller can tell "page fetched but nothing parsed" (markup drift — warn) apart from an
+// empty channel. Sticker/media-only posts have no text div and are skipped by construction.
+function parseTgPreview(html, channel, nowMs) {
+  const items = [];
+  if (typeof html !== "string" || !html) return { items, blocks: 0 };
+  const blocks = html.split('class="tgme_widget_message_wrap').slice(1);
+  const deent = (s) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&#0?36;/g, "$").replace(/&nbsp;/g, " ");
+  const want = String(channel || "").toLowerCase();
+  for (const b of blocks) {
+    const post = b.match(/data-post="([A-Za-z0-9_]+)\/(\d+)"/);
+    if (!post) continue;
+    // Channel-identity gate: only accept posts belonging to the channel we ASKED for. A typo'd
+    // username can land on a redirect, a suggestion page, or a different real channel — and
+    // without this check its posts flood the feed under a name nobody configured.
+    if (post[1].toLowerCase() !== want) continue;
+    const tm = b.match(/<time[^>]*datetime="([^"]+)"/);
+    const pub = tm ? Date.parse(tm[1]) : NaN;
+    if (!Number.isFinite(pub)) continue;
+    const tx = b.match(/tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>/);
+    if (!tx) continue;   // media-only post — nothing to feed
+    const h = deent(tx[1].replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim().slice(0, 220);
+    if (!h) continue;
+    items.push({ id: "tg:" + post[1] + ":" + post[2], tk: null, h,
+      src: "t.me/" + post[1], url: "https://t.me/" + post[1] + "/" + post[2], pub, tg: 1 });
+  }
+  return { items, blocks: blocks.length };
+}
+
+// ---- telegram ticker attribution (pure) ----------------------------------------------------
+// Posts aren't fetched "under" a ticker, so the relevance gate runs inverted: scan the text
+// against the whole universe roster. EXACTLY ONE name matching -> attributed (same trust as
+// the deterministic gate); zero or several -> tape. Conservative by construction: a post
+// naming five tickers pollutes none of their feeds.
+function attributeTg(h, rosterMap) {
+  let hit = null, count = 0;
+  for (const [T, aliases] of rosterMap) {
+    if (newsRelevant(h, null, T, aliases)) { count++; if (count > 1) return null; hit = T; }
+  }
+  return count === 1 ? hit : null;
+}
+
+// ---- earnings <-> filings join (pure) ------------------------------------------------------
+// Once a company reports, the actual release exists in the filings store: the 8-K carrying
+// Item 2.02 IS the earnings release, the 10-Q/10-K is the report. Each earnings entry gets
+// its best filing within a window around the report date — preference: 8-K with Item 2.02,
+// then the quarterly/annual report, then any 8-K; latest wins inside a tier. Upcoming entries
+// naturally get nothing until the filing lands: the link APPEARS when it's live.
+function linkEarningsFilings(entries, filings, nowMs) {
+  if (!Array.isArray(entries) || !entries.length || !Array.isArray(filings) || !filings.length) return entries || [];
+  const fl = filings.filter((a) => a && a.fl && a.tk && Number.isFinite(a.pub) && a.url);
+  if (!fl.length) return entries;
+  const byTk = new Map();
+  for (const a of fl) { const T = String(a.tk).toUpperCase(); if (!byTk.has(T)) byTk.set(T, []); byTk.get(T).push(a); }
+  const tier = (a) => /^8-K/.test(a.form || "") && /Item\s+2\.02/i.test(a.h || "") ? 3
+    : /^10-[QK]/.test(a.form || "") ? 2 : (/^8-K/.test(a.form || "") ? 1 : 0);
+  const DAY_ = 86400000;
+  return entries.map((e) => {
+    if (!e || !e.t || !e.d) return e;
+    const D = Date.parse(e.d + "T12:00:00Z");
+    if (!Number.isFinite(D)) return e;
+    const cands = (byTk.get(String(e.t).toUpperCase()) || []).filter((a) => a.pub >= D - 2 * DAY_ && a.pub <= D + 6 * DAY_);
+    let best = null, bestT = 0;
+    for (const a of cands) { const t = tier(a); if (t > bestT || (t === bestT && best && a.pub > best.pub)) { best = a; bestT = t; } }
+    return best ? Object.assign({}, e, { filing: { form: best.form, url: best.url, pub: best.pub } }) : e;
+  });
+}
+
+// ---- shadow-variant promotion rule ---------------------------------------------------------
+// A challenger threshold replaces the incumbent ONLY when, on out-of-sample shadow claims the
+// engine gathered itself: both sides have >= 30 resolutions; the challenger's live expectancy
+// beats the incumbent's by a real margin (0.08 native units) AND is positive; and its hit rate
+// hasn't collapsed (>= incumbent - 0.02, i.e. it isn't a pure tail-rider). Strict on purpose:
+// with samples this small, promotion churn IS the failure mode. Reversible by the same rule.
+function shouldPromote(inc, ch) {
+  if (!inc || !ch || !(inc.n >= 30) || !(ch.n >= 30)) return false;
+  if (ch.avg == null || inc.avg == null || ch.hit == null || inc.hit == null) return false;
+  if (!(ch.avg > 0)) return false;
+  if (!(ch.avg >= inc.avg + 0.08)) return false;
+  if (!(ch.hit >= inc.hit - 0.02)) return false;
+  return true;
+}
+
+// ---- hold math over the hourly spines ----
+// Price "as of" t: close of the latest candle at or before t, within tol (hourly resolution snaps to
+// the hour, so a 09:30 boundary uses the ~09:00 candle — an acknowledged approximation).
+function priceAsOf(prices, t, tol) {
+  tol = tol || 3 * HOUR;
+  let lo = 0, hi = prices.length - 1, idx = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (prices[m][0] <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+  if (idx < 0) return null;
+  const row = prices[idx];
+  if (t - row[0] > tol) return null;
+  const c = row[4];
+  return Number.isFinite(c) && c > 0 ? c : null;
+}
+// Sum of hourly funding rates over [enter, exit) — the fraction a 1x long pays (or receives, if <0).
+function fundingOver(funding, enter, exit) {
+  let s = 0, any = false;
+  for (const [t, r] of funding) { if (t >= enter && t < exit && Number.isFinite(r)) { s += r; any = true; } }
+  return { sum: s, any };
+}
+function holdReturn(prices, funding, enter, exit, tol) {
+  const pe = priceAsOf(prices, enter, tol), px = priceAsOf(prices, exit, tol);
+  if (pe == null || px == null) return { ok: false };
+  const gross = px / pe - 1;
+  const f = fundingOver(funding || [], enter, exit);
+  return { ok: true, enter, exit, hours: Math.round((exit - enter) / HOUR), pxEnter: pe, pxExit: px, gross, funding: f.sum, fundingKnown: f.any, net: gross - f.sum };
+}
+function runHolds(prices, funding, anchors, tol) {
+  const out = [];
+  for (const a of anchors) { const h = holdReturn(prices, funding, a.enter, a.exit, tol); if (h.ok) { h.tag = a.tag; out.push(h); } }
+  return out;
+}
+
+// ---- aggregation (fat-tailed: report median + IQR + distribution, not just the mean) ----
+function _stats(arr) {
+  const a = arr.filter(Number.isFinite).sort((x, y) => x - y), n = a.length;
+  if (!n) return { n: 0 };
+  const q = (p) => { const i = (n - 1) * p, lo = Math.floor(i), hi = Math.ceil(i); return a[lo] + (a[hi] - a[lo]) * (i - lo); };
+  const mean = a.reduce((s, x) => s + x, 0) / n;
+  let v = 0; for (const x of a) v += (x - mean) * (x - mean);
+  return { n, mean, median: q(0.5), p25: q(0.25), p75: q(0.75), min: a[0], max: a[n - 1], stdev: n > 1 ? Math.sqrt(v / (n - 1)) : 0 };
+}
+function summarize(holds) {
+  const net = holds.map((h) => h.net), gross = holds.map((h) => h.gross), fund = holds.map((h) => h.funding);
+  const sn = _stats(net);
+  if (!sn.n) return { n: 0 };
+  let eqNet = 1, eqGross = 1;
+  for (const h of holds) { eqNet *= 1 + h.net; eqGross *= 1 + h.gross; }
+  const wins = net.filter((x) => x > 0).length;
+  return {
+    n: sn.n,
+    net: sn, gross: _stats(gross), funding: _stats(fund),
+    winRate: wins / sn.n,
+    equityNet: eqNet - 1, equityGross: eqGross - 1,   // compounded total return over all holds
+  };
+}
+// Hour-of-day (ET) activity profile for one ticker: bins each hourly candle by its ET wall-clock hour
+// and returns raw per-hour aggregates — Parkinson-style range volatility ln(high/low), mean candle
+// volume, mean funding rate, and sample counts. ET so the 09:30 open / 16:00 close humps line up with
+// the session decomposition. Pure; the poller normalizes and pools these.
+function activityClock(prices, funding) {
+  const vSum = new Array(24).fill(0), vCnt = new Array(24).fill(0);
+  const qSum = new Array(24).fill(0), qCnt = new Array(24).fill(0);
+  const fSum = new Array(24).fill(0), fCnt = new Array(24).fill(0);
+  // Candles are on the hour, so ET hour = (UTC hour + offset) mod 24, and the ET/UTC offset only
+  // changes at DST boundaries. Cache the offset per UTC day (one formatToParts each) instead of
+  // calling etParts on every candle — ~48x fewer Intl calls. A handful of candles on the two DST
+  // transition days may bin 1h off; immaterial for an activity clock (the session math uses the exact
+  // path). offset is -4 (EDT) or -5 (EST): ET hour = ((utcHour + offset) % 24 + 24) % 24.
+  const offCache = new Map();
+  const etHour = (t) => {
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day);
+    if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    return ((Math.floor((t % DAY) / HOUR) + off) % 24 + 24) % 24;
+  };
+  for (const k of (prices || [])) {
+    const t = k[0], hi = k[2], lo = k[3], v = k[5];
+    if (!Number.isFinite(t)) continue;
+    const hr = etHour(t);
+    if (Number.isFinite(hi) && Number.isFinite(lo) && hi > 0 && lo > 0 && hi >= lo) { vSum[hr] += Math.log(hi / lo); vCnt[hr]++; }
+    if (Number.isFinite(v)) { qSum[hr] += v; qCnt[hr]++; }
+  }
+  for (const p of (funding || [])) {
+    const t = p[0], r = p[1];
+    if (!Number.isFinite(t) || !Number.isFinite(r)) continue;
+    const hr = etHour(t); fSum[hr] += r; fCnt[hr]++;
+  }
+  const vol = new Array(24), volume = new Array(24), fund = new Array(24), n = new Array(24);
+  for (let i = 0; i < 24; i++) {
+    n[i] = vCnt[i];
+    vol[i] = vCnt[i] ? vSum[i] / vCnt[i] : null;
+    volume[i] = qCnt[i] ? qSum[i] / qCnt[i] : null;
+    fund[i] = fCnt[i] ? fSum[i] / fCnt[i] : null;
+  }
+  return { vol, volume, fund, n };
+}
+
+// Day-of-week x hour-of-day (7 x 24, ET) range-volatility + volume grid for one ticker. ET weekday and
+// hour both come from a per-UTC-day offset cache: shifting the timestamp by the ET offset yields an
+// instant whose UTC calendar equals the ET wall calendar, so getUTCDay()/getUTCHours() give ET
+// weekday (0=Sun) and hour with no per-candle formatToParts. Pure; the poller normalizes and pools.
+function dowClock(prices) {
+  const mk = () => Array.from({ length: 7 }, () => new Array(24).fill(0));
+  const vSum = mk(), vCnt = mk(), qSum = mk(), qCnt = mk();
+  const offCache = new Map();
+  for (const k of (prices || [])) {
+    const t = k[0], hi = k[2], lo = k[3], v = k[5];
+    if (!Number.isFinite(t)) continue;
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    const et = new Date(t + off * HOUR), wd = et.getUTCDay(), hr = et.getUTCHours();
+    if (Number.isFinite(hi) && Number.isFinite(lo) && hi > 0 && lo > 0 && hi >= lo) { vSum[wd][hr] += Math.log(hi / lo); vCnt[wd][hr]++; }
+    if (Number.isFinite(v)) { qSum[wd][hr] += v; qCnt[wd][hr]++; }
+  }
+  const vol = [], volume = [], n = [];
+  for (let d = 0; d < 7; d++) {
+    vol[d] = []; volume[d] = []; n[d] = [];
+    for (let h = 0; h < 24; h++) {
+      n[d][h] = vCnt[d][h];
+      vol[d][h] = vCnt[d][h] ? vSum[d][h] / vCnt[d][h] : null;
+      volume[d][h] = qCnt[d][h] ? qSum[d][h] / qCnt[d][h] : null;
+    }
+  }
+  return { vol, volume, n };
+}
+
+// Mean intra-hour return ln(close/open) by ET hour for one ticker (for the quarantined return-
+// seasonality study). Same per-UTC-day offset cache as activityClock. Pure.
+function hourReturnMeans(prices) {
+  const sum = new Array(24).fill(0), cnt = new Array(24).fill(0), offCache = new Map();
+  for (const k of (prices || [])) {
+    const t = k[0], o = k[1], c = k[4];
+    if (!Number.isFinite(t) || !Number.isFinite(o) || !Number.isFinite(c) || o <= 0 || c <= 0) continue;
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    const hr = ((Math.floor((t % DAY) / HOUR) + off) % 24 + 24) % 24;
+    sum[hr] += Math.log(c / o); cnt[hr]++;
+  }
+  const ret = new Array(24);
+  for (let i = 0; i < 24; i++) ret[i] = cnt[i] ? sum[i] / cnt[i] : null;
+  return { ret, n: cnt };
+}
+
+// Per-ET-hour return stats for ONE ticker as a time series: each day's ln(close/open) in that hour is
+// one observation, so this is a within-name t-test (mean/se/t/n) — distinct from the cross-sectional
+// build in the poller (which uses one mean per ticker). Noisier and does not model autocorrelation, so
+// the client labels single-name views with extra caution. Pure; shape matches the cross-sectional hours.
+function hourReturnStats(prices) {
+  const sum = new Array(24).fill(0), sq = new Array(24).fill(0), cnt = new Array(24).fill(0), offCache = new Map();
+  for (const k of (prices || [])) {
+    const t = k[0], o = k[1], c = k[4];
+    if (!Number.isFinite(t) || !Number.isFinite(o) || !Number.isFinite(c) || o <= 0 || c <= 0) continue;
+    const day = Math.floor(t / DAY);
+    let off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    const hr = ((Math.floor((t % DAY) / HOUR) + off) % 24 + 24) % 24;
+    const x = Math.log(c / o); sum[hr] += x; sq[hr] += x * x; cnt[hr]++;
+  }
+  const hours = [];
+  for (let h = 0; h < 24; h++) {
+    const n = cnt[h];
+    if (n < 3) { hours.push({ h, mean: null, se: null, t: null, n }); continue; }
+    const mean = sum[h] / n, varr = (sq[h] - n * mean * mean) / (n - 1);
+    const sd = Math.sqrt(Math.max(0, varr)), se = sd / Math.sqrt(n);
+    hours.push({ h, mean: +mean.toFixed(6), se: +se.toFixed(6), t: se > 0 ? +(mean / se).toFixed(2) : 0, n });
+  }
+  return { hours, sigCount: hours.filter((x) => x.t != null && Math.abs(x.t) >= 2).length };
+}
+
+// Top-2 principal components of a set of row vectors, via power iteration + deflation (no deps).
+// Returns { coords:[[x,y],...] } (one 2D point per row, mean-centred) and varExplained:[f1,f2]
+// (fraction of total variance each axis captures — so the 2D scatter can honestly show how much
+// structure it's actually displaying). Rows with non-finite entries are treated as 0 after centring.
+function pca2(rows) {
+  const n = rows.length, d = n ? rows[0].length : 0;
+  if (n < 2 || d < 2) return { coords: rows.map(() => [0, 0]), varExplained: [0, 0] };
+  const mean = new Array(d).fill(0);
+  for (const r of rows) for (let j = 0; j < d; j++) mean[j] += (Number.isFinite(r[j]) ? r[j] : 0);
+  for (let j = 0; j < d; j++) mean[j] /= n;
+  const X = rows.map((r) => r.map((x, j) => (Number.isFinite(x) ? x : 0) - mean[j]));
+  // covariance d x d
+  const C = Array.from({ length: d }, () => new Array(d).fill(0));
+  for (const x of X) for (let a = 0; a < d; a++) { const xa = x[a]; if (!xa) continue; for (let b = 0; b < d; b++) C[a][b] += xa * x[b]; }
+  const denom = n - 1; for (let a = 0; a < d; a++) for (let b = 0; b < d; b++) C[a][b] /= denom;
+  let trace = 0; for (let a = 0; a < d; a++) trace += C[a][a];
+  const matVec = (M, v) => { const o = new Array(d).fill(0); for (let a = 0; a < d; a++) { let s = 0; for (let b = 0; b < d; b++) s += M[a][b] * v[b]; o[a] = s; } return o; };
+  const norm = (v) => { let s = 0; for (const x of v) s += x * x; return Math.sqrt(s) || 1; };
+  function topEig(M) {
+    let v = new Array(d).fill(0).map((_, i) => Math.sin(i + 1) + 0.1);   // deterministic seed
+    let nv = norm(v); v = v.map((x) => x / nv);
+    for (let it = 0; it < 120; it++) { const w = matVec(M, v); const wn = norm(w); v = w.map((x) => x / wn); }
+    const Mv = matVec(M, v); let lam = 0; for (let a = 0; a < d; a++) lam += v[a] * Mv[a];
+    return { vec: v, val: lam };
+  }
+  const e1 = topEig(C);
+  const C2 = C.map((row, a) => row.map((x, b) => x - e1.val * e1.vec[a] * e1.vec[b]));
+  const e2 = topEig(C2);
+  const coords = X.map((x) => {
+    let p = 0, q = 0; for (let a = 0; a < d; a++) { p += x[a] * e1.vec[a]; q += x[a] * e2.vec[a]; }
+    return [p, q];
+  });
+  return { coords, varExplained: [trace ? e1.val / trace : 0, trace ? e2.val / trace : 0] };
+}
+
+// Pool holds across many tickers (the statistically sound "composite" — averages out single-name noise).
+function poolSummary(byTicker) {
+  const all = [];
+  for (const k in byTicker) for (const h of byTicker[k]) all.push(h);
+  return summarize(all);
+}
+
+// Cross-sectional composite for ONE session: each calendar boundary (a given night / weekend / cash
+// day) becomes a single equal-weight bet across every ticker that had a valid hold on it; the per-
+// boundary mean return is then compounded into an equity curve. This is the "one clean bet per
+// boundary across the class" framing — single-name noise averages out, and because anchors are
+// calendar-derived the enter timestamps line up across tickers, so grouping by `enter` is exact.
+// Input: array of per-ticker hold arrays (each already produced by runHolds for the same anchor set).
+// Output: { n, tickers, breadth, curve:[[t, eqGross, eqNet, fundingKnownFrac, breadth], ...],
+//           mean/median/win (gross & net), totGross, totNet, fundingHorizonTs }.
+function _mean(a) { let s = 0, n = 0; for (const x of a) if (Number.isFinite(x)) { s += x; n++; } return n ? s / n : 0; }
+function _round6(x) { return Math.round(x * 1e6) / 1e6; }
+function sessionComposite(perTickerHolds) {
+  const byB = new Map();
+  let tickers = 0;
+  for (const hs of perTickerHolds) {
+    if (!hs || !hs.length) continue;
+    tickers++;
+    for (const h of hs) {
+      let b = byB.get(h.enter);
+      if (!b) { b = { enter: h.enter, exit: h.exit, g: [], n: [], fk: 0 }; byB.set(h.enter, b); }
+      b.g.push(h.gross); b.n.push(h.net); if (h.fundingKnown) b.fk++;
+    }
+  }
+  const bounds = [...byB.values()].sort((a, b) => a.enter - b.enter);
+  let eqG = 1, eqN = 1, fundingHorizonTs = null;
+  const curve = [], perG = [], perN = [];
+  for (const b of bounds) {
+    const mg = _mean(b.g), mn = _mean(b.n), fk = b.g.length ? b.fk / b.g.length : 0;
+    eqG *= 1 + mg; eqN *= 1 + mn;
+    curve.push([b.enter, _round6(eqG - 1), _round6(eqN - 1), Math.round(fk * 1000) / 1000, b.g.length]);
+    perG.push(mg); perN.push(mn);
+    if (fundingHorizonTs === null && fk >= 0.5) fundingHorizonTs = b.enter;
+  }
+  const winFrac = (a) => (a.length ? a.filter((x) => x > 0).length / a.length : 0);
+  return {
+    n: bounds.length, tickers,
+    breadth: bounds.length ? _mean(bounds.map((b) => b.g.length)) : 0,
+    curve,
+    meanGross: _mean(perG), meanNet: _mean(perN),
+    medianGross: median(perG), medianNet: median(perN),
+    winGross: winFrac(perG), winNet: winFrac(perN),
+    totGross: eqG - 1, totNet: eqN - 1,
+    fundingHorizonTs,
+  };
+}
+
+// ---- Red-tape resilience (DownCap / Hit%) + relative volume --------------------------------
+// The setup these serve: on a red tape, the names that dump least tend to keep leading once the
+// market stabilizes. "Red" is BREADTH-defined, not benchmark-defined — BTC green while alts bleed
+// is a red tape; BTC red while the tape shrugs is not. Reference is the UNIVERSE MEDIAN return
+// per bar, never a benchmark, so the stat is self-normalizing and the benchmark is just a row.
+
+// 4h close-to-close returns from an hourly spine, keyed by 4h bucket index (floor(t/4h)).
+// Completed buckets only (a partial bucket's "close" is a moving target); a return exists only
+// between CONSECUTIVE buckets — gaps in the spine produce no synthetic multi-bucket return.
+function fourHourReturns(hs, now, cutMs) {
+  const B = 4 * 3600 * 1000, curB = Math.floor(now / B);
+  const close = new Map();
+  for (const k of hs) {
+    const t = k[0], c = k[4];
+    if (!Number.isFinite(t) || !Number.isFinite(c) || c <= 0) continue;
+    if (cutMs != null && t < cutMs) continue;
+    const b = Math.floor(t / B);
+    if (b >= curB) continue;                       // in-progress bucket: skip
+    const cur = close.get(b);
+    if (!cur || t >= cur[0]) close.set(b, [t, c]);
+  }
+  const rets = new Map();
+  for (const [b, [, c]] of close) {
+    const prev = close.get(b - 1);
+    if (prev && prev[1] > 0) rets.set(b, c / prev[1] - 1);
+  }
+  return rets;
+}
+
+// Red-tape stats for one universe. seriesByCoin: Map(coin -> Map(bucket -> ret)).
+// A bar is red when the cross-sectional MEDIAN return is negative AND >= `breadth` of reporting
+// names are red — pure breadth, no benchmark. One liquidation-cascade bar must not dominate the
+// Σ ratio, so bars are winsorized by WEIGHT: m* = median(|median-ret|) over red bars, and a bar
+// whose |median-ret| exceeds 2·m* is scaled down to count as exactly 2·m* of tape move (the
+// ticker's return on that bar scales by the same factor — ratio semantics preserved).
+// Per coin: DownCap = 100·Σ(w·ret)/Σ(w·med) on matched red bars (<100 dumps less than the tape,
+// negative = net green on red bars), Hit = share of matched red bars where the coin beat the
+// median. Below `minBars` matched bars: null — a dash, never a fabricated character read.
+function tapeRedStats(seriesByCoin, opts) {
+  const { breadth = 0.7, minBars = 20, minCross = 10 } = opts || {};
+  const byBar = new Map();
+  for (const [, rets] of seriesByCoin)
+    for (const [b, ret] of rets) {
+      let a = byBar.get(b);
+      if (!a) { a = []; byBar.set(b, a); }
+      a.push(ret);
+    }
+  const red = [];                                  // [bucket, medianRet]
+  for (const [b, a] of byBar) {
+    if (a.length < minCross) continue;
+    const med = median(a);
+    if (!(med < 0)) continue;
+    let neg = 0; for (const x of a) if (x < 0) neg++;
+    if (neg / a.length >= breadth) red.push([b, med]);
+  }
+  red.sort((x, y) => x[0] - y[0]);
+  const mstar = median(red.map(([, m]) => Math.abs(m)));
+  const wOf = (m) => (mstar > 0 && Math.abs(m) > 2 * mstar) ? (2 * mstar) / Math.abs(m) : 1;
+  const stats = new Map();
+  for (const [coin, rets] of seriesByCoin) {
+    let sr = 0, sm = 0, n = 0, hit = 0;
+    for (const [b, med] of red) {
+      const ret = rets.get(b);
+      if (ret == null) continue;
+      const w = wOf(med);
+      sr += w * ret; sm += w * med; n++;
+      if (ret > med) hit++;
+    }
+    if (n < minBars || !(sm < 0)) { stats.set(coin, null); continue; }
+    stats.set(coin, { dcap: Math.round((100 * sr) / sm), hit: Math.round((100 * hit) / n), n });
+  }
+  return { redBars: red.length, stats };
+}
+
+// Relative volume, clock-hour matched. For each requested window W (ms, a whole number of
+// hours): notional traded over the last W COMPLETED hourly candles ÷ the median notional of the
+// SAME clock-hour span on prior days. Clock matching is what makes the number honest across the
+// session shape — 3am is judged against prior 3ams, the US open against prior opens — and it is
+// why an off-hours reading is a real signal rather than a guaranteed ~0x. Coverage guards: the
+// current span needs >=75% of its candles present; each baseline sample the same; and at least
+// `minSamples` baseline days must qualify, else null.
+function rvolMulti(hs, windowsMs, now, minSamples) {
+  const HOUR = 3600 * 1000, minS = minSamples == null ? 7 : minSamples;
+  const ntl = new Map();                           // hour bucket -> notional
+  for (const k of hs) {
+    const t = k[0], c = k[4], v = k[5];
+    if (!Number.isFinite(t) || !Number.isFinite(c) || !Number.isFinite(v) || v < 0) continue;
+    ntl.set(Math.floor(t / HOUR), c * v);
+  }
+  const endH = Math.floor(now / HOUR);             // exclusive: candles endH-1 and older are complete
+  const span = (lastH, W) => {                     // sum of W hourly notionals ending AT lastH (inclusive)
+    let s = 0, have = 0;
+    for (let h = lastH - W + 1; h <= lastH; h++) { const x = ntl.get(h); if (x != null) { s += x; have++; } }
+    return have >= Math.ceil(0.75 * W) ? s : null;
+  };
+  const out = {};
+  for (const key in windowsMs) {
+    const W = Math.max(1, Math.round(windowsMs[key] / HOUR));
+    const cur = span(endH - 1, W);
+    if (cur == null) { out[key] = null; continue; }
+    const base = [];
+    for (let d = 1; d <= 31; d++) {
+      const s = span(endH - 1 - 24 * d, W);
+      if (s != null && s > 0) base.push(s);
+    }
+    if (base.length < minS) { out[key] = null; continue; }
+    const m = median(base);
+    out[key] = m > 0 ? +(cur / m).toFixed(2) : null;
+  }
+  return out;
+}
+
+// ===== EMA trend ladder (Trend tab) ==========================================================
+// Reverse-engineered from the Metrik-style "Trend Leaderboard": an EMA 13/21 ribbon evaluated on
+// four timeframes (D1 · H12 · H4 · H1). Per timeframe, three honest states from two comparisons:
+//   up      — px > EMA13 > EMA21 (stacked ribbon, established uptrend)
+//   down    — px < EMA13 < EMA21 (stacked below, established downtrend)
+//   reclaim — above EMA21 but the ribbon isn't stacked up (repairing)
+//   roll    — below EMA21 but the ribbon isn't stacked down (rolling over)
+// Long score = count of 'up' TFs; short score = count of 'down'. A RETEST fires when a trending
+// timeframe's recent bars (last TREND_RETEST_BARS, forming bar included) probed into the 13/21
+// ribbon zone while the close held the EMA21 side of the trend — the classic continuation-entry
+// pullback (long) / rally (short). All approximations are stated, none hidden: the zone test uses
+// the CURRENT EMAs against recent extremes (not bar-by-bar historical EMAs), and the forming
+// bar's close is replaced by the live mark so the ladder tracks price, not a stale hourly close.
+
+const TREND_TFS = ["D1", "H12", "H4", "H1"];   // high -> low; the first retest found is the one reported
+const TREND_RETEST_BARS = 3;                    // recent-extreme window for the zone probe
+const TREND_MIN_BARS = 26;                      // EMA21 needs 21 seed bars + a few recursion steps to be honest
+
+// Last EMA value over `closes` (oldest -> newest). Seeded with the SMA of the first `span` bars —
+// the textbook construction — then recursed. Returns null when there isn't enough history for the
+// seed plus a handful of convergence steps; a dash is honest, a half-converged EMA is not.
+function emaLast(closes, span) {
+  if (!Array.isArray(closes) || closes.length < Math.max(span + 5, TREND_MIN_BARS)) return null;
+  let e = 0;
+  for (let i = 0; i < span; i++) { const v = +closes[i]; if (!isFinite(v)) return null; e += v; }
+  e /= span;
+  const a = 2 / (span + 1);
+  for (let i = span; i < closes.length; i++) { const v = +closes[i]; if (!isFinite(v)) return null; e = a * v + (1 - a) * e; }
+  return e;
+}
+
+// Aggregate the hourly spine into UTC-aligned N-hour buckets (forming bucket included). Only the
+// fields the ladder needs survive: t/o/h/l/c. Missing highs/lows (warm-cache closes-only candles)
+// degrade to the close so the zone test stays defined instead of poisoning Math.min with NaN.
+function bucketCandles(hourly, hours, HOUR) {
+  const W = hours * HOUR, out = [];
+  let cur = null;
+  for (const k of hourly || []) {
+    const t = +k.t; if (!isFinite(t)) continue;
+    const c = +k.c; if (!isFinite(c)) continue;
+    const h = k.h != null && isFinite(+k.h) ? +k.h : c;
+    const l = k.l != null && isFinite(+k.l) ? +k.l : c;
+    const b = Math.floor(t / W) * W;
+    if (!cur || cur.t !== b) { if (cur) out.push(cur); cur = { t: b, o: k.o != null ? +k.o : c, h, l, c }; }
+    else { cur.c = c; if (h > cur.h) cur.h = h; if (l < cur.l) cur.l = l; }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function trendState(px, e13, e21) {
+  if (px == null || e13 == null || e21 == null || !isFinite(px)) return null;
+  if (px > e13 && e13 > e21) return "up";
+  if (px < e13 && e13 < e21) return "down";
+  return px > e21 ? "reclaim" : "roll";
+}
+
+// Build the four-timeframe ladder for one market. `tfCandles` = { D1, H12, H4, H1 }, each an
+// array of {t,h?,l?,c} oldest -> newest with the FORMING bar last. Returns null when any
+// timeframe lacks enough history — a market missing one rung is excluded, not guessed at.
+function trendLadder(px, tfCandles) {
+  if (px == null || !isFinite(+px)) return null;
+  px = +px;
+  const out = { tf: {}, long: { score: 0, retest: null, strength: 0 }, short: { score: 0, retest: null, strength: 0 } };
+  for (const tf of TREND_TFS) {
+    const c = tfCandles[tf];
+    if (!Array.isArray(c) || c.length < TREND_MIN_BARS) return null;
+    const closes = c.map((k) => +k.c);
+    closes[closes.length - 1] = px;                    // live mark drives the forming bar
+    const e13 = emaLast(closes, 13), e21 = emaLast(closes, 21);
+    if (e13 == null || e21 == null || e21 === 0) return null;
+    const st = trendState(px, e13, e21);
+    const lastK = c.slice(-TREND_RETEST_BARS);
+    let lowK = Infinity, highK = -Infinity;
+    for (const k of lastK) {
+      const lo = k.l != null && isFinite(+k.l) ? +k.l : +k.c;
+      const hi = k.h != null && isFinite(+k.h) ? +k.h : +k.c;
+      if (lo < lowK) lowK = lo;
+      if (hi > highK) highK = hi;
+    }
+    // include the live mark itself in the probe window (it may sit past the last stored candle)
+    if (px < lowK) lowK = px; if (px > highK) highK = px;
+    const d21 = ((px - e21) / e21) * 100;
+    out.tf[tf] = { st, e13, e21, d21: +d21.toFixed(2) };
+    if (st === "up") {
+      out.long.score++; out.long.strength += (e13 - e21) / e21;
+      if (!out.long.retest && lowK <= e13 && px > e21) out.long.retest = tf;
+    } else if (st === "down") {
+      out.short.score++; out.short.strength += (e21 - e13) / e21;
+      if (!out.short.retest && highK >= e13 && px < e21) out.short.retest = tf;
+    }
+  }
+  return out;
+}
+
+// Read line for one side of the ladder. Mirrors the source board's language:
+//   retest (score>=3)  ->  "Pullback/Rally to {TF} EMA21 — continuation entry/short"
+//   4/4                ->  "Full up/downtrend — ... · x.x% over/under H1 EMA21"
+//   3/4                ->  "Strong (down) — {laggingTF} lagging"
+//   2/4                ->  "Mixed — {alignedTFs} up/down, wait for alignment"
+// Scores below 2 return null: the board only ranks names with at least higher-TF agreement.
+function trendRead(side, lad) {
+  const L = side === "long", s = L ? lad.long : lad.short;
+  if (s.score < 2) return null;
+  const want = L ? "up" : "down";
+  if (s.retest && s.score >= 3)
+    return { text: L ? `Pullback to ${s.retest} EMA21 — continuation entry` : `Rally to ${s.retest} EMA21 — continuation short`, retest: s.retest };
+  const d = lad.tf.H1 ? Math.abs(lad.tf.H1.d21) : null;
+  const pct = d != null ? `${d.toFixed(1)}%` : "—";
+  if (s.score === 4)
+    return { text: L ? `Full uptrend — long pullbacks · +${pct} over H1 EMA21` : `Full downtrend — short rallies · ${pct} under H1 EMA21`, retest: null };
+  if (s.score === 3) {
+    const lag = TREND_TFS.find((t) => lad.tf[t].st !== want);
+    return { text: L ? `Strong — ${lag} lagging` : `Strong down — ${lag} lagging`, retest: null };
+  }
+  const aligned = TREND_TFS.filter((t) => lad.tf[t].st === want).join("/");
+  return { text: `Mixed — ${aligned} ${L ? "up" : "down"}, wait for alignment`, retest: null };
+}
+
+// Trend age: consecutive most-recent bars where the ribbon was stacked on `side`, computed from
+// an exact per-bar EMA walk (same SMA-seed construction as emaLast, so the final bar agrees with
+// the ladder to the last bit). The forming bar's close is replaced by the live mark, matching the
+// ladder. Bars are only checkable once BOTH EMAs exist (index >= 20), so on short histories the
+// run can hit the edge of what's measurable — `capped` says "at least this old", never "exactly".
+function stackedRun(candles, px, side) {
+  if (!Array.isArray(candles) || candles.length < TREND_MIN_BARS) return null;
+  const closes = candles.map((k) => +k.c);
+  if (px != null && isFinite(+px)) closes[closes.length - 1] = +px;
+  const n = closes.length, a13 = 2 / 14, a21 = 2 / 22;
+  let e13 = 0, e21 = 0, s13 = 0, s21 = 0, run = 0, checked = 0;
+  for (let i = 0; i < n; i++) {
+    const c = closes[i];
+    if (!isFinite(c)) return null;
+    if (i < 13) { s13 += c; if (i === 12) e13 = s13 / 13; } else e13 = a13 * c + (1 - a13) * e13;
+    if (i < 21) { s21 += c; if (i === 20) e21 = s21 / 21; } else e21 = a21 * c + (1 - a21) * e21;
+    if (i < 20) continue;
+    checked++;
+    const stacked = side === "long" ? (c > e13 && e13 > e21) : (c < e13 && e13 < e21);
+    run = stacked ? run + 1 : 0;
+  }
+  return { run, capped: run > 0 && run === checked };
+}
+
+// Guard against the D1 staleness window: daily candles refresh every ~6h, so a fetch that
+// predates UTC midnight leaves the series ending at YESTERDAY'S completed candle. Overwriting
+// that close with the live mark would smear today's price into yesterday's bar and drop a bar
+// from the EMA. If the last bar belongs to a prior UTC day, append a synthetic forming bar at
+// today's day-start carrying the live mark instead; if the forming day is already present (the
+// normal case), return the series untouched and let the ladder's live-mark replacement handle it.
+function withFormingDaily(daily, px, now, DAY) {
+  if (!Array.isArray(daily) || !daily.length || px == null || !isFinite(+px)) return daily;
+  const dayStart = Math.floor(now / DAY) * DAY;
+  const lastT = +daily[daily.length - 1].t;
+  if (!isFinite(lastT) || lastT >= dayStart) return daily;
+  return daily.concat([{ t: dayStart, c: +px }]);
+}
+
+// Ribbon width for one side of the ladder: the AVERAGE EMA13–EMA21 spread across the rungs
+// aligned with that side, as a percent of EMA21. This is the `strength` the ladder already
+// accumulates, normalized per rung — which is what makes it comparable across scores and lets it
+// disambiguate two rows at the same score: a 4/4 over a 0.1% ribbon is a stack one bad bar
+// unwinds; over 2% it's established separation. Null when the side has no aligned rungs — the
+// width of nothing is not zero, it's meaningless.
+function ribbonWidth(s) {
+  if (!s || !(s.score > 0) || !isFinite(s.strength)) return null;
+  return +((100 * s.strength) / s.score).toFixed(2);
+}
+
+// One bar of each ladder timeframe, in ms — the window for the retest-volume read (rrv).
+const TREND_TF_MS = { D1: 24 * 3600e3, H12: 12 * 3600e3, H4: 4 * 3600e3, H1: 3600e3 };
+
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
+  fourHourReturns, tapeRedStats, rvolMulti,
+  // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
+  etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
+  usDayStatus, marketSessions, closedWindows,
+  summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
+  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  // EMA trend ladder (Trend tab)
+  emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
+  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
+
+// ---- stop geometry validation ----------------------------------------------------------------
+// An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it
+// for a short. A composite signal can legitimately fire away from the range edge its playbook
+// levels assume (e.g. a squeeze firing on crowding + fuel with the trigger term ~0, price near
+// the range BOTTOM) — mechanically computed levels then land on the wrong side of entry, and a
+// stop above a long's entry turns the stop-aware track into a win fabricator: the first candle
+// "touches" it and a crash gets capped at +X%. Every stop must pass this gate before it is
+// stamped, resolved against, or kept.
+function stopGeometryOk(side, mark0, stp) {
+  if (stp == null || !(mark0 > 0)) return false;
+  if (side === "long") return stp < mark0;
+  if (side === "short") return stp > mark0;
+  return false;
+}
+
+// ---- play-signed stats for fade playbooks ------------------------------------------------------
+// The gap study is EVENT-signed: positive = the gap continued. For a market whose record says
+// gaps FADE (proven, median < 0), the playbook trades the OTHER side — so every consumer of the
+// stats must flip into play units or three things break at once: the evidence scorer tags the
+// engine's best fade setups `neg exp` and suppresses them, prime can never fire on them, and the
+// ledgered claim/outcome audit runs inverted (a successful fade recorded as a loss). Returns a
+// shallow play-signed copy: med/avg negated, hit complemented, `fade: true` stamped. Never
+// mutates the study object (it is shared with feature/display state).
+function fadeStats(st) {
+  if (!st) return st;
+  const c = Object.assign({}, st, { fade: true });
+  if (Number.isFinite(st.med)) c.med = +(-st.med).toFixed(2);
+  if (Number.isFinite(st.avg)) c.avg = +(-st.avg).toFixed(2);
+  if (Number.isFinite(st.hit)) c.hit = +(1 - st.hit).toFixed(2);
+  return c;
+}
+
+// ---- earnings calendar helpers -----------------------------------------------------------------
+// BMO/AMC are ET concepts, so "today"/"tomorrow" for earnings proximity are ET CALENDAR DAYS —
+// never the browser's or server's local day. Reuses the same Intl-backed ET clock as the session
+// calendar above, so a report never flips days at the wrong hour for a non-US viewer.
+function etDayStr(ms) {
+  const p = etParts(ms != null ? ms : Date.now());
+  return p.y + "-" + String(p.mo).padStart(2, "0") + "-" + String(p.d).padStart(2, "0");
+}
+// Whole-day distance of a YYYY-MM-DD report date from the CURRENT ET day: 0 = today, 1 = tomorrow,
+// negative = already passed. Both sides anchored to UTC midnight of their calendar date, so DST
+// transitions can never produce a fractional day.
+function earnDayDiff(dateStr, nowMs) {
+  if (typeof dateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const a = Date.UTC(+dateStr.slice(0, 4), +dateStr.slice(5, 7) - 1, +dateStr.slice(8, 10));
+  const t = etDayStr(nowMs);
+  const b = Date.UTC(+t.slice(0, 4), +t.slice(5, 7) - 1, +t.slice(8, 10));
+  return Math.round((a - b) / DAY);
+}
+// Finnhub /calendar/earnings -> compact entries for OUR universe only. symMap: UPPERCASED api
+// symbol -> { coin, ticker } (the alias map is applied by the caller when building symMap, so a
+// BRK.B report lands back on the BRKB row). Everything outside the map is discarded — the payload
+// never claims coverage it doesn't have. Sessions normalize to BMO / DMH / AMC / TBD and entries
+// sort by (date, session order within the day, ticker) so "first per ticker" = nearest report.
+const EARN_SESS = { bmo: "BMO", amc: "AMC", dmh: "DMH" };
+const EARN_SESS_ORD = { BMO: 0, DMH: 1, AMC: 2, TBD: 3 };
+function parseEarningsCalendar(json, symMap) {
+  const arr = json && Array.isArray(json.earningsCalendar) ? json.earningsCalendar : [];
+  const out = [];
+  for (const e of arr) {
+    if (!e || typeof e.symbol !== "string" || typeof e.date !== "string") continue;
+    const m = symMap.get(e.symbol.toUpperCase());
+    if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) continue;
+    // 4 decimal places, NOT 2: the feed's estimates carry real information in the 3rd/4th
+    // decimal for low-EPS names. 2dp collapsed the live NFLX print (actual 0.8000 vs est 0.8042,
+    // a genuine -0.5% miss) into "0.8 vs 0.8 miss +0.0%" — a display contradicting its own
+    // verdict. Verdict and surprise must be computed from values that preserve the difference.
+    const q2 = (x) => typeof x === "number" && isFinite(x) ? +x.toFixed(4) : null;
+    const eps = q2(e.epsEstimate), epsA = q2(e.epsActual);
+    // Revenue ships in raw units (feed reports dollars); quantize to 3 significant figures —
+    // the display only ever shows "$41.2B", full doubles are payload weight for nothing.
+    const q3 = (x) => typeof x === "number" && isFinite(x) && x !== 0 ? +x.toPrecision(3) : null;
+    const rev = q3(e.revenueEstimate), revA = q3(e.revenueActual);
+    // Fiscal print identity (quarter/year) rides along: it is the ONLY safe way to tell "this
+    // ticker's report moved to a later date" (drop the stale placeholder) from "this ticker
+    // reports twice in the window" (keep both). Absent from old persisted prints — consumers
+    // must treat missing q/y as unknown, never as a match.
+    const q = Number.isInteger(e.quarter) ? e.quarter : null, y = Number.isInteger(e.year) ? e.year : null;
+    out.push({ coin: m.coin, t: m.ticker, d: e.date, s: EARN_SESS[String(e.hour || "").toLowerCase()] || "TBD", eps, epsA, rev, revA, q, y });
+  }
+  out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (EARN_SESS_ORD[a.s] - EARN_SESS_ORD[b.s]) || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+  return out;
+}
+// Recently-reported window for the Earnings tab: prints whose ET calendar day is in the past
+// `backDays` days (default 2 — "yesterday" and "2 days ago"; today's reported rows already live
+// in the upcoming entries with diff 0). Sorted most-recent day FIRST, chronological session
+// order within a day, ticker as tiebreak. Pure — the poller derives this from the persisted
+// print history at cache-build time, so a report keeps its beat/miss on the tab for two full
+// days after the print instead of vanishing at the ET midnight rollover.
+function recentEarnPrints(prints, nowMs, backDays) {
+  const bd = backDays != null ? backDays : 2;
+  const out = [];
+  if (Array.isArray(prints)) for (const p of prints) {
+    if (!p || typeof p.d !== "string") continue;
+    const df = earnDayDiff(p.d, nowMs);
+    if (df != null && df < 0 && df >= -bd) out.push(p);
+  }
+  out.sort((a, b) => a.d > b.d ? -1 : a.d < b.d ? 1
+    : ((EARN_SESS_ORD[a.s] != null ? EARN_SESS_ORD[a.s] : 3) - (EARN_SESS_ORD[b.s] != null ? EARN_SESS_ORD[b.s] : 3))
+    || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+  return out;
+}
+// Disjoint inclusive [from, to] ET-day chunks covering [fromMs, toMs]. The free-tier calendar
+// TRUNCATES long windows served far-end-first (observed live 2026-07-16: a 19-day earnings-season
+// window returned only Jul 22–30 and silently dropped a same-day NFLX report carrying actuals),
+// so every calendar pull must walk small date slices. Chunks may overlap by one day across a DST
+// boundary — callers dedupe by ticker+date, so overlap is harmless and coverage gaps are not.
+function earnChunks(fromMs, toMs, chunkDays) {
+  const cd = Math.max(1, chunkDays || 3), out = [];
+  for (let a = fromMs; a <= toMs; a += cd * DAY) out.push([etDayStr(a), etDayStr(Math.min(a + (cd - 1) * DAY, toMs))]);
+  return out;
+}
+// A past print is STALE-SCHEDULE GARBAGE when the fresh feed still shows the same ticker
+// scheduled at a FUTURE date for the same fiscal print: the feed dated the row from an estimate,
+// the company picked a later real date, and the placeholder scrolled behind today wearing numbers
+// it never earned (observed live: IBM persisted at 2026-07-14 "with actuals" while IBM's real Q2
+// date is 2026-07-22 per IBM IR — and the phantom fed the reaction study). Drop rule: past print
+// + future schedule for the same ticker + (same quarter/year, or, for legacy prints stored before
+// quarter capture, future date within 10 days of the print date — no quarterly reporter prints
+// twice in 10 days). ABSENCE is never evidence: a symbol missing from one fetch (the truncation
+// failure mode that motivated chunking) must not delete history.
+function purgeStalePrints(prints, parsed, nowMs) {
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(parsed) || !parsed.length) return prints || [];
+  const fut = new Map();
+  for (const e of parsed) {
+    const df = earnDayDiff(e.d, nowMs);
+    if (df != null && df > 0) { let a = fut.get(e.t); if (!a) { a = []; fut.set(e.t, a); } a.push(e); }
+  }
+  if (!fut.size) return prints;
+  const dUtc = (ds) => Date.UTC(+ds.slice(0, 4), +ds.slice(5, 7) - 1, +ds.slice(8, 10));
+  return prints.filter((p) => {
+    const df = earnDayDiff(p.d, nowMs);
+    if (df == null || df >= 0) return true;
+    const a = fut.get(p.t);
+    if (!a) return true;
+    for (const e of a) {
+      if (p.q != null && p.y != null && e.q != null && e.y != null) {
+        if (e.q === p.q && e.y === p.y) return false;
+      } else {
+        const gap = Math.round((dUtc(e.d) - dUtc(p.d)) / DAY);
+        if (gap > 0 && gap <= 10) return false;
+      }
+    }
+    return true;
+  });
+}
+// Back-window existence reconciliation. With chunked pulls the fetched window is complete by
+// construction, so within the REFETCHED back range [now-backDays, now-1] the feed's current
+// claim is authoritative for which prints EXIST: a persisted print the feed no longer lists
+// there was retracted or corrected upstream — dropped. This catches the phantom class where the
+// feed carries NO corrected future row for the reschedule rule to fire on (the live IBM case:
+// phantom at Jul 14, and Finnhub lists nothing for IBM at its real Jul 22 date either).
+// Self-healing both ways — a print the feed re-asserts on a later pull is simply re-merged.
+// Prints OLDER than the back window are NEVER touched: history that can no longer be re-fetched
+// is never deleted on absence. An empty parse purges nothing (a zero-row 19-day window is a
+// broken fetch, not evidence).
+function reconcileEarnPrints(prints, parsed, nowMs, backDays) {
+  const bd = backDays != null ? backDays : 5;
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(parsed) || !parsed.length) return prints || [];
+  const have = new Set();
+  for (const e of parsed) have.add(e.t + "|" + e.d);
+  return prints.filter((p) => {
+    const df = earnDayDiff(p.d, nowMs);
+    if (df == null || df >= 0 || df < -bd) return true;
+    return have.has(p.t + "|" + p.d);
+  });
+}
+module.exports.etDayStr = etDayStr;
+module.exports.mergeNews = mergeNews;
+module.exports.newsRelevant = newsRelevant;
+module.exports.parseTgPreview = parseTgPreview;
+module.exports.attributeTg = attributeTg;
+module.exports.parseEdgarAtom = parseEdgarAtom;
+module.exports.FILINGS_TTL_MS = FILINGS_TTL_MS;
+module.exports.linkEarningsFilings = linkEarningsFilings;
+module.exports.bustAssetTags = bustAssetTags;
+module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
+module.exports.earnDayDiff = earnDayDiff;
+module.exports.parseEarningsCalendar = parseEarningsCalendar;
+module.exports.recentEarnPrints = recentEarnPrints;
+module.exports.earnChunks = earnChunks;
+module.exports.purgeStalePrints = purgeStalePrints;
+module.exports.reconcileEarnPrints = reconcileEarnPrints;
+
+// ---- earnings print history + reaction study ---------------------------------------------------
+// Past prints are the raw material for the per-ticker reaction study. Like the OI log, they
+// accrue and can't be re-fetched reliably (the feed's historical depth is not guaranteed), so
+// every print that passes is persisted. Merge prefers the record that carries ACTUALS — a print
+// first seen as a schedule entry gets upgraded in place when the actual lands on a later fetch.
+function mergeEarnPrints(prev, incoming, nowMs, maxAgeDays) {
+  const cut = (nowMs != null ? nowMs : Date.now()) - (maxAgeDays || 1100) * DAY;
+  const m = new Map();
+  const fill = (arr) => {
+    if (!Array.isArray(arr)) return;
+    for (const p of arr) {
+      if (!p || typeof p.t !== "string" || typeof p.d !== "string") continue;
+      if (Date.UTC(+p.d.slice(0, 4), +p.d.slice(5, 7) - 1, +p.d.slice(8, 10)) < cut) continue;
+      const k = p.t + "|" + p.d;
+      const old = m.get(k);
+      // newer wins field-by-field ONLY where it actually has data — an actual, once stored,
+      // can never be blanked by a later fetch that dropped it.
+      m.set(k, old ? { t: p.t, coin: p.coin || old.coin, d: p.d, s: p.s !== "TBD" ? p.s : old.s,
+        eps: p.eps != null ? p.eps : old.eps, epsA: p.epsA != null ? p.epsA : old.epsA,
+        rev: p.rev != null ? p.rev : old.rev, revA: p.revA != null ? p.revA : old.revA,
+        q: p.q != null ? p.q : old.q, y: p.y != null ? p.y : old.y } : p);
+    }
+  };
+  fill(prev); fill(incoming);
+  const out = [...m.values()];
+  out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : 1));
+  return out;
+}
+// Per-ticker earnings reaction study, computed on the perp's OWN daily closes (UTC days — the
+// perp trades through weekends, so an AMC Friday print's reaction is honestly captured by the
+// Saturday candle). Reaction day: BMO/DMH/TBD = the print's own candle vs the prior close;
+// AMC = the NEXT candle. Candles may be warm-cache [{t,c}] without opens — the gap metrics
+// (open vs prior close, held-to-close) compute only where opens exist and report their own n.
+// Expansion = |reaction| / mean |daily move| over the 20 candles before the print (>=8 required).
+function earnReactionsFor(prints, daily) {
+  if (!Array.isArray(prints) || !prints.length || !Array.isArray(daily) || daily.length < 3) return null;
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  const idxByDay = new Map();
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c)) idxByDay.set(dayOf(daily[i].t), i);
+  const moves = [], exps = [], gaps = [];
+  for (const p of prints) {
+    const pi = idxByDay.get(p.d);
+    if (pi == null) continue;                                    // print predates the retained daily window
+    const ri = p.s === "AMC" ? pi + 1 : pi;
+    if (ri <= 0 || ri >= daily.length) continue;
+    const c1 = daily[ri].c, c0 = daily[ri - 1].c;
+    if (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0) continue;
+    const mv = (c1 - c0) / c0 * 100;
+    moves.push(mv);
+    let base = 0, bn = 0;
+    for (let k = Math.max(1, ri - 20); k < ri; k++) {
+      const a = daily[k].c, b = daily[k - 1].c;
+      if (Number.isFinite(a) && Number.isFinite(b) && b > 0) { base += Math.abs((a - b) / b * 100); bn++; }
+    }
+    if (bn >= 8 && base > 0) exps.push(Math.abs(mv) / (base / bn));
+    const o = daily[ri].o;
+    if (Number.isFinite(o) && o > 0) {
+      const g = (o - c0) / c0 * 100;
+      if (Math.abs(g) > 0.05) gaps.push({ up: g > 0, held: (c1 - o) * g > 0 });
+    }
+  }
+  if (!moves.length) return null;
+  const abs = moves.map(Math.abs);
+  return {
+    n: moves.length,
+    avgAbs: +(abs.reduce((a, b) => a + b, 0) / abs.length).toFixed(2),
+    medAbs: +median(abs).toFixed(2),
+    up: moves.filter((m) => m > 0).length,
+    xMed: exps.length ? +median(exps).toFixed(1) : null, xN: exps.length,
+    gapN: gaps.length, gapUp: gaps.filter((g) => g.up).length, gapHeld: gaps.filter((g) => g.held).length,
+  };
+}
+module.exports.mergeEarnPrints = mergeEarnPrints;
+module.exports.earnReactionsFor = earnReactionsFor;
