@@ -4,13 +4,13 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectLiqFlush,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify, nameAliases } = require("./sectors");
 
@@ -835,7 +835,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush", "airead"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -850,6 +850,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (Array.isArray(d.closed)) {
       if (d.closed.length > 4000 && store.archiveClosed) store.archiveClosed(d.closed.slice(0, d.closed.length - 4000));
       ledgerClosed = d.closed.slice(-4000);
+    }
+    // Crypto engine purge (-101): the main universe was un-enrolled from the signal engine, so
+    // its stored claims — open AND closed, shadows included — leave the record entirely. A dead
+    // engine's history in the aggregates would be exactly the stale-record dishonesty the ledger
+    // exists to prevent. Universe is structural (xyz coins carry ":" in the id, main coins do
+    // not — the same test shadowRecord always used); airead entries are exempt (the Report
+    // tab's analyst record serves both universes and its engine is alive). Idempotent: after
+    // the first boot there is nothing left to drop.
+    {
+      const cryptoEng = (e) => e && e.coin && !String(e.coin).includes(":") && e.ev !== "airead";
+      let pOpen = 0, pClosed = 0;
+      for (const [k, e] of [...ledgerOpen]) if (cryptoEng(e)) { ledgerOpen.delete(k); pOpen++; }
+      const kept = ledgerClosed.filter((e) => !cryptoEng(e));
+      pClosed = ledgerClosed.length - kept.length;
+      ledgerClosed = kept;
+      if (pOpen || pClosed) { ledgerDirty = true; log(`Crypto engine purge: dropped ${pOpen} open and ${pClosed} closed crypto claim(s) from the ledger (airead kept)`); }
     }
     // Unit repair: breakdown/oiflush/fpdiv claims resolved before the normalization fix carry
     // raw-% outcomes despite an R-united claim — sd0 was stamped at fire but never applied at
@@ -916,13 +932,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       }
       if (pfix) { ledgerDirty = true; log(`Ledger play-sign repair: flipped ${pfix} fader claim(s) into the units of the published play`); }
     }
-    if (Array.isArray(d.rearm)) for (const k of d.rearm) if (typeof k === "string") rearm.add(k);
+    // Same purge for the episode/presence bookkeeping keyed `coin|ev...` — a crypto key here
+    // would re-arm or restamp an episode for an engine that no longer exists.
+    const cryptoKey = (k) => { const bar = k.indexOf("|"); return bar > 0 && !k.slice(0, bar).includes(":") && !k.slice(bar + 1).startsWith("airead"); };
+    if (Array.isArray(d.rearm)) for (const k of d.rearm) if (typeof k === "string" && !cryptoKey(k)) rearm.add(k);
     // Presence timelines: a restart must not restamp "since when this condition has been true".
     // Restored entries resume their episode; keys whose condition no longer holds are GC'd on
     // the first build. Only a key with NO saved timeline (first deploy of this feature, or a
     // lost volume) starts observation at boot, and that one is flagged in the payload.
     if (Array.isArray(d.present)) for (const p of d.present)
-      if (Array.isArray(p) && typeof p[0] === "string" && Number.isFinite(p[1])) presentSince.set(p[0], { t: p[1], b: false });
+      if (Array.isArray(p) && typeof p[0] === "string" && !cryptoKey(p[0]) && Number.isFinite(p[1])) presentSince.set(p[0], { t: p[1], b: false });
     if (d.variants) for (const ev in variantState)
       if (d.variants[ev] && Number.isInteger(d.variants[ev].inc) && d.variants[ev].inc >= 0 && d.variants[ev].inc < VARIANTS[ev].vals.length)
         variantState[ev] = { inc: d.variants[ev].inc, hist: Array.isArray(d.variants[ev].hist) ? d.variants[ev].hist.slice(-20) : [] };
@@ -1012,8 +1031,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
           gw: "gapfade shadow only: void width as a multiple of the market's own gap σ (1.0 or 1.5)",
           emv: "pead shadow only: the frozen earnings-reaction move, %",
-          fpx: "fundext shadow only: funding percentile at fire (the gate reading)",
-          oc24: "liqflush shadow only: the 24h open-interest change % at fire (the OI leg of the gate)",
           rm: "airead only: the model that authored the read (analyst accountability claims)",
           ses: "session bucket at fire, xyz only (rth / on / wknd)", dow: "UTC day-of-week at fire (0=Sun)",
         },
@@ -1046,7 +1063,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // stay thin and the export's meta declares the coverage boundary (ctxStampSince).
   // Funding percentile of `rate` within this market's own 31d hourly history, >=96-sample
   // floor — the SAME window and floor as the screener's funding-percentile column, shared by
-  // the fire-time context stamp and the fundext gate so no two consumers can disagree.
+  // the fire-time context stamp and the AI report's crypto positioning read so no two
+  // consumers can disagree.
   function fundPctileNow(coin, rate, t0) {
     if (rate == null || !isFinite(rate)) return null;
     const fh = getFunding(coin), cut = t0 - 31 * DAY;
@@ -1093,6 +1111,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     return c;
   }
   function openLedger(r, ev, sigEntry, dir, extra, vi) {
+    // Crypto engine removal (-101): the main universe opens NO signal or shadow claims.
+    // airead is exempt — that is the Report tab's analyst-accountability record, which
+    // serves both universes and is not this engine's. Belt to the loop's suspenders:
+    // even a future caller that forgets the enrollment rule cannot ledger a crypto claim.
+    if (r && r.uni === "main" && ev !== "airead") return null;
     const key = r.coin + "|" + ev + (vi != null ? "#" + vi : "");
     // mv = playbook-target distance from the mark at fire time, in % — lets the record be
     // sliced by actionable magnitude, matching the client's move filter exactly.
@@ -1299,7 +1322,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush", "airead"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1421,10 +1444,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       tip: "rising 50d MA, price pulled back from >=4% above to touch it \u2014 long at the MA, stop 1\u03c3 below it, target the prior 30d closing high. 10d horizon." },
     { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
       tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
-    { ev: "fundext", uni: "main", label: "funding extreme fade", unit: "R",
-      tip: "funding at the >=95th (or <=5th) percentile of this market's own 31d hourly history for a FULL day \u2014 fade the crowd toward the range mid, stop 1.5\u03c3 with them. 5d horizon, crypto only." },
-    { ev: "liqflush", uni: "main", label: "cascade exhaustion", unit: "R",
-      tip: "a >=2\u03c3 24h drop WITH a >=8% 24h open-interest drop \u2014 forced liquidations did the selling, not information. Long the exhaustion: stop 1\u03c3 below the post-flush mark, target the half-retrace of the flush. 3d horizon, crypto only. The frozen oc24 field records the OI leg for later slicing." },
   ];
   function shadowRecord() {
     const evs = new Set(STRAT_DEFS.map((d) => d.ev));
@@ -1446,12 +1465,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       avg: b.r.length ? +(b.r.reduce((a, x) => a + x, 0) / b.r.length).toFixed(2) : null,
       avgS: b.s.length ? +(b.s.reduce((a, x) => a + x, 0) / b.s.length).toFixed(2) : null,
     };
-    // Two hard-separated panels: each universe sees only the strategies that live there, with
-    // stats aggregated over ITS claims only — a crypto edge can't borrow an equity record.
+    // One panel: the xyz universe is the only one enrolled since the crypto engine removal
+    // (-101). The bucket's structural universe key stays — it is what keeps any stray main
+    // entry from ever counting into an xyz aggregate.
     const panel = (u) => STRAT_DEFS.filter((d) => d.uni === "both" || d.uni === u)
       .map((d) => ({ ev: d.ev, label: d.label, unit: d.unit, tip: d.tip,
         rows: (d.split || [{ vi: 0, tag: null }]).map((sp) => Object.assign({ tag: sp.tag || null }, stat(agg.get(d.ev + "|" + sp.vi + "|" + u)))) }));
-    return { main: panel("main"), xyz: panel("xyz") };
+    return { xyz: panel("xyz") };
   }
   let signalsBuildCount = 0;   // builds since process start — build #1 is the post-boot catch-up where in-force conditions all open at once
   function buildSignals() {
@@ -1474,16 +1494,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // per-ticker earnings prints for the pead shadow: built once per build, tiny array
     const earnPrintsByTk = new Map();
     for (const pr of earnPrints) { let a = earnPrintsByTk.get(pr.t); if (!a) { a = []; earnPrintsByTk.set(pr.t, a); } a.push(pr); }
-    // pass 1: studies + pooling feed — BOTH universes. activeMarkets() is xyz-pure by design
-    // (tape aggregates and regime depend on that purity), so the signal engine concatenates
-    // the main-dex roster explicitly. Until 2026.07.20-87 this loop iterated activeMarkets()
-    // alone: the entire crypto universe was invisible to signals, studies, the ledger and
-    // every shadow strategy — zero crypto claims ever ledgered — while the Markets/Trend tabs
-    // (which read main their own way) looked perfectly healthy. Session-anchored events
-    // (gap, prem, ondrift) naturally no-op for main coins: their gates key off per-coin
-    // overnight/liveClose data that 24/7 markets never produce.
+    // pass 1: studies + pooling feed — xyz universe ONLY. Crypto enrollment (added -87,
+    // removed -101) is gone BY DECISION, not by accident: the absolute-range playbook
+    // geometry produced impossible claims on collapsed coins (negative price targets,
+    // voids multiples of price away) and the crypto side of the engine was retired rather
+    // than repaired. activeMarkets() is xyz-pure by design — iterating it alone IS the
+    // removal. Crypto rows still flow through Markets/Trend/Report untouched; only signals,
+    // studies, the ledger, pooling and every shadow strategy exclude them (enforced again
+    // by openLedger's own universe guard, airead excepted — the Report tab's accountability
+    // record is the analyst's, not this engine's).
     const prepped = [];
-    for (const r of activeMarkets().concat(mainMarkets())) {
+    for (const r of activeMarkets()) {
       if (r.delisted || r.px == null) continue;
       const closes = dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;
       const st = studiesFor(r, closes, dayFunding);
@@ -1573,48 +1594,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
               openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
                 { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,
                   mv: +(Math.abs(pd.target / r.px - 1) * 100).toFixed(2), emv: pd.mv }, 0);
-          }
-          // cascade exhaustion, crypto only: >=2σ 24h drop WITH >=8% 24h OI drop — forced
-          // liquidations did the selling; long the exhaustion once the leverage is gone
-          if (r.uni === "main" && r.d1 != null) {
-            const oh = hist.get(r.coin);
-            let oiChg24 = null;
-            if (oh && oh.length > 4) {
-              const t24 = now - DAY;
-              let base = null;
-              for (const k of oh) if (Math.abs(k[0] - t24) <= 3 * HOUR && (base == null || Math.abs(k[0] - t24) < Math.abs(base[0] - t24))) base = k;
-              const last = oh[oh.length - 1];
-              if (base && base[1] > 0 && last && last[1] > 0) oiChg24 = +((last[1] / base[1] - 1) * 100).toFixed(1);
-            }
-            const lf = oiChg24 != null ? detectLiqFlush(r.d1, sd30, r.px, oiChg24) : null;
-            if (lf && stopGeometryOk("long", r.px, lf.stop))
-              openLedger(r, "liqflush", { score: 0, reading: "" }, 1,
-                { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: lf.stop,
-                  mv: +(Math.abs(lf.target / r.px - 1) * 100).toFixed(2), oc24: oiChg24 }, 0);
-          }
-          // persistent funding extreme, crypto only: the crowd has been paying near its own
-          // monthly extreme for a FULL DAY, not one spiky hour — fade it toward the range mid
-          if (r.uni === "main" && r.feat && r.feat.hi30 > r.feat.lo30) {
-            const pNow = fundPctileNow(r.coin, r.funding, now);
-            let rate24 = null;
-            { const fh = getFunding(r.coin), t24 = now - DAY;
-              for (const k of fh) if (Math.abs(k[0] - t24) <= 3 * HOUR && (rate24 == null || Math.abs(k[0] - t24) < Math.abs(rate24[0] - t24))) rate24 = k;
-            }
-            const pPrev = rate24 ? fundPctileNow(r.coin, rate24[1], now) : null;
-            if (pNow != null && pPrev != null) {
-              const crowdLong = pNow >= 95 && pPrev >= 95 && r.funding > 0;
-              const crowdShort = pNow <= 5 && pPrev <= 5 && r.funding < 0;
-              if (crowdLong || crowdShort) {
-                const side = crowdLong ? "short" : "long", sgn = crowdLong ? 1 : -1;
-                const stpX = +(r.px * (1 + sgn * (1.5 * sd30) / 100)).toPrecision(6);
-                const tgt = (r.feat.hi30 + r.feat.lo30) / 2;
-                const tgtOk = crowdLong ? tgt < r.px : tgt > r.px;   // range mid must sit on the profit side
-                if (tgtOk && stopGeometryOk(side, r.px, stpX))
-                  openLedger(r, "fundext", { score: 0, reading: "" }, crowdLong ? 1 : -1,
-                    { sd0: +sd30.toFixed(3), psd: side, pn: 1, stp: stpX,
-                      mv: +(Math.abs(tgt / r.px - 1) * 100).toFixed(2), fpx: pNow }, 0);
-              }
-            }
           }
         } } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
@@ -1945,13 +1924,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // conditions. Serving top.length as the count pinned the tab badge at "40" forever the
     // moment the universe produced >=40 concurrent conditions — the badge must move with
     // reality, the payload cap is a transport decision. `shown` carries the cap for the client.
-    const top = capPerUniverse(kept, 40);   // per-universe lanes: a stocks-heavy tape can't crowd crypto out of the transport
+    const top = kept.slice(0, 40);   // single-universe transport: plain top-40 by score (per-universe lanes retired with the crypto engine, -101)
     const shadows = shadowRecord();
-    const countU = { main: 0, xyz: 0 };
-    for (const g of kept) countU[g.uni === "main" ? "main" : "xyz"]++;
     const shSig = (a) => a.map((g) => g.rows.map((r) => r.n + ":" + r.open).join(".")).join(",");
     const sig = kept.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",")
-      + "|" + shSig(shadows.main) + "|" + shSig(shadows.xyz);   // shadow record changes must bust the ETag too
+      + "|" + shSig(shadows.xyz);   // shadow record changes must bust the ETag too
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
     for (const k of rearm) if (!firedNow.has(k)) rearm.delete(k);   // condition lapsed -> episode over, key re-armed
     const variants = Object.keys(VARIANTS).map((ev) => ({
@@ -1977,7 +1954,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     sigTickers.clear();
     for (const g of kept) if (g.uni === "xyz") sigTickers.add(String(g.ticker).toUpperCase());
     buildNewsPayload();   // sig/ed badge stamps ride the signals cadence; content hash gates the ETag bump
-    signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, countU, shown: top.length, signals: top,
+    signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
     persistLedger();
@@ -3362,7 +3339,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
   // schema flip to "invalidated — report format updated" on the next read, so a deploy that
   // fixes the report is visible on the first regenerate, never hidden behind a running TTL.
-  const AI_SCHEMA_V = 5;   // v5: news grounding contract (news_read), crypto context, sector-relative
+  const AI_SCHEMA_V = 6;   // v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
@@ -3682,9 +3659,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           const last = oh[oh.length - 1];
           if (base && base[1] > 0 && last && last[1] > 0) cr.oiChg24Pct = +((last[1] / base[1] - 1) * 100).toFixed(1);
         }
-        const live = [];
-        for (const e of ledgerOpen.values()) if (e.coin === coin && (e.ev === "fundext" || e.ev === "liqflush")) live.push(e.ev);
-        if (live.length) cr.cryptoSetupsLive = [...new Set(live)];
         if (Object.keys(cr).length) ctx.crypto = cr;
       } catch (_) {}
     }
@@ -3693,7 +3667,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     ctx.coverage = aiCoverage(coin, windowMs);
     return ctx;
   }
-  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history, the 24h open-interest change, and any crypto-native setups currently live on the name (fundext = persistent funding extreme, liqflush = liquidation-cascade exhaustion) — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly.
+  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history and the 24h open-interest change — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly.
 Respond with ONLY a JSON object — no markdown fences, no preamble — with exactly these keys:
 {"headline": string (<=60 chars, plain-language stance, e.g. "Constructive, leans long" or "Constructive, but earnings in 6 days"),
  "bias": "long"|"short"|"neutral",
