@@ -1796,10 +1796,14 @@ test("server route manifest: every load-bearing API route is registered exactly 
   assert.equal(srv.split('fastify.post("/api/ai-report"').length - 1, 1, "POST /api/ai-report must be registered exactly once");
   // Terminal Tier-3 fallback is a POST backed by poller.askBoard — pin both.
   assert.equal(srv.split('fastify.post("/api/ask"').length - 1, 1, "POST /api/ask must be registered exactly once");
+  // Admin budget reset is a POST backed by poller.resetAiDay — pin route, mapping, and export.
+  assert.equal(srv.split('fastify.post("/api/ai-reset"').length - 1, 1, "POST /api/ai-reset must be registered exactly once");
+  assert.ok(srv.includes('r.error === "cooldown" || r.error === "daily-cap" ? 429'), "/api/ai-report must map daily-cap to 429 like cooldown");
   // Every poller getter the route layer references must be defined AND exported by the poller
   // factory — a route bound to a phantom getter is a 500 the drawer's silent catch would eat.
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(/async function askBoard/.test(pol) && /askBoard,/.test(pol), "poller.askBoard (terminal AI fallback) missing or not exported");
+  assert.ok(/function resetAiDay/.test(pol) && /resetAiDay,/.test(pol), "poller.resetAiDay (admin budget reset) missing or not exported");
   const getters = new Set([...srv.matchAll(/poller\.(get[A-Za-z0-9_]+)\(/g)].map((m) => m[1]));
   assert.ok(getters.size >= 8, `suspiciously few poller getters referenced by routes: ${getters.size}`);
   // Getters take two shapes in poller.js — `function getX(` hoisted then exported shorthand,
@@ -2642,7 +2646,7 @@ test("client + server integrity: the Report tab ships end to end (markers, style
   assert.ok(pol.includes("dr.slice(-(MAIN_DAILY_DAYS + 2))"), "crypto daily payload cap must ride MAIN_DAILY_DAYS");
 });
 
-test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Sol→Terra fallback on refusal", async () => {
+test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Terra→Sol fallback on refusal", async () => {
   // Provider selection is read from env at construction — pin it for this test, restore after.
   const prevProv = process.env.AI_PROVIDER, prevKey = process.env.OPENAI_API_KEY;
   process.env.AI_PROVIDER = "openai"; process.env.OPENAI_API_KEY = "sk-test-openai";
@@ -2660,9 +2664,10 @@ test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Sol→
     assert.ok(g.ok, "OpenAI path must generate: " + (g.error || ""));
     assert.ok(calls[0].url.includes("api.openai.com/v1/chat/completions"), "must hit Chat Completions");
     assert.equal(calls[0].auth, "Bearer sk-test-openai", "must authenticate with a Bearer token");
-    assert.equal(calls[0].model, "gpt-5.6-sol", "OpenAI primary must default to Sol");
-    assert.equal(calls[1].model, "gpt-5.6-terra", "OpenAI fallback must default to Terra");
-    assert.equal(g.report.model, "gpt-5.6-terra", "the report names the model that actually produced it");
+    assert.equal(calls[0].model, "gpt-5.6-terra", "OpenAI primary must default to Terra");
+    assert.equal(calls[0].body.reasoning_effort, "high", "report generation must run Terra at high effort");
+    assert.equal(calls[1].model, "gpt-5.6-sol", "OpenAI fallback must default to Sol");
+    assert.equal(g.report.model, "gpt-5.6-sol", "the report names the model that actually produced it");
     assert.equal(calls[0].body.messages[0].role, "system", "system prompt rides as a system message");
     assert.ok("max_completion_tokens" in calls[0].body && !("max_tokens" in calls[0].body),
       "GPT-5.x requires max_completion_tokens, not max_tokens");
@@ -2686,7 +2691,7 @@ test("ai report: provider auto-detection — OPENAI_API_KEY alone selects OpenAI
     { const { p } = aiTestPoller();
       const l = p.listAiReports();
       assert.equal(l.provider, "openai", "OPENAI_API_KEY alone must auto-select the openai provider");
-      assert.equal(l.model, "gpt-5.6-sol");
+      assert.equal(l.model, "gpt-5.6-terra");
       assert.equal(l.enabled, true); }
     delete process.env.OPENAI_API_KEY;
     { const { p } = aiTestPoller();
@@ -3299,4 +3304,67 @@ test("packed spine 2026.07.21-09: source wiring — packHours/hoursToObj boundar
   assert.ok(pol.includes("featuresFromHourly(hoursToObj(featWin)"), "featuresFromHourly must receive the object-shape view");
   assert.equal((pol.match(/hoursToObj\(r?r?\.hourlyRaw\.slice\(-96\)\)/g) || []).length, 4, "all four H1 rungs (trend, AI, retest, 1h chart) adapt the packed slice to objects");
   assert.ok(pol.includes("if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = packHours(r.hourlyRaw);"), "seedRowNow must pack its spine input");
+});
+
+test("daily report budget + admin reset + terra effort routing", async () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // ---- source pins: config the two surfaces run on --------------------------------------
+  assert.ok(pol.includes('openai: { model: "gpt-5.6-terra", fb: "gpt-5.6-sol"'), "OpenAI default must be terra primary / sol fallback");
+  assert.ok(/AI_REPORT_EFFORT = process\.env\.AI_REPORT_EFFORT \|\| "high"/.test(pol), "report effort must default to high");
+  assert.ok(/AI_ASK_EFFORT = process\.env\.AI_ASK_EFFORT \|\| "medium"/.test(pol), "ask-terminal effort must default to medium");
+  assert.ok(/AI_REPORTS_PER_DAY = Math\.max\(1, Number\(process\.env\.AI_REPORTS_PER_DAY\) \|\| 5\)/.test(pol), "daily cap must default to 5");
+  assert.ok(pol.includes("if (effort) oaBody.reasoning_effort = effort;"), "callModel must send reasoning_effort on the OpenAI path only when set");
+  assert.ok(/callModel\(AI_MODEL, ctx, \{ effort: AI_REPORT_EFFORT \}\)/.test(pol) && /callModel\(AI_MODEL_FALLBACK, ctx, \{ effort: AI_REPORT_EFFORT \}\)/.test(pol),
+    "both report-path model calls must carry the report effort");
+  assert.ok(/effort: AI_ASK_EFFORT/.test(pol), "askBoard callBoth must carry the terminal effort");
+  assert.ok(pol.includes('error: "daily-cap"'), "generateAiReport must fail closed with daily-cap when the budget is spent");
+  assert.ok(pol.includes("aiDay.count++;"), "only successful generations may burn budget");
+  assert.ok(pol.includes("timingSafeEqual"), "admin password compare must be constant-time");
+  assert.ok(pol.includes("day: aiDay,"), "spent budget must persist with the report cache (redeploy can't refill the day)");
+  // ---- terminal ask under an OpenAI key: terra + medium effort actually hit the wire ----
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  process.env.OPENAI_API_KEY = "test-key";
+  try {
+    const calls = [];
+    const aiFetch = async (url, opts) => { calls.push({ url, body: JSON.parse(opts.body) });
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "screen funding<0 & squeeze>50" }, finish_reason: "stop" }] }) }; };
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+    const d = await p.askBoard("which names are the most crowded shorts?", { universe: [{ t: "SOL", sqz: 71, f: -22 }] });
+    assert.equal(d.ok, true, "ask should succeed under the injected OpenAI transport");
+    assert.equal(calls[0].url.includes("api.openai.com"), true, "OpenAI key must route to the OpenAI endpoint");
+    assert.equal(calls[0].body.model, "gpt-5.6-terra", "terminal ask must run on terra");
+    assert.equal(calls[0].body.reasoning_effort, "medium", "terminal ask must run at medium effort");
+    assert.ok(calls[0].body.max_completion_tokens >= 1000, "ask budget must leave headroom for reasoning tokens (a 300-token cap returns empty output at medium effort)");
+    // stats surface the budget so the health payload and client can show it
+    const st = p.stats();
+    assert.equal(st.ai.perDay, 5, "stats must expose the 5/day budget");
+    assert.equal(st.ai.dayLeft, 5, "no generations yet -> full budget");
+  } finally { delete process.env.OPENAI_API_KEY; }
+  // ---- admin reset: fails closed, constant-time gate, lockout on failures ----------------
+  const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  assert.equal(p2.resetAiDay("anything").error, "not-configured", "no ADMIN_PASSWORD -> fails closed");
+  process.env.ADMIN_PASSWORD = "correct-horse";
+  try {
+    assert.equal(p2.resetAiDay("wrong").error, "bad-password", "wrong password rejected");
+    const okRes = p2.resetAiDay("correct-horse");
+    assert.equal(okRes.ok, true, "right password resets");
+    assert.equal(okRes.dayLeft, okRes.perDay, "reset restores the full budget");
+    for (let i = 0; i < 8; i++) p2.resetAiDay("wrong-" + i);   // failures only — the one success above must not count
+    const locked = p2.resetAiDay("correct-horse");
+    assert.equal(locked.error, "rate", "8 failures inside the window lock the endpoint even for the right password");
+    assert.ok(locked.retryMs > 0, "lockout must report a retry window");
+  } finally { delete process.env.ADMIN_PASSWORD; }
+  // ---- client wiring ---------------------------------------------------------------------
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/admin\\s\+reset-reports/.test(app), "terminal must intercept the admin command");
+  assert.ok(app.includes("••••"), "the echoed admin line must be redacted — the password never sits in scrollback");
+  assert.ok(app.includes("function termRun") && app.indexOf("admin\\s+reset-reports") < app.indexOf("termEcho(line);"),
+    "interception must run BEFORE the raw echo and before any tier can escalate the line");
+  assert.ok(app.includes("termAdminReset") && app.includes("/api/ai-reset"), "admin reset client call missing");
+  assert.ok(app.includes("data-cap") && app.includes("!b.dataset.cap"), "cooldown ticker must not re-enable a cap-blocked regenerate button");
+  assert.ok(app.includes("daily-cap"), "client must handle the daily-cap error distinctly from cooldown");
+  assert.ok(app.includes("generations left today") && app.includes("today</span>"), "report card must show the remaining daily budget");
 });
