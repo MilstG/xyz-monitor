@@ -219,8 +219,22 @@ async function loadSnapshot(){
   catch(e){ setStatus(false); if(!activeRows().some(r=>r.px!=null)) el('body').innerHTML=errRow(e.message); }
 }
 async function loadDaily(){ try{ applyDaily(await fetchJSON('/api/daily')); }catch(_){} }
+// The signals/earnings/news tabs pull on their own cadences off the back of the snapshot poll —
+// they stay live even when the snapshot body itself is content-identical (served as a 304 upstream).
+function maybePullSidecars(){
+  { const vis=el('view-signals')&&!el('view-signals').hidden;
+    if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
+  if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
+  if(Date.now()-_newsLast > 3*60*1000) loadNews();   // rotation lands new names every minute server-side
+}
 function applySnapshot(s){
   if(!s||!Array.isArray(s.markets)) return;
+  // Content short-circuit: the server freezes dataTs while nothing a client renders has changed
+  // (see buildSnapshot's content signature), so an unchanged poll — the norm off-hours, and every
+  // 304 — arrives with the SAME dataTs. Skip the full 140-market row-walk + table innerHTML rebuild
+  // + movers/regime/aggregates repaint; just keep the timed sidecar pulls alive. dataTs starts 0 so
+  // the first snapshot always falls through, and a redeploy bumps it so the build badge still updates.
+  if(s.dataTs && s.dataTs===state.dataTs){ maybePullSidecars(); return; }
   state.order=s.markets.map(m=>m.coin);
   const mainM=Array.isArray(s.mainMarkets)?s.mainMarkets:[];
   state.mainOrder=mainM.map(m=>m.coin);
@@ -259,10 +273,7 @@ function applySnapshot(s){
   if(s.regime) state.regimeSrv=s.regime;
   if(s.redBars) state.redBars=s.redBars;
   if(s.warm) state.warm=s.warm;
-  { const vis=el('view-signals')&&!el('view-signals').hidden;
-    if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
-  if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
-  if(Date.now()-_newsLast > 3*60*1000) loadNews();   // rotation lands new names every minute server-side
+  maybePullSidecars();
   if(s.v){ state.build=s.v; const bv=el('ver'); if(bv) bv.textContent=s.v; }
   // offHours now rides the snapshot (15s server rebuild), so the live-gap open↔closed flip
   // lands within one refresh instead of the old daily-path ~15 min. On a flip, pull /api/daily
