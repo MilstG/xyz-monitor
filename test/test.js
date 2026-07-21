@@ -1096,6 +1096,44 @@ test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-t
   assert.ok(sec.includes("const COMPANY_NAMES = {") && sec.includes("nameAliases"), "alias seed present and exported");
 });
 
+test("news discovery gate 2026.07.21-12: common-word tickers don't wear bare-word collisions — the COST/BE screenshot bug", () => {
+  const C = require("../src/compute");
+  assert.equal(typeof C.newsAttributes, "function", "discovery predicate exported");
+  assert.ok(C.COMMON_WORD instanceof Set && C.COMMON_WORD.has("COST") && C.COMMON_WORD.has("DOW"), "common-word set exported and seeded");
+
+  // the two screenshots: a bare common word is NOT enough to attribute in the discovery lane
+  assert.ok(!C.newsAttributes("JUST IN: Iran war has cost the United States $37,500,000,000 so far", "COST", ["Costco"]),
+    "war 'cost' does not attribute to Costco");
+  assert.ok(!C.newsAttributes("TRUMP: WILL BE HITTING PICKAXE MOUNTAIN AREA PRETTY SOON", "BE", ["Bloom Energy"]),
+    "'WILL BE HITTING' does not attribute to Bloom Energy");
+  for (const [T, a] of [["ALL", null], ["ARE", null], ["NOW", ["ServiceNow"]], ["LOW", ["Lowe's"]], ["KEY", null], ["FAST", null], ["WELL", null], ["CAT", ["Caterpillar"]], ["DOW", null]])
+    assert.ok(!C.newsAttributes("MARKETS ARE MOVING FAST AND THE DOW IS WELL OFF ITS LOW", T, a), `word-collision ${T} gated from bare attribution`);
+
+  // decision B: 2-letter symbols never attribute on a bare match, common word or not
+  assert.ok(!C.newsAttributes("GE and BB were both up on the session", "GE", ["GE Aerospace","General Electric"]), "bare 2-letter GE gated");
+  assert.ok(!C.newsAttributes("shares slipped in PM trading", "PM", ["Philip Morris"]), "bare 2-letter PM gated (and it's an abbrev collision)");
+
+  // the explicit signals still attribute — cashtag overrides the gate, company name is unambiguous
+  assert.ok(C.newsAttributes("$COST slumps on soft guidance", "COST", ["Costco"]), "cashtag $COST attributes despite the gate");
+  assert.ok(C.newsAttributes("$BE pops after fuel-cell order", "BE", ["Bloom Energy"]), "cashtag $BE attributes despite the gate");
+  assert.ok(C.newsAttributes("$GE wins a new engine contract", "GE", ["GE Aerospace"]), "cashtag rescues 2-letter symbols too");
+  assert.ok(C.newsAttributes("Costco cuts prices across warehouses", "COST", ["Costco"]), "company name attributes Costco");
+  assert.ok(C.newsAttributes("Bloom Energy lands a data-center deal", "BE", ["Bloom Energy"]), "company name attributes Bloom Energy");
+
+  // distinctive 3+ symbols keep bare-matching — the gate is surgical, not a blanket kill
+  assert.ok(C.newsAttributes("NVDA rips after earnings", "NVDA", ["Nvidia"]), "distinctive NVDA still bare-matches");
+  assert.ok(C.newsAttributes("MSTR adds to the stack", "MSTR", ["MicroStrategy"]), "distinctive MSTR still bare-matches");
+
+  // dollar AMOUNTS are not cashtags: "$118" must not fabricate a $1/$11/$118 ticker path
+  assert.ok(!C.newsAttributes("guidance raised to $118", "COST", ["Costco"]), "a plain dollar amount is not a cashtag");
+
+  // confirmation lane (newsRelevant, T already known) is deliberately UNCHANGED for bare words,
+  // so aliasless names fetched under their own symbol still confirm; and it now honours cashtags
+  assert.ok(C.newsRelevant("Allstate raises dividend", null, "ALL", null) === false, "sanity: no bare 'Allstate' text, alias absent");
+  assert.ok(C.newsRelevant("ALL reports Q3 combined ratio", null, "ALL", null), "confirmation lane still trusts a bare symbol under a known T");
+  assert.ok(C.newsRelevant("$COST beats", null, "COST", null), "confirmation lane honours cashtags");
+});
+
 test("signal engine is xyz-only: crypto rows never fire, never ledger — the real iteration, no harness patches", () => {
   // The mirror of the retired -87 regression guard: the same two seeded rows, the same real
   // unpatched iteration — and now the CRYPTO row must produce nothing while the xyz row still
