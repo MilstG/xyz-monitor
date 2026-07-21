@@ -4173,6 +4173,241 @@ el('corrsearch').addEventListener('input',e=>{ state.corr.search=e.target.value;
 el('mktExport').addEventListener('click', exportMarkets);
 el('corrExport').addEventListener('click', exportCorr);
 
+// ============================================================================
+//  ASK-THE-BOARD TERMINAL — bottom-right console over the LIVE board.
+//  Tier 1: grammar (ticker/field, top, screen, signals, report, corr).
+//  Tier 2: local NL intent — maps human phrasing to the grammar, no AI, reads
+//          the same state.rows the table renders (one code path). Badged 'computed'.
+//  Tier 3: AI fallback (planner+analyst, gpt-5.6-sol) — STUBBED here; wires next build.
+// ============================================================================
+const termEl=id=>document.getElementById(id);
+function termActive(){ return activeRows().filter(r=>!r.delisted); }
+function termFind(tok){ tok=String(tok||'').toUpperCase(); if(!tok) return null;
+  for(const r of state.rows.values()){ if(r.delisted) continue;
+    if((r.ticker||'').toUpperCase()===tok||(r.coin||'').toUpperCase()===tok) return r; } return null; }
+function termAprOf(r){ return (r.funding!=null&&isFinite(r.funding))? r.funding*24*365*100 : null; }
+function tesc(s){ return esc(s); }
+function tpad(s,w,r){ s=String(s); const g=w-s.length; return g<=0?s:(r?' '.repeat(g)+s:s+' '.repeat(g)); }
+function tpct(v,dp){ if(v==null||!isFinite(v)) return '<span class="sec">—</span>'; dp=dp==null?1:dp; return `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(dp)}%</span>`; }
+function tint(v){ if(v==null||!isFinite(v)) return '<span class="sec">—</span>'; return `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${Math.round(v)}</span>`; }
+// field accessors — every value read live off the row the board renders
+const TFIELD={
+  funding:{g:termAprOf,f:v=>(v>=0?'+':'')+v.toFixed(0)+'%',l:'funding'},
+  fundpct:{g:r=>r.fundPct,f:v=>v+'th',l:'fund pctile'},
+  squeeze:{g:r=>r.sqz,f:v=>String(Math.round(v)),l:'squeeze'},
+  momentum:{g:r=>r.mom,f:v=>(v>=0?'+':'')+Math.round(v),l:'momentum'},
+  oi:{g:r=>r.oi,f:fmtUsd,l:'oi'},
+  vol:{g:r=>r.vol,f:fmtUsd,l:'24h vol'},
+  vstape:{g:r=>r.vstape,f:v=>(v>=0?'+':'')+v.toFixed(1)+'%',l:'vs tape'},
+  doi:{g:r=>r.doi,f:v=>(v>=0?'+':'')+v.toFixed(1)+'%',l:'Δoi'},
+  beta:{g:r=>r.beta,f:v=>v.toFixed(2),l:'beta'},
+  dd:{g:r=>r.dd,f:v=>v.toFixed(1)+'%',l:'vs 30d hi'},
+  carry:{g:r=>r.carry,f:v=>(v>=0?'+':'')+v.toFixed(2),l:'carry'},
+  turn:{g:r=>r.turn,f:v=>'×'+v.toFixed(1),l:'oi/vol'},
+  d1:{g:r=>r.d1,f:v=>(v>=0?'+':'')+v.toFixed(1)+'%',l:'1d'},
+  price:{g:r=>r.px,f:fmtPrice,l:'price'},
+};
+const TALIAS={fund:'funding',apr:'funding',rate:'funding',fundingpct:'fundpct',pctile:'fundpct',
+  sqz:'squeeze',mom:'momentum',volume:'vol',openinterest:'oi',tape:'vstape',rs:'vstape',
+  deltaoi:'doi',oichange:'doi',b:'beta',drawdown:'dd',change:'d1',chg:'d1',day:'d1',px:'price',oivol:'turn'};
+function tfield(name){ name=(name||'').toLowerCase().replace(/[^a-z]/g,''); return TFIELD[name]?name:(TALIAS[name]||null); }
+
+// ---- Tier 1 grammar handlers ----
+function termTkHdr(r){ const uni=r.uni==='main'?'crypto':'stocks'; return `<span class="tp-hd">${tesc(r.ticker)}</span> <span class="sec">${tesc(r.coin)}</span> <span class="tp-trans">${uni}${r.sector?' · '+tesc(r.sector):''}</span>`; }
+function termCard(r){ const apr=termAprOf(r), fp=r.fundPct;
+  termHi(r.coin);
+  const lines=[ termTkHdr(r),
+    `<span class="tp-k">price</span> <b>${fmtPrice(r.px)}</b>  ${tpct(r.d1)} ${r.d1>=0?'▲':'▼'}`,
+    apr!=null?`<span class="tp-k">funding</span> ${apr>=0?'<span class=pos>+':'<span class=neg>'}${apr.toFixed(0)}% APR</span>${fp!=null?` · ${fp>=90?'<span class=pos>▴'+fp+'</span>':fp<=10?'<span class=neg>▾'+fp+'</span>':fp}th pctile`:''}`:'',
+    `<span class="tp-k">oi</span> ${fmtUsd(r.oi)}${r.doi!=null?` · Δ ${tpct(r.doi)}`:''}`,
+    (r.sqz!=null||r.mom!=null)?`<span class="tp-k">squeeze</span> <span class="${r.sqz>=50?'amber':'sec'}">${r.sqz!=null?Math.round(r.sqz):'—'}</span>  momentum ${tint(r.mom)}`:'',
+    (r.vstape!=null||r.beta!=null)?`<span class="tp-k">vs tape</span> ${tpct(r.vstape)}${r.beta!=null&&isFinite(r.beta)?` · β ${r.beta.toFixed(2)}`:''}`:'',
+    `<span class="tp-k">views</span> <span class="tp-deep" data-tcmd="report ${r.ticker}">report ▸</span>  <span class="tp-deep" data-topen="${tesc(r.coin)}">drawer ▸</span>` ].filter(Boolean);
+  termOut(lines.join('\n')); }
+function termFieldCmd(r,fname){ const fk=tfield(fname); if(!fk) return termCard(r);
+  const F=TFIELD[fk], v=F.g(r); termHi(r.coin);
+  termOut(`${termTkHdr(r)}\n<span class="tp-k">${F.l}</span> <b>${v==null||!isFinite(v)?'—':F.f(v)}</b>`); }
+function termTop(metric,n){ n=n||8; let key=tfield(metric)||metric, asc=false, label=key;
+  if(metric==='gainers'||metric==='up'){key='d1';asc=false;label='gainers';}
+  if(metric==='losers'||metric==='down'){key='d1';asc=true;label='losers';}
+  const F=TFIELD[key]; if(!F) return termErr(`metric? try: vol · funding · squeeze · momentum · oi · carry · gainers · losers`);
+  let list=termActive().map(r=>({r,v:F.g(r)})).filter(x=>x.v!=null&&isFinite(x.v));
+  list.sort((a,b)=>asc?a.v-b.v:b.v-a.v); list=list.slice(0,n);
+  if(!list.length) return termOut(`<span class="sec">no data for ${tesc(label)} in this scope yet</span>`);
+  const rows=list.map((x,i)=>`${tpad(i+1,2)} <span class="tp-deep" data-tcmd="${x.r.ticker}">${tpad(x.r.ticker,8)}</span> ${tpad(F.f(x.v),9,true)}  <span class="tp-trans">${tpad(fmtUsd(x.r.vol),8,true)} vol</span>`).join('\n');
+  termOut(`<span class="tp-hd">top ${tesc(label)}</span> <span class="tp-trans">· ${state.scope}</span>\n<span class="tp-th">${tpad('#',2)} ${tpad('TICKER',8)} ${tpad((F.l||label).toUpperCase(),9,true)}</span>\n${rows}`); }
+function termScreen(expr){ const cls=(expr||'').split('&').map(c=>c.trim()).filter(Boolean); if(!cls.length) return termErr('screen needs an expression, e.g. funding>20 & squeeze>50');
+  const preds=[]; let sortF=null;
+  for(const c of cls){ const m=c.match(/^([a-z ]+?)\s*(>=|<=|>|<|=)\s*(-?[\d.]+[kmbt]?)$/i);
+    if(!m) return termErr(`can't parse "${tesc(c)}" — form is  field>value`);
+    const fk=tfield(m[1].trim()); if(!fk) return termErr(`unknown field "${tesc(m[1].trim())}"`);
+    let v=parseFloat(m[3]); const suf=(m[3].slice(-1)||'').toLowerCase(); if('kmbt'.includes(suf)) v*={k:1e3,m:1e6,b:1e9,t:1e12}[suf];
+    const F=TFIELD[fk]; if(!sortF) sortF=F; preds.push({F,op:m[2],v}); }
+  const pass=r=>preds.every(p=>{ const x=p.F.g(r); if(x==null||!isFinite(x)) return false;
+    return p.op==='>'?x>p.v:p.op==='<'?x<p.v:p.op==='>='?x>=p.v:p.op==='<='?x<=p.v:x===p.v; });
+  let hits=termActive().filter(pass); hits.sort((a,b)=>(sortF.g(b)||0)-(sortF.g(a)||0));
+  if(!hits.length) return termOut(`<span class="tp-hd">screen</span> <span class="sec">${tesc(expr)}</span>\n<span class="tp-trans">no matches in ${state.scope}</span>`);
+  const rows=hits.slice(0,14).map(r=>`<span class="tp-deep" data-tcmd="${r.ticker}">${tpad(r.ticker,8)}</span> ${tpad(fmtPrice(r.px),9,true)}  ${tpad((termAprOf(r)>=0?'+':'')+(termAprOf(r)!=null?termAprOf(r).toFixed(0):'—')+'%',7,true)} f  ${tpad(r.sqz!=null?Math.round(r.sqz):'—',3,true)} sqz  ${tpad(tint(r.mom).replace(/<[^>]+>/g,''),4,true)} mom`).join('\n');
+  termOut(`<span class="tp-hd">screen</span> <span class="sec">${tesc(expr)}</span> <span class="tp-trans">· ${hits.length} match${hits.length>1?'es':''} · ${state.scope}</span>\n${rows}`); }
+function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.signals))?d.signals.slice():[];
+  groups=groups.filter(g=>{ const r=state.rows.get(g.coin); return r&&!r.delisted&&inScope(r); });
+  if(t) groups=groups.filter(g=>(g.ticker||'').toUpperCase()===t||(g.coin||'').toUpperCase()===t);
+  if(!groups.length) return termOut(`<span class="sec">no active signals${t?' for '+tesc(t):''} in ${state.scope}</span> <span class="tp-trans">— an unusual condition ranked, never a prediction</span>`);
+  const rows=groups.slice(0,10).map(g=>{ const top=(g.sigs&&g.sigs[0])||{}; const side=(top.claim0&&top.claim0.side)||(top.play&&top.play.side)||'watch';
+    const sc=side==='long'?'<span class="tp-chip l">long</span>':side==='short'?'<span class="tp-chip s">short</span>':'<span class="tp-chip">watch</span>';
+    const prime=(g.sigs||[]).some(x=>x.prime)?' <span class="tp-chip p">★prime</span>':'';
+    const score=g.score!=null?g.score:(top.score!=null?top.score:null);
+    return `<span class="tp-deep" data-tcmd="${g.ticker}">${tpad(g.ticker,6)}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
+  termOut(`<span class="amber">⚡ ${groups.length} active signal${groups.length>1?'s':''}</span> <span class="tp-trans">· ledgered &amp; resolved out-of-sample</span>\n${rows}`); }
+function termReport(r){ termOut(`${termTkHdr(r)}\n<span class="tp-trans">opening the AI analyst report…</span>`); openAiReport(r.coin); }
+function termCorr(a,b){ const ra=termFind(a), rb=termFind(b); if(!ra||!rb) return termErr('need two tickers — e.g. corr btc eth');
+  const ma=dailyReturns(ra), mb=dailyReturns(rb); if(!ma||!mb) return termOut(`<span class="sec">not enough daily history for ${tesc(ra.ticker)} × ${tesc(rb.ticker)} yet</span>`);
+  const cut=Math.floor(Date.now()/DAY)-90, xs=[],ys=[];
+  for(const [d,va] of ma){ if(d<cut) continue; const vb=mb.get(d); if(vb!==undefined){ xs.push(va); ys.push(vb); } }
+  const n=xs.length; if(n<20) return termOut(`<span class="sec">only ${n} overlapping days for ${tesc(ra.ticker)} × ${tesc(rb.ticker)} — too few to trust</span>`);
+  let sx=0,sy=0; for(let i=0;i<n;i++){sx+=xs[i];sy+=ys[i];} const mx=sx/n,my=sy/n; let cov=0,vx=0,vy=0;
+  for(let i=0;i<n;i++){ const dx=xs[i]-mx,dy=ys[i]-my; cov+=dx*dy; vx+=dx*dx; vy+=dy*dy; }
+  const rho=(vx>0&&vy>0)?cov/Math.sqrt(vx*vy):null, beta=vx>0?cov/vx:null;
+  if(rho==null) return termOut('<span class="sec">flat series — no correlation</span>');
+  const cl=rho>=0.5?'pos':rho<=-0.5?'neg':'sec';
+  termOut(`<span class="tp-hd">corr</span> ${tesc(ra.ticker)} × ${tesc(rb.ticker)} <span class="tp-trans">· ${n}d daily returns</span>\nρ <b class="${cl}">${rho>=0?'+':''}${rho.toFixed(2)}</b>   hedge β ${beta!=null?beta.toFixed(2):'—'}\n<span class="tp-trans">${Math.abs(rho)>=0.7?'one risk factor wearing two names':Math.abs(rho)<0.3?'largely independent':'moderate co-movement'}</span>`); }
+function termDiverge(r){ const benchC=r.uni==='main'?state.benchMain:state.benchCoin; const bench=benchC?state.rows.get(benchC):null;
+  let rho=null; if(bench&&dailyReturns(r)&&dailyReturns(bench)){ const ma=dailyReturns(r),mb=dailyReturns(bench),cut=Math.floor(Date.now()/DAY)-90,xs=[],ys=[];
+    for(const [d,va] of ma){ if(d<cut) continue; const vb=mb.get(d); if(vb!==undefined){xs.push(va);ys.push(vb);} }
+    if(xs.length>=20){ let sx=0,sy=0;for(let i=0;i<xs.length;i++){sx+=xs[i];sy+=ys[i];}const mx=sx/xs.length,my=sy/xs.length;let cov=0,vx=0,vy=0;for(let i=0;i<xs.length;i++){const dx=xs[i]-mx,dy=ys[i]-my;cov+=dx*dy;vx+=dx*dx;vy+=dy*dy;}if(vx>0&&vy>0)rho=cov/Math.sqrt(vx*vy);} }
+  termHi(r.coin);
+  const verdict = (r.vstape!=null&&Math.abs(r.vstape)>1.5)?(r.vstape>0?'leading the group':'lagging the group'):'moving with the group';
+  termOut(`${termTkHdr(r)}\n<span class="tp-k">corr→bench</span> ${rho!=null?'<b>'+rho.toFixed(2)+'</b>':'—'}${r.beta!=null&&isFinite(r.beta)?' · β '+r.beta.toFixed(2):''}\n<span class="tp-k">vs tape</span> ${tpct(r.vstape)}${r.fundPct!=null?' · funding '+r.fundPct+'th pctile':''}\n<span class="tp-trans">${verdict}${rho!=null&&rho<0.5?', and moving with it less than usual — decoupling':''}</span>`); }
+
+// ---- Tier 2: local NL → grammar (no AI) ----
+const NL_METRIC={volume:'vol',vol:'vol',funding:'funding',rate:'funding',squeeze:'squeeze',squeezes:'squeeze',momentum:'momentum',oi:'oi','open interest':'oi',carry:'carry'};
+function nlResolve(text){ const s=' '+text.toLowerCase().replace(/[?!.,]/g,' ').replace(/\s+/g,' ').trim()+' ';
+  const rTok=text.split(/\s+/).map(w=>termFind(w)).find(Boolean); const tk=rTok?rTok.ticker:null;
+  if(/\b(help|how do i|what can|commands)\b/.test(s)) return 'help';
+  if(/\b(clear|reset|wipe)\b/.test(s)) return 'clear';
+  if(/\b(crowded short|short squeeze|squeeze candidate|squeeze setup|coiled)/.test(s)) return 'screen funding<0 & squeeze>50';
+  if(/\b(crowded long|overheat|euphori|longs paying)/.test(s)) return 'screen fundpct>85';
+  if(/\b(paid to (be )?short|positive carry|get paid)/.test(s)) return 'screen carry>0.3';
+  if(/\b(near (its |their )?high|at (the )?high|breaking out|breakout)/.test(s)) return 'screen dd>-3';
+  if(/\b(oversold|beaten down|near (its |their )?low|washed out|dumped)/.test(s)) return 'screen dd<-25';
+  if(/\b(rising oi|building oi|adding oi|oi building|new money)/.test(s)) return 'screen doi>3';
+  if(/\b(biggest|top|most|highest|largest) (gainer|winner)/.test(s)||/\b(most green|moving up)/.test(s)) return 'top gainers';
+  if(/\b(biggest|top|most|worst) (loser|decliner)/.test(s)||/\b(most red|dumping|selling off)/.test(s)) return 'top losers';
+  const mm=s.match(/\b(top|most|highest|biggest|largest)\s+([a-z ]+?)\b/); if(mm){ for(const k in NL_METRIC){ if(mm[2].indexOf(k)===0||mm[2].trim()===k) return 'top '+NL_METRIC[k]; } }
+  if(/\b(signal|firing|setup|whats active|anything active|whats up)/.test(s)) return 'signals'+(tk?' '+tk:'');
+  if(tk&&/\b(report|analysis|read|analyst|deep dive)/.test(s)) return 'report '+tk;
+  if(tk&&/\b(diverg|decoupl|correlated|moving with|moves with|vs its group|vs the group|vs sector|relative to)/.test(s)) return 'diverge '+tk;
+  if(tk){ for(const w of text.split(/\s+/)){ const fk=tfield(w); if(fk&&termFind(w)!==rTok) return tk+' '+fk; }
+    if(/\bfunding\b/.test(s)) return tk+' funding'; if(/\b(oi|open interest)\b/.test(s)) return tk+' oi';
+    if(/\bsqueeze\b/.test(s)) return tk+' squeeze'; if(/\bmomentum\b/.test(s)) return tk+' momentum';
+    return tk; }
+  return null; }
+
+// ---- resolution / routing ----
+const TERM_VERBS=['top','screen','signals','sig','report','corr','diverge','help','clear','stocks','crypto'];
+function termIsGrammar(head){ return TERM_VERBS.includes(head)||!!termFind(head); }
+function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCase(), T=p[0].toUpperCase();
+  if(h==='stocks'||h==='crypto'){ const b=document.querySelector('.scope[data-scope="'+h+'"]'); if(b) b.click(); termOut(`<span class="sec">scope →</span> <span class="amber">${h}</span>`); return; }
+  if(h==='clear'){ termEl('termScroll').innerHTML=''; return; }
+  if(h==='help'||h==='?') return termHelp();
+  if(h==='top') return termTop((p[1]||'').toLowerCase(), p[2]?parseInt(p[2]):null);
+  if(h==='screen'||h==='scr') return termScreen(p.slice(1).join(' '));
+  if(h==='signals'||h==='sig'){ const t=p[1]?p[1].toUpperCase():null; return termSignals(t); }
+  if(h==='report'||h==='ai'){ const rr=termFind(p[1])||termFind(p[0]); return rr?termReport(rr):termErr('usage: report <ticker>'); }
+  if(h==='corr') return termCorr(p[1],p[2]);
+  if(h==='diverge'){ const r=termFind(p[1]); return r?termDiverge(r):termErr('usage: diverge <ticker>'); }
+  const r=termFind(T); if(r){ if(p[1]) return termFieldCmd(r,p[1]); return termCard(r); }
+  termErr(`unknown "${tesc(h)}" — type help`); }
+// Tier 3 — AI fallback. The local layers couldn't resolve it, so escalate to /api/ask. Planner
+// (which/what) returns a grammar query the CLIENT runs → numbers stay the board's; analyst
+// (why/what-if) returns grounded prose over the compact bundle we send. Auto-routed by shape.
+function termCompactUniverse(){ const rnd=v=>(v==null||!isFinite(v))?null:+v.toFixed(2);
+  return termActive().slice(0,160).map(r=>({ t:r.ticker, px:rnd(r.px), d1:rnd(r.d1), f:rnd(termAprOf(r)),
+    fp:r.fundPct, sqz:r.sqz!=null?Math.round(r.sqz):null, mom:r.mom!=null?Math.round(r.mom):null,
+    vs:rnd(r.vstape), oi:r.oi!=null?Math.round(r.oi):null, vol:r.vol!=null?Math.round(r.vol):null,
+    doi:rnd(r.doi), beta:(r.beta!=null&&isFinite(r.beta))?+r.beta.toFixed(2):null, dd:rnd(r.dd), sector:r.sector||null })); }
+function termThinking(){ const d=document.createElement('div'); d.className='tp-blk';
+  d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line"><span class="amber tp-think">thinking…</span></span>`;
+  termEl('termScroll').appendChild(d); termScrollDown(); return d; }
+async function termAsk(text){
+  const mode=/^\s*(why|explain|how come|what if|what would|what happens|reason|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(text)?'analyst':'planner';
+  const uni=termCompactUniverse(); const think=termThinking();
+  try{
+    const r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({q:text, ctx:{scope:state.scope, mode, universe:uni}})});
+    const d=await r.json().catch(()=>({})); think.remove();
+    if(d&&d.disabled) return termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
+    if(!d||!d.ok){ if(d&&d.error==='rate') return termOutAI(`busy — the shared AI limit is maxed for a moment <span class="tp-trans">(retry in ${Math.ceil((d.retryMs||3000)/1000)}s)</span>.`);
+      return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
+    if(d.mode==='planner'&&d.query){ termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
+    if(d.mode==='analyst'){ return termOutAI(`${tesc(d.answer||'').replace(/\n/g,'<br>')}\n<span class="tp-trans">— reasoned over ${d.marketsN||uni.length} live markets · ${tesc(d.model||'ai')}${d.cached?' · cached':''}</span>`); }
+    return termErr('empty response');
+  }catch(e){ think.remove(); termErr('ask failed — '+tesc(e.message)); }
+}
+function termRun(raw){ const line=raw.trim(); if(!line) return; termEcho(line);
+  const head=line.split(/\s+/)[0].toLowerCase();
+  if(termIsGrammar(head)) return termExec(line);      // direct grammar — no badge, you typed it
+  const nl=nlResolve(line);                            // Tier 2 — local NL intent
+  if(nl){ termOutTrans(nl); return termExec(nl); }
+  return termAsk(line);                                // Tier 3 — AI fallback (stub)
+}
+
+// ---- panel plumbing / rendering ----
+function termOut(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge c">computed</span> <span class="tp-line">${html}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
+function termOutTrans(cmd){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-trans">→ ${tesc(cmd)}</span>`; termEl('termScroll').appendChild(d); }
+function termOutAI(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line">${html}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
+function termEcho(c){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<div class="tp-line tp-echo"><span class="pr">▸</span> <span class="c">${tesc(c)}</span></div>`; termEl('termScroll').appendChild(d); termScrollDown(); }
+function termErr(m){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-line tp-err">✗ ${tesc(m)}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
+function termScrollDown(){ const s=termEl('termScroll'); s.scrollTop=s.scrollHeight; }
+function termHi(coin){ const r=state.rows.get(coin); if(!r) return; if(state.view!=='markets') return;
+  const tr=document.querySelector(`#body tr[data-coin="${coin}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:'smooth'}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
+function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span class="tp-trans">· plain English or the grammar below</span>
+<span class="amber">${tpad('<ticker> [field]',18)}</span><span class="sec">card, or one lens: funding·oi·squeeze·momentum·vstape</span>
+<span class="amber">${tpad('top <metric> [n]',18)}</span><span class="sec">vol·funding·squeeze·momentum·oi·carry·gainers·losers</span>
+<span class="amber">${tpad('screen <expr>',18)}</span><span class="sec">funding>20 &amp; squeeze>50</span>
+<span class="amber">${tpad('signals [ticker]',18)}</span><span class="sec">active signals</span>
+<span class="amber">${tpad('report <ticker>',18)}</span><span class="sec">open the AI analyst report</span>
+<span class="amber">${tpad('corr <a> <b>',18)}</span><span class="sec">pairwise correlation</span>
+<span class="tp-trans">Or just ask: "most crowded shorts", "is HYPE diverging", "biggest losers today". Tab completes · ↑↓ history · ~ opens.</span>`); }
+
+// ---- open / close / input ----
+function termOpen(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(!p) return; p.hidden=false; if(fab) fab.classList.add('hidden'); const q=termEl('termCmd'); if(q) q.focus(); }
+function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) p.hidden=true; if(fab) fab.classList.remove('hidden'); }
+function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
+const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol'];
+function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
+  if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
+  const h=p[0].toLowerCase();
+  if(termFind(p[0])) return TERM_FIELDS.filter(f=>f.startsWith(cur)).map(f=>p.slice(0,-1).join(' ')+' '+f);
+  if(h==='top') return ['vol','funding','squeeze','momentum','oi','carry','gainers','losers'].filter(x=>x.startsWith(cur)).map(x=>'top '+x);
+  if(h==='report'||h==='signals'||h==='corr'||h==='diverge') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>p.slice(0,-1).join(' ')+' '+x);
+  return []; }
+let termHist=[], termHi_=-1;
+function termGhostFn(){ const q=termEl('termCmd'), g=termEl('termGhost'); const v=q.value; if(!v){ g.textContent=''; termHint(); return; }
+  const c=termComps(v), p=v.split(/\s+/), cur=p[p.length-1].toLowerCase();
+  if(c[0]){ const tail=c[0].slice(c[0].lastIndexOf(' ')+1); g.textContent=v+tail.slice(cur.length); } else g.textContent='';
+  termHint(c); }
+function termHint(c){ const h=termEl('termHint'), v=termEl('termCmd').value.trim();
+  if(!v){ h.innerHTML=`<b>try</b> <span class="ex" data-tcmd="top funding 5">top funding 5</span> · <span class="ex" data-tcmd="most crowded shorts">most crowded shorts</span> · <span class="ex" data-tcmd="signals">signals</span> · <span class="ex" data-tcmd="help">help</span>`; return; }
+  h.innerHTML=(c&&c.length)?`↹ ${c.slice(0,6).map(x=>`<span class="ex" data-tcmd="${tesc(x)}">${tesc(x.slice(x.lastIndexOf(' ')+1))}</span>`).join(' ')}`:'<span class="sec">↵ run</span>'; }
+{ const q=termEl('termCmd');
+  if(q){ q.addEventListener('input',termGhostFn);
+    q.addEventListener('keydown',e=>{
+      if(e.key==='Tab'){ e.preventDefault(); const c=termComps(q.value); if(c[0]){ q.value=c[0]+' '; termGhostFn(); } return; }
+      if(e.key==='Enter'){ const v=q.value; if(v.trim()) termHist.unshift(v); termHi_=-1; q.value=''; termEl('termGhost').textContent=''; termRun(v); termHint(); return; }
+      if(e.key==='ArrowUp'){ e.preventDefault(); if(termHi_<termHist.length-1){ termHi_++; q.value=termHist[termHi_]; termGhostFn(); } return; }
+      if(e.key==='ArrowDown'){ e.preventDefault(); if(termHi_>0){ termHi_--; q.value=termHist[termHi_]; } else { termHi_=-1; q.value=''; } termGhostFn(); return; }
+      if(e.key==='Escape'){ termClose(); return; }
+      if(e.key==='ArrowRight'&&termEl('termGhost').textContent&&q.selectionStart===q.value.length){ q.value=termEl('termGhost').textContent; termGhostFn(); } }); }
+  const fab=termEl('termFab'); if(fab) fab.addEventListener('click',termOpen);
+  const mn=termEl('termMin'); if(mn) mn.addEventListener('click',termClose);
+  document.addEventListener('click',e=>{ const x=e.target.closest('[data-tcmd]'); if(x){ termOpen(); termRun(x.dataset.tcmd); return; }
+    const op=e.target.closest('[data-topen]'); if(op){ const c=op.dataset.topen; showView('markets'); if(state.rows.has(c)) openDetail(c); } });
+  document.addEventListener('keydown',e=>{ if((e.key==='`'||e.key==='~')&&document.activeElement.tagName!=='INPUT'&&document.activeElement.tagName!=='TEXTAREA'){ e.preventDefault(); termToggle(); } });
+}
+{ const s=termEl('termScroll'); if(s&&!s.dataset.boot){ s.dataset.boot='1';
+  s.innerHTML=`<div class="tp-blk"><span class="tp-line"><span class="amber">Trade[XYZ] terminal</span> <span class="tp-trans">· ask the board in plain English — the app answers from live data, badged </span><span class="tp-badge c">computed</span></div><div class="tp-blk"><span class="tp-line tp-trans">try <span class="ex" data-tcmd="most crowded shorts">most crowded shorts</span>, a ticker, or <span class="ex" data-tcmd="help">help</span></span></div>`;
+  termHint(); } }
+
 (async ()=>{
   await Promise.all([loadSnapshot(), loadDaily()]);
   applyHash();

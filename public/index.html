@@ -283,6 +283,14 @@
 </div>
 <div class="toast-wrap" id="toastwrap"></div>
 
+<button class="term-fab" id="termFab" title="Ask the board — natural-language query console (press ~)" aria-label="Open the ask-the-board terminal"><span class="tf-ic">▸_</span><span class="tf-t">Ask</span></button>
+<div class="term-panel" id="termPanel" hidden role="dialog" aria-label="Terminal — ask the board">
+  <div class="tp-bar"><span class="tp-dot"></span><span class="tp-brand">Trade<b>[XYZ]</b> · ask the board</span><span class="tp-min" id="termMin" title="minimize (Esc)">▾</span></div>
+  <div class="tp-scroll" id="termScroll"></div>
+  <div class="tp-in"><span class="tp-pr">▸</span><span class="tp-wrap"><span id="termGhost"></span><input id="termCmd" autocomplete="off" spellcheck="false" placeholder="ask anything — a ticker, 'top funding', 'most crowded shorts'…"/></span></div>
+  <div class="tp-hint" id="termHint"></div>
+</div>
+
 <footer>
   Data: Hyperliquid public REST API, fetched once server-side and cached; your browser reads a single pre-computed snapshot.
   Funding = annualized (hourly ×24×365), <span class="pos">green = positive</span>, <span class="neg">red = negative</span>.
