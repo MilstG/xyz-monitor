@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.21-09";
+const VERSION = "2026.07.21-10";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -385,7 +385,16 @@ async function main() {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
     const r = await poller.generateAiReport(String(b.coin || ""));
-    return reply.code(r.ok ? 200 : (r.error === "cooldown" ? 429 : 400)).send(r);
+    return reply.code(r.ok ? 200 : (r.error === "cooldown" || r.error === "daily-cap" ? 429 : 400)).send(r);
+  });
+  // Admin reset of the AI report daily budget. Triggered from the ask terminal
+  // (`admin reset-reports <password>`); the password is compared server-side against
+  // ADMIN_PASSWORD only — never logged, never stored, never echoed. Fails closed (503)
+  // when the env var is unset; a sliding-window failure lockout maps to 429.
+  fastify.post("/api/ai-reset", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const r = poller.resetAiDay(String((req.body || {}).password || ""));
+    return reply.code(r.ok ? 200 : (r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403)).send(r);
   });
   // Recent AI reports across all tickers — the Report tab's shared feed.
   fastify.get("/api/ai-reports", (req, reply) => {
