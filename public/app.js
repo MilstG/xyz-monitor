@@ -4582,12 +4582,31 @@ async function termAsk(text){
     return termErr('empty response');
   }catch(e){ think.remove(); termErr('ask failed — '+tesc(e.message)); }
 }
-function termRun(raw){ const line=raw.trim(); if(!line) return; termEcho(line);
+function termRun(raw){ const line=raw.trim(); if(!line) return;
+  // Admin command — intercepted BEFORE the echo (so the password renders redacted, never
+  // sitting in scrollback) and before any tier can touch it: the password goes to
+  // /api/ai-reset and nowhere else — it can never escalate to /api/ask.
+  const adm=line.match(/^admin\s+reset-reports(?:\s+(\S+))?\s*$/i);
+  if(adm){ termEcho('admin reset-reports'+(adm[1]?' ••••••':''));
+    if(!adm[1]) return termErr('usage: admin reset-reports <password>');
+    return termAdminReset(adm[1]); }
+  termEcho(line);
   const p=line.split(/\s+/);
   if(termGrammarComplete(p)) return termExec(line);   // unambiguous, complete command — run it (no badge, you typed it)
   const nl=nlResolve(line);                            // Tier 2 — local NL intent
   if(nl){ termOutTrans(nl); return termExec(nl); }
   return termAsk(line);                                // Tier 3 — AI fallback (stub)
+}
+async function termAdminReset(pw){
+  try{
+    const r=await fetch('/api/ai-reset',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({password:pw})});
+    const d=await r.json().catch(()=>({}));
+    if(d&&d.ok){ termOut(`daily report budget reset — <b class="pos">${d.dayLeft}/${d.perDay}</b> generations available today`);
+      loadAiRecent(); if(state.report&&state.report.coin&&state.view==='report') loadAiReport(state.report.coin,true); return; }
+    if(d&&d.error==='not-configured') return termErr('ADMIN_PASSWORD is not set on the server — add it on Railway first');
+    if(d&&d.error==='rate') return termErr(`too many attempts — locked for ${Math.ceil((d.retryMs||60000)/1000)}s`);
+    return termErr('wrong password');
+  }catch(e){ termErr('reset failed — '+tesc(e.message)); }
 }
 
 // ---- panel plumbing / rendering ----
@@ -4609,6 +4628,7 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('vs <a> <b>',20)}</span><span class="sec">side-by-side field compare · corr <a> <b> for correlation</span>
 <span class="amber">${tpad('signals · reports',20)}</span><span class="sec">active signals · recent AI reports</span>
 <span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
+<span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
 <span class="tp-trans">Or just ask: "who reports tomorrow", "best sector this week", "whats above the 200dma", "nvda vs amd", "hows the tape". Tab completes · ↑↓ history · ~ opens.</span>`); }
 
 // ---- open / close / input ----
@@ -5173,7 +5193,7 @@ function aiTickCountdown(){
   const cd=el('ai-cd');
   if(cd){ const until=+cd.dataset.until, left=until-Date.now();
     cd.textContent=aiFmtCountdown(left);
-    if(left<=0){ const b=el('ai-regen'); if(b&&b.disabled){ b.disabled=false; b.title='cooldown elapsed — regenerate for everyone'; } cd.classList.add('pos'); } }
+    if(left<=0){ const b=el('ai-regen'); if(b&&b.disabled&&!b.dataset.cap){ b.disabled=false; b.title='cooldown elapsed — regenerate for everyone'; } cd.classList.add('pos'); } }
   const ag=el('ai-age'); if(ag){ ag.textContent=aiFmtAgo(Date.now()-(+ag.dataset.ts)); } }
 setInterval(aiTickCountdown,1000);
 function aiMatches(qs){ qs=(qs||'').trim().toUpperCase(); if(!qs) return [];
@@ -5240,7 +5260,8 @@ async function aiRegenerate(coin){
   try{
     const r=await fetch('/api/ai-report',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({coin})});
     const d=await r.json().catch(()=>({}));
-    if(r.ok&&d.ok){ state.report.data=d.report; if(state.report.coin===coin) renderAiReport(d.report,coin); loadAiRecent(); pushToast('AI report generated — cached for everyone'); }
+    if(r.ok&&d.ok){ state.report.data=d.report; if(state.report.coin===coin) renderAiReport(d.report,coin); loadAiRecent(); pushToast('AI report generated — cached for everyone'+(d.dayLeft!=null?' · '+d.dayLeft+'/'+d.perDay+' left today':'')); }
+    else if(r.status===429&&d.error==='daily-cap'){ pushToast('Daily report budget exhausted ('+(d.perDay||5)+'/day) — resets at midnight UTC, or an admin can reset it in the terminal'); if(state.report.coin===coin) loadAiReport(coin,true); }
     else if(r.status===429){ pushToast('On cooldown — regenerate unlocks in '+aiFmtLeft(d.regenInMs)+' (or on material change)'); if(d.report&&state.report.coin===coin){ state.report.data=d.report; renderAiReport(d.report,coin); } }
     else pushToast('Generation failed — '+(d.error||('HTTP '+r.status)));
   }catch(e){ pushToast('Generation failed — '+e.message); }
@@ -5260,15 +5281,17 @@ function renderAiReport(d,coin){
   if(!d||d.status==='none'){
     box.innerHTML=`<div class="ai-head"><span class="tk">${esc(tk)}</span><span class="sec">${uni} universe</span>${r&&r.px!=null?`<span class="px">${fmtPrice(r.px)}</span>`:''}</div>`+
       `<div class="msg" style="padding:26px 10px">No report for this name yet.${d&&d.enabled===false?'<br><span class="sec" style="font-size:12px">ANTHROPIC_API_KEY is not set on the server — generation is disabled.</span>':' The first generation is cached for the whole group.'}</div>`+
-      (d&&d.enabled!==false?`<div style="text-align:center;padding-bottom:12px"><button class="btn" id="ai-regen">generate report</button></div>`:'');
+      (d&&d.enabled!==false?`<div style="text-align:center;padding-bottom:12px"><button class="btn" id="ai-regen" ${d&&d.dayLeft===0?'disabled data-cap="1" title="daily budget exhausted — resets at midnight UTC, or admin reset-reports in the terminal"':''}>generate report</button>${d&&d.dayLeft!=null?`<div class="sec" style="font-size:11px;margin-top:6px" data-tip="daily generation budget, shared by the whole group — resets at midnight UTC; an admin can reset it early from the ask terminal">${d.dayLeft}/${d.perDay} generations left today</div>`:''}</div>`:'');
     const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
     return;
   }
   const c=d.computed||{}, livePx=r&&r.px!=null?r.px:c.px0;
   const chg=r&&r.d1!=null&&isFinite(r.d1)?`<span class="${r.d1>=0?'pos':'neg'}">${r.d1>=0?'+':''}${(+r.d1).toFixed(2)}% today</span>`:'';
-  const stateLine=d.status==='fresh'?`<span class="pos">fresh</span> · regenerate in <b id="ai-cd" data-until="${Date.now()+(d.regenInMs||0)}">${aiFmtCountdown(d.regenInMs)}</b>`
+  const stateLine=(d.status==='fresh'?`<span class="pos">fresh</span> · regenerate in <b id="ai-cd" data-until="${Date.now()+(d.regenInMs||0)}">${aiFmtCountdown(d.regenInMs)}</b>`
     :d.status==='invalidated'?`<span style="color:var(--accent)">invalidated — ${esc(d.invalidReason||'material change')}</span>`
-    :'<span class="sec">stale</span> · <span class="pos">regenerate available</span>';
+    :'<span class="sec">stale</span> · <span class="pos">regenerate available</span>')
+    +(d.dayLeft!=null?` · <span class="${d.dayLeft>0?'sec':'neg'}" data-tip="daily generation budget, shared by the whole group — resets at midnight UTC; an admin can reset it early from the ask terminal (admin reset-reports)">${d.dayLeft}/${d.perDay} today</span>`:'');
+  const capped=d.dayLeft===0;
   const ev=(d.ai.evidence||[]).map(e2=>`<tr><td class="k">${esc(e2.k)}</td><td>${esc(e2.v)}</td></tr>`).join('');
   const hasRisk=c.riskAbs!=null;
   const scen=(c.scenarios||[]).map(s=>{
@@ -5321,7 +5344,7 @@ function renderAiReport(d,coin){
     <div class="ai-foot">
       <span>${esc(d.model||'')} · generated ${shDate(d.ts)} (<b id="ai-age" data-ts="${d.ts}">${aiFmtAgo(Date.now()-d.ts)}</b> ago) · ${stateLine}</span>
       <span class="contract" data-tip="no frozen side/void/target geometry of its own — the report reads the ledger and can never enter it">synthesis layer — not a ledger signal</span>
-      <button class="btn" id="ai-regen" ${d.canRegen?'':'disabled'} title="${d.canRegen?'compile fresh data and regenerate for everyone':'unlocks on TTL expiry or material change (new claim · claim resolved · earnings print)'}">regenerate</button>
+      <button class="btn" id="ai-regen" ${d.canRegen&&!capped?'':'disabled'}${capped?' data-cap="1"':''} title="${capped?'daily budget exhausted — resets at midnight UTC, or admin reset-reports in the terminal':d.canRegen?'compile fresh data and regenerate for everyone':'unlocks on TTL expiry or material change (new claim · claim resolved · earnings print)'}">regenerate</button>
     </div>`;
   const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
   box.querySelectorAll('[data-aitf]').forEach(el2=>el2.addEventListener('click',()=>{
