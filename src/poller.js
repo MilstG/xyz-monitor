@@ -169,12 +169,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   function getHourly(coin) {
     const r = rows.get(coin), c = r && r.hourlyRaw;
     if (!Array.isArray(c)) return [];
+    // Memoize on the hourlyRaw ARRAY REFERENCE: every mutation of the spine (foldCtx concat/filter,
+    // hydrate, GC-null) reassigns r.hourlyRaw to a new array, so `r._hsRaw === c` is a bulletproof
+    // freshness check — it can never serve a normalized array that disagrees with the source. This
+    // is the hot path: getHourly is called from ~16 sites, several per-market on the 15s snapshot tick,
+    // and each call used to rebuild the full ~4k-element normalized array from scratch.
+    if (r._hsRaw === c && r._hs) return r._hs;
     const out = [];
     for (const k of c) {
       const t = +k.t, o = +k.o, h = +k.h, l = +k.l, cl = +k.c, v = +k.v;
       if (Number.isFinite(t) && Number.isFinite(cl))
         out.push([t, Number.isFinite(o) ? o : cl, Number.isFinite(h) ? h : cl, Number.isFinite(l) ? l : cl, cl, Number.isFinite(v) ? v : 0]);
     }
+    r._hsRaw = c; r._hs = out;
     return out;
   }
   function hourlyCoverage() {
@@ -639,6 +646,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const tapeMain = crypto ? tapeStatsFor("main", mainMarkets()) : tapeCache.main;
     const RVOL_WINS = { h1: HOUR, h4: 4 * HOUR, d1: DAY };
     const nowMs = Date.now();
+    const rvolEndH = Math.floor(nowMs / HOUR);   // clock-hour bucket — half of the rvol memo key (spine ref is the other half)
     const mapMarket = (r) => {
       const cl = classifyCached(r.ticker, r.uni);
       // Funding percentile: where the CURRENT rate sits in this market's own 31d hourly funding
@@ -646,10 +654,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       // mean-reversion zone. Computed for every universe; extremes are just rarer on equities.
       let fundPct = null;
       try {
-        if (r.funding != null && isFinite(r.funding)) {
-          const fh = getFunding(r.coin), cut = Date.now() - 31 * DAY;
+        if (r.funding != null && isFinite(r.funding) && r.fundH && r.fundH.size) {
+          // Read the funding Map DIRECTLY — a percentile is order-independent (a count of samples
+          // at or below the current rate), so it never needed the sorted [t,rate] copy getFunding
+          // builds. Skipping that per-market sort on every 15s tick is the point; the live Map is
+          // the single source, so there's no staleness window.
+          const cut = Date.now() - 31 * DAY;
           let n = 0, le = 0;
-          for (const k of fh) { if (!Array.isArray(k) || k[0] < cut || !isFinite(k[1])) continue; n++; if (k[1] <= r.funding) le++; }
+          for (const [t, rate] of r.fundH) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
           if (n >= 96) fundPct = Math.round((100 * le) / n);   // >=4 days of hourly samples before we claim a percentile
         }
       } catch (_) {}
@@ -659,7 +671,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       const tape = r.uni === "main" ? tapeMain : tapeXyz;
       const red = tape.stats.get(r.coin) || null;
       let rvol = null;
-      try { const hs = getHourly(r.coin); if (hs.length > 24) rvol = rvolMulti(hs, RVOL_WINS, nowMs); } catch (_) {}
+      try {
+        const hs = getHourly(r.coin);
+        if (hs.length > 24) {
+          // rvolMulti's result only moves when a new hourly candle lands (spine ref changes) or the
+          // clock hour rolls (rvolEndH changes) — otherwise it recomputes the same ~4k-entry notional
+          // Map every 15s tick for nothing. Memoize on exactly those two keys.
+          if (r._rvRaw === r.hourlyRaw && r._rvEndH === rvolEndH && r._rv !== undefined) rvol = r._rv;
+          else { rvol = rvolMulti(hs, RVOL_WINS, nowMs); r._rvRaw = r.hourlyRaw; r._rvEndH = rvolEndH; r._rv = rvol; }
+        }
+      } catch (_) {}
       return {
         fundPct, red, rvol,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
@@ -2898,28 +2919,26 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Persist the raw 60d hourly spine so the session analytics survive redeploys instead of blanking
   // while the workers re-fetch. Candles are stored as compact [t,o,h,l,c,v] arrays (the six fields
   // getHourly reads); the current in-memory spine is already <= 60d, so no pruning is needed here.
-  function persistHourly() {
-    const hourly = {};
+  async function persistHourly() {
+    const cut = Date.now() - HOURLY_HISTORY_DAYS * DAY;   // enforce the retention window ON WRITE, so the
+    const hourly = {};                                    // persisted file can never carry more than we reload
     for (const r of rows.values()) {
       if (r.delisted || !Array.isArray(r.hourlyRaw) || !r.hourlyRaw.length) continue;
-      hourly[r.coin] = r.hourlyRaw.map((k) => [+k.t, +k.o, +k.h, +k.l, +k.c, +k.v]);
+      const packed = [];
+      for (const k of r.hourlyRaw) { const t = +k.t; if (Number.isFinite(t) && t >= cut) packed.push([t, +k.o, +k.h, +k.l, +k.c, +k.v]); }
+      if (packed.length) hourly[r.coin] = packed;
     }
-    store.saveHourly({ ts: Date.now(), hourly });
+    await store.saveHourly({ ts: Date.now(), hourly });   // async NDJSON stream — no longer blocks the event loop
   }
-  function hydrateHourly() {
-    const data = store.loadHourly();
-    if (!data || !data.hourly) return 0;
+  async function hydrateHourly() {
     const cut = Date.now() - HOURLY_HISTORY_DAYS * DAY;
     let n = 0;
-    for (const coin in data.hourly) {
-      const arr = data.hourly[coin];
-      if (!Array.isArray(arr) || !arr.length) continue;
+    await store.streamHourly((coin, arr) => {
+      if (!Array.isArray(arr) || !arr.length) return;
       const out = [];
       for (const a of arr) if (Array.isArray(a) && a.length >= 6 && Number.isFinite(a[0]) && a[0] >= cut) out.push({ t: a[0], o: a[1], h: a[2], l: a[3], c: a[4], v: a[5] });
-      if (!out.length) continue;
-      getRow(coin).hourlyRaw = out;
-      n++;
-    }
+      if (out.length) { getRow(coin).hourlyRaw = out; n++; }
+    });
     return n;
   }
 
@@ -2975,7 +2994,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     hydrateLedger();
     log(`Restored signal ledger: ${ledgerOpen.size} open, ${ledgerClosed.length} resolved — track record carries across this deploy`);
-    const restoredHourly = hydrateHourly();
+    const restoredHourly = await hydrateHourly();
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
@@ -3048,8 +3067,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     setInterval(safeTick(buildAnalytics, "buildAnalytics"), ANALYTICS_MS);
     setInterval(() => store.flush(), 30 * 1000);
     setInterval(persistFeatures, 120 * 1000);
-    setInterval(persistHourly, HOURLY_PERSIST_MS);
-    setTimeout(persistHourly, 90 * 1000);   // early snapshot so even a quick redeploy keeps the spine warm
+    setInterval(() => { persistHourly().catch((e) => log("hourly persist failed (isolated): " + (e && e.message))); }, HOURLY_PERSIST_MS);
+    setTimeout(() => { persistHourly().catch((e) => log("hourly persist failed (isolated): " + (e && e.message))); }, 90 * 1000);   // early snapshot so even a quick redeploy keeps the spine warm
     setInterval(maintenance, 24 * 3600 * 1000);
     setTimeout(maintenance, 60 * 1000);
     // Earnings: first pull shortly after the universe reconciles; then one staleness check every

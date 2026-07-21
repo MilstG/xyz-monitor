@@ -14,7 +14,8 @@ function openStore(dataDir) {
   const file = path.join(dataDir, "oi.log");
   const featFile = path.join(dataDir, "features.json");
   const regimeFile = path.join(dataDir, "regime.json");
-  const hourlyFile = path.join(dataDir, "hourly.json");
+  const hourlyFile = path.join(dataDir, "hourly.ndjson");
+  const hourlyJsonFile = path.join(dataDir, "hourly.json");   // legacy whole-object format; read once as a bridge, then retired
   const ledgerFile = path.join(dataDir, "ledger.json");
   const archiveFile = path.join(dataDir, "ledger-archive.jsonl");
   const earnFile = path.join(dataDir, "earnings.json");
@@ -24,6 +25,7 @@ function openStore(dataDir) {
   const aiFile = path.join(dataDir, "ai-reports.json");
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
+  let hourlyWriting = false;   // while true, an async hourly NDJSON write is in flight — skip overlapping ticks
 
   function flush() {
     if (!buf.length || pruning) return;
@@ -251,20 +253,73 @@ function openStore(dataDir) {
         fs.renameSync(tmp, regimeFile);
       } catch (_) {}
     },
-    // Raw 60d hourly OHLCV spine — large, so written atomically (temp + rename) on a slow cadence so a
-    // crash or redeploy mid-write can never corrupt the live file. Restored on boot so the session
-    // analytics come back warm instead of blanking for minutes while the workers re-fetch candles.
-    saveHourly(data) {
+    // Raw hourly OHLCV spine — the biggest cache on the volume (~30 MB at 180d x ~140 markets).
+    // Written as NDJSON: a `{meta:1,ts}` header line, then one `["COIN",[[t,o,h,l,c,v],...]]` line
+    // per market. Async + streamed (a WriteStream with per-line backpressure, yielding to the event
+    // loop every few coins), so the 10-min snapshot no longer does a ~30 MB synchronous
+    // JSON.stringify + writeFileSync that froze every in-flight request. Still atomic: written to a
+    // temp file and renamed into place, so a crash mid-write can't corrupt the live spine. Guarded
+    // against overlap so two persist ticks can't fight over the temp file.
+    async saveHourly(data) {
+      if (!data || !data.hourly || hourlyWriting) return;
+      hourlyWriting = true;
+      const tmp = hourlyFile + ".tmp";
       try {
-        const tmp = hourlyFile + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(data));
-        fs.renameSync(tmp, hourlyFile);
-      } catch (_) {}
+        await new Promise((resolve, reject) => {
+          const out = fs.createWriteStream(tmp);
+          let erred = false;
+          out.on("error", (e) => { erred = true; reject(e); });
+          const write = (s) => new Promise((res) => { if (out.write(s)) res(); else out.once("drain", res); });
+          (async () => {
+            await write(JSON.stringify({ meta: 1, ts: data.ts || Date.now() }) + "\n");
+            let i = 0;
+            for (const coin in data.hourly) {
+              if (erred) return;
+              const c = data.hourly[coin];
+              if (!Array.isArray(c) || !c.length) continue;
+              await write(JSON.stringify([coin, c]) + "\n");
+              if ((++i & 7) === 0) await new Promise(setImmediate);   // yield to the event loop every 8 coins
+            }
+            out.end();
+          })().catch(reject);
+          out.on("finish", () => { if (!erred) resolve(); });
+        });
+        fs.renameSync(tmp, hourlyFile);                    // atomic swap
+        try { if (fs.existsSync(hourlyJsonFile)) fs.unlinkSync(hourlyJsonFile); } catch (_) {}   // retire the legacy bridge file
+      } catch (_) {
+        try { fs.unlinkSync(tmp); } catch (_) {}
+      } finally {
+        hourlyWriting = false;
+      }
     },
-    loadHourly() {
-      try { if (fs.existsSync(hourlyFile)) return JSON.parse(fs.readFileSync(hourlyFile, "utf8")); }
-      catch (_) {}
-      return null;
+    // Streaming boot restore: parse the NDJSON one small line at a time via readline (never a single
+    // ~30 MB JSON.parse and its RSS spike), invoking onEntry(coin, candles) per market. Falls back to
+    // the legacy whole-object hourly.json exactly once so a deploy that predates the NDJSON switch
+    // still restores warm. Returns { ts, coins }.
+    async streamHourly(onEntry) {
+      if (fs.existsSync(hourlyFile)) {
+        let ts = 0, coins = 0;
+        await new Promise((resolve) => {
+          const rl = readline.createInterface({ input: fs.createReadStream(hourlyFile, { encoding: "utf8" }), crlfDelay: Infinity });
+          rl.on("line", (ln) => {
+            if (!ln) return;
+            let v; try { v = JSON.parse(ln); } catch (_) { return; }
+            if (Array.isArray(v)) { try { onEntry(v[0], v[1]); coins++; } catch (_) {} }
+            else if (v && v.meta) ts = +v.ts || 0;
+          });
+          rl.on("close", resolve);
+          rl.on("error", resolve);
+        });
+        return { ts, coins };
+      }
+      // Legacy bridge: the old single-object file. Read once; saveHourly deletes it after the next write.
+      try {
+        if (fs.existsSync(hourlyJsonFile)) {
+          const data = JSON.parse(fs.readFileSync(hourlyJsonFile, "utf8"));
+          if (data && data.hourly) { let coins = 0; for (const coin in data.hourly) { try { onEntry(coin, data.hourly[coin]); coins++; } catch (_) {} } return { ts: data.ts || 0, coins }; }
+        }
+      } catch (_) {}
+      return { ts: 0, coins: 0 };
     },
     close() { flush(); },
   };

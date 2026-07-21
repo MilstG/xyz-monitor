@@ -108,18 +108,36 @@ function featuresFromHourly(c, now, HOUR, DAY) {
 // than 3× tolerance (i.e. a poller outage) uses the nearer sample instead of interpolating
 // across the void. The 4th argument (old per-call tolerance) is accepted and ignored for
 // backward compatibility with existing callers.
+// Binary-search helpers over a [[ts, ...], ...] array kept ASCENDING by ts (which every
+// caller here guarantees: store.loadAll sorts, live appends are monotonic). firstIndexGT
+// returns the first index whose ts is strictly greater than t; firstIndexGE the first index
+// whose ts is >= t. Both return a value in [0, arr.length]. These turn the OI/funding window
+// scans below from O(n) (a full walk of the ~9k-sample 31d spine, per timeframe, per market,
+// every 15s tick) into O(log n) — the single biggest per-tick cost in buildSnapshot.
+function firstIndexGT(arr, t) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m][0] > t) hi = m; else lo = m + 1; }
+  return lo;
+}
+function firstIndexGE(arr, t) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m][0] >= t) hi = m; else lo = m + 1; }
+  return lo;
+}
 function oiDeltaPct(hist, oiNow, windowMs) {
   if (!hist || hist.length < 2 || !(oiNow > 0)) return null;
   const MIN = 60 * 1000, HOUR = 60 * MIN, OI_MIN_GAP = 4.5 * MIN;
   const tol = Math.min(Math.max(2 * OI_MIN_GAP, windowMs * 0.05), 12 * HOUR);
   const target = Date.now() - windowMs;
 
+  // `before` = latest positive-OI sample at or before target; `after` = earliest positive-OI
+  // sample after target. Binary-search the split, then walk outward past any non-positive-OI
+  // samples (rare) — identical result to the old full linear scan, a couple of steps instead
+  // of thousands.
+  const split = firstIndexGT(hist, target);          // first index with ts > target
   let before = null, after = null;
-  for (const s of hist) {
-    if (!(s[1] > 0)) continue;                       // skip non-positive OI samples
-    if (s[0] <= target) { if (!before || s[0] > before[0]) before = s; }
-    else if (!after || s[0] < after[0]) after = s;
-  }
+  for (let i = split - 1; i >= 0; i--) if (hist[i][1] > 0) { before = hist[i]; break; }
+  for (let i = split; i < hist.length; i++) if (hist[i][1] > 0) { after = hist[i]; break; }
   const dBefore = before ? target - before[0] : Infinity;
   const dAfter  = after  ? after[0] - target  : Infinity;
   if (Math.min(dBefore, dAfter) > tol) return null;
@@ -144,9 +162,14 @@ function oiDeltaPct(hist, oiNow, windowMs) {
 function fundingAvg(hist, windowMs) {
   if (!hist || hist.length < 1) return null;
   const now = Date.now(), start = now - windowMs;
+  // Only samples from the one immediately before `start` onward can contribute: any earlier
+  // segment clips to zero width against `start` in the integration below, and simSum/simN only
+  // count t >= start. Binary-search to that sample and skip the (potentially thousands-long)
+  // dead prefix. The pT=null seed reproduces the old loop's state exactly at the boundary.
   let pT = null, pF = null, area = 0, span = 0, simSum = 0, simN = 0;
-  for (const s of hist) {
-    const t = s[0], f = s[2];
+  const i0 = firstIndexGE(hist, start);              // first index with ts >= start
+  for (let i = Math.max(0, i0 - 1); i < hist.length; i++) {
+    const s = hist[i], t = s[0], f = s[2];
     if (f == null || !isFinite(f)) { pT = null; pF = null; continue; }
     if (t >= start) { simSum += f; simN++; }
     if (pT != null && t > pT) {
@@ -1592,7 +1615,7 @@ function ribbonWidth(s) {
 // One bar of each ladder timeframe, in ms — the window for the retest-volume read (rrv).
 const TREND_TF_MS = { D1: 24 * 3600e3, H12: 12 * 3600e3, H4: 4 * 3600e3, H1: 3600e3 };
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
