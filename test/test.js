@@ -1391,6 +1391,16 @@ test("earnings<->filings join: the release links once it's live, tiered preferen
   assert.ok(css.includes(".earn-fl{") && css.includes(".earn-fl.mat{"), "filing chip styling present");
 });
 
+test("warm-boot signals cadence: 2-min builds for the first 20 minutes, then the steady 10", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ['setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);',
+    'setTimeout(safeTick(buildSignals, "buildSignals"), 45 * 1000);',
+    'if (Date.now() - bootT > 20 * 60 * 1000) clearInterval(earlyIv);',
+    'signals warm-boot build:'])
+    assert.ok(pol.includes(pin), 'warm-boot cadence pin missing: ' + pin);
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
