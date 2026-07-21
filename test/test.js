@@ -2014,9 +2014,10 @@ test("emaLast: SMA-seeded EMA — constants, convergence direction, honest nulls
 
 test("bucketCandles: UTC-aligned aggregation, forming bucket, closes-only degradation", () => {
   const { bucketCandles } = require("../src/compute");
-  // 11 hourly candles starting at t=1h -> 4h buckets [0,4), [4,8), [8,12): first bucket partial
+  // 11 hourly candles starting at t=1h -> 4h buckets [0,4), [4,8), [8,12): first bucket partial.
+  // Input is the packed spine shape [t,o,h,l,c,v] (what r.hourlyRaw holds since 2026.07.21-09).
   const hrs = [];
-  for (let i = 1; i <= 11; i++) hrs.push({ t: i * HOUR, o: 10 + i, h: 20 + i, l: 5 + i, c: 10 + i });
+  for (let i = 1; i <= 11; i++) hrs.push([i * HOUR, 10 + i, 20 + i, 5 + i, 10 + i, 1]);
   const b4 = bucketCandles(hrs, 4, HOUR);
   assert.equal(b4.length, 3);
   assert.deepEqual(b4.map((k) => k.t), [0, 4 * HOUR, 8 * HOUR], "buckets are UTC-aligned to the width");
@@ -2024,8 +2025,8 @@ test("bucketCandles: UTC-aligned aggregation, forming bucket, closes-only degrad
   assert.equal(b4[1].h, 27, "bucket high = max hourly high (h4..h7 -> 24..27)");
   assert.equal(b4[1].l, 9, "bucket low = min hourly low (l4..l7 -> 9..12)");
   assert.equal(b4[2].c, 21, "forming bucket carries the latest close");
-  // closes-only candles (warm-cache daily shape) degrade h/l to the close instead of NaN
-  const co = bucketCandles([{ t: HOUR, c: 5 }, { t: 2 * HOUR, c: 6 }], 4, HOUR);
+  // closes-only packed rows (o/h/l null) degrade h/l to the close instead of NaN
+  const co = bucketCandles([[HOUR, null, null, null, 5], [2 * HOUR, null, null, null, 6]], 4, HOUR);
   assert.equal(co.length, 1);
   assert.equal(co[0].h, 6); assert.equal(co[0].l, 5);
 });
@@ -2244,8 +2245,11 @@ test("candles tf param: the chart series IS the ladder series — the modal cann
     assert.ok(rel(e13, row.tf[lad].e13) < 1e-6 && rel(e21, row.tf[lad].e21) < 1e-6,
       `${tf}: an EMA walk over the endpoint series reproduces the shipped ladder EMAs`);
   }
-  // series identity, not just same-answer: each tf is literally the ladder's input for that rung
-  const b4 = bucketCandles(hourly, 4, HOUR), b12 = bucketCandles(hourly, 12, HOUR);
+  // series identity, not just same-answer: each tf is literally the ladder's input for that rung.
+  // bucketCandles now takes the packed spine shape (what the poller feeds it internally), so pack
+  // the object fixture the same way seedRowNow/refreshHourly do for an apples-to-apples comparison.
+  const packedHourly = hourly.map((k) => [k.t, k.o, k.h, k.l, k.c, k.v]);
+  const b4 = bucketCandles(packedHourly, 4, HOUR), b12 = bucketCandles(packedHourly, 12, HOUR);
   const r4 = p.getTfCandles("TCHART", "4h"), r12 = p.getTfCandles("TCHART", "12h");
   assert.equal(r4.candles.length, b4.length, "4h: bucket count matches bucketCandles");
   assert.equal(r12.candles.length, b12.length, "12h: bucket count matches bucketCandles");
@@ -2264,7 +2268,7 @@ test("candles tf param: the chart series IS the ladder series — the modal cann
   // measured data, not fabrication: the invariant "never a fabricated flat candle" is preserved
   // by construction (no coverage -> stays closes-only), and the CLOSES the ladder's EMAs walked
   // ride through untouched, so the chart still cannot disagree with the board.
-  const b24 = new Map(bucketCandles(hourly, 24, HOUR).map((b) => [Math.floor(b.t / DAY), b]));
+  const b24 = new Map(bucketCandles(packedHourly, 24, HOUR).map((b) => [Math.floor(b.t / DAY), b]));
   const last = rd.candles[rd.candles.length - 1];
   const lastDayB = b24.get(Math.floor(last[0] / DAY));
   if (lastDayB) {
@@ -3077,13 +3081,15 @@ test("perf: store source pins the async streamed NDJSON path (no whole-file stri
   assert.ok(!/saveHourly\(data\) \{\s*try \{\s*const tmp = hourlyFile/.test(st), "the old synchronous saveHourly must not survive");
 });
 
-test("perf: getHourly memoizes on the hourlyRaw array reference and rebuilds on replacement", () => {
+test("perf: getHourly is a by-reference passthrough over the packed spine (no normalization copy)", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  // the memo must key on the raw array identity, not a timestamp — the only invalidation that
-  // provably can't serve a normalized array disagreeing with its source.
-  assert.ok(pol.includes("r._hsRaw === c") && pol.includes("r._hs"), "getHourly array-ref memo missing");
-  assert.ok(pol.includes("r._hsRaw = c; r._hs = out"), "getHourly memo store missing");
+  // Since 2026.07.21-09 the spine IS the packed [t,o,h,l,c,v] array (packHours at every write), so
+  // getHourly no longer normalizes — it hands r.hourlyRaw straight back. The old array-ref memo is
+  // gone precisely because there's nothing left to cache; its resurrection would mean the second
+  // resident copy is back.
+  assert.ok(pol.includes("return r && Array.isArray(r.hourlyRaw) ? r.hourlyRaw : [];"), "getHourly passthrough missing");
+  assert.ok(!pol.includes("r._hsRaw"), "the old getHourly normalization memo (r._hsRaw/_hs) must stay gone");
   // persistHourly enforces the retention window ON WRITE so the file never exceeds what reload keeps
   assert.ok(/async function persistHourly/.test(pol), "persistHourly must be async");
   assert.ok(/persistHourly\(\)[^\n]*t >= cut/.test(pol) || pol.includes("t >= cut) packed.push"), "persistHourly must window-on-write");
@@ -3246,4 +3252,51 @@ test("perf batch 2026.07.21-08: getFunding memo, bucketsFor memo, gzip+dataTs wi
   // #2 client dataTs short-circuit + factored sidecar pulls
   assert.ok(app.includes("if(s.dataTs && s.dataTs===state.dataTs){ maybePullSidecars(); return; }"), "client snapshot short-circuit missing");
   assert.ok(app.includes("function maybePullSidecars()"), "sidecar pulls must be factored so they still fire on a 304");
+});
+
+test("packed spine 2026.07.21-09: r.hourlyRaw IS the packed [t,o,h,l,c,v] spine; getHourly is a by-reference passthrough", () => {
+  // #6 — the hourly spine went from {t,o,h,l,c,v} objects to packed numeric rows, killing the
+  // second resident copy getHourly used to build. Pin the shape end to end: a seed of the natural
+  // object shape must come back as packed rows, getHourly must hand back that SAME array (identity,
+  // no rebuild), and the array-indexed consumers must read it correctly.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), endH = Math.floor(now / HOUR);
+  const objSpine = [];
+  for (let i = 0; i < 200; i++) { const t = (endH - 200 + i) * HOUR, c = 100 + i; objSpine.push({ t, o: c, h: c + 1, l: c - 1, c, v: 3 }); }
+  p.seedRowNow("xyz:PACK", { px: 300, uni: "xyz", vol: 1e6, hourlyRaw: objSpine, hourlyTs: now });
+
+  const hs = p.getHourly("xyz:PACK");
+  assert.ok(Array.isArray(hs) && hs.length === 200, "spine seeded");
+  assert.ok(Array.isArray(hs[0]) && hs[0].length === 6, "every spine row is a packed [t,o,h,l,c,v] array, not an object");
+  assert.ok(!("t" in hs[0]) && !("c" in hs[0]), "no object fields survive on a spine row");
+  assert.equal(hs[0][0], (endH - 200) * HOUR, "row[0] is the timestamp");
+  assert.equal(hs[0][4], 100, "row[4] is the close");
+  assert.equal(hs[199][4], 299, "last close");
+
+  // identity: getHourly returns the spine array itself — no per-call normalization copy
+  assert.strictEqual(p.getHourly("xyz:PACK"), p.getHourly("xyz:PACK"), "getHourly is stable by reference across calls");
+
+  // the object-shape adapter round-trips for the consumers that still need it
+  const { bucketCandles } = require("../src/compute");
+  const b4 = bucketCandles(hs, 4, HOUR);
+  assert.ok(b4.length > 0 && typeof b4[0].t === "number" && typeof b4[0].c === "number", "bucketCandles consumes the packed spine and still emits objects");
+});
+
+test("packed spine 2026.07.21-09: source wiring — packHours/hoursToObj boundary, getHourly passthrough, H1 rungs adapted", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("function packHours(arr)"), "packHours (the single write gate) missing");
+  assert.ok(pol.includes("function hoursToObj(arr)"), "hoursToObj (object-shape adapter) missing");
+  // getHourly must be the passthrough, NOT the old normalizing loop
+  assert.ok(pol.includes("return r && Array.isArray(r.hourlyRaw) ? r.hourlyRaw : [];"), "getHourly must pass the packed spine through by reference");
+  assert.ok(!pol.includes("r._hsRaw"), "the old getHourly normalization memo must be gone (no second resident copy)");
+  // every raw fetch/hydrate/seed of the spine goes through packHours; features + H1 rungs go through hoursToObj
+  assert.ok(pol.includes("r.hourlyRaw = packHours(wide)") && pol.includes("concat(packedTail)"), "refreshHourly must pack fetched candles");
+  assert.ok(pol.includes("packHours(arr).filter((k) => k[0] >= cut)"), "hydrateHourly must keep the packed shape");
+  assert.ok(pol.includes("featuresFromHourly(hoursToObj(featWin)"), "featuresFromHourly must receive the object-shape view");
+  assert.equal((pol.match(/hoursToObj\(r?r?\.hourlyRaw\.slice\(-96\)\)/g) || []).length, 4, "all four H1 rungs (trend, AI, retest, 1h chart) adapt the packed slice to objects");
+  assert.ok(pol.includes("if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = packHours(r.hourlyRaw);"), "seedRowNow must pack its spine input");
 });
