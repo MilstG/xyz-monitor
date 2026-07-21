@@ -12,7 +12,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
-const { classify, nameAliases } = require("./sectors");
+const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 const TF = { h1: HOUR, h4: 4 * HOUR, d1: DAY, d7: 7 * DAY, d30: 30 * DAY };
@@ -4183,7 +4183,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     + "earnings [TICKER|today|tomorrow|week|recent] ; news [TICKER] ; breadth [d1|d7|d30] ; sectors [d1|d7|d30] ; reports";
   const ASK_PLANNER_SYS = "You translate a trader's natural-language question about a markets dashboard into EXACTLY ONE query in this grammar, and output ONLY that query — no prose, no backticks, no explanation.\nGrammar: " + ASK_GRAMMAR
     + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>. If the question cannot be expressed in this grammar, output exactly: NONE";
-  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Answer the user's question using ONLY the numbers in context.markets (each entry is one market's live fields; absent keys mean that value is genuinely unavailable for that name): px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. Derive simple arithmetic when asked (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma). Never invent or estimate a figure that is not in or derivable from the data. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
+  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Every entry in context.markets is one market's live fields (absent keys mean that value is genuinely unavailable for that name): name = the company's common name, px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. NUMBERS RULE: every price, %, level or figure you cite must come from these fields or simple arithmetic on them (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma) — never invent or estimate a figure that is not in or derivable from the data. IDENTITY RULE: for what a company IS or what it makes — its products, business lines, sub-industry, competitors — you MAY use well-known general knowledge, but ONLY about tickers present in context.markets, and NEVER name a company that is not in that list. When an answer leans on general knowledge rather than the live fields, note that briefly. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
   function classifyAsk(q) { return /^\s*(why|explain|how come|what if|what would|what happens|reason|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(q || "") ? "analyst" : "planner"; }
   function askQueryValid(str, tickerSet) {
     const s = String(str || "").trim(); if (!s || /^none$/i.test(s)) return false;
@@ -4210,7 +4210,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // exhausted day costs nothing; the client's chip is convenience, this is the real gate.
     if (!askDayLeft()) return withBudget({ ok: false, error: "ask-daily-cap" });
     askHits.push(now);
-    const markets = Array.isArray(ctx.universe) ? ctx.universe.slice(0, 160) : [];
+    // Enrich each row with the canonical company name from sectors.js (server-owned, so the
+    // analyst maps ticker->company reliably instead of guessing). Unseeded names stay ticker-only.
+    const markets = Array.isArray(ctx.universe) ? ctx.universe.slice(0, 160).map((m) => {
+      const nm = companyName(m && m.t); return nm ? Object.assign({ name: nm }, m) : m;
+    }) : [];
     const tickerSet = new Set(markets.map((m) => String(m && m.t || "").toUpperCase()).filter(Boolean));
     // Terminal calls run at medium effort — fast enough for a console, deep enough to plan or
     // reason correctly. The token budgets look oversized for one-line outputs because OpenAI

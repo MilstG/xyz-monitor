@@ -106,5 +106,8 @@ const COMPANY_NAMES = {
   ALB:["Albemarle"], LIN:["Linde"], PLD:["Prologis"], AMT:["American Tower"], EQIX:["Equinix"], SPG:["Simon Property"],
 };
 function nameAliases(t) { return COMPANY_NAMES[String(t || "").toUpperCase()] || null; }
+// Canonical display name for the analyst context: the first alias is the common name
+// ("Nvidia", "Apple"). Unseeded tickers return null — the ticker itself stays the label.
+function companyName(t) { const a = COMPANY_NAMES[String(t || "").toUpperCase()]; return (a && a[0]) || null; }
 
-module.exports = { classify, nameAliases };
+module.exports = { classify, nameAliases, companyName };
