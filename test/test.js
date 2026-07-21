@@ -1351,6 +1351,46 @@ test("EDGAR filings lane: parser, 7d retention, hard isolation from every other 
     assert.ok(app.includes(pin), `filings observability pin missing: ${pin}`);
 });
 
+test("earnings<->filings join: the release links once it's live, tiered preference, upcoming untouched", () => {
+  const C = require("../src/compute");
+  const now = Date.now(), DAY_ = 86400e3;
+  const d0 = new Date(now - 1 * DAY_).toISOString().slice(0, 10);   // reported yesterday
+  const dF = new Date(now + 3 * DAY_).toISOString().slice(0, 10);   // reports in 3 days
+  const D0 = Date.parse(d0 + "T12:00:00Z");
+  const mkFl = (tk, form, h, agoFromD0) => ({ id: "sec:" + tk + form + agoFromD0, tk, fl: 1, form, h,
+    src: "EDGAR", url: "https://sec/" + tk + "/" + form, pub: D0 + agoFromD0 * 3600e3 });
+  const entries = [
+    { coin: "xyz:WDC", t: "WDC", d: d0, s: "AMC" },
+    { coin: "xyz:NVDA", t: "NVDA", d: d0, s: "BMO" },
+    { coin: "xyz:MSTR", t: "MSTR", d: dF, s: "AMC" },
+  ];
+  const filings = [
+    mkFl("WDC", "4", "officer sale", 1),
+    mkFl("WDC", "10-Q", "Quarterly report", 5),
+    mkFl("WDC", "8-K", "Item 2.02 Results of Operations Item 9.01 Exhibits", 2),
+    mkFl("NVDA", "8-K", "Item 7.01 Regulation FD", 3),                    // 8-K without 2.02: last-resort tier
+    mkFl("MSTR", "8-K", "Item 2.02 Results", -30 * 24),                   // way outside any window for dF
+  ];
+  const out = C.linkEarningsFilings(entries, filings, now);
+  assert.equal(out[0].filing.form, "8-K", "the 2.02 8-K beats the 10-Q beats the Form 4 — the release itself wins");
+  assert.ok(out[0].filing.url.includes("/WDC/8-K"));
+  assert.equal(out[1].filing.form, "8-K", "an 8-K without parsed 2.02 items still links as last resort");
+  assert.ok(!out[2].filing, "upcoming entries carry NO link until the filing actually lands");
+  assert.equal(C.linkEarningsFilings(entries, [], now)[0].filing, undefined, "no filings, no decoration, no throw");
+  // serve-time overlay + ETag folding + client pins
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["const entries = linkEarningsFilings(earnCache.entries, flItems", "if (sig !== earnLnSig) { earnLnSig = sig; earnLnVer = Date.now(); }",
+    "dataTs: Math.max(earnCache.dataTs || 0, earnLnVer)"])
+    assert.ok(pol.includes(pin), `earnings-link pin missing: ${pin}`);
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["function earnFilingHtml(e)", "earnFilingHtml(e)", "the earnings release itself",
+    "if(ev.target.closest('a,button')) return;"])
+    assert.ok(app.includes(pin), `earnings-link client pin missing: ${pin}`);
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".earn-fl{") && css.includes(".earn-fl.mat{"), "filing chip styling present");
+});
+
 test("earnings: ET day string is the ET calendar day, not UTC or local (DST both sides)", () => {
   const { etDayStr } = require("../src/compute");
   // July = EDT (UTC-4): 02:00Z is still 22:00 the PREVIOUS day in New York.
