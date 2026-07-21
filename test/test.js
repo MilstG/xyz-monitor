@@ -1688,12 +1688,14 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
-    "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries"];
+    "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries",
+    "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7"]) {
+  for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7",
+    "xyzmon.density", "krow", "state.focus"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -1704,7 +1706,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
@@ -2871,4 +2873,26 @@ test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -
   assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
   for (const frag of ["const AI_SCHEMA_V = 5;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
     assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
+});
+
+test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are fully wired", () => {
+  // Three independent features shipped in one build — each pinned across every file it touches,
+  // so a partial delivery (markup without wiring, wiring without CSS) is a suite failure.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Density: pre-paint restore in the shell (no flash), attribute-driven CSS, persisted preference.
+  assert.ok(html.includes("xyzmon.density"), "density pre-paint restore missing from index.html");
+  assert.ok(css.includes('[data-density="compact"] .wrap tbody td'), "compact table CSS missing");
+  assert.ok(app.includes("store.set('xyzmon.density'"), "density persistence missing");
+  // Keyboard nav: slash-search map, j/k movement, re-applied highlight after each render.
+  for (const pin of ["kmoveSel(1)", "kmoveSel(-1)", "CSS.escape(state.ksel)", "applyKsel();   // innerHTML rebuild"])
+    assert.ok(app.includes(pin), `keyboard nav pin missing: ${pin}`);
+  assert.ok(css.includes(".wrap tbody tr.krow td"), "krow highlight CSS missing");
+  // Focused ticker: set on drawer open, chip in the statusline, report-tab fallback.
+  assert.ok(app.includes("state.focus=coin; updateFocusChip()"), "openDetail must set the focus");
+  assert.ok(app.includes("state.focus && state.rows.has(state.focus)"), "report-tab focus fallback missing");
+  for (const id of ["focusChipT", "focusChipX"]) assert.ok(html.includes(`id="${id}"`), `focus chip markup missing: ${id}`);
+  assert.ok(css.includes(".fchip-t{"), "focus chip CSS missing");
 });
