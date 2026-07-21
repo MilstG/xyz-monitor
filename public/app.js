@@ -303,6 +303,28 @@ function updateFreshness(){ if(!state.connOk) return; const d=el('live'); if(!d|
   const age=Date.now()-state.dataTs;
   if(age>180000){ d.style.background='var(--accent)'; d.title='server data is '+Math.round(age/60000)+'m old — the poller may be stalled'; }
   else { d.style.background='var(--up)'; d.title='live'; } }
+// Data-source freshness tray: one dot per live feed with its age, colour-graded. Reads /api/health
+// (auth-exempt, already carries every source's timestamp via poller.stats) so it needs no new
+// endpoint. Each source declares its own "aging" and "stale" thresholds because a 30s price poll and
+// a 6h earnings refresh have very different notions of fresh. A source that's actively fetch-failing
+// shows red regardless of age. Cheap and slow (45s), independent of the 60s snapshot poll.
+const FRESH_SOURCES=[
+  {k:'data', label:'Data', warn:120000, stale:300000, at:h=>h.lastPoll, fail:h=>h.failing&&(h.failing.hourly>((h.active||0)/2)), tip:'Hyperliquid poll (price · OI · funding)'},
+  {k:'earn', label:'Earn', warn:9*3600e3, stale:24*3600e3, at:h=>h.earnings&&h.earnings.asOf, fail:h=>h.earnings&&h.earnings.error&&h.earnings.error!=='not fetched yet'&&!(h.earnings.asOf), tip:'Finnhub earnings calendar (~6h refresh)'},
+  {k:'news', label:'News', warn:2*3600e3, stale:6*3600e3, at:h=>h.news&&h.news.fetchedAt, fail:h=>h.news&&h.news.error&&!(h.news.fetchedAt), tip:'Company + macro news tape'},
+  {k:'edgar', label:'Filings', warn:3*3600e3, stale:12*3600e3, at:h=>h.news&&h.news.filings&&h.news.filings.fetch&&h.news.filings.fetch.lastOk, fail:h=>{const f=h.news&&h.news.filings&&h.news.filings.fetch; return f&&!f.lastOk&&(f.forbidden||f.netFail);}, tip:'SEC EDGAR filings feed'}];
+function renderFreshTray(h){ const box=el('freshtray'); if(!box||!h) return;
+  const now=Date.now();
+  const dots=FRESH_SOURCES.map(s=>{ let cls='', label=s.label, age=null;
+    const failing=s.fail&&s.fail(h);
+    const ts=s.at(h);
+    if(failing){ cls='stale'; }
+    else if(!ts){ cls=''; }
+    else { age=now-ts; cls=age>s.stale?'stale':(age>s.warn?'warn':'ok'); }
+    const ageTxt=age!=null?aiFmtAgo(age)+' ago':(failing?'fetch failing':'no data yet');
+    return `<span class="fdot ${cls}" title="${esc(s.tip)} — ${ageTxt}"><i></i>${esc(label)}</span>`; }).join('');
+  box.innerHTML=dots; box.hidden=false; }
+async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); renderFreshTray(h); }catch(_){ } }
 function updateSyncProgress(){ const rows=activeRows(); let done=0; for(const r of rows) if(r.feat) done++;
   const s=el('sync'); if(!s) return;
   if(rows.length>0&&done>=rows.length){ s.classList.add('done'); el('sync-t').textContent='synced'; }
@@ -1868,7 +1890,7 @@ function drawSessions(){
   for(const id in _hoverReg) if(!document.getElementById(id)) delete _hoverReg[id];
   const a=state.analytics.data, err=state.analytics.err;
   const head=`<div class="cp-head" style="margin-bottom:4px">Session &amp; time-of-day analytics</div>`+
-    `<div class="sec" style="margin-bottom:16px;max-width:680px;line-height:1.55">Server-side studies of when each market is alive and what an overnight / weekend / cash hold actually pays — built on the 60-day hourly price &amp; funding spines. Panels unlock here as coverage accrues.</div>`;
+    `<div class="sec" style="margin-bottom:16px;max-width:680px;line-height:1.55">Server-side studies of when each market is alive and what an overnight / weekend / cash hold actually pays — built on the 180-day hourly price spine and 60-day funding history. Panels unlock here as coverage accrues.</div>`;
   if(err && !a){ host.innerHTML=head+`<div class="msg">Couldn't load analytics: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
   if(!a || !a.coverage || !a.coverage.hourly){ host.innerHTML=head+`<div class="msg">Computing… warming up the spines.</div>`; return; }
   const c=a.coverage, w=a.window||{}, hr=c.hourly||{}, fund=c.funding||{};
@@ -4015,7 +4037,7 @@ sessions:`
 <div class="hlp-h">The clocks</div>
 <p><b>Hour-of-day activity</b>: when each market is actually alive, in its own volume norm — trade the loud hours, mistrust prints from the dead ones. <b>Funding clock</b>: when the payment concentrates. <b>Day-of-week 7×24 heatmap</b> and <b>return seasonality by hour</b>: where returns systematically cluster in the week — read these with sample-size humility, seasonality is the easiest pattern to hallucinate.</p>
 <div class="hlp-h">Structure panels</div>
-<p><b>Cross-ticker clustering</b> groups markets by the shape of their trading day; <b>asset-class overlays</b> compare the composite day of equities vs FX vs commodities. Panels unlock as the 60-day hourly spine accrues — an empty panel means insufficient coverage, not a bug.</p>
+<p><b>Cross-ticker clustering</b> groups markets by the shape of their trading day; <b>asset-class overlays</b> compare the composite day of equities vs FX vs commodities. Panels unlock as the 180-day hourly spine accrues — an empty panel means insufficient coverage, not a bug.</p>
 <div class="hlp-h">Every chart hovers</div>
 <p>Crosshair + readout on all curves: date, value, and breadth (how many names stood behind that point). Points built on thin breadth deserve less trust.</p>`,
 signals:`
@@ -4053,6 +4075,26 @@ backtest:`
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>
 <div class="hlp-h">How to read the curve</div>
 <p>Four lines: <b>net</b> (after funding), <b>gross</b>, <b>benchmark</b>, <b>equal-weight universe</b>. The shaded split is <b>in-sample | out-of-sample</b>: a strategy that only works left of the line was curve-fit by your eyeballs. Judge on OOS net vs equal-weight — beating the benchmark with a long/short book is table stakes; beating naive equal-weight is the actual bar.</p>`,
+report:`
+<div class="hlp-h">What this is</div>
+<p>Everything the server already holds on one name — price structure, positioning, funding, the signal ledger's own base rates, earnings context — compiled into one prompt and synthesized by <b>Claude</b> into a plain-language read. It is a <i>reading of the board</i>, not an oracle: every number it cites is the same number the other tabs show, and the machinery around the model exists to keep it honest rather than fluent. The search box takes any ticker in either universe; a <b>focused ticker</b> or the drawer's "AI report →" deep-link opens straight to that name.</p>
+<div class="hlp-h">Cached for the whole group — the cooldown IS the rate limit</div>
+<p>Reports are <b>shared</b>: the first generation is cached for everyone, and the <b>regenerate</b> button unlocks only on the TTL cooldown <i>or</i> a material change (a moved mark, a fresh signal, an earnings print that invalidates the cached read). The cooldown is enforced <b>server-side</b> — the disabled button is convenience, the 429 is the gate — so no amount of clicking spends the API budget twice. The freshness line ticks live: <b class="pos">fresh · regenerate in M:SS</b>, then <b>stale</b>, or <b style="color:var(--accent)">invalidated</b> with the reason. "Generated Xm ago" is the cache age, not your session.</p>
+<div class="hlp-h">The annotated chart</div>
+<p>A candlestick chart with a <b>timeframe switcher</b> (D1 · H12 · H4), the <b>EMA 13/21 ribbon</b> with its band fill, and the levels the read leans on drawn as labelled lines (collision-staggered so they don't overprint). <b>Proven-edge markers</b> plot past signal fires as side-typed, colour-coded glyphs with a decoded legend — but only when the edge has earned it: ≥8 resolved roster-wide with positive average R, or ≥5 resolved at ≥60% hit for a name-specific edge. Below that bar the markers are <b>suppressed and the count disclosed</b> in the legend, never quietly shown as if proven. Every annotation is the server's own payload restated — the chart cannot disagree with the board.</p>
+<div class="hlp-h">Scenarios, EV, and the plan</div>
+<p>Each scenario carries a computed <b>R/R and expected value</b>, and the colour follows the <i>money</i>, not the label — an adverse-direction "target" the model mislabelled renders red. The action block is mandatory and its <b>EV-at-entry is computed server-side</b>: a plan that prices out negative is <b>downgraded to "wait"</b> before it ever reaches you, so the tab never presents a losing entry as a call. Directional reads are validated too — a short read without a correctly-sided void level and scenario is rejected, EMAs can't be smuggled in as chart levels, and an opposing-bias anchor can't override the void.</p>
+<div class="hlp-h">Analyst record — the part that keeps it honest</div>
+<p>Every directional read is <b>ledgered at its mark and resolved out-of-sample</b>, exactly like a Signals claim. The record shown (n, hit, average R, both overall and on this name) is <b>live</b> — it moves as claims resolve, not frozen with the report — so over time the tab grades its own past reads instead of asking you to trust the current one. Open reads count down to their horizon alongside the resolved ones.</p>`,
+news:`
+<div class="hlp-h">What it shows</div>
+<p>Two feeds merged into one tape for the <b>xyz</b> universe: company-specific <b>headlines</b> tied to names you follow, and the <b>macro tape</b> that moves everything. Served whole to the browser and sliced client-side — the drawer's per-name news is the same payload filtered, so there's one fetch and one source of truth. Retention is <b>72h</b>; older items age off rather than accumulating into noise.</p>
+<div class="hlp-h">Telegram channels — shared group config</div>
+<p>The channel list is <b>group configuration, not cache</b> — it lives in its own file on the volume so a trimmed news cache can never lose it, and edits apply within seconds for everyone. Each channel shows a live status; a channel erroring out says so rather than silently contributing nothing. Attribution is best-effort: a headline is tied to a ticker only when the match verifies, and unverified items stay in the tape without a false company tag.</p>
+<div class="hlp-h">Filings overlay (SEC EDGAR)</div>
+<p>Regulatory filings for covered US names ride the same feed, flagged <b>FL</b>, with <b>material</b> ones marked. They join the earnings tab when a release links (see the earnings help), but here they read as the raw regulatory tape. Coverage is honest about its edges: foreign listings and non-reporting instruments (indices, ETFs, FX, synthetics) simply don't file, so their absence is real, not a gap.</p>
+<div class="hlp-h">Honest caveats</div>
+<p>This is a <b>tape, not a verdict</b>: it surfaces what was said and filed, not whether it matters. Relevance verification trims obvious mismatches, but a headline's presence is never a signal — the ledger and the board are where a story becomes a measurable condition. A warm cache serves the last good pull across redeploys so the tab comes back populated instead of blank while the rotation catches up.</p>`,
 };
 function openHelp(){
   const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
@@ -4068,6 +4110,59 @@ function closeHelp(){ const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=
 { const hb=el('helpBtn'); if(hb) hb.addEventListener('click',openHelp);
   const bg=el('helpbg'); if(bg) bg.addEventListener('click',closeHelp);
   document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('helpmodal'); if(m&&!m.hidden) closeHelp(); } }); }
+
+// ===== Command palette (⌘K / Ctrl+K) — jump to any ticker's drawer or AI report, or any tab =====
+// Reuses the same universe-validated matcher the AI-report search uses, so a name that isn't in the
+// live universe can't be jumped to. Results are: matching tabs first, then matching tickers. Enter
+// opens the ticker's drawer; Shift+Enter opens its AI report; a tab row switches tabs.
+const CMDK_TABS=[
+  {v:'markets',label:'Markets'},{v:'trend',label:'Trend'},{v:'sectors',label:'Sectors'},
+  {v:'corr',label:'Correlation'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
+  {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
+  {v:'backtest',label:'Backtest'}];
+let _cmdkSel=0, _cmdkRows=[];
+function openCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'), q=el('cmdk-q'); if(!bg||!m||!q) return;
+  bg.hidden=false; m.hidden=false; q.value=''; cmdkRender(''); q.focus();
+  requestAnimationFrame(()=>q.focus()); }
+function closeCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'); if(bg)bg.hidden=true; if(m)m.hidden=true; _cmdkRows=[]; }
+function cmdkOpen(){ const m=el('cmdk'); return m&&!m.hidden; }
+function cmdkRender(qs){ const list=el('cmdk-list'); if(!list) return;
+  qs=(qs||'').trim();
+  const tabHits=qs?CMDK_TABS.filter(t=>t.label.toLowerCase().includes(qs.toLowerCase())||t.v.includes(qs.toLowerCase())):CMDK_TABS.slice(0,0);
+  const mk=aiMatches(qs).slice(0,8);
+  _cmdkRows=[];
+  let html='';
+  if(tabHits.length){ html+='<div class="cmdk-sec">Tabs</div>';
+    tabHits.forEach(t=>{ _cmdkRows.push({kind:'tab',v:t.v});
+      html+=`<div class="cmdk-row" data-i="${_cmdkRows.length-1}"><span class="ic">▸</span><span class="nm">${esc(t.label)}</span></div>`; }); }
+  if(mk.length){ html+='<div class="cmdk-sec">Tickers</div>';
+    mk.forEach(({r})=>{ _cmdkRows.push({kind:'ticker',coin:r.coin});
+      const uni=r.uni==='main'?'crypto':'stocks';
+      const px=r.px!=null&&isFinite(r.px)?fmtPrice(r.px):'';
+      html+=`<div class="cmdk-row" data-i="${_cmdkRows.length-1}"><span class="ic">◎</span><span class="tk">${esc(r.ticker||r.coin)}</span><span class="u">${uni}</span>${px?`<span class="px">${px}</span>`:''}</div>`; }); }
+  if(!_cmdkRows.length) html=`<div class="cmdk-none">${qs?'No ticker or tab matches':'Type a ticker symbol, or a tab name'}</div>`;
+  list.innerHTML=html;
+  _cmdkSel=0; cmdkPaint();
+  list.querySelectorAll('.cmdk-row').forEach(row=>{
+    row.addEventListener('mousemove',()=>{ _cmdkSel=+row.dataset.i; cmdkPaint(); });
+    row.addEventListener('click',(e)=>cmdkActivate(+row.dataset.i, e.shiftKey)); }); }
+function cmdkPaint(){ const list=el('cmdk-list'); if(!list) return;
+  list.querySelectorAll('.cmdk-row').forEach(row=>row.classList.toggle('sel',+row.dataset.i===_cmdkSel));
+  const sel=list.querySelector('.cmdk-row.sel'); if(sel) sel.scrollIntoView({block:'nearest'}); }
+function cmdkActivate(i, report){ const row=_cmdkRows[i]; if(!row) return; closeCmdk();
+  if(row.kind==='tab'){ showView(row.v); return; }
+  if(row.kind==='ticker'){ if(report) openAiReport(row.coin);
+    else { showView('markets'); openDetail(row.coin); } } }
+{ const q=el('cmdk-q'), bg=el('cmdkbg');
+  if(bg) bg.addEventListener('click',closeCmdk);
+  if(q){ q.addEventListener('input',()=>cmdkRender(q.value));
+    q.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){ e.preventDefault(); closeCmdk(); return; }
+      if(e.key==='ArrowDown'){ e.preventDefault(); if(_cmdkRows.length){ _cmdkSel=(_cmdkSel+1)%_cmdkRows.length; cmdkPaint(); } return; }
+      if(e.key==='ArrowUp'){ e.preventDefault(); if(_cmdkRows.length){ _cmdkSel=(_cmdkSel-1+_cmdkRows.length)%_cmdkRows.length; cmdkPaint(); } return; }
+      if(e.key==='Enter'){ e.preventDefault(); cmdkActivate(_cmdkSel, e.shiftKey); } }); }
+  document.addEventListener('keydown',e=>{
+    if((e.metaKey||e.ctrlKey)&&(e.key==='k'||e.key==='K')){ e.preventDefault(); cmdkOpen()?closeCmdk():openCmdk(); } }); }
 { const shq=el('sighist-q');   // claim-history browser on the Signals tab (static markup — survives signals-body re-renders)
   if(shq) shq.addEventListener('input',()=>{ clearTimeout(_shTimer); _shTimer=setTimeout(runSigHist,250); });
   const she=el('sighist-ev');
@@ -4083,6 +4178,7 @@ el('corrExport').addEventListener('click', exportCorr);
   applyHash();
   startCycle();
   scheduleDaily();
+  updateFreshTray(); setInterval(updateFreshTray, 45000);   // data-source freshness dots in the status line
 })();
 
 
@@ -4580,6 +4676,23 @@ HELP.report=`
 <div class="hlp-h">What this is not</div>
 <p>Not a ledger signal. The report has no frozen side/void/target geometry of its own and never enters the track record — it reads the ledger, it cannot write to it.</p>`;
 function aiFmtLeft(ms){ if(ms==null||ms<=0) return ''; return ms>=3600000?(ms/3600000).toFixed(1)+'h':Math.max(1,Math.round(ms/60000))+'m'; }
+// Live cooldown readout: M:SS (or H:MM:SS past an hour). "now" once the cooldown has elapsed.
+function aiFmtCountdown(ms){ if(ms==null||ms<=0) return 'now'; const s=Math.round(ms/1000);
+  const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), ss=s%60, p=n=>String(n).padStart(2,'0');
+  return h>0?`${h}:${p(m)}:${p(ss)}`:`${m}:${p(ss)}`; }
+function aiFmtAgo(ms){ if(ms==null||ms<0) return 'just now'; const s=Math.round(ms/1000);
+  if(s<60) return s+'s'; const m=Math.floor(s/60); if(m<60) return m+'m';
+  const h=Math.floor(m/60); if(h<48) return h+'h'; return Math.floor(h/24)+'d'; }
+// One shared 1s tick drives the report freshness UI so the countdown actually counts down and the
+// regenerate button unlocks the moment the cooldown lapses — no waiting on the 60s data poll. Cheap:
+// it no-ops whenever the report elements aren't on the page.
+function aiTickCountdown(){
+  const cd=el('ai-cd');
+  if(cd){ const until=+cd.dataset.until, left=until-Date.now();
+    cd.textContent=aiFmtCountdown(left);
+    if(left<=0){ const b=el('ai-regen'); if(b&&b.disabled){ b.disabled=false; b.title='cooldown elapsed — regenerate for everyone'; } cd.classList.add('pos'); } }
+  const ag=el('ai-age'); if(ag){ ag.textContent=aiFmtAgo(Date.now()-(+ag.dataset.ts)); } }
+setInterval(aiTickCountdown,1000);
 function aiMatches(qs){ qs=(qs||'').trim().toUpperCase(); if(!qs) return [];
   const out=[];
   for(const r of state.rows.values()){ if(r.delisted) continue;
@@ -4670,9 +4783,9 @@ function renderAiReport(d,coin){
   }
   const c=d.computed||{}, livePx=r&&r.px!=null?r.px:c.px0;
   const chg=r&&r.d1!=null&&isFinite(r.d1)?`<span class="${r.d1>=0?'pos':'neg'}">${r.d1>=0?'+':''}${(+r.d1).toFixed(2)}% today</span>`:'';
-  const stateLine=d.status==='fresh'?`<span class="pos">fresh</span> · regenerate in ${aiFmtLeft(d.regenInMs)}`
+  const stateLine=d.status==='fresh'?`<span class="pos">fresh</span> · regenerate in <b id="ai-cd" data-until="${Date.now()+(d.regenInMs||0)}">${aiFmtCountdown(d.regenInMs)}</b>`
     :d.status==='invalidated'?`<span style="color:var(--accent)">invalidated — ${esc(d.invalidReason||'material change')}</span>`
-    :'<span class="sec">stale</span>';
+    :'<span class="sec">stale</span> · <span class="pos">regenerate available</span>';
   const ev=(d.ai.evidence||[]).map(e2=>`<tr><td class="k">${esc(e2.k)}</td><td>${esc(e2.v)}</td></tr>`).join('');
   const hasRisk=c.riskAbs!=null;
   const scen=(c.scenarios||[]).map(s=>{
@@ -4723,7 +4836,7 @@ function renderAiReport(d,coin){
     <div class="dsec">What would change the read</div>
     <div class="ai-inv">${inv}</div>
     <div class="ai-foot">
-      <span>${esc(d.model||'')} · generated ${shDate(d.ts)} · ${stateLine}</span>
+      <span>${esc(d.model||'')} · generated ${shDate(d.ts)} (<b id="ai-age" data-ts="${d.ts}">${aiFmtAgo(Date.now()-d.ts)}</b> ago) · ${stateLine}</span>
       <span class="contract" data-tip="no frozen side/void/target geometry of its own — the report reads the ledger and can never enter it">synthesis layer — not a ledger signal</span>
       <button class="btn" id="ai-regen" ${d.canRegen?'':'disabled'} title="${d.canRegen?'compile fresh data and regenerate for everyone':'unlocks on TTL expiry or material change (new claim · claim resolved · earnings print)'}">regenerate</button>
     </div>`;

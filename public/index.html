@@ -39,6 +39,8 @@
   <span class="st-item">updated <b id="s-upd">—</b></span>
   <span class="st-sep">·</span>
   <span class="st-item" title="server build — if this doesn't match the latest delivery, the deploy is stale">build <b id="ver">—</b></span>
+  <span class="st-sep">·</span>
+  <span class="st-item freshtray" id="freshtray" title="data-source freshness — green fresh, amber aging, red stale or fetch-failing"></span>
   <span id="focusChip" hidden><span class="st-sep">·</span><button class="fchip-t" id="focusChipT" title="focused ticker — follows you across tabs; click to reopen the drawer">◎ —</button><button class="fchip-x" id="focusChipX" title="clear the focused ticker">✕</button></span>
 </div>
 
@@ -273,6 +275,12 @@
 <div class="help-modal" id="helpmodal" hidden role="dialog" aria-modal="true" aria-label="How to read this tab"></div>
 <div class="help-bg" id="tchartbg" hidden></div>
 <div class="tchart-modal" id="tchartmodal" hidden role="dialog" aria-modal="true" aria-label="Candlestick chart with the EMA 13/21 ribbon"></div>
+<div class="cmdk-bg" id="cmdkbg" hidden></div>
+<div class="cmdk" id="cmdk" hidden role="dialog" aria-modal="true" aria-label="Command palette — jump to any ticker or tab">
+  <div class="cmdk-in"><input id="cmdk-q" type="text" placeholder="Jump to a ticker or tab…  (⏎ open · ⇧⏎ AI report)" autocomplete="off" spellcheck="false" aria-label="Command palette search"/></div>
+  <div class="cmdk-list" id="cmdk-list"></div>
+  <div class="cmdk-foot"><span><b>↑↓</b> move</span><span><b>⏎</b> open</span><span><b>⇧⏎</b> AI report</span><span><b>esc</b> close</span></div>
+</div>
 <div class="toast-wrap" id="toastwrap"></div>
 
 <footer>
