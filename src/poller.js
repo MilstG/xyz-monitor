@@ -4255,7 +4255,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // endpoint is infeasible while legitimate resets stay free. Fails closed when unconfigured.
   const ADMIN_WINDOW_MS = 5 * 60 * 1000, ADMIN_MAX_FAILS = 8;
   const adminFails = [];
-  function resetAiDay(password) {
+  // Constant-time ADMIN_PASSWORD check with a shared sliding-window lockout. Used by BOTH the
+  // report-budget reset and the AI unlock, so brute-force attempts against either count together.
+  function checkAdminPassword(password) {
     const admin = process.env.ADMIN_PASSWORD || "";
     if (!admin) return { ok: false, error: "not-configured" };
     const now = Date.now();
@@ -4265,6 +4267,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const a = Buffer.from(String(password || ""), "utf8"), b = Buffer.from(admin, "utf8");
     const okPw = a.length === b.length && require("crypto").timingSafeEqual(a, b);
     if (!okPw) { adminFails.push(now); return { ok: false, error: "bad-password" }; }
+    return { ok: true };
+  }
+  function resetAiDay(password) {
+    const chk = checkAdminPassword(password);
+    if (!chk.ok) return chk;
     aiDayRoll(); aiDay.count = 0; persistAiReports();
     log("AI daily report budget reset by admin");
     return { ok: true, perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
@@ -4288,6 +4295,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getSignals: () => signalsCache,
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
+    checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
     getEarnings: () => {
       if (!earnCache) return earnCache;
       // filings links overlay at serve time (filings arrive continuously between the 6h
