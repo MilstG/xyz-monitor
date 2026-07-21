@@ -305,30 +305,30 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   const now = Date.now();
   const fixture = { ts: now, rearm: [], variants: null,
     open: [
-      { key: "AAPL|breakout", coin: "AAPL", ticker: "AAPL", ev: "breakout", t0: now - 3600000,
+      { key: "xyz:AAPL|breakout", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakout", t0: now - 3600000,
         mark0: 200, dir: 1, score0: 61, sd0: 1.8, resolveAt: now + 86400000, psd: "long", bt: 1 },
-      { key: "AAPL|bigmove#1", coin: "AAPL", ticker: "AAPL", ev: "bigmove", t0: now - 3600000,
+      { key: "xyz:AAPL|bigmove#1", coin: "xyz:AAPL", ticker: "AAPL", ev: "bigmove", t0: now - 3600000,
         mark0: 200, dir: 1, score0: 0, sd0: 1.8, resolveAt: now + 86400000, vi: 1 },   // shadow — must never surface
     ],
     closed: [
       // breakdown resolved pre-fix: raw % despite sd0 stamped -> must repair to R (-4.4/2.2 = -2)
-      { key: "AAPL|breakdown", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 5 * 86400000,
+      { key: "xyz:AAPL|breakdown", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 5 * 86400000,
         mark0: 210, dir: -1, score0: 55, sd0: 2.2, status: "resolved", tR: now - 86400000,
         realized: -4.4, realizedS: -4.4, win: false, winS: false, psd: "short" },
       // stopped oiflush pre-fix: realized and the stop-capped leg both repair independently
-      { key: "AAPL|oiflush", coin: "AAPL", ticker: "AAPL", ev: "oiflush", t0: now - 9 * 86400000,
+      { key: "xyz:AAPL|oiflush", coin: "xyz:AAPL", ticker: "AAPL", ev: "oiflush", t0: now - 9 * 86400000,
         mark0: 190, dir: 1, score0: 48, sd0: 3, status: "resolved", tR: now - 4 * 86400000,
         realized: 6.6, realizedS: -3, stopped: true, win: true, winS: false },
       // breakout resolved under the OLD code: already R, no rn stamp -> must NOT be touched
-      { key: "AAPL|breakout", coin: "AAPL", ticker: "AAPL", ev: "breakout", t0: now - 12 * 86400000,
+      { key: "xyz:AAPL|breakout", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakout", t0: now - 12 * 86400000,
         mark0: 180, dir: 1, score0: 70, sd0: 2, status: "resolved", tR: now - 7 * 86400000,
         realized: 1.5, realizedS: 1.5, win: true, winS: true, psd: "long" },
       // pre-sigma-epoch breakdown (no sd0): untouched, surfaces as legacy %
-      { key: "AAPL|breakdown#old", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 40 * 86400000,
+      { key: "xyz:AAPL|breakdown#old", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 40 * 86400000,
         mark0: 250, dir: -1, score0: 40, status: "resolved", tR: now - 35 * 86400000,
         realized: 3.1, realizedS: 3.1, win: true, winS: true },
       // different coin — must not leak into AAPL's history
-      { key: "NVDA|breakdown", coin: "NVDA", ticker: "NVDA", ev: "breakdown", t0: now - 5 * 86400000,
+      { key: "xyz:NVDA|breakdown", coin: "xyz:NVDA", ticker: "NVDA", ev: "breakdown", t0: now - 5 * 86400000,
         mark0: 100, dir: -1, score0: 50, sd0: 2, status: "resolved", tR: now - 86400000,
         realized: -2, realizedS: -2, win: false, winS: false },
     ] };
@@ -337,7 +337,7 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   p.hydrateLedgerNow();   // idempotency: the rn stamp must make a second pass a no-op
-  const h = p.getLedgerFor("AAPL");
+  const h = p.getLedgerFor("xyz:AAPL");
   assert.equal(h.open.length, 1, "shadow-variant claims never surface");
   assert.equal(h.open[0].status, "open");
   assert.ok(h.open[0].resolveAt > now, "open claim carries its horizon");
@@ -355,14 +355,14 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(by["breakdown:legacy"].realized, 3.1, "pre-sigma-epoch entry untouched");
   assert.equal(by["breakdown:legacy"].unit, "%", "legacy entry labeled in its true unit");
   assert.equal(by["breakdown:legacy"].legacy, true);
-  assert.equal(p.getLedgerFor("NVDA").closed.length, 1, "history is per-coin");
+  assert.equal(p.getLedgerFor("xyz:NVDA").closed.length, 1, "history is per-coin");
   assert.equal(p.getLedgerFor("").open.length, 0, "no filter -> empty history");
   const byEv = p.getLedgerFor("", "breakdown");
   assert.equal(byEv.closed.length, 3, "event filter crosses tickers (2 AAPL + 1 NVDA)");
   assert.ok(byEv.closed.every(e => e.ev === "breakdown"), "event filter is exact");
   assert.ok(byEv.closed.some(e => e.tk === "NVDA"), "cross-ticker rows carry their ticker");
-  assert.equal(p.getLedgerFor("AAPL", "breakdown").closed.length, 2, "coin+event filters combine");
-  assert.equal(p.getLedgerFor("AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
+  assert.equal(p.getLedgerFor("xyz:AAPL", "breakdown").closed.length, 2, "coin+event filters combine");
+  assert.equal(p.getLedgerFor("xyz:AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
 });
 
 test("ledger export: raw completeness, shadow/legacy accounting, self-describing meta, route wiring", () => {
@@ -370,20 +370,20 @@ test("ledger export: raw completeness, shadow/legacy accounting, self-describing
   const now = Date.now();
   const fixture = { ts: now, rearm: [], variants: null,
     open: [
-      { key: "AAPL|breakout", coin: "AAPL", ticker: "AAPL", ev: "breakout", t0: now - 3600000,
+      { key: "xyz:AAPL|breakout", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakout", t0: now - 3600000,
         mark0: 200, dir: 1, score0: 61, sd0: 1.8, resolveAt: now + 86400000, psd: "long" },
     ],
     closed: [
       // real resolved claim — raw shape must survive intact (key included; pub() would drop it)
-      { key: "AAPL|breakdown", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 5 * 86400000,
+      { key: "xyz:AAPL|breakdown", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 5 * 86400000,
         mark0: 210, dir: -1, score0: 55, sd0: 2.2, status: "resolved", tR: now - 86400000,
         realized: -2, realizedS: -2, rn: 1, win: false, winS: false, psd: "short" },
       // shadow variant — getLedgerFor hides it; the export MUST include and count it
-      { key: "AAPL|bigmove#1", coin: "AAPL", ticker: "AAPL", ev: "bigmove", t0: now - 4 * 86400000,
+      { key: "xyz:AAPL|bigmove#1", coin: "xyz:AAPL", ticker: "AAPL", ev: "bigmove", t0: now - 4 * 86400000,
         mark0: 205, dir: 1, score0: 0, sd0: 1.8, status: "resolved", tR: now - 3 * 86400000,
         realized: 0.4, vi: 1 },
       // legacy pre-sigma entry (R-united event, no sd0) — included and counted as legacy
-      { key: "AAPL|breakdown#old", coin: "AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 40 * 86400000,
+      { key: "xyz:AAPL|breakdown#old", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 40 * 86400000,
         mark0: 250, dir: -1, score0: 40, status: "resolved", tR: now - 35 * 86400000,
         realized: 3.1, realizedS: 3.1, win: true, winS: true },
     ] };
@@ -417,13 +417,16 @@ test("fire-time context stamp: computable fields frozen at openLedger, absent fi
   const now = Date.now(), HOURMS = 3600 * 1000;
   // benchmark row for the crypto universe: mktR must read BTC's 24h move
   p.seedRowNow("BTC", { px: 100000, d1: 2.5 });
-  // target: main-universe coin with a funding history rich enough to clear the >=96-sample
+  // target: main-universe coin opening an AIREAD claim (the sole crypto-legal event since
+  // -101) with a funding history rich enough to clear the >=96-sample
   // percentile floor, a 30d range, and a live rate sitting at a known rank in its own history
   const fundH = new Map();
   for (let i = 0; i < 100; i++) fundH.set(now - (100 - i) * HOURMS, (i + 1) / 1e6);   // ranks 1..100
   p.seedRowNow("ETH", { px: 3000, funding: 75 / 1e6, fundH, feat: { hi30: 3200, lo30: 2800 } });
-  const e = p.openLedgerNow("ETH", "bigmove", { score: 10, reading: "" }, 1, { sd0: 2 });
-  assert.ok(e, "claim opened");
+  const eRef = p.openLedgerNow("ETH", "bigmove", { score: 10, reading: "" }, 1, { sd0: 2 });
+  assert.equal(eRef, null, "crypto signal claims refused at openLedger — the engine is xyz-only (-101)");
+  const e = p.openLedgerNow("ETH", "airead", { score: 10, reading: "" }, 1, { sd0: 2 });
+  assert.ok(e, "airead claim opened — the analyst record is exempt from the crypto removal");
   assert.equal(e.fnd, 75 / 1e6, "funding rate frozen at fire");
   assert.ok(e.fndP >= 73 && e.fndP <= 77, `funding percentile ~75 from the seeded ranks, got ${e.fndP}`);
   assert.equal(e.rngP, 0.5, "px 3000 sits exactly mid-range 2800..3200");
@@ -440,7 +443,7 @@ test("fire-time context stamp: computable fields frozen at openLedger, absent fi
   assert.equal(e2.rngP, undefined, "no features -> absent");
   assert.ok(Number.isInteger(e2.dow), "dow stamped");
   // shadow claims get the same stamp — variant slices need identical features
-  const e3 = p.openLedgerNow("ETH", "bigmove", { score: 0, reading: "" }, 1, { sd0: 2 }, 1);
+  const e3 = p.openLedgerNow("ETH", "airead", { score: 0, reading: "" }, 1, { sd0: 2 }, 1);
   assert.ok(e3 && e3.vi === 1 && e3.fnd === 75 / 1e6 && Number.isInteger(e3.dow), "shadow claim carries the stamp too");
   // stamped claims surface in the export with a coverage epoch once closed
   const x = p.getLedgerExport();
@@ -504,7 +507,7 @@ test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisi
   const mk = (coin, stp) => ({ key: coin + "|reclaim#0", coin, ticker: coin, ev: "reclaim", t0: now - 6 * DAY,
     mark0: 100, dir: 1, score0: 0, sd0: 2, psd: "long", pn: 1, stp, vi: 0, resolveAt: now - DAY });
   const fixture = { ts: now, rearm: [], variants: null, closed: [],
-    open: [mk("CLEAN", 95), mk("STOPPED", 99)] };
+    open: [mk("xyz:CLEAN", 95), mk("xyz:STOPPED", 99)] };
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
@@ -515,19 +518,19 @@ test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisi
     const t = now - i * 3600e3; let px = 100 + (160 - i) * 0.025;
     if (dip && i > 60 && i < 70) px = 98.5;
     hs.push({ t, o: px, h: px + 0.2, l: px - 0.2, c: px, v: 1 }); } return hs; };
-  p.seedRowNow("CLEAN", { px: 104, hourlyRaw: spine(false), hourlyTs: now });
-  p.seedRowNow("STOPPED", { px: 104, hourlyRaw: spine(true), hourlyTs: now });
+  p.seedRowNow("xyz:CLEAN", { px: 104, hourlyRaw: spine(false), hourlyTs: now });
+  p.seedRowNow("xyz:STOPPED", { px: 104, hourlyRaw: spine(true), hourlyTs: now });
   p.buildSignalsNow();   // runs resolveLedger
   const x = p.getLedgerExport();
   const done = Object.fromEntries(x.closed.filter((e) => e.ev === "reclaim").map((e) => [e.coin, e]));
-  assert.ok(done.CLEAN && done.CLEAN.status === "resolved", "clean claim resolved");
-  assert.ok(done.CLEAN.rn === 1 && Math.abs(done.CLEAN.realized - 1.5) < 0.3, `resolved in R (spine drifts ~3% over the hold / σ2 ≈ 1.5R), got ${done.CLEAN.realized}`);
-  assert.equal(done.CLEAN.stopped, false, "stop never touched");
-  assert.ok(Math.abs(done.CLEAN.realizedS - done.CLEAN.realized) < 1e-9, "untouched stop: legs coincide");
-  assert.ok(done.STOPPED && done.STOPPED.stopped === true, "dip through the void marks the claim stopped");
-  assert.ok(done.STOPPED.realizedS < 0 && done.STOPPED.realized > 0,
+  assert.ok(done["xyz:CLEAN"] && done["xyz:CLEAN"].status === "resolved", "clean claim resolved");
+  assert.ok(done["xyz:CLEAN"].rn === 1 && Math.abs(done["xyz:CLEAN"].realized - 1.5) < 0.3, `resolved in R (spine drifts ~3% over the hold / σ2 ≈ 1.5R), got ${done["xyz:CLEAN"].realized}`);
+  assert.equal(done["xyz:CLEAN"].stopped, false, "stop never touched");
+  assert.ok(Math.abs(done["xyz:CLEAN"].realizedS - done["xyz:CLEAN"].realized) < 1e-9, "untouched stop: legs coincide");
+  assert.ok(done["xyz:STOPPED"] && done["xyz:STOPPED"].stopped === true, "dip through the void marks the claim stopped");
+  assert.ok(done["xyz:STOPPED"].realizedS < 0 && done["xyz:STOPPED"].realized > 0,
     "stop-aware leg caps at the void while at-horizon rides to the target — the exact honesty split");
-  assert.equal(p.getLedgerFor("CLEAN").closed.length, 0, "strategy shadows never surface in the claim browser");
+  assert.equal(p.getLedgerFor("xyz:CLEAN").closed.length, 0, "strategy shadows never surface in the claim browser");
 });
 
 test("ledger archive: overflow is appended to the volume before the retention trim", () => {
@@ -547,7 +550,7 @@ test("ledger archive: overflow is appended to the volume before the retention tr
     "resolver + hydrate trims archive before slicing, guarded");
 });
 
-test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext persistence gate", () => {
+test("HTF shadow batch 2: failbrk mirror, pead reaction gate (fundext retired with the crypto engine, -101)", () => {
   const C = require("../src/compute");
   const now = Date.now();
   // ---- failed-breakout fade: exact mirror of the reclaim trap
@@ -585,16 +588,16 @@ test("HTF shadow batch 2: failbrk mirror, pead reaction gate, fundext persistenc
   // ---- EV_META + wiring pins
   assert.equal(C.EV_META.failbrk.horizonMs, 5 * DAY);
   assert.equal(C.EV_META.pead.horizonMs, 10 * DAY);
-  assert.equal(C.EV_META.fundext.horizonMs, 5 * DAY);
+  assert.ok(!C.EV_META.fundext && !C.EV_META.liqflush, "crypto-only shadow metas retired (-101)");
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  for (const pin of ['openLedger(r, "failbrk"', 'openLedger(r, "pead"', 'openLedger(r, "fundext"',
-    'r.uni === "xyz" && r.dailyRaw', 'r.uni === "main" && r.feat',
-    "pNow >= 95 && pPrev >= 95 && r.funding > 0", "pNow <= 5 && pPrev <= 5 && r.funding < 0",
-    "function fundPctileNow"])
+  for (const pin of ['openLedger(r, "failbrk"', 'openLedger(r, "pead"',
+    'r.uni === "xyz" && r.dailyRaw', "function fundPctileNow"])
     assert.ok(pol.includes(pin), `poller wiring pin missing: ${pin}`);
-  // fundext + the context stamp share ONE percentile code path (no two sources of truth)
-  assert.ok((pol.match(/fundPctileNow\(/g) || []).length >= 4, "fireCtx and fundext both route through the shared percentile helper");
+  for (const gone of ['openLedger(r, "fundext"', 'openLedger(r, "liqflush"'])
+    assert.ok(!pol.includes(gone), `crypto shadow fire site must stay removed: ${gone}`);
+  // the fire-time context stamp and the AI crypto read still share ONE percentile code path
+  assert.ok((pol.match(/fundPctileNow\(/g) || []).length >= 3, "fireCtx and the AI crypto block both route through the shared percentile helper");
 });
 
 test("off-site ledger backup: disabled by default, pushes via contents API, blob-sha skip, raw store reads", async () => {
@@ -700,15 +703,23 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
   assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 3, "all three daily-close detectors coerce");
 });
 
-test("strategy-shadow record panel: per-universe aggregation, hard separation, client scope wiring", () => {
+test("crypto engine purge: stored crypto claims leave the ledger at hydrate (airead exempt), panels and records ship xyz-only", () => {
+  // The -101 removal, enforced against the STORED record: a fixture carrying real crypto
+  // claims — open, closed, shadow and visible — hydrates into a ledger with none of them.
+  // A dead engine's history in the aggregates would be exactly the stale-record dishonesty
+  // the ledger exists to prevent. airead survives: the Report tab's analyst record serves
+  // both universes and its engine is alive.
   const { createPoller } = require("../src/poller");
   const now = Date.now();
-  const fixture = { ts: now, rearm: [], variants: null,
+  const fixture = { ts: now, rearm: ["ETH|gapfade#1", "xyz:NVDA|reclaim#0"], variants: null,
+    present: [["ETH|bigmove", now - 3600e3], ["xyz:AAPL|breakdown", now - 3600e3]],
     open: [
       { key: "ETH|gapfade#1", coin: "ETH", ticker: "ETH", ev: "gapfade", t0: now - 3600e3, mark0: 100, dir: 1,
         score0: 0, psd: "short", pn: 1, stp: 101, vi: 1, resolveAt: now + 86400e3 },
       { key: "BTC|fundext#0", coin: "BTC", ticker: "BTC", ev: "fundext", t0: now - 3600e3, mark0: 50, dir: 1,
         score0: 0, sd0: 2, psd: "short", pn: 1, stp: 51.5, vi: 0, resolveAt: now + 86400e3 },
+      { key: "ETH|airead#0", coin: "ETH", ticker: "ETH", ev: "airead", t0: now - 3600e3, mark0: 100, dir: 1,
+        score0: 0, sd0: 2, psd: "long", pn: 1, stp: 95, vi: 0, resolveAt: now + 4 * 86400e3 },
       { key: "xyz:NVDA|reclaim#0", coin: "xyz:NVDA", ticker: "NVDA", ev: "reclaim", t0: now - 3600e3, mark0: 10, dir: 1,
         score0: 0, sd0: 2, psd: "long", pn: 1, stp: 9.5, vi: 0, resolveAt: now + 86400e3 },
     ],
@@ -719,72 +730,84 @@ test("strategy-shadow record panel: per-universe aggregation, hard separation, c
         mark0: 20, dir: -1, psd: "long", pn: 1, vi: 0, status: "resolved", realized: -0.4, realizedS: -0.6, stopped: true },
       { key: "xyz:AAPL|reclaim#0", coin: "xyz:AAPL", ticker: "AAPL", ev: "reclaim", t0: now - 6 * 86400e3, tR: now - 86400e3,
         mark0: 10, dir: 1, sd0: 2, psd: "long", pn: 1, vi: 0, status: "resolved", realized: 1.2, realizedS: 1.2, rn: 1 },
-      // VISIBLE claims (no vi) — these are what the per-universe record sets aggregate
       { key: "xyz:AAPL|breakdown", coin: "xyz:AAPL", ticker: "AAPL", ev: "breakdown", t0: now - 6 * 86400e3, tR: now - 86400e3,
         mark0: 200, dir: -1, sd0: 2, psd: "short", pn: 1, status: "resolved", realized: 1.1, realizedS: 1.1, rn: 1 },
       { key: "ETH|bigmove", coin: "ETH", ticker: "ETH", ev: "bigmove", t0: now - 5 * 86400e3, tR: now - 4 * 86400e3,
         mark0: 3000, dir: 1, sd0: 3, psd: "long", pn: 1, status: "resolved", realized: -0.5, realizedS: -0.5, rn: 1 },
+      { key: "ETH|airead#0", coin: "ETH", ticker: "ETH", ev: "airead", t0: now - 9 * 86400e3, tR: now - 4 * 86400e3,
+        mark0: 90, dir: 1, sd0: 2, psd: "long", pn: 1, vi: 0, status: "resolved", realized: 1.4, realizedS: 1.4, rn: 1 },
     ] };
+  let saved = null;
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
-    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+    saveLedger: (d) => { saved = d; }, insert: () => {}, saveRegime: () => {} };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   p.buildSignalsNow();
   const d = p.getSignals();
-  assert.ok(d.shadows && Array.isArray(d.shadows.main) && Array.isArray(d.shadows.xyz), "two hard-separated panels ship");
-  assert.equal(d.shadows.main.length, 6, "crypto panel: 4 universal + fundext + liqflush");
+  // the purge itself: every non-airead crypto entry is gone, open and closed alike
+  const x = p.getLedgerExport();
+  assert.ok(x.open.every((e) => e.coin.includes(":") || e.ev === "airead"), "no crypto engine claim survives among open entries");
+  assert.ok(x.closed.every((e) => e.coin.includes(":") || e.ev === "airead"), "no crypto engine claim survives among closed entries");
+  assert.equal(p.getLedgerFor("ETH").closed.length, 0, "the claim browser has nothing on a crypto name (airead is vi-stamped and invisible there by design)");
+  const ai = p.aireadClaimsNow();
+  assert.ok(ai.open.some((e) => e.coin === "ETH") && ai.closed.some((e) => e.coin === "ETH"), "airead claims on crypto names survive the purge — open AND closed");
+  assert.ok(saved && saved.open.length === 2 && saved.closed.length === 3,
+    "the purged ledger persists back (ledgerDirty set by the purge): 2 open kept of 4, 3 closed kept of 6");
+  assert.ok(!saved.rearm.includes("ETH|gapfade#1") && !saved.present.some((p0) => p0[0] === "ETH|bigmove"),
+    "no crypto episode/presence key survives to persistence (load filter; the build's own lapse GC clears the rest)");
+  // shadow panel: one universe, one panel — no main key at all
+  assert.ok(d.shadows && Array.isArray(d.shadows.xyz) && !("main" in d.shadows), "single xyz panel ships; the crypto panel is gone, not empty");
+  const xp = Object.fromEntries(d.shadows.xyz.map((g) => [g.ev, g]));
   assert.equal(d.shadows.xyz.length, 5, "stocks panel: 4 universal + pead");
-  const m = Object.fromEntries(d.shadows.main.map((g) => [g.ev, g]));
-  const x = Object.fromEntries(d.shadows.xyz.map((g) => [g.ev, g]));
-  assert.ok(m.liqflush && m.fundext && !m.pead, "crypto-only strategies live on the crypto panel alone");
-  assert.ok(x.pead && !x.liqflush && !x.fundext, "pead lives on the stocks panel alone");
-  assert.deepEqual({ n: m.gapfade.rows[0].n, hit: m.gapfade.rows[0].hit, avg: m.gapfade.rows[0].avg, avgS: m.gapfade.rows[0].avgS },
-    { n: 2, hit: 0.5, avg: 0.2, avgS: 0.1 }, "crypto gapfade 1.0σ: aggregated over crypto claims only");
-  assert.deepEqual({ n: m.gapfade.rows[1].n, open: m.gapfade.rows[1].open }, { n: 0, open: 1 });
-  assert.deepEqual({ n: x.gapfade.rows[0].n, open: x.gapfade.rows[0].open }, { n: 0, open: 0 },
-    "the same strategy on the stocks panel shows ZERO — a crypto record can't leak across the separation");
-  assert.equal(x.reclaim.rows[0].n, 1); assert.equal(x.reclaim.rows[0].avg, 1.2);
-  assert.deepEqual({ n: m.reclaim.rows[0].n, open: m.reclaim.rows[0].open }, { n: 0, open: 0 }, "and the equity reclaim can't leak into crypto");
-  assert.equal(x.reclaim.rows[0].open, 1, "open counts split by universe too");
-  // per-universe record sets: same key, m/x suffix, global keys untouched
-  assert.ok(d.records["0"] && d.records["0m"] && d.records["0x"] && d.records["1p"] && d.records["1pm"], "universe-suffixed record sets ship alongside the global ones");
+  assert.ok(xp.pead && !xp.liqflush && !xp.fundext, "crypto-only strategies are gone from the defs, not just the data");
+  assert.deepEqual({ n: xp.gapfade.rows[0].n, open: xp.gapfade.rows[0].open }, { n: 0, open: 0 },
+    "the purged crypto gapfade record cannot leak into the xyz panel");
+  assert.equal(xp.reclaim.rows[0].n, 1); assert.equal(xp.reclaim.rows[0].avg, 1.2);
+  assert.equal(xp.reclaim.rows[0].open, 1, "xyz shadow aggregation intact");
+  // record sets: xyz claims intact, crypto claims absent from EVERY set including the global
   assert.ok(d.records["0x"].record.breakdown && d.records["0x"].record.breakdown.resolved === 1, "xyz set carries the xyz visible claim");
-  assert.ok(!d.records["0m"].record.breakdown || !d.records["0m"].record.breakdown.resolved, "the xyz claim never leaks into the crypto set");
-  assert.ok(d.records["0m"].record.bigmove && d.records["0m"].record.bigmove.resolved === 1, "crypto set carries the crypto visible claim");
-  assert.ok(!d.records["0x"].record.bigmove || !d.records["0x"].record.bigmove.resolved, "and it never leaks into the xyz set");
-  assert.equal(d.records["0"].record.breakdown.resolved, 1, "global sets keep their exact keys and totals — nothing downstream breaks");
-  assert.ok(d.countU && d.countU.main === 0 && d.countU.xyz === 0, "per-universe live counts ship");
-  // client wiring pins: scope-keyed records, scoped shadows, signals tab allowed in crypto scope
+  assert.equal(d.records["0"].record.breakdown.resolved, 1, "global set keeps its keys and totals");
+  assert.ok(!d.records["0"].record.bigmove, "the purged crypto visible claim is absent from the GLOBAL set too — a dead engine feeds no aggregate");
+  assert.ok(!d.records["0m"] || !d.records["0m"].record.bigmove, "and the m-suffixed set is empty of it");
+  assert.ok(!("countU" in d), "per-universe live counts retired with the second universe");
+  // client wiring pins: xyz-only selection, tab whitelist without signals, drawer skip
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const pin of ["(state.scope==='crypto'?'m':'x')", "state.scope==='crypto'?d.shadows.main:d.shadows.xyz",
-    "b.dataset.view!=='signals'", "v!=='signals') v='markets'", "(g.uni==='main')===(state.scope==='crypto')",
-    "if(state.view==='signals') renderSignals();", "strategy shadows (earning their record)", "awaiting first fire"])
-    assert.ok(app.includes(pin), `client scope pin missing: ${pin}`);
-  assert.equal((app.match(/\(state\.scope==='crypto'\?'m':'x'\)/g) || []).length, 2, "BOTH record-set selection sites are scope-keyed");
+  for (const pin of ["+'x']||d.records[", "const shPanel=d&&d.shadows&&d.shadows.xyz;",
+    "b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report';",
+    "v!=='markets' && v!=='trend' && v!=='report') v='markets'",
+    "rw.uni==='main'){ box.innerHTML=''; return; } }   // crypto: no signal engine (-101)",
+    "strategy shadows (earning their record)"])
+    assert.ok(app.includes(pin), `client xyz-only pin missing: ${pin}`);
+  assert.equal((app.match(/\+'x'\]\|\|d\.records\[/g) || []).length, 2, "BOTH record-set selection sites read the xyz set");
+  assert.ok(!app.includes("d.shadows.main") && !app.includes("countU"), "no client path reads the retired crypto fields");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("uni: r.uni, ev, label: EV_LABEL[ev]"), "every live signal is universe-stamped server-side");
-  assert.ok(pol.includes("shadow record changes must bust the ETag"), "shadow counts fold into the signals ETag signature");
+  assert.ok(pol.includes('return { xyz: panel("xyz") };'), "shadowRecord ships the single panel");
+  assert.ok(pol.includes("uni: r.uni, ev, label: EV_LABEL[ev]"), "signals stay universe-stamped (structural honesty, even with one universe)");
+  assert.ok(pol.includes("shadow record changes must bust the ETag"), "shadow counts still fold into the signals ETag signature");
+  assert.ok(pol.includes("Crypto engine purge") && pol.includes('e.ev !== "airead"'), "the purge and its airead exemption live in hydrate");
 });
 
-test("liqflush: cascade exhaustion needs BOTH legs, geometry is the exact half-retrace", () => {
+test("crypto engine removal (-101): fire sites, detectors, metas and per-universe lanes are gone — and stay gone", () => {
   const C = require("../src/compute");
-  // -10% day on a 3σ market with a -15% OI drain: fires, long
-  const lf = C.detectLiqFlush(-10, 3, 90, -15);
-  assert.ok(lf, "price leg + OI leg together fire");
-  const pre = 90 / 0.9;
-  assert.ok(Math.abs(lf.target - (90 + (pre - 90) / 2)) < 1e-6, "target is the EXACT half-retrace of the flush, not an approximation");
-  assert.ok(Math.abs(lf.stop - 90 * 0.97) < 1e-6, "stop 1σ below the post-flush mark");
-  assert.equal(C.detectLiqFlush(-10, 3, 90, -3), null, "a big drop WITHOUT the OI drain is information, not a cascade — no fire");
-  assert.equal(C.detectLiqFlush(-4, 3, 90, -15), null, "an OI drain without the >=2σ price leg never fires");
-  assert.equal(C.detectLiqFlush(10, 3, 110, -15), null, "up-moves never fire (long-cascade exhaustion only, for now)");
-  assert.equal(C.detectLiqFlush(-10, 3, 90, null), null, "no OI data -> honest null");
-  assert.equal(C.EV_META.liqflush.horizonMs, 3 * DAY);
+  assert.ok(!("detectLiqFlush" in C), "detectLiqFlush retired from compute exports");
+  assert.ok(!("capPerUniverse" in C), "capPerUniverse retired — one universe needs no lanes");
+  assert.ok(!C.EV_META.liqflush && !C.EV_META.fundext, "crypto-only event metas retired");
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  for (const pin of ['openLedger(r, "liqflush"', "oc24: oiChg24", 'r.uni === "main" && r.d1 != null'])
-    assert.ok(pol.includes(pin), `liqflush wiring pin missing: ${pin}`);
-  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "fundext", "liqflush", "airead"])'), "liqflush and airead resolve in R");
+  // the enrollment: pass 1 iterates the xyz-pure roster ALONE — the exact shape whose
+  // accidental version was the -87 bug is now the deliberate removal
+  assert.ok(pol.includes("for (const r of activeMarkets()) {"), "pass-1 iterates activeMarkets() alone");
+  assert.ok(!pol.includes("activeMarkets().concat(mainMarkets())"), "the both-universe concat stays removed");
+  // the guard: even a caller that forgets the rule cannot ledger a crypto claim
+  assert.ok(pol.includes('if (r && r.uni === "main" && ev !== "airead") return null;'), "openLedger refuses crypto engine claims, airead exempt");
+  // the fire sites and their strings are gone entirely
+  for (const gone of ['openLedger(r, "liqflush"', 'openLedger(r, "fundext"', "oc24: oiChg24", "cryptoSetupsLive",
+    "fundext = persistent funding extreme", "capPerUniverse", "countU"])
+    assert.ok(!pol.includes(gone), `crypto engine remnant found in poller: ${gone}`);
+  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"])'),
+    "R-united ledger set carries no retired events");
+  assert.ok(pol.includes("const top = kept.slice(0, 40);"), "transport cap is a plain top-40 — no lanes");
 });
 
 test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
@@ -881,26 +904,17 @@ test("version-stamped shell: index served explicitly with ?v=BUILD asset tags, s
     "index.html asset tags must match the stamper's expected form exactly");
 });
 
-test("per-universe transport cap + scoped tab badge: a stocks-heavy tape can't crowd crypto out", () => {
-  const C = require("../src/compute");
-  const mk = (uni, score) => ({ uni, score });
-  // 50 stocks signals outscore 5 crypto ones — the old global top-40 shipped ZERO crypto
-  const sorted = [];
-  for (let i = 0; i < 50; i++) sorted.push(mk("xyz", 100 - i));
-  for (let i = 0; i < 5; i++) sorted.push(mk("main", 10 - i));
-  const capped = C.capPerUniverse(sorted, 40);
-  assert.equal(capped.filter((g) => g.uni === "xyz").length, 40, "stocks lane capped at 40");
-  assert.equal(capped.filter((g) => g.uni === "main").length, 5, "every live crypto signal ships — the -85 bug");
-  assert.deepEqual(capped.slice(0, 3).map((g) => g.score), [100, 99, 98], "score order preserved");
-  assert.equal(C.capPerUniverse([], 40).length, 0);
+test("transport cap + tab badge: plain top-40 by score, badge reads the single-universe count", () => {
+  // The per-universe lanes (capPerUniverse, the -85 fix) were retired with the crypto engine
+  // at -101: one universe needs no lanes, and the badge speaks for the only universe served.
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("const top = capPerUniverse(kept, 40);"), "payload cap routes through the per-universe lanes");
+  assert.ok(pol.includes("const top = kept.slice(0, 40);"), "payload cap is a plain top-40 slice");
+  assert.ok(!pol.includes("capPerUniverse"), "no lane machinery survives in the poller");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const pin of ["function setSigTabBadge()", "state.scope==='crypto'?d.countU.main:d.countU.xyz",
-    "setSigTabBadge();   // the badge is scoped too"])
-    assert.ok(app.includes(pin), `scoped-badge pin missing: ${pin}`);
-  assert.ok(!app.includes("Signals (${d.count})"), "the global-count badge is gone — the badge speaks per scope");
+  for (const pin of ["function setSigTabBadge()", "const n=d?(d.count||0):0;"])
+    assert.ok(app.includes(pin), `badge pin missing: ${pin}`);
+  assert.ok(!app.includes("countU"), "the scoped-badge machinery is gone with the second universe");
 });
 
 test("AI sector classification: enum-validated, write-once, static map wins, three strikes to macro", async () => {
@@ -1039,12 +1053,10 @@ test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-t
   assert.ok(sec.includes("const COMPANY_NAMES = {") && sec.includes("nameAliases"), "alias seed present and exported");
 });
 
-test("signal engine covers BOTH universes: crypto rows fire, ledger, and record — no harness patches", () => {
-  // Regression guard for the -87 discovery: buildSignals iterated the xyz-pure activeMarkets()
-  // alone, so production never fired, ledgered, or recorded a single crypto claim (4000/4000
-  // closed claims were xyz) while every other crypto surface looked healthy. Worse, the debug
-  // harness used to verify crypto wiring PATCHED activeMarkets to iterate all rows — the tests
-  // proved a code path production never ran. This test uses the real, unpatched iteration.
+test("signal engine is xyz-only: crypto rows never fire, never ledger — the real iteration, no harness patches", () => {
+  // The mirror of the retired -87 regression guard: the same two seeded rows, the same real
+  // unpatched iteration — and now the CRYPTO row must produce nothing while the xyz row still
+  // fires and ledgers. This is the -101 removal proven by behavior, not by string pins alone.
   const { createPoller } = require("../src/poller");
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
@@ -1057,60 +1069,52 @@ test("signal engine covers BOTH universes: crypto rows fire, ledger, and record 
   p.buildDailyNow();
   p.buildSignalsNow();
   const d = p.getSignals();
-  const cryptoLive = d.signals.filter((s) => s.uni === "main");
-  assert.ok(cryptoLive.length > 0, "crypto conditions fire through the REAL iteration — no activeMarkets patch");
-  assert.ok(d.countU.main > 0, "and count into the crypto badge");
-  assert.ok(d.signals.some((s) => s.uni === "xyz"), "xyz signals unaffected");
-  const led = p.getLedgerFor("ETH");
-  assert.ok(led && led.open && led.open.length > 0, "crypto claims actually LEDGER — the record can finally accrue");
+  assert.ok(d.signals.length > 0, "the engine still fires — the removal did not blank the xyz side");
+  assert.ok(d.signals.every((s0) => s0.uni === "xyz"), "every live signal is xyz — an identically-seeded crypto row produced ZERO");
+  const ledC = p.getLedgerFor("ETH");
+  assert.equal((ledC.open || []).length, 0, "crypto claims never ledger");
+  assert.equal((ledC.closed || []).length, 0, "and none exist from before (nothing stored here)");
+  const ledX = p.getLedgerFor("xyz:NVDA");
+  assert.ok(ledX && ledX.open && ledX.open.length > 0, "the xyz row's claims ledger exactly as before the removal");
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("for (const r of activeMarkets().concat(mainMarkets())) {"), "both-universe iteration pinned");
+  assert.ok(pol.includes("for (const r of activeMarkets()) {"), "xyz-only iteration pinned");
   assert.equal((pol.match(/order\.length \? order\.map/g) || []).length, 0, "no activeMarkets fallback patch lives in the shipped source");
 });
 
-test("empty scoped record still RENDERS: awaits, shadows, variants — executed, not string-pinned", () => {
-  // The -87 deploy blanked the crypto accuracy section: an honestly-empty record hit an early
-  // return that swallowed the awaiting-roster, the shadows panel and the variants. This test
-  // executes the REAL sigRecordHtml from the shipped client against an empty scoped record —
-  // rendering behavior, not source pins (the -85 lesson: existence is not wiring).
+test("empty record still RENDERS: awaits, shadows, variants — executed, not string-pinned", () => {
+  // The -87-deploy lesson kept alive after the -101 removal: an honestly-empty record must
+  // still render the awaiting roster, the shadows panel and the variants. This executes the
+  // REAL sigRecordHtml from the shipped client against an empty record — rendering behavior,
+  // not source pins (the -85 lesson: existence is not wiring). Scope machinery is gone: the
+  // tab serves one universe and the roster is unconditional.
   const fs = require("fs"), path = require("path");
   const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const grab = (name) => { const i = src.indexOf("function " + name); assert.ok(i >= 0, name + " missing");
     let dep = 0, j = src.indexOf("{", i);
     for (let k = j; k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
-  const cut = (s) => { const i = src.indexOf(s); assert.ok(i >= 0, "snippet missing: " + s); return; };
-  cut("const EV_XYZ_ONLY=new Set(['gap','prem','ondrift','tretest','tretestdn']);");
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const state = { scope: "crypto" };
+  const state = { scope: "stocks" };
   const sigMovePref = () => 0, sigPrimePref = () => false, sigRecFullPref = () => true, fmtAge = () => "1m";
   const EV_LABELS = {}, EV_TIP = {};
-  const EV_XYZ_ONLY = eval("(" + src.match(/const EV_XYZ_ONLY=(new Set\([^)]*\));/)[1] + ")");
   const ledgerRosterScoped = eval("(" + grab("ledgerRosterScoped") + ")");
   const sigRecordHtml = eval("(" + grab("sigRecordHtml") + ")");
-  // crypto scope, empty 'm' record, shadows shipping normally (server always ships all strategies)
-  const d = { records: { "0m": { record: {}, recent: [] }, "0": { record: { bigmove: { resolved: 5, open: 1, hit: 0.6, med: 0.2, unit: "R" } } } },
-    shadows: { main: [{ ev: "liqflush", label: "cascade exhaustion", unit: "R", tip: "t", rows: [{ tag: null, n: 0, open: 0 }] }], xyz: [] },
+  // empty 'x' record, shadows shipping normally (server always ships all strategies)
+  const d = { records: { "0x": { record: {}, recent: [] }, "0": { record: {} } },
+    shadows: { xyz: [{ ev: "reclaim", label: "breakdown reclaim", unit: "R", tip: "t", rows: [{ tag: null, n: 0, open: 0 }] }] },
     variants: [], count: 0 };
   const html = sigRecordHtml(d);
-  assert.ok(html.includes("No crypto claims resolved yet"), "the honest notice renders");
+  assert.ok(html.includes("No claims resolved yet"), "the honest notice renders");
   assert.ok(html.includes("awaiting first claim"), "the awaiting roster renders BELOW the notice — no early return");
-  for (const ev of ["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "squeeze", "unwind"])
-    assert.ok(html.includes(">" + ev + "<") || html.includes(ev), `crypto-applicable event ${ev} awaits`);
-  for (const ev of ["prem", "gap", "ondrift", "tretest"])
-    assert.ok(!new RegExp('<td>' + ev + '</td>').test(html), `xyz-only event ${ev} must NOT show as awaiting in crypto scope — that would be a lie`);
+  for (const ev of ["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "squeeze", "unwind", "prem", "gap", "ondrift", "tretest"])
+    assert.ok(html.includes(ev), `roster event ${ev} awaits — the full xyz roster, session events included`);
   assert.ok(html.includes("strategy shadows (earning their record)"), "shadows panel renders on an empty record");
-  assert.ok(html.includes("cascade exhaustion"), "with its strategies");
+  assert.ok(html.includes("breakdown reclaim"), "with its strategies");
   assert.ok(!html.includes("sigrec-top"), "headline stats stay hidden until something has actually fired");
-  // roster scoping is symmetric: stocks scope carries the full roster
-  state.scope = "stocks";
-  const full = ledgerRosterScoped();
-  assert.ok(full.includes("prem") && full.includes("gap") && full.includes("tretest"), "stocks roster keeps the session events");
-  state.scope = "crypto";
-  assert.equal(ledgerRosterScoped().length, full.length - 5, "crypto roster excludes exactly the five xyz-only events");
+  assert.equal(ledgerRosterScoped().length, 13, "one roster, thirteen events — no scope branch left to blank it");
 });
 
-test("ai report v5: news-grounded context, no-invention rule, crypto enrichment, sector-relative", () => {
+test("ai report v6: news-grounded context, no-invention rule, crypto positioning (engine-free), sector-relative", () => {
   const { p, px, now } = aiTestPoller();   // seeded xyz:NVDA with spines (existing report harness)
   // verified-only news reaches the analyst: verified, pending and off-topic seeded together
   p.newsIngestNow([
@@ -1140,7 +1144,7 @@ test("ai report v5: news-grounded context, no-invention rule, crypto enrichment,
   assert.equal(p.aiValidateNow(JSON.stringify(good), ctx).ok, true, "used:true WITH a verified headline passes");
   good.news_read = { used: false, note: "no verified headlines in the window" };
   assert.equal(p.aiValidateNow(JSON.stringify(good), noNews).ok, true, "honest empty-news read passes");
-  // crypto enrichment: main-universe context carries the crypto block
+  // crypto positioning: main-universe context still carries funding/OI state — data, not the retired engine
   const DAY_ = 86400e3, HOUR_ = 3600e3;
   const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100, o: 100, h: 101, l: 99, v: 1e6 }); return d; };
   const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) h.push({ t: now - i * HOUR_, o: 100, h: 100.5, l: 99.5, c: 100, v: 1e5 }); return h; };
@@ -1153,10 +1157,11 @@ test("ai report v5: news-grounded context, no-invention rule, crypto enrichment,
   // allowed to be absent-when-uncomputable; what must hold is the source wiring:
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  for (const pin of ["cr.fundingPctile31d = fp", "cr.oiChg24Pct", "cryptoSetupsLive",
-    "const AI_SCHEMA_V = 5;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
+  for (const pin of ["cr.fundingPctile31d = fp", "cr.oiChg24Pct",
+    "const AI_SCHEMA_V = 6;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
     "invented news", "rel7dPct", "rel30dPct", "context.crypto"])
-    assert.ok(pol.includes(pin), `v5 pin missing: ${pin}`);
+    assert.ok(pol.includes(pin), `v6 pin missing: ${pin}`);
+  assert.ok(!pol.includes("cryptoSetupsLive"), "the AI context no longer cites live engine setups it does not have (-101)");
 });
 
 test("analyst-read ledger: directional reports freeze claims, episodes hold, buckets stay isolated", async () => {
@@ -1189,7 +1194,7 @@ test("analyst-read ledger: directional reports freeze claims, episodes hold, buc
   const d = p.getSignals();
   for (const key of ["0", "0x", "0m"])
     assert.ok(!d.records[key] || !d.records[key].record.airead, `airead absent from record set ${key}`);
-  assert.ok(![...d.shadows.main, ...d.shadows.xyz].some((g) => g.ev === "airead"), "and absent from the shadows panel");
+  assert.ok(![...d.shadows.xyz].some((g) => g.ev === "airead"), "and absent from the shadows panel");
   // the record surfaces: ctx + served report both carry analystRecord (open-only state here)
   const ctx = p.aiCompileNow("xyz:NVDA");
   assert.ok(ctx.analystRecord && ctx.analystRecord.openOnName, "the analyst sees its own open read in context");
@@ -1772,16 +1777,16 @@ test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, op
   const fixture = { ts: now, rearm: [], variants: null,
     open: [
       // open long with inverted stop: keeps resolving, loses its stop-aware leg
-      { key: "NATGAS|squeeze", coin: "NATGAS", ticker: "NATGAS", ev: "squeeze", t0: now - 3600000,
+      { key: "xyz:NATGAS|squeeze", coin: "xyz:NATGAS", ticker: "NATGAS", ev: "squeeze", t0: now - 3600000,
         mark0: 2.959, dir: 1, score0: 21, resolveAt: now + 86400000, psd: "long", stp: 3.4 },
     ],
     closed: [
       // the MINIMAX shape: long, stop ABOVE entry, "stopped" into a fabricated +10.68% win
-      { key: "MINIMAX|squeeze", coin: "MINIMAX", ticker: "MINIMAX", ev: "squeeze", t0: now - 5 * 86400000,
+      { key: "xyz:MINIMAX|squeeze", coin: "xyz:MINIMAX", ticker: "MINIMAX", ev: "squeeze", t0: now - 5 * 86400000,
         mark0: 45.694, dir: 1, psd: "long", stp: 50.57, status: "resolved", tR: now - 2 * 86400000,
         realized: -20.79, realizedS: 10.68, stopped: true, win: false, winS: true, score0: 42 },
       // a VALID stopped short: stop above entry, genuinely touched — must be untouched by repair
-      { key: "MSTR|breakdown2", coin: "MSTR", ticker: "MSTR", ev: "breakdown", t0: now - 6 * 86400000,
+      { key: "xyz:MSTR|breakdown2", coin: "xyz:MSTR", ticker: "MSTR", ev: "breakdown", t0: now - 6 * 86400000,
         mark0: 97.9, dir: -1, psd: "short", stp: 102.9, sd0: 2, rn: 1, status: "resolved", tR: now - 86400000,
         realized: 1.2, realizedS: -2.55, stopped: true, win: true, winS: false },
     ] };
@@ -1790,13 +1795,13 @@ test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, op
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   p.hydrateLedgerNow();   // idempotent
-  const mm = p.getLedgerFor("MINIMAX").closed[0];
+  const mm = p.getLedgerFor("xyz:MINIMAX").closed[0];
   assert.equal(mm.realizedS, -20.79, "fabricated stop-aware outcome reverted to at-horizon truth");
   assert.equal(mm.stopped, false, "false stop cleared");
-  const ms = p.getLedgerFor("MSTR").closed[0];
+  const ms = p.getLedgerFor("xyz:MSTR").closed[0];
   assert.equal(ms.realizedS, -2.55, "valid stopped short untouched");
   assert.equal(ms.stopped, true, "valid stop kept");
-  const ng = p.getLedgerFor("NATGAS").open[0];
+  const ng = p.getLedgerFor("xyz:NATGAS").open[0];
   assert.equal(ng.status, "open", "open claim still resolving");
   assert.equal(ng.stopped, false);
 });
@@ -1813,17 +1818,17 @@ test("play-signed results: fadeStats, resolver sign, and hydrate repair of inver
   const fixture = { ts: now, rearm: [], variants: null,
     open: [
       // legacy open fader: claim med must flip; outcome sign comes from psd at resolution
-      { key: "MSTR|gap", coin: "MSTR", ticker: "MSTR", ev: "gap", t0: now - 3600000, mark0: 100,
+      { key: "xyz:MSTR|gap", coin: "xyz:MSTR", ticker: "MSTR", ev: "gap", t0: now - 3600000, mark0: 100,
         dir: 1, psd: "short", score0: 30, resolveAt: now + 86400000, claim: { n: 12, med: -0.8 } },
     ],
     closed: [
       // the observed shape: up-gap (dir +1), FADE play (psd short), stopped, event-signed
       // realizedS +0.73 displayed as a green stop-aware "win" — in play units this fade LOST
-      { key: "MSTR|gap#c", coin: "MSTR", ticker: "MSTR", ev: "gap", t0: now - 5 * 86400000, mark0: 100,
+      { key: "xyz:MSTR|gap#c", coin: "xyz:MSTR", ticker: "MSTR", ev: "gap", t0: now - 5 * 86400000, mark0: 100,
         dir: 1, psd: "short", stp: 101.2, status: "resolved", tR: now - 4 * 86400000,
         realized: 0.73, realizedS: 0.73, stopped: true, win: true, winS: true, claim: { n: 12, med: -0.8 } },
       // aligned continuation gap (psd long, dir +1): must be untouched
-      { key: "COIN|gap", coin: "COIN", ticker: "COIN", ev: "gap", t0: now - 6 * 86400000, mark0: 50,
+      { key: "xyz:COIN|gap", coin: "xyz:COIN", ticker: "COIN", ev: "gap", t0: now - 6 * 86400000, mark0: 50,
         dir: 1, psd: "long", status: "resolved", tR: now - 5 * 86400000,
         realized: 1.4, realizedS: 1.4, win: true, winS: true, claim: { n: 15, med: 0.6 } },
     ] };
@@ -1832,14 +1837,14 @@ test("play-signed results: fadeStats, resolver sign, and hydrate repair of inver
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   p.hydrateLedgerNow();   // idempotent — pn guards the second pass
-  const mm = p.getLedgerFor("MSTR");
+  const mm = p.getLedgerFor("xyz:MSTR");
   const cl = mm.closed[0];
   assert.equal(cl.realized, -0.73, "failed fade now a LOSS in play units");
   assert.equal(cl.win, false, "win flag follows the play");
   assert.equal(cl.realizedS, -0.73, "stop-aware leg flipped too");
   assert.equal(cl.claimMed, 0.8, "claim median flipped into play units");
   assert.equal(mm.open[0].claimMed, 0.8, "open fader claim median flipped");
-  const co = p.getLedgerFor("COIN").closed[0];
+  const co = p.getLedgerFor("xyz:COIN").closed[0];
   assert.equal(co.realized, 1.4, "aligned claim untouched");
   assert.equal(co.win, true);
 });
@@ -2797,46 +2802,46 @@ test("ai report -74/-75: first-fire marks pass the proven-edge gate — episode 
   // Roster record: breakout gets 8 resolved, positive-avg outcomes on OTHER tickers -> proven.
   // gap (n=1) and unwind (n=1) stay unproven -> their fires on N are suppressed and counted.
   const rosterBo = Array.from({ length: 8 }, (_, i) => ({
-    key: "X" + i + "|breakout", coin: "X" + i, ticker: "X" + i, ev: "breakout",
+    key: "xyz:X" + i + "|breakout", coin: "xyz:X" + i, ticker: "X" + i, ev: "breakout",
     t0: now - (60 + i) * 86400000, mark0: 50, dir: 1, score0: 55, sd0: 2,
     status: "resolved", tR: now - (55 + i) * 86400000,
     realized: i < 6 ? 1.2 : -0.8, realizedS: i < 6 ? 1.2 : -0.8, win: i < 6, winS: i < 6, psd: "long", rn: 1 }));
   const fixture = { ts: now, rearm: [], variants: null,
     open: [
-      { key: "N|breakout", coin: "N", ticker: "N", ev: "breakout", t0: now - 1 * 86400000,
+      { key: "xyz:N|breakout", coin: "xyz:N", ticker: "N", ev: "breakout", t0: now - 1 * 86400000,
         mark0: 100, dir: 1, score0: 60, sd0: 2, resolveAt: now + 4 * 86400000, psd: "long" },
       // psd-short claim of a PROVEN type on an up-event: kind must be short (trade side, not event sign).
       // breakdown is in R_LEDGER_EVS, so give it a roster record too via the loop below.
-      { key: "N|breakdown", coin: "N", ticker: "N", ev: "breakdown", t0: now - 10 * 86400000,
+      { key: "xyz:N|breakdown", coin: "xyz:N", ticker: "N", ev: "breakdown", t0: now - 10 * 86400000,
         mark0: 95, dir: -1, score0: 50, sd0: 2, resolveAt: now + 86400000, psd: "short" },
     ],
     closed: rosterBo.concat(
       Array.from({ length: 8 }, (_, i) => ({
-        key: "Y" + i + "|breakdown", coin: "Y" + i, ticker: "Y" + i, ev: "breakdown",
+        key: "xyz:Y" + i + "|breakdown", coin: "xyz:Y" + i, ticker: "Y" + i, ev: "breakdown",
         t0: now - (70 + i) * 86400000, mark0: 40, dir: -1, score0: 50, sd0: 2,
         status: "resolved", tR: now - (65 + i) * 86400000,
         realized: 0.9, realizedS: 0.9, win: true, winS: true, psd: "short", rn: 1 })),
       [
       // the same breakout run, day before (chained: gap 1d <= 2d) — recorded, must NOT re-mark
-      { key: "N|breakout#r1", coin: "N", ticker: "N", ev: "breakout", t0: now - 2 * 86400000,
+      { key: "xyz:N|breakout#r1", coin: "xyz:N", ticker: "N", ev: "breakout", t0: now - 2 * 86400000,
         mark0: 99, dir: 1, score0: 55, sd0: 2, status: "resolved", tR: now - 1 * 86400000,
         realized: 0.4, realizedS: 0.4, win: true, winS: true, psd: "long", rn: 1 },
       // a genuinely separate episode 21 days earlier — must mark, with its outcome on the mark
-      { key: "N|breakout#old", coin: "N", ticker: "N", ev: "breakout", t0: now - 21 * 86400000,
+      { key: "xyz:N|breakout#old", coin: "xyz:N", ticker: "N", ev: "breakout", t0: now - 21 * 86400000,
         mark0: 80, dir: 1, score0: 62, sd0: 2, status: "resolved", tR: now - 16 * 86400000,
         realized: 2.0, realizedS: 2.0, win: true, winS: true, psd: "long", rn: 1 },
       // unproven types firing on N: recorded in the ledger, SUPPRESSED on the chart
-      { key: "N|gap", coin: "N", ticker: "N", ev: "gap", t0: now - 10 * 86400000,
+      { key: "xyz:N|gap", coin: "xyz:N", ticker: "N", ev: "gap", t0: now - 10 * 86400000,
         mark0: 95, dir: 1, score0: 50, status: "resolved", tR: now - 9 * 86400000,
         realized: 1.1, realizedS: 1.1, win: true, winS: true, psd: "short", rn: 1 },
-      { key: "N|unwind", coin: "N", ticker: "N", ev: "unwind", t0: now - 6 * 86400000,
+      { key: "xyz:N|unwind", coin: "xyz:N", ticker: "N", ev: "unwind", t0: now - 6 * 86400000,
         mark0: 92, dir: -1, score0: 45, sd0: 2, status: "void", tR: now - 5 * 86400000, rn: 1 },
     ]) };
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadAiReports: () => null, saveAiReports: () => {} };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
-  const { marks, suppressed } = p.aiMarksNow("N", "N", 92 * 86400000);
+  const { marks, suppressed } = p.aiMarksNow("xyz:N", "N", 92 * 86400000);
   const bo = marks.filter((m) => m.ev === "breakout");
   assert.equal(bo.length, 2, `chained breakout run must mark once per episode (got ${bo.length})`);
   assert.ok(bo.some((m) => Math.abs(m.t - (now - 21 * 86400000)) < 1000), "the separate old episode keeps its own mark");
@@ -2854,13 +2859,13 @@ test("ai report -74/-75: first-fire marks pass the proven-edge gate — episode 
   // the name-specific override: 5 resolved with >=60% hit on THIS name proves a type the roster
   // hasn't — seed a second poller where only N's own record carries the edge
   const fx2 = { ts: now, rearm: [], variants: null, open: [], closed: Array.from({ length: 5 }, (_, i) => ({
-    key: "N|squeeze#" + i, coin: "N", ticker: "N", ev: "squeeze",
+    key: "xyz:N|squeeze#" + i, coin: "xyz:N", ticker: "N", ev: "squeeze",
     t0: now - (10 + i * 8) * 86400000, mark0: 90, dir: 1, score0: 40,
     status: "resolved", tR: now - (8 + i * 8) * 86400000,
     realized: i < 4 ? 2.0 : -1.0, realizedS: i < 4 ? 2.0 : -1.0, win: i < 4, winS: i < 4, psd: "long", rn: 1 })) };
   const p2 = createPoller({ dex: "xyz", store: Object.assign({}, store, { loadLedger: () => fx2 }), log: () => {}, version: "test", crypto: false });
   p2.hydrateLedgerNow();
-  const r2 = p2.aiMarksNow("N", "N", 92 * 86400000);
+  const r2 = p2.aiMarksNow("xyz:N", "N", 92 * 86400000);
   assert.ok(r2.marks.filter((m) => m.ev === "squeeze").length >= 1, "a name-specific 4/5 record proves the type for THIS name");
 });
 
@@ -2872,7 +2877,7 @@ test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -
   for (const frag of ["AI_MK", "ai-mkleg", "proven-edge signals only", "g.kind==='short'", "distinct signal types at onset", "outTxt", "marksSuppressed"])
     assert.ok(app.includes(frag), `app.js missing -74 marker: ${frag}`);
   assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
-  for (const frag of ["const AI_SCHEMA_V = 5;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
+  for (const frag of ["const AI_SCHEMA_V = 6;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
     assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
 });
 
