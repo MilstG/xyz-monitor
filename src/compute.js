@@ -900,25 +900,74 @@ function bustAssetTags(html, v) {
     .replace('src="/app.js"', 'src="/app.js' + q + '"');
 }
 
-// ---- news relevance gate (pure) ------------------------------------------------------------
+// ---- ticker-in-text matchers (pure) --------------------------------------------------------
+// Two signals, ranked by intent. A cashtag ($AAPL) is an explicit "I mean the ticker" — trusted
+// anywhere, for any symbol. A bare word-boundaried symbol (AAPL) is weaker: in ALL-CAPS wire copy
+// every word is capitalised, so the case carries no signal and a symbol that is also an ordinary
+// word ("Iran war has COST…", "WILL BE HITTING…") collides. The confirmation gate (newsRelevant,
+// where the intended T is already known) trusts the bare word; the discovery gate (newsAttributes,
+// which scans arbitrary text against all 84 names to FIND one) does not — see decision B below.
+function symEsc(T) { return T.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function hasCashtag(txtUp, T) { return new RegExp("\\$" + symEsc(T) + "($|[^A-Za-z0-9])").test(txtUp); }
+function symbolWord(txtUp, T) { return new RegExp("(^|[^A-Za-z0-9])" + symEsc(T) + "($|[^A-Za-z0-9])").test(txtUp); }
+function aliasHit(txtLo, aliases) {
+  if (!Array.isArray(aliases)) return false;
+  for (const a of aliases) if (a && txtLo.includes(String(a).toLowerCase())) return true;
+  return false;
+}
+
+// Tickers that are also ordinary English words: a bare all-caps occurrence is far more likely
+// prose than a ticker, so the discovery gate refuses to ATTRIBUTE on it — the cashtag or the
+// company name is required instead. Curated high-frequency words plus every current word-collision
+// in the xyz roster (BE, COST, ON, ALL, ARE, SO, NOW, LOW, KEY, CAT, FAST, WELL, DOW, IT, …).
+// Distinctive symbols that merely happen to be uncommon words (ARM, SNAP, META) are deliberately
+// LEFT OUT so they keep bare-matching. 2-letter symbols are gated wholesale by length, below.
+const COMMON_WORD = new Set([
+  "THE","AND","FOR","ARE","BUT","NOT","YOU","ALL","ANY","CAN","HAD","HER","WAS","ONE","OUR","OUT",
+  "DAY","GET","HAS","HIM","HIS","HOW","MAN","NEW","NOW","OLD","SEE","TWO","WAY","WHO","BOY","DID",
+  "ITS","LET","PUT","SAY","SHE","TOO","USE","WILL","WITH","THIS","THAT","THEY","THEM","THEN","THAN",
+  "WHEN","WHAT","WHOM","WERE","BEEN","HAVE","FROM","INTO","OVER","UPON","SOON","JUST","ONLY","LAST",
+  "NEXT","MOST","MORE","MANY","MUCH","LESS","VERY","GOOD","BEST","HIGH","DOWN","BOTH","EACH","SUCH",
+  "SOME","LIKE","LOOK","COME","CAME","MAKE","MADE","GOES","GONE","TAKE","TOOK","KNOW","WANT","NEED",
+  "GIVE","KEEP","HELP","CALL","TELL","TOLD","YEAR","WEEK","TIME","LIFE","HAND","PART","SIDE","CASE",
+  "FACT","AREA","AREAS","PLAN","DEAL","RATE","RISK","GAIN","LOSS","JOBS","DATA","CASH","DEBT","BOND",
+  "FUND","BANK","RATES","WARS","WAR","COST","COSTS","LOW","LOWS","HIGHS","WELL","FAST","SLOW","KEY",
+  "CAT","DOG","BIG","TOP","WIN","WON","BUY","PAY","CUT","RAW","HOT","RED","BULL","BEAR","DOW","OFF",
+  "ONTO","EVIL","VERY","AREA","LEAD","LEADS","SOON","MOVE","RISE","FALL","DROP","JUMP","EDGE","PACE",
+  "EACH","ELSE","EVEN","EVER","GROW","HOPE","OPEN","REAL","SAME","SEEN","STOP","SURE","TRUE","WIDE",
+]);
+
+// ---- news relevance gate (pure) — CONFIRMATION lane ----------------------------------------
 // Finnhub's company-news returns articles that merely MENTION or are loosely "related to" the
 // queried symbol — a Meta story arrives under AMZN's query, market listicles arrive under
-// whoever's rotation fetched them. An article is attributed to ticker T only if the headline
-// or summary actually names the company: the symbol as a standalone word (2+ chars — a
-// 1-char symbol like F matches everything), or any alias substring, case-insensitive.
+// whoever's rotation fetched them. The intended ticker T is KNOWN here (the article was fetched
+// under it), so this only confirms the text plausibly concerns T: a cashtag, the symbol as a
+// standalone word (2+ chars — a 1-char symbol like F matches everything), or any alias substring.
 // Everything else is NOT dropped — it goes to the AI relevance verdict, and until verified it
 // lives in the unfiltered tape lane, never the universe feed.
 function newsRelevant(headline, summary, ticker, aliases) {
   const T = String(ticker || "").toUpperCase();
   const txt = String(headline || "") + " " + String(summary || "");
-  if (T.length >= 2) {
-    const re = new RegExp("(^|[^A-Za-z0-9])" + T.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "($|[^A-Za-z0-9])");
-    if (re.test(txt.toUpperCase())) return true;
-  }
-  if (Array.isArray(aliases)) {
-    const lo = txt.toLowerCase();
-    for (const a of aliases) if (a && lo.includes(String(a).toLowerCase())) return true;
-  }
+  const up = txt.toUpperCase();
+  if (T.length >= 2 && (hasCashtag(up, T) || symbolWord(up, T))) return true;
+  return aliasHit(txt.toLowerCase(), aliases);
+}
+
+// ---- news attribution gate (pure) — DISCOVERY lane ----------------------------------------
+// Inverted from newsRelevant: T is NOT known — arbitrary text is scanned against the whole roster
+// to find the name it's about. A bare word-boundaried symbol is too weak to attribute on here,
+// because it's exactly how "war has COST…" wears Costco and "WILL BE HITTING…" wears Bloom Energy.
+// Decision B: a bare symbol attributes ONLY when it can't be read as prose — 3+ chars AND not a
+// common word. Everything shorter, and every word-collision, needs the explicit signal instead: a
+// $CASHTAG or the company name. Nothing is lost — a miss stays in the tape lane, never a wrong badge.
+function newsAttributes(headline, ticker, aliases) {
+  const T = String(ticker || "").toUpperCase();
+  if (!T) return false;
+  const txt = String(headline || "");
+  const up = txt.toUpperCase();
+  if (T.length >= 2 && hasCashtag(up, T)) return true;              // $BE / $COST — explicit intent, always
+  if (aliasHit(txt.toLowerCase(), aliases)) return true;           // the company name in the text — unambiguous
+  if (T.length >= 3 && !COMMON_WORD.has(T) && symbolWord(up, T)) return true;   // distinctive bare symbol only
   return false;
 }
 
@@ -1024,14 +1073,15 @@ function parseTgPreview(html, channel, nowMs) {
 }
 
 // ---- telegram ticker attribution (pure) ----------------------------------------------------
-// Posts aren't fetched "under" a ticker, so the relevance gate runs inverted: scan the text
-// against the whole universe roster. EXACTLY ONE name matching -> attributed (same trust as
-// the deterministic gate); zero or several -> tape. Conservative by construction: a post
-// naming five tickers pollutes none of their feeds.
+// Posts aren't fetched "under" a ticker, so attribution runs inverted: scan the text against the
+// whole universe roster through the DISCOVERY gate (newsAttributes — a bare common-word symbol is
+// not enough; needs a cashtag or the company name). EXACTLY ONE name matching -> attributed; zero
+// or several -> tape. Conservative by construction: a post naming five tickers pollutes none, and
+// "Iran war has cost…" / "WILL BE HITTING…" no longer wear Costco / Bloom Energy.
 function attributeTg(h, rosterMap) {
   let hit = null, count = 0;
   for (const [T, aliases] of rosterMap) {
-    if (newsRelevant(h, null, T, aliases)) { count++; if (count > 1) return null; hit = T; }
+    if (newsAttributes(h, T, aliases)) { count++; if (count > 1) return null; hit = T; }
   }
   return count === 1 ? hit : null;
 }
@@ -1801,6 +1851,8 @@ function reconcileEarnPrints(prints, parsed, nowMs, backDays) {
 module.exports.etDayStr = etDayStr;
 module.exports.mergeNews = mergeNews;
 module.exports.newsRelevant = newsRelevant;
+module.exports.newsAttributes = newsAttributes;
+module.exports.COMMON_WORD = COMMON_WORD;
 module.exports.parseTgPreview = parseTgPreview;
 module.exports.attributeTg = attributeTg;
 module.exports.parseEdgarAtom = parseEdgarAtom;
