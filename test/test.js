@@ -1694,7 +1694,9 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
     "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries",
-    "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols"];
+    "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols",
+    "openCmdk", "closeCmdk", "cmdkRender", "cmdkActivate", "aiFmtCountdown", "aiFmtAgo", "aiTickCountdown",
+    "updateFreshTray", "renderFreshTray"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1711,7 +1713,15 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const em of lm[0].matchAll(/:'([^']*)'/g))
     assert.ok(em[1].length <= 32, `EV_LABELS entry too long to be a label: "${em[1].slice(0, 48)}..."`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip"]) {
+  // Help must cover every tab, including the two newest (report, news) — a fallback to HELP.markets
+  // silently showed the wrong help on those tabs before this was pinned.
+  for (const k of ["markets:`", "trend:`", "sectors:`", "corr:`", "sessions:`", "signals:`", "earnings:`", "backtest:`", "report:`", "news:`"])
+    assert.ok(s.includes(k), `HELP is missing an entry for a tab: ${k}`);
+  // Command palette + freshness tray load-bearing markers.
+  assert.ok(s.includes("CMDK_TABS") && s.includes("metaKey||e.ctrlKey") && s.includes("cmdk-q"), "command palette wiring missing");
+  assert.ok(s.includes("FRESH_SOURCES") && s.includes("/api/health"), "freshness tray wiring missing");
+  assert.ok(s.includes("setInterval(aiTickCountdown,1000)"), "report cooldown live ticker missing");
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
