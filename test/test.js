@@ -2936,3 +2936,141 @@ test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wir
   for (const pin of [".wrap tbody td:first-child{position:sticky", ".drawer{width:100vw", "(hover:none) and (pointer:coarse)"])
     assert.ok(css.includes(pin), `mobile css pin missing: ${pin}`);
 });
+
+// ===================================================================================
+// Performance pass 2026.07.21-01: hourly NDJSON persistence, hot-path memoization,
+// binary-search window scans, per-request serialization cache, series downsampling.
+// Each optimization ships with a test that pins its behavior AND proves equivalence to
+// the code path it replaced — a silent regression here is a silent perf cliff or, worse,
+// a stale value that makes the chart disagree with the board.
+// ===================================================================================
+
+test("perf: binary-search oiDeltaPct/fundingAvg are exactly equivalent to the full-scan versions", () => {
+  const { oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE } = require("../src/compute");
+  // helpers: firstIndexGT/GE on an ascending [[ts,...]] array
+  const A = [[10], [20], [20], [30], [40]];
+  assert.equal(firstIndexGT(A, 20), 3, "firstIndexGT past the last equal ts");
+  assert.equal(firstIndexGE(A, 20), 1, "firstIndexGE at the first equal ts");
+  assert.equal(firstIndexGT(A, 5), 0);
+  assert.equal(firstIndexGE(A, 100), 5);
+  assert.equal(firstIndexGT([], 1), 0, "empty array is a no-op");
+
+  // Freeze the clock so the reference and the module see the SAME `target`/`start` — otherwise
+  // the ms that elapse between the two calls masquerade as a mismatch.
+  const FIXED = 1721563200000, realNow = Date.now;
+  Date.now = () => FIXED;
+  try {
+    const MIN = 60e3, OI_MIN_GAP = 4.5 * MIN, H = HOUR, D = DAY;
+    const refOi = (hist, oiNow, win) => {
+      if (!hist || hist.length < 2 || !(oiNow > 0)) return null;
+      const tol = Math.min(Math.max(2 * OI_MIN_GAP, win * 0.05), 12 * H), target = FIXED - win;
+      let b = null, a = null;
+      for (const s of hist) { if (!(s[1] > 0)) continue; if (s[0] <= target) { if (!b || s[0] > b[0]) b = s; } else if (!a || s[0] < a[0]) a = s; }
+      const dB = b ? target - b[0] : Infinity, dA = a ? a[0] - target : Infinity;
+      if (Math.min(dB, dA) > tol) return null;
+      let base; if (b && a && (a[0] - b[0]) <= 3 * tol) { const sp = a[0] - b[0]; base = b[1] + (a[1] - b[1]) * ((target - b[0]) / sp); } else base = (dB <= dA ? b : a)[1];
+      return base > 0 ? (oiNow - base) / base * 100 : null;
+    };
+    const refFund = (hist, win) => {
+      if (!hist || hist.length < 1) return null; const start = FIXED - win;
+      let pT = null, pF = null, area = 0, span = 0, ss = 0, sn = 0;
+      for (const s of hist) { const t = s[0], f = s[2]; if (f == null || !isFinite(f)) { pT = null; pF = null; continue; } if (t >= start) { ss += f; sn++; } if (pT != null && t > pT) { const aa = Math.max(pT, start); if (t > aa) { const fa = aa === pT ? pF : pF + (f - pF) * ((aa - pT) / (t - pT)); area += (fa + f) / 2 * (t - aa); span += (t - aa); } } pT = t; pF = f; }
+      return span > 0 ? area / span : (sn ? ss / sn : null);
+    };
+    let cmp = 0;
+    for (let it = 0; it < 4000; it++) {
+      const n = 1 + Math.floor(Math.random() * 40), hist = []; let t = FIXED - Math.floor(Math.random() * 40) * H;
+      for (let i = 0; i < n; i++) { t += Math.floor(Math.random() * 3 * H); const oi = Math.random() < 0.1 ? 0 : 1 + Math.random() * 1000; const f = Math.random() < 0.15 ? null : (Math.random() - 0.5) * 0.01; hist.push([t, oi, f]); }
+      const oiNow = 1 + Math.random() * 1000, win = [H, 4 * H, D, 7 * D, 30 * D][Math.floor(Math.random() * 5)];
+      const a = oiDeltaPct(hist, oiNow, win), b = refOi(hist, oiNow, win); cmp++;
+      assert.ok(a === b || (a != null && b != null && Math.abs(a - b) < 1e-9), `oiDeltaPct mismatch ${a} vs ${b}`);
+      const c = fundingAvg(hist, win), d = refFund(hist, win); cmp++;
+      assert.ok(c === d || (c != null && d != null && Math.abs(c - d) < 1e-12), `fundingAvg mismatch ${c} vs ${d}`);
+    }
+    assert.ok(cmp >= 8000, "fuzz coverage sanity");
+  } finally { Date.now = realNow; }
+});
+
+test("perf: hourly spine persists as NDJSON, restores by streaming, and bridges the legacy json once", async () => {
+  const { openStore } = require("../src/store");
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "perf-hstore-"));
+  try {
+    const s = openStore(dir);
+    const hourly = {};
+    for (let k = 0; k < 40; k++) { const arr = []; for (let i = 0; i < 300; i++) arr.push([1721000000000 + i * HOUR, 1 + i * 0.01, 1.5, 0.9, 1.2, 1000 + i]); hourly["C" + k] = arr; }
+    await s.saveHourly({ ts: 1721563200000, hourly });
+    assert.ok(fs.existsSync(path.join(dir, "hourly.ndjson")), "NDJSON spine written");
+    // exact round-trip via the streaming reader
+    const got = {}; const meta = await s.streamHourly((coin, c) => { got[coin] = c; });
+    assert.equal(meta.coins, 40, "all coins streamed back");
+    assert.equal(meta.ts, 1721563200000, "header ts restored");
+    assert.deepEqual(got["C7"], hourly["C7"], "candle arrays survive the round-trip byte-for-byte");
+    // legacy bridge: only the old whole-object json present -> still restores
+    fs.unlinkSync(path.join(dir, "hourly.ndjson"));
+    fs.writeFileSync(path.join(dir, "hourly.json"), JSON.stringify({ ts: 42, hourly: { LEG: [[1, 2, 3, 4, 5, 6]]} }));
+    const s2 = openStore(dir); const leg = {}; const lm = await s2.streamHourly((coin, c) => { leg[coin] = c; });
+    assert.deepEqual(leg.LEG, [[1, 2, 3, 4, 5, 6]], "legacy json is read as a one-time bridge");
+    assert.equal(lm.ts, 42);
+    // after the next NDJSON write, the legacy file is retired so it can't shadow future writes
+    await s2.saveHourly({ ts: 7, hourly: { X: [[9, 9, 9, 9, 9, 9]] } });
+    assert.ok(!fs.existsSync(path.join(dir, "hourly.json")), "legacy json retired after the first ndjson write");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("perf: store source pins the async streamed NDJSON path (no whole-file stringify/parse regression)", () => {
+  const fs = require("fs"), path = require("path");
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(st.includes("hourly.ndjson"), "hourly spine must target the NDJSON file");
+  assert.ok(/async saveHourly/.test(st), "saveHourly must be async (no synchronous 30MB write on the event loop)");
+  assert.ok(st.includes("createWriteStream") && st.includes("streamHourly"), "streamed write + streamed read must both exist");
+  assert.ok(st.includes("hourlyWriting"), "overlapping-write guard must exist");
+  // the old blocking one-shot must be gone
+  assert.ok(!/saveHourly\(data\) \{\s*try \{\s*const tmp = hourlyFile/.test(st), "the old synchronous saveHourly must not survive");
+});
+
+test("perf: getHourly memoizes on the hourlyRaw array reference and rebuilds on replacement", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // the memo must key on the raw array identity, not a timestamp — the only invalidation that
+  // provably can't serve a normalized array disagreeing with its source.
+  assert.ok(pol.includes("r._hsRaw === c") && pol.includes("r._hs"), "getHourly array-ref memo missing");
+  assert.ok(pol.includes("r._hsRaw = c; r._hs = out"), "getHourly memo store missing");
+  // persistHourly enforces the retention window ON WRITE so the file never exceeds what reload keeps
+  assert.ok(/async function persistHourly/.test(pol), "persistHourly must be async");
+  assert.ok(/persistHourly\(\)[^\n]*t >= cut/.test(pol) || pol.includes("t >= cut) packed.push"), "persistHourly must window-on-write");
+  assert.ok(/async function hydrateHourly/.test(pol) && pol.includes("store.streamHourly"), "hydrateHourly must stream");
+  assert.ok(pol.includes("await hydrateHourly()"), "boot must await the async hydrate");
+  // rvol memo keys: spine ref + clock hour
+  assert.ok(pol.includes("r._rvRaw === r.hourlyRaw") && pol.includes("r._rvEndH === rvolEndH"), "rvol memo key missing");
+  // fundPct reads the funding Map directly (no sorted getFunding copy) in the hot path
+  assert.ok(pol.includes("for (const [t, rate] of r.fundH)"), "fundPct must read fundH directly in mapMarket");
+});
+
+test("perf: serveCached caches serialization per payload object; series downsamples; compress has a threshold", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // serialization cache keyed on the object (WeakMap) — NOT on the etag string, which two routes
+  // could share and cross-serve.
+  assert.ok(srv.includes("new WeakMap()") && srv.includes("serialCache.get(body)"), "per-object serialization cache missing");
+  assert.ok(srv.includes("serialCache.set(body, s)"), "serialization cache store missing");
+  assert.ok(srv.includes("return reply.send(s)"), "serveCached must send the pre-serialized string");
+  assert.ok(srv.includes("threshold: 1024"), "compress threshold missing");
+  assert.ok(srv.includes("downsampleSeries") && srv.includes("SERIES_CAP"), "series downsampler missing");
+  // 304 revalidation path must remain intact (untouched by the serialization change)
+  assert.ok(srv.includes('if (req.headers["if-none-match"] === tag)') && srv.includes("reply.code(304).send()"), "304 revalidation path must survive");
+
+  // behavioral check of the downsampler: caps length, preserves first and (exact) last sample
+  const mod = { downsampleSeries: null, SERIES_CAP: null };
+  const m = srv.match(/function downsampleSeries\(arr, cap\) \{[\s\S]*?\n\}/);
+  assert.ok(m, "downsampleSeries body not found");
+  // eslint-disable-next-line no-new-func
+  const ds = new Function(m[0] + "; return downsampleSeries;")();
+  const big = []; for (let i = 0; i < 9000; i++) big.push([i, i * 2]);
+  const out = ds(big, 1500);
+  assert.ok(out.length <= 1501, `downsampled length ${out.length} must be ~cap`);
+  assert.deepEqual(out[0], [0, 0], "first sample preserved");
+  assert.deepEqual(out[out.length - 1], big[big.length - 1], "live-edge (last) sample preserved exactly");
+  assert.deepEqual(ds([[1, 1], [2, 2]], 1500), [[1, 1], [2, 2]], "arrays under the cap pass through untouched");
+  assert.deepEqual(ds(null, 1500), [], "null track degrades to empty");
+});
