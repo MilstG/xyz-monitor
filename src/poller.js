@@ -4068,19 +4068,21 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const ASK_CACHE_TTL = 90 * 1000;
   const askHits = [];              // model-call timestamps (sliding window)
   const askCache = new Map();      // normQ -> { at, res }
-  const ASK_GRAMMAR = "top <metric> [n] (metrics: vol funding squeeze momentum oi carry gainers losers); "
-    + "screen <field><op><value> [& <field><op><value> ...] (fields: funding fundpct squeeze momentum oi vol vstape doi beta dd carry turn d1; ops: > < >= <= =); "
-    + "<TICKER> ; <TICKER> <field> ; signals [TICKER] ; corr <A> <B> ; diverge <TICKER>";
+  const ASK_GRAMMAR = "top <field> [n] ; bottom <field> [n] (any field below, plus: gainers losers); "
+    + "screen <field><op><value> [& <field><op><value> ...] (fields: funding fundpct squeeze momentum oi vol vstape doi beta dd ddy carry turn d1 d7 d30 h1 h4 gap prem rvol adr vol30 rs dcap hitr vsvwap vsma20 vsma50 vsma100 vsma200 vsyopen vsmopen; ops: > < >= <= =); "
+    + "<TICKER> ; <TICKER> <field> ; signals [TICKER] ; corr <A> <B> ; diverge <TICKER> ; vs <A> <B> ; "
+    + "earnings [TICKER|today|tomorrow|week|recent] ; news [TICKER] ; breadth [d1|d7|d30] ; sectors [d1|d7|d30] ; reports";
   const ASK_PLANNER_SYS = "You translate a trader's natural-language question about a markets dashboard into EXACTLY ONE query in this grammar, and output ONLY that query — no prose, no backticks, no explanation.\nGrammar: " + ASK_GRAMMAR
-    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3. If the question cannot be expressed in this grammar, output exactly: NONE";
-  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Answer the user's question using ONLY the numbers in context.markets (each entry is one market's live fields: px, d1 %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, oi, vol, doi = OI change %, beta, dd = % below 30d high, sector). Never invent or estimate a figure that is not in the data. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
+    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>. If the question cannot be expressed in this grammar, output exactly: NONE";
+  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Answer the user's question using ONLY the numbers in context.markets (each entry is one market's live fields; absent keys mean that value is genuinely unavailable for that name): px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. Derive simple arithmetic when asked (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma). Never invent or estimate a figure that is not in or derivable from the data. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
   function classifyAsk(q) { return /^\s*(why|explain|how come|what if|what would|what happens|reason|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(q || "") ? "analyst" : "planner"; }
   function askQueryValid(str, tickerSet) {
     const s = String(str || "").trim(); if (!s || /^none$/i.test(s)) return false;
     const p = s.split(/\s+/), h = p[0].toLowerCase(), H = p[0].toUpperCase();
-    if (h === "top") return p[1] != null;
+    if (h === "top" || h === "bottom") return p[1] != null;
     if (h === "screen") return /[<>=]/.test(s);
-    if (h === "signals" || h === "corr" || h === "diverge") return true;
+    if (h === "signals" || h === "corr" || h === "diverge" || h === "vs" || h === "earnings"
+      || h === "news" || h === "breadth" || h === "sectors" || h === "reports") return true;
     return !!(tickerSet && tickerSet.has(H));   // <TICKER> or <TICKER> <field>
   }
   async function askBoard(q, ctx) {
