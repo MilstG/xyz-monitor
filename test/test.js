@@ -1697,7 +1697,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols",
     "openCmdk", "closeCmdk", "cmdkRender", "cmdkActivate", "aiFmtCountdown", "aiFmtAgo", "aiTickCountdown",
     "updateFreshTray", "renderFreshTray",
-    "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose"];
+    "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
+    "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1730,6 +1731,31 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(/if\(termGrammarComplete\(p\)\)/.test(s) && s.includes("nlResolve(line)"), "terminal routing (grammar→NL→AI) missing");
   assert.ok(s.includes("function termGrammarComplete") && s.includes("function metricOf") && s.includes("function termEarnings"), "terminal NL-overhaul helpers missing");
   assert.ok(s.includes("function nlResolve") && /return null;\s*\/\/ a ticker plus intent we don't understand/.test(s), "nlResolve must escalate (return null) on unresolved ticker intent, not degrade to a card");
+  // NL library v2: stopword-guarded ticker detection wired into nlResolve — the fix for
+  // confident-but-wrong cards ("what's on the tape" must never resolve to the ON card).
+  assert.ok(s.includes("const TSTOP=new Set(") && s.includes("nlTickers(rawWords)"), "guarded ticker detection not wired into nlResolve");
+  // every board column callable: computed lenses + windows + any-field top/bottom
+  for (const pin of ["vsma200:", "vsyopen:", "vsvwap:{", "rvol:{", "d7:{", "metricOf(metric)||tfield(metric)", "function termWin"])
+    assert.ok(s.includes(pin), `full-field terminal coverage missing: ${pin}`);
+  // new whole-board verbs routed in termExec
+  for (const pin of ["h==='breadth'", "h==='sectors'", "h==='reports'", "h==='vs'||h==='compare'", "h==='top'||h==='bottom'", "termEarnCal(a1||'today')"])
+    assert.ok(s.includes(pin), `terminal verb routing missing: ${pin}`);
+  // TERM_VERBS regression: it was referenced by termComps but never DEFINED — a silent
+  // ReferenceError on every keystroke that killed ghost text + tab completion.
+  assert.ok(/const TERM_VERBS=\[/.test(s), "TERM_VERBS must be defined, not just referenced (completion engine ReferenceError)");
+  // server planner grammar stays in sync with the client executor (one grammar, two ends)
+  {
+    const polSrc = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+    for (const pin of ["vsma200", '"top" || h === "bottom"', 'h === "breadth"'])
+      assert.ok(polSrc.includes(pin), `ask planner grammar out of sync with client: ${pin}`);
+    // analyst context starvation regression: the AI once answered "yearly open is not in the
+    // data" because termCompactUniverse shipped 14 fields. Every board metric must ship, and
+    // the analyst legend must describe it — a field missing here IS "not in the data".
+    for (const pin of ["yo:rnd(r.yopen)", "mo:rnd(r.mopen)", "m200:rnd(r.ma200)", "d7:rnd(r.d7)", "rv:rnd(r.rvol)", "ddy:rnd(r.ddy)"])
+      assert.ok(s.includes(pin), `analyst context missing board field: ${pin}`);
+    for (const pin of ["yo = yearly open", "mo = monthly open", "m20/m50/m100/m200", "ddy = % below 52w high", "derivable from the data"])
+      assert.ok(polSrc.includes(pin), `analyst legend out of sync with shipped context: ${pin}`);
+  }
   for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
@@ -3095,6 +3121,29 @@ test("perf: serveCached caches serialization per payload object; series downsamp
   assert.deepEqual(out[out.length - 1], big[big.length - 1], "live-edge (last) sample preserved exactly");
   assert.deepEqual(ds([[1, 1], [2, 2]], 1500), [[1, 1], [2, 2]], "arrays under the cap pass through untouched");
   assert.deepEqual(ds(null, 1500), [], "null track degrades to empty");
+});
+
+test("terminal ticker guard: English words never resolve to tickers mid-sentence — the confident-but-wrong fix", () => {
+  // Extract TSTOP + termTickerish from the client and RUN them: "what's on the tape" must never
+  // become the ON Semiconductor card; caps, $-prefix, and single-word queries stay intentional.
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const m = s.match(/const TSTOP=new Set\([\s\S]*?function termTickerish\(w,only\)\{[\s\S]*?\n\}/);
+  assert.ok(m, "TSTOP + termTickerish not extractable from app.js");
+  const tickerish = new Function(m[0] + "; return termTickerish;")();
+  // blocked: lowercase English words inside a sentence (each collides with a plausible listing)
+  for (const w of ["on", "all", "it", "now", "key", "up", "the", "a", "so", "are", "big", "open"])
+    assert.equal(tickerish(w, false), false, `"${w}" lowercase mid-sentence must NOT be ticker-ish`);
+  // allowed: explicit forms
+  assert.equal(tickerish("ON", false), true, "CAPS is intentional");
+  assert.equal(tickerish("$all", false), true, "$-prefix is intentional");
+  assert.equal(tickerish("NVDA", false), true, "caps symbol passes");
+  assert.equal(tickerish("nvda", false), true, "lowercase non-English token passes");
+  assert.equal(tickerish("sol", false), true, "lowercase crypto habit passes");
+  assert.equal(tickerish("now", true), true, "a single-word query is always intentional");
+  // mixed case is a word, not a symbol; punctuation is stripped before judging
+  assert.equal(tickerish("Its", false), false, "mixed case is prose");
+  assert.equal(tickerish("hype?", false), true, "trailing punctuation stripped, token judged clean");
 });
 
 test("ask-the-board terminal Tier-3: planner returns a grammar query, analyst returns grounded prose, disabled without a key, unmappable escalates", async () => {
