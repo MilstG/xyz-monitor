@@ -1046,6 +1046,32 @@ function attributeTg(h, rosterMap) {
   return count === 1 ? hit : null;
 }
 
+// ---- earnings <-> filings join (pure) ------------------------------------------------------
+// Once a company reports, the actual release exists in the filings store: the 8-K carrying
+// Item 2.02 IS the earnings release, the 10-Q/10-K is the report. Each earnings entry gets
+// its best filing within a window around the report date — preference: 8-K with Item 2.02,
+// then the quarterly/annual report, then any 8-K; latest wins inside a tier. Upcoming entries
+// naturally get nothing until the filing lands: the link APPEARS when it's live.
+function linkEarningsFilings(entries, filings, nowMs) {
+  if (!Array.isArray(entries) || !entries.length || !Array.isArray(filings) || !filings.length) return entries || [];
+  const fl = filings.filter((a) => a && a.fl && a.tk && Number.isFinite(a.pub) && a.url);
+  if (!fl.length) return entries;
+  const byTk = new Map();
+  for (const a of fl) { const T = String(a.tk).toUpperCase(); if (!byTk.has(T)) byTk.set(T, []); byTk.get(T).push(a); }
+  const tier = (a) => /^8-K/.test(a.form || "") && /Item\s+2\.02/i.test(a.h || "") ? 3
+    : /^10-[QK]/.test(a.form || "") ? 2 : (/^8-K/.test(a.form || "") ? 1 : 0);
+  const DAY_ = 86400000;
+  return entries.map((e) => {
+    if (!e || !e.t || !e.d) return e;
+    const D = Date.parse(e.d + "T12:00:00Z");
+    if (!Number.isFinite(D)) return e;
+    const cands = (byTk.get(String(e.t).toUpperCase()) || []).filter((a) => a.pub >= D - 2 * DAY_ && a.pub <= D + 6 * DAY_);
+    let best = null, bestT = 0;
+    for (const a of cands) { const t = tier(a); if (t > bestT || (t === bestT && best && a.pub > best.pub)) { best = a; bestT = t; } }
+    return best ? Object.assign({}, e, { filing: { form: best.form, url: best.url, pub: best.pub } }) : e;
+  });
+}
+
 // ---- shadow-variant promotion rule ---------------------------------------------------------
 // A challenger threshold replaces the incumbent ONLY when, on out-of-sample shadow claims the
 // engine gathered itself: both sides have >= 30 resolutions; the challenger's live expectancy
@@ -1786,6 +1812,7 @@ module.exports.parseTgPreview = parseTgPreview;
 module.exports.attributeTg = attributeTg;
 module.exports.parseEdgarAtom = parseEdgarAtom;
 module.exports.FILINGS_TTL_MS = FILINGS_TTL_MS;
+module.exports.linkEarningsFilings = linkEarningsFilings;
 module.exports.bustAssetTags = bustAssetTags;
 module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
 module.exports.earnDayDiff = earnDayDiff;

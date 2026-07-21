@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom } = require("./compute");
+const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, capPerUniverse, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify, nameAliases } = require("./sectors");
 
@@ -2369,6 +2369,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // earnings: no token or a dead endpoint means an error string on the payload, never a
   // broken tab. Retention/dedupe/caps are pure (mergeNews); eviction keys on PUBLISH time.
   let newsItems = [], newsCache = null, newsVer = 0, newsSig = "", newsErr = null, newsFetchedAt = 0;
+  let earnLnSig = "", earnLnVer = 0;   // earnings<->filings link overlay: ETag component
   const newsTkAt = new Map();          // ticker -> last company-news fetch ms (rotation order)
   const NEWS_BATCH = 3;                // company tickers per minute tick
   const sigTickers = new Set();        // tickers with a live kept signal, refreshed each signals build
@@ -4059,7 +4060,18 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getCandles,
     getTfCandles,
     getSignals: () => signalsCache,
-    getEarnings: () => earnCache,
+    getEarnings: () => {
+      if (!earnCache) return earnCache;
+      // filings links overlay at serve time (filings arrive continuously between the 6h
+      // calendar refreshes); their signature folds into dataTs so a new link busts the ETag
+      const flItems = newsItems.filter((a) => a.fl);
+      const entries = linkEarningsFilings(earnCache.entries, flItems, Date.now());
+      const recent = linkEarningsFilings(earnCache.recent, flItems, Date.now());
+      const sig = entries.concat(recent || []).map((e) => e.filing ? e.t + ":" + e.filing.form : "").join(",");
+      if (sig !== earnLnSig) { earnLnSig = sig; earnLnVer = Date.now(); }
+      return Object.assign({}, earnCache, { entries, recent,
+        dataTs: Math.max(earnCache.dataTs || 0, earnLnVer) });
+    },
     voidEarnPrint,
     getTrend,
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
