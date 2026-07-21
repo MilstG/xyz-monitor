@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
-<script>try{var K='xyzmon.theme',RV='xyzmon.themeReset.v2';if(!localStorage.getItem(RV)){localStorage.setItem(K,'dark');localStorage.setItem(RV,'1');}if(localStorage.getItem(K)==='amber')document.documentElement.setAttribute('data-theme','amber');}catch(e){}</script>
+<script>try{var K='xyzmon.theme',RV='xyzmon.themeReset.v2';if(!localStorage.getItem(RV)){localStorage.setItem(K,'dark');localStorage.setItem(RV,'1');}if(localStorage.getItem(K)==='amber')document.documentElement.setAttribute('data-theme','amber');if(localStorage.getItem('xyzmon.density')==='compact')document.documentElement.setAttribute('data-density','compact');}catch(e){}</script>
 </head>
 <body>
 <header>
@@ -33,6 +33,7 @@
   <span class="st-item">updated <b id="s-upd">—</b></span>
   <span class="st-sep">·</span>
   <span class="st-item" title="server build — if this doesn't match the latest delivery, the deploy is stale">build <b id="ver">—</b></span>
+  <span id="focusChip" hidden><span class="st-sep">·</span><button class="fchip-t" id="focusChipT" title="focused ticker — follows you across tabs; click to reopen the drawer">◎ —</button><button class="fchip-x" id="focusChipX" title="clear the focused ticker">✕</button></span>
 </div>
 
 <nav class="tabs" title="Drag a tab to reorder — the order is saved in this browser">
@@ -50,6 +51,7 @@
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
   <button class="tab" data-view="report" title="AI analyst report — everything this server holds on one ticker (trend ladder, signals &amp; track record, positioning, earnings, flags) compiled and synthesized by an AI analyst (Claude or GPT, per server config) into a plain-language read with scenarios, R/R and an annotated chart. Cached for everyone; regenerate unlocks on TTL expiry or material change.">Report</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
+  <button class="btn" id="densBtn" style="align-self:center;padding:6px 11px" title="Row density — compact tightens every table for more rows per screen; saved in this browser">▤ compact</button>
   <button class="btn" id="helpBtn" style="align-self:center;padding:6px 12px;font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
   <button class="btn" id="logoutBtn" hidden style="align-self:center;padding:6px 11px" title="Sign out — clears this browser's session; the shared password gets you back in">⎋</button>
 </nav>

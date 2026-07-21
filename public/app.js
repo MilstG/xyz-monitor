@@ -611,6 +611,7 @@ function render(){
   for(const r of rows){ const cls=(r.coin===bScope)?' class="benchrow"':'';
     let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>'; r.flash=null; out.push(row); }
   body.innerHTML=out.join('');
+  applyKsel();   // innerHTML rebuild wipes the j/k highlight — re-pin it to the selected coin
 }
 function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(r.d1));
   if(rows.length<3){ el('movers').hidden=true; return; } el('movers').hidden=false;
@@ -992,6 +993,7 @@ function comoversFor(coin, L){ const me=state.rows.get(coin); if(!me||!me.daily)
     if(a.length<20) continue; const c=pearson(a,b); if(c!=null&&isFinite(c)) res.push([r.ticker,c]); }
   res.sort((x,y)=>y[1]-x[1]); return res; }
 function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.detail=coin;
+  state.focus=coin; updateFocusChip();   // focus survives the drawer closing — it follows you across tabs
   const co=comoversFor(coin,90), pos=co?co.slice(0,6):[], neg=co?co.slice(-6).reverse().filter(x=>x[1]<0):[];
   const closes=r.daily?r.daily.slice(-90).map(k=>parseFloat(k.c)).filter(isFinite):[];
   const fu=fmtFunding(r.funding), pct=v=>{const p=fmtPct(v);return `<span class="${p.c}">${p.t}</span>`;};
@@ -3865,6 +3867,50 @@ applyScope();
     render(); if(!el('view-sectors').hidden) renderSectors(); if(!el('view-corr').hidden) renderCorr();
   });
 })();
+// ===== row density: cozy (default) vs compact — one html attribute, CSS does the rest =====
+function applyDensity(mode){ if(mode==='compact') document.documentElement.setAttribute('data-density','compact');
+  else document.documentElement.removeAttribute('data-density');
+  const b=el('densBtn'); if(b) b.textContent = mode==='compact'?'▤ cozy':'▤ compact'; }
+(function(){ const cur=()=>document.documentElement.getAttribute('data-density')==='compact'?'compact':'cozy';
+  applyDensity(cur());   // the pre-paint script already set the attribute; this just syncs the button label
+  const b=el('densBtn'); if(b) b.addEventListener('click',()=>{ const next=cur()==='compact'?'cozy':'compact';
+    applyDensity(next); store.set('xyzmon.density',next); }); })();
+
+// ===== focused ticker: set by any drawer open, shown in the statusline, follows across tabs =====
+function updateFocusChip(){ const c=el('focusChip'); if(!c) return;
+  const r=state.focus?state.rows.get(state.focus):null;
+  if(!r){ c.hidden=true; return; }
+  c.hidden=false; const t=el('focusChipT'); if(t) t.textContent='◎ '+(r.ticker||state.focus); }
+{ const t=el('focusChipT'), x=el('focusChipX');
+  if(t) t.addEventListener('click',()=>{ if(state.focus&&state.rows.has(state.focus)){ showView('markets'); openDetail(state.focus); } });
+  if(x) x.addEventListener('click',()=>{ state.focus=null; updateFocusChip(); }); }
+
+// ===== keyboard navigation: "/" search · j/k rows · Enter drawer · Esc clear =====
+function applyKsel(){ const body=el('body'); if(!body) return;
+  body.querySelectorAll('tr.krow').forEach(tr=>tr.classList.remove('krow'));
+  if(!state.ksel||state.view!=='markets') return;
+  const tr=body.querySelector(`tr[data-coin="${CSS.escape(state.ksel)}"]`); if(tr) tr.classList.add('krow'); }
+function kmoveSel(dir){ const rows=sortedRows(); if(!rows.length) return;
+  let i=rows.findIndex(r=>r.coin===state.ksel);
+  i = i<0 ? (dir>0?0:rows.length-1) : Math.min(rows.length-1, Math.max(0, i+dir));
+  state.ksel=rows[i].coin; applyKsel();
+  const tr=el('body').querySelector('tr.krow'); if(tr) tr.scrollIntoView({block:'nearest'}); }
+document.addEventListener('keydown',e=>{
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  const t=e.target, tag=t&&t.tagName;
+  if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||(t&&t.isContentEditable)) return;
+  if(e.key==='/'){ e.preventDefault();
+    // focus the current tab's primary search; tabs without one fall back to the markets filter
+    const map={markets:'filter',corr:'corrsearch',report:'ai-q'};
+    let id=map[state.view];
+    if(!id){ showView('markets'); id='filter'; }
+    const inp=el(id); if(inp){ inp.focus(); inp.select&&inp.select(); } return; }
+  if(state.view!=='markets'||state.detail) return;   // j/k/Enter drive the markets table only, and never under an open drawer
+  if(e.key==='j'){ e.preventDefault(); kmoveSel(1); return; }
+  if(e.key==='k'){ e.preventDefault(); kmoveSel(-1); return; }
+  if(e.key==='Enter'&&state.ksel&&state.rows.has(state.ksel)){ e.preventDefault(); openDetail(state.ksel); return; }
+  if(e.key==='Escape'&&state.ksel){ state.ksel=null; applyKsel(); } });
+
 document.querySelectorAll('#corrtf button').forEach(b=>{ if(b.dataset.d===state.corr.tf)b.classList.add('active');
   b.addEventListener('click',()=>{ state.corr.tf=b.dataset.d; document.querySelectorAll('#corrtf button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-corr').hidden) renderCorr(); }); });
@@ -4491,6 +4537,9 @@ function openReportView(){
         rows.forEach((x,j)=>x.classList.toggle('sel',j===i)); } });
     q.addEventListener('blur',()=>{ setTimeout(()=>{ const b=el('ai-sug'); if(b) b.hidden=true; },150); }); }
   const note=el('ai-note'); if(note) note.textContent='everything the server holds on one name, synthesized by Claude — cached for the whole group; regenerate unlocks on TTL or material change';
+  // No active report but a focused ticker exists → open its report instead of a blank pane.
+  if(!state.report.coin && state.focus && state.rows.has(state.focus)){ state.report.coin=state.focus;
+    const fr=state.rows.get(state.focus); if(q&&fr) q.value=fr.ticker||state.focus; }
   if(state.report.coin) loadAiReport(state.report.coin); else { const p=el('ai-report'); if(p) p.hidden=true; }
   loadAiRecent();
   if(!state.report.tick) state.report.tick=setInterval(()=>{ const v=el('view-report');

@@ -735,3 +735,26 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .earn-fl{border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:1px 7px;font-size:10.5px;text-decoration:none;font-family:var(--mono);white-space:nowrap}
 .earn-fl.mat{border-color:var(--accent);color:var(--accent)}
 .earn-fl:hover{text-decoration:underline;text-underline-offset:2px}
+
+/* ===== focused-ticker chip (statusline) ===== */
+#focusChip{display:inline-flex;align-items:center;gap:5px}
+.fchip-t{background:var(--panel);border:1px solid var(--border);color:var(--accent);font-family:var(--mono);
+  font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:6px;cursor:pointer;letter-spacing:.3px}
+.fchip-t:hover{border-color:var(--accent)}
+.fchip-x{background:transparent;border:none;color:var(--muted);font-size:11px;padding:2px 4px;cursor:pointer;border-radius:4px}
+.fchip-x:hover{color:var(--text)}
+
+/* ===== keyboard row selection (j/k on the markets table) ===== */
+.wrap tbody tr.krow td,.wrap tbody tr.krow th{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.wrap tbody tr.krow td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+
+/* ===== compact density — one attribute tightens every table ===== */
+[data-density="compact"] .wrap tbody td{font-size:12px;padding:4px 9px}
+[data-density="compact"] .wrap tbody th{padding:4px 9px}
+[data-density="compact"] .wrap thead th{font-size:10px;padding-top:6px;padding-bottom:6px}
+[data-density="compact"] .stat .v{font-size:15px}
+[data-density="compact"] .chip{font-size:11px;padding:3px 7px}
+[data-density="compact"] .movers{margin-bottom:10px}
+[data-density="compact"] .sigrec-t td,[data-density="compact"] .sigrec-t th{padding:3px 7px;font-size:11.5px}
+[data-density="compact"] .earn-row{padding-top:4px;padding-bottom:4px}
+[data-density="compact"] .ptbl td,[data-density="compact"] .ptbl th{padding:3px 7px;font-size:11.5px}
