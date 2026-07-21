@@ -335,7 +335,14 @@ function renderFreshTray(h){ const box=el('freshtray'); if(!box||!h) return;
     const ageTxt=age!=null?aiFmtAgo(age)+' ago':(failing?'fetch failing':'no data yet');
     return `<span class="fdot ${cls}" title="${esc(s.tip)} — ${ageTxt}"><i></i>${esc(label)}</span>`; }).join('');
   box.innerHTML=dots; box.hidden=false; }
-async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); renderFreshTray(h); }catch(_){ } }
+async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); renderFreshTray(h); if(h&&h.ai) renderAskBudget(h.ai.askDayLeft, h.ai.askPerDay); }catch(_){ } }
+// Ambient ask-AI budget chip in the terminal bar. Shared group pool, resets midnight UTC; green
+// with headroom, amber when low (<=25%), red at zero. Fed by the 45s health poll AND by each ask
+// response (askDayLeft/askPerDay ride on every /api/ask reply) so it updates the instant you spend.
+function renderAskBudget(left,per){ const b=el('termBudget'); if(!b||left==null||per==null) return;
+  const cls=left<=0?'out':left<=Math.max(1,per*0.25)?'low':'';
+  b.className='tp-budget'+(cls?' '+cls:'');
+  b.innerHTML='ask&nbsp;<b>'+left+'/'+per+'</b>'; }
 function updateSyncProgress(){ const rows=activeRows(); let done=0; for(const r of rows) if(r.feat) done++;
   const s=el('sync'); if(!s) return;
   if(rows.length>0&&done>=rows.length){ s.classList.add('done'); el('sync-t').textContent='synced'; }
@@ -4574,11 +4581,13 @@ async function termAsk(text){
   try{
     const r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({q:text, ctx:{scope:state.scope, mode, universe:uni}})});
     const d=await r.json().catch(()=>({})); think.remove();
+    if(d&&d.askDayLeft!=null) renderAskBudget(d.askDayLeft, d.askPerDay);   // reflect the spend immediately
     if(d&&d.disabled) return termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
     if(!d||!d.ok){ if(d&&d.error==='rate') return termOutAI(`busy — the shared AI limit is maxed for a moment <span class="tp-trans">(retry in ${Math.ceil((d.retryMs||3000)/1000)}s)</span>.`);
+      if(d&&d.error==='ask-daily-cap') return termOutAI(`daily AI limit reached — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
     if(d.mode==='planner'&&d.query){ termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
-    if(d.mode==='analyst'){ return termOutAI(`${tesc(d.answer||'').replace(/\n/g,'<br>')}\n<span class="tp-trans">— reasoned over ${d.marketsN||uni.length} live markets · ${tesc(d.model||'ai')}${d.cached?' · cached':''}</span>`); }
+    if(d.mode==='analyst'){ const tail=d.askDayLeft!=null?` · <span style="color:${d.askDayLeft<=Math.max(1,(d.askPerDay||40)*0.25)?'var(--accent)':'var(--faint)'}">${d.askDayLeft} ask ${d.askDayLeft===1?'call':'calls'} left today</span>`:''; return termOutAI(`${tesc(d.answer||'').replace(/\n/g,'<br>')}\n<span class="tp-trans">— reasoned over ${d.marketsN||uni.length} live markets · ${tesc(d.model||'ai')}${d.cached?' · cached':''}${tail}</span>`); }
     return termErr('empty response');
   }catch(e){ think.remove(); termErr('ask failed — '+tesc(e.message)); }
 }
@@ -4632,7 +4641,7 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="tp-trans">Or just ask: "who reports tomorrow", "best sector this week", "whats above the 200dma", "nvda vs amd", "hows the tape". Tab completes · ↑↓ history · ~ opens.</span>`); }
 
 // ---- open / close / input ----
-function termOpen(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(!p) return; p.hidden=false; if(fab) fab.classList.add('hidden'); const q=termEl('termCmd'); if(q) q.focus(); }
+function termOpen(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(!p) return; p.hidden=false; if(fab) fab.classList.add('hidden'); const q=termEl('termCmd'); if(q) q.focus(); updateFreshTray();   /* refresh the ask-budget chip on open */ }
 function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) p.hidden=true; if(fab) fab.classList.remove('hidden'); }
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent

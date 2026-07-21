@@ -697,8 +697,13 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .tp-bar{display:flex;align-items:center;gap:9px;padding:9px 13px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.02);font-size:11.5px;color:var(--muted)}
 .tp-dot{width:8px;height:8px;border-radius:50%;background:var(--up)}
 .tp-brand{font-family:var(--disp);color:var(--text);font-size:12.5px;font-weight:500}.tp-brand b{color:var(--accent)}
+.tp-budget{margin-left:auto;font-family:var(--mono);font-size:10px;letter-spacing:.3px;color:var(--muted);
+  border:1px solid var(--border);border-radius:5px;padding:1px 6px;white-space:nowrap}
+.tp-budget b{color:var(--up);font-weight:600}
+.tp-budget.low b{color:var(--accent)}
+.tp-budget.out b{color:var(--down)}
 .tp-min{margin-left:0;color:var(--muted);cursor:pointer;font-size:14px;padding:0 4px}
-.tp-exp{margin-left:auto;color:var(--muted);cursor:pointer;font-size:13px;padding:0 6px}
+.tp-exp{margin-left:8px;color:var(--muted);cursor:pointer;font-size:13px;padding:0 6px}
 .tp-exp:hover,.tp-min:hover{color:var(--text)}
 .term-panel.big{width:min(1040px,95vw);height:min(90vh,940px);bottom:2.5vh;right:2.5vw}
 .term-panel.big .tp-scroll{font-size:12.5px}
