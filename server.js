@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.21-10";
+const VERSION = "2026.07.21-11";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -68,17 +68,19 @@ function downsampleSeries(arr, cap) {
 }
 function serveCached(req, reply, payload, fallback) {
   const body = payload || fallback;
-  reply.header("cache-control", "no-cache");
   const tag = etagFor(body);
+  return sendCachedBody(req, reply, body, tag);
+}
+// Shared tail of the cached-serve path: ETag 304 short-circuit, then the WeakMap-memoized
+// serialize + pre-gzip. Split out so serveKeyed (below) can supply its own ETag without
+// duplicating the compression plumbing.
+function sendCachedBody(req, reply, body, tag) {
+  reply.header("cache-control", "no-cache");
   reply.header("etag", tag);
   if (req.headers["if-none-match"] === tag) { reply.code(304).send(); return; }
   let s = serialCache.get(body);
   if (s === undefined) { s = JSON.stringify(body); serialCache.set(body, s); }
   reply.header("content-type", "application/json; charset=utf-8");
-  // Pre-gzip cache: hand back the cached compressed Buffer and set content-encoding ourselves so
-  // @fastify/compress sees an already-encoded body and no-ops. Only worth it over the same 1 KB
-  // threshold the plugin uses; below that (health, channel lists, fallbacks) we send the string and
-  // let the plugin decide. Fallback literals are fresh objects (WeakMap miss) but tiny, so re-gzip is free.
   if (s.length >= 1024 && /\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
     let gz = gzipCache.get(body);
     if (gz === undefined) { gz = zlib.gzipSync(s); gzipCache.set(body, gz); }
@@ -87,6 +89,27 @@ function serveCached(req, reply, payload, fallback) {
     return reply.send(gz);
   }
   return reply.send(s);   // under threshold or client can't gzip — @fastify/compress handles the rest
+}
+// Per-coin cached serve for candles/series. The poller builds these payloads FRESH on every call
+// (fresh arrays, so the WeakMap serialize/gzip memo can never hit) and they carry no dataTs, so
+// etagFor would hand every coin the SAME W/"0" tag — a client's If-None-Match could then be
+// answered with a 304 for a DIFFERENT coin's chart. Both problems are fixed here: the ETag is an
+// explicit content key (coin + query shape + the spine's own update stamp), so it's unique per
+// (coin, timeframe, data version) and collisions are impossible; and a small bounded identity
+// cache holds the built object under that key, giving the serialize+gzip memo a stable reference
+// to hit on the tf-toggle spam these routes actually see. A new content version yields a new key,
+// so a stale body is never served — the map just accumulates a superseded entry, pruned by size.
+const keyedCache = new Map();   // etagKey -> built payload object (stable identity for the memos)
+function serveKeyed(req, reply, etagKey, build, fallback) {
+  const tag = 'W/"' + etagKey + '"';
+  if (req.headers["if-none-match"] === tag) { reply.header("etag", tag).header("cache-control", "no-cache").code(304).send(); return; }
+  let body = keyedCache.get(etagKey);
+  if (body === undefined) {
+    body = build() || fallback;
+    keyedCache.set(etagKey, body);
+    if (keyedCache.size > 800) { let i = 0; for (const k of keyedCache.keys()) { keyedCache.delete(k); if (++i >= 400) break; } }
+  }
+  return sendCachedBody(req, reply, body, tag);
 }
 
 // Constant-time credential check: hash both sides to equal length, then timingSafeEqual.
@@ -200,6 +223,33 @@ pw.addEventListener('keydown',function(e){ if(e.key==='Enter') submit(); });
 async function main() {
   const fastify = Fastify({ logger: false });
 
+  // True when a request carries a valid session cookie or correct HTTP Basic creds. Shared by the
+  // optional site gate below AND the always-on AI-cost guard, so "authenticated" means one thing.
+  const reqAuthed = (req) => {
+    if (sessionOk(getCookie(req, "xyzsess"))) return true;
+    const hdr = req.headers.authorization || "";
+    const [scheme, enc] = hdr.split(" ");
+    if (scheme === "Basic" && enc) {
+      const s = Buffer.from(enc, "base64").toString();
+      const i = s.indexOf(":");
+      if (i >= 0 && credsOk(s.slice(0, i), s.slice(i + 1))) return true;
+    }
+    return false;
+  };
+
+  // Always-on guard for the paid AI-escalation endpoints. These spend real OpenAI/Anthropic budget,
+  // so they must never answer an unauthenticated caller — including when SITE_PASSWORD is UNSET, a
+  // posture where the rest of the (read-only, cache-served) site is deliberately open. Unauthed here
+  // is a hard 401: the AI ask/report generation stays closed on the open web until a site password
+  // exists. The terminal's local grammar is client-side and unaffected; only the AI fallback is gated.
+  // Registered before the routes so it fires first; the optional full-site gate below still runs too.
+  const AI_COST_PATHS = new Set(["/api/ask", "/api/ai-report"]);
+  fastify.addHook("onRequest", async (req, reply) => {
+    const u = req.url.split("?")[0];
+    if (req.method === "POST" && AI_COST_PATHS.has(u) && !reqAuthed(req))
+      return reply.code(401).header("cache-control", "no-store").send({ error: "unauthorized", detail: "AI endpoints require authentication — set SITE_PASSWORD to enable them" });
+  });
+
   // Optional shared-password gate. Disabled unless SITE_PASSWORD is set. Two ways in:
   //   1. Session cookie from the login page (30-day HMAC token) — the normal browser path.
   //   2. HTTP Basic — kept so curl/scripts can still hit the API without a cookie jar.
@@ -210,14 +260,7 @@ async function main() {
     fastify.addHook("onRequest", async (req, reply) => {
       const u = req.url.split("?")[0];
       if (u === "/api/health" || u === "/logout" || (u === "/login" && req.method === "POST")) return;
-      if (sessionOk(getCookie(req, "xyzsess"))) return;
-      const hdr = req.headers.authorization || "";
-      const [scheme, enc] = hdr.split(" ");
-      if (scheme === "Basic" && enc) {
-        const s = Buffer.from(enc, "base64").toString();
-        const i = s.indexOf(":");   // split on the FIRST colon only — passwords may contain colons
-        if (i >= 0 && credsOk(s.slice(0, i), s.slice(i + 1))) return;
-      }
+      if (reqAuthed(req)) return;
       // CRITICAL: in an async hook, reply.send() alone does NOT stop the lifecycle — the
       // route handler still runs and double-sends (here: @fastify/static also answered "/",
       // corrupting the response into a body-less 401 that hangs the browser). Returning the
@@ -320,13 +363,16 @@ async function main() {
   });
   // Per-market OI + funding history — powers the drawer sparklines.
   fastify.get("/api/series", (req, reply) => {
-    reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
-    const s = poller.getSeries(coin) || { oi: [], funding: [] };
     // The drawer sparklines are a few hundred px wide; shipping the full 31d full-resolution track
     // (~9k points) is wasted bytes. Uniform-stride down to ~SERIES_CAP points, always keeping the
     // last (live-edge) sample exact. Shape is preserved; nothing downstream reads raw point count.
-    return { oi: downsampleSeries(s.oi, SERIES_CAP), funding: downsampleSeries(s.funding, SERIES_CAP) };
+    // serveKeyed adds the ETag 304 (drawer reopen on the same name is a no-body round trip) and the
+    // downsample+gzip is memoized on the built object until the coin's spine advances.
+    serveKeyed(req, reply, "series|" + coin + "|" + poller.getCoinStamp(coin).st,
+      () => { const s = poller.getSeries(coin) || { oi: [], funding: [] };
+        return { coin, oi: downsampleSeries(s.oi, SERIES_CAP), funding: downsampleSeries(s.funding, SERIES_CAP) }; },
+      { coin, oi: [], funding: [] });
   });
   // Claim-history browser: filter by ticker (coin=), by event type (ev=), or both. Powers the
   // drawer signal record and the Signals-tab full history search.
@@ -364,12 +410,26 @@ async function main() {
   // modal) — [t,o,h,l,c] bars plus the live mark, so the client's plotted EMAs reproduce the
   // board's to the last bit. Unknown tf values fall through to the legacy hourly shape.
   fastify.get("/api/candles", (req, reply) => {
-    reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
     const days = req.query && req.query.days;
     const tf = req.query && req.query.tf;
-    if (tf) { const r = poller.getTfCandles(coin, tf); if (r) return r; }
-    return { coin, candles: poller.getCandles(coin, days) };
+    // Heaviest per-request payload on the board, and re-fetched on every tf-toggle in the report
+    // and trend chart modals — exactly the traffic the ETag 304 + gzip memo pay off on. The tf
+    // series carries a FORMING last bar whose close is the live mark (getTfCandles reads r.px),
+    // which streams without bumping the spine stamp — so for tf requests the key also folds in a
+    // coarse ~0.1% price bucket: instant toggle-spam at one price 304s, a real move mints a fresh
+    // key, and the forming bar can never freeze against the tape (the one-code-path rule). The
+    // legacy `days` hourly payload does no live-mark substitution client-side, so it keys on the
+    // spine stamp alone.
+    let key;
+    if (tf) { const cs = poller.getCoinStamp(coin);
+      const bucket = cs.px > 0 ? Math.round(Math.log(cs.px) * 1000) : 0;   // ~0.1% granularity, scale-free
+      key = "candles|" + coin + "|tf:" + String(tf).toLowerCase() + "|" + cs.st + "|" + bucket; }
+    else key = "candles|" + coin + "|d:" + (days || 14) + "|" + poller.getCoinStamp(coin).st;
+    serveKeyed(req, reply, key, () => {
+      if (tf) { const r = poller.getTfCandles(coin, tf); if (r) return r; }
+      return { coin, candles: poller.getCandles(coin, days) };
+    }, { coin, candles: [] });
   });
   // AI analyst report: everything this server holds on one ticker, compiled and sent to the
   // Anthropic API (Fable, Opus fallback), validated, and cached for the whole group. GET serves
@@ -391,7 +451,8 @@ async function main() {
   // (`admin reset-reports <password>`); the password is compared server-side against
   // ADMIN_PASSWORD only — never logged, never stored, never echoed. Fails closed (503)
   // when the env var is unset; a sliding-window failure lockout maps to 429.
-  fastify.post("/api/ai-reset", async (req, reply) => {
+  // 8 KB body cap — the payload is just { password }; anything larger is malformed or hostile (413).
+  fastify.post("/api/ai-reset", { bodyLimit: 8 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const r = poller.resetAiDay(String((req.body || {}).password || ""));
     return reply.code(r.ok ? 200 : (r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403)).send(r);
@@ -405,7 +466,9 @@ async function main() {
   // when its local grammar + NL layers can't resolve a question. Planner returns a grammar query
   // the CLIENT executes against its live rows (numbers stay the board's); analyst returns grounded
   // prose over the compact market bundle the client sends. Rate-limited + cached server-side.
-  fastify.post("/api/ask", async (req, reply) => {
+  // 256 KB body cap — the client ships a compact ~160-name universe bundle here; a legitimate
+  // payload is far under this, so the cap only catches oversized/abusive bodies (413).
+  fastify.post("/api/ask", { bodyLimit: 256 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
     return poller.askBoard(b.q || "", b.ctx || {});
