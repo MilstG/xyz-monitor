@@ -724,12 +724,16 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .tp-scroll .amber{color:var(--accent)}.tp-scroll .sec{color:var(--muted)}
 .tp-chip{border:1px solid var(--border);border-radius:4px;padding:0 4px;font-size:10px;color:var(--muted)}
 .tp-chip.l{color:var(--up);border-color:#274b3b}.tp-chip.s{color:var(--down);border-color:#4b2b26}.tp-chip.p{color:var(--accent);border-color:var(--accent-dim)}
-.tp-in{display:flex;align-items:center;gap:9px;padding:10px 13px;border-top:1px solid var(--border);background:rgba(255,255,255,.015)}
-.tp-pr{color:var(--accent);font-weight:600;font-family:var(--mono)}
-.tp-wrap{position:relative;flex:1;display:flex;align-items:center}
-#termCmd{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-family:var(--mono);font-size:13px;caret-color:var(--accent);z-index:2}
+.tp-in{display:flex;align-items:flex-start;gap:9px;padding:10px 13px;border-top:1px solid var(--border);background:rgba(255,255,255,.015)}
+.tp-pr{color:var(--accent);font-weight:600;font-family:var(--mono);font-size:13px;line-height:1.5}
+.tp-wrap{position:relative;flex:1;min-width:0;display:flex;align-items:flex-start}
+/* termCmd is a textarea: rows=1 by default, JS auto-grows it to scrollHeight (capped, then
+   scrolls). pre-wrap + break-word make long questions wrap instead of running off-screen. The
+   ghost overlay behind it shares the exact box metrics (zero padding, same font/line-height,
+   left:0 right:0) so completion text stays aligned under the typed text. */
+#termCmd{flex:1;min-width:0;background:transparent;border:0;outline:0;color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.5;caret-color:var(--accent);z-index:2;resize:none;padding:0;margin:0;display:block;max-height:120px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
 #termCmd::placeholder{color:var(--faint)}
-#termGhost{position:absolute;left:0;top:0;pointer-events:none;color:var(--faint);font-family:var(--mono);font-size:13px;white-space:pre;z-index:1}
+#termGhost{position:absolute;left:0;top:0;right:0;pointer-events:none;color:var(--faint);font-family:var(--mono);font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word;padding:0;margin:0;z-index:1}
 .tp-hint{padding:5px 14px 9px;font-family:var(--mono);font-size:10.5px;color:var(--faint);min-height:24px}
 .tp-hint .ex{color:var(--blue);cursor:pointer}.tp-hint .ex:hover{text-decoration:underline}
 .tp-hint b{color:var(--muted)}

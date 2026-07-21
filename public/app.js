@@ -4664,15 +4664,23 @@ function termGhostFn(){ const q=termEl('termCmd'), g=termEl('termGhost'); const 
 function termHint(c){ const h=termEl('termHint'), v=termEl('termCmd').value.trim();
   if(!v){ h.innerHTML=`<b>try</b> <span class="ex" data-tcmd="top funding 5">top funding 5</span> · <span class="ex" data-tcmd="most crowded shorts">most crowded shorts</span> · <span class="ex" data-tcmd="signals">signals</span> · <span class="ex" data-tcmd="help">help</span>`; return; }
   h.innerHTML=(c&&c.length)?`↹ ${c.slice(0,6).map(x=>`<span class="ex" data-tcmd="${tesc(x)}">${tesc(x.slice(x.lastIndexOf(' ')+1))}</span>`).join(' ')}`:'<span class="sec">↵ run</span>'; }
+// termCmd is a textarea now: keep its height matched to its content (one row, growing to a
+// cap then scrolling) so long questions wrap and jump lines instead of running off-screen.
+function termAutoGrow(el){ if(!el) return; el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px'; }
 { const q=termEl('termCmd');
-  if(q){ q.addEventListener('input',termGhostFn);
+  if(q){ q.addEventListener('input',()=>{ termGhostFn(); termAutoGrow(q); });
     q.addEventListener('keydown',e=>{
-      if(e.key==='Tab'){ e.preventDefault(); const c=termComps(q.value); if(c[0]){ q.value=c[0]+' '; termGhostFn(); } return; }
-      if(e.key==='Enter'){ const v=q.value; if(v.trim()) termHist.unshift(v); termHi_=-1; q.value=''; termEl('termGhost').textContent=''; termRun(v); termHint(); return; }
-      if(e.key==='ArrowUp'){ e.preventDefault(); if(termHi_<termHist.length-1){ termHi_++; q.value=termHist[termHi_]; termGhostFn(); } return; }
-      if(e.key==='ArrowDown'){ e.preventDefault(); if(termHi_>0){ termHi_--; q.value=termHist[termHi_]; } else { termHi_=-1; q.value=''; } termGhostFn(); return; }
+      if(e.key==='Tab'){ e.preventDefault(); const c=termComps(q.value); if(c[0]){ q.value=c[0]+' '; termGhostFn(); termAutoGrow(q); } return; }
+      // Enter runs; Shift+Enter inserts a newline (default) then regrows. Skip while an IME
+      // composition is open so committing a candidate with Enter doesn't fire the command.
+      if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); const v=q.value; if(v.trim()) termHist.unshift(v); termHi_=-1; q.value=''; termAutoGrow(q); termEl('termGhost').textContent=''; termRun(v); termHint(); return; }
+      if(e.key==='Enter'){ setTimeout(()=>termAutoGrow(q),0); return; }
+      // History arrows only steal the keypress on the first/last visual line — mid-question the
+      // caret moves between wrapped lines like a normal textarea.
+      if(e.key==='ArrowUp'&&!q.value.slice(0,q.selectionStart).includes('\n')){ e.preventDefault(); if(termHi_<termHist.length-1){ termHi_++; q.value=termHist[termHi_]; termGhostFn(); termAutoGrow(q); } return; }
+      if(e.key==='ArrowDown'&&!q.value.slice(q.selectionEnd).includes('\n')){ e.preventDefault(); if(termHi_>0){ termHi_--; q.value=termHist[termHi_]; } else { termHi_=-1; q.value=''; } termGhostFn(); termAutoGrow(q); return; }
       if(e.key==='Escape'){ termClose(); return; }
-      if(e.key==='ArrowRight'&&termEl('termGhost').textContent&&q.selectionStart===q.value.length){ q.value=termEl('termGhost').textContent; termGhostFn(); } }); }
+      if(e.key==='ArrowRight'&&termEl('termGhost').textContent&&q.selectionStart===q.value.length){ q.value=termEl('termGhost').textContent; termGhostFn(); termAutoGrow(q); } }); }
   const fab=termEl('termFab'); if(fab) fab.addEventListener('click',termOpen);
   const mn=termEl('termMin'); if(mn) mn.addEventListener('click',termClose);
   const ex=termEl('termExpand'); if(ex) ex.addEventListener('click',()=>{ const pn=termEl('termPanel'); if(!pn) return; const big=pn.classList.toggle('big'); ex.textContent=big?'⤡':'⤢'; ex.title=big?'shrink':'expand'; const q=termEl('termCmd'); if(q) q.focus(); });
