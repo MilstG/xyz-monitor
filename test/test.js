@@ -1799,6 +1799,21 @@ test("server route manifest: every load-bearing API route is registered exactly 
   // Admin budget reset is a POST backed by poller.resetAiDay — pin route, mapping, and export.
   assert.equal(srv.split('fastify.post("/api/ai-reset"').length - 1, 1, "POST /api/ai-reset must be registered exactly once");
   assert.ok(srv.includes('r.error === "cooldown" || r.error === "daily-cap" ? 429'), "/api/ai-report must map daily-cap to 429 like cooldown");
+  // -11 perf: candles + series must go through serveKeyed (ETag 304 + gzip memo), NOT no-store.
+  // A raw serveCached here would be a correctness BUG — etagFor keys only on dataTs, which these
+  // payloads lack, so every coin would share W/"0" and a client could get a 304 for the wrong
+  // coin's chart. serveKeyed supplies a collision-proof per-coin/tf/version ETag instead.
+  assert.ok(srv.includes("function serveKeyed") && srv.includes("function sendCachedBody"), "serveKeyed + sendCachedBody must exist");
+  assert.ok(/get\("\/api\/candles"[\s\S]{0,1600}serveKeyed\(/.test(srv), "/api/candles must serve via serveKeyed");
+  assert.ok(/get\("\/api\/series"[\s\S]{0,1200}serveKeyed\(/.test(srv), "/api/series must serve via serveKeyed");
+  assert.ok(!/get\("\/api\/candles"[\s\S]{0,200}no-store/.test(srv), "/api/candles must no longer be no-store");
+  assert.ok(srv.includes('"candles|"') && srv.includes("cs.px > 0 ? Math.round(Math.log(cs.px)"), "tf-candles key must fold in the live-mark bucket so the forming bar can't freeze");
+  // -11 security: the paid AI endpoints must be closed to unauthenticated callers regardless of
+  // SITE_PASSWORD (never serve model budget to the open web), and both POSTs carry a body cap.
+  assert.ok(srv.includes("const reqAuthed") && srv.includes('AI_COST_PATHS = new Set(["/api/ask", "/api/ai-report"])'), "always-on AI-cost auth guard missing");
+  assert.ok(srv.includes("!reqAuthed(req)") && /AI_COST_PATHS\.has\(u\) && !reqAuthed/.test(srv), "AI-cost guard must 401 unauthenticated callers");
+  assert.ok(/fastify\.post\("\/api\/ask", \{ bodyLimit: 256 \* 1024 \}/.test(srv), "/api/ask must carry a 256 KB body limit");
+  assert.ok(/fastify\.post\("\/api\/ai-reset", \{ bodyLimit: 8 \* 1024 \}/.test(srv), "/api/ai-reset must carry an 8 KB body limit");
   // Every poller getter the route layer references must be defined AND exported by the poller
   // factory — a route bound to a phantom getter is a 500 the drawer's silent catch would eat.
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
@@ -3367,4 +3382,61 @@ test("daily report budget + admin reset + terra effort routing", async () => {
   assert.ok(app.includes("data-cap") && app.includes("!b.dataset.cap"), "cooldown ticker must not re-enable a cap-blocked regenerate button");
   assert.ok(app.includes("daily-cap"), "client must handle the daily-cap error distinctly from cooldown");
   assert.ok(app.includes("generations left today") && app.includes("today</span>"), "report card must show the remaining daily budget");
+});
+
+test("ask daily budget: cap enforced, only successful non-cached calls burn it, surfaced everywhere, chip wired", async () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/ASK_REPORTS_PER_DAY = Math\.max\(1, Number\(process\.env\.ASK_MAX_PER_DAY\) \|\| 40\)/.test(pol), "ask daily cap must default to 40, env ASK_MAX_PER_DAY");
+  assert.ok(pol.includes('error: "ask-daily-cap"'), "askBoard must fail closed with ask-daily-cap");
+  assert.ok(pol.includes("askDay.count++;"), "a successful ask must burn budget");
+  assert.ok(pol.includes("day: aiDay, askDay,"), "ask budget must persist with the report budget (redeploy can't refill)");
+
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  // injected transport (anthropic shape — no env key => provider anthropic)
+  const answers = ["screen funding<0 & squeeze>50"];
+  let calls = 0;
+  const aiFetch = async () => { calls++; return { ok: true, json: async () => ({ content: [{ type: "text", text: answers[0] }], stop_reason: "end_turn" }) }; };
+  // cap of 2 for a fast exhaustion test
+  process.env.ASK_MAX_PER_DAY = "2";
+  try {
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+    const uni = [{ t: "SOL", sqz: 71, f: -22 }];
+    const q = (s) => p.askBoard(s, { universe: uni });
+
+    const a = await q("most crowded shorts?");
+    assert.equal(a.ok, true); assert.equal(a.askPerDay, 2); assert.equal(a.askDayLeft, 1, "one spent -> 1 left");
+    // a REPEAT of the same question is a cache hit — must NOT burn budget
+    const callsBefore = calls;
+    const aCached = await q("most crowded shorts?");
+    assert.equal(aCached.cached, true, "identical question served from cache");
+    assert.equal(calls, callsBefore, "cache hit made no model call");
+    assert.equal(aCached.askDayLeft, 1, "cache hit did not burn budget");
+    // a DIFFERENT question spends the last unit
+    const b = await q("top funding names?");
+    assert.equal(b.ok, true); assert.equal(b.askDayLeft, 0, "budget now exhausted");
+    // next distinct question is capped BEFORE any model call
+    const callsAtCap = calls;
+    const capped = await q("what about momentum leaders?");
+    assert.equal(capped.ok, false); assert.equal(capped.error, "ask-daily-cap", "exhausted -> ask-daily-cap");
+    assert.equal(calls, callsAtCap, "a capped ask must not reach the model");
+    assert.equal(capped.askDayLeft, 0);
+    // health surfaces the budget
+    const st = p.stats();
+    assert.equal(st.ai.askPerDay, 2); assert.equal(st.ai.askDayLeft, 0, "health carries the live ask budget");
+  } finally { delete process.env.ASK_MAX_PER_DAY; }
+
+  // ---- client (Option B ambient chip) wiring ----
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("function renderAskBudget"), "ambient chip renderer missing");
+  assert.ok(/renderAskBudget\(h\.ai\.askDayLeft, h\.ai\.askPerDay\)/.test(app), "chip must be fed by the health poll");
+  assert.ok(app.includes("renderAskBudget(d.askDayLeft, d.askPerDay)"), "chip must update from each ask response");
+  assert.ok(app.includes("'ask-daily-cap'") && app.includes("daily AI limit reached"), "client must handle the ask daily-cap message");
+  assert.ok(app.includes("ask calls left today") || app.includes("call':'calls'"), "analyst tail must show remaining ask budget");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(html.includes('id="termBudget"'), "terminal bar must contain the budget chip");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".tp-budget") && css.includes(".tp-budget.out"), "chip CSS (incl. exhausted state) missing");
 });
