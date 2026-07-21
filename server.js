@@ -9,7 +9,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.21-02";
+const VERSION = "2026.07.21-04";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -374,6 +374,15 @@ async function main() {
   fastify.get("/api/ai-reports", (req, reply) => {
     reply.header("cache-control", "no-store");
     return poller.listAiReports();
+  });
+  // Ask-the-board terminal, Tier-3 fallback. POST { q, ctx } — the client escalates here only
+  // when its local grammar + NL layers can't resolve a question. Planner returns a grammar query
+  // the CLIENT executes against its live rows (numbers stay the board's); analyst returns grounded
+  // prose over the compact market bundle the client sends. Rate-limited + cached server-side.
+  fastify.post("/api/ask", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const b = req.body || {};
+    return poller.askBoard(b.q || "", b.ctx || {});
   });
   fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR }, ...poller.stats(), ts: Date.now() }));
 
