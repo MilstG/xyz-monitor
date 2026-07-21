@@ -3373,7 +3373,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // allowance and return an empty message). Switching providers is a Railway variable, not a code change.
   const AI_DEFAULTS = {
     anthropic: { model: "claude-fable-5", fb: "claude-opus-4-8", maxTokens: 3000 },
-    openai: { model: "gpt-5.6-sol", fb: "gpt-5.6-terra", maxTokens: 8000 },
+    openai: { model: "gpt-5.6-terra", fb: "gpt-5.6-sol", maxTokens: 8000 },
   };
   // ---- off-site ledger backup (weekly, GitHub contents API) --------------------------------
   // The volume is the only home of the track record; this pushes the raw persisted files
@@ -3430,6 +3430,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   const AI_SCHEMA_V = 6;   // v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
+  // Per-surface reasoning effort (OpenAI GPT-5.x only — the Anthropic body stays minimal and
+  // Fable's adaptive thinking is left alone). Reports get the deep pass, the terminal gets the
+  // fast one; both are Railway variables, not code changes.
+  const AI_REPORT_EFFORT = process.env.AI_REPORT_EFFORT || "high";
+  const AI_ASK_EFFORT = process.env.AI_ASK_EFFORT || "medium";
+  // Daily generation budget, shared across the group exactly like the TTL cooldown. Only
+  // SUCCESSFUL generations burn budget (a failed model call costs the group nothing), the day
+  // rolls at midnight UTC, and the counter persists with the report cache so a redeploy can't
+  // refill it. Early reset: terminal `admin reset-reports <password>` -> POST /api/ai-reset.
+  const AI_REPORTS_PER_DAY = Math.max(1, Number(process.env.AI_REPORTS_PER_DAY) || 5);
+  const utcDay = () => new Date().toISOString().slice(0, 10);
+  let aiDay = { day: utcDay(), count: 0 };
+  function aiDayRoll() { const d = utcDay(); if (aiDay.day !== d) aiDay = { day: d, count: 0 }; }
+  function aiDayLeft() { aiDayRoll(); return Math.max(0, AI_REPORTS_PER_DAY - aiDay.count); }
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
   const AI_LEVEL_KINDS = new Set(["void", "target", "zone_low", "zone_high", "note"]);
   let aiReports = new Map();    // coin -> stored report (successes only; errors are returned, not cached)
@@ -3439,9 +3453,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const saved = store.loadAiReports ? store.loadAiReports() : null;
     if (saved && Array.isArray(saved.reports))
       for (const rep of saved.reports) if (rep && rep.coin) aiReports.set(rep.coin, rep);
+    // Same-day restart keeps the spent budget; a stale day is simply dropped (fresh counter).
+    if (saved && saved.day && saved.day.day === utcDay())
+      aiDay = { day: saved.day.day, count: Math.max(0, Number(saved.day.count) || 0) };
   } catch (_) {}
   function persistAiReports() {
-    try { if (store.saveAiReports) store.saveAiReports({ ts: Date.now(), reports: [...aiReports.values()] }); } catch (_) {}
+    try { if (store.saveAiReports) store.saveAiReports({ ts: Date.now(), day: aiDay, reports: [...aiReports.values()] }); } catch (_) {}
   }
   const pctOf = (px, ref) => (px != null && ref != null && isFinite(px) && isFinite(ref) && ref > 0)
     ? +((px / ref - 1) * 100).toFixed(2) : null;
@@ -3956,6 +3973,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // exact transport — provider switch, refusal handling, timeout — without inheriting the
     // report prompt or its token budget. Absent opts = the report path, byte-identical.
     const sys = (opts && opts.system) || AI_SYSTEM, maxTok = (opts && opts.maxTokens) || AI_MAX_TOKENS;
+    // opts.effort maps to OpenAI's reasoning_effort (low|medium|high) and is silently ignored
+    // on the Anthropic path — Fable's adaptive thinking must not be steered.
+    const effort = (opts && opts.effort) || null;
     const doFetch = aiFetch || fetch;
     const ctrl = new AbortController();
     const to = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
@@ -3965,12 +3985,14 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         // OpenAI Chat Completions. max_completion_tokens (not max_tokens — GPT-5.x rejects the
         // old name) covers reasoning + output together, hence the larger budget. Body stays
         // minimal on purpose, same principle as the Anthropic path.
+        const oaBody = { model, max_completion_tokens: maxTok,
+          messages: [{ role: "system", content: sys },
+            { role: "user", content: "Context:\n" + JSON.stringify(ctx) }] };
+        if (effort) oaBody.reasoning_effort = effort;
         res = await doFetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: { "content-type": "application/json", authorization: "Bearer " + AI_KEY() },
-          body: JSON.stringify({ model, max_completion_tokens: maxTok,
-            messages: [{ role: "system", content: sys },
-              { role: "user", content: "Context:\n" + JSON.stringify(ctx) }] }),
+          body: JSON.stringify(oaBody),
           signal: ctrl.signal,
         });
         if (!res.ok) { let msg = "HTTP " + res.status; try { const j = await res.json(); if (j && j.error && j.error.message) msg += " — " + j.error.message; } catch (_) {} return { ok: false, error: msg }; }
@@ -4049,8 +4071,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     }
     const rep = aiReports.get(coin);
     if (!rep) return { coin, status: "none", canRegen: true, ts: Date.now(),
-      enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL };
+      enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
+      perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
     const pub = aiPublic(rep);
+    pub.perDay = AI_REPORTS_PER_DAY; pub.dayLeft = aiDayLeft();   // live, never cached with the report
     const ar = analystRecordFor(coin);
     if (ar) pub.analystRecord = ar;   // live, not cached with the report: the record moves as claims resolve, and the ETag moves with it
     return pub;
@@ -4064,7 +4088,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     });
     out.sort((a, b) => b.ts - a.ts);
     return { ts: Date.now(), ttlMs: AI_TTL_MS, model: AI_MODEL, provider: AI_PROVIDER,
-      enabled: !!(AI_KEY() || aiFetch), reports: out.slice(0, 30) };
+      enabled: !!(AI_KEY() || aiFetch), perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft(),
+      reports: out.slice(0, 30) };
   }
   async function generateAiReport(coin) {
     if (!coin || !aiUniverseOk(coin)) return { ok: false, error: "not in the live universe" };
@@ -4076,19 +4101,23 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // convenience, this check is the gate.
       if (!p.canRegen) return { ok: false, error: "cooldown", regenInMs: p.regenInMs, report: p };
     }
+    // The daily budget is the group's second gate after the TTL: 5 generations a day (env-
+    // tunable), enforced HERE — the client's disabled button is convenience, this check is real.
+    if (!aiDayLeft()) return { ok: false, error: "daily-cap", perDay: AI_REPORTS_PER_DAY, dayLeft: 0 };
     if (aiGenerating.has(coin)) return { ok: false, error: "generation already running for this ticker" };
     aiGenerating.add(coin);
     try {
       const ctx = compileAiContext(coin);
       if (!ctx) return { ok: false, error: "not enough data compiled for this ticker yet" };
-      let used = AI_MODEL, call = await callModel(AI_MODEL, ctx);
+      let used = AI_MODEL, call = await callModel(AI_MODEL, ctx, { effort: AI_REPORT_EFFORT });
       let val = call.ok ? validateAiReport(call.text, ctx) : { ok: false, error: call.error };
       if (!val.ok) {
         log(`AI report ${coin}: ${AI_MODEL} failed (${val.error}) — falling back to ${AI_MODEL_FALLBACK}`);
-        used = AI_MODEL_FALLBACK; call = await callModel(AI_MODEL_FALLBACK, ctx);
+        used = AI_MODEL_FALLBACK; call = await callModel(AI_MODEL_FALLBACK, ctx, { effort: AI_REPORT_EFFORT });
         val = call.ok ? validateAiReport(call.text, ctx) : { ok: false, error: call.error };
       }
       if (!val.ok) { log(`AI report ${coin}: fallback failed too (${val.error})`); return { ok: false, error: val.error }; }
+      aiDay.count++;   // only a SUCCESSFUL generation burns budget; aiAssemble persists the counter with the cache
       const rep = aiAssemble(coin, ctx, val, used);
       // Analyst-read accountability: every validated DIRECTIONAL read becomes a frozen claim
       // in its own ledger bucket — side, the report's own void, its target, mark at generation
@@ -4122,7 +4151,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         }
       } catch (e) { log("airead claim open failed (isolated, report unaffected): " + (e && e.message)); }
       log(`AI report generated: ${coin} via ${used} (bias ${rep.ai.bias}, ev ${rep.computed.evR != null ? rep.computed.evR + "R" : "n/a"})`);
-      return { ok: true, report: aiPublic(rep) };
+      return { ok: true, report: aiPublic(rep), perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
     } finally { aiGenerating.delete(coin); }
   }
 
@@ -4168,20 +4197,25 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     askHits.push(now);
     const markets = Array.isArray(ctx.universe) ? ctx.universe.slice(0, 160) : [];
     const tickerSet = new Set(markets.map((m) => String(m && m.t || "").toUpperCase()).filter(Boolean));
+    // Terminal calls run at medium effort — fast enough for a console, deep enough to plan or
+    // reason correctly. The token budgets look oversized for one-line outputs because OpenAI
+    // bills reasoning tokens against max_completion_tokens: a tight budget at medium effort
+    // returns finish_reason=length with an EMPTY message. On Anthropic these are pure output
+    // caps, so the headroom is harmless there.
     const callBoth = async (sys, payload, maxTok) => {
-      let c = await callModel(AI_MODEL, payload, { system: sys, maxTokens: maxTok });
-      if (!c.ok) c = await callModel(AI_MODEL_FALLBACK, payload, { system: sys, maxTokens: maxTok });
+      let c = await callModel(AI_MODEL, payload, { system: sys, maxTokens: maxTok, effort: AI_ASK_EFFORT });
+      if (!c.ok) c = await callModel(AI_MODEL_FALLBACK, payload, { system: sys, maxTokens: maxTok, effort: AI_ASK_EFFORT });
       return c;
     };
     const analyst = async () => {
-      const c = await callBoth(ASK_ANALYST_SYS, { question: q, scope: ctx.scope || null, markets }, 700);
+      const c = await callBoth(ASK_ANALYST_SYS, { question: q, scope: ctx.scope || null, markets }, 2600);
       return c.ok ? { ok: true, mode: "analyst", answer: c.text.trim(), marketsN: markets.length }
                   : { ok: false, error: c.error || "model call failed" };
     };
     const mode0 = ctx.mode === "analyst" || ctx.mode === "planner" ? ctx.mode : classifyAsk(q);
     let res;
     if (mode0 === "planner") {
-      const c = await callBoth(ASK_PLANNER_SYS, { question: q, scope: ctx.scope || null, tickers: [...tickerSet] }, 300);
+      const c = await callBoth(ASK_PLANNER_SYS, { question: q, scope: ctx.scope || null, tickers: [...tickerSet] }, 1500);
       if (!c.ok) res = { ok: false, error: c.error || "model call failed" };
       else {
         const query = c.text.trim().split("\n")[0].replace(/^`+|`+$/g, "").trim();
@@ -4191,6 +4225,29 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     res.model = AI_MODEL; res.provider = AI_PROVIDER;
     if (res.ok) { askCache.set(normQ, { at: Date.now(), res }); if (askCache.size > 200) askCache.clear(); }
     return res;
+  }
+
+  // ===== Admin reset of the daily report budget ==========================================
+  // Triggered from the ask terminal (`admin reset-reports <password>`). The password lives
+  // ONLY in ADMIN_PASSWORD (a Railway env var) — never in the repo, never logged, never
+  // returned. Constant-time compare so a right-length guess can't be timed; only FAILURES
+  // count toward a sliding-window lockout, so online brute force over the group's shared
+  // endpoint is infeasible while legitimate resets stay free. Fails closed when unconfigured.
+  const ADMIN_WINDOW_MS = 5 * 60 * 1000, ADMIN_MAX_FAILS = 8;
+  const adminFails = [];
+  function resetAiDay(password) {
+    const admin = process.env.ADMIN_PASSWORD || "";
+    if (!admin) return { ok: false, error: "not-configured" };
+    const now = Date.now();
+    while (adminFails.length && adminFails[0] < now - ADMIN_WINDOW_MS) adminFails.shift();
+    if (adminFails.length >= ADMIN_MAX_FAILS)
+      return { ok: false, error: "rate", retryMs: ADMIN_WINDOW_MS - (now - adminFails[0]) };
+    const a = Buffer.from(String(password || ""), "utf8"), b = Buffer.from(admin, "utf8");
+    const okPw = a.length === b.length && require("crypto").timingSafeEqual(a, b);
+    if (!okPw) { adminFails.push(now); return { ok: false, error: "bad-password" }; }
+    aiDayRoll(); aiDay.count = 0; persistAiReports();
+    log("AI daily report budget reset by admin");
+    return { ok: true, perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
   }
 
   return {
@@ -4205,6 +4262,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getTfCandles,
     getSignals: () => signalsCache,
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
+    resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     getEarnings: () => {
       if (!earnCache) return earnCache;
       // filings links overlay at serve time (filings arrive continuously between the 6h
@@ -4320,7 +4378,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
             offTopic: Object.values(secTape).filter((s) => s === "off-topic").length,
             learnedAliases: Object.keys(nameLearned).length } },
         ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
-          fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size },
+          fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size,
+          perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };
