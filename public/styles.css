@@ -758,3 +758,22 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 [data-density="compact"] .sigrec-t td,[data-density="compact"] .sigrec-t th{padding:3px 7px;font-size:11.5px}
 [data-density="compact"] .earn-row{padding-top:4px;padding-bottom:4px}
 [data-density="compact"] .ptbl td,[data-density="compact"] .ptbl th{padding:3px 7px;font-size:11.5px}
+
+/* ===== mobile suite (-100): touch targets, sticky ticker column, full-width drawer ===== */
+@media (hover:none) and (pointer:coarse){
+  .btn,.tab,.seg button,.scope{min-height:38px}
+  .star{padding:6px}   /* the watchlist toggle is a fingertip target, not a cursor target */
+}
+@media (max-width:680px){
+  .drawer{width:100vw;border-left:none}
+  .tabs{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .tabs::-webkit-scrollbar{display:none}
+  .tabs .tab{white-space:nowrap;flex:0 0 auto}
+  /* the ticker column stays pinned while the table pans horizontally */
+  .wrap{-webkit-overflow-scrolling:touch}
+  .wrap thead th:first-child{position:sticky;left:0;z-index:4}
+  .wrap tbody td:first-child{position:sticky;left:0;z-index:1;background:var(--panel)}
+  .wrap tbody tr.krow td:first-child{background:var(--panel2)}
+}
+/* line-chart readouts: on touch the finger covers the point — keep the readout clear of it */
+@media (hover:none){ .lread{pointer-events:none} }

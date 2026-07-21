@@ -1309,6 +1309,7 @@ function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
 function buildLayoutMenu(){ const pop=el('laypop'); const names=Object.keys(state.layouts.list).sort((a,b)=>a.localeCompare(b));
   let h='<div class="cphead">Layouts \u00b7 columns, sort, window, filters</div>';
   h+=`<div class="lrow2${state.layouts.active==null?' cur':''}" data-lay=""><span class="lname">Default</span><span class="lmut">factory</span></div>`;
+  h+=`<div class="lrow2" data-mob="1"><span class="lname">Mobile</span><span class="lmut">built-in \u00b7 phone columns</span></div>`;
   for(const n of names){ const cur=state.layouts.active===n;
     h+=`<div class="lrow2${cur?' cur':''}" data-lay="${esc(n)}"><span class="lname">${esc(n)}${cur&&layoutDirty()?' \u2022':''}</span>`+
        `<button class="lact" data-ren="${esc(n)}" title="Rename">\u270e</button><button class="lact" data-del="${esc(n)}" title="Delete">\u2715</button></div>`; }
@@ -1318,6 +1319,7 @@ function buildLayoutMenu(){ const pop=el('laypop'); const names=Object.keys(stat
     h+=`<button class="btn" id="laySave" style="margin-top:7px;width:100%;justify-content:center" title="Overwrite this layout with the current view">Save to \u2018${esc(state.layouts.active)}\u2019${layoutDirty()?' \u2022':''}</button>`;
   pop.innerHTML=h;
   pop.querySelectorAll('.lrow2').forEach(rw=>rw.addEventListener('click',e=>{ if(e.target.closest('.lact')) return;
+    if(rw.dataset.mob){ applyMobileCols(); buildLayoutMenu(); return; }
     applyLayout(rw.dataset.lay||null); buildLayoutMenu(); }));
   pop.querySelectorAll('[data-ren]').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); const old=b.dataset.ren;
     const nn=(prompt('Rename layout', old)||'').trim(); if(!nn||nn===old) return;
@@ -1459,16 +1461,29 @@ function attachLineHover(){
     if(svg.dataset.hb) return; svg.dataset.hb='1';   // bind once — this now runs from several render paths
     const reg=_hoverReg[svg.id]; if(!reg||!reg.xs||!reg.xs.length) return;
     const cx=svg.querySelector('.lcx'), read=el(svg.id+'-r'); if(!read) return;
-    svg.addEventListener('mousemove',(ev)=>{
+    const scrubAt=(clientX)=>{
       const r=svg.getBoundingClientRect(); if(!r.width) return;
       const vbW=(svg.viewBox&&svg.viewBox.baseVal&&svg.viewBox.baseVal.width)||r.width;
-      const px=(ev.clientX-r.left)/r.width*vbW;
+      const px=(clientX-r.left)/r.width*vbW;
       let bi=0,bd=Infinity; for(let i=0;i<reg.xs.length;i++){ const dd=Math.abs(reg.xs[i]-px); if(dd<bd){bd=dd;bi=i;} }
       cx.setAttribute('x1',reg.xs[bi]); cx.setAttribute('x2',reg.xs[bi]); cx.style.opacity='1';
       read.innerHTML=reg.rows[bi]; read.style.opacity='1';
       read.style.left = px > vbW*0.55 ? '10px' : 'auto'; read.style.right = px > vbW*0.55 ? 'auto' : '10px';
-    });
+    };
+    svg.addEventListener('mousemove',(ev)=>scrubAt(ev.clientX));
     svg.addEventListener('mouseleave',()=>{ if(cx)cx.style.opacity='0'; read.style.opacity='0'; });
+    // Touch: a drag whose intent is horizontal scrubs the crosshair (and stops the page pan);
+    // a vertical drag is a scroll and is left alone. First-touch shows the readout immediately —
+    // charts have no competing tap action, so no long-press gate is needed here.
+    let tst=null;
+    svg.addEventListener('touchstart',(ev)=>{ const t=ev.touches[0]; if(!t) return;
+      tst={x:t.clientX,y:t.clientY,on:false}; scrubAt(t.clientX); },{passive:true});
+    svg.addEventListener('touchmove',(ev)=>{ const t=ev.touches[0]; if(!t||!tst) return;
+      if(!tst.on){
+        const dx=Math.abs(t.clientX-tst.x), dy=Math.abs(t.clientY-tst.y);
+        if(dx>dy+4) tst.on=true; else if(dy>12){ tst=null; if(cx)cx.style.opacity='0'; read.style.opacity='0'; return; } }
+      if(tst&&tst.on){ ev.preventDefault(); scrubAt(t.clientX); } },{passive:false});
+    svg.addEventListener('touchend',()=>{ tst=null; });
   });
 }
 // ---- shared chart-system helpers (one visual language for the whole tab) ----
@@ -3911,6 +3926,31 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&state.ksel&&state.rows.has(state.ksel)){ e.preventDefault(); openDetail(state.ksel); return; }
   if(e.key==='Escape'&&state.ksel){ state.ksel=null; applyKsel(); } });
 
+// ===== mobile column preset: the phone-width table, as a built-in layout =====
+// Columns that survive a ~390px viewport with the ticker pinned: price, the day, the week,
+// funding and positioning. Everything else stays one ⚙ toggle away — this hides, never removes.
+const MOBILE_COLS=['ticker','px','d1','d7','funding','doi','vol'];
+function applyMobileCols(){
+  const ord=[...MOBILE_COLS.filter(k=>COL_BY_KEY[k])];
+  for(const c of COLS) if(!ord.includes(c.key)) ord.push(c.key);
+  state.colOrder=ord;
+  state.colHidden=new Set(COLS.filter(c=>c.hideable!==false && !MOBILE_COLS.includes(c.key)).map(c=>c.key));
+  state.layouts.active=null; saveLayouts();
+  buildHead(); render(); savePrefs(); updateLayoutBtn(); }
+// First visit on a phone-width screen with no stored table prefs → start from the mobile preset
+// instead of a 1300px table. One-shot: the flag is set either way, so a user who widens the
+// column set never gets overridden on a later visit.
+(function(){ try{
+  if(!matchMedia('(max-width:680px)').matches) return;
+  if(store.get('xyzmon.mobilePreset.v1')) return;
+  store.set('xyzmon.mobilePreset.v1','1');
+  if(store.get(PKEY)) return;   // returning browser — their arrangement wins
+  applyMobileCols();
+}catch(_){}})();
+
+// ===== PWA: install-only service worker (caches nothing — see server.js /sw.js) =====
+if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }catch(_){}}
+
 document.querySelectorAll('#corrtf button').forEach(b=>{ if(b.dataset.d===state.corr.tf)b.classList.add('active');
   b.addEventListener('click',()=>{ state.corr.tf=b.dataset.d; document.querySelectorAll('#corrtf button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-corr').hidden) renderCorr(); }); });
@@ -4405,6 +4445,43 @@ function renderTreemap(){
   document.addEventListener('mouseleave', hide, true);
   window.addEventListener('scroll', hide, true);
   window.addEventListener('blur', hide);
+
+  // --- touch parity (standing requirement: every hover readout must work on touch) ---------
+  // Convention: TAP keeps its click action untouched; LONG-PRESS (~420ms) is the hover. On a
+  // sparkline the long-press engages a crosshair scrub that follows the finger (page scroll is
+  // suppressed only while scrubbing). Releasing a long-press leaves the tip on screen to read;
+  // the next touch anywhere clears it. The synthesized click after a long-press is swallowed so
+  // holding a table row reads its tooltip without also opening the drawer.
+  var lp={x:0,y:0,node:null,spark:null,timer:null,held:false,scrub:false};
+  function lpCancel(){ if(lp.timer){ clearTimeout(lp.timer); lp.timer=null; } }
+  document.addEventListener('touchstart', function(e){
+    if(e.touches.length!==1){ lpCancel(); return; }
+    var t=e.touches[0], tgt=e.target;
+    hide();   // any new touch clears a lingering readout first
+    lp.x=t.clientX; lp.y=t.clientY; lp.held=false; lp.scrub=false;
+    lp.spark = (tgt.closest && tgt.closest('svg.tspark, svg[data-series]')) || null;
+    lp.node = lp.spark ? null : tipNode(tgt);
+    if(!lp.spark && !lp.node) return;
+    lpCancel();
+    lp.timer=setTimeout(function(){
+      lp.held=true;
+      if(lp.spark){ lp.scrub=true; handleSpark(lp.spark,{clientX:lp.x,clientY:lp.y}); }
+      else { var raw=hoist(lp.node); if(raw){ clearCross(); show(fmtTitle(raw), lp.x, lp.y); } }
+    }, 420);
+  }, {passive:true});
+  document.addEventListener('touchmove', function(e){
+    var t=e.touches[0]; if(!t) return;
+    if(lp.scrub){ e.preventDefault(); handleSpark(lp.spark,{clientX:t.clientX,clientY:t.clientY}); return; }
+    if(Math.abs(t.clientX-lp.x)>10 || Math.abs(t.clientY-lp.y)>10){ lpCancel(); }   // it's a scroll, not a press
+  }, {passive:false});
+  document.addEventListener('touchend', function(e){
+    lpCancel();
+    if(lp.held){ e.preventDefault();   // swallow the synthesized click — the hold was a read, not a tap
+      if(lp.scrub) hide();             // scrub readout dies with the finger; a data-tip stays to be read
+      lp.held=false; lp.scrub=false; }
+  }, {passive:false});
+  document.addEventListener('touchcancel', function(){ lpCancel(); lp.held=false; lp.scrub=false; }, {passive:true});
+  document.addEventListener('contextmenu', function(e){ if(lp.held||lp.timer){ e.preventDefault(); } });
 })();
 
 // ---- Correlation lookback (7d/30d/90d, default 30d) + unclassified alert ---
