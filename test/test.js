@@ -2840,8 +2840,8 @@ test("client -73: multi-timeframe chart + action panel ship end to end", () => {
   for (const frag of ["aiChartTfSeg", "data-aitf", "state.report.tf", "aiActionHtml", "enter_on_pullback", "entryIsMarket", "EMA13 ", "fill-opacity=\"0.08\""])
     assert.ok(app.includes(frag), `app.js missing -73 marker: ${frag}`);
   for (const cls of [".ai-act", ".ai-tf"]) assert.ok(css.includes(cls), `styles.css missing: ${cls}`);
-  for (const frag of ["AI_SCHEMA_V", "report format updated", "schemaV: AI_SCHEMA_V", "actionable stance without void/target geometry", "downgraded from an entry stance", "bucketCandles(r.hourlyRaw, 24, HOUR)"])
-    assert.ok(pol.includes(frag), `poller.js missing -73 marker: ${frag}`);
+  for (const frag of ["AI_SCHEMA_V", "report format updated", "schemaV: AI_SCHEMA_V", "actionable stance without void/target geometry", "downgraded from an entry stance", "bucketsFor(r, 24)"])
+    assert.ok(pol.includes(frag), `poller.js missing -73 marker: ${frag}`);   // daily-OHLC upgrade still aggregates the spine, now via the memoized bucketsFor (2026.07.21-08)
 });
 
 test("ai report -74/-75: first-fire marks pass the proven-edge gate — episode runs mark once, unproven types are suppressed and counted, sides come from the frozen psd", () => {
@@ -3185,4 +3185,65 @@ test("ask-the-board terminal Tier-3: planner returns a grammar query, analyst re
     aiFetch: async () => { s3++; return s3 === 1 ? respond("buy SOL now!!") : respond("grounded fallback answer"); } });
   const bad = await p3.askBoard("find me something good", { scope: "crypto", universe: uni });
   assert.ok(bad.ok && bad.mode === "analyst", `invalid planner output must not reach the client as a query, got ${JSON.stringify(bad)}`);
+});
+
+test("perf batch 2026.07.21-08: snapshot/daily keep their cache OBJECT while content is unchanged", () => {
+  // #1 — the serialize + gzip WeakMap caches (server.js) and every polling client's 304 all hinge on
+  // the poller handing back the SAME object reference when nothing a client renders has changed. An
+  // empty universe is stable by construction: two back-to-back builds must produce one object, and
+  // dataTs must be a content clock (frozen across the no-op), not the wall clock.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => ({ ts: 0, open: [], closed: [], rearm: [], variants: null }),
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.buildSnapshotNow();
+  const a = p.getSnapshot();
+  p.buildSnapshotNow();
+  const b = p.getSnapshot();
+  assert.ok(a && b, "snapshot built");
+  assert.strictEqual(a, b, "unchanged content must keep the SAME snapshot object (warm serialize/gzip + real 304)");
+  assert.strictEqual(a.dataTs, b.dataTs, "dataTs is a content clock — frozen while nothing a client renders changed");
+  assert.ok(!("_sig" in a), "the content signature must NOT be shipped on the payload (kept module-side)");
+
+  p.buildDailyNow();
+  const d1 = p.getDaily();
+  p.buildDailyNow();
+  const d2 = p.getDaily();
+  assert.ok(d1 && d2, "daily built");
+  assert.strictEqual(d1, d2, "unchanged daily content must keep the SAME object");
+});
+
+test("perf batch 2026.07.21-08: getFunding memo, bucketsFor memo, gzip+dataTs wiring are all present", () => {
+  // Source manifest, same regression-guard philosophy as the route + client-integrity manifests:
+  // a silent deletion of any of these five mechanisms passes `node --check` but quietly restores the
+  // per-request waste (or re-download) they were built to kill, so each is pinned where it lives.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+
+  // #4 getFunding memo + its per-row invalidation at every fundH mutation site (5 writes + clear + sweep)
+  assert.ok(pol.includes("r._fgVer === r._fVer && r._fgH === hourKey"), "getFunding memo key missing");
+  assert.equal((pol.match(/r\._fVer = \(r\._fVer \|\| 0\) \+ 1/g) || []).length, 6, "every fundH mutation site must bump _fVer (seed, 2x foldCtx, backfill, clear, sweep)");
+
+  // #3 bucketsFor memo, and NO raw spine bucketing left at the hot call sites
+  assert.ok(pol.includes("function bucketsFor(r, width)"), "bucketsFor memo helper missing");
+  assert.ok(pol.includes("if (r._bkRaw !== c) { r._bkRaw = c; r._bk = {}; }"), "bucketsFor freshness key missing");
+  assert.ok(!/bucketCandles\((?:r|rr)\.hourlyRaw/.test(pol), "hot paths must bucket through bucketsFor, never rebuild from r.hourlyRaw");
+  assert.ok(pol.includes("H12: bucketsFor(r, 12)") && pol.includes("H4: bucketsFor(r, 4)"), "trend/AI ladders must feed bucketsFor");
+
+  // #1 snapshot content signature keeps the object + content-clock dataTs (sig stays off the payload)
+  assert.ok(pol.includes("if (snapshotCache && lastSnapSig === csig) return;"), "snapshot content-sig short-circuit missing");
+  assert.ok(pol.includes("function markSig(m)"), "per-market fingerprint missing");
+  assert.ok(pol.includes("ts: snapVer, dataTs: snapVer"), "snapshot dataTs must be the content clock, not lastPoll");
+  assert.ok(pol.includes('if (dailyCache && sig === dailySig) return;'), "daily must keep its object on unchanged content");
+
+  // #5 gzip cache in serveCached
+  assert.ok(srv.includes("const gzipCache = new WeakMap();"), "gzip WeakMap missing");
+  assert.ok(srv.includes("gz = zlib.gzipSync(s)") && srv.includes('reply.header("content-encoding", "gzip")'), "pre-gzip serve path missing");
+  assert.ok(srv.includes('const zlib = require("zlib");'), "zlib import missing");
+
+  // #2 client dataTs short-circuit + factored sidecar pulls
+  assert.ok(app.includes("if(s.dataTs && s.dataTs===state.dataTs){ maybePullSidecars(); return; }"), "client snapshot short-circuit missing");
+  assert.ok(app.includes("function maybePullSidecars()"), "sidecar pulls must be factored so they still fire on a 304");
 });
