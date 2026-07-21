@@ -1696,7 +1696,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries",
     "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols",
     "openCmdk", "closeCmdk", "cmdkRender", "cmdkActivate", "aiFmtCountdown", "aiFmtAgo", "aiTickCountdown",
-    "updateFreshTray", "renderFreshTray"];
+    "updateFreshTray", "renderFreshTray",
+    "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1721,7 +1722,13 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(s.includes("CMDK_TABS") && s.includes("metaKey||e.ctrlKey") && s.includes("cmdk-q"), "command palette wiring missing");
   assert.ok(s.includes("FRESH_SOURCES") && s.includes("/api/health"), "freshness tray wiring missing");
   assert.ok(s.includes("setInterval(aiTickCountdown,1000)"), "report cooldown live ticker missing");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray"]) {
+  // Ask-the-board terminal: tiered resolution (grammar → local NL → AI stub), live-data field map, launcher.
+  assert.ok(s.includes("TFIELD") && s.includes("termAprOf"), "terminal live-field accessors missing");
+  assert.ok(s.includes("function nlResolve") && s.includes("Tier 2"), "terminal NL intent layer missing");
+  assert.ok(s.includes("function termAsk") && s.includes("/api/ask"), "terminal AI-fallback client call missing");
+  assert.ok(s.includes("termCompactUniverse") && s.includes("termThinking"), "terminal AI-fallback plumbing missing");
+  assert.ok(/if\(termIsGrammar\(head\)\)/.test(s) && s.includes("nlResolve(line)"), "terminal routing (grammar→NL→AI) missing");
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
@@ -1759,9 +1766,12 @@ test("server route manifest: every load-bearing API route is registered exactly 
   }
   // Generation is a POST with its own registration — pinned separately from the GET reads.
   assert.equal(srv.split('fastify.post("/api/ai-report"').length - 1, 1, "POST /api/ai-report must be registered exactly once");
+  // Terminal Tier-3 fallback is a POST backed by poller.askBoard — pin both.
+  assert.equal(srv.split('fastify.post("/api/ask"').length - 1, 1, "POST /api/ask must be registered exactly once");
   // Every poller getter the route layer references must be defined AND exported by the poller
   // factory — a route bound to a phantom getter is a 500 the drawer's silent catch would eat.
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/async function askBoard/.test(pol) && /askBoard,/.test(pol), "poller.askBoard (terminal AI fallback) missing or not exported");
   const getters = new Set([...srv.matchAll(/poller\.(get[A-Za-z0-9_]+)\(/g)].map((m) => m[1]));
   assert.ok(getters.size >= 8, `suspiciously few poller getters referenced by routes: ${getters.size}`);
   // Getters take two shapes in poller.js — `function getX(` hoisted then exported shorthand,
@@ -3083,4 +3093,45 @@ test("perf: serveCached caches serialization per payload object; series downsamp
   assert.deepEqual(out[out.length - 1], big[big.length - 1], "live-edge (last) sample preserved exactly");
   assert.deepEqual(ds([[1, 1], [2, 2]], 1500), [[1, 1], [2, 2]], "arrays under the cap pass through untouched");
   assert.deepEqual(ds(null, 1500), [], "null track degrades to empty");
+});
+
+test("ask-the-board terminal Tier-3: planner returns a grammar query, analyst returns grounded prose, disabled without a key, unmappable escalates", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  // disabled path: no injected transport and no env key -> AI fallback is off, not a crash
+  const off = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const dOff = await off.askBoard("most crowded shorts", { universe: [{ t: "SOL" }] });
+  assert.ok(dOff.disabled === true, "no key -> disabled, not an error page");
+
+  // injected transport (anthropic shape, since no env key sets provider=anthropic)
+  const respond = (text) => ({ ok: true, json: async () => ({ content: [{ type: "text", text }], stop_reason: "end_turn" }) });
+  let next = null; const calls = [];
+  const aiFetch = async (url, opts) => { calls.push(JSON.parse(opts.body)); return next; };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+  const uni = [{ t: "SOL", sqz: 71, f: -22 }, { t: "HYPE", sqz: 82, f: -31 }, { t: "BTC", sqz: 0, f: 12 }];
+
+  // planner: model emits ONE grammar query; askBoard validates and returns it for the client to run
+  next = respond("screen funding<0 & squeeze>50");
+  const plan = await p.askBoard("which names are the most crowded shorts?", { scope: "crypto", universe: uni });
+  assert.ok(plan.ok && plan.mode === "planner" && plan.query === "screen funding<0 & squeeze>50", `planner query, got ${JSON.stringify(plan)}`);
+
+  // analyst: a "why" question routes to prose, grounded in the bundle; never a query
+  next = respond("HYPE leads: squeeze 82 with funding at -31% APR, the most crowded short in the set.");
+  const ana = await p.askBoard("why is HYPE the standout here?", { scope: "crypto", universe: uni });
+  assert.ok(ana.ok && ana.mode === "analyst" && /HYPE/.test(ana.answer) && ana.marketsN === 3, `analyst prose, got ${JSON.stringify(ana)}`);
+
+  // unmappable planner (model says NONE) escalates to analyst reasoning in the same call
+  let step = 0;
+  const aiFetch2 = async (url, opts) => { step++; return step === 1 ? respond("NONE") : respond("No single screen captures that; broadly, low-funding names skew short."); };
+  const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch: aiFetch2 });
+  const esc = await p2.askBoard("what's the overall vibe of positioning?", { scope: "crypto", universe: uni });
+  assert.ok(esc.ok && esc.mode === "analyst", `NONE from planner must escalate to analyst, got ${JSON.stringify(esc)}`);
+
+  // a bad planner query (not in the grammar) is rejected -> escalates rather than shipped to the client
+  const { createPoller: cp3 } = require("../src/poller");
+  let s3 = 0; const p3 = cp3({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
+    aiFetch: async () => { s3++; return s3 === 1 ? respond("buy SOL now!!") : respond("grounded fallback answer"); } });
+  const bad = await p3.askBoard("find me something good", { scope: "crypto", universe: uni });
+  assert.ok(bad.ok && bad.mode === "analyst", `invalid planner output must not reach the client as a query, got ${JSON.stringify(bad)}`);
 });
