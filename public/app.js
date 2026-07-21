@@ -2261,6 +2261,11 @@ function earnDiffC(dateStr){ if(!/^\d{4}-\d{2}-\d{2}$/.test(dateStr||'')) return
   const a=Date.UTC(+dateStr.slice(0,4),+dateStr.slice(5,7)-1,+dateStr.slice(8,10));
   const t=etDayStrC(); const b=Date.UTC(+t.slice(0,4),+t.slice(5,7)-1,+t.slice(8,10));
   return Math.round((a-b)/DAY); }
+function earnFilingHtml(e){
+  if(!e||!e.filing) return '';
+  const f=e.filing;
+  return `<a class="earn-fl${/^8-K/.test(f.form)?' mat':''}" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc('the actual filing on EDGAR \u2014 '+f.form+(/^8-K/.test(f.form)?' (the earnings release itself)':' (the report)')+' \u00b7 filed '+fmtAge(Date.now()-f.pub)+' ago')}">${esc(f.form)} \u2197</a>`;
+}
 function earnSessLbl(s){ return s==='BMO'?'pre-market (BMO)':s==='AMC'?'after close (AMC)':s==='DMH'?'during market hours':'time TBD'; }
 async function loadEarnings(){
   _earnLast=Date.now();
@@ -2438,6 +2443,7 @@ function renderEarnings(){
           +`<span class="earn-tk">${starred?'<span class="star on" style="margin-right:4px">\u2605</span>':''}${esc(e.t)}</span>`
           +`<span class="earn-sess ${e.s==='BMO'?'bmo':e.s==='AMC'?'amc':''}" data-tip="session per the feed \u2014 BMO reports land before the 09:30 ET open, AMC after the 16:00 ET close">${esc(earnSessLbl(e.s))}</span>`
           +earnEpsHtml(e)
+          +earnFilingHtml(e)
           +earnReactHtml(e)
           +earnStudyHtml(e.t)
           +`<button class="earn-void" data-vt="${esc(e.t)}" data-vd="${esc(e.d)}" style="background:none;border:0;color:var(--faint);cursor:pointer;font-size:14px;line-height:1;padding:0 2px" data-tip="void this print \u2014 operator override for feed garbage: removes it from history and the reaction study and tombstones it so the feed cannot re-add it. Permanent.">\u00d7</button>`
@@ -2453,7 +2459,7 @@ function renderEarnings(){
   if(!groups.size){
     html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
     box.innerHTML=html;
-    box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+    box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
   wireEarnVoid(box);
     return;
   }
@@ -2476,7 +2482,7 @@ function renderEarnings(){
   }
   html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst.</div>`;
   box.innerHTML=html;
-  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',()=>{ const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
   wireEarnVoid(box);
 }
 

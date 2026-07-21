@@ -732,3 +732,6 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .ntg-chip b{font-weight:normal}
 .nform{border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:1px 7px;font-size:11px;min-width:40px;text-align:center;cursor:pointer;white-space:nowrap;font-family:var(--mono)}
 .nform.mat{border-color:var(--accent);color:var(--accent);font-weight:bold}
+.earn-fl{border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:1px 7px;font-size:10.5px;text-decoration:none;font-family:var(--mono);white-space:nowrap}
+.earn-fl.mat{border-color:var(--accent);color:var(--accent)}
+.earn-fl:hover{text-decoration:underline;text-underline-offset:2px}
