@@ -1689,7 +1689,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
     "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries",
-    "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel"];
+    "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1735,7 +1735,8 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/ai-report", "/api/ai-reports", "/api/health",
-    "/api/export/ledger", "/api/news", "/api/news/channels"];
+    "/api/export/ledger", "/api/news", "/api/news/channels",
+    "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
     assert.ok(n >= 1, `server route missing: ${r}`);
@@ -2895,4 +2896,38 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
   assert.ok(app.includes("state.focus && state.rows.has(state.focus)"), "report-tab focus fallback missing");
   for (const id of ["focusChipT", "focusChipX"]) assert.ok(html.includes(`id="${id}"`), `focus chip markup missing: ${id}`);
   assert.ok(css.includes(".fchip-t{"), "focus chip CSS missing");
+});
+
+test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wired", () => {
+  // Four surfaces in one build, each pinned across every file it touches. The service worker is
+  // additionally pinned to be CACHE-FREE: a fetch handler that intercepts nothing. Any future
+  // edit that adds caches.open / caches.match to /sw.js is reintroducing the stale-client bug
+  // class the version-stamped shell exists to kill, and must fail here first.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // Touch parity: long-press hover in the tooltip engine, horizontal-intent scrub on line charts.
+  for (const pin of ["touchstart", "touchmove", "touchend", "lp.scrub", "scrubAt(t.clientX)", "dx>dy+4"])
+    assert.ok(app.includes(pin), `touch parity pin missing: ${pin}`);
+  // Mobile preset: curated columns, built-in Layouts row, one-shot first-visit auto-apply.
+  assert.ok(app.includes("const MOBILE_COLS="), "MOBILE_COLS missing");
+  assert.ok(app.includes("data-mob="), "built-in Mobile layout row missing");
+  assert.ok(app.includes("xyzmon.mobilePreset.v1"), "one-shot auto-apply flag missing");
+  for (const k of ["'ticker'", "'px'", "'d1'", "'funding'"])
+    assert.ok(app.match(/const MOBILE_COLS=\[[^\]]*\]/)[0].includes(k), `mobile preset must keep ${k}`);
+  // PWA shell: head tags in the markup, registration in the client, inline routes in the server.
+  for (const pin of ['rel="manifest"', 'name="theme-color"', 'href="/icon.svg"'])
+    assert.ok(html.includes(pin), `PWA head tag missing: ${pin}`);
+  assert.ok(app.includes("serviceWorker.register('/sw.js')"), "SW registration missing");
+  assert.ok(srv.includes("PWA_MANIFEST") && srv.includes("PWA_SW"), "inline PWA payloads missing from server");
+  // The SW must stay a no-op passthrough: install-prompt eligibility, zero caching.
+  const sw = srv.match(/const PWA_SW = "([^"]+)"/);
+  assert.ok(sw, "PWA_SW literal missing");
+  assert.ok(sw[1].includes("addEventListener('fetch'"), "SW needs a fetch handler for installability");
+  assert.ok(!sw[1].includes("caches") && !sw[1].includes("respondWith"), "SW must not cache or intercept — stale-client hazard");
+  // Mobile CSS: sticky ticker column, full-width drawer, scrollable tab strip, touch targets.
+  for (const pin of [".wrap tbody td:first-child{position:sticky", ".drawer{width:100vw", "(hover:none) and (pointer:coarse)"])
+    assert.ok(css.includes(pin), `mobile css pin missing: ${pin}`);
 });
