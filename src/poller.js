@@ -4057,6 +4057,71 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     } finally { aiGenerating.delete(coin); }
   }
 
+  // ===== Ask-the-board terminal — Tier 3 AI fallback ====================================
+  // Planner: translate a natural-language question into ONE grammar query; the CLIENT then runs
+  // it against the same live rows the board renders, so every number is the board's, never the
+  // model's. Analyst: reason over the compact market bundle the client already computed and
+  // answer in prose, citing only those numbers. Cost-gated by a sliding-window rate limit shared
+  // across the group plus a short cache of identical questions. Reuses callModel (provider switch,
+  // fallback, refusal handling, injected-transport test hook) verbatim.
+  const ASK_WINDOW_MS = 60 * 1000, ASK_MAX_PER_WINDOW = Math.max(1, Number(process.env.ASK_MAX_PER_MIN) || 12);
+  const ASK_CACHE_TTL = 90 * 1000;
+  const askHits = [];              // model-call timestamps (sliding window)
+  const askCache = new Map();      // normQ -> { at, res }
+  const ASK_GRAMMAR = "top <metric> [n] (metrics: vol funding squeeze momentum oi carry gainers losers); "
+    + "screen <field><op><value> [& <field><op><value> ...] (fields: funding fundpct squeeze momentum oi vol vstape doi beta dd carry turn d1; ops: > < >= <= =); "
+    + "<TICKER> ; <TICKER> <field> ; signals [TICKER] ; corr <A> <B> ; diverge <TICKER>";
+  const ASK_PLANNER_SYS = "You translate a trader's natural-language question about a markets dashboard into EXACTLY ONE query in this grammar, and output ONLY that query — no prose, no backticks, no explanation.\nGrammar: " + ASK_GRAMMAR
+    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3. If the question cannot be expressed in this grammar, output exactly: NONE";
+  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Answer the user's question using ONLY the numbers in context.markets (each entry is one market's live fields: px, d1 %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, oi, vol, doi = OI change %, beta, dd = % below 30d high, sector). Never invent or estimate a figure that is not in the data. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
+  function classifyAsk(q) { return /^\s*(why|explain|how come|what if|what would|what happens|reason|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(q || "") ? "analyst" : "planner"; }
+  function askQueryValid(str, tickerSet) {
+    const s = String(str || "").trim(); if (!s || /^none$/i.test(s)) return false;
+    const p = s.split(/\s+/), h = p[0].toLowerCase(), H = p[0].toUpperCase();
+    if (h === "top") return p[1] != null;
+    if (h === "screen") return /[<>=]/.test(s);
+    if (h === "signals" || h === "corr" || h === "diverge") return true;
+    return !!(tickerSet && tickerSet.has(H));   // <TICKER> or <TICKER> <field>
+  }
+  async function askBoard(q, ctx) {
+    q = String(q || "").trim();
+    if (!q) return { ok: false, error: "empty question" };
+    if (!AI_KEY() && !aiFetch) return { ok: false, disabled: true, error: "AI fallback needs an API key on the server (OPENAI_API_KEY / ANTHROPIC_API_KEY)" };
+    ctx = ctx || {};
+    const normQ = q.toLowerCase().replace(/\s+/g, " ").trim();
+    const cached = askCache.get(normQ);
+    if (cached && Date.now() - cached.at < ASK_CACHE_TTL) return Object.assign({ cached: true }, cached.res);
+    const now = Date.now();
+    while (askHits.length && askHits[0] < now - ASK_WINDOW_MS) askHits.shift();
+    if (askHits.length >= ASK_MAX_PER_WINDOW) return { ok: false, error: "rate", retryMs: ASK_WINDOW_MS - (now - askHits[0]) };
+    askHits.push(now);
+    const markets = Array.isArray(ctx.universe) ? ctx.universe.slice(0, 160) : [];
+    const tickerSet = new Set(markets.map((m) => String(m && m.t || "").toUpperCase()).filter(Boolean));
+    const callBoth = async (sys, payload, maxTok) => {
+      let c = await callModel(AI_MODEL, payload, { system: sys, maxTokens: maxTok });
+      if (!c.ok) c = await callModel(AI_MODEL_FALLBACK, payload, { system: sys, maxTokens: maxTok });
+      return c;
+    };
+    const analyst = async () => {
+      const c = await callBoth(ASK_ANALYST_SYS, { question: q, scope: ctx.scope || null, markets }, 700);
+      return c.ok ? { ok: true, mode: "analyst", answer: c.text.trim(), marketsN: markets.length }
+                  : { ok: false, error: c.error || "model call failed" };
+    };
+    const mode0 = ctx.mode === "analyst" || ctx.mode === "planner" ? ctx.mode : classifyAsk(q);
+    let res;
+    if (mode0 === "planner") {
+      const c = await callBoth(ASK_PLANNER_SYS, { question: q, scope: ctx.scope || null, tickers: [...tickerSet] }, 300);
+      if (!c.ok) res = { ok: false, error: c.error || "model call failed" };
+      else {
+        const query = c.text.trim().split("\n")[0].replace(/^`+|`+$/g, "").trim();
+        res = askQueryValid(query, tickerSet) ? { ok: true, mode: "planner", query } : await analyst();  // unmappable -> reason instead
+      }
+    } else res = await analyst();
+    res.model = AI_MODEL; res.provider = AI_PROVIDER;
+    if (res.ok) { askCache.set(normQ, { at: Date.now(), res }); if (askCache.size > 200) askCache.clear(); }
+    return res;
+  }
+
   return {
     start,
     getSnapshot: () => snapshotCache,
@@ -4068,6 +4133,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getCandles,
     getTfCandles,
     getSignals: () => signalsCache,
+    askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
     getEarnings: () => {
       if (!earnCache) return earnCache;
       // filings links overlay at serve time (filings arrive continuously between the 6h
