@@ -2,7 +2,7 @@
 // Run with: npm test  (uses Node's built-in test runner, no dependencies)
 const test = require("node:test");
 const assert = require("node:assert");
-const { classify } = require("../src/sectors");
+const { classify, companyName } = require("../src/sectors");
 const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats } = require("../src/compute");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -13,6 +13,31 @@ test("classify: core equities map to GICS sectors", () => {
   assert.equal(classify("JPM").sector, "Financials");
   assert.equal(classify("LLY").sector, "Health Care");
   assert.equal(classify("TSLA").sector, "Consumer Discretionary");
+});
+
+test("companyName: canonical display name for the analyst context, null for unseeded", () => {
+  assert.equal(companyName("NVDA"), "Nvidia");
+  assert.equal(companyName("nvda"), "Nvidia");   // case-insensitive
+  assert.equal(companyName("AMD"), "AMD");
+  assert.equal(companyName("TSM"), "TSMC");
+  assert.equal(companyName("ZZZZ"), null);        // unseeded -> ticker stays the label
+  assert.equal(companyName(""), null);
+  assert.equal(companyName(null), null);
+});
+
+test("ask-the-board 2C: analyst may use identity/business knowledge, scoped to the universe, numbers stay grounded", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The prompt must split its grounding: figures come only from the data, but identity/business
+  // facts (what a company is, what it makes) may lean on general knowledge — universe-scoped.
+  for (const pin of ["name = the company's common name", "NUMBERS RULE", "IDENTITY RULE",
+    "NEVER name a company that is not in that list", "derivable from the data"])
+    assert.ok(pol.includes(pin), `analyst identity/numbers rule missing: ${pin}`);
+  // And the canonical name must actually be threaded onto each analyst row server-side, so the
+  // model maps ticker->company from the payload rather than guessing.
+  assert.ok(pol.includes("const nm = companyName(m && m.t)") && pol.includes('require("./sectors")'),
+    "company-name injection not wired into askBoard markets");
+  assert.ok(/companyName/.test(pol), "companyName must be imported/used in poller");
 });
 
 test("classify: CL is WTI crude, not Colgate (collision regression)", () => {
@@ -1698,7 +1723,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openCmdk", "closeCmdk", "cmdkRender", "cmdkActivate", "aiFmtCountdown", "aiFmtAgo", "aiTickCountdown",
     "updateFreshTray", "renderFreshTray",
     "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
-    "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo"];
+    "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1753,13 +1778,23 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     // the analyst legend must describe it — a field missing here IS "not in the data".
     for (const pin of ["yo:rnd(r.yopen)", "mo:rnd(r.mopen)", "m200:rnd(r.ma200)", "d7:rnd(r.d7)", "rv:rnd(r.rvol)", "ddy:rnd(r.ddy)"])
       assert.ok(s.includes(pin), `analyst context missing board field: ${pin}`);
-    for (const pin of ["yo = yearly open", "mo = monthly open", "m20/m50/m100/m200", "ddy = % below 52w high", "derivable from the data"])
+    for (const pin of ["yo = yearly open", "mo = monthly open", "m20/m50/m100/m200", "ddy = % below 52w high", "derivable from the data",
+      "name = the company's common name", "NUMBERS RULE", "IDENTITY RULE"])
       assert.ok(polSrc.includes(pin), `analyst legend out of sync with shipped context: ${pin}`);
   }
   for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
+  // 1B: the ask input is a wrapping textarea, not a single-line <input> that runs off-screen.
+  assert.ok(/<textarea id="termCmd"/.test(html), "ask input must be a <textarea> (wrapping), not an <input>");
+  assert.ok(!/<input id="termCmd"/.test(html), "old single-line ask <input> must be gone");
+  const tcss = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(/#termCmd\{[^}]*resize:none/.test(tcss) && /#termCmd\{[^}]*white-space:pre-wrap/.test(tcss), "termCmd textarea must not resize and must wrap");
+  assert.ok(/#termGhost\{[^}]*white-space:pre-wrap/.test(tcss), "ghost overlay must wrap in sync with the textarea");
+  assert.ok(/\.tp-wrap\{[^}]*min-width:0/.test(tcss), "tp-wrap needs min-width:0 or a long value overflows the panel (flexbox min-width:auto)");
+  assert.ok(s.includes("function termAutoGrow") && s.includes("termAutoGrow(q)"), "textarea auto-grow helper missing/unwired");
+  assert.ok(s.includes("!e.shiftKey&&!e.isComposing"), "Enter-to-run must yield to Shift+Enter (newline) and IME composition");
   // The backtest tab was silently dropped from the nav once while every renderer behind it
   // survived — pin both the button and the view section so the tab can't vanish again.
   assert.ok(html.includes('data-view="backtest"'), "backtest tab button missing from nav");
