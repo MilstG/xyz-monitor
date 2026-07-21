@@ -88,6 +88,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let benchCoin = null;
   let mainOrder = [], mainList = [], mainSel = new Set(), mainDay = 0;   // main-dex universe order / today's selection
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
+  let snapVer = 0, lastSnapSig = "";   // /api/snapshot content clock: dataTs bumps only when a client-visible field changes (kept off the payload)
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
   let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
@@ -190,15 +191,40 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     return { coins, candles };
   }
 
+  // UTC-aligned bucket aggregation of the hourly spine, memoized on the spine's ARRAY REFERENCE —
+  // the same freshness contract getHourly uses (every spine mutation reassigns r.hourlyRaw, so
+  // `r._bkRaw === c` can never serve a stale bucketing). buildTrend (every 3 min, both universes),
+  // the /api/candles route (per request, no-store), the signals retest probe and the AI compiler
+  // all aggregate the same ~750-candle spine to the same 4h/12h/24h widths on their own cadences;
+  // each used to rebuild from scratch. The spine only changes on the ~10-min hourly refresh, so a
+  // width is bucketed at most that often and every other caller reads the cached array. Consumers
+  // (trendLadder, the candle serializer) read these arrays; none mutate them, so sharing is safe.
+  function bucketsFor(r, width) {
+    const c = r && r.hourlyRaw;
+    if (!Array.isArray(c)) return [];
+    if (r._bkRaw !== c) { r._bkRaw = c; r._bk = {}; }
+    let out = r._bk[width];
+    if (!out) { out = bucketCandles(c, width, HOUR); r._bk[width] = out; }
+    return out;
+  }
+
   // Per-market hourly funding-rate series: [[hourTs, rate], ...] oldest->newest, rolling FUNDING_HISTORY_DAYS.
   // Built from three sources (oi.log seed, live forward-fill, best-effort fundingHistory backfill) and
   // deduped by hour, so the boundary engine can integrate funding cost over any hold window.
   function getFunding(coin) {
     const r = rows.get(coin);
     if (!r || !r.fundH || !r.fundH.size) return [];
+    // Memoize the sorted [t,rate] copy on this row's fund-mutation counter (bumped at every
+    // r.fundH.set/delete/clear) plus the clock hour. buildDaily calls this per market every 60s and
+    // the analytics + AI sites call it too; the underlying Map only changes when the row's funding is
+    // written (each poll for active names, never for quiet ones), so the per-15s/60s re-sort was pure
+    // waste. The hour key bounds the trailing-window drift to <=1h for names that stop updating.
+    const hourKey = Math.floor(Date.now() / HOUR);
+    if (r._fgVer === r._fVer && r._fgH === hourKey && r._fg) return r._fg;
     const cut = Date.now() - FUNDING_HISTORY_DAYS * DAY, out = [];
     for (const [t, rate] of r.fundH) if (t >= cut && Number.isFinite(rate)) out.push([t, rate]);
     out.sort((a, b) => a[0] - b[0]);
+    r._fgVer = r._fVer; r._fgH = hourKey; r._fg = out;
     return out;
   }
   function fundingCoverage() {
@@ -213,6 +239,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     for (const [coin, h] of hist) {
       const r = rows.get(coin); if (!r) continue;
       for (const s of h) { const t = s[0], f = s[2]; if (f != null && Number.isFinite(f)) { r.fundH.set(Math.floor(t / HOUR) * HOUR, f); } }
+      r._fVer = (r._fVer || 0) + 1;   // invalidate this row's getFunding memo
       if (r.fundH.size) seeded++;
     }
     if (seeded) log(`Seeded hourly funding from oi.log for ${seeded} market(s)`);
@@ -290,7 +317,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
     if (px != null) r.px = px;
     const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
-    const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); }  // forward-fill the current hour
+    const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); r._fVer = (r._fVer || 0) + 1; }  // forward-fill the current hour
     const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
     const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
     const oi = num(ctx.openInterest);
@@ -366,7 +393,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       const px = num(ctx.markPx) ?? num(ctx.midPx) ?? num(ctx.oraclePx);
       if (px != null) r.px = px;
       const pd = num(ctx.prevDayPx); if (pd != null) r.prevDay = pd;
-      const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); }
+      const fn = num(ctx.funding); if (fn != null) { r.funding = fn; r.fundH.set(hourNow, fn); r._fVer = (r._fVer || 0) + 1; }
       const vl = num(ctx.dayNtlVlm); if (vl != null) r.vol = vl;
       const oc = num(ctx.oraclePx); if (oc != null) r.oracle = oc;
       const oi = num(ctx.openInterest);
@@ -525,6 +552,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       const t = num(e && (e.time ?? e.t)), rate = num(e && (e.fundingRate ?? e.funding));
       if (t != null && rate != null) { r.fundH.set(Math.floor(t / HOUR) * HOUR, rate); n++; }
     }
+    if (n) r._fVer = (r._fVer || 0) + 1;   // invalidate this row's getFunding memo
     r.fundBackfilled = true;      // don't re-pull a coin that legitimately returned nothing
     return n;
   }
@@ -640,6 +668,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     return tapeCache[uniKey];
   }
 
+  // Compact per-market fingerprint for the snapshot content signature (see buildSnapshot). Covers
+  // every field mapMarket emits that a client renders: the scalars are already sig()-quantized and
+  // the small nested objects are stringified (they only move on a poll / candle refresh anyway).
+  function markSig(m) {
+    return m.coin + "|" + m.px + "," + m.prevDay + "," + m.funding + "," + m.vol + "," + m.oi + ","
+      + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0)
+      + "|" + (m.ref ? JSON.stringify(m.ref) : "") + (m.feat ? JSON.stringify(m.feat) : "")
+      + (m.red ? JSON.stringify(m.red) : "") + (m.rvol ? JSON.stringify(m.rvol) : "")
+      + (m.doi ? JSON.stringify(m.doi) : "") + (m.fundByWin ? JSON.stringify(m.fundByWin) : "") + ";";
+  }
   function buildSnapshot() {
     sampleRegime();
     const tapeXyz = tapeStatsFor("xyz", activeMarkets());
@@ -696,20 +734,37 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // Crypto ships under its OWN key: snapshot.markets stays xyz-pure so every existing consumer
     // (tabs, studies, treemap, leaders) is untouched until the scope switcher lands in Build B.
     const mainMkts = crypto ? mainMarkets().map(mapMarket) : [];
+    const offHours = computeOffHours(Date.now());
+    // live warmup counts: h = markets without hourly features yet, d = markets with no daily
+    // closes servable at all (no 370d backfill AND no hourly spine to derive from) — lets the
+    // client show "N still backfilling" instead of a mystery placeholder, and poll accordingly
+    let warmH = 0, warmD = 0;
+    for (const r of activeMarkets()) { if (r.delisted) continue;
+      if (!r.feat) warmH++;
+      if (!r.dailyRaw && !(r.hourlyRaw && r.hourlyRaw.length > 24)) warmD++; }
+    // Content signature over EVERYTHING a client renders, excluding ts/dataTs (which always move).
+    // When it matches the previous build we keep the old snapshotCache OBJECT: same reference means
+    // the same ETag — a real 304 for every polling client instead of a fresh ~0.5 MB download — and
+    // the downstream serialize + gzip WeakMap caches (keyed on the object) stay warm. offHours, the
+    // warm counts and the regime ride the signature so a session flip, a backfill completing, or a
+    // correlation shift still busts it even when no price moved. Off-hours, when equities don't
+    // trade, this idles the entire snapshot pipeline end to end (build, serialize, gzip, client render).
+    let csig = "";
+    for (const m of markets) csig += markSig(m);
+    for (const m of mainMkts) csig += markSig(m);
+    csig += "#" + (offHours.closed ? 1 : 0) + ":" + (offHours.closeT || 0) + ":" + (offHours.openT || 0)
+      + "#" + warmH + "," + warmD
+      + "#" + sig(curCorr, 6) + "," + curCorrPct + "," + curCorrN + "," + regimeHist.length
+      + "#" + tapeXyz.redBars + "," + (crypto ? tapeMain.redBars : 0);
+    if (snapshotCache && lastSnapSig === csig) return;   // nothing a client renders changed — keep the object
+    lastSnapSig = csig; snapVer = Date.now();
     snapshotCache = {
-      ts: Date.now(), dataTs: lastPoll, dex, benchCoin,
+      ts: snapVer, dataTs: snapVer, dex, benchCoin,
       benchMain: crypto ? MAIN_BENCH : null, mainMarkets: mainMkts, markets,
       redBars: { xyz: tapeXyz.redBars, main: crypto ? tapeMain.redBars : 0 },
       v: version || null,
-      offHours: computeOffHours(Date.now()),
-      // live warmup counts: h = markets without hourly features yet, d = markets with no daily
-      // closes servable at all (no 370d backfill AND no hourly spine to derive from) — lets the
-      // client show "N still backfilling" instead of a mystery placeholder, and poll accordingly
-      warm: (() => { let h = 0, d = 0;
-        for (const r of activeMarkets()) { if (r.delisted) continue;
-          if (!r.feat) h++;
-          if (!r.dailyRaw && !(r.hourlyRaw && r.hourlyRaw.length > 24)) d++; }
-        return { h, d }; })(),
+      offHours,
+      warm: { h: warmH, d: warmD },
       regime: { corr: curCorr, corrPct: curCorrPct, corrN: curCorrN, corrSamples: regimeHist.length },
     };
   }
@@ -768,8 +823,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (offHours.closed) { const pc = priceAsOf(hs, offHours.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
       }
     }
-    const sig = coins + ":" + lens;
-    if (sig !== dailySig) { dailySig = sig; dailyVer = Date.now(); }   // content changed -> new ETag
+    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0);   // session flip busts it (fresh liveClose/gap direction)
+    if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
+    dailySig = sig; dailyVer = Date.now();   // content changed -> new ETag + fresh object
     if (crypto) buildDailyMain(daily, funding);
     dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, liveClose };
   }
@@ -2974,7 +3030,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (!r.delisted || !r.delistedAt || r.delistedAt >= dcut) continue;
       if (r.hourlyRaw || r.dailyRaw || (r.fundH && r.fundH.size) || hist.has(coin)) {
         r.hourlyRaw = null; r.dailyRaw = null; r.ref = null; r.feat = null;
-        if (r.fundH) r.fundH.clear();
+        if (r.fundH) { r.fundH.clear(); r._fVer = (r._fVer || 0) + 1; }
         hist.delete(coin);
         swept++;
       }
@@ -2984,7 +3040,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const pending = activeMarkets().filter((r) => !r.delisted && !r.dailyRaw).length;
     const hc = hourlyCoverage();
     const fcut = Date.now() - FUNDING_HISTORY_DAYS * DAY;
-    for (const r of rows.values()) if (r.fundH && r.fundH.size) for (const t of r.fundH.keys()) if (t < fcut) r.fundH.delete(t);
+    for (const r of rows.values()) if (r.fundH && r.fundH.size) { let d = false; for (const t of r.fundH.keys()) if (t < fcut) { r.fundH.delete(t); d = true; } if (d) r._fVer = (r._fVer || 0) + 1; }
     const fc = fundingCoverage();
     log(`Daily audit: ${total} active market(s), ${pending} awaiting history backfill; hourly spine: ${hc.coins} market(s), ${hc.candles} candle(s); funding[${fc.endpoint}]: ${fc.coins} market(s), ${fc.points} hour(s)`);
   }
@@ -3126,7 +3182,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       // disagree with the board), with h/l clamped to include it. Real data, not a fallback.
       if (Array.isArray(r.hourlyRaw) && r.hourlyRaw.length > 24 && src.some((k) => k.o == null)) {
         const byDay = new Map();
-        for (const b of bucketCandles(r.hourlyRaw, 24, HOUR))
+        for (const b of bucketsFor(r, 24))
           if (b && isFinite(+b.t) && b.o != null && isFinite(+b.o)) byDay.set(Math.floor(+b.t / DAY), b);
         src = src.map((k) => {
           if (k.o != null || !isFinite(+k.c)) return k;
@@ -3139,7 +3195,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     } else if (key === "1h") {
       src = Array.isArray(r.hourlyRaw) ? r.hourlyRaw.slice(-96) : [];
     } else {
-      src = Array.isArray(r.hourlyRaw) ? bucketCandles(r.hourlyRaw, TF_CANDLES[key], HOUR) : [];
+      src = Array.isArray(r.hourlyRaw) ? bucketsFor(r, TF_CANDLES[key]) : [];
     }
     const out = [];
     for (const k of src) { if (isFinite(+k.t) && isFinite(+k.c)) out.push(q(k)); }
@@ -3168,8 +3224,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       const d1g = withFormingDaily(d1, r.px, now, DAY);
       const lad = trendLadder(r.px, {
         D1: d1g,
-        H12: bucketCandles(r.hourlyRaw, 12, HOUR),
-        H4: bucketCandles(r.hourlyRaw, 4, HOUR),
+        H12: bucketsFor(r, 12),
+        H4: bucketsFor(r, 4),
         H1: r.hourlyRaw.slice(-96),
       });
       if (!lad) { excluded++; continue; }
@@ -3236,7 +3292,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
             let ser = null;
             if (e.retest === "D1") ser = withFormingDaily(Array.isArray(rr.dailyRaw) ? rr.dailyRaw : [], rr.px, now, DAY);
             else if (e.retest === "H1") ser = Array.isArray(rr.hourlyRaw) ? rr.hourlyRaw.slice(-96) : null;
-            else ser = Array.isArray(rr.hourlyRaw) ? bucketCandles(rr.hourlyRaw, e.retest === "H12" ? 12 : 4, HOUR) : null;
+            else ser = Array.isArray(rr.hourlyRaw) ? bucketsFor(rr, e.retest === "H12" ? 12 : 4) : null;
             if (ser && ser.length >= 13) {
               const win = ser.slice(Math.max(0, ser.length - 33), ser.length - 3);
               if (win.length >= 10 && rr.px > 0) {
@@ -3490,8 +3546,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     try {
       if (px != null && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= 26 && daily.length >= 26) {
         const d1g = withFormingDaily(daily, px, now, DAY);
-        const lad = trendLadder(px, { D1: d1g, H12: bucketCandles(r.hourlyRaw, 12, HOUR),
-          H4: bucketCandles(r.hourlyRaw, 4, HOUR), H1: r.hourlyRaw.slice(-96) });
+        const lad = trendLadder(px, { D1: d1g, H12: bucketsFor(r, 12),
+          H4: bucketsFor(r, 4), H1: r.hourlyRaw.slice(-96) });
         if (lad) {
           const tf = {};
           for (const t of ["D1", "H12", "H4"]) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21,
@@ -4207,6 +4263,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
     buildDailyNow: buildDaily,       // harness: populate daily closes so the signals loop has inputs
+    buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
     persistFeatures,
     persistLedger: () => { ledgerDirty = true; persistLedger(); },
     // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
