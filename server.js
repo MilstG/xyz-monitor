@@ -2,6 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
@@ -9,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.21-07";
+const VERSION = "2026.07.21-08";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -49,6 +50,11 @@ function etagFor(body) { return 'W/"' + (body.dataTs != null ? body.dataTs : (bo
 // happen to share a dataTs value can never serve each other's body. Auto-GC'd when the object is
 // replaced. Fallback literals are fresh objects (WeakMap miss) but tiny, so re-stringifying is free.
 const serialCache = new WeakMap();
+// Second layer keyed on the same payload OBJECT: the gzipped Buffer of its serialization. Without
+// this, @fastify/compress re-gzips the ~0.5 MB snapshot for EVERY polling client every cycle — the
+// dominant per-request cost once serialization itself is cached. One compress per content change,
+// shared across all clients, auto-GC'd when the poller swaps the cache object.
+const gzipCache = new WeakMap();
 // Uniform-stride downsample of a [[t, v], ...] track to at most `cap` points, keeping the last
 // (live-edge) sample exact so the sparkline's right edge still reflects the current value.
 const SERIES_CAP = 1500;
@@ -69,7 +75,18 @@ function serveCached(req, reply, payload, fallback) {
   let s = serialCache.get(body);
   if (s === undefined) { s = JSON.stringify(body); serialCache.set(body, s); }
   reply.header("content-type", "application/json; charset=utf-8");
-  return reply.send(s);   // send the pre-serialized string; @fastify/compress still gzips it (over threshold)
+  // Pre-gzip cache: hand back the cached compressed Buffer and set content-encoding ourselves so
+  // @fastify/compress sees an already-encoded body and no-ops. Only worth it over the same 1 KB
+  // threshold the plugin uses; below that (health, channel lists, fallbacks) we send the string and
+  // let the plugin decide. Fallback literals are fresh objects (WeakMap miss) but tiny, so re-gzip is free.
+  if (s.length >= 1024 && /\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
+    let gz = gzipCache.get(body);
+    if (gz === undefined) { gz = zlib.gzipSync(s); gzipCache.set(body, gz); }
+    reply.header("content-encoding", "gzip");
+    reply.header("vary", "accept-encoding");
+    return reply.send(gz);
+  }
+  return reply.send(s);   // under threshold or client can't gzip — @fastify/compress handles the rest
 }
 
 // Constant-time credential check: hash both sides to equal length, then timingSafeEqual.
