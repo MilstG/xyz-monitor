@@ -3023,7 +3023,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     setInterval(buildDaily, 60 * 1000);
     const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
     setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
-    setTimeout(safeTick(buildSignals, "buildSignals"), 2 * 60 * 1000);   // first pass once early backfill has something to chew on
+    // Warm-boot cadence: spines aren't persisted raw, so every deploy re-warms ~150 markets
+    // through the rate-limited workers (~3-5 min). On the steady 10-min cadence each market
+    // then waited up to 10 MORE minutes for the next build to admit it — post-deploy the tab
+    // looked empty long after the data was ready. For the first 20 minutes, build every 2
+    // minutes (episode gates + the bt boot stamp make extra builds idempotent and honest),
+    // with a first partial pass at 45s so the tab is never blank longer than the snapshot.
+    {
+      const bootT = Date.now();
+      setTimeout(safeTick(buildSignals, "buildSignals"), 45 * 1000);
+      const earlyIv = setInterval(() => {
+        safeTick(buildSignals, "buildSignals")();
+        const w = [...rows.values()].filter((r) => !r.delisted && r.hourlyRaw && r.hourlyRaw.length).length;
+        log(`signals warm-boot build: ${w} market(s) spine-warm`);
+        if (Date.now() - bootT > 20 * 60 * 1000) clearInterval(earlyIv);
+      }, 2 * 60 * 1000);
+    }
     // News feed: a few company names per minute (rotation ordered by staleness) + the macro
     // tape every 15 min. Same degradation contract as earnings — token missing or endpoint
     // dead surfaces on the payload, never breaks a tab.
