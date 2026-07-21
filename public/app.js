@@ -4584,6 +4584,7 @@ async function termAsk(text){
     if(d&&d.askDayLeft!=null) renderAskBudget(d.askDayLeft, d.askPerDay);   // reflect the spend immediately
     if(d&&d.disabled) return termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
     if(!d||!d.ok){ if(d&&d.error==='rate') return termOutAI(`busy — the shared AI limit is maxed for a moment <span class="tp-trans">(retry in ${Math.ceil((d.retryMs||3000)/1000)}s)</span>.`);
+      if(d&&d.error==='ai-locked'){ termSetLock(true); return termOutAI(`AI is locked for this session. Run <b>admin unlock &lt;password&gt;</b> to enable AI answers <span class="tp-trans">(local commands like a ticker, <span class="ex" data-tcmd="top funding">top funding</span> or <span class="ex" data-tcmd="signals">signals</span> still work without it)</span>.`); }
       if(d&&d.error==='ask-daily-cap') return termOutAI(`daily AI limit reached — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
     if(d.mode==='planner'&&d.query){ termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
@@ -4595,6 +4596,12 @@ function termRun(raw){ const line=raw.trim(); if(!line) return;
   // Admin command — intercepted BEFORE the echo (so the password renders redacted, never
   // sitting in scrollback) and before any tier can touch it: the password goes to
   // /api/ai-reset and nowhere else — it can never escalate to /api/ask.
+  const aun=line.match(/^admin\s+unlock(?:\s+(\S+))?\s*$/i);
+  if(aun){ termEcho('admin unlock'+(aun[1]?' ••••••':''));
+    if(!aun[1]) return termErr('usage: admin unlock <password>');
+    return termAdminUnlock(aun[1]); }
+  const alk=line.match(/^admin\s+lock\s*$/i);
+  if(alk){ termEcho('admin lock'); return termAdminLock(); }
   const adm=line.match(/^admin\s+reset-reports(?:\s+(\S+))?\s*$/i);
   if(adm){ termEcho('admin reset-reports'+(adm[1]?' ••••••':''));
     if(!adm[1]) return termErr('usage: admin reset-reports <password>');
@@ -4617,6 +4624,28 @@ async function termAdminReset(pw){
     return termErr('wrong password');
   }catch(e){ termErr('reset failed — '+tesc(e.message)); }
 }
+async function termAdminUnlock(pw){
+  try{
+    const r=await fetch('/api/ai-unlock',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({password:pw})});
+    const d=await r.json().catch(()=>({}));
+    if(d&&d.ok){ termSetLock(false); const hrs=Math.round((d.ttlMs||864e5)/36e5);
+      termOut(`AI unlocked for this session <span class="tp-trans">— report generation + AI answers enabled for ${hrs}h or until you close the browser</span>`); return; }
+    if(d&&d.error==='not-configured') return termErr('ADMIN_PASSWORD is not set on the server — add it on Railway first');
+    if(d&&d.error==='rate') return termErr(`too many attempts — locked for ${Math.ceil((d.retryMs||60000)/1000)}s`);
+    return termErr('wrong password');
+  }catch(e){ termErr('unlock failed — '+tesc(e.message)); }
+}
+async function termAdminLock(){
+  try{ await fetch('/api/ai-lock',{method:'POST',headers:{accept:'application/json'}}); }catch(_){}
+  termSetLock(true); termOut('AI locked <span class="tp-trans">— generation now requires admin unlock again</span>');
+}
+// Lock indicator in the terminal header. HttpOnly cookie is invisible to JS, so /api/ai-status is
+// the source of truth for the initial paint on open; unlock/lock flip it optimistically after.
+function termSetLock(locked){ const b=termEl('termLock'); if(!b) return;
+  b.textContent=locked?'🔒 AI':'🔓 AI'; b.classList.toggle('open',!locked);
+  b.title=locked?'AI generation is locked — run: admin unlock <password>':'AI unlocked for this session'; }
+async function termRefreshLock(){ try{ const d=await fetchJSON('/api/ai-status'); const b=termEl('termLock');
+  if(b) b.hidden=!(d&&d.gated); termSetLock(!(d&&d.unlocked)); }catch(_){} }
 
 // ---- panel plumbing / rendering ----
 function termOut(html){ const d=document.createElement('div'); d.className='tp-blk'; d.innerHTML=`<span class="tp-badge c">computed</span> <span class="tp-line">${html}</span>`; termEl('termScroll').appendChild(d); termScrollDown(); }
@@ -4638,10 +4667,12 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('signals · reports',20)}</span><span class="sec">active signals · recent AI reports</span>
 <span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
 <span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
+<span class="amber">${tpad('admin unlock',20)}</span><span class="sec">+ password — unlock AI generation for this session (echo redacted)</span>
+<span class="amber">${tpad('admin lock',20)}</span><span class="sec">re-lock AI generation now</span>
 <span class="tp-trans">Or just ask: "who reports tomorrow", "best sector this week", "whats above the 200dma", "nvda vs amd", "hows the tape". Tab completes · ↑↓ history · ~ opens.</span>`); }
 
 // ---- open / close / input ----
-function termOpen(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(!p) return; p.hidden=false; if(fab) fab.classList.add('hidden'); const q=termEl('termCmd'); if(q) q.focus(); updateFreshTray();   /* refresh the ask-budget chip on open */ }
+function termOpen(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(!p) return; p.hidden=false; if(fab) fab.classList.add('hidden'); const q=termEl('termCmd'); if(q) q.focus(); updateFreshTray(); termRefreshLock();   /* refresh the ask-budget chip + AI lock state on open */ }
 function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) p.hidden=true; if(fab) fab.classList.remove('hidden'); }
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
@@ -5280,6 +5311,7 @@ async function aiRegenerate(coin){
     if(r.ok&&d.ok){ state.report.data=d.report; if(state.report.coin===coin) renderAiReport(d.report,coin); loadAiRecent(); pushToast('AI report generated — cached for everyone'+(d.dayLeft!=null?' · '+d.dayLeft+'/'+d.perDay+' left today':'')); }
     else if(r.status===429&&d.error==='daily-cap'){ pushToast('Daily report budget exhausted ('+(d.perDay||5)+'/day) — resets at midnight UTC, or an admin can reset it in the terminal'); if(state.report.coin===coin) loadAiReport(coin,true); }
     else if(r.status===429){ pushToast('On cooldown — regenerate unlocks in '+aiFmtLeft(d.regenInMs)+' (or on material change)'); if(d.report&&state.report.coin===coin){ state.report.data=d.report; renderAiReport(d.report,coin); } }
+    else if(r.status===401&&d.error==='ai-locked'){ pushToast('AI is locked — open the terminal (~) and run: admin unlock <password>'); }
     else pushToast('Generation failed — '+(d.error||('HTTP '+r.status)));
   }catch(e){ pushToast('Generation failed — '+e.message); }
   state.report.gen=false; if(state.report.coin===coin) renderAiGenState(coin,false);

@@ -702,6 +702,8 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .tp-budget b{color:var(--up);font-weight:600}
 .tp-budget.low b{color:var(--accent)}
 .tp-budget.out b{color:var(--down)}
+.tp-lock{margin-left:10px;font-family:var(--mono);font-size:10px;letter-spacing:.3px;color:var(--down);border:1px solid #4b2b26;border-radius:4px;padding:1px 6px;white-space:nowrap;cursor:help}
+.tp-lock.open{color:var(--up);border-color:#274b3b}
 .tp-min{margin-left:0;color:var(--muted);cursor:pointer;font-size:14px;padding:0 4px}
 .tp-exp{margin-left:8px;color:var(--muted);cursor:pointer;font-size:13px;padding:0 6px}
 .tp-exp:hover,.tp-min:hover{color:var(--text)}
