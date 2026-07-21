@@ -3440,10 +3440,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // rolls at midnight UTC, and the counter persists with the report cache so a redeploy can't
   // refill it. Early reset: terminal `admin reset-reports <password>` -> POST /api/ai-reset.
   const AI_REPORTS_PER_DAY = Math.max(1, Number(process.env.AI_REPORTS_PER_DAY) || 5);
+  // The ask terminal's AI fallback also spends model budget (now at medium effort). Same shape as
+  // the report cap: a shared daily pool, rolling at midnight UTC, over the top of the 12/min window
+  // — so a single busy day can't run up an unbounded bill. Only SUCCESSFUL, non-cached model calls
+  // burn it (a cache hit or a failure costs nothing). Persisted with the report budget so a redeploy
+  // can't refill it; resettable via the same admin path.
+  const ASK_REPORTS_PER_DAY = Math.max(1, Number(process.env.ASK_MAX_PER_DAY) || 40);
   const utcDay = () => new Date().toISOString().slice(0, 10);
   let aiDay = { day: utcDay(), count: 0 };
+  let askDay = { day: utcDay(), count: 0 };
   function aiDayRoll() { const d = utcDay(); if (aiDay.day !== d) aiDay = { day: d, count: 0 }; }
   function aiDayLeft() { aiDayRoll(); return Math.max(0, AI_REPORTS_PER_DAY - aiDay.count); }
+  function askDayRoll() { const d = utcDay(); if (askDay.day !== d) askDay = { day: d, count: 0 }; }
+  function askDayLeft() { askDayRoll(); return Math.max(0, ASK_REPORTS_PER_DAY - askDay.count); }
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
   const AI_LEVEL_KINDS = new Set(["void", "target", "zone_low", "zone_high", "note"]);
   let aiReports = new Map();    // coin -> stored report (successes only; errors are returned, not cached)
@@ -3456,9 +3465,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // Same-day restart keeps the spent budget; a stale day is simply dropped (fresh counter).
     if (saved && saved.day && saved.day.day === utcDay())
       aiDay = { day: saved.day.day, count: Math.max(0, Number(saved.day.count) || 0) };
+    if (saved && saved.askDay && saved.askDay.day === utcDay())
+      askDay = { day: saved.askDay.day, count: Math.max(0, Number(saved.askDay.count) || 0) };
   } catch (_) {}
   function persistAiReports() {
-    try { if (store.saveAiReports) store.saveAiReports({ ts: Date.now(), day: aiDay, reports: [...aiReports.values()] }); } catch (_) {}
+    try { if (store.saveAiReports) store.saveAiReports({ ts: Date.now(), day: aiDay, askDay, reports: [...aiReports.values()] }); } catch (_) {}
   }
   const pctOf = (px, ref) => (px != null && ref != null && isFinite(px) && isFinite(ref) && ref > 0)
     ? +((px / ref - 1) * 100).toFixed(2) : null;
@@ -4184,16 +4195,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return !!(tickerSet && tickerSet.has(H));   // <TICKER> or <TICKER> <field>
   }
   async function askBoard(q, ctx) {
+    const withBudget = (r) => Object.assign(r, { askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() });
     q = String(q || "").trim();
-    if (!q) return { ok: false, error: "empty question" };
-    if (!AI_KEY() && !aiFetch) return { ok: false, disabled: true, error: "AI fallback needs an API key on the server (OPENAI_API_KEY / ANTHROPIC_API_KEY)" };
+    if (!q) return withBudget({ ok: false, error: "empty question" });
+    if (!AI_KEY() && !aiFetch) return withBudget({ ok: false, disabled: true, error: "AI fallback needs an API key on the server (OPENAI_API_KEY / ANTHROPIC_API_KEY)" });
     ctx = ctx || {};
     const normQ = q.toLowerCase().replace(/\s+/g, " ").trim();
     const cached = askCache.get(normQ);
-    if (cached && Date.now() - cached.at < ASK_CACHE_TTL) return Object.assign({ cached: true }, cached.res);
+    if (cached && Date.now() - cached.at < ASK_CACHE_TTL) return withBudget(Object.assign({ cached: true }, cached.res));   // a cache hit never burns budget
     const now = Date.now();
     while (askHits.length && askHits[0] < now - ASK_WINDOW_MS) askHits.shift();
-    if (askHits.length >= ASK_MAX_PER_WINDOW) return { ok: false, error: "rate", retryMs: ASK_WINDOW_MS - (now - askHits[0]) };
+    if (askHits.length >= ASK_MAX_PER_WINDOW) return withBudget({ ok: false, error: "rate", retryMs: ASK_WINDOW_MS - (now - askHits[0]) });
+    // Daily budget, over the top of the per-minute window. Checked BEFORE any model call so an
+    // exhausted day costs nothing; the client's chip is convenience, this is the real gate.
+    if (!askDayLeft()) return withBudget({ ok: false, error: "ask-daily-cap" });
     askHits.push(now);
     const markets = Array.isArray(ctx.universe) ? ctx.universe.slice(0, 160) : [];
     const tickerSet = new Set(markets.map((m) => String(m && m.t || "").toUpperCase()).filter(Boolean));
@@ -4223,8 +4238,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       }
     } else res = await analyst();
     res.model = AI_MODEL; res.provider = AI_PROVIDER;
-    if (res.ok) { askCache.set(normQ, { at: Date.now(), res }); if (askCache.size > 200) askCache.clear(); }
-    return res;
+    if (res.ok) { askDay.count++; persistAiReports();   // a real model call landed — burn one, persist the counter
+      askCache.set(normQ, { at: Date.now(), res }); if (askCache.size > 200) askCache.clear(); }
+    return withBudget(res);
   }
 
   // ===== Admin reset of the daily report budget ==========================================
@@ -4256,6 +4272,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getDaily: () => dailyCache,
     getAnalytics: () => analyticsCache,
     getSeries,
+    // Per-coin cache-key inputs for the candle/series ETag: the spine's data-version stamp (max of
+    // hourly + daily update times — bumps exactly when getSeries/getCandles output can change) and
+    // the live mark (which drives the tf series' forming bar and streams independently of the
+    // stamp). Returned together so the routes build a collision-proof, forming-bar-honest key.
+    getCoinStamp: (coin) => { const r = rows.get(coin); return r ? { st: Math.max(r.hourlyTs || 0, r.dailyTs || 0), px: r.px || 0 } : { st: 0, px: 0 }; },
     getHourly,
     getFunding,
     getCandles,
@@ -4379,7 +4400,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
             learnedAliases: Object.keys(nameLearned).length } },
         ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
           fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size,
-          perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() },
+          perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft(),
+          askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };
