@@ -4191,6 +4191,7 @@ function tpad(s,w,r){ s=String(s); const g=w-s.length; return g<=0?s:(r?' '.repe
 function tpct(v,dp){ if(v==null||!isFinite(v)) return '<span class="sec">—</span>'; dp=dp==null?1:dp; return `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(dp)}%</span>`; }
 function tint(v){ if(v==null||!isFinite(v)) return '<span class="sec">—</span>'; return `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${Math.round(v)}</span>`; }
 // field accessors — every value read live off the row the board renders
+const tpf1=v=>(v>=0?'+':'')+v.toFixed(1)+'%';
 const TFIELD={
   funding:{g:termAprOf,f:v=>(v>=0?'+':'')+v.toFixed(0)+'%',l:'funding'},
   fundpct:{g:r=>r.fundPct,f:v=>v+'th',l:'fund pctile'},
@@ -4209,10 +4210,38 @@ const TFIELD={
   ma20:{g:r=>r.ma20,f:fmtPrice,l:'MA 20'}, ma50:{g:r=>r.ma50,f:fmtPrice,l:'MA 50'},
   ma100:{g:r=>r.ma100,f:fmtPrice,l:'MA 100'}, ma200:{g:r=>r.ma200,f:fmtPrice,l:'MA 200'},
   vwap:{g:r=>r.vwap30,f:fmtPrice,l:'VWAP 30d'},
+  // full board coverage — every numeric column is a callable lens, plus computed distances
+  h1:{g:r=>r.h1,f:tpf1,l:'1h'}, h4:{g:r=>r.h4,f:tpf1,l:'4h'},
+  d7:{g:r=>r.d7,f:tpf1,l:'7d'}, d30:{g:r=>r.d30,f:tpf1,l:'30d'},
+  gap:{g:r=>r.gap,f:tpf1,l:'close→open gap'},
+  prem:{g:r=>r.prem,f:v=>(v>=0?'+':'')+v.toFixed(1)+'bp',l:'perp premium'},
+  rvol:{g:r=>r.rvol,f:v=>'×'+v.toFixed(1),l:'rvol'},
+  adr:{g:r=>r.adr,f:v=>v.toFixed(2)+'%',l:'avg daily range'},
+  vol30:{g:r=>r.vol30,f:v=>Math.round(v)+'%',l:'realized vol (ann)'},
+  rs:{g:r=>r.rs,f:tpf1,l:'vs S&P'},
+  dcap:{g:r=>r.dcap,f:v=>Math.round(v)+'%',l:'downcap 31d'},
+  hitr:{g:r=>r.hitr,f:v=>Math.round(v)+'%',l:'hit% red tape'},
+  ddy:{g:r=>r.ddy,f:v=>v.toFixed(1)+'%',l:'vs YTD hi'},
+  vsvwap:{g:r=>r.vsvwap,f:tpf1,l:'vs 30d VWAP'},
+  yopen:{g:r=>r.yopen,f:fmtPrice,l:'year open'}, mopen:{g:r=>r.mopen,f:fmtPrice,l:'month open'},
+  vsyopen:{g:r=>(r.px>0&&r.yopen>0)?(r.px/r.yopen-1)*100:null,f:tpf1,l:'YTD'},
+  vsmopen:{g:r=>(r.px>0&&r.mopen>0)?(r.px/r.mopen-1)*100:null,f:tpf1,l:'MTD'},
+  vsma20:{g:r=>(r.px>0&&r.ma20>0)?(r.px/r.ma20-1)*100:null,f:tpf1,l:'vs 20dma'},
+  vsma50:{g:r=>(r.px>0&&r.ma50>0)?(r.px/r.ma50-1)*100:null,f:tpf1,l:'vs 50dma'},
+  vsma100:{g:r=>(r.px>0&&r.ma100>0)?(r.px/r.ma100-1)*100:null,f:tpf1,l:'vs 100dma'},
+  vsma200:{g:r=>(r.px>0&&r.ma200>0)?(r.px/r.ma200-1)*100:null,f:tpf1,l:'vs 200dma'},
 };
 const TALIAS={fund:'funding',apr:'funding',rate:'funding',fundingpct:'fundpct',pctile:'fundpct',
-  sqz:'squeeze',mom:'momentum',volume:'vol',openinterest:'oi',tape:'vstape',rs:'vstape',
-  deltaoi:'doi',oichange:'doi',b:'beta',drawdown:'dd',change:'d1',chg:'d1',day:'d1',px:'price',oivol:'turn'};
+  sqz:'squeeze',mom:'momentum',volume:'vol',openinterest:'oi',tape:'vstape',
+  deltaoi:'doi',oichange:'doi',b:'beta',drawdown:'dd',change:'d1',chg:'d1',day:'d1',today:'d1',perf:'d1',performance:'d1',px:'price',oivol:'turn',
+  week:'d7',weekly:'d7','7d':'d7','7day':'d7',month:'d30',monthly:'d30','30d':'d30','30day':'d30',
+  hour:'h1',hourly:'h1','1h':'h1','1hour':'h1','4h':'h4','4hour':'h4',
+  ytd:'vsyopen',yeartodate:'vsyopen',mtd:'vsmopen',monthtodate:'vsmopen',yearopen:'yopen',monthopen:'mopen',
+  premium:'prem',basis:'prem',range:'adr',avgrange:'adr',dailyrange:'adr',
+  relvol:'rvol',relativevolume:'rvol',volatility:'vol30',vola:'vol30',volatile:'vol30',realizedvol:'vol30',
+  downcap:'dcap',downcapture:'dcap',hit:'hitr',hitrate:'hitr',
+  yearhigh:'ddy',ytdhigh:'ddy',high:'dd',fromhigh:'dd',offhigh:'dd',
+  sp500:'rs',spx:'rs',vssp:'rs',vssp500:'rs',vsspx:'rs'};
 function tfield(name){ name=(name||'').toLowerCase().replace(/[^a-z0-9]/g,''); return TFIELD[name]?name:(TALIAS[name]||null); }
 // top-list metrics, with natural-language aliases so "trending", "movers", "hot" resolve.
 const METRICS=new Set(['vol','funding','squeeze','momentum','oi','carry','gainers','losers']);
@@ -4234,18 +4263,22 @@ function termCard(r){ const apr=termAprOf(r), fp=r.fundPct;
     (r.vstape!=null||r.beta!=null)?`<span class="tp-k">vs tape</span> ${tpct(r.vstape)}${r.beta!=null&&isFinite(r.beta)?` · β ${r.beta.toFixed(2)}`:''}`:'',
     `<span class="tp-k">views</span> <span class="tp-deep" data-tcmd="report ${r.ticker}">report ▸</span>  <span class="tp-deep" data-topen="${tesc(r.coin)}">drawer ▸</span>` ].filter(Boolean);
   termOut(lines.join('\n')); }
-function termFieldCmd(r,fname){ const fk=tfield(fname); if(!fk){ termAsk(r.ticker+' '+fname); return; }   // unknown lens -> let the AI try, don't fake a card
+function termFieldCmd(r,fname){
+  if((fname||'').toLowerCase().replace(/[^a-z]/g,'')==='sector'){ termHi(r.coin);
+    return termOut(`${termTkHdr(r)}\n<span class="tp-k">sector</span> <b>${r.sector?tesc(r.sector):'—'}</b>`); }
+  const fk=tfield(fname); if(!fk){ termAsk(r.ticker+' '+fname); return; }   // unknown lens -> let the AI try, don't fake a card
   const F=TFIELD[fk], v=F.g(r); termHi(r.coin);
   termOut(`${termTkHdr(r)}\n<span class="tp-k">${F.l}</span> <b>${v==null||!isFinite(v)?'—':F.f(v)}</b>`); }
-function termTop(metric,n){ n=n||8; const m=metricOf(metric); if(!m) return termErr(`metric? try: vol · funding · squeeze · momentum · oi · carry · gainers · losers`);
-  let key=m, asc=false, label=m;
-  if(m==='gainers'){key='d1';asc=false;} if(m==='losers'){key='d1';asc=true;}
+function termTop(metric,n,asc){ n=n||8; const m=metricOf(metric)||tfield(metric);
+  if(!m) return termErr(`metric? any live column works — vol · funding · squeeze · momentum · oi · carry · gainers · losers · d7 · d30 · rvol · vsvwap · gap · …`);
+  let key=m, label=m;
+  if(m==='gainers'){key='d1';asc=false;} else if(m==='losers'){key='d1';asc=true;}
   const F=TFIELD[key];
   let list=termActive().map(r=>({r,v:F.g(r)})).filter(x=>x.v!=null&&isFinite(x.v));
   list.sort((a,b)=>asc?a.v-b.v:b.v-a.v); list=list.slice(0,n);
   if(!list.length) return termOut(`<span class="sec">no data for ${tesc(label)} in this scope yet</span>`);
-  const rows=list.map((x,i)=>`${tpad(i+1,2)} <span class="tp-deep" data-tcmd="${x.r.ticker}">${tpad(x.r.ticker,8)}</span> ${tpad(F.f(x.v),9,true)}  <span class="tp-trans">${tpad(fmtUsd(x.r.vol),8,true)} vol</span>`).join('\n');
-  termOut(`<span class="tp-hd">top ${tesc(label)}</span> <span class="tp-trans">· ${state.scope}</span>\n<span class="tp-th">${tpad('#',2)} ${tpad('TICKER',8)} ${tpad((F.l||label).toUpperCase(),9,true)}</span>\n${rows}`); }
+  const rows=list.map((x,i)=>`${tpad(i+1,2)} <span class="tp-deep" data-tcmd="${x.r.ticker}">${tpad(x.r.ticker,8)}</span> ${tpad(F.f(x.v),10,true)}  <span class="tp-trans">${tpad(fmtUsd(x.r.vol),8,true)} vol</span>`).join('\n');
+  termOut(`<span class="tp-hd">${asc&&m!=='losers'?'bottom':'top'} ${tesc(label)}</span> <span class="tp-trans">· ${state.scope}</span>\n<span class="tp-th">${tpad('#',2)} ${tpad('TICKER',8)} ${tpad((F.l||label).toUpperCase().slice(0,12),10,true)}</span>\n${rows}`); }
 // Earnings — reads the live earnings map the E-badges use; equities only, honest about coverage.
 function termEarnings(r){
   if(r.uni!=='xyz') return termOut(`${termTkHdr(r)}\n<span class="sec">earnings apply to equities — ${tesc(r.ticker)} doesn't report</span>`);
@@ -4299,33 +4332,175 @@ function termDiverge(r){ const benchC=r.uni==='main'?state.benchMain:state.bench
   const verdict = (r.vstape!=null&&Math.abs(r.vstape)>1.5)?(r.vstape>0?'leading the group':'lagging the group'):'moving with the group';
   termOut(`${termTkHdr(r)}\n<span class="tp-k">corr→bench</span> ${rho!=null?'<b>'+rho.toFixed(2)+'</b>':'—'}${r.beta!=null&&isFinite(r.beta)?' · β '+r.beta.toFixed(2):''}\n<span class="tp-k">vs tape</span> ${tpct(r.vstape)}${r.fundPct!=null?' · funding '+r.fundPct+'th pctile':''}\n<span class="tp-trans">${verdict}${rho!=null&&rho<0.5?', and moving with it less than usual — decoupling':''}</span>`); }
 
+// ---- whole-board commands: every surface the app holds is callable ------------------------
+const TWIN_LBL={d1:'today',d7:'7d',d30:'30d',h1:'1h',h4:'4h'};
+function termBreadth(k){ k=TFIELD[k]?k:'d1'; const F=TFIELD[k];
+  const vals=termActive().map(r=>({r,v:F.g(r)})).filter(x=>x.v!=null&&isFinite(x.v));
+  if(!vals.length) return termOut('<span class="sec">no data in this scope yet</span>');
+  const up=vals.filter(x=>x.v>0).length, dn=vals.filter(x=>x.v<0).length, med=median(vals.map(x=>x.v));
+  vals.sort((a,b)=>b.v-a.v); const hi=vals[0], lo=vals[vals.length-1];
+  const cl=med>0.05?'pos':med<-0.05?'neg':'sec';
+  termOut(`<span class="tp-hd">breadth</span> <span class="tp-trans">· ${state.scope} · ${TWIN_LBL[k]||k} · ${vals.length} names</span>\n`
+    +`<span class="pos">${up} up</span> · <span class="neg">${dn} down</span> · median <b class="${cl}">${med>=0?'+':''}${med.toFixed(2)}%</b>\n`
+    +`<span class="tp-k">best</span> <span class="tp-deep" data-tcmd="${tesc(hi.r.ticker)}">${tesc(hi.r.ticker)}</span> ${tpct(hi.v)}   <span class="tp-k">worst</span> <span class="tp-deep" data-tcmd="${tesc(lo.r.ticker)}">${tesc(lo.r.ticker)}</span> ${tpct(lo.v)}`); }
+function termSectors(k){ k=TFIELD[k]?k:'d1'; const F=TFIELD[k]; const by=new Map();
+  for(const r of termActive()){ const v=F.g(r); if(v==null||!isFinite(v)) continue;
+    const sec=r.sector||'unclassified'; let a=by.get(sec); if(!a){a=[];by.set(sec,a);} a.push(v); }
+  if(!by.size) return termOut('<span class="sec">no sector data in this scope</span>');
+  const grp=[...by.entries()].map(([sec,vs])=>({sec,med:median(vs),n:vs.length})).sort((a,b)=>b.med-a.med);
+  const lines=grp.slice(0,12).map(x=>`${tpad(tesc(secShort(x.sec)).slice(0,15),16)} <span class="${x.med>=0?'pos':'neg'}">${tpad((x.med>=0?'+':'')+x.med.toFixed(2)+'%',8,true)}</span>  <span class="tp-trans">${x.n} name${x.n>1?'s':''}</span>`).join('\n');
+  termOut(`<span class="tp-hd">sectors</span> <span class="tp-trans">· median ${TWIN_LBL[k]||k} · ${state.scope}</span>\n${lines}`); }
+async function termEarnCal(mode){
+  if(state.scope==='crypto') termOut('<span class="tp-trans">earnings are an equities thing — showing the stocks calendar</span>');
+  if(!state.earnPayload){ try{ await loadEarnings(); }catch(_){} }
+  const d=state.earnPayload; if(!d) return termOut('<span class="sec">earnings calendar hasn\'t loaded yet — ask again in a moment</span>');
+  if(mode==='recent'){ const rec=(d.recent||[]).slice(0,10);
+    if(!rec.length) return termOut('<span class="sec">no recently reported names in the window</span>');
+    const lines=rec.map(e=>{ const r=termFind(e.t);
+      const eps=e.epsA!=null?`EPS ${e.epsA}${e.eps!=null?' vs '+e.eps+' est ('+(e.epsA>e.eps?'<span class="pos">beat</span>':e.epsA<e.eps?'<span class="neg">miss</span>':'in line')+')':''}`:'<span class="sec">EPS pending</span>';
+      const day=r&&r.d1!=null&&isFinite(r.d1)?` · day ${tpct(r.d1)}`:'';
+      return `<span class="tp-deep" data-tcmd="${tesc(e.t)}">${tpad(tesc(e.t),7)}</span> ${tesc(e.d)} ${tesc(earnSessLbl(e.s))} · ${eps}${day}`; }).join('\n');
+    return termOut(`<span class="tp-hd">recently reported</span>\n${lines}\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
+  const max=mode==='today'?0:mode==='tomorrow'?1:(d.windowDays||14), min=mode==='tomorrow'?1:0;
+  const ent=(d.entries||[]).map(e=>({e,diff:earnDiffC(e.d)})).filter(x=>x.diff!=null&&x.diff>=min&&x.diff<=max);
+  if(!ent.length) return termOut(`<span class="tp-hd">earnings ${tesc(mode)}</span>\n<span class="sec">nothing scheduled${mode==='today'?' today':mode==='tomorrow'?' tomorrow':' in the next '+(d.windowDays||14)+'d'}</span> <span class="tp-trans">(universe names with a US listing — foreign-only listings aren't covered)</span>`);
+  ent.sort((a,b)=>a.diff-b.diff);
+  const lines=ent.slice(0,14).map(x=>{ const when=x.diff===0?'<b class="amber">today</b>':x.diff===1?'tomorrow':`in ${x.diff}d (${tesc(x.e.d)})`;
+    return `<span class="tp-deep" data-tcmd="${tesc(x.e.t)}">${tpad(tesc(x.e.t),7)}</span> ${when} · ${tesc(earnSessLbl(x.e.s))}${x.e.eps!=null?' · est '+x.e.eps:''}`; }).join('\n');
+  termOut(`<span class="tp-hd">earnings ${tesc(mode)}</span> <span class="tp-trans">· ${ent.length} name${ent.length>1?'s':''}</span>\n${lines}\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
+function termAgo(ts){ const m=Math.max(0,Math.round((Date.now()-ts)/60000)); return m<60?m+'m':m<48*60?Math.round(m/60)+'h':Math.round(m/1440)+'d'; }
+async function termNewsCmd(tk,n){ n=n||8;
+  if(!state.news){ try{ await loadNews(); }catch(_){} }
+  const d=state.news; if(!d||!Array.isArray(d.items)) return termOut('<span class="sec">news feed hasn\'t loaded yet — ask again in a moment</span>');
+  let items=d.items.filter(a=>!a.fl);   // filings are their own lane — never mixed into headlines
+  if(tk) items=items.filter(a=>(a.tk||'').toUpperCase()===tk); else items=items.filter(a=>!!a.tk);   // bare: verified attributions only
+  items=items.slice().sort((a,b)=>(b.pub||0)-(a.pub||0)).slice(0,n);
+  if(!items.length) return termOut(`<span class="sec">no ${tk?tesc(tk)+' ':''}headlines in the 72h window</span>${tk?' <span class="tp-trans">(per-name coverage rotates — thin names surface less often)</span>':''}`);
+  const lines=items.map(a=>`<span class="tp-trans">${termAgo(a.pub||Date.now())}</span> ${a.tk?`<span class="tp-deep" data-tcmd="${tesc(a.tk)}">${tpad(tesc(a.tk),6)}</span> `:''}${a.url?`<a href="${tesc(a.url)}" target="_blank" rel="noopener">${tesc(a.h||'')}</a>`:tesc(a.h||'')}`).join('\n');
+  termOut(`<span class="tp-hd">news${tk?' · '+tesc(tk):''}</span> <span class="tp-trans">· verified attributions · 72h window</span>\n${lines}\n<span class="tp-deep" data-tview="news">open news tab ▸</span>`); }
+async function termReports(){ let d=state.report.list;
+  if(!d){ try{ d=await fetchJSON('/api/ai-reports'); state.report.list=d; }catch(_){} }
+  const list=d&&Array.isArray(d.reports)?d.reports:[];
+  if(!list.length) return termOut('<span class="sec">no AI reports generated yet</span> <span class="tp-trans">— try <span class="ex" data-tcmd="report NVDA">report NVDA</span></span>');
+  const lines=list.slice(0,8).map(x=>`<span class="tp-trans">${termAgo(x.ts)}</span> <span class="tp-deep" data-tcmd="report ${tesc(x.ticker)}">${tpad(tesc(x.ticker),7)}</span> <span class="tp-chip ${x.bias==='long'?'l':x.bias==='short'?'s':''}">${tesc(x.bias||'—')}</span> ${tesc((x.headline||'').slice(0,64))}`).join('\n');
+  termOut(`<span class="tp-hd">recent AI reports</span> <span class="tp-trans">· shared across the group</span>\n${lines}`); }
+function termCompare(a,b){ termHi(a.coin);
+  const F=['price','d1','d7','funding','fundpct','squeeze','momentum','vstape','oi','vol','beta','dd'];
+  const cell=(r,k)=>{ const f=TFIELD[k], v=f.g(r); return v==null||!isFinite(v)?'—':f.f(v); };
+  const lines=F.map(k=>`<span class="tp-k">${tpad(TFIELD[k].l,12)}</span> ${tpad(cell(a,k),12,true)} ${tpad(cell(b,k),12,true)}`).join('\n');
+  termOut(`<span class="tp-hd">compare</span>\n<span class="tp-th">${tpad('',12)} <span class="tp-deep" data-tcmd="${tesc(a.ticker)}">${tpad(tesc(a.ticker),12,true)}</span> <span class="tp-deep" data-tcmd="${tesc(b.ticker)}">${tpad(tesc(b.ticker),12,true)}</span></span>\n${lines}\n<span class="tp-trans">every number is the live board's — same rows the table renders</span>`); }
+
 // ---- Tier 2: local NL → grammar (no AI). Returns null when it genuinely can't map the
 //      question, so termRun escalates to the AI instead of faking a degenerate answer.
-function nlResolve(text){ const words=text.split(/\s+/); const s=' '+text.toLowerCase().replace(/[?!.,]/g,' ').replace(/\s+/g,' ').trim()+' ';
-  const rTok=words.map(w=>termFind(w)).find(Boolean); const tk=rTok?rTok.ticker:null;
+// Ticker guard — the confident-but-wrong killer. A lowercase English word inside a sentence
+// ("on", "all", "it", "now", "key") is NEVER treated as a ticker: only $SYM, CAPS, non-English
+// tokens, or a single-word query count. "what's on the tape" is a question, not a request for
+// the ON Semiconductor card. Blocked-but-real tickers escalate to the AI planner, which sees
+// the ticker roster — an escalation over a wrong answer, never the reverse.
+const TSTOP=new Set(('a an the and or but nor if then than so not no yes is are was were be been being am do does did done '
+ +'can could may might must will would should shall has have had it its this that these those there here where when what '
+ +'who whom whose why how which while all any some few many much more most less least lot lots one two three four five ten '
+ +'on in at by to of for from with within without about into onto over under up down out off vs via per as like unlike just '
+ +'very too also only even still yet again ever never always often now new old good bad best worst better worse big small '
+ +'high low higher lower long short buy sell hold sold bought me my mine we us our ours you your yours they them their theirs '
+ +'he him his she her hers i today tonight tomorrow yesterday week weeks month months year years day days hour hours '
+ +'open opens close closes closed gap news report reports reporting earnings signal signals screen help clear top bottom show tell give find '
+ +'list price prices market markets tape trend chart charts sector sectors name names stock stocks coin coins crypto going doing look looks '
+ +'looking anything something nothing everything anyone whats hows near far above below between against relative move moves moved '
+ +'moving trading trade trades pull pulling right left back next last first great really pretty kind sort bit around since until '
+ +'because want wants need needs think thinks say says get gets got make makes let lets see sees seen watch keep keeps deep dive '
+ +'read take takes came come comes went gone strong weak strength weakness active fresh stale live real time '
+ +'key well met cat run runs play plays main fast slow pay pays paid peak edge camp mind cost costs care love '
+ +'nice cool huge tiny wild flat side ride rose fell hit hits miss level levels').split(/\s+/));
+function termTickerish(w,only){ let c=String(w||'').replace(/[?!.,:;()'"]+$/,'').replace(/^[?!.,:;()'"]+/,'');
+  if(!c) return false;
+  if(c[0]==='$') return true;                                         // $SYM is always intentional
+  if(/[a-z]/.test(c)&&/[A-Z]/.test(c)) return false;                  // Mixed case is a word, not a symbol
+  if(c===c.toUpperCase()&&/^[A-Z][A-Z0-9]{0,7}$/.test(c)) return true;   // typed in CAPS → intentional
+  if(only) return true;                                               // the whole query IS this token
+  return !TSTOP.has(c.toLowerCase());                                 // lowercase in a sentence: only non-English tokens
+}
+function nlTickers(rawWords){ const out=[], seen=new Set(), used=new Set(), only=rawWords.length===1;
+  for(const w of rawWords){
+    const c=w.replace(/^[$]/,'').replace(/[?!.,:;()'"]+$/,'');
+    let ps=c.replace(/['\u2019]s$/,'');          // NVDA's → NVDA
+    if(ps===c){ const m=c.match(/^(\$?[A-Z][A-Z0-9]+)s$/); if(m) ps=m[1]; }   // NVDAs → NVDA (caps body + bare s)
+    let r=null;
+    for(const cand of (ps!==c&&ps.length>=2?[c,ps]:[c])){
+      const probe=(w[0]==='$'?'$':'')+cand;      // keep $-intent through the guard
+      if(!termTickerish(probe,only)) continue;
+      r=termFind(cand); if(r) break; }
+    if(r&&!seen.has(r.coin)){ seen.add(r.coin); out.push(r); used.add(w.toLowerCase()); } }
+  return {rs:out, used}; }
+const TWINDOWS=[[/\b(this |past |last )?week(ly)?\b|\b7 ?days?\b/,'d7'],[/\b(this |past |last )?month(ly)?\b|\b30 ?days?\b/,'d30'],
+  [/\b(past|last) hour\b|\b1 ?hour\b/,'h1'],[/\b4 ?hours?\b|\b4h\b/,'h4'],[/\btoday\b|\b24 ?h(ours?)?\b|\bdaily\b/,'d1']];
+function termWin(s){ for(const [re,k] of TWINDOWS) if(re.test(s)) return k; return null; }
+function nlResolve(text){ const rawWords=text.split(/\s+/); const s=' '+text.toLowerCase().replace(/[?!.,]/g,' ').replace(/\s+/g,' ').trim()+' ';
+  const nt=nlTickers(rawWords); const found=nt.rs; const tk=found.length?found[0].ticker:null;
+  const win=termWin(s); const n=(s.match(/\b(\d{1,3})\b/)||[])[1];
   if(/\b(help|how do i|what can|commands)\b/.test(s)) return 'help';
   if(/\b(clear|reset|wipe)\b/.test(s)) return 'clear';
+  // ---- whole-board questions (no ticker needed) ----
+  if(/\bbreadth\b/.test(s)||/\b(hows?|how is|how are|how does|whats) the (market|tape|board)\b/.test(s)
+    ||/\b(market|tape) (doing|look|looking|today)\b/.test(s)||/\bhow many (names? )?(are )?(up|down|green|red)\b/.test(s)
+    ||/\bis the (tape|market) (red|green|up|down)\b/.test(s)) return 'breadth'+(win?' '+win:'');
+  if(!tk&&/\bsectors?\b/.test(s)&&/\b(best|worst|leading|lagging|strongest|weakest|top|performance|performing|doing|which|hows?|moving|move)\b/.test(s)) return 'sectors'+(win?' '+win:'');
+  if(!tk&&/\b(who|any(one|body|thing)?|what|which)\b/.test(s)&&/\b(reports?|reported|reporting|earnings)\b/.test(s)){
+    if(/\btomorrow\b/.test(s)) return 'earnings tomorrow';
+    if(/\b(reported|recent|just|recap|results)\b/.test(s)) return 'earnings recent';
+    if(/\b(week|upcoming|next|soon|coming)\b/.test(s)) return 'earnings week';
+    return 'earnings today'; }
+  if(!tk&&/\bearnings (calendar|schedule|list)\b/.test(s)) return 'earnings week';
+  if(!tk&&/\b(news|headlines?)\b/.test(s)) return 'news'+(n?' '+n:'');
+  if(!tk&&/\breports?\b/.test(s)&&/\b(latest|recent|new|ai|feed|list)\b/.test(s)) return 'reports';
+  // ---- positioning screens in trader phrasing ----
   if(/\b(crowded short|short squeeze|squeeze candidate|squeeze setup|coiled)/.test(s)) return 'screen funding<0 & squeeze>50';
   if(/\b(crowded long|overheat|euphori|longs paying)/.test(s)) return 'screen fundpct>85';
   if(/\b(paid to (be )?short|positive carry|get paid)/.test(s)) return 'screen carry>0.3';
-  if(/\b(near (its |their )?high|at (the )?high|breaking out|breakout)/.test(s)) return 'screen dd>-3';
-  if(/\b(oversold|beaten down|near (its |their )?low|washed out|dumped)/.test(s)) return 'screen dd<-25';
+  if(!tk&&/\b(near (its |their )?high|at (the )?high|breaking out|breakout)/.test(s)) return 'screen dd>-3';
+  if(!tk&&/\b(oversold|beaten down|near (its |their )?low|washed out|dumped)/.test(s)) return 'screen dd<-25';
   if(/\b(rising oi|building oi|adding oi|oi building|new money)/.test(s)) return 'screen doi>3';
-  // top-N in any phrasing: "top 5 trending stocks", "biggest gainers", "most volume", "5 hottest names"
-  if(/\b(top|most|highest|biggest|largest|best|worst|leading|hottest?)\b/.test(s)||/\b(gainers?|losers?|movers?|trending)\b/.test(s)){
-    const n=(s.match(/\b(\d{1,3})\b/)||[])[1];
-    for(const w of words){ const m=metricOf(w); if(m) return 'top '+m+(n?' '+n:''); }
+  if(/\b(most|heavily) shorted\b|\bbiggest shorts\b/.test(s)) return 'bottom funding';
+  { const ma=s.match(/\b(above|below|over|under) (their |the |its )?(20|50|100|200) ?d?ma\b/)||s.match(/\b(above|below|over|under) (their |the |its )?ma ?(20|50|100|200)\b/);
+    if(ma){ const nn=ma[3]; if(tk) return tk+' vsma'+nn; return 'screen vsma'+nn+((ma[1]==='above'||ma[1]==='over')?'>0':'<0'); } }
+  if(/\b(above|over) (the |their |its )?vwap\b/.test(s)) return tk?tk+' vsvwap':'screen vsvwap>0';
+  if(/\b(below|under) (the |their |its )?vwap\b/.test(s)) return tk?tk+' vsvwap':'screen vsvwap<0';
+  if(!tk&&(/\b(unusual|elevated|abnormal|heavy) volume\b/.test(s)||/\bvolume spike\b/.test(s))) return 'screen rvol>2';
+  if(!tk&&/\bgap(ped|ping)? up\b/.test(s)) return 'screen gap>1';
+  if(!tk&&/\bgap(ped|ping)? down\b/.test(s)) return 'screen gap<-1';
+  // ---- superlatives → top/bottom over ANY live field, window-aware ----
+  if(/\b(top|most|highest|biggest|largest|best|worst|lowest|least|smallest|bottom|leading|hottest?)\b/.test(s)||/\b(gainers?|losers?|movers?|trending)\b/.test(s)){
+    const asc=/\b(lowest|least|smallest|bottom)\b/.test(s);
+    for(const w of rawWords){ const m=metricOf(w); if(m){
+      if((m==='gainers'||m==='losers')&&win&&win!=='d1') return (m==='losers'?'bottom ':'top ')+win+(n?' '+n:'');
+      return (asc&&m!=='losers'&&m!=='gainers'?'bottom ':'top ')+m+(n?' '+n:''); } }
+    for(const w of rawWords){ if(nt.used.has(w.toLowerCase())) continue; const f=tfield(w); if(f&&f!=='price') return (asc?'bottom ':'top ')+f+(n?' '+n:''); }
+    if(win) return (asc?'bottom ':'top ')+win+(n?' '+n:'');
   }
-  if(/\b(signal|firing|setup|whats active|anything active|whats up)/.test(s)) return 'signals'+(tk?' '+tk:'');
+  if(/\b(signal|firing|setup|whats active|anything active)/.test(s)||(/\bwhats up\b/.test(s)&&rawWords.length<=3)) return 'signals'+(tk?' '+tk:'');
+  // ---- two names → local side-by-side (a plain field compare never needs the AI) ----
+  if(found.length>=2&&/\b(vs|versus|against|compare|compared|or)\b/.test(s)) return 'vs '+found[0].ticker+' '+found[1].ticker;
+  if(found.length===2&&rawWords.length<=3) return 'vs '+found[0].ticker+' '+found[1].ticker;
   if(tk){
+    if(/\b(news|headlines?)\b/.test(s)) return 'news '+tk;
     if(/\b(earnings?|announc)/.test(s)||/when.*(report|earnings)/.test(s)) return 'earnings '+tk;
     if(/\b(report|analysis|analyst|deep dive|read on)/.test(s)) return 'report '+tk;
     if(/\b(diverg|decoupl|correlated|moving with|moves with|vs its group|vs the group|vs sector|relative to)/.test(s)) return 'diverge '+tk;
-    for(const w of words){ if(termFind(w)===rTok) continue; const fk=tfield(w); if(fk) return tk+' '+fk; }   // explicit field word
-    if(/\b(moving average|\bma\b|sma|ema|vwap)/.test(s)){ if(/vwap/.test(s)) return tk+' vwap'; const n=(s.match(/\b(20|50|100|200)\b/)||[])[1]; return n?tk+' ma'+n:null; }
+    { // "yearly open" / "monthly open" — the level; "above/vs/since the year open" — the distance.
+      // Must run BEFORE the single-word field scan: "monthly" alone aliases to d30.
+      const yo=/\b(year(ly|'?s)?|annual)\s+open(ing)?\b/.test(s), mo=/\bmonth(ly|'?s)?\s+open(ing)?\b/.test(s);
+      if(yo||mo){ const dist=/\b(above|below|over|under|vs|versus|from|since|off|against|relative)\b/.test(s);
+        return tk+' '+(dist?(yo?'vsyopen':'vsmopen'):(yo?'yopen':'mopen')); } }
+    for(const w of rawWords){ if(nt.used.has(w.toLowerCase())) continue; const fk=tfield(w); if(fk) return tk+' '+fk; }   // explicit field word
+    if(/\b(moving average|\bma\b|sma|ema|vwap)/.test(s)){ if(/vwap/.test(s)) return tk+' vwap'; const nn=(s.match(/\b(20|50|100|200)\b/)||[])[1]; return nn?tk+' ma'+nn:null; }
     if(/\bfunding\b|\brate\b/.test(s)) return tk+' funding'; if(/\b(oi|open interest)\b/.test(s)) return tk+' oi';
     if(/\bsqueeze\b/.test(s)) return tk+' squeeze'; if(/\bmomentum\b/.test(s)) return tk+' momentum';
-    if(words.length<=1||/\b(price|quote|how is|hows|what is|whats|show|chart|pull up)\b/.test(s)) return tk;   // near-bare -> card
+    if(/\b(sector|industry|group)\b/.test(s)) return tk+' sector';
+    if(/\b(ytd|year to date)\b/.test(s)) return tk+' vsyopen'; if(/\b(mtd|month to date)\b/.test(s)) return tk+' vsmopen';
+    if(/\b(off|from|below) (its |the )?(30d |monthly )?high\b/.test(s)) return tk+' dd';
+    if(win&&/\b(do|doing|done|did|perform|performed|performance|move|moved|hold|holding|chang)/.test(s)) return tk+' '+win;
+    if(win&&rawWords.length<=4) return tk+' '+win;
+    if(rawWords.length<=1||/\b(price|quote|how is|hows|what is|whats|show|chart|pull up)\b/.test(s)) return tk;   // near-bare -> card
     return null;   // a ticker plus intent we don't understand -> let the AI try, never fake a card
   }
   return null; }
@@ -4335,21 +4510,31 @@ function nlResolve(text){ const words=text.split(/\s+/); const s=' '+text.toLowe
 // head with junk args ("top 5 trending stocks", "nvda earnings") is NOT complete, so it falls
 // through to the NL layer and then the AI — never erroring or degrading to a bare card.
 function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0]);
-  if(r) return p.length===1 || tfield(p[1])!=null;              // <TICKER> alone, or <TICKER> <real field>
-  if(head==='top') return p.slice(1).some(x=>metricOf(x)!=null);
+  if(r) return p.length===1 || tfield(p[1])!=null || (p[1]||'').toLowerCase()==='sector';   // <TICKER> alone, or <TICKER> <real field>
+  if(head==='top'||head==='bottom') return p.slice(1).some(x=>metricOf(x)!=null||tfield(x)!=null);
   if(head==='screen'||head==='scr') return p.length>1 && /[<>=]/.test(p.join(' '));
-  if(head==='signals'||head==='sig'||head==='help'||head==='clear'||head==='stocks'||head==='crypto') return true;
-  if(head==='report'||head==='ai'||head==='corr'||head==='diverge'||head==='earnings'||head==='earn') return !!termFind(p[1]);
+  if(head==='signals'||head==='sig'||head==='help'||head==='clear'||head==='stocks'||head==='crypto'
+    ||head==='breadth'||head==='sectors'||head==='news'||head==='reports') return true;
+  if(head==='earnings'||head==='earn') return p.length===1||!!termFind(p[1])||['today','tomorrow','week','recent'].includes((p[1]||'').toLowerCase());
+  if(head==='vs'||head==='compare') return !!(termFind(p[1])&&termFind(p[2]));
+  if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
   return false; }
 function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCase(), T=p[0].toUpperCase();
   if(h==='stocks'||h==='crypto'){ const b=document.querySelector('.scope[data-scope="'+h+'"]'); if(b) b.click(); termOut(`<span class="sec">scope →</span> <span class="amber">${h}</span>`); return; }
   if(h==='clear'){ termEl('termScroll').innerHTML=''; return; }
   if(h==='help'||h==='?') return termHelp();
-  if(h==='top'){ const rest=p.slice(1); const n=rest.map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); const metric=rest.find(x=>metricOf(x)); return termTop(metric||(rest[0]||''), n); }
+  if(h==='top'||h==='bottom'){ const rest=p.slice(1); const n=rest.map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); const metric=rest.find(x=>metricOf(x)||tfield(x)); return termTop(metric||(rest[0]||''), n, h==='bottom'); }
   if(h==='screen'||h==='scr') return termScreen(p.slice(1).join(' '));
   if(h==='signals'||h==='sig'){ const t=p[1]?p[1].toUpperCase():null; return termSignals(t); }
+  if(h==='breadth') return termBreadth(tfield(p[1])||'d1');
+  if(h==='sectors') return termSectors(tfield(p[1])||'d1');
+  if(h==='news'){ const rr=termFind(p[1]); const nn=p.slice(1).map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); return termNewsCmd(rr?rr.ticker.toUpperCase():null,nn); }
+  if(h==='reports') return termReports();
+  if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
   if(h==='report'||h==='ai'){ const rr=termFind(p[1])||termFind(p[0]); return rr?termReport(rr):termErr('usage: report <ticker>'); }
-  if(h==='earnings'||h==='earn'){ const rr=termFind(p[1]); return rr?termEarnings(rr):termErr('usage: earnings <ticker>'); }
+  if(h==='earnings'||h==='earn'){ const a1=(p[1]||'').toLowerCase();
+    if(!p[1]||['today','tomorrow','week','recent'].includes(a1)) return termEarnCal(a1||'today');
+    const rr=termFind(p[1]); return rr?termEarnings(rr):termErr('usage: earnings [ticker | today | tomorrow | week | recent]'); }
   if(h==='corr') return termCorr(p[1],p[2]);
   if(h==='diverge'){ const r=termFind(p[1]); return r?termDiverge(r):termErr('usage: diverge <ticker>'); }
   const r=termFind(T); if(r){ if(p[1]) return termFieldCmd(r,p[1]); return termCard(r); }
@@ -4358,10 +4543,17 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
 // (which/what) returns a grammar query the CLIENT runs → numbers stay the board's; analyst
 // (why/what-if) returns grounded prose over the compact bundle we send. Auto-routed by shape.
 function termCompactUniverse(){ const rnd=v=>(v==null||!isFinite(v))?null:+v.toFixed(2);
-  return termActive().slice(0,160).map(r=>({ t:r.ticker, px:rnd(r.px), d1:rnd(r.d1), f:rnd(termAprOf(r)),
+  // The analyst only knows what this row carries — a field missing here IS "not in the data".
+  // Ship every board metric (short keys; nulls dropped to keep the payload lean).
+  return termActive().slice(0,160).map(r=>{ const o={ t:r.ticker, px:rnd(r.px), d1:rnd(r.d1), f:rnd(termAprOf(r)),
     fp:r.fundPct, sqz:r.sqz!=null?Math.round(r.sqz):null, mom:r.mom!=null?Math.round(r.mom):null,
     vs:rnd(r.vstape), oi:r.oi!=null?Math.round(r.oi):null, vol:r.vol!=null?Math.round(r.vol):null,
-    doi:rnd(r.doi), beta:(r.beta!=null&&isFinite(r.beta))?+r.beta.toFixed(2):null, dd:rnd(r.dd), sector:r.sector||null })); }
+    doi:rnd(r.doi), beta:(r.beta!=null&&isFinite(r.beta))?+r.beta.toFixed(2):null, dd:rnd(r.dd), sector:r.sector||null,
+    h1:rnd(r.h1), h4:rnd(r.h4), d7:rnd(r.d7), d30:rnd(r.d30), gap:rnd(r.gap), pr:rnd(r.prem),
+    rv:rnd(r.rvol), adr:rnd(r.adr), v30:rnd(r.vol30), rs:rnd(r.rs), hitr:rnd(r.hitr), ddy:rnd(r.ddy),
+    yo:rnd(r.yopen), mo:rnd(r.mopen), m20:rnd(r.ma20), m50:rnd(r.ma50), m100:rnd(r.ma100), m200:rnd(r.ma200),
+    vw:rnd(r.vsvwap) };
+    for(const k in o){ if(o[k]==null) delete o[k]; } return o; }); }
 function termThinking(){ const d=document.createElement('div'); d.className='tp-blk';
   d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line"><span class="amber tp-think">thinking…</span></span>`;
   termEl('termScroll').appendChild(d); termScrollDown(); return d; }
@@ -4396,26 +4588,33 @@ function termErr(m){ const d=document.createElement('div'); d.className='tp-blk'
 function termScrollDown(){ const s=termEl('termScroll'); s.scrollTop=s.scrollHeight; }
 function termHi(coin){ const r=state.rows.get(coin); if(!r) return; if(state.view!=='markets') return;
   const tr=document.querySelector(`#body tr[data-coin="${coin}"]`); if(tr){ tr.classList.add('rowflash'); tr.scrollIntoView({block:'center',behavior:'smooth'}); setTimeout(()=>tr.classList.remove('rowflash'),1500); } }
-function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span class="tp-trans">· plain English or the grammar below</span>
-<span class="amber">${tpad('<ticker> [field]',18)}</span><span class="sec">card, or one lens: funding·oi·squeeze·momentum·vstape</span>
-<span class="amber">${tpad('top <metric> [n]',18)}</span><span class="sec">vol·funding·squeeze·momentum·oi·carry·gainers·losers</span>
-<span class="amber">${tpad('screen <expr>',18)}</span><span class="sec">funding>20 &amp; squeeze>50</span>
-<span class="amber">${tpad('signals [ticker]',18)}</span><span class="sec">active signals</span>
-<span class="amber">${tpad('report <ticker>',18)}</span><span class="sec">open the AI analyst report</span>
-<span class="amber">${tpad('corr <a> <b>',18)}</span><span class="sec">pairwise correlation</span>
-<span class="tp-trans">Or just ask: "most crowded shorts", "is HYPE diverging", "biggest losers today". Tab completes · ↑↓ history · ~ opens.</span>`); }
+function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span class="tp-trans">· plain English or the grammar below · every board column is a lens</span>
+<span class="amber">${tpad('<ticker> [field]',20)}</span><span class="sec">card, or any column: funding·oi·squeeze·d7·rvol·gap·vsvwap·vsma200·ytd·sector·…</span>
+<span class="amber">${tpad('top|bottom <field> [n]',20)}</span><span class="sec">any field, plus gainers·losers — "top d7 5", "bottom funding"</span>
+<span class="amber">${tpad('screen <expr>',20)}</span><span class="sec">funding>20 &amp; squeeze>50 · vsma200>0 · rvol>2</span>
+<span class="amber">${tpad('breadth · sectors',20)}</span><span class="sec">tape health · sector performance (add d7/d30 for a window)</span>
+<span class="amber">${tpad('earnings [t|when]',20)}</span><span class="sec">a ticker, or today·tomorrow·week·recent</span>
+<span class="amber">${tpad('news [ticker]',20)}</span><span class="sec">verified headlines · 72h window</span>
+<span class="amber">${tpad('vs <a> <b>',20)}</span><span class="sec">side-by-side field compare · corr <a> <b> for correlation</span>
+<span class="amber">${tpad('signals · reports',20)}</span><span class="sec">active signals · recent AI reports</span>
+<span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
+<span class="tp-trans">Or just ask: "who reports tomorrow", "best sector this week", "whats above the 200dma", "nvda vs amd", "hows the tape". Tab completes · ↑↓ history · ~ opens.</span>`); }
 
 // ---- open / close / input ----
 function termOpen(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(!p) return; p.hidden=false; if(fab) fab.classList.add('hidden'); const q=termEl('termCmd'); if(q) q.focus(); }
 function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) p.hidden=true; if(fab) fab.classList.remove('hidden'); }
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
-const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol'];
+// TERM_VERBS was referenced by the completion engine but never defined — a silent
+// ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','diverge','vs','compare','help','clear','stocks','crypto'];
+const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
   const h=p[0].toLowerCase();
   if(termFind(p[0])) return TERM_FIELDS.filter(f=>f.startsWith(cur)).map(f=>p.slice(0,-1).join(' ')+' '+f);
-  if(h==='top') return ['vol','funding','squeeze','momentum','oi','carry','gainers','losers'].filter(x=>x.startsWith(cur)).map(x=>'top '+x);
-  if(h==='report'||h==='signals'||h==='corr'||h==='diverge') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>p.slice(0,-1).join(' ')+' '+x);
+  if(h==='top'||h==='bottom') return ['vol','funding','squeeze','momentum','oi','carry','gainers','losers','d7','d30','rvol','vsvwap','gap','adr','vol30'].filter(x=>x.startsWith(cur)).map(x=>h+' '+x);
+  if(h==='earnings') return ['today','tomorrow','week','recent'].concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur)).map(x=>'earnings '+x);
+  if(h==='report'||h==='signals'||h==='corr'||h==='diverge'||h==='news'||h==='vs'||h==='compare') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>p.slice(0,-1).join(' ')+' '+x);
   return []; }
 let termHist=[], termHi_=-1;
 function termGhostFn(){ const q=termEl('termCmd'), g=termEl('termGhost'); const v=q.value; if(!v){ g.textContent=''; termHint(); return; }
