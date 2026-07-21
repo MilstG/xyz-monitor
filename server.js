@@ -25,6 +25,15 @@ const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
 const SESSION_SECRET = process.env.SESSION_SECRET
   ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
   : crypto.createHash("sha256").update(`xyzmon-session|${SITE_USER}|${SITE_PASSWORD}`).digest();
+// AI admin gate. AI generation (ask-terminal fallback + report generation) is LOCKED by default
+// and only opens after someone enters ADMIN_PASSWORD via `admin unlock` in the terminal. The
+// unlock is a stateless HMAC cookie (xyzai), signed with a secret derived from ADMIN_PASSWORD —
+// so rotating the admin password on Railway revokes every outstanding unlock, and an UNSET admin
+// password mints no valid token, leaving the gate closed (fail-closed, never fail-open). There is
+// deliberately no header/Basic-auth bypass: scripts can't unlock, so AI stays browser+password only.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const AI_UNLOCK_SECRET = crypto.createHash("sha256").update(`xyzmon-ai-unlock|${ADMIN_PASSWORD}`).digest();
+const AI_UNLOCK_MS = 24 * 3600 * 1000;   // hard ceiling on an unlock's life, even if the browser restores its session
 
 function log(msg) { console.log(new Date().toISOString() + " " + msg); }
 
@@ -160,6 +169,30 @@ function setSessionCookies(reply, req, maxAgeSec, token) {
   ]);
 }
 
+// ===== AI-unlock cookie (HttpOnly, browser-session-lived, HMAC-signed) =====
+// Same stateless shape as the session token, but signed with AI_UNLOCK_SECRET and capped at 24h.
+// The cookie carries NO Max-Age, so it is a session cookie that dies when the browser closes; the
+// signed expiry inside it is the belt-and-suspenders hard cap on top of that.
+function signAiUnlock(expMs) {
+  return expMs + "." + crypto.createHmac("sha256", AI_UNLOCK_SECRET).update("ai|" + expMs).digest("base64url");
+}
+function aiUnlockOk(tok) {
+  if (!ADMIN_PASSWORD || !tok || tok.length > 128) return false;   // no admin password set => gate stays closed
+  const dot = tok.indexOf(".");
+  if (dot < 1) return false;
+  const exp = Number(tok.slice(0, dot));
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const a = Buffer.from(tok), b = Buffer.from(signAiUnlock(exp));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function aiCookieAttrs(req, clear) {
+  const secure = (req.headers["x-forwarded-proto"] || req.protocol) === "https" ? "; Secure" : "";
+  // No Max-Age on set => browser-session cookie (gone on close). Max-Age=0 on clear => delete now.
+  return `; Path=/; SameSite=Lax${clear ? "; Max-Age=0" : ""}${secure}; HttpOnly`;
+}
+function setAiUnlockCookie(reply, req, token) { reply.header("set-cookie", "xyzai=" + token + aiCookieAttrs(req, false)); }
+function clearAiUnlockCookie(reply, req) { reply.header("set-cookie", "xyzai=x" + aiCookieAttrs(req, true)); }
+
 // Brute-force damper for /login: 8 wrong passwords from one IP = 15 min lockout. In-memory —
 // a restart clears it, which is fine; this is a speed bump, not a vault. Map is size-capped
 // so a spoofed-IP flood can't grow it unbounded.
@@ -246,8 +279,15 @@ async function main() {
   const AI_COST_PATHS = new Set(["/api/ask", "/api/ai-report"]);
   fastify.addHook("onRequest", async (req, reply) => {
     const u = req.url.split("?")[0];
-    if (req.method === "POST" && AI_COST_PATHS.has(u) && !reqAuthed(req))
-      return reply.code(401).header("cache-control", "no-store").send({ error: "unauthorized", detail: "AI endpoints require authentication — set SITE_PASSWORD to enable them" });
+    if (req.method === "POST" && AI_COST_PATHS.has(u)) {
+      if (!reqAuthed(req))
+        return reply.code(401).header("cache-control", "no-store").send({ error: "unauthorized", detail: "AI endpoints require authentication — set SITE_PASSWORD to enable them" });
+      // Second lock, layered over authentication: even a logged-in caller (browser OR script/Basic
+      // auth) must present a valid AI-unlock cookie. There is no header shortcut, so the only way to
+      // get one is `admin unlock <password>` in the terminal — AI stays browser+admin-password only.
+      if (!aiUnlockOk(getCookie(req, "xyzai")))
+        return reply.code(401).header("cache-control", "no-store").send({ error: "ai-locked", detail: "AI is locked — run 'admin unlock <password>' in the terminal to enable it for this session" });
+    }
   });
 
   // Optional shared-password gate. Disabled unless SITE_PASSWORD is set. Two ways in:
@@ -456,6 +496,28 @@ async function main() {
     reply.header("cache-control", "no-store");
     const r = poller.resetAiDay(String((req.body || {}).password || ""));
     return reply.code(r.ok ? 200 : (r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403)).send(r);
+  });
+  // Admin AI unlock: verify ADMIN_PASSWORD (same constant-time compare + shared lockout as the
+  // budget reset), then mint the xyzai unlock cookie. This is the ONLY way to open AI generation;
+  // there is no header/script path. Body is just { password } — 8 KB cap like the reset route.
+  fastify.post("/api/ai-unlock", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const r = poller.checkAdminPassword(String((req.body || {}).password || ""));
+    if (!r.ok) return reply.code(r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403).send(r);
+    setAiUnlockCookie(reply, req, signAiUnlock(Date.now() + AI_UNLOCK_MS));
+    return reply.code(200).send({ ok: true, ttlMs: AI_UNLOCK_MS });
+  });
+  // Drop the unlock early (`admin lock`). No password needed to LOCK — locking never grants anything.
+  fastify.post("/api/ai-lock", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    clearAiUnlockCookie(reply, req);
+    return reply.code(200).send({ ok: true });
+  });
+  // UI hint: is the gate active, and does this caller currently hold a valid unlock? Lets the
+  // terminal show the right lock state on open without exposing the HttpOnly cookie to page JS.
+  fastify.get("/api/ai-status", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    return { gated: !!ADMIN_PASSWORD, unlocked: aiUnlockOk(getCookie(req, "xyzai")) };
   });
   // Recent AI reports across all tickers — the Report tab's shared feed.
   fastify.get("/api/ai-reports", (req, reply) => {
