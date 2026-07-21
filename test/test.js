@@ -1727,8 +1727,10 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(s.includes("function nlResolve") && s.includes("Tier 2"), "terminal NL intent layer missing");
   assert.ok(s.includes("function termAsk") && s.includes("/api/ask"), "terminal AI-fallback client call missing");
   assert.ok(s.includes("termCompactUniverse") && s.includes("termThinking"), "terminal AI-fallback plumbing missing");
-  assert.ok(/if\(termIsGrammar\(head\)\)/.test(s) && s.includes("nlResolve(line)"), "terminal routing (grammar→NL→AI) missing");
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd"]) {
+  assert.ok(/if\(termGrammarComplete\(p\)\)/.test(s) && s.includes("nlResolve(line)"), "terminal routing (grammar→NL→AI) missing");
+  assert.ok(s.includes("function termGrammarComplete") && s.includes("function metricOf") && s.includes("function termEarnings"), "terminal NL-overhaul helpers missing");
+  assert.ok(s.includes("function nlResolve") && /return null;\s*\/\/ a ticker plus intent we don't understand/.test(s), "nlResolve must escalate (return null) on unresolved ticker intent, not degrade to a card");
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
