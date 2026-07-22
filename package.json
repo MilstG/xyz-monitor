@@ -4,10 +4,10 @@
   "private": true,
   "type": "commonjs",
   "description": "Server-cached monitor for HIP-3 perp markets on Hyperliquid (dex: xyz)",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.5 <25" },
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test"
+    "start": "node --experimental-sqlite server.js",
+    "test": "node --experimental-sqlite --test"
   },
   "dependencies": {
     "@fastify/compress": "^7.0.3",

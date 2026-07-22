@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.21-13";
+const VERSION = "2026.07.22-01";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -453,6 +453,15 @@ async function main() {
     const coin = (req.query && req.query.coin) || "";
     const days = req.query && req.query.days;
     const tf = req.query && req.query.tf;
+    // res=5m serves the on-disk 5-minute archive (from/to epoch-ms, optional max points), a
+    // separate axis from tf= (ladder timeframes) and days= (hourly spine). Downsampled server-side;
+    // ETag folds in the coin's last-captured-bar stamp so a new bar mints a fresh key. Same
+    // serveKeyed path as the rest of the route (the manifest pins /api/candles -> serveKeyed).
+    if (req.query && (req.query.res === "5m" || req.query.res === "5")) {
+      const from = req.query.from, to = req.query.to, max = req.query.max;
+      const key = "candles5m|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
+      return serveKeyed(req, reply, key, () => poller.getCandles5m(coin, from, to, max), { coin, res: "5m", enabled: false, candles: [], coverage: { enabled: false } });
+    }
     // Heaviest per-request payload on the board, and re-fetched on every tf-toggle in the report
     // and trend chart modals — exactly the traffic the ETag 304 + gzip memo pay off on. The tf
     // series carries a FORMING last bar whose close is the live mark (getTfCandles reads r.px),
