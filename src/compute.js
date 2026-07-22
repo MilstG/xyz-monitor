@@ -1669,7 +1669,76 @@ function ribbonWidth(s) {
 // One bar of each ladder timeframe, in ms — the window for the retest-volume read (rrv).
 const TREND_TF_MS = { D1: 24 * 3600e3, H12: 12 * 3600e3, H4: 4 * 3600e3, H1: 3600e3 };
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats,
+// Tape-wide positioning regime (pure). From an array of per-name [ts, oi, funding] spines
+// (ascending), reconstruct the daily aggregate the whole book traded: total notional OI and the
+// OI-weighted mean funding as an APR %. Each name is forward-filled across days from its first
+// sample, so a name with a stale spine still carries its last known positioning instead of
+// dropping out and jerking the aggregate. Funding is annualized rate*24*365*100; a name with a
+// null funding sample still contributes its OI but not the funding weight for that day. The last
+// series point is where the tiles read their current values, so tile and chart-end can never
+// disagree. Returns the series plus z-score-vs-window and 7d/30d OI change.
+function regimeAggregate(spines, opts) {
+  opts = opts || {};
+  const now = opts.now || Date.now();
+  const DAY = 86400 * 1000;
+  const days = opts.days || 60;
+  const APR = 24 * 365 * 100;             // hourly funding rate -> APR percent
+  const endDay = Math.floor(now / DAY);
+  const startDay = endDay - (days - 1);
+  const list = Array.isArray(spines) ? spines.filter((s) => Array.isArray(s) && s.length) : [];
+  const empty = { series: [], totalOi: null, netFundApr: null, oiZ: null, oi7dPct: null, oi30dPct: null, names: list.length };
+  if (!list.length) return empty;
+  const oiSum = new Array(days).fill(0), fwSum = new Array(days).fill(0), fwDen = new Array(days).fill(0), seen = new Array(days).fill(0);
+  for (const sp of list) {
+    const dayOi = new Array(days).fill(null), dayF = new Array(days).fill(null);
+    let preOi = null, preF = null;        // last known strictly before the window: the fill seed
+    for (const s of sp) {
+      if (!(s[1] > 0)) continue;
+      const d = Math.floor(s[0] / DAY);
+      const f = (s[2] != null && isFinite(s[2])) ? s[2] : null;
+      if (d < startDay) { preOi = s[1]; if (f != null) preF = f; continue; }
+      if (d > endDay) break;
+      const idx = d - startDay;
+      dayOi[idx] = s[1]; if (f != null) dayF[idx] = f;   // last sample of the day wins
+    }
+    let curOi = preOi, curF = preF;
+    for (let i = 0; i < days; i++) {
+      if (dayOi[i] != null) curOi = dayOi[i];
+      if (dayF[i] != null) curF = dayF[i];
+      if (curOi != null && curOi > 0) {
+        oiSum[i] += curOi; seen[i] += 1;
+        if (curF != null && isFinite(curF)) { fwSum[i] += curOi * curF; fwDen[i] += curOi; }
+      }
+    }
+  }
+  const series = [];
+  for (let i = 0; i < days; i++) {
+    if (!seen[i]) continue;               // no name has started this early in the window
+    const nf = fwDen[i] > 0 ? (fwSum[i] / fwDen[i]) * APR : null;
+    series.push([(startDay + i) * DAY, oiSum[i], nf != null ? +nf.toFixed(2) : null]);
+  }
+  if (!series.length) return empty;
+  const last = series[series.length - 1], totalOi = last[1], netFundApr = last[2];
+  const ois = series.map((p) => p[1]);
+  let z = null;
+  if (ois.length >= 5) {
+    const m = ois.reduce((a, b) => a + b, 0) / ois.length;
+    let v = 0; for (const x of ois) v += (x - m) * (x - m);
+    const sd = Math.sqrt(v / ois.length);
+    z = sd > 0 ? (totalOi - m) / sd : 0;
+  }
+  const pctChg = (back) => { if (series.length <= back) return null; const prev = series[series.length - 1 - back][1]; return prev > 0 ? (totalOi / prev - 1) * 100 : null; };
+  const p7 = pctChg(7), p30 = pctChg(30);
+  return {
+    series, totalOi, netFundApr,
+    oiZ: z != null ? +z.toFixed(2) : null,
+    oi7dPct: p7 != null ? +p7.toFixed(1) : null,
+    oi30dPct: p30 != null ? +p30.toFixed(1) : null,
+    names: list.length,
+  };
+}
+
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats, regimeAggregate,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,

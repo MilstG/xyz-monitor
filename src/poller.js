@@ -6,7 +6,7 @@ const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead,
 } = require("./compute");
-const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr,
+const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
@@ -2057,6 +2057,47 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // than raw candles. Slice 1 establishes the data path + coverage/readiness; the seven studies
   // (session decomposition, hour/funding clocks, day-of-week grid, clustering, seasonality) populate
   // `sections` in later slices.
+  // Tape-wide positioning regime: how crowded (OI-weighted funding + percentile-extreme breadth)
+  // and how leveraged (aggregate OI, stretch z-score) the book is — split crypto (main) / stocks
+  // (xyz) / both. Pure reconstruction from the persisted [ts,oi,funding] spines (populated from
+  // day one), so no new persistence and no per-name ledger machinery (crypto stays context, not a
+  // ledger signal — consistent with the -101 crypto-engine removal).
+  const REGIME_DAYS = 60;
+  function buildRegime() {
+    const now = Date.now();
+    // The two universes live in separate rosters by design (activeMarkets() is xyz-pure; crypto
+    // rides mainMarkets()). Combine them here rather than filtering one list by r.uni — that is the
+    // canonical split the rest of the poller uses, and it is what makes "crypto" populate at all.
+    const stocks = activeMarkets().filter((r) => r && !r.delisted);
+    const crypto = mainMarkets().filter((r) => r && !r.delisted);
+    const groups = { all: crypto.concat(stocks), crypto, stocks };
+    const out = { now, days: REGIME_DAYS };
+    for (const key of ["all", "crypto", "stocks"]) {
+      const g = groups[key];
+      if (!g.length) { out[key] = { names: 0, pending: true }; continue; }
+      const spines = g.map((r) => hist.get(r.coin)).filter((a) => Array.isArray(a) && a.length);
+      const agg = regimeAggregate(spines, { now, days: REGIME_DAYS });
+      // Crowding breadth off the LIVE funding percentile (point-in-time; not plotted, so no
+      // chart/tile disagreement). One code path: r.fundPct is the same percentile the board flags.
+      let nlong = 0, nshort = 0, npct = 0, volSum = 0;
+      for (const r of g) {
+        if (r.fundPct != null && isFinite(r.fundPct)) { npct++; if (r.fundPct >= 90) nlong++; else if (r.fundPct <= 10) nshort++; }
+        if (r.vol > 0) volSum += r.vol;
+      }
+      const longExt = npct ? +(100 * nlong / npct).toFixed(1) : null;
+      const shortExt = npct ? +(100 * nshort / npct).toFixed(1) : null;
+      out[key] = {
+        names: g.length,
+        series: agg.series,
+        crowd: { netFundApr: agg.netFundApr, longExtPct: longExt, shortExtPct: shortExt,
+          netCrowd: (longExt != null && shortExt != null) ? +(longExt - shortExt).toFixed(1) : null, pctNames: npct },
+        lev: { totalOi: agg.totalOi, oiZ: agg.oiZ, oi7dPct: agg.oi7dPct, oi30dPct: agg.oi30dPct,
+          oiVol: (agg.totalOi != null && volSum > 0) ? +(agg.totalOi / volSum).toFixed(2) : null },
+      };
+    }
+    return out;
+  }
+
   function buildAnalytics() {
     const READY_HOURS = 20 * 24;   // "ready" = >= ~20 trading days of hourly candles for the session studies
     const universe = activeMarkets()
@@ -2072,7 +2113,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const hc = hourlyCoverage(), fc = fundingCoverage();
     const equityMarkets = universe.filter((u) => u.assetClass === "Equity").length;
     const ready = universe.filter((u) => u.hours >= READY_HOURS).length;
-    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}`;
+    const regime = buildRegime();
+    const rgSig = ["all", "crypto", "stocks"].map((k) => { const d = regime[k]; return d && !d.pending ? `${Math.round(d.lev.totalOi || 0)}|${d.crowd.netFundApr || 0}|${d.crowd.netCrowd || 0}|${(d.series || []).length}` : "0"; }).join(";");
+    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}`;
     if (sig !== analyticsSig) { analyticsSig = sig; analyticsVer = Date.now(); }   // content changed -> new ETag
     analyticsCache = {
       ts: Date.now(),
@@ -2086,6 +2129,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       sections: (() => {
         const hourClock = buildActivityClocks();
         return {
+          regime,
           sessionDecomp: buildSessionDecomp(),
           hourClock,
           dow: buildDowHeatmap(),
@@ -4369,6 +4413,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
     buildDailyNow: buildDaily,       // harness: populate daily closes so the signals loop has inputs
     buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
+    buildAnalyticsNow: buildAnalytics, // harness: run one analytics build synchronously (regime aggregate path)
     persistFeatures,
     persistLedger: () => { ledgerDirty = true; persistLedger(); },
     // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
