@@ -27,6 +27,33 @@ function openStore(dataDir) {
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
   let hourlyWriting = false;   // while true, an async hourly NDJSON write is in flight — skip overlapping ticks
 
+  // ---- 5-minute OHLCV candle archive (node:sqlite) -----------------------------------------
+  // Build-forward archive. Hyperliquid's candleSnapshot only serves the most recent 5000 candles
+  // per interval (~17d at 5m), so anything older than that window exists ONLY here — this file is
+  // the sole copy of that history, which is why snapshotCandles exists (copy it off-volume). It is
+  // disk-resident and RANGE-QUERIED, never hydrated whole into RAM the way the hourly spine is:
+  // 370d x 5m x ~150 markets is ~15M rows, far past what belongs resident, but every read is one
+  // ticker over one window. node:sqlite ships in the runtime (Node >= 22.5, --experimental-sqlite),
+  // so this adds NO native dependency and NO build toolchain — the same zero-dep rule the NDJSON
+  // stores were built around. If the module is unavailable (older runtime, or the flag is off) the
+  // whole sub-store degrades to no-ops via candlesEnabled(); nothing else in the app is affected.
+  const candleFile = path.join(dataDir, "candles.db");
+  let cdb = null, cInsert = null, cRange = null, cEvict = null, cCov = null, cCount = null;
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    cdb = new DatabaseSync(candleFile);
+    cdb.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+    cdb.exec("CREATE TABLE IF NOT EXISTS candles_5m (coin TEXT NOT NULL, ts INTEGER NOT NULL, o REAL, h REAL, l REAL, c REAL, v REAL, PRIMARY KEY (coin, ts)) STRICT, WITHOUT ROWID;");
+    // (coin, ts) PK on a WITHOUT ROWID table clusters each market's series contiguous on disk, so a
+    // window read is one seek + sequential scan; the upsert makes every seed / tail / gap-fill pull
+    // idempotent, so overlap on re-fetch is absorbed rather than duplicated.
+    cInsert = cdb.prepare("INSERT INTO candles_5m (coin, ts, o, h, l, c, v) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(coin, ts) DO UPDATE SET o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c, v=excluded.v");
+    cRange = cdb.prepare("SELECT ts, o, h, l, c, v FROM candles_5m WHERE coin = ? AND ts >= ? AND ts <= ? ORDER BY ts");
+    cEvict = cdb.prepare("DELETE FROM candles_5m WHERE ts < ?");
+    cCov = cdb.prepare("SELECT MIN(ts) AS mn, MAX(ts) AS mx, COUNT(*) AS n FROM candles_5m WHERE coin = ?");
+    cCount = cdb.prepare("SELECT COUNT(*) AS n FROM candles_5m");
+  } catch (_) { cdb = null; }
+
   function flush() {
     if (!buf.length || pruning) return;
     try { fs.appendFileSync(file, buf.join("")); buf = []; }
@@ -321,7 +348,64 @@ function openStore(dataDir) {
       } catch (_) {}
       return { ts: 0, coins: 0 };
     },
-    close() { flush(); },
+    // ---- 5m candle archive API ----------------------------------------------------------
+    // True only when node:sqlite loaded; every candle method below is a safe no-op otherwise, so
+    // callers gate on this rather than crashing a runtime without the module/flag.
+    candlesEnabled() { return !!cdb; },
+    // Idempotent batch upsert of packed [t,o,h,l,c,v] rows for one coin. Wrapped in a single
+    // transaction so a partial write can't land and so thousands of bars commit as one fsync.
+    insertCandles(coin, rows) {
+      if (!cdb || !Array.isArray(rows) || !rows.length) return 0;
+      let n = 0;
+      try {
+        cdb.exec("BEGIN");
+        for (const k of rows) {
+          if (!Array.isArray(k)) continue;
+          const t = +k[0], c = +k[4];
+          if (!Number.isFinite(t) || !Number.isFinite(c)) continue;   // a bar with no timestamp/close is not a bar
+          const o = +k[1], h = +k[2], l = +k[3], v = +k[5];
+          cInsert.run(coin, Math.trunc(t), Number.isFinite(o) ? o : c, Number.isFinite(h) ? h : c, Number.isFinite(l) ? l : c, c, Number.isFinite(v) ? v : 0);
+          n++;
+        }
+        cdb.exec("COMMIT");
+      } catch (_) { try { cdb.exec("ROLLBACK"); } catch (_) {} return 0; }
+      return n;
+    },
+    // Range read: packed [t,o,h,l,c,v] rows for one coin over [from,to] inclusive, oldest->newest.
+    readCandles(coin, from, to) {
+      if (!cdb) return [];
+      try {
+        const out = [];
+        for (const r of cRange.all(coin, Math.trunc(+from), Math.trunc(+to))) out.push([r.ts, r.o, r.h, r.l, r.c, r.v]);
+        return out;
+      } catch (_) { return []; }
+    },
+    // Retention: drop every bar older than `before`. One statement over the whole archive.
+    evictCandles(before) {
+      if (!cdb) return 0;
+      try { return Number(cEvict.run(Math.trunc(+before)).changes) || 0; } catch (_) { return 0; }
+    },
+    // Per-coin coverage for the capture cursor + the UI depth disclosure: {min, max, count}.
+    // Because the instruments are 24/7 with no halts, count vs (max-min) span is itself the gap
+    // read — a missing bar is a real capture gap, never a market closure, so absent rows are the
+    // honest representation and no fill is invented.
+    candleCoverage(coin) {
+      if (!cdb) return { min: null, max: null, count: 0 };
+      try { const r = cCov.get(coin); return { min: r && r.mn != null ? r.mn : null, max: r && r.mx != null ? r.mx : null, count: r ? Number(r.n) || 0 : 0 }; }
+      catch (_) { return { min: null, max: null, count: 0 }; }
+    },
+    candleCount() { if (!cdb) return 0; try { const r = cCount.get(); return r ? Number(r.n) || 0 : 0; } catch (_) { return 0; } },
+    // Off-copy for backup: VACUUM INTO writes a clean, defragmented snapshot. This archive is the
+    // only copy of anything past the native window, so this is the recovery hedge — the caller
+    // schedules it and (ideally) ships the file off-volume. Defaults beside the live db.
+    snapshotCandles(dest) {
+      if (!cdb) return false;
+      const out = dest || (candleFile + ".bak");
+      try { fs.unlinkSync(out); } catch (_) {}
+      try { cdb.exec("VACUUM INTO '" + String(out).replace(/'/g, "''") + "'"); return true; } catch (_) { return false; }
+    },
+    closeCandles() { try { if (cdb) cdb.close(); } catch (_) {} cdb = null; },
+    close() { flush(); try { if (cdb) cdb.close(); } catch (_) {} },
   };
 }
 

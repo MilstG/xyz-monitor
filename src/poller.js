@@ -56,6 +56,13 @@ const HOURLY_PASS_THRESHOLD = 0.9;    // start daily backfill once this fraction
 const ANALYTICS_MS = 3 * 60 * 1000;   // recompute the session / time-of-day analytics payload every 3 min
 const HOURLY_PERSIST_MS = 10 * 60 * 1000;   // save the raw hourly spine to /data so it survives redeploys
                                       // (so a few permanently-unfetchable markets can't block all daily data)
+// ---- 5-minute OHLCV archive (build-forward, on-disk via node:sqlite) --------------------------
+const FIVE_MIN = 5 * 60 * 1000;
+const M5_RETENTION_DAYS = 370;        // rolling 5m archive; 370 (not 365) buys a few days of slack so a "1y" chart is never short
+const M5_SEED_DAYS = 17;              // native candleSnapshot window at 5m (5000 * 5min ~= 17.36d) — the most one pull can return
+const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m bars about once per bar
+const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
+const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
 const REGIME_SAMPLE_MS = 30 * 60 * 1000;  // append one correlation sample to history every 30 min
@@ -119,6 +126,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         px: null, prevDay: null, funding: null, vol: null, oi: null, oiBase: null, oracle: null, d1: null,
         ref: null, feat: null, dailyRaw: null, hourlyRaw: null, fundH: new Map(), fundBackfilled: false,
         hourlyTs: 0, dailyTs: 0, isNew: true, delisted: false,
+        m5Ts: 0, m5LastTs: 0, m5Fail: 0, m5FailUntil: 0, m5SeededCursor: false,   // 5m archive capture cursor (see capture5m)
       };
       rows.set(coin, r);
     }
@@ -550,6 +558,50 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         const r = rows.get(coin);
         if (r) { r.dFail = (r.dFail || 0) + 1; r.dFailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.dFail, 15 * 60 * 1000); }
       } finally { inflight.delete("d:" + coin); }
+    }
+  }
+
+  // ---- 5-minute archive capture -----------------------------------------------------------
+  // Fold this market's freshly CLOSED 5m bars into the on-disk archive (src/store.js candles_5m).
+  // Build-forward: the FIRST pull for a coin seeds the native ~17d window; thereafter we pull only
+  // from just before the last stored bar (the idempotent upsert absorbs the one-bar overlap), so a
+  // reconnect/redeploy resumes from the cursor rather than re-pulling. The FORMING bar is never
+  // written — the same closed-vs-fresh guard the daily rebuild uses — so a bar lands exactly once,
+  // when final. The instruments are 24/7 with no halts, so a missing bar in the covered range is
+  // always a real capture gap, never a closure: we don't fabricate it, and if an outage exceeds the
+  // native window the pre-window span is simply unrecoverable (the endpoint won't serve it) and
+  // stays an honest hole that coverage count-vs-span reveals — nothing is invented to paper over it.
+  function m5FilterClosed(raw, now) { return packHours(raw).filter((k) => k[0] + FIVE_MIN <= now); }
+  async function capture5m(coin) {
+    if (!store.candlesEnabled || !store.candlesEnabled()) return;
+    const r = rows.get(coin);
+    if (!r || r.delisted || r.px == null) return;
+    const now = Date.now();
+    // Resolve the cursor from disk once (survives redeploys), then track it in memory.
+    if (!r.m5SeededCursor) { const cov = store.candleCoverage(coin); r.m5LastTs = cov.max || 0; r.m5SeededCursor = true; }
+    const from = r.m5LastTs ? r.m5LastTs - FIVE_MIN : now - M5_SEED_DAYS * DAY;
+    const raw = await fetchCandles(coin, "5m", from, now, M5_FETCH_WEIGHT);
+    if (!Array.isArray(raw) || !raw.length) { r.m5Ts = now; return; }
+    const closed = m5FilterClosed(raw, now);
+    if (closed.length) { store.insertCandles(coin, closed); r.m5LastTs = Math.max(r.m5LastTs, closed[closed.length - 1][0]); }
+    r.m5Ts = now;
+  }
+  const need5m = (r) => store.candlesEnabled && store.candlesEnabled() && r.px != null &&
+    Date.now() - (r.m5Ts || 0) > M5_STALE && Date.now() >= (r.m5FailUntil || 0);
+  // One worker suffices: ~150 markets x a tiny tail pull spread over 5 min is well under 1 req/s.
+  // Mirrors hourlyWorker's inflight guard + per-coin exponential fail backoff.
+  async function fiveMinWorker() {
+    for (;;) {
+      if (!store.candlesEnabled || !store.candlesEnabled()) { await sleep(60000); continue; }
+      const coin = pick(need5m, "m5:");
+      if (!coin) { await sleep(2000); continue; }
+      if (inflight.has("m5:" + coin)) { await sleep(500); continue; }
+      inflight.add("m5:" + coin);
+      try { await capture5m(coin); const r = rows.get(coin); if (r) r.m5Fail = 0; }
+      catch (_) {
+        const r = rows.get(coin);
+        if (r) { r.m5Fail = (r.m5Fail || 0) + 1; r.m5FailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.m5Fail, 15 * 60 * 1000); }
+      } finally { inflight.delete("m5:" + coin); }
     }
   }
 
@@ -3078,6 +3130,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           if (out.length !== arr.length) hist.set(coin, out);
         } }
     } catch (e) { log("prune failed: " + (e && e.message)); }
+    // 5m archive retention: single DELETE past the 370d line. One resolution, so there's no rollup
+    // and no boundary bucket to protect — just drop what aged out.
+    if (store.candlesEnabled && store.candlesEnabled()) {
+      try {
+        const dropped = store.evictCandles(Date.now() - M5_RETENTION_DAYS * DAY);
+        const kept = store.candleCount ? store.candleCount() : 0;
+        log(`5m archive: ${kept} bar(s) retained, ${dropped} evicted past ${M5_RETENTION_DAYS}d`);
+      } catch (e) { log("5m evict failed: " + (e && e.message)); }
+    }
     // Heavy-data GC for markets delisted > 7d. They stay in Hyperliquid's meta forever (so the
     // row itself must survive to keep the universe index-aligned for the WS feed), but there's
     // no reason to keep holding their 60d hourly spine, funding map and OI history in memory.
@@ -3128,6 +3189,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     hourlyWorker(); hourlyWorker();
     dailyWorker(); dailyWorker();
     fundingWorker();
+    // 5m archive: one capture lane + a daily off-copy snapshot. Enabled only when node:sqlite
+    // loaded (Node >= 22.5 with --experimental-sqlite); otherwise the worker idles and the feature
+    // is simply absent, exactly like a missing external token elsewhere.
+    if (store.candlesEnabled && store.candlesEnabled()) {
+      fiveMinWorker();
+      const snap = () => { try { if (store.snapshotCandles()) log("5m archive: off-copy snapshot written (candles.db.bak)"); } catch (_) {} };
+      setInterval(snap, M5_SNAPSHOT_MS);
+      setTimeout(snap, 10 * 60 * 1000);
+      log(`5m archive: ENABLED (node:sqlite) — capturing closed 5m bars, ${M5_RETENTION_DAYS}d retention, ${store.candleCount ? store.candleCount() : 0} bar(s) on disk`);
+    } else {
+      log("5m archive: disabled (node:sqlite unavailable — needs Node >= 22.5 with --experimental-sqlite)");
+    }
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
     const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
@@ -3204,6 +3277,42 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       out.push([k[0], sig(k[1], 9), sig(k[2], 9), sig(k[3], 9), sig(k[4], 9), rnd(k[5], 2)]);
     }
     return out;
+  }
+
+  // Per-market 5-minute OHLCV from the on-disk archive: [[t,o,h,l,c,v], ...] over [from,to],
+  // quantized like the hourly candle payload. A wide window is downsampled SERVER-SIDE (never ship
+  // or scan a raw 370d @ 5m series to a browser): rows past ~maxPoints are aggregated to the
+  // smallest 5-min multiple that fits, via the SAME bucketCandles the trend rungs use — so a
+  // coarsened bar is an honest OHLC of its constituents (o=first, h=max, l=min, c=last, v=sum),
+  // not a decimated sample. Coverage rides along so the drawer can state real archive depth.
+  function getCandles5m(coin, from, to, maxPoints) {
+    if (!store.candlesEnabled || !store.candlesEnabled()) return { coin, res: "5m", enabled: false, candles: [], coverage: { enabled: false } };
+    const now = Date.now();
+    let hi = Number.isFinite(+to) ? +to : now;
+    let lo = Number.isFinite(+from) ? +from : hi - 30 * DAY;
+    if (lo > hi) { const t = lo; lo = hi; hi = t; }
+    const rows5 = store.readCandles(coin, lo, hi);   // packed [t,o,h,l,c,v]
+    const cap = Math.max(200, Math.min(6000, Number(maxPoints) || 3000));
+    let out = rows5;
+    if (rows5.length > cap) {
+      // 5-min units per coarsened bar. (len-1)/(cap-1) rather than len/cap so that boundary
+      // alignment (buckets are floored on absolute time, so the first/last can be partial) can
+      // never push the result to cap+1 — the count stays <= cap.
+      const mult = Math.ceil((rows5.length - 1) / (cap - 1));
+      out = bucketCandles(rows5, mult, FIVE_MIN).map((b) => [b.t, b.o, b.h, b.l, b.c, b.v]);
+    }
+    const q = [];
+    for (const k of out) q.push([k[0], sig(k[1], 9), sig(k[2], 9), sig(k[3], 9), sig(k[4], 9), rnd(k[5], 2)]);
+    const cov = store.candleCoverage(coin);
+    return { coin, res: "5m", enabled: true, from: lo, to: hi,
+      coverage: { min: cov.min, max: cov.max, count: cov.count, days: cov.min && cov.max ? +((cov.max - cov.min) / DAY).toFixed(1) : 0 },
+      candles: q };
+  }
+  function getCandleCoverage(coin) {
+    if (!store.candlesEnabled || !store.candlesEnabled()) return { enabled: false };
+    const cov = store.candleCoverage(coin);
+    return { enabled: true, min: cov.min, max: cov.max, count: cov.count,
+      days: cov.min && cov.max ? +((cov.max - cov.min) / DAY).toFixed(1) : 0 };
   }
 
   // Ladder-timeframe candles for the Trend-tab chart modal (tf = 1h | 4h | 12h | 1d): EXACTLY
@@ -4335,6 +4444,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getHourly,
     getFunding,
     getCandles,
+    getCandles5m,
+    getCandleCoverage,
+    // 5m archive freshness stamp for the route ETag: the coin's last-captured bar ts (in-memory,
+    // no db hit). Advances as capture lands new bars, so a stale body is never served; a purely
+    // historical window over-invalidates only at the live edge, which is harmless.
+    getM5Stamp: (coin) => { const r = rows.get(coin); return r ? (r.m5LastTs || 0) : 0; },
+    _m5FilterClosed: m5FilterClosed,   // harness: closed-bar guard, testable without network
     getTfCandles,
     getSignals: () => signalsCache,
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
