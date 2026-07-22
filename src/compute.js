@@ -1558,18 +1558,30 @@ function trendState(px, e13, e21) {
 // Build the four-timeframe ladder for one market. `tfCandles` = { D1, H12, H4, H1 }, each an
 // array of {t,h?,l?,c} oldest -> newest with the FORMING bar last. Returns null when any
 // timeframe lacks enough history — a market missing one rung is excluded, not guessed at.
-function trendLadder(px, tfCandles) {
+// `fast`/`slow` are the two ribbon spans (default 13/21 — the canonical board). A rung with fewer
+// than TREND_MIN_BARS bars still excludes the whole name (a market with no honest trend on some
+// timeframe isn't board material). But a rung that clears that floor yet can't seed the CHOSEN
+// slow MA (e.g. a 200 EMA over crypto's ~92 daily bars) is neither excluded nor guessed: it's a
+// `nodata` rung — an honest grey dot that fills in on its own as history deepens. Score, strength
+// and retest are counted over the rungs that DID compute; `avail` reports how many that was, so a
+// board built on a longer MA can score out-of-available instead of penalising a pending rung.
+function trendLadder(px, tfCandles, fast, slow) {
   if (px == null || !isFinite(+px)) return null;
   px = +px;
-  const out = { tf: {}, long: { score: 0, retest: null, strength: 0 }, short: { score: 0, retest: null, strength: 0 } };
+  fast = fast || 13; slow = slow || 21;
+  const out = { tf: {}, fast, slow, avail: 0, long: { score: 0, retest: null, strength: 0 }, short: { score: 0, retest: null, strength: 0 } };
   for (const tf of TREND_TFS) {
     const c = tfCandles[tf];
     if (!Array.isArray(c) || c.length < TREND_MIN_BARS) return null;
     const closes = c.map((k) => +k.c);
     closes[closes.length - 1] = px;                    // live mark drives the forming bar
-    const e13 = emaLast(closes, 13), e21 = emaLast(closes, 21);
-    if (e13 == null || e21 == null || e21 === 0) return null;
-    const st = trendState(px, e13, e21);
+    const eF = emaLast(closes, fast), eS = emaLast(closes, slow);
+    if (eF == null || eS == null || eS === 0) {        // clears the floor, can't seed the slow MA → grey, not excluded
+      out.tf[tf] = { st: "nodata", e13: null, e21: null, d21: null };
+      continue;
+    }
+    out.avail++;
+    const st = trendState(px, eF, eS);
     const lastK = c.slice(-TREND_RETEST_BARS);
     let lowK = Infinity, highK = -Infinity;
     for (const k of lastK) {
@@ -1580,14 +1592,14 @@ function trendLadder(px, tfCandles) {
     }
     // include the live mark itself in the probe window (it may sit past the last stored candle)
     if (px < lowK) lowK = px; if (px > highK) highK = px;
-    const d21 = ((px - e21) / e21) * 100;
-    out.tf[tf] = { st, e13, e21, d21: +d21.toFixed(2) };
+    const d21 = ((px - eS) / eS) * 100;
+    out.tf[tf] = { st, e13: eF, e21: eS, d21: +d21.toFixed(2) };   // e13/e21 keys keep the wire shape; they hold the active fast/slow EMAs
     if (st === "up") {
-      out.long.score++; out.long.strength += (e13 - e21) / e21;
-      if (!out.long.retest && lowK <= e13 && px > e21) out.long.retest = tf;
+      out.long.score++; out.long.strength += (eF - eS) / eS;
+      if (!out.long.retest && lowK <= eF && px > eS) out.long.retest = tf;
     } else if (st === "down") {
-      out.short.score++; out.short.strength += (e21 - e13) / e21;
-      if (!out.short.retest && highK >= e13 && px < e21) out.short.retest = tf;
+      out.short.score++; out.short.strength += (eS - eF) / eS;
+      if (!out.short.retest && highK >= eF && px < eS) out.short.retest = tf;
     }
   }
   return out;
@@ -1603,18 +1615,24 @@ function trendRead(side, lad) {
   const L = side === "long", s = L ? lad.long : lad.short;
   if (s.score < 2) return null;
   const want = L ? "up" : "down";
+  const avail = lad.avail != null ? lad.avail : 4;     // rungs that actually seeded the chosen MA
+  const pending = TREND_TFS.filter((t) => lad.tf[t] && lad.tf[t].st === "nodata");
+  const pnote = pending.length ? ` · ${pending.join("/")} pending history` : "";
   if (s.retest && s.score >= 3)
     return { text: L ? `Pullback to ${s.retest} EMA21 — continuation entry` : `Rally to ${s.retest} EMA21 — continuation short`, retest: s.retest };
-  const d = lad.tf.H1 ? Math.abs(lad.tf.H1.d21) : null;
+  const d = lad.tf.H1 && lad.tf.H1.d21 != null ? Math.abs(lad.tf.H1.d21) : null;
   const pct = d != null ? `${d.toFixed(1)}%` : "—";
-  if (s.score === 4)
-    return { text: L ? `Full uptrend — long pullbacks · +${pct} over H1 EMA21` : `Full downtrend — short rallies · ${pct} under H1 EMA21`, retest: null };
-  if (s.score === 3) {
-    const lag = TREND_TFS.find((t) => lad.tf[t].st !== want);
-    return { text: L ? `Strong — ${lag} lagging` : `Strong down — ${lag} lagging`, retest: null };
+  if (s.score === avail && avail >= 2) {               // every AVAILABLE rung aligned
+    if (avail === 4)
+      return { text: L ? `Full uptrend — long pullbacks · +${pct} over H1 EMA21` : `Full downtrend — short rallies · ${pct} under H1 EMA21`, retest: null };
+    return { text: L ? `Aligned ${s.score}/${avail} — long pullbacks${pnote}` : `Aligned ${s.score}/${avail} — short rallies${pnote}`, retest: null };
   }
-  const aligned = TREND_TFS.filter((t) => lad.tf[t].st === want).join("/");
-  return { text: `Mixed — ${aligned} ${L ? "up" : "down"}, wait for alignment`, retest: null };
+  // lag search skips nodata rungs — a pending rung is unknown, not lagging
+  const lag = TREND_TFS.find((t) => lad.tf[t] && lad.tf[t].st !== want && lad.tf[t].st !== "nodata");
+  if (lag && (s.score === avail - 1 || s.score === 3))
+    return { text: L ? `Strong — ${lag} lagging${pnote}` : `Strong down — ${lag} lagging${pnote}`, retest: null };
+  const aligned = TREND_TFS.filter((t) => lad.tf[t] && lad.tf[t].st === want).join("/");
+  return { text: `Mixed — ${aligned} ${L ? "up" : "down"}, wait for alignment${pnote}`, retest: null };
 }
 
 // Trend age: consecutive most-recent bars where the ribbon was stacked on `side`, computed from
@@ -1622,20 +1640,21 @@ function trendRead(side, lad) {
 // the ladder to the last bit). The forming bar's close is replaced by the live mark, matching the
 // ladder. Bars are only checkable once BOTH EMAs exist (index >= 20), so on short histories the
 // run can hit the edge of what's measurable — `capped` says "at least this old", never "exactly".
-function stackedRun(candles, px, side) {
-  if (!Array.isArray(candles) || candles.length < TREND_MIN_BARS) return null;
+function stackedRun(candles, px, side, fast, slow) {
+  fast = fast || 13; slow = slow || 21;
+  if (!Array.isArray(candles) || candles.length < Math.max(slow + 5, TREND_MIN_BARS)) return null;
   const closes = candles.map((k) => +k.c);
   if (px != null && isFinite(+px)) closes[closes.length - 1] = +px;
-  const n = closes.length, a13 = 2 / 14, a21 = 2 / 22;
-  let e13 = 0, e21 = 0, s13 = 0, s21 = 0, run = 0, checked = 0;
+  const n = closes.length, aF = 2 / (fast + 1), aS = 2 / (slow + 1);
+  let eF = 0, eS = 0, sF = 0, sS = 0, run = 0, checked = 0;
   for (let i = 0; i < n; i++) {
     const c = closes[i];
     if (!isFinite(c)) return null;
-    if (i < 13) { s13 += c; if (i === 12) e13 = s13 / 13; } else e13 = a13 * c + (1 - a13) * e13;
-    if (i < 21) { s21 += c; if (i === 20) e21 = s21 / 21; } else e21 = a21 * c + (1 - a21) * e21;
-    if (i < 20) continue;
+    if (i < fast) { sF += c; if (i === fast - 1) eF = sF / fast; } else eF = aF * c + (1 - aF) * eF;
+    if (i < slow) { sS += c; if (i === slow - 1) eS = sS / slow; } else eS = aS * c + (1 - aS) * eS;
+    if (i < slow - 1) continue;
     checked++;
-    const stacked = side === "long" ? (c > e13 && e13 > e21) : (c < e13 && e13 < e21);
+    const stacked = side === "long" ? (c > eF && eF > eS) : (c < eF && eF < eS);
     run = stacked ? run + 1 : 0;
   }
   return { run, capped: run > 0 && run === checked };

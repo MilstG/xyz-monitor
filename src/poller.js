@@ -3493,6 +3493,89 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     return trendCache;
   }
+
+  // ---- parametric trend board (served at /api/trend?fast=&slow=) ----
+  // Same ladder, same one-code-path math (compute.js), for a user-chosen pair of MAs. The DEFAULT
+  // pair (13/21) is never routed here — it returns the canonical getTrend() so the shared board,
+  // its ETag and the chart modal stay byte-identical. Only the four pickable spans are allowed; a
+  // pair is normalised so the smaller span is the fast one. This board is LEAN by design: it ships
+  // the dots (with honest `nodata` grey rungs), score-out-of-available, read, retest flag, width
+  // and Δslow — the retest zone band, rrv, swing and chart-modal ride-alongs stay on the canonical
+  // 13/21 path (the modal drills a name at 13/21). The H1 rung reads a deeper slice of the retained
+  // spine so a 200 EMA can seed there; D1 depth is whatever dailyRaw holds, so a 200 greys on
+  // crypto D1 (~92 daily bars) until that history deepens — the grey dot IS that honest state.
+  const TREND_PICKABLE = [13, 21, 50, 200];
+  const TREND_PAIR_H1_BARS = 260;                   // widen H1 so EMA200 seeds (spine retains ~180d)
+  const trendPairCache = new Map();                 // "fast-slow" -> { ts, data }
+  function validTrendPair(fast, slow) {
+    fast = Math.trunc(+fast); slow = Math.trunc(+slow);
+    if (!TREND_PICKABLE.includes(fast) || !TREND_PICKABLE.includes(slow) || fast === slow) return null;
+    return { fast: Math.min(fast, slow), slow: Math.max(fast, slow) };
+  }
+  function buildTrendPair(fast, slow) {
+    const now = Date.now();
+    const sides = { long: { crypto: [], stocks: [] }, short: { crypto: [], stocks: [] } };
+    let scanned = 0, excluded = 0;
+    for (const r of rows.values()) {
+      if (r.delisted) continue;
+      if (r.px == null || !Array.isArray(r.hourlyRaw) || r.hourlyRaw.length < 26) { excluded++; continue; }
+      const d1 = Array.isArray(r.dailyRaw) ? r.dailyRaw : null;
+      if (!d1 || d1.length < 26) { excluded++; continue; }
+      const d1g = withFormingDaily(d1, r.px, now, DAY);
+      const lad = trendLadder(r.px, {
+        D1: d1g,
+        H12: bucketsFor(r, 12),
+        H4: bucketsFor(r, 4),
+        H1: hoursToObj(r.hourlyRaw.slice(-TREND_PAIR_H1_BARS)),
+      }, fast, slow);
+      if (!lad) { excluded++; continue; }
+      scanned++;
+      const uni = r.uni === "main" ? "crypto" : "stocks";
+      for (const side of ["long", "short"]) {
+        const read = trendRead(side, lad);
+        if (!read) continue;
+        const s = lad[side];
+        const tf = {};
+        for (const t of TREND_TFS) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21 };
+        // age via the SAME pair (generalised stackedRun) — dashes honestly when the slow MA can't
+        // seed the D1 rung (e.g. a 200 over crypto's shallow daily history), never a 13/21 stand-in.
+        let age = null, ageCap = false;
+        if (lad.tf.D1.st === (side === "long" ? "up" : "down")) {
+          const sr = stackedRun(d1g, r.px, side, fast, slow);
+          if (sr) { age = sr.run; ageCap = sr.capped; }
+        }
+        sides[side][uni].push({ coin: r.coin, t: r.ticker, score: s.score, avail: lad.avail, tf,
+          read: read.text, retest: read.retest, strength: +s.strength.toFixed(5), width: ribbonWidth(s), age, ageCap, vol: r.vol || 0 });
+      }
+    }
+    for (const side of ["long", "short"]) for (const uni of ["crypto", "stocks"]) {
+      // Rank by lit FRACTION (score/available) so a clean 3/3 isn't outranked by a 3/4, then by
+      // available-rung count (a true 4-rung read beats a 3-rung one at equal fraction), then
+      // fresh-first, then volume — the canonical board's ordering, made denominator-aware.
+      sides[side][uni].sort((a, b) => ((b.score / (b.avail || 1)) - (a.score / (a.avail || 1)))
+        || (b.avail - a.avail)
+        || ((a.age == null ? Infinity : a.age) - (b.age == null ? Infinity : b.age))
+        || (b.vol - a.vol));
+      sides[side][uni] = sides[side][uni].slice(0, TREND_TOP).map(({ vol, ...e }) => e);
+    }
+    return { ts: now, dataTs: now,
+      params: { ema: [fast, slow], tfs: TREND_TFS, retestBars: 3, top: TREND_TOP, pickable: TREND_PICKABLE },
+      coverage: { included: scanned, excluded },
+      long: sides.long, short: sides.short };
+  }
+  function getTrendPair(fast, slow) {
+    const v = validTrendPair(fast, slow);
+    if (!v) return null;
+    if (v.fast === 13 && v.slow === 21) return getTrend();     // canonical shared board
+    const key = v.fast + "-" + v.slow;
+    const hit = trendPairCache.get(key);
+    if (hit && Date.now() - hit.ts < TREND_MS) return hit.data;
+    let data;
+    try { data = buildTrendPair(v.fast, v.slow); }
+    catch (e) { log("buildTrendPair error: " + (e && e.message)); return hit ? hit.data : null; }
+    trendPairCache.set(key, { ts: Date.now(), data });
+    return data;
+  }
   // D1 alignment at claim open, read off the trend board already in memory. null = unknown
   // (not board material, or no board yet) — never guessed.
   function trendAlignAtFire(coin, side) {
@@ -4470,6 +4553,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     },
     voidEarnPrint,
     getTrend,
+    getTrendPair,
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);
