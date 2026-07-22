@@ -101,7 +101,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   report:{ coin:null, data:null, list:null, gen:false, tick:null, tf:'1d' },   // AI analyst report tab
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
-  analytics:{ data:null, err:null, ts:0, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
+  analytics:{ data:null, err:null, ts:0, regime:{ sel:'all' }, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false } };
 
 function el(id){ return document.getElementById(id); }
@@ -1900,6 +1900,74 @@ function renderSeasonality(se){
   return sHead('Return seasonality by hour','quarantined — pick all, a sector or one name; grey is noise, colored cleared significance')+controls+banner+sCard(seasonBarSvg(v.hours))+sCap(cap);
 }
 function attachSeasonControls(){ const sel=el('seasonsel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.season.sel=sel.value; drawSessions(); }); }
+// ===== Positioning regime strip (crowding + system leverage, crypto / stocks / both) =====
+// Reads a.sections.regime (pure server aggregate of fields already on the board). Chart-bearing
+// tiles come off the same series the chart draws, so the number and the line can't disagree.
+function regimeCurveSvg(series, o){
+  const W=520,H=150, pl=54,pr=16,pt=12,pb=22;
+  const pts=(series||[]).map(p=>[p[0],p[o.idx]]).filter(p=>p[1]!=null&&isFinite(p[1]));
+  if(pts.length<2) return '<div class="msg" style="height:110px;display:flex;align-items:center;justify-content:center">Not enough history yet — the line fills in as OI banks.</div>';
+  const n=pts.length, vs=pts.map(p=>p[1]);
+  let lo=Math.min(...vs), hi=Math.max(...vs);
+  const zeroCross = o.kind==='skew' && lo<0 && hi>0;
+  if(o.kind==='skew'){ lo=Math.min(lo,0); hi=Math.max(hi,0); }
+  if(hi===lo){ hi+=Math.abs(hi)*0.1||1; lo-=Math.abs(lo)*0.1||1; }
+  const padd=(hi-lo)*0.1; hi+=padd; lo-=padd;
+  const X=i=> pl+(n<=1?0:i/(n-1))*(W-pl-pr);
+  const Y=v=> pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
+  const fmtY = o.kind==='oi' ? (v=>fmtUsd(v)) : (v=>(v>=0?'+':'')+v.toFixed(0)+'%');
+  let s=lcGrid(pl,W-pr,lcTicks(lo,hi,4),Y,fmtY);
+  if(zeroCross) s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--faint)" stroke-width="1"/>`;
+  const baseV = o.kind==='skew'?0:lo;
+  let area=`M ${X(0).toFixed(1)} ${Y(baseV).toFixed(1)}`;
+  for(let i=0;i<n;i++) area+=` L ${X(i).toFixed(1)} ${Y(vs[i]).toFixed(1)}`;
+  area+=` L ${X(n-1).toFixed(1)} ${Y(baseV).toFixed(1)} Z`;
+  s+=`<path d="${area}" fill="${o.color}" fill-opacity="0.09"/>`;
+  s+=`<path d="${pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[1]).toFixed(1)).join(' ')}" fill="none" stroke="${o.color}" stroke-width="1.7"/>`;
+  s+=`<circle cx="${X(n-1).toFixed(1)}" cy="${Y(vs[n-1]).toFixed(1)}" r="2.6" fill="${o.color}"/>`;
+  s+=`<text x="${pl}" y="${H-6}" class="lc-tick">${sessDate(pts[0][0])}</text>`;
+  s+=`<text x="${(W-pr).toFixed(1)}" y="${H-6}" text-anchor="end" class="lc-tick">${sessDate(pts[n-1][0])}</text>`;
+  const xs=pts.map((_,i)=>X(i));
+  const rows=pts.map(p=>`<b style="color:var(--text)">${sessDate(p[0])}</b><br><span style="color:${o.color}">${o.label}: ${o.kind==='oi'?fmtUsd(p[1]):((p[1]>=0?'+':'')+p[1].toFixed(1)+'% APR')}</span>`);
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+function renderRegime(reg, sel){
+  if(!reg) return '';
+  const classes=[['all','Both'],['crypto','Crypto'],['stocks','Stocks']];
+  if(!classes.some(c=>c[0]===sel)) sel='all';
+  const label = sel==='all'?'the whole book':(sel==='crypto'?'crypto':'stocks');
+  const selHtml=`<select id="regimesel" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 7px;font-family:var(--mono);font-size:11px">`+
+    classes.map(c=>`<option value="${c[0]}"${c[0]===sel?' selected':''}>${c[1]}</option>`).join('')+`</select>`;
+  const headRow=`<div class="cp-sub" style="margin:2px 0 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="t" style="color:var(--text)">◆ Positioning regime</span> <span class="d sec">— how crowded &amp; leveraged ${label} is, tape-wide</span><span style="margin-left:auto">${selHtml}</span></div>`;
+  const d=reg[sel];
+  if(!d || d.pending || !d.series || !d.series.length){
+    return headRow+`<div class="msg">Accruing — the regime line fills in as OI &amp; funding history banks${d&&d.names?` (${d.names} ${sel==='all'?'':sel+' '}names)`:''}.</div>`;
+  }
+  const cw=d.crowd||{}, lv=d.lev||{};
+  const aprCell=(v)=> v==null?'—':`<span class="${v>=0?'up':'down'}">${v>=0?'+':''}${v.toFixed(1)}%</span>`;
+  const pctCell=(v,g,b)=> v==null?'—':`<span style="color:${g?'var(--accent)':(b?'var(--blue)':'var(--text)')}">${v}%</span>`;
+  const crowdTiles=`<div class="s-grid" style="margin-bottom:12px">`+
+    `<div class="s-stat"><div class="k" title="OI-weighted mean funding across ${label}, annualized. Positive = the book, weighted by size, is paying to be long.">net funding skew</div><div class="v">${aprCell(cw.netFundApr)}</div><div class="s">${cw.pctNames||0} names priced</div></div>`+
+    `<div class="s-stat"><div class="k" title="Share of names at or above the 90th percentile of their OWN 31d funding — crowded long.">crowded long</div><div class="v">${pctCell(cw.longExtPct,true,false)}</div><div class="s">&ge; 90th pctile</div></div>`+
+    `<div class="s-stat"><div class="k" title="Share at or below the 10th percentile of own 31d funding — crowded short, squeeze fuel.">crowded short</div><div class="v">${pctCell(cw.shortExtPct,false,true)}</div><div class="s">&le; 10th pctile</div></div>`+
+    `<div class="s-stat"><div class="k" title="crowded-long% minus crowded-short%. Tape-wide net crowding.">net crowding</div><div class="v">${cw.netCrowd==null?'—':(cw.netCrowd>0?'+':'')+cw.netCrowd}</div><div class="s">${cw.netCrowd==null?'':(cw.netCrowd>0?'skewed long':(cw.netCrowd<0?'skewed short':'balanced'))}</div></div>`+
+    `</div>`;
+  const chgCell=(v,suf)=> v==null?'':`<span class="${v>=0?'up':'down'}">${v>=0?'+':''}${v.toFixed(1)}%</span> ${suf}`;
+  const levTiles=`<div class="s-grid" style="margin-bottom:12px">`+
+    `<div class="s-stat"><div class="k" title="Sum of notional open interest across ${label} (reconstructed daily — matches the chart end).">total OI</div><div class="v">${fmtUsd(lv.totalOi)}</div><div class="s">${chgCell(lv.oi7dPct,'7d')}</div></div>`+
+    `<div class="s-stat"><div class="k" title="Total OI as a z-score vs its own trailing window mean — how far current leverage sits above normal.">leverage stretch</div><div class="v">${lv.oiZ==null?'—':(lv.oiZ>0?'+':'')+lv.oiZ.toFixed(1)+'\u03c3'}</div><div class="s">${lv.oiZ==null?'accruing':(lv.oiZ>=1?'elevated':(lv.oiZ<=-1?'light':'normal'))}</div></div>`+
+    `<div class="s-stat"><div class="k" title="Total OI over trailing 24h notional volume. Higher = leverage is sticky (held, not churned).">OI / 24h vol</div><div class="v">${lv.oiVol==null?'—':lv.oiVol.toFixed(2)+'\u00d7'}</div><div class="s">positions vs turnover</div></div>`+
+    `<div class="s-stat"><div class="k" title="30-day change in total OI — leverage building or bleeding out of the book.">&Delta; OI 30d</div><div class="v">${lv.oi30dPct==null?'—':(lv.oi30dPct>=0?'<span class="up">+':'<span class="down">')+lv.oi30dPct.toFixed(1)+'%</span>'}</div><div class="s">over the window</div></div>`+
+    `</div>`;
+  const oiChart=regimeCurveSvg(d.series, {idx:1, color:'var(--blue)', kind:'oi', label:'total OI'});
+  const skewChart=regimeCurveSvg(d.series, {idx:2, color:'var(--accent)', kind:'skew', label:'net funding skew'});
+  const grid=`<div class="rg-charts" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">`+
+    sCard(sCap('Total OI \u00b7 '+(sel==='all'?'both':sel))+oiChart)+
+    sCard(sCap('Net funding skew (APR) \u00b7 '+(sel==='all'?'both':sel))+skewChart)+
+    `</div>`;
+  return headRow+crowdTiles+levTiles+grid+`<div class="sec" style="margin:10px 0 20px;font-size:11px;max-width:720px;line-height:1.5">Crowding is OI-weighted funding + how many names sit at a funding extreme; leverage is aggregate OI and how stretched it is vs its own norm. Crowded <em>and</em> stretched is the cascade precondition — context, not a trade.</div>`;
+}
+function wireRegimeControls(){ const s=el('regimesel'); if(!s) return; s.addEventListener('change',()=>{ if(!state.analytics.regime) state.analytics.regime={sel:'all'}; state.analytics.regime.sel=s.value; drawSessions(); }); }
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
   // GC stale hover entries instead of wiping the registry: hoverChart is now also used by the
@@ -1966,7 +2034,10 @@ function drawSessions(){
         `</div>`).join('')+`</div>`
     : `<div class="sec" style="margin:22px 0 4px;font-size:12px;opacity:.8">All seven studies live. ◆</div>`;
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
-  host.innerHTML=head+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  const regime = a.sections && a.sections.regime;
+  const regimeBlock = renderRegime(regime, (state.analytics.regime&&state.analytics.regime.sel)||'all');
+  host.innerHTML=head+regimeBlock+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  if(regime) wireRegimeControls();
   if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
   if(dow && !dow.pending) attachDowControls();
   if(se && !se.pending) attachSeasonControls();
