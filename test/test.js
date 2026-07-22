@@ -3606,3 +3606,141 @@ test("regime strip: pure aggregate rides /api/analytics sections, split crypto/s
   // crowding breadth reuses the board's own funding percentile — one code path, not a second threshold
   assert.ok(pol.includes("r.fundPct >= 90") && pol.includes("r.fundPct <= 10"), "crowding breadth must reuse r.fundPct thresholds");
 });
+
+// ============================================================================================
+// 5-minute OHLCV archive (build 2026.07.22-01): on-disk node:sqlite store, build-forward capture,
+// server-side downsampled reads, 370d retention. The archive is the SOLE copy of history past the
+// native ~17d candleSnapshot window, so these pin the integrity that keeps it honest.
+// ============================================================================================
+test("5m archive: upsert is idempotent, range reads clustered, evict + coverage exact", () => {
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzm5-"));
+  try {
+    const s = openStore(dir);
+    assert.ok(s.candlesEnabled(), "node:sqlite must be available under --experimental-sqlite (test runner passes the flag)");
+    assert.ok(fs.existsSync(path.join(dir, "candles.db")), "candle db file created on the volume");
+    const M5 = 5 * 60 * 1000, base = 1_700_000_000_000;
+    const bars = [];
+    for (let i = 0; i < 10; i++) bars.push([base + i * M5, 100 + i, 101 + i, 99 + i, 100.5 + i, 1000 + i]);
+    assert.equal(s.insertCandles("xyz:AAPL", bars), 10, "all ten bars upserted");
+    // idempotency: re-inserting the same window (with a changed close on one bar) must NOT duplicate
+    const again = bars.map((k) => k.slice());
+    again[3] = [again[3][0], 200, 210, 190, 205, 9999];   // same (coin,ts), new body
+    s.insertCandles("xyz:AAPL", again);
+    const cov = s.candleCoverage("xyz:AAPL");
+    assert.equal(cov.count, 10, "upsert on the same keys does not duplicate rows");
+    assert.equal(cov.min, base, "coverage min = first bar");
+    assert.equal(cov.max, base + 9 * M5, "coverage max = last bar");
+    const r = s.readCandles("xyz:AAPL", base, base + 9 * M5);
+    assert.equal(r.length, 10, "range read returns the whole window, oldest->newest");
+    for (let i = 1; i < r.length; i++) assert.ok(r[i][0] > r[i - 1][0], "rows come back time-ordered");
+    assert.equal(r[3][4], 205, "the conflicting bar took the UPDATE close, not a second row");
+    // a second coin is isolated (clustering by (coin,ts))
+    s.insertCandles("BTC", [[base, 1, 2, 3, 4, 5]]);
+    assert.equal(s.readCandles("xyz:AAPL", base, base).length, 1, "cross-coin isolation on read");
+    // evict drops strictly older-than the cut, whole archive
+    const dropped = s.evictCandles(base + 5 * M5);
+    assert.equal(dropped, 6, "evict removes exactly the bars older than the cut, whole archive (5 of AAPL + BTC's 1)");
+    assert.equal(s.candleCoverage("xyz:AAPL").min, base + 5 * M5, "post-evict min advances to the cut");
+    assert.equal(s.readCandles("BTC", base, base).length, 0, "BTC's lone old bar also evicted (whole-archive cut)");
+    s.close();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("5m archive: capture writes only CLOSED bars (the forming bar is never final)", () => {
+  const { openStore } = require("../src/store");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzm5f-"));
+  try {
+    const store = openStore(dir);
+    const { createPoller } = require("../src/poller");
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const M5 = 5 * 60 * 1000;
+    // now sits mid-bar; the bar STARTING at `forming` has not fully elapsed and must be dropped.
+    const forming = Math.floor(Date.now() / M5) * M5;
+    const now = forming + 2 * 60 * 1000;   // 2 min into the forming bar
+    const raw = [];
+    for (let i = 6; i >= 1; i--) raw.push({ t: forming - i * M5, o: 10, h: 11, l: 9, c: 10 + i, v: 100 });
+    raw.push({ t: forming, o: 10, h: 11, l: 9, c: 99, v: 100 });   // the forming bar
+    const closed = p._m5FilterClosed(raw, now);
+    assert.equal(closed.length, 6, "the forming bar is filtered out; only fully-elapsed bars remain");
+    assert.ok(closed.every((k) => k[0] + M5 <= now), "every kept bar is fully closed as of now");
+    assert.ok(!closed.some((k) => k[0] === forming), "the forming bar specifically is absent");
+    // and packHours coercion holds: rows are packed [t,o,h,l,c,v]
+    assert.equal(closed[0].length, 6, "closed bars are packed six-tuples");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("5m archive: getCandles5m range-reads, downsamples wide windows to honest OHLC, ships coverage", () => {
+  const { openStore } = require("../src/store");
+  const { bucketCandles } = require("../src/compute");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzm5g-"));
+  try {
+    const store = openStore(dir);
+    const { createPoller } = require("../src/poller");
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const M5 = 5 * 60 * 1000, base = 1_700_000_000_000, N = 2000;
+    const bars = [];
+    for (let i = 0; i < N; i++) bars.push([base + i * M5, 100 + i, 120 + i, 80 + i, 100 + i, 10 + i]);
+    store.insertCandles("xyz:NVDA", bars);
+    // narrow read: under the cap, returned verbatim (quantized)
+    const narrow = p.getCandles5m("xyz:NVDA", base, base + 9 * M5, 3000);
+    assert.equal(narrow.enabled, true, "archive reports enabled");
+    assert.equal(narrow.candles.length, 10, "narrow window returns raw 5m bars");
+    assert.equal(narrow.candles[0].length, 6, "bars keep the volume column");
+    assert.ok(narrow.coverage && narrow.coverage.count === N, "coverage reports full archive depth, not just the window");
+    // wide read with a small cap: MUST downsample below the cap, and each coarse bar is a true
+    // OHLC aggregate of its constituents (o=first, h=max, l=min, c=last), never a decimated sample.
+    const cap = 200;
+    const wide = p.getCandles5m("xyz:NVDA", base, base + (N - 1) * M5, cap);
+    assert.ok(wide.candles.length <= cap, `downsampled to <= cap (${wide.candles.length} <= ${cap})`);
+    assert.ok(wide.candles.length > 1, "still a real series, not collapsed");
+    const mult = Math.ceil((N - 1) / (cap - 1));
+    const expect = bucketCandles(bars, mult, M5);
+    assert.equal(wide.candles.length, expect.length, "bucket count matches bucketCandles at the chosen multiple");
+    assert.equal(wide.candles[0][0], expect[0].t, "first coarse bucket ts matches bucketCandles");
+    assert.equal(wide.candles[0][1], expect[0].o, "coarse open = first constituent open (honest OHLC)");
+    assert.equal(wide.candles[0][2], expect[0].h, "coarse high = max constituent high");
+    assert.equal(wide.candles[0][3], expect[0].l, "coarse low = min constituent low");
+    assert.equal(wide.candles[0][4], expect[0].c, "coarse close = last constituent close");
+    // reversed from/to is tolerated; an out-of-range window returns empty but stays enabled
+    const empty = p.getCandles5m("xyz:NVDA", base - 100 * M5, base - 50 * M5, 3000);
+    assert.equal(empty.enabled, true);
+    assert.equal(empty.candles.length, 0, "window with no bars returns an empty (not fabricated) series");
+    // res=5m is a DIFFERENT axis from tf=; the ladder getter still refuses "5m"
+    assert.equal(p.getTfCandles("xyz:NVDA", "5m"), null, "tf=5m stays unknown; 5m is served via res=, not tf=");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("5m archive: source + wiring manifest (store engine, capture path, route, run flags)", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const sto = rd("src/store.js"), pol = rd("src/poller.js"), srv = rd("server.js");
+  const pkg = rd("package.json"), rail = rd("railway.json");
+  // store engine: node:sqlite, clustered STRICT table, idempotent upsert, and the off-copy hedge
+  assert.ok(sto.includes('require("node:sqlite")'), "store must use the built-in node:sqlite (no native dep)");
+  assert.ok(sto.includes("candles.db"), "candle archive targets candles.db");
+  assert.ok(sto.includes("WITHOUT ROWID") && sto.includes("STRICT"), "candles_5m must be a STRICT, WITHOUT ROWID clustered table");
+  assert.ok(sto.includes("ON CONFLICT(coin, ts) DO UPDATE"), "inserts must upsert (idempotent capture/gap-fill)");
+  assert.ok(sto.includes("VACUUM INTO"), "snapshotCandles must VACUUM INTO an off-copy (sole-copy recovery hedge)");
+  assert.ok(/candlesEnabled\(\)/.test(sto), "store must expose candlesEnabled() so callers degrade cleanly without the module");
+  // poller capture path: forming-bar guard, one worker, 370d retention, exported getters
+  assert.ok(pol.includes("function capture5m") && pol.includes("function fiveMinWorker"), "capture + worker present");
+  assert.ok(pol.includes("k[0] + FIVE_MIN <= now"), "closed-bar guard (forming bar dropped) present");
+  assert.ok(pol.includes("M5_RETENTION_DAYS = 370"), "retention pinned at 370d");
+  assert.ok(pol.includes("store.evictCandles(") && /maintenance[\s\S]*evictCandles/.test(pol), "eviction runs inside maintenance");
+  assert.ok(/getCandles5m,/.test(pol) && /getCandleCoverage,/.test(pol) && /getM5Stamp:/.test(pol), "5m getters exported");
+  assert.ok(pol.includes("fiveMinWorker();"), "capture worker launched in start()");
+  // route: res=5m branch on /api/candles (no new route string — manifest still counts one)
+  assert.ok(/res === "5m"/.test(srv), "/api/candles must branch on res=5m");
+  assert.ok(srv.includes('"candles5m|"') && srv.includes("poller.getCandles5m(") && srv.includes("poller.getM5Stamp("), "res=5m must key + serve via the 5m getters");
+  assert.equal(srv.split('fastify.get("/api/candles"').length - 1, 1, "still exactly one /api/candles registration");
+  // run flags: the experimental-sqlite flag must be present everywhere the app is launched/tested,
+  // and Node pinned so a runtime bump can't silently change the module API under us.
+  assert.ok(/--experimental-sqlite server\.js/.test(pkg), "npm start must pass --experimental-sqlite");
+  assert.ok(/--experimental-sqlite --test/.test(pkg), "npm test must pass --experimental-sqlite");
+  assert.ok(/">=22\.5/.test(pkg), "engines.node must require >= 22.5 (node:sqlite availability), pinned");
+  assert.ok(/--experimental-sqlite server\.js/.test(rail), "railway startCommand must pass --experimental-sqlite");
+});
