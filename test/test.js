@@ -2241,11 +2241,12 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
   const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const defs = {};
   for (const m of s.matchAll(/^(?:async )?function ([A-Za-z0-9_]+)\(/gm)) defs[m[1]] = (defs[m[1]] || 0) + 1;
-  for (const n of ["loadTrend", "openTrend", "renderTrend", "trendDotHtml", "trendSectionHtml"]) {
+  for (const n of ["loadTrend", "openTrend", "renderTrend", "trendDotHtml", "trendSectionHtml", "trendMAChips"]) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
-  for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`", "tage", "td21", "fresh-first", "twidth", "rrv"])
+  for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`", "tage", "td21", "fresh-first", "twidth", "rrv",
+    "tma-chip", "?fast=", "&slow=", "nodata", "tpend", "_trendMA"])
     assert.ok(s.includes(frag), `missing client feature marker: ${frag}`);
   const eng = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
   for (const fn of ["function stackedRun(", "function ribbonWidth(", "TREND_TF_MS"])
@@ -2259,7 +2260,8 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(srv.includes("/api/trend"), "server route missing: /api/trend");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl", ".twidth", ".tchart-btn", ".tchart-modal", ".tcbtn-td"])
+  for (const cls of [".tdot", ".tretest", ".trend-t", ".trow-hl", ".twidth", ".tchart-btn", ".tchart-modal", ".tcbtn-td",
+    ".tdot.nd", ".tma-chip", ".tma-chip.on"])
     assert.ok(css.includes(cls), `missing style: ${cls}`);
   // chart modal contract markers: the button ships on rows, the fetch carries tf=, and the
   // candles route branches to the ladder-series getter — drop any one and the modal quietly
@@ -2343,6 +2345,60 @@ test("trend board ships width + retest volume (rrv) end to end via the seed harn
   assert.ok(row.rrv != null && row.rrv > 1.6 && row.rrv < 2.6,
     `retest volume reads ~2x for a doubled final day, got ${row.rrv}`);
   for (const e of p.getTrend().long.stocks) if (!e.retest) assert.ok(e.rrv == null, "rrv only rides a retest");
+});
+
+test("trendLadder: a chosen 200 MA greys rungs without the history and scores out of available", () => {
+  const { trendLadder, trendRead } = require("../src/compute");
+  const mk = (n, f) => Array.from({ length: n }, (_, i) => { const c = f(i); return { t: i * 3600e3, o: c, h: c * 1.001, l: c * 0.999, c }; });
+  const up = (i) => 100 * Math.pow(1.003, i);
+  const deep = mk(260, up), shallow = mk(60, up), px = up(259) * 1.003;
+  // default 13/21: every rung seeds, avail = 4, e13/e21 keys preserved (canonical wire shape)
+  let lad = trendLadder(px, { D1: deep, H12: deep, H4: deep, H1: deep });
+  assert.equal(lad.avail, 4, "default pair seeds all four rungs");
+  assert.ok(lad.tf.D1.e13 > 0 && lad.tf.D1.e21 > 0, "default ladder still ships e13/e21");
+  assert.equal(lad.fast, 13); assert.equal(lad.slow, 21);
+  // 13/200 with a shallow D1: D1 can't seed EMA200 -> grey rung, not an excluded name
+  lad = trendLadder(px, { D1: shallow, H12: deep, H4: deep, H1: deep }, 13, 200);
+  assert.equal(lad.tf.D1.st, "nodata", "shallow D1 greys under a 200");
+  assert.equal(lad.tf.D1.e21, null, "a nodata rung carries no EMA");
+  assert.equal(lad.avail, 3, "avail counts only rungs that seeded the slow MA");
+  assert.equal(lad.long.score, 3, "the uptrend scores 3 up over the 3 available rungs");
+  const read = trendRead("long", lad);
+  assert.ok(/pending history/.test(read.text), "the read discloses the pending rung");
+  assert.ok(!/D1 lagging/.test(read.text), "a pending rung is never reported as 'lagging'");
+  // the 26-bar floor still excludes the whole name (unchanged contract), grey is only ABOVE it
+  assert.equal(trendLadder(px, { D1: deep.slice(-20), H12: deep, H4: deep, H1: deep }, 13, 200), null,
+    "a rung below the 26-bar floor still excludes the name");
+});
+
+test("stackedRun honours custom spans and dashes when the slow MA can't seed", () => {
+  const { stackedRun } = require("../src/compute");
+  const up = (n) => Array.from({ length: n }, (_, i) => ({ c: 100 * Math.pow(1.003, i) }));
+  assert.equal(stackedRun(up(60), null, "long", 13, 200), null, "60 bars can't seed a 200 EMA");
+  const r = stackedRun(up(260), 100 * Math.pow(1.003, 260), "long", 13, 200);
+  assert.ok(r && r.run > 0, "a clean uptrend over 260 bars has a positive 13/200 run");
+  const d = stackedRun(up(60), null, "long");   // default 13/21 unchanged: 60 bars is plenty
+  assert.ok(d && d.run > 0, "default spans still measure a run on 60 bars");
+});
+
+test("getTrendPair: validates the pickable set, passes the default through to the shared board", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
+  for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i); hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+  const px = hourly[N - 1].c * 1.0005, daily = [];
+  for (let i = 0; i < 60; i++) daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c: px * Math.pow(1.01, i - 59), l: px * Math.pow(1.01, i - 59) * 0.99, h: px * Math.pow(1.01, i - 59) * 1.002 });
+  p.seedRowNow("TP1", { px, uni: "xyz", vol: 1e6, hourlyRaw: hourly, dailyRaw: daily });
+  p.buildTrendNow();
+  assert.equal(p.getTrendPair(13, 21), p.getTrend(), "the default pair returns the canonical shared board");
+  assert.equal(p.getTrendPair(9, 50), null, "a span outside the pickable set is rejected");
+  assert.equal(p.getTrendPair(50, 50), null, "a pair must be two distinct MAs");
+  const board = p.getTrendPair(200, 50);   // unordered input normalises to fast<slow
+  assert.ok(board && board.params, "a valid custom pair builds a board");
+  assert.deepEqual(board.params.ema, [50, 200], "the built board reports its normalised pair");
+  assert.deepEqual(board.params.pickable, [13, 21, 50, 200], "the board advertises the pickable set");
 });
 
 test("candles tf param: the chart series IS the ladder series — the modal cannot disagree with the board", () => {
