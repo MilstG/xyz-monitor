@@ -1779,7 +1779,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openCmdk", "closeCmdk", "cmdkRender", "cmdkActivate", "aiFmtCountdown", "aiFmtAgo", "aiTickCountdown",
     "updateFreshTray", "renderFreshTray",
     "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
-    "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock"];
+    "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock",
+    "renderRegime", "regimeCurveSvg", "wireRegimeControls"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -3566,4 +3567,42 @@ test("ask daily budget: cap enforced, only successful non-cached calls burn it, 
   assert.ok(html.includes('id="termBudget"'), "terminal bar must contain the budget chip");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".tp-budget") && css.includes(".tp-budget.out"), "chip CSS (incl. exhausted state) missing");
+});
+
+test("regimeAggregate: tape-wide OI + OI-weighted funding APR, forward-filled, chart/tile share the series end", () => {
+  const { regimeAggregate } = require("../src/compute");
+  const now = Date.now();
+  const t = (back) => now - back * DAY;
+  const A = [], B = [];
+  for (let k = 10; k >= 0; k--) { A.push([t(k), 1000 + (10 - k) * 10, 0.00001]); B.push([t(k), 200, -0.00002]); }
+  const r = regimeAggregate([A, B], { now, days: 15 });
+  assert.ok(r.series.length >= 10, "one point per day once names start");
+  const last = r.series[r.series.length - 1];
+  assert.ok(Math.abs(last[1] - 1300) < 1e-6, "total OI is the sum of both names' last OI");
+  const expect = +(((1100 * 0.00001 + 200 * -0.00002) / 1300) * 24 * 365 * 100).toFixed(2);
+  assert.ok(Math.abs(last[2] - expect) < 0.05, "netFundApr is OI-weighted funding, annualized");
+  assert.equal(r.totalOi, last[1]);
+  assert.equal(r.netFundApr, last[2]);
+  assert.ok(r.oiZ != null, "z-score present with enough points");
+  const C = [[t(9), 500, 0.00001]];
+  const r2 = regimeAggregate([C], { now, days: 15 });
+  assert.equal(r2.series[r2.series.length - 1][1], 500, "stale name is forward-filled to last known OI, not dropped");
+  const e = regimeAggregate([], { now, days: 15 });
+  assert.equal(e.series.length, 0);
+  assert.equal(e.totalOi, null);
+});
+
+test("regime strip: pure aggregate rides /api/analytics sections, split crypto/stocks, rendered with the shared hoverChart", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(pol.includes("function buildRegime") && pol.includes("regimeAggregate("), "buildRegime + pure aggregate call missing from poller");
+  assert.ok(pol.includes("regime,"), "regime must be a key on the analytics sections payload");
+  assert.ok(/function buildRegime[\s\S]*mainMarkets\(\)/.test(pol) && /function buildRegime[\s\S]*activeMarkets\(\)/.test(pol), "regime must combine crypto (mainMarkets) + stocks (activeMarkets), not filter one roster");
+  assert.ok(require("../src/compute").regimeAggregate, "regimeAggregate must be exported from compute");
+  assert.ok(app.includes("function renderRegime") && app.includes("function regimeCurveSvg") && app.includes("function wireRegimeControls"), "regime client renderers missing");
+  assert.ok(app.includes("a.sections && a.sections.regime"), "analytics render must read sections.regime");
+  assert.ok(app.includes("regimeCurveSvg(d.series") && app.includes("hoverChart("), "regime charts must use the shared hoverChart infrastructure");
+  // crowding breadth reuses the board's own funding percentile — one code path, not a second threshold
+  assert.ok(pol.includes("r.fundPct >= 90") && pol.includes("r.fundPct <= 10"), "crowding breadth must reuse r.fundPct thresholds");
 });
