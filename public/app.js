@@ -2624,9 +2624,15 @@ function renderEarnings(){
 // lens), red = stacked down. RETEST = recent bars probed the 13/21 zone on a trending TF while
 // the close held EMA21 — the continuation-entry pullback. Rows click through to market detail.
 let _trend=null,_trendLast=0,_trendSide='long',_trendWired=false,_trendInflight=false;
+// Active MA pair for the board. [fast,slow] insertion-ordered so a "click a third to swap" replaces
+// the OLDER of the two. Default 13/21 fetches the canonical board (no query); any other pair hits
+// the parametric endpoint. Server enforces the allowed set — this is just the picker's mirror.
+const _trendMAOpts=[13,21,50,200];
+let _trendMA=[13,21];
+function _trendPairQ(){ const a=Math.min(..._trendMA),b=Math.max(..._trendMA); return (a===13&&b===21)?'':`?fast=${a}&slow=${b}`; }
 async function loadTrend(){
   if(_trendInflight) return; _trendInflight=true;
-  try{ const d=await fetchJSON('/api/trend'); _trend=d; _trendLast=Date.now(); }
+  try{ const d=await fetchJSON('/api/trend'+_trendPairQ()); _trend=d; _trendLast=Date.now(); }
   catch(_){ }
   finally{ _trendInflight=false; }
   if(state.view==='trend') renderTrend();
@@ -2642,8 +2648,22 @@ function openTrend(){
   renderTrend();
   if(Date.now()-_trendLast>60*1000) loadTrend();
 }
+// The picker: four pickable MAs, two active. Clicking an inactive chip swaps out the OLDER active
+// one (insertion order). Default 13/21 is the canonical board; anything else refetches parametric.
+function trendMAChips(){
+  const act=new Set(_trendMA), has200=_trendMA.includes(200);
+  const chips=_trendMAOpts.map(p=>`<button type="button" class="tma-chip${act.has(p)?' on':''}" data-ma="${p}" data-tip="${act.has(p)?'active MA \\u2014 click another to swap this pair':'set this as one of the two MAs (replaces the older active one)'}">${p}</button>`).join('');
+  const note=has200
+    ? 'EMA200 needs ~205 bars on a rung \\u2014 rungs without it show grey until history deepens'
+    : 'pick 2 \\u00b7 click a third to swap the older';
+  return `<div class="tma" id="tma-pick"><span class="tma-lbl">MAs</span>${chips}<span class="tma-note sec">${note}</span></div>`;
+}
 function trendDotHtml(tf,cell,side){
   const st=cell&&cell.st, d=cell&&cell.d21!=null?cell.d21:null;
+  if(st==='nodata'){
+    const slow=Math.max(..._trendMA);
+    return `<span class="tdot nd" data-tip="${tf} \\u00b7 not enough history to seed EMA${slow} on this rung yet \\u2014 an honest grey, not a miss; fills in on its own as daily history deepens"></span>`;
+  }
   // long lens: up=green, reclaim=yellow, else red · short lens: down=red(aligned), roll=yellow, else green
   const cls = st==='up'?'g' : st==='down'?'r' : st==='reclaim'?(side==='long'?'y':'g') : (side==='long'?'r':'y');
   const stLbl = st==='up'?'trending — px > EMA13 > EMA21' : st==='down'?'downtrending — px < EMA13 < EMA21'
@@ -2656,7 +2676,8 @@ function trendSectionHtml(list,side,label,sub){
   if(!list||!list.length) rows=`<tr><td colspan="12"><div class="msg" style="padding:14px 0">No ${side==='long'?'long':'short'} candidates with \u22652/4 alignment right now \u2014 honest emptiness, not a bug.</div></td></tr>`;
   else rows=list.map((e,i)=>{
     const dots=['D1','H12','H4','H1'].map(t=>`<td class="tdc">${trendDotHtml(t,e.tf&&e.tf[t],side)}</td>`).join('');
-    const scCls=side==='long'?(e.score===4?'pos':e.score===3?'':'sec'):(e.score===4?'neg':e.score===3?'':'sec');
+    const denom=e.avail!=null?e.avail:4, full=e.score===denom;
+    const scCls=side==='long'?(full?'pos':e.score>=denom-1?'':'sec'):(full?'neg':e.score>=denom-1?'':'sec');
     // rrv: volume through the retest, one bar of the retesting TF, clock-matched (server-built)
     const rrv=e.retest&&e.rrv!=null?e.rrv:null;
     const badge=e.retest?`<span class="tretest" data-tip="price has pulled back to the EMA21 zone on a trending timeframe (${e.retest}) \u2014 prime continuation-entry zone${rrv!=null?` \u00b7 volume through the zone: ${rrv.toFixed(1)}\u00d7 the clock-matched norm for one ${e.retest} bar \u2014 ~1\u00d7 or less = quiet pullback (healthy continuation character), \u22652\u00d7 = the level is being fought, not respected`:''}">RETEST${rrv!=null?` \u00b7 ${rrv.toFixed(1)}\u00d7`:''}</span>`:'';
@@ -2681,7 +2702,7 @@ function trendSectionHtml(list,side,label,sub){
     const wTxt=e.width==null?'\u2014':`${e.width.toFixed(2)}%`;
     return `<tr data-coin="${esc(e.coin)}" class="${e.retest?'trow-hl':''}" data-tip="open ${esc(e.t)} in the market detail panel">`
       +`<td class="sec" style="width:26px">${i+1}</td><td class="ttick">${esc(e.t)}${ctx}</td>${dots}`
-      +`<td class="tscore ${scCls}">${e.score}/4</td>`
+      +`<td class="tscore ${scCls}${denom<4?' tpend':''}"${denom<4?` data-tip="scored out of ${denom} available rungs \\u2014 one or more rungs can't seed the chosen MA yet (grey)"`:''}>${e.score}/${denom}${denom<4?'<span class="tpend-star">*</span>':''}</td>`
       +`<td class="twidth" data-tip="ribbon width \u2014 average EMA13\u2013EMA21 spread across the rungs aligned with this side, % of EMA21 \u00b7 disambiguates equal scores: thin (\u22720.15%) = fragile stack one bad bar flips, wide = established separation">${wTxt}</td>`
       +`<td class="tage" data-tip="${ageTip}">${ageTxt}</td>`
       +`<td class="td21 ${dCls}" data-tip="live distance from the H1 EMA21 \u2014 proximity to the entry zone \u00b7 small = at the zone, large = extended (chasing)">${dTxt}</td>`
@@ -2703,16 +2724,24 @@ function renderTrend(){
   if(!d||(!d.long&&!d.short)){ box.innerHTML='<div class="msg"><span class="big">Loading\u2026</span>Building the trend ladder.</div>'; if(asof) asof.textContent=''; return; }
   const side=_trendSide==='short'?'short':'long', b=d[side]||{};
   const cov=d.coverage||{};
-  if(asof) asof.textContent=`EMA 13/21 \u00b7 D1 \u00b7 H12 \u00b7 H4 \u00b7 H1 \u00b7 ${cov.included||0} markets laddered${cov.excluded?` \u00b7 ${cov.excluded} excluded (insufficient history)`:''}`;
+  if(asof) asof.textContent=`EMA ${Math.min(..._trendMA)}/${Math.max(..._trendMA)} \u00b7 D1 \u00b7 H12 \u00b7 H4 \u00b7 H1 \u00b7 ${cov.included||0} markets laddered${cov.excluded?` \u00b7 ${cov.excluded} excluded (insufficient history)`:''}`;
   const L=side==='long';
   const cr=state.scope==='crypto';
-  let html=cr?trendSectionHtml(b.crypto,side,'CRYPTO','Hyperliquid main dex \u00b7 top-60 by volume')
-             :trendSectionHtml(b.stocks,side,'STOCKS \u00b7 MACRO','Hyperliquid xyz dex');
+  let html=trendMAChips();
+  html+=cr?trendSectionHtml(b.crypto,side,'CRYPTO','Hyperliquid main dex \u00b7 top-60 by volume')
+          :trendSectionHtml(b.stocks,side,'STOCKS \u00b7 MACRO','Hyperliquid xyz dex');
   html+=`<div class="corrpanel tlegend"><div class="cp-sub" style="margin:0 0 8px">How to read it</div>`
     +(L?`<div><span class="tdot g"></span> <b>Trending</b> <span class="sec">\u2014 price &gt; EMA13 &gt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Reclaiming</b> <span class="sec">\u2014 above EMA21, not yet stacked</span> &nbsp; <span class="tdot r"></span> <b>Below trend</b></div>`
        :`<div><span class="tdot r"></span> <b>Downtrending</b> <span class="sec">\u2014 price &lt; EMA13 &lt; EMA21</span> &nbsp; <span class="tdot y"></span> <b>Rolling over</b> <span class="sec">\u2014 below EMA21, not yet stacked</span> &nbsp; <span class="tdot g"></span> <b>Above trend</b></div>`)
+    +`<div style="margin-top:6px"><span class="tdot nd"></span> <b>No history yet</b> <span class="sec">\u2014 the rung can't seed the chosen MA; scored out of available and fills in as data deepens</span></div>`
     +`<div class="sec" style="margin-top:8px;line-height:1.6"><b style="color:var(--text)">4/4 \u2014 all ${L?'green':'red'}:</b> established ${L?'up':'down'}trend; look for ${L?'longs on pullbacks':'shorts on rallies'} into the EMA21 zone. <b style="color:var(--text)">2\u20133/4 \u2014 mixed:</b> higher timeframes lead \u2014 wait for lower-TF alignment before entries; manage size. <b style="color:var(--blue)">RETEST</b> \u2014 price has pulled back to the EMA21 zone on a trending timeframe: prime continuation-entry zone. Click a row for the market's detail panel. Ranked by score, then <b style="color:var(--text)">fresh-first</b> \u2014 within a score the youngest D1 stack ranks highest (the young trend is the entry, the old one is the chase); <b style="color:var(--text)">age</b> counts consecutive D1 days stacked (N+ = at least, history-capped), <b style="color:var(--text)">\u039421</b> is the live distance from the H1 EMA21 (small = at the entry zone, large = extended). Only names with \u22652/4 alignment appear \u2014 top ${(d.params&&d.params.top)||10}. Flip the scope switcher for the other universe.</div></div>`;
   box.innerHTML=html;
+  const pick=el('tma-pick');
+  if(pick) pick.addEventListener('click',(ev)=>{ const c=ev.target.closest('button[data-ma]'); if(!c) return;
+    const p=+c.dataset.ma; if(_trendMA.includes(p)) return;   // already active
+    _trendMA=[_trendMA[1],p];   // drop the older, keep the newer, add the pick
+    renderTrend();              // instant chip feedback; the board swaps in when the fetch lands
+    loadTrend(); });
   box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
   // chart button: opens the ladder chart modal; stopPropagation so the row's drawer click is untouched
   box.querySelectorAll('.tchart-btn').forEach(b=>b.addEventListener('click',(ev)=>{ ev.stopPropagation(); openTrendChart(b.dataset.coin,side); }));

@@ -603,6 +603,14 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .tdot.g{background:var(--up);box-shadow:0 0 6px rgba(70,185,126,.45)}
 .tdot.y{background:var(--accent);box-shadow:0 0 6px rgba(227,165,60,.4)}
 .tdot.r{background:var(--down);box-shadow:0 0 6px rgba(229,96,77,.45)}
+.tdot.nd{background:transparent;border:1.5px dashed var(--border-strong,#3d4650);box-shadow:none}
+.tma{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 12px}
+.tma-lbl{font-size:10px;letter-spacing:.14em;color:var(--muted,#6b7785)}
+.tma-chip{font:inherit;font-size:11px;cursor:pointer;padding:3px 9px;border-radius:4px;border:1px solid var(--line,#26323f);background:transparent;color:var(--muted,#7d8894);letter-spacing:.03em}
+.tma-chip:hover{border-color:var(--border-strong,#3d4650)}
+.tma-chip.on{border-color:var(--up);background:rgba(70,185,126,.12);color:var(--up)}
+.tma-note{font-size:10px;margin-left:2px}
+.tscore.tpend .tpend-star{color:var(--accent);margin-left:1px}
 .tretest{display:inline-block;margin-left:9px;padding:2px 9px;border-radius:10px;background:var(--blue);color:#0d1117;
   font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.6px;cursor:help;vertical-align:middle}
 .tlegend{font-size:12.5px}
