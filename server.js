@@ -477,12 +477,14 @@ async function main() {
     // legacy `days` hourly payload does no live-mark substitution client-side, so it keys on the
     // spine stamp alone.
     let key;
+    const cfast = req.query && req.query.fast, cslow = req.query && req.query.slow;
+    const cpair = (cfast != null || cslow != null) ? `|ma:${cfast || ""}-${cslow || ""}` : "";
     if (tf) { const cs = poller.getCoinStamp(coin);
       const bucket = cs.px > 0 ? Math.round(Math.log(cs.px) * 1000) : 0;   // ~0.1% granularity, scale-free
-      key = "candles|" + coin + "|tf:" + String(tf).toLowerCase() + "|" + cs.st + "|" + bucket; }
+      key = "candles|" + coin + "|tf:" + String(tf).toLowerCase() + cpair + "|" + cs.st + "|" + bucket; }
     else key = "candles|" + coin + "|d:" + (days || 14) + "|" + poller.getCoinStamp(coin).st;
     serveKeyed(req, reply, key, () => {
-      if (tf) { const r = poller.getTfCandles(coin, tf); if (r) return r; }
+      if (tf) { const r = poller.getTfCandles(coin, tf, cfast, cslow); if (r) return r; }
       return { coin, candles: poller.getCandles(coin, days) };
     }, { coin, candles: [] });
   });
