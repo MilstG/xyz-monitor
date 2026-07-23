@@ -1672,12 +1672,12 @@ function trendRead(side, lad) {
   const pending = TREND_TFS.filter((t) => lad.tf[t] && lad.tf[t].st === "nodata");
   const pnote = pending.length ? ` · ${pending.join("/")} pending history` : "";
   if (s.retest && s.score >= 3)
-    return { text: L ? `Pullback to ${s.retest} EMA21 — continuation entry` : `Rally to ${s.retest} EMA21 — continuation short`, retest: s.retest };
+    return { text: L ? `Pullback to ${s.retest} EMA${lad.slow} — continuation entry` : `Rally to ${s.retest} EMA${lad.slow} — continuation short`, retest: s.retest };
   const d = lad.tf.H1 && lad.tf.H1.d21 != null ? Math.abs(lad.tf.H1.d21) : null;
   const pct = d != null ? `${d.toFixed(1)}%` : "—";
   if (s.score === avail && avail >= 2) {               // every AVAILABLE rung aligned
     if (avail === 4)
-      return { text: L ? `Full uptrend — long pullbacks · +${pct} over H1 EMA21` : `Full downtrend — short rallies · ${pct} under H1 EMA21`, retest: null };
+      return { text: L ? `Full uptrend — long pullbacks · +${pct} over H1 EMA${lad.slow}` : `Full downtrend — short rallies · ${pct} under H1 EMA${lad.slow}`, retest: null };
     return { text: L ? `Aligned ${s.score}/${avail} — long pullbacks${pnote}` : `Aligned ${s.score}/${avail} — short rallies${pnote}`, retest: null };
   }
   // lag search skips nodata rungs — a pending rung is unknown, not lagging
