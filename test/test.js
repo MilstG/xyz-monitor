@@ -1270,10 +1270,72 @@ test("ai report v6: news-grounded context, no-invention rule, crypto positioning
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["cr.fundingPctile31d = fp", "cr.oiChg24Pct",
-    "const AI_SCHEMA_V = 6;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
-    "invented news", "rel7dPct", "rel30dPct", "context.crypto"])
-    assert.ok(pol.includes(pin), `v6 pin missing: ${pin}`);
+    "const AI_SCHEMA_V = 7;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
+    "invented news", "rel7dPct", "rel30dPct", "context.crypto",
+    // v7 earnings reported-vs-upcoming split
+    "earnEntryState(x, now) === \"upcoming\"", "e.reported =",
+    "event scenario without a pending earnings print", "reportedD"])
+    assert.ok(pol.includes(pin), `v6/v7 pin missing: ${pin}`);
   assert.ok(!pol.includes("cryptoSetupsLive"), "the AI context no longer cites live engine setups it does not have (-101)");
+});
+
+test("earnings: earnEntryState splits reported vs upcoming on actual-present OR the ET session clock", () => {
+  const C = require("../src/compute");
+  const at = (iso) => new Date(iso).getTime();
+  const noon = at("2026-07-23T18:00:00Z");    // 14:00 ET — a BMO release is out, the AMC close is not
+  const evening = at("2026-07-23T22:00:00Z");  // 18:00 ET — after the AMC close (the bug's exact clock)
+  const today = C.etDayStr(noon), yest = C.etDayStr(noon - 86400e3), tomo = C.etDayStr(noon + 86400e3);
+  const S = C.earnEntryState;
+  assert.equal(S({ d: today, s: "AMC", epsA: 0.42 }, noon), "reported", "actual present = reported even before the close");
+  assert.equal(S({ d: today, s: "AMC", epsA: null }, noon), "upcoming", "AMC before 16:00 ET is still ahead");
+  assert.equal(S({ d: today, s: "AMC", epsA: null }, evening), "reported", "AMC after the close is out — the screenshot fix, even with no actual yet");
+  assert.equal(S({ d: today, s: "BMO", epsA: null }, noon), "reported", "BMO is out by the open");
+  assert.equal(S({ d: today, s: "DMH", epsA: null }, noon), "upcoming");
+  assert.equal(S({ d: today, s: "DMH", epsA: null }, evening), "reported", "DMH settles on the close threshold");
+  assert.equal(S({ d: today, s: "TBD", epsA: null }, evening), "upcoming", "TBD same-day has no clock to trust — actual-present only");
+  assert.equal(S({ d: yest, s: "TBD", epsA: null }, noon), "reported", "any prior ET day is unconditionally past");
+  assert.equal(S({ d: tomo, s: "AMC", epsA: null }, noon), "upcoming", "any future ET day is ahead");
+  assert.equal(S(null, noon), "upcoming", "a malformed entry never fabricates a reported state");
+});
+
+test("ai report: a reported print is a post-event object, not a pending `next`; validator bans a stale event scenario", () => {
+  const { p, px } = aiTestPoller();
+  const C = require("../src/compute");
+  const yest = C.etDayStr(Date.now() - 86400e3);     // unconditionally reported
+  const future = C.etDayStr(Date.now() + 6 * 86400e3); // unconditionally upcoming
+  // INTC-shaped: today's print already out (carried as a back-window row with its actual) AND a
+  // real next print six days ahead. The reported row must NOT masquerade as `next`.
+  p.seedEarnNow([
+    { t: "NVDA", d: yest, s: "AMC", eps: 0.22, epsA: 0.42, rev: null, revA: null },
+    { t: "NVDA", d: future, s: "AMC", eps: 0.30, epsA: null, rev: null, revA: null },
+  ]);
+  const ctx = p.aiCompileNow("xyz:NVDA");
+  assert.ok(ctx.earnings, "earnings block present");
+  assert.equal(ctx.earnings.next.d, future, "`next` is the still-ahead print, never the reported one");
+  assert.ok(ctx.earnings.reported && ctx.earnings.reported.d === yest, "the printed row surfaces as `reported`");
+  assert.equal(ctx.earnings.reported.beat, true, "beat verdict computed from actual vs estimate");
+  assert.ok(Math.abs(ctx.earnings.reported.surprisePct - 90.9) < 0.2, "surprise% computed server-side");
+
+  // With ONLY a reported print (no `next`), the pending-binary framing is illegitimate.
+  p.seedEarnNow([{ t: "NVDA", d: yest, s: "AMC", eps: 0.22, epsA: 0.42 }]);
+  const ctx2 = p.aiCompileNow("xyz:NVDA");
+  assert.ok(ctx2.earnings.reported && !ctx2.earnings.next, "printed-only name carries reported, no next");
+  const voidLv = +(px * 0.95).toPrecision(6), tgt = +(px * 1.10).toPrecision(6);
+  const withEvent = JSON.parse(AI_GOOD(px, voidLv, tgt));
+  withEvent.scenarios = [
+    { name: "continuation to the target", kind: "target", p: 0.4, target: tgt, note: "trend persists" },
+    { name: "the earnings print decides", kind: "event", p: 0.4, target: null, note: "coin flip into the report" },
+    { name: "breaks the void", kind: "void", p: 0.2, target: null, note: "thesis dead below" },
+  ];
+  const rej = p.aiValidateNow(JSON.stringify(withEvent), ctx2);
+  assert.equal(rej.ok, false, "an event scenario with no pending print is rejected");
+  assert.match(rej.error, /event scenario without a pending earnings print/, "rejection names the stale-event cause");
+
+  // The SAME event scenario is fine once a print is genuinely ahead.
+  p.seedEarnNow([{ t: "NVDA", d: future, s: "AMC", eps: 0.30, epsA: null }]);
+  const ctx3 = p.aiCompileNow("xyz:NVDA");
+  assert.ok(ctx3.earnings.next && !ctx3.earnings.reported, "ahead-only name carries next, no reported");
+  assert.equal(p.aiValidateNow(JSON.stringify(withEvent), ctx3).ok, true, "event scenario passes with a pending print ahead");
 });
 
 test("analyst-read ledger: directional reports freeze claims, episodes hold, buckets stay isolated", async () => {
@@ -3200,7 +3262,7 @@ test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -
   for (const frag of ["AI_MK", "ai-mkleg", "proven-edge signals only", "g.kind==='short'", "distinct signal types at onset", "outTxt", "marksSuppressed"])
     assert.ok(app.includes(frag), `app.js missing -74 marker: ${frag}`);
   assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
-  for (const frag of ["const AI_SCHEMA_V = 6;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
+  for (const frag of ["const AI_SCHEMA_V = 7;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
     assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
 });
 
