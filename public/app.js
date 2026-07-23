@@ -2776,19 +2776,21 @@ function tcEmaSeries(closes,span){
   for(let i=span;i<n;i++){ const v=+closes[i]; if(!isFinite(v)) return out.fill(null,i); e=a*v+(1-a)*e; out[i]=e; }
   return out;
 }
-function tcStateMeta(st,side){
+function tcStateMeta(st,side,ema){
+  const F=(ema&&ema[0])||13, S=(ema&&ema[1])||21;
   // same color lens as the board dots \u2014 the modal restates the board, never re-decides it
   const cls = st==='up'?'g' : st==='down'?'r' : st==='reclaim'?(side==='long'?'y':'g') : (side==='long'?'r':'y');
-  const lbl = st==='up'?'trending \u2014 px > EMA13 > EMA21' : st==='down'?'downtrending \u2014 px < EMA13 < EMA21'
-    : st==='reclaim'?'reclaiming \u2014 above EMA21, ribbon not stacked' : st==='roll'?'rolling over \u2014 below EMA21, ribbon not stacked':'\u2014';
+  const lbl = st==='up'?`trending \u2014 px > EMA${F} > EMA${S}` : st==='down'?`downtrending \u2014 px < EMA${F} < EMA${S}`
+    : st==='reclaim'?`reclaiming \u2014 above EMA${S}, ribbon not stacked` : st==='roll'?`rolling over \u2014 below EMA${S}, ribbon not stacked`:'\u2014';
   return {cls,lbl};
 }
-function tcCandleSvg(cd,px,tfc,retesting,side,swing){
-  const W=640,H=330, pl=6,pr=56,pt=10,pb=22, SHOW=64, SEED=20;
+function tcCandleSvg(cd,px,tfc,retesting,side,swing,ema){
+  const F=(ema&&ema[0])||13, S=(ema&&ema[1])||21;
+  const W=640,H=330, pl=6,pr=56,pt=10,pb=22, SHOW=64, SEED=S-1;   // seed window = bars before the SLOW EMA exists
   if(!cd||cd.length<2) return '<div class="msg" style="padding:18px 0">Not enough candles for this timeframe yet \u2014 the series is still filling server-side.</div>';
   const closes=cd.map(k=>+k[4]);
   if(px!=null&&isFinite(+px)) closes[closes.length-1]=+px;   // live mark drives the forming bar, matching trendLadder
-  const e13=tcEmaSeries(closes,13), e21=tcEmaSeries(closes,21);
+  const e13=tcEmaSeries(closes,F), e21=tcEmaSeries(closes,S);
   const i0=Math.max(0,cd.length-SHOW), view=cd.slice(i0), n=view.length;
   let lo=Infinity,hi=-Infinity;
   for(let i=0;i<n;i++){ const k=view[i];
@@ -2881,11 +2883,12 @@ function tcDepthNote(cd,tfName,closesOnly){
 function renderTrendChart(res){
   const m=el('tchartmodal'); if(!m||m.hidden) return;
   const e=_tc.entry||{}, tfDef=TC_TFS.find(t=>t.api===_tc.tf)||TC_TFS[1];
+  const ema=_tc.ema||[13,21], F=ema[0], S=ema[1];
   const tfc=e.tf&&e.tf[tfDef.lad]?e.tf[tfDef.lad]:null;
-  const st=tfc?tcStateMeta(tfc.st,_tc.side):null;
+  const st=tfc?tcStateMeta(tfc.st,_tc.side,ema):null;
   const retesting=!!(e.retest&&e.retest===tfDef.lad);
   const seg=TC_TFS.map(t=>{ const cell=e.tf&&e.tf[t.lad];
-    const dot=cell?`<span class="tdot ${tcStateMeta(cell.st,_tc.side).cls}" style="width:7px;height:7px;margin-right:5px;box-shadow:none"></span>`:'';
+    const dot=cell?`<span class="tdot ${tcStateMeta(cell.st,_tc.side,ema).cls}" style="width:7px;height:7px;margin-right:5px;box-shadow:none"></span>`:'';
     return `<button type="button" class="cdtf${t.api===_tc.tf?' on':''}" data-tf="${t.api}">${dot}${t.lbl}</button>`; }).join('');
   const rrv=retesting&&e.rrv!=null?` \u00b7 zone volume ${e.rrv.toFixed(1)}\u00d7`:'';
   const d21=tfc&&tfc.d21!=null?`\u039421 ${tfc.d21>=0?'+':''}${tfc.d21.toFixed(1)}%`:'';
@@ -2897,14 +2900,14 @@ function renderTrendChart(res){
     `<div class="tcm-head"><span class="ttick" style="font-size:16px">${esc(e.t||_tc.coin)}</span>`+
     (res&&res.px!=null?`<span class="tcm-px">${fmtPrice(res.px)}</span>`:'')+
     (st?`<span class="tcm-badge ${st.cls}" data-tip="${tfDef.lad} \u00b7 ${st.lbl} \u2014 the board's own classification for this rung, restated">${tfDef.lad} ${tfc.st}</span>`:'')+
-    `<span class="tcm-badge sc" data-tip="timeframes aligned with the ${_tc.side} side, from the board">${e.score!=null?e.score+'/4':''}</span>`+
-    (e.retest?`<span class="tretest" data-tip="the board's retest flag \u2014 recent bars probed the 13/21 zone on ${e.retest} while the close held EMA21${e.rrv!=null?` \u00b7 volume through the zone ${e.rrv.toFixed(1)}\u00d7 the clock-matched norm`:''}">RETEST ${e.retest}</span>`:'')+
+    `<span class="tcm-badge sc" data-tip="timeframes aligned with the ${_tc.side} side, from the board">${e.score!=null?e.score+'/'+(e.avail||4):''}</span>`+
+    (e.retest?`<span class="tretest" data-tip="the board's retest flag \u2014 recent bars probed the ${F}/${S} zone on ${e.retest} while the close held EMA${S}${e.rrv!=null?` \u00b7 volume through the zone ${e.rrv.toFixed(1)}\u00d7 the clock-matched norm`:''}">RETEST ${e.retest}</span>`:'')+
     `<span class="cdtf-seg" style="margin-left:auto">${seg}</span>`+
     `<button type="button" class="btn tcm-x" id="tchartx" aria-label="close">\u2715</button></div>`+
-    `<div class="tcm-chart">${tcCandleSvg(cd,res?res.px:null,tfc,retesting,_tc.side,(_tc.entry&&_tc.entry.swing!=null)?_tc.entry.swing:null)}</div>`+
-    `<div class="tcm-leg"><span><i style="color:var(--blue)">\u2501</i> EMA13</span><span><i style="color:var(--accent)">\u2501</i> EMA21</span>`+
-    `<span><i class="tcm-zsw"></i> 13/21 retest zone (ladder levels)</span>`+
-    (d21?`<span class="tcm-d21" data-tip="live distance from this rung's EMA21 at the last board build \u2014 small = at the entry zone, large = extended">${d21}</span>`:'')+`</div>`+
+    `<div class="tcm-chart">${tcCandleSvg(cd,res?res.px:null,tfc,retesting,_tc.side,(_tc.entry&&_tc.entry.swing!=null)?_tc.entry.swing:null,ema)}</div>`+
+    `<div class="tcm-leg"><span><i style="color:var(--blue)">\u2501</i> EMA${F}</span><span><i style="color:var(--accent)">\u2501</i> EMA${S}</span>`+
+    `<span><i class="tcm-zsw"></i> ${F}/${S} retest zone (ladder levels)</span>`+
+    (d21?`<span class="tcm-d21" data-tip="live distance from this rung's EMA${S} at the last board build \u2014 small = at the entry zone, large = extended">${d21}</span>`:'')+`</div>`+
     `<div class="tcm-note">${tcDepthNote(cd,tfDef.lad,closesOnly)}</div>`+
     `<div class="tcm-read">${st?`<span class="tdot ${st.cls}" style="margin-right:7px"></span>`:''}${esc(e.read||'')}${rrv?`<span class="sec">${rrv}</span>`:''}`+
     `<div class="sec" style="margin-top:5px;font-size:11.5px;line-height:1.55">Badges, zone levels and the read are the Trend board's own values (\u22643 min old); candles are the exact series that board's ladder consumed for this rung, so the plotted ribbon reproduces its EMAs. Nothing here is re-derived client-side.</div></div>`;
@@ -2918,7 +2921,8 @@ async function loadTrendChart(){
   renderTrendChart(null);   // header + seg paint immediately; the chart body says it's loading
   const body=m.querySelector('.tcm-chart'); if(body) body.innerHTML='<div class="msg" style="padding:18px 0">Loading\u2026</div>';
   try{
-    const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(_tc.coin)+'&tf='+encodeURIComponent(_tc.tf));
+    const pq=(_tc.ema&&!(_tc.ema[0]===13&&_tc.ema[1]===21))?`&fast=${_tc.ema[0]}&slow=${_tc.ema[1]}`:'';
+    const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(_tc.coin)+'&tf='+encodeURIComponent(_tc.tf)+pq);
     if(seq!==_tc.seq||m.hidden) return;   // a newer click or a close superseded this fetch
     renderTrendChart(res);
   }catch(_){ if(seq===_tc.seq&&!m.hidden&&body) body.innerHTML='<div class="msg" style="padding:18px 0">Chart unavailable \u2014 the candles endpoint did not answer. The board above is unaffected.</div>'; }
@@ -2929,7 +2933,7 @@ function openTrendChart(coin,side){
   const board=(_trend&&_trend[side]&&_trend[side][uni])||[];
   const e=board.find(x=>x.coin===coin);
   if(!e) return;   // board re-ranked under the click \u2014 nothing honest to show
-  _tc={coin,side,entry:e,inflight:false,seq:_tc.seq,
+  _tc={coin,side,entry:e,ema:(_trend&&_trend.params&&_trend.params.ema)||[13,21],inflight:false,seq:_tc.seq,
     tf:(e.retest&&(TC_TFS.find(t=>t.lad===e.retest)||{}).api)||'4h'};   // open on the retesting rung when one fires
   bg.hidden=false; m.hidden=false;
   loadTrendChart();
