@@ -524,6 +524,33 @@ test("swing shadow setups: detectors, geometry, fundflip stop, gapfade wiring, E
   const stale = flat.map((k) => [k[0], k[1]]);
   stale[stale.length - 2][1] = lo + 1; stale[stale.length - 1][1] = lo + 1;   // break aged out: last two closes back above
   assert.equal(C.detectReclaim(stale, lo + 0.4), null, "an old wound is not a fresh trap");
+  // ---- intraday liquidity sweep (5m): prior-session low pierced, rejected inside the bar, reclaim holds
+  const FIVE = 5 * 60 * 1000;
+  const mkTail = () => { const a = []; for (let i = 0; i < 30; i++) a.push([now - (30 - i) * FIVE, 100, 100.2, 99.8, 100, 10]); return a; };
+  const swLo = mkTail(); swLo[27] = [swLo[27][0], 99.6, 99.8, 98.5, 99.5, 25];   // wick to 98.5 below dayLo=99, closes back at 99.5
+  const sw = C.detectSweep(swLo, 101, 99, 99.3, 0.25);
+  assert.ok(sw && sw.side === "long", "a rejected pierce of the prior-session low fires long");
+  assert.equal(sw.level, 99, "level is the swept prior-session low");
+  assert.equal(sw.stop, 98.5, "void is the sweep extreme (the wick low)");
+  assert.ok(Math.abs(sw.target - 99.5) < 1e-9, "target is the measured move: level + (level - sweep low)");
+  assert.ok(sw.stop < 99.3 && sw.target > 99.3, "tradeable geometry: stop below the mark, target above");
+  const swHi = mkTail(); swHi[27] = [swHi[27][0], 100.4, 101.5, 100.2, 100.5, 25];
+  const ss = C.detectSweep(swHi, 101, 99, 100.7, 0.25);
+  assert.ok(ss && ss.side === "short", "a rejected pierce of the prior-session high fires short");
+  assert.equal(ss.stop, 101.5, "short void is the sweep high");
+  assert.ok(Math.abs(ss.target - 100.5) < 1e-9, "short target is level - (sweep high - level)");
+  assert.equal(C.detectSweep(swLo, 101, 95, 99.3, 0.25), null, "a wick that never reaches the level is not a sweep");
+  const graze = mkTail(); graze[27] = [graze[27][0], 99.6, 99.8, 98.95, 99.5, 25];   // pierces by 0.05 < 0.25*median
+  assert.equal(C.detectSweep(graze, 101, 99, 99.3, 0.25), null, "a shallow graze under the min-depth floor doesn't count");
+  const noRcl = mkTail(); noRcl[27] = [noRcl[27][0], 99.6, 99.8, 98.5, 98.7, 25];   // closes BELOW the level — not rejected in-bar
+  assert.equal(C.detectSweep(noRcl, 101, 99, 99.3, 0.25), null, "no in-bar rejection: the level wasn't reclaimed");
+  const broke = mkTail(); broke[27] = [broke[27][0], 99.6, 99.8, 98.5, 99.5, 25]; broke[29] = [broke[29][0], 99, 99.1, 98.6, 98.8, 10];
+  assert.equal(C.detectSweep(broke, 101, 99, 99.3, 0.25), null, "a later close back through the level breaks the reclaim");
+  assert.equal(C.detectSweep(swLo, 101, 99, 98.8, 0.25), null, "mark not back above the swept low: no live reclaim");
+  assert.equal(C.detectSweep(swLo.slice(-8), 101, 99, 99.3, 0.25), null, "under 12 bars: honest null");
+  const strTail = swLo.map((k) => [k[0], String(k[1]), String(k[2]), String(k[3]), String(k[4]), k[5]]);
+  let strSw; assert.doesNotThrow(() => { strSw = C.detectSweep(strTail, 101, 99, 99.3, 0.25); }, "string OHLC from the archive must never throw");
+  assert.ok(strSw && strSw.side === "long", "string coercion still detects the sweep");
   // ---- fundflip playbook stop (ops item 3): 1σ against the flip; legacy no-ctx shape unchanged
   const ffL = C.playbook("fundflip", { dir: 1, px: 100, sd30: 2 });
   assert.equal(ffL.side, "long"); assert.equal(ffL.stop, 98);
@@ -533,6 +560,7 @@ test("swing shadow setups: detectors, geometry, fundflip stop, gapfade wiring, E
   // ---- EV_META: swing horizons + gapfade on the gap calendar
   assert.equal(C.EV_META.reclaim.horizonMs, 5 * DAY);
   assert.equal(C.EV_META.mapull.horizonMs, 10 * DAY);
+  assert.equal(C.EV_META.sweep.horizonMs, DAY, "the 5m sweep resolves at a 1d horizon");
   assert.equal(C.EV_META.gapfade.horizonMs, null, "gapfade resolves at the next session close, like gap");
   // ---- wiring pins: the fire sites and calendar branch exist in the poller
   const fs = require("fs"), path = require("path");
@@ -541,6 +569,9 @@ test("swing shadow setups: detectors, geometry, fundflip stop, gapfade wiring, E
   assert.ok(pol.includes("[1, 1.5].forEach"), "both void widths ledger");
   assert.ok(pol.includes('ev === "gap" || ev === "gapfade"'), "gapfade rides the gap resolution calendar");
   assert.ok(pol.includes('openLedger(r, "reclaim"') && pol.includes('openLedger(r, "mapull"'), "swing shadow fire sites present");
+  assert.ok(pol.includes('openLedger(r, "sweep"'), "5m sweep shadow fire site present");
+  assert.ok(pol.includes('detectSweep(store.readCandles(r.coin, now - SWEEP_LOOK_MS, now)'), "sweep reads the 5m archive tail, prior-session levels from dailyRaw");
+  assert.ok(pol.includes('r.uni === "xyz" && store.candlesEnabled'), "sweep is gated xyz-only and behind the optional 5m archive");
   assert.ok(pol.includes('playbook("fundflip", { dir: s0, px: r.px, sd30 })'), "fundflip call site feeds the stop context");
 });
 
@@ -801,8 +832,8 @@ test("crypto engine purge: stored crypto claims leave the ledger at hydrate (air
   // shadow panel: one universe, one panel — no main key at all
   assert.ok(d.shadows && Array.isArray(d.shadows.xyz) && !("main" in d.shadows), "single xyz panel ships; the crypto panel is gone, not empty");
   const xp = Object.fromEntries(d.shadows.xyz.map((g) => [g.ev, g]));
-  assert.equal(d.shadows.xyz.length, 5, "stocks panel: 4 universal + pead");
-  assert.ok(xp.pead && !xp.liqflush && !xp.fundext, "crypto-only strategies are gone from the defs, not just the data");
+  assert.equal(d.shadows.xyz.length, 6, "stocks panel: 4 universal + pead + sweep");
+  assert.ok(xp.pead && xp.sweep && !xp.liqflush && !xp.fundext, "crypto-only strategies are gone from the defs, not just the data");
   assert.deepEqual({ n: xp.gapfade.rows[0].n, open: xp.gapfade.rows[0].open }, { n: 0, open: 0 },
     "the purged crypto gapfade record cannot leak into the xyz panel");
   assert.equal(xp.reclaim.rows[0].n, 1); assert.equal(xp.reclaim.rows[0].avg, 1.2);
@@ -848,7 +879,7 @@ test("crypto engine removal (-101): fire sites, detectors, metas and per-univers
   for (const gone of ['openLedger(r, "liqflush"', 'openLedger(r, "fundext"', "oc24: oiChg24", "cryptoSetupsLive",
     "fundext = persistent funding extreme", "capPerUniverse", "countU"])
     assert.ok(!pol.includes(gone), `crypto engine remnant found in poller: ${gone}`);
-  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"])'),
+  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead"])'),
     "R-united ledger set carries no retired events");
   assert.ok(pol.includes("const top = kept.slice(0, 40);"), "transport cap is a plain top-40 — no lanes");
 });
