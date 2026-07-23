@@ -541,6 +541,7 @@ const EV_META = {
   mapull:   { horizonMs: 10 * DAY, horizon: "next 10d, off the rising MA50",  studyKey: null },     // shadow swing setup
   failbrk:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the failed breakout", studyKey: null }, // shadow swing setup
   pead:     { horizonMs: 10 * DAY, horizon: "next 10d, drifting with the earnings reaction", studyKey: null },  // shadow swing setup (xyz)
+  sweep:    { horizonMs: DAY,      horizon: "next 1d, off the swept prior-session level", studyKey: null },     // shadow 5m microstructure setup (xyz)
   airead:   { horizonMs: 5 * DAY,  horizon: "next 5d, the analyst report's own read", studyKey: null },  // AI analyst accountability claim
 };
 // Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
@@ -886,6 +887,58 @@ function detectPead(prints, daily, px, sd30) {
   if (up ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
   return { side: up ? "long" : "short", mv: +mv.toFixed(2), d: best.pr.d,
     stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+
+// ---- intraday liquidity sweep (5m microstructure) ------------------------------------------
+// The failed-break reclaim, fired one timeframe down: a 5m wick pierces the prior completed
+// session's high or low and is REJECTED inside the same bar (close back on the origin side),
+// no later bar has closed through (the reclaim still holds), and the mark sits back on the
+// origin side — a stop-run that trapped the breakout and reversed. Frozen geometry mirrors
+// detectReclaim / detectFailBrk EXACTLY (void = the sweep extreme, target = level + 1x the
+// trap depth), so it plugs into the same stop-aware resolver with no new outcome path. Pure
+// over 5m candles [t, o, h, l, c, v] ascending. Both sides are checked; only the more recent
+// sweep fires when both qualify. This is a shadow (vi=0 at the fire site) — it earns its record
+// out of sample before any promotion, like every setup here.
+//   m5   : recent CLOSED 5m bars, oldest -> newest (the tail — a few hours)
+//   dayHi/dayLo : the prior completed session's high / low (the swept levels)
+//   px   : current mark
+//   frac : min pierce past the level, as a multiple of the window's median 5m range (default 0.25)
+function detectSweep(m5, dayHi, dayLo, px, frac) {
+  if (!Array.isArray(m5) || m5.length < 12 || !(px > 0)) return null;
+  const f = frac > 0 ? frac : 0.25;
+  const H = m5.map((k) => +k[2]), L = m5.map((k) => +k[3]), C = m5.map((k) => +k[4]);   // COERCE — sqlite can hand back strings; NaN math fails closed (null), never throws
+  const ranges = [];
+  for (let i = 0; i < m5.length; i++) { const d = H[i] - L[i]; if (Number.isFinite(d) && d >= 0) ranges.push(d); }
+  if (ranges.length < 12) return null;
+  const med = median(ranges);
+  if (!(med > 0)) return null;
+  const minDepth = f * med, n = m5.length;
+  // newest -> oldest scan for the most recent qualifying sweep. low=true: a swept LOW (long side).
+  const findSweep = (level, low) => {
+    if (!(level > 0)) return null;
+    for (let i = n - 1; i >= 0; i--) {
+      if (!Number.isFinite(H[i]) || !Number.isFinite(L[i]) || !Number.isFinite(C[i])) continue;
+      if (low) {
+        if (!(L[i] < level) || !((level - L[i]) >= minDepth) || !(C[i] >= level)) continue;   // pierced, genuinely, and rejected within the bar
+        let held = true; for (let j = i + 1; j < n; j++) if (C[j] < level) { held = false; break; }   // reclaim never broke again
+        if (held) return { extreme: L[i], idx: i };
+      } else {
+        if (!(H[i] > level) || !((H[i] - level) >= minDepth) || !(C[i] <= level)) continue;
+        let held = true; for (let j = i + 1; j < n; j++) if (C[j] > level) { held = false; break; }
+        if (held) return { extreme: H[i], idx: i };
+      }
+    }
+    return null;
+  };
+  const loS = px > dayLo ? findSweep(dayLo, true) : null;    // mark currently back above the swept low
+  const hiS = px < dayHi ? findSweep(dayHi, false) : null;   // or back below the swept high
+  let side = null, level = null, ex = null;
+  if (loS && (!hiS || loS.idx >= hiS.idx)) { side = "long"; level = dayLo; ex = loS.extreme; }
+  else if (hiS) { side = "short"; level = dayHi; ex = hiS.extreme; }
+  if (!side) return null;
+  const stop = ex, target = side === "long" ? level + (level - ex) : level - (ex - level);
+  if (side === "long" ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
+  return { side, level: +level.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
 
 // ---- served-index cache busting (pure) -----------------------------------------------------
@@ -1763,7 +1816,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };

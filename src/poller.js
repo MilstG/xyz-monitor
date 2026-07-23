@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -63,6 +63,8 @@ const M5_SEED_DAYS = 17;              // native candleSnapshot window at 5m (500
 const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m bars about once per bar
 const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
+const SWEEP_LOOK_MS = 4 * HOUR;            // 5m tail scanned for a prior-session-level stop-run (~48 bars; detector needs >=12)
+const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept level, as a fraction of the window's median 5m range
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
 const REGIME_SAMPLE_MS = 30 * 60 * 1000;  // append one correlation sample to history every 30 min
@@ -978,7 +980,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -1465,7 +1467,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1587,6 +1589,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       tip: "rising 50d MA, price pulled back from >=4% above to touch it \u2014 long at the MA, stop 1\u03c3 below it, target the prior 30d closing high. 10d horizon." },
     { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
       tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
+    { ev: "sweep", uni: "xyz", label: "liquidity sweep (5m)", unit: "R",
+      tip: "the failed-break reclaim one timeframe down: a 5m wick pierces the prior session's high or low and is rejected inside the bar, the reclaim holds, and the mark is back on the origin side \u2014 a stop-run that trapped the break and reversed. Void = the sweep extreme, target = level + 1x the trap depth. 1d horizon, R-united, stop-aware. Builds forward on the 5m archive; accrues out of sample." },
   ];
   function shadowRecord() {
     const evs = new Set(STRAT_DEFS.map((d) => d.ev));
@@ -1737,6 +1741,21 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
               openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
                 { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,
                   mv: +(Math.abs(pd.target / r.px - 1) * 100).toFixed(2), emv: pd.mv }, 0);
+          }
+          // intraday liquidity sweep (5m): the failed-break reclaim fired on a prior-session
+          // high/low stop-run. xyz only for now — the ledger takes no crypto claim, and gating
+          // here saves a per-row archive read across the main universe. The archive is optional
+          // (node:sqlite) and range-queried, never resident; prior COMPLETED session = dailyRaw[-2]
+          // (never the in-progress bar). Same isolated try — a bad read can't take the board down.
+          if (r.uni === "xyz" && store.candlesEnabled && store.candlesEnabled() && r.dailyRaw && r.dailyRaw.length >= 2) {
+            const pdr = r.dailyRaw[r.dailyRaw.length - 2], dayHi = pdr && +pdr.h, dayLo = pdr && +pdr.l;
+            if (dayHi > 0 && dayLo > 0) {
+              const sw = detectSweep(store.readCandles(r.coin, now - SWEEP_LOOK_MS, now), dayHi, dayLo, r.px, SWEEP_FRAC);
+              if (sw && stopGeometryOk(sw.side, r.px, sw.stop))
+                openLedger(r, "sweep", { score: 0, reading: "" }, sw.side === "long" ? 1 : -1,
+                  { sd0: +sd30.toFixed(3), psd: sw.side, pn: 1, stp: sw.stop,
+                    mv: +(Math.abs(sw.target / r.px - 1) * 100).toFixed(2) }, 0);
+            }
           }
         } } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
