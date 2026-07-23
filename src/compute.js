@@ -1871,6 +1871,29 @@ function earnDayDiff(dateStr, nowMs) {
   const b = Date.UTC(+t.slice(0, 4), +t.slice(5, 7) - 1, +t.slice(8, 10));
   return Math.round((a - b) / DAY);
 }
+// State of ONE calendar entry relative to now: "reported" once the print is out, "upcoming" while
+// it is still ahead. The report window reaches days BACK, so a same-day AMC row lingers in the
+// feed with diff 0 long after the company has printed — handing it to the analyst as an upcoming
+// binary was the "earnings after close today" bug (the report braced for an event that already
+// happened). "Out" = the actual has landed (epsA present, unambiguous) OR the ET session clock has
+// passed: AMC/DMH after the 16:00 close, BMO after the 09:30 open, ANY prior ET day unconditionally.
+// A same-day TBD (session unknown) has no clock to trust, so it stays "upcoming" until its actual
+// lands or the ET day rolls over — the honest choice, never a guessed timestamp. Pure and
+// ET-anchored (reuses the Intl clock), so it never flips at the wrong hour for a non-US server.
+function earnEntryState(entry, nowMs) {
+  if (!entry || typeof entry.d !== "string") return "upcoming";
+  if (entry.epsA != null) return "reported";
+  const diff = earnDayDiff(entry.d, nowMs);
+  if (diff == null) return "upcoming";
+  if (diff < 0) return "reported";
+  if (diff > 0) return "upcoming";
+  const et = etParts(nowMs != null ? nowMs : Date.now());
+  const past = (h, mi) => et.h > h || (et.h === h && et.mi >= mi);
+  const s = entry.s || "TBD";
+  if (s === "BMO") return past(9, 30) ? "reported" : "upcoming";          // out by the open
+  if (s === "AMC" || s === "DMH") return past(16, 0) ? "reported" : "upcoming";   // out by the close
+  return "upcoming";                                                      // TBD same-day: actual-present only
+}
 // Finnhub /calendar/earnings -> compact entries for OUR universe only. symMap: UPPERCASED api
 // symbol -> { coin, ticker } (the alias map is applied by the caller when building symMap, so a
 // BRK.B report lands back on the BRKB row). Everything outside the map is discarded — the payload
@@ -2002,6 +2025,7 @@ module.exports.linkEarningsFilings = linkEarningsFilings;
 module.exports.bustAssetTags = bustAssetTags;
 module.exports.NEWS_TTL_MS = NEWS_TTL_MS;
 module.exports.earnDayDiff = earnDayDiff;
+module.exports.earnEntryState = earnEntryState;
 module.exports.parseEarningsCalendar = parseEarningsCalendar;
 module.exports.recentEarnPrints = recentEarnPrints;
 module.exports.earnChunks = earnChunks;

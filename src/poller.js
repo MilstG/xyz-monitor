@@ -10,7 +10,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
@@ -3684,7 +3684,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
   // schema flip to "invalidated — report format updated" on the next read, so a deploy that
   // fixes the report is visible on the first regenerate, never hidden behind a running TTL.
-  const AI_SCHEMA_V = 6;   // v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
+  const AI_SCHEMA_V = 7;   // v7: earnings reported-vs-upcoming split — a printed event is a post-event object (context.earnings.reported), never served as a pending `next` binary; validator bans a stale `event` scenario; v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   // Per-surface reasoning effort (OpenAI GPT-5.x only — the Anthropic body stays minimal and
@@ -3738,7 +3738,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     for (const e of ledgerClosed) if (e.coin === coin && e.vi == null) closedN++;
     let lastPrintD = null;
     if (ticker) for (const p of earnPrints) if (p.t === ticker && (!lastPrintD || p.d > lastPrintD)) lastPrintD = p.d;
-    return { openN, closedN, lastPrintD };
+    // The actual can land on the calendar row minutes after the print, before it graduates into
+    // earnPrints — so a report generated pre-print would otherwise sit stale through the whole
+    // cooldown. reportedD tracks the freshest already-out row directly from the calendar, closing
+    // that window: the moment the print flips a name to "reported", the cached report unlocks.
+    let reportedD = null;
+    if (ticker && earnCache && Array.isArray(earnCache.entries))
+      for (const x of earnCache.entries)
+        if (x.t === ticker && earnEntryState(x, Date.now()) === "reported" && (!reportedD || x.d > reportedD)) reportedD = x.d;
+    return { openN, closedN, lastPrintD, reportedD };
   }
   function aiInvalidReason(rep) {
     if ((rep.schemaV || 1) !== AI_SCHEMA_V) return "report format updated";
@@ -3747,6 +3755,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (cur.openN > (s.openN || 0)) return "new signal claim opened";
     if (cur.closedN > (s.closedN || 0)) return "claim resolved";
     if ((cur.lastPrintD || null) !== (s.lastPrintD || null)) return "earnings print landed";
+    if ((cur.reportedD || null) !== (s.reportedD || null)) return "earnings print landed";
     return null;
   }
   // Coverage honesty: gaps in the retained series inside the report window. Computed, never
@@ -3971,16 +3980,34 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       try {
         const tk = r.ticker || coin, e = {};
         if (earnCache && Array.isArray(earnCache.entries)) {
-          const up = earnCache.entries.filter((x) => x.t === tk).sort((a, b) => (a.d < b.d ? -1 : 1))[0];
+          const mine = earnCache.entries.filter((x) => x.t === tk);
+          // Split this name's rows into what is genuinely AHEAD vs already OUT. The window reaches
+          // days back, so a same-day AMC row that already carries its actual (or whose session
+          // clock has passed) still sits here — served as `next` it read to the analyst as a
+          // pending binary ("earnings after close today"), which is the whole bug. earnEntryState
+          // is the single arbiter; `next` only ever receives an upcoming row.
+          const up = mine.filter((x) => earnEntryState(x, now) === "upcoming").sort((a, b) => (a.d < b.d ? -1 : 1))[0];
           if (up) e.next = { d: up.d, session: up.s || "TBD",
-            inDays: Math.max(0, Math.round((Date.UTC(+up.d.slice(0, 4), +up.d.slice(5, 7) - 1, +up.d.slice(8, 10)) - Date.now()) / DAY)) };
+            inDays: Math.max(0, Math.round((Date.UTC(+up.d.slice(0, 4), +up.d.slice(5, 7) - 1, +up.d.slice(8, 10)) - now) / DAY)) };
+          // Freshest already-reported row — today's print in the graduation gap before it lands in
+          // earnPrints, or a prior-day row still in the back-window. Gives the analyst a POST-event
+          // object (beat/miss + surprise) so it reads the print instead of bracing for one that
+          // already happened. Distinct from lastPrint (which reads persisted history and lags the
+          // feed by the graduation delay — the exact window the bug lived in).
+          const rp = mine.filter((x) => earnEntryState(x, now) === "reported").sort((a, b) => (a.d > b.d ? -1 : 1))[0];
+          if (rp) e.reported = { d: rp.d, session: rp.s || "TBD",
+            eps: rp.eps != null ? rp.eps : null, epsA: rp.epsA != null ? rp.epsA : null,
+            beat: rp.eps != null && rp.epsA != null ? rp.epsA > rp.eps : null,
+            surprisePct: rp.eps != null && rp.epsA != null && rp.eps !== 0
+              ? +(((rp.epsA - rp.eps) / Math.abs(rp.eps)) * 100).toFixed(1) : null,
+            agoDays: Math.max(0, -(earnDayDiff(rp.d, now) || 0)) };
         }
         if (earnStudy && earnStudy[tk]) e.reaction = earnStudy[tk];
         let last = null;
         for (const p of earnPrints) if (p.t === tk && p.epsA != null && (!last || p.d > last.d)) last = p;
         if (last) e.lastPrint = { d: last.d, session: last.s || null, eps: last.eps, epsA: last.epsA,
           beat: last.eps != null && last.epsA != null ? last.epsA > last.eps : null };
-        if (e.next || e.reaction || e.lastPrint) ctx.earnings = e;
+        if (e.next || e.reported || e.reaction || e.lastPrint) ctx.earnings = e;
       } catch (_) {}
       try { const cl = classifyCached(r.ticker, r.uni);
         if (cl && cl.sector) {
@@ -4040,14 +4067,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     ctx.coverage = aiCoverage(coin, windowMs);
     return ctx;
   }
-  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history and the 24h open-interest change — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly.
+  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history and the 24h open-interest change — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly. context.earnings may carry "next" (a scheduled print still AHEAD — this, and only this, is earnings event risk) and/or "reported" (a print already OUT, with its beat/miss and surprise%): a "reported" print is SETTLED HISTORY, not a pending catalyst — read its result and the tape's reaction, and never describe it as upcoming or tell the reader to wait for it.
 Respond with ONLY a JSON object — no markdown fences, no preamble — with exactly these keys:
 {"headline": string (<=60 chars, plain-language stance, e.g. "Constructive, leans long" or "Constructive, but earnings in 6 days"),
  "bias": "long"|"short"|"neutral",
  "synthesis": string (one paragraph, 3-6 sentences, plain human language a non-quant friend reads in 30 seconds; name the single dominant risk honestly),
  "evidence": array of 3-8 {"k": short label (<=16 chars, lowercase), "v": one plain-language sentence grounded in a specific number from the context},
- "eventRisk": string or null (equities with an upcoming print inside ~10 days: what the reaction study says and what holding through it means; otherwise null),
- "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. "target" scenarios are THESIS-DIRECTION only — an adverse recovery against the bias is the "void" scenario (through the void level) or "flat", never a target. If an earnings print falls inside the scenario horizon, the middle scenario must be kind "event" — the print decides, treat it as a coin flip scaled by the reaction study, and say so.
+ "eventRisk": string or null — ONLY when context.earnings.next places a print still AHEAD inside ~10 days: what the reaction study says and what holding through it means. If the print is already out (context.earnings.reported present and no context.earnings.next) or none is scheduled, this is null — a passed print is history, not event risk,
+ "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. "target" scenarios are THESIS-DIRECTION only — an adverse recovery against the bias is the "void" scenario (through the void level) or "flat", never a target. If — and ONLY if — context.earnings.next places a print still AHEAD inside the scenario horizon, the middle scenario must be kind "event": the print decides, treat it as a coin flip scaled by the reaction study, and say so. When the print is already OUT (context.earnings.reported present, no context.earnings.next), the event is in the PAST — fold the reported beat/miss and the tape's reaction into the read, do NOT emit an "event" scenario, and never frame earnings as pending.
  "news_read": {"used": true|false, "note": one sentence, <=200 chars} — REQUIRED. "used" is true only when the read materially leans on a headline from context.news.verified; the note names which (or states that no verified headlines exist / none were material). NEWS CONTRACT: catalyst or news statements anywhere in the report may reference ONLY headlines provided in context.news. If context.news.verified is empty you MUST NOT infer, recall, or invent any company news — state that no verified headlines exist in the window and read the tape on its own. context.news.tape items are market backdrop, never company catalysts.
  "invalidations": array of 1-5 plain sentences — observable conditions that would change the read,
  "action": {"stance": "enter_now"|"enter_on_pullback"|"take_profit"|"wait"|"no_trade", "entry": price or null, "note": one sentence on why this stance and what to watch}. The actionable read: offer an entry stance whenever the geometry supports one (a void and a target exist and the expected value at some entry is positive) — "enter_on_pullback" requires "entry" set to the pullback level (typically the zone), "enter_now" may leave entry null (the current price). When the honest answer is to stand aside — event about to decide, negative expected value, neutral read, thin data — say "wait" or "no_trade" and name the condition that would change it. Never invent a stance the scenario odds don't support.
@@ -4086,6 +4113,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (!(psum >= 0.85 && psum <= 1.15)) return { ok: false, error: "scenario probabilities do not sum to 1" };
     for (const s of out.scenarios) s.p = +(s.p / psum).toFixed(3);
     if (out.scenarios.filter((s) => s.kind === "void").length > 1) return { ok: false, error: "multiple void scenarios" };
+    // An "event" scenario asserts a scheduled print will decide the move — legitimate ONLY when
+    // one is still AHEAD (context.earnings.next). A reported or absent print yields a stale
+    // coin-flip that reads as pending event risk (the "earnings after close today" bug). Structural
+    // guard; the tightened context + prompt carry the prose. Never trips a genuine upcoming print.
+    const earnAhead = !!(ctx.earnings && ctx.earnings.next);
+    if (!earnAhead && out.scenarios.some((s) => s.kind === "event"))
+      return { ok: false, error: "event scenario without a pending earnings print (context.earnings.next)" };
     const levels = [];
     if (out.levels != null) {
       if (!Array.isArray(out.levels) || out.levels.length > 4) return { ok: false, error: "bad levels (max 4)" };
@@ -4582,6 +4616,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (r.uni === "main") { if (!mainList.includes(coin)) mainList.push(coin); if (!mainOrder.includes(coin)) mainOrder.push(coin); }
       else if (!order.includes(coin)) order.push(coin);   // xyz seeds join the xyz roster exactly as the universe refresh would place them
       return r;
+    },
+    seedEarnNow: (entries, study, prints) => {   // harness: inject calendar rows / study / print history so the earnings-context split is testable without network
+      earnCache = { ts: Date.now(), dataTs: 1, asOf: Date.now(), windowDays: EARN_WINDOW_DAYS, source: "finnhub", error: null, entries: entries || [], recent: [], eligible: 1 };
+      if (study) earnStudy = study;
+      if (prints) earnPrints = prints;
+      return earnCache;
     },
     needDailyNow: (coin) => { const r = rows.get(coin); return !!(r && needDaily(r)); },   // harness: does the daily worker consider this market fetch-worthy right now
     getLedgerFor,
