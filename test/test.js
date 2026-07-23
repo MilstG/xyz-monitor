@@ -2276,8 +2276,10 @@ test("trend leaderboard integrity: client, markup and server carry the tab end t
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
+  assert.ok(!/\\\\u[0-9a-f]{4}/.test(s), "no double-escaped unicode (\\\\uXXXX) may leak into client strings — it renders as literal text");
   for (const frag of ["/api/trend", "trow-hl", "tretest", "trend:`", "tage", "td21", "fresh-first", "twidth", "rrv",
-    "tma-chip", "?fast=", "&slow=", "nodata", "tpend", "_trendMA", "_tc.ema", "SEED=S-1"])
+    "tma-chip", "?fast=", "&slow=", "nodata", "tpend", "_trendMA", "_tc.ema", "SEED=S-1",
+    "EMA${F}", "EMA${S}", "\\u0394${S}"])   // board text follows the active pair, not a hardcoded 13/21
     assert.ok(s.includes(frag), `missing client feature marker: ${frag}`);
   const eng = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
   for (const fn of ["function stackedRun(", "function ribbonWidth(", "TREND_TF_MS"])
@@ -2452,6 +2454,7 @@ test("parametric chart parity: pair board ships EMAs + rrv/swing, and the deeper
   assert.equal(row.avail, 3, "scored out of the three rungs that seeded");
   assert.ok(row.tf.D1.e13 > 0 && row.tf.D1.e21 > 0, "computed rungs ship the pair's EMA values for the modal's zone band");
   assert.equal(row.retest, "D1", "the deep daily wick owns the retest");
+  assert.ok(/EMA50/.test(row.read) && !/EMA21/.test(row.read), "the read names the active slow MA (EMA50), not a hardcoded 21");
   assert.ok(row.rrv != null && row.rrv > 1.5, `rrv is computed for the pair board (parity), got ${row.rrv}`);
   assert.ok("swing" in row, "the swing target is evaluated for the pair board (parity) — null here since a monotonic climb has no overhead swing");
   // the pair chart widens the H1 feed to match the board and reproduces its H1 EMAs bit-for-bit
