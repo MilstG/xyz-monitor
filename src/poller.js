@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -63,8 +63,6 @@ const M5_SEED_DAYS = 17;              // native candleSnapshot window at 5m (500
 const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m bars about once per bar
 const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
-const SWEEP_LOOK_MS = 4 * HOUR;            // 5m tail scanned for a prior-session-level stop-run (~48 bars; detector needs >=12)
-const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept level, as a fraction of the window's median 5m range
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
 const REGIME_SAMPLE_MS = 30 * 60 * 1000;  // append one correlation sample to history every 30 min
@@ -980,7 +978,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -1467,7 +1465,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "airead"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1589,8 +1587,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       tip: "rising 50d MA, price pulled back from >=4% above to touch it \u2014 long at the MA, stop 1\u03c3 below it, target the prior 30d closing high. 10d horizon." },
     { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
       tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
-    { ev: "sweep", uni: "xyz", label: "liquidity sweep (5m)", unit: "R",
-      tip: "the failed-break reclaim one timeframe down: a 5m wick pierces the prior session's high or low and is rejected inside the bar, the reclaim holds, and the mark is back on the origin side \u2014 a stop-run that trapped the break and reversed. Void = the sweep extreme, target = level + 1x the trap depth. 1d horizon, R-united, stop-aware. Builds forward on the 5m archive; accrues out of sample." },
   ];
   function shadowRecord() {
     const evs = new Set(STRAT_DEFS.map((d) => d.ev));
@@ -1741,21 +1737,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
               openLedger(r, "pead", { score: 0, reading: "" }, pd.side === "long" ? 1 : -1,
                 { sd0: +sd30.toFixed(3), psd: pd.side, pn: 1, stp: pd.stop,
                   mv: +(Math.abs(pd.target / r.px - 1) * 100).toFixed(2), emv: pd.mv }, 0);
-          }
-          // intraday liquidity sweep (5m): the failed-break reclaim fired on a prior-session
-          // high/low stop-run. xyz only for now — the ledger takes no crypto claim, and gating
-          // here saves a per-row archive read across the main universe. The archive is optional
-          // (node:sqlite) and range-queried, never resident; prior COMPLETED session = dailyRaw[-2]
-          // (never the in-progress bar). Same isolated try — a bad read can't take the board down.
-          if (r.uni === "xyz" && store.candlesEnabled && store.candlesEnabled() && r.dailyRaw && r.dailyRaw.length >= 2) {
-            const pdr = r.dailyRaw[r.dailyRaw.length - 2], dayHi = pdr && +pdr.h, dayLo = pdr && +pdr.l;
-            if (dayHi > 0 && dayLo > 0) {
-              const sw = detectSweep(store.readCandles(r.coin, now - SWEEP_LOOK_MS, now), dayHi, dayLo, r.px, SWEEP_FRAC);
-              if (sw && stopGeometryOk(sw.side, r.px, sw.stop))
-                openLedger(r, "sweep", { score: 0, reading: "" }, sw.side === "long" ? 1 : -1,
-                  { sd0: +sd30.toFixed(3), psd: sw.side, pn: 1, stp: sw.stop,
-                    mv: +(Math.abs(sw.target / r.px - 1) * 100).toFixed(2) }, 0);
-            }
           }
         } } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline
@@ -3346,9 +3327,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // `px` ships alongside so the client applies the SAME live-mark-drives-the-forming-bar
   // substitution trendLadder does before walking its EMAs.
   const TF_CANDLES = { "1h": 1, "4h": 4, "12h": 12, "1d": 0 };   // 0 = daily series, not a bucket width
-  function getTfCandles(coin, tf) {
+  function getTfCandles(coin, tf, fast, slow) {
     const key = String(tf || "").toLowerCase();
     if (!(key in TF_CANDLES)) return null;
+    // A valid non-default MA pair widens the H1 read to match what buildTrendPair fed the ladder,
+    // so the modal's plotted ribbon reproduces the pair board's EMAs bit-for-bit (the same
+    // one-code-path contract the canonical 13/21 chart holds). D1/H4/H12 are already deep enough.
+    const pair = (fast != null || slow != null) ? validTrendPair(fast, slow) : null;
+    const h1Bars = (pair && !(pair.fast === 13 && pair.slow === 21)) ? TREND_PAIR_H1_BARS : 96;
     const r = rows.get(coin);
     if (!r) return { coin, tf: key, px: null, minBars: 26, candles: [] };
     const q = (k) => [+k.t,
@@ -3378,7 +3364,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         });
       }
     } else if (key === "1h") {
-      src = Array.isArray(r.hourlyRaw) ? hoursToObj(r.hourlyRaw.slice(-96)) : [];   // chart serializer reads the object shape
+      src = Array.isArray(r.hourlyRaw) ? hoursToObj(r.hourlyRaw.slice(-h1Bars)) : [];   // chart serializer reads the object shape
     } else {
       src = Array.isArray(r.hourlyRaw) ? bucketsFor(r, TF_CANDLES[key]) : [];
     }
@@ -3397,6 +3383,48 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // A market missing ANY rung (new listing, shallow spine) is excluded and counted, never guessed.
   const TREND_MS = 3 * 60 * 1000;     // memo window — inputs only change on ~10-min candle refreshes anyway
   const TREND_TOP = 10;               // rows per universe per side, like the source board
+  // Shared retest enrichment for the shipped rows of ONE board (<= TREND_TOP), used by both the
+  // canonical 13/21 builder and the parametric-pair builder so the two never drift. rrv = volume
+  // through the retest (one bar of the retesting TF, clock-matched, rvolMulti); swing = the prior
+  // swing high/low the continuation targets, from the SAME series the ladder consumed. Both are
+  // deliberately OUT of the content signature (they drift with each completed bar; `retest` itself
+  // is in the signature, so they're fresh at onset). Honest null when the baseline/lookback can't
+  // qualify. Series depth for the swing lookback is the last ~30 bars, so the H1 slice width is
+  // immaterial here — the same window falls out of a 96- or a 280-bar slice.
+  function enrichRetest(list, side, now) {
+    for (const e of list) {
+      if (!e.retest) continue;
+      try {
+        const W = TREND_TF_MS[e.retest];
+        const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now) : null;
+        e.rrv = rv && rv.w != null ? rv.w : null;
+      } catch (_) { e.rrv = null; }
+      e.swing = null;
+      try {
+        const rr = rows.get(e.coin);
+        if (rr) {
+          let ser = null;
+          if (e.retest === "D1") ser = withFormingDaily(Array.isArray(rr.dailyRaw) ? rr.dailyRaw : [], rr.px, now, DAY);
+          else if (e.retest === "H1") ser = Array.isArray(rr.hourlyRaw) ? hoursToObj(rr.hourlyRaw.slice(-96)) : null;
+          else ser = Array.isArray(rr.hourlyRaw) ? bucketsFor(rr, e.retest === "H12" ? 12 : 4) : null;
+          if (ser && ser.length >= 13) {
+            const win = ser.slice(Math.max(0, ser.length - 33), ser.length - 3);
+            if (win.length >= 10 && rr.px > 0) {
+              let lvl = null;
+              for (const k of win) {
+                const v = side === "long"
+                  ? (k.h != null && isFinite(+k.h) ? +k.h : +k.c)
+                  : (k.l != null && isFinite(+k.l) ? +k.l : +k.c);
+                if (!isFinite(v)) continue;
+                lvl = lvl == null ? v : (side === "long" ? Math.max(lvl, v) : Math.min(lvl, v));
+              }
+              if (lvl != null && (side === "long" ? lvl > rr.px * 1.001 : lvl < rr.px * 0.999)) e.swing = sig(lvl, 9);
+            }
+          }
+        }
+      } catch (_) { e.swing = null; }
+    }
+  }
   function buildTrend() {
     const now = Date.now();
     const sides = { long: { crypto: [], stocks: [] }, short: { crypto: [], stocks: [] } };
@@ -3446,56 +3474,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         || ((a.age == null ? Infinity : a.age) - (b.age == null ? Infinity : b.age))
         || (b.vol - a.vol));
       sides[side][uni] = sides[side][uni].slice(0, TREND_TOP).map(({ vol, ...e }) => e);
-      // Retest volume read (rrv) — computed only for the rows that actually shipped (<= TREND_TOP
-      // per board), so the extra work stays bounded regardless of universe size. The window is ONE
-      // bar of the retesting timeframe, clock-hour matched against the same span on prior days
-      // (rvolMulti, same construction as the Markets-table RVOL): ~1x or less = the pullback into
-      // the zone is quiet (healthy continuation character), >=2x = heavy tape INTO the zone — the
-      // level is being fought, not respected. Null when the volume baseline can't qualify — an
-      // honest dash, mirroring every other RVOL surface. Deliberately NOT in the content
-      // signature: like d21, it drifts with every completed hour, and versioning it would defeat
-      // the ETag; it is fresh at retest onset because `retest` itself IS in the signature.
-      for (const e of sides[side][uni]) {
-        if (!e.retest) continue;
-        try {
-          const W = TREND_TF_MS[e.retest];
-          const rv = W ? rvolMulti(getHourly(e.coin), { w: W }, now) : null;
-          e.rrv = rv && rv.w != null ? rv.w : null;
-        } catch (_) { e.rrv = null; }
-        // Prior-swing level for the retest: the target the read alludes to ("prior swing high"),
-        // computed from the SAME series builders the ladder consumed for that rung, for shipped
-        // retest rows only (bounded work, like rrv). Long: the highest high (close when the bar
-        // is closes-only) of the ~30 bars before the probe window; short: the lowest low. Null
-        // when the lookback is too thin or the level sits on the wrong side of the mark — an
-        // honest dash, never a fabricated target. Feeds the chart modal's target line and the
-        // tretest ledger claim's frozen target; NOT in the content signature (fires with retest,
-        // which is).
-        e.swing = null;
-        try {
-          const rr = rows.get(e.coin);
-          if (rr) {
-            let ser = null;
-            if (e.retest === "D1") ser = withFormingDaily(Array.isArray(rr.dailyRaw) ? rr.dailyRaw : [], rr.px, now, DAY);
-            else if (e.retest === "H1") ser = Array.isArray(rr.hourlyRaw) ? hoursToObj(rr.hourlyRaw.slice(-96)) : null;   // uniform object shape with the H4/H12/D1 branches
-            else ser = Array.isArray(rr.hourlyRaw) ? bucketsFor(rr, e.retest === "H12" ? 12 : 4) : null;
-            if (ser && ser.length >= 13) {
-              const win = ser.slice(Math.max(0, ser.length - 33), ser.length - 3);
-              if (win.length >= 10 && rr.px > 0) {
-                let lvl = null;
-                for (const k of win) {
-                  const v = side === "long"
-                    ? (k.h != null && isFinite(+k.h) ? +k.h : +k.c)
-                    : (k.l != null && isFinite(+k.l) ? +k.l : +k.c);
-                  if (!isFinite(v)) continue;
-                  lvl = lvl == null ? v : (side === "long" ? Math.max(lvl, v) : Math.min(lvl, v));
-                }
-                // target must sit on the PROFIT side of the mark, else it isn't a target
-                if (lvl != null && (side === "long" ? lvl > rr.px * 1.001 : lvl < rr.px * 0.999)) e.swing = sig(lvl, 9);
-              }
-            }
-          }
-        } catch (_) { e.swing = null; }
-      }
+      enrichRetest(sides[side][uni], side, now);
     }
     const sigTrend = JSON.stringify([["long", "short"].map((s) => ["crypto", "stocks"].map((u) =>
       sides[s][u].map((e) => [e.coin, e.score, e.retest, e.read, e.age])))]);
@@ -3524,7 +3503,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // spine so a 200 EMA can seed there; D1 depth is whatever dailyRaw holds, so a 200 greys on
   // crypto D1 (~92 daily bars) until that history deepens — the grey dot IS that honest state.
   const TREND_PICKABLE = [13, 21, 50, 200];
-  const TREND_PAIR_H1_BARS = 260;                   // widen H1 so EMA200 seeds (spine retains ~180d)
+  const TREND_PAIR_H1_BARS = 280;                   // widen H1 so EMA200 seeds AND the last ~64 shown bars clear the seed window (spine retains ~180d)
   const trendPairCache = new Map();                 // "fast-slow" -> { ts, data }
   function validTrendPair(fast, slow) {
     fast = Math.trunc(+fast); slow = Math.trunc(+slow);
@@ -3555,7 +3534,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (!read) continue;
         const s = lad[side];
         const tf = {};
-        for (const t of TREND_TFS) tf[t] = { st: lad.tf[t].st, d21: lad.tf[t].d21 };
+        for (const t of TREND_TFS) {
+          const g = lad.tf[t];
+          tf[t] = { st: g.st, d21: g.d21, e13: g.e13 != null ? sig(g.e13, 9) : null, e21: g.e21 != null ? sig(g.e21, 9) : null };
+        }
         // age via the SAME pair (generalised stackedRun) — dashes honestly when the slow MA can't
         // seed the D1 rung (e.g. a 200 over crypto's shallow daily history), never a 13/21 stand-in.
         let age = null, ageCap = false;
@@ -3576,6 +3558,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         || ((a.age == null ? Infinity : a.age) - (b.age == null ? Infinity : b.age))
         || (b.vol - a.vol));
       sides[side][uni] = sides[side][uni].slice(0, TREND_TOP).map(({ vol, ...e }) => e);
+      enrichRetest(sides[side][uni], side, now);
     }
     return { ts: now, dataTs: now,
       params: { ema: [fast, slow], tfs: TREND_TFS, retestBars: 3, top: TREND_TOP, pickable: TREND_PICKABLE },
