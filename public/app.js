@@ -305,7 +305,8 @@ function applyDaily(d){ if(!d||!d.daily) return;
   if(!state._ohSnap) state.offHours = d.offHours || {closed:false};   // legacy path: only until a snapshot has shipped the fresher copy
   for(const coin in d.daily){ const r=state.rows.get(coin); if(!r) continue;
     const arr=d.daily[coin];
-    r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1]})):r.daily;
+    r.daily=Array.isArray(arr)?arr.map(p=>({t:p[0], c:p[1], h:p[2], v:p[3]})):r.daily;   // h/v are additive tuple columns (2026.07.24-04) — absent on an older server, undefined here
+    if(d.oi && Array.isArray(d.oi[coin])){ r.dailyOI=d.oi[coin]; r._doi=null; }
     r.closePx=(d.liveClose && d.liveClose[coin]>0)?d.liveClose[coin]:null;   // price at the last close, for the live in-progress gap
     if(d.funding && Array.isArray(d.funding[coin])){ r.dailyFund=d.funding[coin].map(p=>({t:p[0], f:p[1]})); r._dfund=null; }
     if(d.overnight && Array.isArray(d.overnight[coin])){ r.overnight=d.overnight[coin].map(p=>({t:p[0], g:p[1], f:p[2]})); r._dov=null;
@@ -314,7 +315,7 @@ function applyDaily(d){ if(!d||!d.daily) return;
       r.gap30 = n? (eq-1)*100 : undefined;
       const last=r.overnight[r.overnight.length-1]; r.gapDone = last&&isFinite(last.g)? last.g*100 : undefined;   // last completed close->open gap
     }
-    r._dret=null; r._wrL=null; }
+    r._dret=null; r._wrL=null; r._dlvl=null; }
   scheduleRender();
   if(!el('view-corr').hidden) openCorr();           // wrapper, so the "loading X/Y" sync counter advances with the data
   if(!el('view-sectors').hidden) renderSectors();   // leaders map + sector corr fill in live as daily coverage grows
@@ -794,6 +795,12 @@ function dailyFunding(r){ if(r._dfund!==undefined && r._dfund!==null) return r._
   const m=new Map(); for(const k of c){ const f=parseFloat(k.f); if(isFinite(f)) m.set(Math.floor(k.t/DAY), f); } r._dfund=m; return m; }
 function overnightReturns(r){ if(r._dov!==undefined && r._dov!==null) return r._dov; const c=r.overnight; if(!c||!c.length){ r._dov=null; return null; }
   const g=new Map(), f=new Map(); for(const k of c){ const gr=parseFloat(k.g), fn=parseFloat(k.f); const d=Math.floor(k.t/DAY); if(isFinite(gr)){ g.set(d,gr); f.set(d, isFinite(fn)?fn:0); } } r._dov={g,f}; return r._dov; }
+function dailyLevels(r){ if(r._dlvl) return r._dlvl; const c=r.daily; if(!c||!c.length){ r._dlvl=null; return null; }   // day -> {c, h, v} price/high/volume levels (h/v null on an older server payload)
+  const m=new Map(); for(const k of c){ const cl=parseFloat(k.c); if(!isFinite(cl)) continue;
+    const h=parseFloat(k.h), v=parseFloat(k.v); m.set(Math.floor(k.t/DAY), { c:cl, h:isFinite(h)&&h>0?h:null, v:isFinite(v)&&v>0?v:null }); }
+  r._dlvl=m; return m; }
+function dailyOI(r){ if(r._doi!==undefined && r._doi!==null) return r._doi; const c=r.dailyOI; if(!c||!c.length){ r._doi=null; return null; }   // day -> daily-step open interest from the sampled history
+  const m=new Map(); for(const k of c){ const x=parseFloat(k[1]); if(isFinite(x)&&x>0) m.set(Math.floor(k[0]/DAY), x); } r._doi=m; return m; }
 function pearson(a,b){ const n=a.length; if(n<3) return null; let sa=0,sb=0; for(let i=0;i<n;i++){sa+=a[i];sb+=b[i];}
   const ma=sa/n, mb=sb/n; let cov=0,va=0,vb=0; for(let i=0;i<n;i++){ const da=a[i]-ma, db=b[i]-mb; cov+=da*db; va+=da*da; vb+=db*db; }
   if(va<=0||vb<=0) return null; return cov/Math.sqrt(va*vb); }
@@ -2478,13 +2485,19 @@ function drawSessions(){
 // parameter tweaks are instant and add no server load. Non-fitted ranking rules: the honest overfitting
 // risk is the user picking params by eye, which the in-sample/out-of-sample split is there to expose.
 const BT_MIN_DAYS=25, BT_ANN=252;
-const BT_SIGNALS={ mom:'Momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)', lowvol:'Low volatility' };
+const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)',
+  lowvol:'Low volatility', ivol:'Low idiosyncratic vol', beta:'Low beta (BAB)', max:'Anti-lottery (low MAX)',
+  carry:'Funding carry', hprox:'High proximity', volt:'Volume trend', oid:'OI change' };
+// signals that need payload columns beyond closes — btRun reports an honest "not shipped" instead of an empty rank
+const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov' };
+function btAnn(){ return state.scope==='crypto'?365:BT_ANN; }   // crypto trades every day; equities ~252 sessions
 function btUniverse(){
-  const u=state.backtest.universe;
+  const u=state.backtest.universe, cr=state.scope==='crypto';
   return [...state.rows.values()].filter(r=>{
-    if(r.uni==='main') return false;
-    if(r.delisted || !r.daily || r.coin===state.benchCoin) return false;
+    if((r.uni==='main')!==cr) return false;                       // scope picks the universe: xyz vs Hyperliquid main — never merged
+    if(r.delisted || !r.daily || r.coin===scopeBench()) return false;
     const m=dailyReturns(r); if(!m || m.size<BT_MIN_DAYS) return false;
+    if(cr) return true;                                           // crypto: whole roster; sector/equity filters are xyz concepts
     if(u==='eq') return r.assetClass==='Equity';
     if(u && u.indexOf('sec:')===0) return r.sector===u.slice(4);
     return true;
@@ -2497,7 +2510,7 @@ function btMatrix(){
   const series=new Map();                                   // dense per-name log-return series over the common day axis (NaN where missing)
   for(const r of rows){ const m=rmap.get(r.coin), a=new Float64Array(days.length).fill(NaN);
     for(const [d,v] of m) a[idx.get(d)]=v; series.set(r.coin,a); }
-  let benchSeries=null; const bench=state.benchCoin?state.rows.get(state.benchCoin):null;
+  let benchSeries=null; const bC=scopeBench(), bench=bC?state.rows.get(bC):null;   // SP500 anchors stocks, BTC anchors crypto
   if(bench){ const bm=dailyReturns(bench); if(bm){ benchSeries=new Float64Array(days.length).fill(NaN); for(const [d,v] of bm) if(idx.has(d)) benchSeries[idx.get(d)]=v; } }
   const fund=new Map();                                     // per-name daily funding a 1x long pays (0 where unknown), aligned to the day axis
   let fundCov=0;
@@ -2505,39 +2518,77 @@ function btMatrix(){
   const ovG=new Map(), ovF=new Map(); let ovCov=0;          // overnight+weekend hold: gross return (NaN where no hold that morning) and the funding paid during the hold
   for(const r of rows){ const ov=overnightReturns(r); if(ov && ov.g.size){ const g=new Float64Array(days.length).fill(NaN), f=new Float64Array(days.length).fill(0);
       for(const [d,v] of ov.g) if(idx.has(d)){ g[idx.get(d)]=v; f[idx.get(d)]=ov.f.get(d)||0; } ovG.set(r.coin,g); ovF.set(r.coin,f); ovCov++; } }
-  return { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov };
+  const pxm=new Map(), him=new Map(), vom=new Map(), oim=new Map(); let hiCov=0, voCov=0, oiCov=0;   // level columns for the level-based signals
+  for(const r of rows){ const lv=dailyLevels(r); if(lv){
+      const px=new Float64Array(days.length).fill(NaN); let hi=null, vo=null;
+      for(const [d,o] of lv){ if(!idx.has(d)) continue; const i=idx.get(d); px[i]=o.c;
+        if(o.h!=null){ if(!hi) hi=new Float64Array(days.length).fill(NaN); hi[i]=o.h; }
+        if(o.v!=null){ if(!vo) vo=new Float64Array(days.length).fill(NaN); vo[i]=o.v; } }
+      pxm.set(r.coin,px); if(hi){ him.set(r.coin,hi); hiCov++; } if(vo){ vom.set(r.coin,vo); voCov++; } }
+    const om=dailyOI(r); if(om && om.size){ const a=new Float64Array(days.length).fill(NaN); let n=0;
+      for(const [d,v] of om) if(idx.has(d)){ a[idx.get(d)]=v; n++; } if(n>=5){ oim.set(r.coin,a); oiCov++; } } }
+  return { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov };
 }
-// signal score for one name at day-index di over a trailing L-day window (uses returns through di only — no lookahead)
-function btScore(sig, a, bench, di, L){
+// signal score for one name at day-index di over a trailing L-day window (uses data through di only — no
+// lookahead). `ex` carries the extra aligned columns { f:funding, px:closes, hi:highs, vo:volume, oi:openInterest }
+// (each null when not shipped). Every score is oriented so HIGHER = the quantity we long under direction=high.
+function btScore(sig, a, bench, di, L, ex){
   const lo=di-L+1; if(lo<0) return NaN;
   if(sig==='rev'){ const v=a[di]; return Number.isFinite(v)? -v : NaN; }            // fade the most recent day
-  if(sig==='res'){                                                                   // cumulative return net of a within-window β to the benchmark
+  if(sig==='carry'){ const f=ex&&ex.f; if(!f) return NaN;                            // long the names shorts pay to hold: score = −(window funding a 1x long pays)
+    let s=0; for(let i=lo;i<=di;i++){ const x=f[i]; if(Number.isFinite(x)) s+=x; } return -s; }
+  if(sig==='hprox'){ const px=ex&&ex.px, hi=ex&&ex.hi; if(!px||!hi) return NaN;      // closeness to the window high: log(close / max high), ≤0, 0 = printing the high now
+    const p0=px[di]; if(!Number.isFinite(p0)||p0<=0) return NaN;
+    let mx=-Infinity,n=0; for(let i=lo;i<=di;i++){ const h=Number.isFinite(hi[i])?hi[i]:px[i]; if(Number.isFinite(h)&&h>0){ if(h>mx)mx=h; n++; } }
+    return n>=Math.max(5,L*0.6)&&mx>0? Math.log(p0/mx) : NaN; }
+  if(sig==='volt'){ const vo=ex&&ex.vo; if(!vo) return NaN;                          // recent-vs-window volume, log ratio (ambiguous sign by nature — the direction toggle decides which tail you own)
+    const k=Math.min(5,Math.max(2,Math.round(L/4)));
+    let rs=0,rn=0,bs=0,bn=0; for(let i=lo;i<=di;i++){ const v=vo[i]; if(Number.isFinite(v)&&v>=0){ bs+=v; bn++; if(i>di-k){ rs+=v; rn++; } } }
+    if(bn<Math.max(5,L*0.6)||rn<1||!(bs>0)) return NaN; return Math.log((rs/rn+1e-12)/(bs/bn+1e-12)); }
+  if(sig==='oid'){ const o=ex&&ex.oi; if(!o) return NaN;                             // OI change across the window: log(last/first finite)
+    let f0=NaN,l0=NaN,n=0; for(let i=lo;i<=di;i++){ const x=o[i]; if(Number.isFinite(x)&&x>0){ if(!Number.isFinite(f0)) f0=x; l0=x; n++; } }
+    return n>=Math.max(4,Math.round(L*0.4))&&f0>0? Math.log(l0/f0) : NaN; }
+  if(sig==='res'||sig==='beta'||sig==='ivol'){                                       // one β regression, three reads: residual return, −β (BAB), −residual vol
     let mn=0,mb=0,cn=0; for(let i=lo;i<=di;i++){ const x=a[i], y=bench?bench[i]:NaN; if(Number.isFinite(x)&&Number.isFinite(y)){ mn+=x; mb+=y; cn++; } }
     if(cn<Math.max(5,L*0.6)) return NaN; mn/=cn; mb/=cn;
-    let c=0,vb=0,sx=0,sy=0; for(let i=lo;i<=di;i++){ const x=a[i], y=bench?bench[i]:NaN; if(Number.isFinite(x)&&Number.isFinite(y)){ c+=(x-mn)*(y-mb); vb+=(y-mb)*(y-mb); sx+=x; sy+=y; } }
-    return sx-(vb>0?c/vb:0)*sy;
+    let c=0,vb=0,vx=0,sx=0,sy=0; for(let i=lo;i<=di;i++){ const x=a[i], y=bench?bench[i]:NaN; if(Number.isFinite(x)&&Number.isFinite(y)){ c+=(x-mn)*(y-mb); vb+=(y-mb)*(y-mb); vx+=(x-mn)*(x-mn); sx+=x; sy+=y; } }
+    const b=vb>0?c/vb:0;
+    if(sig==='beta') return -b;
+    if(sig==='ivol') return -Math.sqrt(Math.max(0,(vx-b*b*vb)/Math.max(1,cn-1)));
+    return sx-b*sy;
   }
-  let sum=0,sq=0,n=0; for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ sum+=x; sq+=x*x; n++; } }
+  let sum=0,sq=0,mx=-Infinity,n=0; for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ sum+=x; sq+=x*x; if(x>mx)mx=x; n++; } }
   if(n<Math.max(5,L*0.6)) return NaN;
   if(sig==='lowvol'){ const mean=sum/n, varr=(sq-n*mean*mean)/Math.max(1,n-1); return -Math.sqrt(Math.max(0,varr)); }  // low vol ranks high
-  // momentum: skip the most recent day so 1-day reversion doesn't contaminate the trend
+  if(sig==='max') return -mx;                                                        // anti-lottery: the boring names rank high, the biggest single-day pop ranks low
+  // momentum (also the base score smom demeans by sector): skip the most recent day so 1-day reversion doesn't contaminate the trend
   let s2=0,n2=0; for(let i=lo;i<=di-1;i++){ const x=a[i]; if(Number.isFinite(x)){ s2+=x; n2++; } }
   return n2>=Math.max(4,L*0.5)? s2 : NaN;
 }
 function btRun(){
   const p=state.backtest, mx=btMatrix();
   if(mx.rows.length<8 || mx.days.length<p.lookback+p.cadence+6) return { ok:false, have:mx.rows.length, days:mx.days.length };
-  const { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov }=mx, coins=rows.map(r=>r.coin);
-  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=L, on=p.holdWindow==='on';
+  const { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov }=mx, coins=rows.map(r=>r.coin);
+  const covOf={ fundCov, hiCov, voCov, oiCov };
+  if(BT_NEEDS[p.signal] && !(covOf[BT_NEEDS[p.signal]]>0)) return { ok:false, nodata:BT_SIGNALS[p.signal] };   // the column this rule ranks on isn't in the payload yet — say so instead of ranking nothing
+  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=L, on=p.holdWindow==='on' && state.scope!=='crypto';   // 24/7 markets have no overnight boundary
   let weights=new Map(), lastBook=null, feeCum=0, fundCum=0;
   const tkOf=new Map(rows.map(r=>[r.coin, r.ticker]));
+  const secOf=new Map(rows.map(r=>[r.coin, r.sector||r.assetClass||'—']));           // smom demean groups; unsectored names pool together
+  const exOf=(c)=>({ f:fund.get(c)||null, px:pxm.get(c)||null, hi:him.get(c)||null, vo:vom.get(c)||null, oi:oim.get(c)||null });
+  const base=p.signal==='smom'?'mom':p.signal;
   const portR=[], eq=[1], eqg=[1], eqb=[1], eqew=[1], curveDays=[days[start]];
   let turnoverSum=0, rebalances=0, posSum=0, posCount=0;
   for(let di=start; di<days.length-1; di++){
     if((di-start)%cad===0){                                          // rebalance
       const scored=[];
-      for(const c of coins){ const raw=btScore(p.signal, series.get(c), benchSeries, di, L);
-        if(Number.isFinite(raw)) scored.push({ c, raw, s:(p.direction==='low'? -raw : raw) }); }  // s = the quantity we go long on
+      for(const c of coins){ const raw=btScore(base, series.get(c), benchSeries, di, L, exOf(c));
+        if(Number.isFinite(raw)) scored.push({ c, raw }); }
+      if(p.signal==='smom'){                                         // sector-relative: demean the raw momentum within each sector so no rank is just a sector bet
+        const gs=new Map(); for(const z of scored){ const g=secOf.get(z.c); const b=gs.get(g)||[0,0]; b[0]+=z.raw; b[1]++; gs.set(g,b); }
+        for(const z of scored){ const b=gs.get(secOf.get(z.c)); z.raw=z.raw-(b[1]?b[0]/b[1]:0); }
+      }
+      for(const z of scored) z.s=(p.direction==='low'? -z.raw : z.raw);              // s = the quantity we go long on
       scored.sort((a,b)=>b.s-a.s);
       const N=scored.length, k=Math.max(1,Math.min(N,Math.floor(N*q))), nw=new Map();
       let longs=scored.slice(0,k), shorts=scored.slice(N-k);
@@ -2585,14 +2636,14 @@ function btRun(){
 function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
   for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ s+=x; sq+=x*x; n++; } }
   if(n<3) return 0; const m=s/n; return Math.sqrt(Math.max(0,(sq-n*m*m)/(n-1))); }
-function btStats(portR, eqSeg){
+function btStats(portR, eqSeg, ann){
   const n=portR.length; if(!n||eqSeg.length<2) return null;
   let mean=0; for(const x of portR) mean+=x; mean/=n;
   let v=0; for(const x of portR) v+=(x-mean)*(x-mean); const sd=Math.sqrt(v/Math.max(1,n-1));
   let hit=0; for(const x of portR) if(x>0) hit++;
   const total=eqSeg[eqSeg.length-1]/eqSeg[0]-1;
   let peak=eqSeg[0], mdd=0; for(const e of eqSeg){ if(e>peak) peak=e; const dd=e/peak-1; if(dd<mdd) mdd=dd; }
-  return { total, sharpe: sd>0? mean/sd*Math.sqrt(BT_ANN):0, hit:hit/n, mdd, n };
+  return { total, sharpe: sd>0? mean/sd*Math.sqrt(ann||BT_ANN):0, hit:hit/n, mdd, n };
 }
 // equity curve: net (accent) / gross (blue) / benchmark (muted) / equal-weight (faint); IS|OOS split shaded; crosshair hover
 function btCurveSvg(res, splitIdx){
@@ -2663,15 +2714,17 @@ function renderBacktest(){
   // controls
   const opt=(v,l,cur)=>`<option value="${esc(v)}"${cur===v?' selected':''}>${esc(l)}</option>`;
   const seg=(id,cur,opts)=>`<div class="seg" id="${id}">`+opts.map(([v,l])=>`<button data-v="${v}"${String(cur)===String(v)?' class="active"':''}>${l}</button>`).join('')+`</div>`;
-  const sectors=[...new Set([...state.rows.values()].filter(r=>r.assetClass==='Equity'&&r.sector).map(r=>r.sector))].sort();
-  let uniSel=`<select id="btUni" class="clocksel">`+opt('all','All markets',p.universe)+opt('eq','Equities only',p.universe);
+  const cr=state.scope==='crypto';
+  const sectors=cr?[]:[...new Set([...state.rows.values()].filter(r=>r.assetClass==='Equity'&&r.sector).map(r=>r.sector))].sort();
+  let uniSel=`<select id="btUni" class="clocksel">`+opt('all',cr?'All crypto (top-60 by vol)':'All markets',cr?'all':p.universe);
+  if(!cr) uniSel+=opt('eq','Equities only',p.universe);
   if(sectors.length) uniSel+=`<optgroup label="By sector">`+sectors.map(sc=>opt('sec:'+sc, sc, p.universe)).join('')+`</optgroup>`;
   uniSel+=`</select>`;
   let sigSel=`<select id="btSig" class="clocksel">`+Object.keys(BT_SIGNALS).map(k=>opt(k,BT_SIGNALS[k],p.signal)).join('')+`</select>`;
   const controls=
     `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}`+
-    `<span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}</div>`+
-    `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d']])}`+
+    (cr?'':`<span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}`)+`</div>`+   // crypto is 24/7 — no overnight boundary to hold across
+    `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d'],[60,'60d'],[120,'120d']])}`+
     `<span class="lbl">rebalance</span>${seg('btCad',p.cadence,[[1,'1d'],[5,'5d'],[10,'10d']])}`+
     `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`+
     `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
@@ -2681,12 +2734,16 @@ function renderBacktest(){
     `<span class="lbl">weighting</span>${seg('btWt',p.weighting,[['eq','equal'],['sig','by signal'],['vol','inverse-vol']])}`+
     `<span class="lbl">gate</span>${seg('btReq',p.reqSign?'sign':'any',[['any','any rank'],['sign','signal must agree']])}</div>`;
   if(!res.ok){
-    return head+controls+sCard(`<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center">Not enough daily history yet — ${res.have||0} names, need 8 with ≥${BT_MIN_DAYS}d. Fills in as /api/daily loads.</div>`);
+    const msg=res.nodata
+      ? `${esc(res.nodata)} ranks on a data column this server isn't shipping yet (daily highs/volume, OI, or funding). Redeploy the backend, then it fills in on the next /api/daily load.`
+      : `Not enough daily history yet — ${res.have||0} names, need 8 with ≥${BT_MIN_DAYS}d (and more days than the lookback). Fills in as /api/daily loads, or pick a shorter lookback.`;
+    return head+controls+sCard(`<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center;text-align:center;padding:0 30px">${msg}</div>`);
   }
   const m=res.days.length, splitIdx=Math.max(1,Math.min(m-2,Math.floor(m*p.split)));
   const isR=res.portR.slice(0,splitIdx), oosR=res.portR.slice(splitIdx);
   const isE=res.eq.slice(0,splitIdx+1), oosE=res.eq.slice(splitIdx);
-  const full=btStats(res.portR,res.eq), is=btStats(isR,isE), oos=btStats(oosR,oosE);
+  const ann=btAnn();
+  const full=btStats(res.portR,res.eq,ann), is=btStats(isR,isE,ann), oos=btStats(oosR,oosE,ann);
   const stats=`<div class="s-grid" style="margin:12px 0 4px">`+
     btStatBox('In-sample',is,'var(--blue)')+btStatBox('Out-of-sample',oos,'var(--accent)')+btStatBox('Full period',full,'var(--text)')+
     `<div class="s-stat"><div class="s-k">Frictions</div>`+
@@ -2694,15 +2751,15 @@ function renderBacktest(){
       `<div class="s-row"><span>turnover</span><b>${(res.turnover*100).toFixed(0)}%</b></div>`+
       `<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`+
       `<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div></div></div>`;
-  const leg=sLeg([{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:'benchmark'},{color:'var(--faint)',label:'equal-weight'}]);
+  const leg=sLeg([{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'},{color:'var(--faint)',label:'equal-weight'}]);
   const pctq=(p.quantile*100).toFixed(0), dirTop=p.direction==='high'?'top':'bottom';
   const structTxt = p.structure==='long' ? `<b>long-only</b>, holding the ${dirTop} ${pctq}%`
     : p.structure==='short' ? `<b>short-only</b>, shorting the ${p.direction==='high'?'bottom':'top'} ${pctq}%`
     : `<b>long/short</b> — long the ${dirTop} ${pctq}%, short the other tail, dollar-neutral`;
   const wtTxt = p.weighting==='sig'?'signal-weighted':p.weighting==='vol'?'inverse-vol weighted':'equal-weight';
-  const cap = p.holdWindow==='on'
+  const cap = res.on
     ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled. <b>Hover</b> the curve. Not a live trade signal.`
-    : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled, ~2 months of the current universe. <b>Hover</b> the curve. Not a live trade signal.`;
+    : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}. <b>Hover</b> the curve. Not a live trade signal.`;
   return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap);
 }
 function attachBtControls(){
@@ -2732,19 +2789,20 @@ function applyScope(){
   // ticker, so the same tab serves both universes regardless of scope. Signals left this
   // list at -101: the crypto side of the signal engine was removed, so the tab has nothing
   // true to show in crypto scope.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr'; });
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr' && b.dataset.view!=='backtest'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
 
-  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr') { showView('markets'); }
+  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr' && state.view!=='backtest') { showView('markets'); }
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
+  if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
   setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='corr') v='markets';   // crypto scope: Markets + Trend + Report + Correlation (signal engine is xyz-only since -101)
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='corr' && v!=='backtest') v='markets';   // crypto scope: Markets + Trend + Report + Correlation + Backtest (signal engine is xyz-only since -101)
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -4633,6 +4691,10 @@ earnings:`
 backtest:`
 <div class="hlp-h">What it is</div>
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>
+<div class="hlp-h">The signal roster</div>
+<p>Twelve non-fitted ranking rules in five families. <b>Trend</b>: momentum, sector-relative momentum (demeaned within each sector so no rank is just a sector bet), residual momentum (β-neutral), high proximity (closeness to the window high). <b>Reversion</b>: short-term reversion. <b>Risk</b>: low volatility, low idiosyncratic vol, low beta (BAB), anti-lottery (fade the biggest single-day pop). <b>Perp-native</b>: funding carry — long the names shorts pay to hold. <b>Flow</b>: volume trend and OI change, both deliberately sign-ambiguous — the direction toggle decides which tail you own. Rules that rank on daily highs/volume, OI, or funding say so honestly when the server isn't shipping that column yet.</p>
+<div class="hlp-h">Crypto scope</div>
+<p>The tab follows the Stocks/Crypto switcher: crypto runs the top-60 Hyperliquid perps against a <b>BTC benchmark</b> with 365-day annualization, no overnight hold (24/7 markets have no boundary), and funding carry at home. The two universes never mix in one run.</p>
 <div class="hlp-h">How to read the curve</div>
 <p>Four lines: <b>net</b> (after funding), <b>gross</b>, <b>benchmark</b>, <b>equal-weight universe</b>. The shaded split is <b>in-sample | out-of-sample</b>: a strategy that only works left of the line was curve-fit by your eyeballs. Judge on OOS net vs equal-weight — beating the benchmark with a long/short book is table stakes; beating naive equal-weight is the actual bar.</p>`,
 report:`
