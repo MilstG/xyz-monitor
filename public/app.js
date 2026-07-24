@@ -60,6 +60,8 @@ const COLS=[
     td:r=>sqzCell(r)},
   {key:'cascT', label:'Casc', type:'num', def:'desc', tip:'Liquidation-cascade flag (crypto scope only): \u25c6 with age when a 15-minute bucket in the last 24h printed a side\u2019s forced-liquidation notional \u22653\u03c3 above its own trailing 24h baseline WITH open interest dropping \u22651% in the same bucket \u2014 forced flow that actually cleared positioning. Red \u25c6 = longs liquidated (down-cascade), green \u25c6 = shorts (up-cascade). Aggregated CEX data via Coinalyze \u2014 market context for the HL name, NOT Hyperliquid-native. Hover a cell for the bucket\u2019s numbers; the drawer has the full panel. Computed server-side \u2014 board and drawer always agree.',
     td:r=>cascCell(r)},
+  {key:'liq24', label:'24h Liqs', type:'num', def:'desc', tip:'Total forced-liquidation volume over the last 24 hours, USD (crypto scope only): longs + shorts liquidated, summed from 15-minute buckets. Aggregated CEX data via Coinalyze, USD source-converted \u2014 market context for the HL name, NOT Hyperliquid-native. Hover a cell for the long/short split \u2014 a heavily one-sided day tells you which crowd was carried out. Same server-computed rollup the drawer\u2019s Derivs panel shows.',
+    td:r=>liq24Cell(r)},
   {key:'carry', label:'Carry', type:'num', def:'desc', tip:'Funding carry per unit of risk: window-avg funding (APR%) \u00f7 annualized realized vol. +0.5 = the short side collects half a vol-unit per year just for holding; negative = the long side is paid. The screen for "paid to take the unpopular side." Same sign convention as the funding column.',
     td:r=>carryCell(r)},
   {key:'vol', label:'24h Vol', type:'num', td:r=>`<td class="sec">${fmtUsd(r.vol)}</td>`},
@@ -92,9 +94,15 @@ function cascCell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</sp
   if(!c||!c.t) return '<td><span class="na" title="no liquidation cascade flagged in the last 24h \u00b7 aggregated CEX data (Coinalyze), not HL-native \u00b7 a bucket is only judged against \u226524h of its own accumulated baseline \u2014 honest blank until then">\u00b7</span></td>';
   const age=fmtAge(Date.now()-c.t);
   return `<td class="${c.side==='long'?'neg':'pos'}" title="${c.side} cascade ${age} ago \u00b7 ${fmtUsd(c.liq)} of ${c.side}s force-liquidated in one 15m bucket \u00b7 OI ${c.doiPct>0?'+':''}${c.doiPct}% in the same bucket \u00b7 aggregated CEX (Coinalyze) \u2014 context for the HL name, not HL-native \u00b7 drawer has the full panel">\u25c6 ${age}</td>`; }
+function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</span></td>';
+  if(r.liq24==null||!isFinite(r.liq24)) return '<td><span class="na" title="no aggregated CEX liq data yet for this name \u00b7 accumulating (Coinalyze), or no CEX perp mapped \u2014 disclosed gap, never a zero">\u2014</span></td>';
+  const L=r.liqL24||0,S=r.liqS24||0,tot=r.liq24;
+  const lp=tot>0?Math.round(100*L/tot):0;
+  const sk=tot>0?(lp>=67?'neg':(lp<=33?'pos':'')):'';
+  return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','liq24','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
 const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dcap','hitr','rvol','vwap','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
@@ -496,7 +504,7 @@ let renderQueued=false;
 function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); updateMovers();}); }
 function scCls(r){ return (r.candleTs && (Date.now()-r.candleTs>2*state.refreshMs+60000)) ? 'stale':''; }
 const XYZ_ONLY_COLS=new Set(['gap']);   // session-anchored concepts — a 24/7 market has none
-const MAIN_ONLY_COLS=new Set(['cascT']);   // aggregated-CEX derivs context — exists only for the crypto universe
+const MAIN_ONLY_COLS=new Set(['cascT','liq24']);   // aggregated-CEX derivs context — exists only for the crypto universe
 function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key) && !(state.scope==='crypto'&&XYZ_ONLY_COLS.has(c.key)) && !(state.scope!=='crypto'&&MAIN_ONLY_COLS.has(c.key))); }
 let dragKey=null;
 function clearDropMarks(){ document.querySelectorAll('#head th').forEach(t=>t.classList.remove('drop-before','drop-after')); }
