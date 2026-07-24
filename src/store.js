@@ -23,6 +23,7 @@ function openStore(dataDir) {
   const tgFile = path.join(dataDir, "tgchannels.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
+  const duelFile = path.join(dataDir, "duel.json");         // score-duel daily snapshots + rank-IC series
   const derivFile = path.join(dataDir, "derivs.log");        // Coinalyze 15-min rows: coin\tts\tlongLiq\tshortLiq\toi
   const derivMapFile = path.join(dataDir, "derivmap.json");  // resolved base-asset -> Coinalyze symbol map
   let dbuf = [];
@@ -199,6 +200,19 @@ function openStore(dataDir) {
         fs.writeFileSync(tmp, JSON.stringify(data));
         fs.renameSync(tmp, ledgerFile);
       } catch (_) {}
+    },
+    // Score-duel state (MOM vs MOM+ daily snapshots + rank-IC series). Same atomic write
+    // discipline as the ledger blob: tmp + rename, so a crash mid-write never truncates the
+    // only copy of an accruing out-of-sample record.
+    saveDuel(data) {
+      try {
+        const tmp = duelFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, duelFile);
+      } catch (_) {}
+    },
+    loadDuel() {
+      try { return JSON.parse(fs.readFileSync(duelFile, "utf8")); } catch (_) { return null; }
     },
     loadLedger() {
       try { return JSON.parse(fs.readFileSync(ledgerFile, "utf8")); } catch (_) { return null; }

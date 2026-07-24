@@ -13,6 +13,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
+const { momPair, spearmanIC, duelStats } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -322,6 +323,110 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const h = hist.get(r.coin), out = {};
     for (const k in TF) out[k] = fundingAvg(h, TF[k]);
     return out;
+  }
+
+  // ===== Score duel: MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) ================
+  // The adjudicator for the candidate momentum column. Once per UTC day the poller snapshots BOTH
+  // scores for every name (canonical d1 basis — the duel is window-independent even though the
+  // board follows the timeframe selector), and when the next day's snapshot lands it computes
+  // per-scope Spearman rank IC of each score against the realized snapshot→snapshot return.
+  // The verdict gate (n ≥ DUEL_MIN_N days, or |t| ≥ 2 on the paired ΔIC) lives server-side so
+  // the panel can refuse to call a winner early — the anti-eyeball mechanism, same philosophy
+  // as the backtest's IS/OOS split. State persists to the volume: an accruing out-of-sample
+  // record must survive redeploys or it is not a record.
+  const DUEL_RETENTION_D = 180, DUEL_MIN_N = 60, DUEL_MIN_NAMES = 8;
+  let duel = { snaps: {}, ic: [] };
+  let duelDirty = true, duelCache = null;
+  function hydrateDuel() {
+    try {
+      const d = store.loadDuel();
+      if (d && Array.isArray(d.ic)) duel = { snaps: d.snaps || {}, ic: d.ic };
+    } catch (_) {}
+  }
+  function duelInputs(r) {
+    const f = r.feat;
+    if (!f || !(f.volH > 0) || r.px == null || !isFinite(r.px)) return null;
+    const ref = r.ref || {};
+    const pct = (p) => (p != null && isFinite(p) && p > 0) ? (r.px / p - 1) * 100 : null;
+    const dw = computeDoi(r) || {}, fw = computeFundWin(r) || {};
+    // funding percentile: same loop as the snapshot's fundPct — current rate vs the market's own
+    // 31d hourly distribution, ≥96 samples before claiming one (an honest null beats a fake rank)
+    let fundPct = null;
+    try {
+      if (r.funding != null && isFinite(r.funding) && r.fundH && r.fundH.size) {
+        const cut = Date.now() - 31 * DAY;
+        let n = 0, le = 0;
+        for (const [t, rate] of r.fundH) { if (t < cut || !isFinite(rate)) continue; n++; if (rate <= r.funding) le++; }
+        if (n >= 96) fundPct = Math.round((100 * le) / n);
+      }
+    } catch (_) {}
+    const fh = (fw.d1 != null && isFinite(fw.d1)) ? fw.d1 : r.funding;   // window-avg funding, point-rate fallback
+    return {
+      h1: pct(ref.p1h), h4: pct(ref.p4h),
+      d1: (r.d1 != null && isFinite(r.d1)) ? r.d1 : null,
+      d7: pct(ref.p7d), d30: pct(ref.p30d),
+      volH: f.volH, volD: f.volD, px: r.px, hi30: f.hi30, lo30: f.lo30,
+      doi: (dw.d1 != null && isFinite(dw.d1)) ? dw.d1 : null,
+      fundAPR: (fh != null && isFinite(fh)) ? fh * 24 * 365 * 100 : null,
+      fundPct,
+    };
+  }
+  function duelTick(nowMs, inject) {
+    const now = nowMs || Date.now(), day = Math.floor(now / DAY);
+    if (duel.snaps[day]) return;   // one snapshot per UTC day — cheap per-tick guard
+    const snap = { xyz: {}, main: {} };
+    const unis = inject || { xyz: activeMarkets(), main: crypto ? mainMarkets() : [] };
+    for (const u of ["xyz", "main"]) {
+      for (const r of unis[u] || []) {
+        if (r.delisted) continue;
+        let inp = null;
+        try { inp = duelInputs(r); } catch (_) {}
+        if (!inp) continue;
+        const p = momPair(inp);
+        if (p.mom == null || p.momp == null || !isFinite(p.mom) || !isFinite(p.momp)) continue;
+        snap[u][r.coin] = [sig(p.mom, 6), sig(p.momp, 6), sig(r.px, 9)];
+      }
+    }
+    // A near-empty snapshot (boot, features still hydrating) must NOT burn the day — retry next tick.
+    if (Object.keys(snap.xyz).length + Object.keys(snap.main).length < DUEL_MIN_NAMES) return;
+    duel.snaps[day] = snap;
+    const prev = duel.snaps[day - 1];
+    if (prev) {
+      for (const u of ["xyz", "main"]) {
+        const A = [], B = [], R = [];
+        for (const coin in prev[u] || {}) {
+          const p0 = prev[u][coin], p1 = snap[u] && snap[u][coin];
+          if (!p1 || !(p0[2] > 0) || !(p1[2] > 0)) continue;
+          A.push(p0[0]); B.push(p0[1]); R.push(p1[2] / p0[2] - 1);
+        }
+        if (A.length >= DUEL_MIN_NAMES) {
+          const a = spearmanIC(A, R), b = spearmanIC(B, R);
+          if (a != null && b != null) duel.ic.push({ d: day - 1, u, a: sig(a, 4), b: sig(b, 4), n: A.length });
+        }
+      }
+    }
+    for (const k of Object.keys(duel.snaps)) if (+k < day - 1) delete duel.snaps[k];   // only yesterday is ever needed again
+    const cutD = day - DUEL_RETENTION_D;
+    duel.ic = duel.ic.filter((row) => row.d >= cutD);
+    duelDirty = true;
+    try { store.saveDuel(duel); } catch (_) {}
+  }
+  function getDuel() {
+    if (!duelDirty && duelCache) return duelCache;
+    const scopes = {};
+    for (const u of ["xyz", "main"]) {
+      const rowsU = duel.ic.filter((row) => row.u === u).sort((x, y) => x.d - y.d);
+      scopes[u] = {
+        ic: rowsU.map((row) => [row.d, row.a, row.b, row.n]),
+        stats: duelStats(rowsU.map((row) => ({ a: row.a, b: row.b })), DUEL_MIN_N),
+      };
+    }
+    const lastD = duel.ic.length ? duel.ic[duel.ic.length - 1].d : 0;
+    // dataTs is the ETag key: it must move exactly when content moves — a new IC day or a
+    // retention drop both change ic.length, so the sum is collision-proof for this payload.
+    duelCache = { ts: Date.now(), dataTs: lastD * DAY + duel.ic.length, minN: DUEL_MIN_N, scopes };
+    duelDirty = false;
+    return duelCache;
   }
 
   async function pollUniverse() {
@@ -3460,6 +3565,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
     log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), classifier ${AI_CLASSIFY_MODEL}, TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     if (crypto) czBoot();
+    hydrateDuel();
+    if (duel.ic.length) log(`Restored score duel: ${duel.ic.length} IC day(s) — the MOM vs MOM+ record carries across this deploy`);
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
@@ -3538,6 +3645,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       log("Ledger backup: disabled (set LEDGER_BACKUP_REPO + GITHUB_TOKEN to enable off-site snapshots)");
     }
     setInterval(safeTick(buildAnalytics, "buildAnalytics"), ANALYTICS_MS);
+    // Duel snapshot: cheap one-key guard per attempt; a boot mid-day retries every minute until
+    // enough features are warm to snap, then idles until the next UTC midnight.
+    setInterval(safeTick(duelTick, "duelTick"), 60 * 1000);
+    setTimeout(safeTick(duelTick, "duelTick"), 45 * 1000);
     setInterval(() => store.flush(), 30 * 1000);
     setInterval(persistFeatures, 120 * 1000);
     setInterval(() => { persistHourly().catch((e) => log("hourly persist failed (isolated): " + (e && e.message))); }, HOURLY_PERSIST_MS);
@@ -4908,6 +5019,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getSnapshot: () => snapshotCache,
     getDaily: () => dailyCache,
     getAnalytics: () => analyticsCache,
+    getDuel,
+    duelTickNow: duelTick,           // harness: run one duel snapshot attempt at an injected clock, with an optional injected universe
+    hydrateDuelNow: hydrateDuel,     // harness: hydrate duel state from the (stubbed) store without start()
     getSeries,
     // Per-coin cache-key inputs for the candle/series ETag: the spine's data-version stamp (max of
     // hourly + daily update times — bumps exactly when getSeries/getCandles output can change) and

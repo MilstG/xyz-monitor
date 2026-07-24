@@ -1835,7 +1835,104 @@ function regimeAggregate(spines, opts) {
   };
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate,
+// ===== Markets-tab momentum pair (build 2026.07.24-07) ==========================================
+// mom  — the incumbent board score, math byte-identical to the client's original computeMomentum:
+//        risk-adjusted 5-horizon blend × cross-horizon coherence + range tilt, then a
+//        direction-agnostic OI conviction multiplier clamp(1+0.4·tanh(ΔOI/8), 0.6, 1.4).
+// momp — the MOM+ candidate: SAME shared core, but the OI term is regime-qualified (bench V2:
+//        OI building amplifies only scaled by funding corroboration with the score's side;
+//        OI falling is covering — mechanically different flow — and dampens at half band) and
+//        a funding-crowding haircut is applied (bench V3: the crowd paying an own-31d funding
+//        extreme to be on the score's side → ×0.8, the exhaustion tax the ▴/▾ flag points at).
+// Both ship as board columns; the score duel adjudicates them on daily forward rank IC before
+// any promotion touches the incumbent. Pure numbers in, {mom, momp, why} out. The client
+// mirrors this math for the live per-timeframe columns; the poller calls THIS for the
+// canonical 00:00 UTC duel snapshot; a constant-fragment test pins the two implementations
+// to identical coefficients so they cannot silently drift apart.
+function momPair(inp) {
+  const clampN = (v, a, b) => Math.min(b, Math.max(a, v));
+  const volH = inp.volH, volD = (inp.volD > 0) ? inp.volD : null;
+  if (!(volH > 0)) return { mom: undefined, momp: undefined, why: null };
+  const H = [[inp.h1, 1, 0.10], [inp.h4, 4, 0.15], [inp.d1, 24, 0.30], [inp.d7, 168, 0.30], [inp.d30, 720, 0.15]];
+  let s = 0, w = 0, sa = 0;
+  for (const [ret, hrs, wt] of H) {
+    if (ret == null || !isFinite(ret)) continue;
+    const sigma = (hrs >= 24 && volD) ? volD * Math.sqrt(hrs / 24) : volH * Math.sqrt(hrs);
+    if (!(sigma > 0)) continue;
+    const z = (ret / 100) / sigma; s += wt * z; sa += wt * Math.abs(z); w += wt;
+  }
+  if (w === 0) return { mom: null, momp: null, why: null };
+  const kappa = sa > 0 ? Math.abs(s) / sa : 0;
+  let core = (s / w) * (0.5 + 0.5 * kappa);
+  if (inp.px != null && inp.hi30 != null && inp.lo30 != null && inp.hi30 > inp.lo30)
+    core += 0.4 * (clampN((inp.px - inp.lo30) / (inp.hi30 - inp.lo30), 0, 1) - 0.5) * 2;
+  const doi = inp.doi;
+  // incumbent branch — the shipped score, untouched
+  let coreA = core;
+  if (doi != null && isFinite(doi)) coreA *= clampN(1 + 0.4 * Math.tanh(doi / 8), 0.6, 1.4);
+  // MOM+ branch — V2 regime-qualified OI + V3 crowding haircut
+  let coreB = core; const why = [];
+  if (doi != null && isFinite(doi) && core !== 0 && doi !== 0) {
+    if (doi > 0) {
+      let c = 0.5;                                          // corroboration: 1 with the score, 0 against, 0.5 flat/unknown
+      const fAPR = inp.fundAPR;
+      if (fAPR != null && isFinite(fAPR) && Math.abs(Math.tanh(fAPR / 25)) >= 0.15)
+        c = ((core > 0) === (fAPR > 0)) ? 1 : 0;
+      coreB *= clampN(1 + 0.4 * Math.tanh(doi / 8) * (0.5 + 0.5 * c), 0.6, 1.4);
+      why.push(c === 1 ? "OI+ corroborated" : c === 0 ? "OI+ conflicted" : "OI+ fund flat");
+    } else {
+      coreB *= clampN(1 - 0.2 * Math.tanh(-doi / 8), 0.6, 1.4);
+      why.push(core > 0 ? "squeeze-side OI" : "unwind-side OI");
+    }
+  }
+  const fp = inp.fundPct, fAPR2 = inp.fundAPR;
+  if (core !== 0 && fp != null && fAPR2 != null && isFinite(fAPR2)) {
+    if (core > 0 && fAPR2 > 0 && fp >= 90) { coreB *= 0.8; why.push("crowded long −20%"); }
+    else if (core < 0 && fAPR2 < 0 && fp <= 10) { coreB *= 0.8; why.push("crowded short −20%"); }
+  }
+  return { mom: 100 * Math.tanh(coreA / 1.5), momp: 100 * Math.tanh(coreB / 1.5), why: why.length ? why.join(" · ") : null };
+}
+
+// Spearman rank IC: pearson of average ranks (ties → mean rank). Returns null when either
+// side is degenerate (constant), rather than a fabricated 0 — an honest dash beats fake signal.
+function rankAvg(a) {
+  const idx = a.map((v, i) => [v, i]).sort((x, y) => x[0] - y[0]);
+  const rk = new Array(a.length);
+  let i = 0;
+  while (i < idx.length) {
+    let j = i; while (j + 1 < idx.length && idx[j + 1][0] === idx[i][0]) j++;
+    const r = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) rk[idx[k][1]] = r;
+    i = j + 1;
+  }
+  return rk;
+}
+function spearmanIC(scores, rets) {
+  if (!scores || !rets || scores.length !== rets.length || scores.length < 3) return null;
+  const r = pearson(rankAvg(scores), rankAvg(rets));
+  return (r != null && isFinite(r)) ? r : null;
+}
+
+// Duel verdict stats over daily IC pairs [{a, b}]: means, share of days B led, and the paired
+// t-stat on the DIFFERENCE (b − a) — the anti-eyeball number. verdict unlocks at minN days or
+// |t| ≥ 2, whichever first; until then the panel refuses to call a winner.
+function duelStats(rows, minN) {
+  const n = rows.length;
+  if (!n) return { n: 0, meanA: null, meanB: null, winB: null, t: null, verdict: false };
+  let sa2 = 0, sb2 = 0, wb = 0; const d = [];
+  for (const r of rows) { sa2 += r.a; sb2 += r.b; if (r.b > r.a) wb++; d.push(r.b - r.a); }
+  const meanA = sa2 / n, meanB = sb2 / n, winB = wb / n;
+  let t = null;
+  if (n >= 3) {
+    const md = d.reduce((p, q) => p + q, 0) / n;
+    const sd = stdev(d);
+    t = sd > 0 ? md / (sd / Math.sqrt(n)) : null;
+  }
+  const verdict = n >= (minN || 60) || (t != null && Math.abs(t) >= 2);
+  return { n, meanA, meanB, winB, t, verdict };
+}
+
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
