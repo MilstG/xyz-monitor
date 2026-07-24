@@ -1902,7 +1902,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp",
     "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
     "compgAligned", "compgTickLabel", "compgHoverLabel",
-    "cascCell", "loadDrawerDerivs", "renderDerivs", "dzWire"];
+    "cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire",
+    "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1945,7 +1946,14 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const pin of ["h==='breadth'", "h==='sectors'", "h==='reports'", "h==='vs'||h==='compare'", "h==='comp'", "h==='top'||h==='bottom'", "termEarnCal(a1||'today')"])
     assert.ok(s.includes(pin), `terminal verb routing missing: ${pin}`);
   // COMP/G N-name comparison: launcher wiring, the union-day aligner, and the two render modes.
-  assert.ok(s.includes("openCompg()") && s.includes("compgBtn") && /const COMPG=\{/.test(s), "COMP/G launcher + state missing");
+  assert.ok(s.includes("openCompg()") && /const COMPG=\{/.test(s), "COMP/G launcher + state missing");
+  // -03: auto-launch replaced the button. The Corr tab must call compgAuto on open AND on a
+  // scope flip, the picker must exist, and the launcher button must stay dead (a revert that
+  // resurrects el('compgBtn') wiring would throw on the missing element and kill the client).
+  assert.ok(/if\(v==='corr'\)\{ openCorr\(\); setTimeout\(compgAuto,60\)/.test(s), "COMP/G must auto-open with the Corr tab");
+  assert.ok(s.includes("renderCorr(); setTimeout(compgAuto,60)"), "scope flip on the Corr tab must re-auto-open COMP/G for the new universe");
+  assert.ok(!s.includes("compgBtn"), "the COMP/G launcher button must stay removed from app.js");
+  assert.ok(s.includes("COMPG.closed=true") && s.includes("if(COMPG.closed) return;"), "panel close must latch for the session so auto-launch respects it");
   assert.ok(s.includes("function alignedDailyN") && s.includes("COMPG.mode==='spread'") && s.includes("COMPG.mode==='index'"), "COMP/G index/spread modes missing");
   assert.ok(s.includes("head==='comp'") && s.includes("TERM_VERBS=['top'") && s.includes("'corr','comp'"), "comp verb not wired into grammar/verb list");
   // Crypto intraday correlation tab: the tab is un-gated on crypto scope, the matrix comes from
@@ -1963,7 +1971,10 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   // silently drops COMP/G back to equities-only.
   assert.ok(s.includes("function compgAligned") && s.includes("state.scope==='crypto' && CORR._intraday && CORR._bars && CORR._times"), "COMP/G crypto data seam missing");
   assert.ok(s.includes("COMPG.anchorTs") && !s.includes("COMPG.anchorDay"), "COMP/G anchor must be timestamp-based (anchorTs), not day-int");
-  assert.ok(s.includes("cg.hidden=false") && !/openCompg\(tickers\)\{\s*if\(state\.scope==='crypto'\)\{ const p=el\('compg'\)/.test(s), "COMP/G must no longer be hidden/blocked on crypto");
+  // (-03) the launcher button and its cg.hidden=false unhide are gone — crypto availability is
+  // now guaranteed by compgAuto firing on the Corr tab in both scopes; this pin keeps the old
+  // crypto-block from ever returning inside openCompg.
+  assert.ok(s.includes("function compgAuto") && !/openCompg\(tickers\)\{\s*if\(state\.scope==='crypto'\)\{ const p=el\('compg'\)/.test(s), "COMP/G must no longer be hidden/blocked on crypto");
   // TERM_VERBS regression: it was referenced by termComps but never DEFINED — a silent
   // ReferenceError on every keystroke that killed ghost text + tab completion.
   assert.ok(/const TERM_VERBS=\[/.test(s), "TERM_VERBS must be defined, not just referenced (completion engine ReferenceError)");
@@ -1981,7 +1992,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
       "name = the company's common name", "NUMBERS RULE", "IDENTITY RULE"])
       assert.ok(polSrc.includes(pin), `analyst legend out of sync with shipped context: ${pin}`);
   }
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand", "compg", "compgBtn"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand", "compg"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
