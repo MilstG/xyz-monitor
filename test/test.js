@@ -867,8 +867,8 @@ test("crypto engine purge: stored crypto claims leave the ledger at hydrate (air
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["+'x']||d.records[", "const shPanel=d&&d.shadows&&d.shadows.xyz;",
-    "b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr';",
-    "v!=='markets' && v!=='trend' && v!=='report' && v!=='corr') v='markets'",
+    "b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr' && b.dataset.view!=='backtest';",
+    "v!=='markets' && v!=='trend' && v!=='report' && v!=='corr' && v!=='backtest') v='markets'",
     "rw.uni==='main'){ box.innerHTML=''; return; } }   // crypto: no signal engine (-101)",
     "strategy shadows (earning their record)"])
     assert.ok(app.includes(pin), `client xyz-only pin missing: ${pin}`);
@@ -1903,7 +1903,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
     "compgAligned", "compgTickLabel", "compgHoverLabel",
     "cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire",
-    "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto"];
+    "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto",
+    "dailyLevels", "dailyOI"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -4198,4 +4199,80 @@ test("coinalyze client contract: header key, second-based windows, USD flag, per
     await cz.oiHistory(["BTCUSDT_PERP.A"], "15min", from, to);
     assert.equal(cz.usage().used, 3, "call-unit ledger accumulates across endpoints");
   } finally { global.fetch = realFetch; }
+});
+
+test("daily payload v2 (2026.07.24-04): [t,c,h,v] tuples + per-name OI series, both universes, both paths", () => {
+  // The backtest's level-based signals (high proximity, volume trend, OI change) rank on columns
+  // the payload never used to carry. Pin the shape end to end: dailyRaw path ships [t,c,h,v] with
+  // h >= c, the hourly-derive fallback aggregates h=max/v=sum per day, OI rides oiDailySeries, and
+  // the crypto slice cap still applies. Extra columns are additive — index 0/1 stay [t, close].
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  const now = Date.now();
+  const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY, c: 100 + i, o: 100, h: 104 + i, l: 98, v: 5e5 + i }); return d; };
+  // hourly-only seed: 3 full UTC days of bars, high = c+1, vol = 10 each -> derived day: h = max(c)+1, v = 240
+  const d0 = Math.floor(now / DAY) * DAY - 3 * DAY, hourly = [];
+  for (let i = 0; i < 72; i++) { const c = 50 + (i % 24) * 0.1; hourly.push({ t: d0 + i * HOUR, o: c, h: c + 1, l: c - 1, c, v: 10 }); }
+  p.seedRowNow("xyz:AAA", { px: 160, ticker: "AAA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), dailyTs: now });
+  p.seedRowNow("xyz:BBB", { px: 52, ticker: "BBB", uni: "xyz", vol: 1e6, hourlyRaw: hourly, hourlyTs: now });
+  p.seedRowNow("ETH", { px: 112, ticker: "ETH", uni: "main", vol: 5e7, dailyRaw: mkD(), dailyTs: now });
+  // sampled OI history: 20 days of one-per-midnight points, rising 1e6 -> 2e6
+  const histArr = []; for (let i = 30; i >= 1; i--) histArr.push([Math.floor(now / DAY) * DAY - i * DAY, 1e6 + (30 - i) * 5e4, 0.0001]);   // oiDailySeries needs >=24 samples
+  p.seedHistNow("xyz:AAA", histArr);
+  p.buildDailyNow();
+  const dc = p.getDaily();
+  const a = dc.daily["xyz:AAA"];
+  assert.ok(a && a.length >= 60, "dailyRaw path ships");
+  const row = a[a.length - 1];
+  assert.equal(row.length, 4, "tuple is [t,c,h,v]");
+  assert.ok(row[2] > row[1], "high above close (h = c+4 by construction)");
+  assert.ok(row[3] > 0, "volume ships");
+  const b = dc.daily["xyz:BBB"];
+  assert.ok(b && b.length >= 2, "hourly-derive fallback ships");
+  const fullDay = b.find((k) => k[3] === 240);
+  assert.ok(fullDay, "derived day volume is the summed hourly volume (24 x 10)");
+  assert.ok(fullDay[2] >= fullDay[1] && fullDay[2] <= fullDay[1] + 1.5, "derived day high is the max hourly high");
+  const e = dc.daily["ETH"];
+  assert.ok(e && e.length <= 94 && e[e.length - 1].length === 4, "crypto rides the same tuple under the MAIN_DAILY_DAYS cap");
+  const oiA = dc.oi && dc.oi["xyz:AAA"];
+  assert.ok(Array.isArray(oiA) && oiA.length >= 10, "OI daily series ships for the seeded history");
+  assert.ok(oiA.every((k) => k.length === 2 && k[1] > 0), "OI rows are [day, oi]");
+  assert.ok(oiA[oiA.length - 1][1] > oiA[0][1], "the seeded rise survives the daily-step resample");
+  assert.ok(!dc.oi["xyz:BBB"], "no sampled history -> no OI series (never a synthetic one)");
+});
+
+test("backtest v2 manifest: twelve-signal roster, scope seam, data gates, sector demean — pinned in the shipped client", () => {
+  // Source-manifest guard, same philosophy as the client-integrity test: each of these silently
+  // reverting would leave a plausible-looking tab quietly running the old four-signal, xyz-only test.
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // the roster: every key present with a short label
+  for (const k of ["mom:'", "smom:'", "rev:'", "res:'", "lowvol:'", "ivol:'", "beta:'", "max:'", "carry:'", "hprox:'", "volt:'", "oid:'"])
+    assert.ok(s.includes(k), `BT_SIGNALS missing key: ${k}`);
+  // data-gated rules declare their column and btRun refuses honestly instead of ranking nothing
+  assert.ok(s.includes("const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov' }"), "BT_NEEDS gate map missing");
+  assert.ok(s.includes("nodata:BT_SIGNALS[p.signal]"), "no-data refusal missing from btRun");
+  assert.ok(s.includes("res.nodata"), "no-data message missing from renderBacktest");
+  // score plumbing: extras object into btScore, one regression serving res/beta/ivol, sector demean for smom
+  assert.ok(s.includes("btScore(base, series.get(c), benchSeries, di, L, exOf(c))"), "extras not passed into btScore");
+  assert.ok(s.includes("sig==='res'||sig==='beta'||sig==='ivol'"), "shared-regression branch missing");
+  assert.ok(s.includes("if(p.signal==='smom')"), "sector demean missing");
+  // scope seam: universe follows the switcher, bench is scoped, crypto kills the overnight hold and annualizes at 365
+  assert.ok(s.includes("if((r.uni==='main')!==cr) return false;"), "scope-aware universe filter missing");
+  assert.ok(s.includes("const bC=scopeBench(), bench=bC?state.rows.get(bC):null;"), "scoped benchmark missing from btMatrix");
+  assert.ok(s.includes("p.holdWindow==='on' && state.scope!=='crypto'"), "crypto must not run the overnight hold");
+  assert.ok(s.includes("function btAnn()") && s.includes("state.scope==='crypto'?365:BT_ANN"), "scope-aware annualization missing");
+  assert.ok(s.includes("if(state.view==='backtest') drawBacktest();"), "scope flip must re-run the open tab");
+  // the tab is un-gated for crypto in BOTH gates (visibility + navigation)
+  assert.equal((s.match(/v!=='report' && v!=='corr' && v!=='backtest'/g) || []).length, 1, "showView crypto gate must include backtest");
+  assert.ok(s.includes("b.dataset.view!=='backtest'"), "applyScope tab visibility must include backtest");
+  // level columns: aligned arrays + coverage counts, longer lookbacks, named benchmark in the legend
+  assert.ok(s.includes("pxm, him, vom, oim, hiCov, voCov, oiCov"), "level-column matrix outputs missing");
+  assert.ok(s.includes("[60,'60d'],[120,'120d']"), "60/120d lookbacks missing");
+  assert.ok(s.includes("benchmark (BTC)") && s.includes("benchmark (SP500)"), "legend must name the scope's benchmark");
+  // the new payload readers exist and applyDaily maps the extra tuple columns + oi
+  assert.ok(s.includes("h:p[2], v:p[3]"), "applyDaily must read the h/v tuple columns");
+  assert.ok(s.includes("r.dailyOI=d.oi[coin]"), "applyDaily must read the oi map");
 });
