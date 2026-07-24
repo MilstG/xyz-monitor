@@ -1295,7 +1295,7 @@ test("ai report v6: news-grounded context, no-invention rule, crypto positioning
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["cr.fundingPctile31d = fp", "cr.oiChg24Pct",
-    "const AI_SCHEMA_V = 7;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
+    "const AI_SCHEMA_V = 8;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
     "invented news", "rel7dPct", "rel30dPct", "context.crypto",
     // v7 earnings reported-vs-upcoming split
     "earnEntryState(x, now) === \"upcoming\"", "e.reported =",
@@ -1912,7 +1912,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   }
   for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7",
     "xyzmon.density", "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs",
-    "key:'momp'", "/api/duel", "momentum2:", "r.momWhy"]) {
+    "key:'momp'", "/api/duel", "momentum2:", "r.momWhy",
+    "c.structLevels", "detected structural level(s) drawn faint"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -3326,7 +3327,7 @@ test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -
   for (const frag of ["AI_MK", "ai-mkleg", "proven-edge signals only", "g.kind==='short'", "distinct signal types at onset", "outTxt", "marksSuppressed"])
     assert.ok(app.includes(frag), `app.js missing -74 marker: ${frag}`);
   assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
-  for (const frag of ["const AI_SCHEMA_V = 7;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
+  for (const frag of ["const AI_SCHEMA_V = 8;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
     assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
 });
 
@@ -4562,4 +4563,209 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
   for (const cls of [".duel-verdict", ".duel-tbl", ".duel-row", ".mompw"]) assert.ok(css.includes(cls), `styles.css missing ${cls}`);
   assert.ok(html.includes("MOM+"), "index.html footer must introduce the candidate column");
   assert.ok(app.includes("Score duel</div>"), "backtest help must document the duel");
+});
+
+// ===== -09: structural level detector + void snap rule ========================================
+// A zigzag whose turning points land on exact prices, so the pivot detector has unambiguous
+// structure to find: resistance at 130 (4 touches), support at 100 (3), and a FLIP at 115 —
+// one leg peaks there, a later leg troughs there. Linear legs mean no interior bar is ever a
+// pivot (each sits strictly between its neighbours), so every level below is deliberate.
+function zigDaily(pts, per, t0, dayMs) {
+  const out = [];
+  for (let s = 0; s < pts.length - 1; s++) {
+    const a = pts[s], b = pts[s + 1];
+    for (let j = 1; j <= per; j++) out.push(a + (b - a) * (j / per));
+  }
+  return out.map((c, i) => ({ t: t0 + i * dayMs, o: c, h: c * 1.001, l: c * 0.999, c }));
+}
+const ZIG_PTS = [100, 130, 100, 130, 100, 115, 100, 130, 115, 130, 100];
+
+test("levels -09: detectLevels finds confirmed pivot clusters, classifies flips, and refuses to guess", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400000, now = Date.now();
+  const daily = zigDaily(ZIG_PTS, 8, now - 80 * DAY_, DAY_);
+  const px = daily[daily.length - 1].c;
+  const r = C.detectLevels(daily, px, 3, { minBars: 60 });
+  assert.ok(r, "a zigzag with clean turns must produce levels");
+  const at = (v) => r.items.find((l) => Math.abs(l.v / v - 1) < 0.02) || null;
+  const res = at(130), sup = at(100), flip = at(115);
+  assert.ok(res && res.side === "res", "130 is touched only by highs — resistance");
+  assert.ok(sup && sup.side === "sup", "100 is touched only by lows — support");
+  assert.ok(flip && flip.side === "flip", "115 capped one leg and floored another — flip, and the flip is the point of the classifier");
+  assert.ok(res.n >= 3, `130 should carry several touches, got n=${res.n}`);
+  assert.equal(flip.n, 2, "the flip is exactly one high + one low by construction");
+  assert.ok(r.items.every((l) => l.n >= 2), "minN defaults to 2 — a single untested pivot is not a level");
+  assert.ok(r.tauPct > 0 && r.k === 3 && r.minN === 2, "tuning is echoed back so the snap rule can read tau");
+  // ageD counts back from the LAST bar, and distPct is signed against the mark
+  assert.ok(r.items.every((l) => l.ageD >= 0 && Number.isFinite(l.distPct)), "each level carries age + distance");
+  assert.ok(res.distPct > 0 && sup.distPct < 0, "with the mark mid-range, resistance is above and support below");
+});
+
+test("levels -09: honest null — a monotone trend confirms no structure, and short history returns nothing", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400000, now = Date.now();
+  // The exact shape the AI harness seeds: every bar's high exceeds the last, every low too.
+  // There is no confirmed pivot anywhere in it, and inventing one would be the whole bug.
+  const rise = Array.from({ length: 80 }, (_, i) => {
+    const c = 100 * Math.pow(1.008, i);
+    return { t: now - (79 - i) * DAY_, o: c * 0.995, h: c * 1.01, l: c * 0.99, c };
+  });
+  assert.equal(C.detectLevels(rise, rise[79].c, 2), null, "a clean uptrend has no confirmed pivots — null, never a fabricated level");
+  const short = zigDaily(ZIG_PTS, 2, now - 20 * DAY_, DAY_);
+  assert.equal(C.detectLevels(short, short[short.length - 1].c, 3, { minBars: 60 }), null, "under the bar floor returns null");
+  assert.equal(C.detectLevels(null, 100, 3), null, "garbage in, null out");
+  assert.equal(C.detectLevels([], 100, 3), null);
+  assert.equal(C.detectLevels(zigDaily(ZIG_PTS, 8, now, DAY_), 0, 3), null, "no mark, no distances, no levels");
+});
+
+test("levels -09: the last k bars can never confirm a pivot, and closes-only bars degrade instead of throwing", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400000, now = Date.now();
+  const daily = zigDaily(ZIG_PTS, 8, now - 80 * DAY_, DAY_);
+  // A fresh spike in the final 2 bars is UNCONFIRMED — k=3 needs 3 bars on the right.
+  const spiked = daily.slice(0, -2).concat([
+    { t: now - DAY_, o: 200, h: 200, l: 199, c: 199.5 },
+    { t: now, o: 199, h: 199, l: 198, c: 198.5 }]);
+  const r = C.detectLevels(spiked, 198.5, 3, { minBars: 60 });
+  assert.ok(!r || !r.items.some((l) => l.v > 150), "the unconfirmed spike must NOT become a level — that is a guess wearing a price");
+  // warm-cache shape: closes only, no h/l. Falls back to the close rather than going offline.
+  const closesOnly = daily.map((k) => ({ t: k.t, c: k.c }));
+  const rc = C.detectLevels(closesOnly, px0(closesOnly), 3, { minBars: 60 });
+  assert.ok(rc && rc.items.length, "closes-only history still yields close-based pivots");
+  assert.ok(rc.items.some((l) => l.side === "flip"), "and still classifies the flip");
+  function px0(a) { return a[a.length - 1].c; }
+});
+
+test("levels -09: tolerance scales with the name's own volatility, and minN sets the detector's character", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400000, now = Date.now();
+  const daily = zigDaily(ZIG_PTS, 8, now - 80 * DAY_, DAY_);
+  const px = daily[daily.length - 1].c;
+  const quiet = C.detectLevels(daily, px, 0.5, { minBars: 60 });
+  const wild = C.detectLevels(daily, px, 12, { minBars: 60 });
+  assert.ok(quiet.tauPct < wild.tauPct, "a volatile name clusters wider — a fixed percent would over-merge one and shatter the other");
+  assert.ok(wild.items.length <= quiet.items.length, "wider tolerance merges levels, never splits them");
+  assert.equal(C.detectLevels(daily, px, 3, { minBars: 60, tauMult: 0.4, minN: 9 }), null,
+    "an unreachable touch floor yields null, not a level nobody can justify");
+  const n1 = C.detectLevels(daily, px, 3, { minBars: 60, minN: 1 });
+  assert.ok(n1.items.length >= C.detectLevels(daily, px, 3, { minBars: 60 }).items.length,
+    "minN=1 admits every pivot — the setting that would make the snap rule decorative");
+  const cap = C.detectLevels(daily, px, 3, { minBars: 60, minN: 1, max: 2 });
+  assert.equal(cap.items.length, 2, "max caps the shipped list");
+  assert.ok(cap.items[0].v > cap.items[1].v, "shipped high -> low");
+});
+
+// A poller seeded with the same zigzag, but ending on a partial recovery so the mark sits
+// MID-range: structure exists both above (130 resistance) and below (115 flip, 100 support),
+// which is the only configuration where a long void has anywhere legitimate to land.
+function aiLevelPoller() {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+    loadAiReports: () => null, saveAiReports: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), DAY_ = 86400000, HOUR_ = 3600000;
+  const daily = zigDaily(ZIG_PTS.concat([118]), 8, now - 88 * DAY_, DAY_);
+  const px = daily[daily.length - 1].c;
+  const hourly = Array.from({ length: 40 * 24 }, (_, i) =>
+    ({ t: now - (40 * 24 - 1 - i) * HOUR_, o: px, h: px * 1.002, l: px * 0.998, c: px, v: 1000 }));
+  p.seedRowNow("xyz:NVDA", { px, d1: 1.2, funding: 0.00001, vol: 5e7, oi: 2e7,
+    ref: { p1h: px * 0.999, p4h: px * 0.996, p7d: px * 0.94, p30d: px * 0.85 },
+    dailyRaw: daily, hourlyRaw: hourly, dailyTs: now, hourlyTs: now, isNew: false });
+  return { p, px, now };
+}
+
+test("levels -09: ctx.levels always ships — populated where structure exists, explicitly empty with a note where it doesn't", () => {
+  const { p } = aiLevelPoller();
+  const ctx = p.aiCompileNow("xyz:NVDA");
+  assert.ok(ctx.levels && Array.isArray(ctx.levels.items), "ctx.levels must ALWAYS ship — the snap rule binds to it, so absent and empty must not be the same thing");
+  assert.ok(ctx.levels.items.length >= 2, "the zigzag has structure the detector should find");
+  assert.ok(ctx.levels.tauPct > 0, "tau ships so the validator can size its snap tolerance from the same number");
+  assert.ok(ctx.levels.items.every((l) => l.v > 0 && l.n >= 2 && typeof l.side === "string"), "every shipped level carries price, touches and a side");
+  // the monotone harness: no confirmed pivots anywhere, and the note says so rather than shipping nothing
+  const mono = aiTestPoller().p.aiCompileNow("xyz:NVDA");
+  assert.equal(mono.levels.n, 0);
+  assert.deepEqual(mono.levels.items, []);
+  assert.ok(/insufficient daily history/.test(mono.levels.note), "the empty case explains itself: " + mono.levels.note);
+});
+
+test("levels -09: a non-anchored directional void must sit on detected structure — off-level reads are rejected, near-misses snap", () => {
+  const { p, px } = aiLevelPoller();
+  const ctx = () => p.aiCompileNow("xyz:NVDA");
+  const c0 = ctx();
+  const below = c0.levels.items.filter((l) => l.v < px).sort((a, b) => b.v - a.v);
+  assert.ok(below.length, "harness must offer at least one level under the mark");
+  const lv = below[0].v, tgt = +(px * 1.09).toPrecision(6);
+  // a void copied verbatim off ctx.levels passes untouched
+  const ok = p.aiValidateNow(AI_GOOD(px, lv, tgt), c0);
+  assert.ok(ok.ok, "a void ON a detected level must pass: " + (ok.error || ""));
+  assert.ok(Math.abs(ok.computed.voidLevel / lv - 1) < 1e-6, "and must not be moved");
+  // the whole point: a plausible round number backed by nothing is refused, not quietly used
+  const tol = c0.levels.tauPct * 0.5 / 100;
+  const bogus = +(lv * (1 - 12 * tol)).toPrecision(6);
+  const bad = p.aiValidateNow(AI_GOOD(px, bogus, tgt), c0);
+  assert.equal(bad.ok, false, "an off-structure void must fail");
+  assert.ok(/does not sit on any detected structural level/.test(bad.error), bad.error);
+  // within tolerance the value is snapped exactly onto the level, and the report says it was
+  const near = +(lv * (1 + tol * 0.4)).toPrecision(6);
+  const sn = p.aiValidateNow(AI_GOOD(px, near, tgt), c0);
+  assert.ok(sn.ok, "a near-miss must snap, not fail: " + (sn.error || ""));
+  assert.ok(Math.abs(sn.computed.voidLevel / lv - 1) < 1e-6, "snapped onto the detected price, so the chart line and the ledger stop agree with the detector");
+  assert.equal(sn.computed.correctedVoid, true, "a moved void must be flagged corrected, exactly like the claim-anchor path");
+  // and the money math is computed off the SNAPPED void, never the model's original number
+  const risk = px - sn.computed.voidLevel;
+  const scT = sn.computed.scenarios.find((s) => s.kind === "target");
+  assert.ok(Math.abs(scT.payoffR - (tgt - px) / risk) < 0.02, "R is measured from the snapped void");
+});
+
+test("levels -09: the snap rule yields to frozen claim geometry, exempts neutral reads, and stands down with no structure", () => {
+  const { p, px } = aiLevelPoller();
+  const c0 = p.aiCompileNow("xyz:NVDA");
+  const tol = c0.levels.tauPct * 0.5 / 100;
+  const lv = c0.levels.items.filter((l) => l.v < px).sort((a, b) => b.v - a.v)[0].v;
+  const offLevel = +(lv * (1 - 12 * tol)).toPrecision(6), tgt = +(px * 1.09).toPrecision(6);
+  // 1. a frozen claim outranks the detector — the ledger's stop is the void, structure or not
+  const anchored = Object.assign({}, c0, { claimAnchor: { ev: "breakout", side: "long",
+    stop: offLevel, target: null, t0: Date.now(), resolveAt: Date.now() + 86400000 } });
+  const a = p.aiValidateNow(AI_GOOD(px, offLevel, tgt), anchored);
+  assert.ok(a.ok, "claim geometry must still win outright: " + (a.error || ""));
+  assert.ok(Math.abs(a.computed.voidLevel / offLevel - 1) < 1e-6, "and the claim stop is used verbatim, never snapped away from the ledger");
+  // 2. a neutral read carries no void and is not subject to the rule
+  const neutral = JSON.parse(AI_GOOD(px, lv, tgt));
+  neutral.bias = "neutral"; neutral.levels = []; neutral.action = { stance: "wait", entry: null, note: "no directional edge here" };
+  neutral.scenarios = [{ name: "chop", kind: "flat", p: 0.6, target: null }, { name: "resolves up", kind: "target", p: 0.4, target: tgt }];
+  assert.equal(p.aiValidateNow(JSON.stringify(neutral), c0).ok, true, "neutral reads are exempt");
+  // 3. no confirmed structure -> the rule stands down entirely, or a young listing could never
+  // get a directional read at all
+  const bare = Object.assign({}, c0, { levels: { n: 0, items: [], note: "insufficient daily history for confirmed pivots" } });
+  assert.equal(p.aiValidateNow(AI_GOOD(px, offLevel, tgt), bare).ok, true, "empty levels must not block a report");
+  const gone = Object.assign({}, c0); delete gone.levels;
+  assert.equal(p.aiValidateNow(AI_GOOD(px, offLevel, tgt), gone).ok, true, "a context predating the field degrades, never throws");
+});
+
+test("levels -09: manifest — detector, context block, snap rule and prompt contract are all pinned", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const pin of ["function detectLevels(", "detectLevels,"])
+    assert.ok(cmp.includes(pin), `compute.js missing -09 pin: ${pin}`);
+  for (const pin of [
+    "const AI_LEVEL_K = 3, AI_LEVEL_TAU = 0.4, AI_LEVEL_MINN = 2, AI_LEVEL_MAX = 8;",
+    "const AI_SNAP_TOL = 0.5;", "const AI_SCHEMA_V = 8;",
+    "ctx.levels = lv || { n: 0, items: [], note:",
+    "does not sit on any detected structural level", "(snapped to structure)",
+    // the prompt must POINT at the field — the old wording asked for swing data the context never shipped
+    "context.levels.items — copy the value verbatim", "context.levels carries the structural levels",
+    // the report payload must carry the evidence, or the chart would have to re-derive it and
+    // could then disagree with the validator that accepted the read
+    "structLevels: (ctx.levels && Array.isArray(ctx.levels.items))"])
+    assert.ok(pol.includes(pin), `poller.js missing -09 pin: ${pin}`);
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["c.structLevels", "detected structural level(s) drawn faint",
+    "flip \\u2014 has served as both resistance and support"])
+    assert.ok(app.includes(pin), `app.js missing -09 pin: ${pin}`);
+  assert.ok(!app.includes("if(offView.length)    if(offView.length)"), "the duplicated offView guard must stay fixed");
+  assert.ok(!pol.includes("prior swings implied by the data"),
+    "the unfulfillable prompt clause must be gone — it asked for swing data no context ever carried");
+  assert.equal((cmp.match(/function detectLevels\(/g) || []).length, 1, "exactly one detectLevels definition");
 });
