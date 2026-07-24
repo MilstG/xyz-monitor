@@ -4122,6 +4122,10 @@ test("poller deriv lane: cadence, cooldown, one-code-path casc, and honest label
   assert.ok(/getDerivs,\s*\n\s*refreshDerivs,/.test(pol), "getDerivs + refreshDerivs exported");
   assert.ok(pol.includes("derivsKey:"), "collision-proof ETag key exported for serveKeyed");
   assert.ok(pol.includes("store.pruneDerivs(Date.now() - CZ_RETENTION)"), "retention pass wired into maintenance");
+  assert.ok(pol.includes("czRoll.set(coin, derivRollup(rows, Date.now()))") && pol.includes("roll: czRoll.get(coin) || null"),
+    "board column and drawer chips must read the SAME memoized rollup object — one code path");
+  assert.ok(pol.includes("liq24: droll ? (droll.ll24 || 0) + (droll.sl24 || 0) : undefined"), "snapshot must ship the 24h liq total on main rows");
+  assert.ok(pol.includes('+ "," + (m.liq24 || 0)'), "liq24 must ride markSig so the snapshot ETag busts when it moves");
   assert.ok(pol.includes("cascadeFlags(rows)") && pol.includes("cascadeFlags(arr)"), "flags recomputed on merge AND on boot restore");
   assert.ok(pol.includes("COINALYZE_API_KEY"), "keyed by env, feature absent without it");
 });
@@ -4140,12 +4144,13 @@ test("server: /api/derivs routes registered once, keyed ETag, cooldown maps to 4
 test("client: CASC column + drawer deriv panel wired, crypto-scoped, honestly labeled", () => {
   const fs = require("fs"), path = require("path");
   const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const fn of ["cascCell", "loadDrawerDerivs", "renderDerivs", "dzWire"]) {
+  for (const fn of ["cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire"]) {
     const n = [...s.matchAll(new RegExp("^(?:async )?function " + fn + "\\(", "gm"))].length;
     assert.equal(n, 1, `client function ${fn} must exist exactly once`);
   }
   assert.ok(s.includes("MAIN_ONLY_COLS") && s.includes("MAIN_ONLY_COLS.has(c.key)"), "cascT must be filtered out of the xyz scope like gap is out of crypto");
-  assert.ok(s.includes("'doi','sqz','cascT','carry'"), "cascT in DEFAULT_ORDER");
+  assert.ok(s.includes("'cascT','liq24'"), "liq24 must be crypto-scoped alongside cascT");
+  assert.ok(s.includes("'doi','sqz','cascT','liq24','carry'"), "cascT + liq24 in DEFAULT_ORDER");
   assert.ok(s.includes("key:'cascT'"), "column keys on the flat numeric sort field, not the object");
   assert.ok(s.includes("/api/derivs?coin=") && s.includes("/api/derivs/refresh"), "drawer fetch + manual refresh endpoints wired");
   assert.ok(s.includes("dderivs"), "drawer slot present for crypto rows");
