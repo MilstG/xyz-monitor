@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.24-06";
+const VERSION = "2026.07.24-07";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -383,6 +383,10 @@ async function main() {
     serveCached(req, reply, poller.getDaily(), { ts: 0, daily: {} }));
   fastify.get("/api/analytics", (req, reply) =>
     serveCached(req, reply, poller.getAnalytics(), { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} }));
+  // Score duel: MOM vs MOM+ daily rank-IC record. Content only moves when a new IC day lands,
+  // so serveCached's dataTs ETag makes this a 304 for nearly every poll.
+  fastify.get("/api/duel", (req, reply) =>
+    serveCached(req, reply, poller.getDuel(), { ts: 0, dataTs: 0, minN: 60, scopes: {} }));
   // EMA 13/21 trend ladder (D1 · H12 · H4 · H1) — ranked long/short leaderboards per universe.
   fastify.get("/api/trend", (req, reply) => {
     const q = req.query || {};
