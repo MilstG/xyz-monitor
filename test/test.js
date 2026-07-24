@@ -1904,7 +1904,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "compgAligned", "compgTickLabel", "compgHoverLabel",
     "cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire",
     "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto",
-    "dailyLevels", "dailyOI"];
+    "dailyLevels", "dailyOI", "btMomVariant"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -4243,16 +4243,22 @@ test("daily payload v2 (2026.07.24-04): [t,c,h,v] tuples + per-name OI series, b
   assert.ok(!dc.oi["xyz:BBB"], "no sampled history -> no OI series (never a synthetic one)");
 });
 
-test("backtest v2 manifest: twelve-signal roster, scope seam, data gates, sector demean — pinned in the shipped client", () => {
+test("backtest v2 manifest: seventeen-signal roster, scope seam, data gates, sector demean — pinned in the shipped client", () => {
   // Source-manifest guard, same philosophy as the client-integrity test: each of these silently
   // reverting would leave a plausible-looking tab quietly running the old four-signal, xyz-only test.
   const fs = require("fs"), path = require("path");
   const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   // the roster: every key present with a short label
-  for (const k of ["mom:'", "smom:'", "rev:'", "res:'", "lowvol:'", "ivol:'", "beta:'", "max:'", "carry:'", "hprox:'", "volt:'", "oid:'"])
+  for (const k of ["mom:'", "smom:'", "rev:'", "res:'", "lowvol:'", "ivol:'", "beta:'", "max:'", "carry:'", "hprox:'", "volt:'", "oid:'",
+    "m0:'", "mres:'", "moi:'", "mfund:'", "mpart:'"])
     assert.ok(s.includes(k), `BT_SIGNALS missing key: ${k}`);
   // data-gated rules declare their column and btRun refuses honestly instead of ranking nothing
-  assert.ok(s.includes("const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov' }"), "BT_NEEDS gate map missing");
+  assert.ok(s.includes("const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov', moi:'oiCov', mfund:'fundCov', mpart:'voCov' }"), "BT_NEEDS gate map missing");
+  // the live-score variant family (-05): fixed-horizon dispatch BEFORE the lookback guard, extended warmup
+  assert.ok(s.includes("const BT_MVAR={ m0:1, mres:1, moi:1, mfund:1, mpart:1 }"), "BT_MVAR family map missing");
+  assert.ok(s.includes("if(BT_MVAR[sig]) return btMomVariant(sig, a, bench, di, ex);"), "variant dispatch missing from btScore");
+  assert.ok(s.includes("const warmN=BT_MVAR[p.signal]?Math.max(p.lookback,31):p.lookback;"), "variant warmup missing from btRun");
+  assert.ok(s.includes("start=warmN"), "btRun walk must start at the warmup, not the raw lookback");
   assert.ok(s.includes("nodata:BT_SIGNALS[p.signal]"), "no-data refusal missing from btRun");
   assert.ok(s.includes("res.nodata"), "no-data message missing from renderBacktest");
   // score plumbing: extras object into btScore, one regression serving res/beta/ivol, sector demean for smom
@@ -4275,4 +4281,55 @@ test("backtest v2 manifest: twelve-signal roster, scope seam, data gates, sector
   // the new payload readers exist and applyDaily maps the extra tuple columns + oi
   assert.ok(s.includes("h:p[2], v:p[3]"), "applyDaily must read the h/v tuple columns");
   assert.ok(s.includes("r.dailyOI=d.oi[coin]"), "applyDaily must read the oi map");
+});
+
+test("live-score variant family (2026.07.24-05): btMomVariant executed — M0 mirrors the blend, each variant moves exactly one term", () => {
+  // The REAL btMomVariant from the shipped client (the -85 lesson: existence is not wiring),
+  // run on deterministic synthetic series where every candidate term's direction is known by
+  // construction. Each variant is asserted AGAINST M0 on the same inputs, so a regression in
+  // any single modulation fails its own assertion by name.
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => { const i = src.indexOf("function " + name); assert.ok(i >= 0, name + " missing");
+    let dep = 0, j = src.indexOf("{", i);
+    for (let k = j; k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
+  const clamp = (x, a, b) => Math.min(Math.max(x, a), b);   // the client helper the function closes over
+  const mv = eval("(" + grab("btMomVariant") + ")");
+  const N = 140, di = 121;                                   // odd di: the last daily bar is the up-leg of the sawtooth
+  // steady uptrend with a sawtooth (mean +0.2%/day, ±0.4% wiggle) — volD is real, tanh unsaturated
+  const up = [], down = [], chop = [];
+  for (let i = 0; i < N; i++) { const w = i % 2 ? 0.004 : -0.004;
+    up.push(0.002 + w); down.push(-0.002 + w); chop.push(i % 2 ? 0.006 : -0.006); }
+  const pxOf = (a) => { const p = []; let c = 100; for (const x of a) { c *= Math.exp(x); p.push(c); } return p; };
+  const exBase = (a) => ({ f: null, px: pxOf(a), hi: null, vo: null, oi: null });
+  // warmup: before 31 days of runway the score is an honest NaN, not a guess
+  assert.ok(Number.isNaN(mv("m0", up, null, 20, exBase(up))), "pre-warmup must be NaN");
+  const m0up = mv("m0", up, null, di, exBase(up)), m0dn = mv("m0", down, null, di, exBase(down)), m0ch = mv("m0", chop, null, di, exBase(chop));
+  assert.ok(Number.isFinite(m0up) && m0up > 0 && m0up < 100, "M0 on a clean uptrend is positive and unsaturated");
+  assert.ok(m0dn < 0, "M0 on the mirrored downtrend is negative");
+  assert.ok(m0up > m0ch + 5, "coherent trend must outrank a violent chop of the same amplitude");
+  // range tilt: same returns without the close series lose the (positive, at-the-highs) tilt
+  assert.ok(m0up > mv("m0", up, null, di, { f: null, px: null, hi: null, vo: null, oi: null }), "range tilt must lift a name at its 30d highs");
+  // V1 — β-residual: a perfect benchmark clone keeps only its raw 1d term; with no benchmark, V1 IS M0
+  assert.ok(mv("mres", up, up, di, exBase(up)) < m0up - 1, "a β-clone's slow horizons must residualize away");
+  assert.equal(mv("mres", up, null, di, exBase(up)), m0up, "no benchmark -> raw fallback -> exactly M0");
+  // V2 — regime-qualified OI: building WITH the side (funding corroborating) amplifies; falling OI dampens; no OI column -> exactly M0
+  const oiUp = [], oiDn = []; for (let i = 0; i < N; i++) { oiUp.push(1e6 * Math.pow(1.02, i)); oiDn.push(1e6 * Math.pow(0.98, i)); }
+  const fPos = new Array(N).fill(2e-4), fNeg = new Array(N).fill(-2e-4);
+  assert.ok(mv("moi", up, null, di, Object.assign(exBase(up), { oi: oiUp, f: fPos })) > m0up + 1, "longs+ with corroborating funding must amplify");
+  assert.ok(mv("moi", up, null, di, Object.assign(exBase(up), { oi: oiDn, f: fPos })) < m0up - 1, "a squeeze (OI falling into strength) must dampen, not amplify");
+  assert.ok(mv("moi", down, null, di, Object.assign(exBase(down), { oi: oiUp, f: fNeg })) < m0dn - 1, "shorts+ with shorts paying must amplify the negative side");
+  assert.equal(mv("moi", up, null, di, exBase(up)), m0up, "no OI column -> unmodulated core -> exactly M0 (universe parity with the control)");
+  // V3 — crowding haircut: today's funding at its own 31d max, crowd long into a long score -> ×0.8; flat funding has no extremes
+  const fSpike = new Array(N).fill(1e-4); for (let i = di - 4; i <= di; i++) fSpike[i] = (4 + (i - (di - 4))) * 2e-4;   // ramps into a window max AT di
+  assert.ok(mv("mfund", up, null, di, Object.assign(exBase(up), { f: fSpike })) < m0up - 1, "same-side funding extreme must take the 0.8 haircut");
+  assert.equal(mv("mfund", up, null, di, Object.assign(exBase(up), { f: new Array(N).fill(1e-4) })), m0up, "flat funding is not an extreme — no haircut");
+  assert.equal(mv("mfund", up, null, di, exBase(up)), m0up, "no funding column -> exactly M0");
+  // V4 — volume participation: recent volume above the window norm nudges up, below nudges down, capped either way
+  const voHi = new Array(N).fill(1e6), voLo = new Array(N).fill(1e6);
+  for (let i = di - 4; i <= di; i++) { voHi[i] = 3e6; voLo[i] = 3e5; }
+  const partHi = mv("mpart", up, null, di, Object.assign(exBase(up), { vo: voHi })), partLo = mv("mpart", up, null, di, Object.assign(exBase(up), { vo: voLo }));
+  assert.ok(partHi > m0up && partLo < m0up, "participation must nudge in the volume's direction");
+  assert.ok(Math.abs(partHi - m0up) < Math.abs(m0up) * 0.35, "the participation nudge stays a nudge — capped, never a regime of its own");
+  assert.equal(mv("mpart", up, null, di, exBase(up)), m0up, "no volume column -> exactly M0");
 });
