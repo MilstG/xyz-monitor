@@ -899,3 +899,26 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 }
 /* line-chart readouts: on touch the finger covers the point — keep the readout clear of it */
 @media (hover:none){ .lread{pointer-events:none} }
+
+/* ===== drawer: deriv-context panel (Coinalyze · crypto universe) ===== */
+.dzsrc{font-size:10px;color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,transparent);
+  border-radius:3px;padding:1px 6px;margin-left:8px;font-weight:400;letter-spacing:.02em;vertical-align:1px}
+.dzsub{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--faint);margin:-2px 0 8px}
+.dzdot{width:7px;height:7px;border-radius:50%;background:var(--up);display:inline-block}
+.dzdot.warn{background:var(--accent)}
+.dzrefresh{margin-left:auto;font-size:10px;padding:2px 8px;background:transparent;color:var(--blue);
+  border:1px solid color-mix(in srgb,var(--blue) 45%,transparent);border-radius:3px;cursor:pointer;font-family:inherit}
+.dzrefresh:disabled{opacity:.45;cursor:default}
+.dzchips{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:0 0 10px}
+.dzchip{background:color-mix(in srgb,var(--text) 5%,transparent);border-radius:4px;padding:6px 8px}
+.dzchip .dzk{display:block;font-size:10px;color:var(--faint)}
+.dzchip .dzv{display:block;font-size:12.5px;margin-top:1px}
+.dzlbl{font-size:10px;color:var(--faint);margin:2px 0 3px}
+.dzwrap{position:relative;margin-bottom:6px}
+.dzwrap svg{width:100%;display:block;height:auto}
+#dderivs{position:relative}
+#dderivs.dzstale .dzwrap,#dderivs.dzstale .dzchips{opacity:.55}
+.dztip{position:absolute;z-index:6;background:var(--panel,#161d29);border:1px solid var(--grid,#2a3546);
+  border-radius:4px;padding:5px 8px;font-size:10.5px;line-height:1.5;pointer-events:none;white-space:nowrap}
+.dzfoot{font-size:10px;color:var(--faint);border-top:1px solid color-mix(in srgb,var(--text) 10%,transparent);
+  padding-top:6px;margin-bottom:12px}

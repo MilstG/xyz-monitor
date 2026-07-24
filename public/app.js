@@ -58,6 +58,8 @@ const COLS=[
     td:r=>`<td>${oiCell(r)}</td>`},
   {key:'sqz', label:'Squeeze', type:'num', def:'desc', tip:'Squeeze susceptibility 0\u2013100: how loaded the short-squeeze spring is over the window. Crowding (how hard shorts pay via window-avg negative funding) \u00d7 fuel (OI building) \u00d7 trigger (price pressing toward the 30d high). 0 whenever funding is positive \u2014 no crowded shorts, no squeeze. Sort descending to screen. Hover for the components.',
     td:r=>sqzCell(r)},
+  {key:'cascT', label:'Casc', type:'num', def:'desc', tip:'Liquidation-cascade flag (crypto scope only): \u25c6 with age when a 15-minute bucket in the last 24h printed a side\u2019s forced-liquidation notional \u22653\u03c3 above its own trailing 24h baseline WITH open interest dropping \u22651% in the same bucket \u2014 forced flow that actually cleared positioning. Red \u25c6 = longs liquidated (down-cascade), green \u25c6 = shorts (up-cascade). Aggregated CEX data via Coinalyze \u2014 market context for the HL name, NOT Hyperliquid-native. Hover a cell for the bucket\u2019s numbers; the drawer has the full panel. Computed server-side \u2014 board and drawer always agree.',
+    td:r=>cascCell(r)},
   {key:'carry', label:'Carry', type:'num', def:'desc', tip:'Funding carry per unit of risk: window-avg funding (APR%) \u00f7 annualized realized vol. +0.5 = the short side collects half a vol-unit per year just for holding; negative = the long side is paid. The screen for "paid to take the unpopular side." Same sign convention as the funding column.',
     td:r=>carryCell(r)},
   {key:'vol', label:'24h Vol', type:'num', td:r=>`<td class="sec">${fmtUsd(r.vol)}</td>`},
@@ -85,9 +87,14 @@ function vsvwapCell(r){ const v=r.vsvwap;
 function turnCell(r){ if(r.turn==null||!isFinite(r.turn)) return '<td><span class="na">\u2014</span></td>';
   const c=r.turn>=2?'accent':(r.turn<0.5?'sec':'');
   return `<td${c?` class="${c}"`:''} title="OI ${fmtUsd(r.oi)} \u00f7 24h vol ${fmtUsd(r.vol)} \u2014 positioning is ${r.turn.toFixed(1)}\u00d7 the daily flow">\u00d7${r.turn>=10?r.turn.toFixed(0):r.turn.toFixed(1)}</td>`; }
+function cascCell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</span></td>';
+  const c=r.casc;
+  if(!c||!c.t) return '<td><span class="na" title="no liquidation cascade flagged in the last 24h \u00b7 aggregated CEX data (Coinalyze), not HL-native \u00b7 a bucket is only judged against \u226524h of its own accumulated baseline \u2014 honest blank until then">\u00b7</span></td>';
+  const age=fmtAge(Date.now()-c.t);
+  return `<td class="${c.side==='long'?'neg':'pos'}" title="${c.side} cascade ${age} ago \u00b7 ${fmtUsd(c.liq)} of ${c.side}s force-liquidated in one 15m bucket \u00b7 OI ${c.doiPct>0?'+':''}${c.doiPct}% in the same bucket \u00b7 aggregated CEX (Coinalyze) \u2014 context for the HL name, not HL-native \u00b7 drawer has the full panel">\u25c6 ${age}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
 const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dcap','hitr','rvol','vwap','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
@@ -489,7 +496,8 @@ let renderQueued=false;
 function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAnimationFrame(()=>{renderQueued=false; render(); updateMovers();}); }
 function scCls(r){ return (r.candleTs && (Date.now()-r.candleTs>2*state.refreshMs+60000)) ? 'stale':''; }
 const XYZ_ONLY_COLS=new Set(['gap']);   // session-anchored concepts — a 24/7 market has none
-function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key) && !(state.scope==='crypto'&&XYZ_ONLY_COLS.has(c.key))); }
+const MAIN_ONLY_COLS=new Set(['cascT']);   // aggregated-CEX derivs context — exists only for the crypto universe
+function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key) && !(state.scope==='crypto'&&XYZ_ONLY_COLS.has(c.key)) && !(state.scope!=='crypto'&&MAIN_ONLY_COLS.has(c.key))); }
 let dragKey=null;
 function clearDropMarks(){ document.querySelectorAll('#head th').forEach(t=>t.classList.remove('drop-before','drop-after')); }
 function moveColumn(src, dst, after){
@@ -1324,6 +1332,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div id="dcandles"></div>
     ${splitHtml}
     <div id="dseries"></div>
+    ${r.uni==='main'?'<div id="dderivs"></div>':''}
     <div id="dledger"></div>
     <div id="dnews"></div>
     <div class="dsec">Metrics</div>
@@ -1352,6 +1361,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   loadDrawerSeries(coin);
   loadDrawerCandles(coin);
   loadDrawerLedger(coin);
+  if(r.uni==='main') loadDrawerDerivs(coin);
   fillDrawerNews(); if(!state.news) loadNews();   // slice from the shared payload; first open triggers the fetch
   { const dai=el('dai'); if(dai){ dai.onclick=()=>{ closeDetail(); openAiReport(coin); };
     // state-aware label: annotate with the shared cache's age so the group knows a read exists
@@ -1438,6 +1448,97 @@ async function loadDrawerSeries(coin){
       html+=`<div class="dsec">Funding APR ${span(s.funding)} · now ${(last>=0?'+':'')+last.toFixed(1)}%</div>${sparkline(v,{zero:true,color:'var(--blue)'})}`; }
     box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:12px">collecting — the trend appears here as history accrues server-side</div>';
   }catch(_){}
+}
+// ===== drawer: deriv-context panel (crypto universe · aggregated CEX via Coinalyze) =====
+// Everything rendered here is the server payload — chips, buckets, cascade flags. Nothing is
+// re-derived client-side, so this panel, the CASC column and any future consumer always agree.
+// Charts: mirrored hourly liquidation bars (shorts up green, longs down red) + agg-OI line on a
+// separate scale below (no dual-axis), shared crosshair + per-bucket tooltip across both.
+let DZSEQ=0;
+function loadDrawerDerivs(coin){ const box=el('dderivs'); if(!box) return; const seq=++DZSEQ;
+  fetchJSON('/api/derivs?coin='+encodeURIComponent(coin))
+    .then(d=>{ if(state.detail!==coin||seq!==DZSEQ||!box.isConnected) return; renderDerivs(box,coin,d); })
+    .catch(()=>{ if(state.detail===coin&&box.isConnected) box.innerHTML=''; }); }
+function renderDerivs(box,coin,d){
+  if(!d||d.enabled===false){ box.innerHTML=''; return; }   // no key on the server — the panel simply doesn't exist
+  const head=`<div class="dsec" data-tip="aggregated CEX liquidations + open interest for this coin \u2014 market context for the HL name, NOT Hyperliquid-native \u00b7 source: Coinalyze${d.venue?' \u00b7 venue: '+esc(d.venue)+' perp':''} \u00b7 USD values source-converted \u00b7 15-min buckets, chart aggregated hourly">Derivs context <span class="dzsrc">${esc(d.venue||'CEX')} \u00b7 coinalyze \u2014 not HL</span></div>`;
+  if(d.error&&!(d.hours&&d.hours.length)){ box.innerHTML=head+`<div class="sec" style="font-size:11.5px;margin-bottom:10px">${esc(d.error)}</div>`; return; }
+  const H=d.hours||[], roll=d.roll, now=Date.now();
+  const stale=d.staleMs!=null&&d.staleMs>2*15*60*1000;
+  const asOf=d.asOf?fmtAge(now-d.asOf)+' ago':'never';
+  const chip=(k,v,t)=>`<div class="dzchip" data-tip="${esc(t)}"><span class="dzk">${k}</span><span class="dzv">${v}</span></div>`;
+  let chips='<div class="dzchips">';
+  if(roll){
+    chips+=chip('agg OI',roll.oi!=null?fmtUsd(roll.oi):'\u2014','latest aggregated CEX open interest (USD, source-converted)');
+    chips+=chip('OI \u0394 24h',roll.doi24!=null?`<span class="${roll.doi24>=0?'pos':'neg'}">${roll.doi24>=0?'+':''}${roll.doi24}%</span>`:'\u2014','open-interest change vs the stored bucket ~24h ago \u2014 dash when accumulated coverage is thinner (honest null, never a guess)');
+    chips+=chip('long liqs 24h',`<span class="neg">${fmtUsd(roll.ll24)}</span>`,'longs force-liquidated over the last 24h of 15-min buckets');
+    chips+=chip('short liqs 24h',`<span class="pos">${fmtUsd(roll.sl24)}</span>`,'shorts force-liquidated over the last 24h of 15-min buckets');
+  }
+  const r0=state.rows.get(coin);
+  if(r0&&r0.fundPct!=null) chips+=chip('HL fund pctile',`P${r0.fundPct}`,'HL-NATIVE: where the current Hyperliquid funding rate sits in this market\u2019s own 31d hourly distribution \u2014 the one number in this panel from our own book, same percentile the funding column flags');
+  chips+='</div>';
+  const cov=d.coverageMs!=null?Math.max(1,Math.round(d.coverageMs/86400000)):null;
+  const dot=`<span class="dzdot${stale?' warn':''}" data-tip="${stale?'STALE \u2014 last successful Coinalyze fetch '+asOf+' \u00b7 HL-native data elsewhere in this drawer is unaffected':'fresh \u00b7 last fetch '+asOf}"></span>`;
+  const rbtn=`<button class="dzrefresh" id="dzref" data-tip="manual out-of-band refresh for this name (2 call-units against the shared Coinalyze budget) \u00b7 60s per-ticker cooldown, server-enforced and shared across the group \u00b7 queues behind the sweep, never blows the rate limit">refresh</button>`;
+  const sub=`<div class="dzsub">as of ${asOf} ${dot}${cov?` \u00b7 <span data-tip="how much 15-min history THIS server has accumulated for the coin \u2014 Coinalyze deletes intraday history daily, so baselines only grow here \u00b7 cascade flags need \u226524h">${cov}d accumulated</span>`:''}${rbtn}</div>`;
+  let charts='';
+  if(H.length>=6){
+    const W=560,HA=104,HB=64,mid=54,N=H.length,bw=Math.max(1,W/N-2);
+    let sc=1; for(const b of H){ if(b[1]>sc)sc=b[1]; if(b[2]>sc)sc=b[2]; }
+    const cx=i=>i*(W/N)+bw/2;
+    let g=`<line x1="0" y1="${mid}" x2="${W}" y2="${mid}" stroke="var(--grid,rgba(128,128,128,.25))" stroke-width="1"/>`;
+    const cascSet=new Set((d.casc||[]).map(f=>Math.floor(f.t/3600000)*3600000));
+    for(let i=0;i<N;i++){ const b=H[i], x=i*(W/N)+1;
+      const hs=(b[2]||0)/sc*46, hl=(b[1]||0)/sc*46;
+      g+=`<rect x="${x.toFixed(1)}" y="${(mid-hs).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(hs,0.8).toFixed(1)}" fill="var(--up)"/>`;
+      g+=`<rect x="${x.toFixed(1)}" y="${mid+1}" width="${bw.toFixed(1)}" height="${Math.max(hl,0.8).toFixed(1)}" fill="var(--down)"/>`;
+      if(cascSet.has(b[0])) g+=`<text x="${cx(i).toFixed(1)}" y="9" fill="var(--accent)" font-size="9" text-anchor="middle">\u25c6</text>`;
+    }
+    g+=`<line class="dzchA" x1="0" y1="0" x2="0" y2="${HA}" stroke="var(--accent)" stroke-width="1" opacity="0"/>`;
+    const oiV=H.map(b=>b[3]).filter(v=>v!=null);
+    let oiSvg='';
+    if(oiV.length>=2){ const mn=Math.min(...oiV),mx=Math.max(...oiV),sp=(mx-mn)||1; let pts='';
+      for(let i=0;i<N;i++){ const v=H[i][3]; if(v==null)continue; pts+=`${cx(i).toFixed(1)},${(56-((v-mn)/sp)*48).toFixed(1)} `; }
+      oiSvg=`<div class="dzlbl">agg OI (USD) \u00b7 same window</div><div class="dzwrap"><svg class="dzoi" viewBox="0 0 ${W} ${HB}" preserveAspectRatio="none"><polyline points="${pts.trim()}" fill="none" stroke="var(--blue)" stroke-width="1.6" stroke-linejoin="round"/><line class="dzchB" x1="0" y1="0" x2="0" y2="${HB}" stroke="var(--accent)" stroke-width="1" opacity="0"/><circle class="dzdotB" r="3" fill="var(--blue)" opacity="0"/></svg></div>`; }
+    charts=`<div class="dzlbl">liquidations \u00b7 hourly \u00b7 ${Math.min(48,H.length)}h <span class="pos">shorts \u25b4</span> <span class="neg">longs \u25be</span> <span style="color:var(--accent)">\u25c6 cascade</span></div><div class="dzwrap"><svg class="dzliq" viewBox="0 0 ${W} ${HA}" preserveAspectRatio="none">${g}</svg></div>${oiSvg}<div class="dztip" style="display:none"></div>`;
+  } else {
+    charts=`<div class="sec" style="font-size:11.5px;margin-bottom:8px">accumulating \u2014 the chart appears once a few hourly buckets exist${d.error?' \u00b7 '+esc(d.error):''}</div>`;
+  }
+  box.innerHTML=head+sub+chips+charts+`<div class="dzfoot">context only \u00b7 a different venue population than the HL book \u00b7 baselines grow server-side from day one</div>`;
+  box.classList.toggle('dzstale',stale);
+  dzWire(box,coin,d);
+}
+function dzWire(box,coin,d){
+  const btn=box.querySelector('#dzref');
+  if(btn){ if(d.refreshInMs>0){ btn.disabled=true; btn.textContent=`refresh \u00b7 ${Math.ceil(d.refreshInMs/1000)}s`; setTimeout(()=>{ if(state.detail===coin&&btn.isConnected){ btn.disabled=false; btn.textContent='refresh'; } },d.refreshInMs+250); }
+    btn.onclick=async()=>{ btn.disabled=true; btn.textContent='\u2026';
+      try{ const r=await fetch('/api/derivs/refresh',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({coin})});
+        const j=await r.json().catch(()=>null);
+        if(r.status===429&&j&&j.retryInMs!=null){ btn.textContent=`cooldown \u00b7 ${Math.ceil(j.retryInMs/1000)}s`; setTimeout(()=>{ if(state.detail===coin) loadDrawerDerivs(coin); },j.retryInMs+250); return; }
+        loadDrawerDerivs(coin);
+      }catch(_){ btn.disabled=false; btn.textContent='refresh'; } }; }
+  const H=d.hours||[]; if(H.length<6) return;
+  const liq=box.querySelector('.dzliq'), oi=box.querySelector('.dzoi'), tip=box.querySelector('.dztip');
+  const chA=box.querySelector('.dzchA'), chB=box.querySelector('.dzchB'), dotB=box.querySelector('.dzdotB');
+  const N=H.length, W=560, oiV=H.map(b=>b[3]).filter(v=>v!=null);
+  const mn=oiV.length?Math.min(...oiV):0, mx=oiV.length?Math.max(...oiV):1, sp=(mx-mn)||1;
+  const cascByH=new Map(); for(const f of d.casc||[]) cascByH.set(Math.floor(f.t/3600000)*3600000,f);
+  function move(ev,svg){ const r=svg.getBoundingClientRect();
+    const i=Math.max(0,Math.min(N-1,Math.floor((ev.clientX-r.left)/r.width*N)));
+    const b=H[i], x=(i*(W/N)+Math.max(1,W/N-2)/2);
+    if(chA){ chA.setAttribute('x1',x); chA.setAttribute('x2',x); chA.setAttribute('opacity','.6'); }
+    if(chB){ chB.setAttribute('x1',x); chB.setAttribute('x2',x); chB.setAttribute('opacity','.6'); }
+    if(dotB&&b[3]!=null){ dotB.setAttribute('cx',x); dotB.setAttribute('cy',56-((b[3]-mn)/sp)*48); dotB.setAttribute('opacity','1'); }
+    const f=cascByH.get(b[0]);
+    const dte=new Date(b[0]);
+    const pd=i>0&&H[i-1][3]!=null&&b[3]!=null&&H[i-1][3]>0?((b[3]/H[i-1][3]-1)*100).toFixed(2):null;
+    tip.innerHTML=`${String(dte.getUTCHours()).padStart(2,'0')}:00 UTC${f?` <span style="color:var(--accent)">\u25c6 ${esc(f.side)} cascade</span>`:''}<br/><span class="neg">long liq ${fmtUsd(b[1]||0)}</span> \u00b7 <span class="pos">short liq ${fmtUsd(b[2]||0)}</span><br/><span style="color:var(--blue)">agg OI ${b[3]!=null?fmtUsd(b[3]):'\u2014'}</span>${pd!=null?` <span class="sec">\u0394 ${pd>0?'+':''}${pd}%</span>`:''}`;
+    tip.style.display='block';
+    const br=box.getBoundingClientRect();
+    let tx=ev.clientX-br.left+12; if(tx>br.width-170) tx=Math.max(0,ev.clientX-br.left-165);
+    tip.style.left=tx+'px'; tip.style.top=(ev.clientY-br.top+14)+'px'; }
+  function out(){ tip.style.display='none'; for(const e of [chA,chB,dotB]) if(e) e.setAttribute('opacity','0'); }
+  for(const svg of [liq,oi]){ if(!svg) continue; svg.addEventListener('mousemove',e=>move(e,svg)); svg.addEventListener('mouseleave',out); }
 }
 // ===== per-ticker signal record (drawer) + full history (Signals tab search) =====
 // The drawer shows only the compact record — hit rate, per-event fractions, open count — so it
