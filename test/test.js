@@ -1901,13 +1901,14 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "renderRegime", "regimeCurveSvg", "wireRegimeControls",
     "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp",
     "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
-    "compgAligned", "compgTickLabel", "compgHoverLabel"];
+    "compgAligned", "compgTickLabel", "compgHoverLabel",
+    "cascCell", "loadDrawerDerivs", "renderDerivs", "dzWire"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
   for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7",
-    "xyzmon.density", "krow", "state.focus"]) {
+    "xyzmon.density", "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -2025,7 +2026,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/ai-report", "/api/ai-reports", "/api/health",
+    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/ai-report", "/api/ai-reports", "/api/health",
     "/api/export/ledger", "/api/news", "/api/news/channels",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
@@ -2035,6 +2036,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   }
   // Generation is a POST with its own registration — pinned separately from the GET reads.
   assert.equal(srv.split('fastify.post("/api/ai-report"').length - 1, 1, "POST /api/ai-report must be registered exactly once");
+  assert.equal(srv.split('fastify.post("/api/derivs/refresh"').length - 1, 1, "POST /api/derivs/refresh must be registered exactly once");
   // Terminal Tier-3 fallback is a POST backed by poller.askBoard — pin both.
   assert.equal(srv.split('fastify.post("/api/ask"').length - 1, 1, "POST /api/ask must be registered exactly once");
   // Admin budget reset is a POST backed by poller.resetAiDay — pin route, mapping, and export.
@@ -3976,4 +3978,208 @@ test("5m archive: source + wiring manifest (store engine, capture path, route, r
   assert.ok(/--experimental-sqlite --test/.test(pkg), "npm test must pass --experimental-sqlite");
   assert.ok(/">=22\.5/.test(pkg), "engines.node must require >= 22.5 (node:sqlite availability), pinned");
   assert.ok(/--experimental-sqlite server\.js/.test(rail), "railway startCommand must pass --experimental-sqlite");
+});
+
+// ===== Coinalyze deriv-context lane (build 2026.07.24-01) =======================================
+// Aggregated CEX liquidations + OI as crypto-universe context: pure math, accumulation store,
+// the 15-min sweep + manual refresh, the CASC column and the drawer panel. Same manifest
+// philosophy as everything else: every new symbol, route, class and const is pinned.
+
+test("czMergeHistory: dedupes by timestamp, last write wins, no-change is detected", () => {
+  const { czMergeHistory } = require("../src/compute");
+  const a = [[1000, 10, 5, 100], [2000, 20, 6, 101]];
+  const r1 = czMergeHistory(a, [[2000, 20, 6, 101], [3000, 30, 7, 99]]);
+  assert.equal(r1.changed, true);
+  assert.equal(r1.rows.length, 3);
+  assert.deepEqual(r1.rows[2], [3000, 30, 7, 99]);
+  const r2 = czMergeHistory(r1.rows, [[2000, 20, 6, 101]]);   // exact overlap only
+  assert.equal(r2.changed, false, "identical overlapping rows must not report change (ETag would churn)");
+  const r3 = czMergeHistory(r1.rows, [[2000, 25, 6, 101]]);   // re-fetched bucket grew
+  assert.equal(r3.changed, true);
+  assert.equal(r3.rows.find((x) => x[0] === 2000)[1], 25, "last write wins on a grown bucket");
+  assert.equal(r1.rows.find((x) => x[0] === 2000)[1], 20, "merge returns a NEW array — input untouched");
+});
+
+test("cascadeFlags: fires on a liq spike WITH an OI drop, never on either alone", () => {
+  const { cascadeFlags } = require("../src/compute");
+  const Q = 15 * 60 * 1000;
+  const rows = [];
+  for (let i = 0; i < 100; i++) rows.push([i * Q, 100000, 80000, 5000000]);   // calm baseline, flat OI
+  // spike WITHOUT an OI drop -> not a cascade (busy bar, nothing cleared)
+  rows.push([100 * Q, 5000000, 80000, 5000000]);
+  let f = cascadeFlags(rows);
+  assert.equal(f.length, 0, "liq spike with flat OI must not flag");
+  // spike WITH the OI drop -> long cascade
+  rows[rows.length - 1] = [100 * Q, 5000000, 80000, 4900000];   // -2% OI
+  f = cascadeFlags(rows);
+  assert.equal(f.length, 1);
+  assert.equal(f[0].side, "long");
+  assert.equal(f[0].t, 100 * Q);
+  assert.ok(f[0].doiPct < -1);
+  // OI drop WITHOUT a liq spike -> not a cascade
+  rows[rows.length - 1] = [100 * Q, 110000, 80000, 4900000];
+  f = cascadeFlags(rows);
+  assert.equal(f.length, 0, "OI drop on a calm liq bar must not flag");
+});
+
+test("cascadeFlags: short side attributes correctly and a thin baseline stays honestly silent", () => {
+  const { cascadeFlags } = require("../src/compute");
+  const Q = 15 * 60 * 1000;
+  const thin = [];
+  for (let i = 0; i < 10; i++) thin.push([i * Q, 100000, 80000, 5000000]);
+  thin.push([10 * Q, 100000, 4000000, 4800000]);
+  assert.equal(cascadeFlags(thin).length, 0, "under minSamples of baseline no bucket may be judged — honest null over a guess");
+  const rows = [];
+  for (let i = 0; i < 100; i++) rows.push([i * Q, 100000, 80000, 5000000]);
+  rows.push([100 * Q, 100000, 4000000, 4800000]);   // shorts blown out, OI cleared
+  const f = cascadeFlags(rows);
+  assert.equal(f.length, 1);
+  assert.equal(f[0].side, "short", "shorts liquidated = up-cascade, side-typed");
+});
+
+test("derivRollup: 24h side totals, latest OI, and doi24 goes null without a 24h-old reference", () => {
+  const { derivRollup } = require("../src/compute");
+  const now = 200 * 3600 * 1000, H = 3600 * 1000;
+  const rows = [];
+  for (let i = 0; i < 30; i++) rows.push([now - (30 - i) * H, 1000, 500, 4000000 + i * 10000]);
+  const r = derivRollup(rows, now);
+  // 23 buckets inside the window: the row at exactly now-24h is the OI REFERENCE (boundary is
+  // inclusive on the reference side, so a bucket is never both reference and window member).
+  assert.equal(r.ll24, 23 * 1000);
+  assert.equal(r.sl24, 23 * 500);
+  assert.equal(r.oi, 4000000 + 29 * 10000);
+  assert.ok(Number.isFinite(r.doi24) && r.doi24 > 0, "24h OI change computed against the stored bucket at/just before the cutoff");
+  const short = rows.slice(-5);   // only 5h of coverage — no 24h reference exists
+  const r2 = derivRollup(short, now);
+  assert.equal(r2.doi24, null, "thin coverage -> doi24 is an honest null, never extrapolated");
+});
+
+test("aggDerivHourly: liqs SUM into the hour bucket, OI takes the LAST 15-min sample", () => {
+  const { aggDerivHourly } = require("../src/compute");
+  const Q = 15 * 60 * 1000, H0 = 100 * 3600 * 1000;
+  const rows = [[H0, 10, 1, 100], [H0 + Q, 20, 2, 200], [H0 + 2 * Q, 30, 3, 300], [H0 + 3 * Q, 40, 4, 400],
+    [H0 + 4 * Q, 5, 6, 500]];
+  const h = aggDerivHourly(rows);
+  assert.equal(h.length, 2);
+  assert.deepEqual(h[0], [H0, 100, 10, 400], "hour 1: liqs summed, OI = end-of-hour sample");
+  assert.deepEqual(h[1], [H0 + 4 * Q, 5, 6, 500]);
+});
+
+test("store: deriv log roundtrip, flat-cutoff prune, and the symbol map survives atomically", async () => {
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzdz-"));
+  const s = openStore(dir);
+  const Q = 15 * 60 * 1000;
+  s.insertDeriv("BTC", 10 * Q, 1000, 500, 900000);
+  s.insertDeriv("BTC", 11 * Q, 1100, 501, 900001);
+  s.insertDeriv("ETH", 11 * Q, 50, 25, 80000);
+  s.insertDeriv("BTC", 12 * Q, null, 502, null);   // partial buckets persist as blanks, not zeros
+  s.flushDerivs();
+  const m = s.loadDerivs(0);
+  assert.equal(m.size, 2);
+  assert.equal(m.get("BTC").length, 3);
+  assert.deepEqual(m.get("BTC")[2], [12 * Q, null, 502, null], "nulls roundtrip as nulls — never invented zeros");
+  assert.deepEqual(m.get("ETH")[0], [11 * Q, 50, 25, 80000]);
+  // grown forming bucket re-persisted at the same ts: load must dedupe LAST-WINS, never duplicate
+  s.insertDeriv("BTC", 12 * Q, 999, 502, 777777);
+  s.flushDerivs();
+  const md = s.loadDerivs(0);
+  assert.equal(md.get("BTC").length, 3, "re-persisted boundary bucket must dedupe on load, not duplicate the ts");
+  assert.deepEqual(md.get("BTC")[2], [12 * Q, 999, 502, 777777], "last write wins for a grown bucket");
+  const removed = await s.pruneDerivs(11 * Q);
+  assert.equal(removed, 1, "flat cutoff drops exactly the rows older than `before`");
+  const m2 = s.loadDerivs(0);
+  assert.equal(m2.get("BTC").length, 2);
+  s.saveDerivMap({ ts: 123, map: { BTC: { sym: "BTCUSDT_PERP.A", venue: "Binance" } } });
+  const dm = s.loadDerivMap();
+  assert.equal(dm.ts, 123);
+  assert.equal(dm.map.BTC.sym, "BTCUSDT_PERP.A");
+  s.close();
+});
+
+test("coinalyze client: call-unit pacing, symbol-cost batching, USD source-conversion pinned", () => {
+  const fs = require("fs"), path = require("path");
+  const hl = fs.readFileSync(path.join(__dirname, "..", "src", "hyperliquid.js"), "utf8");
+  assert.ok(hl.includes("const MAX = 38;"), "coinalyze limiter must cap under the 40 calls/min ceiling");
+  assert.ok(hl.includes("symbols.length"), "batched requests must charge one call-unit PER SYMBOL, not per request");
+  assert.ok(hl.split("convert_to_usd").length - 1 >= 2, "liq + OI histories must request source-side USD conversion");
+  assert.ok(hl.includes("retry-after"), "429s must honor Retry-After");
+  assert.ok(hl.includes("createCoinalyze") && hl.includes("if (!key) return null;"), "no key -> no client, the lane never starts");
+});
+
+test("poller deriv lane: cadence, cooldown, one-code-path casc, and honest labeling pinned", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("const CZ_SWEEP_MS = 15 * 60 * 1000"), "15-min sweep cadence");
+  assert.ok(pol.includes("const CZ_REFRESH_CD = 60 * 1000"), "60s manual-refresh cooldown");
+  assert.ok(pol.includes("const CZ_BATCH = 20"), "20-symbol batches (Coinalyze max)");
+  assert.ok(pol.includes('const CZ_VENUES = ["Binance", "Bybit", "OKX"]'), "deterministic venue preference order");
+  assert.ok(/error: "cooldown", retryInMs/.test(pol), "manual refresh must enforce the cooldown server-side with retryInMs");
+  assert.ok(pol.includes("czCascLatest(r.coin)") && pol.includes("cascT: casc ? casc.t : undefined"),
+    "snapshot casc/cascT must come from the SAME czCasc the drawer payload reads — board and drawer can never disagree");
+  assert.ok(pol.includes('+ "," + (m.cascT || 0)'), "casc must ride markSig so a fired/expired flag busts the snapshot ETag");
+  assert.ok(/getDerivs,\s*\n\s*refreshDerivs,/.test(pol), "getDerivs + refreshDerivs exported");
+  assert.ok(pol.includes("derivsKey:"), "collision-proof ETag key exported for serveKeyed");
+  assert.ok(pol.includes("store.pruneDerivs(Date.now() - CZ_RETENTION)"), "retention pass wired into maintenance");
+  assert.ok(pol.includes("cascadeFlags(rows)") && pol.includes("cascadeFlags(arr)"), "flags recomputed on merge AND on boot restore");
+  assert.ok(pol.includes("COINALYZE_API_KEY"), "keyed by env, feature absent without it");
+});
+
+test("server: /api/derivs routes registered once, keyed ETag, cooldown maps to 429", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.equal(srv.split('fastify.get("/api/derivs"').length - 1, 1, "GET /api/derivs exactly once");
+  assert.equal(srv.split('fastify.post("/api/derivs/refresh"').length - 1, 1, "POST /api/derivs/refresh exactly once");
+  assert.ok(/get\("\/api\/derivs"[\s\S]{0,600}serveKeyed\(/.test(srv), "/api/derivs must serve via serveKeyed (per-coin fresh payloads — raw serveCached would collide ETags across coins)");
+  assert.ok(srv.includes('"derivs|" + poller.derivsKey(coin)'), "ETag key must come from poller.derivsKey");
+  assert.ok(/fastify\.post\("\/api\/derivs\/refresh", \{ bodyLimit: 8 \* 1024 \}/.test(srv), "refresh POST must carry a body cap");
+  assert.ok(/r\.error === "cooldown" \? reply\.code\(429\)|error === "cooldown"\) return reply\.code\(429\)/.test(srv), "cooldown must map to 429");
+});
+
+test("client: CASC column + drawer deriv panel wired, crypto-scoped, honestly labeled", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const fn of ["cascCell", "loadDrawerDerivs", "renderDerivs", "dzWire"]) {
+    const n = [...s.matchAll(new RegExp("^(?:async )?function " + fn + "\\(", "gm"))].length;
+    assert.equal(n, 1, `client function ${fn} must exist exactly once`);
+  }
+  assert.ok(s.includes("MAIN_ONLY_COLS") && s.includes("MAIN_ONLY_COLS.has(c.key)"), "cascT must be filtered out of the xyz scope like gap is out of crypto");
+  assert.ok(s.includes("'doi','sqz','cascT','carry'"), "cascT in DEFAULT_ORDER");
+  assert.ok(s.includes("key:'cascT'"), "column keys on the flat numeric sort field, not the object");
+  assert.ok(s.includes("/api/derivs?coin=") && s.includes("/api/derivs/refresh"), "drawer fetch + manual refresh endpoints wired");
+  assert.ok(s.includes("dderivs"), "drawer slot present for crypto rows");
+  assert.ok(s.includes("not HL-native") || s.includes("not Hyperliquid-native"), "aggregated-CEX labeling must be permanent in the UI");
+  assert.ok(s.includes("mousemove") && s.includes("dztip"), "shared-crosshair hover + tooltip wired on the panel charts");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const cls of [".dzchips", ".dzchip", ".dzsrc", ".dzdot", ".dzrefresh", ".dztip", ".dzfoot"])
+    assert.ok(css.includes(cls), `deriv panel CSS class missing: ${cls}`);
+});
+
+test("coinalyze client contract: header key, second-based windows, USD flag, per-symbol units", async () => {
+  const { createCoinalyze } = require("../src/hyperliquid");
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), key: opts && opts.headers && opts.headers.api_key });
+    return { ok: true, status: 200, json: async () => ([{ symbol: "BTCUSDT_PERP.A", history: [{ t: 1784900000, l: 1000, s: 500 }] }]) };
+  };
+  try {
+    const cz = createCoinalyze({ key: "k-test", log: () => {} });
+    assert.ok(cz, "client must construct with a key");
+    assert.equal(createCoinalyze({ key: "", log: () => {} }), null, "no key -> no client");
+    const from = 1784900000000, to = 1784903600000;
+    const out = await cz.liqHistory(["BTCUSDT_PERP.A", "ETHUSDT_PERP.A"], "15min", from, to);
+    assert.equal(out[0].symbol, "BTCUSDT_PERP.A");
+    const u = new URL(calls[0].url);
+    assert.equal(calls[0].key, "k-test", "api_key must travel as a header");
+    assert.equal(u.searchParams.get("symbols"), "BTCUSDT_PERP.A,ETHUSDT_PERP.A", "batch = comma-joined symbols");
+    assert.equal(u.searchParams.get("from"), String(Math.floor(from / 1000)), "windows in UNIX SECONDS, not ms");
+    assert.equal(u.searchParams.get("to"), String(Math.floor(to / 1000)));
+    assert.equal(u.searchParams.get("interval"), "15min");
+    assert.equal(u.searchParams.get("convert_to_usd"), "true", "USD conversion is source-side, stored as-received");
+    assert.equal(cz.usage().used, 2, "two symbols must charge two call-units against the 38/min budget");
+    await cz.oiHistory(["BTCUSDT_PERP.A"], "15min", from, to);
+    assert.equal(cz.usage().used, 3, "call-unit ledger accumulates across endpoints");
+  } finally { global.fetch = realFetch; }
 });
