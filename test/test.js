@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { classify, companyName } = require("../src/sectors");
-const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats } = require("../src/compute");
+const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, corrMatrix, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats } = require("../src/compute");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 
@@ -171,6 +171,25 @@ test("meanPairwiseCorr: identical series -> ~1, needs overlap", () => {
   assert.ok(pairs === 3 && corr > 0.9);
   // a single series can form no pairs
   assert.equal(meanPairwiseCorr([s1], 30).corr, null);
+});
+
+test("corrMatrix: aligned intraday returns — overlap gate, null gaps, symmetry, diagonal", () => {
+  // Pre-aligned equal-length return series on a shared grid; null marks a gap. This is the crypto
+  // correlation tab's server-side matrix (built over the 5m archive at 4h/1d/7d).
+  const base = [0.01, -0.02, 0.03, 0.00, -0.01, 0.02, 0.01, -0.03, 0.02, 0.01, -0.01, 0.02, 0.00, 0.01, -0.02, 0.03, 0.01, -0.01, 0.02, 0.00, 0.015];
+  const near = base.map((x) => x * 0.95 + 0.001);   // ~perfectly correlated
+  const gappy = base.slice(); gappy[3] = null; gappy[7] = null;   // a couple of holes, still plenty of overlap
+  const allnull = base.map(() => null);
+  const { C, N } = corrMatrix([base, near, gappy, allnull], 15);
+  assert.ok(C[0][1] > 0.99, `near-identical series should correlate ~1, got ${C[0][1]}`);
+  assert.equal(C[0][0], 1);                       // diagonal
+  assert.equal(C[1][0], C[0][1]);                 // symmetric
+  assert.equal(C[0][3], null);                    // vs all-null -> null
+  assert.equal(N[0][3], 0);                       // and zero overlap recorded
+  assert.ok(N[0][2] >= 15 && C[0][2] != null);    // gappy still clears the overlap gate
+  // Below the overlap floor -> null even when the two agree perfectly.
+  const short = [0.1, 0.2, -0.1, 0.3, 0.1, -0.2, 0.1, 0.2, -0.1, 0.3];
+  assert.equal(corrMatrix([short, short.map((x) => x * 1.1)], 15).C[0][1], null);
 });
 
 const C = require("../src/compute");
@@ -848,8 +867,8 @@ test("crypto engine purge: stored crypto claims leave the ledger at hydrate (air
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["+'x']||d.records[", "const shPanel=d&&d.shadows&&d.shadows.xyz;",
-    "b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report';",
-    "v!=='markets' && v!=='trend' && v!=='report') v='markets'",
+    "b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr';",
+    "v!=='markets' && v!=='trend' && v!=='report' && v!=='corr') v='markets'",
     "rw.uni==='main'){ box.innerHTML=''; return; } }   // crypto: no signal engine (-101)",
     "strategy shadows (earning their record)"])
     assert.ok(app.includes(pin), `client xyz-only pin missing: ${pin}`);
@@ -1880,7 +1899,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
     "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock",
     "renderRegime", "regimeCurveSvg", "wireRegimeControls",
-    "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp"];
+    "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp",
+    "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1926,6 +1946,15 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(s.includes("openCompg()") && s.includes("compgBtn") && /const COMPG=\{/.test(s), "COMP/G launcher + state missing");
   assert.ok(s.includes("function alignedDailyN") && s.includes("COMPG.mode==='spread'") && s.includes("COMPG.mode==='index'"), "COMP/G index/spread modes missing");
   assert.ok(s.includes("head==='comp'") && s.includes("TERM_VERBS=['top'") && s.includes("'corr','comp'"), "comp verb not wired into grammar/verb list");
+  // Crypto intraday correlation tab: the tab is un-gated on crypto scope, the matrix comes from
+  // the server payload (not client buildCorr on daily), the lookback is scope-aware (4h/1d/7d),
+  // and the pair view aligns on the shipped intraday series. Each of these silently reverting to
+  // the equities-only path would look fine but show an empty/wrong crypto matrix.
+  assert.ok(s.includes("/api/corr-crypto") && s.includes("function renderCorrCrypto"), "crypto corr fetch path missing");
+  assert.ok(s.includes("CORR._intraday") && s.includes("function paintCorr"), "crypto corr shared painter / intraday flag missing");
+  assert.ok(s.includes("function syncCorrLookback") && /\[\['4h','4h'\],\['1d','1d'\],\['7d','7d'\]\]/.test(s), "scope-aware 4h/1d/7d lookback missing");
+  assert.ok(s.includes("function alignedIntraday") && s.includes("CORR._bars"), "crypto pair-view intraday alignment missing");
+  assert.ok(/v!=='report' && v!=='corr'/.test(s), "corr tab must be un-gated for crypto scope in showView");
   // TERM_VERBS regression: it was referenced by termComps but never DEFINED — a silent
   // ReferenceError on every keystroke that killed ghost text + tab completion.
   assert.ok(/const TERM_VERBS=\[/.test(s), "TERM_VERBS must be defined, not just referenced (completion engine ReferenceError)");
@@ -1988,7 +2017,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/ai-report", "/api/ai-reports", "/api/health",
+    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/ai-report", "/api/ai-reports", "/api/health",
     "/api/export/ledger", "/api/news", "/api/news/channels",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
