@@ -104,6 +104,7 @@ function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Nu
 // values), `sig` = significant digits (for prices, which span 6 orders of magnitude).
 function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
+const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
 function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt }) {
   const rows = new Map();          // coin -> row
@@ -865,18 +866,30 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // client-side correlation that reads it — can populate from the hourly spine (available early, and what
   // the warm cache restores) instead of waiting on the separate rate-limited 370d daily backfill.
   function deriveDailyClose(hs) {
+    // [d, close, dayHigh, dayVol] per UTC day — close is the last hourly close, high the max hourly
+    // high, vol the summed hourly volume. Extra columns are additive: every [t,c]-shaped consumer
+    // (studies, correlation, old clients) keeps reading indices 0/1 untouched.
     const byDay = new Map();
-    for (const k of hs) { const t = k[0], c = k[4]; if (!Number.isFinite(t) || !Number.isFinite(c)) continue; const d = Math.floor(t / DAY) * DAY; const cur = byDay.get(d); if (!cur || t >= cur[0]) byDay.set(d, [t, c]); }
-    return [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => [v[0] - (v[0] % DAY), v[1]]);
+    for (const k of hs) {
+      const t = k[0], c = k[4]; if (!Number.isFinite(t) || !Number.isFinite(c)) continue;
+      const d = Math.floor(t / DAY) * DAY; let cur = byDay.get(d);
+      if (!cur) { cur = [t, c, -Infinity, 0]; byDay.set(d, cur); }
+      if (t >= cur[0]) { cur[0] = t; cur[1] = c; }
+      if (Number.isFinite(k[2]) && k[2] > cur[2]) cur[2] = k[2];
+      if (Number.isFinite(k[5]) && k[5] > 0) cur[3] += k[5];
+    }
+    return [...byDay.entries()].sort((a, b) => a[0] - b[0])
+      .map(([d, v]) => [d, v[1], Number.isFinite(v[2]) && v[2] > 0 ? sig(v[2], 7) : null, v[3] > 0 ? sig(v[3], 6) : null]);
   }
 
-  function buildDailyMain(daily, funding) {
+  function buildDailyMain(daily, funding, oi) {
     for (const r of mainMarkets()) {
       const hs = getHourly(r.coin);
       let dr = null;
-      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c]);
+      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? sigq(k.h, 7) : null, Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : null]);
       else if (hs.length > 24) dr = deriveDailyClose(hs);   // UTC-floored by construction — correct for 24/7 markets
       if (dr && dr.length) daily[r.coin] = dr.slice(-(MAIN_DAILY_DAYS + 2));
+      if (oi) { const os = oiDailySeries(r.coin); if (os) oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); }
       const fh = getFunding(r.coin);
       if (fh.length) {
         const byDay = new Map();
@@ -886,7 +899,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
   }
   function buildDaily() {
-    const daily = {}, funding = {}, overnight = {}, liveClose = {};
+    const daily = {}, funding = {}, overnight = {}, liveClose = {}, oi = {};
     const nowMs = Date.now();
     const offHours = computeOffHours(nowMs);   // kept here too for client compatibility; the snapshot copy is the fresh one
     let coins = 0, lens = 0;
@@ -894,9 +907,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
       // daily closes: prefer the real 370d backfill; otherwise bootstrap from the hourly spine
       let dr = null;
-      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c]);
+      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? sigq(k.h, 7) : null, Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : null]);
       else if (hs.length > 24) dr = deriveDailyClose(hs);
       if (dr && dr.length) { daily[r.coin] = dr; coins++; lens += dr.length; }
+      { const os = oiDailySeries(r.coin); if (os) oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); }   // daily-step OI for the backtest's OI-change signal — updates ride the daily-close sig, matching its own granularity
 
       const fh = getFunding(r.coin);                                    // hourly [t,rate] -> daily funding a 1x long pays (sum of the day's hourly rates)
       if (fh.length) {
@@ -919,8 +933,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0);   // session flip busts it (fresh liveClose/gap direction)
     if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
     dailySig = sig; dailyVer = Date.now();   // content changed -> new ETag + fresh object
-    if (crypto) buildDailyMain(daily, funding);
-    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, liveClose };
+    if (crypto) buildDailyMain(daily, funding, oi);
+    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, liveClose, oi };
   }
 
   // ---- signal engine (served at /api/signals) ---------------------------------------------
@@ -4924,6 +4938,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       else if (!order.includes(coin)) order.push(coin);   // xyz seeds join the xyz roster exactly as the universe refresh would place them
       return r;
     },
+    seedHistNow: (coin, arr) => { hist.set(coin, arr); },   // harness: seed the sampled OI/funding history ([t, oi, funding] rows) so oiDailySeries is testable without network
     seedEarnNow: (entries, study, prints) => {   // harness: inject calendar rows / study / print history so the earnings-context split is testable without network
       earnCache = { ts: Date.now(), dataTs: 1, asOf: Date.now(), windowDays: EARN_WINDOW_DAYS, source: "finnhub", error: null, entries: entries || [], recent: [], eligible: 1 };
       if (study) earnStudy = study;
