@@ -756,7 +756,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // the small nested objects are stringified (they only move on a poll / candle refresh anyway).
   function markSig(m) {
     return m.coin + "|" + m.px + "," + m.prevDay + "," + m.funding + "," + m.vol + "," + m.oi + ","
-      + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0) + "," + (m.cascT || 0)
+      + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0) + "," + (m.cascT || 0) + "," + (m.liq24 || 0)
       + "|" + (m.ref ? JSON.stringify(m.ref) : "") + (m.feat ? JSON.stringify(m.feat) : "")
       + (m.red ? JSON.stringify(m.red) : "") + (m.rvol ? JSON.stringify(m.rvol) : "")
       + (m.doi ? JSON.stringify(m.doi) : "") + (m.fundByWin ? JSON.stringify(m.fundByWin) : "") + ";";
@@ -806,9 +806,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       // detail object (hover) plus a flat numeric sort key. Same czCasc the drawer panel reads —
       // the board and the chart can never disagree on whether a cascade fired.
       const casc = r.uni === "main" && cz ? czCascLatest(r.coin) : null;
+      // 24h liquidation volume (aggregated CEX, USD source-converted): the SAME memoized rollup
+      // object the drawer chips serve — one code path, board and drawer can never disagree.
+      const droll = r.uni === "main" && cz ? czRoll.get(r.coin) : null;
       return {
         fundPct, red, rvol,
         casc: casc || undefined, cascT: casc ? casc.t : undefined,
+        liq24: droll ? (droll.ll24 || 0) + (droll.sl24 || 0) : undefined,
+        liqL24: droll ? droll.ll24 : undefined, liqS24: droll ? droll.sl24 : undefined,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
@@ -3153,6 +3158,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   const cz = crypto ? createCoinalyze({ key: process.env.COINALYZE_API_KEY || "", log }) : null;
   const czHist = new Map();      // coin -> sorted packed rows [ts, longLiqUsd, shortLiqUsd, oiUsd]
   const czCasc = new Map();      // coin -> cascade flags over the retained window (recomputed on change)
+  const czRoll = new Map();      // coin -> 24h rollup {ll24, sl24, oi, doi24} — memoized on fold; the board column AND the drawer chips read THIS one object
   const czRefreshAt = new Map(); // coin -> last manual-refresh ts (server-enforced group cooldown)
   let czMap = null;              // base asset -> { sym, venue } (persisted; null until resolved)
   let czMapAt = 0, czUnmapped = [];
@@ -3229,6 +3235,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         store.insertDeriv(coin, r[0], r[1], r[2], r[3]);
     }
     czCasc.set(coin, cascadeFlags(rows));
+    czRoll.set(coin, derivRollup(rows, Date.now()));
     return true;
   }
   async function czFetchInto(coins) {
@@ -3329,7 +3336,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const cdLeft = Math.max(0, CZ_REFRESH_CD - (Date.now() - (czRefreshAt.get(coin) || 0)));
     return { ...base, venue: czVenueLabel(coin), asOf: czLastOk || null,
       staleMs: czLastOk ? Date.now() - czLastOk : null, error: czErr,
-      roll: derivRollup(hist, Date.now()), hours, casc, cascLast: czCascLatest(coin),
+      roll: czRoll.get(coin) || null, hours, casc, cascLast: czCascLatest(coin),
       coverageMs: hist.length ? Date.now() - hist[0][0] : 0, refreshInMs: cdLeft };
   }
   function czBoot() {
@@ -3337,7 +3344,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const saved = store.loadDerivMap();
     if (saved && saved.map) { czMap = saved.map; czMapAt = saved.ts || 0; }
     const loaded = store.loadDerivs(Date.now() - CZ_RETENTION);
-    for (const [c, arr] of loaded) { czHist.set(c, arr); czCasc.set(c, cascadeFlags(arr)); }
+    for (const [c, arr] of loaded) { czHist.set(c, arr); czCasc.set(c, cascadeFlags(arr)); czRoll.set(c, derivRollup(arr, Date.now())); }
     if (loaded.size) czVer = Date.now();
     log(`Coinalyze deriv context: ENABLED — restored ${loaded.size} market(s) of accumulated 15-min history${czMap ? `, symbol map warm (${Object.keys(czMap).length} bases)` : ""}`);
     setTimeout(() => { czSweep(); }, 90 * 1000);   // first sweep after universe warmup, off the boot path
@@ -3356,7 +3363,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         for (const [c, arr] of czHist) {
           if (!arr.length || arr[0][0] >= dcut) continue;
           const i = arr.findIndex((k) => k[0] >= dcut);
-          czHist.set(c, i > 0 ? arr.slice(i) : (i === 0 ? arr : []));
+          const kept = i > 0 ? arr.slice(i) : (i === 0 ? arr : []);
+          czHist.set(c, kept);
+          czCasc.set(c, cascadeFlags(kept));
+          czRoll.set(c, derivRollup(kept, Date.now()));
         }
       }
       // mirror the same shape in memory so the hist arrays track the on-disk store
