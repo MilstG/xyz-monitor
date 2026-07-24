@@ -4554,6 +4554,10 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
   assert.ok(/'mom','momp'/.test(app), "momp must sit beside mom in DEFAULT_ORDER");
   assert.equal(app.split("colAdjacent(").length - 1, 3, "adjacency migration: one definition + prefs path + layout path");
   assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
+  // -08: the hot dot rides BOTH momentum cells — it flags the name, not the incumbent score,
+  // and must survive when only one of the two columns is visible.
+  const mompFn = app.slice(app.indexOf("function mompCell"), app.indexOf("function rsCell"));
+  assert.ok(mompFn.includes("hotdot"), "mompCell must render the hot dot like momCell does");
   // css + footer + help
   for (const cls of [".duel-verdict", ".duel-tbl", ".duel-row", ".mompw"]) assert.ok(css.includes(cls), `styles.css missing ${cls}`);
   assert.ok(html.includes("MOM+"), "index.html footer must introduce the candidate column");
