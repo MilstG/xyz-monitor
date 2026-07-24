@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.23-03";
+const VERSION = "2026.07.23-04";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -419,6 +419,17 @@ async function main() {
       () => { const s = poller.getSeries(coin) || { oi: [], funding: [] };
         return { coin, oi: downsampleSeries(s.oi, SERIES_CAP), funding: downsampleSeries(s.funding, SERIES_CAP) }; },
       { coin, oi: [], funding: [] });
+  });
+  // Crypto intraday correlation matrix (Correlation tab, crypto scope). w = 4h | 1d | 7d selects
+  // the window (and its base bar: 5m / 15m / 1h). The poller builds it over the 5m archive and
+  // memoizes per window; the ETag key folds the archive stamp so a fresh bar mints a fresh key and
+  // toggle-spam on one window 304s. Ships the matrix + per-name close series on a shared grid, so
+  // the pair view and COMP/G rebase off the exact numbers the matrix used — one source of truth.
+  fastify.get("/api/corr-crypto", (req, reply) => {
+    const win = (req.query && req.query.w) || "1d";
+    return serveKeyed(req, reply, "corr-crypto|" + win + "|" + poller.getCryptoCorrStamp(win),
+      () => poller.getCryptoCorr(win),
+      { win, enabled: false, bar: null, times: [], coins: [], C: [], N: [], minOv: 0, reason: "not built yet" });
   });
   // Claim-history browser: filter by ticker (coin=), by event type (ev=), or both. Powers the
   // drawer signal record and the Signals-tab full history search.
