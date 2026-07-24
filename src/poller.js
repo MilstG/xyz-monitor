@@ -882,12 +882,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       .map(([d, v]) => [d, v[1], Number.isFinite(v[2]) && v[2] > 0 ? sig(v[2], 7) : null, v[3] > 0 ? sig(v[3], 6) : null]);
   }
 
+  // [t,c,h,v] tuples from a row's dailyRaw + hourly spine. Full-OHLC bars map directly. Closes-only
+  // bars (a warm-cache hydrate, pre--06 files) keep their full depth for c but OVERLAY h/v from the
+  // hourly spine for the days it covers — so the level-based backtest signals ship from minute one
+  // after a redeploy instead of gating until the OHLC-upgrade queue drains. Older days simply carry
+  // null h/v until the real backfill lands (btScore's per-day px fallback handles the seam).
+  function dailyTuples(r, hs) {
+    if (r.dailyRaw && r.dailyRaw.length >= 5) {
+      if (!dailyLacksOHLC(r)) return r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? sigq(k.h, 7) : null, Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : null]);
+      const dv = hs.length > 24 ? new Map(deriveDailyClose(hs).map((k) => [k[0], k])) : null;
+      return r.dailyRaw.map((k) => {   // a -06 warm file round-trips h/v on the bar itself — prefer those, spine-overlay only the gaps
+        const e = dv && dv.get(Math.floor(k.t / DAY) * DAY);
+        const h = Number.isFinite(k.h) ? sigq(k.h, 7) : (e ? e[2] : null);
+        const v = Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : (e ? e[3] : null);
+        return [k.t, k.c, h, v];
+      });
+    }
+    return hs.length > 24 ? deriveDailyClose(hs) : null;   // UTC-floored by construction — correct for 24/7 markets
+  }
   function buildDailyMain(daily, funding, oi) {
     for (const r of mainMarkets()) {
       const hs = getHourly(r.coin);
-      let dr = null;
-      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? sigq(k.h, 7) : null, Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : null]);
-      else if (hs.length > 24) dr = deriveDailyClose(hs);   // UTC-floored by construction — correct for 24/7 markets
+      const dr = dailyTuples(r, hs);
       if (dr && dr.length) daily[r.coin] = dr.slice(-(MAIN_DAILY_DAYS + 2));
       if (oi) { const os = oiDailySeries(r.coin); if (os) oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); }
       const fh = getFunding(r.coin);
@@ -900,17 +916,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   }
   function buildDaily() {
     const daily = {}, funding = {}, overnight = {}, liveClose = {}, oi = {};
+    let ohlcN = 0, oiN = 0;   // sig terms: names whose latest tuple carries a high, and total OI points — so OHLC upgrades and OI growth bust the cache despite unchanged bar counts
     const nowMs = Date.now();
     const offHours = computeOffHours(nowMs);   // kept here too for client compatibility; the snapshot copy is the fresh one
     let coins = 0, lens = 0;
     for (const r of activeMarkets()) {
       const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
       // daily closes: prefer the real 370d backfill; otherwise bootstrap from the hourly spine
-      let dr = null;
-      if (r.dailyRaw && r.dailyRaw.length >= 5) dr = r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? sigq(k.h, 7) : null, Number.isFinite(k.v) && k.v > 0 ? sigq(k.v, 6) : null]);
-      else if (hs.length > 24) dr = deriveDailyClose(hs);
-      if (dr && dr.length) { daily[r.coin] = dr; coins++; lens += dr.length; }
-      { const os = oiDailySeries(r.coin); if (os) oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); }   // daily-step OI for the backtest's OI-change signal — updates ride the daily-close sig, matching its own granularity
+      const dr = dailyTuples(r, hs);
+      if (dr && dr.length) { daily[r.coin] = dr; coins++; lens += dr.length; if (!r.dailyRaw || !dailyLacksOHLC(r)) ohlcN++; }   // count natively-full names: each in-place OHLC upgrade moves this and busts the cache
+      { const os = oiDailySeries(r.coin); if (os) { oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); oiN += os.length; } }   // daily-step OI for the backtest's OI-change signal
 
       const fh = getFunding(r.coin);                                    // hourly [t,rate] -> daily funding a 1x long pays (sum of the day's hourly rates)
       if (fh.length) {
@@ -930,7 +945,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (offHours.closed) { const pc = priceAsOf(hs, offHours.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
       }
     }
-    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0);   // session flip busts it (fresh liveClose/gap direction)
+    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + ohlcN + ":" + oiN;   // session flip busts it (fresh liveClose/gap direction); ohlcN/oiN bust it as warm closes-only bars upgrade in place
     if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
     dailySig = sig; dailyVer = Date.now();   // content changed -> new ETag + fresh object
     if (crypto) buildDailyMain(daily, funding, oi);
@@ -2473,7 +2488,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (m.feat) r.feat = m.feat;
       if (typeof m.hourlyTs === "number") r.hourlyTs = m.hourlyTs;
       if (typeof m.dailyTs === "number") r.dailyTs = m.dailyTs;
-      if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c]) => ({ t, c }));
+      if (Array.isArray(m.daily) && m.daily.length) r.dailyRaw = m.daily.map(([t, c, h, v]) => ({ t, c, h: h == null ? undefined : h, v: v == null ? undefined : v }));   // pre--06 warm files are 2-tuples — h/v hydrate undefined and the spine overlay covers them
       if (Array.isArray(m.ph) && m.ph.length) { const cut = Date.now() - 7 * DAY; r.premH = m.ph.filter((x) => Array.isArray(x) && x[0] >= cut); }
       r.isNew = false;
       n++;
@@ -3133,7 +3148,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       markets[r.coin] = {
         ref: r.ref || null, feat: r.feat || null,
         hourlyTs: r.hourlyTs || 0, dailyTs: r.dailyTs || 0,
-        daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c]) : null,
+        daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null,   // h/v round-trip (-06) so a redeploy no longer strips the level columns; o/l stay unpersisted, so dailyLacksOHLC still queues the real backfill
         ph,   // downsampled 7d premium baseline, so redeploys keep the dislocation z-scores warm
       };
     }
@@ -4939,6 +4954,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return r;
     },
     seedHistNow: (coin, arr) => { hist.set(coin, arr); },   // harness: seed the sampled OI/funding history ([t, oi, funding] rows) so oiDailySeries is testable without network
+    hydrateFeaturesNow: hydrateFeatures,   // harness: run the warm-cache hydrate against an injected store.loadFeatures — persisted-shape compat is testable without a boot
     seedEarnNow: (entries, study, prints) => {   // harness: inject calendar rows / study / print history so the earnings-context split is testable without network
       earnCache = { ts: Date.now(), dataTs: 1, asOf: Date.now(), windowDays: EARN_WINDOW_DAYS, source: "finnhub", error: null, entries: entries || [], recent: [], eligible: 1 };
       if (study) earnStudy = study;
