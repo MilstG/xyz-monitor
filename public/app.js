@@ -611,7 +611,11 @@ function mompCell(r){
   const sign=r.momp>0?'+':'', dv=(r.mom!=null&&isFinite(r.mom))?r.momp-r.mom:null;
   const mark=(dv!=null&&Math.abs(dv)>=10&&r.momWhy)?`<i class="mompw" title="diverges ${dv>0?'+':''}${Math.round(dv)} from the incumbent — ${esc(r.momWhy)}">\u0394</i>`:'';
   const t=r.momWhy?` title="${esc(r.momWhy)}"`:'';
-  return `<td${shade(r.momp,60)}${t}><span style="color:${momColor(r.momp)};font-weight:600">${sign}${Math.round(r.momp)}</span>${mark}</td>`; }
+  // Same hot dot as the incumbent column: the flag marks the NAME (volume/premium vs its own
+  // norm), not the score — it must survive on the board even when only one of the two momentum
+  // columns is visible.
+  const hot=r.hot?'<span class="hotdot" title="volume / activity well above this market\u2019s own norm">\u25cf</span>':'';
+  return `<td${shade(r.momp,60)}${t}><span style="color:${momColor(r.momp)};font-weight:600">${sign}${Math.round(r.momp)}</span>${hot}${mark}</td>`; }
 function rsCell(r){ const bC=r.uni==='main'?state.benchMain:state.benchCoin;
   if(!bC)return '<span class="na" title="no benchmark detected">—</span>';
   if(r.coin===bC)return `<span class="sec" title="this is the benchmark">${r.uni==='main'?'BTC':'S&amp;P'}</span>`;
