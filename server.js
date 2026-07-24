@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.23-05";
+const VERSION = "2026.07.24-01";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -433,6 +433,24 @@ async function main() {
   });
   // Claim-history browser: filter by ticker (coin=), by event type (ev=), or both. Powers the
   // drawer signal record and the Signals-tab full history search.
+  // Coinalyze deriv context (crypto drawer panel + CASC column detail). Per-coin fresh payloads
+  // must go through serveKeyed (same reasoning as candles/series): the body carries live cooldown
+  // and staleness fields, so the ETag key comes from poller.derivsKey — collision-proof per
+  // (coin, content version, refresh stamp, as-of minute).
+  fastify.get("/api/derivs", (req, reply) => {
+    const coin = String((req.query && req.query.coin) || "");
+    return serveKeyed(req, reply, "derivs|" + poller.derivsKey(coin), () => poller.getDerivs(coin),
+      { coin, enabled: false, error: "unavailable" });
+  });
+  // Manual per-ticker refresh: cooldown is the group's rate limit, enforced in the poller —
+  // the client's disabled button is convenience, this check is the gate. Cooldown maps to 429.
+  fastify.post("/api/derivs/refresh", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    const coin = String((req.body && req.body.coin) || "");
+    const r = await poller.refreshDerivs(coin);
+    if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
+    if (!r.ok) return reply.code(400).send(r);
+    return r;
+  });
   fastify.get("/api/ledger", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
