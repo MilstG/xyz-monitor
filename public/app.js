@@ -6300,6 +6300,20 @@ async function aiReportChart(coin,c){
     let s='';
     for(const v of ticks){ const y=Y(v).toFixed(1);
       s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${axf(v)}</text>`; }
+    // Structural levels: the confirmed pivot clusters the analyst's void had to land on. Drawn
+    // here — before price, faint — so they read as the evidence behind the read rather than
+    // competing with the void/target annotations. Deliberately unlabelled: up to eight of them
+    // would wreck the collision-staggered label column, so the detail (touches, age, distance)
+    // lives on a hit-rect tooltip one hover away. Server-shipped with the report, never
+    // re-derived here: the chart may not disagree with the validator that accepted the read.
+    const struct=((c&&c.structLevels)||[]).filter(l=>l&&isFinite(+l.v)&&inView(+l.v)
+      &&!levels.some(x=>x.value>0&&Math.abs(+l.v/x.value-1)<0.002));
+    for(const l of struct){ const y=Y(+l.v);
+      const col=l.side==='flip'?'var(--accent)':(l.side==='res'?'var(--down)':'var(--up)');
+      const what=l.side==='flip'?'flip \u2014 has served as both resistance and support':(l.side==='res'?'resistance':'support');
+      const tip=`${fmtPrice(+l.v)} \u00b7 ${what} \u00b7 ${l.n} confirmed pivot touch${l.n===1?'':'es'}, most recent ${l.ageD}d ago \u00b7 ${l.distPct>=0?'+':''}${(+l.distPct).toFixed(1)}% from the mark \u00b7 detected structure, not an annotation \u2014 a directional read with no frozen claim must place its void on one of these or the report is rejected server-side`;
+      s+=`<line x1="${pl}" y1="${y.toFixed(1)}" x2="${W-pr}" y2="${y.toFixed(1)}" stroke="${col}" stroke-width="1" stroke-opacity="0.24" stroke-dasharray="2 4"/>`
+        +`<rect x="${pl}" y="${(y-4).toFixed(1)}" width="${W-pl-pr}" height="8" fill="transparent" data-tip="${esc(tip)}"/>`; }
     const zl=levels.find(l=>l.kind==='zone_low'), zh=levels.find(l=>l.kind==='zone_high');
     if(zl&&zh&&inView(zl.value)&&inView(zh.value)){ let zt=Y(Math.max(zl.value,zh.value)), zb=Y(Math.min(zl.value,zh.value));
       s+=`<rect x="${pl}" y="${zt.toFixed(1)}" width="${W-pl-pr}" height="${Math.max(2,zb-zt).toFixed(1)}" fill="var(--accent)" fill-opacity="0.06" stroke="var(--accent)" stroke-opacity="0.45" stroke-dasharray="3 3"/>`; }
@@ -6401,7 +6415,8 @@ async function aiReportChart(coin,c){
     } else if(c&&c.marksSuppressed){
       below+=`<div class="sec" style="font-size:10.5px;margin-top:6px">${c.marksSuppressed} signal fire(s) in the window, none from a proven-edge type \u2014 nothing marked; the ledger records them all</div>`;
     }
-    if(offView.length)    if(offView.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
+    if(offView.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">off-chart: ${offView.map(l=>`${fmtPrice(l.value)} — ${esc(l.label)} (${l.value<lo?'below':'above'} view)`).join(' · ')}</div>`;
+    if(struct.length) below+=`<div class="sec" style="font-size:11px;margin-top:4px">${struct.length} detected structural level(s) drawn faint \u2014 confirmed daily pivot clusters (<span style="color:var(--up)">support</span> \u00b7 <span style="color:var(--down)">resistance</span> \u00b7 <span style="color:var(--accent)">flip</span>); hover any for its touch count and age. Without a frozen claim, the void above had to sit on one of them.</div>`;
     if(lineMode) below+=`<div class="sec" style="font-size:11px;margin-top:4px">close-line mode — full candles return automatically as the daily backfill refreshes (warm-cache dailies carry closes only)</div>`;
     box.innerHTML=hoverChart(s,{w:W,h:H,pt,pb,xs,rows})+below;
     attachLineHover();
