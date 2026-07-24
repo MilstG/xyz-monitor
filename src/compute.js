@@ -230,6 +230,31 @@ function meanPairwiseCorr(seriesList, Ldays) {
     }
   return { corr: n ? sum / n : null, pairs: n };
 }
+// Pairwise correlation matrix over PRE-ALIGNED return series — every series is the same length on
+// a shared time grid, null marking a gap. A cell is null below `minOv` overlapping non-null pairs,
+// the same honest-overlap discipline as the daily matrix, applied to intraday bars. Returns
+// { C, N }: C the correlation matrix (1 on the diagonal, symmetric), N the overlap count behind
+// each cell so the hover can show how much history stands behind a number.
+function corrMatrix(retList, minOv) {
+  const K = retList.length;
+  const C = Array.from({ length: K }, () => new Array(K).fill(null));
+  const N = Array.from({ length: K }, () => new Array(K).fill(0));
+  for (let i = 0; i < K; i++) {
+    C[i][i] = 1;
+    const ri = retList[i]; if (!ri) continue;
+    for (let j = i + 1; j < K; j++) {
+      const rj = retList[j]; if (!rj) continue;
+      const L = Math.min(ri.length, rj.length), a = [], b = [];
+      for (let t = 0; t < L; t++) {
+        const x = ri[t], y = rj[t];
+        if (x != null && y != null && Number.isFinite(x) && Number.isFinite(y)) { a.push(x); b.push(y); }
+      }
+      const c = a.length >= minOv ? pearson(a, b) : null;
+      C[i][j] = c; C[j][i] = c; N[i][j] = a.length; N[j][i] = a.length;
+    }
+  }
+  return { C, N };
+}
 
 
 
@@ -1810,7 +1835,7 @@ function regimeAggregate(spines, opts) {
   };
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, stopGeometryOk, fadeStats, regimeAggregate,
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,

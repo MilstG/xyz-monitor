@@ -11,7 +11,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
-const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median } = require("./compute");
+const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -3334,6 +3334,64 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       days: cov.min && cov.max ? +((cov.max - cov.min) / DAY).toFixed(1) : 0 };
   }
 
+  // ---- crypto intraday correlation matrix (Correlation tab, crypto scope) ----------------------
+  // The equities correlation tab runs client-side on daily closes; crypto keeps only ~31d of daily
+  // history but 370d of 5-minute bars, so its matrix is built HERE, over intraday returns, at the
+  // window the client asks for. Base bar per window keeps every window in a healthy sample band:
+  // 4h -> 5m (~48 bars), 1d -> 15m (~96), 7d -> 1h (~168). One small payload carries the matrix AND
+  // the per-name close series (on a shared grid) so the pair view and COMP/G reproduce the exact
+  // numbers the matrix was built from — one source of truth, no second fetch. Memoized per window
+  // with a 60s floor and an archive-stamp key; degrades honestly to enabled:false with no archive.
+  const CRYPTO_CORR_WINS = { "4h": { ms: 4 * HOUR, bar: FIVE_MIN }, "1d": { ms: DAY, bar: 15 * 60000 }, "7d": { ms: 7 * DAY, bar: HOUR } };
+  const cryptoCorrMemo = new Map();
+  const CRYPTO_CORR_TTL = 60 * 1000;
+  function cryptoCorrUniverse() {
+    return [...rows.values()].filter((r) => r.uni === "main" && !r.delisted && r.px != null && r.vol != null)
+      .sort((a, b) => (b.vol || 0) - (a.vol || 0)).slice(0, 60);
+  }
+  function cryptoCorrWin(win) { return CRYPTO_CORR_WINS[win] ? win : "1d"; }
+  function getCryptoCorrStamp(win) {
+    win = cryptoCorrWin(win); const w = CRYPTO_CORR_WINS[win];
+    // fresh bar -> fresh key (bar-floored now), plus universe size so a listing change re-mints
+    return "cx:" + win + ":" + Math.floor(Date.now() / w.bar) + ":" + cryptoCorrUniverse().length;
+  }
+  function buildCryptoCorr(win) {
+    win = cryptoCorrWin(win); const w = CRYPTO_CORR_WINS[win], stamp = getCryptoCorrStamp(win);
+    if (!store.candlesEnabled || !store.candlesEnabled())
+      return { win, enabled: false, bar: w.bar, times: [], coins: [], C: [], N: [], minOv: 0, stamp,
+        reason: "5m archive disabled (needs node:sqlite / Node >= 22.5)" };
+    const now = Date.now(), from = now - w.ms - w.bar, mult = Math.max(1, Math.round(w.bar / FIVE_MIN));
+    const uni = cryptoCorrUniverse();
+    const gridStart = Math.floor((now - w.ms) / w.bar) * w.bar, times = [];
+    for (let t = gridStart; t <= now; t += w.bar) times.push(t);
+    const gi = new Map(times.map((t, i) => [t, i]));
+    const coins = [], retList = [];
+    for (const r of uni) {
+      const raw = store.readCandles(r.coin, from, now);   // packed 5m [t,o,h,l,c,v]
+      const bars = mult > 1 ? bucketCandles(raw, mult, FIVE_MIN)
+        : raw.map((k) => ({ t: k[0], c: k[4] }));
+      const closes = new Array(times.length).fill(null);
+      for (const b of bars) { const idx = gi.get(Math.floor(b.t / w.bar) * w.bar); if (idx != null && b.c != null) closes[idx] = b.c; }
+      const ret = new Array(times.length).fill(null);
+      let prev = null, prevI = -2;
+      for (let i = 0; i < times.length; i++) { const c = closes[i];
+        if (c != null && c > 0) { if (prev != null && i === prevI + 1) ret[i] = Math.log(c / prev); prev = c; prevI = i; } }
+      coins.push({ tk: r.ticker, coin: r.coin, closes: closes.map((c) => (c == null ? null : sig(c, 9))),
+        cov: closes.reduce((a, c) => a + (c != null ? 1 : 0), 0) });
+      retList.push(ret);
+    }
+    const minOv = Math.max(20, Math.floor(times.length * 0.5));
+    const { C, N } = corrMatrix(retList, minOv);
+    const Cr = C.map((row) => row.map((v) => (v == null ? null : +v.toFixed(4))));
+    return { win, enabled: true, bar: w.bar, gridLen: times.length, minOv, times, coins, C: Cr, N, stamp };
+  }
+  function getCryptoCorr(win) {
+    win = cryptoCorrWin(win); const stamp = getCryptoCorrStamp(win), m = cryptoCorrMemo.get(win), now = Date.now();
+    if (m && m.stamp === stamp && now - m.at < CRYPTO_CORR_TTL) return m.payload;
+    const payload = buildCryptoCorr(win); cryptoCorrMemo.set(win, { at: now, stamp: payload.stamp, payload });
+    return payload;
+  }
+
   // Ladder-timeframe candles for the Trend-tab chart modal (tf = 1h | 4h | 12h | 1d): EXACTLY
   // the series buildTrend feeds trendLadder for that rung — H1 is the spine's last 96 bars,
   // H4/H12 are UTC-aligned bucketCandles aggregations of the full spine, D1 is the daily series
@@ -4592,6 +4650,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getFunding,
     getCandles,
     getCandles5m,
+    getCryptoCorr, getCryptoCorrStamp,
     getCandleCoverage,
     // 5m archive freshness stamp for the route ETag: the coin's last-captured bar ts (in-memory,
     // no db hit). Advances as capture lands new bars, so a stale body is never served; a purely
