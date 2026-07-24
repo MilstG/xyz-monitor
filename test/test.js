@@ -4333,3 +4333,60 @@ test("live-score variant family (2026.07.24-05): btMomVariant executed — M0 mi
   assert.ok(Math.abs(partHi - m0up) < Math.abs(m0up) * 0.35, "the participation nudge stays a nudge — capped, never a regime of its own");
   assert.equal(mv("mpart", up, null, di, exBase(up)), m0up, "no volume column -> exactly M0");
 });
+
+test("daily payload v3 (2026.07.24-06): warm closes-only bars overlay h/v from the spine, upgrades bust the cache, warm files round-trip", () => {
+  // The -04 deploy gated Volume trend / High proximity on live: the warm cache hydrates dailyRaw
+  // as closes-only {t,c}, so every name shipped null h/v until the OHLC-upgrade queue drained —
+  // and the content signature (coins:lens:closed) couldn't see the in-place upgrades, so even the
+  // healed bars kept serving stale until a day roll. Pin all three fixes by behavior.
+  const { createPoller } = require("../src/poller");
+  const mkStore = (loadFeatures) => ({ loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadFeatures: loadFeatures || (() => null) });
+  const now = Date.now(), D0 = Math.floor(now / DAY) * DAY;
+  // hourly spine: 3 full UTC days (D-3..D-1), h = c+1, v = 10/hr -> derived day: v = 240
+  const hourly = []; for (let i = 0; i < 72; i++) { const c = 50 + (i % 24) * 0.1; hourly.push({ t: D0 - 3 * DAY + i * HOUR, o: c, h: c + 1, l: c - 1, c, v: 10 }); }
+  // 60 closes-only daily bars ending D-1 — exactly what a pre--06 warm file hydrates to
+  const closesOnly = []; for (let i = 60; i >= 1; i--) closesOnly.push({ t: D0 - i * DAY, c: 100 + i });
+
+  // (1) spine overlay: closes-only depth is preserved, spine-covered days carry h/v, older days stay null
+  const p = createPoller({ dex: "xyz", store: mkStore(), log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("xyz:AAA", { px: 101, ticker: "AAA", uni: "xyz", vol: 1e7, dailyRaw: closesOnly, dailyTs: now, hourlyRaw: hourly, hourlyTs: now });
+  p.buildDailyNow();
+  let dc = p.getDaily(); const a = dc.daily["xyz:AAA"];
+  assert.equal(a.length, 60, "full closes-only depth preserved — the overlay never shrinks history");
+  const last = a[a.length - 1];
+  assert.ok(last[2] != null && last[3] === 240, "spine-covered day carries the derived high and the summed volume");
+  assert.ok(a[0][2] == null && a[0][3] == null, "days older than the spine stay honestly null until the real backfill");
+  assert.equal(last[1], 101, "the close is still the dailyRaw close, never the derived one — one code path for c");
+
+  // (2) sig bust: an in-place OHLC upgrade (same coin count, same bar count) must produce a fresh payload
+  const ts1 = dc.dataTs;
+  const fullBars = closesOnly.map((k) => ({ t: k.t, o: k.c - 1, h: k.c + 5, l: k.c - 5, c: k.c, v: 7e5 }));
+  p.seedRowNow("xyz:AAA", { dailyRaw: fullBars });
+  p.buildDailyNow();
+  dc = p.getDaily();
+  assert.ok(dc.dataTs !== ts1, "the upgrade busts the content signature despite unchanged lengths");
+  const a2 = dc.daily["xyz:AAA"];
+  assert.ok(a2[0][2] != null && a2[0][3] === 7e5, "post-upgrade tuples carry the real backfilled h/v on every day");
+
+  // (3) warm-file compat: pre--06 2-tuples hydrate clean; -06 4-tuples round-trip h/v with no spine at all
+  const oldFile = { markets: { "xyz:OLD": { dailyTs: now, daily: closesOnly.map((k) => [k.t, k.c]) } } };
+  const newFile = { markets: { "xyz:NEW": { dailyTs: now, daily: closesOnly.map((k) => [k.t, k.c, k.c + 3, 12345]) } } };
+  for (const [file, coin, wantH] of [[oldFile, "xyz:OLD", false], [newFile, "xyz:NEW", true]]) {
+    const q = createPoller({ dex: "xyz", store: mkStore(() => file), log: () => {}, version: "test", crypto: false });
+    q.seedRowNow(coin, { px: 100, ticker: coin.slice(4), uni: "xyz", vol: 1e6 });   // roster membership comes from the universe refresh; hydrate only warms the row
+    q.hydrateFeaturesNow();
+    q.buildDailyNow();
+    const row = q.getDaily().daily[coin];
+    assert.ok(row && row.length === 60, coin + " hydrates and ships");
+    assert.equal(row[10][2] != null, wantH, coin + (wantH ? " carries the round-tripped high" : " carries null h (2-tuple file, no spine)"));
+    if (wantH) assert.equal(row[10][3], 12345, "volume round-trips the warm file");
+  }
+
+  // source pins: the persist map writes h/v, the sig carries the coverage terms
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null"), "warm persist must write 4-tuples");
+  assert.ok(pol.includes('+ ":" + ohlcN + ":" + oiN'), "content signature must carry the OHLC/OI coverage terms");
+  assert.ok(pol.includes("function dailyTuples(r, hs)"), "the shared tuple builder must exist (one code path for both universes)");
+});
