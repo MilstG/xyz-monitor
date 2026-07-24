@@ -1064,7 +1064,7 @@ function renderPairPanel(){
 // histories are honest: a name listed after the anchor rebases to its own first close and the
 // legend states the date, never a silent 100 at a different origin.
 const COMPG_PAL=['var(--accent)','var(--blue)','var(--up)','var(--down)','#b98cd6','#d6c25a','#5ac8d6','#d68f5a'];
-const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorDay:null, win:null };
+const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorTs:null, win:null, _intraday:false, _span:0 };
 function compgColor(i){ return COMPG_PAL[i%COMPG_PAL.length]; }
 function compgRowFor(tk){ tk=String(tk||'').toUpperCase(); for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; } return null; }
 // union-day alignment across N names; a name missing a day carries null (gaps stay visible)
@@ -1077,47 +1077,66 @@ function alignedDailyN(rows, Ldays){
   const series=maps.map(m=>days.map(d=>{ const v=m.get(d); return v===undefined?null:v; }));
   return {days, series};
 }
-function compgSeries(){
+// One data seam for COMP/G, so the rebase/spread/render below is universe-agnostic. Equities align
+// daily closes over the window (axis = day-ms). Crypto reads the SAME intraday closes the matrix was
+// built from (CORR._bars on CORR._times) — axis = bar timestamps in ms — so the overlay and the
+// correlation matrix agree to the number. Returns { axis(ms[]), series(closes[][]), selPresent(tk[]) }.
+function compgAligned(){
+  if(state.scope==='crypto' && CORR._intraday && CORR._bars && CORR._times){
+    const axis=CORR._times.slice();
+    const selP=COMPG.sel.filter(t=>CORR._bars.has(t));
+    return { axis, series:selP.map(t=>CORR._bars.get(t)), selPresent:selP, intraday:true };
+  }
   const L=COMPG.win||+state.corr.tf, rows=COMPG.sel.map(compgRowFor);
   const idx=COMPG.sel.map((_,i)=>i).filter(i=>rows[i]);
   const al=alignedDailyN(idx.map(i=>rows[i]), L);
-  const days=al.days;
-  if(days.length<2) return {days, lines:[], anchorIdx:0};
-  let aIdx=0; if(COMPG.anchorDay!=null){ while(aIdx<days.length-1&&days[aIdx]<COMPG.anchorDay) aIdx++; }
-  // rebase each aligned series to 100 at the anchor (or its own first close after it)
-  const reb=al.series.map(s=>{ let bi=aIdx; while(bi<s.length&&s[bi]==null) bi++;
-    if(bi>=s.length) return {vals:s.map(()=>null), lateDay:null, base:null};
-    const base=s[bi]; return {vals:s.map((v,i)=> (i<bi||v==null)?null:(v/base*100)), lateDay:bi>aIdx?days[bi]:null, base}; });
-  const rebByTk={}; idx.forEach((si,k)=>{ rebByTk[COMPG.sel[si]]=reb[k].vals; });
+  return { axis:al.days.map(d=>d*DAY), series:al.series, selPresent:idx.map(i=>COMPG.sel[i]), intraday:false };
+}
+function compgTickLabel(ts){ const d=new Date(ts), md=(d.getMonth()+1)+'/'+d.getDate();
+  return (COMPG._intraday && COMPG._span<=1.6*DAY) ? md+' '+String(d.getHours()).padStart(2,'0')+':00' : md; }
+function compgHoverLabel(ts){ const d=new Date(ts), md=(d.getMonth()+1)+'/'+d.getDate();
+  return COMPG._intraday ? md+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0') : md; }
+function compgSeries(){
+  const A=compgAligned(), axis=A.axis, series=A.series, selP=A.selPresent;
+  COMPG._intraday=!!A.intraday; COMPG._span=axis.length?axis[axis.length-1]-axis[0]:0;
+  if(axis.length<2||!selP.length) return {axis, lines:[], anchorIdx:0};
+  // anchor = first axis point at/after the chosen timestamp (index into the shared grid)
+  let aIdx=0; if(COMPG.anchorTs!=null){ while(aIdx<axis.length-1&&axis[aIdx]<COMPG.anchorTs) aIdx++; }
+  // rebase each series to 100 at the anchor (or its own first close after it, if it listed later)
+  const reb=series.map(s=>{ let bi=aIdx; while(bi<s.length&&s[bi]==null) bi++;
+    if(bi>=s.length) return {vals:s.map(()=>null), lateTs:null};
+    const base=s[bi]; return {vals:s.map((v,i)=> (i<bi||v==null)?null:(v/base*100)), lateTs:bi>aIdx?axis[bi]:null}; });
+  const rebByTk={}; selP.forEach((tk,k)=>{ rebByTk[tk]=reb[k].vals; });
+  const colorOf=tk=>compgColor(COMPG.sel.indexOf(tk));   // colour stays keyed to the chip order
   let lines;
   if(COMPG.mode==='index'){
-    lines=idx.map((si,k)=>({tk:COMPG.sel[si], color:compgColor(si), vals:reb[k].vals, lateDay:reb[k].lateDay}));
+    lines=selP.map((tk,k)=>({tk, color:colorOf(tk), vals:reb[k].vals, lateTs:reb[k].lateTs}));
   } else {
-    const vis=new Set(idx.filter(si=>!COMPG.off.has(COMPG.sel[si])).map(si=>COMPG.sel[si]));
+    const vis=new Set(selP.filter(tk=>!COMPG.off.has(tk)));
     let baseVals;
-    if(COMPG.base==='__basket'){ baseVals=days.map((_,i)=>{ let s=0,n=0; for(const tk of vis){ const v=rebByTk[tk]?rebByTk[tk][i]:null; if(v!=null){s+=v;n++;} } return n?s/n:null; }); }
-    else baseVals=rebByTk[COMPG.base]||days.map(()=>null);
-    lines=idx.map((si,k)=>({tk:COMPG.sel[si], color:compgColor(si),
-      vals:reb[k].vals.map((v,i)=> (v==null||baseVals[i]==null)?null:(v-baseVals[i])), lateDay:reb[k].lateDay}));
+    if(COMPG.base==='__basket'){ baseVals=axis.map((_,i)=>{ let s=0,n=0; for(const tk of vis){ const v=rebByTk[tk]?rebByTk[tk][i]:null; if(v!=null){s+=v;n++;} } return n?s/n:null; }); }
+    else baseVals=rebByTk[COMPG.base]||axis.map(()=>null);
+    lines=selP.map((tk,k)=>({tk, color:colorOf(tk),
+      vals:reb[k].vals.map((v,i)=> (v==null||baseVals[i]==null)?null:(v-baseVals[i])), lateTs:reb[k].lateTs}));
   }
-  return {days, lines, anchorIdx:aIdx};
+  return {axis, lines, anchorIdx:aIdx};
 }
 const CG={W:900,H:360,PL:46,PR:56,PT:12,PB:22};
 function compgSvg(S){
-  const {W,H,PL,PR,PT,PB}=CG, days=S.days, vis=S.lines.filter(l=>!COMPG.off.has(l.tk));
+  const {W,H,PL,PR,PT,PB}=CG, axis=S.axis, vis=S.lines.filter(l=>!COMPG.off.has(l.tk));
   const baseline=COMPG.mode==='index'?100:0;
   let mn=baseline,mx=baseline;
   vis.forEach(l=>l.vals.forEach(v=>{ if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; }}));
   if(mn===mx){mn-=1;mx+=1;} const pad=(mx-mn)*0.08; mn-=pad; mx+=pad;
-  const n=days.length, X=i=>PL+(n<2?0:(i/(n-1))*(W-PL-PR)), Y=v=>PT+(1-(v-mn)/(mx-mn))*(H-PT-PB);
+  const n=axis.length, X=i=>PL+(n<2?0:(i/(n-1))*(W-PL-PR)), Y=v=>PT+(1-(v-mn)/(mx-mn))*(H-PT-PB);
   let g='';
   for(let k=0;k<=5;k++){ const v=mn+(mx-mn)*k/5, y=Y(v).toFixed(1);
     g+=`<line x1="${PL}" y1="${y}" x2="${W-PR}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`
       +`<text x="${W-PR+5}" y="${(+y+3).toFixed(1)}" fill="var(--faint)" font-size="10">${COMPG.mode==='index'?v.toFixed(0):(v>=0?'+':'')+v.toFixed(1)}</text>`; }
   const yb=Y(baseline).toFixed(1);
   g+=`<line x1="${PL}" y1="${yb}" x2="${W-PR}" y2="${yb}" stroke="var(--faint)" stroke-dasharray="4 3"/>`;
-  for(let i=0;i<n;i+=Math.max(1,Math.floor(n/6))){ const d=new Date(days[i]*DAY);
-    g+=`<text x="${X(i).toFixed(1)}" y="${H-6}" fill="var(--faint)" font-size="10" text-anchor="middle">${d.getMonth()+1}/${d.getDate()}</text>`; }
+  for(let i=0;i<n;i+=Math.max(1,Math.floor(n/6))){
+    g+=`<text x="${X(i).toFixed(1)}" y="${H-6}" fill="var(--faint)" font-size="10" text-anchor="middle">${compgTickLabel(axis[i])}</text>`; }
   const ax=X(S.anchorIdx).toFixed(1);
   g+=`<line id="cg-anchor" x1="${ax}" y1="${PT}" x2="${ax}" y2="${H-PB}" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>`
     +`<rect id="cg-anchorhit" x="${(+ax-6).toFixed(1)}" y="${PT}" width="12" height="${H-PT-PB}" fill="transparent" style="cursor:ew-resize"/>`;
@@ -1129,28 +1148,38 @@ function compgSvg(S){
 function compgLegend(S){
   const rows=S.lines.map(l=>{ let li=l.vals.length-1; while(li>0&&l.vals[li]==null)li--;
     const last=l.vals[li], chg=COMPG.mode==='index'?(last!=null?last-100:null):last;
-    return {tk:l.tk,color:l.color,last,chg,lateDay:l.lateDay}; });
+    return {tk:l.tk,color:l.color,last,chg,lateTs:l.lateTs}; });
   rows.sort((a,b)=>(b.chg==null?-1e9:b.chg)-(a.chg==null?-1e9:a.chg));
   return rows.map(r=>{ const off=COMPG.off.has(r.tk)?' off':'';
-    const late=r.lateDay?` <span class="cg-late" data-tip="listed after the anchor — rebased to its own first close on this date">·${new Date(r.lateDay*DAY).getMonth()+1}/${new Date(r.lateDay*DAY).getDate()}</span>`:'';
+    const late=r.lateTs?` <span class="cg-late" data-tip="listed after the anchor — rebased to its own first close">·${compgHoverLabel(r.lateTs)}</span>`:'';
     const v=r.last==null?'<span class="na">·</span>':(COMPG.mode==='index'
       ? `${r.last.toFixed(1)} <span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}%</span>`
       : `<span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}pp</span>`);
     return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${esc(r.tk)}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
 }
 function openCompg(tickers){
-  if(state.scope==='crypto'){ const p=el('compg'); if(p) p.hidden=true; return; }   // equities-only this build
-  const uni=new Set(activeRows().map(r=>(r.ticker||'').toUpperCase()));
-  let sel=(tickers&&tickers.length?tickers.map(t=>String(t).toUpperCase()):[])
-    .filter(t=>uni.has(t)); 
+  const cr=state.scope==='crypto';
+  if(cr && !(CORR._intraday && CORR._bars && CORR._times)){
+    // COMP/G rides on the correlation matrix's intraday series — build it first, then retry.
+    const want=state.corr.ctf||'1d'; if(typeof renderCorr==='function') renderCorr();
+    let tries=0; const wait=()=>{ if(state.scope!=='crypto') return;
+      if(CORR._intraday && CORR._bars && CORR._win===want){ openCompg(tickers); }
+      else if(tries++<50){ setTimeout(wait,100); } };
+    const p0=el('compg'); if(p0){ p0.hidden=false; p0.innerHTML='<div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— building '+esc(want)+' intraday series…</span></div>'; }
+    setTimeout(wait,120); return;
+  }
+  const uni = cr ? new Set([...CORR._bars.keys()].map(t=>String(t).toUpperCase()))
+                 : new Set(activeRows().map(r=>(r.ticker||'').toUpperCase()));
+  let sel=(tickers&&tickers.length?tickers.map(t=>String(t).toUpperCase()):[]).filter(t=>uni.has(t));
   if(!sel.length){ // default: the current matrix set, top 8 by |window return|
     const rows=(CORR._rows&&CORR._rows.length?CORR._rows:corrScope());
-    const L=+state.corr.tf;
-    sel=rows.map(r=>({t:(r.ticker||'').toUpperCase(),m:Math.abs(windowRetPct(r,L)||0)}))
+    sel=rows.map(r=>({t:(r.ticker||'').toUpperCase(),m:Math.abs((cr?corrRet(r):windowRetPct(r,+state.corr.tf))||0)}))
       .sort((a,b)=>b.m-a.m).slice(0,8).map(x=>x.t); }
   sel=[...new Set(sel)].slice(0,8);
-  COMPG.sel=sel; COMPG.off=new Set(); COMPG.mode='index'; COMPG.base='__basket'; COMPG.win=+state.corr.tf;
-  COMPG.anchorDay=Math.floor(Date.now()/DAY)-COMPG.win;   // rebase from the window start
+  COMPG.sel=sel; COMPG.off=new Set(); COMPG.mode='index'; COMPG.base='__basket';
+  COMPG.win = cr ? (state.corr.ctf||'1d') : +state.corr.tf;
+  COMPG.anchorTs = cr ? (CORR._times.length?CORR._times[0]:null)
+                      : (Math.floor(Date.now()/DAY)-(+state.corr.tf))*DAY;   // rebase from the window start
   const p=el('compg'); if(p){ p.hidden=false; renderCompg(); p.scrollIntoView({behavior:'smooth',block:'nearest'}); }
 }
 function renderCompg(){
@@ -1160,12 +1189,22 @@ function renderCompg(){
   const S=compgSeries();
   const {svg,X,Y}=compgSvg(S);
   const chips=COMPG.sel.map((t,i)=>`<span class="cg-chip${COMPG.off.has(t)?' off':''}" data-tk="${esc(t)}"><span class="cg-sw" style="background:${compgColor(i)}"></span>${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`).join('');
-  const anchISO=new Date((COMPG.anchorDay)*DAY).toISOString().slice(0,10);
-  const minISO=new Date((Math.floor(Date.now()/DAY)-365)*DAY).toISOString().slice(0,10);
-  const maxISO=new Date(Math.floor(Date.now()/DAY)*DAY).toISOString().slice(0,10);
-  const presets=[[30,'30d'],[60,'60d'],[90,'90d'],[COMPG.win,'full']].map(([d,l])=>{
-    const day=Math.floor(Date.now()/DAY)-d, on=Math.abs((COMPG.anchorDay||0)-day)<1?' on':'';
-    return `<button class="cg-pill${on}" data-cgd="${d}">${l}</button>`; }).join('');
+  const cr=COMPG._intraday, ax=S.axis;
+  let anchorCtl;
+  if(cr){
+    const cpick=(ts,lbl)=>{ const on=(COMPG.anchorTs!=null&&Math.abs(COMPG.anchorTs-ts)<1)?' on':''; return `<button class="cg-pill${on}" data-cgts="${ts}">${lbl}</button>`; };
+    anchorCtl = ax.length>=2
+      ? `<span class="cg-lbl">rebase</span>${cpick(ax[0],'start')}${cpick(ax[Math.floor((ax.length-1)/2)],'mid')}${cpick(ax[Math.max(0,ax.length-2)],'recent')}<span class="cg-lbl">or drag the amber line</span>`
+      : `<span class="cg-lbl">rebase — drag the amber line</span>`;
+  } else {
+    const anchISO=new Date((COMPG.anchorTs!=null?COMPG.anchorTs:Date.now())).toISOString().slice(0,10);
+    const minISO=new Date((Math.floor(Date.now()/DAY)-365)*DAY).toISOString().slice(0,10);
+    const maxISO=new Date(Math.floor(Date.now()/DAY)*DAY).toISOString().slice(0,10);
+    const presets=[[30,'30d'],[60,'60d'],[90,'90d'],[COMPG.win,'full']].map(([d,l])=>{
+      const ts=(Math.floor(Date.now()/DAY)-d)*DAY, on=Math.abs((COMPG.anchorTs||0)-ts)<DAY?' on':'';
+      return `<button class="cg-pill${on}" data-cgd="${d}">${l}</button>`; }).join('');
+    anchorCtl=`<span class="cg-lbl">rebase</span>${presets}<input type="date" id="cg-date" value="${anchISO}" min="${minISO}" max="${maxISO}"/><span class="cg-lbl">or drag the amber line</span>`;
+  }
   const baseOpts=`<option value="__basket">equal-wt basket</option>`+COMPG.sel.map(t=>`<option value="${esc(t)}"${COMPG.base===t?' selected':''}>${esc(t)}</option>`).join('');
   p.hidden=false;
   p.innerHTML=`
@@ -1176,21 +1215,20 @@ function renderCompg(){
         <button data-cgm="spread"${COMPG.mode==='spread'?' class="on"':''}>Spread</button></span></div>
     <div class="cg-ctrls">
       <div class="cg-chips">${chips}</div>
-      <div class="cg-anchorctl"><span class="cg-lbl">rebase</span>${presets}
-        <input type="date" id="cg-date" value="${anchISO}" min="${minISO}" max="${maxISO}"/>
-        <span class="cg-lbl">or drag the amber line</span></div>
+      <div class="cg-anchorctl">${anchorCtl}</div>
       <div class="cg-basectl"${COMPG.mode==='spread'?'':' hidden'}><span class="cg-lbl">vs</span><select id="cg-base">${baseOpts}</select></div>
     </div>
     <div class="cg-chartwrap">${svg}<div class="cg-read" id="cg-read"></div></div>
     <div class="cg-legend">${compgLegend(S)}</div>
     <div class="cg-foot">${COMPG.mode==='index'
-      ? `Each name rebased to 100 at the anchor (${new Date((COMPG.anchorDay)*DAY).getMonth()+1}/${new Date((COMPG.anchorDay)*DAY).getDate()}). Above 100 = outperformed since; below = lagged. A name listed after the anchor starts at its own first close (dated in the legend).`
+      ? `Each name rebased to 100 at the anchor (${compgHoverLabel(COMPG.anchorTs)}). Above 100 = outperformed since; below = lagged. A name listed after the anchor starts at its own first close (dated in the legend).`
       : `Each name minus ${COMPG.base==='__basket'?'the equal-weight basket of visible names':esc(COMPG.base)}, in percentage points. Zero = moving with the ${COMPG.base==='__basket'?'group':'base'}; positive = leading it.`}</div>`;
   // wire
   el('cg-close').onclick=()=>{ p.hidden=true; };
   p.querySelectorAll('#cg-mode button').forEach(b=>b.onclick=()=>{ COMPG.mode=b.dataset.cgm; renderCompg(); });
-  p.querySelectorAll('[data-cgd]').forEach(b=>b.onclick=()=>{ COMPG.anchorDay=Math.floor(Date.now()/DAY)-(+b.dataset.cgd); renderCompg(); });
-  const dt=el('cg-date'); if(dt) dt.onchange=()=>{ const d=Math.floor(new Date(dt.value+'T00:00:00Z').getTime()/DAY); if(isFinite(d)){ COMPG.anchorDay=d; renderCompg(); } };
+  p.querySelectorAll('[data-cgd]').forEach(b=>b.onclick=()=>{ COMPG.anchorTs=(Math.floor(Date.now()/DAY)-(+b.dataset.cgd))*DAY; renderCompg(); });
+  p.querySelectorAll('[data-cgts]').forEach(b=>b.onclick=()=>{ COMPG.anchorTs=+b.dataset.cgts; renderCompg(); });
+  const dt=el('cg-date'); if(dt) dt.onchange=()=>{ const t=new Date(dt.value+'T00:00:00Z').getTime(); if(isFinite(t)){ COMPG.anchorTs=t; renderCompg(); } };
   const bs=el('cg-base'); if(bs) bs.onchange=()=>{ COMPG.base=bs.value; renderCompg(); };
   p.querySelectorAll('.cg-chip').forEach(c=>c.onclick=e=>{ const t=c.dataset.tk;
     if(e.target.dataset.x){ COMPG.sel=COMPG.sel.filter(x=>x!==t); COMPG.off.delete(t); if(COMPG.base===t)COMPG.base='__basket'; renderCompg(); return; }
@@ -1200,23 +1238,22 @@ function renderCompg(){
 }
 function compgWireChart(S,X,Y){
   const svg=el('cg-chart'), read=el('cg-read'), cx=el('cg-cx'), dots=el('cg-dots'); if(!svg) return;
-  const {W,PL,PR,PT,PB,H}=CG, n=S.days.length, vis=S.lines.filter(l=>!COMPG.off.has(l.tk));
+  const {W,PL,PR,PT,PB,H}=CG, n=S.axis.length, vis=S.lines.filter(l=>!COMPG.off.has(l.tk));
   const idxAt=e=>{ const r=svg.getBoundingClientRect(); const xv=(e.clientX-r.left)/r.width*W;
     let i=Math.round((xv-PL)/(W-PL-PR)*(n-1)); return Math.max(0,Math.min(n-1,i)); };
   const hit=el('cg-anchorhit'); if(hit) hit.addEventListener('mousedown',()=>{COMPG._drag=true;});
   if(!COMPG._dragBound){ COMPG._dragBound=true; window.addEventListener('mouseup',()=>{COMPG._drag=false;}); }
   svg.addEventListener('mousemove',e=>{
-    if(COMPG._drag){ const i=idxAt(e); COMPG.anchorDay=S.days[i]; renderCompg(); return; }
+    if(COMPG._drag){ const i=idxAt(e); COMPG.anchorTs=S.axis[i]; renderCompg(); return; }
     const i=idxAt(e), x=X(i); cx.setAttribute('x1',x); cx.setAttribute('x2',x); cx.setAttribute('opacity','0.7');
     let d='',rows=[]; vis.forEach(l=>{ const v=l.vals[i]; if(v==null)return;
       d+=`<circle cx="${x.toFixed(1)}" cy="${Y(v).toFixed(1)}" r="2.6" fill="${l.color}"/>`; rows.push({tk:l.tk,color:l.color,v}); });
     dots.innerHTML=d; rows.sort((a,b)=>b.v-a.v);
-    const dd=new Date(S.days[i]*DAY);
-    read.innerHTML=`<div class="cg-rdate">${dd.getMonth()+1}/${dd.getDate()}</div>`+rows.map(r=>`<div class="cg-rd"><span><span style="color:${r.color}">■</span> ${esc(r.tk)}</span><span>${COMPG.mode==='index'?r.v.toFixed(1):(r.v>=0?'+':'')+r.v.toFixed(1)}</span></div>`).join('');
+    read.innerHTML=`<div class="cg-rdate">${compgHoverLabel(S.axis[i])}</div>`+rows.map(r=>`<div class="cg-rd"><span><span style="color:${r.color}">■</span> ${esc(r.tk)}</span><span>${COMPG.mode==='index'?r.v.toFixed(1):(r.v>=0?'+':'')+r.v.toFixed(1)}</span></div>`).join('');
     read.style.display='block'; const rr=svg.getBoundingClientRect(), px=(x/W)*rr.width;
     read.style.left=(px>rr.width-170?px-160:px+12)+'px';
   });
-  svg.addEventListener('mouseleave',()=>{ if(dragging)return; cx.setAttribute('opacity','0'); dots.innerHTML=''; read.style.display='none'; });
+  svg.addEventListener('mouseleave',()=>{ if(COMPG._drag)return; cx.setAttribute('opacity','0'); dots.innerHTML=''; read.style.display='none'; });
 }
 
 // ===== CSV export =====
@@ -2528,7 +2565,7 @@ function applyScope(){
   // true to show in crypto scope.
   document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  { const cg=el('compgBtn'); if(cg) cg.hidden=cr; }   // COMP/G overlay is equities-only for now (crypto is intraday; the overlay follows next build)
+  { const cg=el('compgBtn'); if(cg) cg.hidden=false; }   // COMP/G now runs on both universes (crypto uses the matrix's intraday series)
   if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr') { showView('markets'); }
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); }   // repaint the matrix for the new universe/data source
@@ -4384,7 +4421,7 @@ corr:`
 <div class="hlp-h">Co-movers &amp; hedges (click a ticker label)</div>
 <p>The names that move with it (proxies, contagion map) and against it (natural hedges). Strongest-pairs below surfaces the tightest relationships across the whole set. ↓ CSV exports the matrix.</p>
 <div class="hlp-h">COMP/G — N-name comparison</div>
-<p>The pair view generalized. <b>COMP/G</b> (button top-right, or <span class="amber">comp NVDA AAPL MSFT …</span> in the terminal) rebases every selected name to <b>100</b> at a chosen date and overlays them — "how have these six traded relative to each other since X." Set the anchor with the presets, the date picker, or by <b>dragging the amber line</b>. <b>Spread mode</b> plots each name minus the equal-weight basket of visible names (or a base you pick) in percentage points — a clean read on who's leading and lagging the group. Runs on the daily closes already loaded, so it's instant and never hits the server. A name listed after the anchor rebases to its own first close, dated in the legend — no fake shared origin.</p>`,
+<p>The pair view generalized. <b>COMP/G</b> (button top-right, or <span class="amber">comp NVDA AAPL MSFT …</span> in the terminal) rebases every selected name to <b>100</b> at a chosen date and overlays them — "how have these six traded relative to each other since X." Set the anchor with the presets, the date picker, or by <b>dragging the amber line</b>. <b>Spread mode</b> plots each name minus the equal-weight basket of visible names (or a base you pick) in percentage points — a clean read on who's leading and lagging the group. Runs on the closes already loaded — daily on equities, the shared intraday grid (4h/1d/7d) on crypto, the same series the correlation matrix uses — so it's instant and never adds a fetch. A name listed after the anchor rebases to its own first close, dated in the legend — no fake shared origin.</p>`,
 sessions:`
 <div class="hlp-h">Session decomposition — the flagship</div>
 <p>What an <b>overnight</b> (close→open), <b>weekend</b> (Fri→Mon), and <b>cash</b> (open→close) hold actually pays, pooled one equal-weight bet per calendar boundary across the equity class, compounded into equity curves. <b>Gross</b> vs <b>net</b>: the shaded band is the running funding drag — an edge that dies net-of-funding is not an edge, it's a donation. A persistently rising overnight curve while the cash curve is flat is the classic overnight effect; the drawer's "where the 30d return happened" split is the per-name version of the same question.</p>
@@ -4668,9 +4705,8 @@ function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.s
     return `<span class="tp-deep" data-tcmd="${g.ticker}">${tpad(g.ticker,6)}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
   termOut(`<span class="amber">⚡ ${groups.length} active signal${groups.length>1?'s':''}</span> <span class="tp-trans">· ledgered &amp; resolved out-of-sample</span>\n${rows}`); }
 function termReport(r){ termOut(`${termTkHdr(r)}\n<span class="tp-trans">opening the AI analyst report…</span>`); openAiReport(r.coin); }
-function termComp(tickers){ if(state.scope==='crypto') return termOut('<span class="tp-trans">COMP/G runs on the equities side for now — the crypto correlation tab (matrix + pair view) is on the 4h/1d/7d intraday windows.</span>');
-  showView('corr');
-  setTimeout(()=>openCompg(tickers), 40);   // let openCorr build the matrix context first
+function termComp(tickers){ showView('corr');
+  setTimeout(()=>openCompg(tickers), 40);   // openCompg self-defers on crypto until the matrix's intraday series is ready
   termOut(`<span class="tp-hd">comp</span> ${tickers.map(t=>tesc(t)).join(' · ')} <span class="tp-trans">· COMP/G — ${tickers.length} names rebased to 100 over ${tfLabel()}</span>`); }
 function termCorr(a,b){ const ra=termFind(a), rb=termFind(b); if(!ra||!rb) return termErr('need two tickers — e.g. corr btc eth');
   const ma=dailyReturns(ra), mb=dailyReturns(rb); if(!ma||!mb) return termOut(`<span class="sec">not enough daily history for ${tesc(ra.ticker)} × ${tesc(rb.ticker)} yet</span>`);
