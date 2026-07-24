@@ -995,6 +995,168 @@ function renderPairPanel(){
   el('pairclose').onclick=()=>{ state.corr.pair=null; p.hidden=true; };
 }
 
+// ===== COMP/G — N-name normalized comparison =============================================
+// The pair view generalized to N names: rebase every series to 100 at a chosen anchor date and
+// overlay (index mode), or plot each name minus the equal-weight basket / a chosen base in
+// percentage points (spread mode). Runs entirely on r.daily — the same daily closes the board
+// and the pair view already consume — so it's 100% client-side, zero server calls. Ragged
+// histories are honest: a name listed after the anchor rebases to its own first close and the
+// legend states the date, never a silent 100 at a different origin.
+const COMPG_PAL=['var(--accent)','var(--blue)','var(--up)','var(--down)','#b98cd6','#d6c25a','#5ac8d6','#d68f5a'];
+const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorDay:null, win:null };
+function compgColor(i){ return COMPG_PAL[i%COMPG_PAL.length]; }
+function compgRowFor(tk){ tk=String(tk||'').toUpperCase(); for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; } return null; }
+// union-day alignment across N names; a name missing a day carries null (gaps stay visible)
+function alignedDailyN(rows, Ldays){
+  const cutoff=Math.floor(Date.now()/DAY)-Ldays;
+  const maps=rows.map(r=>{ const m=new Map(), c=r&&r.daily?r.daily:[];
+    for(const k of c){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)&&d>=cutoff) m.set(d,cl); } return m; });
+  const dayset=new Set(); maps.forEach(m=>m.forEach((_,d)=>dayset.add(d)));
+  const days=[...dayset].sort((x,y)=>x-y);
+  const series=maps.map(m=>days.map(d=>{ const v=m.get(d); return v===undefined?null:v; }));
+  return {days, series};
+}
+function compgSeries(){
+  const L=COMPG.win||+state.corr.tf, rows=COMPG.sel.map(compgRowFor);
+  const idx=COMPG.sel.map((_,i)=>i).filter(i=>rows[i]);
+  const al=alignedDailyN(idx.map(i=>rows[i]), L);
+  const days=al.days;
+  if(days.length<2) return {days, lines:[], anchorIdx:0};
+  let aIdx=0; if(COMPG.anchorDay!=null){ while(aIdx<days.length-1&&days[aIdx]<COMPG.anchorDay) aIdx++; }
+  // rebase each aligned series to 100 at the anchor (or its own first close after it)
+  const reb=al.series.map(s=>{ let bi=aIdx; while(bi<s.length&&s[bi]==null) bi++;
+    if(bi>=s.length) return {vals:s.map(()=>null), lateDay:null, base:null};
+    const base=s[bi]; return {vals:s.map((v,i)=> (i<bi||v==null)?null:(v/base*100)), lateDay:bi>aIdx?days[bi]:null, base}; });
+  const rebByTk={}; idx.forEach((si,k)=>{ rebByTk[COMPG.sel[si]]=reb[k].vals; });
+  let lines;
+  if(COMPG.mode==='index'){
+    lines=idx.map((si,k)=>({tk:COMPG.sel[si], color:compgColor(si), vals:reb[k].vals, lateDay:reb[k].lateDay}));
+  } else {
+    const vis=new Set(idx.filter(si=>!COMPG.off.has(COMPG.sel[si])).map(si=>COMPG.sel[si]));
+    let baseVals;
+    if(COMPG.base==='__basket'){ baseVals=days.map((_,i)=>{ let s=0,n=0; for(const tk of vis){ const v=rebByTk[tk]?rebByTk[tk][i]:null; if(v!=null){s+=v;n++;} } return n?s/n:null; }); }
+    else baseVals=rebByTk[COMPG.base]||days.map(()=>null);
+    lines=idx.map((si,k)=>({tk:COMPG.sel[si], color:compgColor(si),
+      vals:reb[k].vals.map((v,i)=> (v==null||baseVals[i]==null)?null:(v-baseVals[i])), lateDay:reb[k].lateDay}));
+  }
+  return {days, lines, anchorIdx:aIdx};
+}
+const CG={W:900,H:360,PL:46,PR:56,PT:12,PB:22};
+function compgSvg(S){
+  const {W,H,PL,PR,PT,PB}=CG, days=S.days, vis=S.lines.filter(l=>!COMPG.off.has(l.tk));
+  const baseline=COMPG.mode==='index'?100:0;
+  let mn=baseline,mx=baseline;
+  vis.forEach(l=>l.vals.forEach(v=>{ if(v!=null){ if(v<mn)mn=v; if(v>mx)mx=v; }}));
+  if(mn===mx){mn-=1;mx+=1;} const pad=(mx-mn)*0.08; mn-=pad; mx+=pad;
+  const n=days.length, X=i=>PL+(n<2?0:(i/(n-1))*(W-PL-PR)), Y=v=>PT+(1-(v-mn)/(mx-mn))*(H-PT-PB);
+  let g='';
+  for(let k=0;k<=5;k++){ const v=mn+(mx-mn)*k/5, y=Y(v).toFixed(1);
+    g+=`<line x1="${PL}" y1="${y}" x2="${W-PR}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`
+      +`<text x="${W-PR+5}" y="${(+y+3).toFixed(1)}" fill="var(--faint)" font-size="10">${COMPG.mode==='index'?v.toFixed(0):(v>=0?'+':'')+v.toFixed(1)}</text>`; }
+  const yb=Y(baseline).toFixed(1);
+  g+=`<line x1="${PL}" y1="${yb}" x2="${W-PR}" y2="${yb}" stroke="var(--faint)" stroke-dasharray="4 3"/>`;
+  for(let i=0;i<n;i+=Math.max(1,Math.floor(n/6))){ const d=new Date(days[i]*DAY);
+    g+=`<text x="${X(i).toFixed(1)}" y="${H-6}" fill="var(--faint)" font-size="10" text-anchor="middle">${d.getMonth()+1}/${d.getDate()}</text>`; }
+  const ax=X(S.anchorIdx).toFixed(1);
+  g+=`<line id="cg-anchor" x1="${ax}" y1="${PT}" x2="${ax}" y2="${H-PB}" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>`
+    +`<rect id="cg-anchorhit" x="${(+ax-6).toFixed(1)}" y="${PT}" width="12" height="${H-PT-PB}" fill="transparent" style="cursor:ew-resize"/>`;
+  vis.forEach(l=>{ let d='',st=false; l.vals.forEach((v,i)=>{ if(v==null){st=false;return;} d+=(st?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' '; st=true; });
+    if(d) g+=`<path d="${d}" fill="none" stroke="${l.color}" stroke-width="1.4"/>`; });
+  g+=`<line id="cg-cx" x1="0" y1="${PT}" x2="0" y2="${H-PB}" stroke="var(--muted)" stroke-dasharray="2 2" opacity="0"/><g id="cg-dots"></g>`;
+  return {svg:`<svg id="cg-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${g}</svg>`, X, Y};
+}
+function compgLegend(S){
+  const rows=S.lines.map(l=>{ let li=l.vals.length-1; while(li>0&&l.vals[li]==null)li--;
+    const last=l.vals[li], chg=COMPG.mode==='index'?(last!=null?last-100:null):last;
+    return {tk:l.tk,color:l.color,last,chg,lateDay:l.lateDay}; });
+  rows.sort((a,b)=>(b.chg==null?-1e9:b.chg)-(a.chg==null?-1e9:a.chg));
+  return rows.map(r=>{ const off=COMPG.off.has(r.tk)?' off':'';
+    const late=r.lateDay?` <span class="cg-late" data-tip="listed after the anchor — rebased to its own first close on this date">·${new Date(r.lateDay*DAY).getMonth()+1}/${new Date(r.lateDay*DAY).getDate()}</span>`:'';
+    const v=r.last==null?'<span class="na">·</span>':(COMPG.mode==='index'
+      ? `${r.last.toFixed(1)} <span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}%</span>`
+      : `<span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}pp</span>`);
+    return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${esc(r.tk)}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
+}
+function openCompg(tickers){
+  const uni=new Set(activeRows().map(r=>(r.ticker||'').toUpperCase()));
+  let sel=(tickers&&tickers.length?tickers.map(t=>String(t).toUpperCase()):[])
+    .filter(t=>uni.has(t)); 
+  if(!sel.length){ // default: the current matrix set, top 8 by |window return|
+    const rows=(CORR._rows&&CORR._rows.length?CORR._rows:corrScope());
+    const L=+state.corr.tf;
+    sel=rows.map(r=>({t:(r.ticker||'').toUpperCase(),m:Math.abs(windowRetPct(r,L)||0)}))
+      .sort((a,b)=>b.m-a.m).slice(0,8).map(x=>x.t); }
+  sel=[...new Set(sel)].slice(0,8);
+  COMPG.sel=sel; COMPG.off=new Set(); COMPG.mode='index'; COMPG.base='__basket'; COMPG.win=+state.corr.tf;
+  COMPG.anchorDay=Math.floor(Date.now()/DAY)-COMPG.win;   // rebase from the window start
+  const p=el('compg'); if(p){ p.hidden=false; renderCompg(); p.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+}
+function renderCompg(){
+  const p=el('compg'); if(!p) return;
+  if(COMPG.sel.length<2){ p.hidden=false; p.innerHTML=`<div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— normalized comparison</span> <button class="btn xtiny" id="cg-close" title="close" style="float:right">✕</button></div><div class="sec" style="margin-top:6px">Add at least two names — click tickers in the matrix, or run <span class="amber">comp NVDA AAPL MSFT</span> in the terminal.</div>`;
+    const c=el('cg-close'); if(c) c.onclick=()=>{ p.hidden=true; }; return; }
+  const S=compgSeries();
+  const {svg,X,Y}=compgSvg(S);
+  const chips=COMPG.sel.map((t,i)=>`<span class="cg-chip${COMPG.off.has(t)?' off':''}" data-tk="${esc(t)}"><span class="cg-sw" style="background:${compgColor(i)}"></span>${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`).join('');
+  const anchISO=new Date((COMPG.anchorDay)*DAY).toISOString().slice(0,10);
+  const minISO=new Date((Math.floor(Date.now()/DAY)-365)*DAY).toISOString().slice(0,10);
+  const maxISO=new Date(Math.floor(Date.now()/DAY)*DAY).toISOString().slice(0,10);
+  const presets=[[30,'30d'],[60,'60d'],[90,'90d'],[COMPG.win,'full']].map(([d,l])=>{
+    const day=Math.floor(Date.now()/DAY)-d, on=Math.abs((COMPG.anchorDay||0)-day)<1?' on':'';
+    return `<button class="cg-pill${on}" data-cgd="${d}">${l}</button>`; }).join('');
+  const baseOpts=`<option value="__basket">equal-wt basket</option>`+COMPG.sel.map(t=>`<option value="${esc(t)}"${COMPG.base===t?' selected':''}>${esc(t)}</option>`).join('');
+  p.hidden=false;
+  p.innerHTML=`
+    <div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— ${COMPG.sel.length} names · rebased to 100 · ${tfLabel()} window</span>
+      <button class="btn xtiny" id="cg-close" title="close" style="float:right">✕</button>
+      <span class="seg cg-seg" id="cg-mode" style="float:right;margin-right:8px">
+        <button data-cgm="index"${COMPG.mode==='index'?' class="on"':''}>Index =100</button>
+        <button data-cgm="spread"${COMPG.mode==='spread'?' class="on"':''}>Spread</button></span></div>
+    <div class="cg-ctrls">
+      <div class="cg-chips">${chips}</div>
+      <div class="cg-anchorctl"><span class="cg-lbl">rebase</span>${presets}
+        <input type="date" id="cg-date" value="${anchISO}" min="${minISO}" max="${maxISO}"/>
+        <span class="cg-lbl">or drag the amber line</span></div>
+      <div class="cg-basectl"${COMPG.mode==='spread'?'':' hidden'}><span class="cg-lbl">vs</span><select id="cg-base">${baseOpts}</select></div>
+    </div>
+    <div class="cg-chartwrap">${svg}<div class="cg-read" id="cg-read"></div></div>
+    <div class="cg-legend">${compgLegend(S)}</div>
+    <div class="cg-foot">${COMPG.mode==='index'
+      ? `Each name rebased to 100 at the anchor (${new Date((COMPG.anchorDay)*DAY).getMonth()+1}/${new Date((COMPG.anchorDay)*DAY).getDate()}). Above 100 = outperformed since; below = lagged. A name listed after the anchor starts at its own first close (dated in the legend).`
+      : `Each name minus ${COMPG.base==='__basket'?'the equal-weight basket of visible names':esc(COMPG.base)}, in percentage points. Zero = moving with the ${COMPG.base==='__basket'?'group':'base'}; positive = leading it.`}</div>`;
+  // wire
+  el('cg-close').onclick=()=>{ p.hidden=true; };
+  p.querySelectorAll('#cg-mode button').forEach(b=>b.onclick=()=>{ COMPG.mode=b.dataset.cgm; renderCompg(); });
+  p.querySelectorAll('[data-cgd]').forEach(b=>b.onclick=()=>{ COMPG.anchorDay=Math.floor(Date.now()/DAY)-(+b.dataset.cgd); renderCompg(); });
+  const dt=el('cg-date'); if(dt) dt.onchange=()=>{ const d=Math.floor(new Date(dt.value+'T00:00:00Z').getTime()/DAY); if(isFinite(d)){ COMPG.anchorDay=d; renderCompg(); } };
+  const bs=el('cg-base'); if(bs) bs.onchange=()=>{ COMPG.base=bs.value; renderCompg(); };
+  p.querySelectorAll('.cg-chip').forEach(c=>c.onclick=e=>{ const t=c.dataset.tk;
+    if(e.target.dataset.x){ COMPG.sel=COMPG.sel.filter(x=>x!==t); COMPG.off.delete(t); if(COMPG.base===t)COMPG.base='__basket'; renderCompg(); return; }
+    if(COMPG.off.has(t))COMPG.off.delete(t); else COMPG.off.add(t); renderCompg(); });
+  p.querySelectorAll('.cg-lg').forEach(l=>l.onclick=()=>{ const t=l.dataset.tk; if(COMPG.off.has(t))COMPG.off.delete(t); else COMPG.off.add(t); renderCompg(); });
+  compgWireChart(S,X,Y);
+}
+function compgWireChart(S,X,Y){
+  const svg=el('cg-chart'), read=el('cg-read'), cx=el('cg-cx'), dots=el('cg-dots'); if(!svg) return;
+  const {W,PL,PR,PT,PB,H}=CG, n=S.days.length, vis=S.lines.filter(l=>!COMPG.off.has(l.tk));
+  const idxAt=e=>{ const r=svg.getBoundingClientRect(); const xv=(e.clientX-r.left)/r.width*W;
+    let i=Math.round((xv-PL)/(W-PL-PR)*(n-1)); return Math.max(0,Math.min(n-1,i)); };
+  const hit=el('cg-anchorhit'); if(hit) hit.addEventListener('mousedown',()=>{COMPG._drag=true;});
+  if(!COMPG._dragBound){ COMPG._dragBound=true; window.addEventListener('mouseup',()=>{COMPG._drag=false;}); }
+  svg.addEventListener('mousemove',e=>{
+    if(COMPG._drag){ const i=idxAt(e); COMPG.anchorDay=S.days[i]; renderCompg(); return; }
+    const i=idxAt(e), x=X(i); cx.setAttribute('x1',x); cx.setAttribute('x2',x); cx.setAttribute('opacity','0.7');
+    let d='',rows=[]; vis.forEach(l=>{ const v=l.vals[i]; if(v==null)return;
+      d+=`<circle cx="${x.toFixed(1)}" cy="${Y(v).toFixed(1)}" r="2.6" fill="${l.color}"/>`; rows.push({tk:l.tk,color:l.color,v}); });
+    dots.innerHTML=d; rows.sort((a,b)=>b.v-a.v);
+    const dd=new Date(S.days[i]*DAY);
+    read.innerHTML=`<div class="cg-rdate">${dd.getMonth()+1}/${dd.getDate()}</div>`+rows.map(r=>`<div class="cg-rd"><span><span style="color:${r.color}">■</span> ${esc(r.tk)}</span><span>${COMPG.mode==='index'?r.v.toFixed(1):(r.v>=0?'+':'')+r.v.toFixed(1)}</span></div>`).join('');
+    read.style.display='block'; const rr=svg.getBoundingClientRect(), px=(x/W)*rr.width;
+    read.style.left=(px>rr.width-170?px-160:px+12)+'px';
+  });
+  svg.addEventListener('mouseleave',()=>{ if(dragging)return; cx.setAttribute('opacity','0'); dots.innerHTML=''; read.style.display='none'; });
+}
+
 // ===== CSV export =====
 function downloadCSV(name, matrix){
   const csv=matrix.map(row=>row.map(c=>{ const s=(c==null)?'':String(c); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }).join(',')).join('\r\n');
@@ -4155,7 +4317,9 @@ corr:`
 <div class="hlp-h">Pair view (click a cell)</div>
 <p>Three reads on one pair. <b>Hedge β</b>: units of B per unit of A for a beta-neutral pair. The <b>beta-adjusted spread</b> ln(A) − β·ln(B) with its mean ±1σ band — the <b>z-score</b> says how stretched the pair is <i>relative to its own history</i>: beyond ±1.5–2, A is rich or cheap vs B, the mean-reversion trade. The <b>rolling correlation</b> tells you whether the relationship is stable enough to trust: a spread z-score on a pair whose correlation is disintegrating is not a signal, it's a divorce.</p>
 <div class="hlp-h">Co-movers &amp; hedges (click a ticker label)</div>
-<p>The names that move with it (proxies, contagion map) and against it (natural hedges). Strongest-pairs below surfaces the tightest relationships across the whole set. ↓ CSV exports the matrix.</p>`,
+<p>The names that move with it (proxies, contagion map) and against it (natural hedges). Strongest-pairs below surfaces the tightest relationships across the whole set. ↓ CSV exports the matrix.</p>
+<div class="hlp-h">COMP/G — N-name comparison</div>
+<p>The pair view generalized. <b>COMP/G</b> (button top-right, or <span class="amber">comp NVDA AAPL MSFT …</span> in the terminal) rebases every selected name to <b>100</b> at a chosen date and overlays them — "how have these six traded relative to each other since X." Set the anchor with the presets, the date picker, or by <b>dragging the amber line</b>. <b>Spread mode</b> plots each name minus the equal-weight basket of visible names (or a base you pick) in percentage points — a clean read on who's leading and lagging the group. Runs on the daily closes already loaded, so it's instant and never hits the server. A name listed after the anchor rebases to its own first close, dated in the legend — no fake shared origin.</p>`,
 sessions:`
 <div class="hlp-h">Session decomposition — the flagship</div>
 <p>What an <b>overnight</b> (close→open), <b>weekend</b> (Fri→Mon), and <b>cash</b> (open→close) hold actually pays, pooled one equal-weight bet per calendar boundary across the equity class, compounded into equity curves. <b>Gross</b> vs <b>net</b>: the shaded band is the running funding drag — an edge that dies net-of-funding is not an edge, it's a donation. A persistently rising overnight curve while the cash curve is flat is the classic overnight effect; the drawer's "where the 30d return happened" split is the per-name version of the same question.</p>
@@ -4297,6 +4461,7 @@ el('corrsearch').addEventListener('input',e=>{ state.corr.search=e.target.value;
   clearTimeout(corrSearchT); corrSearchT=setTimeout(()=>{ if(!el('view-corr').hidden) openCorr(); },300); });
 el('mktExport').addEventListener('click', exportMarkets);
 el('corrExport').addEventListener('click', exportCorr);
+el('compgBtn').addEventListener('click', ()=>openCompg());
 
 // ============================================================================
 //  ASK-THE-BOARD TERMINAL — bottom-right console over the LIVE board.
@@ -4438,6 +4603,9 @@ function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.s
     return `<span class="tp-deep" data-tcmd="${g.ticker}">${tpad(g.ticker,6)}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
   termOut(`<span class="amber">⚡ ${groups.length} active signal${groups.length>1?'s':''}</span> <span class="tp-trans">· ledgered &amp; resolved out-of-sample</span>\n${rows}`); }
 function termReport(r){ termOut(`${termTkHdr(r)}\n<span class="tp-trans">opening the AI analyst report…</span>`); openAiReport(r.coin); }
+function termComp(tickers){ showView('corr');
+  setTimeout(()=>openCompg(tickers), 40);   // let openCorr build the matrix context first
+  termOut(`<span class="tp-hd">comp</span> ${tickers.map(t=>tesc(t)).join(' · ')} <span class="tp-trans">· COMP/G — ${tickers.length} names rebased to 100 over ${tfLabel()}</span>`); }
 function termCorr(a,b){ const ra=termFind(a), rb=termFind(b); if(!ra||!rb) return termErr('need two tickers — e.g. corr btc eth');
   const ma=dailyReturns(ra), mb=dailyReturns(rb); if(!ma||!mb) return termOut(`<span class="sec">not enough daily history for ${tesc(ra.ticker)} × ${tesc(rb.ticker)} yet</span>`);
   const cut=Math.floor(Date.now()/DAY)-90, xs=[],ys=[];
@@ -4642,6 +4810,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
     ||head==='breadth'||head==='sectors'||head==='news'||head==='reports') return true;
   if(head==='earnings'||head==='earn') return p.length===1||!!termFind(p[1])||['today','tomorrow','week','recent'].includes((p[1]||'').toLowerCase());
   if(head==='vs'||head==='compare') return !!(termFind(p[1])&&termFind(p[2]));
+  if(head==='comp') return p.slice(1).filter(x=>termFind(x)).length>=2;
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
   return false; }
 function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCase(), T=p[0].toUpperCase();
@@ -4656,6 +4825,7 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='news'){ const rr=termFind(p[1]); const nn=p.slice(1).map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); return termNewsCmd(rr?rr.ticker.toUpperCase():null,nn); }
   if(h==='reports') return termReports();
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
+  if(h==='comp'){ const tks=[...new Set(p.slice(1).map(x=>termFind(x)).filter(Boolean).map(r=>(r.ticker||'').toUpperCase()))]; return tks.length>=2?termComp(tks):termErr('usage: comp <ticker> <ticker> [more…] — needs at least two'); }
   if(h==='report'||h==='ai'){ const rr=termFind(p[1])||termFind(p[0]); return rr?termReport(rr):termErr('usage: report <ticker>'); }
   if(h==='earnings'||h==='earn'){ const a1=(p[1]||'').toLowerCase();
     if(!p[1]||['today','tomorrow','week','recent'].includes(a1)) return termEarnCal(a1||'today');
@@ -4771,6 +4941,7 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('earnings [t|when]',20)}</span><span class="sec">a ticker, or today·tomorrow·week·recent</span>
 <span class="amber">${tpad('news [ticker]',20)}</span><span class="sec">verified headlines · 72h window</span>
 <span class="amber">${tpad('vs <a> <b>',20)}</span><span class="sec">side-by-side field compare · corr <a> <b> for correlation</span>
+<span class="amber">${tpad('comp <a> <b> …',20)}</span><span class="sec">overlay N names rebased to 100 (COMP/G) · index or spread mode</span>
 <span class="amber">${tpad('signals · reports',20)}</span><span class="sec">active signals · recent AI reports</span>
 <span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
 <span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
@@ -4784,7 +4955,7 @@ function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) 
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
 // ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
-const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','diverge','vs','compare','help','clear','stocks','crypto'];
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','help','clear','stocks','crypto'];
 const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
@@ -4792,7 +4963,7 @@ function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toL
   if(termFind(p[0])) return TERM_FIELDS.filter(f=>f.startsWith(cur)).map(f=>p.slice(0,-1).join(' ')+' '+f);
   if(h==='top'||h==='bottom') return ['vol','funding','squeeze','momentum','oi','carry','gainers','losers','d7','d30','rvol','vsvwap','gap','adr','vol30'].filter(x=>x.startsWith(cur)).map(x=>h+' '+x);
   if(h==='earnings') return ['today','tomorrow','week','recent'].concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur)).map(x=>'earnings '+x);
-  if(h==='report'||h==='signals'||h==='corr'||h==='diverge'||h==='news'||h==='vs'||h==='compare') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>p.slice(0,-1).join(' ')+' '+x);
+  if(h==='report'||h==='signals'||h==='corr'||h==='comp'||h==='diverge'||h==='news'||h==='vs'||h==='compare') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>p.slice(0,-1).join(' ')+' '+x);
   return []; }
 let termHist=[], termHi_=-1;
 function termGhostFn(){ const q=termEl('termCmd'), g=termEl('termGhost'); const v=q.value; if(!v){ g.textContent=''; termHint(); return; }
