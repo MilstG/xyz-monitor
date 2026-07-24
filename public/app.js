@@ -2487,9 +2487,14 @@ function drawSessions(){
 const BT_MIN_DAYS=25, BT_ANN=252;
 const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)',
   lowvol:'Low volatility', ivol:'Low idiosyncratic vol', beta:'Low beta (BAB)', max:'Anti-lottery (low MAX)',
-  carry:'Funding carry', hprox:'High proximity', volt:'Volume trend', oid:'OI change' };
+  carry:'Funding carry', hprox:'High proximity', volt:'Volume trend', oid:'OI change',
+  m0:'Blend M0 — live-score analogue', mres:'Blend V1 — β-residual slow horizons', moi:'Blend V2 — regime-qualified OI',
+  mfund:'Blend V3 — funding-crowding haircut', mpart:'Blend V4 — volume participation' };
+// the live-score variant family: the promotion bench for the Markets-tab momentum column. Fixed
+// 1/7/30d horizons mirroring computeMomentum — the lookback control is ignored for these five.
+const BT_MVAR={ m0:1, mres:1, moi:1, mfund:1, mpart:1 };
 // signals that need payload columns beyond closes — btRun reports an honest "not shipped" instead of an empty rank
-const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov' };
+const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov', moi:'oiCov', mfund:'fundCov', mpart:'voCov' };
 function btAnn(){ return state.scope==='crypto'?365:BT_ANN; }   // crypto trades every day; equities ~252 sessions
 function btUniverse(){
   const u=state.backtest.universe, cr=state.scope==='crypto';
@@ -2529,10 +2534,91 @@ function btMatrix(){
       for(const [d,v] of om) if(idx.has(d)){ a[idx.get(d)]=v; n++; } if(n>=5){ oim.set(r.coin,a); oiCov++; } } }
   return { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov };
 }
+// ===== Live-score variant family (2026.07.24-05): the daily-granularity mirror of computeMomentum =====
+// Purpose: validate candidate upgrades to the Markets-tab momentum score OUT OF SAMPLE before any of
+// them touches the live column. M0 is the control — the closest daily-computable analogue of the
+// shipped blend (risk-adjusted 1/7/30d returns at .40/.40/.20, cross-horizon coherence, range tilt;
+// the intraday h1/h4 terms are untestable at daily granularity and carry over unchanged regardless).
+// V1–V4 are M0 plus exactly ONE candidate term each, so an OOS delta vs M0 measures that term and
+// nothing else. Honest limits, stated not hidden: the range tilt runs on closes for BOTH rails (the
+// daily tuple ships no low, and one high-only rail would skew the tilt); names missing a modulation
+// column (OI / funding / volume) fall back to the unmodulated core so the ranked universe stays
+// identical to the control and the comparison measures the term, not universe drift.
+function btMomVariant(sig, a, bench, di, ex){
+  if(di<30) return NaN;
+  // trailing 30d daily vol through di — the risk yardstick for every horizon (live: measured volD)
+  let vs=0,vq=0,vn=0; for(let i=di-29;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ vs+=x; vq+=x*x; vn++; } }
+  if(vn<15) return NaN;
+  const vm=vs/vn, volD=Math.sqrt(Math.max(0,(vq-vn*vm*vm)/(vn-1)));
+  if(!(volD>0)) return NaN;
+  // β for V1: trailing ≤90d regression through di (no lookahead), min 40 overlapping days; below
+  // that the residualization falls back to raw — a β fit on a stub window is worse than none
+  let beta=null;
+  if(sig==='mres'&&bench){ const lo=Math.max(0,di-89); let mn=0,mb=0,cn=0;
+    for(let i=lo;i<=di;i++){ const x=a[i],y=bench[i]; if(Number.isFinite(x)&&Number.isFinite(y)){ mn+=x; mb+=y; cn++; } }
+    if(cn>=40){ mn/=cn; mb/=cn; let c=0,vb=0;
+      for(let i=lo;i<=di;i++){ const x=a[i],y=bench[i]; if(Number.isFinite(x)&&Number.isFinite(y)){ c+=(x-mn)*(y-mb); vb+=(y-mb)*(y-mb); } }
+      if(vb>0) beta=c/vb; } }
+  // risk-adjusted horizon blend: z_h = Σ log-returns / (volD·√h); weights .40/.40/.20 renormalized
+  // over the horizons present (mirrors the live score skipping missing windows). The 7d horizon is
+  // mandatory — without it the score is just yesterday's bar wearing a blend's name.
+  let ws=0,wzs=0,wza=0,has7=false;
+  for(const [h,wt] of [[1,0.40],[7,0.40],[30,0.20]]){
+    let rs=0,rn=0,bs=0;
+    for(let i=di-h+1;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ rs+=x; rn++; }
+      if(beta!=null&&h>=7){ const y=bench[i]; if(Number.isFinite(y)) bs+=y; } }
+    if(rn<Math.max(1,Math.ceil(h*0.6))) continue;
+    const z=((beta!=null&&h>=7)?rs-beta*bs:rs)/(volD*Math.sqrt(h));   // V1: slow horizons keep only the idiosyncratic move; 1d stays raw
+    ws+=wt; wzs+=wt*z; wza+=wt*Math.abs(z); if(h===7) has7=true;
+  }
+  if(!(ws>0)||!has7) return NaN;
+  const kappa=wza>0?Math.abs(wzs)/wza:0;   // cross-horizon coherence — same read as the live score
+  let core=(wzs/ws)*(0.5+0.5*kappa);
+  // range-position tilt over 30d of closes (symmetric by construction — see the header note)
+  const px=ex&&ex.px;
+  if(px){ let hi=-Infinity,lo=Infinity,pn=0;
+    for(let i=di-29;i<=di;i++){ const p=px[i]; if(Number.isFinite(p)&&p>0){ if(p>hi)hi=p; if(p<lo)lo=p; pn++; } }
+    if(pn>=15&&hi>lo&&Number.isFinite(px[di])) core+=0.4*(clamp((px[di]-lo)/(hi-lo),0,1)-0.5)*2; }
+  // V2 — regime-qualified OI: OI building WITH the score's side (longs+ / shorts+) amplifies,
+  // scaled by funding corroboration (the crowd paying to be on that side = new conviction, not
+  // noise); OI FALLING (squeeze / unwind) dampens — covering is mechanically different flow from
+  // new money and must not amplify like it. Clamped to the live score's [0.6, 1.4] band.
+  if(sig==='moi'){ const o=ex&&ex.oi;
+    if(o){ let f0=NaN,l0=NaN,on=0;
+      for(let i=di-7;i<=di;i++){ const x=o[i]; if(Number.isFinite(x)&&x>0){ if(!Number.isFinite(f0)) f0=x; l0=x; on++; } }
+      if(on>=3&&f0>0&&core!==0){
+        const doi=(l0/f0-1)*100;
+        let mult=1;
+        if(doi>0){ let c=0.5; const f=ex&&ex.f;   // corroboration: 1 = funding moved with the flow story, 0 = against, 0.5 = flat/unknown
+          if(f){ let f7=0,fn=0; for(let i=di-6;i<=di;i++){ const x=f[i]; if(Number.isFinite(x)){ f7+=x; fn++; } }
+            if(fn>=4){ const agree=core>0?f7:-f7; c=agree>1e-6?1:(agree<-1e-6?0:0.5); } }
+          mult=1+0.4*Math.tanh(doi/8)*(0.5+0.5*c); }
+        else if(doi<0) mult=1-0.2*Math.tanh(-doi/8);
+        core*=clamp(mult,0.6,1.4);
+      } } }
+  // V3 — funding-crowding haircut: today's funding at its own 31d extreme with the crowd on the
+  // SAME side as the score -> ×0.8. The exhaustion tax the board's ▴/▾ percentile flag points at.
+  if(sig==='mfund'){ const f=ex&&ex.f;
+    if(f&&core!==0&&Number.isFinite(f[di])){ const vals=[];
+      for(let i=di-30;i<=di;i++){ const x=f[i]; if(Number.isFinite(x)) vals.push(x); }
+      if(vals.length>=20&&Math.max.apply(null,vals)>Math.min.apply(null,vals)){   // a flat distribution has no extremes — rank(≤) on constants would read 1.0 and tax every flat-funding name
+        let le=0; for(const x of vals) if(x<=f[di]) le++;
+        const rank=le/vals.length;
+        if(core>0&&f[di]>0&&rank>=0.9) core*=0.8;
+        else if(core<0&&f[di]<0&&rank<=0.1) core*=0.8; } } }
+  // V4 — volume participation: recent 5d vs 30d average volume, small symmetric multiplier — a
+  // move on volume outranks the same move on air, capped at ±15% so participation only nudges.
+  if(sig==='mpart'){ const vo=ex&&ex.vo;
+    if(vo){ let rs=0,rn=0,bs=0,bn=0;
+      for(let i=di-29;i<=di;i++){ const v=vo[i]; if(Number.isFinite(v)&&v>=0){ bs+=v; bn++; if(i>di-5){ rs+=v; rn++; } } }
+      if(bn>=15&&rn>=3&&bs>0) core*=clamp(1+0.15*Math.tanh(Math.log((rs/rn+1e-12)/(bs/bn+1e-12))/0.4),0.85,1.15); } }
+  return 100*Math.tanh(core/1.5);   // the live squash — ranks unchanged, magnitudes match the board's −100…+100 semantics
+}
 // signal score for one name at day-index di over a trailing L-day window (uses data through di only — no
 // lookahead). `ex` carries the extra aligned columns { f:funding, px:closes, hi:highs, vo:volume, oi:openInterest }
 // (each null when not shipped). Every score is oriented so HIGHER = the quantity we long under direction=high.
 function btScore(sig, a, bench, di, L, ex){
+  if(BT_MVAR[sig]) return btMomVariant(sig, a, bench, di, ex);   // the variant family runs fixed horizons — L does not apply
   const lo=di-L+1; if(lo<0) return NaN;
   if(sig==='rev'){ const v=a[di]; return Number.isFinite(v)? -v : NaN; }            // fade the most recent day
   if(sig==='carry'){ const f=ex&&ex.f; if(!f) return NaN;                            // long the names shorts pay to hold: score = −(window funding a 1x long pays)
@@ -2567,11 +2653,12 @@ function btScore(sig, a, bench, di, L, ex){
 }
 function btRun(){
   const p=state.backtest, mx=btMatrix();
-  if(mx.rows.length<8 || mx.days.length<p.lookback+p.cadence+6) return { ok:false, have:mx.rows.length, days:mx.days.length };
+  const warmN=BT_MVAR[p.signal]?Math.max(p.lookback,31):p.lookback;   // variants need their fixed 30d horizon + 1 regardless of the lookback setting
+  if(mx.rows.length<8 || mx.days.length<warmN+p.cadence+6) return { ok:false, have:mx.rows.length, days:mx.days.length };
   const { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov }=mx, coins=rows.map(r=>r.coin);
   const covOf={ fundCov, hiCov, voCov, oiCov };
   if(BT_NEEDS[p.signal] && !(covOf[BT_NEEDS[p.signal]]>0)) return { ok:false, nodata:BT_SIGNALS[p.signal] };   // the column this rule ranks on isn't in the payload yet — say so instead of ranking nothing
-  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=L, on=p.holdWindow==='on' && state.scope!=='crypto';   // 24/7 markets have no overnight boundary
+  const L=p.lookback, cad=Math.max(1,p.cadence), q=p.quantile, costR=p.cost/1e4, start=warmN, on=p.holdWindow==='on' && state.scope!=='crypto';   // 24/7 markets have no overnight boundary
   let weights=new Map(), lastBook=null, feeCum=0, fundCum=0;
   const tkOf=new Map(rows.map(r=>[r.coin, r.ticker]));
   const secOf=new Map(rows.map(r=>[r.coin, r.sector||r.assetClass||'—']));           // smom demean groups; unsectored names pool together
@@ -2725,6 +2812,7 @@ function renderBacktest(){
     `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}`+
     (cr?'':`<span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}`)+`</div>`+   // crypto is 24/7 — no overnight boundary to hold across
     `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d'],[60,'60d'],[120,'120d']])}`+
+    (BT_MVAR[p.signal]?`<span class="sec" style="align-self:center">n/a — this rule runs fixed 1/7/30d horizons</span>`:'')+
     `<span class="lbl">rebalance</span>${seg('btCad',p.cadence,[[1,'1d'],[5,'5d'],[10,'10d']])}`+
     `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`+
     `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
@@ -2757,9 +2845,13 @@ function renderBacktest(){
     : p.structure==='short' ? `<b>short-only</b>, shorting the ${p.direction==='high'?'bottom':'top'} ${pctq}%`
     : `<b>long/short</b> — long the ${dirTop} ${pctq}%, short the other tail, dollar-neutral`;
   const wtTxt = p.weighting==='sig'?'signal-weighted':p.weighting==='vol'?'inverse-vol weighted':'equal-weight';
+  const mvarCol={moi:'OI',mfund:'funding',mpart:'volume'}[p.signal];
+  const mvarNote = BT_MVAR[p.signal]
+    ? ` <b>Live-score variant:</b> fixed 1/7/30d risk-adjusted horizons mirroring the Markets-tab momentum blend — the lookback control does not apply. Judge it against <i>Blend M0 — live-score analogue</i> on out-of-sample net: only a term that beats the control there earns promotion into the live column. Daily granularity can only mirror the ≥1d structure of the live score (weights renormalized to .40/.40/.20; the intraday terms carry over untested either way), and the range tilt runs on closes — the daily tuple ships no low${mvarCol?`. Names missing the ${mvarCol} column fall back to the unmodulated core, so the ranked universe matches the control and the OOS gap measures the term itself`:''}.`
+    : '';
   const cap = res.on
-    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled. <b>Hover</b> the curve. Not a live trade signal.`
-    : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}. <b>Hover</b> the curve. Not a live trade signal.`;
+    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
+    : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
   return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap);
 }
 function attachBtControls(){
@@ -4692,7 +4784,7 @@ backtest:`
 <div class="hlp-h">What it is</div>
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>
 <div class="hlp-h">The signal roster</div>
-<p>Twelve non-fitted ranking rules in five families. <b>Trend</b>: momentum, sector-relative momentum (demeaned within each sector so no rank is just a sector bet), residual momentum (β-neutral), high proximity (closeness to the window high). <b>Reversion</b>: short-term reversion. <b>Risk</b>: low volatility, low idiosyncratic vol, low beta (BAB), anti-lottery (fade the biggest single-day pop). <b>Perp-native</b>: funding carry — long the names shorts pay to hold. <b>Flow</b>: volume trend and OI change, both deliberately sign-ambiguous — the direction toggle decides which tail you own. Rules that rank on daily highs/volume, OI, or funding say so honestly when the server isn't shipping that column yet.</p>
+<p>Seventeen non-fitted ranking rules in six families. <b>Trend</b>: momentum, sector-relative momentum (demeaned within each sector so no rank is just a sector bet), residual momentum (β-neutral), high proximity (closeness to the window high). <b>Reversion</b>: short-term reversion. <b>Risk</b>: low volatility, low idiosyncratic vol, low beta (BAB), anti-lottery (fade the biggest single-day pop). <b>Perp-native</b>: funding carry — long the names shorts pay to hold. <b>Flow</b>: volume trend and OI change, both deliberately sign-ambiguous — the direction toggle decides which tail you own. <b>Live-score variants</b>: Blend M0 is the daily mirror of the Markets-tab momentum score (risk-adjusted 1/7/30d blend × cross-horizon coherence + range tilt), and V1–V4 each add exactly one candidate upgrade — β-residual slow horizons, regime-qualified OI, a funding-crowding haircut, volume participation. This family is the promotion bench for the live column: a candidate ships into the board's Momentum only after beating M0 on out-of-sample net, and losers get deleted, not left as clutter. These five run fixed horizons, so the lookback control doesn't apply. Rules that rank on daily highs/volume, OI, or funding say so honestly when the server isn't shipping that column yet.</p>
 <div class="hlp-h">Crypto scope</div>
 <p>The tab follows the Stocks/Crypto switcher: crypto runs the top-60 Hyperliquid perps against a <b>BTC benchmark</b> with 365-day annualization, no overnight hold (24/7 markets have no boundary), and funding carry at home. The two universes never mix in one run.</p>
 <div class="hlp-h">How to read the curve</div>
