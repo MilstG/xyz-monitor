@@ -2920,7 +2920,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (struck) { buildNewsPayload(); store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned }); }
     const pend = secPending();
     if (!pend.tape.length && !pend.tickers.length && !pend.rel.length && !pend.names.length) return { ok: true, idle: true, applied: struck };
-    const call = await callModel(AI_MODEL_FALLBACK, pend, { system: SEC_CLASSIFY_SYSTEM, maxTokens: 600 });
+    const call = await callModel(AI_CLASSIFY_MODEL, pend, { system: SEC_CLASSIFY_SYSTEM, maxTokens: 600, effort: AI_CLASSIFY_EFFORT });
     if (!call.ok) { secErr = call.error; return { ok: false, error: call.error }; }
     let out = null;
     try { out = JSON.parse(String(call.text).replace(/```json|```/g, "").trim()); } catch (_) {}
@@ -3191,7 +3191,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
-    log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
+    log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), classifier ${AI_CLASSIFY_MODEL}, TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
@@ -3629,8 +3629,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // max_completion_tokens, so the OpenAI budget is larger or reasoning can eat the whole
   // allowance and return an empty message). Switching providers is a Railway variable, not a code change.
   const AI_DEFAULTS = {
-    anthropic: { model: "claude-fable-5", fb: "claude-opus-4-8", maxTokens: 3000 },
-    openai: { model: "gpt-5.6-terra", fb: "gpt-5.6-sol", maxTokens: 8000 },
+    anthropic: { model: "claude-fable-5", fb: "claude-opus-4-8", classify: "claude-haiku-4-5", maxTokens: 3000 },
+    openai: { model: "gpt-5.6-terra", fb: "gpt-5.6-sol", classify: "gpt-5.4-nano", maxTokens: 8000 },
   };
   // ---- off-site ledger backup (weekly, GitHub contents API) --------------------------------
   // The volume is the only home of the track record; this pushes the raw persisted files
@@ -3679,6 +3679,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   const AI_DEF = AI_DEFAULTS[AI_PROVIDER] || AI_DEFAULTS.anthropic;
   const AI_MODEL = process.env.AI_MODEL || AI_DEF.model;
   const AI_MODEL_FALLBACK = process.env.AI_MODEL_FALLBACK || AI_DEF.fb;
+  // The news/sector classifier is a high-frequency UNATTENDED task (every 10 min, whether or not
+  // anyone is watching) doing enum classification, y/n relevance and alias extraction — nano-tier
+  // work, not report/ask work. It runs on its OWN model, decoupled from the report/ask fallback
+  // chain, so cheapening it can never degrade a report (the old code reused AI_MODEL_FALLBACK,
+  // which on OpenAI is the flagship Sol tier — the classifier was silently running frontier).
+  // Default is the cheapest classification-grade tier per provider; AI_CLASSIFY_MODEL overrides
+  // without a deploy, and AI_CLASSIFY_EFFORT trims OpenAI's reasoning tokens (this task wants none).
+  const AI_CLASSIFY_MODEL = process.env.AI_CLASSIFY_MODEL || AI_DEF.classify || AI_MODEL_FALLBACK;
+  const AI_CLASSIFY_EFFORT = process.env.AI_CLASSIFY_EFFORT || "low";
   const AI_KEY = () => AI_PROVIDER === "openai" ? (process.env.OPENAI_API_KEY || "") : (process.env.ANTHROPIC_API_KEY || "");
   const AI_TTL_MS = Math.max(5, Number(process.env.AI_REPORT_TTL_MIN) || 30) * 60 * 1000;
   // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
@@ -4717,7 +4726,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
             offTopic: Object.values(secTape).filter((s) => s === "off-topic").length,
             learnedAliases: Object.keys(nameLearned).length } },
         ai: { enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
-          fallback: AI_MODEL_FALLBACK, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size,
+          fallback: AI_MODEL_FALLBACK, classify: AI_CLASSIFY_MODEL, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size,
           perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft(),
           askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() },
         rate: limiterUsage(),
