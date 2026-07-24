@@ -1879,7 +1879,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "updateFreshTray", "renderFreshTray",
     "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
     "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock",
-    "renderRegime", "regimeCurveSvg", "wireRegimeControls"];
+    "renderRegime", "regimeCurveSvg", "wireRegimeControls",
+    "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1919,8 +1920,12 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const pin of ["vsma200:", "vsyopen:", "vsvwap:{", "rvol:{", "d7:{", "metricOf(metric)||tfield(metric)", "function termWin"])
     assert.ok(s.includes(pin), `full-field terminal coverage missing: ${pin}`);
   // new whole-board verbs routed in termExec
-  for (const pin of ["h==='breadth'", "h==='sectors'", "h==='reports'", "h==='vs'||h==='compare'", "h==='top'||h==='bottom'", "termEarnCal(a1||'today')"])
+  for (const pin of ["h==='breadth'", "h==='sectors'", "h==='reports'", "h==='vs'||h==='compare'", "h==='comp'", "h==='top'||h==='bottom'", "termEarnCal(a1||'today')"])
     assert.ok(s.includes(pin), `terminal verb routing missing: ${pin}`);
+  // COMP/G N-name comparison: launcher wiring, the union-day aligner, and the two render modes.
+  assert.ok(s.includes("openCompg()") && s.includes("compgBtn") && /const COMPG=\{/.test(s), "COMP/G launcher + state missing");
+  assert.ok(s.includes("function alignedDailyN") && s.includes("COMPG.mode==='spread'") && s.includes("COMPG.mode==='index'"), "COMP/G index/spread modes missing");
+  assert.ok(s.includes("head==='comp'") && s.includes("TERM_VERBS=['top'") && s.includes("'corr','comp'"), "comp verb not wired into grammar/verb list");
   // TERM_VERBS regression: it was referenced by termComps but never DEFINED — a silent
   // ReferenceError on every keystroke that killed ghost text + tab completion.
   assert.ok(/const TERM_VERBS=\[/.test(s), "TERM_VERBS must be defined, not just referenced (completion engine ReferenceError)");
@@ -1938,7 +1943,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
       "name = the company's common name", "NUMBERS RULE", "IDENTITY RULE"])
       assert.ok(polSrc.includes(pin), `analyst legend out of sync with shipped context: ${pin}`);
   }
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand", "compg", "compgBtn"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
