@@ -48,6 +48,8 @@ const COLS=[
     td:r=>betaCell(r)},
   {key:'mom', label:'Momentum', type:'num', def:'desc', tip:'Self-normalizing momentum −100…+100: risk-adjusted multi-horizon return × 7d trend quality + range position, modulated by OI conviction.',
     td:r=>`<td${shade(r.mom,60)}>${momCell(r)}</td>`},
+  {key:'momp', label:'MOM+', type:'num', def:'desc', tip:'CANDIDATE momentum, running head-to-head with the incumbent: same core, but the OI term is regime-qualified (OI building amplifies only when funding corroborates the score\u2019s side; falling OI is short-covering \u2014 mechanically different flow \u2014 and dampens at half strength) and a funding-crowding haircut applies when the crowd pays its own monthly extreme to sit on the score\u2019s side (\u00d70.8 \u2014 the exhaustion tax the \u25b4/\u25be flag points at). Hover a diverging cell for which terms fired. Adjudicated on daily forward rank IC in the Backtest tab\u2019s Score duel panel \u2014 promotion only on a locked verdict, not by eye.',
+    td:r=>mompCell(r)},
   {key:'vol30', label:'Vol (ann)', type:'num', tip:'Annualized realized volatility from hourly returns over ~30 days.', td:r=>volCell(r)},
   {key:'adr', label:'Avg Range', type:'num', tip:'Average daily range: mean of each completed day\u2019s (high − low) / close, over the window (7d, or 30d when the 30d window is selected). Reads as "on a typical day this moves X%."', td:r=>adrCell(r)},
   {key:'dd', label:'vs 30d hi', type:'num', tip:'Distance below the 30-day high (0% = sitting at the high).', td:r=>ddCell(r)},
@@ -102,7 +104,7 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','liq24','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','momp','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','liq24','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
 const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dcap','hitr','rvol','vwap','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
@@ -112,6 +114,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
+  duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
   watch:new Set(), watchOnly:false, detail:null,
   report:{ coin:null, data:null, list:null, gen:false, tick:null, tf:'1d' },   // AI analyst report tab
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
@@ -365,8 +368,17 @@ function updateSyncProgress(){ const rows=activeRows(); let done=0; for(const r 
   else { s.classList.remove('done'); el('sync-t').textContent=`syncing ${done}/${rows.length}`; } }
 
 // ===== derived metrics =====
+// computeMomentum now returns the PAIR {mom, momp, why} (build 2026.07.24-07):
+//   mom  — the incumbent score, math byte-identical to what shipped before this build.
+//   momp — MOM+, the candidate: same shared core, OI term regime-qualified (bench V2 — OI
+//          building amplifies only scaled by funding corroboration with the score's side;
+//          falling OI is covering and dampens at half band) plus the funding-crowding
+//          haircut (bench V3 — the crowd paying its own-31d extreme to be on the score's
+//          side → ×0.8). why = short mechanism tags for whichever terms made the two differ.
+// This mirrors momPair in src/compute.js, which the poller runs for the canonical daily duel
+// snapshot; a constant-fragment test pins the coefficients identical across the two files.
 function computeMomentum(r){
-  const f=r.feat; if(!f||!(f.volH>0)) return undefined;
+  const f=r.feat; if(!f||!(f.volH>0)) return {mom:undefined,momp:undefined,why:null};
   const volD=(f.volD>0)?f.volD:null;   // measured daily vol; null until hourly features load -> falls back to hourly x sqrt(t)
   const H=[[r.h1,1,0.10],[r.h4,4,0.15],[r.d1,24,0.30],[r.d7,168,0.30],[r.d30,720,0.15]];
   let s=0,w=0,sa=0;
@@ -375,15 +387,39 @@ function computeMomentum(r){
     const sigma=(hrs>=24&&volD)?volD*Math.sqrt(hrs/24):f.volH*Math.sqrt(hrs);
     if(!(sigma>0))continue;
     const z=(ret/100)/sigma; s+=wt*z; sa+=wt*Math.abs(z); w+=wt; }
-  if(w===0) return null;
+  if(w===0) return {mom:null,momp:null,why:null};
   // cross-horizon coherence: |net blended move| / total absolute path across horizons, in [0,1].
   // 1 = every horizon agrees (clean trend), ->0 = horizons fight (choppy / rolling over). Replaces the
   // single-horizon 30d r2 gate so the quality factor reflects the multi-horizon blend the score is built from.
   const kappa = sa>0 ? Math.abs(s)/sa : 0;
   let core=(s/w)*(0.5+0.5*kappa);
   if(r.px!=null&&f.hi30!=null&&f.lo30!=null&&f.hi30>f.lo30) core+=0.4*(clamp((r.px-f.lo30)/(f.hi30-f.lo30),0,1)-0.5)*2;
-  if(r.doi!=null&&isFinite(r.doi)) core*=clamp(1+0.4*Math.tanh(r.doi/8),0.6,1.4);
-  return 100*Math.tanh(core/1.5);
+  // incumbent branch: direction-agnostic OI conviction — unchanged
+  let coreA=core;
+  if(r.doi!=null&&isFinite(r.doi)) coreA*=clamp(1+0.4*Math.tanh(r.doi/8),0.6,1.4);
+  // MOM+ branch: window-avg funding APR (same window expression the regime read uses) + the
+  // fixed-31d funding percentile the ▴/▾ column flag already ships
+  const tfKey=TF_MAP[state.tf]||'d1';
+  const fh=r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding;
+  const fAPR=(fh!=null&&isFinite(fh))?fh*24*365*100:null;
+  let coreB=core; const why=[];
+  if(r.doi!=null&&isFinite(r.doi)&&core!==0&&r.doi!==0){
+    if(r.doi>0){
+      let c=0.5;   // corroboration: 1 with the score, 0 against, 0.5 flat/unknown
+      if(fAPR!=null&&isFinite(fAPR)&&Math.abs(Math.tanh(fAPR/25))>=0.15) c=((core>0)===(fAPR>0))?1:0;
+      coreB*=clamp(1+0.4*Math.tanh(r.doi/8)*(0.5+0.5*c),0.6,1.4);
+      why.push(c===1?'OI+ corroborated':c===0?'OI+ conflicted':'OI+ fund flat');
+    } else {
+      coreB*=clamp(1-0.2*Math.tanh(-r.doi/8),0.6,1.4);
+      why.push(core>0?'squeeze-side OI':'unwind-side OI');
+    }
+  }
+  const fp=r.fundPct;
+  if(core!==0&&fp!=null&&fAPR!=null&&isFinite(fAPR)){
+    if(core>0&&fAPR>0&&fp>=90){ coreB*=0.8; why.push('crowded long −20%'); }
+    else if(core<0&&fAPR<0&&fp<=10){ coreB*=0.8; why.push('crowded short −20%'); }
+  }
+  return {mom:100*Math.tanh(coreA/1.5), momp:100*Math.tanh(coreB/1.5), why:why.length?why.join(' · '):null};
 }
 function computeDerived(){
   const tfKey=TF_MAP[state.tf]||'d1';
@@ -409,7 +445,7 @@ function computeDerived(){
     const bench=r.uni==='main'?bM:bX, benchRet=bench?bench[tfKey]:null;
     r.doi=r.doiByWin?(r.doiByWin[tfKey]??null):null;
     r.regime=regimeDetail(r[tfKey], r.doi, (r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding), (r.feat&&r.feat.volH), (TF_MS[state.tf]||DAY)/HOUR);
-    r.mom=computeMomentum(r);
+    { const mp=computeMomentum(r); r.mom=mp.mom; r.momp=mp.momp; r.momWhy=mp.why; }
     const prem=(r.px!=null&&r.oracle)?Math.abs((r.px-r.oracle)/r.oracle):0;
     const vs=(r.vol!=null&&r.feat&&r.feat.volBase>0)?r.vol/r.feat.volBase:null;
     r.hot=(vs!=null&&vs>=1.8)||prem>=0.004;
@@ -506,6 +542,10 @@ function scheduleRender(){ if(renderQueued)return; renderQueued=true; requestAni
 function scCls(r){ return (r.candleTs && (Date.now()-r.candleTs>2*state.refreshMs+60000)) ? 'stale':''; }
 const XYZ_ONLY_COLS=new Set(['gap']);   // session-anchored concepts — a 24/7 market has none
 const MAIN_ONLY_COLS=new Set(['cascT','liq24']);   // aggregated-CEX derivs context — exists only for the crypto universe
+// Migration adjacency: when a stored order predates a column that belongs beside another
+// (momp beside mom), move it there instead of leaving it appended at the table's far edge.
+function colAdjacent(v,key,anchor){ const i=v.indexOf(key),a=v.indexOf(anchor);
+  if(i>=0&&a>=0&&i!==a+1){ v.splice(i,1); v.splice(v.indexOf(anchor)+1,0,key); } }
 function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key) && !(state.scope==='crypto'&&XYZ_ONLY_COLS.has(c.key)) && !(state.scope!=='crypto'&&MAIN_ONLY_COLS.has(c.key))); }
 let dragKey=null;
 function clearDropMarks(){ document.querySelectorAll('#head th').forEach(t=>t.classList.remove('drop-before','drop-after')); }
@@ -565,6 +605,13 @@ function gapCell(r){ const g=r.gap;
 function momCell(r){ if(r.mom===undefined)return '<span class="ph">·</span>'; if(r.mom===null)return '<span class="na">—</span>';
   const sign=r.mom>0?'+':'';
   return `<span style="color:${momColor(r.mom)};font-weight:600">${sign}${Math.round(r.mom)}</span>`+(r.hot?'<span class="hotdot" title="volume / activity well above this market\u2019s own norm">●</span>':''); }
+function mompCell(r){
+  if(r.momp===undefined)return '<td><span class="ph">·</span></td>';
+  if(r.momp===null)return '<td><span class="na">—</span></td>';
+  const sign=r.momp>0?'+':'', dv=(r.mom!=null&&isFinite(r.mom))?r.momp-r.mom:null;
+  const mark=(dv!=null&&Math.abs(dv)>=10&&r.momWhy)?`<i class="mompw" title="diverges ${dv>0?'+':''}${Math.round(dv)} from the incumbent — ${esc(r.momWhy)}">\u0394</i>`:'';
+  const t=r.momWhy?` title="${esc(r.momWhy)}"`:'';
+  return `<td${shade(r.momp,60)}${t}><span style="color:${momColor(r.momp)};font-weight:600">${sign}${Math.round(r.momp)}</span>${mark}</td>`; }
 function rsCell(r){ const bC=r.uni==='main'?state.benchMain:state.benchCoin;
   if(!bC)return '<span class="na" title="no benchmark detected">—</span>';
   if(r.coin===bC)return `<span class="sec" title="this is the benchmark">${r.uni==='main'?'BTC':'S&amp;P'}</span>`;
@@ -1734,6 +1781,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(p.layoutV===LAYOUT_V){ // otherwise a one-time migration leaves the new default layout in place
     if(Array.isArray(p.colOrder)){ const v=p.colOrder.filter(k=>COL_BY_KEY[k]);
       for(const c of COLS) if(!v.includes(c.key)){ v.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) state.colHidden.add(c.key); }
+      colAdjacent(v,'momp','mom');   // the candidate migrates in NEXT TO the incumbent, not appended at the far right
       state.colOrder=v; }
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
@@ -1775,6 +1823,7 @@ function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
   const ord=(Array.isArray(src.colOrder)?src.colOrder:[]).filter(k=>COL_BY_KEY[k]);
   const hid=new Set((Array.isArray(src.colHidden)?src.colHidden:[]).filter(k=>COL_BY_KEY[k]));
   for(const c of COLS) if(!ord.includes(c.key)){ ord.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) hid.add(c.key); }
+  colAdjacent(ord,'momp','mom');   // same adjacency rule for saved layouts
   state.colOrder=ord; state.colHidden=hid;
   if(src.sortKey&&COL_BY_KEY[src.sortKey]){ state.sortKey=src.sortKey; state.sortDir=src.sortDir==='asc'?'asc':'desc'; }
   state.watchOnly=!!src.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly);
@@ -2825,7 +2874,7 @@ function renderBacktest(){
     const msg=res.nodata
       ? `${esc(res.nodata)} ranks on a data column this server isn't shipping yet (daily highs/volume, OI, or funding). Redeploy the backend, then it fills in on the next /api/daily load.`
       : `Not enough daily history yet — ${res.have||0} names, need 8 with ≥${BT_MIN_DAYS}d (and more days than the lookback). Fills in as /api/daily loads, or pick a shorter lookback.`;
-    return head+controls+sCard(`<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center;text-align:center;padding:0 30px">${msg}</div>`);
+    return head+controls+sCard(`<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center;text-align:center;padding:0 30px">${msg}</div>`)+renderDuelSection();
   }
   const m=res.days.length, splitIdx=Math.max(1,Math.min(m-2,Math.floor(m*p.split)));
   const isR=res.portR.slice(0,splitIdx), oosR=res.portR.slice(splitIdx);
@@ -2852,7 +2901,81 @@ function renderBacktest(){
   const cap = res.on
     ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
     : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
-  return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap);
+  return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap)+renderDuelSection();
+}
+// ===== Score duel — MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) =====
+// The adjudicator for the candidate column. Server-computed record (/api/duel): once per UTC
+// day the poller snapshots both scores per name and, when the next day's prices land, computes
+// per-scope Spearman rank IC of each score against the realized next-day return. This panel
+// renders that record — it never recomputes it — plus a LIVE divergence list built from the
+// same rows the board renders (one code path: the Δ names here are exactly the Δ cells there).
+const DUEL_ROLL=7, DUEL_REFRESH_MS=60000;
+function duelRoll(a){ const o=[]; for(let i=0;i<a.length;i++){ let s2=0,n2=0;
+  for(let j=Math.max(0,i-(DUEL_ROLL-1));j<=i;j++){ s2+=a[j]; n2++; } o.push(s2/n2); } return o; }
+async function loadDuelData(){
+  const d=state.duel;
+  if(d.pending||(d.at&&Date.now()-d.at<DUEL_REFRESH_MS)) return;
+  d.pending=true;
+  try{ d.data=await fetchJSON('/api/duel'); d.at=Date.now(); }
+  catch(_){ }
+  d.pending=false;
+  if(state.view==='backtest') drawBacktest();
+}
+function duelSvg(ic){
+  const W=520,H=150, pl=54,pr=16,pt=12,pb=22;
+  if(!ic||ic.length<2) return `<div class="msg" style="height:110px;display:flex;align-items:center;justify-content:center;text-align:center;padding:0 30px">Accruing — the record starts at the first full UTC day after deploy and needs 2 resolved days before a line can draw. ${ic&&ic.length?ic.length+' day so far.':'Day 0.'}</div>`;
+  const n=ic.length, ra=duelRoll(ic.map(r2=>r2[1])), rb=duelRoll(ic.map(r2=>r2[2]));
+  let lo=Math.min(0,...ra,...rb), hi=Math.max(0,...ra,...rb);
+  if(hi===lo){ hi+=0.01; lo-=0.01; } const padd=(hi-lo)*0.1; hi+=padd; lo-=padd;
+  const X=i=> pl+(n<=1?0:i/(n-1))*(W-pl-pr);
+  const Y=v=> pt+(1-(v-lo)/(hi-lo))*(H-pt-pb);
+  let s2=lcGrid(pl,W-pr,lcTicks(lo,hi,4),Y,v=>v.toFixed(2));
+  s2+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--faint)" stroke-width="1"/>`;
+  const path=a=>a.map((v,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)).join(' ');
+  s2+=`<path d="${path(ra)}" fill="none" stroke="var(--muted)" stroke-width="1.7"/>`;
+  s2+=`<path d="${path(rb)}" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-dasharray="5 3"/>`;
+  s2+=`<circle cx="${X(n-1).toFixed(1)}" cy="${Y(ra[n-1]).toFixed(1)}" r="2.6" fill="var(--muted)"/>`;
+  s2+=`<circle cx="${X(n-1).toFixed(1)}" cy="${Y(rb[n-1]).toFixed(1)}" r="2.6" fill="var(--accent)"/>`;
+  s2+=`<text x="${pl}" y="${H-6}" class="lc-tick">${sessDate(ic[0][0]*DAY)}</text>`;
+  s2+=`<text x="${(W-pr).toFixed(1)}" y="${H-6}" text-anchor="end" class="lc-tick">${sessDate(ic[n-1][0]*DAY)}</text>`;
+  const xs=ic.map((_,i)=>X(i));
+  const rows=ic.map((r2,i)=>`<b style="color:var(--text)">${sessDate(r2[0]*DAY)}</b> <span class="sec">· ${r2[3]} names</span><br>`+
+    `<span style="color:var(--muted)">MOM ${ra[i].toFixed(3)}</span> · <span style="color:var(--accent)">MOM+ ${rb[i].toFixed(3)}</span>`+
+    ` · Δ <span class="${rb[i]-ra[i]>=0?'pos':'neg'}">${(rb[i]-ra[i]>=0?'+':'')+(rb[i]-ra[i]).toFixed(3)}</span>`+
+    `<br><span class="sec" style="font-size:10px">raw day: MOM ${r2[1].toFixed(3)} · MOM+ ${r2[2].toFixed(3)}</span>`);
+  return hoverChart(s2,{w:W,h:H,pt,pb,xs,rows});
+}
+function duelDivergence(){
+  const rows2=activeRows().filter(r2=>!r2.delisted&&r2.mom!=null&&r2.momp!=null&&isFinite(r2.mom)&&isFinite(r2.momp)&&Math.abs(r2.momp-r2.mom)>=1)
+    .sort((a,b)=>Math.abs(b.momp-b.mom)-Math.abs(a.momp-a.mom)).slice(0,5);
+  if(!rows2.length) return `<div class="s-cap" style="margin-top:6px">No live disagreements ≥1pt right now — on names without an OI build, a covering flow, or a funding extreme, the two scores are identical by construction.</div>`;
+  const tr=rows2.map(r2=>{ const dv=r2.momp-r2.mom;
+    return `<div class="duel-row"><span class="duel-tk">${esc(r2.ticker)}</span>`+
+      `<span style="color:${momColor(r2.mom)}">${r2.mom>0?'+':''}${Math.round(r2.mom)}</span>`+
+      `<span style="color:${momColor(r2.momp)}">${r2.momp>0?'+':''}${Math.round(r2.momp)}</span>`+
+      `<span class="${dv>=0?'pos':'neg'}">${dv>=0?'+':''}${Math.round(dv)}</span>`+
+      `<span class="sec duel-why">${esc(r2.momWhy||'')}</span></div>`; }).join('');
+  return `<div class="s-cap" style="margin:10px 0 4px">Live disagreements — the spot-check that MOM+ diverges for the right reasons (${state.tf} window, same rows as the board):</div>`+
+    `<div class="duel-tbl"><div class="duel-row duel-hd"><span>name</span><span>MOM</span><span>MOM+</span><span>Δ</span><span>why</span></div>${tr}</div>`;
+}
+function renderDuelSection(){
+  const head=sHead('Score duel — MOM vs MOM+','the candidate momentum column, adjudicated on daily forward rank IC — not by eye');
+  const d=state.duel.data;
+  const uKey=state.scope==='crypto'?'main':'xyz';
+  if(!d||!d.scopes||!d.scopes[uKey]) return head+sCard(`<div class="msg" style="height:110px;display:flex;align-items:center;justify-content:center">${state.duel.pending?'Loading the duel record…':'Duel record not served yet — redeploy the backend, the panel fills in on the next load.'}</div>`)+duelDivergence();
+  const sc=d.scopes[uKey], st=sc.stats||{}, ic=sc.ic||[];
+  const fmtIC=v=>(v==null||!isFinite(v))?'—':(v>=0?'+':'')+v.toFixed(3);
+  const stats=`<div class="s-grid" style="margin:12px 0 4px">`+
+    `<div class="s-stat"><div class="s-k" style="color:var(--muted)">MOM (incumbent)</div><div class="s-row"><span>mean IC</span><b>${fmtIC(st.meanA)}</b></div><div class="s-row"><span>days</span><b>${st.n||0}</b></div></div>`+
+    `<div class="s-stat"><div class="s-k" style="color:var(--accent)">MOM+ (candidate)</div><div class="s-row"><span>mean IC</span><b>${fmtIC(st.meanB)}</b></div><div class="s-row"><span>better days</span><b>${st.winB!=null?Math.round(st.winB*100)+'%':'—'}</b></div></div>`+
+    `<div class="s-stat"><div class="s-k">Verdict gate</div><div class="s-row"><span>t on ΔIC</span><b>${st.t!=null&&isFinite(st.t)?st.t.toFixed(2):'—'}</b></div><div class="s-row"><span>unlocks</span><b>${d.minN}d or |t|≥2</b></div></div></div>`;
+  let verdict;
+  if(!st.n) verdict=`<div class="duel-verdict">Day 0 — the record starts accruing at the first full UTC day after deploy. Both columns are live on the board now; this panel is what decides between them.</div>`;
+  else if(!st.verdict) verdict=`<div class="duel-verdict">${st.meanB>st.meanA?'MOM+ leads':st.meanB<st.meanA?'The incumbent leads':'Dead even'} on mean rank IC after ${st.n} day${st.n===1?'':'s'} — <b>no verdict yet</b>. The gate refuses to call a winner before ${d.minN} days or |t| ≥ 2 on the daily IC difference; anything earlier is eyeball-fitting with extra steps.</div>`;
+  else verdict=`<div class="duel-verdict on"><b>Verdict unlocked</b> after ${st.n} days (t ${st.t!=null?st.t.toFixed(2):'—'}): ${st.meanB>st.meanA?'<b>MOM+ wins</b> — say the word and it gets promoted into the incumbent (and the loser deleted, per the bench rule).':st.meanB<st.meanA?'<b>the incumbent holds</b> — MOM+ gets deleted, not left as clutter.':'a statistical tie — the incumbent holds by default.'}</div>`;
+  const leg=sLeg([{color:'var(--muted)',label:'MOM (incumbent, 7d roll)'},{color:'var(--accent)',label:'MOM+ (candidate, 7d roll)'}]);
+  const cap=`Each point: Spearman rank correlation between that day's 00:00 UTC score snapshot and the realized next-day return across the ${state.scope==='crypto'?'crypto':'xyz'} universe — "did this column's ordering predict tomorrow." Lines are ${DUEL_ROLL}d rolling means (raw daily IC is noise to the eye; the stats and the t-test run on the raw days). Canonical d1 basis, window-independent — the board columns follow the timeframe selector, this record does not. Snapshots persist to the volume, so the record survives redeploys. <b>Hover</b> the curve.`;
+  return head+stats+verdict+leg+sCard(duelSvg(ic))+sCap(cap)+duelDivergence();
 }
 function attachBtControls(){
   const sig=el('btSig'); if(sig) sig.addEventListener('change',()=>{ state.backtest.signal=sig.value; drawBacktest(); });
@@ -2862,7 +2985,7 @@ function attachBtControls(){
   segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false); segWire('btHold','holdWindow',false);
   const rq=el('btReq'); if(rq) rq.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest.reqSign=(b.dataset.v==='sign'); drawBacktest(); }));
 }
-function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); }
+function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); loadDuelData(); }
 async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values()].some(r=>r.daily)){ await loadDaily(); if(state.view==='backtest') drawBacktest(); } }
 
 function updateBenchNote(){ const bn=el('benchnote'); if(!bn) return;
@@ -4788,7 +4911,9 @@ backtest:`
 <div class="hlp-h">Crypto scope</div>
 <p>The tab follows the Stocks/Crypto switcher: crypto runs the top-60 Hyperliquid perps against a <b>BTC benchmark</b> with 365-day annualization, no overnight hold (24/7 markets have no boundary), and funding carry at home. The two universes never mix in one run.</p>
 <div class="hlp-h">How to read the curve</div>
-<p>Four lines: <b>net</b> (after funding), <b>gross</b>, <b>benchmark</b>, <b>equal-weight universe</b>. The shaded split is <b>in-sample | out-of-sample</b>: a strategy that only works left of the line was curve-fit by your eyeballs. Judge on OOS net vs equal-weight — beating the benchmark with a long/short book is table stakes; beating naive equal-weight is the actual bar.</p>`,
+<p>Four lines: <b>net</b> (after funding), <b>gross</b>, <b>benchmark</b>, <b>equal-weight universe</b>. The shaded split is <b>in-sample | out-of-sample</b>: a strategy that only works left of the line was curve-fit by your eyeballs. Judge on OOS net vs equal-weight — beating the benchmark with a long/short book is table stakes; beating naive equal-weight is the actual bar.</p>
+<div class="hlp-h">Score duel</div>
+<p>Below the curve: the head-to-head between the board's <b>Momentum</b> and the <b>MOM+</b> candidate (same core; OI term regime-qualified so covering flow doesn't amplify like new money, plus a funding-crowding haircut at the crowd's own monthly extreme). Once per UTC day the server snapshots both scores for every name and, when the next day's prices land, computes each column's <b>rank IC</b> — the Spearman correlation between that day's ordering and the realized next-day return. Forward, out of sample, accruing from deploy; the record persists on the volume across redeploys. The <b>verdict gate</b> refuses to call a winner before 60 days or |t| ≥ 2 on the daily IC difference — the same anti-eyeball doctrine as the IS/OOS split, applied to the score itself. The live-disagreements list underneath shows which names the two columns argue about right now and <i>why</i>, so you can spot-check that MOM+ diverges for the stated mechanisms rather than just measuring that it diverges. On a locked verdict the winner keeps the column and the loser gets deleted.</p>`,
 report:`
 <div class="hlp-h">What this is</div>
 <p>Everything the server already holds on one name — price structure, positioning, funding, the signal ledger's own base rates, earnings context — compiled into one prompt and synthesized by <b>Claude</b> into a plain-language read. It is a <i>reading of the board</i>, not an oracle: every number it cites is the same number the other tabs show, and the machinery around the model exists to keep it honest rather than fluent. The search box takes any ticker in either universe; a <b>focused ticker</b> or the drawer's "AI report →" deep-link opens straight to that name.</p>
@@ -4912,6 +5037,7 @@ const TFIELD={
   fundpct:{g:r=>r.fundPct,f:v=>v+'th',l:'fund pctile'},
   squeeze:{g:r=>r.sqz,f:v=>String(Math.round(v)),l:'squeeze'},
   momentum:{g:r=>r.mom,f:v=>(v>=0?'+':'')+Math.round(v),l:'momentum'},
+  momentum2:{g:r=>r.momp,f:v=>(v>=0?'+':'')+Math.round(v),l:'MOM+'},
   oi:{g:r=>r.oi,f:fmtUsd,l:'oi'},
   vol:{g:r=>r.vol,f:fmtUsd,l:'24h vol'},
   vstape:{g:r=>r.vstape,f:v=>(v>=0?'+':'')+v.toFixed(1)+'%',l:'vs tape'},

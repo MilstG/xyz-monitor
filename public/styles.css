@@ -937,3 +937,15 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .cg-fill{display:flex;align-items:center;gap:6px;margin:4px 0 6px;flex-wrap:wrap}
 .cg-cnt{font-size:10px;color:var(--faint);margin-left:auto}
 .cg-cap{font-size:10px;color:var(--accent)}
+
+/* ===== Score duel (build 2026.07.24-07) ===== */
+.duel-verdict{margin:10px 0 8px;padding:8px 12px;background:var(--panel2);border-left:2px solid var(--muted);border-radius:0;font-size:12px;color:var(--text);line-height:1.55}
+.duel-verdict.on{border-left-color:var(--accent)}
+.duel-tbl{border:1px solid var(--border);border-radius:8px;overflow:hidden;font-size:12px}
+.duel-row{display:grid;grid-template-columns:64px 52px 52px 44px 1fr;gap:8px;padding:6px 12px;align-items:baseline}
+.duel-row:not(.duel-hd):hover{background:var(--panel2)}
+.duel-row+.duel-row{border-top:1px solid var(--border)}
+.duel-hd{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.duel-tk{color:var(--accent)}
+.duel-why{font-size:10.5px;text-align:right}
+.mompw{font-style:normal;color:var(--accent);font-size:9px;margin-left:3px;vertical-align:super;cursor:help}
