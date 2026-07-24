@@ -1904,13 +1904,15 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "compgAligned", "compgTickLabel", "compgHoverLabel",
     "cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire",
     "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto",
-    "dailyLevels", "dailyOI", "btMomVariant"];
+    "dailyLevels", "dailyOI", "btMomVariant",
+    "mompCell", "renderDuelSection", "duelSvg", "duelDivergence", "loadDuelData", "duelRoll", "colAdjacent"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
   for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7",
-    "xyzmon.density", "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs"]) {
+    "xyzmon.density", "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs",
+    "key:'momp'", "/api/duel", "momentum2:", "r.momWhy"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
     assert.ok(ok, `missing client feature marker: ${frag}`);
   }
@@ -2037,7 +2039,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   // twice) is now a suite failure, and each poller.getX() a route calls must exist in poller.js.
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/trend", "/api/signals",
+  const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/duel", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/ai-report", "/api/ai-reports", "/api/health",
     "/api/export/ledger", "/api/news", "/api/news/channels",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
@@ -4389,4 +4391,171 @@ test("daily payload v3 (2026.07.24-06): warm closes-only bars overlay h/v from t
   assert.ok(pol.includes("daily: r.dailyRaw ? r.dailyRaw.map((k) => [k.t, k.c, Number.isFinite(k.h) ? k.h : null, Number.isFinite(k.v) ? k.v : null]) : null"), "warm persist must write 4-tuples");
   assert.ok(pol.includes('+ ":" + ohlcN + ":" + oiN'), "content signature must carry the OHLC/OI coverage terms");
   assert.ok(pol.includes("function dailyTuples(r, hs)"), "the shared tuple builder must exist (one code path for both universes)");
+});
+
+// ===== Score duel + MOM/MOM+ pair (build 2026.07.24-07) =========================================
+// The candidate momentum column and its adjudicator. Pure math executed on fixtures, the poller's
+// snapshot/IC/persistence loop driven through the harness with injected universes and clock, and
+// a constant-fragment pin welding the client's mirrored math to compute.js so the two
+// implementations cannot silently drift apart.
+
+test("momPair: incumbent branch is byte-identical math; V2/V3 move only the candidate, in the stated directions", () => {
+  const { momPair } = require("../src/compute");
+  const base = { h1: 0.5, h4: 1.2, d1: 2.5, d7: 6.0, d30: 12.0, volH: 0.004, volD: 0.02,
+    px: 108, hi30: 110, lo30: 90, doi: null, fundAPR: null, fundPct: null };
+  // no OI, no funding: the two branches share the whole path -> identical scores, no tags
+  const p0 = momPair(base);
+  assert.ok(isFinite(p0.mom) && isFinite(p0.momp), "pair computes");
+  assert.equal(p0.mom, p0.momp, "without an OI or crowding term the candidate IS the incumbent");
+  assert.equal(p0.why, null, "no mechanism fired, no tag");
+  // hand-check the incumbent against the original formula on the same inputs
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  let sN = 0, w = 0, sa = 0;
+  for (const [ret, hrs, wt] of [[0.5, 1, 0.10], [1.2, 4, 0.15], [2.5, 24, 0.30], [6.0, 168, 0.30], [12.0, 720, 0.15]]) {
+    const sigma = (hrs >= 24) ? 0.02 * Math.sqrt(hrs / 24) : 0.004 * Math.sqrt(hrs);
+    const z = (ret / 100) / sigma; sN += wt * z; sa += wt * Math.abs(z); w += wt;
+  }
+  const kappa = Math.abs(sN) / sa;
+  const core = (sN / w) * (0.5 + 0.5 * kappa) + 0.4 * (clamp((108 - 90) / (110 - 90), 0, 1) - 0.5) * 2;
+  assert.ok(Math.abs(p0.mom - 100 * Math.tanh(core / 1.5)) < 1e-9, "incumbent matches the original computeMomentum math exactly");
+  // OI building, funding corroborating the long side: candidate amplifies, incumbent amplifies its own way
+  const pC = momPair(Object.assign({}, base, { doi: 6, fundAPR: 20, fundPct: 50 }));
+  assert.ok(pC.momp > p0.momp, "corroborated OI build amplifies the candidate");
+  assert.ok(/OI\+ corroborated/.test(pC.why), "corroboration tagged");
+  // same build, crowd on the OPPOSITE side: amplification collapses to the conflicted floor
+  const pX = momPair(Object.assign({}, base, { doi: 6, fundAPR: -20, fundPct: 50 }));
+  assert.ok(pX.momp < pC.momp, "conflicted funding amplifies less than corroborated");
+  assert.ok(/OI\+ conflicted/.test(pX.why), "conflict tagged");
+  // falling OI: incumbent dampens at the full 0.4 band, candidate at half — covering is not conviction
+  const pS = momPair(Object.assign({}, base, { doi: -6 }));
+  assert.ok(pS.mom < p0.mom, "incumbent dampens on falling OI");
+  assert.ok(pS.momp < p0.momp && pS.momp > pS.mom, "candidate dampens at HALF band: below the unmodulated core, above the incumbent");
+  assert.ok(/squeeze-side OI/.test(pS.why), "positive-score falling OI tagged squeeze-side");
+  // V3: crowded long at the >=90th own-31d percentile with positive funding -> x0.8 on the candidate only
+  const pH = momPair(Object.assign({}, base, { fundAPR: 40, fundPct: 95 }));
+  assert.ok(pH.mom === p0.mom, "haircut never touches the incumbent");
+  assert.ok(pH.momp < pH.mom, "crowded-long haircut taxes the candidate");
+  assert.ok(/crowded long/.test(pH.why), "haircut tagged");
+  // V3 side gate: same extreme percentile but crowd on the OPPOSITE side of the score -> no tax
+  const pN = momPair(Object.assign({}, base, { fundAPR: -40, fundPct: 5 }));
+  assert.equal(pN.momp, p0.momp, "a short-side crowd under a long score is squeeze fuel, not exhaustion — no haircut");
+  // degenerate inputs stay honest
+  assert.equal(momPair({ volH: 0 }).mom, undefined, "no vol -> undefined, not a fabricated 0");
+  assert.equal(momPair(Object.assign({}, base, { h1: null, h4: null, d1: null, d7: null, d30: null })).mom, null, "no horizons -> null");
+});
+
+test("spearmanIC: exact on clean ranks, tie-averaged, honest null on degenerate input", () => {
+  const { spearmanIC } = require("../src/compute");
+  assert.ok(Math.abs(spearmanIC([1, 2, 3, 4], [10, 20, 30, 40]) - 1) < 1e-12, "perfect monotone -> +1");
+  assert.ok(Math.abs(spearmanIC([1, 2, 3, 4], [40, 30, 20, 10]) + 1) < 1e-12, "perfect inverse -> -1");
+  // ties -> average ranks: [1,1,2] vs [5,5,9] is still a perfect rank agreement
+  assert.ok(Math.abs(spearmanIC([1, 1, 2], [5, 5, 9]) - 1) < 1e-12, "tie-averaged ranks agree");
+  assert.equal(spearmanIC([3, 3, 3, 3], [1, 2, 3, 4]), null, "constant scores -> null, not 0");
+  assert.equal(spearmanIC([1, 2], [1, 2]), null, "below the 3-name floor -> null");
+});
+
+test("duelStats: paired t on the IC difference; verdict locks at minN days OR |t| >= 2, never before", () => {
+  const { duelStats } = require("../src/compute");
+  const flat = duelStats([], 60);
+  assert.equal(flat.n, 0); assert.equal(flat.verdict, false);
+  // B consistently 0.02 better with tiny noise: t explodes long before 60 days
+  const rows = []; for (let i = 0; i < 20; i++) rows.push({ a: 0.01 + (i % 3) * 1e-4, b: 0.03 + (i % 3) * 1e-4 });
+  const st = duelStats(rows, 60);
+  assert.equal(st.n, 20);
+  assert.ok(Math.abs(st.meanB - st.meanA - 0.02) < 1e-9, "mean gap exact");
+  assert.equal(st.winB, 1, "B led every day");
+  assert.ok(st.t > 2, "consistent gap -> significant t");
+  assert.equal(st.verdict, true, "|t| >= 2 unlocks before minN");
+  // pure noise around zero gap: no verdict at n < minN...
+  const noisy = []; for (let i = 0; i < 30; i++) noisy.push({ a: (i % 2 ? 1 : -1) * 0.05, b: (i % 2 ? -1 : 1) * 0.05 });
+  const sn = duelStats(noisy, 60);
+  assert.ok(Math.abs(sn.t) < 2 && sn.verdict === false, "noise stays locked below minN");
+  // ...but the day-count gate alone unlocks at minN even without significance
+  const long = []; for (let i = 0; i < 60; i++) long.push({ a: (i % 2 ? 1 : -1) * 0.05, b: (i % 2 ? -1 : 1) * 0.05 });
+  assert.equal(duelStats(long, 60).verdict, true, "minN days unlocks the verdict regardless of t");
+});
+
+test("poller score duel: one snapshot per UTC day, IC lands when the next day's prices do, state persists and hydrates", () => {
+  const { createPoller } = require("../src/poller");
+  let saved = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveDuel: (d) => { saved = JSON.parse(JSON.stringify(d)); }, loadDuel: () => saved };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const DAY = 86400000;
+  const mkRow = (i, px) => ({ coin: "xyz:T" + i, ticker: "T" + i, delisted: false, uni: "xyz",
+    px, d1: (i - 4.5) * 2,   // spread of returns so scores rank cleanly
+    ref: { p1h: px * 0.999, p4h: px * 0.998, p7d: px / (1 + (i - 4.5) * 0.05), p30d: px / (1 + (i - 4.5) * 0.08) },
+    feat: { volH: 0.004, volD: 0.02, hi30: px * 1.1, lo30: px * 0.85 }, funding: 0.00001 });
+  const day1 = 20000, now1 = day1 * DAY + 3600000;
+  const rows1 = []; for (let i = 0; i < 10; i++) rows1.push(mkRow(i, 100));
+  p.duelTickNow(now1, { xyz: rows1, main: [] });
+  assert.ok(saved && saved.snaps[day1] && Object.keys(saved.snaps[day1].xyz).length === 10, "day-1 snapshot lands and persists");
+  assert.equal(saved.ic.length, 0, "no IC yet — one day is not a record");
+  // same day, later tick: the one-key guard must not double-snap or rewrite
+  const before = JSON.stringify(saved.snaps[day1]);
+  p.duelTickNow(now1 + 7200000, { xyz: rows1.map((r) => Object.assign({}, r, { px: 999 })), main: [] });
+  assert.equal(JSON.stringify(saved.snaps[day1]), before, "second tick on the same day is a no-op");
+  // next day: returns proportional to score rank -> IC near +1 for both columns
+  const rows2 = []; for (let i = 0; i < 10; i++) rows2.push(mkRow(i, 100 * (1 + i * 0.01)));
+  p.duelTickNow((day1 + 1) * DAY + 3600000, { xyz: rows2, main: [] });
+  assert.equal(saved.ic.length, 1, "exactly one IC row per scope per day pair");
+  const row = saved.ic[0];
+  assert.equal(row.d, day1); assert.equal(row.u, "xyz"); assert.equal(row.n, 10);
+  assert.ok(row.a > 0.9 && row.b > 0.9, "rank-aligned returns -> IC near +1 for both scores");
+  assert.ok(!saved.snaps[day1 - 5], "stale snapshots pruned");
+  // the served payload carries the record + gate
+  const duel = p.getDuel();
+  assert.equal(duel.scopes.xyz.ic.length, 1);
+  assert.equal(duel.scopes.xyz.stats.n, 1);
+  assert.equal(duel.scopes.xyz.stats.verdict, false, "one day never unlocks a verdict");
+  assert.ok(duel.minN >= 60, "verdict gate shipped to the client");
+  assert.ok(duel.dataTs > 0, "dataTs moves with content so the ETag works");
+  // a fresh poller hydrates the same record off the (stubbed) volume
+  const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p2.hydrateDuelNow();
+  assert.equal(p2.getDuel().scopes.xyz.ic.length, 1, "record survives a redeploy");
+  // boot mid-day with a cold universe must NOT burn the day: below the name floor, no snap
+  let saved3 = null;
+  const store3 = Object.assign({}, store, { saveDuel: (d) => { saved3 = d; }, loadDuel: () => null });
+  const p3 = createPoller({ dex: "xyz", store: store3, log: () => {}, version: "test", crypto: false });
+  p3.duelTickNow(now1, { xyz: rows1.slice(0, 3), main: [] });
+  assert.equal(saved3, null, "under 8 snappable names the day stays unclaimed for a later retry");
+});
+
+test("build -07 manifest: pair math welded across compute.js and app.js; duel plumbing pinned end to end", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const stf = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  // Constant-fragment weld: every coefficient of the shared core + V2 + V3 must appear in BOTH
+  // implementations. Retuning one file without the other is a suite failure, which is the point.
+  for (const frag of ["0.4*Math.tanh", "/8)", "(0.5+0.5*kappa)", "0.6,1.4", "1.5)",
+    "Math.tanh(fAPR/25))>=0.15", "(0.5+0.5*c)", "0.2*Math.tanh", "*=0.8", "fp>=90", "fp<=10"])
+    assert.ok(app.replace(/\s+/g, "").includes(frag.replace(/\s+/g, "")), `app.js missing pair-math fragment: ${frag}`);
+  for (const frag of ["0.4 * Math.tanh", "(0.5 + 0.5 * kappa)", "0.6, 1.4", "Math.tanh(fAPR / 25)) >= 0.15",
+    "(0.5 + 0.5 * c)", "1 - 0.2 * Math.tanh", "*= 0.8", "fp >= 90", "fp <= 10"])
+    assert.ok(cmp.includes(frag), `compute.js missing pair-math fragment: ${frag}`);
+  // poller: snapshot cadence guards, floors, retention, persistence, exports
+  for (const frag of ["DUEL_RETENTION_D = 180", "DUEL_MIN_N = 60", "DUEL_MIN_NAMES = 8",
+    "if (duel.snaps[day]) return", "store.saveDuel(duel)", "hydrateDuel", "getDuel,", "duelTickNow: duelTick",
+    "momPair, spearmanIC, duelStats"])
+    assert.ok(pol.includes(frag), `poller.js missing duel pin: ${frag}`);
+  assert.ok(/setInterval\(safeTick\(duelTick, "duelTick"\), 60 \* 1000\)/.test(pol), "duel timer wired at 60s");
+  // server: exactly one registration already covered by the route manifest; pin the getter binding
+  assert.ok(srv.includes("poller.getDuel()"), "/api/duel must serve poller.getDuel through serveCached");
+  // store: atomic blob pair
+  assert.ok(stf.includes("saveDuel(data)") && stf.includes("loadDuel()") && stf.includes('duel.json'), "store duel blob missing");
+  // client: column adjacent to the incumbent in the default order, migration helper applied twice
+  assert.ok(/'mom','momp'/.test(app), "momp must sit beside mom in DEFAULT_ORDER");
+  assert.equal(app.split("colAdjacent(").length - 1, 3, "adjacency migration: one definition + prefs path + layout path");
+  assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
+  // css + footer + help
+  for (const cls of [".duel-verdict", ".duel-tbl", ".duel-row", ".mompw"]) assert.ok(css.includes(cls), `styles.css missing ${cls}`);
+  assert.ok(html.includes("MOM+"), "index.html footer must introduce the candidate column");
+  assert.ok(app.includes("Score duel</div>"), "backtest help must document the duel");
 });
