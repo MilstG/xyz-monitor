@@ -2131,3 +2131,107 @@ function earnReactionsFor(prints, daily) {
 }
 module.exports.mergeEarnPrints = mergeEarnPrints;
 module.exports.earnReactionsFor = earnReactionsFor;
+
+// ===== Coinalyze derivatives context (crypto universe) ==========================================
+// Pure math over the packed deriv rows [ts, longLiqUsd, shortLiqUsd, oiUsd]. Fetch/assembly lives
+// in poller.js; nothing here touches I/O. USD values arrive source-converted (Coinalyze
+// convert_to_usd) and are aggregated CEX data — labeling stays honest downstream.
+
+// Merge freshly fetched rows into an existing sorted series, deduping by timestamp (last write
+// wins — a re-fetched overlapping bucket may have grown). Returns a NEW sorted array and whether
+// anything changed, so callers can gate content-clock bumps on real change.
+function czMergeHistory(existing, incoming) {
+  const base = Array.isArray(existing) ? existing : [];
+  const inc = Array.isArray(incoming) ? incoming : [];
+  if (!inc.length) return { rows: base, changed: false };
+  const m = new Map();
+  for (const r of base) if (Array.isArray(r) && Number.isFinite(r[0])) m.set(r[0], r);
+  let changed = false;
+  for (const r of inc) {
+    if (!Array.isArray(r) || !Number.isFinite(r[0])) continue;
+    const prev = m.get(r[0]);
+    if (!prev || prev[1] !== r[1] || prev[2] !== r[2] || prev[3] !== r[3]) { m.set(r[0], r); changed = true; }
+  }
+  if (!changed) return { rows: base, changed: false };
+  const rows = [...m.values()].sort((a, b) => a[0] - b[0]);
+  return { rows, changed: true };
+}
+
+// Cascade flag: a liquidation bucket is a cascade when the side's liquidation notional spikes
+// vs its OWN trailing distribution AND open interest drops in the same bucket — forced flow
+// that actually cleared positioning, not just a busy bar. Honest-null: below minSamples of
+// trailing history the bucket can't be judged and is silently skipped (never guessed).
+function cascadeFlags(rows, opts) {
+  const o = opts || {};
+  const look = o.look || 96;                 // trailing buckets in the baseline (96 x 15min = 24h)
+  const minSamples = o.minSamples || 24;     // don't judge against a thinner baseline than this
+  const z = o.z || 3;                        // spike threshold in trailing std devs
+  const minUsd = o.minUsd || 250000;         // absolute floor — a z-spike on dust is not a cascade
+  const oiDropPct = o.oiDropPct || 1.0;      // OI must fall at least this % bucket-over-bucket
+  const out = [];
+  if (!Array.isArray(rows) || rows.length < minSamples + 1) return out;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!Array.isArray(r)) continue;
+    const oiPrev = rows[i - 1][3], oiNow = r[3];
+    if (!Number.isFinite(oiPrev) || !Number.isFinite(oiNow) || oiPrev <= 0) continue;
+    const doiPct = (oiNow / oiPrev - 1) * 100;
+    if (doiPct > -oiDropPct) continue;       // no positioning cleared — whatever the liq bar was, not a cascade
+    for (const side of [1, 2]) {             // 1 = longs liquidated (down-cascade), 2 = shorts (up-cascade)
+      const v = r[side];
+      if (!Number.isFinite(v) || v < minUsd) continue;
+      let s = 0, s2 = 0, n = 0;
+      for (let k = Math.max(1, i - look); k < i; k++) {
+        const w = rows[k] && rows[k][side];
+        if (Number.isFinite(w)) { s += w; s2 += w * w; n++; }
+      }
+      if (n < minSamples) continue;
+      const mean = s / n, va = Math.max(0, s2 / n - mean * mean), sd = Math.sqrt(va);
+      if (v >= mean + z * Math.max(sd, mean * 0.25) ) {
+        out.push({ t: r[0], side: side === 1 ? "long" : "short",
+          liq: Math.round(v), doiPct: +doiPct.toFixed(2) });
+      }
+    }
+  }
+  return out;
+}
+
+// 24h rollup for the drawer chips: liq totals per side, latest OI, and OI change vs ~24h ago
+// (nearest stored bucket at or before the cutoff — an honest null when coverage is thinner).
+function derivRollup(rows, now) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const cut = (Number.isFinite(now) ? now : Date.now()) - 24 * 3600 * 1000;
+  let ll = 0, sl = 0, oiRef = null;
+  for (const r of rows) {
+    if (!Array.isArray(r) || !Number.isFinite(r[0])) continue;
+    if (r[0] <= cut) { if (Number.isFinite(r[3])) oiRef = r[3]; continue; }
+    if (Number.isFinite(r[1])) ll += r[1];
+    if (Number.isFinite(r[2])) sl += r[2];
+  }
+  const last = rows[rows.length - 1];
+  const oi = last && Number.isFinite(last[3]) ? last[3] : null;
+  const doi24 = oi != null && oiRef != null && oiRef > 0 ? +((oi / oiRef - 1) * 100).toFixed(2) : null;
+  return { ll24: Math.round(ll), sl24: Math.round(sl), oi: oi != null ? Math.round(oi) : null, doi24 };
+}
+
+// Display aggregation: 15-min rows -> hourly buckets (liqs summed, OI = last sample in the
+// bucket). Raw 15-min stays in the store for the cascade math; the drawer chart reads this.
+function aggDerivHourly(rows) {
+  const out = [];
+  if (!Array.isArray(rows)) return out;
+  let cur = null;
+  for (const r of rows) {
+    if (!Array.isArray(r) || !Number.isFinite(r[0])) continue;
+    const hb = Math.floor(r[0] / 3600000) * 3600000;
+    if (!cur || cur[0] !== hb) { cur = [hb, 0, 0, null]; out.push(cur); }
+    if (Number.isFinite(r[1])) cur[1] += r[1];
+    if (Number.isFinite(r[2])) cur[2] += r[2];
+    if (Number.isFinite(r[3])) cur[3] = r[3];
+  }
+  for (const b of out) { b[1] = Math.round(b[1]); b[2] = Math.round(b[2]); if (b[3] != null) b[3] = Math.round(b[3]); }
+  return out;
+}
+module.exports.czMergeHistory = czMergeHistory;
+module.exports.cascadeFlags = cascadeFlags;
+module.exports.derivRollup = derivRollup;
+module.exports.aggDerivHourly = aggDerivHourly;

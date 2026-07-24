@@ -23,6 +23,10 @@ function openStore(dataDir) {
   const tgFile = path.join(dataDir, "tgchannels.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
+  const derivFile = path.join(dataDir, "derivs.log");        // Coinalyze 15-min rows: coin\tts\tlongLiq\tshortLiq\toi
+  const derivMapFile = path.join(dataDir, "derivmap.json");  // resolved base-asset -> Coinalyze symbol map
+  let dbuf = [];
+  let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
   let buf = [];
   let pruning = false;   // while true, hold appends in `buf` so we never touch the file mid-rewrite
   let hourlyWriting = false;   // while true, an async hourly NDJSON write is in flight — skip overlapping ticks
@@ -405,7 +409,91 @@ function openStore(dataDir) {
       try { cdb.exec("VACUUM INTO '" + String(out).replace(/'/g, "''") + "'"); return true; } catch (_) { return false; }
     },
     closeCandles() { try { if (cdb) cdb.close(); } catch (_) {} cdb = null; },
-    close() { flush(); try { if (cdb) cdb.close(); } catch (_) {} },
+    // ---- Coinalyze deriv-context history ------------------------------------------------
+    // Same append-log discipline as oi.log: Coinalyze deletes intraday history daily (~15-20d
+    // window at 15min), so OUR log is the only place percentile/cascade baselines can grow.
+    // Every sweep appends only rows newer than what's already on disk (the poller gates that).
+    insertDeriv(coin, ts, ll, sl, oi) {
+      dbuf.push(coin + "\t" + ts + "\t" + (ll == null ? "" : ll) + "\t" + (sl == null ? "" : sl) + "\t" + (oi == null ? "" : oi) + "\n");
+      if (dbuf.length >= 200) this.flushDerivs();
+    },
+    flushDerivs() {
+      if (!dbuf.length || dPruning) return;
+      try { fs.appendFileSync(derivFile, dbuf.join("")); dbuf = []; }
+      catch (_) { if (dbuf.length > MAX_BUF) dbuf = dbuf.slice(dbuf.length >> 1); }
+    },
+    loadDerivs(since) {
+      const m = new Map();
+      try {
+        if (!fs.existsSync(derivFile)) return m;
+        const lines = fs.readFileSync(derivFile, "utf8").split("\n");
+        for (const ln of lines) {
+          if (!ln) continue;
+          const p = ln.split("\t");
+          if (p.length < 5) continue;
+          const ts = +p[1];
+          if (!Number.isFinite(ts) || ts < since) continue;
+          const row = [ts, p[2] === "" ? null : +p[2], p[3] === "" ? null : +p[3], p[4] === "" ? null : +p[4]];
+          let a = m.get(p[0]);
+          if (!a) { a = new Map(); m.set(p[0], a); }
+          a.set(ts, row);   // dedupe by ts, LAST write wins — a re-persisted grown boundary bucket supersedes its first observation
+        }
+        for (const [coin, a] of m) m.set(coin, [...a.values()].sort((x, y) => x[0] - y[0]));
+      } catch (_) {}
+      return m;
+    },
+    // Flat-cutoff streaming prune (no thinning band — 15-min resolution IS the product here),
+    // atomic rename, appends buffered during the rewrite. Async: callers should await it.
+    async pruneDerivs(before) {
+      if (dPruning) return 0;
+      this.flushDerivs();
+      if (!fs.existsSync(derivFile)) return 0;
+      dPruning = true;
+      const tmp = derivFile + ".tmp";
+      let removed = 0;
+      try {
+        await new Promise((resolve, reject) => {
+          const input = fs.createReadStream(derivFile, { encoding: "utf8" });
+          const output = fs.createWriteStream(tmp);
+          const rl = readline.createInterface({ input, crlfDelay: Infinity });
+          rl.on("line", (ln) => {
+            if (!ln) return;
+            const i1 = ln.indexOf("\t"), i2 = ln.indexOf("\t", i1 + 1);
+            if (i1 < 0 || i2 < 0) return;
+            const t = +ln.slice(i1 + 1, i2);
+            if (!Number.isFinite(t) || t < before) { removed++; return; }
+            output.write(ln + "\n");
+          });
+          rl.on("close", () => output.end());
+          rl.on("error", reject);
+          output.on("finish", resolve);
+          output.on("error", reject);
+        });
+        fs.renameSync(tmp, derivFile);
+      } catch (_) {
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        removed = 0;
+      } finally {
+        dPruning = false;
+        this.flushDerivs();
+      }
+      return removed;
+    },
+    // Resolved symbol map (base asset -> {sym, venue}) — config-grade, atomic like the rest,
+    // so a boot never has to re-spend call budget re-resolving an unchanged universe.
+    saveDerivMap(data) {
+      try {
+        const tmp = derivMapFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, derivMapFile);
+      } catch (_) {}
+    },
+    loadDerivMap() {
+      try { if (fs.existsSync(derivMapFile)) return JSON.parse(fs.readFileSync(derivMapFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    close() { flush(); this.flushDerivs(); try { if (cdb) cdb.close(); } catch (_) {} },
   };
 }
 

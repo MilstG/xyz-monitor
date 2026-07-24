@@ -129,4 +129,75 @@ function createUniverseSocket({ onCtxs, log }) {
   };
 }
 
-module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket };
+// ---- Coinalyze client -----------------------------------------------------------------
+// Aggregated CEX derivatives context (liquidations + open interest) for the crypto universe.
+// Coinalyze's limit is 40 API calls/min where EACH SYMBOL in a batched request consumes one
+// call — a 20-symbol batch costs 20 units. We cap at 38 units/min, which naturally paces a
+// 60-name sweep at ~2 batch requests per minute (~3 min per full sweep). Same event-window
+// limiter shape as the Hyperliquid one above; 429s additionally honor Retry-After.
+const CZ_API = "https://api.coinalyze.net/v1";
+const czLimiter = (() => {
+  const MAX = 38;
+  let ev = [];
+  return {
+    async acquire(u) {
+      for (;;) {
+        const now = Date.now();
+        ev = ev.filter((e) => now - e.t < 60000);
+        const used = ev.reduce((s, e) => s + e.u, 0);
+        if (used + u <= MAX) { ev.push({ t: now, u }); return; }
+        await sleep(Math.max(60000 - (now - ev[0].t) + 40, 250));
+      }
+    },
+    usage() {
+      const now = Date.now();
+      ev = ev.filter((e) => now - e.t < 60000);
+      return { used: ev.reduce((s, e) => s + e.u, 0), max: MAX };
+    },
+  };
+})();
+function createCoinalyze({ key, log }) {
+  if (!key) return null;
+  async function czGet(path, params, units) {
+    await czLimiter.acquire(units);
+    const qs = new URLSearchParams(params).toString();
+    const url = CZ_API + path + (qs ? "?" + qs : "");
+    let lastErr;
+    for (let a = 0; a < 3; a++) {
+      try {
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 25000);
+        let res;
+        try { res = await fetch(url, { headers: { api_key: key }, signal: ctrl.signal }); }
+        finally { clearTimeout(to); }
+        if (res.status === 429) {
+          const ra = Math.min(60, Math.max(2, parseInt(res.headers.get("retry-after"), 10) || 5));
+          await sleep(ra * 1000); continue;
+        }
+        if (res.status === 401) throw Object.assign(new Error("invalid Coinalyze API key"), { fatal: true });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return await res.json();
+      } catch (e) {
+        if (e && e.fatal) throw e;
+        lastErr = e;
+        await sleep(900 * (a + 1));
+      }
+    }
+    throw lastErr || new Error("coinalyze request failed");
+  }
+  return {
+    exchanges: () => czGet("/exchanges", {}, 1),
+    futureMarkets: () => czGet("/future-markets", {}, 1),
+    // Batched histories: symbols is an array (<= 20), each costing one call-unit.
+    // USD conversion is done source-side (convert_to_usd) — stored as-received, labeled as such.
+    liqHistory: (symbols, interval, from, to) =>
+      czGet("/liquidation-history", { symbols: symbols.join(","), interval,
+        from: Math.floor(from / 1000), to: Math.floor(to / 1000), convert_to_usd: "true" }, symbols.length),
+    oiHistory: (symbols, interval, from, to) =>
+      czGet("/open-interest-history", { symbols: symbols.join(","), interval,
+        from: Math.floor(from / 1000), to: Math.floor(to / 1000), convert_to_usd: "true" }, symbols.length),
+    usage: () => czLimiter.usage(),
+  };
+}
+
+module.exports = { infoPost, fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze };

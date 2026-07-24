@@ -1,7 +1,8 @@
 "use strict";
 // Owns all Hyperliquid I/O. Polls the universe, backfills candle history, samples OI,
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
-const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket } = require("./hyperliquid");
+const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
+const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep,
@@ -46,6 +47,20 @@ const MAIN_DAILY_DAYS = 92;           // crypto DAILY-candle window: 90d of char
 const MAIN_HOURLY_WEIGHT = 35;        // 31d spine pull
 const MAIN_DAILY_WEIGHT = 8;          // 92d daily pull (same request weight — one candleSnapshot either way)
 const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
+// ---- Coinalyze derivatives context (crypto universe only) -------------------------------------
+// Aggregated CEX liquidations + OI as CONTEXT for the Hyperliquid names — a different venue
+// population than our book, permanently labeled as such in every payload. External dependency is
+// data-only (env COINALYZE_API_KEY, no package) and fully degradable: key missing -> the lane
+// never starts and payloads say so; fetch failing -> last-known-with-timestamp, staleness shown.
+const CZ_SWEEP_MS = 15 * 60 * 1000;   // full-roster sweep cadence
+const CZ_INTERVAL = "15min";          // fetch granularity; raw 15-min feeds the cascade math,
+const CZ_BUCKET = 15 * 60 * 1000;     // the drawer chart reads the hourly aggregation
+const CZ_SEED_MS = 14 * DAY;          // first-pull window (Coinalyze intraday retention is ~15-20d at 15min)
+const CZ_RETENTION = 92 * DAY;        // OUR accumulated history (they delete theirs daily — this log is the baseline)
+const CZ_REFRESH_CD = 60 * 1000;      // manual per-ticker refresh cooldown, server-enforced, shared across the group
+const CZ_BATCH = 20;                  // symbols per batched request (their max)
+const CZ_VENUES = ["Binance", "Bybit", "OKX"];   // deterministic single-venue preference per base asset
+const CZ_QUOTES = new Set(["USDT", "USD", "USDC"]);
 const FUNDING_HISTORY_DAYS = 60;      // rolling hourly funding-rate window (aligned with the price spine)
 const FUNDING_FETCH_WEIGHT = 20;      // rate-limit weight for a fundingHistory pull
 const FUNDING_PROBE_MIN = 8;          // if the first N (highest-vol) backfills all return nothing, treat
@@ -741,7 +756,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // the small nested objects are stringified (they only move on a poll / candle refresh anyway).
   function markSig(m) {
     return m.coin + "|" + m.px + "," + m.prevDay + "," + m.funding + "," + m.vol + "," + m.oi + ","
-      + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0)
+      + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0) + "," + (m.cascT || 0)
       + "|" + (m.ref ? JSON.stringify(m.ref) : "") + (m.feat ? JSON.stringify(m.feat) : "")
       + (m.red ? JSON.stringify(m.red) : "") + (m.rvol ? JSON.stringify(m.rvol) : "")
       + (m.doi ? JSON.stringify(m.doi) : "") + (m.fundByWin ? JSON.stringify(m.fundByWin) : "") + ";";
@@ -787,8 +802,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           else { rvol = rvolMulti(hs, RVOL_WINS, nowMs); r._rvRaw = r.hourlyRaw; r._rvEndH = rvolEndH; r._rv = rvol; }
         }
       } catch (_) {}
+      // Cascade flag (crypto only): the latest server-computed cascade within 24h, shipped as the
+      // detail object (hover) plus a flat numeric sort key. Same czCasc the drawer panel reads —
+      // the board and the chart can never disagree on whether a cascade fired.
+      const casc = r.uni === "main" && cz ? czCascLatest(r.coin) : null;
       return {
         fundPct, red, rvol,
+        casc: casc || undefined, cascT: casc ? casc.t : undefined,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
@@ -3126,11 +3146,219 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     return n;
   }
 
+  // ===== Coinalyze derivatives-context lane (crypto universe only) ==============================
+  // Assembly only — the math (merge, cascade, rollup, hourly agg) is pure in compute.js, the
+  // fetch client + pacing lives in hyperliquid.js, persistence in store.js. One code path: the
+  // screener CASC column and the drawer panel both read what this lane computed server-side.
+  const cz = crypto ? createCoinalyze({ key: process.env.COINALYZE_API_KEY || "", log }) : null;
+  const czHist = new Map();      // coin -> sorted packed rows [ts, longLiqUsd, shortLiqUsd, oiUsd]
+  const czCasc = new Map();      // coin -> cascade flags over the retained window (recomputed on change)
+  const czRefreshAt = new Map(); // coin -> last manual-refresh ts (server-enforced group cooldown)
+  let czMap = null;              // base asset -> { sym, venue } (persisted; null until resolved)
+  let czMapAt = 0, czUnmapped = [];
+  let czVer = 0;                 // content clock for the /api/derivs ETag key — bumps only on real change
+  let czLastOk = 0, czErr = null, czLastSweep = 0, czSweeping = false;
+
+  function czVenueLabel(coin) {
+    const m = czMap && czMap[coin];
+    return m ? m.venue : null;
+  }
+  // Resolve base asset -> one Coinalyze perp symbol, deterministic venue preference. Persisted so
+  // a boot re-spends zero budget on an unchanged universe; re-resolved when >24h old AND a live
+  // main-universe name is unmapped (new listings pick up within a day without a deploy).
+  async function czResolveMap(force) {
+    if (!cz) return;
+    if (!force && czMap && Date.now() - czMapAt < 24 * 3600 * 1000) return;
+    const [exs, mkts] = await Promise.all([cz.exchanges(), cz.futureMarkets()]);
+    if (!Array.isArray(exs) || !Array.isArray(mkts)) throw new Error("coinalyze market list: bad shape");
+    const codeToVenue = new Map();
+    for (const e of exs) if (e && e.code && e.name) codeToVenue.set(String(e.code), String(e.name));
+    const rank = (venue) => {
+      const i = CZ_VENUES.findIndex((v) => venue && venue.toLowerCase().includes(v.toLowerCase()));
+      return i < 0 ? CZ_VENUES.length : i;
+    };
+    const best = new Map();   // base -> {sym, venue, r}
+    for (const m of mkts) {
+      if (!m || !m.is_perpetual || !m.symbol || !m.base_asset) continue;
+      if (!CZ_QUOTES.has(String(m.quote_asset || ""))) continue;
+      const venue = codeToVenue.get(String(m.exchange || "")) || String(m.exchange || "");
+      const r = rank(venue);
+      if (r >= CZ_VENUES.length) continue;   // only the named venues — a deterministic map, not "whatever exists"
+      const cur = best.get(m.base_asset);
+      if (!cur || r < cur.r) best.set(m.base_asset, { sym: m.symbol, venue, r });
+    }
+    const out = {};
+    for (const [base, v] of best) out[base] = { sym: v.sym, venue: v.venue };
+    czMap = out; czMapAt = Date.now();
+    store.saveDerivMap({ ts: czMapAt, map: out });
+    czUnmapped = mainList.filter((c) => !czMap[c]);
+    log(`Coinalyze symbol map resolved: ${Object.keys(out).length} base assets, ${czUnmapped.length} of ${mainList.length} live names unmapped${czUnmapped.length ? " (" + czUnmapped.slice(0, 8).join(",") + (czUnmapped.length > 8 ? ",…" : "") + ")" : ""}`);
+  }
+  // Fold one batch's response pair into memory + the on-disk log. Only rows STRICTLY newer than
+  // the coin's last persisted bucket are appended (the merge itself tolerates overlap).
+  function czFold(coin, liqSeries, oiSeries) {
+    const byTs = new Map();
+    for (const p of liqSeries || []) {
+      const t = (+p.t) * 1000;
+      if (!Number.isFinite(t)) continue;
+      byTs.set(t, [t, Number.isFinite(+p.l) ? +p.l : null, Number.isFinite(+p.s) ? +p.s : null, null]);
+    }
+    for (const p of oiSeries || []) {
+      const t = (+p.t) * 1000;
+      if (!Number.isFinite(t)) continue;
+      let row = byTs.get(t);
+      if (!row) { row = [t, null, null, null]; byTs.set(t, row); }
+      row[3] = Number.isFinite(+p.c) ? +p.c : null;   // OI history is OHLC-per-bucket; close = end-of-bucket level
+    }
+    if (!byTs.size) return false;
+    const prev = czHist.get(coin) || [];
+    const lastPersisted = prev.length ? prev[prev.length - 1][0] : 0;
+    const inc = [...byTs.values()].sort((a, b) => a[0] - b[0]);
+    const { rows, changed } = czMergeHistory(prev, inc);
+    if (!changed) return false;
+    czHist.set(coin, rows);
+    // Persist strictly-newer rows, PLUS the boundary bucket when a re-fetch grew it — the last
+    // bucket of a sweep is usually still forming, and freezing its first observation on disk
+    // would restore a stale boundary on reboot. loadDerivs dedupes by ts (last write wins), so
+    // the occasional re-append is absorbed instead of duplicated.
+    const prevLast = prev.length ? prev[prev.length - 1] : null;
+    for (const r of inc) {
+      if (r[0] > lastPersisted) store.insertDeriv(coin, r[0], r[1], r[2], r[3]);
+      else if (r[0] === lastPersisted && prevLast &&
+        (prevLast[1] !== r[1] || prevLast[2] !== r[2] || prevLast[3] !== r[3]))
+        store.insertDeriv(coin, r[0], r[1], r[2], r[3]);
+    }
+    czCasc.set(coin, cascadeFlags(rows));
+    return true;
+  }
+  async function czFetchInto(coins) {
+    const now = Date.now();
+    const syms = [], symCoin = new Map();
+    for (const c of coins) {
+      const m = czMap && czMap[c];
+      if (!m) continue;
+      syms.push(m.sym); symCoin.set(m.sym, c);
+    }
+    if (!syms.length) return false;
+    // from = the oldest last-stored bucket in this batch minus a 2-bucket overlap; seed window on first pull
+    let from = now - CZ_SEED_MS;
+    let newest = 0;
+    for (const s of syms) {
+      const h = czHist.get(symCoin.get(s));
+      const last = h && h.length ? h[h.length - 1][0] : 0;
+      if (last) newest = newest === 0 ? last : Math.min(newest, last);
+    }
+    if (newest) from = Math.max(from, newest - 2 * CZ_BUCKET);
+    const [liq, oi] = await Promise.all([
+      cz.liqHistory(syms, CZ_INTERVAL, from, now),
+      cz.oiHistory(syms, CZ_INTERVAL, from, now),
+    ]);
+    const liqBy = new Map(), oiBy = new Map();
+    for (const e of Array.isArray(liq) ? liq : []) if (e && e.symbol) liqBy.set(e.symbol, e.history || []);
+    for (const e of Array.isArray(oi) ? oi : []) if (e && e.symbol) oiBy.set(e.symbol, e.history || []);
+    let changed = false;
+    for (const s of syms) {
+      const c = symCoin.get(s);
+      if (czFold(c, liqBy.get(s), oiBy.get(s))) changed = true;
+    }
+    return changed;
+  }
+  async function czSweep() {
+    if (!cz || czSweeping) return;
+    czSweeping = true;
+    try {
+      await czResolveMap(false);
+      czUnmapped = mainList.filter((c) => !czMap[c]);
+      if (czUnmapped.length && Date.now() - czMapAt > 24 * 3600 * 1000) await czResolveMap(true);
+      let changed = false;
+      const coins = mainList.filter((c) => czMap[c]);
+      for (let i = 0; i < coins.length; i += CZ_BATCH) {
+        if (await czFetchInto(coins.slice(i, i + CZ_BATCH))) changed = true;
+      }
+      store.flushDerivs();
+      czLastOk = Date.now(); czErr = null;
+      if (changed) czVer = Date.now();
+    } catch (e) {
+      czErr = (e && e.message) || "sweep failed";
+      log("Coinalyze sweep failed (isolated): " + czErr);
+    } finally {
+      czSweeping = false; czLastSweep = Date.now();
+    }
+  }
+  // Manual per-ticker refresh: same fetch path, same pacing queue (a burst can never blow the
+  // rate limit — it just waits), cooldown enforced HERE per coin, shared across the group.
+  async function refreshDerivs(coin) {
+    if (!cz) return { ok: false, error: "coinalyze disabled (no COINALYZE_API_KEY)" };
+    const r = rows.get(coin);
+    if (!r || r.uni !== "main") return { ok: false, error: "not in the crypto universe" };
+    if (!czMap || !czMap[coin]) return { ok: false, error: "no CEX perp mapped for this name" };
+    const last = czRefreshAt.get(coin) || 0;
+    const since = Date.now() - last;
+    if (since < CZ_REFRESH_CD) return { ok: false, error: "cooldown", retryInMs: CZ_REFRESH_CD - since };
+    czRefreshAt.set(coin, Date.now());
+    try {
+      const changed = await czFetchInto([coin]);
+      store.flushDerivs();
+      czLastOk = Date.now(); czErr = null;
+      if (changed) czVer = Date.now();
+      return { ok: true, changed, ts: Date.now() };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || "refresh failed" };
+    }
+  }
+  // Latest cascade within 24h for the screener column — computed here, read by mapMarket, so the
+  // board and the drawer can never disagree on whether/when a cascade fired.
+  function czCascLatest(coin) {
+    const flags = czCasc.get(coin);
+    if (!flags || !flags.length) return null;
+    const f = flags[flags.length - 1];
+    if (Date.now() - f.t > 24 * 3600 * 1000) return null;
+    return f;
+  }
+  function getDerivs(coin) {
+    const base = { coin: coin || "", ts: Date.now(), src: "coinalyze", ver: czVer,
+      enabled: !!cz, interval: CZ_INTERVAL, refreshCdMs: CZ_REFRESH_CD };
+    if (!cz) return { ...base, error: "disabled (no COINALYZE_API_KEY on the server)" };
+    const r = coin ? rows.get(coin) : null;
+    if (!r || r.uni !== "main") return { ...base, error: "not in the crypto universe" };
+    if (!czMap || !czMap[coin]) return { ...base, error: "no CEX perp mapped for this name", asOf: czLastOk || null };
+    const hist = czHist.get(coin) || [];
+    const cut = Date.now() - 48 * 3600 * 1000;
+    const hours = aggDerivHourly(hist.filter((x) => x[0] >= cut));
+    const casc = (czCasc.get(coin) || []).filter((f) => f.t >= cut);
+    const cdLeft = Math.max(0, CZ_REFRESH_CD - (Date.now() - (czRefreshAt.get(coin) || 0)));
+    return { ...base, venue: czVenueLabel(coin), asOf: czLastOk || null,
+      staleMs: czLastOk ? Date.now() - czLastOk : null, error: czErr,
+      roll: derivRollup(hist, Date.now()), hours, casc, cascLast: czCascLatest(coin),
+      coverageMs: hist.length ? Date.now() - hist[0][0] : 0, refreshInMs: cdLeft };
+  }
+  function czBoot() {
+    if (!cz) { log("Coinalyze deriv context: disabled (no COINALYZE_API_KEY)"); return; }
+    const saved = store.loadDerivMap();
+    if (saved && saved.map) { czMap = saved.map; czMapAt = saved.ts || 0; }
+    const loaded = store.loadDerivs(Date.now() - CZ_RETENTION);
+    for (const [c, arr] of loaded) { czHist.set(c, arr); czCasc.set(c, cascadeFlags(arr)); }
+    if (loaded.size) czVer = Date.now();
+    log(`Coinalyze deriv context: ENABLED — restored ${loaded.size} market(s) of accumulated 15-min history${czMap ? `, symbol map warm (${Object.keys(czMap).length} bases)` : ""}`);
+    setTimeout(() => { czSweep(); }, 90 * 1000);   // first sweep after universe warmup, off the boot path
+    setInterval(() => { if (Date.now() - czLastSweep >= CZ_SWEEP_MS) czSweep(); }, 60 * 1000);
+  }
+
   async function maintenance() {
     try {
       const isMain = (coin) => !coin.includes(":");
       const n = await store.prune(Date.now() - OI_RETENTION, Date.now() - OI_FULL_RES, isMain, Date.now() - MAIN_HIST_DAYS * DAY);
       if (n) log(`OI retention pass: ${n} sample(s) dropped/thinned (xyz: full 31d + hourly to 365d; crypto: flat 31d)`);
+      if (cz) {
+        const dn = await store.pruneDerivs(Date.now() - CZ_RETENTION);
+        if (dn) log(`Deriv-context retention pass: ${dn} row(s) dropped (flat ${Math.round(CZ_RETENTION / DAY)}d at 15min)`);
+        const dcut = Date.now() - CZ_RETENTION;
+        for (const [c, arr] of czHist) {
+          if (!arr.length || arr[0][0] >= dcut) continue;
+          const i = arr.findIndex((k) => k[0] >= dcut);
+          czHist.set(c, i > 0 ? arr.slice(i) : (i === 0 ? arr : []));
+        }
+      }
       // mirror the same shape in memory so the hist arrays track the on-disk store
       { const full = Date.now() - OI_FULL_RES, mainCut = Date.now() - MAIN_HIST_DAYS * DAY;
         for (const [coin, arr] of hist) {
@@ -3192,6 +3420,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
     log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), classifier ${AI_CLASSIFY_MODEL}, TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
+    if (crypto) czBoot();
     await pollUniverse();
     seedFundingFromOI();
     buildSnapshot(); buildDaily(); buildAnalytics();
@@ -4714,6 +4943,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // AI analyst report: cached read, on-demand generation (TTL cooldown enforced inside), and
     // the recent-reports list for the Report tab.
     getAiReport,
+    // Coinalyze deriv context: cached read (per-coin), manual refresh (cooldown enforced inside),
+    // and the collision-proof ETag key for serveKeyed — coin + content clock + this coin's manual
+    // refresh stamp + the as-of minute, so a cooldown tick or staleness advance is never frozen
+    // behind a cached body.
+    getDerivs,
+    refreshDerivs,
+    derivsKey: (coin) => coin + "|" + czVer + "|" + (czRefreshAt.get(coin) || 0) + "|" + (czErr ? 1 : 0) + "|" + Math.floor((czLastOk || 0) / 60000),
     generateAiReport,
     listAiReports,
     aiCompileNow: compileAiContext,   // harness: build the context object without any network
@@ -4788,6 +5024,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
           fallback: AI_MODEL_FALLBACK, classify: AI_CLASSIFY_MODEL, ttlMin: Math.round(AI_TTL_MS / 60000), reports: aiReports.size,
           perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft(),
           askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() },
+        derivs: { enabled: !!cz, mapped: czMap ? mainList.filter((c) => czMap[c]).length : 0,
+          unmapped: czUnmapped.length, coins: czHist.size, lastOk: czLastOk || null,
+          lastSweep: czLastSweep || null, error: czErr, usage: cz ? cz.usage() : null },
         rate: limiterUsage(),
         ws: sock ? Object.assign(sock.status(), { applied: wsApplied }) : { enabled: false },
       };
