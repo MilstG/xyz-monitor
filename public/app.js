@@ -92,7 +92,7 @@ const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma1
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null,
-  filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', topN:40, selected:null, search:'', topPairs:10, pair:null},
+  filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
@@ -761,7 +761,7 @@ function renderRegimeStrip(){
 }
 
 // ===== correlation tab =====
-const CORR={ _rows:null, _C:null, _N:null, _ord:null, _readout:'Hover a cell to read a pair · click a ticker for its co-movers &amp; hedges' };
+const CORR={ _rows:null, _C:null, _N:null, _ord:null, _intraday:false, _bars:null, _times:null, _win:null, _minOv:0, _readout:'Hover a cell to read a pair · click a ticker for its co-movers &amp; hedges' };
 function corrScope(){
   let rows=activeRows().filter(r=>r.vol!=null);
   const s=state.corr.search.trim();
@@ -812,15 +812,24 @@ function windowRetPct(r, Ldays){ if(!r) return null; if(r._wrL===Ldays) return r
     for(const k of c){ const cl=parseFloat(k.c); if(!isFinite(cl))continue; if(k.t>=cutoff&&first==null)first=cl; last=cl; }
     if(first!=null&&last!=null&&first>0) val=(last-first)/first*100; }
   r._wrL=Ldays; r._wrV=val; return val; }
-function tfLabel(){ return state.corr.tf==='365'?'1y':state.corr.tf+'d'; }
+function tfLabel(){ if(state.scope==='crypto') return state.corr.ctf||'1d'; return state.corr.tf==='365'?'1y':state.corr.tf+'d'; }
+// Window return for a correlation-tab row. Crypto reads the intraday close series the matrix was
+// built from (first→last non-null on the shared grid); equities use the daily-close window return.
+// One accessor so co-movers, strongest-pairs, the hover and the pair view all agree per universe.
+function corrRet(row){ if(!row) return null;
+  if(CORR._intraday && CORR._bars){ const s=CORR._bars.get(row.ticker); if(!s) return null;
+    let first=null,last=null; for(const c of s){ if(c!=null){ if(first==null)first=c; last=c; } }
+    return (first!=null&&last!=null&&first>0)?(last-first)/first*100:null; }
+  return windowRetPct(row, +state.corr.tf); }
+function corrOvUnit(){ return CORR._intraday?' bars':'d'; }
 function sret(x){ return x==null?'<span class="na">·</span>':`<span class="${x>=0?'pos':'neg'}">${x>=0?'+':''}${x.toFixed(1)}%</span>`; }
 function spp(d){ return d==null?'<span class="na">·</span>':`<span class="${d>=0?'pos':'neg'}">${d>=0?'+':''}${d.toFixed(0)}pp</span>`; }
 function corrTipHtml(ri,ci){ const rows=CORR._rows; if(!rows||!CORR._C) return '';
-  const a=rows[ri], b=rows[ci], L=+state.corr.tf, ra=windowRetPct(a,L);
+  const a=rows[ri], b=rows[ci], ra=corrRet(a);
   if(ri===ci) return `<div class="hd"><span class="tk">${esc(a.ticker)}</span></div><div class="mut">${tfLabel()} return ${ra==null?'n/a':(ra>=0?'+':'')+ra.toFixed(1)+'%'}</div>`;
-  const v=CORR._C[ri][ci], n=CORR._N[ri][ci]||0, rb=windowRetPct(b,L);
+  const v=CORR._C[ri][ci], n=CORR._N[ri][ci]||0, rb=corrRet(b);
   let s=`<div class="hd"><span class="tk">${esc(a.ticker)}</span> <span class="mut">×</span> <span class="tk">${esc(b.ticker)}</span></div>`;
-  s+=`<div>r = ${v==null?'<span class="na">n/a</span>':`<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span>`} <span class="mut">· ${n}d overlap</span></div>`;
+  s+=`<div>r = ${v==null?'<span class="na">n/a</span>':`<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span>`} <span class="mut">· ${n}${corrOvUnit()} overlap</span></div>`;
   if(ra!=null&&rb!=null){ const d=ra-rb;
     s+=`<div class="mut" style="margin-top:3px">${tfLabel()} performance</div>`;
     s+=`<div>${esc(a.ticker)} ${sret(ra)} · ${esc(b.ticker)} ${sret(rb)}</div>`;
@@ -832,8 +841,23 @@ function positionTip(tip,e){ const pad=14, w=tip.offsetWidth, h=tip.offsetHeight
   tip.style.left=Math.max(6,x)+'px'; tip.style.top=Math.max(6,y)+'px'; }
 function setCorrSync(t,done){ const s=el('corrsync'); if(!s)return; s.classList.toggle('done',!!done); el('corrsync-t').textContent=t; }
 
+function syncCorrLookback(){ const seg=el('corrtf'); if(!seg) return;
+  const cr=state.scope==='crypto';
+  const opts = cr ? [['4h','4h'],['1d','1d'],['7d','7d']] : [['7','7d'],['30','30d'],['90','90d']];
+  let cur = cr ? (state.corr.ctf||'1d') : state.corr.tf;
+  if(!cr && !['7','30','90'].includes(cur)) cur=state.corr.tf='30';
+  const ttl = cr ? 'intraday corr on the 5m archive' : 'daily-return corr';
+  seg.innerHTML='<span class="seglbl" title="'+ttl+'">lookback</span>'
+    + opts.map(([d,l])=>`<button type="button" data-d="${d}"${d===cur?' class="active"':''}>${l}</button>`).join('');
+  seg.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{
+    if(state.scope==='crypto') state.corr.ctf=b.dataset.d; else state.corr.tf=b.dataset.d;
+    seg.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));
+    const v=el('view-corr'); if(typeof renderCorr==='function' && v && !v.hidden) renderCorr(); }));
+}
 function openCorr(){
+  syncCorrLookback();
   if(!state.rows.size){ el('corrwrap').innerHTML='<div class="msg">Markets still loading — switch back in a moment.</div>'; return; }
+  if(state.scope==='crypto'){ renderCorr(); return; }
   const rows=corrScope(), have=rows.filter(r=>r.daily).length;
   setCorrSync(have>=rows.length?'ready':`loading ${have}/${rows.length}`, have>=rows.length);
   renderCorr();
@@ -841,12 +865,39 @@ function openCorr(){
 function readoutHtml(rt,ct,v,n){
   if(v==null||v==='na'||v==='') return `<b>${esc(rt)}</b> × <b>${esc(ct)}</b> · <span class="na">not enough overlapping history</span>`;
   const f=parseFloat(v), cls=f>0?'pos':(f<0?'neg':'sec');
-  return `<b>${esc(rt)}</b> × <b>${esc(ct)}</b> · <span class="${cls}">${f>=0?'+':''}${f.toFixed(2)}</span> · ${n}d overlap`;
+  return `<b>${esc(rt)}</b> × <b>${esc(ct)}</b> · <span class="${cls}">${f>=0?'+':''}${f.toFixed(2)}</span> · ${n}${corrOvUnit()} overlap`;
 }
 function renderCorr(){
+  if(state.scope==='crypto') return renderCorrCrypto();
   const rows=corrScope();
   if(rows.length<2){ el('corrwrap').innerHTML='<div class="msg"><span class="big">Not enough markets</span>Widen the focus search or pick a larger set.</div>'; el('corrpairs').innerHTML=''; el('corrpanel').hidden=true; return; }
-  const L=+state.corr.tf, res=buildCorr(rows,L), C=res.C, OV=res.N;
+  const L=+state.corr.tf, res=buildCorr(rows,L);
+  paintCorr(rows, res.C, res.N, {});
+}
+// Crypto scope: the matrix is built server-side over the 5m archive (equities keep ~31d of daily,
+// crypto keeps 370d of 5m), so we fetch the window's matrix + per-name close series and paint the
+// SAME table. The series ride along so the pair view reproduces the exact numbers — one payload,
+// one source of truth. Honest degradation: archive off → a clear message, never fabricated cells.
+async function renderCorrCrypto(){
+  const win=state.corr.ctf||'1d';
+  setCorrSync('building '+win+'…', false);
+  if(!CORR._intraday||CORR._win!==win) el('corrwrap').innerHTML='<div class="msg">Building '+esc(win)+' intraday correlation…</div>';
+  let d; try{ d=await fetchJSON('/api/corr-crypto?w='+encodeURIComponent(win)); }
+  catch(e){ el('corrwrap').innerHTML='<div class="msg">Couldn\'t load crypto correlation — '+esc(e.message||'network error')+'</div>'; setCorrSync('error', false); return; }
+  if(state.scope!=='crypto'||state.view!=='corr') return;   // scope/view flipped mid-fetch
+  if(!d||!d.enabled){ el('corrwrap').innerHTML='<div class="msg"><span class="big">Intraday archive unavailable</span>'+esc((d&&d.reason)||'the 5-minute archive is disabled on the server')+'</div>';
+    el('corrpairs').innerHTML=''; el('corrpanel').hidden=true; el('pairpanel').hidden=true; setCorrSync('no archive', false); return; }
+  const topN=state.corr.topN||40, coins=d.coins.slice(0, topN), K=coins.length;
+  if(K<2){ el('corrwrap').innerHTML='<div class="msg">Not enough crypto markets with intraday coverage yet.</div>'; el('corrpairs').innerHTML=''; return; }
+  const rows=coins.map(c=>({ticker:c.tk, coin:c.coin, uni:'main', _cov:c.cov}));
+  const C=Array.from({length:K},(_,i)=>coins.map((_,j)=>d.C[i][j]));   // front-sliced ⇒ index-aligned submatrix
+  const OV=Array.from({length:K},(_,i)=>coins.map((_,j)=>d.N[i][j]));
+  const bars=new Map(); coins.forEach(c=>bars.set(c.tk, c.closes));
+  paintCorr(rows, C, OV, { intraday:true, bars, times:d.times, win, minOv:d.minOv, gridLen:d.gridLen });
+  setCorrSync('ready · '+win, true);
+}
+function paintCorr(rows, C, OV, opts){
+  opts=opts||{};
   const D=C.map(row=>row.map(v=>v==null?1:1-v));
   const ord=clusterOrder(D);
   const cell=rows.length<=20?30:rows.length<=40?20:15, showVal=rows.length<=20;
@@ -863,6 +914,7 @@ function renderCorr(){
   h+='</tbody></table>';
   el('corrwrap').innerHTML=h;
   CORR._rows=rows; CORR._C=C; CORR._N=OV; CORR._ord=ord;
+  CORR._intraday=!!opts.intraday; CORR._bars=opts.bars||null; CORR._times=opts.times||null; CORR._win=opts.win||null; CORR._minOv=opts.minOv||0;
   const tbl=el('corrwrap').querySelector('table.cmx');
   const cols=[...tbl.querySelectorAll('thead th.cl')], rls=[...tbl.querySelectorAll('tbody th.rl')];
   tbl.addEventListener('mouseover', e=>{ const td=e.target.closest('td'); if(!td) return;
@@ -885,14 +937,14 @@ function renderCorrPanel(){
   for(let j=0;j<rows.length;j++){ if(j===sel) continue; const v=C[sel][j]; if(v!=null&&isFinite(v)) pairs.push([rows[j].ticker,v,j]); }
   pairs.sort((a,b)=>b[1]-a[1]);
   const pos=pairs.slice(0,8), neg=pairs.slice(-8).reverse().filter(x=>x[1]<0);
-  const L=+state.corr.tf, rMe=windowRetPct(me,L);
+  const rMe=corrRet(me);
   const bar=v=>`<span class="cbar" style="width:${Math.round(Math.abs(v)*64)}px;background:${corrColor(v)}"></span>`;
-  const li=(t,v,j)=>{ const rb=windowRetPct(rows[j],L), d=(rMe!=null&&rb!=null)?rMe-rb:null;
+  const li=(t,v,j)=>{ const rb=corrRet(rows[j]), d=(rMe!=null&&rb!=null)?rMe-rb:null;
     const tip=(rMe!=null&&rb!=null)?`${esc(me.ticker)} ${rMe>=0?'+':''}${rMe.toFixed(1)}% vs ${esc(t)} ${rb>=0?'+':''}${rb.toFixed(1)}% over ${tfLabel()}`:'not enough history';
     return `<div class="crow"><span class="ct">${esc(t)}</span>${bar(v)}<span class="cv ${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span><span class="cv2" title="${esc(tip)}">${spp(d)}</span></div>`; };
   const tfl=tfLabel();
   p.hidden=false;
-  p.innerHTML=`<div class="cp-head">${esc(me.ticker)} <span class="sec" style="font-weight:400">— ${tfl} daily-return correlation · Δ = ${esc(me.ticker)} return − other</span></div>
+  p.innerHTML=`<div class="cp-head">${esc(me.ticker)} <span class="sec" style="font-weight:400">— ${tfl} ${CORR._intraday?'intraday':'daily'}-return correlation · Δ = ${esc(me.ticker)} return − other</span></div>
     <div class="cp-cols">
       <div><div class="cp-sub">Strongest co-movers</div>${pos.map(x=>li(x[0],x[1],x[2])).join('')||'<div class="sec">—</div>'}</div>
       <div><div class="cp-sub">Strongest hedges (inverse)</div>${neg.length?neg.map(x=>li(x[0],x[1],x[2])).join(''):'<div class="sec">no negative correlations in this window</div>'}</div>
@@ -907,12 +959,12 @@ function renderCorrPairs(){
   pairs.sort((x,y)=>y.v-x.v);
   const k=state.corr.topPairs, top=pairs.slice(0,k), bot=pairs.slice(-k).reverse().filter(p=>p.v<0);
   const tfl=tfLabel();
-  const row=p=>{ const ra=windowRetPct(rows[p.i],L), rb=windowRetPct(rows[p.j],L), d=(ra!=null&&rb!=null)?ra-rb:null;
+  const row=p=>{ const ra=corrRet(rows[p.i]), rb=corrRet(rows[p.j]), d=(ra!=null&&rb!=null)?ra-rb:null;
     const dt=(ra!=null&&rb!=null)?`${tfl}: ${p.a} ${ra>=0?'+':''}${ra.toFixed(1)}% vs ${p.b} ${rb>=0?'+':''}${rb.toFixed(1)}%`:'not enough history';
     return `<tr data-i="${p.i}" data-j="${p.j}"><td class="pp">${esc(p.a)} <span class="sec">×</span> ${esc(p.b)}</td>`+
       `<td class="${p.v>=0?'pos':'neg'}" style="text-align:right">${p.v>=0?'+':''}${p.v.toFixed(2)}</td>`+
       `<td style="text-align:right" title="${esc(dt)}">${spp(d)}</td>`+
-      `<td class="sec" style="text-align:right">${p.n}d</td></tr>`; };
+      `<td class="sec" style="text-align:right">${p.n}${CORR._intraday?'':'d'}</td></tr>`; };
   const head='<thead><tr><th>Pair</th><th>r</th><th title="window-return spread: left ticker − right ticker">Δ</th><th>n</th></tr></thead>';
   box.innerHTML=`<div class="cp-cols">
     <div><div class="cp-sub">Strongest correlations (${tfl})</div><table class="ptbl">${head}<tbody>${top.map(row).join('')}</tbody></table></div>
@@ -926,6 +978,14 @@ function alignedDaily(a,b,Ldays){ const ca=a.daily, cb=b.daily; if(!ca||!cb) ret
   for(const k of cb){ const cl=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(cl)&&d>=cutoff) mb.set(d,cl); }
   const days=[...ma.keys()].filter(d=>mb.has(d)).sort((x,y)=>x-y);
   return {days, pa:days.map(d=>ma.get(d)), pb:days.map(d=>mb.get(d))}; }
+// Crypto pair alignment: both names already sit on the matrix's shared intraday grid (CORR._bars),
+// so we just intersect the non-null closes — same {days,pa,pb} shape alignedDaily returns, so the
+// pair-view math below is identical. The β / spread-z / rolling-ρ read is on intraday returns.
+function alignedIntraday(A,B){ if(!CORR._bars) return null;
+  const a=CORR._bars.get(A.ticker), b=CORR._bars.get(B.ticker); if(!a||!b) return null;
+  const pa=[],pb=[]; const n=Math.min(a.length,b.length);
+  for(let k=0;k<n;k++){ if(a[k]!=null&&b[k]!=null){ pa.push(a[k]); pb.push(b[k]); } }
+  return pa.length>=2?{days:pa.map((_,k)=>k), pa, pb}:null; }
 function sparkline(vals, opts){ opts=opts||{}; const w=260, h=46, pad=4;
   const fin=vals.filter(v=>v!=null&&isFinite(v)); if(fin.length<2) return '<div class="sec" style="font-size:11px">not enough data</div>';
   let mn=Math.min(...fin), mx=Math.max(...fin);
@@ -957,10 +1017,11 @@ function renderPairPanel(){
   const p=el('pairpanel'), rows=CORR._rows, pr=state.corr.pair;
   if(!rows||!pr){ p.hidden=true; return; }
   const [i,j]=pr, A=rows[i], B=rows[j]; if(!A||!B){ p.hidden=true; return; }
-  const L=+state.corr.tf, al=alignedDaily(A,B,L);
+  const cr=CORR._intraday, al = cr ? alignedIntraday(A,B) : alignedDaily(A,B,+state.corr.tf);
+  const minPts = cr ? Math.max(12, CORR._minOv||20) : 8;
   const close='<button class="btn xtiny" id="pairclose" title="close" style="float:right">✕</button>';
-  if(!al||al.days.length<8){ p.hidden=false;
-    p.innerHTML=`<div class="cp-head">${esc(A.ticker)} ÷ ${esc(B.ticker)} ${close}</div><div class="sec" style="margin-top:6px">Not enough overlapping daily history yet — still loading in the background, or one of these listed recently.</div>`;
+  if(!al||al.days.length<minPts){ p.hidden=false;
+    p.innerHTML=`<div class="cp-head">${esc(A.ticker)} ÷ ${esc(B.ticker)} ${close}</div><div class="sec" style="margin-top:6px">Not enough overlapping ${cr?'intraday':'daily'} history yet — still loading in the background, or one of these listed recently.</div>`;
     el('pairclose').onclick=()=>{ state.corr.pair=null; p.hidden=true; }; return; }
   const retA=[],retB=[]; for(let k=1;k<al.pa.length;k++){ retA.push(Math.log(al.pa[k]/al.pa[k-1])); retB.push(Math.log(al.pb[k]/al.pb[k-1])); }
   let saA=0,saB=0; const nR=retA.length; for(let k=0;k<nR;k++){saA+=retA[k];saB+=retB[k];}
@@ -970,7 +1031,7 @@ function renderPairPanel(){
   const m=resid.reduce((s,x)=>s+x,0)/resid.length, sd=stdev(resid), last=resid[resid.length-1], z=sd>0?(last-m)/sd:0;
   const W=Math.min(30, Math.max(10, Math.floor(retA.length/3))), roll=[];
   for(let k=0;k<retA.length;k++){ if(k<W-1){ roll.push(null); continue; } roll.push(pearson(retA.slice(k-W+1,k+1), retB.slice(k-W+1,k+1))); }
-  const cNow=CORR._C[i][j], ra=windowRetPct(A,L), rb=windowRetPct(B,L), spread=(ra!=null&&rb!=null)?ra-rb:null;
+  const cNow=CORR._C[i][j], ra=corrRet(A), rb=corrRet(B), spread=(ra!=null&&rb!=null)?ra-rb:null;
   const zc=Math.abs(z)>=2?'neg':(Math.abs(z)>=1?'pos':'sec');
   const rcap=z>1.5?`spread stretched high — ${esc(A.ticker)} rich vs ${esc(B.ticker)}`:(z<-1.5?`spread stretched low — ${esc(A.ticker)} cheap vs ${esc(B.ticker)}`:'spread near its mean (fair value)');
   p.hidden=false;
@@ -988,7 +1049,7 @@ function renderPairPanel(){
       <div><div class="cp-sub">Beta-adjusted spread <span class="sec">· ln(${esc(A.ticker)}) − β·ln(${esc(B.ticker)}) · mean ±1σ</span></div>
         ${sparkline(resid,{mean:m,band:sd,color:'var(--accent)'})}
         <div class="sec spk-cap">${rcap}</div></div>
-      <div><div class="cp-sub">Rolling ${W}d correlation <span class="sec">· now ${cNow==null?'—':cNow.toFixed(2)}</span></div>
+      <div><div class="cp-sub">Rolling ${W}-${cr?'bar':'day'} correlation <span class="sec">· now ${cNow==null?'—':cNow.toFixed(2)}</span></div>
         ${sparkline(roll,{zero:true,lo:-1,hi:1,color:'var(--blue)'})}
         <div class="sec spk-cap">${rollStability(roll)}</div></div>
     </div>`;
@@ -1078,6 +1139,7 @@ function compgLegend(S){
     return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${esc(r.tk)}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
 }
 function openCompg(tickers){
+  if(state.scope==='crypto'){ const p=el('compg'); if(p) p.hidden=true; return; }   // equities-only this build
   const uni=new Set(activeRows().map(r=>(r.ticker||'').toUpperCase()));
   let sel=(tickers&&tickers.length?tickers.map(t=>String(t).toUpperCase()):[])
     .filter(t=>uni.has(t)); 
@@ -2464,16 +2526,19 @@ function applyScope(){
   // ticker, so the same tab serves both universes regardless of scope. Signals left this
   // list at -101: the crypto side of the signal engine was removed, so the tab has nothing
   // true to show in crypto scope.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report'; });
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report') { showView('markets'); }
+  { const cg=el('compgBtn'); if(cg) cg.hidden=cr; }   // COMP/G overlay is equities-only for now (crypto is intraday; the overlay follows next build)
+  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr') { showView('markets'); }
+  if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
+  if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); }   // repaint the matrix for the new universe/data source
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report') v='markets';   // crypto scope: Markets + Trend + Report (the signal engine is xyz-only since -101)
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='corr') v='markets';   // crypto scope: Markets + Trend + Report + Correlation (signal engine is xyz-only since -101)
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -4603,7 +4668,8 @@ function termSignals(t){ const d=state.signals; let groups=(d&&Array.isArray(d.s
     return `<span class="tp-deep" data-tcmd="${g.ticker}">${tpad(g.ticker,6)}</span> ${tpad(top.label||top.ev||'—',11)} ${score!=null?'<span class="amber">score '+Math.round(score)+'</span>':''}${prime} ${sc}`; }).join('\n');
   termOut(`<span class="amber">⚡ ${groups.length} active signal${groups.length>1?'s':''}</span> <span class="tp-trans">· ledgered &amp; resolved out-of-sample</span>\n${rows}`); }
 function termReport(r){ termOut(`${termTkHdr(r)}\n<span class="tp-trans">opening the AI analyst report…</span>`); openAiReport(r.coin); }
-function termComp(tickers){ showView('corr');
+function termComp(tickers){ if(state.scope==='crypto') return termOut('<span class="tp-trans">COMP/G runs on the equities side for now — the crypto correlation tab (matrix + pair view) is on the 4h/1d/7d intraday windows.</span>');
+  showView('corr');
   setTimeout(()=>openCompg(tickers), 40);   // let openCorr build the matrix context first
   termOut(`<span class="tp-hd">comp</span> ${tickers.map(t=>tesc(t)).join(' · ')} <span class="tp-trans">· COMP/G — ${tickers.length} names rebased to 100 over ${tfLabel()}</span>`); }
 function termCorr(a,b){ const ra=termFind(a), rb=termFind(b); if(!ra||!rb) return termErr('need two tickers — e.g. corr btc eth');
@@ -5416,25 +5482,12 @@ function renderTreemap(){
   function esc(s){ return String(s).replace(/[&<>"]/g,function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); }
   function ready(fn){ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',fn); else fn(); }
 
-  // --- A. correlation lookback: 7d / 30d ----------------------------------
+  // --- A. correlation lookback (scope-aware: stocks 7/30/90d, crypto 4h/1d/7d) -------------
   function fixCorrLookback(){
-    var seg=document.getElementById('corrtf'); if(!seg) return;
-    if(typeof state!=='undefined' && state.corr){ if(state.corr.tf!=='7' && state.corr.tf!=='30' && state.corr.tf!=='90') state.corr.tf='30'; }
-    seg.innerHTML='<span class="seglbl">lookback</span>'
-      +'<button type="button" data-d="7">7d</button>'
-      +'<button type="button" data-d="30">30d</button>'
-      +'<button type="button" data-d="90">90d</button>';
-    seg.querySelectorAll('button').forEach(function(b){
-      if(typeof state!=='undefined' && state.corr && b.getAttribute('data-d')===state.corr.tf) b.classList.add('active');
-      b.addEventListener('click',function(){
-        if(typeof state!=='undefined' && state.corr) state.corr.tf=b.getAttribute('data-d');
-        seg.querySelectorAll('button').forEach(function(x){ x.classList.toggle('active',x===b); });
-        var v=document.getElementById('view-corr');
-        if(typeof renderCorr==='function' && v && !v.hidden) renderCorr();
-      });
-    });
-    var v=document.getElementById('view-corr');
-    if(typeof renderCorr==='function' && v && !v.hidden) renderCorr();
+    if(typeof syncCorrLookback==='function'){ syncCorrLookback();
+      var v=document.getElementById('view-corr');
+      if(typeof renderCorr==='function' && v && !v.hidden) renderCorr();
+      return; }
   }
 
   // --- B. unclassified-listing alert --------------------------------------
