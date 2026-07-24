@@ -5,7 +5,7 @@ const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -4130,7 +4130,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // Bumped whenever the prompt/validator/schema changes shape: cached reports from an older
   // schema flip to "invalidated — report format updated" on the next read, so a deploy that
   // fixes the report is visible on the first regenerate, never hidden behind a running TTL.
-  const AI_SCHEMA_V = 7;   // v7: earnings reported-vs-upcoming split — a printed event is a post-event object (context.earnings.reported), never served as a pending `next` binary; validator bans a stale `event` scenario; v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
+  // Level-detector tuning. k=3 -> a 7-bar fractal window (the last 3 bars can confirm nothing).
+  // tau = 0.4 x sd30 clusters touches at roughly half a typical daily move. minN=2 is the setting
+  // that decides the detector's character: at 1 every pivot is a "level" and the snap rule below
+  // becomes decorative, at 3 more names fall to the honest-null path.
+  const AI_LEVEL_K = 3, AI_LEVEL_TAU = 0.4, AI_LEVEL_MINN = 2, AI_LEVEL_MAX = 8;
+  const AI_SNAP_TOL = 0.5;   // x tauPct — how close a proposed void must sit to a detected level
+  const AI_SCHEMA_V = 8;   // v8: structural level detector — ctx.levels ships confirmed pivot clusters and a non-anchored directional void must snap to one (previously the void was bounded only by a +-40/60% sanity band); v7: earnings reported-vs-upcoming split — a printed event is a post-event object (context.earnings.reported), never served as a pending `next` binary; validator bans a stale `event` scenario; v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   // Per-surface reasoning effort (OpenAI GPT-5.x only — the Anthropic body stays minimal and
@@ -4509,11 +4515,26 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       } catch (_) {}
     }
     try { const ar = analystRecordFor(coin); if (ar) ctx.analystRecord = ar; } catch (_) {}
+    // -- structural levels: confirmed pivot clusters the void must sit on ----------------------
+    // Detection is pure (compute.detectLevels); this is assembly. ctx.levels ALWAYS ships — an
+    // explicit empty with a note, never an absent field — because the validator's snap rule binds
+    // to it: present-and-populated means a directional void must match one of these, present-and-
+    // empty means the rule stands down. An absent field would make "no history" and "detector
+    // threw" indistinguishable, and the honest answer differs between them.
+    try {
+      const rets30 = [];
+      for (let i = Math.max(1, closes.length - 30); i < closes.length; i++)
+        if (closes[i - 1] > 0) rets30.push((closes[i] / closes[i - 1] - 1) * 100);
+      const sd30 = rets30.length >= 10 ? stdev(rets30) : 0;
+      const lv = detectLevels(daily, px, sd30,
+        { k: AI_LEVEL_K, tauMult: AI_LEVEL_TAU, minN: AI_LEVEL_MINN, max: AI_LEVEL_MAX });
+      ctx.levels = lv || { n: 0, items: [], note: "insufficient daily history for confirmed pivots" };
+    } catch (_) { ctx.levels = { n: 0, items: [], note: "level detection unavailable" }; }
     ctx.flags = aiFlags(r);
     ctx.coverage = aiCoverage(coin, windowMs);
     return ctx;
   }
-  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history and the 24h open-interest change — read positioning through these when present. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly. context.earnings may carry "next" (a scheduled print still AHEAD — this, and only this, is earnings event risk) and/or "reported" (a print already OUT, with its beat/miss and surprise%): a "reported" print is SETTLED HISTORY, not a pending catalyst — read its result and the tape's reaction, and never describe it as upcoming or tell the reader to wait for it.
+  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, structural levels, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history and the 24h open-interest change — read positioning through these when present. context.levels carries the structural levels this name has actually respected: each item is a cluster of confirmed daily pivots, with v (the price), side ("res" overhead, "sup" below, "flip" for a level that has served as both), n (how many pivots touched it), ageD (days since the most recent touch) and distPct (distance from the mark). These are the ONLY prices you may treat as structure — a level with n=2 touched 40 days ago is weak evidence and should be described as such, while a flip with n=5 touched last week is the strongest structure the tape offers. When context.levels.items is empty the note says why: say plainly that no confirmed structure exists and lean on trend and positioning instead. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly. context.earnings may carry "next" (a scheduled print still AHEAD — this, and only this, is earnings event risk) and/or "reported" (a print already OUT, with its beat/miss and surprise%): a "reported" print is SETTLED HISTORY, not a pending catalyst — read its result and the tape's reaction, and never describe it as upcoming or tell the reader to wait for it.
 Respond with ONLY a JSON object — no markdown fences, no preamble — with exactly these keys:
 {"headline": string (<=60 chars, plain-language stance, e.g. "Constructive, leans long" or "Constructive, but earnings in 6 days"),
  "bias": "long"|"short"|"neutral",
@@ -4524,8 +4545,8 @@ Respond with ONLY a JSON object — no markdown fences, no preamble — with exa
  "news_read": {"used": true|false, "note": one sentence, <=200 chars} — REQUIRED. "used" is true only when the read materially leans on a headline from context.news.verified; the note names which (or states that no verified headlines exist / none were material). NEWS CONTRACT: catalyst or news statements anywhere in the report may reference ONLY headlines provided in context.news. If context.news.verified is empty you MUST NOT infer, recall, or invent any company news — state that no verified headlines exist in the window and read the tape on its own. context.news.tape items are market backdrop, never company catalysts.
  "invalidations": array of 1-5 plain sentences — observable conditions that would change the read,
  "action": {"stance": "enter_now"|"enter_on_pullback"|"take_profit"|"wait"|"no_trade", "entry": price or null, "note": one sentence on why this stance and what to watch}. The actionable read: offer an entry stance whenever the geometry supports one (a void and a target exist and the expected value at some entry is positive) — "enter_on_pullback" requires "entry" set to the pullback level (typically the zone), "enter_now" may leave entry null (the current price). When the honest answer is to stand aside — event about to decide, negative expected value, neutral read, thin data — say "wait" or "no_trade" and name the condition that would change it. Never invent a stance the scenario odds don't support.
- "levels": array of at most 4 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high", "label": <=60 chars} for chart annotation. Level discipline is strict: when bias is "long" or "short" you MUST include exactly one "void" level — the observable price where the read is dead (the frozen claim stop when claimAnchor exists, otherwise a structural level like the relevant swing low/high) — and exactly one "void" scenario resolving against it. At most one "target" level, optionally one zone_low+zone_high pair. NEVER annotate moving averages as levels (EMAs drift — the chart draws the live ribbon itself) and never annotate range bounds unless the bound IS the void or target. Levels must sit within roughly ±25% of the current price or they won't render.
-Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Use only levels derivable from the context (range structure, claim geometry, prior swings implied by the data). Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
+ "levels": array of at most 4 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high", "label": <=60 chars} for chart annotation. Level discipline is strict: when bias is "long" or "short" you MUST include exactly one "void" level — the observable price where the read is dead. This number is NOT free: when claimAnchor exists the void IS its stop, and otherwise the void MUST be one of the prices in context.levels.items — copy the value verbatim. A void that matches no detected level is rejected server-side and the report is discarded, so pick the level, then build the read around it — and exactly one "void" scenario resolving against it. At most one "target" level, optionally one zone_low+zone_high pair. NEVER annotate moving averages as levels (EMAs drift — the chart draws the live ribbon itself) and never annotate range bounds unless the bound IS the void or target. Levels must sit within roughly ±25% of the current price or they won't render.
+Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Otherwise every level you emit must come from context.levels.items or from claim geometry — do not invent round numbers, and do not derive levels from range bounds the detector did not confirm. Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
   // Validate the model's JSON, correct the void to frozen-claim geometry when one exists, and
   // compute every displayed number (risk unit, per-scenario R/R and payoff, EV) server-side.
   function validateAiReport(rawText, ctx) {
@@ -4595,6 +4616,31 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (anchorStop != null) {
       if (!voidL) { voidL = { value: sig(anchorStop, 9), kind: "void", label: "void — frozen claim stop" }; levels.push(voidL); corrected = true; }
       else if (Math.abs(voidL.value - anchorStop) / anchorStop > 0.005) { voidL.value = sig(anchorStop, 9); voidL.label += " (corrected to frozen claim stop)"; corrected = true; }
+    }
+    // No frozen claim to anchor to: the void must still sit on a price the tape respected. The
+    // detector ships confirmed pivot clusters in ctx.levels; a void matching none of them is a
+    // plausible-looking number with nothing behind it, and the risk unit, every per-scenario R
+    // and the EV all inherit that softness while LOOKING computed. Hard reject rather than a
+    // silent snap to the nearest level: moving a void the model never reasoned against leaves its
+    // scenario probabilities describing a different trade, which is a worse failure than no
+    // report. Within tolerance the value IS snapped, so the chart line and the ledger stop land
+    // on the detected price rather than a near-miss. Stands down entirely when the detector had
+    // too little history to speak — a young listing still gets a read.
+    const lvItems = ctx.levels && Array.isArray(ctx.levels.items) ? ctx.levels.items : [];
+    if (anchorStop == null && out.bias !== "neutral" && voidL && lvItems.length) {
+      const tol = Math.max((+ctx.levels.tauPct || 0.5) * AI_SNAP_TOL, 0.1) / 100;
+      let near = null, best = Infinity;
+      for (const l of lvItems) {
+        if (!(l && +l.v > 0)) continue;
+        const d = Math.abs(+l.v / voidL.value - 1);
+        if (d <= tol && d < best) { best = d; near = l; }
+      }
+      if (!near) return { ok: false, error: "void level does not sit on any detected structural level" };
+      if (sig(+near.v, 9) !== voidL.value) {
+        voidL.value = sig(+near.v, 9);
+        voidL.label = (voidL.label + " (snapped to structure)").slice(0, 80);
+        corrected = true;
+      }
     }
     // A directional read without a void is an unfalsifiable read — the entire R/R and EV promise
     // dies with it, so it fails validation instead of shipping dashes. Neutral reads may omit it.
@@ -4782,7 +4828,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       ai: validated.ai, computed: (() => { const mk = aiMarks(coin, (r && r.ticker) || ctx.ticker, 92 * DAY);
         return Object.assign({}, validated.computed,
           { marks: mk.marks, marksSuppressed: mk.suppressed, flags: ctx.flags || [], coverage: ctx.coverage || null,
-            claimAnchor: ctx.claimAnchor || null }); })() };
+            claimAnchor: ctx.claimAnchor || null,
+            // The evidence the void was checked against, frozen with the report: re-deriving these
+            // client-side would let the chart disagree with the validator that accepted the read.
+            structLevels: (ctx.levels && Array.isArray(ctx.levels.items)) ? ctx.levels.items : [] }); })() };
     aiReports.set(coin, rep);
     persistAiReports();
     return rep;

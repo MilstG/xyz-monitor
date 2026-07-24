@@ -966,6 +966,89 @@ function detectSweep(m5, dayHi, dayLo, px, frac) {
   return { side, level: +level.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
 
+// ---- structural levels: confirmed pivots, clustered by the name's own volatility ------------
+// The AI analyst's void level has to sit on a price the tape actually respected. Until this
+// existed the prompt asked for "prior swings implied by the data" while the context shipped no
+// swing data at all — an unfulfillable instruction whose only real constraint was a +-40/60%
+// sanity band, so a plausible round number passed and every figure computed off it (risk unit,
+// per-scenario R, EV) inherited a soft input dressed as a hard one.
+//
+// Three legs, all pure:
+//   1. CONFIRMED fractal pivots. Bar i is a pivot high when its high strictly exceeds every high
+//      in [i-k, i+k]; pivot low mirrors on lows. k bars are required on EACH side, so the last k
+//      bars produce nothing — an unconfirmed pivot is a guess, and removing guesses is the whole
+//      point of the function. Strict comparison means a flat double-top yields no pivot:
+//      conservative by construction, same posture as stopTouched.
+//   2. Cluster at tau = max(tauMult * sd30, 0.5%), scaled to the name's own daily volatility. A
+//      fixed percent over-merges a quiet name and shatters a volatile one.
+//   3. Classify from cluster membership: all highs = "res", all lows = "sup", both = "flip" — a
+//      level that capped price and later floored it (or the reverse). The flip falls out for
+//      free and carries the most information of the three.
+// A cluster ships only at minN members: one untested pivot is a data point, not a level.
+// Warm-cache daily rows can arrive closes-only; h/l fall back to the close rather than throwing,
+// degrading the detector to close-based pivots instead of taking it offline. Honest null when
+// the history is too short to confirm anything — callers stand their rules down, never fabricate.
+//   daily : ascending daily rows {t, o, h, l, c} (r.dailyRaw shape)
+//   px    : current mark
+//   sd30  : stdev of the last 30 daily % returns (0/absent -> the 0.5% tau floor applies)
+function detectLevels(daily, px, sd30, opts) {
+  const o = opts || {};
+  const k = Number.isFinite(o.k) && o.k >= 1 ? Math.round(o.k) : 3;
+  const tauMult = Number.isFinite(o.tauMult) && o.tauMult > 0 ? o.tauMult : 0.4;
+  const minN = Number.isFinite(o.minN) && o.minN >= 1 ? Math.round(o.minN) : 2;
+  const maxOut = Number.isFinite(o.max) && o.max >= 1 ? Math.round(o.max) : 8;
+  const minBars = Number.isFinite(o.minBars) ? o.minBars : 60;
+  if (!Array.isArray(daily) || !(px > 0)) return null;
+  const b = [];
+  for (const d of daily) {
+    if (!d) continue;
+    const c = +d.c;                                        // COERCE: string closes reach here on some feed paths
+    if (!Number.isFinite(c) || !(c > 0)) continue;
+    const hr = +d.h, lr = +d.l;
+    const h = Number.isFinite(hr) && hr > 0 ? hr : c, l = Number.isFinite(lr) && lr > 0 ? lr : c;
+    b.push({ h: Math.max(h, c), l: Math.min(l, c) });      // a bar whose close sits outside its own range is bad data, not a pivot
+  }
+  if (b.length < minBars || b.length < 2 * k + 1) return null;
+  const piv = [];
+  for (let i = k; i < b.length - k; i++) {
+    let isH = true, isL = true;
+    for (let j = i - k; j <= i + k && (isH || isL); j++) {
+      if (j === i) continue;
+      if (b[j].h >= b[i].h) isH = false;
+      if (b[j].l <= b[i].l) isL = false;
+    }
+    if (isH) piv.push({ i, v: b[i].h, t: "h" });
+    if (isL) piv.push({ i, v: b[i].l, t: "l" });
+  }
+  if (!piv.length) return null;
+  const tauPct = Math.max(sd30 > 0 ? tauMult * sd30 : 0, 0.5), tau = tauPct / 100;
+  piv.sort((a, z) => a.v - z.v);
+  const cl = [];
+  for (const p of piv) {
+    const last = cl.length ? cl[cl.length - 1] : null;
+    // Chain against the RUNNING mean, not the seed member: a level's price is the average of the
+    // touches that define it, and comparing to the seed lets a long chain drift past tau.
+    if (last && last.ref > 0 && Math.abs(p.v / last.ref - 1) <= tau) {
+      last.mem.push(p);
+      last.ref = last.mem.reduce((s, x) => s + x.v, 0) / last.mem.length;
+    } else cl.push({ ref: p.v, mem: [p] });
+  }
+  const lastI = b.length - 1, out = [];
+  for (const c of cl) {
+    if (c.mem.length < minN) continue;
+    const hs = c.mem.filter((m) => m.t === "h").length;
+    let li = -1; for (const m of c.mem) if (m.i > li) li = m.i;
+    out.push({ v: +c.ref.toPrecision(9), n: c.mem.length,
+      side: hs > 0 && hs < c.mem.length ? "flip" : (hs > 0 ? "res" : "sup"),
+      ageD: lastI - li, distPct: +((c.ref / px - 1) * 100).toFixed(2) });
+  }
+  if (!out.length) return null;
+  // Keep the NEAREST maxOut (the levels a void could plausibly sit on), then present high -> low.
+  out.sort((a, z) => Math.abs(a.distPct) - Math.abs(z.distPct));
+  const keep = out.slice(0, maxOut).sort((a, z) => z.v - a.v);
+  return { k, tauPct: +tauPct.toFixed(3), minN, n: keep.length, items: keep };
+}
+
 // ---- served-index cache busting (pure) -----------------------------------------------------
 // Stamps ?v=<build> on the two client asset tags so browsers refetch exactly when the build
 // changes and never otherwise. The -84 lesson: with bare asset tags, a deploy updates the
@@ -1938,7 +2021,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
