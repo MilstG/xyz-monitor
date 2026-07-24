@@ -1900,7 +1900,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock",
     "renderRegime", "regimeCurveSvg", "wireRegimeControls",
     "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp",
-    "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback"];
+    "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
+    "compgAligned", "compgTickLabel", "compgHoverLabel"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1955,6 +1956,13 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(s.includes("function syncCorrLookback") && /\[\['4h','4h'\],\['1d','1d'\],\['7d','7d'\]\]/.test(s), "scope-aware 4h/1d/7d lookback missing");
   assert.ok(s.includes("function alignedIntraday") && s.includes("CORR._bars"), "crypto pair-view intraday alignment missing");
   assert.ok(/v!=='report' && v!=='corr'/.test(s), "corr tab must be un-gated for crypto scope in showView");
+  // COMP/G runs on both universes via one axis-generic seam: equities align daily closes (axis =
+  // day-ms), crypto reads the matrix's intraday closes (CORR._bars on CORR._times). The anchor is a
+  // timestamp, not a day-int, and the button is no longer hidden on crypto. Reverting any of these
+  // silently drops COMP/G back to equities-only.
+  assert.ok(s.includes("function compgAligned") && s.includes("state.scope==='crypto' && CORR._intraday && CORR._bars && CORR._times"), "COMP/G crypto data seam missing");
+  assert.ok(s.includes("COMPG.anchorTs") && !s.includes("COMPG.anchorDay"), "COMP/G anchor must be timestamp-based (anchorTs), not day-int");
+  assert.ok(s.includes("cg.hidden=false") && !/openCompg\(tickers\)\{\s*if\(state\.scope==='crypto'\)\{ const p=el\('compg'\)/.test(s), "COMP/G must no longer be hidden/blocked on crypto");
   // TERM_VERBS regression: it was referenced by termComps but never DEFINED — a silent
   // ReferenceError on every keystroke that killed ghost text + tab completion.
   assert.ok(/const TERM_VERBS=\[/.test(s), "TERM_VERBS must be defined, not just referenced (completion engine ReferenceError)");
