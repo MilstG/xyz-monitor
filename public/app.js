@@ -1080,7 +1080,7 @@ function renderPairPanel(){
 // histories are honest: a name listed after the anchor rebases to its own first close and the
 // legend states the date, never a silent 100 at a different origin.
 const COMPG_PAL=['var(--accent)','var(--blue)','var(--up)','var(--down)','#b98cd6','#d6c25a','#5ac8d6','#d68f5a'];
-const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorTs:null, win:null, _intraday:false, _span:0 };
+const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorTs:null, win:null, _intraday:false, _span:0, closed:false };
 function compgColor(i){ return COMPG_PAL[i%COMPG_PAL.length]; }
 function compgRowFor(tk){ tk=String(tk||'').toUpperCase(); for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; } return null; }
 // union-day alignment across N names; a name missing a day carries null (gaps stay visible)
@@ -1173,6 +1173,60 @@ function compgLegend(S){
       : `<span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}pp</span>`);
     return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${esc(r.tk)}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
 }
+// ===== COMP/G picker: universe-validated typeahead + fill shortcuts =====
+// The panel auto-opens on the Corr tab (no launcher button) and re-renders live on every
+// add/remove — selection is chips + typeahead, matrix clicks still work as before.
+function compgUniverse(){ return state.scope==='crypto'
+  ? (CORR._bars ? [...CORR._bars.keys()].map(t=>String(t).toUpperCase()) : [])
+  : activeRows().map(r=>(r.ticker||'').toUpperCase()).filter(Boolean); }
+function compgDefaultSel(){ const cr=state.scope==='crypto';
+  const rows=(CORR._rows&&CORR._rows.length?CORR._rows:corrScope());
+  return [...new Set(rows.map(r=>({t:(r.ticker||'').toUpperCase(),m:Math.abs((cr?corrRet(r):windowRetPct(r,+state.corr.tf))||0)}))
+    .sort((a,b)=>b.m-a.m).slice(0,8).map(x=>x.t))].slice(0,8); }
+function compgAddName(t){ t=String(t||'').toUpperCase(); if(!t||COMPG.sel.includes(t)||COMPG.sel.length>=8) return false;
+  if(!compgUniverse().includes(t)) return false;
+  COMPG.sel.push(t); renderCompg(); return true; }
+function compgPickerHtml(){ const n=COMPG.sel.length;
+  const cap=n>=8?'<span class="cg-cap">max 8 — remove one to add</span>':'';
+  return `<div class="cg-pick"><input id="cg-add" placeholder="add name — type to search the ${state.scope==='crypto'?'crypto':'xyz'} universe" autocomplete="off"/><div id="cg-sugg" class="cg-sugg" hidden></div></div>
+    <div class="cg-fill"><span class="cg-lbl">fill:</span>
+      <button class="cg-pill" id="cg-top8" title="the current matrix set, top 8 by |window return| — the auto-launch default">top 8 movers</button>
+      <button class="cg-pill" id="cg-watch" title="your starred names present in this universe (up to 8)">\u2605 watchlist</button>
+      <button class="cg-pill" id="cg-clear" title="empty the selection">clear</button>
+      <span class="cg-cnt">${n}/8</span>${cap}</div>`; }
+function compgWirePicker(p){
+  const inp=el('cg-add'), sg=el('cg-sugg'); if(!inp) return;
+  const show=()=>{ const q=inp.value.trim().toUpperCase();
+    if(!q){ sg.hidden=true; return; }
+    const uni=compgUniverse().filter(t=>!COMPG.sel.includes(t));
+    const m=[...uni.filter(t=>t.startsWith(q)),...uni.filter(t=>!t.startsWith(q)&&t.includes(q))].slice(0,6);
+    if(!m.length){ sg.innerHTML='<div class="cg-sg-none">no match in the live universe</div>'; sg.hidden=false; return; }
+    sg.innerHTML=m.map(t=>`<div class="cg-sg" data-t="${esc(t)}">${esc(t)}</div>`).join(''); sg.hidden=false;
+    sg.querySelectorAll('.cg-sg').forEach(x=>x.onclick=()=>{ if(compgAddName(x.dataset.t)){ const ni=el('cg-add'); if(ni){ ni.focus(); } } }); };
+  inp.oninput=show;
+  inp.onkeydown=e=>{
+    if(e.key==='Escape'){ sg.hidden=true; return; }
+    if(e.key!=='Enter') return;
+    const q=inp.value.trim().toUpperCase(); if(!q) return;
+    const uni=compgUniverse().filter(t=>!COMPG.sel.includes(t));
+    const m=uni.find(t=>t===q)||uni.find(t=>t.startsWith(q));
+    if(m&&compgAddName(m)){ const ni=el('cg-add'); if(ni) ni.focus(); } };
+  const t8=el('cg-top8'); if(t8) t8.onclick=()=>{ COMPG.sel=compgDefaultSel(); COMPG.off=new Set(); COMPG.base='__basket'; renderCompg(); };
+  const w=el('cg-watch'); if(w) w.onclick=()=>{ const uni=new Set(compgUniverse());
+    const sel=[]; for(const c of state.watch){ const r=state.rows.get(c); const tk=r?String(r.ticker||r.coin||'').toUpperCase():String(c).toUpperCase();
+      if(uni.has(tk)&&!sel.includes(tk)) sel.push(tk); if(sel.length>=8) break; }
+    COMPG.sel=sel; COMPG.off=new Set(); COMPG.base='__basket'; renderCompg(); };
+  const cl=el('cg-clear'); if(cl) cl.onclick=()=>{ COMPG.sel=[]; COMPG.off=new Set(); COMPG.base='__basket'; renderCompg(); };
+}
+// Auto-launch: called whenever the Corr tab paints (view switch or scope flip). First visit
+// seeds the default set via openCompg (which self-defers on crypto until the matrix's intraday
+// series is ready); later visits keep whatever selection you built. A closed panel stays
+// closed for the session; the terminal comp verb reopens it.
+function compgAuto(){ if(COMPG.closed) return;
+  const present=COMPG.sel.filter(t=>compgUniverse().includes(t));
+  if(present.length>=2){ const pp=el('compg'); if(pp){ pp.hidden=false; renderCompg(); } }
+  else openCompg();
+}
 function openCompg(tickers){
   const cr=state.scope==='crypto';
   if(cr && !(CORR._intraday && CORR._bars && CORR._times)){
@@ -1187,11 +1241,9 @@ function openCompg(tickers){
   const uni = cr ? new Set([...CORR._bars.keys()].map(t=>String(t).toUpperCase()))
                  : new Set(activeRows().map(r=>(r.ticker||'').toUpperCase()));
   let sel=(tickers&&tickers.length?tickers.map(t=>String(t).toUpperCase()):[]).filter(t=>uni.has(t));
-  if(!sel.length){ // default: the current matrix set, top 8 by |window return|
-    const rows=(CORR._rows&&CORR._rows.length?CORR._rows:corrScope());
-    sel=rows.map(r=>({t:(r.ticker||'').toUpperCase(),m:Math.abs((cr?corrRet(r):windowRetPct(r,+state.corr.tf))||0)}))
-      .sort((a,b)=>b.m-a.m).slice(0,8).map(x=>x.t); }
+  if(!sel.length) sel=compgDefaultSel();   // default: the current matrix set, top 8 by |window return|
   sel=[...new Set(sel)].slice(0,8);
+  COMPG.closed=false;
   COMPG.sel=sel; COMPG.off=new Set(); COMPG.mode='index'; COMPG.base='__basket';
   COMPG.win = cr ? (state.corr.ctf||'1d') : +state.corr.tf;
   COMPG.anchorTs = cr ? (CORR._times.length?CORR._times[0]:null)
@@ -1200,8 +1252,14 @@ function openCompg(tickers){
 }
 function renderCompg(){
   const p=el('compg'); if(!p) return;
-  if(COMPG.sel.length<2){ p.hidden=false; p.innerHTML=`<div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— normalized comparison</span> <button class="btn xtiny" id="cg-close" title="close" style="float:right">✕</button></div><div class="sec" style="margin-top:6px">Add at least two names — click tickers in the matrix, or run <span class="amber">comp NVDA AAPL MSFT</span> in the terminal.</div>`;
-    const c=el('cg-close'); if(c) c.onclick=()=>{ p.hidden=true; }; return; }
+  if(COMPG.sel.length<2){ p.hidden=false;
+    const chips=COMPG.sel.map((t,i)=>`<span class="cg-chip" data-tk="${esc(t)}"><span class="cg-sw" style="background:${compgColor(i)}"></span>${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`).join('');
+    p.innerHTML=`<div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— normalized comparison</span> <button class="btn xtiny" id="cg-close" title="close for this session" style="float:right">✕</button></div>
+      <div class="cg-ctrls"><div class="cg-chips">${chips}</div>${compgPickerHtml()}</div>
+      <div class="sec" style="margin-top:6px">Add at least two names — type above, use the fill buttons, or click tickers in the matrix. Terminal: <span class="amber">comp NVDA AAPL MSFT</span>.</div>`;
+    const c=el('cg-close'); if(c) c.onclick=()=>{ p.hidden=true; COMPG.closed=true; };
+    p.querySelectorAll('.cg-chip .cg-x').forEach(x=>x.onclick=()=>{ COMPG.sel=COMPG.sel.filter(t=>t!==x.dataset.x); renderCompg(); });
+    compgWirePicker(p); return; }
   const S=compgSeries();
   const {svg,X,Y}=compgSvg(S);
   const chips=COMPG.sel.map((t,i)=>`<span class="cg-chip${COMPG.off.has(t)?' off':''}" data-tk="${esc(t)}"><span class="cg-sw" style="background:${compgColor(i)}"></span>${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`).join('');
@@ -1231,6 +1289,7 @@ function renderCompg(){
         <button data-cgm="spread"${COMPG.mode==='spread'?' class="on"':''}>Spread</button></span></div>
     <div class="cg-ctrls">
       <div class="cg-chips">${chips}</div>
+      ${compgPickerHtml()}
       <div class="cg-anchorctl">${anchorCtl}</div>
       <div class="cg-basectl"${COMPG.mode==='spread'?'':' hidden'}><span class="cg-lbl">vs</span><select id="cg-base">${baseOpts}</select></div>
     </div>
@@ -1240,7 +1299,8 @@ function renderCompg(){
       ? `Each name rebased to 100 at the anchor (${compgHoverLabel(COMPG.anchorTs)}). Above 100 = outperformed since; below = lagged. A name listed after the anchor starts at its own first close (dated in the legend).`
       : `Each name minus ${COMPG.base==='__basket'?'the equal-weight basket of visible names':esc(COMPG.base)}, in percentage points. Zero = moving with the ${COMPG.base==='__basket'?'group':'base'}; positive = leading it.`}</div>`;
   // wire
-  el('cg-close').onclick=()=>{ p.hidden=true; };
+  el('cg-close').onclick=()=>{ p.hidden=true; COMPG.closed=true; };
+  compgWirePicker(p);
   p.querySelectorAll('#cg-mode button').forEach(b=>b.onclick=()=>{ COMPG.mode=b.dataset.cgm; renderCompg(); });
   p.querySelectorAll('[data-cgd]').forEach(b=>b.onclick=()=>{ COMPG.anchorTs=(Math.floor(Date.now()/DAY)-(+b.dataset.cgd))*DAY; renderCompg(); });
   p.querySelectorAll('[data-cgts]').forEach(b=>b.onclick=()=>{ COMPG.anchorTs=+b.dataset.cgts; renderCompg(); });
@@ -2674,10 +2734,10 @@ function applyScope(){
   // true to show in crypto scope.
   document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  { const cg=el('compgBtn'); if(cg) cg.hidden=false; }   // COMP/G now runs on both universes (crypto uses the matrix's intraday series)
+
   if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr') { showView('markets'); }
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
-  if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); }   // repaint the matrix for the new universe/data source
+  if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
@@ -2700,7 +2760,7 @@ function showView(v){
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
-  if(v==='corr') openCorr();
+  if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
@@ -4672,7 +4732,7 @@ el('corrsearch').addEventListener('input',e=>{ state.corr.search=e.target.value;
   clearTimeout(corrSearchT); corrSearchT=setTimeout(()=>{ if(!el('view-corr').hidden) openCorr(); },300); });
 el('mktExport').addEventListener('click', exportMarkets);
 el('corrExport').addEventListener('click', exportCorr);
-el('compgBtn').addEventListener('click', ()=>openCompg());
+
 
 // ============================================================================
 //  ASK-THE-BOARD TERMINAL — bottom-right console over the LIVE board.

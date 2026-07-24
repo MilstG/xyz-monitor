@@ -922,3 +922,18 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
   border-radius:4px;padding:5px 8px;font-size:10.5px;line-height:1.5;pointer-events:none;white-space:nowrap}
 .dzfoot{font-size:10px;color:var(--faint);border-top:1px solid color-mix(in srgb,var(--text) 10%,transparent);
   padding-top:6px;margin-bottom:12px}
+
+/* ===== COMP/G picker (auto-launch build) ===== */
+.cg-pick{position:relative;margin:4px 0 2px}
+.cg-pick input{width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);
+  border-radius:4px;color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 10px;outline:none}
+.cg-pick input:focus{border-color:var(--accent-dim)}
+.cg-sugg{position:absolute;top:32px;left:0;right:0;background:var(--panel2);border:1px solid var(--border);
+  border-radius:4px;z-index:8;overflow:hidden}
+.cg-sg{padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border)}
+.cg-sg:last-child{border-bottom:none}
+.cg-sg:hover{background:var(--panel);color:var(--accent)}
+.cg-sg-none{padding:6px 10px;font-size:11px;color:var(--faint)}
+.cg-fill{display:flex;align-items:center;gap:6px;margin:4px 0 6px;flex-wrap:wrap}
+.cg-cnt{font-size:10px;color:var(--faint);margin-left:auto}
+.cg-cap{font-size:10px;color:var(--accent)}
