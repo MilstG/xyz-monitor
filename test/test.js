@@ -1035,9 +1035,15 @@ test("AI sector classification: enum-validated, write-once, static map wins, thr
   // wiring pins: schedule, fallback model, scope guard, client A+B surfaces
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  for (const pin of ["callModel(AI_MODEL_FALLBACK, pend, { system: SEC_CLASSIFY_SYSTEM", "const GICS_SECTORS = [",
+  for (const pin of ["callModel(AI_CLASSIFY_MODEL, pend, { system: SEC_CLASSIFY_SYSTEM, maxTokens: 600, effort: AI_CLASSIFY_EFFORT })", "const GICS_SECTORS = [",
     "learned sectors feed the NEWS badges/grouping ONLY", "classifySecTick().catch", "sectors: { tapeClassified:"])
     assert.ok(pol.includes(pin), `classifier pin missing: ${pin}`);
+  // the classifier runs on its OWN cheap model, never the report/ask fallback (which on OpenAI is
+  // the flagship Sol tier) — decoupling proven by source, so a report-quality change can't touch it
+  assert.ok(/AI_CLASSIFY_MODEL = process\.env\.AI_CLASSIFY_MODEL \|\| AI_DEF\.classify \|\| AI_MODEL_FALLBACK/.test(pol), "classifier model must be its own knob, falling back to provider default then the report fallback");
+  assert.ok(/AI_CLASSIFY_EFFORT = process\.env\.AI_CLASSIFY_EFFORT \|\| "low"/.test(pol), "classifier effort must default to low (nano classification wants no reasoning tokens)");
+  assert.ok(pol.includes('classify: "gpt-5.4-nano"') && pol.includes('classify: "claude-haiku-4-5"'), "each provider must default the classifier to a cheap classification-grade tier");
+  assert.ok(!pol.includes("callModel(AI_MODEL_FALLBACK, pend"), "the classifier must no longer reuse the report/ask fallback model");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["id=\"nsec\"", "data-nv=", "newsView==='sector'", "nsec-badge${a.secAi?' ai':''}",
     "const SEC_SHORT=", "newsSec&&a.sec!==newsSec", "'unclassified'"])
