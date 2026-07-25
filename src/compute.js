@@ -1392,7 +1392,9 @@ function sessionRecords(hourly, opts) {
       mfeDnPct: +((op - lo) / op * 100).toFixed(4),
       rangePct: +(rng / op * 100).toFixed(4),
       openQ, closedAbove: cl > op,
-      firstHrExt: hiI === 0 || loI === 0 });                 // an extreme printed in the session's first spine hour
+      firstHrExt: hiI === 0 || loI === 0,                    // an extreme printed in the session's first spine hour
+      hiHr: new Date(+bars[hiI][0]).getUTCHours(),           // UTC hour that printed the high / low — the
+      loHr: new Date(+bars[loI][0]).getUTCHours() });        // time-based-pivots study reads these
   }
   return out;
 }
@@ -1534,6 +1536,149 @@ function anatomyPool(perTicker, opts) {
       breakBoth: dirN ? q4(dirTot.both / dirN) : null,
       medDaysToBreak: daysToAll.length ? median(daysToAll) : null, nBreaks: dirN },
     naked };
+}
+
+// ---- candle behaviour (pure) -----------------------------------------------------------------
+// Daily-bar conditionals: classify each closed session's candle, then measure the NEXT session.
+// Mutually exclusive priority (outside > inside > doji > strong close > plain) so every bar lands
+// in exactly one bucket and the frequencies mean something. Follow-through is SIGNED with the
+// type's own thesis (a strong bear close followed by more downside scores positive), in the next
+// session's own pre-frozen sd — descriptive base rates, not signals.
+const CANDLE_TYPES = ["outside", "inside", "doji", "strongBull", "strongBear", "plain"];
+function candleType(r, prev) {
+  const rng = r.h - r.l;
+  if (!(rng > 0)) return null;
+  if (prev && r.h > prev.h && r.l < prev.l) return "outside";
+  if (prev && r.h < prev.h && r.l > prev.l) return "inside";
+  const body = Math.abs(r.c - r.o);
+  if (body <= 0.2 * rng) return "doji";
+  if (r.c > r.o && (r.c - r.l) / rng >= 0.8) return "strongBull";
+  if (r.c < r.o && (r.h - r.c) / rng >= 0.8) return "strongBear";
+  return "plain";
+}
+// One ticker's typed events: [{t, type, follow, rngSd}] where follow = next-session close-to-close
+// in next-session sd, signed with the type (bull types +up, bear types +down, neutral types raw).
+function candleEvents(records) {
+  const out = [];
+  for (let i = 0; i < records.length - 1; i++) {
+    const r = records[i], nx = records[i + 1];
+    const ty = candleType(r, i ? records[i - 1] : null);
+    if (!ty || !(r.c > 0) || !(nx.c > 0) || nx.sdPrev == null || !(nx.sdPrev > 0)) continue;
+    const retR = (nx.c / r.c - 1) * 100 / nx.sdPrev;
+    const follow = ty === "strongBear" ? -retR : retR;     // signed with the thesis; neutral types stay raw
+    out.push({ t: r.t, type: ty, follow: +follow.toFixed(3),
+      rngSd: nx.rangeSd != null ? nx.rangeSd : null });
+  }
+  return out;
+}
+// Day-pooled aggregate across tickers: per type, frequency share, mean signed follow-through, and
+// next-session range vs the unconditional median (expansion factor). Same minCross day-cell floor
+// as every anatomy rate; n published as days.
+function candlePool(perTicker, opts) {
+  const o = opts || {};
+  const minCross = Number.isFinite(o.minCross) ? o.minCross : 3;
+  const byType = {}; for (const t of CANDLE_TYPES) byType[t] = { fol: new Map(), rng: new Map(), nTS: 0 };
+  const allRng = [];
+  const push = (m, k, v) => { let a = m.get(k); if (!a) m.set(k, a = []); a.push(v); };
+  let total = 0;
+  for (const tk of perTicker) for (const e of tk.candles) {
+    total++;
+    const c = byType[e.type]; c.nTS++;
+    push(c.fol, e.t, e.follow);
+    if (e.rngSd != null) { push(c.rng, e.t, e.rngSd); allRng.push(e.rngSd); }
+  }
+  const baseRng = allRng.length ? median(allRng) : null;
+  const dayMean = (cells) => {
+    let sm = 0, n = 0;
+    for (const a of cells.values()) if (a.length >= minCross) { sm += a.reduce((p, v) => p + v, 0) / a.length; n++; }
+    return n ? { v: +(sm / n).toFixed(3), nDays: n } : { v: null, nDays: 0 };
+  };
+  const types = CANDLE_TYPES.map((t) => {
+    const c = byType[t], f = dayMean(c.fol);
+    const dm = []; for (const a of c.rng.values()) if (a.length >= minCross) dm.push(a.reduce((p, v) => p + v, 0) / a.length);
+    const mr = dm.length ? median(dm) : null;
+    return { type: t, share: total ? +(c.nTS / total).toFixed(4) : null, nTS: c.nTS,
+      follow: f.v, nDays: f.nDays,
+      rngX: mr != null && baseRng > 0 ? +(mr / baseRng).toFixed(3) : null };
+  });
+  return { n: total, types, baseRngSd: baseRng != null ? +baseRng.toFixed(3) : null };
+}
+
+// ---- time-based pivots (pure) ----------------------------------------------------------------
+// WHEN does the day's extreme print? Per day, the cross-section of names yields a distribution
+// over 24 UTC hours for the high and for the low; pooled = the mean of those daily distributions
+// (each day one observation, so one violent tape day cannot own the histogram). Conditionals:
+// an extreme printed in the first 4 UTC hours and the close's side of the open — the "early low,
+// trend day up" folklore, measured instead of assumed.
+const PIVOT_EARLY_H = 4;
+function pivotPool(perTicker, opts) {
+  const o = opts || {};
+  const minCross = Number.isFinite(o.minCross) ? o.minCross : 3;
+  const hiByDay = new Map(), loByDay = new Map();
+  const elCells = new Map(), ehCells = new Map();            // early-low -> closedAbove, early-high -> closed BELOW
+  const push = (m, k, v) => { let a = m.get(k); if (!a) m.set(k, a = []); a.push(v); };
+  for (const tk of perTicker) for (const r of tk.records) {
+    if (r.hiHr == null || r.loHr == null) continue;
+    push(hiByDay, r.t, r.hiHr); push(loByDay, r.t, r.loHr);
+    if (r.loHr < PIVOT_EARLY_H) push(elCells, r.t, r.closedAbove ? 1 : 0);
+    if (r.hiHr < PIVOT_EARLY_H) push(ehCells, r.t, r.closedAbove ? 0 : 1);
+  }
+  const hist = (m) => {
+    const acc = new Array(24).fill(0); let n = 0;
+    for (const hrs of m.values()) {
+      if (hrs.length < minCross) continue;
+      const d = new Array(24).fill(0);
+      for (const h of hrs) d[h] += 1 / hrs.length;
+      for (let i = 0; i < 24; i++) acc[i] += d[i];
+      n++;
+    }
+    return { share: acc.map((x) => n ? +(x / n).toFixed(4) : 0), nDays: n };
+  };
+  const rate = (m) => {
+    let sm = 0, n = 0;
+    for (const a of m.values()) if (a.length >= minCross) { sm += a.reduce((p, v) => p + v, 0) / a.length; n++; }
+    return { rate: n ? +(sm / n).toFixed(4) : null, nDays: n };
+  };
+  return { hi: hist(hiByDay), lo: hist(loByDay), earlyH: PIVOT_EARLY_H,
+    earlyLowUp: rate(elCells), earlyHighDown: rate(ehCells) };
+}
+
+// ---- per-ticker summaries (pure) -------------------------------------------------------------
+// The scope-selector payloads. Per-name rates are WITHIN-NAME TIME SERIES (each session one
+// observation — no cross-day pooling exists for one name); the client labels them as such. The
+// same floors apply: a cell under minN publishes null, never a rate on a handful of sessions.
+function anatomyTickerSummary(records, monday, naked, candles, opts) {
+  const o = opts || {};
+  const minN = Number.isFinite(o.minN) ? o.minN : 20;
+  const q3 = (x) => x == null ? null : +(+x).toFixed(3);
+  const rate = (arr) => arr.length >= minN ? +(arr.filter(Boolean).length / arr.length).toFixed(4) : null;
+  const up = records.map((r) => r.mfeUpSd).filter((x) => x != null);
+  const dn = records.map((r) => r.mfeDnSd).filter((x) => x != null);
+  const upP = records.map((r) => r.mfeUpPct).filter(Number.isFinite);
+  const dnP = records.map((r) => r.mfeDnPct).filter(Number.isFinite);
+  const quart = [1, 2, 3, 4].map((q) => {
+    const rows = records.filter((r) => r.openQ === q);
+    return { q, n: rows.length,
+      closedAbove: rate(rows.map((r) => r.closedAbove)),
+      firstHr: rate(rows.map((r) => r.firstHrExt)) };
+  });
+  const mw = monday.filter((e) => e.dir !== undefined);
+  const contained = mw.length >= 8 ? +(mw.filter((e) => e.contained).length / mw.length).toFixed(4) : null;
+  const rev = {}; for (const H of NAKED_HORIZONS) {
+    const a = naked.map((e) => e.rev[H]).filter((x) => x != null);
+    rev[H] = rate(a.map(Boolean).map((_, i) => a[i]));
+  }
+  const types = {}; for (const t of CANDLE_TYPES) {
+    const evs = candles.filter((e) => e.type === t);
+    const fol = evs.map((e) => e.follow);
+    types[t] = { n: evs.length,
+      follow: fol.length >= minN ? +(fol.reduce((a, b) => a + b, 0) / fol.length).toFixed(3) : null };
+  }
+  return { sessions: records.length, sdSessions: up.length,
+    mfe: { medUpSd: up.length >= minN ? q3(median(up)) : null, medDnSd: dn.length >= minN ? q3(median(dn)) : null,
+      medUpPct: upP.length >= minN ? q3(median(upP)) : null, medDnPct: dnP.length >= minN ? q3(median(dnP)) : null },
+    quartiles: quart, monday: { weeks: mw.length, contained }, naked: { horizons: NAKED_HORIZONS, revisit: rev },
+    candles: types };
 }
 
 // ---- served-index cache busting (pure) -----------------------------------------------------
@@ -2517,7 +2662,9 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   // session anatomy (build 2026.07.24-11): excursion / open-quartile / Monday range / naked opens
   sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, MFE_EDGES, NAKED_HORIZONS,
   // ledger shadow pair (build 2026.07.24-12): outsized-wick fill + round-number front-run
-  detectWickFill, detectRoundFront, roundStep };
+  detectWickFill, detectRoundFront, roundStep,
+  // candle behaviour + time pivots + per-ticker scopes (build 2026.07.24-13)
+  candleType, candleEvents, candlePool, pivotPool, anatomyTickerSummary, CANDLE_TYPES, PIVOT_EARLY_H };
 
 // ---- stop geometry validation ----------------------------------------------------------------
 // An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it

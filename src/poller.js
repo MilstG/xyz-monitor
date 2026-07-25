@@ -5,7 +5,7 @@ const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -2372,7 +2372,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const lvSt = buildLevelsStudy();   // computed once; reused in sections below so sig and payload can never disagree
     const lvSig = lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`;
     const anSt = buildAnatomy();       // same one-computation contract as the levels study
-    const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday.weeks}:${anSt.naked.revisit.join(",")}`;
+    const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday.weeks}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
     const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
     if (sig !== analyticsSig) { analyticsSig = sig; analyticsVer = Date.now(); }   // content changed -> new ETag
     analyticsCache = {
@@ -2648,6 +2648,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const st = levelStudy(pooled, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
     st.coverage = { tickers: contributing, skippedThin, windowDays: HOURLY_HISTORY_DAYS,
       minBars: LVL_MINBARS, stride: LVL_STRIDE };
+    // Per-ticker verdicts through the SAME aggregator with the SAME floors — one code path; the
+    // distance buckets are dropped per name (thin by construction) but overall + the touch-count
+    // split survive wherever their cells clear the floor.
+    st.byTicker = {};
+    for (const r of eq) {
+      if (!r._lvEv || !r._lvEv.length) continue;
+      const one = levelStudy(r._lvEv, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
+      st.byTicker[r.coin] = { ticker: r.ticker, n: one.n, overall: one.overall, byTouches: one.byTouches };
+    }
     return st;
   }
 
@@ -2668,15 +2677,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (r._anSrc !== hs) {
         r._anSrc = hs;
         const rec = anatomyEnrich(sessionRecords(hs, {}));
-        r._anRec = rec.length >= ANAT_MIN_SESS
-          ? { records: rec, monday: mondayStats(rec), naked: nakedStats(rec) }
-          : null;
+        if (rec.length >= ANAT_MIN_SESS) {
+          const monday = mondayStats(rec), naked = nakedStats(rec), candles = candleEvents(rec);
+          r._anRec = { records: rec, monday, naked, candles,
+            summary: anatomyTickerSummary(rec, monday, naked, candles, { minN: ANAT_MIN_SESS }) };
+        } else r._anRec = null;
       }
-      if (r._anRec) perTicker.push(r._anRec); else skippedThin++;
+      if (r._anRec) perTicker.push(Object.assign({ coin: r.coin, ticker: r.ticker }, r._anRec)); else skippedThin++;
     }
     if (perTicker.length < ANAT_MIN_EQ) return { pending: true, count: perTicker.length, need: ANAT_MIN_EQ };
     const pool = anatomyPool(perTicker, { minCross: ANAT_MIN_CROSS });
     pool.coverage = { windowDays: HOURLY_HISTORY_DAYS, minSessions: ANAT_MIN_SESS, minCross: ANAT_MIN_CROSS, skippedThin };
+    // Per-ticker scope: within-name time series, same floors — the client labels the n-basis switch.
+    pool.byTicker = {};
+    for (const tk of perTicker) pool.byTicker[tk.coin] = Object.assign({ ticker: tk.ticker }, tk.summary);
+    // Candle behaviour + time pivots ride the SAME per-ticker records — one pass, three studies.
+    pool.candles = candlePool(perTicker, { minCross: ANAT_MIN_CROSS });
+    pool.pivots = pivotPool(perTicker, { minCross: ANAT_MIN_CROSS });
     return pool;
   }
 
