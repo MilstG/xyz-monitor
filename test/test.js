@@ -5811,3 +5811,36 @@ test("-17 client + server wiring manifest: dual-universe route, tz-aware rendere
     "isCr?'ten':'eleven'",                                    // footer count is universe-aware
   ]) assert.ok(app.includes(pin), `app.js missing -17 client pin: ${pin}`);
 });
+
+// ===== 2026.07.24-17 hotfix: dual-universe /api/analytics must never wedge both sessions tabs =====
+// Two failure modes shipped in -17 could leave BOTH crypto and stocks stuck on "warming up the spines":
+//   1. Boot built both universes UNGUARDED before the retry interval was registered — a throw in
+//      either build aborted start(), so the interval never armed and nothing ever retried.
+//   2. The analytics ETag keyed on dataTs only; both universes stamp dataTs with Date.now(), so a
+//      same-millisecond boot could hand them identical ETags and let the browser 304 one universe's
+//      request with the other's cached body.
+test("-17 hotfix: boot analytics builds are isolated so a failure can't abort interval registration", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // both boot builds are wrapped so a throw is logged, not propagated
+  assert.ok(/try \{ buildAnalytics\("stocks"\); \} catch/.test(pol), "boot stocks build is try/caught");
+  assert.ok(/try \{ buildAnalytics\("crypto"\); \} catch/.test(pol), "boot crypto build is try/caught");
+  // the unguarded one-liner must be gone (boot-specific form: chained after buildDaily())
+  assert.ok(!pol.includes('buildDaily(); buildAnalytics("stocks"); if (crypto) buildAnalytics("crypto");'),
+    "the unguarded boot build line must not survive");
+  // the steady-state interval stays safeTick-wrapped and rebuilds both
+  assert.ok(/setInterval\(safeTick\(\(\) => \{ buildAnalytics\("stocks"\); if \(crypto\) buildAnalytics\("crypto"\); \}, "buildAnalytics"\)/.test(pol),
+    "the rebuild interval rebuilds both universes under safeTick");
+});
+
+test("-17 hotfix: analytics ETag is scope-namespaced so the two universes can't collide", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // the route builds a scope-prefixed validator and 304s only on an exact scope-tag match
+  assert.ok(srv.includes('const tag = \'W/"\' + scope + "-" +'), "ETag prefixes the scope");
+  assert.ok(srv.includes('if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }'),
+    "304 only when the scope-namespaced tag matches");
+  // prove the two tags differ even at an identical dataTs
+  const tagOf = (scope, dataTs) => 'W/"' + scope + "-" + dataTs + '"';
+  assert.notEqual(tagOf("stocks", 1721000000000), tagOf("crypto", 1721000000000), "same-ms builds still get distinct tags");
+});
