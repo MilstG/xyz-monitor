@@ -5,7 +5,7 @@ const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -81,6 +81,9 @@ const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (ste
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
 const SWEEP_LOOK_MS = 4 * HOUR;            // 5m tail scanned for a prior-session-level stop-run (~48 bars; detector needs >=12)
 const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept level, as a fraction of the window's median 5m range
+const WICK_FRAC = 0.55;                    // min wick share of the bar's range for a fill claim (dominant wick, not a doji tail)
+const WICK_SIZE_MULT = 1.1;                // the wick bar's range vs its own trailing-30 median — a real bar, not noise
+const RNDF_LO_BAND = 0.05, RNDF_HI_BAND = 0.6;   // round-figure approach band, x the name's own sd30
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
 const REGIME_SAMPLE_MS = 30 * 60 * 1000;  // append one correlation sample to history every 30 min
@@ -1915,6 +1918,27 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
                   { sd0: +sd30.toFixed(3), psd: sw.side, pn: 1, stp: sw.stop,
                     mv: +(Math.abs(sw.target / r.px - 1) * 100).toFixed(2) }, 0);
             }
+          }
+          // outsized-wick fill + round-figure front-run (build -12): the Vectora-inspired ledger
+          // pair, shipped as shadows like every setup before them. Wick bars come from the
+          // spine-derived daily buckets (always full OHLC — dailyRaw goes closes-only after a
+          // warm boot, which would blind the wick math), last CLOSED bucket only; the round
+          // front-run rides the same closes tuples as the other swing shadows. xyz only: the
+          // ledger takes no crypto claim, and gating here saves the bucket walk on main rows.
+          if (r.uni === "xyz") {
+            const db24 = bucketsFor(r, 24);
+            if (Array.isArray(db24) && db24.length >= 32) {
+              const wf = detectWickFill(db24.slice(0, -1), r.px, { frac: WICK_FRAC, sizeMult: WICK_SIZE_MULT });
+              if (wf && stopGeometryOk(wf.side, r.px, wf.stop))
+                openLedger(r, "wickfill", { score: 0, reading: "" }, wf.side === "long" ? 1 : -1,
+                  { sd0: +sd30.toFixed(3), psd: wf.side, pn: 1, stp: wf.stop,
+                    mv: +(Math.abs(wf.target / r.px - 1) * 100).toFixed(2) }, 0);
+            }
+            const rf = detectRoundFront(closes, r.px, sd30, { loBand: RNDF_LO_BAND, hiBand: RNDF_HI_BAND });
+            if (rf && stopGeometryOk(rf.side, r.px, rf.stop))
+              openLedger(r, "roundfr", { score: 0, reading: "" }, rf.side === "long" ? 1 : -1,
+                { sd0: +sd30.toFixed(3), psd: rf.side, pn: 1, stp: rf.stop,
+                  mv: +(Math.abs(rf.target / r.px - 1) * 100).toFixed(2) }, 0);
           }
         } } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
         // OI flush: 7d ΔOI at a −σ extreme of its own distribution, into a decline

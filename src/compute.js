@@ -567,6 +567,8 @@ const EV_META = {
   failbrk:  { horizonMs: 5 * DAY,  horizon: "next 5d, fading the failed breakout", studyKey: null }, // shadow swing setup
   pead:     { horizonMs: 10 * DAY, horizon: "next 10d, drifting with the earnings reaction", studyKey: null },  // shadow swing setup (xyz)
   sweep:    { horizonMs: DAY,      horizon: "next 1d, off the swept prior-session level", studyKey: null },     // shadow 5m microstructure setup (xyz)
+  wickfill: { horizonMs: 3 * DAY,  horizon: "next 3d, filling the outsized wick", studyKey: null },            // shadow swing setup (xyz)
+  roundfr:  { horizonMs: 2 * DAY,  horizon: "next 2d, fading into the round figure", studyKey: null },         // shadow swing setup (xyz)
   airead:   { horizonMs: 5 * DAY,  horizon: "next 5d, the analyst report's own read", studyKey: null },  // AI analyst accountability claim
 };
 // Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
@@ -964,6 +966,101 @@ function detectSweep(m5, dayHi, dayLo, px, frac) {
   const stop = ex, target = side === "long" ? level + (level - ex) : level - (ex - level);
   if (side === "long" ? !(stop < px && target > px) : !(stop > px && target < px && target > 0)) return null;
   return { side, level: +level.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
+}
+
+// ---- large-wick fill (daily) ------------------------------------------------------------------
+// Yesterday printed an outsized bar dominated by one wick: a violent probe that was rejected back
+// inside. The fill thesis: price returns INTO that wick (to its midpoint) within a few sessions —
+// the classic magnet left by a rejected extreme. Frozen geometry: entry = current mark, target =
+// the wick's midpoint, void = the wick bar's opposite extreme (a close through it means the
+// rejection side won outright and the fill thesis is dead). Ships as a SHADOW earning its record
+// out of sample; parameters fixed at launch. Pure over CLOSED daily bars {t,o,h,l,c} ascending
+// (the spine-derived buckets — always full OHLC, never the warm-cache closes-only shape).
+//   frac    : min wick share of the bar's range (default 0.55)
+//   sizeMult: min bar range vs the trailing-30 median range (default 1.1 — a real bar, not noise)
+function detectWickFill(daily, px, opts) {
+  const o = opts || {};
+  const frac = o.frac > 0 ? o.frac : 0.55, sizeMult = o.sizeMult > 0 ? o.sizeMult : 1.1;
+  if (!Array.isArray(daily) || daily.length < 31 || !(px > 0)) return null;
+  const B = daily[daily.length - 1];
+  const bo = +B.o, bh = +B.h, bl = +B.l, bc = +B.c;   // COERCE — string fields fail closed
+  if (![bo, bh, bl, bc].every((x) => Number.isFinite(x) && x > 0) || !(bh > bl)) return null;
+  const ranges = [];
+  for (let i = daily.length - 31; i < daily.length - 1; i++) {
+    const d = +daily[i].h - +daily[i].l;
+    if (Number.isFinite(d) && d > 0) ranges.push(d);
+  }
+  if (ranges.length < 20) return null;
+  const range = bh - bl;
+  if (!(range >= sizeMult * median(ranges))) return null;
+  const bodyHi = Math.max(bo, bc), bodyLo = Math.min(bo, bc);
+  const upW = bh - bodyHi, dnW = bodyLo - bl;
+  let side = null, target = null, stop = null, wickPct = null;
+  if (upW / range >= frac && upW > 1.5 * dnW) {          // dominant UPPER wick -> fill = long back into it
+    target = (bodyHi + bh) / 2; stop = bl; side = "long"; wickPct = upW / range;
+    if (!(px < target) || !(px > stop)) return null;     // fill already done, or thesis already dead
+  } else if (dnW / range >= frac && dnW > 1.5 * upW) {   // dominant LOWER wick -> fill = short back into it
+    target = (bodyLo + bl) / 2; stop = bh; side = "short"; wickPct = dnW / range;
+    if (!(px > target) || !(px < stop)) return null;
+  } else return null;
+  return { side, stop: +stop.toPrecision(6), target: +target.toPrecision(6),
+    wickPct: +wickPct.toFixed(3), barT: +B.t || 0 };
+}
+
+// ---- round-number front-run -------------------------------------------------------------------
+// Price grinding toward a round number tends to stall just before it: resting orders cluster AT
+// the figure, so the front-run fades the approach with invalidation just THROUGH the figure.
+// roundStep picks the psychologically dominant grid for a price's magnitude — the largest of
+// {10^k, 10^k/2, 10^k/10} whose step is <= 12% of price — deterministic and testable.
+function roundStep(px) {
+  if (!(px > 0)) return null;
+  const p10 = Math.pow(10, Math.floor(Math.log10(px)));
+  for (const g of [p10, p10 / 2, p10 / 10]) if (g / px <= 0.12) return g;
+  return p10 / 10;
+}
+// Both sides checked: an advance into the round ABOVE fades short; a decline into the round BELOW
+// fades long. When both somehow qualify, the nearer level wins. Freshness is closes-only by
+// construction (the input is [t, c] tuples): a level is "fresh" when no close in the trailing 20
+// bars sat beyond it — a wick-touch does not consume freshness here, and that limitation is
+// accepted rather than papered over with data the tuples don't carry. Frozen geometry: void just
+// through the figure (0.25σ past, floored at 0.1%), target = a 0.75σ retrace of the approach.
+//   closes: [[t, c], ...] ascending (the same input the other swing shadows consume)
+function detectRoundFront(closes, px, sd30, opts) {
+  const o = opts || {};
+  const loB = o.loBand > 0 ? o.loBand : 0.05, hiB = o.hiBand > 0 ? o.hiBand : 0.6;   // approach band, x sd30
+  if (!Array.isArray(closes) || closes.length < 26 || !(px > 0) || !(sd30 > 0)) return null;
+  const g = roundStep(px);
+  if (!(g > 0)) return null;
+  const c = closes.map((k) => +k[1]);
+  const n = c.length;
+  if (!Number.isFinite(c[n - 1]) || !Number.isFinite(c[n - 6])) return null;
+  const thruPct = Math.max(0.25 * sd30, 0.1);            // invalidation depth past the figure, in %
+  const cand = [];
+  const RU = Math.ceil(px / g - 1e-9) * g;               // nearest round above
+  if (RU > px) {
+    const dist = (RU / px - 1) * 100;
+    if (dist >= loB * sd30 && dist <= hiB * sd30 && c[n - 1] > c[n - 6]) {   // advancing INTO it
+      let fresh = true;
+      for (let i = Math.max(0, n - 21); i < n; i++) if (c[i] >= RU) { fresh = false; break; }
+      if (fresh) cand.push({ side: "short", lvl: RU, dist,
+        stop: RU * (1 + thruPct / 100), target: px * (1 - 0.75 * sd30 / 100) });
+    }
+  }
+  const RD = Math.floor(px / g + 1e-9) * g;              // nearest round below
+  if (RD > 0 && RD < px) {
+    const dist = (1 - RD / px) * 100;
+    if (dist >= loB * sd30 && dist <= hiB * sd30 && c[n - 1] < c[n - 6]) {   // declining INTO it
+      let fresh = true;
+      for (let i = Math.max(0, n - 21); i < n; i++) if (c[i] <= RD) { fresh = false; break; }
+      if (fresh) cand.push({ side: "long", lvl: RD, dist,
+        stop: RD * (1 - thruPct / 100), target: px * (1 + 0.75 * sd30 / 100) });
+    }
+  }
+  if (!cand.length) return null;
+  cand.sort((a, b) => a.dist - b.dist);
+  const w = cand[0];
+  return { side: w.side, lvl: +w.lvl.toPrecision(9), stop: +w.stop.toPrecision(6),
+    target: +w.target.toPrecision(6), distPct: +w.dist.toFixed(3) };
 }
 
 // ---- structural levels: confirmed pivots, clustered by the name's own volatility ------------
@@ -2418,7 +2515,9 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   // structural-level outcome study (build 2026.07.24-10): does detectLevels output actually hold?
   normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K,
   // session anatomy (build 2026.07.24-11): excursion / open-quartile / Monday range / naked opens
-  sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, MFE_EDGES, NAKED_HORIZONS };
+  sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, MFE_EDGES, NAKED_HORIZONS,
+  // ledger shadow pair (build 2026.07.24-12): outsized-wick fill + round-number front-run
+  detectWickFill, detectRoundFront, roundStep };
 
 // ---- stop geometry validation ----------------------------------------------------------------
 // An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it
