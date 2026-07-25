@@ -2510,8 +2510,9 @@ function renderLevels(lv){
   const controls=`<div class="s-ctrls">${scope}${note}</div>`;
   const o=lv.overall;
   const head=sHead('Structural level validation','does the -09 detector\'s output earn its place on the chart');
-  const chart=sCard(lvlTouchSvg(lv));
-  const cap1=sCap('Orange = how often a detected level was touched inside the horizon; grey = a same-distance permutation control resolved through the identical bar test. The gap is the only signal: above control, levels attract; below, they repel; equal, the detector is drawing noise. Dim slots sit under the '+lv.cellFloor+'-event floor and publish nothing. <b>Hover</b> any bar for exact rates and n.');
+  const chartSrc=(one&&one.buckets)?one:lv;
+  const chart=sCard(lvlTouchSvg(chartSrc));
+  const cap1=sCap((one&&one.buckets?`<b>${esc(one.ticker)}</b> distance buckets — one name's events, so most cells sit under the floor by construction; dim slots disclose their n. `:'')+'Orange = how often a detected level was touched inside the horizon; grey = a same-distance permutation control resolved through the identical bar test. The gap is the only signal: above control, levels attract; below, they repel; equal, the detector is drawing noise. Dim slots sit under the '+lv.cellFloor+'-event floor and publish nothing. <b>Hover</b> any bar for exact rates and n.');
   const src=one||lv, srcT=one?one.byTouches:lv.byTouches;
   const rows=[lvlHoldRow(one?esc(one.ticker)+' — all levels':'All levels',Object.assign({n:src.n,medBeyondSd:null},src.overall||o),lv.cellFloor)];
   const side={res:'Resistance',sup:'Support',flip:'Flip — served both sides'};
@@ -2540,7 +2541,7 @@ function anMfeSvg(m){
        `<text x="${pl-7}" y="${(+y+3.5).toFixed(1)}" text-anchor="end" class="lc-tick">${(g*cap*100).toFixed(0)}%</text>`; } }
   for(let i=0;i<n;i++){
     const hu=m.upShare[i]/cap*half, hd=m.dnShare[i]/cap*half, x=X(i);
-    const tip=(d,v)=>`${labs[i]}σ · max ${d} excursion from open&#10;${(v*100).toFixed(1)}% of ${m.n.toLocaleString()} sd-scored ticker-sessions`;
+    const tip=(d,v)=>`${labs[i]}σ · max ${d} excursion from open&#10;${(v*100).toFixed(1)}% of ${m.n.toLocaleString()} ${m.basis||'sd-scored ticker-sessions'}`;
     s+=`<rect x="${(x+2).toFixed(1)}" y="${(mid-hu).toFixed(1)}" width="${(bw-4).toFixed(1)}" height="${hu.toFixed(1)}" fill="var(--up)" opacity=".7"><title>${tip('UP',m.upShare[i])}</title></rect>`;
     s+=`<rect x="${(x+2).toFixed(1)}" y="${mid.toFixed(1)}" width="${(bw-4).toFixed(1)}" height="${hd.toFixed(1)}" fill="var(--down)" opacity=".7"><title>${tip('DOWN',m.dnShare[i])}</title></rect>`;
     if(i%2===0) s+=`<text x="${(x+bw/2).toFixed(1)}" y="${H-pb+15}" text-anchor="middle" class="lc-tick">${labs[i]}</text>`;
@@ -2560,8 +2561,14 @@ function renderAnatomy(an){
   const note=one?`<span class="rt">${esc(one.ticker)} · ${one.sessions} sessions — within-name time series (each session one obs; histogram stays pooled)</span>`
     :`<span class="rt">${an.tickers} equities · ${an.days} UTC sessions · ${an.tickerSessions.toLocaleString()} ticker-sessions (${an.sdSessions.toLocaleString()} σ-scored) · ${cov.windowDays||180}d spine</span>`;
   const controls=`<div class="s-ctrls">${scope}${note}</div>`;
-  const mfeBlock=sCard(anMfeSvg(an.mfe))+
-    sCap(`Green above the axis = the session's maximum push UP from its open; red below = maximum push DOWN, each in the name's own pre-session σ (frozen before the session — no lookahead). Medians dashed: ${an.mfe.medUpSd??'—'}σ up / ${an.mfe.medDnSd??'—'}σ down. This is the yardstick for every level: a target beyond the typical excursion needs more than one session to be reachable. <b>Hover</b> a bar for its share.`);
+  // Chart follows the scope: per-name histogram when it clears the floor (same edges/binning as
+  // the pool — one code path server-side), else the pooled chart with the fallback said out loud.
+  const oneHist=one&&one.mfeHist?Object.assign({medUpSd:one.mfe.medUpSd,medDnSd:one.mfe.medDnSd,basis:esc(one.ticker)+' sd-scored sessions'},one.mfeHist):null;
+  const mfeSrc=oneHist||an.mfe;
+  const mfeBlock=sCard(anMfeSvg(mfeSrc))+
+    sCap((oneHist?`<b>${esc(one.ticker)}</b> — within-name histogram over ${oneHist.n} sd-scored sessions. `
+      :(one?`<b>${esc(one.ticker)}</b> has too few sd-scored sessions for its own histogram — the chart stays pooled. `:''))+
+    `Green above the axis = the session's maximum push UP from its open; red below = maximum push DOWN, each in the name's own pre-session σ (frozen before the session — no lookahead). Medians dashed: ${mfeSrc.medUpSd??'—'}σ up / ${mfeSrc.medDnSd??'—'}σ down. This is the yardstick for every level: a target beyond the typical excursion needs more than one session to be reachable. <b>Hover</b> a bar for its share.`);
   const oneMfe=one?`<div class="s-cap" style="margin-top:-4px"><b>${esc(one.ticker)}</b> medians: up ${one.mfe.medUpSd??'—'}σ (${one.mfe.medUpPct??'—'}%) · down ${one.mfe.medDnSd??'—'}σ (${one.mfe.medDnPct??'—'}%) over ${one.sdSessions} σ-scored sessions.</div>`:'';
   const QL=['lowest quarter','lower middle','upper middle','highest quarter'];
   const qSrc=one?one.quartiles.map(q=>({q:q.q,closedAbove:q.closedAbove,firstHr:q.firstHr,medRangeSd:null,nDays:q.n,nTS:q.n})):an.quartiles;
@@ -2596,10 +2603,12 @@ function renderCandles(an){
   const rows=cd.types.filter(t=>t.nTS>0).map(t=>{
     const oneT=one&&one.candles[t.type];
     const fol=one?(oneT?oneT.follow:null):t.follow;
+    const shr=one?(oneT?oneT.share:null):t.share;
+    const rgx=one?(oneT?oneT.rngX:null):t.rngX;
     const nStr=one?(oneT?oneT.n+' bars':'—'):`${t.nDays} days`;
     const folCell=fol==null?'—':`<span class="${fol>=0?'pos':'neg'}">${fol>=0?'+':''}${fol.toFixed(2)}R</span>`;
-    const tip=`${CB_LABELS[t.type]} — ${CB_TIPS[t.type]}&#10;${one?`${esc(one.ticker)}: ${oneT?oneT.n:0} bars, mean follow ${fol==null?'—':fol.toFixed(2)+'R'}`:`share ${anPct(t.share)} of all bars · mean signed follow ${fol==null?'—':fol.toFixed(2)+'R'} over ${t.nDays} pooled days&#10;next-session range ${t.rngX!=null?t.rngX+'× the unconditional median':'—'}`}&#10;cells under the floor stay —`;
-    return `<tr title="${tip}"><td>${CB_LABELS[t.type]}</td><td>${one?'—':anPct(t.share)}</td><td>${folCell}</td><td>${one?'—':(t.rngX!=null?t.rngX.toFixed(2)+'×':'—')}</td><td>${nStr}</td></tr>`;
+    const tip=`${CB_LABELS[t.type]} — ${CB_TIPS[t.type]}&#10;${one?`${esc(one.ticker)}: ${oneT?oneT.n:0} bars — share ${anPct(shr)} of its own typed bars, mean follow ${fol==null?'—':fol.toFixed(2)+'R'}&#10;next-session range ${rgx!=null?rgx+'× the name\'s own unconditional median':'—'}`:`share ${anPct(t.share)} of all bars · mean signed follow ${fol==null?'—':fol.toFixed(2)+'R'} over ${t.nDays} pooled days&#10;next-session range ${t.rngX!=null?t.rngX+'× the unconditional median':'—'}`}&#10;cells under the floor stay —`;
+    return `<tr title="${tip}"><td>${CB_LABELS[t.type]}</td><td>${anPct(shr)}</td><td>${folCell}</td><td>${rgx!=null?rgx.toFixed(2)+'×':'—'}</td><td>${nStr}</td></tr>`;
   }).join('');
   const table=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr><th>bar type</th><th>share</th><th>next-day follow</th><th>next range</th><th>n</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   const cap=sCap('Follow-through is the next session\'s close-to-close move in that session\'s own pre-frozen σ, signed with the bar\'s thesis — a strong bear close followed by more downside scores <em>positive</em>. Neutral types (doji, inside, outside) stay raw-signed. Descriptive conditionals, not signals. <b>Hover</b> a row for the full readout.');
@@ -2615,26 +2624,89 @@ function pivotHistSvg(pv){
   s+=`<rect x="${rx.toFixed(1)}" y="${pt}" width="${rw.toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"><title>US cash session (13:30–20:00 UTC)</title></rect>`;
   for(let h=0;h<24;h++){
     const x=pl+h*bw, hw=(bw-3)/2;
-    s+=`<rect x="${(x+1).toFixed(1)}" y="${Y(pv.hi.share[h]).toFixed(1)}" width="${hw.toFixed(1)}" height="${(Y(0)-Y(pv.hi.share[h])).toFixed(1)}" fill="var(--up)" opacity=".75"><title>day HIGH printed in ${h}:00 UTC — ${(pv.hi.share[h]*100).toFixed(1)}% of names (mean of ${pv.hi.nDays} daily distributions)</title></rect>`;
-    s+=`<rect x="${(x+2+hw).toFixed(1)}" y="${Y(pv.lo.share[h]).toFixed(1)}" width="${hw.toFixed(1)}" height="${(Y(0)-Y(pv.lo.share[h])).toFixed(1)}" fill="var(--down)" opacity=".75"><title>day LOW printed in ${h}:00 UTC — ${(pv.lo.share[h]*100).toFixed(1)}% of names (mean of ${pv.lo.nDays} daily distributions)</title></rect>`;
+    const basisH=pv.basis?`${pv.basis} — share of its ${pv.hi.nDays} sessions`:`% of names (mean of ${pv.hi.nDays} daily distributions)`;
+    const basisL=pv.basis?`${pv.basis} — share of its ${pv.lo.nDays} sessions`:`% of names (mean of ${pv.lo.nDays} daily distributions)`;
+    s+=`<rect x="${(x+1).toFixed(1)}" y="${Y(pv.hi.share[h]).toFixed(1)}" width="${hw.toFixed(1)}" height="${(Y(0)-Y(pv.hi.share[h])).toFixed(1)}" fill="var(--up)" opacity=".75"><title>day HIGH printed in ${h}:00 UTC — ${(pv.hi.share[h]*100).toFixed(1)}% · ${basisH}</title></rect>`;
+    s+=`<rect x="${(x+2+hw).toFixed(1)}" y="${Y(pv.lo.share[h]).toFixed(1)}" width="${hw.toFixed(1)}" height="${(Y(0)-Y(pv.lo.share[h])).toFixed(1)}" fill="var(--down)" opacity=".75"><title>day LOW printed in ${h}:00 UTC — ${(pv.lo.share[h]*100).toFixed(1)}% · ${basisL}</title></rect>`;
     if(h%4===0) s+=`<text x="${(x+bw/2).toFixed(1)}" y="${H-pb+14}" text-anchor="middle" class="lc-tick">${h}:00</text>`;
   }
   s+=`<text x="${((pl+W-pr)/2).toFixed(1)}" y="${H-4}" text-anchor="middle" class="lc-ax">UTC hour the session extreme printed · green = high, red = low · blue band = US cash</text></svg>`;
   return s;
 }
 function renderPivots(an){
-  const pv=an.pivots; if(!pv||!pv.hi||!pv.hi.nDays) return '';
+  if(!an.pivots||!an.pivots.hi||!an.pivots.hi.nDays) return '';
+  const st=studyScopeState('pivots'), one=st.sel&&an.byTicker?an.byTicker[st.sel]:null;
+  // Within-name mode: each session one observation — a different n basis than the pooled
+  // cross-sectional mean, labeled as such. Under the floor the pooled histogram stays and says so.
+  const pv=one&&one.pivots?Object.assign({basis:esc(one.ticker)},one.pivots):an.pivots;
   const head=sHead('Time-based pivots','when the day\'s extremes actually print');
-  const controls=`<div class="s-ctrls"><span class="rt">${pv.hi.nDays} pooled days · each day one cross-sectional distribution — one violent tape day cannot own the histogram</span></div>`;
+  const scope=`<span class="lbl">scope</span>`+studyScopeSel('pvsel',an.byTicker,st.sel);
+  const note=pv.basis?`<span class="rt">${pv.basis} · ${pv.hi.nDays} sessions — within-name time series (each session one obs; no cross-sectional pooling for one name)</span>`
+    :(one?`<span class="rt">${esc(one.ticker)} has too few sessions for its own histogram — showing the pooled study · ${an.pivots.hi.nDays} pooled days</span>`
+    :`<span class="rt">${an.pivots.hi.nDays} pooled days · each day one cross-sectional distribution — one violent tape day cannot own the histogram</span>`);
+  const controls=`<div class="s-ctrls">${scope}${note}</div>`;
   const el2=pv.earlyLowUp, eh=pv.earlyHighDown;
-  const cond=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:480px"><thead><tr><th>conditional</th><th>rate</th><th>n (days)</th></tr></thead><tbody>`+
-    `<tr title="the day's LOW printed before ${pv.earlyH}:00 UTC — how often the session then closed ABOVE its open (the early-low trend-day folklore, measured)"><td>Low in first ${pv.earlyH}h → closed above open</td><td>${anPct(el2.rate)}</td><td>${el2.nDays}</td></tr>`+
-    `<tr title="the day's HIGH printed before ${pv.earlyH}:00 UTC — how often the session then closed BELOW its open"><td>High in first ${pv.earlyH}h → closed below open</td><td>${anPct(eh.rate)}</td><td>${eh.nDays}</td></tr>`+
+  const nb=pv.basis?'qualifying sessions — within-name; rates under the floor stay —':'days';
+  const cond=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:480px"><thead><tr><th>conditional</th><th>rate</th><th title="${nb}">n (${pv.basis?'sessions':'days'})</th></tr></thead><tbody>`+
+    `<tr title="the day's LOW printed before ${pv.earlyH}:00 UTC — how often the session then closed ABOVE its open (the early-low trend-day folklore, measured)&#10;n basis: ${nb}"><td>Low in first ${pv.earlyH}h → closed above open</td><td>${anPct(el2.rate)}</td><td>${el2.nDays}</td></tr>`+
+    `<tr title="the day's HIGH printed before ${pv.earlyH}:00 UTC — how often the session then closed BELOW its open&#10;n basis: ${nb}"><td>High in first ${pv.earlyH}h → closed below open</td><td>${anPct(eh.rate)}</td><td>${eh.nDays}</td></tr>`+
     `</tbody></table></div>`;
   const cap=sCap('An extreme that prints early and holds is the trend-day signature — but its rate is only meaningful against the ~50% coin-flip base, and the histogram is the context: on a 24/7 synthetic book the extremes cluster where the underlying cash session concentrates variance. <b>Hover</b> any bar or row for exact shares and n.');
   return head+controls+sCard(pivotHistSvg(pv))+cond+cap;
 }
 function wireRegimeControls(){ const s=el('regimesel'); if(!s) return; s.addEventListener('change',()=>{ if(!state.analytics.regime) state.analytics.regime={sel:'all'}; state.analytics.regime.sel=s.value; drawSessions(); }); }
+// ===== Sessions tab: grouped, collapsible layout (build 2026.07.24-15) =====
+// The tab used to be one blind scroll: a blurb, four coverage cards, a readiness bar, eleven
+// studies fully expanded, then a separate "on deck" table. Reorganized: one status line (the
+// coverage bookkeeping collapses once ready hits 100% — full numbers stay on hover), a sticky
+// jump bar, and five thematic groups. Each group header carries a one-line live verdict computed
+// from the SAME section payload its panels render — one code path, the verdict can never disagree
+// with the chart. Open state persists per browser like the tab order. Pending studies stay
+// visible as dimmed rows inside their own group with the same "computing — needs X" wording;
+// nothing pending is hidden, it just stops being a separate table.
+const SESS_GROUPS=[
+  {id:'positioning',label:'Positioning'},
+  {id:'holds',label:'Holds'},
+  {id:'clocks',label:'Clocks'},
+  {id:'week',label:'Week'},
+  {id:'structure',label:'Structure'}];
+const SG_KEY='xyz-sessgroups';
+function sgOpenSet(){ if(state.analytics.sgOpen) return state.analytics.sgOpen;
+  let v=null; try{ v=JSON.parse(store.get(SG_KEY)||'null'); }catch(_){}
+  state.analytics.sgOpen=new Set(Array.isArray(v)?v.filter(id=>SESS_GROUPS.some(g=>g.id===id)):['positioning','holds']);
+  return state.analytics.sgOpen; }
+function sgToggle(id){ const s=sgOpenSet(); if(s.has(id)) s.delete(id); else s.add(id);
+  store.set(SG_KEY,JSON.stringify([...s])); drawSessions(); }
+// Dimmed in-group row for a study that hasn't unlocked — same honest wording the deck used.
+function sgPendRow(name,detail,stars){
+  return `<div class="sg-pend"><span class="sp-s">${stars||''}</span><span class="sp-n">${name}</span>`+
+    `<span class="sp-d">${detail}</span><span class="sp-t">pending</span></div>`; }
+function sgSection(id,label,verdict,items){
+  const live=items.filter(x=>x&&x.html).map(x=>x.html);
+  const pends=items.filter(x=>x&&x.pend).map(x=>x.pend);
+  const open=sgOpenSet().has(id), allPend=!live.length, count=live.length+pends.length;
+  return `<section class="sg${allPend?' sg-dim':''}" id="sg-${id}">`+
+    `<div class="sg-h" data-g="${id}" role="button" tabindex="0" aria-expanded="${open?'true':'false'}" title="${open?'collapse':'expand'} — the state is saved in this browser">`+
+    `<span class="sg-c">${open?'\u25be':'\u25b8'}</span><span class="sg-t">${label}</span>`+
+    `<span class="sg-v">${verdict}</span>`+
+    `<span class="sg-n">${open?'open':'collapsed'}${count>1?` \u00b7 ${count} studies`:''}</span></div>`+
+    `<div class="sg-b"${open?'':' hidden'}>${live.join('')}${pends.join('')}</div></section>`;
+}
+function wireSessGroups(host){
+  host.querySelectorAll('.sg-h').forEach(h=>{ const go=()=>sgToggle(h.dataset.g);
+    h.addEventListener('click',go);
+    h.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); go(); } }); });
+  host.querySelectorAll('.jchip').forEach(b=>b.addEventListener('click',()=>{
+    const id=b.dataset.j, s=sgOpenSet(), jump=()=>{ const t=el('sg-'+id); if(t) t.scrollIntoView({behavior:'smooth',block:'start'}); };
+    if(!s.has(id)){ s.add(id); store.set(SG_KEY,JSON.stringify([...s])); drawSessions(); requestAnimationFrame(jump); }
+    else jump(); }));
+  if(!window._sgScrollWired){ window._sgScrollWired=true;
+    window.addEventListener('scroll',()=>{ const vs=el('view-sessions'); if(!vs||vs.hidden) return;
+      let act=null;
+      for(const g of SESS_GROUPS){ const sec=el('sg-'+g.id); if(sec&&sec.getBoundingClientRect().top<=90) act=g.id; }
+      document.querySelectorAll('#sessions-body .jchip').forEach(x=>x.classList.toggle('on',x.dataset.j===act));
+    },{passive:true}); }
+}
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
   // GC stale hover entries instead of wiping the registry: hoverChart is now also used by the
@@ -2642,90 +2714,110 @@ function drawSessions(){
   // resetting it could reissue an id that a still-live chart owns.
   for(const id in _hoverReg) if(!document.getElementById(id)) delete _hoverReg[id];
   const a=state.analytics.data, err=state.analytics.err;
-  const head=`<div class="cp-head" style="margin-bottom:4px">Session &amp; time-of-day analytics</div>`+
-    `<div class="sec" style="margin-bottom:16px;max-width:680px;line-height:1.55">Server-side studies of when each market is alive and what an overnight / weekend / cash hold actually pays — built on the 180-day hourly price spine and 60-day funding history. Panels unlock here as coverage accrues.</div>`;
-  if(err && !a){ host.innerHTML=head+`<div class="msg">Couldn't load analytics: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
-  if(!a || !a.coverage || !a.coverage.hourly){ host.innerHTML=head+`<div class="msg">Computing… warming up the spines.</div>`; return; }
+  const title=`<div class="cp-head" style="margin-bottom:6px">Session &amp; time-of-day analytics</div>`;
+  if(err && !a){ host.innerHTML=title+`<div class="msg">Couldn't load analytics: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
+  if(!a || !a.coverage || !a.coverage.hourly){ host.innerHTML=title+`<div class="msg">Computing\u2026 warming up the spines.</div>`; return; }
   const c=a.coverage, w=a.window||{}, hr=c.hourly||{}, fund=c.funding||{};
-  const endpoint = fund.endpoint==='on' ? '<span class="pos">live history</span>' : '<span class="sec">sampled fallback</span>';
-  const card=(label,val,sub)=>`<div class="s-stat"><div class="k">${label}</div><div class="v">${val}</div>`+
-    (sub?`<div class="s">${sub}</div>`:'')+`</div>`;
-  const cards=`<div class="s-grid" style="margin-bottom:18px">`+
-    card('Markets', c.markets, `${c.equityMarkets} equity`)+
-    card('Hourly spine', hr.coins||0, `${(hr.candles||0).toLocaleString()} candles · ${w.hourlyDays||60}d`)+
-    card('Funding spine', fund.coins||0, `${(fund.points||0).toLocaleString()} pts · ${endpoint}`)+
-    card('Ready', `${c.ready}/${c.markets}`, `≥ ${Math.round((c.readyHours||480)/24)}d hourly · ${covPct(c.ready,c.markets)}%`)+
-    `</div>`;
   const rp=covPct(c.ready,c.markets);
-  const bar=`<div style="margin-bottom:8px"><div class="sec" style="font-size:11px;margin-bottom:6px">Spine readiness — session studies unlock as this fills · <b style="color:var(--text)">${rp}%</b></div>`+
-    `<div style="height:8px;border-radius:4px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${rp}%;background:var(--accent);transition:width .4s"></div></div></div>`;
-  let panels=[
-    ['Session decomposition','cash / overnight / weekend equity curves, gross &amp; net-of-funding','★★★★★'],
-    ['Hour-of-day activity clock','volatility · volume · funding per ticker','★★★★☆'],
-    ['Funding clock','when carry is with you or against you, on a schedule','★★★★☆'],
-    ['Cross-ticker clustering','group markets by when they trade; flag the oddballs','★★★★☆'],
-    ['Asset-class overlays','pooled hour-of-day curves per class','★★★☆☆'],
-    ['Day-of-week 7×24 heatmap','weekend-gap &amp; Friday→Monday risk','★★★☆☆'],
-    ['Return seasonality by hour','exploratory · significance-flagged','★★☆☆☆'],
-    ['Structural level validation','touch &amp; hold vs a matched control — the -09 detector\'s report card','★★★★☆'],
-    ['Session anatomy','excursion · open quartiles · Monday range · naked opens','★★★☆☆'],
-    ['Candle behaviour','daily bar types and what followed them','★★☆☆☆'],
-    ['Time-based pivots','when the day\'s extremes print · early-extreme conditionals','★★★☆☆'],
-  ];
-  const sd = a.sections && a.sections.sessionDecomp;
-  let flagship='';
-  if(sd && !sd.pending){ flagship = renderSessionDecomp(sd); panels = panels.filter(p=>p[0]!=='Session decomposition'); }
-  else if(sd && sd.pending){ panels[0]=['Session decomposition',`computing — needs ≥${sd.need} equities with ≥3d hourly spine (have ${sd.equityCount})`,'★★★★★']; }
-  const hc = a.sections && a.sections.hourClock;
-  let clocks='', overlay='';
-  if(hc && !hc.pending){ clocks = renderClocks(hc); panels = panels.filter(p=>p[0]!=='Hour-of-day activity clock' && p[0]!=='Funding clock');
-    if(hc.pooled && hc.pooled.byClass && Object.keys(hc.pooled.byClass).length){ overlay = renderClassOverlay(hc); panels = panels.filter(p=>p[0]!=='Asset-class overlays'); }
-  }
-  else if(hc && hc.pending){ const ci=panels.findIndex(p=>p[0]==='Hour-of-day activity clock'); if(ci>=0) panels[ci]=['Hour-of-day activity clock',`computing — needs ≥3 markets with ≥5d hourly spine (have ${hc.count})`,'★★★★☆']; }
-  const dow = a.sections && a.sections.dow;
-  let dowBlock='';
-  if(dow && !dow.pending){ dowBlock = renderDow(dow); panels = panels.filter(p=>p[0]!=='Day-of-week 7×24 heatmap'); }
-  else if(dow && dow.pending){ const di=panels.findIndex(p=>p[0]==='Day-of-week 7×24 heatmap'); if(di>=0) panels[di]=['Day-of-week 7×24 heatmap',`computing — needs ≥3 markets with ≥5d hourly spine (have ${dow.count})`,'★★★☆☆']; }
-  const cl = a.sections && a.sections.clusters;
-  let clBlock='';
-  if(cl && !cl.pending){ clBlock = renderClusters(cl); panels = panels.filter(p=>p[0]!=='Cross-ticker clustering'); }
-  else if(cl && cl.pending){ const ci=panels.findIndex(p=>p[0]==='Cross-ticker clustering'); if(ci>=0) panels[ci]=['Cross-ticker clustering',`computing — needs ≥8 markets with an hourly profile (have ${cl.count||0})`,'★★★★☆']; }
-  const se = a.sections && a.sections.seasonality;
-  let seBlock='';
-  if(se && !se.pending){ seBlock = renderSeasonality(se); panels = panels.filter(p=>p[0]!=='Return seasonality by hour'); }
-  else if(se && se.pending){ const si=panels.findIndex(p=>p[0]==='Return seasonality by hour'); if(si>=0) panels[si]=['Return seasonality by hour',`computing — needs ≥${se.need||8} equities with ≥5d hourly spine (have ${se.count||0})`,'★★☆☆☆']; }
-  const lv = a.sections && a.sections.levels;
-  let lvBlock='';
-  if(lv && !lv.pending){ lvBlock = renderLevels(lv); panels = panels.filter(p=>p[0]!=='Structural level validation'); }
-  else if(lv && lv.pending){ const li=panels.findIndex(p=>p[0]==='Structural level validation'); if(li>=0) panels[li]=['Structural level validation',`computing — needs ≥${lv.need||5} equities with ≥71 closed daily bars off the spine (have ${lv.count||0})`,'★★★★☆']; }
-  const an = a.sections && a.sections.anatomy;
-  let anBlock='';
-  let cbBlock='', pvBlock='';
-  if(an && !an.pending){ anBlock = renderAnatomy(an); panels = panels.filter(p=>p[0]!=='Session anatomy');
-    cbBlock = renderCandles(an); if(cbBlock) panels = panels.filter(p=>p[0]!=='Candle behaviour');
-    pvBlock = renderPivots(an); if(pvBlock) panels = panels.filter(p=>p[0]!=='Time-based pivots'); }
-  else if(an && an.pending){ const ai=panels.findIndex(p=>p[0]==='Session anatomy'); if(ai>=0) panels[ai]=['Session anatomy',`computing — needs ≥${an.need||5} equities with ≥20 complete UTC sessions (have ${an.count||0})`,'★★★☆☆']; }
-  const deck = panels.length
-    ? `<div class="cp-sub" style="margin:22px 0 10px">On deck</div>`+
-      `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
-      panels.map(p=>`<div style="display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel);flex-wrap:wrap">`+
-        `<span style="color:var(--accent);font-size:11px;letter-spacing:1px;min-width:52px">${p[2]}</span>`+
-        `<span style="min-width:180px;color:var(--text)">${p[0]}</span>`+
-        `<span class="sec" style="font-size:12px;flex:1 1 200px">${p[1]}</span>`+
-        `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
-        `</div>`).join('')+`</div>`
-    : `<div class="sec" style="margin:22px 0 4px;font-size:12px;opacity:.8">All eleven studies live. ◆</div>`;
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
+  // The four coverage cards + readiness bar collapse into one status line; full numbers on hover.
+  // Below 100% ready a thin inline bar returns so the unlock progress stays visible.
+  const statTip=`hourly spine: ${hr.coins||0} coins \u00b7 ${(hr.candles||0).toLocaleString()} candles \u00b7 ${w.hourlyDays||60}d`+
+    `&#10;funding spine: ${fund.coins||0} coins \u00b7 ${(fund.points||0).toLocaleString()} pts \u00b7 ${fund.endpoint==='on'?'live history':'sampled fallback'}`+
+    `&#10;ready: ${c.ready}/${c.markets} at \u2265 ${Math.round((c.readyHours||480)/24)}d hourly \u2014 studies unlock as this fills`;
+  const status=`<div class="sg-status" title="${statTip}">${c.markets} markets \u00b7 ${c.equityMarkets} equity \u00b7 spine ${rp}% \u00b7 ${w.hourlyDays||60}d hourly \u00b7 funding ${fund.endpoint==='on'?'live history':'sampled fallback'}${age?' \u00b7 '+age:''}</div>`;
+  const bar= rp<100 ? `<div style="margin:0 0 10px" title="spine readiness \u2014 session studies unlock as this fills \u00b7 ${rp}%"><div style="height:5px;border-radius:3px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${rp}%;background:var(--accent);transition:width .4s"></div></div></div>` : '';
+  const jump=`<div class="jumpbar"><span class="lbl">jump</span>`+
+    SESS_GROUPS.map(g=>`<button type="button" class="jchip" data-j="${g.id}">${g.label}</button>`).join('')+`</div>`;
+  // ---- sections (unchanged renderers) ----
+  const sd = a.sections && a.sections.sessionDecomp;
+  let flagship='', sdPend='';
+  if(sd && !sd.pending) flagship = renderSessionDecomp(sd);
+  else sdPend = sgPendRow('Session decomposition', sd?`computing \u2014 needs \u2265${sd.need} equities with \u22653d hourly spine (have ${sd.equityCount})`:'cash / overnight / weekend equity curves, gross &amp; net-of-funding','\u2605\u2605\u2605\u2605\u2605');
+  const hc = a.sections && a.sections.hourClock;
+  let clocks='', overlay='', hcPend='', ovPend='';
+  if(hc && !hc.pending){ clocks = renderClocks(hc);
+    if(hc.pooled && hc.pooled.byClass && Object.keys(hc.pooled.byClass).length) overlay = renderClassOverlay(hc);
+    else ovPend = sgPendRow('Asset-class overlays','pooled hour-of-day curves per class \u2014 needs \u22652 classes with profiles','\u2605\u2605\u2605\u2606\u2606'); }
+  else hcPend = sgPendRow('Hour-of-day + funding clocks', hc?`computing \u2014 needs \u22653 markets with \u22655d hourly spine (have ${hc.count})`:'volatility \u00b7 volume \u00b7 funding per ticker','\u2605\u2605\u2605\u2605\u2606');
+  const dow = a.sections && a.sections.dow;
+  let dowBlock='', dowPend='';
+  if(dow && !dow.pending) dowBlock = renderDow(dow);
+  else dowPend = sgPendRow('Day-of-week 7\u00d724 heatmap', dow?`computing \u2014 needs \u22653 markets with \u22655d hourly spine (have ${dow.count})`:'weekend-gap &amp; Friday\u2192Monday risk','\u2605\u2605\u2605\u2606\u2606');
+  const cl = a.sections && a.sections.clusters;
+  let clBlock='', clPend='';
+  if(cl && !cl.pending) clBlock = renderClusters(cl);
+  else clPend = sgPendRow('Cross-ticker clustering', cl?`computing \u2014 needs \u22658 markets with an hourly profile (have ${cl.count||0})`:'group markets by when they trade; flag the oddballs','\u2605\u2605\u2605\u2605\u2606');
+  const se = a.sections && a.sections.seasonality;
+  let seBlock='', sePend='';
+  if(se && !se.pending) seBlock = renderSeasonality(se);
+  else sePend = sgPendRow('Return seasonality by hour', se?`computing \u2014 needs \u2265${se.need||8} equities with \u22655d hourly spine (have ${se.count||0})`:'exploratory \u00b7 significance-flagged','\u2605\u2605\u2606\u2606\u2606');
+  const lv = a.sections && a.sections.levels;
+  let lvBlock='', lvPend='';
+  if(lv && !lv.pending) lvBlock = renderLevels(lv);
+  else lvPend = sgPendRow('Structural level validation', lv?`computing \u2014 needs \u2265${lv.need||5} equities with \u226571 closed daily bars off the spine (have ${lv.count||0})`:'touch &amp; hold vs a matched control','\u2605\u2605\u2605\u2605\u2606');
+  const an = a.sections && a.sections.anatomy;
+  let anBlock='', cbBlock='', pvBlock='', anPend='', cbPend='', pvPend='';
+  if(an && !an.pending){ anBlock = renderAnatomy(an);
+    cbBlock = renderCandles(an);
+    if(!cbBlock) cbPend = sgPendRow('Candle behaviour','no typed daily bars yet \u2014 rides the anatomy records','\u2605\u2605\u2606\u2606\u2606');
+    pvBlock = renderPivots(an);
+    if(!pvBlock) pvPend = sgPendRow('Time-based pivots','no session extremes recorded yet \u2014 rides the anatomy records','\u2605\u2605\u2605\u2606\u2606'); }
+  else { const det = an?`computing \u2014 needs \u2265${an.need||5} equities with \u226520 complete UTC sessions (have ${an.count||0})`:'rides the anatomy records';
+    anPend = sgPendRow('Session anatomy', det,'\u2605\u2605\u2605\u2606\u2606');
+    cbPend = sgPendRow('Candle behaviour', det,'\u2605\u2605\u2606\u2606\u2606');
+    pvPend = sgPendRow('Time-based pivots', det,'\u2605\u2605\u2605\u2606\u2606'); }
   const regime = a.sections && a.sections.regime;
   const regimeBlock = renderRegime(regime, (state.analytics.regime&&state.analytics.regime.sel)||'all');
-  host.innerHTML=head+regimeBlock+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+lvBlock+anBlock+cbBlock+pvBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  // ---- group verdicts: computed from the same section objects the panels render ----
+  const vPositioning=()=>{ const d=regime&&regime.all;
+    if(!d||d.pending||!d.crowd) return 'accruing \u2014 fills in as OI &amp; funding history banks';
+    const cw=d.crowd, p=[];
+    if(cw.netFundApr!=null) p.push(`skew ${cw.netFundApr>=0?'+':''}${cw.netFundApr.toFixed(1)}%`);
+    if(cw.longExtPct!=null) p.push(`${cw.longExtPct}% crowded-long`);
+    if(cw.shortExtPct!=null) p.push(`${cw.shortExtPct}% crowded-short`);
+    return p.join(' \u00b7 ')||'\u2014'; };
+  const vHolds=()=>{ if(!sd||sd.pending) return sd?`computing \u2014 ${sd.equityCount}/${sd.need} equities ready`:'computing';
+    const S=sd.sessions||{}, seg=(k,l)=>S[k]&&S[k].totNet!=null?`${l} ${fp(S[k].totNet)} net`:null;
+    return [seg('overnight','overnight'),seg('weekend','weekend'),seg('cash','cash')].filter(Boolean).join(' \u00b7 ')||'\u2014'; };
+  const vClocks=()=>{ if(!hc||hc.pending) return hc?`computing \u2014 ${hc.count} markets with a spine`:'computing';
+    const all=(hc.pooled&&hc.pooled.all)||{}, p=[];
+    let ph=null,pv2=-Infinity; (all.vol||[]).forEach((x,i)=>{ if(Number.isFinite(x)&&x>pv2){pv2=x;ph=i;} });
+    if(ph!=null) p.push(`busiest ${ph}:00 ET`);
+    let fh=null,fv=0; (all.fund||[]).forEach((x,i)=>{ if(Number.isFinite(x)&&Math.abs(x)>fv){fv=Math.abs(x);fh=i;} });
+    if(fh!=null&&fv>0) p.push(`carry peaks ${fh}:00 ET (${all.fund[fh]>0?'longs pay':'longs receive'})`);
+    return p.join(' \u00b7 ')||'\u2014'; };
+  const vWeek=()=>{ if(!dow||dow.pending) return dow?`computing \u2014 ${dow.count} markets with a spine`:'computing';
+    const g=(dow.pooled&&dow.pooled.all)||{}, cells=g.vol;
+    if(Array.isArray(cells)){ let bd=null,bh=null,bv=-Infinity;
+      for(let d2=0;d2<7;d2++){ const row=cells[d2]; if(!Array.isArray(row)) continue;
+        for(let h=0;h<24;h++){ const x=row[h]; if(Number.isFinite(x)&&x>bv){bv=x;bd=d2;bh=h;} } }
+      if(bd!=null) return `busiest ${WD_NAMES[bd]} ${bh}:00 ET \u00b7 ${g.count||0} markets`; }
+    return `${g.count||0} markets \u00b7 7\u00d724 ET grid`; };
+  const vStructure=()=>{ const p=[];
+    if(lv&&!lv.pending&&lv.overall&&lv.overall.excess!=null)
+      p.push(`levels ${(lv.overall.excess>=0?'+':'')+(lv.overall.excess*100).toFixed(1)}pp vs control`);
+    if(cl&&!cl.pending) p.push(`${cl.count} markets clustered${(cl.oddballs&&cl.oddballs.length)?` \u00b7 ${cl.oddballs.length} oddballs`:''}`);
+    return p.join(' \u00b7 ')||'computing'; };
+  // ---- assemble ----
+  const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||anBlock||cbBlock||pvBlock;
+  const allLive = anySections && !(sdPend||hcPend||ovPend||dowPend||clPend||sePend||lvPend||anPend||cbPend||pvPend);
+  const groups =
+    sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock}])+
+    sgSection('holds','Holds',vHolds(),[{html:flagship},{pend:sdPend},{html:anBlock},{pend:anPend},{html:cbBlock},{pend:cbPend},{html:pvBlock},{pend:pvPend}])+
+    sgSection('clocks','Clocks',vClocks(),[{html:clocks},{pend:hcPend},{html:overlay},{pend:ovPend},{html:seBlock},{pend:sePend}])+
+    sgSection('week','Week',vWeek(),[{html:dowBlock},{pend:dowPend}])+
+    sgSection('structure','Structure',vStructure(),[{html:clBlock},{pend:clPend},{html:lvBlock},{pend:lvPend}]);
+  const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All eleven studies live. \u25c6</div>` : '';
+  host.innerHTML=title+status+bar+jump+groups+foot;
   if(regime) wireRegimeControls();
   if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
   if(dow && !dow.pending) attachDowControls();
   if(se && !se.pending) attachSeasonControls();
   if(lv && !lv.pending) attachStudyScope('lvlsel','levels');
-  if(an && !an.pending){ attachStudyScope('anatsel','anatomy'); attachStudyScope('cbsel','candles'); }
+  if(an && !an.pending){ attachStudyScope('anatsel','anatomy'); attachStudyScope('cbsel','candles'); attachStudyScope('pvsel','pivots'); }
   attachLineHover();
+  wireSessGroups(host);
 }
 // ===== Strategy backtest — client-side, cross-sectional long/short on the daily returns already loaded =====
 // Everything runs in-browser off state.rows[*].daily (shipped via /api/daily) + the SP500 benchmark, so

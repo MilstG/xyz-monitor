@@ -949,3 +949,29 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .duel-tk{color:var(--accent)}
 .duel-why{font-size:10.5px;text-align:right}
 .mompw{font-style:normal;color:var(--accent);font-size:9px;margin-left:3px;vertical-align:super;cursor:help}
+
+/* ============ Sessions tab: grouped collapsible layout (-15) ============ */
+.sg-status{font-family:var(--mono);font-size:11px;color:var(--muted);margin:0 0 8px;cursor:default}
+.jumpbar{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  padding:8px 0;margin-bottom:14px;background:var(--bg);border-bottom:1px solid var(--border)}
+.jumpbar .lbl{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-right:2px}
+.jchip{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;
+  padding:3px 10px;font-family:var(--mono);font-size:11px;cursor:pointer}
+.jchip:hover{border-color:var(--accent)}
+.jchip.on{color:var(--accent);border-color:var(--accent)}
+.sg{border:1px solid var(--border);border-radius:9px;overflow:hidden;margin-bottom:10px}
+.sg.sg-dim{opacity:.55}
+.sg-h{display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel);cursor:pointer;user-select:none}
+.sg-h:hover .sg-t{color:var(--accent)}
+.sg-h:focus-visible{outline:1px solid var(--accent);outline-offset:-1px}
+.sg-c{color:var(--muted);font-size:11px;min-width:11px}
+.sg-t{font-size:12.5px;font-weight:600;color:var(--text)}
+.sg-v{flex:1;color:var(--muted);font-family:var(--mono);font-size:11px;min-width:120px}
+.sg-n{color:var(--faint);font-size:10px;white-space:nowrap}
+.sg-b{padding:12px 14px;background:var(--bg);border-top:1px solid var(--border)}
+.sg-pend{display:flex;align-items:baseline;gap:12px;padding:9px 4px;opacity:.55;font-size:12px;flex-wrap:wrap}
+.sg-pend .sp-s{color:var(--accent);font-size:11px;letter-spacing:1px;min-width:52px}
+.sg-pend .sp-n{min-width:180px;color:var(--text)}
+.sg-pend .sp-d{color:var(--muted);font-size:12px;flex:1 1 200px}
+.sg-pend .sp-t{margin-left:auto;color:var(--muted);font-size:10.5px;opacity:.9;text-transform:uppercase;letter-spacing:.5px}
+@media(max-width:640px){ .sg-v{min-width:0;flex-basis:100%;order:9} }
