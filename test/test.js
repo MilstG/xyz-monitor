@@ -1899,6 +1899,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
     "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock",
     "renderRegime", "regimeCurveSvg", "wireRegimeControls",
+    "drawSessions", "sgOpenSet", "sgToggle", "sgPendRow", "sgSection", "wireSessGroups",
     "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp",
     "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
     "compgAligned", "compgTickLabel", "compgHoverLabel",
@@ -4993,7 +4994,7 @@ test("levels study -10: client manifest — panel renderers, deck entry, hover c
     "a.sections && a.sections.levels",
     "'Structural level validation'",
     "lvBlock = renderLevels(lv);",
-    "seBlock+lvBlock",                                        // the panel is actually in the assembled DOM (-11 appended anBlock after it)
+    "{html:lvBlock},{pend:lvPend}",                           // the panel is actually in the assembled DOM (-15 grouped layout)
     "All eleven studies live",                                // the deck footer counts every live study (bumped by -13 candles + pivots)
     'table class="ptbl"',                                     // reuses the styled panel-table class, no orphan CSS
     "under the ${st.cellFloor}-event floor, no rate published",   // floored cells are hoverable and explained
@@ -5218,7 +5219,7 @@ test("anatomy -11: client manifest — renderers, deck entry, hover contract, ho
     "a.sections && a.sections.anatomy",
     "'Session anatomy'",
     "anBlock = renderAnatomy(an);",
-    "lvBlock+anBlock",                                        // -13 appended cbBlock+pvBlock after it
+    "{html:anBlock},{pend:anPend}",                           // the panel is actually in the assembled DOM (-15 grouped layout)
     "All eleven studies live",                                // -13 bumped the count (candles + pivots)
     "readable only after the fact",                           // the openQ conditioning caveat ships in the UI
     "frozen before the session — no lookahead",               // and so does the sd-freeze claim
@@ -5447,7 +5448,7 @@ test("-13 wiring manifest: byTicker on both studies, candles + pivots served, si
     assert.equal((app.match(new RegExp("^function " + fn + "\\(", "gm")) || []).length, 1, `exactly one ${fn}`);
   for (const pin of [
     "'Candle behaviour'", "'Time-based pivots'",
-    "anBlock+cbBlock+pvBlock+deck",
+    "{html:pvBlock},{pend:pvPend}",
     "attachStudyScope('lvlsel','levels')", "attachStudyScope('anatsel','anatomy')",
     "within-name time series",                                 // the n-basis switch is labeled, both panels
     "All eleven studies live",
@@ -5488,10 +5489,141 @@ test("-13 end-to-end: byTicker scopes, candles and pivots ride the served anatom
     assert.ok(Object.keys(lv.byTicker).length >= 1, "levels scope entries served where events exist");
     for (const k in lv.byTicker) {
       const v = lv.byTicker[k];
-      assert.ok(Number.isFinite(v.n) && v.overall, "slim per-name levels shape: n + overall + byTouches");
-      assert.equal(v.buckets, undefined, "distance buckets are pooled-only by design");
+      assert.ok(Number.isFinite(v.n) && v.overall, "per-name levels shape: n + overall + byTouches");
+      // -14: buckets ship per name so the chart follows the scope selector — same aggregator,
+      // same floor (thin per-name cells arrive dim, disclosing their n, never silently dropped).
+      assert.ok(Array.isArray(v.buckets) && v.buckets.length && Number.isFinite(v.cellFloor),
+        "per-name distance buckets + cellFloor served (chart follows the selector)");
+      for (const b of v.buckets) assert.ok(Number.isFinite(b.n), "each per-name bucket discloses its n");
     }
     assert.ok(an.candles && an.candles.n > 300 && an.candles.types.length === 6, "candle behaviour served");
     assert.ok(Math.abs(an.pivots.hi.share.reduce((a, b) => a + b, 0) - 1) < 0.01, "pivot histogram served, sums to 1");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ===== build 2026.07.24-14: per-ticker scope reaches the CHARTS, pivots gains its selector =====
+// The -13 scopes switched only the tables; the flagship visuals (excursion histogram, level
+// touch chart, pivot clock histogram) stayed silently pooled, and time-based pivots had no
+// selector at all. -14 ships per-name payloads through the SAME pure builders with the SAME
+// floors, and the client renders them with the n-basis switch labeled.
+
+test("-14 anatomyTickerSummary: per-name mfe histogram, candle share/rngX, within-name pivots", () => {
+  const C = require("../src/compute");
+  const HOUR = 3600 * 1000;
+  const synth = (seed, days) => {
+    let s = seed * 7919 + 17, p = 100 + seed;
+    const rnd = () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648 - 0.5; };
+    const t0 = Math.floor((Date.now() - days * 24 * HOUR) / HOUR) * HOUR, out = [];
+    for (let i = 0; i < days * 24; i++) {
+      const o = p, c = o * (1 + rnd() * 0.01);
+      out.push([t0 + i * HOUR, o, Math.max(o, c) * (1 + Math.abs(rnd()) * 0.004),
+        Math.min(o, c) * (1 - Math.abs(rnd()) * 0.004), c, 1000]);
+      p = c;
+    }
+    return out;
+  };
+  const rec = C.anatomyEnrich(C.sessionRecords(synth(3, 90), {}));
+  const monday = C.mondayStats(rec), naked = C.nakedStats(rec), candles = C.candleEvents(rec);
+  const sm = C.anatomyTickerSummary(rec, monday, naked, candles, { minN: 20 });
+  // mfe histogram: same edges as the pool, shares sum to 1 per side, n disclosed
+  assert.ok(sm.mfeHist && sm.mfeHist.n >= 20 && sm.mfeHist.edges.length === 10);
+  for (const side of ["upShare", "dnShare"])
+    assert.ok(Math.abs(sm.mfeHist[side].reduce((a, b) => a + b, 0) - 1) < 0.01, side + " sums to 1");
+  // candle table cells: shares sum to 1 over the name's own typed bars; rngX floors at minN
+  const shares = Object.values(sm.candles).map((t) => t.share).filter((x) => x != null);
+  assert.ok(Math.abs(shares.reduce((a, b) => a + b, 0) - 1) < 0.01, "candle shares sum to 1");
+  for (const t of Object.values(sm.candles)) if (t.n < 20) assert.equal(t.rngX, null, "rngX under the floor stays null");
+  // within-name pivots: mirrors pivotPool field names, shares sum to 1, session-count basis
+  assert.ok(sm.pivots && sm.pivots.hi.nDays === sm.pivots.lo.nDays && sm.pivots.hi.nDays >= 20);
+  assert.ok(Math.abs(sm.pivots.hi.share.reduce((a, b) => a + b, 0) - 1) < 0.01, "per-name hi histogram sums to 1");
+  assert.ok(Math.abs(sm.pivots.lo.share.reduce((a, b) => a + b, 0) - 1) < 0.01, "per-name lo histogram sums to 1");
+  // floor behavior: a thin record set publishes no histogram and no pivots — never a thin chart
+  const thin = C.anatomyTickerSummary(rec.slice(0, 10), C.mondayStats(rec.slice(0, 10)),
+    C.nakedStats(rec.slice(0, 10)), C.candleEvents(rec.slice(0, 10)), { minN: 20 });
+  assert.equal(thin.mfeHist, null, "under-floor mfe histogram stays null");
+  assert.equal(thin.pivots, null, "under-floor pivots stays null");
+});
+
+test("-14 client: charts follow the scope selector; pivots selector exists and is wired", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "attachStudyScope('pvsel','pivots')",                       // the missing selector, wired
+    "studyScopeSel('pvsel'",                                    // and rendered
+    "const chartSrc=(one&&one.buckets)?one:lv;",                // levels chart follows the scope
+    "one&&one.mfeHist?Object.assign(",                          // anatomy histogram follows the scope
+    "one&&one.pivots?Object.assign({basis:esc(one.ticker)},one.pivots):an.pivots", // pivots too
+    "has too few sd-scored sessions for its own histogram",     // honest under-floor fallback, anatomy
+    "has too few sessions for its own histogram",               // honest under-floor fallback, pivots
+    "m.basis||'sd-scored ticker-sessions'",                     // n-basis label switches in the SVG tips
+  ]) assert.ok(app.includes(pin), `app.js missing -14 pin: ${pin}`);
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("buckets: one.buckets, far: one.far, cellFloor: one.cellFloor"),
+    "poller ships per-name distance buckets for the levels chart");
+});
+
+// ===== build 2026.07.24-15: sessions tab grouped into collapsible sections =====
+// One status line replaces the coverage cards + readiness bar at 100% ready, a sticky jump bar
+// replaces blind scroll, five groups replace the flat stack, group verdicts come from the same
+// section payloads the panels render, and pending studies fold into their group as dimmed rows.
+
+test("-15 sessions groups: collapse behavior, persistence, dimmed all-pending groups", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i >= 0, "missing " + name);
+    let d = 0, j = app.indexOf("{", i);
+    for (let k = j; k < app.length; k++) { if (app[k] === "{") d++; if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); } }
+  };
+  const sgConsts = app.match(/const SESS_GROUPS=\[[\s\S]*?\];\nconst SG_KEY='[^']*';/);
+  assert.ok(sgConsts, "SESS_GROUPS + SG_KEY defined together");
+  const R = new Function(
+    "const saved={};\nconst store={get:k=>saved[k]??null,set:(k,v)=>{saved[k]=v;}};\n" +
+    "const state={analytics:{}};\nlet redraws=0;\nfunction drawSessions(){redraws++;}\n" +
+    sgConsts[0] + "\n" + grab("sgOpenSet") + "\n" + grab("sgToggle") + "\n" +
+    grab("sgPendRow") + "\n" + grab("sgSection") + "\n" +
+    "return {sgOpenSet,sgToggle,sgSection,sgPendRow,saved,state,redrawCount:()=>redraws};")();
+  // default open set: positioning + holds, everything else collapsed
+  const open0 = R.sgOpenSet();
+  assert.ok(open0.has("positioning") && open0.has("holds") && !open0.has("clocks"), "default open set");
+  // open section renders its body; collapsed section hides it (content still in the DOM)
+  const openHtml = R.sgSection("holds", "Holds", "overnight +4% net", [{ html: "<i>LIVE</i>" }]);
+  assert.ok(openHtml.includes('aria-expanded="true"') && !openHtml.includes(" hidden>"), "open group shows body");
+  const closedHtml = R.sgSection("clocks", "Clocks", "busiest 15:00 ET", [{ html: "<i>LIVE</i>" }]);
+  assert.ok(closedHtml.includes('aria-expanded="false"') && closedHtml.includes(" hidden>") && closedHtml.includes("LIVE"),
+    "collapsed group hides but still carries its body");
+  // a group with zero live studies dims and stays visible — nothing pending is hidden
+  const pendHtml = R.sgSection("week", "Week", "computing", [{ pend: R.sgPendRow("Day-of-week", "computing — needs 3 (have 1)", "") }]);
+  assert.ok(pendHtml.includes("sg-dim") && pendHtml.includes("pending"), "all-pending group dims, discloses state");
+  // toggling persists to storage and triggers a redraw
+  R.sgToggle("clocks");
+  assert.ok(JSON.parse(R.saved["xyz-sessgroups"]).includes("clocks"), "open state persisted per browser");
+  assert.equal(R.redrawCount(), 1, "toggle redraws");
+  R.sgToggle("clocks");
+  assert.ok(!JSON.parse(R.saved["xyz-sessgroups"]).includes("clocks"), "collapse persisted too");
+});
+
+test("-15 client + styles manifest: status line, sticky jump bar, verdicts from section payloads", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    'class="sg-status"',                                     // coverage cards + readiness bar collapse to one line
+    "full numbers stay on hover",                            // and the detail is not lost, it moves to the tooltip
+    'class="jumpbar"', 'data-j="${g.id}"', 'data-g="${id}"', // jump chips + group headers
+    "['positioning','holds']",                               // default open set
+    "store.set(SG_KEY",                                      // persistence, same store the tab order uses
+    "const vPositioning=", "const vHolds=", "const vClocks=", "const vWeek=", "const vStructure=",  // verdicts exist
+    "sd.sessions||{}",                                       // ...and read the SAME section objects the panels render
+    "hc.pooled&&hc.pooled.all",
+    "dow.pooled&&dow.pooled.all",
+    "lv.overall.excess",
+    "WD_NAMES[bd]",                                          // week verdict uses the heatmap's own day labels
+    "computing \\u2014 needs",                               // pending rows keep the honest unlock wording
+    "All eleven studies live",                               // the all-live footer survives the redesign
+  ]) assert.ok(app.includes(pin), `app.js missing -15 pin: ${pin}`);
+  assert.ok(!app.includes("On deck"), "the separate deck block is gone");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const pin of [".jumpbar{position:sticky", ".jchip.on{", ".sg-h{", ".sg-v{", ".sg-b{", ".sg-pend{", ".sg.sg-dim{"])
+    assert.ok(css.includes(pin), `styles.css missing -15 rule: ${pin}`);
 });
