@@ -383,13 +383,20 @@ async function main() {
     serveCached(req, reply, poller.getDaily(), { ts: 0, daily: {} }));
   fastify.get("/api/analytics", (req, reply) => {
     const scope = req.query && req.query.u === "crypto" ? "crypto" : "stocks";
-    const body = poller.getAnalytics(scope) || { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} };
+    // When the cache is genuinely empty, ship the recorded build error with the fallback. Without
+    // this the client can't distinguish "spines still warming" from "the build throws every cycle".
+    const built = poller.getAnalytics(scope);
+    const buildErr = poller.getAnalyticsErr ? poller.getAnalyticsErr(scope) : "";
+    const body = built || { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {}, buildError: buildErr || null };
     // ETag must be scope-distinct: the two universes' dataTs values are both Date.now()-stamped and
     // can coincide to the millisecond at boot, which would let the browser 304 a crypto request with a
     // cached stocks body (or vice-versa) — both tabs then read a payload for the wrong universe. Prefix
     // the scope so the two URLs can never share a validator. (-17 fix.)
     reply.header("cache-control", "no-cache");
-    const tag = 'W/"' + scope + "-" + (body.dataTs != null ? body.dataTs : (body.ts || 0)) + '"';
+    // The empty fallback always carries dataTs 0, so without mixing the error text into the validator
+    // a freshly-recorded failure reason would sit behind a 304 and never reach the tab.
+    const errKey = built ? "" : "-e" + (buildErr ? buildErr.length : 0);
+    const tag = 'W/"' + scope + "-" + (body.dataTs != null ? body.dataTs : (body.ts || 0)) + errKey + '"';
     reply.header("etag", tag);
     if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }
     reply.header("content-type", "application/json; charset=utf-8");
