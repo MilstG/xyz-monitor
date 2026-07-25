@@ -2457,6 +2457,58 @@ function renderRegime(reg, sel){
     `</div>`;
   return headRow+crowdTiles+levTiles+grid+`<div class="sec" style="margin:10px 0 20px;font-size:11px;max-width:720px;line-height:1.5">Crowding is OI-weighted funding + how many names sit at a funding extreme; leverage is aggregate OI and how stretched it is vs its own norm. Crowded <em>and</em> stretched is the cascade precondition — context, not a trade.</div>`;
 }
+// ---- structural-level validation (sections.levels) ----
+// The -09 detector's report card. Two charts + one table, all control-matched: excess = real rate
+// minus a same-distance permutation control, so a bar above zero is edge over matched noise. Every
+// element carries a <title> readout (bars/cells hover contract).
+function lvlPct(x){ return x==null?'—':(x*100).toFixed(1)+'%'; }
+function lvlTouchSvg(st){
+  const rows=st.buckets.concat(st.far?[Object.assign({lo:st.far.lo,hi:null},st.far)]:[]);
+  const W=560,H=230,pl=44,pr=14,pt=14,pb=34, n=rows.length;
+  const bw=(W-pl-pr)/n, Y=v=>pt+(1-v)*(H-pt-pb);
+  let s=`<svg viewBox="0 0 ${W} ${H}" class="lchart" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  for(const g of [0,.25,.5,.75,1]){ const y=Y(g).toFixed(1);
+    s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`+
+       `<text x="${pl-7}" y="${(+y+3.5).toFixed(1)}" text-anchor="end" class="lc-tick">${(g*100)|0}%</text>`; }
+  for(let i=0;i<n;i++){ const b=rows[i], x=pl+i*bw, lab=b.hi==null?('>'+b.lo):(b.lo+'–'+b.hi);
+    s+=`<text x="${(x+bw/2).toFixed(1)}" y="${H-pb+16}" text-anchor="middle" class="lc-tick">${lab}</text>`;
+    if(b.touchRate==null){ // floored cell: honest empty slot, hoverable so the floor is explained
+      s+=`<rect x="${(x+3).toFixed(1)}" y="${pt}" width="${(bw-6).toFixed(1)}" height="${H-pt-pb}" fill="var(--panel2)" opacity=".35"><title>${lab}σ · n=${b.n} — under the ${st.cellFloor}-event floor, no rate published</title></rect>`;
+      continue; }
+    const bw2=(bw-8)/2, xr=x+3, xc=x+5+bw2;
+    const tip=`${lab}σ from detection mark · n=${b.n} (${b.nTouched} touched)&#10;level touch ${lvlPct(b.touchRate)} vs control ${lvlPct(b.baseline)} → excess ${(b.excess>=0?'+':'')+(b.excess*100).toFixed(1)}pp`;
+    s+=`<rect x="${xr.toFixed(1)}" y="${Y(b.touchRate).toFixed(1)}" width="${bw2.toFixed(1)}" height="${(Y(0)-Y(b.touchRate)).toFixed(1)}" fill="var(--accent)" opacity=".85"><title>${tip}</title></rect>`;
+    s+=`<rect x="${xc.toFixed(1)}" y="${Y(b.baseline).toFixed(1)}" width="${bw2.toFixed(1)}" height="${(Y(0)-Y(b.baseline)).toFixed(1)}" fill="var(--muted)" opacity=".45"><title>${tip}</title></rect>`;
+  }
+  s+=`<text x="${((pl+W-pr)/2).toFixed(1)}" y="${H-5}" text-anchor="middle" class="lc-ax">level distance at detection (× the name's own daily σ)</text></svg>`;
+  return s;
+}
+function lvlHoldRow(label,c,floor){
+  if(!c) return '';
+  const ex=c.excess!=null?`<span class="${c.excess>=0?'pos':'neg'}">${(c.excess>=0?'+':'')+(c.excess*100).toFixed(1)}pp</span>`:'—';
+  const hb=c.holdBaseline!=null?lvlPct(c.holdBaseline):'—';
+  const hEx=(c.holdRate!=null&&c.holdBaseline!=null)?`<span class="${c.holdRate-c.holdBaseline>=0?'pos':'neg'}">${((c.holdRate-c.holdBaseline)>=0?'+':'')+((c.holdRate-c.holdBaseline)*100).toFixed(1)}pp</span>`:'—';
+  const tip=`${label} · n=${c.n}, ${c.nTouched} touched&#10;touch ${lvlPct(c.touchRate)} vs control ${lvlPct(c.baseline)}&#10;hold ${lvlPct(c.holdRate)} vs control ${hb}${c.medBeyondSd!=null?'&#10;median run past a BROKEN level: '+c.medBeyondSd.toFixed(2)+'σ':''}${(c.nTouched<floor)?'&#10;hold cells under the '+floor+'-touch floor stay —':''}`;
+  return `<tr title="${tip}"><td>${label}</td><td>${c.n.toLocaleString()}</td><td>${lvlPct(c.touchRate)}</td><td>${ex}</td>`+
+    `<td>${lvlPct(c.holdRate)}</td><td>${hb}</td><td>${hEx}</td><td>${c.medBeyondSd!=null?c.medBeyondSd.toFixed(2)+'σ':'—'}</td></tr>`;
+}
+function renderLevels(lv){
+  const cov=lv.coverage||{};
+  const controls=`<div class="s-ctrls"><span class="rt">${cov.tickers||0} equities · ${lv.n.toLocaleString()} level-events · ${cov.windowDays||180}d daily bars off the hourly spine · walk-forward every ${cov.stride||5} bars, ${lv.horizon}-bar horizon</span></div>`;
+  const o=lv.overall;
+  const head=sHead('Structural level validation','does the -09 detector\'s output earn its place on the chart');
+  const chart=sCard(lvlTouchSvg(lv));
+  const cap1=sCap('Orange = how often a detected level was touched inside the horizon; grey = a same-distance permutation control resolved through the identical bar test. The gap is the only signal: above control, levels attract; below, they repel; equal, the detector is drawing noise. Dim slots sit under the '+lv.cellFloor+'-event floor and publish nothing. <b>Hover</b> any bar for exact rates and n.');
+  const rows=[lvlHoldRow('All levels',Object.assign({n:lv.n,medBeyondSd:null},o),lv.cellFloor)];
+  const side={res:'Resistance',sup:'Support',flip:'Flip — served both sides'};
+  for(const k of ['res','sup','flip']) if(lv.bySide[k]) rows.push(lvlHoldRow(side[k],lv.bySide[k],lv.cellFloor));
+  for(const k of ['2','3','4+']) if(lv.byTouches[k]) rows.push(lvlHoldRow(k+'-touch levels',lv.byTouches[k],lv.cellFloor));
+  const table=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:640px"><thead><tr>`+
+    `<th>group</th><th>n</th><th>touch</th><th>vs ctl</th><th>hold</th><th>hold ctl</th><th>vs ctl</th><th>run past</th>`+
+    `</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+  const cap2=sCap('Hold = the touch bar closed back on the side price came from; run past = how far a BROKEN level was exceeded before the horizon — the stop-run cost of a void parked there. The touch-count split audits the detector\'s own minimum (2 touches): if 2-touch rows show no hold edge over control while 4+ does, the snap rule is anchoring AI voids to noise. Out of sample by construction; the control is matched per event, validated unbiased on pooled random walks. <b>Hover</b> a row for the full readout.');
+  return head+controls+chart+cap1+table+cap2;
+}
 function wireRegimeControls(){ const s=el('regimesel'); if(!s) return; s.addEventListener('change',()=>{ if(!state.analytics.regime) state.analytics.regime={sel:'all'}; state.analytics.regime.sel=s.value; drawSessions(); }); }
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
@@ -2490,6 +2542,7 @@ function drawSessions(){
     ['Asset-class overlays','pooled hour-of-day curves per class','★★★☆☆'],
     ['Day-of-week 7×24 heatmap','weekend-gap &amp; Friday→Monday risk','★★★☆☆'],
     ['Return seasonality by hour','exploratory · significance-flagged','★★☆☆☆'],
+    ['Structural level validation','touch &amp; hold vs a matched control — the -09 detector\'s report card','★★★★☆'],
   ];
   const sd = a.sections && a.sections.sessionDecomp;
   let flagship='';
@@ -2513,6 +2566,10 @@ function drawSessions(){
   let seBlock='';
   if(se && !se.pending){ seBlock = renderSeasonality(se); panels = panels.filter(p=>p[0]!=='Return seasonality by hour'); }
   else if(se && se.pending){ const si=panels.findIndex(p=>p[0]==='Return seasonality by hour'); if(si>=0) panels[si]=['Return seasonality by hour',`computing — needs ≥${se.need||8} equities with ≥5d hourly spine (have ${se.count||0})`,'★★☆☆☆']; }
+  const lv = a.sections && a.sections.levels;
+  let lvBlock='';
+  if(lv && !lv.pending){ lvBlock = renderLevels(lv); panels = panels.filter(p=>p[0]!=='Structural level validation'); }
+  else if(lv && lv.pending){ const li=panels.findIndex(p=>p[0]==='Structural level validation'); if(li>=0) panels[li]=['Structural level validation',`computing — needs ≥${lv.need||5} equities with ≥71 closed daily bars off the spine (have ${lv.count||0})`,'★★★★☆']; }
   const deck = panels.length
     ? `<div class="cp-sub" style="margin:22px 0 10px">On deck</div>`+
       `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
@@ -2522,11 +2579,11 @@ function drawSessions(){
         `<span class="sec" style="font-size:12px;flex:1 1 200px">${p[1]}</span>`+
         `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
         `</div>`).join('')+`</div>`
-    : `<div class="sec" style="margin:22px 0 4px;font-size:12px;opacity:.8">All seven studies live. ◆</div>`;
+    : `<div class="sec" style="margin:22px 0 4px;font-size:12px;opacity:.8">All eight studies live. ◆</div>`;
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
   const regime = a.sections && a.sections.regime;
   const regimeBlock = renderRegime(regime, (state.analytics.regime&&state.analytics.regime.sel)||'all');
-  host.innerHTML=head+regimeBlock+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  host.innerHTML=head+regimeBlock+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+lvBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
   if(regime) wireRegimeControls();
   if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
   if(dow && !dow.pending) attachDowControls();
