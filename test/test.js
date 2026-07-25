@@ -4977,7 +4977,7 @@ test("levels study -10: poller wiring manifest — section, scope, source, memo,
   for (const pin of [
     "function buildLevelsStudy(U)",
     "levels: lvSt,",                                          // sections wired to the ONE precomputed study
-    "const lvSt = buildLevelsStudy(U);",                      // computed before the sig so ETag and payload agree
+    'const lvSt = on("structure") ? buildLevelsStudy(U) : DISABLED;',   // -19: built only when the universe publishes Structure                      // computed before the sig so ETag and payload agree
     "const LVL_MIN_EQ = 5;",
     "const LVL_STRIDE = 5, LVL_HORIZON = 10, LVL_MINBARS = 60, LVL_CELL_FLOOR = 20;",
     "const db = bucketsFor(r, 24);",                          // spine-derived OHLC dailies — NOT dailyRaw (closes-only after a warm boot would blind the low-side touch test)
@@ -4992,7 +4992,7 @@ test("levels study -10: poller wiring manifest — section, scope, source, memo,
   assert.ok(/studyEligible: \(r\) => r && !r\.delisted && classifyCached\(r\.ticker\)\.assetClass === "Equity"/.test(pol),
     "stocks universe still gates studies to equities");
   // the analytics sig must move when the study moves
-  assert.ok(pol.includes("const lvSig = lvSt.pending ?") && /const sig = `\$\{U\.scope\}[^`]*\$\{lvSig\}/.test(pol),
+  assert.ok(pol.includes('const lvSig = lvSt.disabled ? "off" : (lvSt.pending ?') && /const sig = `\$\{U\.scope\}[^`]*\$\{lvSig\}/.test(pol),
     "levels study signature must feed the /api/analytics ETag");
   assert.ok(!pol.includes("levels: buildLevelsStudy(),"), "sections must reuse lvSt, never a second computation that could disagree with the sig");
 });
@@ -5007,7 +5007,7 @@ test("levels study -10: client manifest — panel renderers, deck entry, hover c
     "'Structural level validation'",
     "lvBlock = renderLevels(lv);",
     "{html:lvBlock},{pend:lvPend}",                           // the panel is actually in the assembled DOM (-15 grouped layout)
-    "All ${isCr?'ten':'eleven'} studies live",                     // -17: count is universe-aware (crypto = ten, seasonality n/a)
+    "All ${nStudies} studies live",                     // -17: count is universe-aware (crypto = ten, seasonality n/a)
     'table class="ptbl"',                                     // reuses the styled panel-table class, no orphan CSS
     "under the ${st.cellFloor}-event floor, no rate published",   // floored cells are hoverable and explained
   ]) assert.ok(app.includes(pin), `app.js missing -10 client pin: ${pin}`);
@@ -5232,7 +5232,7 @@ test("anatomy -11: client manifest — renderers, deck entry, hover contract, ho
     "'Session anatomy'",
     "anBlock = renderAnatomy(an);",
     "{html:anBlock},{pend:anPend}",                           // the panel is actually in the assembled DOM (-15 grouped layout)
-    "All ${isCr?'ten':'eleven'} studies live",                                // -13 bumped the count (candles + pivots)
+    "All ${nStudies} studies live",                                // -13 bumped the count (candles + pivots)
     "readable only after the fact",                           // the openQ conditioning caveat ships in the UI
     "frozen before the session — no lookahead",               // and so does the sd-freeze claim
   ]) assert.ok(app.includes(pin), `app.js missing -11 client pin: ${pin}`);
@@ -5463,7 +5463,7 @@ test("-13 wiring manifest: byTicker on both studies, candles + pivots served, si
     "{html:pvBlock},{pend:pvPend}",
     "attachStudyScope('lvlsel','levels')", "attachStudyScope('anatsel','anatomy')",
     "within-name time series",                                 // the n-basis switch is labeled, both panels
-    "All ${isCr?'ten':'eleven'} studies live",
+    "All ${nStudies} studies live",
   ]) assert.ok(app.includes(pin), `app.js missing -13 client pin: ${pin}`);
 });
 
@@ -5588,8 +5588,10 @@ test("-15 sessions groups: collapse behavior, persistence, dimmed all-pending gr
     let d = 0, j = app.indexOf("{", i);
     for (let k = j; k < app.length; k++) { if (app[k] === "{") d++; if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); } }
   };
-  const sgConsts = app.match(/const SESS_GROUPS=\[[\s\S]*?\];\nconst SG_KEY='[^']*';/);
-  assert.ok(sgConsts, "SESS_GROUPS + SG_KEY defined together");
+  const sgGroups = app.match(/const SESS_GROUPS=\[[\s\S]*?\];/);
+  const sgKey = app.match(/const SG_KEY='[^']*';/);
+  assert.ok(sgGroups && sgKey, "SESS_GROUPS + SG_KEY both defined");
+  const sgConsts = [sgGroups[0] + "\n" + sgKey[0]];
   const R = new Function(
     "const saved={};\nconst store={get:k=>saved[k]??null,set:(k,v)=>{saved[k]=v;}};\n" +
     "const state={analytics:{}};\nlet redraws=0;\nfunction drawSessions(){redraws++;}\n" +
@@ -5633,7 +5635,7 @@ test("-15 client + styles manifest: status line, sticky jump bar, verdicts from 
     "lv.overall.excess",
     "WD_NAMES[bd]",                                          // week verdict uses the heatmap's own day labels
     "computing \\u2014 needs",                               // pending rows keep the honest unlock wording
-    "All ${isCr?'ten':'eleven'} studies live",                               // the all-live footer survives the redesign
+    "All ${nStudies} studies live",                               // the all-live footer survives the redesign
   ]) assert.ok(app.includes(pin), `app.js missing -15 pin: ${pin}`);
   assert.ok(!app.includes("On deck"), "the separate deck block is gone");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
@@ -5757,21 +5759,22 @@ test("-17 crypto analytics build: every applicable study lives on a 90d crypto u
     const legs = Object.keys(sec.sessionDecomp.sessions);
     assert.deepEqual(legs.sort(), ["utcday", "weekend"].sort(), "crypto decomposition: UTC-day + weekend, no cash leg");
     assert.equal(sec.sessionDecomp.isCrypto, true);
-    // clocks / dow carry the UTC tz and a single Crypto class
-    assert.equal(sec.hourClock.tz, "UTC"); assert.deepEqual(Object.keys(sec.hourClock.pooled.byClass), ["Crypto"]);
-    assert.equal(sec.dow.tz, "UTC");
-    // levels lives at 90d depth — this is what the retention bump unlocked (would be pending at 31d)
-    assert.ok(sec.levels && !sec.levels.pending, "levels study lives on the 90d crypto spine");
-    assert.equal(sec.levels.coverage.windowDays, 90);
-    assert.ok(sec.levels.n > 0 && sec.levels.coverage.tickers >= 5, "levels pooled across the crypto roster");
+    // -19: crypto publishes Positioning + Holds only. The Clocks/Week/Structure studies are not
+    // computed at all (they compare nothing on a one-class 24/7 book) and ship as {disabled:true}
+    // so the payload shape stays uniform and the client renders no panel and no "computing" row.
+    assert.deepEqual(cr.groups, ["positioning", "holds"], "crypto publishes exactly positioning + holds");
+    for (const k of ["hourClock", "dow", "clusters", "seasonality", "levels"])
+      assert.equal(sec[k] && sec[k].disabled, true, `crypto ${k} must be disabled, not built`);
+    // and the ones it DOES publish are real (no disabled leaking into the Holds group)
+    for (const k of ["sessionDecomp", "anatomy"])
+      assert.ok(sec[k] && !sec[k].disabled, `crypto ${k} must still be built`);
     // anatomy + candle behaviour + pivots all live off the same record pass
     assert.ok(sec.anatomy && !sec.anatomy.pending, "anatomy lives");
     assert.ok(sec.anatomy.candles && sec.anatomy.candles.n > 0, "candle behaviour served for crypto");
     assert.ok(sec.anatomy.pivots && sec.anatomy.pivots.hi.nDays > 0, "time pivots served for crypto");
     assert.equal(Object.keys(sec.anatomy.byTicker).length, 8, "per-name anatomy scope for every perp");
-    // clustering lives; seasonality is honestly not-applicable (one-class book, no sector split)
-    assert.ok(sec.clusters && !sec.clusters.pending, "clustering lives");
-    assert.ok(sec.seasonality && sec.seasonality.pending && sec.seasonality.notApplicable, "seasonality n/a for crypto, stated");
+    // stocks still publishes all five groups — the gating is per-universe, not global
+    assert.deepEqual(st.groups, ["positioning", "holds", "clocks", "week", "structure"], "xyz keeps every group");
 
     // the xyz build with a single seeded equity stays honestly pending — universes don't cross-contaminate
     assert.ok(st.sections.sessionDecomp.pending && st.sections.anatomy.pending, "xyz build independent (1 equity -> pending)");
@@ -5809,7 +5812,7 @@ test("-17 client + server wiring manifest: dual-universe route, tz-aware rendere
     "if(cash!==false){",                                      // clock scaffold suppresses the cash arc for crypto
     "sd.isCrypto",                                            // session decomposition renderer is universe-aware
     "chart('utcday','UTC day",                               // and draws the UTC-day leg
-    "isCr?'ten':'eleven'",                                    // footer count is universe-aware
+    "const nStudies = 1/*regime*/+4",   // -19: study count derived from the published group set                                    // footer count is universe-aware
   ]) assert.ok(app.includes(pin), `app.js missing -17 client pin: ${pin}`);
 });
 
@@ -5970,4 +5973,47 @@ test("-17 regression: drawSessions EXECUTES and renders for both universes (no R
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls;
     global.fetch = saved.f;
   }
+});
+
+// ===== build 2026.07.24-20: crypto publishes fewer groups; thin per-name tables fall back ========
+test("-20: crypto renders only Positioning + Holds; stocks keeps all five groups", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // server declares the set once, per universe, and skips building the disabled studies
+  assert.ok(pol.includes('groups: ["positioning", "holds"],'), "crypto descriptor publishes two groups");
+  assert.ok(pol.includes('groups: ["positioning", "holds", "clocks", "week", "structure"],'), "stocks keeps five");
+  assert.ok(pol.includes("groups: U.groups.slice(),"), "the group set ships in the payload");
+  for (const gated of ['on("clocks") ? buildActivityClocks(U) : DISABLED',
+    'on("week") ? buildDowHeatmap(U) : DISABLED', 'on("structure") ? buildClusters(hourClock) : DISABLED',
+    'on("clocks") ? buildSeasonality(U) : DISABLED', 'on("structure") ? buildLevelsStudy(U) : DISABLED'])
+    assert.ok(pol.includes(gated), `study must be group-gated, not built and hidden: ${gated}`);
+  // client renders exactly the published set — no hard-coded five-group chain
+  assert.ok(app.includes("function sessGroups()"), "client resolves the group set from the payload");
+  assert.ok(app.includes("const groups = sessGroups().map(g=>GROUP_BODY[g.id]()).join('');"), "group assembly is payload-driven");
+  assert.ok(app.includes("sessGroups().map(g=>`<button type=\"button\" class=\"jchip\"") , "jump bar follows the published set");
+  // a disabled study must render NOTHING — not a "computing" row promising it later
+  for (const g of ["!hc.disabled", "!dow.disabled", "!cl.disabled", "!lv.disabled", "se.disabled"])
+    assert.ok(app.includes(g), `client must treat disabled as absent: ${g}`);
+  // the study count is derived, never hard-coded (crypto would otherwise claim eleven)
+  assert.ok(app.includes("const nStudies = 1/*regime*/+4"), "study count derived from the group set");
+  assert.ok(!/All \$\{isCr\?'ten':'eleven'\}/.test(app), "no hard-coded ten/eleven claim survives");
+});
+
+test("-20: a per-name scope under the sample floor falls back to pooled instead of a dash wall", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // the fallback helpers exist and every thin-cell table consults them
+  assert.ok(app.includes("function _anyCell(") && app.includes("function _fbNote("), "fallback helpers defined");
+  for (const fb of ["const qFallback=", "const moFallback=", "const nkFallback=", "const cbFallback=", "const cvFallback="])
+    assert.ok(app.includes(fb), `missing fallback gate: ${fb}`);
+  // and each one labels itself rather than silently swapping scope under a per-name header
+  // four notes for five gates: the weekly-container and naked-open fallbacks share one line
+  assert.equal((app.match(/_fbNote\(/g) || []).length - 1, 4, "four labeled fallback notes (helper definition excluded)");
+  // the floor itself must NEVER be lowered — that would be the false precision this app refuses
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(/const minN = Number\.isFinite\(o\.minN\) \? o\.minN : 20;/.test(cmp), "the per-bucket sample floor is unchanged");
+  assert.ok(/rate = \(arr\) => arr\.length >= minN \?/.test(cmp), "rates below the floor still return null");
+  // med day range is pooled-only: the column is omitted per-name, never rendered as dashes
+  assert.ok(app.includes("const qMed=!qScope;"), "med-range column omitted in per-name scope");
 });
