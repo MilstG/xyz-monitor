@@ -381,8 +381,20 @@ async function main() {
     serveCached(req, reply, poller.getSnapshot(), { ts: 0, dataTs: 0, benchCoin: null, markets: [] }));
   fastify.get("/api/daily", (req, reply) =>
     serveCached(req, reply, poller.getDaily(), { ts: 0, daily: {} }));
-  fastify.get("/api/analytics", (req, reply) =>
-    serveCached(req, reply, poller.getAnalytics(req.query && req.query.u === "crypto" ? "crypto" : "stocks"), { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} }));
+  fastify.get("/api/analytics", (req, reply) => {
+    const scope = req.query && req.query.u === "crypto" ? "crypto" : "stocks";
+    const body = poller.getAnalytics(scope) || { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} };
+    // ETag must be scope-distinct: the two universes' dataTs values are both Date.now()-stamped and
+    // can coincide to the millisecond at boot, which would let the browser 304 a crypto request with a
+    // cached stocks body (or vice-versa) — both tabs then read a payload for the wrong universe. Prefix
+    // the scope so the two URLs can never share a validator. (-17 fix.)
+    reply.header("cache-control", "no-cache");
+    const tag = 'W/"' + scope + "-" + (body.dataTs != null ? body.dataTs : (body.ts || 0)) + '"';
+    reply.header("etag", tag);
+    if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }
+    reply.header("content-type", "application/json; charset=utf-8");
+    return reply.send(JSON.stringify(body));
+  });
   // Score duel: MOM vs MOM+ daily rank-IC record. Content only moves when a new IC day lands,
   // so serveCached's dataTs ETag makes this a 304 for nearly every poll.
   fastify.get("/api/duel", (req, reply) =>
