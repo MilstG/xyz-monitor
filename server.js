@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.24-16";
+const VERSION = "2026.07.24-17";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -382,7 +382,7 @@ async function main() {
   fastify.get("/api/daily", (req, reply) =>
     serveCached(req, reply, poller.getDaily(), { ts: 0, daily: {} }));
   fastify.get("/api/analytics", (req, reply) =>
-    serveCached(req, reply, poller.getAnalytics(), { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} }));
+    serveCached(req, reply, poller.getAnalytics(req.query && req.query.u === "crypto" ? "crypto" : "stocks"), { ts: 0, dataTs: 0, coverage: {}, universe: [], sections: {} }));
   // Score duel: MOM vs MOM+ daily rank-IC record. Content only moves when a new IC day lands,
   // so serveCached's dataTs ETag makes this a 304 for nearly every poll.
   fastify.get("/api/duel", (req, reply) =>
