@@ -4994,7 +4994,7 @@ test("levels study -10: client manifest — panel renderers, deck entry, hover c
     "'Structural level validation'",
     "lvBlock = renderLevels(lv);",
     "seBlock+lvBlock",                                        // the panel is actually in the assembled DOM (-11 appended anBlock after it)
-    "All nine studies live",                                  // the deck footer counts every live study (bumped by -11 anatomy)
+    "All eleven studies live",                                // the deck footer counts every live study (bumped by -13 candles + pivots)
     'table class="ptbl"',                                     // reuses the styled panel-table class, no orphan CSS
     "under the ${st.cellFloor}-event floor, no rate published",   // floored cells are hoverable and explained
   ]) assert.ok(app.includes(pin), `app.js missing -10 client pin: ${pin}`);
@@ -5218,8 +5218,8 @@ test("anatomy -11: client manifest — renderers, deck entry, hover contract, ho
     "a.sections && a.sections.anatomy",
     "'Session anatomy'",
     "anBlock = renderAnatomy(an);",
-    "lvBlock+anBlock+deck",
-    "All nine studies live",
+    "lvBlock+anBlock",                                        // -13 appended cbBlock+pvBlock after it
+    "All eleven studies live",                                // -13 bumped the count (candles + pivots)
     "readable only after the fact",                           // the openQ conditioning caveat ships in the UI
     "frozen before the session — no lookahead",               // and so does the sd-freeze claim
   ]) assert.ok(app.includes(pin), `app.js missing -11 client pin: ${pin}`);
@@ -5363,4 +5363,135 @@ test("shadow pair -12: manifest — EV_META, poller wiring, geometry gate, shado
   // shadows stay invisible: no client labels, ever, until a promotion build adds them deliberately
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(!app.includes("wickfill") && !app.includes("roundfr"), "no client surface for unpromoted shadows");
+});
+
+// ============================================================================================
+// Candle behaviour + time-based pivots + per-ticker scopes (build 2026.07.24-13).
+// ============================================================================================
+const { candleType, candleEvents, candlePool, pivotPool, anatomyTickerSummary, CANDLE_TYPES, PIVOT_EARLY_H } = require("../src/compute");
+
+test("candles -13: classifier is mutually exclusive with the pinned priority, and follow-through is thesis-signed", () => {
+  const R = (o, h, l, c) => ({ t: 0, o, h, l, c });
+  assert.equal(candleType(R(100, 106, 94, 101), R(99, 104, 96, 100)), "outside");
+  assert.equal(candleType(R(100, 103, 97, 101), R(99, 104, 96, 100)), "inside");
+  assert.equal(candleType(R(100, 105, 95, 100.5), null), "doji", "body <= 20% of range");
+  assert.equal(candleType(R(100, 105, 99.5, 104.8), null), "strongBull");
+  assert.equal(candleType(R(105, 105.5, 100, 100.2), null), "strongBear");
+  assert.equal(candleType(R(100, 106, 95, 103), null), "plain", "real body, close not in an extreme fifth");
+  assert.equal(candleType(R(100, 100, 100, 100), null), null, "zero-range bar is unclassifiable");
+  // priority: an engulfing doji is an OUTSIDE bar first
+  assert.equal(candleType(R(100, 107, 93, 100.3), R(99, 104, 96, 100)), "outside");
+  assert.deepEqual(CANDLE_TYPES, ["outside", "inside", "doji", "strongBull", "strongBear", "plain"]);
+  // signing: a strong bear close followed by a -3% day (next sd 2) scores POSITIVE ~1.5R
+  const rec = [
+    { t: 0, o: 105, h: 105.5, l: 100, c: 100.2, sdPrev: 2, rangeSd: 2.6 },
+    { t: 1, o: 100, h: 101, l: 96, c: 97, sdPrev: 2, rangeSd: 2.5 }];
+  const ev = candleEvents(rec);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].type, "strongBear");
+  assert.ok(Math.abs(ev[0].follow - 1.597) < 1e-3, `bear thesis followed through -> positive R, got ${ev[0].follow}`);
+  // a next-bar without a frozen sd contributes nothing (never rescaled)
+  assert.equal(candleEvents([rec[0], Object.assign({}, rec[1], { sdPrev: null })]).length, 0);
+});
+
+test("pivots -13: day-distribution pooling — each day one distribution, minCross floors, conditionals exact", () => {
+  const DAY = 864e5, mon = Date.UTC(2026, 3, 6);
+  const mkTk = (hh, ll, ca) => ({ records: Array.from({ length: 30 }, (_, d) => ({ t: mon + d * DAY, hiHr: hh, loHr: ll, closedAbove: ca })) });
+  const pv = pivotPool([mkTk(2, 14, true), mkTk(2, 14, true), mkTk(2, 14, true), mkTk(2, 14, false), mkTk(2, 3, true)], { minCross: 3 });
+  assert.equal(pv.hi.share[2], 1, "all five highs at 2:00 -> that hour owns the whole distribution");
+  assert.equal(pv.hi.nDays, 30);
+  assert.ok(Math.abs(pv.lo.share[14] - 0.8) < 1e-9 && Math.abs(pv.lo.share[3] - 0.2) < 1e-9,
+    "the daily distribution splits by cross-sectional share, then averages across days");
+  assert.ok(Math.abs(pv.hi.share.reduce((a, b) => a + b, 0) - 1) < 1e-6, "each pooled histogram sums to 1");
+  assert.equal(pv.earlyLowUp.rate, null, "one name below the cross-sectional floor publishes nothing");
+  assert.equal(pv.earlyHighDown.rate, 0.2, "all five highs early: closed-below share exact");
+  assert.equal(pv.earlyH, PIVOT_EARLY_H);
+  // sessionRecords now stamps the pivot hours, exactly
+  const HOUR = 36e5, bars = [];
+  for (let i = 0; i < 24; i++) bars.push([mon + i * HOUR, 100, i === 7 ? 111 : 101, i === 19 ? 92 : 99, 100, 1]);
+  const rec = sessionRecords(bars, { minBars: 20, now: mon + 5 * DAY })[0];
+  assert.equal(rec.hiHr, 7, "the high's UTC hour is stamped");
+  assert.equal(rec.loHr, 19, "the low's UTC hour is stamped");
+});
+
+test("scopes -13: anatomyTickerSummary is a within-name time series with the same floors", () => {
+  const DAY = 864e5, mon = Date.UTC(2026, 3, 6);
+  const rec = Array.from({ length: 60 }, (_, i) => ({ t: mon + i * DAY, o: 100, h: 102, l: 99, c: i % 2 ? 101 : 99.5,
+    mfeUpSd: 0.8, mfeDnSd: 0.4, mfeUpPct: 2, mfeDnPct: 1, rangeSd: 1.2, sdPrev: 2.5,
+    openQ: (i % 4) + 1, closedAbove: i % 2 === 1, firstHrExt: i % 3 === 0, hiHr: 5, loHr: 15 }));
+  const sm = anatomyTickerSummary(rec, [], [], [], { minN: 20 });
+  assert.equal(sm.sessions, 60);
+  assert.equal(sm.mfe.medUpSd, 0.8);
+  for (const q of sm.quartiles) {
+    assert.equal(q.n, 15, "60 sessions split evenly across quartiles");
+    assert.equal(q.closedAbove, null, "15 < minN 20 -> the per-name cell floors to null, exactly like the pooled cells");
+  }
+  const sm2 = anatomyTickerSummary(rec, [], [], [], { minN: 10 });
+  assert.ok(sm2.quartiles.every((q) => q.closedAbove != null), "above the floor the same cells publish");
+  assert.equal(sm.monday.contained, null, "no weeks -> null");
+});
+
+test("-13 wiring manifest: byTicker on both studies, candles + pivots served, sig extended, client scoped", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    "pool.byTicker = {};", "st.byTicker = {};",
+    "pool.candles = candlePool(perTicker, { minCross: ANAT_MIN_CROSS });",
+    "pool.pivots = pivotPool(perTicker, { minCross: ANAT_MIN_CROSS });",
+    "summary: anatomyTickerSummary(rec, monday, naked, candles, { minN: ANAT_MIN_SESS })",
+    "const one = levelStudy(r._lvEv, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });",   // per-name verdicts through the SAME aggregator
+    "anSt.candles ? anSt.candles.n : 0",                                                        // candles/pivots content busts the ETag
+  ]) assert.ok(pol.includes(pin), `poller.js missing -13 pin: ${pin}`);
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const fn of ["renderCandles", "renderPivots", "pivotHistSvg", "studyScopeSel", "studyScopeState", "attachStudyScope"])
+    assert.equal((app.match(new RegExp("^function " + fn + "\\(", "gm")) || []).length, 1, `exactly one ${fn}`);
+  for (const pin of [
+    "'Candle behaviour'", "'Time-based pivots'",
+    "anBlock+cbBlock+pvBlock+deck",
+    "attachStudyScope('lvlsel','levels')", "attachStudyScope('anatsel','anatomy')",
+    "within-name time series",                                 // the n-basis switch is labeled, both panels
+    "All eleven studies live",
+  ]) assert.ok(app.includes(pin), `app.js missing -13 client pin: ${pin}`);
+});
+
+test("-13 end-to-end: byTicker scopes, candles and pivots ride the served anatomy payload", async () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzsc-"));
+  try {
+    const store = openStore(dir);
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const HOUR = 3600 * 1000, now = Math.floor(Date.now() / HOUR) * HOUR;
+    const spine = (seed) => {
+      let s = seed; const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+      const nrm = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+      const out = []; let px = 100; const N = 130 * 24;
+      for (let i = 0; i < N; i++) {
+        px *= 1 + nrm() * 0.004;
+        const h = px * (1 + Math.abs(nrm()) * 0.002), l = px * (1 - Math.abs(nrm()) * 0.002);
+        out.push([now - (N - i) * HOUR, px, Math.max(h, px), Math.min(l, px), px, 1000]);
+      }
+      return out;
+    };
+    const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
+    names.forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(61 + i * 19), hourlyTs: now }));
+    p.buildAnalyticsNow();
+    const secs = p.getAnalytics().sections;
+    const an = secs.anatomy, lv = secs.levels;
+    assert.ok(an && !an.pending && lv && !lv.pending);
+    assert.equal(Object.keys(an.byTicker).length, names.length, "every equity gets an anatomy scope entry");
+    const one = an.byTicker["xyz:NVDA"];
+    assert.equal(one.ticker, "NVDA");
+    assert.ok(one.sessions >= 120 && one.quartiles.length === 4 && one.candles.doji !== undefined,
+      "per-name summary carries sessions, quartiles and candle types");
+    assert.ok(Object.keys(lv.byTicker).length >= 1, "levels scope entries served where events exist");
+    for (const k in lv.byTicker) {
+      const v = lv.byTicker[k];
+      assert.ok(Number.isFinite(v.n) && v.overall, "slim per-name levels shape: n + overall + byTouches");
+      assert.equal(v.buckets, undefined, "distance buckets are pooled-only by design");
+    }
+    assert.ok(an.candles && an.candles.n > 300 && an.candles.types.length === 6, "candle behaviour served");
+    assert.ok(Math.abs(an.pivots.hi.share.reduce((a, b) => a + b, 0) - 1) < 0.01, "pivot histogram served, sums to 1");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
