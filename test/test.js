@@ -1235,6 +1235,13 @@ test("empty record still RENDERS: awaits, shadows, variants — executed, not st
   const sigMovePref = () => 0, sigPrimePref = () => false, sigRecFullPref = () => true, fmtAge = () => "1m";
   const EV_LABELS = {}, EV_TIP = {};
   const ledgerRosterScoped = eval("(" + grab("ledgerRosterScoped") + ")");
+  // -16: subsections render behind collapsed headers; open them all so the body paths execute.
+  // The REAL sigSec is grabbed (signature-anchored — plain grab("sigSec") would hit sigSecOpen).
+  const grabSig = () => { const i = src.indexOf("function sigSec(id,cls,label,tip,body)"); assert.ok(i >= 0, "sigSec missing");
+    let dep = 0, j = src.indexOf("{", i);
+    for (let k = j; k < src.length; k++) { if (src[k] === "{") dep++; if (src[k] === "}") { dep--; if (!dep) return src.slice(i, k + 1); } } };
+  const sigSecOpen = () => new Set(["evtable", "slices", "curve", "tuning", "shadows", "resolutions"]);
+  const sigSec = eval("(" + grabSig() + ")");
   const sigRecordHtml = eval("(" + grab("sigRecordHtml") + ")");
   // empty 'x' record, shadows shipping normally (server always ships all strategies)
   const d = { records: { "0x": { record: {}, recent: [] }, "0": { record: {} } },
@@ -1900,6 +1907,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "termBreadth", "termSectors", "termCompare", "termEarnCal", "termNewsCmd", "termReports", "termTickerish", "nlTickers", "termWin", "termAgo", "termAutoGrow", "termAdminUnlock", "termAdminLock", "termSetLock", "termRefreshLock",
     "renderRegime", "regimeCurveSvg", "wireRegimeControls",
     "drawSessions", "sgOpenSet", "sgToggle", "sgPendRow", "sgSection", "wireSessGroups",
+    "sigSecOpen", "sigSecToggle", "sigSec",
     "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp",
     "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
     "compgAligned", "compgTickLabel", "compgHoverLabel",
@@ -5626,4 +5634,51 @@ test("-15 client + styles manifest: status line, sticky jump bar, verdicts from 
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of [".jumpbar{position:sticky", ".jchip.on{", ".sg-h{", ".sg-v{", ".sg-b{", ".sg-pend{", ".sg.sg-dim{"])
     assert.ok(css.includes(pin), `styles.css missing -15 rule: ${pin}`);
+});
+
+// ===== build 2026.07.24-16: signals stats sections collapse by default =====
+// The audit's subsections (by-event table, slices, equity curve, self-tuning, strategy shadows,
+// recent resolutions) and the Record-by-event strip each render as a collapsed header until
+// clicked; the choice persists per browser. Collapsed content is absent from the DOM but every
+// header names its section — nothing is curated away, one click opens any of it.
+
+test("-16 sigSec: collapsed by default, opens from the persisted set, toggle round-trips", () => {
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grabAt = (sig) => { const i = src.indexOf(sig); assert.ok(i >= 0, sig + " missing");
+    let d = 0, j = src.indexOf("{", i);
+    for (let k = j; k < src.length; k++) { if (src[k] === "{") d++; if (src[k] === "}") { d--; if (!d) return src.slice(i, k + 1); } } };
+  const saved = {};
+  const localStorage = { getItem: (k) => saved[k] ?? null, setItem: (k, v) => { saved[k] = v; } };
+  let redraws = 0; const renderSignals = () => { redraws++; };
+  const SIGSEC_KEY = "xyz-sigsecs";
+  const sigSecOpen = eval("(" + grabAt("function sigSecOpen()") + ")");
+  const sigSecToggle = eval("(" + grabAt("function sigSecToggle(id)") + ")");
+  const sigSec = eval("(" + grabAt("function sigSec(id,cls,label,tip,body)") + ")");
+  // default: nothing open — the body string is NOT in the output, the named header is
+  const closed = sigSec("tuning", "sigrec-sub", "self-tuning (shadow variants)", "tip", "<i>BODY</i>");
+  assert.ok(closed.includes('aria-expanded="false"') && closed.includes("self-tuning") && !closed.includes("BODY"),
+    "collapsed by default: header only, body absent");
+  // open via toggle: persisted, redrawn, body present
+  sigSecToggle("tuning");
+  assert.ok(JSON.parse(saved["xyz-sigsecs"]).includes("tuning") && redraws === 1, "toggle persists and redraws");
+  const open = sigSec("tuning", "sigrec-sub", "self-tuning (shadow variants)", "tip", "<i>BODY</i>");
+  assert.ok(open.includes('aria-expanded="true"') && open.includes("BODY"), "open section renders its body");
+  sigSecToggle("tuning");
+  assert.ok(!JSON.parse(saved["xyz-sigsecs"]).includes("tuning"), "collapse round-trips");
+});
+
+test("-16 client manifest: every stats section behind sigSec, strip included, toggles bound", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const id of ["evtable", "slices", "curve", "tuning", "shadows", "resolutions", "recstrip"])
+    assert.ok(app.includes(`sigSec('${id}'`), `section '${id}' renders through sigSec`);
+  for (const pin of [
+    "const SIGSEC_KEY='xyz-sigsecs'",
+    "box.querySelectorAll('[data-sigsec]')",                  // click + keyboard binding lives in bindSigControls
+    "'recstrip','dsec','Record by event'",                    // the strip keeps its dsec header styling
+    "shadow claims only \\u2014 never shown as live signals", // the shadows footnote survives inside its section
+  ]) assert.ok(app.includes(pin), `app.js missing -16 pin: ${pin}`);
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".sigsec-h{cursor:pointer"), "styles.css missing .sigsec-h");
 });
