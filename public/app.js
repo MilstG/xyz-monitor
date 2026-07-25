@@ -2587,6 +2587,12 @@ function anMfeSvg(m){
   return s;
 }
 function anPct(x){ return x==null?'—':(x*100).toFixed(1)+'%'; }
+// -19: a per-name scope whose cells all sit under the sample floor renders a wall of em-dashes,
+// which reads as "broken" rather than "not enough data yet". Mirror what the MFE histogram already
+// does — fall back to the pooled table and say so out loud. The floor is NEVER lowered: a rate on
+// n=8 is +/-35pp and publishing it would be exactly the false precision this app refuses.
+function _anyCell(rows,keys){ return !!rows&&rows.some(r=>keys.some(k=>r[k]!=null)); }
+function _fbNote(name,scopeLabel){ return `<div class="s-cap" style="margin-top:-4px"><b>${scopeLabel}</b> has too few sessions per bucket for its own ${name} \u2014 the table stays pooled.</div>`; }
 function renderAnatomy(an){
   const cov=an.coverage||{};
   const st=studyScopeState('anatomy'), one=st.sel&&an.byTicker?an.byTicker[st.sel]:null;
@@ -2605,19 +2611,27 @@ function renderAnatomy(an){
     `Green above the axis = the session's maximum push UP from its open; red below = maximum push DOWN, each in the name's own pre-session σ (frozen before the session — no lookahead). Medians dashed: ${mfeSrc.medUpSd??'—'}σ up / ${mfeSrc.medDnSd??'—'}σ down. This is the yardstick for every level: a target beyond the typical excursion needs more than one session to be reachable. <b>Hover</b> a bar for its share.`);
   const oneMfe=one?`<div class="s-cap" style="margin-top:-4px"><b>${esc(one.ticker)}</b> medians: up ${one.mfe.medUpSd??'—'}σ (${one.mfe.medUpPct??'—'}%) · down ${one.mfe.medDnSd??'—'}σ (${one.mfe.medDnPct??'—'}%) over ${one.sdSessions} σ-scored sessions.</div>`:'';
   const QL=['lowest quarter','lower middle','upper middle','highest quarter'];
-  const qSrc=one?one.quartiles.map(q=>({q:q.q,closedAbove:q.closedAbove,firstHr:q.firstHr,medRangeSd:null,nDays:q.n,nTS:q.n})):an.quartiles;
+  const qOne=one?one.quartiles.map(q=>({q:q.q,closedAbove:q.closedAbove,firstHr:q.firstHr,medRangeSd:null,nDays:q.n,nTS:q.n})):null;
+  const qFallback=!!qOne&&!_anyCell(qOne,['closedAbove','firstHr']);
+  const qSrc=qFallback?an.quartiles:(qOne||an.quartiles);
+  const qScope=qFallback?null:one;   // row tooltips must describe the scope actually shown
+  const qMed=!qScope;   // median day range is pooled-only — omit the column per-name rather than ship a dash column
   const qRows=qSrc.map(q=>{
-    const tip=`Q${q.q} — open in the ${QL[q.q-1]} of the day's eventual range&#10;closed above open ${anPct(q.closedAbove)} · extreme in first UTC hour ${anPct(q.firstHr)}&#10;median day range ${q.medRangeSd!=null?q.medRangeSd+'σ':'—'}&#10;${one?`n = ${q.nDays} sessions — within-name time series`:`n = ${q.nDays} days (cross-sectional means, ≥${cov.minCross||3} names/day) · ${q.nTS.toLocaleString()} ticker-sessions`}`;
-    return `<tr title="${tip}"><td>Q${q.q} — ${QL[q.q-1]}</td><td>${anPct(q.closedAbove)}</td><td>${anPct(q.firstHr)}</td><td>${q.medRangeSd!=null?q.medRangeSd.toFixed(2)+'σ':'—'}</td><td>${q.nDays}</td></tr>`;
+    const tip=`Q${q.q} — open in the ${QL[q.q-1]} of the day's eventual range&#10;closed above open ${anPct(q.closedAbove)} · extreme in first UTC hour ${anPct(q.firstHr)}&#10;median day range ${q.medRangeSd!=null?q.medRangeSd+'σ':'—'}&#10;${qScope?`n = ${q.nDays} sessions — within-name time series`:`n = ${q.nDays} days (cross-sectional means, ≥${cov.minCross||3} names/day) · ${q.nTS.toLocaleString()} ticker-sessions`}`;
+    return `<tr title="${tip}"><td>Q${q.q} — ${QL[q.q-1]}</td><td>${anPct(q.closedAbove)}</td><td>${anPct(q.firstHr)}</td>${qMed?`<td>${q.medRangeSd!=null?q.medRangeSd.toFixed(2)+'σ':'—'}</td>`:''}<td>${q.nDays}</td></tr>`;
   }).join('');
-  const qTable=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr>`+
-    `<th>open quartile</th><th>closed above</th><th>extreme in 1st hr</th><th>med range</th><th>n (days)</th></tr></thead><tbody>${qRows}</tbody></table></div>`+
+  const qTable=(qFallback?_fbNote('open-quartile splits',esc(one.ticker)):'')+`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr>`+
+    `<th>open quartile</th><th>closed above</th><th>extreme in 1st hr</th>${qMed?'<th>med range</th>':''}<th>n (${qScope?'sessions':'days'})</th></tr></thead><tbody>${qRows}</tbody></table></div>`+
     sCap(`Which quarter of the day's <em>eventual</em> range the open landed in. Q1's high close-above rate is mostly mechanical — conditioning on the realized range makes these readable only after the fact. Base rates for context, never an entry. <b>Hover</b> a row for the full readout.`);
-  const mo=one?{weeks:one.monday.weeks,contained:one.monday.contained,breakUp:null,breakDown:null,breakBoth:null,medDaysToBreak:null,nBreaks:null}:an.monday;
-  const nk=one?{horizons:one.naked.horizons,revisit:one.naked.horizons.map(h=>one.naked.revisit[h]),nDays:one.naked.horizons.map(()=>one.sessions)}:an.naked;
+  const moOne=one?{weeks:one.monday.weeks,contained:one.monday.contained,breakUp:null,breakDown:null,breakBoth:null,medDaysToBreak:null,nBreaks:null}:null;
+  const moFallback=!!moOne&&moOne.contained==null;
+  const mo=moFallback?an.monday:(moOne||an.monday);
+  const nkOne=one?{horizons:one.naked.horizons,revisit:one.naked.horizons.map(h=>one.naked.revisit[h]),nDays:one.naked.horizons.map(()=>one.sessions)}:null;
+  const nkFallback=!!nkOne&&!nkOne.revisit.some(x=>x!=null);
+  const nk=nkFallback?an.naked:(nkOne||an.naked);
   const moTip=`Monday range as the week's container · ${mo.weeks} pooled weeks&#10;held all week ${anPct(mo.contained)}&#10;first break up ${anPct(mo.breakUp)} · down ${anPct(mo.breakDown)} · both sides same session ${anPct(mo.breakBoth)}&#10;median sessions to first break: ${mo.medDaysToBreak??'—'} · ${mo.nBreaks} break events`;
   const nkRow=nk.horizons.map((h,i)=>`<td title="open revisited within ${h} session(s) — day-pooled over ${nk.nDays[i]} anchor days">${anPct(nk.revisit[i])}</td>`).join('');
-  const moNk=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr>`+
+  const moNk=((moFallback||nkFallback)?_fbNote('weekly / naked-open rates',esc(one.ticker)):'')+`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr>`+
     `<th>weekly &amp; open studies</th><th colspan="4">rates</th></tr></thead><tbody>`+
     `<tr title="${moTip}"><td>Monday range held all week</td><td>${anPct(mo.contained)}</td><td class="sec" colspan="3">${mo.breakUp!=null?`breaks: ${anPct(mo.breakUp)} up · ${anPct(mo.breakDown)} down · ${anPct(mo.breakBoth)} both — median ${mo.medDaysToBreak??'—'} session(s) to break (${mo.weeks} wks)`:`${mo.weeks} weeks — break-direction split needs the pooled scope`}</td></tr>`+
     `<tr><td title="a session's open traded back through within N later sessions — untested (naked) opens are the complement">Open revisited within 1 / 3 / 5 / 10 sessions</td>${nkRow}</tr>`+
@@ -2634,8 +2648,13 @@ function renderCandles(an){
   const head=sHead('Candle behaviour','what each daily bar type was followed by');
   const scope=`<span class="lbl">scope</span>`+studyScopeSel('cbsel',an.byTicker,st.sel);
   const note=one?`<span class="rt">${esc(one.ticker)} — within-name time series</span>`:`<span class="rt">${cd.n.toLocaleString()} typed bars · follow-through in the NEXT session's own σ, signed with the type's thesis</span>`;
+  // If not one bar type clears the follow-through floor for this name, the per-name table would be
+  // an all-dash column. Fall back to pooled wholesale (never a per-name share next to a pooled
+  // follow — mixing scopes in one row is worse than either scope alone) and label it.
+  const cbFallback=!!one&&!cd.types.some(t=>{ const o=one.candles&&one.candles[t.type]; return o&&o.follow!=null; });
+  const cbOne=cbFallback?null:one;
   const rows=cd.types.filter(t=>t.nTS>0).map(t=>{
-    const oneT=one&&one.candles[t.type];
+    const one=cbOne, oneT=one&&one.candles[t.type];
     const fol=one?(oneT?oneT.follow:null):t.follow;
     const shr=one?(oneT?oneT.share:null):t.share;
     const rgx=one?(oneT?oneT.rngX:null):t.rngX;
@@ -2644,7 +2663,7 @@ function renderCandles(an){
     const tip=`${CB_LABELS[t.type]} — ${CB_TIPS[t.type]}&#10;${one?`${esc(one.ticker)}: ${oneT?oneT.n:0} bars — share ${anPct(shr)} of its own typed bars, mean follow ${fol==null?'—':fol.toFixed(2)+'R'}&#10;next-session range ${rgx!=null?rgx+'× the name\'s own unconditional median':'—'}`:`share ${anPct(t.share)} of all bars · mean signed follow ${fol==null?'—':fol.toFixed(2)+'R'} over ${t.nDays} pooled days&#10;next-session range ${t.rngX!=null?t.rngX+'× the unconditional median':'—'}`}&#10;cells under the floor stay —`;
     return `<tr title="${tip}"><td>${CB_LABELS[t.type]}</td><td>${anPct(shr)}</td><td>${folCell}</td><td>${rgx!=null?rgx.toFixed(2)+'×':'—'}</td><td>${nStr}</td></tr>`;
   }).join('');
-  const table=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr><th>bar type</th><th>share</th><th>next-day follow</th><th>next range</th><th>n</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const table=(cbFallback?_fbNote('follow-through rates',esc(one.ticker)):'')+`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr><th>bar type</th><th>share</th><th>next-day follow</th><th>next range</th><th>n</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   const cap=sCap('Follow-through is the next session\'s close-to-close move in that session\'s own pre-frozen σ, signed with the bar\'s thesis — a strong bear close followed by more downside scores <em>positive</em>. Neutral types (doji, inside, outside) stay raw-signed. Descriptive conditionals, not signals. <b>Hover</b> a row for the full readout.');
   return head+`<div class="s-ctrls">${scope}${note}</div>`+table+cap;
 }
@@ -2679,9 +2698,13 @@ function renderPivots(an){
     :(one?`<span class="rt">${esc(one.ticker)} has too few sessions for its own histogram — showing the pooled study · ${an.pivots.hi.nDays} pooled days</span>`
     :`<span class="rt">${an.pivots.hi.nDays} pooled days · each day one cross-sectional distribution — one violent tape day cannot own the histogram</span>`);
   const controls=`<div class="s-ctrls">${scope}${note}</div>`;
-  const el2=pv.earlyLowUp, eh=pv.earlyHighDown;
-  const nb=pv.basis?'qualifying sessions — within-name; rates under the floor stay —':'days';
-  const cond=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:480px"><thead><tr><th>conditional</th><th>rate</th><th title="${nb}">n (${pv.basis?'sessions':'days'})</th></tr></thead><tbody>`+
+  // The histogram already falls back to pooled under the floor; the conditional rates need the same
+  // treatment or they render as two bare dashes under a per-name header.
+  const cvFallback=!!pv.basis&&pv.earlyLowUp.rate==null&&pv.earlyHighDown.rate==null;
+  const cv=cvFallback?an.pivots:pv;
+  const el2=cv.earlyLowUp, eh=cv.earlyHighDown;
+  const nb=(cvFallback?false:pv.basis)?'qualifying sessions — within-name; rates under the floor stay —':'days';
+  const cond=(cvFallback?_fbNote('early-extreme conditionals',esc(one.ticker)):'')+`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:480px"><thead><tr><th>conditional</th><th>rate</th><th title="${nb}">n (${(cvFallback?false:pv.basis)?'sessions':'days'})</th></tr></thead><tbody>`+
     `<tr title="the day's LOW printed before ${pv.earlyH}:00 UTC — how often the session then closed ABOVE its open (the early-low trend-day folklore, measured)&#10;n basis: ${nb}"><td>Low in first ${pv.earlyH}h → closed above open</td><td>${anPct(el2.rate)}</td><td>${el2.nDays}</td></tr>`+
     `<tr title="the day's HIGH printed before ${pv.earlyH}:00 UTC — how often the session then closed BELOW its open&#10;n basis: ${nb}"><td>High in first ${pv.earlyH}h → closed below open</td><td>${anPct(eh.rate)}</td><td>${eh.nDays}</td></tr>`+
     `</tbody></table></div>`;
@@ -2706,6 +2729,10 @@ const SESS_GROUPS=[
   {id:'clocks',label:'Clocks'},
   {id:'week',label:'Week'},
   {id:'structure',label:'Structure'}];
+// -19: the payload declares which groups this universe publishes (crypto drops Clocks/Week/
+// Structure — see analyticsUniverse). Client renders exactly that set; one source of truth.
+function sessGroups(){ const a=state.analytics.data, g=a&&a.groups;
+  return Array.isArray(g)&&g.length ? SESS_GROUPS.filter(x=>g.indexOf(x.id)>-1) : SESS_GROUPS; }
 const SG_KEY='xyz-sessgroups2';   // -17: bumped from xyz-sessgroups so a stale saved set from an
                                   // earlier session can't override the intended default (positioning
                                   // + holds open, the rest collapsed). Applies to both universes —
@@ -2742,7 +2769,7 @@ function wireSessGroups(host){
   if(!window._sgScrollWired){ window._sgScrollWired=true;
     window.addEventListener('scroll',()=>{ const vs=el('view-sessions'); if(!vs||vs.hidden) return;
       let act=null;
-      for(const g of SESS_GROUPS){ const sec=el('sg-'+g.id); if(sec&&sec.getBoundingClientRect().top<=90) act=g.id; }
+      for(const g of sessGroups()){ const sec=el('sg-'+g.id); if(sec&&sec.getBoundingClientRect().top<=90) act=g.id; }
       document.querySelectorAll('#sessions-body .jchip').forEach(x=>x.classList.toggle('on',x.dataset.j===act));
     },{passive:true}); }
 }
@@ -2774,7 +2801,7 @@ function drawSessions(){
   const status=`<div class="sg-status" title="${statTip}">${c.markets} markets \u00b7 ${c.equityMarkets} ${a.isCrypto?'perps':'equity'} \u00b7 spine ${rp}% \u00b7 ${w.hourlyDays||60}d hourly \u00b7 funding ${fund.endpoint==='on'?'live history':'sampled fallback'}${age?' \u00b7 '+age:''}</div>`;
   const bar= rp<100 ? `<div style="margin:0 0 10px" title="spine readiness \u2014 session studies unlock as this fills \u00b7 ${rp}%"><div style="height:5px;border-radius:3px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${rp}%;background:var(--accent);transition:width .4s"></div></div></div>` : '';
   const jump=`<div class="jumpbar"><span class="lbl">jump</span>`+
-    SESS_GROUPS.map(g=>`<button type="button" class="jchip" data-j="${g.id}">${g.label}</button>`).join('')+`</div>`;
+    sessGroups().map(g=>`<button type="button" class="jchip" data-j="${g.id}">${g.label}</button>`).join('')+`</div>`;
   // ---- sections (unchanged renderers) ----
   const sd = a.sections && a.sections.sessionDecomp;
   let flagship='', sdPend='';
@@ -2782,27 +2809,28 @@ function drawSessions(){
   else sdPend = sgPendRow('Session decomposition', sd?`computing \u2014 needs \u2265${sd.need} equities with \u22653d hourly spine (have ${sd.equityCount})`:'cash / overnight / weekend equity curves, gross &amp; net-of-funding','\u2605\u2605\u2605\u2605\u2605');
   const hc = a.sections && a.sections.hourClock;
   let clocks='', overlay='', hcPend='', ovPend='';
-  if(hc && !hc.pending){ clocks = renderClocks(hc);
+  if(hc && !hc.pending && !hc.disabled){ clocks = renderClocks(hc);
     if(hc.pooled && hc.pooled.byClass && Object.keys(hc.pooled.byClass).length) overlay = renderClassOverlay(hc);
     else ovPend = sgPendRow('Asset-class overlays','pooled hour-of-day curves per class \u2014 needs \u22652 classes with profiles','\u2605\u2605\u2605\u2606\u2606'); }
-  else hcPend = sgPendRow('Hour-of-day + funding clocks', hc?`computing \u2014 needs \u22653 markets with \u22655d hourly spine (have ${hc.count})`:'volatility \u00b7 volume \u00b7 funding per ticker','\u2605\u2605\u2605\u2605\u2606');
+  else if(!hc||!hc.disabled) hcPend = sgPendRow('Hour-of-day + funding clocks', hc?`computing \u2014 needs \u22653 markets with \u22655d hourly spine (have ${hc.count})`:'volatility \u00b7 volume \u00b7 funding per ticker','\u2605\u2605\u2605\u2605\u2606');
   const dow = a.sections && a.sections.dow;
   let dowBlock='', dowPend='';
-  if(dow && !dow.pending) dowBlock = renderDow(dow);
-  else dowPend = sgPendRow('Day-of-week 7\u00d724 heatmap', dow?`computing \u2014 needs \u22653 markets with \u22655d hourly spine (have ${dow.count})`:'weekend-gap &amp; Friday\u2192Monday risk','\u2605\u2605\u2605\u2606\u2606');
+  if(dow && !dow.pending && !dow.disabled) dowBlock = renderDow(dow);
+  else if(!dow||!dow.disabled) dowPend = sgPendRow('Day-of-week 7\u00d724 heatmap', dow?`computing \u2014 needs \u22653 markets with \u22655d hourly spine (have ${dow.count})`:'weekend-gap &amp; Friday\u2192Monday risk','\u2605\u2605\u2605\u2606\u2606');
   const cl = a.sections && a.sections.clusters;
   let clBlock='', clPend='';
-  if(cl && !cl.pending) clBlock = renderClusters(cl);
-  else clPend = sgPendRow('Cross-ticker clustering', cl?`computing \u2014 needs \u22658 markets with an hourly profile (have ${cl.count||0})`:'group markets by when they trade; flag the oddballs','\u2605\u2605\u2605\u2605\u2606');
+  if(cl && !cl.pending && !cl.disabled) clBlock = renderClusters(cl);
+  else if(!cl||!cl.disabled) clPend = sgPendRow('Cross-ticker clustering', cl?`computing \u2014 needs \u22658 markets with an hourly profile (have ${cl.count||0})`:'group markets by when they trade; flag the oddballs','\u2605\u2605\u2605\u2605\u2606');
   const se = a.sections && a.sections.seasonality;
   let seBlock='', sePend='';
-  if(se && !se.pending) seBlock = renderSeasonality(se);
+  if(se && !se.pending && !se.disabled) seBlock = renderSeasonality(se);
+  else if(se && se.disabled) sePend = '';
   else if(se && se.notApplicable) sePend = sgPendRow('Return seasonality by hour','not applicable to crypto \u2014 this is a by-sector cross-sectional test and the crypto book is one class','\u2605\u2605\u2606\u2606\u2606');
   else sePend = sgPendRow('Return seasonality by hour', se?`computing \u2014 needs \u2265${se.need||8} equities with \u22655d hourly spine (have ${se.count||0})`:'exploratory \u00b7 significance-flagged','\u2605\u2605\u2606\u2606\u2606');
   const lv = a.sections && a.sections.levels;
   let lvBlock='', lvPend='';
-  if(lv && !lv.pending) lvBlock = renderLevels(lv);
-  else lvPend = sgPendRow('Structural level validation', lv?`computing \u2014 needs \u2265${lv.need||5} equities with \u226571 closed daily bars off the spine (have ${lv.count||0})`:'touch &amp; hold vs a matched control','\u2605\u2605\u2605\u2605\u2606');
+  if(lv && !lv.pending && !lv.disabled) lvBlock = renderLevels(lv);
+  else if(!lv||!lv.disabled) lvPend = sgPendRow('Structural level validation', lv?`computing \u2014 needs \u2265${lv.need||5} equities with \u226571 closed daily bars off the spine (have ${lv.count||0})`:'touch &amp; hold vs a matched control','\u2605\u2605\u2605\u2605\u2606');
   const an = a.sections && a.sections.anatomy;
   let anBlock='', cbBlock='', pvBlock='', anPend='', cbPend='', pvPend='';
   if(an && !an.pending){ anBlock = renderAnatomy(an);
@@ -2851,22 +2879,33 @@ function drawSessions(){
   // ---- assemble ----
   const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||anBlock||cbBlock||pvBlock;
   const isCr = !!(a && a.isCrypto);
-  // Crypto has ten applicable studies — seasonality is a by-sector test with no crypto analogue,
-  // so its "pending" here is not-applicable and must not block the all-live footer.
-  const allLive = anySections && !(sdPend||hcPend||ovPend||dowPend||clPend||(isCr?false:sePend)||lvPend||anPend||cbPend||pvPend);
-  const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All ${isCr?'ten':'eleven'} studies live. \u25c6</div>` : '';
-  const groups =
-    sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock}])+
-    sgSection('holds','Holds',vHolds(),[{html:flagship},{pend:sdPend},{html:anBlock},{pend:anPend},{html:cbBlock},{pend:cbPend},{html:pvBlock},{pend:pvPend}])+
-    sgSection('clocks','Clocks',vClocks(),[{html:clocks},{pend:hcPend},{html:overlay},{pend:ovPend},{html:seBlock},{pend:sePend}])+
-    sgSection('week','Week',vWeek(),[{html:dowBlock},{pend:dowPend}])+
-    sgSection('structure','Structure',vStructure(),[{html:clBlock},{pend:clPend},{html:lvBlock},{pend:lvPend}]);
+  // Only studies this universe actually publishes can hold back the all-live footer, and the count
+  // is derived from the live payload rather than hard-coded — crypto ships a five-study Holds +
+  // Positioning set, so claiming "eleven" there would be a lie. (-19)
+  const onG=(id)=>sessGroups().some(g=>g.id===id);
+  const gate=[sdPend,anPend,cbPend,pvPend]
+    .concat(onG('clocks')?[hcPend,ovPend,sePend]:[])
+    .concat(onG('week')?[dowPend]:[])
+    .concat(onG('structure')?[clPend,lvPend]:[]);
+  const allLive = anySections && !gate.some(Boolean);
+  const nStudies = 1/*regime*/+4/*decomp, anatomy, candles, pivots*/
+    +(onG('clocks')?3:0)+(onG('week')?1:0)+(onG('structure')?2:0);
+  const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All ${nStudies} studies live. \u25c6</div>` : '';
+  // Render only the groups this universe publishes (-19) — crypto ships positioning + holds.
+  const GROUP_BODY={
+    positioning:()=>sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock}]),
+    holds:()=>sgSection('holds','Holds',vHolds(),[{html:flagship},{pend:sdPend},{html:anBlock},{pend:anPend},{html:cbBlock},{pend:cbPend},{html:pvBlock},{pend:pvPend}]),
+    clocks:()=>sgSection('clocks','Clocks',vClocks(),[{html:clocks},{pend:hcPend},{html:overlay},{pend:ovPend},{html:seBlock},{pend:sePend}]),
+    week:()=>sgSection('week','Week',vWeek(),[{html:dowBlock},{pend:dowPend}]),
+    structure:()=>sgSection('structure','Structure',vStructure(),[{html:clBlock},{pend:clPend},{html:lvBlock},{pend:lvPend}]),
+  };
+  const groups = sessGroups().map(g=>GROUP_BODY[g.id]()).join('');
   host.innerHTML=title+status+bar+jump+groups+foot;
   if(regime) wireRegimeControls();
-  if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
-  if(dow && !dow.pending) attachDowControls();
-  if(se && !se.pending) attachSeasonControls();
-  if(lv && !lv.pending) attachStudyScope('lvlsel','levels');
+  if(hc && !hc.pending && !hc.disabled){ attachClockControls(); if(overlay) attachOverlayControls(); }
+  if(dow && !dow.pending && !dow.disabled) attachDowControls();
+  if(se && !se.pending && !se.disabled) attachSeasonControls();
+  if(lv && !lv.pending && !lv.disabled) attachStudyScope('lvlsel','levels');
   if(an && !an.pending){ attachStudyScope('anatsel','anatomy'); attachStudyScope('cbsel','candles'); attachStudyScope('pvsel','pivots'); }
   attachLineHover();
   wireSessGroups(host);
