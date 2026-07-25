@@ -395,6 +395,32 @@ function closedWindows(startMs, endMs) {
 function overnightAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "overnight"); }
 function weekendAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "weekend"); }
 
+// ---- 24/7 (crypto) anchor generators -------------------------------------------------------
+// A perp book never closes, so cash/overnight/weekend are meaningless. The two holds that DO carry
+// meaning on a continuous book:
+//   utcDay  — each complete UTC calendar day, 00:00 -> next 00:00. The "did holding a day pay"
+//             analogue of the equity cash session, on the market's own clock.
+//   cryptoWeekend — Fri 00:00 UTC -> Mon 00:00 UTC. Weekend crypto is a real regime (thin books,
+//             gap risk into Monday); this measures the Fri->Mon hold as one bet.
+function utcDayAnchors(startMs, endMs) {
+  const out = [];
+  let d = Math.ceil(startMs / DAY) * DAY;
+  for (; d + DAY <= endMs; d += DAY) out.push({ enter: d, exit: d + DAY, tag: "utcday" });
+  return out;
+}
+function cryptoWeekendAnchors(startMs, endMs) {
+  const out = [];
+  // Walk UTC day-starts; a Friday 00:00 UTC opens a hold that exits the following Monday 00:00 UTC.
+  let d = Math.ceil(startMs / DAY) * DAY;
+  for (; d + 3 * DAY <= endMs; d += DAY) {
+    if (new Date(d).getUTCDay() === 5) {   // 5 = Friday
+      const exit = d + 3 * DAY;            // Mon 00:00 UTC
+      if (exit <= endMs) out.push({ enter: d, exit, tag: "cryptoweekend" });
+    }
+  }
+  return out;
+}
+
 // ---- event studies -----------------------------------------------------------------------
 // For each defined event, scan a market's OWN history, find every occurrence, and measure what
 // happened next. The output is an honest conditional base rate — median forward return, hit
@@ -2016,7 +2042,7 @@ function summarize(holds) {
 // and returns raw per-hour aggregates — Parkinson-style range volatility ln(high/low), mean candle
 // volume, mean funding rate, and sample counts. ET so the 09:30 open / 16:00 close humps line up with
 // the session decomposition. Pure; the poller normalizes and pools these.
-function activityClock(prices, funding) {
+function activityClock(prices, funding, tz) {
   const vSum = new Array(24).fill(0), vCnt = new Array(24).fill(0);
   const qSum = new Array(24).fill(0), qCnt = new Array(24).fill(0);
   const fSum = new Array(24).fill(0), fCnt = new Array(24).fill(0);
@@ -2025,8 +2051,11 @@ function activityClock(prices, funding) {
   // calling etParts on every candle — ~48x fewer Intl calls. A handful of candles on the two DST
   // transition days may bin 1h off; immaterial for an activity clock (the session math uses the exact
   // path). offset is -4 (EDT) or -5 (EST): ET hour = ((utcHour + offset) % 24 + 24) % 24.
+  // tz==="UTC" (the 24/7 crypto book) short-circuits the offset to 0 — hours are UTC as-is.
+  const utc = tz === "UTC";
   const offCache = new Map();
   const etHour = (t) => {
+    if (utc) return Math.floor((t % DAY) / HOUR);
     const day = Math.floor(t / DAY);
     let off = offCache.get(day);
     if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
@@ -2058,15 +2087,16 @@ function activityClock(prices, funding) {
 // hour both come from a per-UTC-day offset cache: shifting the timestamp by the ET offset yields an
 // instant whose UTC calendar equals the ET wall calendar, so getUTCDay()/getUTCHours() give ET
 // weekday (0=Sun) and hour with no per-candle formatToParts. Pure; the poller normalizes and pools.
-function dowClock(prices) {
+function dowClock(prices, tz) {
   const mk = () => Array.from({ length: 7 }, () => new Array(24).fill(0));
   const vSum = mk(), vCnt = mk(), qSum = mk(), qCnt = mk();
+  const utc = tz === "UTC";
   const offCache = new Map();
   for (const k of (prices || [])) {
     const t = k[0], hi = k[2], lo = k[3], v = k[5];
     if (!Number.isFinite(t)) continue;
-    const day = Math.floor(t / DAY);
-    let off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); }
+    let off = 0;
+    if (!utc) { const day = Math.floor(t / DAY); off = offCache.get(day); if (off === undefined) { off = etOffsetAt(t); offCache.set(day, off); } }
     const et = new Date(t + off * HOUR), wd = et.getUTCDay(), hr = et.getUTCHours();
     if (Number.isFinite(hi) && Number.isFinite(lo) && hi > 0 && lo > 0 && hi >= lo) { vSum[wd][hr] += Math.log(hi / lo); vCnt[wd][hr]++; }
     if (Number.isFinite(v)) { qSum[wd][hr] += v; qCnt[wd][hr]++; }
@@ -2688,6 +2718,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
+  utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,

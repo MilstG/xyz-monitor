@@ -8,7 +8,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
-  cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
+  cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
@@ -40,12 +40,18 @@ const RED_MIN_BARS = 20;              // per-market gate: fewer matched red bars
 const MAIN_DEX = "";                  // Hyperliquid main perp universe
 const MAIN_BENCH = "BTC";
 const MAIN_TOP_N = 60;                // selected by 24h notional volume, recomputed once per UTC day
-const MAIN_HIST_DAYS = 31;
+const MAIN_HIST_DAYS = 31;            // crypto OI archive + funding-history window (storage-bounded)
+const MAIN_SPINE_DAYS = 90;           // crypto HOURLY PRICE-spine window (-17): 90d so the session studies
+                                      // (levels, anatomy, candle behaviour, clocks, decomposition) run at the
+                                      // same depth the equity side does. Decoupled from MAIN_HIST_DAYS on
+                                      // purpose — the OI 5-min archive and funding stay 31d (storage cost);
+                                      // only the price candles deepen. HL backfills the whole window in one
+                                      // candleSnapshot call, so it fills on the first refresh after deploy.
 const MAIN_DAILY_DAYS = 92;           // crypto DAILY-candle window: 90d of chart plus EMA21 seed headroom.
                                       // Hourly stays 31d — the bump serves the D1 ladder rung, the drawer's
                                       // 90d sparkline, and the AI report's daily chart; Hyperliquid backfills
                                       // the whole window in one call, so it fills on the first refresh cycle.
-const MAIN_HOURLY_WEIGHT = 35;        // 31d spine pull
+const MAIN_HOURLY_WEIGHT = 35;        // 90d spine pull (-17): one candleSnapshot, same request weight
 const MAIN_DAILY_WEIGHT = 8;          // 92d daily pull (same request weight — one candleSnapshot either way)
 const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
 // ---- Coinalyze derivatives context (crypto universe only) -------------------------------------
@@ -119,7 +125,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
   let snapVer = 0, lastSnapSig = "";   // /api/snapshot content clock: dataTs bumps only when a client-visible field changes (kept off the payload)
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
-  let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics
+  let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics (xyz)
+  let analyticsCryptoCache = null, analyticsCryptoVer = 0, analyticsCryptoSig = "";   // ETag version for /api/analytics?u=crypto (-17)
+  // Last build error per universe + a lazy-build cooldown. The sessions tab used to show a bare
+  // "warming up the spines" whenever the cache was empty, which is indistinguishable from a build
+  // that is failing every cycle — the reason the -17 breakage was invisible. Now the failure reason
+  // is recorded and served, and the route can build on demand if the cache never populated.
+  let analyticsErrMsg = "", analyticsCryptoErrMsg = "";
+  let analyticsLazyTs = 0, analyticsCryptoLazyTs = 0;
+  const ANALYTICS_LAZY_CD = 20 * 1000;   // at most one on-demand build attempt per universe per 20s
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
   let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0;   // /api/trend — lazy, memoized, ETag rides content
@@ -228,9 +242,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const r = rows.get(coin);
     return r && Array.isArray(r.hourlyRaw) ? r.hourlyRaw : [];
   }
-  function hourlyCoverage() {
+  function hourlyCoverage(U) {
     let coins = 0, candles = 0;
-    for (const r of rows.values()) if (Array.isArray(r.hourlyRaw) && r.hourlyRaw.length) { coins++; candles += r.hourlyRaw.length; }
+    const src = U ? U.roster() : [...rows.values()];
+    for (const r of src) if (Array.isArray(r.hourlyRaw) && r.hourlyRaw.length) { coins++; candles += r.hourlyRaw.length; }
     return { coins, candles };
   }
 
@@ -270,9 +285,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     r._fgVer = r._fVer; r._fgH = hourKey; r._fg = out;
     return out;
   }
-  function fundingCoverage() {
+  function fundingCoverage(U) {
     let coins = 0, points = 0;
-    for (const r of rows.values()) if (r.fundH && r.fundH.size) { coins++; points += r.fundH.size; }
+    const src = U ? U.roster() : [...rows.values()];
+    for (const r of src) if (r.fundH && r.fundH.size) { coins++; points += r.fundH.size; }
     return { coins, points, endpoint: fundingHistoryEnabled ? "on" : "off(sampled)" };
   }
   // Seed the hourly funding series from persisted oi.log samples (one value per hour) so we start with
@@ -570,10 +586,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // Cold start OR a spine restored from an older, shallower build: one wide 180d pull.
     // Steady state: fetch only the last ~48h tail and merge — the old design re-pulled the
     // full window every refresh, which at 180d would consume the entire rate budget.
-    const histDays = r.uni === "main" ? MAIN_HIST_DAYS : HOURLY_HISTORY_DAYS;
+    const histDays = r.uni === "main" ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS;
     const spine = Array.isArray(r.hourlyRaw) ? r.hourlyRaw : null;   // packed [[t,o,h,l,c,v], ...]
     const firstT = spine && spine.length ? +spine[0][0] : Infinity;
-    const deep = spine && spine.length > 48 && firstT <= now - (histDays - (r.uni === "main" ? 7 : 30)) * DAY;
+    const deep = spine && spine.length > 48 && firstT <= now - (histDays - (r.uni === "main" ? 14 : 30)) * DAY;
     if (!deep) {
       const wide = await fetchCandles(coin, "1h", now - histDays * DAY, now, r.uni === "main" ? MAIN_HOURLY_WEIGHT : HOURLY_FETCH_WEIGHT);
       if (Array.isArray(wide)) r.hourlyRaw = packHours(wide);
@@ -2352,52 +2368,96 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     return out;
   }
 
-  function buildAnalytics() {
+  // Universe descriptor threaded through every session-study builder (-17). The whole analytics
+  // engine was xyz-only: activeMarkets() + assetClass==="Equity" filters baked in. Now each builder
+  // takes a `U` — roster (which markets), classOf (how to label/group them), tz (axis labels), and
+  // isCrypto (drop the US-cash-session framing: no cash leg in decomposition, no cash band on the
+  // clocks/pivots, all perps are one "Crypto" class). One code path, two universes; the crypto side
+  // reads mainMarkets() at the 90d spine depth (-17 retention bump) so its studies run at real depth.
+  function analyticsUniverse(scope) {
+    if (scope === "crypto") return {
+      scope: "crypto", isCrypto: true, tz: "UTC",
+      roster: () => mainMarkets().filter((r) => r && !r.delisted),
+      classOf: () => "Crypto",
+      // On a 24/7 book "equity" gating is meaningless — the study-eligible set is the whole roster
+      // with a spine, so studyEligible mirrors roster (minus the spine-length floor each study owns).
+      studyEligible: (r) => r && !r.delisted,
+    };
+    return {
+      scope: "stocks", isCrypto: false, tz: "ET",
+      roster: () => activeMarkets().filter((r) => r && !r.delisted),
+      classOf: (r) => classifyCached(r.ticker).assetClass,
+      studyEligible: (r) => r && !r.delisted && classifyCached(r.ticker).assetClass === "Equity",
+    };
+  }
+
+  // Error-recording wrapper. Every scheduled and on-demand build goes through this so a persistent
+  // failure surfaces in the UI (and the logs) instead of masquerading as "still warming up".
+  function buildAnalyticsSafe(scope) {
+    const cr = scope === "crypto";
+    try {
+      const p = buildAnalytics(scope);
+      if (cr) analyticsCryptoErrMsg = ""; else analyticsErrMsg = "";
+      return p;
+    } catch (e) {
+      const m = (e && e.message) || String(e);
+      if (cr) analyticsCryptoErrMsg = m; else analyticsErrMsg = m;
+      log(`buildAnalytics(${cr ? "crypto" : "stocks"}) failed: ${m}`);
+      return null;
+    }
+  }
+
+  function buildAnalytics(scope) {
+    const U = analyticsUniverse(scope || "stocks");
     const READY_HOURS = 20 * 24;   // "ready" = >= ~20 trading days of hourly candles for the session studies
-    const universe = activeMarkets()
-      .filter((r) => !r.delisted)
+    const universe = U.roster()
       .map((r) => {
-        const cl = classifyCached(r.ticker);
+        const cls = U.classOf(r);
         return {
-          coin: r.coin, ticker: r.ticker, sector: cl.sector, assetClass: cl.assetClass,
+          coin: r.coin, ticker: r.ticker, sector: U.isCrypto ? "Crypto" : classifyCached(r.ticker).sector, assetClass: cls,
           hours: Array.isArray(r.hourlyRaw) ? r.hourlyRaw.length : 0,
           funding: r.fundH ? r.fundH.size : 0,
         };
       });
-    const hc = hourlyCoverage(), fc = fundingCoverage();
-    const equityMarkets = universe.filter((u) => u.assetClass === "Equity").length;
+    const hc = hourlyCoverage(U), fc = fundingCoverage(U);
+    const equityMarkets = U.isCrypto ? universe.length : universe.filter((u) => u.assetClass === "Equity").length;
     const ready = universe.filter((u) => u.hours >= READY_HOURS).length;
-    const regime = buildRegime();
+    const regime = buildRegime();   // regime is inherently both-universe; the client reads regime[scope]
     const rgSig = ["all", "crypto", "stocks"].map((k) => { const d = regime[k]; return d && !d.pending ? `${Math.round(d.lev.totalOi || 0)}|${d.crowd.netFundApr || 0}|${d.crowd.netCrowd || 0}|${(d.series || []).length}` : "0"; }).join(";");
-    const lvSt = buildLevelsStudy();   // computed once; reused in sections below so sig and payload can never disagree
+    const lvSt = buildLevelsStudy(U);   // computed once; reused in sections below so sig and payload can never disagree
     const lvSig = lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`;
-    const anSt = buildAnatomy();       // same one-computation contract as the levels study
-    const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday.weeks}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
-    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
-    if (sig !== analyticsSig) { analyticsSig = sig; analyticsVer = Date.now(); }   // content changed -> new ETag
-    analyticsCache = {
+    const anSt = buildAnatomy(U);       // same one-computation contract as the levels study
+    const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday ? anSt.monday.weeks : 0}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
+    const sig = `${U.scope}:${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
+    const cache = U.isCrypto ? { get v() { return analyticsCryptoVer; }, set v(x) { analyticsCryptoVer = x; }, get s() { return analyticsCryptoSig; }, set s(x) { analyticsCryptoSig = x; } }
+                             : { get v() { return analyticsVer; }, set v(x) { analyticsVer = x; }, get s() { return analyticsSig; }, set s(x) { analyticsSig = x; } };
+    if (sig !== cache.s) { cache.s = sig; cache.v = Date.now(); }   // content changed -> new ETag
+    const payload = {
+      scope: U.scope, tz: U.tz, isCrypto: U.isCrypto,
       ts: Date.now(),
-      dataTs: analyticsVer,
-      window: { hourlyDays: HOURLY_HISTORY_DAYS, fundingDays: FUNDING_HISTORY_DAYS },
+      dataTs: cache.v,
+      window: { hourlyDays: U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS, fundingDays: U.isCrypto ? MAIN_HIST_DAYS : FUNDING_HISTORY_DAYS },
       coverage: {
         hourly: hc, funding: fc,
         markets: universe.length, equityMarkets, ready, readyHours: READY_HOURS,
       },
       universe,
       sections: (() => {
-        const hourClock = buildActivityClocks();
+        const hourClock = buildActivityClocks(U);
         return {
           regime,
-          sessionDecomp: buildSessionDecomp(),
+          sessionDecomp: buildSessionDecomp(U),
           hourClock,
-          dow: buildDowHeatmap(),
+          dow: buildDowHeatmap(U),
           clusters: buildClusters(hourClock),
-          seasonality: buildSeasonality(),
+          seasonality: buildSeasonality(U),
           levels: lvSt,
           anatomy: anSt,
         };
       })(),
     };
+    if (U.isCrypto) analyticsCryptoCache = payload; else analyticsCache = payload;
+    return payload;
   }
 
   // Session decomposition (the flagship): for the equity class, run overnight (close->open),
@@ -2407,31 +2467,33 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // funding-known fraction and a horizon timestamp — the client renders net as approximate before it.
   const SESSION_MIN_SPINE = 3 * 24;    // a ticker needs >= 3 days of hourly candles to contribute
   const SESSION_MIN_EQUITIES = 5;      // don't publish the study until the class is broad enough
-  function buildSessionDecomp() {
+  function buildSessionDecomp(U) {
+    U = U || analyticsUniverse("stocks");
     const now = Date.now();
     const end = Math.floor(now / HOUR) * HOUR;
-    const start = end - HOURLY_HISTORY_DAYS * DAY;
+    const start = end - (U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS) * DAY;
     const tol = 3 * HOUR;
-    const eq = activeMarkets().filter((r) =>
-      !r.delisted && classifyCached(r.ticker).assetClass === "Equity" &&
-      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= SESSION_MIN_SPINE);
-    if (eq.length < SESSION_MIN_EQUITIES) return { pending: true, equityCount: eq.length, need: SESSION_MIN_EQUITIES };
-    const anchors = {
-      overnight: overnightAnchors(start, end),
-      weekend: weekendAnchors(start, end),
-      cash: cashAnchors(start, end),
-    };
+    const eq = U.roster().filter((r) =>
+      U.studyEligible(r) && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= SESSION_MIN_SPINE);
+    if (eq.length < SESSION_MIN_EQUITIES) return { pending: true, equityCount: eq.length, need: SESSION_MIN_EQUITIES, isCrypto: U.isCrypto };
+    // Equity: cash / overnight / weekend around the US session. Crypto (24/7): the two holds that
+    // survive a continuous book — the whole UTC day, and the Fri->Mon weekend. No cash leg exists.
+    const legs = U.isCrypto
+      ? { utcday: utcDayAnchors(start, end), weekend: cryptoWeekendAnchors(start, end) }
+      : { overnight: overnightAnchors(start, end), weekend: weekendAnchors(start, end), cash: cashAnchors(start, end) };
     const sessions = {};
-    for (const s of ["overnight", "weekend", "cash"]) {
+    for (const s in legs) {
       const perTicker = [];
-      for (const r of eq) perTicker.push(runHolds(getHourly(r.coin), getFunding(r.coin), anchors[s], tol));
+      for (const r of eq) perTicker.push(runHolds(getHourly(r.coin), getFunding(r.coin), legs[s], tol));
       sessions[s] = sessionComposite(perTicker);
     }
-    const ov = sessions.overnight;
+    // Headline story: overnight (close->open) for equities; the UTC-day hold for crypto.
+    const ov = U.isCrypto ? sessions.utcday : sessions.overnight;
     return {
-      window: { start, end, days: HOURLY_HISTORY_DAYS },
+      window: { start, end, days: U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS },
+      isCrypto: U.isCrypto,
       equityCount: eq.length,
-      fundingEndpoint: fundingCoverage().endpoint,
+      fundingEndpoint: fundingCoverage(U).endpoint,
       sessions,
       headline: {   // the "buy at close, sell before open" story lives in the overnight session
         medianGross: ov.medianGross, medianNet: ov.medianNet,
@@ -2465,17 +2527,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     return { vr: _round(vr, 3), qr: _round(qr, 3), fund: _round(fund, 9), n, count: list.length };
   }
-  function buildActivityClocks() {
-    const mkts = activeMarkets().filter((r) =>
-      !r.delisted && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
+  function buildActivityClocks(U) {
+    U = U || analyticsUniverse("stocks");
+    const mkts = U.roster().filter((r) =>
+      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
     if (mkts.length < 3) return { pending: true, count: mkts.length };
     const tickers = [];
     for (const r of mkts) {
-      const cl = classifyCached(r.ticker);
-      const raw = activityClock(getHourly(r.coin), getFunding(r.coin));
+      const cls = U.classOf(r);
+      const raw = activityClock(getHourly(r.coin), getFunding(r.coin), U.tz);
       const vm = _nanmean(raw.vol), qm = _nanmean(raw.volume);
       tickers.push({
-        coin: r.coin, ticker: r.ticker, sector: cl.sector, assetClass: cl.assetClass,
+        coin: r.coin, ticker: r.ticker, sector: U.isCrypto ? "Crypto" : classifyCached(r.ticker).sector, assetClass: cls,
         vr: _round(_normTo(raw.vol, vm), 3),
         qr: _round(_normTo(raw.volume, qm), 3),
         fund: _round(raw.fund, 9),
@@ -2485,7 +2548,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     const byClass = {};
     for (const c of [...new Set(tickers.map((t) => t.assetClass))]) byClass[c] = _poolClocks(tickers.filter((t) => t.assetClass === c));
-    return { hours: 24, tz: "ET", metricDefault: "vol", tickers, pooled: { all: _poolClocks(tickers), byClass } };
+    return { hours: 24, tz: U.tz, isCrypto: U.isCrypto, metricDefault: "vol", tickers, pooled: { all: _poolClocks(tickers), byClass } };
   }
 
   // Day-of-week x hour-of-day 7x24 heatmap (the weekend-gap / Friday->Monday story). Per-ticker grids
@@ -2509,18 +2572,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     return { vol: _roundGrid(vol, 3), volume: _roundGrid(volume, 3), n, count: list.length };
   }
-  function buildDowHeatmap() {
-    const mkts = activeMarkets().filter((r) =>
-      !r.delisted && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
+  function buildDowHeatmap(U) {
+    U = U || analyticsUniverse("stocks");
+    const mkts = U.roster().filter((r) =>
+      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
     if (mkts.length < 3) return { pending: true, count: mkts.length };
     const per = [];
     for (const r of mkts) {
-      const cl = classifyCached(r.ticker), g = dowClock(getHourly(r.coin));
-      per.push({ assetClass: cl.assetClass, volN: _normGrid(g.vol, _nanmean2(g.vol)), volumeN: _normGrid(g.volume, _nanmean2(g.volume)), n: g.n });
+      const cls = U.classOf(r), g = dowClock(getHourly(r.coin), U.tz);
+      per.push({ assetClass: cls, volN: _normGrid(g.vol, _nanmean2(g.vol)), volumeN: _normGrid(g.volume, _nanmean2(g.volume)), n: g.n });
     }
     const byClass = {};
     for (const c of [...new Set(per.map((p) => p.assetClass))]) byClass[c] = _poolGrids(per.filter((p) => p.assetClass === c));
-    return { hours: 24, tz: "ET", metricDefault: "vol", pooled: { all: _poolGrids(per), byClass } };
+    return { hours: 24, tz: U.tz, isCrypto: U.isCrypto, metricDefault: "vol", pooled: { all: _poolGrids(per), byClass } };
   }
 
   // Cross-ticker clustering on the normalized 24h volatility profile (when each name is alive). We
@@ -2588,10 +2652,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     return { hours, sigCount: hours.filter((x) => x.t != null && Math.abs(x.t) >= 2).length };
   }
-  function buildSeasonality() {
-    const eq = activeMarkets().filter((r) =>
-      !r.delisted && classifyCached(r.ticker).assetClass === "Equity" &&
-      Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
+  function buildSeasonality(U) {
+    U = U || analyticsUniverse("stocks");
+    // Seasonality is a cross-sectional-by-sector t-test; a one-class crypto book has no sector split
+    // to run it over, and it's the most-quarantined study even for equities. Not applicable to crypto.
+    if (U.isCrypto) return { pending: true, notApplicable: true, count: 0 };
+    const eq = U.roster().filter((r) =>
+      U.studyEligible(r) && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= CLOCK_MIN_SPINE);
     if (eq.length < SEASON_MIN) return { pending: true, count: eq.length, need: SEASON_MIN };
     const byTicker = {}, universe = [], sectorMeans = {}, allMeans = [];
     for (const r of eq) {
@@ -2623,8 +2690,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // 365d tier, which is the right trade for a study whose whole claim is measurement integrity.
   const LVL_MIN_EQ = 5;                 // publish only when the class is broad enough (same posture as sessionDecomp)
   const LVL_STRIDE = 5, LVL_HORIZON = 10, LVL_MINBARS = 60, LVL_CELL_FLOOR = 20;
-  function buildLevelsStudy() {
-    const eq = activeMarkets().filter((r) => !r.delisted && classifyCached(r.ticker).assetClass === "Equity");
+  function buildLevelsStudy(U) {
+    U = U || analyticsUniverse("stocks");
+    const eq = U.roster().filter((r) => U.studyEligible(r));
     const pooled = []; let contributing = 0, skippedThin = 0;
     for (const r of eq) {
       const db = bucketsFor(r, 24);
@@ -2646,7 +2714,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     if (contributing < LVL_MIN_EQ) return { pending: true, count: contributing, need: LVL_MIN_EQ };
     const st = levelStudy(pooled, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
-    st.coverage = { tickers: contributing, skippedThin, windowDays: HOURLY_HISTORY_DAYS,
+    st.coverage = { tickers: contributing, skippedThin, windowDays: U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS,
       minBars: LVL_MINBARS, stride: LVL_STRIDE };
     // Per-ticker verdicts through the SAME aggregator with the SAME floors — one code path. The
     // distance buckets ship per name so the chart follows the scope selector; most per-name cells
@@ -2669,8 +2737,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // memo contract as the levels study: per-ticker records recompute only when the spine object
   // itself is replaced (~10 min), so the 3-min analytics cadence reads cache.
   const ANAT_MIN_EQ = 5, ANAT_MIN_SESS = 20, ANAT_MIN_CROSS = 3;
-  function buildAnatomy() {
-    const eq = activeMarkets().filter((r) => !r.delisted && classifyCached(r.ticker).assetClass === "Equity");
+  function buildAnatomy(U) {
+    U = U || analyticsUniverse("stocks");
+    const eq = U.roster().filter((r) => U.studyEligible(r));
     const perTicker = []; let skippedThin = 0;
     for (const r of eq) {
       const hs = getHourly(r.coin);
@@ -2688,7 +2757,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     if (perTicker.length < ANAT_MIN_EQ) return { pending: true, count: perTicker.length, need: ANAT_MIN_EQ };
     const pool = anatomyPool(perTicker, { minCross: ANAT_MIN_CROSS });
-    pool.coverage = { windowDays: HOURLY_HISTORY_DAYS, minSessions: ANAT_MIN_SESS, minCross: ANAT_MIN_CROSS, skippedThin };
+    pool.coverage = { windowDays: U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS, minSessions: ANAT_MIN_SESS, minCross: ANAT_MIN_CROSS, skippedThin };
+    pool.isCrypto = U.isCrypto;
     // Per-ticker scope: within-name time series, same floors — the client labels the n-basis switch.
     pool.byTicker = {};
     for (const tk of perTicker) pool.byTicker[tk.coin] = Object.assign({ ticker: tk.ticker }, tk.summary);
@@ -3672,6 +3742,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   }
 
   async function start() {
+    // Isolation helper, hoisted to the top of start() so the critical rebuild loops can be armed
+    // before anything that might throw.
+    const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
+    // ---- ARM THE ANALYTICS REBUILD LOOP FIRST -------------------------------------------------
+    // This used to be registered ~90 lines down, after the universe poll, the WebSocket, the
+    // workers and the sqlite probe. start() is invoked as poller.start().catch(log), so ANY throw
+    // in that stretch silently skipped the registration: the analytics cache stayed null forever,
+    // /api/analytics served its empty fallback, and BOTH sessions tabs sat on "warming up the
+    // spines" with no error to show — no retry would ever come. Arming it here means the loop
+    // exists no matter what else on the boot path fails, so the tab always self-heals.
+    setInterval(safeTick(() => { buildAnalyticsSafe("stocks"); if (crypto) buildAnalyticsSafe("crypto"); }, "buildAnalytics"), ANALYTICS_MS);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     hydrateLedger();
@@ -3686,7 +3767,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (duel.ic.length) log(`Restored score duel: ${duel.ic.length} IC day(s) — the MOM vs MOM+ record carries across this deploy`);
     await pollUniverse();
     seedFundingFromOI();
-    buildSnapshot(); buildDaily(); buildAnalytics();
+    buildSnapshot(); buildDaily();
+    // Isolate each universe's boot build: a throw here used to abort the rest of start() — including
+    // the analytics rebuild interval registered further down — so one bad build left BOTH tabs stuck
+    // on "warming up the spines" forever with no retry. Now a failure is logged and the interval still
+    // registers, so the next cycle rebuilds. (-17: the crypto build added a second failure surface.)
+    buildAnalyticsSafe("stocks"); if (crypto) buildAnalyticsSafe("crypto");   // records the reason on failure; never throws
     // WebSocket accelerator: real-time price/funding/OI pushes at zero rate-limit weight.
     // While it's healthy the REST universe poll drops to every 5th tick (~150s) — it still
     // owns membership (names / new listings / delistings) and instantly resumes the full
@@ -3714,7 +3800,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
-    const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
     setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
     // Warm-boot cadence: spines aren't persisted raw, so every deploy re-warms ~150 markets
     // through the rate-limited workers (~3-5 min). On the steady 10-min cadence each market
@@ -3761,7 +3846,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     } else {
       log("Ledger backup: disabled (set LEDGER_BACKUP_REPO + GITHUB_TOKEN to enable off-site snapshots)");
     }
-    setInterval(safeTick(buildAnalytics, "buildAnalytics"), ANALYTICS_MS);
+    // (the analytics rebuild interval is armed at the top of start() — see the note there)
     // Duel snapshot: cheap one-key guard per attempt; a boot mid-day retries every minute until
     // enough features are warm to snap, then idles until the next UTC midnight.
     setInterval(safeTick(duelTick, "duelTick"), 60 * 1000);
@@ -5184,7 +5269,22 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     start,
     getSnapshot: () => snapshotCache,
     getDaily: () => dailyCache,
-    getAnalytics: () => analyticsCache,
+    getAnalytics: (scope) => {
+      const cr = scope === "crypto";
+      let c = cr ? analyticsCryptoCache : analyticsCache;
+      // Self-heal: an empty cache means the scheduled build has not landed yet (or the boot path
+      // died before arming it). Build once on demand, rate-limited, so the first request that finds
+      // the cache cold repairs it rather than serving an empty fallback forever.
+      if (!c && !(cr && !crypto)) {
+        const now = Date.now(), last = cr ? analyticsCryptoLazyTs : analyticsLazyTs;
+        if (now - last >= ANALYTICS_LAZY_CD) {
+          if (cr) analyticsCryptoLazyTs = now; else analyticsLazyTs = now;
+          c = buildAnalyticsSafe(scope);
+        }
+      }
+      return c;
+    },
+    getAnalyticsErr: (scope) => (scope === "crypto" ? analyticsCryptoErrMsg : analyticsErrMsg),
     getDuel,
     duelTickNow: duelTick,           // harness: run one duel snapshot attempt at an injected clock, with an optional injected universe
     hydrateDuelNow: hydrateDuel,     // harness: hydrate duel state from the (stubbed) store without start()
