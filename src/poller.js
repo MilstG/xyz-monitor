@@ -2377,6 +2377,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   function analyticsUniverse(scope) {
     if (scope === "crypto") return {
       scope: "crypto", isCrypto: true, tz: "UTC",
+      // Which session-study GROUPS this universe publishes (-19). Crypto keeps Positioning (the
+      // regime aggregate) and Holds (session decomposition, anatomy, candle behaviour, pivots) and
+      // drops the rest: the asset-class overlay and clustering both collapse to a single "Crypto"
+      // class so they compare nothing, seasonality is a by-sector test with no crypto analogue, and
+      // the hour/day grids on a 24/7 book restate the clock without a cash session to contrast it
+      // against. One declaration, shipped in the payload — the client renders exactly these, and the
+      // builders below skip the disabled studies entirely rather than burning CPU on hidden panels.
+      groups: ["positioning", "holds"],
       roster: () => mainMarkets().filter((r) => r && !r.delisted),
       classOf: () => "Crypto",
       // On a 24/7 book "equity" gating is meaningless — the study-eligible set is the whole roster
@@ -2385,6 +2393,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     };
     return {
       scope: "stocks", isCrypto: false, tz: "ET",
+      groups: ["positioning", "holds", "clocks", "week", "structure"],
       roster: () => activeMarkets().filter((r) => r && !r.delisted),
       classOf: (r) => classifyCached(r.ticker).assetClass,
       studyEligible: (r) => r && !r.delisted && classifyCached(r.ticker).assetClass === "Equity",
@@ -2424,8 +2433,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const ready = universe.filter((u) => u.hours >= READY_HOURS).length;
     const regime = buildRegime();   // regime is inherently both-universe; the client reads regime[scope]
     const rgSig = ["all", "crypto", "stocks"].map((k) => { const d = regime[k]; return d && !d.pending ? `${Math.round(d.lev.totalOi || 0)}|${d.crowd.netFundApr || 0}|${d.crowd.netCrowd || 0}|${(d.series || []).length}` : "0"; }).join(";");
-    const lvSt = buildLevelsStudy(U);   // computed once; reused in sections below so sig and payload can never disagree
-    const lvSig = lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`;
+    // Groups this universe publishes; a study whose group is off is never built (-19).
+    const on = (g) => U.groups.indexOf(g) > -1;
+    const DISABLED = { disabled: true };
+    const lvSt = on("structure") ? buildLevelsStudy(U) : DISABLED;   // computed once; reused in sections below so sig and payload can never disagree
+    const lvSig = lvSt.disabled ? "off" : (lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`);
     const anSt = buildAnatomy(U);       // same one-computation contract as the levels study
     const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday ? anSt.monday.weeks : 0}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
     const sig = `${U.scope}:${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
@@ -2442,15 +2454,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         markets: universe.length, equityMarkets, ready, readyHours: READY_HOURS,
       },
       universe,
+      groups: U.groups.slice(),
       sections: (() => {
-        const hourClock = buildActivityClocks(U);
+        const hourClock = on("clocks") ? buildActivityClocks(U) : DISABLED;
         return {
           regime,
           sessionDecomp: buildSessionDecomp(U),
           hourClock,
-          dow: buildDowHeatmap(U),
-          clusters: buildClusters(hourClock),
-          seasonality: buildSeasonality(U),
+          dow: on("week") ? buildDowHeatmap(U) : DISABLED,
+          clusters: on("structure") ? buildClusters(hourClock) : DISABLED,
+          seasonality: on("clocks") ? buildSeasonality(U) : DISABLED,
           levels: lvSt,
           anatomy: anSt,
         };
