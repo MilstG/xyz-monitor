@@ -127,6 +127,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
   let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics (xyz)
   let analyticsCryptoCache = null, analyticsCryptoVer = 0, analyticsCryptoSig = "";   // ETag version for /api/analytics?u=crypto (-17)
+  // Last build error per universe + a lazy-build cooldown. The sessions tab used to show a bare
+  // "warming up the spines" whenever the cache was empty, which is indistinguishable from a build
+  // that is failing every cycle — the reason the -17 breakage was invisible. Now the failure reason
+  // is recorded and served, and the route can build on demand if the cache never populated.
+  let analyticsErrMsg = "", analyticsCryptoErrMsg = "";
+  let analyticsLazyTs = 0, analyticsCryptoLazyTs = 0;
+  const ANALYTICS_LAZY_CD = 20 * 1000;   // at most one on-demand build attempt per universe per 20s
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
   let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0;   // /api/trend — lazy, memoized, ETag rides content
@@ -2384,6 +2391,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     };
   }
 
+  // Error-recording wrapper. Every scheduled and on-demand build goes through this so a persistent
+  // failure surfaces in the UI (and the logs) instead of masquerading as "still warming up".
+  function buildAnalyticsSafe(scope) {
+    const cr = scope === "crypto";
+    try {
+      const p = buildAnalytics(scope);
+      if (cr) analyticsCryptoErrMsg = ""; else analyticsErrMsg = "";
+      return p;
+    } catch (e) {
+      const m = (e && e.message) || String(e);
+      if (cr) analyticsCryptoErrMsg = m; else analyticsErrMsg = m;
+      log(`buildAnalytics(${cr ? "crypto" : "stocks"}) failed: ${m}`);
+      return null;
+    }
+  }
+
   function buildAnalytics(scope) {
     const U = analyticsUniverse(scope || "stocks");
     const READY_HOURS = 20 * 24;   // "ready" = >= ~20 trading days of hourly candles for the session studies
@@ -3719,6 +3742,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   }
 
   async function start() {
+    // Isolation helper, hoisted to the top of start() so the critical rebuild loops can be armed
+    // before anything that might throw.
+    const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
+    // ---- ARM THE ANALYTICS REBUILD LOOP FIRST -------------------------------------------------
+    // This used to be registered ~90 lines down, after the universe poll, the WebSocket, the
+    // workers and the sqlite probe. start() is invoked as poller.start().catch(log), so ANY throw
+    // in that stretch silently skipped the registration: the analytics cache stayed null forever,
+    // /api/analytics served its empty fallback, and BOTH sessions tabs sat on "warming up the
+    // spines" with no error to show — no retry would ever come. Arming it here means the loop
+    // exists no matter what else on the boot path fails, so the tab always self-heals.
+    setInterval(safeTick(() => { buildAnalyticsSafe("stocks"); if (crypto) buildAnalyticsSafe("crypto"); }, "buildAnalytics"), ANALYTICS_MS);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     hydrateLedger();
@@ -3738,8 +3772,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // the analytics rebuild interval registered further down — so one bad build left BOTH tabs stuck
     // on "warming up the spines" forever with no retry. Now a failure is logged and the interval still
     // registers, so the next cycle rebuilds. (-17: the crypto build added a second failure surface.)
-    try { buildAnalytics("stocks"); } catch (e) { log("boot buildAnalytics(stocks) failed (isolated): " + (e && e.message)); }
-    if (crypto) { try { buildAnalytics("crypto"); } catch (e) { log("boot buildAnalytics(crypto) failed (isolated): " + (e && e.message)); } }
+    buildAnalyticsSafe("stocks"); if (crypto) buildAnalyticsSafe("crypto");   // records the reason on failure; never throws
     // WebSocket accelerator: real-time price/funding/OI pushes at zero rate-limit weight.
     // While it's healthy the REST universe poll drops to every 5th tick (~150s) — it still
     // owns membership (names / new listings / delistings) and instantly resumes the full
@@ -3767,7 +3800,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
-    const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
     setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
     // Warm-boot cadence: spines aren't persisted raw, so every deploy re-warms ~150 markets
     // through the rate-limited workers (~3-5 min). On the steady 10-min cadence each market
@@ -3814,7 +3846,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     } else {
       log("Ledger backup: disabled (set LEDGER_BACKUP_REPO + GITHUB_TOKEN to enable off-site snapshots)");
     }
-    setInterval(safeTick(() => { buildAnalytics("stocks"); if (crypto) buildAnalytics("crypto"); }, "buildAnalytics"), ANALYTICS_MS);
+    // (the analytics rebuild interval is armed at the top of start() — see the note there)
     // Duel snapshot: cheap one-key guard per attempt; a boot mid-day retries every minute until
     // enough features are warm to snap, then idles until the next UTC midnight.
     setInterval(safeTick(duelTick, "duelTick"), 60 * 1000);
@@ -5237,7 +5269,22 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     start,
     getSnapshot: () => snapshotCache,
     getDaily: () => dailyCache,
-    getAnalytics: (scope) => (scope === "crypto" ? analyticsCryptoCache : analyticsCache),
+    getAnalytics: (scope) => {
+      const cr = scope === "crypto";
+      let c = cr ? analyticsCryptoCache : analyticsCache;
+      // Self-heal: an empty cache means the scheduled build has not landed yet (or the boot path
+      // died before arming it). Build once on demand, rate-limited, so the first request that finds
+      // the cache cold repairs it rather than serving an empty fallback forever.
+      if (!c && !(cr && !crypto)) {
+        const now = Date.now(), last = cr ? analyticsCryptoLazyTs : analyticsLazyTs;
+        if (now - last >= ANALYTICS_LAZY_CD) {
+          if (cr) analyticsCryptoLazyTs = now; else analyticsLazyTs = now;
+          c = buildAnalyticsSafe(scope);
+        }
+      }
+      return c;
+    },
+    getAnalyticsErr: (scope) => (scope === "crypto" ? analyticsCryptoErrMsg : analyticsErrMsg),
     getDuel,
     duelTickNow: duelTick,           // harness: run one duel snapshot attempt at an injected clock, with an optional injected universe
     hydrateDuelNow: hydrateDuel,     // harness: hydrate duel state from the (stubbed) store without start()
