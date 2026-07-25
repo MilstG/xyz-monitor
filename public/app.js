@@ -2509,6 +2509,60 @@ function renderLevels(lv){
   const cap2=sCap('Hold = the touch bar closed back on the side price came from; run past = how far a BROKEN level was exceeded before the horizon — the stop-run cost of a void parked there. The touch-count split audits the detector\'s own minimum (2 touches): if 2-touch rows show no hold edge over control while 4+ does, the snap rule is anchoring AI voids to noise. Out of sample by construction; the control is matched per event, validated unbiased on pooled random walks. <b>Hover</b> a row for the full readout.');
   return head+controls+chart+cap1+table+cap2;
 }
+// ---- session anatomy (sections.anatomy) ----
+// Four descriptive base-rate panels off one per-session record pass. Descriptive means
+// descriptive: openQ conditions on the realized range (readable only after the fact) and the
+// captions say so. Rates are day-pooled; the honest n is days/weeks, never ticker-sessions.
+function anMfeSvg(m){
+  const labs=m.edges.map((e,i)=>(i?m.edges[i-1]:0)+'–'+e).concat([m.edges[m.edges.length-1]+'+']);
+  const n=labs.length, W=560,H=240,pl=44,pr=14,pt=14,pb=36;
+  const mid=(pt+H-pb)/2, half=(H-pt-pb)/2-4;
+  const cap=Math.max(...m.upShare,...m.dnShare,0.001);
+  const bw=(W-pl-pr)/n, X=i=>pl+i*bw;
+  let s=`<svg viewBox="0 0 ${W} ${H}" class="lchart" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
+  s+=`<line x1="${pl}" y1="${mid}" x2="${W-pr}" y2="${mid}" stroke="var(--grid)" stroke-width="1"/>`;
+  for(const g of [0.5,1]){ for(const k of [1,-1]){ const y=(mid-k*g*half).toFixed(1);
+    s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1" opacity=".45"/>`+
+       `<text x="${pl-7}" y="${(+y+3.5).toFixed(1)}" text-anchor="end" class="lc-tick">${(g*cap*100).toFixed(0)}%</text>`; } }
+  for(let i=0;i<n;i++){
+    const hu=m.upShare[i]/cap*half, hd=m.dnShare[i]/cap*half, x=X(i);
+    const tip=(d,v)=>`${labs[i]}σ · max ${d} excursion from open&#10;${(v*100).toFixed(1)}% of ${m.n.toLocaleString()} sd-scored ticker-sessions`;
+    s+=`<rect x="${(x+2).toFixed(1)}" y="${(mid-hu).toFixed(1)}" width="${(bw-4).toFixed(1)}" height="${hu.toFixed(1)}" fill="var(--up)" opacity=".7"><title>${tip('UP',m.upShare[i])}</title></rect>`;
+    s+=`<rect x="${(x+2).toFixed(1)}" y="${mid.toFixed(1)}" width="${(bw-4).toFixed(1)}" height="${hd.toFixed(1)}" fill="var(--down)" opacity=".7"><title>${tip('DOWN',m.dnShare[i])}</title></rect>`;
+    if(i%2===0) s+=`<text x="${(x+bw/2).toFixed(1)}" y="${H-pb+15}" text-anchor="middle" class="lc-tick">${labs[i]}</text>`;
+  }
+  const medX=v=>pl+Math.min(n-0.02,(v/ (m.edges[m.edges.length-1]+0.25))*n)*bw;
+  if(m.medUpSd!=null) s+=`<line x1="${medX(m.medUpSd).toFixed(1)}" y1="${(mid-half).toFixed(1)}" x2="${medX(m.medUpSd).toFixed(1)}" y2="${mid}" stroke="var(--up)" stroke-width="1.4" stroke-dasharray="3 3"><title>median up excursion ${m.medUpSd}σ</title></line>`;
+  if(m.medDnSd!=null) s+=`<line x1="${medX(m.medDnSd).toFixed(1)}" y1="${mid}" x2="${medX(m.medDnSd).toFixed(1)}" y2="${(mid+half).toFixed(1)}" stroke="var(--down)" stroke-width="1.4" stroke-dasharray="3 3"><title>median down excursion ${m.medDnSd}σ</title></line>`;
+  s+=`<text x="${((pl+W-pr)/2).toFixed(1)}" y="${H-5}" text-anchor="middle" class="lc-ax">max excursion from the session open (× the name's own pre-session σ)</text></svg>`;
+  return s;
+}
+function anPct(x){ return x==null?'—':(x*100).toFixed(1)+'%'; }
+function renderAnatomy(an){
+  const cov=an.coverage||{};
+  const head=sHead('Session anatomy','how far a session travels, where opens sit, what Monday contains, which opens stay naked');
+  const controls=`<div class="s-ctrls"><span class="rt">${an.tickers} equities · ${an.days} UTC sessions · ${an.tickerSessions.toLocaleString()} ticker-sessions (${an.sdSessions.toLocaleString()} σ-scored) · ${cov.windowDays||180}d spine</span></div>`;
+  const mfeBlock=sCard(anMfeSvg(an.mfe))+
+    sCap(`Green above the axis = the session's maximum push UP from its open; red below = maximum push DOWN, each in the name's own pre-session σ (frozen before the session — no lookahead). Medians dashed: ${an.mfe.medUpSd??'—'}σ up / ${an.mfe.medDnSd??'—'}σ down. This is the yardstick for every level: a target beyond the typical excursion needs more than one session to be reachable. <b>Hover</b> a bar for its share.`);
+  const QL=['lowest quarter','lower middle','upper middle','highest quarter'];
+  const qRows=an.quartiles.map(q=>{
+    const tip=`Q${q.q} — open in the ${QL[q.q-1]} of the day's eventual range&#10;closed above open ${anPct(q.closedAbove)} · extreme in first UTC hour ${anPct(q.firstHr)}&#10;median day range ${q.medRangeSd!=null?q.medRangeSd+'σ':'—'}&#10;n = ${q.nDays} days (cross-sectional means, ≥${cov.minCross||3} names/day) · ${q.nTS.toLocaleString()} ticker-sessions`;
+    return `<tr title="${tip}"><td>Q${q.q} — ${QL[q.q-1]}</td><td>${anPct(q.closedAbove)}</td><td>${anPct(q.firstHr)}</td><td>${q.medRangeSd!=null?q.medRangeSd.toFixed(2)+'σ':'—'}</td><td>${q.nDays}</td></tr>`;
+  }).join('');
+  const qTable=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr>`+
+    `<th>open quartile</th><th>closed above</th><th>extreme in 1st hr</th><th>med range</th><th>n (days)</th></tr></thead><tbody>${qRows}</tbody></table></div>`+
+    sCap(`Which quarter of the day's <em>eventual</em> range the open landed in. Q1's high close-above rate is mostly mechanical — conditioning on the realized range makes these readable only after the fact. Base rates for context, never an entry. <b>Hover</b> a row for the full readout.`);
+  const mo=an.monday, nk=an.naked;
+  const moTip=`Monday range as the week's container · ${mo.weeks} pooled weeks&#10;held all week ${anPct(mo.contained)}&#10;first break up ${anPct(mo.breakUp)} · down ${anPct(mo.breakDown)} · both sides same session ${anPct(mo.breakBoth)}&#10;median sessions to first break: ${mo.medDaysToBreak??'—'} · ${mo.nBreaks} break events`;
+  const nkRow=nk.horizons.map((h,i)=>`<td title="open revisited within ${h} session(s) — day-pooled over ${nk.nDays[i]} anchor days">${anPct(nk.revisit[i])}</td>`).join('');
+  const moNk=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:520px"><thead><tr>`+
+    `<th>weekly &amp; open studies</th><th colspan="4">rates</th></tr></thead><tbody>`+
+    `<tr title="${moTip}"><td>Monday range held all week</td><td>${anPct(mo.contained)}</td><td class="sec" colspan="3">breaks: ${anPct(mo.breakUp)} up · ${anPct(mo.breakDown)} down · ${anPct(mo.breakBoth)} both — median ${mo.medDaysToBreak??'—'} session(s) to break (${mo.weeks} wks)</td></tr>`+
+    `<tr><td title="a session's open traded back through within N later sessions — untested (naked) opens are the complement">Open revisited within 1 / 3 / 5 / 10 sessions</td>${nkRow}</tr>`+
+    `</tbody></table></div>`+
+    sCap(`Monday's [low, high] as the week's container on a 24/7 book — "both" marks a session that pierced both sides, unorderable at daily granularity and counted separately rather than guessed. The revisit row is the naked-open study: the complement of each rate is the share of opens still untested at that horizon. <b>Hover</b> any cell for n.`);
+  return head+controls+mfeBlock+qTable+moNk;
+}
 function wireRegimeControls(){ const s=el('regimesel'); if(!s) return; s.addEventListener('change',()=>{ if(!state.analytics.regime) state.analytics.regime={sel:'all'}; state.analytics.regime.sel=s.value; drawSessions(); }); }
 function drawSessions(){
   const host=el('sessions-body'); if(!host) return;
@@ -2543,6 +2597,7 @@ function drawSessions(){
     ['Day-of-week 7×24 heatmap','weekend-gap &amp; Friday→Monday risk','★★★☆☆'],
     ['Return seasonality by hour','exploratory · significance-flagged','★★☆☆☆'],
     ['Structural level validation','touch &amp; hold vs a matched control — the -09 detector\'s report card','★★★★☆'],
+    ['Session anatomy','excursion · open quartiles · Monday range · naked opens','★★★☆☆'],
   ];
   const sd = a.sections && a.sections.sessionDecomp;
   let flagship='';
@@ -2570,6 +2625,10 @@ function drawSessions(){
   let lvBlock='';
   if(lv && !lv.pending){ lvBlock = renderLevels(lv); panels = panels.filter(p=>p[0]!=='Structural level validation'); }
   else if(lv && lv.pending){ const li=panels.findIndex(p=>p[0]==='Structural level validation'); if(li>=0) panels[li]=['Structural level validation',`computing — needs ≥${lv.need||5} equities with ≥71 closed daily bars off the spine (have ${lv.count||0})`,'★★★★☆']; }
+  const an = a.sections && a.sections.anatomy;
+  let anBlock='';
+  if(an && !an.pending){ anBlock = renderAnatomy(an); panels = panels.filter(p=>p[0]!=='Session anatomy'); }
+  else if(an && an.pending){ const ai=panels.findIndex(p=>p[0]==='Session anatomy'); if(ai>=0) panels[ai]=['Session anatomy',`computing — needs ≥${an.need||5} equities with ≥20 complete UTC sessions (have ${an.count||0})`,'★★★☆☆']; }
   const deck = panels.length
     ? `<div class="cp-sub" style="margin:22px 0 10px">On deck</div>`+
       `<div style="display:flex;flex-direction:column;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden">`+
@@ -2579,11 +2638,11 @@ function drawSessions(){
         `<span class="sec" style="font-size:12px;flex:1 1 200px">${p[1]}</span>`+
         `<span class="sec" style="margin-left:auto;font-size:10.5px;opacity:.7;text-transform:uppercase;letter-spacing:.5px">pending</span>`+
         `</div>`).join('')+`</div>`
-    : `<div class="sec" style="margin:22px 0 4px;font-size:12px;opacity:.8">All eight studies live. ◆</div>`;
+    : `<div class="sec" style="margin:22px 0 4px;font-size:12px;opacity:.8">All nine studies live. ◆</div>`;
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
   const regime = a.sections && a.sections.regime;
   const regimeBlock = renderRegime(regime, (state.analytics.regime&&state.analytics.regime.sel)||'all');
-  host.innerHTML=head+regimeBlock+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+lvBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
+  host.innerHTML=head+regimeBlock+cards+bar+flagship+clocks+overlay+dowBlock+clBlock+seBlock+lvBlock+anBlock+deck+`<div class="sec" style="margin-top:12px;font-size:11px">${age}</div>`;
   if(regime) wireRegimeControls();
   if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
   if(dow && !dow.pending) attachDowControls();
