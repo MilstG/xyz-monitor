@@ -4155,6 +4155,17 @@ function fillDrawerNews(){
 function fmtAge(ms){ if(ms==null) return ''; const h=ms/3600000; if(h<1) return Math.max(1,Math.round(ms/60000))+'m'; if(h<48) return h.toFixed(h<10?1:0)+'h'; return (h/24).toFixed(1)+'d'; }
 function sigRecFullPref(){ try{ return localStorage.getItem('xyz-sigrecfull')==='1'; }catch(_){ return false; } }
 function setSigRecFull(v){ try{ localStorage.setItem('xyz-sigrecfull',v?'1':'0'); }catch(_){} renderSignals(); }
+// Per-section collapse for the signals stats area (build 2026.07.24-16): every audit subsection
+// and the Record-by-event strip render as a collapsed header by default — click to open, state
+// persisted per browser. The master audit toggle is unchanged; opening it now reveals a table
+// of contents instead of the whole wall. Section content is NOT in the DOM while collapsed —
+// nothing is curated away, the headers name everything and one click opens any of it.
+const SIGSEC_KEY='xyz-sigsecs';
+function sigSecOpen(){ try{ const v=JSON.parse(localStorage.getItem(SIGSEC_KEY)||'null'); return new Set(Array.isArray(v)?v:[]); }catch(_){ return new Set(); } }
+function sigSecToggle(id){ const s=sigSecOpen(); if(s.has(id)) s.delete(id); else s.add(id);
+  try{ localStorage.setItem(SIGSEC_KEY,JSON.stringify([...s])); }catch(_){} renderSignals(); }
+function sigSec(id,cls,label,tip,body){ const open=sigSecOpen().has(id);
+  return `<div class="${cls} sigsec-h" data-sigsec="${id}" role="button" tabindex="0" aria-expanded="${open?'true':'false'}" data-tip="${tip} \u00b7 click to ${open?'collapse':'open'}">${open?'\u25be':'\u25b8'} ${label}</div>`+(open?body:''); }
 function sigViewPref(){ try{ return localStorage.getItem('xyz-sigview')||'detail'; }catch(_){ return 'detail'; } }
 function sigPrimePref(){ try{ return localStorage.getItem('xyz-sigprime')==='1'; }catch(_){ return false; } }
 function setSigPrime(v){ try{ localStorage.setItem('xyz-sigprime',v?'1':'0'); }catch(_){} renderSignals(); }
@@ -4291,7 +4302,8 @@ function sigRecordHtml(d){
   const recOpen=sigRecFullPref();
   // The audit block (per-event table, calibration, self-tuning, recent resolutions) is
   // retrospective \u2014 collapsed by default behind this header, which carries the headline
-  // numbers either way. The "Record by event" strip above stays as the always-visible summary.
+  // numbers either way. Opened, it reveals per-section collapsed headers (build -16), not the
+  // whole wall; the "Record by event" strip below is likewise a collapsed header by default.
   let s=`<div class="dsec sigrec-tgl" data-recx style="margin-top:22px;cursor:pointer" data-tip="out-of-sample accuracy \u00b7 every fired signal is ledgered at its mark and resolved at its stated horizon under the study\u2019s own sign convention \u00b7 this section is what actually happened after the engine spoke \u2014 the record it must answer to \u00b7 click to ${recOpen?'collapse':'expand the full audit: per-event table, calibration, self-tuning, recent resolutions'}">${recOpen?'\u25be':'\u25b8'} Signal accuracy \u2014 live track record${thr>0||pr?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${pr?'\u2605 prime':''}${pr&&thr>0?' \u00b7 ':''}${thr>0?'move \u2265'+thr+'%':''} claims only</span>`:''}</div>`;
   if(!fired){
     // no early return: the awaiting roster, strategy shadows and self-tuning variants must
@@ -4311,11 +4323,10 @@ function sigRecordHtml(d){
   if(!recOpen) return s;   // collapsed: header + headline totals only; the strip above is the summary
   {   // always render the by-event section when expanded: with zero resolved it is the roster
       // itself — open-only rows plus explicit awaits ("never fired" vs "not wired", stated)
-    s+='<div class="sigrec-sub" data-tip="claimed-vs-live per event type \u2014 the honesty gap, with the stop-aware parallel track">by event</div>';
-    s+='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="stop-aware hit \u00b7 outcomes capped at the void when touched before horizon \u00b7 covers claims resolved since stop-tracking began (build -22) \u2014 n can trail the live column\u2019s">stop hit</th><th class="ss" data-tip="stop-aware median realized">stop med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s stop hit for how many claims were stopped out">stop pf</th><th></th></tr></thead><tbody>';
+    let evt='<table class="sigrec-t"><thead><tr><th>event</th><th data-tip="resolved / still open">n</th><th data-tip="share of resolved claims that resolved positive under the event\u2019s sign convention">live hit</th><th data-tip="median realized outcome across resolved claims">live med</th><th data-tip="profit factor: gross wins \u00f7 gross losses across resolved claims. >1 = the winners outweigh the losers in size, not just count \u2014 hover for the average win vs average loss">pf</th><th data-tip="average of the in-sample medians claimed at fire time \u2014 compare against live med: this is the honesty gap">claimed</th><th class="ss" data-tip="stop-aware hit \u00b7 outcomes capped at the void when touched before horizon \u00b7 covers claims resolved since stop-tracking began (build -22) \u2014 n can trail the live column\u2019s">stop hit</th><th class="ss" data-tip="stop-aware median realized">stop med</th><th class="ss" data-tip="stop-aware profit factor \u2014 hover the row\u2019s stop hit for how many claims were stopped out">stop pf</th><th></th></tr></thead><tbody>';
     for(const ev of [...evs].sort((a,b)=>((rc[b].resolved||0)-(rc[a].resolved||0))||((rc[b].open||0)-(rc[a].open||0)))){ const r=rc[ev]; if(!r.resolved&&!r.open) continue;
       const bad=r.resolved>=10&&r.hit<0.5&&r.med<=0, good=r.resolved>=10&&r.hit>=0.55&&r.med>0;
-      s+=`<tr><td>${esc(EV_LABELS[ev]||ev)}</td><td>${r.resolved}${r.open?` <span class="sec">/${r.open}</span>`:''}</td>`
+      evt+=`<tr><td>${esc(EV_LABELS[ev]||ev)}</td><td>${r.resolved}${r.open?` <span class="sec">/${r.open}</span>`:''}</td>`
         +`<td>${r.hit!=null?`<span class="${r.hit>=0.5?'pos':'neg'}">${Math.round(r.hit*100)}%</span>`:'\u2014'}</td>`
         +`<td>${r.med!=null?`<span class="${r.med>=0?'pos':'neg'}">${r.med>=0?'+':''}${r.med}${r.unit}</span>`:'\u2014'}</td>`
         +`<td>${r.pf!=null?`<span class="${r.pf>=1?'pos':'neg'}" data-tip="${esc(`avg win ${r.avgWin!=null?'+'+r.avgWin+r.unit:'\u2014'} vs avg loss ${r.avgLoss!=null?r.avgLoss+r.unit:'\u2014'}`)}">${r.pf}</span>`:'\u2014'}</td>`
@@ -4328,81 +4339,85 @@ function sigRecordHtml(d){
     // roster members with zero claims: an explicit greyed row, so the roster is always the
     // full roster — "never fired" reads as a fact, not an omission
     for(const ev of ledgerRosterScoped()){ if(rc[ev]) continue;
-      s+=`<tr class="await" data-tip="${esc(`in the ledger roster \u2014 no claim has fired yet under the current gates${ev==='tretest'||ev==='tretestdn'?' \u00b7 stocks/macro universe only: crypto retests never ledger; the next RETEST badge on the stocks Trend board opens the first claim':''}`)}"><td>${esc(EV_LABELS[ev]||ev)}</td><td>0</td><td colspan="7">awaiting first claim</td><td></td></tr>`;
+      evt+=`<tr class="await" data-tip="${esc(`in the ledger roster \u2014 no claim has fired yet under the current gates${ev==='tretest'||ev==='tretestdn'?' \u00b7 stocks/macro universe only: crypto retests never ledger; the next RETEST badge on the stocks Trend board opens the first claim':''}`)}"><td>${esc(EV_LABELS[ev]||ev)}</td><td>0</td><td colspan="7">awaiting first claim</td><td></td></tr>`;
     }
-    s+='</tbody></table>';
+    evt+='</tbody></table>';
+    s+=sigSec('evtable','sigrec-sub','by event','claimed-vs-live per event type \u2014 the honesty gap, with the stop-aware parallel track',evt);
   }
   const rx=rs.recordX;
+  let sl='', cv='';
   if(rx){
-    s+='<div class="sigrec-sub" data-tip="the record cut along the axes that matter: does the score rank outcomes, does the engine read one side better, is form improving, where does it read best">slices</div>';
     if(rx.buckets&&rx.buckets.some(b=>b.n>0)){
-      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="calibration: does the score at fire time actually rank outcomes? If higher buckets don't hit more often, the scoring \u2014 not the events \u2014 needs work.">calibration</span>`;
-      for(const b of rx.buckets) s+=`<span class="sigrec-chip" data-tip="claims fired with score ${esc(b.k)}: ${b.n} resolved">score ${esc(b.k)}: ${b.hit!=null?`<b class="${b.hit>=0.5?'pos':'neg'}">${Math.round(b.hit*100)}%</b>`:'\u2014'} <i>(n=${b.n})</i></span>`;
+      sl+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="calibration: does the score at fire time actually rank outcomes? If higher buckets don't hit more often, the scoring \u2014 not the events \u2014 needs work.">calibration</span>`;
+      for(const b of rx.buckets) sl+=`<span class="sigrec-chip" data-tip="claims fired with score ${esc(b.k)}: ${b.n} resolved">score ${esc(b.k)}: ${b.hit!=null?`<b class="${b.hit>=0.5?'pos':'neg'}">${Math.round(b.hit*100)}%</b>`:'\u2014'} <i>(n=${b.n})</i></span>`;
       s+='</div>';
     }
     if(rx.side&&(rx.side.long.n||rx.side.short.n)){
-      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="resolved claims split by implied direction \u2014 a persistent gap here means the engine reads one side of the tape better than the other">by side</span>`
+      sl+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="resolved claims split by implied direction \u2014 a persistent gap here means the engine reads one side of the tape better than the other">by side</span>`
         +`<span class="sigrec-chip">longs ${rx.side.long.hit!=null?`<b class="${rx.side.long.hit>=0.5?'pos':'neg'}">${Math.round(rx.side.long.hit*100)}%</b>`:'\u2014'} <i>(n=${rx.side.long.n})</i></span>`
         +`<span class="sigrec-chip">shorts ${rx.side.short.hit!=null?`<b class="${rx.side.short.hit>=0.5?'pos':'neg'}">${Math.round(rx.side.short.hit*100)}%</b>`:'\u2014'} <i>(n=${rx.side.short.n})</i></span></div>`;
     }
     if(rx.form&&rx.form.recentN>=10){
       const f=rx.form, up=f.recentHit>=f.allHit;
-      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="recent form vs all-time \u2014 is the engine improving as the blend and caps kick in, or degrading with the regime?">form</span>`
+      sl+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="recent form vs all-time \u2014 is the engine improving as the blend and caps kick in, or degrading with the regime?">form</span>`
         +`<span class="sigrec-chip">last ${f.recentN}: <b class="${f.recentHit>=0.5?'pos':'neg'}">${Math.round(f.recentHit*100)}%</b> ${up?'\u2197':'\u2198'} vs all-time ${Math.round(f.allHit*100)}% <i>(n=${f.allN})</i></span></div>`;
     }
     if(rx.tickers){
       const chip=(x)=>`<span class="sigrec-chip" data-tip="${x.n} resolved claims on ${esc(x.t)}">${esc(x.t)} <b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b> <i>(n=${x.n})</i></span>`;
-      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="which markets this engine actually reads well (\u22655 resolutions each) \u2014 signal quality is not uniform across the universe">reads best</span>${rx.tickers.best.map(chip).join('')}`
+      sl+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="which markets this engine actually reads well (\u22655 resolutions each) \u2014 signal quality is not uniform across the universe">reads best</span>${rx.tickers.best.map(chip).join('')}`
         +`<span class="sigrec-k" style="margin-left:14px">worst</span>${rx.tickers.worst.map(chip).join('')}</div>`;
     }
-    if(SHOW_CLAIM_CURVE&&rx.curve&&rx.curve.length>=5){
-      s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="cumulative R curve \u00b7 equal-weight running sum of every resolved R-united claim in fired order \u00b7 solid: at-horizon outcomes \u00b7 dashed: stop-aware outcomes \u00b7 hover for the claim behind each step">claim equity curve (R) <span style="text-transform:none;letter-spacing:0">\u2014 solid: at-horizon \u00b7 <span style="color:var(--blue)">dashed: stop-aware</span></span></div>`+recCurveSvg(rx.curve);
-    }
+    if(SHOW_CLAIM_CURVE&&rx.curve&&rx.curve.length>=5) cv=recCurveSvg(rx.curve);
   }
   if(rs.confluence&&(rs.confluence.confN||rs.confluence.soloN)){
     const c=rs.confluence;
-    s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="Does agreement actually help? Resolved claims split by whether they fired WITH other conditions on the same name or alone. Once both sides have 15+ resolutions, the confluence score bonus scales to this measured lift \u2014 and drops to zero if agreement doesn't prove out.">confluence</span>`
+    sl+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="Does agreement actually help? Resolved claims split by whether they fired WITH other conditions on the same name or alone. Once both sides have 15+ resolutions, the confluence score bonus scales to this measured lift \u2014 and drops to zero if agreement doesn't prove out.">confluence</span>`
       +`<span class="sigrec-chip">with company ${c.confN&&c.confHit!=null?`<b class="${c.confHit>=(c.soloHit||0)?'pos':'neg'}">${Math.round(c.confHit*100)}%</b>`:'\u2014'} <i>(n=${c.confN||0})</i></span>`
       +`<span class="sigrec-chip">solo ${c.soloN&&c.soloHit!=null?`<b>${Math.round(c.soloHit*100)}%</b>`:'\u2014'} <i>(n=${c.soloN||0})</i></span>`
       +`<span class="sigrec-chip" data-tip="${c.confN>=15&&c.soloN>=15?'earned from the measured lift':'default until 15+ resolutions per side'}">bonus <b>${c.confN>=15&&c.soloN>=15?c.bonus:8}</b>/condition</span></div>`;
   }
+  if(sl) s+=sigSec('slices','sigrec-sub','slices','the record cut along the axes that matter \u2014 calibration, by side, form, reads best, confluence \u00b7 does the score rank outcomes, does the engine read one side better, is form improving',sl);
+  if(cv) s+=sigSec('curve','sigrec-sub','claim equity curve (R) \u2014 solid: at-horizon \u00b7 dashed: stop-aware','cumulative R curve \u00b7 equal-weight running sum of every resolved R-united claim in fired order \u00b7 hover for the claim behind each step',cv);
   if(d&&d.variants&&d.variants.length){
-    s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="Bounded self-improvement: each gated event runs 2\u20133 candidate thresholds. Only the incumbent emits visible signals \u2014 but ALL variants (incumbent included) silently ledger shadow claims on identical bookkeeping, so the comparison is out-of-sample and apples-to-apples. A challenger is promoted only with \u226530 resolutions on BOTH sides, expectancy beating the incumbent by \u22650.08 native units and positive, and no hit-rate collapse. Promotions are logged, persisted, and reversible by the same rule. This searches a small fixed hypothesis space under out-of-sample discipline \u2014 it cannot re-fit freely.">self-tuning (shadow variants)</div>`;
+    let tun='';
     for(const v of d.variants){
-      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="${esc('trigger parameter: '+v.param+' \u2014 live signals currently fire at '+v.param+v.cur)}">${esc(EV_LABELS[v.ev]||v.ev)}</span>`;
+      tun+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="${esc('trigger parameter: '+v.param+' \u2014 live signals currently fire at '+v.param+v.cur)}">${esc(EV_LABELS[v.ev]||v.ev)}</span>`;
       for(const x of v.vals){
-        s+=`<span class="sigrec-chip${x.inc?' inc':''}" data-tip="${esc(`${v.param}${x.v} \u2014 ${x.inc?'INCUMBENT: the threshold live signals use':'shadow challenger: ledgered silently, never shown as a signal'}. ${x.n} resolved shadow claim${x.n===1?'':'s'}${x.n<30?' (promotion needs 30 on both sides)':''}.`)}">${x.inc?'\u2605 ':''}${esc(v.param)}${x.v}${x.hit!=null?` <b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b>`:''}${x.avg!=null?` <span class="${x.avg>=0?'pos':'neg'}">${x.avg>=0?'+':''}${x.avg}${v.unit}</span>`:''} <i>(n=${x.n})</i></span>`;
+        tun+=`<span class="sigrec-chip${x.inc?' inc':''}" data-tip="${esc(`${v.param}${x.v} \u2014 ${x.inc?'INCUMBENT: the threshold live signals use':'shadow challenger: ledgered silently, never shown as a signal'}. ${x.n} resolved shadow claim${x.n===1?'':'s'}${x.n<30?' (promotion needs 30 on both sides)':''}.`)}">${x.inc?'\u2605 ':''}${esc(v.param)}${x.v}${x.hit!=null?` <b class="${x.hit>=0.5?'pos':'neg'}">${Math.round(x.hit*100)}%</b>`:''}${x.avg!=null?` <span class="${x.avg>=0?'pos':'neg'}">${x.avg>=0?'+':''}${x.avg}${v.unit}</span>`:''} <i>(n=${x.n})</i></span>`;
       }
       if(v.hist&&v.hist.length){ const h=v.hist[v.hist.length-1];
-        s+=`<span class="sec" style="font-size:10px" data-tip="${esc(`most recent promotion: incumbent ${h.incAvg}${v.unit} on n=${h.incN} vs challenger ${h.chAvg}${v.unit} on n=${h.chN} \u2014 out-of-sample shadow claims only`)}">promoted ${h.from}\u2192${h.to} on n=${h.chN} out-of-sample</span>`; }
-      s+='</div>';
+        tun+=`<span class="sec" style="font-size:10px" data-tip="${esc(`most recent promotion: incumbent ${h.incAvg}${v.unit} on n=${h.incN} vs challenger ${h.chAvg}${v.unit} on n=${h.chN} \u2014 out-of-sample shadow claims only`)}">promoted ${h.from}\u2192${h.to} on n=${h.chN} out-of-sample</span>`; }
+      tun+='</div>';
     }
+    s+=sigSec('tuning','sigrec-sub','self-tuning (shadow variants)',`Bounded self-improvement: each gated event runs 2\u20133 candidate thresholds. Only the incumbent emits visible signals \u2014 but ALL variants (incumbent included) silently ledger shadow claims on identical bookkeeping, so the comparison is out-of-sample and apples-to-apples. A challenger is promoted only with \u226530 resolutions on BOTH sides, expectancy beating the incumbent by \u22650.08 native units and positive, and no hit-rate collapse. Promotions are logged, persisted, and reversible by the same rule. This searches a small fixed hypothesis space under out-of-sample discipline \u2014 it cannot re-fit freely.`,tun);
   }
   const shPanel=d&&d.shadows&&d.shadows.xyz;
   if(shPanel&&shPanel.length){
-    s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px" data-tip="Strategy shadows: whole candidate STRATEGIES (not threshold tweaks) earning an out-of-sample record before any promotion. Every claim carries frozen side/void/target at fire, resolves stop-aware, and is episode-deduped like everything else \u2014 and NONE of it touches the live board. This panel is the entire record; nothing is curated away. A strategy that never earns anything simply never surfaces.">strategy shadows (earning their record)</div>`;
+    let shd='';
     for(const g of shPanel){
-      s+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="${esc(g.tip)}">${esc(g.label)}</span>`;
+      shd+=`<div class="sigrec-xr"><span class="sigrec-k" data-tip="${esc(g.tip)}">${esc(g.label)}</span>`;
       for(const r of g.rows){
         const pre=r.tag?esc(r.tag)+' ':'';
         if(r.n){
-          s+=`<span class="sigrec-chip" data-tip="${esc(`${r.n} resolved out-of-sample claim${r.n===1?'':'s'}, outcomes in ${g.unit}${r.avgS!=null?' \u00b7 stop = disciplined leg, resolved against the frozen void':''}${r.open?` \u00b7 ${r.open} still open`:''}`)}">${pre}<b class="${r.hit>=0.5?'pos':'neg'}">${Math.round(r.hit*100)}%</b> <span class="${r.avg>=0?'pos':'neg'}">${r.avg>=0?'+':''}${r.avg}${g.unit}</span>${r.avgS!=null?` \u00b7 stop <span class="${r.avgS>=0?'pos':'neg'}">${r.avgS>=0?'+':''}${r.avgS}${g.unit}</span>`:''} <i>(n=${r.n}${r.open?` \u00b7 ${r.open} open`:''})</i></span>`;
+          shd+=`<span class="sigrec-chip" data-tip="${esc(`${r.n} resolved out-of-sample claim${r.n===1?'':'s'}, outcomes in ${g.unit}${r.avgS!=null?' \u00b7 stop = disciplined leg, resolved against the frozen void':''}${r.open?` \u00b7 ${r.open} still open`:''}`)}">${pre}<b class="${r.hit>=0.5?'pos':'neg'}">${Math.round(r.hit*100)}%</b> <span class="${r.avg>=0?'pos':'neg'}">${r.avg>=0?'+':''}${r.avg}${g.unit}</span>${r.avgS!=null?` \u00b7 stop <span class="${r.avgS>=0?'pos':'neg'}">${r.avgS>=0?'+':''}${r.avgS}${g.unit}</span>`:''} <i>(n=${r.n}${r.open?` \u00b7 ${r.open} open`:''})</i></span>`;
         } else if(r.open){
-          s+=`<span class="sigrec-chip" data-tip="claims are open and resolving \u2014 the first outcomes land at their horizons">${pre}<b>${r.open} open</b> <i>\u00b7 none resolved yet</i></span>`;
+          shd+=`<span class="sigrec-chip" data-tip="claims are open and resolving \u2014 the first outcomes land at their horizons">${pre}<b>${r.open} open</b> <i>\u00b7 none resolved yet</i></span>`;
         } else {
-          s+=`<span class="sigrec-chip" style="border-style:dashed" data-tip="wired and watching \u2014 no market has met the fire conditions yet">${pre}awaiting first fire</span>`;
+          shd+=`<span class="sigrec-chip" style="border-style:dashed" data-tip="wired and watching \u2014 no market has met the fire conditions yet">${pre}awaiting first fire</span>`;
         }
       }
-      s+='</div>';
+      shd+='</div>';
     }
-    s+=`<div class="sec" style="font-size:10.5px;margin-top:4px">shadow claims only \u2014 never shown as live signals \u00b7 promotion requires an earned record</div>`;
+    shd+=`<div class="sec" style="font-size:10.5px;margin-top:4px">shadow claims only \u2014 never shown as live signals \u00b7 promotion requires an earned record</div>`;
+    s+=sigSec('shadows','sigrec-sub','strategy shadows (earning their record)',`Strategy shadows: whole candidate STRATEGIES (not threshold tweaks) earning an out-of-sample record before any promotion. Every claim carries frozen side/void/target at fire, resolves stop-aware, and is episode-deduped like everything else \u2014 and NONE of it touches the live board. This panel is the entire record; nothing is curated away. A strategy that never earns anything simply never surfaces.`,shd);
   }
   if(rs.recent&&rs.recent.length){
-    s+=`<div class="sec" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 4px" data-tip="the most recent claims to reach their horizon and get scored">recent resolutions</div><div class="sigrec-recent">`;
+    let res=`<div class="sigrec-recent">`;
     for(const e of rs.recent){
-      s+=`<span class="recr ${e.win?'w':'l'}" data-tip="${esc(`${e.ticker} \u00b7 ${EV_LABELS[e.ev]||e.ev} \u00b7 fired ${new Date(e.t0).toLocaleString()}, resolved ${new Date(e.tR).toLocaleString()} \u2014 at-horizon ${e.realized>=0?'+':''}${e.realized}${e.unit}${e.realizedS!=null?`; stop-aware ${e.realizedS>=0?'+':''}${e.realizedS}${e.unit}${e.stopped?' (void level touched before horizon)':''}`:''}`)}">${e.stopped?'\u26d4 ':''}${esc(e.ticker)} <b class="${e.win?'pos':'neg'}">${e.realized>=0?'+':''}${e.realized}${e.unit}</b></span>`;
+      res+=`<span class="recr ${e.win?'w':'l'}" data-tip="${esc(`${e.ticker} \u00b7 ${EV_LABELS[e.ev]||e.ev} \u00b7 fired ${new Date(e.t0).toLocaleString()}, resolved ${new Date(e.tR).toLocaleString()} \u2014 at-horizon ${e.realized>=0?'+':''}${e.realized}${e.unit}${e.realizedS!=null?`; stop-aware ${e.realizedS>=0?'+':''}${e.realizedS}${e.unit}${e.stopped?' (void level touched before horizon)':''}`:''}`)}">${e.stopped?'\u26d4 ':''}${esc(e.ticker)} <b class="${e.win?'pos':'neg'}">${e.realized>=0?'+':''}${e.realized}${e.unit}</b></span>`;
     }
-    s+='</div>';
+    res+='</div>';
+    s+=sigSec('resolutions','sigrec-sub','recent resolutions','the most recent claims to reach their horizon and get scored',res);
   }
   return s;
 }
@@ -4428,7 +4443,7 @@ function renderSignals(){
   // ondrift, trend retests) are excluded in crypto scope, where "awaiting" would be a lie.
   {   // always render the strip: on an empty scoped record it IS the roster — every applicable
       // event as an explicit "awaiting first claim" chip, never a vanished section
-    rec='<div class="dsec" style="margin-top:22px" data-tip="compact per-event record \u2014 the same ledger the accuracy table details below, one chip per event type">Record by event</div><div class="recstrip">';
+    let recBody='<div class="recstrip">';
     // record-first ordering: proven/measured entries (by sample size) up top, open-but-unresolved
     // next, roster members awaiting their first claim at the bottom — informational rows never
     // outrank rows with actual outcomes
@@ -4439,12 +4454,12 @@ function renderSignals(){
         : `${r.open||0} open, none resolved yet`;
       const bad = r.resolved>=10 && r.hit<0.5 && r.med<=0;
       const good = r.resolved>=10 && r.hit>=0.55 && r.med>0;
-      rec+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 out-of-sample record: every firing ledgered at its mark, resolved at the stated horizon under the study\u2019s own sign convention \u00b7 what actually happened after the engine spoke`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
+      recBody+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 out-of-sample record: every firing ledgered at its mark, resolved at the stated horizon under the study\u2019s own sign convention \u00b7 what actually happened after the engine spoke`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
     }
     for(const ev of ledgerRosterScoped()){ if(recSrc[ev]) continue;
-      rec+=`<span class="rec await" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 in the ledger roster \u2014 no claim has fired yet under the current gates${ev==='tretest'||ev==='tretestdn'?' (stocks/macro universe only: crypto retests never ledger)':''}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> awaiting first claim</span>`;
+      recBody+=`<span class="rec await" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 in the ledger roster \u2014 no claim has fired yet under the current gates${ev==='tretest'||ev==='tretestdn'?' (stocks/macro universe only: crypto retests never ledger)':''}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> awaiting first claim</span>`;
     }
-    rec+='</div>';
+    recBody+='</div>';
     // Earnings-conditioned split: shown only past n>=5 resolved earnings-window claims per
     // event — below that it's accounting, not evidence. Both halves shown so the comparison
     // is honest; units are the event's own (gap %, others R).
@@ -4455,8 +4470,9 @@ function renderSignals(){
         const f=(x)=>x?`${Math.round((x.hit||0)*100)}% hit · avg ${x.avg>=0?'+':''}${x.avg} (n=${x.n})`:'no ordinary sample yet';
         chips+=`<span class="rec" data-tip="resolved claims split by the earnings tag: claims in force within 1 ET day of a scheduled print vs all other claims of the same event. Same sign convention and units as the main record. Thin samples — a sizing prior in the making, not yet a proven split.">· <b>${esc(EV_LABELS[ev]||ev)}</b> thru earnings: ${f(sp.eg)} vs ordinary ${f(sp.reg)}</span>`;
       }
-      if(chips) rec+=`<div class="recstrip" style="margin-top:4px">${chips}</div>`;
+      if(chips) recBody+=`<div class="recstrip" style="margin-top:4px">${chips}</div>`;
     }
+    rec='<div style="margin-top:22px"></div>'+sigSec('recstrip','dsec','Record by event','compact per-event record \u2014 the same ledger the accuracy table details, one chip per event type \u00b7 includes the earnings-conditioned split where n allows',recBody);
   }
   if(!d||!d.signals||!d.signals.length){
     box.innerHTML=intro+`<div class="msg">No unusual stocks/macro conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
@@ -4500,6 +4516,9 @@ function bindSigControls(box){
   box.querySelectorAll('.sigcard[data-coll] .sigcard-h').forEach(h=>h.addEventListener('click',(ev)=>{ if(ev.target.closest('.sig-tick'))return; sigExpanded.delete(h.parentNode.dataset.coll); renderSignals(); }));
   box.querySelectorAll('[data-lowx]').forEach(b=>b.addEventListener('click',()=>{ state._sigLow=!state._sigLow; renderSignals(); }));
   box.querySelectorAll('[data-recx]').forEach(b=>b.addEventListener('click',()=>{ setSigRecFull(!sigRecFullPref()); }));
+  box.querySelectorAll('[data-sigsec]').forEach(b=>{ const go=()=>sigSecToggle(b.dataset.sigsec);
+    b.addEventListener('click',go);
+    b.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); go(); } }); });
 }
 
 // ===== sectors tab =====

@@ -975,3 +975,8 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sg-pend .sp-d{color:var(--muted);font-size:12px;flex:1 1 200px}
 .sg-pend .sp-t{margin-left:auto;color:var(--muted);font-size:10.5px;opacity:.9;text-transform:uppercase;letter-spacing:.5px}
 @media(max-width:640px){ .sg-v{min-width:0;flex-basis:100%;order:9} }
+
+/* Signals stats: per-section collapse headers (-16) */
+.sigsec-h{cursor:pointer;user-select:none}
+.sigsec-h:hover{color:var(--text)}
+.sigsec-h:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
