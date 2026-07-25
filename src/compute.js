@@ -1247,6 +1247,199 @@ function levelStudy(events, opts) {
     })() };
 }
 
+// ---- session anatomy (pure) ------------------------------------------------------------------
+// Per-UTC-day session records off the hourly spine, powering four descriptive studies in one pass:
+// excursion from the open (the denominator that makes any level's touch rate readable), where the
+// open sat in the day's eventual range, Monday's range as a weekly container, and open revisits
+// ("naked opens"). DESCRIPTIVE base rates, not signals: openQ in particular conditions on the
+// realized range, so its splits are readable only after the fact — the UI says so. Nothing here
+// fires a ledger event.
+const DAY_MS = 86400 * 1000;
+//
+// sessionRecords: packed hourly [t,o,h,l,c,v] ascending -> one record per COMPLETE UTC day.
+//   minBars (default 20) filters spine-gap days; the current (forming) UTC day is always excluded.
+//   Raw fields only — sd-normalization happens in anatomyEnrich so the freeze is testable alone.
+function sessionRecords(hourly, opts) {
+  const o = opts || {};
+  const minBars = Number.isFinite(o.minBars) ? o.minBars : 20;
+  const nowDay = Math.floor((Number.isFinite(o.now) ? o.now : Date.now()) / DAY_MS) * DAY_MS;
+  if (!Array.isArray(hourly) || hourly.length < minBars) return [];
+  const byDay = new Map();
+  for (const k of hourly) {
+    const t = +k[0];
+    if (!Number.isFinite(t)) continue;
+    const d = Math.floor(t / DAY_MS) * DAY_MS;
+    if (d >= nowDay) continue;                               // forming day: partial extremes, non-final close
+    let a = byDay.get(d); if (!a) byDay.set(d, a = []);
+    a.push(k);
+  }
+  const out = [];
+  for (const [d, bars] of [...byDay.entries()].sort((x, y) => x[0] - y[0])) {
+    if (bars.length < minBars) continue;                     // spine-gap day — a partial session is not a session
+    bars.sort((x, y) => x[0] - y[0]);
+    const op = +bars[0][1], cl = +bars[bars.length - 1][4];
+    if (!(op > 0) || !(cl > 0)) continue;
+    let hi = -Infinity, lo = Infinity, hiI = 0, loI = 0;
+    for (let i = 0; i < bars.length; i++) {
+      const h = +bars[i][2], l = +bars[i][3];
+      if (Number.isFinite(h) && h > hi) { hi = h; hiI = i; }
+      if (Number.isFinite(l) && l < lo) { lo = l; loI = i; }
+    }
+    if (!(hi > 0) || !(lo > 0) || !(hi >= lo)) continue;
+    const rng = hi - lo;
+    // openQ: which quarter of the day's EVENTUAL range the open landed in (1 = lowest). A
+    // zero-range day has no quarters — openQ null, excluded from the split downstream.
+    const openQ = rng > 0 ? Math.min(4, 1 + Math.floor((op - lo) / rng * 4)) : null;
+    out.push({ t: d, o: op, h: hi, l: lo, c: cl, bars: bars.length,
+      mfeUpPct: +((hi - op) / op * 100).toFixed(4),
+      mfeDnPct: +((op - lo) / op * 100).toFixed(4),
+      rangePct: +(rng / op * 100).toFixed(4),
+      openQ, closedAbove: cl > op,
+      firstHrExt: hiI === 0 || loI === 0 });                 // an extreme printed in the session's first spine hour
+  }
+  return out;
+}
+// anatomyEnrich: stamp each record with the trailing daily-return sd FROZEN before its own session
+// (returns up to the PRIOR close only — the same no-lookahead discipline as sdAt), then express the
+// excursions in that unit. Records before the sd warms up carry sdPrev null and are excluded from
+// every sd-denominated stat — never silently rescaled.
+function anatomyEnrich(records) {
+  const rets = [];
+  for (let i = 1; i < records.length; i++) {
+    const a = records[i - 1].c, b = records[i].c;
+    rets.push(a > 0 && b > 0 ? (b / a - 1) * 100 : NaN);
+  }
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    const sd = retStd(rets.slice(Math.max(0, i - 31), Math.max(0, i - 1)), 15);   // window ends at r[i-1]'s return: strictly pre-session
+    r.sdPrev = sd != null ? +sd.toFixed(4) : null;
+    r.mfeUpSd = sd > 0 ? +(r.mfeUpPct / sd).toFixed(3) : null;
+    r.mfeDnSd = sd > 0 ? +(r.mfeDnPct / sd).toFixed(3) : null;
+    r.rangeSd = sd > 0 ? +(r.rangePct / sd).toFixed(3) : null;
+  }
+  return records;
+}
+// mondayStats: ISO-week events for one ticker. Monday's [low, high] as the container; the rest of
+// the week (Tue..Sun on a 24/7 book) either stays inside or breaks. With daily granularity a
+// session that pierces BOTH sides cannot be ordered intraday — that is a "both" event, counted
+// separately rather than guessed.
+function mondayStats(records) {
+  const byWeek = new Map();
+  for (const r of records) {
+    const dow = new Date(r.t).getUTCDay();                   // 0 Sun .. 6 Sat
+    const wk = r.t - (dow === 0 ? 6 : dow - 1) * DAY_MS;     // Monday-anchored week key
+    let w = byWeek.get(wk); if (!w) byWeek.set(wk, w = {});
+    w[dow] = r;
+  }
+  const events = [];
+  for (const [wk, w] of [...byWeek.entries()].sort((a, b) => a[0] - b[0])) {
+    const mon = w[1];
+    if (!mon) continue;
+    const rest = [2, 3, 4, 5, 6, 0].map((d) => w[d]).filter(Boolean);
+    if (rest.length < 3) continue;                           // a week the spine barely covers proves nothing
+    let brokeDir = null, daysTo = null;
+    for (let i = 0; i < rest.length; i++) {
+      const up = rest[i].h > mon.h, dn = rest[i].l < mon.l;
+      if (!up && !dn) continue;
+      brokeDir = up && dn ? "both" : (up ? "up" : "down");
+      daysTo = i + 1;
+      break;
+    }
+    events.push({ wk, contained: brokeDir == null, dir: brokeDir, daysTo, rest: rest.length });
+  }
+  return events;
+}
+// nakedStats: for each session's OPEN, was it traded back through within the next H sessions?
+// Anchors without full forward coverage at a horizon are excluded from that horizon (honest
+// truncation, never a survivorship-flavored partial count).
+const NAKED_HORIZONS = [1, 3, 5, 10];
+function nakedStats(records) {
+  const out = [];
+  for (let i = 0; i < records.length; i++) {
+    const O = records[i].o;
+    if (!(O > 0)) continue;
+    const ev = { t: records[i].t, rev: {} };
+    for (const H of NAKED_HORIZONS) {
+      if (i + H >= records.length) { ev.rev[H] = null; continue; }
+      let hit = false;
+      for (let j = i + 1; j <= i + H; j++) if (records[j].l <= O && O <= records[j].h) { hit = true; break; }
+      ev.rev[H] = hit;
+    }
+    out.push(ev);
+  }
+  return out;
+}
+// anatomyPool: the served aggregate. One tape day moves every name at once, so ticker-sessions are
+// not independent — every rate is a cross-sectional mean per day (>= minCross names) averaged
+// across days, and the published n is the DAY count. The MFE histogram is pooled ticker-sessions
+// (a shape, not a rate) with both counts disclosed.
+const MFE_EDGES = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5];
+function anatomyPool(perTicker, opts) {
+  const o = opts || {};
+  const minCross = Number.isFinite(o.minCross) ? o.minCross : 3;
+  const q4 = (x) => +x.toFixed(4);
+  const dayMean = (cells) => {   // cells: Map day -> number[] ; -> { rate, nDays }
+    let s = 0, n = 0;
+    for (const a of cells.values()) if (a.length >= minCross) { s += a.reduce((p, v) => p + v, 0) / a.length; n++; }
+    return n ? { rate: q4(s / n), nDays: n } : { rate: null, nDays: n };
+  };
+  const push = (m, k, v) => { let a = m.get(k); if (!a) m.set(k, a = []); a.push(v); };
+  const upShare = new Array(MFE_EDGES.length + 1).fill(0), dnShare = new Array(MFE_EDGES.length + 1).fill(0);
+  const upAll = [], dnAll = [];
+  const qCells = [1, 2, 3, 4].map(() => ({ ca: new Map(), fh: new Map(), rg: new Map(), nTS: 0 }));
+  const mondayByWk = new Map(), nakedByDay = NAKED_HORIZONS.map(() => new Map());
+  let tickerSessions = 0; const daySet = new Set(); let sdSessions = 0;
+  for (const tk of perTicker) {
+    for (const r of tk.records) {
+      tickerSessions++; daySet.add(r.t);
+      if (r.mfeUpSd != null) {
+        sdSessions++;
+        upAll.push(r.mfeUpSd); dnAll.push(r.mfeDnSd);
+        const bi = (v) => { let i = 0; while (i < MFE_EDGES.length && v > MFE_EDGES[i]) i++; return i; };
+        upShare[bi(r.mfeUpSd)]++; dnShare[bi(r.mfeDnSd)]++;
+      }
+      if (r.openQ != null) {
+        const c = qCells[r.openQ - 1]; c.nTS++;
+        push(c.ca, r.t, r.closedAbove ? 1 : 0);
+        push(c.fh, r.t, r.firstHrExt ? 1 : 0);
+        if (r.rangeSd != null) push(c.rg, r.t, r.rangeSd);
+      }
+    }
+    for (const e of tk.monday) push(mondayByWk, e.wk, e);
+    for (const e of tk.naked) NAKED_HORIZONS.forEach((H, i) => { if (e.rev[H] != null) push(nakedByDay[i], e.t, e.rev[H] ? 1 : 0); });
+  }
+  const quartiles = qCells.map((c, i) => {
+    const ca = dayMean(c.ca), fh = dayMean(c.fh);
+    const dm = []; for (const a of c.rg.values()) if (a.length >= minCross) dm.push(a.reduce((p, v) => p + v, 0) / a.length);
+    return { q: i + 1, closedAbove: ca.rate, firstHr: fh.rate, nDays: ca.nDays, nTS: c.nTS,
+      medRangeSd: dm.length ? +median(dm).toFixed(3) : null };
+  });
+  let wContained = 0, wN = 0; const dirTot = { up: 0, down: 0, both: 0 }; const daysToAll = [];
+  for (const evs of mondayByWk.values()) {
+    if (evs.length < minCross) continue;
+    wN++;
+    wContained += evs.filter((e) => e.contained).length / evs.length;
+    for (const e of evs) { if (e.dir) dirTot[e.dir]++; if (e.daysTo != null) daysToAll.push(e.daysTo); }
+  }
+  const dirN = dirTot.up + dirTot.down + dirTot.both;
+  const naked = { horizons: NAKED_HORIZONS,
+    revisit: nakedByDay.map((m) => dayMean(m).rate),
+    nDays: nakedByDay.map((m) => dayMean(m).nDays) };
+  const shareOf = (a, tot) => a.map((x) => (tot ? q4(x / tot) : 0));
+  return {
+    tickers: perTicker.length, tickerSessions, days: daySet.size, sdSessions,
+    mfe: { edges: MFE_EDGES, upShare: shareOf(upShare, sdSessions), dnShare: shareOf(dnShare, sdSessions),
+      medUpSd: upAll.length ? +median(upAll).toFixed(3) : null,
+      medDnSd: dnAll.length ? +median(dnAll).toFixed(3) : null, n: sdSessions },
+    quartiles,
+    monday: { weeks: wN, contained: wN ? q4(wContained / wN) : null,
+      breakUp: dirN ? q4(dirTot.up / dirN) : null, breakDown: dirN ? q4(dirTot.down / dirN) : null,
+      breakBoth: dirN ? q4(dirTot.both / dirN) : null,
+      medDaysToBreak: daysToAll.length ? median(daysToAll) : null, nBreaks: dirN },
+    naked };
+}
+
+// ---- served-index cache busting (pure) -----------------------------------------------------
 // Stamps ?v=<build> on the two client asset tags so browsers refetch exactly when the build
 // changes and never otherwise. The -84 lesson: with bare asset tags, a deploy updates the
 // server while browsers silently keep running last week's client — the API served 281
@@ -2223,7 +2416,9 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
   // structural-level outcome study (build 2026.07.24-10): does detectLevels output actually hold?
-  normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K };
+  normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K,
+  // session anatomy (build 2026.07.24-11): excursion / open-quartile / Monday range / naked opens
+  sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, MFE_EDGES, NAKED_HORIZONS };
 
 // ---- stop geometry validation ----------------------------------------------------------------
 // An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it

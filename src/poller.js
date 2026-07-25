@@ -5,7 +5,7 @@ const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -2347,7 +2347,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const rgSig = ["all", "crypto", "stocks"].map((k) => { const d = regime[k]; return d && !d.pending ? `${Math.round(d.lev.totalOi || 0)}|${d.crowd.netFundApr || 0}|${d.crowd.netCrowd || 0}|${(d.series || []).length}` : "0"; }).join(";");
     const lvSt = buildLevelsStudy();   // computed once; reused in sections below so sig and payload can never disagree
     const lvSig = lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`;
-    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}`;
+    const anSt = buildAnatomy();       // same one-computation contract as the levels study
+    const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday.weeks}:${anSt.naked.revisit.join(",")}`;
+    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
     if (sig !== analyticsSig) { analyticsSig = sig; analyticsVer = Date.now(); }   // content changed -> new ETag
     analyticsCache = {
       ts: Date.now(),
@@ -2368,6 +2370,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           clusters: buildClusters(hourClock),
           seasonality: buildSeasonality(),
           levels: lvSt,
+          anatomy: anSt,
         };
       })(),
     };
@@ -2622,6 +2625,35 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     st.coverage = { tickers: contributing, skippedThin, windowDays: HOURLY_HISTORY_DAYS,
       minBars: LVL_MINBARS, stride: LVL_STRIDE };
     return st;
+  }
+
+  // ---- session anatomy (served in sections.anatomy) ------------------------------------------
+  // Four descriptive base-rate studies off one per-UTC-day record pass: excursion from the open,
+  // open-quartile splits, Monday-range containment, naked-open revisits. Same scope wall as every
+  // study (xyz equities via activeMarkets), same day-pooled honesty (rates are cross-sectional
+  // means per day averaged across days; the published n is days, not ticker-sessions), same
+  // memo contract as the levels study: per-ticker records recompute only when the spine object
+  // itself is replaced (~10 min), so the 3-min analytics cadence reads cache.
+  const ANAT_MIN_EQ = 5, ANAT_MIN_SESS = 20, ANAT_MIN_CROSS = 3;
+  function buildAnatomy() {
+    const eq = activeMarkets().filter((r) => !r.delisted && classifyCached(r.ticker).assetClass === "Equity");
+    const perTicker = []; let skippedThin = 0;
+    for (const r of eq) {
+      const hs = getHourly(r.coin);
+      if (!Array.isArray(hs) || !hs.length) { skippedThin++; continue; }
+      if (r._anSrc !== hs) {
+        r._anSrc = hs;
+        const rec = anatomyEnrich(sessionRecords(hs, {}));
+        r._anRec = rec.length >= ANAT_MIN_SESS
+          ? { records: rec, monday: mondayStats(rec), naked: nakedStats(rec) }
+          : null;
+      }
+      if (r._anRec) perTicker.push(r._anRec); else skippedThin++;
+    }
+    if (perTicker.length < ANAT_MIN_EQ) return { pending: true, count: perTicker.length, need: ANAT_MIN_EQ };
+    const pool = anatomyPool(perTicker, { minCross: ANAT_MIN_CROSS });
+    pool.coverage = { windowDays: HOURLY_HISTORY_DAYS, minSessions: ANAT_MIN_SESS, minCross: ANAT_MIN_CROSS, skippedThin };
+    return pool;
   }
 
 
