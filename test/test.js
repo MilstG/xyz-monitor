@@ -5791,8 +5791,9 @@ test("-17 client + server wiring manifest: dual-universe route, tz-aware rendere
     'scope: "crypto", isCrypto: true, tz: "UTC",',
     "roster: () => mainMarkets().filter",
     "analyticsCryptoCache = payload",
-    'getAnalytics: (scope) => (scope === "crypto"',
-    'buildAnalytics("crypto")',
+    'getAnalytics: (scope) => {',                     // -17 hotfix: self-healing getter (lazy build on a cold cache)
+    'getAnalyticsErr: (scope) =>',                    // and the recorded failure reason the route ships
+    'buildAnalyticsSafe("crypto")',   // -17 hotfix: all builds route through the error-recording wrapper
   ]) assert.ok(pol.includes(pin), `poller.js missing -17 pin: ${pin}`);
   assert.ok(srv.includes('req.query && req.query.u === "crypto"'), "server routes ?u=crypto to the crypto analytics cache");
   // compute: crypto anchors exported, clocks accept a tz
@@ -5819,18 +5820,57 @@ test("-17 client + server wiring manifest: dual-universe route, tz-aware rendere
 //   2. The analytics ETag keyed on dataTs only; both universes stamp dataTs with Date.now(), so a
 //      same-millisecond boot could hand them identical ETags and let the browser 304 one universe's
 //      request with the other's cached body.
-test("-17 hotfix: boot analytics builds are isolated so a failure can't abort interval registration", () => {
+test("-17 hotfix: the analytics rebuild loop is armed before any throwable boot step", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  // both boot builds are wrapped so a throw is logged, not propagated
-  assert.ok(/try \{ buildAnalytics\("stocks"\); \} catch/.test(pol), "boot stocks build is try/caught");
-  assert.ok(/try \{ buildAnalytics\("crypto"\); \} catch/.test(pol), "boot crypto build is try/caught");
-  // the unguarded one-liner must be gone (boot-specific form: chained after buildDaily())
+  const body = pol.slice(pol.indexOf("async function start() {"));
+  const armIdx = body.indexOf('setInterval(safeTick(() => { buildAnalyticsSafe("stocks")');
+  assert.ok(armIdx > -1, "the analytics rebuild interval must be registered inside start()");
+  // THE invariant this bug taught us: start() runs as poller.start().catch(log), so anything that
+  // throws before the interval is registered silently kills the retry loop and both sessions tabs
+  // sit on "warming up the spines" forever. The loop must therefore be armed before the first await
+  // and before every throwable boot step (universe poll, socket, workers, sqlite probe).
+  const firstAwait = body.indexOf("await ");
+  assert.ok(firstAwait === -1 || armIdx < firstAwait, "rebuild loop must be armed before the first await in start()");
+  for (const later of ["await pollUniverse()", "createUniverseSocket(", "hourlyWorker()", "store.candlesEnabled"]) {
+    const i = body.indexOf(later);
+    if (i > -1) assert.ok(armIdx < i, `rebuild loop must be armed before ${later}`);
+  }
+  // every build path goes through the error-recording wrapper, which never throws
+  assert.ok(/function buildAnalyticsSafe\(scope\) \{[\s\S]*?catch \(e\)/.test(pol), "buildAnalyticsSafe catches and records");
+  assert.ok(pol.includes('buildAnalyticsSafe("stocks"); if (crypto) buildAnalyticsSafe("crypto");   // records the reason on failure; never throws'),
+    "boot builds go through the wrapper");
   assert.ok(!pol.includes('buildDaily(); buildAnalytics("stocks"); if (crypto) buildAnalytics("crypto");'),
-    "the unguarded boot build line must not survive");
-  // the steady-state interval stays safeTick-wrapped and rebuilds both
-  assert.ok(/setInterval\(safeTick\(\(\) => \{ buildAnalytics\("stocks"\); if \(crypto\) buildAnalytics\("crypto"\); \}, "buildAnalytics"\)/.test(pol),
-    "the rebuild interval rebuilds both universes under safeTick");
+    "the original unguarded boot build line must not survive");
+  // exactly one safeTick definition (the hoist must not have left a duplicate)
+  assert.equal((pol.match(/const safeTick = /g) || []).length, 1, "one safeTick definition");
+});
+
+test("-17 hotfix: getAnalytics self-heals a cold cache and the failure reason reaches the client", () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzheal-"));
+  try {
+    const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: true });
+    const HOUR = 3600e3, now = Math.floor(Date.now() / HOUR) * HOUR;
+    const spine = (seed) => { let s = seed; const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+      const out = []; let px = 100; const N = 40 * 24, t0 = now - N * HOUR;
+      for (let i = 0; i < N; i++) { const o = px, c = o * (1 + (rnd() - 0.5) * 0.01); out.push([t0 + i * HOUR, o, Math.max(o, c) * 1.002, Math.min(o, c) * 0.998, c, 1000]); px = c; }
+      return out; };
+    ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL"].forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(3 + i), hourlyTs: now }));
+    ["BTC", "ETH", "SOL", "AVAX", "LINK"].forEach((t, i) => p.seedRowNow(t, { px: 100, hourlyRaw: spine(20 + i), hourlyTs: now }));
+    // start() is NEVER called — the worst case, a boot path that died before any build ran. Pre-fix
+    // this served the empty fallback forever; now the first request repairs the cache itself.
+    const st = p.getAnalytics("stocks"), cr = p.getAnalytics("crypto");
+    assert.ok(st && st.coverage && st.coverage.hourly, "stocks analytics self-heals on first request");
+    assert.ok(cr && cr.coverage && cr.coverage.hourly, "crypto analytics self-heals on first request");
+    assert.equal(st.scope, "stocks"); assert.equal(cr.scope, "crypto");
+    // a healthy build records no error
+    assert.equal(p.getAnalyticsErr("stocks"), "", "no error recorded on a healthy build");
+    assert.equal(p.getAnalyticsErr("crypto"), "");
+    assert.equal(typeof p.getAnalyticsErr, "function", "the error getter is exported for the route");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("-17 hotfix: analytics ETag is scope-namespaced so the two universes can't collide", () => {
