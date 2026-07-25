@@ -4769,3 +4769,288 @@ test("levels -09: manifest — detector, context block, snap rule and prompt con
     "the unfulfillable prompt clause must be gone — it asked for swing data no context ever carried");
   assert.equal((cmp.match(/function detectLevels\(/g) || []).length, 1, "exactly one detectLevels definition");
 });
+
+// ============================================================================================
+// Structural-level outcome study (build 2026.07.24-10). detectLevels already decides which levels
+// this app draws and which levels an AI void may snap to (AI_SNAP_TOL); nothing measured whether
+// they hold. These pin the measurement AND, critically, pin the null: an earlier revision compared
+// touch rates to the continuous first-passage formula 2(1-phi(d/sqrt(h))) and reported that levels
+// REPEL price on pure random walks, because a bar-bracketing touch test under-detects a gappy tape
+// relative to continuous monitoring. The permutation control replaced it. The unbiasedness test
+// below is the guard that stops that class of bug from ever shipping as a finding again.
+// ============================================================================================
+const { normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K } = require("../src/compute");
+
+// deterministic tape generator shared by the study tests (no PRNG dependency, seeded LCG)
+function _walk(seed, n, vol) {
+  let s = seed;
+  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const nrm = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+  const d = []; let px = 100;
+  for (let i = 0; i < (n || 500); i++) {
+    px *= 1 + nrm() * (vol || 0.018);
+    const h = px * (1 + Math.abs(nrm()) * 0.007), l = px * (1 - Math.abs(nrm()) * 0.007);
+    d.push({ t: 1.7e12 + i * 864e5, h: Math.max(h, px), l: Math.min(l, px), c: px });
+  }
+  return d;
+}
+
+test("levels study -10: normCdf and the analytic touch formula are numerically correct", () => {
+  assert.ok(Math.abs(normCdf(0) - 0.5) < 1e-9, "phi(0) = 0.5 exactly");
+  assert.ok(Math.abs(normCdf(1.96) - 0.975) < 5e-5, `phi(1.96) ~ 0.975, got ${normCdf(1.96)}`);
+  assert.ok(Math.abs(normCdf(-1) - 0.158655) < 5e-5, `phi(-1) ~ 0.15866, got ${normCdf(-1)}`);
+  assert.ok(Math.abs(normCdf(2.5) + normCdf(-2.5) - 1) < 1e-9, "symmetric about zero");
+  assert.equal(normCdf(NaN), null, "non-finite input fails closed, never NaN-propagates");
+  // 2(1-phi(d/sqrt(h))) — retained as a reference/reporting quantity, NOT as the study's null
+  assert.ok(Math.abs(touchBaseline(1, 10) - 0.7518) < 1e-3, `d=1,h=10 ~ 0.752, got ${touchBaseline(1, 10)}`);
+  assert.ok(touchBaseline(0, 10) === 1, "a level at zero distance is touched with certainty");
+  assert.ok(touchBaseline(8, 10) < 0.02, "a very distant level is near-impossible in the horizon");
+  assert.equal(touchBaseline(-1, 10), null, "negative distance is rejected");
+  assert.equal(touchBaseline(1, 0), null, "zero horizon is rejected");
+});
+
+test("levels study -10: studyBars mirrors detectLevels' coercion and degrades closes-only bars", () => {
+  const b = studyBars([{ t: 1, h: 11, l: 9, c: 10 }, { t: 2, c: 20 }, { t: 3, h: 5, l: 8, c: 6 },
+    { t: 4, c: 0 }, { t: 5, c: "12", h: "13", l: "11" }, null, { t: 6, c: NaN }]);
+  assert.equal(b.length, 4, "only bars with a usable positive close survive");
+  assert.deepEqual(b[1], { t: 2, h: 20, l: 20, c: 20 }, "closes-only bar becomes a zero-range bar, not a dropped one");
+  assert.ok(b[2].h >= b[2].c && b[2].l <= b[2].c, "a close outside its own range is repaired, matching detectLevels");
+  assert.equal(b[3].c, 12, "string OHLC is coerced (sqlite/feed paths hand back strings)");
+  assert.deepEqual(studyBars(null), [], "non-array input returns empty, never throws");
+});
+
+test("levels study -10: events freeze detection-time attributes and resolve only from later bars", () => {
+  const d = _walk(4242, 400);
+  const out = levelOutcomes(d, 1.8, { k: 3, tauMult: 0.4, minN: 2, max: 8, stride: 5, horizon: 10 });
+  assert.ok(out.n > 50, `enough events to test on, got ${out.n}`);
+  assert.equal(out.horizon, 10); assert.equal(out.stride, 5);
+  for (const e of out.events) {
+    assert.ok(["res", "sup", "flip"].includes(e.side), "side is a detector class");
+    assert.ok(e.nTouch >= 2, "minN is respected — no 1-touch level is scored");
+    assert.ok(e.distSd > 0, "a level at zero distance is skipped, never scored");
+    assert.equal(typeof e.above, "boolean");
+    if (e.touched) {
+      assert.ok(e.bars >= 1 && e.bars <= 10, `touch lands inside the horizon, got ${e.bars}`);
+      assert.equal(typeof e.held, "boolean", "a touched level always resolves hold/break");
+      assert.ok(Number.isFinite(e.beyondSd) && e.beyondSd >= 0, "excursion past the level is measured");
+    } else {
+      assert.equal(e.held, null, "an untouched level makes no hold claim");
+      assert.equal(e.beyondSd, null, "and no excursion claim");
+    }
+  }
+  // No lookahead: truncating the tape to the last detection point must not change any event that
+  // was already fully resolved inside the retained window.
+  const half = levelOutcomes(d.slice(0, 300), 1.8, { k: 3, tauMult: 0.4, minN: 2, max: 8, stride: 5, horizon: 10 });
+  const key = (e) => `${e.t}|${e.v}`;
+  const map = new Map(out.events.map((e) => [key(e), e]));
+  let checked = 0;
+  for (const e of half.events) {
+    const f = map.get(key(e));
+    if (!f) continue;
+    assert.equal(f.touched, e.touched, "prefix-only detection: a resolved event is identical on a longer tape");
+    assert.equal(f.held, e.held, "and its hold verdict is identical");
+    checked++;
+  }
+  assert.ok(checked > 20, `enough overlapping events compared (${checked})`);
+});
+
+test("levels study -10: the permutation control is present, deterministic, and same-distance", () => {
+  const d = _walk(777, 400);
+  const a = levelOutcomes(d, 1.8, { stride: 5, horizon: 10 });
+  const b = levelOutcomes(d, 1.8, { stride: 5, horizon: 10 });
+  assert.deepEqual(a.events, b.events, "no PRNG anywhere — identical input yields byte-identical events");
+  const withCtl = a.events.filter((e) => Number.isFinite(e.plTouch));
+  assert.ok(withCtl.length > a.n * 0.9, "virtually every event carries a control estimate");
+  for (const e of withCtl) {
+    assert.ok(e.plTouch >= 0 && e.plTouch <= 1, "control touch rate is a probability");
+    if (e.plHeld != null) assert.ok(e.plHeld >= 0 && e.plHeld <= 1, "control hold rate is a probability");
+  }
+  assert.ok(PLACEBO_K >= 8, "the control needs enough anchors to be stable");
+});
+
+test("levels study -10: levelStudy buckets by distance, floors thin cells to null, and excess = rate - control", () => {
+  const d = _walk(31337, 500);
+  const ev = levelOutcomes(d, 1.8, { stride: 5, horizon: 10 }).events;
+  const st = levelStudy(ev, { horizon: 10, cellFloor: 20 });
+  assert.equal(st.buckets.length, LVL_EDGES.length, "one bucket per edge");
+  assert.equal(st.buckets[0].lo, 0, "first bucket starts at zero distance");
+  assert.equal(st.buckets[st.buckets.length - 1].hi, LVL_EDGES[LVL_EDGES.length - 1]);
+  for (let i = 1; i < st.buckets.length; i++)
+    assert.equal(st.buckets[i].lo, st.buckets[i - 1].hi, "buckets tile the axis with no gap or overlap");
+  let assigned = 0;
+  for (const b of st.buckets) {
+    assigned += b.n;
+    if (b.n < 20) assert.equal(b.touchRate, null, `a cell under the floor reports null, not a rate on n=${b.n}`);
+    if (b.touchRate != null && b.baseline != null)
+      assert.ok(Math.abs(b.excess - (b.touchRate - b.baseline)) < 1e-4, "excess is exactly rate minus control");
+    assert.ok(b.nTouched <= b.n, "touched count cannot exceed the cell");
+  }
+  assert.equal(assigned + (st.far ? st.far.n : 0), st.n, "every event lands in exactly one bucket or in far");
+  // honest nulls on empty / degenerate input
+  const z = levelStudy([], { horizon: 10 });
+  assert.equal(z.n, 0); assert.equal(z.overall.touchRate, null, "no events -> null rate, never 0%");
+  assert.equal(levelOutcomes(_walk(9, 40), 1.8, {}).n, 0, "history shorter than minBars+horizon yields no events");
+  assert.equal(levelOutcomes(_walk(9, 400), 0, {}).n, 0, "no volatility scale -> no study, rather than a divide-by-zero");
+  assert.equal(levelOutcomes(null, 1.8, {}).n, 0, "null input degrades, never throws");
+});
+
+test("levels study -10: THE NULL — pooled random walks must show no touch edge (guards the analytic-baseline bug)", () => {
+  // An earlier revision used 2(1-phi(d/sqrt(h))) as the null and produced excess of -0.06 to -0.34
+  // on pure noise: a bar-bracketing touch test under-detects a gappy tape, so the continuous
+  // formula is biased high. Any future change that reintroduces an analytic null will fail here.
+  let all = [];
+  for (let k = 0; k < 12; k++)
+    all = all.concat(levelOutcomes(_walk(1000 + k * 77, 500), 1.8, { stride: 5, horizon: 10 }).events);
+  const st = levelStudy(all, { horizon: 10, cellFloor: 40 });
+  assert.ok(st.n > 5000, `pooled sample large enough to bound the null (${st.n})`);
+  const exs = st.buckets.filter((b) => b.excess != null).map((b) => b.excess).concat(st.far && st.far.excess != null ? [st.far.excess] : []);
+  assert.ok(exs.length >= 5, "enough populated buckets to judge");
+  const mean = exs.reduce((a, x) => a + x, 0) / exs.length;
+  assert.ok(Math.abs(mean) < 0.02, `mean excess under the null must be ~0, got ${mean.toFixed(5)}`);
+  assert.ok(Math.max(...exs.map(Math.abs)) < 0.06, `no single bucket may fake an edge, worst = ${Math.max(...exs.map(Math.abs)).toFixed(4)}`);
+  // the high-n far bucket is where the null is tightest and any bias would be unmistakable
+  if (st.far && st.far.n > 1000 && st.far.excess != null)
+    assert.ok(Math.abs(st.far.excess) < 0.01, `far bucket excess must be near-exact, got ${st.far.excess}`);
+});
+
+test("levels study -10: manifest — engine, control and exports are pinned", () => {
+  const fs = require("fs"), path = require("path");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const pin of ["function normCdf(", "function touchBaseline(", "function studyBars(",
+    "function levelOutcomes(", "function levelStudy(",
+    "const LVL_EDGES = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];",
+    "const PLACEBO_K = 24, PLACEBO_STEP = 3;",
+    "normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K };"])
+    assert.ok(cmp.includes(pin), `compute.js missing -10 pin: ${pin}`);
+  for (const f of ["normCdf", "touchBaseline", "studyBars", "levelOutcomes", "levelStudy"])
+    assert.equal((cmp.match(new RegExp("function " + f + "\\(", "g")) || []).length, 1, `exactly one ${f} definition`);
+  // the study must consume the SHIPPING detector, not a private copy or a tuned variant
+  assert.ok(/const lv = detectLevels\(b\.slice\(0, i \+ 1\), px, sd30, dOpts\);/.test(cmp),
+    "levelOutcomes must call detectLevels on the PREFIX with pass-through opts (one code path)");
+  assert.ok(cmp.includes("// The null for a SET of levels is the mean of each level's own touch probability"),
+    "the Jensen note must survive — it explains why grouped cells average per-event controls");
+  assert.ok(!/const bs = rows\.map\(\(e\) => touchBaseline\(e\.distSd, horizon\)\)/.test(cmp),
+    "the analytic null must not return as the study's baseline — it is provably biased here");
+});
+
+test("levels study -10: the hold arm is also unbiased under the null (across-tape SE, not naive)", () => {
+  // The naive pooled reading once showed hold-vs-control at +2.9pp / "3.6 SE" — clustered-sample
+  // noise: up to 8 levels share one detection window, so events are correlated and the naive SE is
+  // ~4x too tight. Across independent tapes the difference is ~0 (measured -0.19pp, t=-0.21 on 40
+  // tapes). This pins that: the per-tape mean difference must stay inside an honest band.
+  const diffs = [];
+  for (let k = 0; k < 14; k++) {
+    const ev = levelOutcomes(_walk(500 + k * 131, 500), 1.8, { stride: 5, horizon: 10 }).events;
+    const t = ev.filter((e) => e.touched);
+    if (t.length < 25) continue;
+    const pc = t.map((e) => e.plHeld).filter(Number.isFinite);
+    if (pc.length < 25) continue;
+    diffs.push(t.filter((e) => e.held).length / t.length - pc.reduce((a, x) => a + x, 0) / pc.length);
+  }
+  assert.ok(diffs.length >= 10, `enough qualifying tapes (${diffs.length})`);
+  const m = diffs.reduce((a, x) => a + x, 0) / diffs.length;
+  assert.ok(Math.abs(m) < 0.035, `mean hold difference under the null must be ~0, got ${(m * 100).toFixed(2)}pp`);
+});
+
+test("levels study -10: overall block carries its own controls, built like any cell", () => {
+  const ev = levelOutcomes(_walk(31337, 500), 1.8, { stride: 5, horizon: 10 }).events;
+  const st = levelStudy(ev, { horizon: 10, cellFloor: 20 });
+  const o = st.overall;
+  assert.ok(Number.isFinite(o.baseline), "overall touch control present");
+  assert.ok(Math.abs(o.excess - (o.touchRate - o.baseline)) < 1e-4, "overall excess = rate - control exactly");
+  if (o.nTouched >= 20) assert.ok(o.holdBaseline == null || (o.holdBaseline >= 0 && o.holdBaseline <= 1), "hold control is a probability when published");
+});
+
+test("levels study -10: poller wiring manifest — section, scope, source, memo, sig", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    "function buildLevelsStudy()",
+    "levels: lvSt,",                                          // sections wired to the ONE precomputed study
+    "const lvSt = buildLevelsStudy();",                       // computed before the sig so ETag and payload agree
+    "const LVL_MIN_EQ = 5;",
+    "const LVL_STRIDE = 5, LVL_HORIZON = 10, LVL_MINBARS = 60, LVL_CELL_FLOOR = 20;",
+    "const db = bucketsFor(r, 24);",                          // spine-derived OHLC dailies — NOT dailyRaw (closes-only after a warm boot would blind the low-side touch test)
+    "const bars = db.slice(0, -1);",                          // forming UTC day excluded — closed bars only
+    "r._lvSrc !== db",                                        // memo on the bucket array's own freshness contract
+    "detectLevels, levelOutcomes, levelStudy,",               // engine imported alongside the detector it audits
+  ]) assert.ok(pol.includes(pin), `poller.js missing -10 wiring pin: ${pin}`);
+  // scope: xyz-pure equities via activeMarkets, matching every other study
+  assert.ok(/buildLevelsStudy\(\) \{\s*\n\s*const eq = activeMarkets\(\)\.filter\(\(r\) => !r\.delisted && classifyCached\(r\.ticker\)\.assetClass === "Equity"\)/.test(pol),
+    "the study must scope to xyz equities through activeMarkets (crypto never enters studies)");
+  // the analytics sig must move when the study moves
+  assert.ok(pol.includes("const lvSig = lvSt.pending ?") && /const sig = `\$\{universe\.length\}[^`]*\$\{lvSig\}`/.test(pol),
+    "levels study signature must feed the /api/analytics ETag");
+  assert.ok(!pol.includes("levels: buildLevelsStudy(),"), "sections must reuse lvSt, never a second computation that could disagree with the sig");
+});
+
+test("levels study -10: client manifest — panel renderers, deck entry, hover contract", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const fn of ["renderLevels", "lvlTouchSvg", "lvlHoldRow", "lvlPct"])
+    assert.equal((app.match(new RegExp("^function " + fn + "\\(", "gm")) || []).length, 1, `exactly one ${fn} definition`);
+  for (const pin of [
+    "a.sections && a.sections.levels",
+    "'Structural level validation'",
+    "lvBlock = renderLevels(lv);",
+    "seBlock+lvBlock+deck",                                   // the panel is actually in the assembled DOM
+    "All eight studies live",                                 // the deck footer counts this study
+    'table class="ptbl"',                                     // reuses the styled panel-table class, no orphan CSS
+    "under the ${st.cellFloor}-event floor, no rate published",   // floored cells are hoverable and explained
+  ]) assert.ok(app.includes(pin), `app.js missing -10 client pin: ${pin}`);
+  // hover contract: every data rect in the touch chart and every table row carries a readout
+  const seg = app.slice(app.indexOf("function lvlTouchSvg"), app.indexOf("function renderLevels"));
+  assert.ok((seg.match(/<title>/g) || []).length >= 3, "chart bars must carry <title> readouts");
+  assert.ok(app.includes('<tr title="${tip}"'), "table rows must carry the full hover readout");
+});
+
+test("levels study -10: end-to-end through the poller — seeded equities produce a served study, thin books stay pending", async () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzlvl-"));
+  try {
+    const store = openStore(dir);
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const HOUR = 3600 * 1000, now = Math.floor(Date.now() / HOUR) * HOUR;
+    // 130 UTC days of hourly bars per name — enough closed daily buckets past minBars+horizon.
+    const spine = (seed) => {
+      let s = seed; const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+      const nrm = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+      const out = []; let px = 100; const N = 130 * 24;
+      for (let i = 0; i < N; i++) {
+        px *= 1 + nrm() * 0.004;
+        const h = px * (1 + Math.abs(nrm()) * 0.002), l = px * (1 - Math.abs(nrm()) * 0.002);
+        out.push([now - (N - i) * HOUR, px, Math.max(h, px), Math.min(l, px), px, 1000]);
+      }
+      return out;
+    };
+    // AAPL/MSFT/NVDA-class tickers classify as Equity through the real classifier.
+    const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
+    names.forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(97 + i * 13), hourlyTs: now }));
+    p.buildAnalyticsNow();
+    const a = p.getAnalytics();
+    assert.ok(a && a.sections && a.sections.levels, "sections.levels served");
+    const lv = a.sections.levels;
+    assert.ok(!lv.pending, `study live with ${names.length} seeded equities, got ${JSON.stringify({ pending: lv.pending, count: lv.count })}`);
+    assert.ok(lv.n > 50, `pooled events across the seeded book (${lv.n})`);
+    assert.equal(lv.coverage.tickers, names.length, "every seeded equity contributes");
+    assert.equal(lv.horizon, 10);
+    assert.ok(Array.isArray(lv.buckets) && lv.buckets.length === 7, "distance buckets served");
+    assert.ok(lv.overall.touchRate == null || Number.isFinite(lv.overall.baseline), "overall control rides along");
+    // ETag: the analytics version must move when the study first lands (sig includes lvSig)
+    const v1 = a.dataTs;
+    assert.ok(v1 > 0, "analytics ETag version stamped");
+    // memo: a second build with an unchanged spine must NOT recompute (events array identity survives)
+    p.buildAnalyticsNow();
+    const b = p.getAnalytics();
+    assert.equal(b.dataTs, v1, "unchanged content -> unchanged ETag version (levels sig is stable)");
+    // pending path: a fresh poller with too few equities reports the honest gate
+    const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    p2.seedRowNow("xyz:AAPL", { px: 100, ticker: "AAPL", hourlyRaw: spine(5), hourlyTs: now });
+    p2.buildAnalyticsNow();
+    const lv2 = p2.getAnalytics().sections.levels;
+    assert.ok(lv2.pending, "one equity -> pending, never a study on a two-name class");
+    assert.equal(lv2.need, 5);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
