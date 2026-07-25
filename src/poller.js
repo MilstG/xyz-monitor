@@ -3733,7 +3733,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (duel.ic.length) log(`Restored score duel: ${duel.ic.length} IC day(s) — the MOM vs MOM+ record carries across this deploy`);
     await pollUniverse();
     seedFundingFromOI();
-    buildSnapshot(); buildDaily(); buildAnalytics("stocks"); if (crypto) buildAnalytics("crypto");
+    buildSnapshot(); buildDaily();
+    // Isolate each universe's boot build: a throw here used to abort the rest of start() — including
+    // the analytics rebuild interval registered further down — so one bad build left BOTH tabs stuck
+    // on "warming up the spines" forever with no retry. Now a failure is logged and the interval still
+    // registers, so the next cycle rebuilds. (-17: the crypto build added a second failure surface.)
+    try { buildAnalytics("stocks"); } catch (e) { log("boot buildAnalytics(stocks) failed (isolated): " + (e && e.message)); }
+    if (crypto) { try { buildAnalytics("crypto"); } catch (e) { log("boot buildAnalytics(crypto) failed (isolated): " + (e && e.message)); } }
     // WebSocket accelerator: real-time price/funding/OI pushes at zero rate-limit weight.
     // While it's healthy the REST universe poll drops to every 5th tick (~150s) — it still
     // owns membership (names / new listings / delistings) and instantly resumes the full
