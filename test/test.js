@@ -1302,7 +1302,7 @@ test("ai report v6: news-grounded context, no-invention rule, crypto positioning
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["cr.fundingPctile31d = fp", "cr.oiChg24Pct",
-    "const AI_SCHEMA_V = 8;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
+    "const AI_SCHEMA_V = 9;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
     "invented news", "rel7dPct", "rel30dPct", "context.crypto",
     // v7 earnings reported-vs-upcoming split
     "earnEntryState(x, now) === \"upcoming\"", "e.reported =",
@@ -3337,7 +3337,7 @@ test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -
   for (const frag of ["AI_MK", "ai-mkleg", "proven-edge signals only", "g.kind==='short'", "distinct signal types at onset", "outTxt", "marksSuppressed"])
     assert.ok(app.includes(frag), `app.js missing -74 marker: ${frag}`);
   assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
-  for (const frag of ["const AI_SCHEMA_V = 8;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
+  for (const frag of ["const AI_SCHEMA_V = 9;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
     assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
 });
 
@@ -4761,7 +4761,7 @@ test("levels -09: manifest — detector, context block, snap rule and prompt con
     assert.ok(cmp.includes(pin), `compute.js missing -09 pin: ${pin}`);
   for (const pin of [
     "const AI_LEVEL_K = 3, AI_LEVEL_TAU = 0.4, AI_LEVEL_MINN = 2, AI_LEVEL_MAX = 8;",
-    "const AI_SNAP_TOL = 0.5;", "const AI_SCHEMA_V = 8;",
+    "const AI_SNAP_TOL = 0.5;", "const AI_SCHEMA_V = 9;",
     "ctx.levels = lv || { n: 0, items: [], note:",
     "does not sit on any detected structural level", "(snapped to structure)",
     // the prompt must POINT at the field — the old wording asked for swing data the context never shipped
@@ -6016,4 +6016,98 @@ test("-20: a per-name scope under the sample floor falls back to pooled instead 
   assert.ok(/rate = \(arr\) => arr\.length >= minN \?/.test(cmp), "rates below the floor still return null");
   // med day range is pooled-only: the column is omitted per-name, never rendered as dashes
   assert.ok(app.includes("const qMed=!qScope;"), "med-range column omitted in per-name scope");
+});
+
+test("ai report -01: target reconciliation — the level is the one source of truth, a null scenario target is filled from it, neither is still fatal", () => {
+  const { p, px } = aiTestPoller();
+  const ctx = () => p.aiCompileNow("xyz:NVDA");
+  const voidLv = +(px * 0.95).toPrecision(6), tgt = +(px * 1.10).toPrecision(6);
+  const mut = (fn) => { const o = JSON.parse(AI_GOOD(px, voidLv, tgt)); fn(o); return JSON.stringify(o); };
+  const scenT = (r) => r.computed.scenarios.find((s) => s.kind === "target");
+  // the baseline: both fields carry the price, nothing is reconciled
+  const base = p.aiValidateNow(AI_GOOD(px, voidLv, tgt), ctx());
+  assert.ok(base.ok, base.error || "");
+  assert.equal(base.computed.correctedTarget, false, "a fully-specified payload must not be flagged as reconciled");
+  // THE BUG: the prompt offers "target": null, the validator rejected it, and the report died.
+  // The target LEVEL is present, so the scenario field is filled from it and the R/R is identical.
+  const nulled = p.aiValidateNow(mut((o) => { o.scenarios[0].target = null; }), ctx());
+  assert.ok(nulled.ok, "a null scenario target with a target level present must validate: " + (nulled.error || ""));
+  assert.equal(nulled.computed.correctedTarget, true, "the fill must be flagged, not silent");
+  assert.equal(scenT(nulled).target, scenT(base).target, "the filled target must be the level's own price");
+  assert.equal(scenT(nulled).payoffR, scenT(base).payoffR, "payoff must be identical to the fully-specified payload");
+  assert.equal(nulled.computed.evR, base.computed.evR, "EV must be identical too");
+  // the action block reads the same number: the entry plan survives the null
+  assert.equal(nulled.computed.action.target, base.computed.action.target, "the action target must survive the fill");
+  // a scenario price that DISAGREES with the level loses: chart and card may never show two targets
+  const drift = p.aiValidateNow(mut((o) => { o.scenarios[0].target = +(tgt * 1.05).toPrecision(6); }), ctx());
+  assert.ok(drift.ok, drift.error || "");
+  assert.equal(drift.computed.correctedTarget, true, "a disagreeing scenario price must be corrected to the level");
+  assert.equal(scenT(drift).target, scenT(base).target, "the LEVEL wins, not the scenario's own number");
+  // neither field carries a price: still fatal, still the same error string
+  const neither = p.aiValidateNow(mut((o) => {
+    o.scenarios[0].target = null; o.levels = o.levels.filter((l) => l.kind !== "target");
+  }), ctx());
+  assert.equal(neither.ok, false);
+  assert.ok(/target scenario without a target level/.test(neither.error), neither.error);
+  // scenario price with NO level: the level is minted so the chart draws what the card claims
+  const minted = p.aiValidateNow(mut((o) => { o.levels = o.levels.filter((l) => l.kind !== "target"); }), ctx());
+  assert.ok(minted.ok, "a scenario-only target must validate: " + (minted.error || ""));
+  assert.equal(minted.computed.correctedTarget, true, "minting must be flagged");
+  const ml = minted.computed.levels.filter((l) => l.kind === "target");
+  assert.equal(ml.length, 1, "exactly one target level must be minted");
+  assert.equal(ml[0].value, scenT(minted).target, "the minted level and the scenario must be the SAME number");
+  assert.equal(scenT(minted).payoffR, scenT(base).payoffR, "minted geometry must produce the baseline payoff");
+  // ...and an out-of-band scenario price is rejected rather than minted into a fake R
+  const wild = p.aiValidateNow(mut((o) => {
+    o.levels = o.levels.filter((l) => l.kind !== "target"); o.scenarios[0].target = +(px * 4).toPrecision(6);
+  }), ctx());
+  assert.equal(wild.ok, false);
+  assert.ok(/target scenario price outside sanity bounds/.test(wild.error), wild.error);
+  // non-target kinds keep their null: the fill is scoped to "target" alone
+  assert.equal(nulled.computed.scenarios.find((s) => s.kind === "void").target, null, "void scenarios stay target-null");
+  assert.equal(nulled.computed.scenarios.find((s) => s.kind === "flat").target, null, "flat scenarios stay target-null");
+});
+
+test("ai report -01: prompt and validator agree on the target contract, and a rejection logs its shape", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The prompt must no longer offer a null it will be punished for, and the void/target rules
+  // must stay SEPARATE — collapsing them back is what left crypto with no legal target price.
+  assert.ok(pol.includes('A "target" scenario MUST carry a price'), "prompt must demand a price on target scenarios");
+  assert.ok(pol.includes('"target": null is for the "flat", "void" and "event" kinds only'),
+    "prompt must scope the null to the non-target kinds");
+  assert.ok(pol.includes("The TARGET is held to a softer rule than the void"),
+    "prompt must keep the target's structure rule softer than the void's");
+  assert.ok(/Otherwise the VOID must come from context\.levels\.items/.test(pol),
+    "the hard-rules line must bind context.levels.items to the VOID, not to every level");
+  assert.ok(!/every level you emit must come from context\.levels\.items/.test(pol),
+    "the blanket every-level rule must be gone — it is what produced the null target");
+  // levels are parsed BEFORE the scenario loop; the reconciliation depends on that order
+  assert.ok(pol.indexOf("let targetLv = levels.find") < pol.indexOf('if (s.kind === "target") {'),
+    "the levels parse must be hoisted above the scenario loop");
+  assert.equal(pol.split("const levels = [];").length - 1, 1, "the levels parse must exist exactly once (no duplicate left behind)");
+  assert.ok(pol.includes("correctedTarget: targetReconciled"), "the reconciliation flag must ship in computed");
+  // the fingerprint logger: present, wired into the double-failure path, and shape-only
+  assert.ok(/function aiRejectShape\(rawText\)/.test(pol), "aiRejectShape helper missing");
+  assert.ok(pol.includes("fallback failed too (${val.error}) — ${aiRejectShape("), "double-failure log must carry the shape");
+  const { p } = aiTestPoller();
+  assert.equal(typeof p.aiRejectShapeNow, "function", "aiRejectShape must be reachable from the harness");
+  assert.ok(/no model text/.test(p.aiRejectShapeNow(null)), "a transport failure must say so");
+  assert.ok(/unparseable \(\d+ chars\)/.test(p.aiRejectShapeNow("not json at all")), "unparseable payloads report their length");
+  const shp = p.aiRejectShapeNow(JSON.stringify({ bias: "long",
+    scenarios: [{ kind: "target", target: null }, { kind: "void" }], levels: [{ kind: "void" }] }));
+  assert.ok(/bias=long/.test(shp) && /scen=\[target,void\]/.test(shp) && /levels=\[void\]/.test(shp), shp);
+  assert.ok(/empty=\[[^\]]*scen\.target[^\]]*\]/.test(shp) && /level\.target/.test(shp), "the empty-field list must name the gaps: " + shp);
+  assert.ok(!/synthesis|headline/.test(shp), "the fingerprint must carry shapes, never payload prose");
+});
+
+test("client -01: the target reconciliation is disclosed on the card, with hover, next to the void precedent", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("c.correctedTarget?"), "the card must read the reconciliation flag from the server payload");
+  assert.ok(app.includes("target reconciled to the chart level"), "the disclosure text is missing");
+  // standing requirement: every annotation of this class carries hover context, same as the void's
+  assert.ok(/c\.correctedTarget\?' · <span data-tip="/.test(app), "the disclosure must carry a data-tip hover explanation");
+  // one-code-path: the flag is SERVER-derived, never recomputed client-side from the levels
+  assert.ok(!/correctedTarget\s*=/.test(app), "the client must never assign correctedTarget itself");
 });
