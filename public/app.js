@@ -1966,10 +1966,23 @@ let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
   if(_analyticsInflight) return; _analyticsInflight=true;
-  try{ const d=await fetchJSON('/api/analytics'); state.analytics.data=d; state.analytics.err=null; state.analytics.ts=Date.now(); }
-  catch(e){ state.analytics.err=e.message||String(e); }
+  const cr=state.scope==='crypto';
+  const url=cr?'/api/analytics?u=crypto':'/api/analytics';
+  try{ const d=await fetchJSON(url);
+    // Keep the two universes in separate slots so a scope flip mid-flight never renders crypto
+    // data into a stocks view or vice-versa; drawSessions reads whichever matches the live scope.
+    if(cr) state.analyticsCrypto={data:d,err:null,ts:Date.now()}; else state.analyticsStocks={data:d,err:null,ts:Date.now()};
+    syncAnalyticsSlot();
+  }
+  catch(e){ if(cr){ state.analyticsCrypto=Object.assign(state.analyticsCrypto||{},{err:e.message||String(e)}); } else { state.analyticsStocks=Object.assign(state.analyticsStocks||{},{err:e.message||String(e)}); } syncAnalyticsSlot(); }
   finally{ _analyticsInflight=false; }
   if(state.view==='sessions') drawSessions();
+}
+// Point state.analytics.{data,err,ts} at the slot for the live scope — preserves the many existing
+// call sites that read state.analytics.* while keeping per-universe payloads isolated.
+function syncAnalyticsSlot(){
+  const src=(state.scope==='crypto'?state.analyticsCrypto:state.analyticsStocks)||{};
+  state.analytics.data=src.data||null; state.analytics.err=src.err||null; state.analytics.ts=src.ts||0;
 }
 function covPct(n,d){ return d>0?Math.round(100*n/d):0; }
 function fp(x,dp){ dp=(dp==null?2:dp); if(x==null||!isFinite(x))return '—'; return (x>0?'+':'')+(x*100).toFixed(dp)+'%'; }
@@ -2071,19 +2084,24 @@ function sessCurveSvg(curve, horizonTs){
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function renderSessionDecomp(sd){
+  const cr=!!sd.isCrypto;
   const h=sd.headline, S=sd.sessions;
   const funded = h.fundingHorizonTs!=null;
   const dragBp = (h.meanGross - h.meanNet)*1e4;
   const endp = sd.fundingEndpoint==='on' ? 'live funding history' : 'sampled funding';
+  const unit = cr?'day':'night', units = cr?'days':'nights', period = cr?`${sd.window.days}d`:'60d';
+  const headLabel = cr
+    ? `UTC day · buy at 00:00, sell at 24:00 · ${sd.equityCount} perps`
+    : `Overnight · buy at close, sell before open · ${sd.equityCount} equities`;
   const head = `<div style="background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;padding:16px 18px;margin-bottom:16px">`+
-    `<div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">Overnight · buy at close, sell before open · ${sd.equityCount} equities</div>`+
+    `<div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">${headLabel}</div>`+
     `<div style="display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap">`+
-      `<div><div style="font-family:var(--mono);font-size:32px;line-height:1" class="${dcls(h.medianNet)}">${fp(h.medianNet)}</div><div class="sec" style="font-size:11px;margin-top:3px">median net / night</div></div>`+
-      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--blue)">${fp(h.medianGross)}</div><div class="sec" style="font-size:11px;margin-top:3px">gross / night</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:32px;line-height:1" class="${dcls(h.medianNet)}">${fp(h.medianNet)}</div><div class="sec" style="font-size:11px;margin-top:3px">median net / ${unit}</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--blue)">${fp(h.medianGross)}</div><div class="sec" style="font-size:11px;margin-top:3px">gross / ${unit}</div></div>`+
       `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--muted)">−${dragBp.toFixed(1)}bp</div><div class="sec" style="font-size:11px;margin-top:3px">funding drag</div></div>`+
       `<div style="width:1px;align-self:stretch;background:var(--border)"></div>`+
-      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1" class="${dcls(h.totNet)}">${fp(h.totNet)}</div><div class="sec" style="font-size:11px;margin-top:3px">60d net · gross ${fp(h.totGross)}</div></div>`+
-      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--text)">${(h.winNet*100).toFixed(0)}%</div><div class="sec" style="font-size:11px;margin-top:3px">win · ${h.nights} nights</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1" class="${dcls(h.totNet)}">${fp(h.totNet)}</div><div class="sec" style="font-size:11px;margin-top:3px">${period} net · gross ${fp(h.totGross)}</div></div>`+
+      `<div><div style="font-family:var(--mono);font-size:20px;line-height:1;color:var(--text)">${(h.winNet*100).toFixed(0)}%</div><div class="sec" style="font-size:11px;margin-top:3px">win · ${h.nights} ${units}</div></div>`+
     `</div>`+
     `<div class="s-cap" style="margin-top:12px">${funded ? `Net-of-funding reliable from <b>${sessDate(h.fundingHorizonTs)}</b> onward (${endp}).` : `Net-of-funding approximate — funding history sparse (${endp}); the dashed net line tracks gross before coverage begins.`}</div></div>`;
   const chart=(key,label)=>{ const x=S[key]; if(!x||!x.n) return '';
@@ -2091,13 +2109,20 @@ function renderSessionDecomp(sd){
       `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px"><span style="color:var(--text);font-size:13px;font-weight:600">${label}</span>`+
       `<span class="sec" style="font-size:11px">net <span class="${dcls(x.totNet)}">${fp(x.totNet)}</span> · ${x.n} bets · win ${(x.winNet*100).toFixed(0)}%</span></div>`+
       sessCurveSvg(x.curve, x.fundingHorizonTs)+`</div>`; };
-  const charts = `<div class="s-grid" style="margin-bottom:6px">`+
-    chart('overnight','Overnight · close→open')+chart('weekend','Weekend · Fri→Mon')+chart('cash','Cash · open→close')+`</div>`;
-  return sHead('Session decomposition','what an overnight / weekend / cash hold actually pays, pooled one bet per calendar boundary across the equity class')+
+  const charts = cr
+    ? `<div class="s-grid" style="margin-bottom:6px">`+chart('utcday','UTC day · 00:00→24:00')+chart('weekend','Weekend · Fri→Mon')+`</div>`
+    : `<div class="s-grid" style="margin-bottom:6px">`+chart('overnight','Overnight · close→open')+chart('weekend','Weekend · Fri→Mon')+chart('cash','Cash · open→close')+`</div>`;
+  const subtitle = cr
+    ? 'what a full UTC-day hold and a Fri→Mon weekend hold actually pay on a 24/7 book, net of funding'
+    : 'what an overnight / weekend / cash hold actually pays, pooled one bet per calendar boundary across the equity class';
+  const capText = cr
+    ? 'Each boundary is one equal-weight bet across every perp that traded it; per-boundary means compounded. No cash leg exists on a continuous book — the UTC day is the holding-period analogue. <b>Hover</b> any curve for the date, gross/net, and breadth. The shaded band is the running funding drag.'
+    : 'Each boundary is one equal-weight bet across every equity that traded it; per-boundary means are compounded. <b>Hover</b> any curve for the date, gross/net, and breadth. The shaded band is the running funding drag.';
+  return sHead('Session decomposition',subtitle)+
     head+
     sLeg([{color:'var(--blue)',label:'gross'},{color:'var(--accent)',label:'net of funding'},{shape:'dot',color:'var(--accent)',label:'shaded gap = funding cost'}])+
     charts+
-    sCap('Each boundary is one equal-weight bet across every equity that traded it; per-boundary means are compounded. <b>Hover</b> any curve for the date, gross/net, and breadth. The shaded band is the running funding drag.');
+    sCap(capText);
 }
 
 // ---- hour-of-day activity + funding clocks (ET, midnight at top, clockwise) ----
@@ -2110,16 +2135,24 @@ function clockWedge(cx,cy,ri,ro,d0,d1){
   return `M${x0} ${y0} L${x1} ${y1} A${ro} ${ro} 0 ${large} 1 ${x2} ${y2} L${x3} ${y3} A${ri} ${ri} 0 ${large} 0 ${x0} ${y0} Z`;
 }
 function clockArc(cx,cy,r,d0,d1){ const P=(a)=>clockPolar(cx,cy,r,a).map(v=>v.toFixed(2)); const [x0,y0]=P(d0),[x1,y1]=P(d1); const large=(d1-d0)>180?1:0; return `M${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1}`; }
-function clockScaffold(cx,cy,ri,ro){
+// -17: sessions renderers read the live payload's tz so crypto (24/7) labels UTC and drops the
+// US cash-session band. One helper, consulted by the clock/dow/pivot builders; falls back to ET.
+function _szTz(){ const a=state.analytics.data; return (a&&a.tz)||'ET'; }
+function _szCash(){ const a=state.analytics.data; return !(a&&a.isCrypto); }   // cash band only for equities
+function clockScaffold(cx,cy,ri,ro,cash){
   let s='';
-  // US cash-session highlight arc (09:30–16:00 ET)
-  s+=`<path d="${clockWedge(cx,cy,ri-3,ro+10,clockDeg(9.5),clockDeg(16))}" fill="var(--blue)" opacity="0.08"/>`;
+  if(cash!==false){
+    // US cash-session highlight arc (09:30–16:00 ET) — equities only; a 24/7 book has no cash window
+    s+=`<path d="${clockWedge(cx,cy,ri-3,ro+10,clockDeg(9.5),clockDeg(16))}" fill="var(--blue)" opacity="0.08"/>`;
+  }
   // hour ticks + labels every 3h
   for(let h=0;h<24;h+=3){ const [lx,ly]=clockPolar(cx,cy,ro+16,clockDeg(h)); const lab=h===0?'0':(h===12?'12':(''+h));
     s+=`<text x="${lx.toFixed(1)}" y="${(ly+3).toFixed(1)}" text-anchor="middle" class="lc-tick">${lab}</text>`; }
-  // open/close ticks
-  for(const hh of [9.5,16]){ const [a,b]=clockPolar(cx,cy,ri-3,clockDeg(hh)), [c,d]=clockPolar(cx,cy,ro+3,clockDeg(hh));
-    s+=`<line x1="${a.toFixed(1)}" y1="${b.toFixed(1)}" x2="${c.toFixed(1)}" y2="${d.toFixed(1)}" stroke="var(--blue)" stroke-width="1" opacity="0.6"/>`; }
+  if(cash!==false){
+    // open/close ticks
+    for(const hh of [9.5,16]){ const [a,b]=clockPolar(cx,cy,ri-3,clockDeg(hh)), [c,d]=clockPolar(cx,cy,ro+3,clockDeg(hh));
+      s+=`<line x1="${a.toFixed(1)}" y1="${b.toFixed(1)}" x2="${c.toFixed(1)}" y2="${d.toFixed(1)}" stroke="var(--blue)" stroke-width="1" opacity="0.6"/>`; }
+  }
   return s;
 }
 function activityClockSvg(vec, metric){
@@ -2130,14 +2163,14 @@ function activityClockSvg(vec, metric){
   const maxV = Math.max(...vals, 1.2);
   const rOf=v=> ri + (v/maxV)*(roMax-ri);
   let s=`<svg viewBox="0 0 ${W} ${H}" class="sclock" style="width:100%;height:auto;display:block">`;
-  s+=clockScaffold(cx,cy,ri,roMax);
+  s+=clockScaffold(cx,cy,ri,roMax,_szCash());
   // concentric ×-average reference rings + labels (readable magnitude)
   for(let k=0.5;k<=maxV+1e-9;k+=0.5){ if(k<0.5) continue; const r=rOf(k), one=Math.abs(k-1)<1e-9;
     s+=`<circle cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="none" stroke="${one?'var(--muted)':'var(--grid)'}" stroke-width="1"${one?' stroke-dasharray="2 3"':''}/>`;
     if(k%1===0||one) s+=`<text x="${cx+2}" y="${(cy-r+3).toFixed(1)}" class="lc-tick" style="fill:var(--faint)">${k}×</text>`; }
   for(let h=0;h<24;h++){ const val=arr[h]; if(!Number.isFinite(val)) continue;
     const ro=rOf(val), col= val>=1?'var(--accent)':'var(--accent-dim)', op=0.35+0.55*Math.min(1,val/maxV);
-    s+=`<path d="${clockWedge(cx,cy,ri,ro,clockDeg(h)+1.4,clockDeg(h+1)-1.4)}" fill="${col}" fill-opacity="${op.toFixed(2)}"><title>${h}:00 ET · ${val.toFixed(2)}× avg${vec.volAbsMean&&metric!=='volume'?' · '+(val*vec.volAbsMean*100).toFixed(2)+'% hourly range':''}</title></path>`; }
+    s+=`<path d="${clockWedge(cx,cy,ri,ro,clockDeg(h)+1.4,clockDeg(h+1)-1.4)}" fill="${col}" fill-opacity="${op.toFixed(2)}"><title>${h}:00 ${_szTz()} · ${val.toFixed(2)}× avg${vec.volAbsMean&&metric!=='volume'?' · '+(val*vec.volAbsMean*100).toFixed(2)+'% hourly range':''}</title></path>`; }
   s+=`<circle cx="${cx}" cy="${cy}" r="${ri}" fill="var(--panel)" stroke="var(--border)"/>`;
   s+=`<text x="${cx}" y="${cy-1}" text-anchor="middle" style="font-size:10px;fill:var(--muted)">${metric==='volume'?'volume':'range'}</text>`;
   s+=`<text x="${cx}" y="${cy+11}" text-anchor="middle" style="font-size:8px;fill:var(--faint)">× avg</text>`;
@@ -2149,11 +2182,11 @@ function fundingClockSvg(fund){
   if(vals.length<6) return '<div class="msg" style="height:200px;display:flex;align-items:center;justify-content:center">No funding schedule yet.</div>';
   const maxAbs = Math.max(...vals.map(Math.abs))||1e-9;
   let s=`<svg viewBox="0 0 ${W} ${H}" class="sclock" style="width:100%;height:auto;display:block">`;
-  s+=clockScaffold(cx,cy,ri,ro);
+  s+=clockScaffold(cx,cy,ri,ro,_szCash());
   for(let h=0;h<24;h++){ const f=arr[h]; if(!Number.isFinite(f)) continue;
     const col = f>0?'var(--down)':'var(--up)';   // >0 longs pay (cost), <0 longs receive
     const op = 0.2 + 0.62*(Math.abs(f)/maxAbs);
-    s+=`<path d="${clockWedge(cx,cy,ri,ro,clockDeg(h)+1.4,clockDeg(h+1)-1.4)}" fill="${col}" fill-opacity="${op.toFixed(2)}"><title>${h}:00 ET · ${(f*100).toFixed(4)}%/h · ${f>0?'longs pay':'longs receive'}</title></path>`; }
+    s+=`<path d="${clockWedge(cx,cy,ri,ro,clockDeg(h)+1.4,clockDeg(h+1)-1.4)}" fill="${col}" fill-opacity="${op.toFixed(2)}"><title>${h}:00 ${_szTz()} · ${(f*100).toFixed(4)}%/h · ${f>0?'longs pay':'longs receive'}</title></path>`; }
   const net = arr.reduce((a,b)=>a+(Number.isFinite(b)?b:0),0);
   const netCls = net>0?'--down':(net<0?'--up':'--muted');
   s+=`<circle cx="${cx}" cy="${cy}" r="${ri}" fill="var(--panel)" stroke="var(--border)"/>`;
@@ -2187,9 +2220,10 @@ function renderClocks(hc){
     `<div style="flex:1 1 240px;min-width:230px" class="s-card"><div style="color:var(--text);font-size:13px;font-weight:600;margin-bottom:6px">Activity — when it moves</div>${activityClockSvg(vec, st.metric)}</div>`+
     `<div style="flex:1 1 240px;min-width:230px" class="s-card"><div style="color:var(--text);font-size:13px;font-weight:600;margin-bottom:6px">Funding — <span style="color:var(--up)">receive</span> / <span style="color:var(--down)">pay</span> by hour</div>${fundingClockSvg(vec.fund)}</div>`+
     `</div>`;
-  const cap=`Midnight ET at top, clockwise. Left clock: spoke length = that hour's range/volume vs the day's average — rings mark 1×, 2×… and the blue arc is the US cash session. Right clock: color = carry direction, brightness = size. `+
-    (ph!=null?`Busiest near <b>${ph}:00 ET</b>`:'')+(fh!=null&&Number.isFinite(vec.fund[fh])?`; strongest carry near <b>${fh}:00 ET</b> (${vec.fund[fh]>0?'longs pay':'longs receive'})`:'')+`. <b>Hover</b> a wedge for exact values.`;
-  return sHead('Hour-of-day clocks','the robust timing layer — range volatility, volume and funding by ET hour')+controls+twin+sCap(cap);
+  const _tz=_szTz();
+  const cap=`Midnight ${_tz} at top, clockwise. Left clock: spoke length = that hour's range/volume vs the day's average — rings mark 1×, 2×…${_szCash()?' and the blue arc is the US cash session':''}. Right clock: color = carry direction, brightness = size. `+
+    (ph!=null?`Busiest near <b>${ph}:00 ${_tz}</b>`:'')+(fh!=null&&Number.isFinite(vec.fund[fh])?`; strongest carry near <b>${fh}:00 ${_tz}</b> (${vec.fund[fh]>0?'longs pay':'longs receive'})`:'')+`. <b>Hover</b> a wedge for exact values.`;
+  return sHead('Hour-of-day clocks',`the robust timing layer — range volatility, volume and funding by ${_tz} hour`)+controls+twin+sCap(cap);
 }
 function attachClockControls(){
   const sel=el('clocksel'); if(sel) sel.addEventListener('change',()=>{ state.analytics.clock.sel=sel.value; drawSessions(); });
@@ -2212,18 +2246,18 @@ function overlayLineSvg(series, metric){
   const Y=v=> pt + (1-(v-lo)/(hi-lo))*(H-pt-pb);
   const fmtV=(v)=> metric==='funding' ? (v*100).toFixed(4)+'%' : v.toFixed(2)+'×';
   const fmtTick=(v)=> metric==='funding' ? (v*100).toFixed(3)+'%' : v.toFixed(1)+'×';
-  let s=`<rect x="${X(9.5).toFixed(1)}" y="${pt}" width="${(X(16)-X(9.5)).toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"/>`;
+  let s=_szCash()?`<rect x="${X(9.5).toFixed(1)}" y="${pt}" width="${(X(16)-X(9.5)).toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"/>`:'';
   s+=lcGrid(pl,W-pr,lcTicks(lo,hi,4),Y,fmtTick);
   s+=`<line x1="${pl}" y1="${Y(base).toFixed(1)}" x2="${W-pr}" y2="${Y(base).toFixed(1)}" stroke="var(--faint)" stroke-dasharray="3 3" stroke-width="1"/>`;
   for(let h=0;h<=24;h+=6){ const hh=Math.min(h,23); s+=`<text x="${X(hh).toFixed(1)}" y="${H-9}" text-anchor="middle" class="lc-tick">${h}</text>`; }
-  s+=`<text x="${(pl+W-pr)/2}" y="${H-1}" text-anchor="middle" class="lc-ax">ET hour</text>`;
+  s+=`<text x="${(pl+W-pr)/2}" y="${H-1}" text-anchor="middle" class="lc-ax">${_szTz()} hour</text>`;
   for(const ser of series){
     let d='', pen=false;
     for(let h=0;h<24;h++){ const v=ser.vec[h]; if(!Number.isFinite(v)){ pen=false; continue; } d+=(pen?'L':'M')+X(h).toFixed(1)+' '+Y(v).toFixed(1)+' '; pen=true; }
     if(d) s+=`<path d="${d.trim()}" fill="none" stroke="${ser.color}" stroke-width="1.7" stroke-linejoin="round"/>`;
   }
   const xs=[]; for(let h=0;h<24;h++) xs.push(X(h));
-  const rows=[]; for(let h=0;h<24;h++){ rows.push(`<b style="color:var(--text)">${h}:00 ET</b><br>`+series.map(ser=>`<span style="color:${ser.color}">${esc(ser.cls)} ${Number.isFinite(ser.vec[h])?fmtV(ser.vec[h]):'—'}</span>`).join('<br>')); }
+  const rows=[]; for(let h=0;h<24;h++){ rows.push(`<b style="color:var(--text)">${h}:00 ${_szTz()}</b><br>`+series.map(ser=>`<span style="color:${ser.color}">${esc(ser.cls)} ${Number.isFinite(ser.vec[h])?fmtV(ser.vec[h]):'—'}</span>`).join('<br>')); }
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function renderClassOverlay(hc){
@@ -2235,8 +2269,8 @@ function renderClassOverlay(hc){
   const mbtn=(m,l)=>`<button type="button" class="ovmetric${st.metric===m?' on':''}" data-m="${m}">${l}</button>`;
   const controls=`<div class="s-ctrls"><span class="lbl">metric</span><span class="clockseg">${mbtn('vol','range vol')}${mbtn('volume','volume')}${mbtn('funding','funding')}</span></div>`;
   const cap = st.metric==='funding'
-    ? 'Mean funding rate by ET hour, one line per class. Above the dashed zero = longs pay; below = longs receive. Blue band = US cash session. <b>Hover</b> for exact rates.'
-    : 'Each class\'s pooled hour-of-day shape, normalized so 1× is its own daily average — this compares <b>timing</b>, not absolute size. Blue band = US cash session. <b>Hover</b> for values.';
+    ? `Mean funding rate by ${_szTz()} hour, one line per class. Above the dashed zero = longs pay; below = longs receive.${_szCash()?' Blue band = US cash session.':''} <b>Hover</b> for exact rates.`
+    : `Each class's pooled hour-of-day shape, normalized so 1× is its own daily average — this compares <b>timing</b>, not absolute size.${_szCash()?' Blue band = US cash session.':''} <b>Hover</b> for values.`;
   return sHead('Asset-class overlays','pooled hour-of-day shapes, one line per class')+controls+legend+sCard(overlayLineSvg(series, st.metric))+sCap(cap);
 }
 function attachOverlayControls(){ document.querySelectorAll('.ovmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.overlay.metric=b.dataset.m; drawSessions(); })); }
@@ -2255,17 +2289,17 @@ function dowHeatSvg(grid, metric){
   const lx=38, cw=Math.max(18,Math.min(30,Math.floor((560-lx-14)/24))), ch=20, top=6, W=lx+cw*24+14, H=top+ch*7+22;
   let cap=0; for(let d=0;d<7;d++)for(let h=0;h<24;h++){ const v=cells[d][h]; if(Number.isFinite(v)&&v>cap)cap=v; } if(!cap)cap=1;
   let s=`<svg viewBox="0 0 ${W} ${H}" class="sheat" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
-  const rx=lx+9.5*cw, rw=(16-9.5)*cw;
-  s+=`<rect x="${rx.toFixed(1)}" y="${top}" width="${rw.toFixed(1)}" height="${(ch*5)}" fill="var(--blue)" opacity="0.06"/>`;
+  if(_szCash()){ const rx=lx+9.5*cw, rw=(16-9.5)*cw;
+    s+=`<rect x="${rx.toFixed(1)}" y="${top}" width="${rw.toFixed(1)}" height="${(ch*5)}" fill="var(--blue)" opacity="0.06"/>`; }
   for(let row=0;row<7;row++){ const d=WD_ORDER[row]; const y=top+row*ch;
     s+=`<text x="${lx-6}" y="${(y+ch/2+3).toFixed(1)}" text-anchor="end" style="font-size:10px;fill:${(d===0||d===6)?'var(--faint)':'var(--muted)'}">${WD_NAMES[d]}</text>`;
     for(let h=0;h<24;h++){ const x=lx+h*cw; const v=cells[d][h];
       s+=`<rect x="${x}" y="${y}" width="${cw-1}" height="${ch-1}" fill="var(--panel2)"/>`;
-      if(Number.isFinite(v)){ const op=Math.max(0.04,Math.min(1,v/cap)); s+=`<rect x="${x}" y="${y}" width="${cw-1}" height="${ch-1}" fill="var(--accent)" fill-opacity="${op.toFixed(3)}"><title>${WD_NAMES[d]} ${h}:00 ET · ${v.toFixed(2)}× avg${ns[d]?' · n='+(ns[d][h]||0):''}</title></rect>`; }
+      if(Number.isFinite(v)){ const op=Math.max(0.04,Math.min(1,v/cap)); s+=`<rect x="${x}" y="${y}" width="${cw-1}" height="${ch-1}" fill="var(--accent)" fill-opacity="${op.toFixed(3)}"><title>${WD_NAMES[d]} ${h}:00 ${_szTz()} · ${v.toFixed(2)}× avg${ns[d]?' · n='+(ns[d][h]||0):''}</title></rect>`; }
     }
   }
   for(let h=0;h<=24;h+=3){ const hh=Math.min(h,23); const x=lx+hh*cw+cw/2; s+=`<text x="${x.toFixed(1)}" y="${(top+ch*7+13)}" text-anchor="middle" class="lc-tick">${h}</text>`; }
-  s+=`<text x="${(lx+cw*24/2).toFixed(1)}" y="${(top+ch*7+21)}" text-anchor="middle" class="lc-ax">ET hour</text>`;
+  s+=`<text x="${(lx+cw*24/2).toFixed(1)}" y="${(top+ch*7+21)}" text-anchor="middle" class="lc-ax">${_szTz()} hour</text>`;
   return s+'</svg>';
 }
 function renderDow(dow){
@@ -2280,7 +2314,7 @@ function renderDow(dow){
   const legend=`<div class="s-leg"><span class="it">less</span>`+
     `<span style="width:120px;height:9px;border-radius:3px;display:inline-block;background:linear-gradient(90deg,var(--panel2),var(--accent))"></span>`+
     `<span class="it">more active vs its own average</span></div>`;
-  const cap='Each cell is that weekday-hour\'s range/volume vs the group\'s own average — darker = busier. Blue block = weekday US cash session. Weekend rows sit empty for equities but stay alive for 24/7 crypto — the Friday→Monday gap is the overnight-risk story. <b>Hover</b> a cell for its value and sample count.';
+  const cap=`Each cell is that weekday-hour's range/volume vs the group's own average — darker = busier.${_szCash()?' Blue block = weekday US cash session. Weekend rows sit empty for equities but stay alive for 24/7 crypto — the Friday→Monday gap is the overnight-risk story.':' Hours are UTC; the Friday→Monday weekend is the thin-book gap-risk story.'} <b>Hover</b> a cell for its value and sample count.`;
   return sHead('Day-of-week × hour heatmap','the weekend-gap and Friday→Monday risk map')+controls+legend+`<div class="s-card" style="overflow-x:auto">${dowHeatSvg(r.grid, st.metric)}</div>`+sCap(cap);
 }
 function attachDowControls(){
@@ -2620,8 +2654,8 @@ function pivotHistSvg(pv){
   const cap=Math.max(...pv.hi.share,...pv.lo.share,0.001);
   const bw=(W-pl-pr)/24, Y=v=>pt+(1-v/cap)*(H-pt-pb);
   let s=`<svg viewBox="0 0 ${W} ${H}" class="lchart" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`;
-  const rx=pl+13.5*bw, rw=(20-13.5)*bw;
-  s+=`<rect x="${rx.toFixed(1)}" y="${pt}" width="${rw.toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"><title>US cash session (13:30–20:00 UTC)</title></rect>`;
+  if(_szCash()){ const rx=pl+13.5*bw, rw=(20-13.5)*bw;
+    s+=`<rect x="${rx.toFixed(1)}" y="${pt}" width="${rw.toFixed(1)}" height="${H-pt-pb}" fill="var(--blue)" opacity="0.06"><title>US cash session (13:30–20:00 UTC)</title></rect>`; }
   for(let h=0;h<24;h++){
     const x=pl+h*bw, hw=(bw-3)/2;
     const basisH=pv.basis?`${pv.basis} — share of its ${pv.hi.nDays} sessions`:`% of names (mean of ${pv.hi.nDays} daily distributions)`;
@@ -2630,7 +2664,7 @@ function pivotHistSvg(pv){
     s+=`<rect x="${(x+2+hw).toFixed(1)}" y="${Y(pv.lo.share[h]).toFixed(1)}" width="${hw.toFixed(1)}" height="${(Y(0)-Y(pv.lo.share[h])).toFixed(1)}" fill="var(--down)" opacity=".75"><title>day LOW printed in ${h}:00 UTC — ${(pv.lo.share[h]*100).toFixed(1)}% · ${basisL}</title></rect>`;
     if(h%4===0) s+=`<text x="${(x+bw/2).toFixed(1)}" y="${H-pb+14}" text-anchor="middle" class="lc-tick">${h}:00</text>`;
   }
-  s+=`<text x="${((pl+W-pr)/2).toFixed(1)}" y="${H-4}" text-anchor="middle" class="lc-ax">UTC hour the session extreme printed · green = high, red = low · blue band = US cash</text></svg>`;
+  s+=`<text x="${((pl+W-pr)/2).toFixed(1)}" y="${H-4}" text-anchor="middle" class="lc-ax">UTC hour the session extreme printed · green = high, red = low${_szCash()?' · blue band = US cash':''}</text></svg>`;
   return s;
 }
 function renderPivots(an){
@@ -2651,7 +2685,9 @@ function renderPivots(an){
     `<tr title="the day's LOW printed before ${pv.earlyH}:00 UTC — how often the session then closed ABOVE its open (the early-low trend-day folklore, measured)&#10;n basis: ${nb}"><td>Low in first ${pv.earlyH}h → closed above open</td><td>${anPct(el2.rate)}</td><td>${el2.nDays}</td></tr>`+
     `<tr title="the day's HIGH printed before ${pv.earlyH}:00 UTC — how often the session then closed BELOW its open&#10;n basis: ${nb}"><td>High in first ${pv.earlyH}h → closed below open</td><td>${anPct(eh.rate)}</td><td>${eh.nDays}</td></tr>`+
     `</tbody></table></div>`;
-  const cap=sCap('An extreme that prints early and holds is the trend-day signature — but its rate is only meaningful against the ~50% coin-flip base, and the histogram is the context: on a 24/7 synthetic book the extremes cluster where the underlying cash session concentrates variance. <b>Hover</b> any bar or row for exact shares and n.');
+  const cap=sCap(_szCash()
+    ? 'An extreme that prints early and holds is the trend-day signature — but its rate is only meaningful against the ~50% coin-flip base, and the histogram is the context: on a 24/7 synthetic book the extremes cluster where the underlying cash session concentrates variance. <b>Hover</b> any bar or row for exact shares and n.'
+    : 'An extreme that prints early and holds is the trend-day signature — but its rate is only meaningful against the ~50% coin-flip base. On a continuous book the extremes spread across all 24 UTC hours rather than concentrating in a cash window; where they cluster is this histogram\'s story. <b>Hover</b> any bar or row for exact shares and n.');
   return head+controls+sCard(pivotHistSvg(pv))+cond+cap;
 }
 function wireRegimeControls(){ const s=el('regimesel'); if(!s) return; s.addEventListener('change',()=>{ if(!state.analytics.regime) state.analytics.regime={sel:'all'}; state.analytics.regime.sel=s.value; drawSessions(); }); }
@@ -2670,7 +2706,10 @@ const SESS_GROUPS=[
   {id:'clocks',label:'Clocks'},
   {id:'week',label:'Week'},
   {id:'structure',label:'Structure'}];
-const SG_KEY='xyz-sessgroups';
+const SG_KEY='xyz-sessgroups2';   // -17: bumped from xyz-sessgroups so a stale saved set from an
+                                  // earlier session can't override the intended default (positioning
+                                  // + holds open, the rest collapsed). Applies to both universes —
+                                  // the sessions tab shares one collapse model across crypto/stocks.
 function sgOpenSet(){ if(state.analytics.sgOpen) return state.analytics.sgOpen;
   let v=null; try{ v=JSON.parse(store.get(SG_KEY)||'null'); }catch(_){}
   state.analytics.sgOpen=new Set(Array.isArray(v)?v.filter(id=>SESS_GROUPS.some(g=>g.id===id)):['positioning','holds']);
@@ -2725,7 +2764,7 @@ function drawSessions(){
   const statTip=`hourly spine: ${hr.coins||0} coins \u00b7 ${(hr.candles||0).toLocaleString()} candles \u00b7 ${w.hourlyDays||60}d`+
     `&#10;funding spine: ${fund.coins||0} coins \u00b7 ${(fund.points||0).toLocaleString()} pts \u00b7 ${fund.endpoint==='on'?'live history':'sampled fallback'}`+
     `&#10;ready: ${c.ready}/${c.markets} at \u2265 ${Math.round((c.readyHours||480)/24)}d hourly \u2014 studies unlock as this fills`;
-  const status=`<div class="sg-status" title="${statTip}">${c.markets} markets \u00b7 ${c.equityMarkets} equity \u00b7 spine ${rp}% \u00b7 ${w.hourlyDays||60}d hourly \u00b7 funding ${fund.endpoint==='on'?'live history':'sampled fallback'}${age?' \u00b7 '+age:''}</div>`;
+  const status=`<div class="sg-status" title="${statTip}">${c.markets} markets \u00b7 ${c.equityMarkets} ${a.isCrypto?'perps':'equity'} \u00b7 spine ${rp}% \u00b7 ${w.hourlyDays||60}d hourly \u00b7 funding ${fund.endpoint==='on'?'live history':'sampled fallback'}${age?' \u00b7 '+age:''}</div>`;
   const bar= rp<100 ? `<div style="margin:0 0 10px" title="spine readiness \u2014 session studies unlock as this fills \u00b7 ${rp}%"><div style="height:5px;border-radius:3px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${rp}%;background:var(--accent);transition:width .4s"></div></div></div>` : '';
   const jump=`<div class="jumpbar"><span class="lbl">jump</span>`+
     SESS_GROUPS.map(g=>`<button type="button" class="jchip" data-j="${g.id}">${g.label}</button>`).join('')+`</div>`;
@@ -2751,6 +2790,7 @@ function drawSessions(){
   const se = a.sections && a.sections.seasonality;
   let seBlock='', sePend='';
   if(se && !se.pending) seBlock = renderSeasonality(se);
+  else if(se && se.notApplicable) sePend = sgPendRow('Return seasonality by hour','not applicable to crypto \u2014 this is a by-sector cross-sectional test and the crypto book is one class','\u2605\u2605\u2606\u2606\u2606');
   else sePend = sgPendRow('Return seasonality by hour', se?`computing \u2014 needs \u2265${se.need||8} equities with \u22655d hourly spine (have ${se.count||0})`:'exploratory \u00b7 significance-flagged','\u2605\u2605\u2606\u2606\u2606');
   const lv = a.sections && a.sections.levels;
   let lvBlock='', lvPend='';
@@ -2777,9 +2817,11 @@ function drawSessions(){
     if(cw.longExtPct!=null) p.push(`${cw.longExtPct}% crowded-long`);
     if(cw.shortExtPct!=null) p.push(`${cw.shortExtPct}% crowded-short`);
     return p.join(' \u00b7 ')||'\u2014'; };
-  const vHolds=()=>{ if(!sd||sd.pending) return sd?`computing \u2014 ${sd.equityCount}/${sd.need} equities ready`:'computing';
+  const vHolds=()=>{ if(!sd||sd.pending) return sd?`computing \u2014 ${sd.equityCount}/${sd.need} ${sd.isCrypto?'perps':'equities'} ready`:'computing';
     const S=sd.sessions||{}, seg=(k,l)=>S[k]&&S[k].totNet!=null?`${l} ${fp(S[k].totNet)} net`:null;
-    return [seg('overnight','overnight'),seg('weekend','weekend'),seg('cash','cash')].filter(Boolean).join(' \u00b7 ')||'\u2014'; };
+    return (sd.isCrypto
+      ? [seg('utcday','UTC day'),seg('weekend','weekend')]
+      : [seg('overnight','overnight'),seg('weekend','weekend'),seg('cash','cash')]).filter(Boolean).join(' \u00b7 ')||'\u2014'; };
   const vClocks=()=>{ if(!hc||hc.pending) return hc?`computing \u2014 ${hc.count} markets with a spine`:'computing';
     const all=(hc.pooled&&hc.pooled.all)||{}, p=[];
     let ph=null,pv2=-Infinity; (all.vol||[]).forEach((x,i)=>{ if(Number.isFinite(x)&&x>pv2){pv2=x;ph=i;} });
@@ -2801,14 +2843,16 @@ function drawSessions(){
     return p.join(' \u00b7 ')||'computing'; };
   // ---- assemble ----
   const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||anBlock||cbBlock||pvBlock;
-  const allLive = anySections && !(sdPend||hcPend||ovPend||dowPend||clPend||sePend||lvPend||anPend||cbPend||pvPend);
-  const groups =
+  const isCr = !!(a && a.isCrypto);
+  // Crypto has ten applicable studies — seasonality is a by-sector test with no crypto analogue,
+  // so its "pending" here is not-applicable and must not block the all-live footer.
+  const allLive = anySections && !(sdPend||hcPend||ovPend||dowPend||clPend||(isCr?false:sePend)||lvPend||anPend||cbPend||pvPend);
+  const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All ${isCr?'ten':'eleven'} studies live. \u25c6</div>` : '';
     sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock}])+
     sgSection('holds','Holds',vHolds(),[{html:flagship},{pend:sdPend},{html:anBlock},{pend:anPend},{html:cbBlock},{pend:cbPend},{html:pvBlock},{pend:pvPend}])+
     sgSection('clocks','Clocks',vClocks(),[{html:clocks},{pend:hcPend},{html:overlay},{pend:ovPend},{html:seBlock},{pend:sePend}])+
     sgSection('week','Week',vWeek(),[{html:dowBlock},{pend:dowPend}])+
     sgSection('structure','Structure',vStructure(),[{html:clBlock},{pend:clPend},{html:lvBlock},{pend:lvPend}]);
-  const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All eleven studies live. \u25c6</div>` : '';
   host.innerHTML=title+status+bar+jump+groups+foot;
   if(regime) wireRegimeControls();
   if(hc && !hc.pending){ attachClockControls(); if(overlay) attachOverlayControls(); }
@@ -3294,20 +3338,21 @@ function applyScope(){
   // ticker, so the same tab serves both universes regardless of scope. Signals left this
   // list at -101: the crypto side of the signal engine was removed, so the tab has nothing
   // true to show in crypto scope.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr' && b.dataset.view!=='backtest'; });
+  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr' && b.dataset.view!=='backtest' && b.dataset.view!=='sessions'; });
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
 
-  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr' && state.view!=='backtest') { showView('markets'); }
+  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr' && state.view!=='backtest' && state.view!=='sessions') { showView('markets'); }
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
+  if(state.view==='sessions'){ syncAnalyticsSlot(); drawSessions(); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
   setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='corr' && v!=='backtest') v='markets';   // crypto scope: Markets + Trend + Report + Correlation + Backtest (signal engine is xyz-only since -101)
+  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='corr' && v!=='backtest' && v!=='sessions') v='markets';   // crypto scope: Markets + Trend + Report + Correlation + Backtest + Sessions (-17); signal engine stays xyz-only
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
