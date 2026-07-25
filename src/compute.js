@@ -1668,15 +1668,52 @@ function anatomyTickerSummary(records, monday, naked, candles, opts) {
     const a = naked.map((e) => e.rev[H]).filter((x) => x != null);
     rev[H] = rate(a.map(Boolean).map((_, i) => a[i]));
   }
+  // Per-name candle table cells: share of the name's own typed bars, next-range vs the name's
+  // OWN unconditional median (same construction as candlePool, one name's basis) — follow already
+  // floors at minN, rngX inherits the same floor so a thin type publishes — not a guess.
+  const allRng = candles.map((e) => e.rngSd).filter((x) => x != null);
+  const baseRng = allRng.length >= minN ? median(allRng) : null;
   const types = {}; for (const t of CANDLE_TYPES) {
     const evs = candles.filter((e) => e.type === t);
     const fol = evs.map((e) => e.follow);
+    const rg = evs.map((e) => e.rngSd).filter((x) => x != null);
     types[t] = { n: evs.length,
-      follow: fol.length >= minN ? +(fol.reduce((a, b) => a + b, 0) / fol.length).toFixed(3) : null };
+      share: candles.length ? +(evs.length / candles.length).toFixed(4) : null,
+      follow: fol.length >= minN ? +(fol.reduce((a, b) => a + b, 0) / fol.length).toFixed(3) : null,
+      rngX: (rg.length >= minN && baseRng > 0) ? +(median(rg) / baseRng).toFixed(3) : null };
+  }
+  // Per-name MFE histogram: SAME edges and binning as anatomyPool so the client chart renders
+  // either payload unchanged. Published only at >= minN sd-scored sessions — under the floor the
+  // client keeps the pooled histogram and says so, never a thin per-name chart passed off as one.
+  let mfeHist = null;
+  if (up.length >= minN) {
+    const us = new Array(MFE_EDGES.length + 1).fill(0), ds = new Array(MFE_EDGES.length + 1).fill(0);
+    const bi = (v) => { let i = 0; while (i < MFE_EDGES.length && v > MFE_EDGES[i]) i++; return i; };
+    for (const v of up) us[bi(v)]++;
+    for (const v of dn) ds[bi(v)]++;
+    mfeHist = { edges: MFE_EDGES, n: up.length,
+      upShare: us.map((x) => +(x / up.length).toFixed(4)),
+      dnShare: ds.map((x) => +(x / dn.length).toFixed(4)) };
+  }
+  // Per-name time pivots: WITHIN-NAME time series — each session one observation, so nDays here
+  // is the session count and the client labels the basis switch. Same field names as pivotPool so
+  // the histogram renderer takes either. Conditional rates floor at minN qualifying sessions.
+  const pvRec = records.filter((r) => r.hiHr != null && r.loHr != null);
+  let pivots = null;
+  if (pvRec.length >= minN) {
+    const hs = new Array(24).fill(0), ls = new Array(24).fill(0);
+    for (const r of pvRec) { hs[r.hiHr]++; ls[r.loHr]++; }
+    const el2 = pvRec.filter((r) => r.loHr < PIVOT_EARLY_H).map((r) => (r.closedAbove ? 1 : 0));
+    const eh = pvRec.filter((r) => r.hiHr < PIVOT_EARLY_H).map((r) => (r.closedAbove ? 0 : 1));
+    const rt = (a) => ({ rate: a.length >= minN ? +(a.reduce((p, v) => p + v, 0) / a.length).toFixed(4) : null, nDays: a.length });
+    pivots = { hi: { share: hs.map((x) => +(x / pvRec.length).toFixed(4)), nDays: pvRec.length },
+      lo: { share: ls.map((x) => +(x / pvRec.length).toFixed(4)), nDays: pvRec.length },
+      earlyH: PIVOT_EARLY_H, earlyLowUp: rt(el2), earlyHighDown: rt(eh) };
   }
   return { sessions: records.length, sdSessions: up.length,
     mfe: { medUpSd: up.length >= minN ? q3(median(up)) : null, medDnSd: dn.length >= minN ? q3(median(dn)) : null,
       medUpPct: upP.length >= minN ? q3(median(upP)) : null, medDnPct: dnP.length >= minN ? q3(median(dnP)) : null },
+    mfeHist, pivots,
     quartiles: quart, monday: { weeks: mw.length, contained }, naked: { horizons: NAKED_HORIZONS, revisit: rev },
     candles: types };
 }

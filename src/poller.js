@@ -2648,14 +2648,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const st = levelStudy(pooled, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
     st.coverage = { tickers: contributing, skippedThin, windowDays: HOURLY_HISTORY_DAYS,
       minBars: LVL_MINBARS, stride: LVL_STRIDE };
-    // Per-ticker verdicts through the SAME aggregator with the SAME floors — one code path; the
-    // distance buckets are dropped per name (thin by construction) but overall + the touch-count
-    // split survive wherever their cells clear the floor.
+    // Per-ticker verdicts through the SAME aggregator with the SAME floors — one code path. The
+    // distance buckets ship per name so the chart follows the scope selector; most per-name cells
+    // sit under the floor by construction and render as honest dim slots disclosing their n.
     st.byTicker = {};
     for (const r of eq) {
       if (!r._lvEv || !r._lvEv.length) continue;
       const one = levelStudy(r._lvEv, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
-      st.byTicker[r.coin] = { ticker: r.ticker, n: one.n, overall: one.overall, byTouches: one.byTouches };
+      st.byTicker[r.coin] = { ticker: r.ticker, n: one.n, overall: one.overall, byTouches: one.byTouches,
+        buckets: one.buckets, far: one.far, cellFloor: one.cellFloor };
     }
     return st;
   }
