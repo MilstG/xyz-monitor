@@ -4351,7 +4351,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // becomes decorative, at 3 more names fall to the honest-null path.
   const AI_LEVEL_K = 3, AI_LEVEL_TAU = 0.4, AI_LEVEL_MINN = 2, AI_LEVEL_MAX = 8;
   const AI_SNAP_TOL = 0.5;   // x tauPct — how close a proposed void must sit to a detected level
-  const AI_SCHEMA_V = 8;   // v8: structural level detector — ctx.levels ships confirmed pivot clusters and a non-anchored directional void must snap to one (previously the void was bounded only by a +-40/60% sanity band); v7: earnings reported-vs-upcoming split — a printed event is a post-event object (context.earnings.reported), never served as a pending `next` binary; validator bans a stale `event` scenario; v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
+  const AI_SCHEMA_V = 9;   // v9: target-price reconciliation — the target level is the single source of truth and a null scenario target is filled from it (the prompt offered "target": null while the validator rejected it, killing crypto reads where the detector confirms no cluster on the thesis side); v8: structural level detector — ctx.levels ships confirmed pivot clusters and a non-anchored directional void must snap to one (previously the void was bounded only by a +-40/60% sanity band); v7: earnings reported-vs-upcoming split — a printed event is a post-event object (context.earnings.reported), never served as a pending `next` binary; validator bans a stale `event` scenario; v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   // Per-surface reasoning effort (OpenAI GPT-5.x only — the Anthropic body stays minimal and
@@ -4756,12 +4756,36 @@ Respond with ONLY a JSON object — no markdown fences, no preamble — with exa
  "synthesis": string (one paragraph, 3-6 sentences, plain human language a non-quant friend reads in 30 seconds; name the single dominant risk honestly),
  "evidence": array of 3-8 {"k": short label (<=16 chars, lowercase), "v": one plain-language sentence grounded in a specific number from the context},
  "eventRisk": string or null — ONLY when context.earnings.next places a print still AHEAD inside ~10 days: what the reaction study says and what holding through it means. If the print is already out (context.earnings.reported present and no context.earnings.next) or none is scheduled, this is null — a passed print is history, not event risk,
- "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. "target" scenarios are THESIS-DIRECTION only — an adverse recovery against the bias is the "void" scenario (through the void level) or "flat", never a target. If — and ONLY if — context.earnings.next places a print still AHEAD inside the scenario horizon, the middle scenario must be kind "event": the print decides, treat it as a coin flip scaled by the reaction study, and say so. When the print is already OUT (context.earnings.reported present, no context.earnings.next), the event is in the PAST — fold the reported beat/miss and the tape's reaction into the read, do NOT emit an "event" scenario, and never frame earnings as pending.
+ "scenarios": array of 2-4 {"name": short plain description, "kind": "target"|"flat"|"void"|"event", "p": probability 0..1, "target": price level or null, "note": one sentence}. A "target" scenario MUST carry a price: repeat the exact value of your "target" level in it — the same number, not a rounded or nearby one. "target": null is for the "flat", "void" and "event" kinds only. Probabilities must sum to ~1 and be anchored on the track record and base rates in the context, not vibes. "target" scenarios are THESIS-DIRECTION only — an adverse recovery against the bias is the "void" scenario (through the void level) or "flat", never a target. If — and ONLY if — context.earnings.next places a print still AHEAD inside the scenario horizon, the middle scenario must be kind "event": the print decides, treat it as a coin flip scaled by the reaction study, and say so. When the print is already OUT (context.earnings.reported present, no context.earnings.next), the event is in the PAST — fold the reported beat/miss and the tape's reaction into the read, do NOT emit an "event" scenario, and never frame earnings as pending.
  "news_read": {"used": true|false, "note": one sentence, <=200 chars} — REQUIRED. "used" is true only when the read materially leans on a headline from context.news.verified; the note names which (or states that no verified headlines exist / none were material). NEWS CONTRACT: catalyst or news statements anywhere in the report may reference ONLY headlines provided in context.news. If context.news.verified is empty you MUST NOT infer, recall, or invent any company news — state that no verified headlines exist in the window and read the tape on its own. context.news.tape items are market backdrop, never company catalysts.
  "invalidations": array of 1-5 plain sentences — observable conditions that would change the read,
  "action": {"stance": "enter_now"|"enter_on_pullback"|"take_profit"|"wait"|"no_trade", "entry": price or null, "note": one sentence on why this stance and what to watch}. The actionable read: offer an entry stance whenever the geometry supports one (a void and a target exist and the expected value at some entry is positive) — "enter_on_pullback" requires "entry" set to the pullback level (typically the zone), "enter_now" may leave entry null (the current price). When the honest answer is to stand aside — event about to decide, negative expected value, neutral read, thin data — say "wait" or "no_trade" and name the condition that would change it. Never invent a stance the scenario odds don't support.
- "levels": array of at most 4 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high", "label": <=60 chars} for chart annotation. Level discipline is strict: when bias is "long" or "short" you MUST include exactly one "void" level — the observable price where the read is dead. This number is NOT free: when claimAnchor exists the void IS its stop, and otherwise the void MUST be one of the prices in context.levels.items — copy the value verbatim. A void that matches no detected level is rejected server-side and the report is discarded, so pick the level, then build the read around it — and exactly one "void" scenario resolving against it. At most one "target" level, optionally one zone_low+zone_high pair. NEVER annotate moving averages as levels (EMAs drift — the chart draws the live ribbon itself) and never annotate range bounds unless the bound IS the void or target. Levels must sit within roughly ±25% of the current price or they won't render.
-Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Otherwise every level you emit must come from context.levels.items or from claim geometry — do not invent round numbers, and do not derive levels from range bounds the detector did not confirm. Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
+ "levels": array of at most 4 {"value": price, "kind": "void"|"target"|"zone_low"|"zone_high", "label": <=60 chars} for chart annotation. Level discipline is strict: when bias is "long" or "short" you MUST include exactly one "void" level — the observable price where the read is dead. This number is NOT free: when claimAnchor exists the void IS its stop, and otherwise the void MUST be one of the prices in context.levels.items — copy the value verbatim. A void that matches no detected level is rejected server-side and the report is discarded, so pick the level, then build the read around it — and exactly one "void" scenario resolving against it. At most one "target" level, optionally one zone_low+zone_high pair. The TARGET is held to a softer rule than the void, because a thesis-direction target often has no confirmed cluster in front of it: prefer a context.levels.items price on the thesis side, and when none exists, name the nearest structural extreme the data does support (range high/low, the prior swing) and say in the label that it is unconfirmed. What you must never do is omit the target price — a target scenario with no price is rejected server-side and the whole report is discarded. NEVER annotate moving averages as levels (EMAs drift — the chart draws the live ribbon itself) and never annotate range bounds unless the bound IS the void or target. Levels must sit within roughly ±25% of the current price or they won't render.
+Hard rules: if claimAnchor exists, its stop IS the void level — use exactly that number. Otherwise the VOID must come from context.levels.items or from claim geometry — do not invent round numbers for it, and do not derive it from range bounds the detector did not confirm. Every other level prefers a detected price and must be labelled as unconfirmed when it is not one. Never mention timeframes below 4h. Cite the name's own numbers, not generic market lore. Where the data is thin (low n, coverage gaps, unknown trend split), say so plainly instead of smoothing over it. No investment-advice framing beyond describing the mechanical scenarios.`;
+  // Structural fingerprint of a REJECTED payload, for the log line only. Shapes, not content:
+  // bias, the scenario kinds, the level kinds, and which price fields came back empty. Total
+  // failure to parse is itself the answer. Must never throw — a diagnostic that can crash the
+  // generate path is worse than no diagnostic.
+  function aiRejectShape(rawText) {
+    if (rawText == null) return "shape: n/a (no model text)";
+    let o;
+    try {
+      const clean = String(rawText).replace(/```json|```/g, "").trim();
+      o = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+    } catch (_) { return `shape: unparseable (${String(rawText).length} chars)`; }
+    try {
+      const sc = Array.isArray(o.scenarios) ? o.scenarios : [];
+      const lv = Array.isArray(o.levels) ? o.levels : [];
+      const kinds = sc.map((s) => (s && s.kind) || "?").join(",") || "none";
+      const lks = lv.map((l) => (l && l.kind) || "?").join(",") || "none";
+      const gaps = [];
+      if (sc.some((s) => s && s.kind === "target" && !(Number.isFinite(s.target) && s.target > 0))) gaps.push("scen.target");
+      if (!lv.some((l) => l && l.kind === "target")) gaps.push("level.target");
+      if (!lv.some((l) => l && l.kind === "void")) gaps.push("level.void");
+      if (!o.action || o.action.entry == null) gaps.push("action.entry");
+      return `shape: bias=${o.bias || "?"} scen=[${kinds}] levels=[${lks}] empty=[${gaps.join(",") || "none"}]`;
+    } catch (_) { return "shape: introspection failed"; }
+  }
   // Validate the model's JSON, correct the void to frozen-claim geometry when one exists, and
   // compute every displayed number (risk unit, per-scenario R/R and payoff, EV) server-side.
   function validateAiReport(rawText, ctx) {
@@ -4784,24 +4808,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (out.eventRisk != null && !str(out.eventRisk, 500)) return { ok: false, error: "bad eventRisk" };
     if (!Array.isArray(out.invalidations) || out.invalidations.length < 1 || out.invalidations.length > 5
       || !out.invalidations.every((s) => str(s, 240))) return { ok: false, error: "bad invalidations" };
-    if (!Array.isArray(out.scenarios) || out.scenarios.length < 2 || out.scenarios.length > 4) return { ok: false, error: "bad scenarios" };
-    let psum = 0;
-    for (const s of out.scenarios) {
-      if (!s || !str(s.name, 90) || !AI_KINDS.has(s.kind) || typeof s.p !== "number" || !(s.p >= 0 && s.p <= 1)) return { ok: false, error: "bad scenario entry" };
-      if (s.kind === "target" && !(Number.isFinite(s.target) && s.target > 0)) return { ok: false, error: "target scenario without a target level" };
-      if (s.note != null && !str(s.note, 300)) return { ok: false, error: "bad scenario note" };
-      psum += s.p;
-    }
-    if (!(psum >= 0.85 && psum <= 1.15)) return { ok: false, error: "scenario probabilities do not sum to 1" };
-    for (const s of out.scenarios) s.p = +(s.p / psum).toFixed(3);
-    if (out.scenarios.filter((s) => s.kind === "void").length > 1) return { ok: false, error: "multiple void scenarios" };
-    // An "event" scenario asserts a scheduled print will decide the move — legitimate ONLY when
-    // one is still AHEAD (context.earnings.next). A reported or absent print yields a stale
-    // coin-flip that reads as pending event risk (the "earnings after close today" bug). Structural
-    // guard; the tightened context + prompt carry the prose. Never trips a genuine upcoming print.
-    const earnAhead = !!(ctx.earnings && ctx.earnings.next);
-    if (!earnAhead && out.scenarios.some((s) => s.kind === "event"))
-      return { ok: false, error: "event scenario without a pending earnings print (context.earnings.next)" };
+    // Levels are parsed BEFORE the scenarios because the target price is one number the payload
+    // states twice — as the "target" level (what the chart draws) and as the target scenario's own
+    // field (what the R/R column reads) — and nothing reconciled them. The prompt's schema line
+    // offers "target": price level or null while the loop below hard-rejected the null, so an
+    // honest payload that placed the price in levels and left the scenario field empty was
+    // discarded. Crypto is where that bit: the v8 rule sends every level to context.levels.items,
+    // and the detector confirms far fewer clusters on ~90 daily bars at a volatility-scaled tau
+    // than on an equity's 370, so on a name with no cluster on the thesis side there was no
+    // permitted number to write. One source of truth: the target LEVEL wins, the scenario field
+    // is reconciled to it, and the hard failure survives only when neither carries a price.
     const levels = [];
     if (out.levels != null) {
       if (!Array.isArray(out.levels) || out.levels.length > 4) return { ok: false, error: "bad levels (max 4)" };
@@ -4816,6 +4832,49 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     }
     if (levels.filter((l) => l.kind === "void").length > 1) return { ok: false, error: "multiple void levels" };
     if (levels.filter((l) => l.kind === "target").length > 1) return { ok: false, error: "multiple target levels" };
+    let targetLv = levels.find((l) => l.kind === "target") || null;
+    let targetReconciled = false, targetSeed = null;
+    if (!Array.isArray(out.scenarios) || out.scenarios.length < 2 || out.scenarios.length > 4) return { ok: false, error: "bad scenarios" };
+    let psum = 0;
+    for (const s of out.scenarios) {
+      if (!s || !str(s.name, 90) || !AI_KINDS.has(s.kind) || typeof s.p !== "number" || !(s.p >= 0 && s.p <= 1)) return { ok: false, error: "bad scenario entry" };
+      if (s.kind === "target") {
+        const st = Number.isFinite(s.target) && s.target > 0 ? +s.target : null;
+        // Neither field carries a price: the scenario claims a move to nowhere and every R it
+        // would feed is uncomputable. Still a hard failure, same error string as before.
+        if (st == null && targetLv == null) return { ok: false, error: "target scenario without a target level" };
+        if (st == null) { s.target = targetLv.value; targetReconciled = true; }
+        else if (targetLv && Math.abs(st / targetLv.value - 1) > 0.005) { s.target = targetLv.value; targetReconciled = true; }
+        // A scenario price with no level to answer to gets the level sanity band applied to it
+        // directly — an out-of-band target produces a real-looking R off a price the chart would
+        // refuse to draw, which is the false-precision failure this layer exists to prevent.
+        else if (!targetLv) {
+          if (!(st > px * 0.6 && st < px * 1.6)) return { ok: false, error: "target scenario price outside sanity bounds" };
+          targetSeed = sig(st, 9);
+        }
+      }
+      if (s.note != null && !str(s.note, 300)) return { ok: false, error: "bad scenario note" };
+      psum += s.p;
+    }
+    // The chart may not disagree with the card: when the price arrived only in the scenario row,
+    // mint the matching level so both surfaces draw the same number. Skipped when the model
+    // already spent all four annotation slots — it chose those, and the R/R column still reads
+    // the scenario's own price.
+    if (targetLv == null && targetSeed != null && levels.length < 4) {
+      targetLv = { value: targetSeed, kind: "target", label: "target — from the scenario table" };
+      levels.push(targetLv);
+      targetReconciled = true;
+    }
+    if (!(psum >= 0.85 && psum <= 1.15)) return { ok: false, error: "scenario probabilities do not sum to 1" };
+    for (const s of out.scenarios) s.p = +(s.p / psum).toFixed(3);
+    if (out.scenarios.filter((s) => s.kind === "void").length > 1) return { ok: false, error: "multiple void scenarios" };
+    // An "event" scenario asserts a scheduled print will decide the move — legitimate ONLY when
+    // one is still AHEAD (context.earnings.next). A reported or absent print yields a stale
+    // coin-flip that reads as pending event risk (the "earnings after close today" bug). Structural
+    // guard; the tightened context + prompt carry the prose. Never trips a genuine upcoming print.
+    const earnAhead = !!(ctx.earnings && ctx.earnings.next);
+    if (!earnAhead && out.scenarios.some((s) => s.kind === "event"))
+      return { ok: false, error: "event scenario without a pending earnings print (context.earnings.next)" };
     // Frozen geometry wins: with a live claim, the void level IS the claim's stop. Model output
     // that disagrees is overwritten and flagged — the chart may never contradict the ledger.
     let corrected = false;
@@ -4887,7 +4946,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (!act || typeof act !== "object" || !AI_STANCES.has(act.stance)) return { ok: false, error: "bad action stance" };
     if (act.note != null && !str(act.note, 300)) return { ok: false, error: "bad action note" };
     if (act.entry != null && (!Number.isFinite(act.entry) || !(act.entry > px * 0.6 && act.entry < px * 1.6))) return { ok: false, error: "action entry outside sanity bounds" };
-    const targetL = levels.find((l) => l.kind === "target") || null;
+    const targetL = targetLv;   // hoisted above the scenario loop; may have been minted from it
     let action = { stance: act.stance, note: act.note ? String(act.note).trim() : null };
     if (act.stance === "enter_now" || act.stance === "enter_on_pullback") {
       if (voidL == null || targetL == null) return { ok: false, error: "actionable stance without void/target geometry" };
@@ -4915,7 +4974,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       eventRisk: out.eventRisk ? String(out.eventRisk).trim() : null,
       invalidations: out.invalidations.map((s) => s.trim()) },
       computed: { px0: sig(px, 9), levels, voidLevel: voidL ? voidL.value : null, riskAbs: risk != null ? sig(risk, 9) : null,
-        riskPct: risk != null ? +((risk / px) * 100).toFixed(2) : null, correctedVoid: corrected, scenarios: scen, evR: ev, action } };
+        riskPct: risk != null ? +((risk / px) * 100).toFixed(2) : null, correctedVoid: corrected,
+        correctedTarget: targetReconciled, scenarios: scen, evR: ev, action } };
   }
   // Chart annotation marks, computed here from the ledger + prints — never model-invented.
   // FIRST FIRES ONLY: same-event entries chaining within 2 days of the prior entry's span are
@@ -5128,7 +5188,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         used = AI_MODEL_FALLBACK; call = await callModel(AI_MODEL_FALLBACK, ctx, { effort: AI_REPORT_EFFORT });
         val = call.ok ? validateAiReport(call.text, ctx) : { ok: false, error: call.error };
       }
-      if (!val.ok) { log(`AI report ${coin}: fallback failed too (${val.error})`); return { ok: false, error: val.error }; }
+      // Both models rejected and nothing is cached, so the offending payload is gone the moment
+      // this returns — and a bare error string can't distinguish "the model wrote nonsense" from
+      // "the prompt and the validator disagree" (the crypto null-target bug hid here for a build).
+      // Log the SHAPE, never the body: bias, scenario kinds, level kinds, and which numeric fields
+      // were absent. Enough to place the fault, no prose in the logs, no PII-shaped content.
+      if (!val.ok) {
+        log(`AI report ${coin}: fallback failed too (${val.error}) — ${aiRejectShape(call.ok ? call.text : null)}`);
+        return { ok: false, error: val.error };
+      }
       aiDay.count++;   // only a SUCCESSFUL generation burns budget; aiAssemble persists the counter with the cache
       const rep = aiAssemble(coin, ctx, val, used);
       // Analyst-read accountability: every validated DIRECTIONAL read becomes a frozen claim
@@ -5388,6 +5456,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     listAiReports,
     aiCompileNow: compileAiContext,   // harness: build the context object without any network
     aiValidateNow: validateAiReport,  // harness: run model text through the validator + server math
+    aiRejectShapeNow: aiRejectShape,  // harness: the log-only structural fingerprint of a rejected payload
     aiMarksNow: aiMarks,              // harness: first-fire chart marks without a full generation
     aiIngestNow: (coin, rawText, model) => {   // harness: full ingest path minus the API call
       const ctx = compileAiContext(coin);
