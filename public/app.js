@@ -2755,7 +2755,14 @@ function drawSessions(){
   const a=state.analytics.data, err=state.analytics.err;
   const title=`<div class="cp-head" style="margin-bottom:6px">Session &amp; time-of-day analytics</div>`;
   if(err && !a){ host.innerHTML=title+`<div class="msg">Couldn't load analytics: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
-  if(!a || !a.coverage || !a.coverage.hourly){ host.innerHTML=title+`<div class="msg">Computing\u2026 warming up the spines.</div>`; return; }
+  if(!a || !a.coverage || !a.coverage.hourly){
+    // A cold cache and a build that throws every cycle look identical from here — the server now
+    // ships the reason when it has one, so say which it is rather than implying progress forever.
+    const be=a&&a.buildError;
+    host.innerHTML=title+(be
+      ? `<div class="msg">Analytics build is failing server-side: ${esc(be)}<br><span class="sec">Retrying every cycle. This is a bug, not a warm-up \u2014 the reason above is from the server log.</span></div>`
+      : `<div class="msg">Computing\u2026 warming up the spines.</div>`);
+    return; }
   const c=a.coverage, w=a.window||{}, hr=c.hourly||{}, fund=c.funding||{};
   const rp=covPct(c.ready,c.markets);
   const age=a.ts?`updated ${Math.max(0,Math.round((Date.now()-a.ts)/1000))}s ago`:'';
