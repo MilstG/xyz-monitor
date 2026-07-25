@@ -793,7 +793,7 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
   assert.ok(pol.includes("let swingFails = 0, swingErr = null;"), "counters reset per build");
   assert.ok(pol.includes("strategy shadows failed on ${swingFails} market(s)"), "failures log once per build, visibly");
   const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
-  assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 3, "all three daily-close detectors coerce");
+  assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 4, "every daily-close detector coerces (reclaim, failbrk, mapull + roundfr since -12)");
 });
 
 test("crypto engine purge: stored crypto claims leave the ledger at hydrate (airead exempt), panels and records ship xyz-only", () => {
@@ -5267,4 +5267,100 @@ test("anatomy -11: end-to-end through the poller — served study, stable ETag, 
     const an2 = p2.getAnalytics().sections.anatomy;
     assert.ok(an2.pending && an2.need === 5, "thin book reports the honest gate");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ============================================================================================
+// Ledger shadow pair (build 2026.07.24-12): outsized-wick fill + round-figure front-run. Both
+// ship as vi=0 shadows — no UI surface, no in-sample study, records earned purely out of sample
+// through the existing rearm/resolver machinery. These pin the frozen geometry and the refusals.
+// ============================================================================================
+const { detectWickFill, detectRoundFront, roundStep } = require("../src/compute");
+
+test("shadow pair -12: detectWickFill freezes exact geometry and refuses everything ambiguous", () => {
+  const mk = (o, h, l, c, t) => ({ t: t || 0, o, h, l, c });
+  const base = []; for (let i = 0; i < 30; i++) base.push(mk(99, 100, 98, 99.5, i));
+  // dominant UPPER wick: o=99 c=100 h=110 l=98.5 -> range 11.5, upper wick 10 (87% of range)
+  const up = base.concat([mk(99, 110, 98.5, 100, 30)]);
+  const wf = detectWickFill(up, 101, {});
+  assert.deepEqual({ s: wf.side, t: wf.target, v: wf.stop }, { s: "long", t: 105, v: 98.5 },
+    "long fill: target = wick midpoint (bodyHi+high)/2, void = the bar's opposite extreme");
+  assert.ok(Math.abs(wf.wickPct - 0.87) < 0.001, "wick share measured");
+  // mirror
+  const dn = base.concat([mk(100, 100.5, 89, 99, 30)]);
+  const wf2 = detectWickFill(dn, 97, {});
+  assert.deepEqual({ s: wf2.side, t: wf2.target, v: wf2.stop }, { s: "short", t: 94, v: 100.5 },
+    "short fill mirrors exactly");
+  // refusals — each one is a claim that must never open
+  assert.equal(detectWickFill(up, 106, {}), null, "fill already done: mark past the target");
+  assert.equal(detectWickFill(up, 98, {}), null, "thesis already dead: mark through the void");
+  assert.equal(detectWickFill(base.concat([mk(99, 100.4, 98.3, 99.6, 30)]), 99, {}), null,
+    "a bar under the size floor is noise, not a wick event");
+  assert.equal(detectWickFill(base.concat([mk(99.5, 106, 93, 99.5, 30)]), 99, {}), null,
+    "two-sided bar: no dominant wick, no unambiguous direction, no claim");
+  assert.equal(detectWickFill(base.slice(0, 20).concat([up[30]]), 101, {}), null, "short history refuses");
+  assert.equal(detectWickFill(null, 100, {}), null, "null input degrades");
+  const strs = up.map((b) => ({ t: b.t, o: String(b.o), h: String(b.h), l: String(b.l), c: String(b.c) }));
+  const wfs = detectWickFill(strs, 101, {});
+  assert.ok(wfs && wfs.target === 105, "string OHLC coerced, never NaN-thrown");
+});
+
+test("shadow pair -12: roundStep picks the dominant grid deterministically across magnitudes", () => {
+  const cases = [[87, 10], [95, 10], [432, 50], [6.4, 0.5], [1.3, 0.1], [9.1, 1], [0.043, 0.005]];
+  for (const [px, g] of cases) assert.equal(roundStep(px), g, `roundStep(${px}) = ${g}`);
+  assert.equal(roundStep(0), null); assert.equal(roundStep(-5), null);
+  for (const px of [0.7, 3, 18, 250, 7100]) {
+    const g = roundStep(px);
+    assert.ok(g / px <= 0.12 + 1e-12, `step never exceeds 12% of price (${px} -> ${g})`);
+  }
+});
+
+test("shadow pair -12: detectRoundFront fades the approach with the void through the figure, both sides, fresh only", () => {
+  const DAY = 864e5;
+  const seq = (f) => Array.from({ length: 26 }, (_, i) => [i * DAY, f(i)]);
+  // advance into 90 from below -> short front-run
+  const r1 = detectRoundFront(seq((i) => 84 + i * 0.19), 89.2, 2, {});
+  assert.deepEqual({ s: r1.side, l: r1.lvl }, { s: "short", l: 90 });
+  assert.ok(Math.abs(r1.stop - 90.45) < 1e-9, "void = figure x (1 + 0.25 sd), just THROUGH the round");
+  assert.ok(Math.abs(r1.target - 87.862) < 1e-9, "target = 0.75 sd retrace of the approach");
+  // decline into 80 from above -> long mirror
+  const r2 = detectRoundFront(seq((i) => 86 - i * 0.2), 80.9, 2, {});
+  assert.deepEqual({ s: r2.side, l: r2.lvl }, { s: "long", l: 80 });
+  assert.ok(r2.stop < 80 && r2.target > 80.9, "long geometry sided correctly");
+  // refusals
+  assert.equal(detectRoundFront(seq((i) => i === 20 ? 90.5 : 84 + i * 0.19), 89.2, 2, {}), null,
+    "a close beyond the figure inside 20 bars consumes freshness — no claim on a tested level");
+  assert.equal(detectRoundFront(seq((i) => 84 + i * 0.19), 85, 1, {}), null, "mid-grid: outside the approach band");
+  assert.equal(detectRoundFront(seq((i) => 84 - i * 0.19), 89.2, 2, {}), null,
+    "near the round above but DECLINING: no advance into it, no front-run");
+  assert.equal(detectRoundFront(seq((i) => 84 + i * 0.19), 89.2, 0, {}), null, "no vol scale, no study");
+  assert.equal(detectRoundFront(null, 89, 2, {}), null, "null input degrades");
+});
+
+test("shadow pair -12: manifest — EV_META, poller wiring, geometry gate, shadow-only, xyz-only", () => {
+  const fs = require("fs"), path = require("path");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const f of ["detectWickFill", "detectRoundFront", "roundStep"])
+    assert.equal((cmp.match(new RegExp("function " + f + "\\(", "g")) || []).length, 1, `exactly one ${f}`);
+  assert.ok(/wickfill: \{ horizonMs: 3 \* DAY/.test(cmp) && /roundfr: {2}\{ horizonMs: 2 \* DAY/.test(cmp),
+    "EV_META entries pinned with their horizons");
+  for (const pin of [
+    "const WICK_FRAC = 0.55;", "const WICK_SIZE_MULT = 1.1;",
+    "const RNDF_LO_BAND = 0.05, RNDF_HI_BAND = 0.6;",
+    'openLedger(r, "wickfill"', 'openLedger(r, "roundfr"',
+    "detectWickFill(db24.slice(0, -1), r.px,",                 // closed spine buckets only — never dailyRaw, never the forming day
+    "detectRoundFront(closes, r.px, sd30,",
+  ]) assert.ok(pol.includes(pin), `poller.js missing -12 pin: ${pin}`);
+  // both claims gated by stopGeometryOk and opened as vi=0 shadows inside the isolated try
+  assert.ok(/wf && stopGeometryOk\(wf\.side, r\.px, wf\.stop\)/.test(pol), "wickfill geometry-gated");
+  assert.ok(/rf && stopGeometryOk\(rf\.side, r\.px, rf\.stop\)/.test(pol), "roundfr geometry-gated");
+  for (const ev of ["wickfill", "roundfr"]) {
+    const m = pol.match(new RegExp('openLedger\\(r, "' + ev + '"[\\s\\S]{0,260}?\\}, 0\\);'));
+    assert.ok(m, `${ev} must open as a vi=0 shadow`);
+  }
+  const seg = pol.slice(pol.indexOf("outsized-wick fill + round-figure front-run"), pol.indexOf('openLedger(r, "roundfr"'));
+  assert.ok(seg.includes('if (r.uni === "xyz")'), "the pair is xyz-gated at the call site (belt to openLedger's crypto suspenders)");
+  // shadows stay invisible: no client labels, ever, until a promotion build adds them deliberately
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(!app.includes("wickfill") && !app.includes("roundfr"), "no client surface for unpromoted shadows");
 });
