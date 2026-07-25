@@ -1049,7 +1049,204 @@ function detectLevels(daily, px, sd30, opts) {
   return { k, tauPct: +tauPct.toFixed(3), minN, n: keep.length, items: keep };
 }
 
-// ---- served-index cache busting (pure) -----------------------------------------------------
+// ---- structural-level outcome study (pure) ---------------------------------------------------
+// detectLevels ALREADY decides which levels this app draws and which levels an AI void is allowed
+// to snap to (AI_SNAP_TOL). Nothing has ever measured whether those levels do anything. This walks
+// the daily tape, re-detects levels from the PREFIX ONLY at a fixed stride, and watches each level
+// forward over a fixed horizon — so every observation is out of sample with respect to the bars
+// that produced it. Two questions, both of which the snap rule silently bets on:
+//   1. does a detected level get TOUCHED more often than distance alone implies?
+//   2. once touched, does it HOLD (close rejected back to the origin side) or break?
+// The second is the one that matters for a void: a void on a level that breaks 70% of the time is
+// not an invalidation point, it is a stop-loss donation.
+//
+// Standard normal CDF (Abramowitz & Stegun 7.1.26). Needed for the random-walk touch baseline;
+// hand-rolled because the zero-dependency rule applies here as everywhere else.
+function normCdf(z) {
+  if (!Number.isFinite(z)) return null;
+  const s = z < 0 ? -1 : 1, x = Math.abs(z) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const erf = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return 0.5 * (1 + s * erf);
+}
+// P(a driftless walk of per-bar sd 1 touches a level d sd away within h bars) = 2(1 - phi(d/sqrt(h))).
+// This is the null the study is measured against: a level 0.2 sd out gets touched constantly and
+// that is geometry, not structure.
+function touchBaseline(distSd, horizon) {
+  if (!(distSd >= 0) || !(horizon > 0)) return null;
+  const p = 2 * (1 - normCdf(distSd / Math.sqrt(horizon)));
+  return +Math.max(0, Math.min(1, p)).toFixed(4);
+}
+// Normalize daily bars to {h,l,c} exactly the way detectLevels does, so the study can never see a
+// bar shape the detector wouldn't. Closes-only bars degrade to h=l=c (no intrabar reach) rather
+// than being dropped — the same honest-null posture as the OHLC upgrade path.
+function studyBars(daily) {
+  const b = [];
+  if (!Array.isArray(daily)) return b;
+  for (const d of daily) {
+    if (!d) continue;
+    const c = +d.c;
+    if (!Number.isFinite(c) || !(c > 0)) continue;
+    const hr = +d.h, lr = +d.l;
+    const h = Number.isFinite(hr) && hr > 0 ? hr : c, l = Number.isFinite(lr) && lr > 0 ? lr : c;
+    b.push({ t: +d.t || 0, h: Math.max(h, c), l: Math.min(l, c), c });
+  }
+  return b;
+}
+// One ticker's event list. Every event is frozen at DETECTION time (distance, touch count, side,
+// age) and resolved only from bars strictly after it — the same discipline the ledger uses, which
+// is what makes the aggregate quotable rather than a curve fit.
+//   daily : [{t,h,l,c}, ...] ascending
+//   sd30  : this name's own 30d daily-return sd, in percent (the detector's tolerance scale)
+//   opts  : { k, tauMult, minN, max, minBars, stride, horizon } — detector opts pass through
+//           UNCHANGED so the study measures the shipping configuration, not a tuned variant
+function levelOutcomes(daily, sd30, opts) {
+  const o = opts || {};
+  const stride = Number.isFinite(o.stride) && o.stride >= 1 ? Math.round(o.stride) : 5;
+  const horizon = Number.isFinite(o.horizon) && o.horizon >= 1 ? Math.round(o.horizon) : 10;
+  const minBars = Number.isFinite(o.minBars) ? o.minBars : 60;
+  const b = studyBars(daily);
+  if (b.length < minBars + horizon + 1 || !(sd30 > 0)) return { n: 0, events: [], horizon, stride };
+  const dOpts = { k: o.k, tauMult: o.tauMult, minN: o.minN, max: o.max, minBars };
+  const events = [];
+  for (let i = minBars; i < b.length - horizon; i += stride) {
+    const px = b[i].c;
+    if (!(px > 0)) continue;
+    // Detector sees the prefix ONLY. Rebuilding the slice each stride is the honest cost of not
+    // letting a single future bar leak into the levels being scored.
+    const lv = detectLevels(b.slice(0, i + 1), px, sd30, dOpts);
+    if (!lv || !lv.items.length) continue;
+    const tau = Math.max(lv.tauPct, 0.1) / 100;
+    for (const it of lv.items) {
+      const L = it.v;
+      if (!(L > 0)) continue;
+      const rel = L / px - 1;
+      if (Math.abs(rel) <= tau) continue;                 // already at the level: no distance to travel, nothing to measure
+      const above = rel > 0;
+      const distSd = +(Math.abs(rel) * 100 / sd30).toFixed(3);
+      const ev = { t: b[i].t, v: L, side: it.side, nTouch: it.n, ageD: it.ageD,
+        above, distSd, touched: false, bars: null, held: null, beyondSd: null,
+        plTouch: null, plHeld: null };
+      for (let j = i + 1; j <= i + horizon; j++) {
+        if (!(b[j].l <= L && L <= b[j].h)) continue;      // bracketing bar = the touch; closes-only bars touch only by closing exactly through
+        ev.touched = true;
+        ev.bars = j - i;
+        // Held = the touch bar closed back on the side price came FROM. Broke = closed through.
+        ev.held = above ? b[j].c < L : b[j].c > L;
+        // How far past the level price reached before the horizon ran out — a void placed here
+        // would have been run by exactly this much.
+        let beyond = 0;
+        for (let m = j; m <= i + horizon; m++) {
+          const past = above ? b[m].h - L : L - b[m].l;
+          if (past > beyond) beyond = past;
+        }
+        ev.beyondSd = +(beyond / L * 100 / sd30).toFixed(3);
+        break;
+      }
+      // ---- permutation control -------------------------------------------------------------
+      // A level's touch rate cannot be compared to the continuous first-passage formula
+      // 2(1-phi(d/sqrt(h))): that assumes price is monitored continuously, while a touch here
+      // requires a BAR to bracket the level. A gappy tape jumps over levels without bracketing
+      // them, so the analytic null is biased high and would report "levels repel price" on pure
+      // noise. The control instead carries the SAME relative distance to OTHER detection points'
+      // marks and resolves it in THEIR forward windows through this identical loop — so the
+      // discreteness, the intrabar range and the return distribution all cancel, and what is
+      // left is the only thing we wanted to measure: does being a detected level add anything?
+      // Offsets are deterministic (no PRNG) so the payload is reproducible and testable.
+      let plN = 0, plHit = 0, plHeld = 0;
+      for (let m = 1; m <= PLACEBO_K; m++) {
+        const j = i + m * PLACEBO_STEP * stride;
+        const jj = minBars + ((j - minBars) % Math.max(1, b.length - horizon - minBars));
+        if (jj === i || !(b[jj].c > 0)) continue;
+        const Lp = b[jj].c * (1 + rel);                  // same signed distance, different anchor
+        if (!(Lp > 0)) continue;
+        plN++;
+        for (let q = jj + 1; q <= jj + horizon && q < b.length; q++) {
+          if (!(b[q].l <= Lp && Lp <= b[q].h)) continue;
+          plHit++;
+          if (above ? b[q].c < Lp : b[q].c > Lp) plHeld++;
+          break;
+        }
+      }
+      if (plN) {
+        ev.plTouch = +(plHit / plN).toFixed(4);
+        ev.plHeld = plHit ? +(plHeld / plHit).toFixed(4) : null;
+      }
+      events.push(ev);
+    }
+  }
+  return { n: events.length, events, horizon, stride };
+}
+// Aggregate one or many tickers' event lists into the served payload. Distance buckets are fixed
+// so the x-axis means the same thing on every scope, and every cell carries its own n — a bucket
+// under the floor reports null rather than a rate computed on four observations.
+// Distance edges in units of the name's own DAILY sd. Calibrated to where detectLevels output
+// actually lands: the nearest-8 structural levels on a name with sd30 ~2% commonly sit 2-8 sd
+// out, so the intraday 0.25-2 sd scale used for open-relative studies would leave every
+// bucket empty. Anything past the last edge falls into `far`.
+const LVL_EDGES = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+// Permutation control: K placebo anchors per real level, walked STEP*stride bars apart so the
+// control windows do not overlap the real one. Deterministic by construction.
+const PLACEBO_K = 24, PLACEBO_STEP = 3;
+function levelStudy(events, opts) {
+  const o = opts || {};
+  const horizon = Number.isFinite(o.horizon) && o.horizon >= 1 ? Math.round(o.horizon) : 10;
+  const floor = Number.isFinite(o.cellFloor) ? o.cellFloor : 20;
+  const ev = (Array.isArray(events) ? events : []).filter((e) => e && Number.isFinite(e.distSd));
+  const rate = (a) => (a.length >= floor ? +(a.filter(Boolean).length / a.length).toFixed(4) : null);
+  // The null for a SET of levels is the mean of each level's own touch probability, not the
+  // probability at the set's mean distance. Jensen makes those differ badly whenever the set mixes
+  // distances (every bySide / byTouches group does), which would show excess where there is none.
+  const cell = (rows) => {
+    const touched = rows.filter((e) => e.touched);
+    const bs = rows.map((e) => e.plTouch).filter(Number.isFinite);
+    const base = bs.length ? +(bs.reduce((a, x) => a + x, 0) / bs.length).toFixed(4) : null;
+    const tr = rate(rows.map((e) => e.touched));
+    const broke = touched.filter((e) => e.held === false).map((e) => e.beyondSd).filter(Number.isFinite);
+    const mb = broke.length >= floor ? median(broke) : null;
+    return { n: rows.length, nTouched: touched.length,
+      touchRate: tr, baseline: base,
+      excess: tr != null && base != null ? +(tr - base).toFixed(4) : null,
+      holdRate: rate(touched.map((e) => e.held)),
+      holdBaseline: (() => { const a = touched.map((e) => e.plHeld).filter(Number.isFinite);
+        return a.length >= floor ? +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(4) : null; })(),
+      medBeyondSd: mb == null ? null : +mb.toFixed(3) };
+  };
+  const buckets = [];
+  for (let i = 0; i < LVL_EDGES.length; i++) {
+    const lo = i ? LVL_EDGES[i - 1] : 0, hi = LVL_EDGES[i];
+    const rows = ev.filter((e) => e.distSd > lo && e.distSd <= hi);
+    buckets.push(Object.assign({ lo, hi, mid: +((lo + hi) / 2).toFixed(3) }, cell(rows)));
+  }
+  const far = ev.filter((e) => e.distSd > LVL_EDGES[LVL_EDGES.length - 1]);
+  const bySide = {};
+  for (const s of ["res", "sup", "flip"]) {
+    const rows = ev.filter((e) => e.side === s);
+    if (rows.length) bySide[s] = cell(rows);
+  }
+  // The knob that matters: detectLevels ships AI_LEVEL_MINN = 2. If a 2-touch level holds no
+  // better than chance and a 4-touch level does, that constant is wrong and this is the evidence.
+  const byTouches = {};
+  for (const [key, pred] of [["2", (e) => e.nTouch === 2], ["3", (e) => e.nTouch === 3], ["4+", (e) => e.nTouch >= 4]]) {
+    const rows = ev.filter(pred);
+    if (rows.length) byTouches[key] = cell(rows);
+  }
+  const allTouched = ev.filter((e) => e.touched);
+  return { n: ev.length, horizon, cellFloor: floor,
+    buckets, far: far.length ? Object.assign({ lo: LVL_EDGES[LVL_EDGES.length - 1] }, cell(far)) : null,
+    bySide, byTouches,
+    overall: (() => {   // the summary row carries its own controls, same construction as any cell
+      const bs = ev.map((e) => e.plTouch).filter(Number.isFinite);
+      const hb = allTouched.map((e) => e.plHeld).filter(Number.isFinite);
+      const tr = rate(ev.map((e) => e.touched));
+      const base = bs.length ? +(bs.reduce((a, x) => a + x, 0) / bs.length).toFixed(4) : null;
+      return { nTouched: allTouched.length, touchRate: tr, baseline: base,
+        excess: tr != null && base != null ? +(tr - base).toFixed(4) : null,
+        holdRate: rate(allTouched.map((e) => e.held)),
+        holdBaseline: hb.length >= floor ? +(hb.reduce((a, x) => a + x, 0) / hb.length).toFixed(4) : null };
+    })() };
+}
+
 // Stamps ?v=<build> on the two client asset tags so browsers refetch exactly when the build
 // changes and never otherwise. The -84 lesson: with bare asset tags, a deploy updates the
 // server while browsers silently keep running last week's client — the API served 281
@@ -2024,7 +2221,9 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
-  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats };
+  priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
+  // structural-level outcome study (build 2026.07.24-10): does detectLevels output actually hold?
+  normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K };
 
 // ---- stop geometry validation ----------------------------------------------------------------
 // An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it

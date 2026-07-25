@@ -5,7 +5,7 @@ const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -2345,7 +2345,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     const ready = universe.filter((u) => u.hours >= READY_HOURS).length;
     const regime = buildRegime();
     const rgSig = ["all", "crypto", "stocks"].map((k) => { const d = regime[k]; return d && !d.pending ? `${Math.round(d.lev.totalOi || 0)}|${d.crowd.netFundApr || 0}|${d.crowd.netCrowd || 0}|${(d.series || []).length}` : "0"; }).join(";");
-    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}`;
+    const lvSt = buildLevelsStudy();   // computed once; reused in sections below so sig and payload can never disagree
+    const lvSig = lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`;
+    const sig = `${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}`;
     if (sig !== analyticsSig) { analyticsSig = sig; analyticsVer = Date.now(); }   // content changed -> new ETag
     analyticsCache = {
       ts: Date.now(),
@@ -2365,6 +2367,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           dow: buildDowHeatmap(),
           clusters: buildClusters(hourClock),
           seasonality: buildSeasonality(),
+          levels: lvSt,
         };
       })(),
     };
@@ -2579,6 +2582,46 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     universe.sort((a, b) => (a.ticker < b.ticker ? -1 : 1));
     return { equityCount: eq.length, all: crossHours(allMeans), bySector, byTicker, universe };
+  }
+
+  // ---- structural-level outcome study (served in sections.levels) ----------------------------
+  // detectLevels (-09) decides which levels the AI report draws and which levels a proposed void
+  // is ALLOWED to snap to. This section is its report card: levelOutcomes re-detects on the prefix
+  // only (out of sample by construction) and scores every level against a same-distance permutation
+  // control, so the served excess is edge over matched noise, not over an analytic formula the
+  // bar-sampled tape provably violates. Daily bars come from bucketsFor(r, 24) — the memoized
+  // full-OHLC aggregation of the hourly spine — NOT from dailyRaw: a warm-cache hydrate leaves
+  // dailyRaw closes-only (no lows), which would silently blind the study's down-side touch test.
+  // One source, always OHLC, zero warm-boot seam; the cost is the spine's 180d window vs dailyRaw's
+  // 365d tier, which is the right trade for a study whose whole claim is measurement integrity.
+  const LVL_MIN_EQ = 5;                 // publish only when the class is broad enough (same posture as sessionDecomp)
+  const LVL_STRIDE = 5, LVL_HORIZON = 10, LVL_MINBARS = 60, LVL_CELL_FLOOR = 20;
+  function buildLevelsStudy() {
+    const eq = activeMarkets().filter((r) => !r.delisted && classifyCached(r.ticker).assetClass === "Equity");
+    const pooled = []; let contributing = 0, skippedThin = 0;
+    for (const r of eq) {
+      const db = bucketsFor(r, 24);
+      if (!Array.isArray(db) || db.length < LVL_MINBARS + LVL_HORIZON + 2) { skippedThin++; continue; }
+      // Drop the last bucket unconditionally: it is the forming UTC day (partial extremes and a
+      // non-final close) — the same closed-bar-only posture the 5m capture lane enforces.
+      const bars = db.slice(0, -1);
+      const closes = bars.map((k) => [k.t, k.c]);
+      const sd30 = retStd(dailyRets(closes).slice(-30), 15);
+      if (!(sd30 > 0)) { skippedThin++; continue; }
+      // Memo on the spine-derived bucket array identity (bucketsFor's own freshness contract):
+      // the spine changes on the ~10-min refresh, so the walk-forward runs at most that often per
+      // name and every 3-min analytics build in between reads the cached events.
+      if (r._lvSrc !== db) {
+        r._lvSrc = db;
+        r._lvEv = levelOutcomes(bars, sd30, { stride: LVL_STRIDE, horizon: LVL_HORIZON, minBars: LVL_MINBARS }).events;
+      }
+      if (r._lvEv.length) { contributing++; for (const e of r._lvEv) pooled.push(e); }
+    }
+    if (contributing < LVL_MIN_EQ) return { pending: true, count: contributing, need: LVL_MIN_EQ };
+    const st = levelStudy(pooled, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
+    st.coverage = { tickers: contributing, skippedThin, windowDays: HOURLY_HISTORY_DAYS,
+      minBars: LVL_MINBARS, stride: LVL_STRIDE };
+    return st;
   }
 
 
