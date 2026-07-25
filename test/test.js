@@ -4920,7 +4920,7 @@ test("levels study -10: manifest — engine, control and exports are pinned", ()
     "function levelOutcomes(", "function levelStudy(",
     "const LVL_EDGES = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];",
     "const PLACEBO_K = 24, PLACEBO_STEP = 3;",
-    "normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K };"])
+    "normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K,"])
     assert.ok(cmp.includes(pin), `compute.js missing -10 pin: ${pin}`);
   for (const f of ["normCdf", "touchBaseline", "studyBars", "levelOutcomes", "levelStudy"])
     assert.equal((cmp.match(new RegExp("function " + f + "\\(", "g")) || []).length, 1, `exactly one ${f} definition`);
@@ -4979,7 +4979,7 @@ test("levels study -10: poller wiring manifest — section, scope, source, memo,
   assert.ok(/buildLevelsStudy\(\) \{\s*\n\s*const eq = activeMarkets\(\)\.filter\(\(r\) => !r\.delisted && classifyCached\(r\.ticker\)\.assetClass === "Equity"\)/.test(pol),
     "the study must scope to xyz equities through activeMarkets (crypto never enters studies)");
   // the analytics sig must move when the study moves
-  assert.ok(pol.includes("const lvSig = lvSt.pending ?") && /const sig = `\$\{universe\.length\}[^`]*\$\{lvSig\}`/.test(pol),
+  assert.ok(pol.includes("const lvSig = lvSt.pending ?") && /const sig = `\$\{universe\.length\}[^`]*\$\{lvSig\}/.test(pol),
     "levels study signature must feed the /api/analytics ETag");
   assert.ok(!pol.includes("levels: buildLevelsStudy(),"), "sections must reuse lvSt, never a second computation that could disagree with the sig");
 });
@@ -4993,8 +4993,8 @@ test("levels study -10: client manifest — panel renderers, deck entry, hover c
     "a.sections && a.sections.levels",
     "'Structural level validation'",
     "lvBlock = renderLevels(lv);",
-    "seBlock+lvBlock+deck",                                   // the panel is actually in the assembled DOM
-    "All eight studies live",                                 // the deck footer counts this study
+    "seBlock+lvBlock",                                        // the panel is actually in the assembled DOM (-11 appended anBlock after it)
+    "All nine studies live",                                  // the deck footer counts every live study (bumped by -11 anatomy)
     'table class="ptbl"',                                     // reuses the styled panel-table class, no orphan CSS
     "under the ${st.cellFloor}-event floor, no rate published",   // floored cells are hoverable and explained
   ]) assert.ok(app.includes(pin), `app.js missing -10 client pin: ${pin}`);
@@ -5052,5 +5052,219 @@ test("levels study -10: end-to-end through the poller — seeded equities produc
     const lv2 = p2.getAnalytics().sections.levels;
     assert.ok(lv2.pending, "one equity -> pending, never a study on a two-name class");
     assert.equal(lv2.need, 5);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ============================================================================================
+// Session anatomy (build 2026.07.24-11): per-UTC-day records off the hourly spine feeding four
+// descriptive studies — excursion from open, open-quartile splits, Monday-range containment,
+// naked-open revisits. Descriptive base rates with day-pooled honesty; nothing here is a signal.
+// ============================================================================================
+const { sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, MFE_EDGES, NAKED_HORIZONS } = require("../src/compute");
+
+test("anatomy -11: sessionRecords measures exact geometry, drops forming and partial days", () => {
+  const DAY = 864e5, HOUR = 36e5, mon = Date.UTC(2026, 6, 6);   // a Monday
+  const bar = (t, o, h, l, c) => [t, o, h, l, c, 100];
+  const hours = [];
+  for (let i = 0; i < 24; i++) {   // day 1: open 100, high 110 IN BAR 0, low 95 in bar 12, close 104
+    const t = mon + i * HOUR;
+    if (i === 0) hours.push(bar(t, 100, 110, 99, 101));
+    else if (i === 12) hours.push(bar(t, 100, 101, 95, 100));
+    else if (i === 23) hours.push(bar(t, 103, 104, 102, 104));
+    else hours.push(bar(t, 100, 102, 99, 101));
+  }
+  for (let i = 0; i < 24; i++) {   // day 2: extremes mid-day, closes above
+    const t = mon + DAY + i * HOUR;
+    if (i === 3) hours.push(bar(t, 104, 104.2, 103, 104));
+    else if (i === 20) hours.push(bar(t, 105, 106, 104.5, 105.5));
+    else hours.push(bar(t, 104, 105, 103.5, 104.8));
+  }
+  const recs = sessionRecords(hours, { minBars: 20, now: mon + 10 * DAY });
+  assert.equal(recs.length, 2, "two complete sessions");
+  const r1 = recs[0];
+  assert.equal(r1.o, 100); assert.equal(r1.h, 110); assert.equal(r1.l, 95); assert.equal(r1.c, 104);
+  assert.equal(r1.mfeUpPct, 10, "max up excursion from open exact");
+  assert.equal(r1.mfeDnPct, 5, "max down excursion exact");
+  assert.equal(r1.rangePct, 15, "range exact");
+  assert.equal(r1.openQ, 2, "open 100 in range 95..110 -> second quarter");
+  assert.equal(r1.firstHrExt, true, "the high printed in the session's first bar");
+  assert.equal(r1.closedAbove, true);
+  assert.equal(recs[1].firstHrExt, false, "day 2 extremes were mid-session");
+  // forming-day exclusion: a `now` inside day 2 drops it
+  assert.equal(sessionRecords(hours, { minBars: 20, now: mon + DAY + 5 * HOUR }).length, 1, "the forming UTC day is never a record");
+  // partial-day filter: 6 bars of day 2 do not make a session
+  assert.equal(sessionRecords(hours.slice(0, 30), { minBars: 20, now: mon + 10 * DAY }).length, 1, "a spine-gap day is dropped, not scored on partial extremes");
+  assert.deepEqual(sessionRecords(null, {}), [], "null input degrades");
+});
+
+test("anatomy -11: the sd freeze is strictly pre-session — today's move can never scale its own excursion", () => {
+  const DAY = 864e5, HOUR = 36e5, mon = Date.UTC(2026, 3, 6);
+  // 30 quiet days then one violent day: the violent day's OWN return must not enter its sdPrev.
+  const hours = [];
+  for (let d = 0; d < 31; d++) for (let i = 0; i < 24; i++) {
+    const base = d < 30 ? 100 + d * 0.1 : 130;               // day 31 gaps +30%
+    hours.push([mon + d * DAY + i * HOUR, base, base + 0.05, base - 0.05, base + (i === 23 ? 0.02 : 0), 1]);
+  }
+  const rec = anatomyEnrich(sessionRecords(hours, { minBars: 20, now: mon + 60 * DAY }));
+  const last = rec[rec.length - 1];
+  assert.ok(last.sdPrev != null && last.sdPrev < 1, `the violent day's sdPrev reflects only the quiet history, got ${last.sdPrev}`);
+  for (let i = 0; i < Math.min(15, rec.length); i++)
+    assert.equal(rec[i].sdPrev, null, "records before the sd warms up carry null, never a rescaled guess");
+  for (const r of rec) if (r.sdPrev == null) {
+    assert.equal(r.mfeUpSd, null, "no sd -> no sd-denominated excursion");
+    assert.equal(r.rangeSd, null);
+  }
+});
+
+test("anatomy -11: mondayStats containment, first-break direction, the unorderable 'both', thin weeks", () => {
+  const DAY = 864e5, HOUR = 36e5, mon = Date.UTC(2026, 6, 6);
+  const bar = (t, o, h, l, c) => [t, o, Math.max(h, o, c), Math.min(l, o, c), c, 1];
+  const hours = [];
+  for (let d = 0; d < 21; d++) for (let i = 0; i < 24; i++) {
+    const t = mon + d * DAY + i * HOUR;
+    let o = 105, h = 108, l = 101, c = 105;
+    if (d % 7 === 0) { o = 100; h = 110; l = 100; c = 105; }          // Mondays: range 100..110
+    if (d === 3 && i === 6) { o = 101; h = 101; l = 94; c = 100; }    // wk1 Thu breaks LOW
+    if (d === 10 && i === 6) { o = 105; h = 112; l = 93; c = 105; }   // wk2 Thu pierces BOTH sides
+    hours.push(bar(t, o, h, l, c));
+  }
+  const recs = sessionRecords(hours, { minBars: 20, now: mon + 40 * DAY });
+  const ev = mondayStats(recs);
+  assert.equal(ev.length, 3, "three complete weeks");
+  assert.deepEqual({ c: ev[0].contained, d: ev[0].dir, n: ev[0].daysTo }, { c: false, d: "down", n: 3 }, "wk1: first break down on the 3rd rest session");
+  assert.deepEqual({ c: ev[1].contained, d: ev[1].dir }, { c: false, d: "both" }, "a session piercing both sides is 'both' — unorderable at daily granularity, never guessed");
+  assert.deepEqual({ c: ev[2].contained, d: ev[2].dir, n: ev[2].daysTo }, { c: true, d: null, n: null }, "wk3 held all week");
+  // a week whose spine coverage is thin proves nothing
+  assert.equal(mondayStats(recs.slice(0, 3)).length, 0, "fewer than 3 rest sessions -> no event");
+});
+
+test("anatomy -11: nakedStats revisits are exact and truncated horizons report null, never partial counts", () => {
+  const DAY = 864e5;
+  const rec = [
+    { t: 0 * DAY, o: 100, h: 105, l: 99 },
+    { t: 1 * DAY, o: 104, h: 106, l: 101 },   // does NOT reach 100
+    { t: 2 * DAY, o: 105, h: 107, l: 103 },
+    { t: 3 * DAY, o: 106, h: 108, l: 99.5 },  // reaches 100 -> anchor 0 revisited at lag 3
+    { t: 4 * DAY, o: 107, h: 109, l: 106 },
+  ];
+  const nk = nakedStats(rec);
+  assert.equal(nk[0].rev[1], false, "not revisited next session");
+  assert.equal(nk[0].rev[3], true, "revisited within 3");
+  assert.equal(nk[0].rev[5], null, "5-session horizon lacks full forward coverage -> null, not a hopeful partial");
+  assert.equal(nk[4].rev[1], null, "the last anchor has no forward sessions at any horizon");
+  assert.deepEqual(NAKED_HORIZONS, [1, 3, 5, 10], "horizon ladder pinned");
+});
+
+test("anatomy -11: anatomyPool day-pools every rate (n = days), floors thin day-cells, shares sum to 1", () => {
+  const DAY = 864e5, HOUR = 36e5, mon = Date.UTC(2026, 3, 6);
+  const mk = (seed) => {
+    let s = seed; const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    const nrm = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+    const hh = []; let px = 100;
+    for (let d = 0; d < 60; d++) for (let i = 0; i < 24; i++) {
+      px *= 1 + nrm() * 0.004;
+      const h = px * (1 + Math.abs(nrm()) * 0.002), l = px * (1 - Math.abs(nrm()) * 0.002);
+      hh.push([mon + d * DAY + i * HOUR, px, Math.max(h, px), Math.min(l, px), px, 1]);
+    }
+    const rec = anatomyEnrich(sessionRecords(hh, { minBars: 20, now: mon + 90 * DAY }));
+    return { records: rec, monday: mondayStats(rec), naked: nakedStats(rec) };
+  };
+  const tks = [1, 2, 3, 4, 5, 6].map((k) => mk(k * 911));
+  const an = anatomyPool(tks, { minCross: 3 });
+  assert.equal(an.tickers, 6);
+  assert.equal(an.days, 60, "the honest n is distinct days, and it is served");
+  assert.equal(an.tickerSessions, 360);
+  assert.equal(an.sdSessions, 264, "exactly the post-warmup sessions are sd-scored (6 x 44)");
+  const sum = an.mfe.upShare.reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(sum - 1) < 0.01, `histogram shares sum to 1, got ${sum}`);
+  assert.equal(an.mfe.upShare.length, MFE_EDGES.length + 1, "one share per bin plus the overflow tail");
+  for (const q of an.quartiles) {
+    assert.ok(q.nDays <= an.days, "a cell's day count cannot exceed the window");
+    if (q.nDays === 0) assert.equal(q.closedAbove, null, "no qualifying days -> null, never a rate");
+  }
+  // day-cell floor: with minCross above the book size, every rate must go null
+  const anStrict = anatomyPool(tks, { minCross: 99 });
+  for (const q of anStrict.quartiles) assert.equal(q.closedAbove, null, "day-cells under the cross-sectional floor publish nothing");
+  assert.equal(anStrict.naked.revisit[0], null, "naked rates respect the same floor");
+  // empty pool: nulls throughout, never zeros pretending to be measurements
+  const z = anatomyPool([], {});
+  assert.equal(z.mfe.medUpSd, null); assert.equal(z.monday.contained, null); assert.equal(z.days, 0);
+});
+
+test("anatomy -11: poller wiring manifest — section, scope, memo, sig", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    "function buildAnatomy()",
+    "anatomy: anSt,",
+    "const anSt = buildAnatomy();",
+    "const ANAT_MIN_EQ = 5, ANAT_MIN_SESS = 20, ANAT_MIN_CROSS = 3;",
+    "r._anSrc !== hs",                                        // memo on the spine's own identity
+    "sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool,",
+  ]) assert.ok(pol.includes(pin), `poller.js missing -11 wiring pin: ${pin}`);
+  assert.ok(/buildAnatomy\(\) \{\s*\n\s*const eq = activeMarkets\(\)\.filter\(\(r\) => !r\.delisted && classifyCached\(r\.ticker\)\.assetClass === "Equity"\)/.test(pol),
+    "anatomy scopes to xyz equities through activeMarkets (crypto never enters studies)");
+  assert.ok(pol.includes("const anSig = anSt.pending ?") && /const sig = `\$\{universe\.length\}[^`]*\$\{anSig\}`/.test(pol),
+    "anatomy signature must feed the /api/analytics ETag");
+  assert.ok(!pol.includes("anatomy: buildAnatomy(),"), "sections must reuse anSt — one computation, sig and payload agree");
+});
+
+test("anatomy -11: client manifest — renderers, deck entry, hover contract, honest-n language", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const fn of ["renderAnatomy", "anMfeSvg", "anPct"])
+    assert.equal((app.match(new RegExp("^function " + fn + "\\(", "gm")) || []).length, 1, `exactly one ${fn} definition`);
+  for (const pin of [
+    "a.sections && a.sections.anatomy",
+    "'Session anatomy'",
+    "anBlock = renderAnatomy(an);",
+    "lvBlock+anBlock+deck",
+    "All nine studies live",
+    "readable only after the fact",                           // the openQ conditioning caveat ships in the UI
+    "frozen before the session — no lookahead",               // and so does the sd-freeze claim
+  ]) assert.ok(app.includes(pin), `app.js missing -11 client pin: ${pin}`);
+  const seg = app.slice(app.indexOf("function anMfeSvg"), app.indexOf("function renderAnatomy"));
+  assert.ok((seg.match(/<title>/g) || []).length >= 3, "histogram bars and median markers carry <title> readouts");
+});
+
+test("anatomy -11: end-to-end through the poller — served study, stable ETag, honest pending", async () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzanat-"));
+  try {
+    const store = openStore(dir);
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const HOUR = 3600 * 1000, now = Math.floor(Date.now() / HOUR) * HOUR;
+    const spine = (seed) => {
+      let s = seed; const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+      const nrm = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+      const out = []; let px = 100; const N = 130 * 24;
+      for (let i = 0; i < N; i++) {
+        px *= 1 + nrm() * 0.004;
+        const h = px * (1 + Math.abs(nrm()) * 0.002), l = px * (1 - Math.abs(nrm()) * 0.002);
+        out.push([now - (N - i) * HOUR, px, Math.max(h, px), Math.min(l, px), px, 1000]);
+      }
+      return out;
+    };
+    const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
+    names.forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(41 + i * 17), hourlyTs: now }));
+    p.buildAnalyticsNow();
+    const a = p.getAnalytics();
+    const an = a.sections && a.sections.anatomy;
+    assert.ok(an && !an.pending, `anatomy live, got ${JSON.stringify(an && { pending: an.pending, count: an.count })}`);
+    assert.equal(an.tickers, names.length);
+    assert.ok(an.days >= 120, `~129 complete UTC sessions expected, got ${an.days}`);
+    assert.ok(an.mfe.medUpSd > 0, "sd-scored excursion medians served");
+    assert.ok(an.monday.weeks >= 15, `pooled weeks served (${an.monday.weeks})`);
+    assert.ok(an.naked.revisit.every((x) => x == null || (x >= 0 && x <= 1)), "revisit rates are probabilities");
+    const v1 = a.dataTs;
+    p.buildAnalyticsNow();
+    assert.equal(p.getAnalytics().dataTs, v1, "unchanged spine -> memo holds, ETag stable");
+    const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    p2.seedRowNow("xyz:AAPL", { px: 100, ticker: "AAPL", hourlyRaw: spine(5), hourlyTs: now });
+    p2.buildAnalyticsNow();
+    const an2 = p2.getAnalytics().sections.anatomy;
+    assert.ok(an2.pending && an2.need === 5, "thin book reports the honest gate");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
