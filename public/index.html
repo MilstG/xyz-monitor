@@ -54,6 +54,7 @@
   <button class="tab" data-view="corr">Correlation</button>
   <button class="tab" data-view="sessions">Sessions</button>
   <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
+  <button class="tab" data-view="actionable" id="tab-actionable" title="Every name currently AT a swing trigger — entry, void and target read verbatim from the claim frozen at fire time, reward:risk net of expected funding over the hold, ranked by expectancy. Days-to-weeks horizons only (D1 · H12 · H4).">Actionable</button>
   <button class="tab" data-view="earnings" title="Upcoming earnings reports for the equity universe — dates and session (pre-market / after close), ET calendar">Earnings</button>
   <button class="tab" data-view="news" title="Headlines for the equity universe (per-name, Finnhub) plus the general macro tape — 72h rolling window, per-name refresh every few minutes. Badges cross-reference the app: amber = earnings within 7 days, red = a live signal is firing on that name.">News</button>
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
@@ -249,6 +250,21 @@
 <section id="view-news" hidden>
   <div id="news-body"></div>
 </section>
+<section id="view-actionable" hidden>
+  <div class="controls">
+    <div class="seg" id="actside" role="group" aria-label="Side">
+      <span class="seglbl">side</span>
+      <button type="button" data-aside="all" class="active">All</button>
+      <button type="button" data-aside="long">Longs</button>
+      <button type="button" data-aside="short">Shorts</button>
+    </div>
+    <label class="copt" title="Hide rows whose setup has no out-of-sample record yet — the ones with an honest expectancy only."><input type="checkbox" id="act-provenonly"> proven only</label>
+    <label class="copt" title="Hide rows with a scheduled earnings print inside the setup's horizon."><input type="checkbox" id="act-noearn"> no earnings in horizon</label>
+    <span class="sec" id="act-asof" style="align-self:center;font-size:12px"></span>
+  </div>
+  <div id="act-body"><div class="msg">Loading…</div></div>
+</section>
+
 <section id="view-earnings" hidden>
   <div id="earnings-body"><div class="msg">Loading…</div></div>
 </section>

@@ -190,7 +190,12 @@ footer code{font-family:var(--mono);color:var(--muted)}
 .arule .ax{margin-left:auto;cursor:pointer;color:var(--faint);font-size:14px} .arule .ax:hover{color:var(--down)}
 .alog{font-family:var(--mono);font-size:11.5px;color:var(--muted);padding:4px 4px;border-bottom:1px solid var(--grid);line-height:1.4}
 .alog .at{color:var(--faint)}
-.toast-wrap{position:fixed;bottom:16px;right:16px;z-index:90;display:flex;flex-direction:column;gap:8px;max-width:320px}
+/* Bottom-LEFT, deliberately. Bottom-right is owned by the terminal FAB (z-118) and its 440px
+   panel (z-119), so a toast there renders underneath the button and entirely behind an open
+   terminal. The right edge belongs to the drawer (460px, full height). z-90 keeps toasts above
+   the drawer and its backdrop (both z-80) but below the modals (help/chart z-121, cmdk z-130),
+   so an alert can never cover a dialog you are mid-read on. */
+.toast-wrap{position:fixed;bottom:16px;left:16px;z-index:90;display:flex;flex-direction:column;gap:8px;max-width:340px}
 .toast{background:var(--panel2);border:1px solid var(--accent-dim);border-left:3px solid var(--accent);border-radius:8px;
   padding:9px 12px;font-family:var(--mono);font-size:12px;color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,.5);
   animation:toastin .25s ease-out}
@@ -226,6 +231,9 @@ footer code{font-family:var(--mono);color:var(--muted)}
 .tab.active{color:var(--text);border-bottom-color:var(--accent)}
 .tab:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .tab{user-select:none;-webkit-user-select:none}
+/* Belt to the hidden attribute's braces: .tab sets no display today, so [hidden] already wins,
+   but a future display rule on .tab would silently un-hide every hidden tab. */
+nav.tabs .tab[hidden]{display:none}
 .tab.dragging{opacity:.35}
 
 /* correlation heatmap */
@@ -980,3 +988,40 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sigsec-h{cursor:pointer;user-select:none}
 .sigsec-h:hover{color:var(--text)}
 .sigsec-h:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
+
+/* ===== actionable board (build 2026.07.26-01) =================================================
+   Reuses .trend-t for the table shell — same visual role as the trend leaderboard, so the two
+   boards read as siblings rather than as two people's work. Only the columns unique to this
+   board get their own rules. */
+.act-h{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.9px;
+  color:var(--text);margin:16px 0 7px;display:flex;align-items:baseline;gap:9px}
+.act-h:first-child{margin-top:4px}
+.act-h .sec{text-transform:none;letter-spacing:0;font-size:11px;color:var(--muted)}
+.act-tbl td{font-family:var(--mono);font-size:12.5px}
+.act-tbl .tk{font-weight:700;letter-spacing:.3px}
+/* Expectancy is the column that does the ranking — accented so the eye lands on it first. */
+.act-tbl .act-ev{color:var(--accent);font-weight:700}
+/* Age past ~70% of the expiry budget: the setup still qualifies but is no longer fresh. */
+.act-tbl .act-stale{color:var(--accent-dim)}
+.act-also{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--border);
+  border-radius:4px;padding:1px 4px;margin-left:5px;cursor:help}
+.act-warn{color:var(--accent);font-style:normal;cursor:help}
+.act-note{color:var(--muted);cursor:help}
+.act-foot{margin-top:12px;padding-top:9px;border-top:1px solid var(--grid);
+  color:var(--faint);font-family:var(--mono);font-size:10.5px;line-height:1.75}
+
+/* ---- trigger toast: a one-line alert is useless without the geometry attached ---------------- */
+.toast-trig{padding:10px 12px;line-height:1.5;max-width:340px}
+.toast-trig .tt-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.toast-trig .tt-lbl{font-size:9.5px;letter-spacing:1.1px;color:var(--accent)}
+.toast-trig .tt-n{font-size:13px;margin-bottom:4px;letter-spacing:.2px}
+.toast-trig .tt-g{font-size:11px;color:var(--muted)}
+.toast-trig .tt-w{font-size:10.5px;color:var(--accent);margin-top:6px;padding-top:5px;border-top:1px solid var(--grid)}
+.toast-trig .tt-a{display:flex;gap:6px;margin-top:9px}
+.toast-trig .tt-a .btn{font-size:10.5px;padding:4px 8px}
+.toast-trig .ax{cursor:pointer;color:var(--muted);font-size:11px}
+.toast-trig .ax:hover{color:var(--text)}
+.toast-trig .warn{color:var(--accent)}
+/* Late past half a risk unit: still tradeable, but you are chasing and the row should say so. */
+.act-tbl .act-late-bad{color:var(--accent)}
+@media(max-width:480px){ .toast-wrap{left:12px;right:12px;max-width:none} }
