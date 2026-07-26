@@ -3123,3 +3123,177 @@ module.exports.czMergeHistory = czMergeHistory;
 module.exports.cascadeFlags = cascadeFlags;
 module.exports.derivRollup = derivRollup;
 module.exports.aggDerivHourly = aggDerivHourly;
+
+// ---- actionable board: carry-netting, expectancy, merge/rank (build 2026.07.26-01) ----------
+// Swing scope is days-to-weeks off D1/H12/H4, and at that horizon perpetual funding stops being
+// noise and becomes a P&L line item: a 3-week hold on a crowded long at 45% APR donates ~2.6% of
+// notional to carry before the trade does anything, which against a 5% stop is half an R. So the
+// board's headline reward:risk is NET of expected carry, and the gross figure rides along for
+// disclosure. Every function here is pure — the poller does assembly only, and the board reads
+// the OPEN LEDGER's already-frozen side/void/target rather than re-deriving any geometry.
+const CARRY_YEAR_MS = 365 * 24 * 3600 * 1000;
+const ACT_TF_RANK = { D1: 3, H12: 2, H4: 1, H1: 0 };
+const ACT_TF_MS = { D1: 86400000, H12: 12 * 3600000, H4: 4 * 3600000, H1: 3600000 };
+
+// Funding carried over one hold, expressed in R — the trade's own risk unit, so it is directly
+// comparable across a 2%-stop name and a 12%-stop one. Sign convention is the venue's: positive
+// funding means LONGS PAY shorts, so a long bleeds carry and a short is paid to wait. Honest null
+// when any leg is missing — a zero here would read as "no carry", which is a different claim.
+function carryR(o) {
+  if (!o) return null;
+  const side = o.side, entry = +o.entry, stop = +o.stop, hz = +o.horizonMs, fh = o.fundingHourly;
+  if (side !== "long" && side !== "short") return null;
+  if (!(entry > 0) || !(stop > 0) || !(hz > 0)) return null;
+  if (fh == null || !Number.isFinite(+fh)) return null;
+  const riskPct = (Math.abs(entry - stop) / entry) * 100;
+  if (!(riskPct > 0)) return null;
+  const aprPct = +fh * 24 * 365 * 100;
+  const costPct = aprPct * (hz / CARRY_YEAR_MS);          // what a LONG pays across the hold
+  const effectPct = side === "long" ? -costPct : costPct;  // a short receives the same amount
+  return { aprPct: +aprPct.toFixed(2), costPct: +costPct.toFixed(3), r: +(effectPct / riskPct).toFixed(3) };
+}
+
+// Gross and funding-net reward:risk for one frozen geometry. Carry folds into the REWARD leg
+// only — the risk leg is the distance to the void, which funding does not move. Returns null on
+// any geometry that isn't tradeable from here (void on the wrong side, target already through),
+// which is what silently expires a setup the market has walked away from.
+function netRR(o) {
+  if (!o) return null;
+  const side = o.side, entry = +o.entry, stop = +o.stop, target = +o.target;
+  if (side !== "long" && side !== "short") return null;
+  if (!(entry > 0) || !(stop > 0) || !(target > 0)) return null;
+  if (!stopGeometryOk(side, entry, stop)) return null;
+  if (side === "long" ? !(target > entry) : !(target < entry)) return null;
+  const riskPct = (Math.abs(entry - stop) / entry) * 100;
+  const rewardPct = (Math.abs(target - entry) / entry) * 100;
+  if (!(riskPct > 0) || !(rewardPct > 0)) return null;
+  const gross = rewardPct / riskPct;
+  const cr = o.carry && Number.isFinite(o.carry.r) ? o.carry.r : null;
+  return { riskPct: +riskPct.toFixed(3), rewardPct: +rewardPct.toFixed(3),
+    gross: +gross.toFixed(2), net: cr == null ? +gross.toFixed(2) : +(gross + cr).toFixed(2),
+    carryR: cr, carryKnown: cr != null };
+}
+
+// Expectancy in R for ONE instance: the event's out-of-sample hit rate applied to THIS instance's
+// net geometry — a win takes the net reward, a loss takes the void for -1R. Deliberately not the
+// historical average realized R, which answers a different question (how past fires went) than
+// the one the board asks (what entering this one here is worth). Null below the record floor.
+function setupEV(hit, rr, n, minN) {
+  if (hit == null || !Number.isFinite(+hit)) return null;
+  if (rr == null || !Number.isFinite(+rr)) return null;
+  if (minN != null && (n == null || n < minN)) return null;
+  return +(+hit * +rr - (1 - +hit)).toFixed(3);
+}
+
+// Bars in trigger, in the bars of the setup's OWN timeframe. A daily retest on its ninth bar is
+// not the same animal as one on its first, and at swing horizon that difference is the whole
+// question of whether you are early or late.
+function barsInTrigger(t0, now, tf) {
+  const w = ACT_TF_MS[tf] || ACT_TF_MS.D1;
+  if (!(t0 > 0) || !(now > 0) || now < t0) return null;
+  return Math.floor((now - t0) / w);
+}
+
+// Precedence when one name fires several setups at once. Proven geometry outranks unproven
+// outright — an unproven detector never overwrites a levelled claim's void or target. Then
+// expectancy, then the higher timeframe, then the earlier fire.
+function actionableBetter(a, b) {
+  if (!a) return false;
+  if (!b) return true;
+  if (!!a.unproven !== !!b.unproven) return !a.unproven;
+  const ae = a.evR == null ? -Infinity : a.evR, be = b.evR == null ? -Infinity : b.evR;
+  if (ae !== be) return ae > be;
+  const at = ACT_TF_RANK[a.tf] == null ? -1 : ACT_TF_RANK[a.tf];
+  const bt = ACT_TF_RANK[b.tf] == null ? -1 : ACT_TF_RANK[b.tf];
+  if (at !== bt) return at > bt;
+  return (a.t0 || 0) < (b.t0 || 0);
+}
+
+// Collapse simultaneous fires on one name+side into ONE row: you take one position per name per
+// side, and two detectors agreeing is corroboration, not two trades. The losers ride along in
+// `also` as labels only — never their levels, so the row's geometry has exactly one author.
+function mergeActionable(cands) {
+  if (!Array.isArray(cands)) return [];
+  const win = new Map();
+  for (const c of cands) {
+    if (!c || !c.coin || (c.side !== "long" && c.side !== "short")) continue;
+    const k = c.coin + "|" + c.side;
+    if (actionableBetter(c, win.get(k))) win.set(k, c);
+  }
+  const out = [];
+  for (const [k, w] of win) {
+    const also = [];
+    for (const c of cands) {
+      if (!c || c === w || !c.coin) continue;
+      if (c.coin + "|" + c.side !== k) continue;
+      also.push({ ev: c.ev, label: c.label || c.ev, unproven: !!c.unproven });
+    }
+    out.push(also.length ? Object.assign({}, w, { also }) : w);
+  }
+  return out;
+}
+
+// Split and rank. Proven rows sort by expectancy — the number that actually orders candidates.
+// Unproven rows have no honest expectancy, so they sort by net reward:risk in their own section
+// rather than being handed a fabricated rank inside the main one.
+function rankActionable(rows) {
+  const proven = [], unproven = [];
+  for (const r of (Array.isArray(rows) ? rows : [])) (r && r.unproven ? unproven : proven).push(r);
+  const netOf = (r) => (r && r.rr && Number.isFinite(r.rr.net) ? r.rr.net : -Infinity);
+  proven.sort((a, b) => ((b.evR == null ? -Infinity : b.evR) - (a.evR == null ? -Infinity : a.evR))
+    || (netOf(b) - netOf(a)) || (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
+  unproven.sort((a, b) => (netOf(b) - netOf(a)) || (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
+  return { proven, unproven };
+}
+
+// How far price has travelled from the fire mark, measured in the setup's OWN risk unit rather
+// than percent. This is the number that says whether you are taking the trade the record was
+// scored on: the record's entry was mark0, and every unit of R spent getting to the live mark is
+// edge you no longer have. Positive = late (price moved the setup's way without you). Negative =
+// the market came back and you can enter better than the fire. Risk is measured at the FIRE, not
+// from the live mark, because that is the denominator the record itself used.
+function lateR(side, mark0, now, stop) {
+  if (side !== "long" && side !== "short") return null;
+  if (!(mark0 > 0) || !(now > 0) || !(stop > 0)) return null;
+  const risk0 = Math.abs(mark0 - stop);
+  if (!(risk0 > 0)) return null;
+  const moved = side === "long" ? now - mark0 : mark0 - now;
+  return +(moved / risk0).toFixed(3);
+}
+
+// One trigger key per claim, stable across builds and restarts. Keyed on the fire TIME as well as
+// the name/side/event, so a re-arm after an episode lapses is a genuinely new trigger rather than
+// a silent duplicate of the old one.
+function trigKey(row) {
+  if (!row || !row.coin || !row.ev) return null;
+  return row.coin + "|" + row.side + "|" + row.ev + "|" + (row.t0 || 0);
+}
+
+// Per-transport eligibility. The event stream is canonical and carries EVERY new trigger; each
+// channel decides what it is willing to interrupt someone for. Kept pure and shared so the
+// browser toast and a future Telegram push cannot drift into announcing different things.
+function trigEligible(row, cfg) {
+  if (!row) return false;
+  const c = cfg || {};
+  if (c.provenOnly && row.unproven) return false;
+  if (c.minEV != null) { if (row.evR == null || row.evR < c.minEV) return false; }
+  if (c.minRR != null) { if (!row.rr || !(row.rr.net >= c.minRR)) return false; }
+  if (c.maxLate != null) { if (row.late != null && row.late > c.maxLate) return false; }
+  if (c.sides && c.sides.length && !c.sides.includes(row.side)) return false;
+  if (Array.isArray(c.muted) && c.muted.includes(row.coin)) return false;
+  if (c.noEarnings && row.earn) return false;
+  return true;
+}
+
+module.exports.lateR = lateR;
+module.exports.trigKey = trigKey;
+module.exports.trigEligible = trigEligible;
+module.exports.carryR = carryR;
+module.exports.netRR = netRR;
+module.exports.setupEV = setupEV;
+module.exports.barsInTrigger = barsInTrigger;
+module.exports.actionableBetter = actionableBetter;
+module.exports.mergeActionable = mergeActionable;
+module.exports.rankActionable = rankActionable;
+module.exports.ACT_TF_MS = ACT_TF_MS;
+module.exports.ACT_TF_RANK = ACT_TF_RANK;

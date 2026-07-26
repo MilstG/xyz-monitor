@@ -21,6 +21,7 @@ function openStore(dataDir) {
   const earnFile = path.join(dataDir, "earnings.json");
   const newsFile = path.join(dataDir, "news.json");
   const tgFile = path.join(dataDir, "tgchannels.json");
+  const trigFile = path.join(dataDir, "triggers.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
   const duelFile = path.join(dataDir, "duel.json");         // score-duel daily snapshots + rank-IC series
@@ -249,6 +250,21 @@ function openStore(dataDir) {
     },
     loadTgChannels() {
       try { return JSON.parse(fs.readFileSync(tgFile, "utf8")); } catch (_) { return null; }
+    },
+    // Trigger-alert state: which setups have already been announced, plus the emitted event log
+    // and its sequence high-water mark. Persisted for one reason — without it, every redeploy
+    // re-announces the entire live board, which is exactly the failure that makes an alerting
+    // feature get switched off on day two. A missing file is a FIRST BOOT and is handled by the
+    // caller as a silent seed, never as "nothing has fired yet".
+    saveTriggers(data) {
+      try {
+        const tmp = trigFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, trigFile);
+      } catch (_) {}
+    },
+    loadTriggers() {
+      try { return JSON.parse(fs.readFileSync(trigFile, "utf8")); } catch (_) { return null; }
     },
     // News feed warm cache (atomic like the rest): a redeploy serves the last fetched
     // headlines instead of a blank tab while the worker's first rotation completes.

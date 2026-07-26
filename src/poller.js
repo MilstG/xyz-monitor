@@ -14,6 +14,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { momPair, spearmanIC, duelStats } = require("./compute");
+const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, rankActionable, ACT_TF_MS, lateR, trigKey, trigEligible } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -3774,6 +3775,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
+    // Announced-trigger set: without this a redeploy re-announces the whole live board.
+    if (hydrateTriggers()) log(`Restored trigger state: ${trigSeen.size} announced setup(s), seq ${trigSeq}`);
     log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), classifier ${AI_CLASSIFY_MODEL}, TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     if (crypto) czBoot();
     hydrateDuel();
@@ -3814,6 +3817,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     setInterval(buildSnapshot, 15 * 1000);
     setInterval(buildDaily, 60 * 1000);
     setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
+    // Trigger detection follows the signals build on the same cadence, offset so it reads a
+    // settled ledger. Isolated: a board error must never take the signal engine down with it.
+    setInterval(safeTick(buildActionable, "buildActionable"), 10 * 60 * 1000);
+    setTimeout(safeTick(buildActionable, "buildActionable"), 75 * 1000);
     // Warm-boot cadence: spines aren't persisted raw, so every deploy re-warms ~150 markets
     // through the rate-limited workers (~3-5 min). On the steady 10-min cadence each market
     // then waited up to 10 MORE minutes for the next build to admit it — post-deploy the tab
@@ -5346,6 +5353,203 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ok: true, perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
   }
 
+  // ===== Actionable board — swing scope (build 2026.07.26-01) =================================
+  // One cross-universe list of every name currently AT a swing trigger, with the entry, void and
+  // target you would actually use, ranked by expectancy. The candidate set is the OPEN LEDGER
+  // itself: every open claim already froze side/void/target at fire time, so this board is a
+  // read, a carry-netting and a merge — it re-derives NO geometry. That is deliberate and load-
+  // bearing. The moment this file recomputes a level the ledger already owns, the board and the
+  // record start answering different questions about the same trade.
+  //
+  // Swing gate is horizon, not a hand-kept list: an event qualifies when EV_META gives it a
+  // horizon of at least ACT_MIN_HZ. That way a future 5d event joins automatically and a 1d
+  // scalp never leaks in, without anyone remembering to edit a set.
+  //
+  // Entry is the LIVE mark, not the fire-time mark. Reward:risk therefore decays as price walks
+  // away from the trigger, and a setup whose void has already been passed drops off the board on
+  // its own (netRR returns null on inverted geometry) rather than lingering as a stale row.
+  const ACT_MIN_HZ = 3 * DAY;          // days-to-weeks only — 1d events belong to the Signals tab
+  const ACT_MAX_BARS = 10;             // bars in trigger before a setup is considered gone stale
+  // Hard floor on net reward:risk. Doubles as the board's only kill switch: because R:R is
+  // repriced from the LIVE mark every build, a setup that gets chased dies here on its own — no
+  // separate "too late" rule is needed, and the two can never disagree about the same row.
+  const ACT_MIN_RR = 1.5;
+  const ACT_REC_MIN_N = 8;             // resolved fires before an event's hit rate may price EV
+  const ACT_MS = 60 * 1000;            // memo window; inputs move on signal builds, not per request
+  let actCache = null, actBuilt = 0, actSig = "", actVer = 0;
+  // Labels come from the two places that already own them — the signals engine's EV_LABEL and the
+  // strategy panel's STRAT_DEFS — so a renamed setup can't read one way here and another there.
+  const ACT_LABEL = (() => {
+    const m = Object.assign({}, EV_LABEL);
+    for (const d of STRAT_DEFS) if (!m[d.ev]) m[d.ev] = d.label;
+    return m;
+  })();
+
+  // Out-of-sample record for one event family, split by ledger visibility so a shadow setup can
+  // never borrow the visible engine's record. Same exclusions the honesty badges use: resolved
+  // only, finite outcome, and legacy pre-sigma outcomes stay out of the R aggregates.
+  function actRecord(ev, shadow) {
+    let n = 0, w = 0, sum = 0;
+    for (const e of ledgerClosed) {
+      if (e.ev !== ev || e.status !== "resolved" || !Number.isFinite(e.realized)) continue;
+      if (shadow ? e.vi == null : e.vi != null) continue;
+      if (R_LEDGER_EVS.has(e.ev) && !(e.sd0 > 0)) continue;
+      n++; sum += e.realized; if (e.realized > 0) w++;
+    }
+    if (!n) return { n: 0, hit: null, avgR: null };
+    return { n, hit: +(w / n).toFixed(3), avgR: +(sum / n).toFixed(2) };
+  }
+
+  function buildActionable() {
+    const now = Date.now();
+    const recMemo = new Map();
+    const recOf = (ev, shadow) => {
+      const k = ev + "|" + (shadow ? 1 : 0);
+      if (!recMemo.has(k)) recMemo.set(k, actRecord(ev, shadow));
+      return recMemo.get(k);
+    };
+    const cands = [];
+    let expired = 0, noGeom = 0, thinRR = 0;
+    for (const e of ledgerOpen.values()) {
+      const meta = EV_META[e.ev];
+      if (!meta || !(meta.horizonMs >= ACT_MIN_HZ)) continue;   // swing horizons only
+      if (e.ev === "airead") continue;                          // the analyst's own claim, not a setup
+      const side = e.psd || (e.dir >= 0 ? "long" : "short");
+      if (side !== "long" && side !== "short") continue;
+      const r = rows.get(e.coin);
+      if (!r || r.delisted || !(r.px > 0)) continue;
+      if (r.uni === "main" && !crypto) continue;
+      // Frozen geometry, read verbatim: the void is the claim's stamped stop, the target is
+      // reconstructed from the stamped target distance against the fire-time mark. No level here
+      // is computed from live data.
+      if (!(e.stp > 0) || e.mv == null || !Number.isFinite(+e.mv) || !(e.mark0 > 0)) { noGeom++; continue; }
+      const target = side === "long" ? e.mark0 * (1 + +e.mv / 100) : e.mark0 * (1 - +e.mv / 100);
+      const tf = e.tf && ACT_TF_MS[e.tf] ? e.tf : "D1";
+      const bars = barsInTrigger(e.t0, now, tf);
+      if (bars != null && bars > ACT_MAX_BARS) { expired++; continue; }
+      const carry = carryR({ side, entry: r.px, stop: e.stp, horizonMs: meta.horizonMs, fundingHourly: r.funding });
+      const rr = netRR({ side, entry: r.px, stop: e.stp, target, carry });
+      if (!rr) { noGeom++; continue; }                          // void passed or target already through
+      if (!(rr.net >= ACT_MIN_RR)) { thinRR++; continue; }
+      const shadow = e.vi != null;
+      const rec = recOf(e.ev, shadow);
+      const evR = setupEV(rec.hit, rr.net, rec.n, ACT_REC_MIN_N);
+      // Earnings inside the horizon is a binary the base rate cannot see. Flagged, never filtered
+      // — standing aside is the reader's call, and pead deliberately trades the aftermath.
+      let earn = null;
+      if (r.uni === "xyz") {
+        const ep = earnProx(r.ticker);
+        if (ep && ep.diff != null && ep.diff * DAY <= meta.horizonMs) earn = { d: ep.e.d, s: ep.e.s, days: ep.diff };
+      }
+      cands.push({
+        coin: e.coin, t: r.ticker, uni: r.uni === "main" ? "crypto" : "stocks", side,
+        ev: e.ev, label: ACT_LABEL[e.ev] || e.ev, shadow,
+        unproven: shadow || evR == null,
+        tf, t0: e.t0, bars, stale: bars != null && bars >= Math.ceil(ACT_MAX_BARS * 0.7),
+        // Both marks, always. `fired` is the entry the track record was scored on; `entry` is
+        // what buying now costs. `late` is the distance between them in the setup's own risk
+        // unit — the honest measure of how much edge is already spent before you are in.
+        fired: sig(e.mark0, 9), entry: sig(r.px, 9), void: sig(e.stp, 9), target: sig(target, 9),
+        late: lateR(side, e.mark0, r.px, e.stp),
+        rr, carry, evR, rec: { n: rec.n, hit: rec.hit, avgR: rec.avgR },
+        horizonD: +(meta.horizonMs / DAY).toFixed(0), earn,
+      });
+    }
+    const ranked = rankActionable(mergeActionable(cands));
+    const sigA = JSON.stringify([ranked.proven, ranked.unproven].map((a) =>
+      a.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.net, x.evR])));
+    if (sigA !== actSig) { actSig = sigA; actVer = Date.now(); }
+    actBuilt = now;
+    actCache = { ts: now, dataTs: actVer,
+      params: { minHorizonDays: ACT_MIN_HZ / DAY, maxBars: ACT_MAX_BARS, minRR: ACT_MIN_RR,
+        recMinN: ACT_REC_MIN_N, netOfCarry: true, tfs: ["D1", "H12", "H4"] },
+      coverage: { candidates: cands.length, expired, noGeometry: noGeom, thinRR,
+        openClaims: ledgerOpen.size },
+      proven: ranked.proven, unproven: ranked.unproven,
+      count: ranked.proven.length + ranked.unproven.length };
+    // Detection runs on the poller's clock as part of the build, so a trigger is recorded whether
+    // or not anyone has the tab open — the precondition for any push transport.
+    try { trigScan(ranked.proven.concat(ranked.unproven), now); }
+    catch (err) { log("trigScan error (isolated, board still served): " + (err && err.message)); }
+  }
+  // ---- trigger stream (Telegram-ready foundation) --------------------------------------------
+  // Detection lives HERE, not in the browser, and that is the whole point of this layer. A toast
+  // built in app.js would mean a future Telegram push needs its own duplicate notion of "new",
+  // its own dedup and its own idea of which setups are worth interrupting someone for — three
+  // chances to disagree with the screen. Instead the poller owns one canonical, sequenced event
+  // stream, persisted across restarts, and each TRANSPORT (browser toast today, Telegram bot
+  // later, anything else after) is a thin consumer that applies its own eligibility filter.
+  //
+  // Eligibility deliberately does NOT gate the stream — every genuinely new trigger is emitted.
+  // A channel's thresholds are a property of the channel, so the browser can read them from the
+  // user's own settings while Telegram reads them from server config, without either censoring
+  // the record of what actually fired.
+  const TRIG_RING = 200;              // events retained for late-joining consumers
+  const TRIG_SEEN_TTL = 21 * DAY;     // prune announced keys past any plausible swing horizon
+  const TRIG_GRACE_MS = 2 * HOUR;     // see below — the anti-blast rule on the first build
+  let trigSeen = new Map();           // trigKey -> ts announced
+  let trigEvents = [];                // sequenced, oldest first
+  let trigSeq = 0, trigDirty = false, trigFirstBuild = true;
+
+  function hydrateTriggers() {
+    const d = store.loadTriggers ? store.loadTriggers() : null;
+    if (!d) return false;
+    if (Array.isArray(d.seen)) for (const kv of d.seen) if (Array.isArray(kv) && typeof kv[0] === "string") trigSeen.set(kv[0], +kv[1] || 0);
+    if (Array.isArray(d.events)) trigEvents = d.events.filter((e) => e && typeof e.coin === "string").slice(-TRIG_RING);
+    trigSeq = Number.isFinite(d.seq) ? d.seq : (trigEvents.length ? trigEvents[trigEvents.length - 1].seq || 0 : 0);
+    return true;
+  }
+  function persistTriggers() {
+    if (!store.saveTriggers) return;
+    const cut = Date.now() - TRIG_SEEN_TTL;
+    for (const [k, t] of trigSeen) if (t < cut) trigSeen.delete(k);
+    store.saveTriggers({ seq: trigSeq, seen: [...trigSeen.entries()], events: trigEvents.slice(-TRIG_RING) });
+    trigDirty = false;
+  }
+  // Called with the freshly ranked board. Emits one event per newly-seen claim.
+  //
+  // The anti-blast rule: on the FIRST build after a boot, a new key only announces if the claim
+  // itself fired within TRIG_GRACE_MS. Everything older is seeded silently. This covers both the
+  // first-ever boot (a full board, none of it news) and a restart after downtime (where the board
+  // is full of claims that opened while nobody was listening) with one rule instead of a special
+  // case for each — and it is why a redeploy does not detonate twenty notifications.
+  function trigScan(rows, now) {
+    const fresh = [];
+    for (const row of rows) {
+      const k = trigKey(row);
+      if (!k) continue;
+      if (trigSeen.has(k)) continue;
+      trigSeen.set(k, now); trigDirty = true;
+      if (trigFirstBuild && !(row.t0 > 0 && now - row.t0 <= TRIG_GRACE_MS)) continue;   // seeded, not announced
+      const ev = Object.assign({ seq: ++trigSeq, at: now }, row);
+      delete ev.also;   // the event is one claim; corroboration is a board concern
+      trigEvents.push(ev); fresh.push(ev);
+    }
+    if (trigEvents.length > TRIG_RING) trigEvents = trigEvents.slice(-TRIG_RING);
+    trigFirstBuild = false;
+    if (trigDirty) persistTriggers();
+    if (fresh.length) log(`triggers: ${fresh.length} new setup(s) — ${fresh.map((e) => e.t + " " + e.side).join(", ")}`);
+    return fresh;
+  }
+  // The stream, for any transport. `seq` is the high-water mark: a consumer stores the last seq it
+  // handled and takes everything above it, which is restart-safe and refresh-safe in a way that a
+  // timestamp comparison is not.
+  function getTriggers(sinceSeq) {
+    const since = Number.isFinite(+sinceSeq) ? +sinceSeq : null;
+    const evs = since == null ? trigEvents.slice(-40) : trigEvents.filter((e) => e.seq > since);
+    return { ts: Date.now(), dataTs: trigSeq, seq: trigSeq,
+      params: { ring: TRIG_RING, graceMs: TRIG_GRACE_MS, seenTtlMs: TRIG_SEEN_TTL },
+      known: trigSeen.size, events: evs, count: evs.length };
+  }
+
+  function getActionable() {
+    const now = Date.now();
+    if (!actCache || now - actBuilt > ACT_MS) {
+      try { buildActionable(); } catch (err) { log("buildActionable error: " + (err && err.message)); }
+    }
+    return actCache || { ts: Date.now(), dataTs: 0, params: {}, coverage: {}, proven: [], unproven: [], count: 0 };
+  }
+
   return {
     start,
     getSnapshot: () => snapshotCache,
@@ -5406,6 +5610,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     voidEarnPrint,
     getTrend,
     getTrendPair,
+    getActionable,
+    getTriggers,
+    buildActionableNow: buildActionable,   // harness: force an actionable rebuild without waiting out the memo
+    hydrateTriggersNow: hydrateTriggers,   // harness: restore announced-set/event log without a boot
+    trigStateNow: () => ({ seq: trigSeq, seen: trigSeen.size, events: trigEvents.length, firstBuild: trigFirstBuild }),
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);
