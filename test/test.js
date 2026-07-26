@@ -1915,7 +1915,9 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire",
     "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto",
     "dailyLevels", "dailyOI", "btMomVariant",
-    "mompCell", "renderDuelSection", "duelSvg", "duelDivergence", "loadDuelData", "duelRoll", "colAdjacent"];
+    "mompCell", "renderDuelSection", "duelSvg", "duelDivergence", "loadDuelData", "duelRoll", "colAdjacent",
+    "loadActionable", "openActionable", "renderActionable", "actRows", "actRowTip", "actRR", "actEV",
+    "actLate", "actLateCls", "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -1936,7 +1938,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   // Help must cover every tab, including the two newest (report, news) — a fallback to HELP.markets
   // silently showed the wrong help on those tabs before this was pinned.
-  for (const k of ["markets:`", "trend:`", "sectors:`", "corr:`", "sessions:`", "signals:`", "earnings:`", "backtest:`", "report:`", "news:`"])
+  for (const k of ["markets:`", "trend:`", "sectors:`", "corr:`", "sessions:`", "signals:`", "earnings:`", "backtest:`", "report:`", "news:`", "actionable:`"])
     assert.ok(s.includes(k), `HELP is missing an entry for a tab: ${k}`);
   // Command palette + freshness tray load-bearing markers.
   assert.ok(s.includes("CMDK_TABS") && s.includes("metaKey||e.ctrlKey") && s.includes("cmdk-q"), "command palette wiring missing");
@@ -2029,6 +2031,9 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(html.includes('id="termLock"'), "terminal AI lock indicator markup missing");
   // The backtest tab was silently dropped from the nav once while every renderer behind it
   // survived — pin both the button and the view section so the tab can't vanish again.
+  // Still pinned, and deliberately so: the tab is HIDDEN from the strip, not removed. The markup,
+  // the view section and every renderer behind it stay live — so this guard still catches a real
+  // deletion, while the hide itself is asserted separately below.
   assert.ok(html.includes('data-view="backtest"'), "backtest tab button missing from nav");
   assert.ok(html.includes('id="view-backtest"'), "backtest view section missing");
   assert.ok(s.includes("xyzmon.tabs.v1"), "tab-order persistence key missing from client");
@@ -2052,6 +2057,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/duel", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/ai-report", "/api/ai-reports", "/api/health",
+    "/api/actionable", "/api/triggers",
     "/api/export/ledger", "/api/news", "/api/news/channels",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
@@ -6110,4 +6116,473 @@ test("client -01: the target reconciliation is disclosed on the card, with hover
   assert.ok(/c\.correctedTarget\?' · <span data-tip="/.test(app), "the disclosure must carry a data-tip hover explanation");
   // one-code-path: the flag is SERVER-derived, never recomputed client-side from the levels
   assert.ok(!/correctedTarget\s*=/.test(app), "the client must never assign correctedTarget itself");
+});
+
+// ===== actionable board (build 2026.07.26-01) =================================================
+// The board's whole claim is that it re-derives nothing: it reads the geometry the ledger froze,
+// nets carry against it, and ranks. These tests pin that contract at every seam — the carry sign
+// convention (the thing that flips a short's economics), the honest-null floors, the merge that
+// keeps one name from becoming two trades, and the section split that keeps unproven setups out
+// of the expectancy rank.
+
+test("actionable -01: carry is signed by side, scaled by horizon, and expressed in the trade's own R", () => {
+  const { carryR } = require("../src/compute");
+  const HOUR = 3600e3, DAY = 86400e3;
+  // 43.8% APR (the venue's hourly rate x 24 x 365), 5d horizon, 1.78% stop.
+  const fh = 0.05 / 1000;   // 0.00005/hr -> 43.8% APR
+  const L = carryR({ side: "long", entry: 100, stop: 98.22, horizonMs: 5 * DAY, fundingHourly: fh });
+  assert.ok(L, "long carry computed");
+  assert.equal(L.aprPct, 43.8, "APR is the hourly rate annualized");
+  assert.ok(Math.abs(L.costPct - 43.8 * 5 / 365) < 1e-3, "cost is APR prorated across the horizon, not the full year");
+  // positive funding = longs pay: the long's carry must be a DRAG (negative R).
+  assert.ok(L.r < 0, "a long pays when funding is positive");
+  assert.ok(Math.abs(L.r - (-L.costPct / 1.78)) < 0.01, "carry in R = cost% / risk%");
+  // The mirror: same market, same hold, opposite side — a short is PAID to wait. This sign flip
+  // is the entire reason carry is worth surfacing at swing horizon rather than ignoring.
+  const S = carryR({ side: "short", entry: 100, stop: 101.78, horizonMs: 5 * DAY, fundingHourly: fh });
+  assert.ok(S.r > 0, "a short receives when funding is positive");
+  assert.ok(Math.abs(S.r + L.r) < 0.02, "the two sides are equal and opposite on mirrored geometry");
+  // Same funding, longer hold = strictly more carry. At 1d it is noise; at 21d it is a line item.
+  const d1 = carryR({ side: "long", entry: 100, stop: 98.22, horizonMs: DAY, fundingHourly: fh });
+  const d21 = carryR({ side: "long", entry: 100, stop: 98.22, horizonMs: 21 * DAY, fundingHourly: fh });
+  assert.ok(Math.abs(d1.r) < Math.abs(L.r) && Math.abs(L.r) < Math.abs(d21.r), "carry scales with the hold");
+  assert.ok(Math.abs(d21.r) > 0.5, "a three-week hold at this rate costs more than half a risk unit");
+  // Wider stop absorbs the same cash carry into less R — carry is relative to the trade's risk.
+  const wide = carryR({ side: "long", entry: 100, stop: 90, horizonMs: 5 * DAY, fundingHourly: fh });
+  assert.ok(Math.abs(wide.r) < Math.abs(L.r), "the same carry is a smaller share of a wider stop");
+  // Honest nulls: a missing leg must not silently become zero carry, which is a different claim.
+  assert.equal(carryR({ side: "long", entry: 100, stop: 98, horizonMs: 5 * DAY, fundingHourly: null }), null, "unknown funding is null, never 0");
+  assert.equal(carryR({ side: "flat", entry: 100, stop: 98, horizonMs: DAY, fundingHourly: fh }), null, "unsided input rejected");
+  assert.equal(carryR({ side: "long", entry: 100, stop: 100, horizonMs: DAY, fundingHourly: fh }), null, "zero risk distance rejected");
+  assert.equal(carryR(null), null, "null input rejected");
+});
+
+test("actionable -02: netRR folds carry into reward only, and rejects geometry that isn't tradeable from here", () => {
+  const { netRR, carryR } = require("../src/compute");
+  const DAY = 86400e3;
+  const base = { side: "long", entry: 100, stop: 95, target: 115 };
+  const gross = netRR(base);
+  assert.equal(gross.gross, 3, "15% reward over 5% risk = 3.0");
+  assert.equal(gross.net, 3, "no carry supplied => net equals gross");
+  assert.equal(gross.carryKnown, false, "and the payload says the carry is unknown rather than zero");
+  const carry = carryR({ side: "long", entry: 100, stop: 95, horizonMs: 10 * DAY, fundingHourly: 0.0001 });
+  const net = netRR(Object.assign({}, base, { carry }));
+  assert.equal(net.gross, 3, "gross is untouched by carry");
+  assert.ok(net.net < net.gross, "a paying long nets below gross");
+  assert.equal(net.riskPct, gross.riskPct, "carry must NOT move the risk leg — the void distance is unchanged by funding");
+  assert.ok(Math.abs(net.net - (net.gross + net.carryR)) < 0.011, "net = gross + carry in R");
+  assert.equal(net.carryKnown, true, "carry disclosed as known");
+  // A short paid to wait nets ABOVE gross — the ranking consequence that makes netting worth doing.
+  const sc = carryR({ side: "short", entry: 100, stop: 105, horizonMs: 10 * DAY, fundingHourly: 0.0001 });
+  const sn = netRR({ side: "short", entry: 100, stop: 105, target: 85, carry: sc });
+  assert.ok(sn.net > sn.gross, "a short in a crowded-long name is paid to hold, so net exceeds gross");
+  // Geometry that can't be entered from here returns null — this is what silently expires a row
+  // once price has walked through the void, rather than leaving a stale line on the board.
+  assert.equal(netRR({ side: "long", entry: 100, stop: 105, target: 115 }), null, "long with the void above entry rejected");
+  assert.equal(netRR({ side: "short", entry: 100, stop: 95, target: 85 }), null, "short with the void below entry rejected");
+  assert.equal(netRR({ side: "long", entry: 100, stop: 95, target: 99 }), null, "target already through rejected");
+  assert.equal(netRR({ side: "short", entry: 100, stop: 105, target: 101 }), null, "short target above entry rejected");
+});
+
+test("actionable -03: expectancy prices THIS instance's geometry and stays null below the record floor", () => {
+  const { setupEV } = require("../src/compute");
+  // 60% hit on a 2.5 R:R = .6*2.5 - .4 = +1.10R
+  assert.equal(setupEV(0.6, 2.5, 13, 8), 1.1, "hit x net - (1-hit) x 1");
+  assert.equal(setupEV(0.5, 1, 20, 8), 0, "a coin flip at 1:1 is exactly break-even");
+  assert.ok(setupEV(0.4, 2, 20, 8) > 0, "a sub-50% setup is still positive at 2:1");
+  assert.ok(setupEV(0.7, 0.3, 20, 8) < 0, "a high-hit setup with poor geometry is still negative");
+  // The floor: below the resolved-fire minimum the hit rate cannot honestly price anything.
+  assert.equal(setupEV(0.6, 2.5, 7, 8), null, "n below the floor yields no expectancy");
+  assert.equal(setupEV(0.6, 2.5, 0, 8), null, "zero resolved fires yields no expectancy");
+  assert.equal(setupEV(0.6, 2.5, null, 8), null, "unknown n yields no expectancy");
+  assert.equal(setupEV(null, 2.5, 20, 8), null, "unknown hit rate yields no expectancy");
+  assert.equal(setupEV(0.6, null, 20, 8), null, "unknown geometry yields no expectancy");
+  // Expectancy uses the INSTANCE's geometry, not the event's historical average R — same hit
+  // rate on better geometry must produce a better number, or the board's rank means nothing.
+  assert.ok(setupEV(0.6, 3.5, 13, 8) > setupEV(0.6, 2.0, 13, 8), "better geometry ranks higher at equal hit rate");
+});
+
+test("actionable -04: bars in trigger are counted in the setup's own timeframe", () => {
+  const { barsInTrigger } = require("../src/compute");
+  const now = 1700000000000, DAY = 86400e3;
+  assert.equal(barsInTrigger(now - 3 * DAY, now, "D1"), 3, "three daily bars");
+  assert.equal(barsInTrigger(now - 3 * DAY, now, "H12"), 6, "the same span is six H12 bars");
+  assert.equal(barsInTrigger(now - 3 * DAY, now, "H4"), 18, "and eighteen H4 bars");
+  assert.equal(barsInTrigger(now - 1000, now, "D1"), 0, "a fresh fire is bar zero");
+  assert.equal(barsInTrigger(now, now - 1000, "D1"), null, "a future fire time is null, not negative");
+  assert.equal(barsInTrigger(null, now, "D1"), null, "missing fire time is null");
+  assert.equal(barsInTrigger(now - 3 * DAY, now, "NOPE"), 3, "an unknown timeframe falls back to daily rather than throwing");
+});
+
+test("actionable -05: one name+side is one row — proven geometry wins, the rest ride along as corroboration", () => {
+  const { mergeActionable, actionableBetter } = require("../src/compute");
+  const mk = (o) => Object.assign({ coin: "AAA", side: "long", ev: "x", label: "X", tf: "D1", t0: 100, unproven: false, evR: 0.5, rr: { net: 2 } }, o);
+  // Proven beats unproven outright, regardless of how good the unproven row's expectancy looks —
+  // an unproven detector must never overwrite a levelled claim's void or target.
+  assert.equal(actionableBetter(mk({ unproven: true, evR: 99 }), mk({ unproven: false, evR: 0 })), false, "unproven never outranks proven");
+  assert.equal(actionableBetter(mk({ unproven: false, evR: 0 }), mk({ unproven: true, evR: 99 })), true, "proven wins even on worse expectancy");
+  assert.equal(actionableBetter(mk({ evR: 1.2 }), mk({ evR: 0.4 })), true, "then expectancy decides");
+  assert.equal(actionableBetter(mk({ evR: 0.5, tf: "D1" }), mk({ evR: 0.5, tf: "H4" })), true, "then the higher timeframe");
+  assert.equal(actionableBetter(mk({ evR: 0.5, tf: "D1", t0: 50 }), mk({ evR: 0.5, tf: "D1", t0: 900 })), true, "then the earlier fire");
+  // Two detectors on one name+side collapse to a single row: you take one position, not two.
+  const merged = mergeActionable([
+    mk({ ev: "tretest", label: "Trend retest (long)", evR: 0.9, unproven: false }),
+    mk({ ev: "mapull", label: "MA50 pullback", evR: 5, unproven: true }),
+  ]);
+  assert.equal(merged.length, 1, "one name + one side = one row");
+  assert.equal(merged[0].ev, "tretest", "the proven claim owns the row");
+  assert.deepEqual(merged[0].also.map((a) => a.ev), ["mapull"], "the loser rides along as corroboration");
+  assert.ok(merged[0].also[0].unproven === true, "and its unproven status is disclosed, not laundered");
+  assert.ok(merged[0].also[0].target === undefined && merged[0].also[0].void === undefined,
+    "corroboration carries labels ONLY — never its own levels, so the row's geometry has exactly one author");
+  // Opposite sides on one name are two genuinely different trades and must NOT collapse.
+  const bothSides = mergeActionable([mk({ side: "long" }), mk({ side: "short", ev: "y" })]);
+  assert.equal(bothSides.length, 2, "long and short on one name stay separate rows");
+  // Different names never merge.
+  assert.equal(mergeActionable([mk({ coin: "AAA" }), mk({ coin: "BBB" })]).length, 2, "distinct names stay distinct");
+  // Junk in, nothing out.
+  assert.deepEqual(mergeActionable([null, { coin: "", side: "long" }, mk({ side: "flat" })]), [], "malformed candidates are dropped, not rendered");
+  assert.deepEqual(mergeActionable(null), [], "null input is an empty board, not a throw");
+});
+
+test("actionable -06: the split keeps unproven setups out of the expectancy rank", () => {
+  const { rankActionable } = require("../src/compute");
+  const mk = (coin, unproven, evR, net) => ({ coin, side: "long", unproven, evR, rr: { net } });
+  const out = rankActionable([
+    mk("LOW", false, 0.2, 2.0),
+    mk("SHADOW_BIG", true, null, 9.9),
+    mk("HIGH", false, 1.4, 1.3),
+    mk("SHADOW_SMALL", true, null, 2.2),
+  ]);
+  assert.deepEqual(out.proven.map((r) => r.coin), ["HIGH", "LOW"], "proven rows sort by expectancy, not by R:R");
+  assert.deepEqual(out.unproven.map((r) => r.coin), ["SHADOW_BIG", "SHADOW_SMALL"], "unproven rows sort by net R:R in their own section");
+  // The load-bearing property: a spectacular-looking unproven setup must never outrank a modest
+  // proven one in the main list, because its expectancy is unknown, not high.
+  assert.ok(!out.proven.some((r) => r.unproven), "no unproven row leaks into the proven section");
+  assert.ok(out.unproven.every((r) => r.evR == null), "and nothing in the unproven section carries a fabricated expectancy");
+  assert.deepEqual(rankActionable(null), { proven: [], unproven: [] }, "null input is an empty board");
+});
+
+test("actionable -07: the board reads the ledger's frozen geometry and never re-derives a level", () => {
+  const { createPoller } = require("../src/poller");
+  const HOUR = 3600e3, DAY = 86400e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
+  for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+    hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+  const px = hourly[N - 1].c * 1.0005, daily = [];
+  for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
+    daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
+  p.seedRowNow("TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
+  p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+  const a = p.getActionable();
+  assert.equal(a.count, 1, "the stacked-uptrend retest lands on the board");
+  const row = a.unproven[0];
+  assert.ok(row, "a fresh event with no resolved fires sits in the unproven section");
+  assert.equal(row.evR, null, "and carries no expectancy");
+  assert.equal(row.rec.n, 0, "because its record is empty");
+  // The contract: the row's void is the ledger's frozen stop, byte for byte — not a recompute.
+  assert.ok(row.void > 0 && row.target > row.entry, "long geometry is coherent");
+  assert.equal(row.side, "long"); assert.equal(row.ev, "tretest");
+  // Carry: 0.00005/hr = 43.8% APR; over the 5d tretest horizon that is a real drag on a long.
+  assert.equal(row.carry.aprPct, 43.8, "funding annualizes to the venue's APR");
+  assert.ok(row.rr.carryR < 0, "a long pays here");
+  assert.ok(row.rr.net < row.rr.gross, "so net R:R sits below gross");
+  assert.ok(Math.abs(row.rr.net - (row.rr.gross + row.rr.carryR)) < 0.011, "net = gross + carry");
+  assert.equal(row.horizonD, 5, "horizon comes from EV_META, not a local constant");
+  assert.equal(row.uni, "stocks");
+  assert.equal(row.bars, 0, "freshly fired");
+  // Swing gate is by horizon, so short-horizon events can never leak onto a swing board.
+  const { EV_META } = require("../src/compute");
+  for (const r of a.proven.concat(a.unproven))
+    assert.ok(EV_META[r.ev].horizonMs >= 3 * DAY, `sub-3d event on the swing board: ${r.ev}`);
+  assert.equal(a.params.netOfCarry, true, "the payload declares that R:R is net of carry");
+  assert.equal(a.params.recMinN, 8, "and discloses the record floor the client renders");
+  assert.ok(a.coverage.openClaims >= 1, "coverage discloses how many open claims were scanned");
+});
+
+test("actionable -08: a setup expires when price passes its void, and the payload counts what it dropped", () => {
+  const { createPoller } = require("../src/poller");
+  const HOUR = 3600e3, DAY = 86400e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
+  for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+    hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+  const px = hourly[N - 1].c * 1.0005, daily = [];
+  for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
+    daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
+  p.seedRowNow("TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
+  p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+  assert.equal(p.getActionable().count, 1, "the row is on the board to begin with");
+  // Now walk the mark down through the frozen void. The claim stays open in the ledger — it is
+  // still a live record with a real outcome pending — but it is no longer ENTERABLE from here,
+  // which is a different question and the only one this board asks.
+  const voided = p.getActionable().unproven[0].void;
+  p.seedRowNow("TRSIG", { px: voided * 0.98 });
+  p.buildActionableNow();
+  const a2 = p.getActionable();
+  assert.equal(a2.count, 0, "a setup whose void has been passed drops off the board");
+  assert.ok(a2.coverage.noGeometry >= 1, "and is counted as untradeable-from-here rather than silently vanishing");
+  assert.ok(a2.coverage.openClaims >= 1, "the underlying claim is still open in the ledger — the board dropped it, the record did not");
+});
+
+test("actionable -09: client renders the server's numbers and states the carry contract on the tab", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Tab + view + controls exist and are wired into navigation.
+  assert.ok(html.includes('data-view="actionable"') && html.includes('id="view-actionable"'), "actionable tab/view markup missing");
+  assert.ok(html.includes('id="act-body"') && html.includes('id="actside"'), "actionable board container/controls missing");
+  assert.ok(html.includes('id="act-provenonly"') && html.includes('id="act-noearn"'), "actionable filters missing");
+  assert.ok(s.includes("setHidden('view-actionable', v!=='actionable')"), "actionable view not wired into showView");
+  assert.ok(s.includes("if(v==='actionable')") && s.includes("openActionable()"), "actionable tab does not open its board");
+  assert.ok(s.includes("/api/actionable"), "client never calls the actionable endpoint");
+  // The one-code-path contract: the client must NOT recompute reward:risk, carry or expectancy.
+  // It formats what the server ranked. A local arithmetic path here is exactly how the board and
+  // the record start disagreeing about the same trade.
+  assert.ok(!/act[A-Za-z]*\s*=\s*[^;]*rewardPct\s*\/\s*riskPct/.test(s), "client must not recompute R:R locally");
+  assert.ok(!/r\.rr\.gross\s*\+\s*r\.(carry|rr)\.\w*[Rr]\b/.test(s), "client must not recompute net R:R locally");
+  assert.ok(s.includes("actRR(r.rr.net)") && s.includes("actEV(r.evR)"), "client must render the server's net R:R and expectancy verbatim");
+  // Every column and both derived numbers are hoverable — the standing rule for this app.
+  assert.ok(s.includes("function actRowTip"), "row tooltip missing");
+  for (const frag of ["R:R gross", "R:R net", "carry over", "expectancy", "in trigger", "record:"])
+    assert.ok(s.includes(frag), `row tooltip must disclose: ${frag}`);
+  assert.ok(s.includes("(paid to hold)") && s.includes("(you pay)"), "the tooltip must state which way carry runs for this side");
+  assert.ok(s.includes("funding unavailable"), "an unknown funding rate must be disclosed, not shown as zero carry");
+  // The board must say, in the UI, that R:R is net and where EV is blank — the honesty contract.
+  assert.ok(s.includes("R:R is net of expected funding"), "footer must state that R:R is carry-netted");
+  assert.ok(/blank below \$\{p\.recMinN\|\|8\} resolved fires/.test(s), "footer must state the record floor that blanks EV");
+  assert.ok(s.includes("No record yet"), "the unproven section must be labelled as having no record");
+  assert.ok(s.includes("frozen at fire time") && s.includes("never re-derived"), "footer must state that levels are frozen, not re-derived");
+  assert.ok(s.includes("no crypto claims"), "footer must disclose that the board is equities-only");
+  // Styling exists for every class the renderer emits (a missing rule renders an unreadable board).
+  for (const cls of ["act-h", "act-tbl", "act-ev", "act-stale", "act-also", "act-warn", "act-note", "act-foot"])
+    assert.ok(css.includes("." + cls), `missing CSS for client class: ${cls}`);
+  // Reuses the trend board's table shell rather than forking a second look for a sibling board.
+  assert.ok(s.includes('<table class="trend-t act-tbl">'), "actionable board should reuse the trend table shell");
+});
+
+// ===== trigger stream + fire-vs-now (build 2026.07.26-02) =====================================
+// The stream is the Telegram-ready foundation: detection is the poller's, sequenced and persisted,
+// and each transport is a thin consumer. These tests pin the properties that make a push channel
+// tolerable — announce once, never re-announce, and never detonate the whole board on a redeploy.
+
+test("triggers -01: lateness is measured in the setup's own risk unit, against the FIRE mark", () => {
+  const { lateR } = require("../src/compute");
+  // fired 176.20, void 171.85 => 4.35 of risk. At 178.90 you have spent 2.70 of it.
+  assert.equal(lateR("long", 176.20, 178.90, 171.85), 0.621, "late = distance travelled / risk AT THE FIRE");
+  assert.equal(lateR("long", 176.20, 176.20, 171.85), 0, "at the fire mark you are not late");
+  assert.ok(lateR("long", 176.20, 175.00, 171.85) < 0, "price back below the fire means you enter better than the record did");
+  // Shorts mirror: favourable travel is DOWN, so a lower mark is late for a short.
+  assert.ok(lateR("short", 241.10, 239.40, 252.30) > 0, "a short is late when price has already fallen");
+  assert.ok(lateR("short", 241.10, 244.00, 252.30) < 0, "and early when price came back up");
+  const L = lateR("long", 100, 102, 95), S = lateR("short", 100, 98, 105);
+  assert.equal(L, S, "mirrored geometry gives mirrored lateness");
+  // The denominator is fire-time risk, NOT live risk — that is the unit the record was scored in.
+  assert.equal(lateR("long", 100, 110, 90), 1, "ten points travelled on a ten-point stop is exactly 1.0R late");
+  assert.equal(lateR("flat", 100, 102, 95), null, "unsided rejected");
+  assert.equal(lateR("long", 100, 102, 100), null, "zero fire-time risk rejected");
+  assert.equal(lateR("long", 0, 102, 95), null, "missing fire mark rejected");
+});
+
+test("triggers -02: eligibility is per-transport and never gates the stream", () => {
+  const { trigEligible, trigKey } = require("../src/compute");
+  const row = { coin: "xyz:AMD", side: "long", ev: "tretest", t0: 5, unproven: false, evR: 0.52, rr: { net: 2.31 }, late: 0.10, earn: null };
+  assert.equal(trigEligible(row, {}), true, "an empty config interrupts for everything");
+  assert.equal(trigEligible(row, { provenOnly: true }), true, "proven row passes proven-only");
+  assert.equal(trigEligible(Object.assign({}, row, { unproven: true }), { provenOnly: true }), false, "unproven row filtered by proven-only");
+  assert.equal(trigEligible(Object.assign({}, row, { evR: null }), { minEV: 0 }), false, "a null expectancy cannot clear an EV floor");
+  assert.equal(trigEligible(row, { minEV: 0.6 }), false, "EV below the floor filtered");
+  assert.equal(trigEligible(row, { minRR: 2.5 }), false, "R:R below the floor filtered");
+  assert.equal(trigEligible(row, { minRR: 1.5 }), true, "R:R above the floor passes");
+  // The rule that makes alerting usable rather than annoying: don't wake someone for a setup
+  // that has already run away from its own entry.
+  assert.equal(trigEligible(Object.assign({}, row, { late: 0.9 }), { maxLate: 0.5 }), false, "a chased setup is filtered out of alerts");
+  assert.equal(trigEligible(Object.assign({}, row, { late: null }), { maxLate: 0.5 }), true, "unknown lateness is not treated as late");
+  assert.equal(trigEligible(row, { muted: ["xyz:AMD"] }), false, "muted name filtered");
+  assert.equal(trigEligible(row, { muted: ["xyz:NVDA"] }), true, "a different mute does not filter");
+  assert.equal(trigEligible(row, { sides: ["short"] }), false, "side filter honoured");
+  assert.equal(trigEligible(Object.assign({}, row, { earn: { days: 3 } }), { noEarnings: true }), false, "earnings-in-horizon filter honoured");
+  assert.equal(trigEligible(null, {}), false, "null row is never eligible");
+  // Keys are per-claim AND per-fire, so a re-arm after an episode lapses is genuinely new.
+  assert.equal(trigKey(row), "xyz:AMD|long|tretest|5");
+  assert.notEqual(trigKey(row), trigKey(Object.assign({}, row, { t0: 9 })), "a later fire is a distinct trigger, not a duplicate");
+  assert.equal(trigKey({}), null, "malformed row has no key");
+});
+
+test("triggers -03: announce once, never twice, and never re-blast the board on a redeploy", () => {
+  const { createPoller } = require("../src/poller");
+  const HOUR = 3600e3, DAY = 86400e3;
+  let savedTrig = null, savedLed = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
+    saveLedger: (d) => { savedLed = JSON.parse(JSON.stringify(d)); }, loadLedger: () => savedLed,
+    saveTriggers: (d) => { savedTrig = JSON.parse(JSON.stringify(d)); }, loadTriggers: () => savedTrig };
+  // NOTE: the coin id must carry ":" — the ledger's universe test is structural, and a colon-free
+  // id is classified as a (purged) crypto claim on hydrate.
+  const COIN = "xyz:TRSIG";
+  const seed = (p) => {
+    const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
+    for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+      hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+    const px = hourly[N - 1].c * 1.0005, daily = [];
+    for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
+      daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
+    p.seedRowNow(COIN, { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
+  };
+  const build = (p) => { p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow(); };
+
+  const p1 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  seed(p1); build(p1);
+  const t1 = p1.getTriggers();
+  assert.equal(t1.seq, 1, "a fresh in-grace fire emits exactly one event");
+  assert.equal(t1.events[0].t, "TRSIG");
+  assert.ok(t1.events[0].fired > 0 && t1.events[0].late != null, "the event carries both marks so a transport can compose a message without re-reading the board");
+  assert.equal(t1.events[0].also, undefined, "corroboration is a board concern, not part of the claim event");
+  // Idempotence within a process: rebuilding must not re-announce a claim already seen.
+  build(p1);
+  assert.equal(p1.getTriggers().seq, 1, "rebuilding the board does not re-announce");
+  // Restart with the persisted announced-set AND the persisted ledger: the frozen t0 keeps the
+  // key stable, so nothing re-fires. This is the property that decides whether a push channel
+  // survives contact with a deploy.
+  const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  seed(p2); p2.hydrateTriggersNow(); p2.hydrateLedgerNow(); build(p2);
+  assert.equal(p2.getTriggers().seq, 1, "a redeploy re-announces nothing");
+  assert.equal(p2.trigStateNow().seen, 1, "and restores the announced set rather than starting blank");
+  // Cursor semantics: a consumer stores the last seq handled and takes everything above it.
+  assert.equal(p2.getTriggers(0).count, 1, "since=0 replays the retained window");
+  assert.equal(p2.getTriggers(1).count, 0, "since=high-water yields nothing");
+  assert.equal(p2.getTriggers(99).count, 0, "a cursor beyond the stream is empty, not negative");
+});
+
+test("triggers -04: a cold start with a stale board seeds silently instead of detonating", () => {
+  const { createPoller } = require("../src/poller");
+  const HOUR = 3600e3, DAY = 86400e3;
+  let savedLed = null;
+  const mkStore = (loadLed) => ({ loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
+    saveLedger: (d) => { savedLed = JSON.parse(JSON.stringify(d)); }, loadLedger: loadLed,
+    saveTriggers: () => {}, loadTriggers: () => null });
+  const COIN = "xyz:OLD";
+  const seed = (p) => {
+    const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
+    for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+      hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+    const px = hourly[N - 1].c * 1.0005, daily = [];
+    for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
+      daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
+    p.seedRowNow(COIN, { px, ticker: "OLD", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
+  };
+  // Pass 1: open a claim normally and capture the persisted ledger.
+  const p1 = createPoller({ dex: "xyz", store: mkStore(() => null), log: () => {}, version: "test", crypto: false });
+  seed(p1); p1.buildTrendNow(); p1.buildSignalsNow();
+  assert.ok(savedLed && savedLed.open && savedLed.open.length >= 1, "a claim was opened and persisted");
+  // Backdate it by three days — the restart-after-downtime case: the board is full of claims that
+  // fired while nobody was listening, and none of them are news.
+  const stale = JSON.parse(JSON.stringify(savedLed));
+  for (const e of stale.open) e.t0 = Date.now() - 3 * DAY;
+  // Pass 2: a genuinely cold process (no persisted trigger state) meets that stale board.
+  const p2 = createPoller({ dex: "xyz", store: mkStore(() => stale), log: () => {}, version: "test", crypto: false });
+  seed(p2); p2.hydrateLedgerNow(); p2.buildActionableNow();
+  const t = p2.getTriggers();
+  assert.ok(p2.getActionable().count >= 1, "the stale claim is still ON the board — it is tradeable, just not news");
+  assert.ok(t.known >= 1, "and it IS recorded as known, so it can never announce later");
+  assert.equal(t.seq, 0, "but NOTHING is announced: opening the app after a weekend must not fire once per setup");
+  assert.equal(t.count, 0, "the stream is empty");
+  assert.equal(p2.trigStateNow().firstBuild, false, "the grace is spent after one pass");
+  // Now a genuinely NEW claim on the same process must announce, proving the grace was a one-shot
+  // for the cold start and not a permanent mute. (Rebuilding the same name would not do: the
+  // hydrated claim keeps its frozen t0, so openLedger finds it rather than opening a second one —
+  // which is itself the dedup working.)
+  const now2 = Date.now(), endH2 = Math.floor(now2 / HOUR), N2 = 16 * 24, h2 = [];
+  for (let i = 0; i < N2; i++) { const t = (endH2 - N2 + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+    h2.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+  const px2 = h2[N2 - 1].c * 1.0005, d2 = [];
+  for (let i = 0; i < 60; i++) { const c = px2 * Math.pow(1.002, i - 59);
+    d2.push({ t: (Math.floor(now2 / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
+  p2.seedRowNow("xyz:FRESH", { px: px2, ticker: "FRESH", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: h2, dailyRaw: d2 });
+  p2.buildTrendNow(); p2.buildSignalsNow(); p2.buildActionableNow();
+  const t2 = p2.getTriggers();
+  assert.ok(t2.seq >= 1, "a claim opened after the cold start DOES announce");
+  assert.ok(t2.events.some((e) => e.t === "FRESH"), "and it is the new name, not the seeded stale one");
+  assert.ok(!t2.events.some((e) => e.t === "OLD"), "the silently-seeded claim never announces retroactively");
+});
+
+test("triggers -05: browser transport is a consumer only, and the toast surface avoids the terminal", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Consumer, not detector: the client must read the server's stream and advance a cursor. If it
+  // ever decides for itself what counts as "new", a future Telegram push has a second opinion.
+  assert.ok(s.includes("/api/triggers"), "client must consume the server trigger stream");
+  assert.ok(s.includes("function trigSeqGet") && s.includes("function trigSeqSet"), "cursor persistence missing");
+  assert.ok(s.includes("if(cur==null){ trigSeqSet(d.seq||0); return; }"), "first run on a device must adopt the high-water mark without firing the retained ring");
+  // Dedup belongs to the poller: the client must hold a single integer cursor, not a set of keys.
+  // (Checked as identifiers, not prose — the comments in app.js legitimately discuss the concept.)
+  for (const ident of ["trigSeen", "trigKeys", "seenTriggers", "firedKeys"])
+    assert.ok(!new RegExp("(let|const|var)\\s+" + ident + "\\b").test(s), `client must not keep its own announced-set (${ident}) — dedup belongs to the poller`);
+  assert.ok(/store\.get\(TSEQ\)/.test(s) && /store\.set\(TSEQ/.test(s), "the client's entire memory of what it has shown must be one persisted sequence number");
+  // Fires land in the SHARED alert log so the bell badge and Recent list cover both kinds.
+  assert.ok(/A\.log\.unshift\(\{t:Date\.now\(\), text\}\)/.test(s), "trigger fires must land in the shared alert log");
+  assert.ok(s.includes("function fireTrigger") && s.includes("updateBell()"), "trigger fires must update the bell");
+  // Settings live in the bell panel, not in the board's filter row (which would be a second,
+  // competing alert-configuration surface).
+  assert.ok(s.includes('id="at-on"') && s.includes('id="at-proven"') && s.includes('id="at-late"'), "trigger settings missing from the alerts panel");
+  assert.ok(s.includes("trig:{ on:false"), "trigger alerts must default OFF");
+  assert.ok(s.includes("A.trig") && s.includes("trig:state.alerts.trig"), "trigger config must persist alongside the alert rules");
+  assert.ok(/state\.alerts\.trig=Object\.assign/.test(s), "trigger config must be restored on load");
+  // Toast placement: bottom-LEFT, because bottom-right is the terminal's and the right edge is
+  // the drawer's. Above the drawer, below the modals.
+  assert.ok(/\.toast-wrap\{position:fixed;bottom:16px;left:16px;z-index:90/.test(css), "toast surface must sit bottom-left at z-90");
+  assert.ok(!/\.toast-wrap\{[^}]*right:16px/.test(css), "toast must not sit in the terminal FAB's corner");
+  for (const cls of ["toast-trig", "tt-h", "tt-g", "tt-a", "act-late-bad"])
+    assert.ok(css.includes("." + cls), `missing CSS for trigger toast class: ${cls}`);
+  // The toast has to carry geometry and an escape hatch, or it is just noise with a ticker on it.
+  assert.ok(s.includes("data-mute") && s.includes("data-rep"), "toast must offer mute and report actions");
+  assert.ok(s.includes("fired ${fmtPrice(ev.fired)}"), "toast must show the fire mark");
+  // Board: both marks and lateness are rendered from the payload.
+  assert.ok(s.includes("fmtPrice(r.fired)") && s.includes("actLate(r.late)"), "board must render the fire mark and lateness");
+  assert.ok(s.includes(">Fired</th>") && s.includes(">Now</th>") && s.includes(">Late</th>"), "board must carry Fired / Now / Late columns");
+  assert.ok(!/r\.entry\s*[-/]\s*r\.fired/.test(s), "client must not recompute lateness locally");
+});
+
+test("triggers -06: the R:R floor is the board's single kill switch, set at 1.5", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/ACT_MIN_RR = 1\.5;/.test(pol), "net R:R floor must be 1.5");
+  // Because R:R is repriced from the live mark every build, a chased setup dies at this gate on
+  // its own. A separate lateness-based expiry would be a second gate that could disagree with it.
+  assert.ok(!/ACT_MAX_LATE|lateExpire|maxLateDrop/.test(pol), "lateness must not be a second expiry gate — the R:R floor already kills chased setups");
+  assert.ok(/if \(!\(rr\.net >= ACT_MIN_RR\)\) \{ thinRR\+\+; continue; \}/.test(pol), "the floor must be enforced against the LIVE-mark R:R, every build");
+});
+
+test("tabs: backtest is hidden from the strip by default without withdrawing the feature", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  // Hidden by a declarative list, not by editing markup — so un-hiding is one word and the
+  // difference between "hidden" and "deleted" stays legible to the next reader.
+  assert.ok(/const HIDDEN_TABS=new Set\(\['backtest'\]\)/.test(s), "backtest must be hidden via the HIDDEN_TABS list");
+  assert.ok(s.includes("function applyTabVisibility"), "tab visibility applier missing");
+  assert.ok(/applyTabOrder\(\); applyTabVisibility\(\);/.test(s), "visibility must be applied on the initial nav pass");
+  assert.ok(/applyTabVisibility==='function'\) applyTabVisibility\(\)/.test(s), "visibility must be re-applied when the strip is rebuilt at runtime");
+  assert.ok(/nav\.tabs \.tab\[hidden\]\{display:none\}/.test(css), "a display rule on .tab must not be able to silently un-hide a hidden tab");
+  // The feature is NOT withdrawn: markup, view section, renderers, help and the deep link all live.
+  assert.ok(html.includes('data-view="backtest"') && html.includes('id="view-backtest"'), "backtest markup must survive the hide");
+  assert.ok(s.includes("backtest:`"), "backtest help entry must survive the hide");
+  assert.ok(s.includes("function renderBacktest_load"), "backtest renderer must survive the hide");
+  assert.ok(/h==='backtest'|v==='backtest'/.test(s), "showView must still route to backtest");
+  assert.ok(/h==='sectors'\|\|h==='corr'\|\|h==='markets'|h==='backtest'/.test(s) || s.includes("h==='backtest'"), "the #backtest deep link must still resolve");
+  // Command palette stays the deliberate way back in — and must list every LIVE tab, including
+  // the one added this build (which it did not, until now).
+  assert.ok(/\{v:'backtest',label:'Backtest'\}/.test(s), "backtest must remain findable in the command palette");
+  assert.ok(/\{v:'actionable',label:'Actionable'\}/.test(s), "the actionable tab must be listed in the command palette");
+  // Only backtest is hidden — this guard fails loudly if the list quietly grows.
+  const m = s.match(/const HIDDEN_TABS=new Set\(\[([^\]]*)\]\)/);
+  assert.ok(m, "HIDDEN_TABS not found");
+  assert.equal(m[1].split(",").filter((x) => x.trim()).length, 1, "exactly one tab should be hidden — review any addition to HIDDEN_TABS");
 });
