@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.25-01";
+const VERSION = "2026.07.26-02";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -418,6 +418,21 @@ async function main() {
   // Ranked live signals + their per-market historical base rates (event studies).
   fastify.get("/api/signals", (req, reply) =>
     serveCached(req, reply, poller.getSignals(), { ts: 0, dataTs: 0, count: 0, signals: [] }));
+
+  // Trigger stream: the sequenced log of newly-fired setups. Consumers pass the last seq they
+  // handled and get everything above it — restart-safe and refresh-safe in a way a timestamp is
+  // not. no-store because the whole value is "what is new since MY cursor", which is per-caller.
+  fastify.get("/api/triggers", (req, reply) => {
+    const since = req.query && req.query.since;
+    return reply.header("cache-control", "no-store").send(poller.getTriggers(since));
+  });
+
+  // Actionable board: names currently at a swing trigger, funding-net and ranked by expectancy.
+  // Content-signature ETag via serveCached — the payload only moves when a claim opens, closes,
+  // ages a bar, or its geometry re-prices against the live mark.
+  fastify.get("/api/actionable", (req, reply) =>
+    serveCached(req, reply, poller.getActionable(),
+      { ts: 0, dataTs: 0, params: {}, coverage: {}, proven: [], unproven: [], count: 0 }));
   // Earnings calendar for the xyz equity universe (Finnhub-fed, 6h server refresh). ETag rides
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
