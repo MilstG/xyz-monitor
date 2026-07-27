@@ -1916,8 +1916,9 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto",
     "dailyLevels", "dailyOI", "btMomVariant",
     "mompCell", "renderDuelSection", "duelSvg", "duelDivergence", "loadDuelData", "duelRoll", "colAdjacent",
-    "loadActionable", "openActionable", "renderActionable", "actRows", "actRowTip", "actRR", "actEV",
-    "actLate", "actLateCls", "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet"];
+    "loadActionable", "openActionable", "renderActionable", "actHead", "actDetail", "actCmp", "actCell", "actRR", "actEV",
+    "actLate", "actLateCls", "actAgo", "actSortLoad", "actSortSave",
+    "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -6217,22 +6218,19 @@ test("actionable -04: bars in trigger are counted in the setup's own timeframe",
 test("actionable -05: one name+side is one row — proven geometry wins, the rest ride along as corroboration", () => {
   const { mergeActionable, actionableBetter } = require("../src/compute");
   const mk = (o) => Object.assign({ coin: "AAA", side: "long", ev: "x", label: "X", tf: "D1", t0: 100, unproven: false, evR: 0.5, rr: { net: 2 } }, o);
-  // Proven beats unproven outright, regardless of how good the unproven row's expectancy looks —
-  // an unproven detector must never overwrite a levelled claim's void or target.
-  assert.equal(actionableBetter(mk({ unproven: true, evR: 99 }), mk({ unproven: false, evR: 0 })), false, "unproven never outranks proven");
-  assert.equal(actionableBetter(mk({ unproven: false, evR: 0 }), mk({ unproven: true, evR: 99 })), true, "proven wins even on worse expectancy");
-  assert.equal(actionableBetter(mk({ evR: 1.2 }), mk({ evR: 0.4 })), true, "then expectancy decides");
+  // Every candidate reaching the merge has already cleared the confirmed gate, so precedence is
+  // expectancy first — there is no proven/unproven tier left to break.
+  assert.equal(actionableBetter(mk({ evR: 1.2 }), mk({ evR: 0.4 })), true, "expectancy decides");
   assert.equal(actionableBetter(mk({ evR: 0.5, tf: "D1" }), mk({ evR: 0.5, tf: "H4" })), true, "then the higher timeframe");
   assert.equal(actionableBetter(mk({ evR: 0.5, tf: "D1", t0: 50 }), mk({ evR: 0.5, tf: "D1", t0: 900 })), true, "then the earlier fire");
   // Two detectors on one name+side collapse to a single row: you take one position, not two.
   const merged = mergeActionable([
-    mk({ ev: "tretest", label: "Trend retest (long)", evR: 0.9, unproven: false }),
-    mk({ ev: "mapull", label: "MA50 pullback", evR: 5, unproven: true }),
+    mk({ ev: "tretest", label: "Trend retest (long)", evR: 0.9 }),
+    mk({ ev: "mapull", label: "MA50 pullback", evR: 0.4 }),
   ]);
   assert.equal(merged.length, 1, "one name + one side = one row");
-  assert.equal(merged[0].ev, "tretest", "the proven claim owns the row");
+  assert.equal(merged[0].ev, "tretest", "the higher-expectancy claim owns the row");
   assert.deepEqual(merged[0].also.map((a) => a.ev), ["mapull"], "the loser rides along as corroboration");
-  assert.ok(merged[0].also[0].unproven === true, "and its unproven status is disclosed, not laundered");
   assert.ok(merged[0].also[0].target === undefined && merged[0].also[0].void === undefined,
     "corroboration carries labels ONLY — never its own levels, so the row's geometry has exactly one author");
   // Opposite sides on one name are two genuinely different trades and must NOT collapse.
@@ -6242,26 +6240,39 @@ test("actionable -05: one name+side is one row — proven geometry wins, the res
   assert.equal(mergeActionable([mk({ coin: "AAA" }), mk({ coin: "BBB" })]).length, 2, "distinct names stay distinct");
   // Junk in, nothing out.
   assert.deepEqual(mergeActionable([null, { coin: "", side: "long" }, mk({ side: "flat" })]), [], "malformed candidates are dropped, not rendered");
+  assert.equal(typeof require("../src/compute").rankActionable, "undefined", "the proven/unproven split function is gone, not left dead — the gate replaced it");
   assert.deepEqual(mergeActionable(null), [], "null input is an empty board, not a throw");
 });
 
-test("actionable -06: the split keeps unproven setups out of the expectancy rank", () => {
-  const { rankActionable } = require("../src/compute");
-  const mk = (coin, unproven, evR, net) => ({ coin, side: "long", unproven, evR, rr: { net } });
-  const out = rankActionable([
-    mk("LOW", false, 0.2, 2.0),
-    mk("SHADOW_BIG", true, null, 9.9),
-    mk("HIGH", false, 1.4, 1.3),
-    mk("SHADOW_SMALL", true, null, 2.2),
-  ]);
-  assert.deepEqual(out.proven.map((r) => r.coin), ["HIGH", "LOW"], "proven rows sort by expectancy, not by R:R");
-  assert.deepEqual(out.unproven.map((r) => r.coin), ["SHADOW_BIG", "SHADOW_SMALL"], "unproven rows sort by net R:R in their own section");
-  // The load-bearing property: a spectacular-looking unproven setup must never outrank a modest
-  // proven one in the main list, because its expectancy is unknown, not high.
-  assert.ok(!out.proven.some((r) => r.unproven), "no unproven row leaks into the proven section");
-  assert.ok(out.unproven.every((r) => r.evR == null), "and nothing in the unproven section carries a fabricated expectancy");
-  assert.deepEqual(rankActionable(null), { proven: [], unproven: [] }, "null input is an empty board");
-});
+test("actionable -06: the CONFIRMED gate drops negative-expectancy setups instead of demoting them", () => {
+  const { setupEV, netRR } = require("../src/compute");
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The gate is a single function so there is exactly one place that decides what gets suggested.
+  assert.ok(/function actConfirm\(rec, evR, rr, ev\)/.test(pol), "actConfirm gate missing");
+  for (const cond of ['return "norecord"', 'return "negexp"', 'return "negev"', 'return "thinRR"', 'return "noedge"'])
+    assert.ok(pol.includes(cond), `gate must reject with a named reason: ${cond}`);
+  // Both expectancy tests are required and they are NOT the same test. avg is retrospective (did
+  // this family pay); EV is prospective on this instance (does it still pay from here).
+  // Field name pinned deliberately: actRecord returns avgR, and an earlier cut of the gate read
+  // rec.avg — undefined, which failed the comparison and rejected EVERY setup as negative-
+  // expectancy. A silent empty board is the worst possible failure mode for this feature.
+  assert.ok(/if \(!\(rec\.avgR > 0\)\) return "negexp";/.test(pol), "the gate must read rec.avgR, the field actRecord actually returns");
+  assert.ok(/if \(evR == null \|\| !\(evR > 0\)\) return "negev";/.test(pol), "a negative-EV entry must be dropped even if the family's average is positive");
+  assert.ok(/ACT_MIN_RR = 2\.0;/.test(pol), "the suggestion floor must be R:R 2.0");
+  // Gate BEFORE merge: otherwise an unconfirmed candidate could win a name+side on a flattering
+  // EV and then be rejected, silently losing a confirmed row that was behind it.
+  const gi = pol.indexOf("const why = actConfirm("), mi = pol.indexOf("mergeActionable(cands)");
+  assert.ok(gi > 0 && mi > 0 && gi < mi, "the gate must run before the merge");
+  // Nothing is demoted to a second section — the payload is one flat list of confirmed rows.
+  assert.ok(!/unproven: shadow/.test(pol), "the proven/unproven split must be gone from the row builder");
+  assert.ok(/rows: board, count: board\.length/.test(pol), "payload must be one flat confirmed list");
+  // The arithmetic the gate leans on, pinned directly: a losing family can still look fine on a
+  // single instance's geometry, which is exactly why avg > 0 is checked separately.
+  assert.ok(setupEV(0.35, 2.5, 20, 8) > 0, "a 35% hit at 2.5R models positive on this instance...");
+  const rr = netRR({ side: "long", entry: 100, stop: 95, target: 115 });
+  assert.equal(rr.net, 3, "...while the geometry check stays independent of the record");
+}, );
 
 test("actionable -07: the board reads the ledger's frozen geometry and never re-derives a level", () => {
   const { createPoller } = require("../src/poller");
@@ -6278,36 +6289,29 @@ test("actionable -07: the board reads the ledger's frozen geometry and never re-
   p.seedRowNow("TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
   p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
   const a = p.getActionable();
-  assert.equal(a.count, 1, "the stacked-uptrend retest lands on the board");
-  const row = a.unproven[0];
-  assert.ok(row, "a fresh event with no resolved fires sits in the unproven section");
-  assert.equal(row.evR, null, "and carries no expectancy");
-  assert.equal(row.rec.n, 0, "because its record is empty");
-  // The contract: the row's void is the ledger's frozen stop, byte for byte — not a recompute.
-  assert.ok(row.void > 0 && row.target > row.entry, "long geometry is coherent");
-  assert.equal(row.side, "long"); assert.equal(row.ev, "tretest");
-  // Carry: 0.00005/hr = 43.8% APR; over the 5d tretest horizon that is a real drag on a long.
-  assert.equal(row.carry.aprPct, 43.8, "funding annualizes to the venue's APR");
-  assert.ok(row.rr.carryR < 0, "a long pays here");
-  assert.ok(row.rr.net < row.rr.gross, "so net R:R sits below gross");
-  assert.ok(Math.abs(row.rr.net - (row.rr.gross + row.rr.carryR)) < 0.011, "net = gross + carry");
-  assert.equal(row.horizonD, 5, "horizon comes from EV_META, not a local constant");
-  assert.equal(row.uni, "stocks");
-  assert.equal(row.bars, 0, "freshly fired");
+  // A brand-new event has no record, so it is NOT suggested — the whole point of the gate. It is
+  // dropped with a named reason rather than shown with a blank expectancy.
+  assert.equal(a.count, 0, "an event with no resolved fires is not suggested");
+  assert.ok(Array.isArray(a.rows) && a.rows.length === 0, "the payload is one flat list, and it is empty");
+  assert.equal(a.coverage.norecord, 1, "and the drop is counted against a named reason");
+  assert.ok(a.coverage.openClaims >= 1, "coverage discloses how many open claims were scanned");
+  assert.equal(a.params.netOfCarry, true, "the payload declares that R:R is net of carry");
+  assert.equal(a.params.recMinN, 8, "and discloses the record floor");
+  assert.equal(a.params.gate, "confirmed", "and names the gate it applied");
+  assert.deepEqual(a.params.requires, ["n>=8", "avgR>0", "EV>0", "R:R>=2.0", "!noedge"], "the gate's conditions ship with the payload so the UI can state them");
+  // Nothing confirmed means nothing announced — the stream inherits the gate by construction.
+  assert.equal(p.getTriggers().seq, 0, "an unconfirmed setup never reaches the trigger stream");
   // Swing gate is by horizon, so short-horizon events can never leak onto a swing board.
   const { EV_META } = require("../src/compute");
-  for (const r of a.proven.concat(a.unproven))
+  for (const r of a.rows)
     assert.ok(EV_META[r.ev].horizonMs >= 3 * DAY, `sub-3d event on the swing board: ${r.ev}`);
-  assert.equal(a.params.netOfCarry, true, "the payload declares that R:R is net of carry");
-  assert.equal(a.params.recMinN, 8, "and discloses the record floor the client renders");
-  assert.ok(a.coverage.openClaims >= 1, "coverage discloses how many open claims were scanned");
 });
 
-test("actionable -08: a setup expires when price passes its void, and the payload counts what it dropped", () => {
+test("actionable -08: geometry that is no longer tradeable is counted, and the claim survives it", () => {
   const { createPoller } = require("../src/poller");
   const HOUR = 3600e3, DAY = 86400e3;
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
-    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveTriggers: () => {}, loadTriggers: () => null };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
   for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
@@ -6315,21 +6319,24 @@ test("actionable -08: a setup expires when price passes its void, and the payloa
   const px = hourly[N - 1].c * 1.0005, daily = [];
   for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
     daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
-  p.seedRowNow("TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
+  p.seedRowNow("xyz:TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
   p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
-  assert.equal(p.getActionable().count, 1, "the row is on the board to begin with");
-  // Now walk the mark down through the frozen void. The claim stays open in the ledger — it is
-  // still a live record with a real outcome pending — but it is no longer ENTERABLE from here,
-  // which is a different question and the only one this board asks.
-  const voided = p.getActionable().unproven[0].void;
-  p.seedRowNow("TRSIG", { px: voided * 0.98 });
+  const a1 = p.getActionable();
+  assert.equal(a1.coverage.norecord, 1, "the claim is scanned and rejected on record, with geometry still intact");
+  // Walk the mark down through the frozen void. netRR now returns null, so the rejection reason
+  // changes from "no record" to "no tradeable geometry" — the row is gone for a different reason,
+  // and which reason it was stays visible.
+  const led = [...(p.trigStateNow() ? [1] : [])];
+  p.seedRowNow("xyz:TRSIG", { px: px * 0.5 });
   p.buildActionableNow();
   const a2 = p.getActionable();
-  assert.equal(a2.count, 0, "a setup whose void has been passed drops off the board");
-  assert.ok(a2.coverage.noGeometry >= 1, "and is counted as untradeable-from-here rather than silently vanishing");
+  assert.equal(a2.count, 0, "still nothing suggested");
+  assert.ok(a2.coverage.noGeometry >= 1, "and the reason is now that the geometry is not tradeable from here");
   assert.ok(a2.coverage.openClaims >= 1, "the underlying claim is still open in the ledger — the board dropped it, the record did not");
+  assert.equal(a2.coverage.confirmed, 0, "confirmed count is explicit, not inferred from an empty array");
 });
 
+const ACT_TIP_COLS = ["ago", "fired", "entry", "late", "void", "target", "rr", "evR", "rec"];
 test("actionable -09: client renders the server's numbers and states the carry contract on the tab", () => {
   const fs = require("fs"), path = require("path");
   const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
@@ -6338,7 +6345,8 @@ test("actionable -09: client renders the server's numbers and states the carry c
   // Tab + view + controls exist and are wired into navigation.
   assert.ok(html.includes('data-view="actionable"') && html.includes('id="view-actionable"'), "actionable tab/view markup missing");
   assert.ok(html.includes('id="act-body"') && html.includes('id="actside"'), "actionable board container/controls missing");
-  assert.ok(html.includes('id="act-provenonly"') && html.includes('id="act-noearn"'), "actionable filters missing");
+  assert.ok(html.includes('id="act-noearn"') && html.includes('id="act-sortreset"'), "actionable filters/sort-reset missing");
+  assert.ok(!html.includes('id="act-provenonly"'), "the proven-only filter must be gone — the board is confirmed-only");
   assert.ok(s.includes("setHidden('view-actionable', v!=='actionable')"), "actionable view not wired into showView");
   assert.ok(s.includes("if(v==='actionable')") && s.includes("openActionable()"), "actionable tab does not open its board");
   assert.ok(s.includes("/api/actionable"), "client never calls the actionable endpoint");
@@ -6348,16 +6356,29 @@ test("actionable -09: client renders the server's numbers and states the carry c
   assert.ok(!/act[A-Za-z]*\s*=\s*[^;]*rewardPct\s*\/\s*riskPct/.test(s), "client must not recompute R:R locally");
   assert.ok(!/r\.rr\.gross\s*\+\s*r\.(carry|rr)\.\w*[Rr]\b/.test(s), "client must not recompute net R:R locally");
   assert.ok(s.includes("actRR(r.rr.net)") && s.includes("actEV(r.evR)"), "client must render the server's net R:R and expectancy verbatim");
-  // Every column and both derived numbers are hoverable — the standing rule for this app.
-  assert.ok(s.includes("function actRowTip"), "row tooltip missing");
-  for (const frag of ["R:R gross", "R:R net", "carry over", "expectancy", "in trigger", "record:"])
-    assert.ok(s.includes(frag), `row tooltip must disclose: ${frag}`);
-  assert.ok(s.includes("(paid to hold)") && s.includes("(you pay)"), "the tooltip must state which way carry runs for this side");
+  assert.ok(!s.includes('">No record yet'), "there is no second section any more — unconfirmed setups are not shown at all");
+  // Hover contract: every column header explains itself, and the full audit trail lives in the
+  // click-to-expand trade card rather than a cramped row tooltip.
+  for (const c of ACT_TIP_COLS) assert.ok(new RegExp("k:'" + c + "'[^}]*tip:").test(s), `column ${c} must carry a header tooltip`);
+  assert.ok(s.includes("function actDetail"), "expanded trade card missing");
+  for (const frag of ["the trade", "the record", "risk / reward", "carry", "expectancy", "lateness", "bar(s) in trigger"])
+    assert.ok(s.includes(frag), `trade card must disclose: ${frag}`);
+  assert.ok(s.includes("(paid to hold)") && s.includes("(you pay)"), "the card must state which way carry runs for this side");
   assert.ok(s.includes("funding unavailable"), "an unknown funding rate must be disclosed, not shown as zero carry");
+  // Rows expand on click; the two escape hatches out of the card are wired.
+  assert.ok(/box\.querySelectorAll\('tr\.act-row'\)/.test(s) && s.includes("_actOpen[k]=!_actOpen[k]"), "rows must expand on click");
+  assert.ok(s.includes("data-rep=") && s.includes("data-dr="), "the card must offer the AI report and the ticker drawer");
+  // Sorting is the one thing the client owns — persisted, with nulls pinned last both ways.
+  assert.ok(s.includes("function actCmp") && s.includes("if(xn) return 1; if(yn) return -1;"), "nulls must sort last in both directions");
+  assert.ok(s.includes("actSortSave()") && s.includes("ASKEY"), "sort choice must persist");
+  assert.ok(/_actSort=\{k:'ago',d:1\}/.test(s), "default sort must be newest-first");
+  // The board must state the gate it applied, in the UI, not just in the payload.
+  assert.ok(s.includes("Confirmed only."), "footer must state the board is confirmed-only");
+  assert.ok(s.includes("Most events in the ledger do not clear that"), "footer must be honest that most events fail the gate");
+  assert.ok(s.includes("an empty board is a real answer"), "an empty board must be explained, not look broken");
   // The board must say, in the UI, that R:R is net and where EV is blank — the honesty contract.
   assert.ok(s.includes("R:R is net of expected funding"), "footer must state that R:R is carry-netted");
-  assert.ok(/blank below \$\{p\.recMinN\|\|8\} resolved fires/.test(s), "footer must state the record floor that blanks EV");
-  assert.ok(s.includes("No record yet"), "the unproven section must be labelled as having no record");
+  assert.ok(/at least \$\{p\.recMinN\|\|8\} resolved out-of-sample fires/.test(s), "footer must state the record floor the gate requires");
   assert.ok(s.includes("frozen at fire time") && s.includes("never re-derived"), "footer must state that levels are frozen, not re-derived");
   assert.ok(s.includes("no crypto claims"), "footer must disclose that the board is equities-only");
   // Styling exists for every class the renderer emits (a missing rule renders an unreadable board).
@@ -6392,10 +6413,11 @@ test("triggers -01: lateness is measured in the setup's own risk unit, against t
 
 test("triggers -02: eligibility is per-transport and never gates the stream", () => {
   const { trigEligible, trigKey } = require("../src/compute");
-  const row = { coin: "xyz:AMD", side: "long", ev: "tretest", t0: 5, unproven: false, evR: 0.52, rr: { net: 2.31 }, late: 0.10, earn: null };
+  const row = { coin: "xyz:AMD", side: "long", ev: "tretest", t0: 5, evR: 0.52, rr: { net: 2.31 }, late: 0.10, earn: null };
   assert.equal(trigEligible(row, {}), true, "an empty config interrupts for everything");
-  assert.equal(trigEligible(row, { provenOnly: true }), true, "proven row passes proven-only");
-  assert.equal(trigEligible(Object.assign({}, row, { unproven: true }), { provenOnly: true }), false, "unproven row filtered by proven-only");
+  // There is deliberately NO provenOnly option: the server's stream carries only confirmed
+  // setups now, so such a filter would imply unconfirmed alerts are possible. It isn't.
+  assert.ok(!/provenOnly/.test(trigEligible.toString()), "eligibility must not carry a provenOnly filter — the gate is upstream");
   assert.equal(trigEligible(Object.assign({}, row, { evR: null }), { minEV: 0 }), false, "a null expectancy cannot clear an EV floor");
   assert.equal(trigEligible(row, { minEV: 0.6 }), false, "EV below the floor filtered");
   assert.equal(trigEligible(row, { minRR: 2.5 }), false, "R:R below the floor filtered");
@@ -6415,16 +6437,27 @@ test("triggers -02: eligibility is per-transport and never gates the stream", ()
   assert.equal(trigKey({}), null, "malformed row has no key");
 });
 
+// Shared fixture: a resolved out-of-sample record for `tretest`, sufficient to clear the
+// CONFIRMED gate (n >= 8, avg > 0). Without this, NOTHING reaches the board or the trigger stream
+// — which is the gate working, but makes announce/dedup untestable, so the record is seeded.
+function actClosedRecord(coin, n, realized) {
+  const out = [];
+  for (let i = 0; i < (n || 10); i++) out.push({ key: coin + "|tretest#h" + i, coin, ticker: "TRSIG",
+    ev: "tretest", status: "resolved", realized: realized == null ? 1.4 : realized,
+    t0: Date.now() - (60 + i) * 86400e3, tR: Date.now() - (55 + i) * 86400e3, psd: "long", pn: 1 });
+  return out;
+}
 test("triggers -03: announce once, never twice, and never re-blast the board on a redeploy", () => {
   const { createPoller } = require("../src/poller");
   const HOUR = 3600e3, DAY = 86400e3;
   let savedTrig = null, savedLed = null;
-  const store = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
-    saveLedger: (d) => { savedLed = JSON.parse(JSON.stringify(d)); }, loadLedger: () => savedLed,
-    saveTriggers: (d) => { savedTrig = JSON.parse(JSON.stringify(d)); }, loadTriggers: () => savedTrig };
   // NOTE: the coin id must carry ":" — the ledger's universe test is structural, and a colon-free
   // id is classified as a (purged) crypto claim on hydrate.
   const COIN = "xyz:TRSIG";
+  const store = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
+    saveLedger: (d) => { savedLed = JSON.parse(JSON.stringify(d)); },
+    loadLedger: () => savedLed || { ts: Date.now(), open: [], closed: actClosedRecord(COIN) },
+    saveTriggers: (d) => { savedTrig = JSON.parse(JSON.stringify(d)); }, loadTriggers: () => savedTrig };
   const seed = (p) => {
     const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
     for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
@@ -6437,7 +6470,8 @@ test("triggers -03: announce once, never twice, and never re-blast the board on 
   const build = (p) => { p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow(); };
 
   const p1 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
-  seed(p1); build(p1);
+  seed(p1); p1.hydrateLedgerNow(); build(p1);   // hydrate first: the record is what makes the claim confirmed
+  assert.equal(p1.getActionable().count, 1, "with a real record behind it, the setup IS suggested");
   const t1 = p1.getTriggers();
   assert.equal(t1.seq, 1, "a fresh in-grace fire emits exactly one event");
   assert.equal(t1.events[0].t, "TRSIG");
@@ -6451,6 +6485,7 @@ test("triggers -03: announce once, never twice, and never re-blast the board on 
   // survives contact with a deploy.
   const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   seed(p2); p2.hydrateTriggersNow(); p2.hydrateLedgerNow(); build(p2);
+  assert.equal(p2.getActionable().count, 1, "the setup is still suggested after the restart");
   assert.equal(p2.getTriggers().seq, 1, "a redeploy re-announces nothing");
   assert.equal(p2.trigStateNow().seen, 1, "and restores the announced set rather than starting blank");
   // Cursor semantics: a consumer stores the last seq handled and takes everything above it.
@@ -6463,10 +6498,11 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
   const { createPoller } = require("../src/poller");
   const HOUR = 3600e3, DAY = 86400e3;
   let savedLed = null;
+  const COIN = "xyz:OLD";
+  const REC = actClosedRecord(COIN);
   const mkStore = (loadLed) => ({ loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
     saveLedger: (d) => { savedLed = JSON.parse(JSON.stringify(d)); }, loadLedger: loadLed,
     saveTriggers: () => {}, loadTriggers: () => null });
-  const COIN = "xyz:OLD";
   const seed = (p) => {
     const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
     for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
@@ -6477,13 +6513,14 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
     p.seedRowNow(COIN, { px, ticker: "OLD", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
   };
   // Pass 1: open a claim normally and capture the persisted ledger.
-  const p1 = createPoller({ dex: "xyz", store: mkStore(() => null), log: () => {}, version: "test", crypto: false });
-  seed(p1); p1.buildTrendNow(); p1.buildSignalsNow();
+  const p1 = createPoller({ dex: "xyz", store: mkStore(() => ({ ts: Date.now(), open: [], closed: REC })), log: () => {}, version: "test", crypto: false });
+  seed(p1); p1.hydrateLedgerNow(); p1.buildTrendNow(); p1.buildSignalsNow();
   assert.ok(savedLed && savedLed.open && savedLed.open.length >= 1, "a claim was opened and persisted");
   // Backdate it by three days — the restart-after-downtime case: the board is full of claims that
   // fired while nobody was listening, and none of them are news.
   const stale = JSON.parse(JSON.stringify(savedLed));
   for (const e of stale.open) e.t0 = Date.now() - 3 * DAY;
+  stale.closed = REC;   // the record travels with it, so the stale claim is confirmed, not merely old
   // Pass 2: a genuinely cold process (no persisted trigger state) meets that stale board.
   const p2 = createPoller({ dex: "xyz", store: mkStore(() => stale), log: () => {}, version: "test", crypto: false });
   seed(p2); p2.hydrateLedgerNow(); p2.buildActionableNow();
@@ -6530,7 +6567,8 @@ test("triggers -05: browser transport is a consumer only, and the toast surface 
   assert.ok(s.includes("function fireTrigger") && s.includes("updateBell()"), "trigger fires must update the bell");
   // Settings live in the bell panel, not in the board's filter row (which would be a second,
   // competing alert-configuration surface).
-  assert.ok(s.includes('id="at-on"') && s.includes('id="at-proven"') && s.includes('id="at-late"'), "trigger settings missing from the alerts panel");
+  assert.ok(s.includes('id="at-on"') && s.includes('id="at-late"') && s.includes('id="at-ev"'), "trigger settings missing from the alerts panel");
+  assert.ok(!s.includes('id="at-proven"'), "the proven-only toggle must be gone — the stream is confirmed-only upstream");
   assert.ok(s.includes("trig:{ on:false"), "trigger alerts must default OFF");
   assert.ok(s.includes("A.trig") && s.includes("trig:state.alerts.trig"), "trigger config must persist alongside the alert rules");
   assert.ok(/state\.alerts\.trig=Object\.assign/.test(s), "trigger config must be restored on load");
@@ -6545,18 +6583,19 @@ test("triggers -05: browser transport is a consumer only, and the toast surface 
   assert.ok(s.includes("fired ${fmtPrice(ev.fired)}"), "toast must show the fire mark");
   // Board: both marks and lateness are rendered from the payload.
   assert.ok(s.includes("fmtPrice(r.fired)") && s.includes("actLate(r.late)"), "board must render the fire mark and lateness");
-  assert.ok(s.includes(">Fired</th>") && s.includes(">Now</th>") && s.includes(">Late</th>"), "board must carry Fired / Now / Late columns");
+  for (const lb of ["'Fired'", "'Now'", "'Late'", "'Ago'", "'Rec'"])
+    assert.ok(s.includes("lb:" + lb), `board must carry the ${lb} column`);
   assert.ok(!/r\.entry\s*[-/]\s*r\.fired/.test(s), "client must not recompute lateness locally");
 });
 
-test("triggers -06: the R:R floor is the board's single kill switch, set at 1.5", () => {
+test("triggers -06: R:R is the board's kill switch, set at 2.0, with no second lateness gate", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(/ACT_MIN_RR = 1\.5;/.test(pol), "net R:R floor must be 1.5");
+  assert.ok(/ACT_MIN_RR = 2\.0;/.test(pol), "net R:R floor must be 2.0");
   // Because R:R is repriced from the live mark every build, a chased setup dies at this gate on
   // its own. A separate lateness-based expiry would be a second gate that could disagree with it.
   assert.ok(!/ACT_MAX_LATE|lateExpire|maxLateDrop/.test(pol), "lateness must not be a second expiry gate — the R:R floor already kills chased setups");
-  assert.ok(/if \(!\(rr\.net >= ACT_MIN_RR\)\) \{ thinRR\+\+; continue; \}/.test(pol), "the floor must be enforced against the LIVE-mark R:R, every build");
+  assert.ok(/if \(!rr \|\| !\(rr\.net >= ACT_MIN_RR\)\) return "thinRR";/.test(pol), "the floor must be enforced inside the gate, against the LIVE-mark R:R");
 });
 
 test("tabs: backtest is hidden from the strip by default without withdrawing the feature", () => {
@@ -6566,7 +6605,7 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   // Hidden by a declarative list, not by editing markup — so un-hiding is one word and the
   // difference between "hidden" and "deleted" stays legible to the next reader.
-  assert.ok(/const HIDDEN_TABS=new Set\(\['backtest'\]\)/.test(s), "backtest must be hidden via the HIDDEN_TABS list");
+  assert.ok(/const HIDDEN_TABS=new Set\(\['backtest','actionable'\]\)/.test(s), "backtest and actionable must both be hidden via HIDDEN_TABS");
   assert.ok(s.includes("function applyTabVisibility"), "tab visibility applier missing");
   assert.ok(/applyTabOrder\(\); applyTabVisibility\(\);/.test(s), "visibility must be applied on the initial nav pass");
   assert.ok(/applyTabVisibility==='function'\) applyTabVisibility\(\)/.test(s), "visibility must be re-applied when the strip is rebuilt at runtime");
@@ -6575,8 +6614,7 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   assert.ok(html.includes('data-view="backtest"') && html.includes('id="view-backtest"'), "backtest markup must survive the hide");
   assert.ok(s.includes("backtest:`"), "backtest help entry must survive the hide");
   assert.ok(s.includes("function renderBacktest_load"), "backtest renderer must survive the hide");
-  assert.ok(/h==='backtest'|v==='backtest'/.test(s), "showView must still route to backtest");
-  assert.ok(/h==='sectors'\|\|h==='corr'\|\|h==='markets'|h==='backtest'/.test(s) || s.includes("h==='backtest'"), "the #backtest deep link must still resolve");
+  assert.ok(s.includes("setHidden('view-backtest'"), "showView must still route to backtest");
   // Command palette stays the deliberate way back in — and must list every LIVE tab, including
   // the one added this build (which it did not, until now).
   assert.ok(/\{v:'backtest',label:'Backtest'\}/.test(s), "backtest must remain findable in the command palette");
@@ -6584,5 +6622,99 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   // Only backtest is hidden — this guard fails loudly if the list quietly grows.
   const m = s.match(/const HIDDEN_TABS=new Set\(\[([^\]]*)\]\)/);
   assert.ok(m, "HIDDEN_TABS not found");
-  assert.equal(m[1].split(",").filter((x) => x.trim()).length, 1, "exactly one tab should be hidden — review any addition to HIDDEN_TABS");
+  assert.equal(m[1].split(",").filter((x) => x.trim()).length, 2, "exactly two tabs should be hidden — review any addition to HIDDEN_TABS");
+  // A hidden tab MUST stay reachable by URL, or hiding it removes it. The old applyHash whitelist
+  // silently omitted actionable, signals and news, which made #actionable a no-op.
+  assert.ok(/const HASH_VIEWS=new Set\(/.test(s), "hash routing must be a declared view set, not an inline whitelist");
+  for (const v of ["actionable", "backtest", "signals", "news", "markets", "trend", "report"])
+    assert.ok(new RegExp("'" + v + "'").test(s.match(/const HASH_VIEWS=new Set\(\[[^\]]*\]\)/)[0]), `#${v} must be routable`);
+  assert.ok(s.includes("if(HASH_VIEWS.has(h)) showView(h);"), "applyHash must route via the view set");
+  const hv = s.indexOf("const HASH_VIEWS"), ah = s.indexOf("function applyHash");
+  assert.ok(hv > 0 && hv < ah, "HASH_VIEWS must be declared before applyHash");
+});
+
+test("actionable -10: the gate rejects each way independently, and never silently empties the board", () => {
+  const HOUR = 3600e3, DAY = 86400e3;
+  const { createPoller } = require("../src/poller");
+  const COIN = "xyz:GATE";
+  const mk = (closed) => {
+    const store = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
+      saveLedger: () => {}, loadLedger: () => ({ ts: Date.now(), open: [], closed }),
+      saveTriggers: () => {}, loadTriggers: () => null };
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const now = Date.now(), endH = Math.floor(now / HOUR), N = 16 * 24, hourly = [];
+    for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR, c = 100 * Math.pow(1.0005, i);
+      hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+    const px = hourly[N - 1].c * 1.0005, daily = [];
+    for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
+      daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
+    p.seedRowNow(COIN, { px, ticker: "GATE", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
+    p.hydrateLedgerNow(); p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+    return p.getActionable();
+  };
+  const rec = (n, realized) => { const o = []; for (let i = 0; i < n; i++)
+    o.push({ key: COIN + "|tretest#h" + i, coin: COIN, ticker: "GATE", ev: "tretest", status: "resolved",
+      realized, t0: Date.now() - (60 + i) * DAY, tR: Date.now() - (55 + i) * DAY, psd: "long", pn: 1 }); return o; };
+
+  // Winning record, enough of it: suggested.
+  const good = mk(rec(10, 1.4));
+  assert.equal(good.count, 1, "a family with 10 resolved winners IS suggested");
+  assert.equal(good.rows[0].rec.n, 10);
+  assert.ok(good.rows[0].evR > 0, "and carries a positive expectancy");
+  assert.ok(good.rows[0].rr.net >= 2.0, "and clears the R:R floor");
+
+  // Same edge, too few fires: the record cannot speak yet.
+  assert.equal(mk(rec(7, 1.4)).coverage.norecord, 1, "7 resolved fires is below the floor");
+  assert.equal(mk(rec(7, 1.4)).count, 0, "and it is dropped, not shown with a blank EV");
+
+  // Enough fires, but the family LOST money: this is the case the first cut got wrong.
+  const losing = mk(rec(12, -0.6));
+  assert.equal(losing.count, 0, "a negative-expectancy family is never suggested");
+  assert.equal(losing.coverage.negexp, 1, "and the reason is named");
+
+  // Break-even is not positive: the boundary is > 0, not >= 0.
+  assert.equal(mk(rec(12, 0)).coverage.negexp, 1, "a flat record is not an edge");
+
+  // Coverage always accounts for every scanned claim, so an empty board can always be explained.
+  for (const a of [good, mk(rec(7, 1.4)), losing]) {
+    const c = a.coverage, dropped = c.expired + c.noGeometry + c.thinRR + c.norecord + c.negexp + c.negev + c.noedge;
+    assert.equal(c.confirmed + dropped, 1, "every scanned claim is either confirmed or counted against a reason");
+    assert.ok(c.openClaims >= 1, "and the open-claim count is always disclosed");
+  }
+});
+
+test("tabs: every HIDDEN_TABS entry matches a real nav button, and every hidden tab stays URL-reachable", () => {
+  // The source-grep guard above proves the strings exist in each file; it does NOT prove they
+  // refer to each other. A typo on either side — data-view="actionables", or HIDDEN_TABS holding
+  // 'action' — passes that guard and ships a visible tab. This test joins the two files.
+  const fs = require("fs"), path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const nav = html.match(/<nav class="tabs"[\s\S]*?<\/nav>/);
+  assert.ok(nav, "nav.tabs block not found — applyTabVisibility's selector would find nothing");
+  const views = [...nav[0].matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]);
+  assert.ok(views.length >= 10, `suspiciously few nav tabs: ${views.length}`);
+  const hm = app.match(/const HIDDEN_TABS=new Set\(\[([^\]]*)\]\)/);
+  assert.ok(hm, "HIDDEN_TABS not found");
+  const hidden = hm[1].split(",").map((x) => x.trim().replace(/'/g, "")).filter(Boolean);
+  // Join: no orphan hide entries, and each intended tab really is covered.
+  for (const h of hidden)
+    assert.ok(views.includes(h), `HIDDEN_TABS names '${h}' but no nav button has data-view="${h}" — the hide is a no-op`);
+  for (const want of ["backtest", "actionable"])
+    assert.ok(hidden.includes(want) && views.includes(want), `${want} must be present in the nav AND listed as hidden`);
+  // The applier must key off the same attribute the markup uses.
+  assert.ok(/HIDDEN_TABS\.has\(t\.dataset\.view\)/.test(app), "applyTabVisibility must match on dataset.view, the attribute the nav actually carries");
+  assert.ok(/document\.querySelector\('nav\.tabs'\)/.test(app), "applyTabVisibility must query the nav that exists in the markup");
+  // Hiding a tab must never strand it: each hidden view has to remain routable by hash.
+  const hv = app.match(/const HASH_VIEWS=new Set\(\[([^\]]*)\]\)/);
+  assert.ok(hv, "HASH_VIEWS not found");
+  const routable = hv[1].split(",").map((x) => x.trim().replace(/'/g, "")).filter(Boolean);
+  for (const h of hidden)
+    assert.ok(routable.includes(h), `hidden tab '${h}' is not in HASH_VIEWS — hiding it would remove it from the app entirely`);
+  // And every nav tab should be routable, hidden or not, so a shared link never dead-ends.
+  for (const v of views)
+    assert.ok(routable.includes(v), `nav tab '${v}' has no hash route — #${v} would silently do nothing`);
+  // Each hidden view must still have its section, or showView bounces to markets.
+  for (const h of hidden)
+    assert.ok(html.includes(`id="view-${h}"`), `hidden tab '${h}' has no view section — showView would redirect to markets`);
 });
