@@ -4237,9 +4237,13 @@ function renderActionable(){
   } else {
     h+=`<table class="trend-t act-tbl">${actHead()}<tbody>`;
     for(const r of rows){
-      const sc=r.side==='long'?'pos':'neg', op=!!_actOpen[r.coin+'|'+r.side];
+      // Side is a WORD, not a colour. It used to be carried only by the pos/neg tint on this cell,
+      // which is unreadable for anyone who can't separate the hues and — worse — reads like a
+      // day-change tint on a ticker, so a short looked like a name that was simply down. The chip
+      // states the direction; the tint is now a second, redundant encoding of the same fact.
+      const sd=r.side==='long'?'l':'s', op=!!_actOpen[r.coin+'|'+r.side];
       h+=`<tr class="act-row${op?' open':''}" data-key="${esc(r.coin+'|'+r.side)}" data-coin="${esc(r.coin)}">`
-        +`<td class="${sc}">${op?'\u25be ':''}<span class="tk">${esc(r.t)}</span>${r.earn?' <i class="act-warn" title="earnings inside the horizon">\u26a0</i>':''}${r.mac&&r.mac.length?` <i class="act-mwarn" data-tip="${esc(r.mac.map(m=>m.label+' '+(m.days===0?'today':m.days===1?'tomorrow':'in '+m.days+'d')+' ('+m.tEt+' ET)').join(' \u00b7 '))} \u2014 universe-wide scheduled binar${r.mac.length===1?'y':'ies'} inside the horizon">\u25c6</i>`:''}</td>`
+        +`<td>${op?'\u25be ':''}<span class="tk">${esc(r.t)}</span> <span class="act-side ${sd}" title="${r.side==='long'?'LONG \u2014 the claim pays if price rises; the void sits below the entry':'SHORT \u2014 the claim pays if price falls; the void sits above the entry'}">${r.side==='long'?'\u25b2':'\u25bc'} ${esc(r.side)}</span>${r.earn?' <i class="act-warn" title="earnings inside the horizon">\u26a0</i>':''}${r.mac&&r.mac.length?` <i class="act-mwarn" data-tip="${esc(r.mac.map(m=>m.label+' '+(m.days===0?'today':m.days===1?'tomorrow':'in '+m.days+'d')+' ('+m.tEt+' ET)').join(' \u00b7 '))} \u2014 universe-wide scheduled binar${r.mac.length===1?'y':'ies'} inside the horizon">\u25c6</i>`:''}</td>`
         +`<td class="sec">${esc(r.label)} <span class="act-tf">${esc(r.tf)}</span>${r.cls==='ev'?' <span class="act-tf" title="below 2:1 at fire, positive expectancy — the win-often family">grinder</span>':''}${r.also&&r.also.length?` <span class="act-also" title="${esc(r.also.map(a=>a.label).join(', '))}">+${r.also.length}</span>`:''}</td>`
         +`<td style="text-align:right">${actAgo(Date.now()-r.t0)}</td>`
         +`<td class="sec" style="text-align:right">${fmtPrice(r.fired)}</td>`

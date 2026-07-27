@@ -999,6 +999,12 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .act-h .sec{text-transform:none;letter-spacing:0;font-size:11px;color:var(--muted)}
 .act-tbl td{font-family:var(--mono);font-size:12.5px}
 .act-tbl .tk{font-weight:700;letter-spacing:.3px}
+/* Direction, stated. Outline chip rather than a filled badge so it reads at compact density and
+   never competes with the accented EV column for the eye. Mirrors .tp-chip's l/s treatment. */
+.act-side{border:1px solid var(--border);border-radius:4px;padding:0 4px;font-size:10px;
+  letter-spacing:.4px;cursor:help;white-space:nowrap}
+.act-side.l{color:var(--up);border-color:#274b3b}
+.act-side.s{color:var(--down);border-color:#4b2b26}
 /* Expectancy is the column that does the ranking — accented so the eye lands on it first. */
 .act-tbl .act-ev{color:var(--accent);font-weight:700}
 /* Age past ~70% of the expiry budget: the setup still qualifies but is no longer fresh. */
