@@ -1047,3 +1047,40 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .act-det .ad-w{margin-top:7px;padding-top:6px;border-top:1px solid var(--grid);color:var(--accent);font-size:10.5px}
 .act-det .ad-a{display:flex;gap:6px;margin-top:10px}
 .act-det .ad-a .btn{font-size:10.5px;padding:4px 9px}
+
+/* ===== admin panel: feature visibility ========================================================
+   Row-per-feature switchboard. Deliberately plain: this is an operator surface, so state legibility
+   beats decoration — the three states read as words, not colours alone, so the panel is still usable
+   in the amber theme and for anyone who can't separate the hues. */
+.adm-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin:0 0 14px}
+.adm-title{font-family:var(--disp);font-size:16px;font-weight:600;letter-spacing:-.2px}
+.adm-sub{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px}
+.adm-sub b{color:var(--text);font-weight:600}
+.adm-prev{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin:0 0 16px}
+.adm-prevlbl{font-family:var(--disp);font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin-bottom:7px}
+.adm-prevrow{display:flex;flex-wrap:wrap;gap:6px}
+.adm-chip{font-family:var(--mono);font-size:11.5px;padding:3px 9px;background:var(--panel2);border:1px solid var(--border);border-radius:5px}
+.adm-none{font-family:var(--mono);font-size:11.5px;color:var(--down)}
+.adm-grp{font-family:var(--disp);font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin:16px 0 6px}
+.adm-grp:first-child{margin-top:0}
+.adm-row{display:flex;align-items:center;gap:12px;padding:8px 8px;border-bottom:1px solid var(--border);border-radius:4px}
+/* Per-row hover: the key and its route list are the load-bearing detail, so the row has to be
+   visibly the unit you are acting on before you click a state. */
+.adm-row:hover{background:var(--panel)}
+.adm-row.dim{opacity:.34}
+.adm-meta{flex:1;min-width:0}
+.adm-lab{font-family:var(--disp);font-size:13.5px}
+.adm-key{font-family:var(--mono);font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.adm-row:hover .adm-key{color:var(--muted)}
+.adm-seg{display:flex;gap:3px;background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:3px;flex:none}
+.adm-b{font-family:var(--mono);font-size:11px;padding:3px 9px;border:none;border-radius:5px;background:transparent;color:var(--muted);cursor:pointer}
+.adm-b:hover:not(:disabled){color:var(--text)}
+.adm-b:disabled{cursor:default;opacity:.5}
+.adm-b.on{color:#000;font-weight:600}
+.adm-b.on.public{background:var(--up)}
+.adm-b.on.admin{background:var(--accent)}
+.adm-b.on.off{background:var(--down)}
+.adm-lock{font-family:var(--mono);font-size:11px;padding:3px 9px;color:var(--faint);border:1px dashed var(--border);border-radius:5px;cursor:help}
+.adm-foot{font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.65;margin-top:16px;padding-top:12px;border-top:1px solid var(--border)}
+.adm-foot b{color:var(--accent)}
+#admVap.on{background:var(--accent);color:#000}

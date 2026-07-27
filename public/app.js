@@ -1980,7 +1980,85 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.trig&&typeof d.trig==='object') state.alerts.trig=Object.assign(state.alerts.trig,d.trig,{muted:Array.isArray(d.trig.muted)?d.trig.muted:[]}); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable']);
+const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
+// ===== admin panel: feature visibility switchboard =============================================
+// Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
+// rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
+// button because a draft state is another way for the panel and the server to disagree.
+let _adm=null, _admVap=false, _admBusy='';
+async function openAdmin(){ if(!IS_ADMIN) return; renderAdmin(); await loadAdmin(); }
+async function loadAdmin(){
+  try{ _adm=await fetchJSON('/api/features'); }
+  catch(e){ _adm={error:String(e&&e.message||e)}; }
+  renderAdmin(); }
+function admLabel(st){ return st==='public'?'public':st==='admin'?'admin':'off'; }
+function renderAdmin(){
+  const host=el('adm-rows'); if(!host) return;
+  if(!_adm){ host.innerHTML='<div class="msg">Loading…</div>'; return; }
+  if(_adm.error){ host.innerHTML='<div class="msg">Could not load feature state — '+esc(_adm.error)+'</div>'; return; }
+  const man=_adm.manifest||[];
+  const groups=[['tab','Tabs'],['act','Actions']];
+  let h='';
+  for(const [kind,title] of groups){
+    const rows=man.filter(m=>m.kind===kind);
+    if(!rows.length) continue;
+    h+='<div class="adm-grp">'+esc(title)+'</div>';
+    for(const m of rows){
+      const locked=!m.settable;
+      // A pinned/locked row shows its state as a static chip, not a control whose write the server
+      // would refuse — offering a button that always fails is worse than offering none.
+      const seg=locked
+        ? '<span class="adm-lock" title="'+(m.pin?'Always public — this is the fallback every gated view falls through to':'Always admin — this is the panel that controls every other flag')+'">'+esc(admLabel(m.state))+' · locked</span>'
+        : ['public','admin','off'].map(v=>'<button type="button" class="adm-b'+(m.state===v?' on '+v:'')+'" data-k="'+esc(m.key)+'" data-v="'+v+'"'+(_admBusy===m.key?' disabled':'')+'>'+v+'</button>').join('');
+      const dim=_admVap && m.state!=='public';
+      h+='<div class="adm-row'+(dim?' dim':'')+'">'
+        +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+'</div>'
+        +'<div class="adm-key">'+esc(m.key)+(m.routes&&m.routes.length?' · '+esc(m.routes.join(', ')):' · no route')+'</div></div>'
+        +'<div class="adm-seg">'+seg+'</div></div>';
+    }
+  }
+  host.innerHTML=h;
+  host.querySelectorAll('.adm-b').forEach(b=>b.addEventListener('click',()=>setAdmFlag(b.dataset.k,b.dataset.v)));
+  const c=_adm.counts||{};
+  const cnt=el('adm-count');
+  if(cnt) cnt.innerHTML='Public users see <b>'+(c.public||0)+'</b> of '+(c.total||0)+' · <b>'+(c.admin||0)+'</b> admin-only · <b>'+(c.off||0)+'</b> off';
+  const pv=el('adm-prev');
+  if(pv){ const pub=man.filter(m=>m.kind==='tab'&&m.state==='public');
+    pv.innerHTML=pub.length?pub.map(m=>'<span class="adm-chip">'+esc(m.label)+'</span>').join(''):'<span class="adm-none">no tabs visible to the public</span>'; }
+  const ft=el('adm-foot');
+  if(ft) ft.innerHTML='Server-enforced: a gated tab is absent from the markup and every route it owns returns 403. '
+    +'Changes apply to the whole group on their next load — there is no per-user setting. '
+    +(_admVap?'<b>Viewing as public.</b> Your session is unchanged; the Admin tab stays visible so you can switch back.':'');
+  const vb=el('admVap'); if(vb) vb.classList.toggle('on',_admVap);
+}
+// Optimistic: paint the new state, then reconcile with whatever the server actually resolved (a
+// request can be legally transformed — or refused — and the panel must show the truth, not the ask).
+async function setAdmFlag(key,state){
+  if(!_adm||!_adm.manifest||_admBusy) return;
+  const row=_adm.manifest.find(m=>m.key===key); if(!row||!row.settable) return;
+  const prev=row.state;
+  row.state=state; _admBusy=key; renderAdmin();
+  try{
+    const r=await fetch('/api/features',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:key,state:state})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok){ row.state=prev; _admBusy=''; renderAdmin();
+      pushToast('Could not change '+key+' — '+((d&&d.error)||('HTTP '+r.status))); return; }
+    _adm=d.features||_adm; _admBusy='';
+    // The gate is server-side, so the live page is now out of date for the CURRENT viewer too.
+    if(!_admVap && _adm.resolved){ FLAGS_VIEW=_adm.resolved; applyTabVisibility(); }
+    renderAdmin();
+  }catch(e){ row.state=prev; _admBusy=''; renderAdmin(); pushToast('Network error changing '+key); }
+}
+function toggleViewAsPublic(){
+  if(!_adm) return;
+  _admVap=!_admVap;
+  // Swaps in a SERVER-resolved set either way — never a locally recomputed one.
+  FLAGS_VIEW = _admVap ? (_adm.resolvedPublic||FLAGS) : FLAGS;
+  applyTabVisibility();
+  if(!tabVisible(state.view)) showView('markets');
+  renderAdmin();
+}
+
 // ===== feature visibility: ONE composition point ===============================================
 // Server-resolved, injected pre-paint into the shell (window.__FLAGS). Never re-derived here from a
 // raw flag — the same one-code-path rule the chart annotations follow. Before this, four places
@@ -1992,13 +2070,21 @@ const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals
 // cosmetic leak beats an app with no tabs.
 const FLAGS = (window.__FLAGS && typeof window.__FLAGS==='object') ? window.__FLAGS : null;
 const IS_ADMIN = !!window.__ADMIN;
-function featureOn(key){ return FLAGS ? !!FLAGS[key] : true; }
+function featureOn(key){ return FLAGS_VIEW ? !!FLAGS_VIEW[key] : true; }
 // Crypto scope is Markets + Trend + Report + Correlation + Backtest + Sessions by design (the signal
 // engine is xyz-only since -101). This set was written out longhand in two places that had already
 // drifted apart once; it lives here now and both callers read it.
 const CRYPTO_VIEWS=new Set(['markets','trend','report','corr','backtest','sessions']);
 function inScope(v){ return state.scope!=='crypto' || CRYPTO_VIEWS.has(v); }
-function tabVisible(v){ return inScope(v) && featureOn(v); }
+// The Admin tab keys off IS_ADMIN, not the flag set, and deliberately bypasses inScope. It is the
+// control surface for every other flag, so making it flag-driven would be circular: "view as public"
+// swaps in the public set, which hides the panel, which removes the toggle that turns it back off.
+// The manifest still carries an `admin` entry with lock:true so the markup->manifest join holds and
+// no write can ever open it; this line is what keeps the switchboard reachable while it is in use.
+function tabVisible(v){ if(v==='admin') return IS_ADMIN; return inScope(v) && featureOn(v); }
+// featureOn reads FLAGS_VIEW, not FLAGS, so "view as public" can swap the whole resolved set in one
+// assignment. Both sets come from the server; nothing here recomputes a visibility.
+let FLAGS_VIEW = FLAGS;
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
   // Every view name is routable, not a hand-kept subset. The old whitelist silently omitted
@@ -3462,6 +3548,7 @@ function showView(v){
   setHidden('view-news', v!=='news');
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
+  setHidden('view-admin', v!=='admin');
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
   if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
   if(v==='sessions') renderSessions();
@@ -3471,6 +3558,7 @@ function showView(v){
   if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
+  if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
 }
@@ -5417,6 +5505,7 @@ function wireTabDrag(){ const nav=document.querySelector('nav.tabs'); if(!nav) r
     nav.insertBefore(drag, (e.clientX < r.left + r.width/2) ? over : over.nextSibling); });   // live reorder — the moving tab IS the drop indicator
 }
 applyTabOrder(); applyTabVisibility(); wireTabDrag();
+{ const vb=el('admVap'); if(vb) vb.addEventListener('click',toggleViewAsPublic); }
 // Logout button: only meaningful when the server set the JS-visible auth marker at login.
 { const lb=el('logoutBtn'); if(lb && /(^|;\s*)xyzauth=1/.test(document.cookie)){ lb.hidden=false;
     lb.addEventListener('click',()=>{ location.href='/logout'; }); } }
@@ -5666,7 +5755,7 @@ const CMDK_TABS=[
   {v:'markets',label:'Markets'},{v:'trend',label:'Trend'},{v:'sectors',label:'Sectors'},
   {v:'corr',label:'Correlation'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
-  {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'}];
+  {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'admin',label:'Admin'}];
 let _cmdkSel=0, _cmdkRows=[];
 function openCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'), q=el('cmdk-q'); if(!bg||!m||!q) return;
   bg.hidden=false; m.hidden=false; q.value=''; cmdkRender(''); q.focus();

@@ -60,6 +60,7 @@
   <button class="tab" data-view="news" title="Headlines for the equity universe (per-name, Finnhub) plus the general macro tape — 72h rolling window, per-name refresh every few minutes. Badges cross-reference the app: amber = earnings within 7 days, red = a live signal is firing on that name.">News</button>
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
   <button class="tab" data-view="report" title="AI analyst report — everything this server holds on one ticker (trend ladder, signals &amp; track record, positioning, earnings, flags) compiled and synthesized by an AI analyst (Claude or GPT, per server config) into a plain-language read with scenarios, R/R and an annotated chart. Cached for everyone; regenerate unlocks on TTL expiry or material change.">Report</button>
+  <button class="tab" data-view="admin" id="tab-admin" title="Feature visibility — choose what the group sees and what stays admin-only. Server-enforced: a gated tab is absent from the markup and its routes 403.">Admin</button>
   <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
   <button class="btn" id="densBtn" style="align-self:center;padding:6px 11px" title="Row density — compact tightens every table for more rows per screen; saved in this browser">▤ compact</button>
   <button class="btn" id="helpBtn" style="align-self:center;padding:6px 12px;font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
@@ -285,6 +286,22 @@
   </div>
   <div id="ai-report" class="corrpanel" hidden></div>
   <div id="ai-recent"></div>
+</section>
+
+<section id="view-admin" hidden>
+  <div class="adm-head">
+    <div>
+      <div class="adm-title">Feature visibility</div>
+      <div class="adm-sub" id="adm-count">Loading…</div>
+    </div>
+    <button class="btn" id="admVap" title="Re-render the whole app with the public feature set, without dropping your admin session. The only reliable way to check what the group actually sees.">◉ view as public</button>
+  </div>
+  <div class="adm-prev">
+    <div class="adm-prevlbl">public nav preview</div>
+    <div class="adm-prevrow" id="adm-prev"></div>
+  </div>
+  <div id="adm-rows"><div class="msg">Loading…</div></div>
+  <div class="adm-foot" id="adm-foot"></div>
 </section>
 
 <div class="drawer-bg" id="drawerbg"></div>
