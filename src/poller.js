@@ -5,6 +5,7 @@ const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
+const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, FOMC_DECISIONS } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -116,6 +117,12 @@ const EARN_ALIAS = { BRKB: "BRK.B" }; // xyz ticker -> US exchange symbol where 
 // print inside the horizon is a different return distribution than the study sample, so the
 // evidence contribution is capped — same mechanism and same cap as the no-live-edge guard.
 const EARN_GUARD = new Set(["breakout", "breakdown", "gap", "ondrift"]);
+// Macro calendar (FOMC + FRED). Same degradation contract as earnings: env FRED_KEY, data-only,
+// no package; unset key = macro rows absent with the reason on the payload, earnings untouched.
+// The FOMC table needs no key and always serves. Refresh rides the earnings cadence (6h + 30min
+// staleness retry), PLUS a refire when a release instant passed since the last good fetch — so
+// an 8:30 print's actual lands on the tab within the half hour instead of waiting out the 6h.
+const MACRO_STALE = EARN_STALE, MACRO_RETRY_MS = EARN_RETRY_MS;
 function num(x) { const v = typeof x === "number" ? x : parseFloat(x); return Number.isFinite(v) ? v : null; }
 // Payload-trim helpers: the snapshot ships hundreds of derived floats per market at full
 // double precision (17 digits) — quantizing to what the UI can actually display cuts the
@@ -2474,6 +2481,21 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           if (eG && eG.eg == null) { eG.eg = 1; ledgerDirty = true; }
         }
       }
+      // Macro guard: FOMC / CPI / NFP (and the rest of the roster) <=1 ET day out is the
+      // universe-wide analogue of the earnings guard — a scheduled binary the base rate cannot
+      // see, on BOTH universes (CPI moves BTC as hard as it moves SPX). Same session-spanning
+      // event set, same cap, same flagged-never-filtered contract. If the earnings guard already
+      // trimmed this claim the cap is not applied twice — one binary ahead or two, the borrowed
+      // statistical confidence is capped once at the same 8 points.
+      if (EARN_GUARD.has(g.ev)) {
+        const mp = macroProx(now);
+        if (mp) {
+          g.mac = mp;
+          if (!g.earnguard && g.evp > 8) { g.score = Math.max(0, Math.round(g.score - (g.evp - 8))); g.macguard = true; }
+          const mG = ledgerOpen.get(g.coin + "|" + g.ev);
+          if (mG && mG.mg == null) { mG.mg = 1; ledgerDirty = true; }   // claim stamped in force <=1d of a macro print — future conditioned splits read this
+        }
+      }
       delete g.evp;
       // structure: median-target vs invalidation R/R, folded into the score. Poor structure
       // (rr < 0.8) costs 20%; clean structure (rr >= 1.5) earns a nudge. Then `prime` marks
@@ -3101,6 +3123,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   }
   // Nearest UPCOMING report for a ticker: { diff, e } with diff in ET calendar days (0 = today,
   // 1 = tomorrow). Past entries linger in the cache until the next refresh; they're skipped here.
+  // Nearest upcoming macro event within 1 ET day — the universe-wide analogue of earnProx.
+  // Ticker-independent by construction: FOMC moves BTC as hard as it moves SPX.
+  function macroProx(nowMs) {
+    const ent = macroCache && Array.isArray(macroCache.entries) ? macroCache.entries : [];
+    let best = null;
+    for (const e of ent) {
+      if (macroEntryState(e, nowMs) !== "upcoming") continue;
+      const df = earnDayDiff(e.d, nowMs);
+      if (df == null || df < 0 || df > 1) continue;
+      if (!best || df < best.prox) best = { k: e.k, label: e.label, d: e.d, tEt: e.tEt, prox: df };
+    }
+    return best;
+  }
   function earnProx(ticker) {
     const a = earnMap.get(ticker);
     if (!a) return null;
@@ -3722,6 +3757,145 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   }
   const earnTick = () => { fetchEarnings().catch((e) => log("earnings tick failed: " + (e && e.message))); };
 
+  // ===================== macro calendar fetch (FOMC table + FRED) =====================
+  // One /fred/releases pull resolves release NAMES to ids (never hardcoded integers — a FRED
+  // renumbering degrades to "event absent + logged"), one /fred/releases/dates pull carries the
+  // forward schedule (include_release_dates_with_no_data=true + far realtime_end is the
+  // documented way to receive dates the data hasn't landed for yet), then one small
+  // observations pull per stat series computes the prior/actual numbers. ~12 paced GETs per
+  // refresh against a 120/min budget; Hyperliquid budget untouched. The FOMC side is the static
+  // table in compute.js and serves even with no key.
+  let macroCache = null, macroVer = 0, macroSig = "", lastMacroOk = 0, macroErr = null;
+  let macroIds = null;                 // Map k -> FRED release id, resolved once per boot
+  const macroStats = {};               // k -> { cur, prev }: the reducer at the latest obs and at the obs before it
+  function macroStatFor(def, obsByS) {
+    const o = (s) => obsByS[s] || [];
+    if (def.stat === "yoyPair") { const a = yoyPct(o(def.series[0])), b = yoyPct(o(def.series[1]));
+      return a ? { yoy: a.v, core: b ? b.v : null, m: a.m } : null; }
+    if (def.stat === "jobs") { const a = momDelta(o(def.series[0])), b = lastObs(o(def.series[1]));
+      return a ? { chgK: a.v, unemp: b ? b.v : null, m: a.m } : null; }
+    if (def.stat === "yoyOne") { const a = yoyPct(o(def.series[0])); return a ? { yoy: a.v, m: a.m } : null; }
+    if (def.stat === "momOne") { const a = momPct(o(def.series[0])); return a ? { mom: a.v, m: a.m } : null; }
+    if (def.stat === "qoq") { const a = lastObs(o(def.series[0])); return a ? { qoq: a.v, m: a.m } : null; }
+    return null;
+  }
+  function macroDressEntries(raw, now) {
+    // prior = the latest published stat (labeled with its month — never claimed as consensus,
+    // FRED carries no street estimates); actual = the SAME stat iff the row is released AND the
+    // series' latest obs matches the print's reference period exactly. Anything else on a
+    // released row is `pend` — disclosed, never a stale month dressed as the print.
+    return raw.map((e) => {
+      const out = Object.assign({}, e);
+      if (e.k === "FOMC") {
+        const s = macroStats.FOMC;
+        if (s && s.cur) {
+          if (macroEntryState(e, now) === "released") {
+            // actual = the range once the daily target series has an obs ON/after decision day;
+            // prior = the range in force going in (the current one until the print moves it).
+            if (s.cur.d >= e.d) { out.actual = { lo: s.cur.lo, hi: s.cur.hi };
+              out.prior = s.prev ? { lo: s.prev.lo, hi: s.prev.hi } : { lo: s.cur.lo, hi: s.cur.hi }; }
+            else { out.pend = true; out.prior = { lo: s.cur.lo, hi: s.cur.hi }; }
+          } else out.prior = { lo: s.cur.lo, hi: s.cur.hi };
+        }
+        return out;
+      }
+      const s = macroStats[e.k];
+      if (macroEntryState(out, now) === "released") {
+        const want = macroExpectedObsMonth(e.k, e.d);
+        if (s && s.cur && want && s.cur.m === want) { out.actual = s.cur; if (s.prev) out.prior = s.prev; }
+        else { out.pend = true; if (s && s.cur) out.prior = s.cur; }
+      } else if (s && s.cur) out.prior = s.cur;
+      return out;
+    });
+  }
+  async function fetchMacro() {
+    const now = Date.now();
+    const key = process.env.FRED_KEY || "";
+    const fget = async (path, params) => {
+      const q = new URLSearchParams(Object.assign({ api_key: key, file_type: "json" }, params));
+      const res = await fetch("https://api.stlouisfed.org/fred/" + path + "?" + q, {
+        headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+      if (!res.ok) throw new Error("FRED HTTP " + res.status);
+      return res.json();
+    };
+    let fredDates = [], err = null;
+    try {
+      if (key) {
+        if (!macroIds || !macroIds.size) {
+          macroIds = parseFredReleases(await fget("releases", { limit: 1000 }), MACRO_RELEASES);
+          await sleep(150);
+          const missing = MACRO_RELEASES.filter((d) => !macroIds.has(d.k)).map((d) => d.k);
+          if (missing.length) log("macro: FRED release name(s) unresolved, rows absent: " + missing.join(", "));
+        }
+        if (macroIds && macroIds.size) {
+          const idToK = new Map(); for (const [k, id] of macroIds) idToK.set(id, k);
+          const dj = await fget("releases/dates", { include_release_dates_with_no_data: "true",
+            realtime_start: new Date(now - 6 * DAY).toISOString().slice(0, 10),
+            realtime_end: "9999-12-31", limit: 1000, sort_order: "asc" });
+          fredDates = parseFredReleasesDates(dj, idToK);
+          await sleep(150);
+          for (const def of MACRO_RELEASES) {
+            if (!macroIds.has(def.k)) continue;
+            const obsByS = {};
+            for (const sid of def.series) {
+              obsByS[sid] = fredObsSeries(await fget("series/observations", { series_id: sid,
+                observation_start: new Date(now - 480 * DAY).toISOString().slice(0, 10) }));
+              await sleep(150);
+            }
+            const cur = macroStatFor(def, obsByS);
+            const obsPrev = {}; for (const sid of def.series) obsPrev[sid] = (obsByS[sid] || []).slice(0, -1);
+            const prev = macroStatFor(def, obsPrev);
+            if (cur) macroStats[def.k] = { cur, prev: prev || null };
+          }
+          const [tl, tu] = await Promise.all([
+            fget("series/observations", { series_id: "DFEDTARL", observation_start: new Date(now - 60 * DAY).toISOString().slice(0, 10) }),
+            fget("series/observations", { series_id: "DFEDTARU", observation_start: new Date(now - 60 * DAY).toISOString().slice(0, 10) })]);
+          const loS = fredObsSeries(tl), hiS = fredObsSeries(tu);
+          const lo = lastObs(loS), hi = lastObs(hiS);
+          if (lo && hi) {
+            // prev = the last DISTINCT range before the current one (daily series repeats the
+            // held range every day) — lets a released decision row read "held" vs "cut/hiked".
+            let loP = null, hiP = null;
+            for (let i = hiS.length - 2; i >= 0; i--) if (hiS[i][1] !== hi.v || (loS[i] && loS[i][1] !== lo.v)) { hiP = hiS[i][1]; loP = loS[i] ? loS[i][1] : null; break; }
+            macroStats.FOMC = { cur: { lo: lo.v, hi: hi.v, d: hi.d }, prev: loP != null && hiP != null ? { lo: loP, hi: hiP } : null };
+          }
+        }
+      } else err = "FRED_KEY not set";
+    } catch (e) { err = (e && e.message) || "fetch failed"; }
+    // The FOMC table serves regardless — a dead FRED (or no key) still puts rate decisions on
+    // the calendar; only the print rows and stats degrade, with the reason on the payload.
+    const entries = macroDressEntries(buildMacroEntries(fredDates, now, EARN_WINDOW_DAYS, 2), now);
+    const fut = FOMC_DECISIONS.filter((f) => (earnDayDiff(f.d, now) || -1) >= 0).length;
+    if (fut < 2) log("macro: FOMC table nearly exhausted (" + fut + " future decision(s)) — extend FOMC_DECISIONS in src/compute.js from federalreserve.gov");
+    const sigM = entries.map((e) => e.k + e.d + (e.actual ? "a" + JSON.stringify(e.actual) : "") + (e.pend ? "p" : "")).join(",") + "|" + (err || "");
+    if (sigM !== macroSig) { macroSig = sigM; macroVer = now; }
+    macroErr = err;
+    if (!err) lastMacroOk = now;
+    macroCache = { ts: now, dataTs: macroVer, asOf: err ? (macroCache && macroCache.asOf) : now,
+      error: err, entries, kinds: 1 + (macroIds ? macroIds.size : 0) };
+    if (store.saveMacro) store.saveMacro({ ts: now, entries, stats: macroStats, ids: macroIds ? [...macroIds] : [] });
+    log("Macro calendar: " + entries.length + " event(s) in the window (" + (err ? "FRED: " + err + "; FOMC table only" : "FOMC + " + (macroIds ? macroIds.size : 0) + " FRED release(s)") + ")");
+  }
+  const macroTick = () => { fetchMacro().catch((e) => log("macro tick failed: " + (e && e.message))); };
+  function loadMacroCache() {
+    const data = store.loadMacro ? store.loadMacro() : null;
+    if (!data || !Array.isArray(data.entries)) return false;
+    Object.assign(macroStats, data.stats || {});
+    if (Array.isArray(data.ids) && data.ids.length) macroIds = new Map(data.ids);
+    macroVer = data.ts || Date.now();
+    macroCache = { ts: Date.now(), dataTs: macroVer, asOf: data.ts || null, error: null,
+      entries: data.entries, kinds: 1 + (macroIds ? macroIds.size : 0) };
+    return true;
+  }
+  // A release instant crossed since the last good fetch means an actual is (about to be) out
+  // there — refire off-cadence so the banner flips to its result strip within the half hour.
+  function macroCrossed() {
+    if (!macroCache || !Array.isArray(macroCache.entries)) return false;
+    for (const e of macroCache.entries)
+      if (!e.actual && macroEntryState(e, lastMacroOk) === "upcoming" && macroEntryState(e, Date.now()) === "released") return true;
+    return false;
+  }
+
   function persistFeatures() {
     const markets = {};
     for (const r of rows.values()) {
@@ -4203,6 +4377,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // 30 min while a healthy one refreshes 4x/day. One HTTP GET each time; zero HL rate budget.
     setTimeout(earnTick, 20 * 1000);
     setInterval(() => { if (Date.now() - lastEarnOk > EARN_STALE) earnTick(); }, EARN_RETRY_MS);
+    // Macro: warm-boot from /data, first live pull shortly after boot, then the 6h staleness
+    // check — which ALSO refires when a release instant crossed since the last good fetch, so
+    // an 8:30 print's actual reaches the tab within ~30 min instead of waiting out the 6h.
+    try { loadMacroCache(); } catch (_) {}
+    setTimeout(macroTick, 25 * 1000);
+    setInterval(() => { if (Date.now() - lastMacroOk > MACRO_STALE || macroCrossed()) macroTick(); }, MACRO_RETRY_MS);
     // Reaction study rerun after the daily backfill has had time to land full candles (opens
     // arrive with the live pull; the warm cache only carries closes) — bumps the ETag on change.
     setTimeout(() => { try { refreshEarnStudy(true); } catch (_) {} }, 10 * 60 * 1000);
@@ -4816,6 +4996,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             flags.push({ kind: g.ev, t: (g.claim0 && g.claim0.t) || g.t0 || Date.now(),
               txt: (EV_LABEL[g.ev] || g.ev) + " signal live" + (g.play && g.play.side ? ` (${g.play.side})` : "") });
     } catch (_) {}
+    try {
+      // Scheduled macro binaries inside the report horizon — stated as facts next to the
+      // divergence detectors. Deterministic server-side: the flag renders whether or not the
+      // analyst weaves it in (the prompt separately requires that it does).
+      const now2 = Date.now();
+      for (const m of macroWithin(macroCache && macroCache.entries || [], now2, 10 * DAY).slice(0, 3)) {
+        const when = m.days === 0 ? "today" : m.days === 1 ? "tomorrow" : "in " + m.days + "d";
+        flags.push({ kind: "macro_event",
+          txt: `${m.label} ${when} (${m.d}, ${m.tEt} ET)${m.sep ? " — SEP/dot-plot meeting" : ""} — a scheduled universe-wide binary inside the report horizon` });
+      }
+    } catch (_) {}
     return flags;
   }
   // The context compiler: everything the model sees, from data already in memory. D1/H12/H4 only —
@@ -5018,6 +5209,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           beat: last.eps != null && last.epsA != null ? last.epsA > last.eps : null };
         if (e.next || e.reported || e.reaction || e.lastPrint) ctx.earnings = e;
       } catch (_) {}
+      try {
+        // Universe-wide scheduled macro binaries — FOMC/CPI/NFP/PPI/retail/GDP/PCE. `next` are
+        // events still AHEAD inside ~10d (with the latest published stat as the prior — labeled
+        // by month, never claimed as consensus; FRED carries no street estimates). `recent` is
+        // the freshest print already OUT within 2d, with its actual when landed. Both universes:
+        // these move BTC as hard as they move SPX.
+        const ment = macroCache && Array.isArray(macroCache.entries) ? macroCache.entries : [];
+        const mn = macroWithin(ment, now, 10 * DAY).slice(0, 3).map((m) => {
+          const full = ment.find((x) => x.k === m.k && x.d === m.d) || {};
+          return { k: m.k, label: m.label, d: m.d, timeEt: m.tEt, inDays: m.days,
+            sep: m.sep, prior: full.prior || null };
+        });
+        let mr = null;
+        for (const e of ment) {
+          if (macroEntryState(e, now) !== "released") continue;
+          const ago = -(earnDayDiff(e.d, now) || 0);
+          if (ago > 2) continue;
+          if (!mr || e.d > mr.d) mr = { k: e.k, label: e.label, d: e.d, timeEt: e.tEt,
+            agoDays: Math.max(0, ago), actual: e.actual || null, pending: e.pend === true || undefined, prior: e.prior || null };
+        }
+        if (mn.length || mr) ctx.macro = { next: mn, recent: mr };
+      } catch (_) {}
       try { const cl = classifyCached(r.ticker, r.uni);
         if (cl && cl.sector) {
           const peers = activeMarkets().filter((x) => !x.delisted && classifyCached(x.ticker, x.uni).sector === cl.sector);
@@ -5091,7 +5304,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     ctx.coverage = aiCoverage(coin, windowMs);
     return ctx;
   }
-  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, structural levels, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history and the 24h open-interest change — read positioning through these when present. context.levels carries the structural levels this name has actually respected: each item is a cluster of confirmed daily pivots, with v (the price), side ("res" overhead, "sup" below, "flip" for a level that has served as both), n (how many pivots touched it), ageD (days since the most recent touch) and distPct (distance from the mark). These are the ONLY prices you may treat as structure — a level with n=2 touched 40 days ago is weak evidence and should be described as such, while a flip with n=5 touched last week is the strongest structure the tape offers. When context.levels.items is empty the note says why: say plainly that no confirmed structure exists and lean on trend and positioning instead. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly. context.earnings may carry "next" (a scheduled print still AHEAD — this, and only this, is earnings event risk) and/or "reported" (a print already OUT, with its beat/miss and surprise%): a "reported" print is SETTLED HISTORY, not a pending catalyst — read its result and the tape's reaction, and never describe it as upcoming or tell the reader to wait for it.
+  const AI_SYSTEM = `You are the analyst layer of a private trading dashboard. You receive one JSON context object holding everything the server knows about a single perp market: price/momentum state, an EMA 13/21 trend ladder (daily, 12-hour and 4-hour rungs only), live signals with frozen claim geometry, this name's own out-of-sample signal track record, positioning (open interest, funding), benchmark beta decomposition, volatility regime, structural levels, divergence flags, coverage gaps, and (for equities) earnings event risk and sector context including the name's return RELATIVE to its own sector's median (sector.rel7dPct / rel30dPct — cite these when distinguishing name-specific moves from sector-wide ones). Crypto contexts may carry context.crypto: the funding percentile against the name's own 31d history and the 24h open-interest change — read positioning through these when present. context.levels carries the structural levels this name has actually respected: each item is a cluster of confirmed daily pivots, with v (the price), side ("res" overhead, "sup" below, "flip" for a level that has served as both), n (how many pivots touched it), ageD (days since the most recent touch) and distPct (distance from the mark). These are the ONLY prices you may treat as structure — a level with n=2 touched 40 days ago is weak evidence and should be described as such, while a flip with n=5 touched last week is the strongest structure the tape offers. When context.levels.items is empty the note says why: say plainly that no confirmed structure exists and lean on trend and positioning instead. context.news carries the ONLY headlines you may reference (verified per-name + macro tape). context.analystRecord, when present, is YOUR OWN out-of-sample record: every prior directional read was frozen as a claim (your void as the stop) and resolved at 5d. Weigh it — a thin or losing record on this name is a reason to hedge the read or demand more confirmation, and say so plainly. context.earnings may carry "next" (a scheduled print still AHEAD — this, and only this, is earnings event risk) and/or "reported" (a print already OUT, with its beat/miss and surprise%): a "reported" print is SETTLED HISTORY, not a pending catalyst — read its result and the tape's reaction, and never describe it as upcoming or tell the reader to wait for it. context.macro, when present, carries scheduled UNIVERSE-WIDE macro binaries (FOMC decisions, CPI, nonfarm payrolls, PPI, retail sales, GDP, PCE): "next" lists events still ahead with their ET dates/times and the latest published PRIOR value (labeled by reference month — this is the prior print, NOT a consensus estimate; no street consensus exists in this system, so never invent one or claim a beat/miss vs expectations), and "recent" is the freshest print already out with its actual when landed. These are the ONLY macro events you may reference and they apply to crypto exactly as to equities. An event in context.macro.next inside your scenario horizon MUST be acknowledged in the read and reflected in the plan (entry timing around the print, or a stated reason to hold through it); a macro release does NOT use the "event" scenario kind — that kind is reserved for this name's own earnings print — fold macro risk into the probabilities and notes instead.
 Respond with ONLY a JSON object — no markdown fences, no preamble — with exactly these keys:
 {"headline": string (<=60 chars, plain-language stance, e.g. "Constructive, leans long" or "Constructive, but earnings in 6 days"),
  "bias": "long"|"short"|"neutral",
@@ -6062,6 +6275,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         const ep = earnProx(r.ticker);
         if (ep && ep.diff != null && ep.diff * DAY <= meta.horizonMs) earn = { d: ep.e.d, s: ep.e.s, days: ep.diff };
       }
+      // Universe-wide macro binaries inside this setup's horizon — both universes, capped at two
+      // (the nearest carry the risk; a third is noise). Flagged, never filtered, like earnings.
+      let mac = null;
+      { const mw = macroWithin(macroCache && macroCache.entries || [], now, meta.horizonMs).slice(0, 2);
+        if (mw.length) mac = mw.map((m) => ({ k: m.k, label: m.label, d: m.d, tEt: m.tEt, days: m.days })); }
       cands.push({
         // k = the underlying claim's ledger key. The settled record is keyed on it — one episode
         // per claim, however often the row blinks. Ships on the payload (harmless) but the client
@@ -6078,7 +6296,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         fired: sig(e.mark0, 9), entry: sig(r.px, 9), void: sig(e.stp, 9), target: sig(target, 9),
         late: lateR(side, e.mark0, r.px, e.stp),
         rr, carry, evR, rec: { n: rec.n, hit: rec.hit, avgR: rec.avgR },
-        horizonD: +(meta.horizonMs / DAY).toFixed(0), earn,
+        horizonD: +(meta.horizonMs / DAY).toFixed(0), earn, mac,
       });
     }
     // Newest first: the default the board opens on. The client may re-sort any column, but the
@@ -7337,7 +7555,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const sig = entries.concat(recent || []).map((e) => e.filing ? e.t + ":" + e.filing.form : "").join(",");
       if (sig !== earnLnSig) { earnLnSig = sig; earnLnVer = Date.now(); }
       return Object.assign({}, earnCache, { entries, recent,
-        dataTs: Math.max(earnCache.dataTs || 0, earnLnVer) });
+        macro: macroCache && Array.isArray(macroCache.entries) ? macroCache.entries : [],
+        macroErr: macroCache ? macroCache.error : "not fetched yet",
+        macroAsOf: macroCache ? macroCache.asOf : null,
+        dataTs: Math.max(earnCache.dataTs || 0, earnLnVer, macroCache ? (macroCache.dataTs || 0) : 0) });
     },
     voidEarnPrint,
     getTrend,

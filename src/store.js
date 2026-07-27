@@ -19,6 +19,7 @@ function openStore(dataDir) {
   const ledgerFile = path.join(dataDir, "ledger.json");
   const archiveFile = path.join(dataDir, "ledger-archive.jsonl");
   const earnFile = path.join(dataDir, "earnings.json");
+  const macroFile = path.join(dataDir, "macro.json");
   const newsFile = path.join(dataDir, "news.json");
   const tgFile = path.join(dataDir, "tgchannels.json");
   const trigFile = path.join(dataDir, "triggers.json");
@@ -324,6 +325,21 @@ function openStore(dataDir) {
     },
     loadEarnings() {
       try { if (fs.existsSync(earnFile)) return JSON.parse(fs.readFileSync(earnFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    // Macro calendar warm cache (FOMC + FRED): same contract as earnings — a redeploy inside
+    // the 6h refresh window serves the last good entries/stats instead of blanking the banner
+    // and the calendar's macro rows until FRED answers.
+    saveMacro(data) {
+      try {
+        const tmp = macroFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, macroFile);
+      } catch (_) {}
+    },
+    loadMacro() {
+      try { if (fs.existsSync(macroFile)) return JSON.parse(fs.readFileSync(macroFile, "utf8")); }
       catch (_) {}
       return null;
     },

@@ -4178,3 +4178,194 @@ function epScore(side, entryBasis, voidLv, target, kind, exitPx) {
 }
 module.exports.epResolve = epResolve;
 module.exports.epScore = epScore;
+
+// ===================== macro calendar (FOMC + FRED scheduled releases) =====================
+// Universe-wide scheduled binaries: FOMC decisions from the Fed's published schedule (static —
+// a table that changes once a decade needs no poller) and BLS/BEA/Census prints via FRED's
+// releases/dates endpoint (free key). Everything here is pure; the poller owns the fetching.
+//
+// FOMC decision days (day 2 of each meeting; statement 2:00 PM ET, presser 2:30). Source:
+// federalreserve.gov/monetarypolicy/fomccalendars.htm — 2026 confirmed schedule and the 2027
+// tentative schedule announced 2025-09-05 (each date tentative until confirmed at the meeting
+// immediately preceding it; in practice the published schedule almost never moves). SEP (dot
+// plot) rides the Mar/Jun/Sep/Dec meetings. EXTEND THIS TABLE when the Fed publishes the next
+// year — the poller logs loudly when fewer than 2 future decisions remain.
+const FOMC_DECISIONS = [
+  { d: "2026-01-28", sep: false }, { d: "2026-03-18", sep: true },
+  { d: "2026-04-29", sep: false }, { d: "2026-06-17", sep: true },
+  { d: "2026-07-29", sep: false }, { d: "2026-09-16", sep: true },
+  { d: "2026-10-28", sep: false }, { d: "2026-12-09", sep: true },
+  { d: "2027-01-27", sep: false }, { d: "2027-03-17", sep: true },
+  { d: "2027-04-28", sep: false }, { d: "2027-06-09", sep: true },
+  { d: "2027-07-28", sep: false }, { d: "2027-09-15", sep: true },
+  { d: "2027-10-27", sep: false }, { d: "2027-12-08", sep: true },
+  { d: "2028-01-26", sep: false },
+];
+// FRED-fed release roster. `fredName` is the EXACT release name on FRED — ids are resolved by
+// name at fetch time (one /fred/releases pull) instead of hardcoding integers, so a FRED
+// renumbering degrades to "event absent + logged", never to a mislabeled row. All six print at
+// 8:30 ET (BLS/BEA/Census convention); FOMC is the only 14:00. `series` are the FRED series the
+// poller pulls to compute the prior/actual stat for the row; `stat` names the pure reducer below.
+const MACRO_RELEASES = [
+  { k: "CPI",    label: "CPI",              fredName: "Consumer Price Index",           tEt: "08:30", series: ["CPIAUCSL", "CPILFESL"], stat: "yoyPair" },
+  { k: "NFP",    label: "Nonfarm payrolls", fredName: "Employment Situation",           tEt: "08:30", series: ["PAYEMS", "UNRATE"],     stat: "jobs" },
+  { k: "PPI",    label: "PPI final demand", fredName: "Producer Price Index",           tEt: "08:30", series: ["PPIFIS"],               stat: "yoyOne" },
+  { k: "RETAIL", label: "Retail sales",     fredName: "Advance Monthly Sales for Retail and Food Services", tEt: "08:30", series: ["RSAFS"], stat: "momOne" },
+  { k: "GDP",    label: "GDP",              fredName: "Gross Domestic Product",         tEt: "08:30", series: ["A191RL1Q225SBEA"],      stat: "qoq" },
+  { k: "PCE",    label: "PCE",              fredName: "Personal Income and Outlays",    tEt: "08:30", series: ["PCEPI", "PCEPILFE"],    stat: "yoyPair" },
+];
+const MACRO_LABEL = { FOMC: "FOMC rate decision" };
+for (const m of MACRO_RELEASES) MACRO_LABEL[m.k] = m.label;
+// /fred/releases -> Map(k -> release id). Exact case-insensitive name match ONLY — a release
+// FRED renamed resolves to nothing and its rows go absent (disclosed), never guessed.
+function parseFredReleases(json, defs) {
+  const out = new Map();
+  const arr = json && Array.isArray(json.releases) ? json.releases : [];
+  const byName = new Map();
+  for (const r of arr) if (r && typeof r.name === "string" && Number.isFinite(+r.id)) byName.set(r.name.trim().toLowerCase(), +r.id);
+  for (const d of defs || MACRO_RELEASES) { const id = byName.get(d.fredName.toLowerCase()); if (id != null) out.set(d.k, id); }
+  return out;
+}
+// /fred/releases/dates -> [{k, d}] for OUR resolved releases only, deduped by k|d, malformed
+// dates dropped. idToK: Map(release id -> k).
+function parseFredReleasesDates(json, idToK) {
+  const arr = json && Array.isArray(json.release_dates) ? json.release_dates : [];
+  const seen = new Set(), out = [];
+  for (const r of arr) {
+    if (!r || !Number.isFinite(+r.release_id) || typeof r.date !== "string") continue;
+    const k = idToK.get(+r.release_id);
+    if (!k || !/^\d{4}-\d{2}-\d{2}$/.test(r.date)) continue;
+    const key = k + "|" + r.date;
+    if (seen.has(key)) continue;
+    seen.add(key); out.push({ k, d: r.date });
+  }
+  return out;
+}
+// /fred/series/observations -> [["YYYY-MM-DD", value], ...] finite values only, date-ascending.
+function fredObsSeries(json) {
+  const arr = json && Array.isArray(json.observations) ? json.observations : [];
+  const out = [];
+  for (const o of arr) {
+    if (!o || typeof o.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(o.date)) continue;
+    const v = parseFloat(o.value);
+    if (!Number.isFinite(v)) continue;   // FRED ships "." for missing
+    out.push([o.date, v]);
+  }
+  out.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return out;
+}
+function _ym(d) { return d.slice(0, 7); }
+function _ymShift(ym, months) {
+  let y = +ym.slice(0, 4), m = +ym.slice(5, 7) - 1 + months;
+  y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+  return y + "-" + String(m + 1).padStart(2, "0");
+}
+// YoY % of an index series at its latest observation: needs the month exactly 12 back — a gap
+// in the series yields null, never a nearest-neighbor approximation.
+function yoyPct(obs) {
+  if (!Array.isArray(obs) || !obs.length) return null;
+  const [dL, vL] = obs[obs.length - 1];
+  const want = _ymShift(_ym(dL), -12);
+  for (let i = obs.length - 2; i >= 0; i--) {
+    const ym = _ym(obs[i][0]);
+    if (ym === want) { const v0 = obs[i][1]; return v0 !== 0 ? { v: +((vL / v0 - 1) * 100).toFixed(1), m: _ym(dL) } : null; }
+    if (ym < want) break;
+  }
+  return null;
+}
+// MoM % at the latest observation (prior calendar month required, same no-approximation rule).
+function momPct(obs) {
+  if (!Array.isArray(obs) || obs.length < 2) return null;
+  const [dL, vL] = obs[obs.length - 1], [dP, vP] = obs[obs.length - 2];
+  if (_ym(dP) !== _ymShift(_ym(dL), -1) || vP === 0) return null;
+  return { v: +((vL / vP - 1) * 100).toFixed(1), m: _ym(dL) };
+}
+// Month-over-month LEVEL change (PAYEMS is a level in thousands — the "+147k" IS this delta).
+function momDelta(obs) {
+  if (!Array.isArray(obs) || obs.length < 2) return null;
+  const [dL, vL] = obs[obs.length - 1], [dP, vP] = obs[obs.length - 2];
+  if (_ym(dP) !== _ymShift(_ym(dL), -1)) return null;
+  return { v: +(vL - vP).toFixed(0), m: _ym(dL) };
+}
+function lastObs(obs) {
+  if (!Array.isArray(obs) || !obs.length) return null;
+  const [d, v] = obs[obs.length - 1];
+  return { v, d, m: _ym(d) };
+}
+// Reference period a print released on ET day `d` covers: monthlies cover the prior calendar
+// month; GDP covers the latest COMPLETE quarter before the release (obs dated at quarter start).
+// The actual for a released row is accepted ONLY when the series' latest obs matches this month
+// exactly — anything else is "pending", disclosed, never a stale month dressed as the print.
+function macroExpectedObsMonth(k, d) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d || "")) return null;
+  if (k === "FOMC") return null;
+  const prev = _ymShift(_ym(d), -1);
+  if (k !== "GDP") return prev;
+  const y = +prev.slice(0, 4), m = +prev.slice(5, 7);
+  const qStart = m - ((m - 1) % 3);                       // start month of the quarter `prev` sits in
+  const done = qStart + 3 <= m + 1 ? qStart : qStart - 3; // quarter must be COMPLETE before release month
+  return done >= 1 ? y + "-" + String(done).padStart(2, "0") : (y - 1) + "-10";
+}
+// Merge the FOMC table + FRED dates into served entries inside [now - backDays, now + windowDays]
+// (ET day arithmetic — same convention as earnings). One entry per k|d, date-then-time sorted.
+// FOMC rows carry tEt 14:00, the SEP flag, and d1 (day one of the two-day meeting) for display.
+function buildMacroEntries(fredDates, nowMs, windowDays, backDays) {
+  const out = [], seen = new Set();
+  const inWin = (d) => { const df = earnDayDiff(d, nowMs); return df != null && df >= -(backDays || 2) && df <= (windowDays || 14); };
+  for (const f of FOMC_DECISIONS) if (inWin(f.d)) {
+    const day1 = new Date(Date.UTC(+f.d.slice(0, 4), +f.d.slice(5, 7) - 1, +f.d.slice(8, 10)) - 24 * 3600 * 1000);
+    out.push({ k: "FOMC", label: MACRO_LABEL.FOMC, d: f.d, tEt: "14:00", sep: f.sep,
+      d1: day1.toISOString().slice(0, 10) });
+    seen.add("FOMC|" + f.d);
+  }
+  for (const r of fredDates || []) {
+    const key = r.k + "|" + r.d;
+    if (seen.has(key) || !inWin(r.d)) continue;
+    seen.add(key);
+    out.push({ k: r.k, label: MACRO_LABEL[r.k] || r.k, d: r.d,
+      tEt: (MACRO_RELEASES.find((x) => x.k === r.k) || {}).tEt || "08:30" });
+  }
+  out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.tEt < b.tEt ? -1 : a.tEt > b.tEt ? 1 : (a.k < b.k ? -1 : a.k > b.k ? 1 : 0)));
+  return out;
+}
+// upcoming | released, by actual-presence OR the ET clock — the single arbiter, mirroring
+// earnEntryState: a passed 8:30 (or 14:00 for FOMC) flips the row even before FRED's data lands.
+function macroEntryState(entry, nowMs) {
+  if (!entry || typeof entry.d !== "string") return "upcoming";
+  if (entry.actual != null) return "released";
+  const diff = earnDayDiff(entry.d, nowMs);
+  if (diff == null) return "upcoming";
+  if (diff < 0) return "released";
+  if (diff > 0) return "upcoming";
+  const et = etParts(nowMs != null ? nowMs : Date.now());
+  const hh = +(entry.tEt || "08:30").slice(0, 2), mm = +(entry.tEt || "08:30").slice(3, 5);
+  return (et.h > hh || (et.h === hh && et.mi >= mm)) ? "released" : "upcoming";
+}
+// Upcoming macro events whose ET release day sits inside a horizon from now — the actionable
+// board / report flag source. Day-granular like the earnings guard (the horizon is in bars-days;
+// sub-day precision here would be false precision).
+function macroWithin(entries, nowMs, horizonMs) {
+  const out = [];
+  const hd = Math.floor((horizonMs || 0) / (24 * 3600 * 1000));
+  for (const e of entries || []) {
+    if (macroEntryState(e, nowMs) !== "upcoming") continue;
+    const df = earnDayDiff(e.d, nowMs);
+    if (df == null || df < 0 || df > hd) continue;
+    out.push({ k: e.k, label: e.label, d: e.d, tEt: e.tEt, days: df, sep: e.sep === true ? true : undefined });
+  }
+  return out;
+}
+module.exports.FOMC_DECISIONS = FOMC_DECISIONS;
+module.exports.MACRO_RELEASES = MACRO_RELEASES;
+module.exports.MACRO_LABEL = MACRO_LABEL;
+module.exports.parseFredReleases = parseFredReleases;
+module.exports.parseFredReleasesDates = parseFredReleasesDates;
+module.exports.fredObsSeries = fredObsSeries;
+module.exports.yoyPct = yoyPct;
+module.exports.momPct = momPct;
+module.exports.momDelta = momDelta;
+module.exports.lastObs = lastObs;
+module.exports.macroExpectedObsMonth = macroExpectedObsMonth;
+module.exports.buildMacroEntries = buildMacroEntries;
+module.exports.macroEntryState = macroEntryState;
+module.exports.macroWithin = macroWithin;
