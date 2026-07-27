@@ -2055,6 +2055,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "mompCell", "renderDuelSection", "duelSvg", "duelDivergence", "loadDuelData", "duelRoll", "colAdjacent",
     "loadActionable", "openActionable", "renderActionable", "actHead", "actDetail", "actCmp", "actCell", "actRR", "actEV",
     "actLate", "actLateCls", "actAgo", "actSortLoad", "actSortSave",
+    "actSettled", "actEpDetail", "actSettledWire", "actSetPct", "actSetR", "actSetDays",
+    "termHistPush", "termCausal",
     "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet",
     "fireOps", "fireLedger", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft",
     "alertText", "alertUnread", "alertMarkRead", "loadRules", "ruleAct"];
@@ -6546,7 +6548,10 @@ test("actionable -09: client renders the server's numbers and states the carry c
   assert.ok(s.includes("R:R is net of expected funding"), "footer must state that R:R is carry-netted");
   assert.ok(/at least \$\{p\.recMinN\|\|8\} resolved out-of-sample fires/.test(s), "footer must state the record floor the gate requires");
   assert.ok(s.includes("frozen at fire time") && s.includes("never re-derived"), "footer must state that levels are frozen, not re-derived");
-  assert.ok(s.includes("no crypto claims"), "footer must disclose that the board is equities-only");
+  // -15: the crypto engine is back (2026.07.26-08) and the board is cross-universe — the old
+  // "equities only" disclosure would now be the lie. The footer must say the scoped truth instead.
+  assert.ok(!s.includes("no crypto claims"), "the stale equities-only footer line must be gone — the board serves both universes");
+  assert.ok(s.includes("Both universes, scoped by the toggle above"), "footer must state the cross-universe scoped contract");
   // Styling exists for every class the renderer emits (a missing rule renders an unreadable board).
   for (const cls of ["act-h", "act-tbl", "act-ev", "act-stale", "act-also", "act-warn", "act-note", "act-foot"])
     assert.ok(css.includes("." + cls), `missing CSS for client class: ${cls}`);
@@ -9386,4 +9391,254 @@ test("stamped assets cache immutable; everything else still force-revalidates", 
   // The shell must still be the thing that mints stamped URLs, or immutable serves nothing.
   assert.ok(srv.includes('src="/app.js?v=${VERSION}"') && srv.includes('href="/styles.css?v=${VERSION}"'),
     "the boot-time shell rewrite is the sole source of stamped URLs — the cache-buster IS the URL");
+});
+
+// ===== settled board record + terminal causal routing (build 2026.07.27-15) ====================
+// Two failures shipped in one screenshot: "why is DRAM dumping so much today" degraded to a bare
+// `DRAM d1` card (the field scan ate "today" before intent was ever considered), and the follow-up
+// complaint reached the analyst ALONE — the ask path carried no transcript, so the model could
+// truthfully see only four words. These tests pin the guard, the transcript, and the board's new
+// settled record end to end.
+
+test("terminal -15: causal intent escalates to the analyst — a ticker inside a 'why' is context, never the answer", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // Extract the guard regex from nlResolve and RUN it against the screenshot phrasings.
+  const m = s.match(/\/\\bwhy\\b\|[^/]*behind \(the\|this\|its\)\\b\//);
+  assert.ok(m, "causal-intent guard regex not found in app.js");
+  const re = new RegExp(m[0].slice(1, -1));
+  for (const q of ["why is dram dumping so much today", "what could be causing dram dump today",
+    "why is the tape red", "explain nvda's move", "whats driving sol"])
+    assert.ok(re.test(" " + q + " "), `causal phrasing must match the guard: "${q}"`);
+  for (const q of ["whats nvda funding", "top gainers today", "nvda vs sol", "most crowded shorts"])
+    assert.ok(!re.test(" " + q + " "), `non-causal phrasing must stay local: "${q}"`);
+  // Position: the guard runs before the whole-board patterns and before the ticker block, so no
+  // local mapping can eat a causal question first.
+  const gi = s.indexOf("Causal / explanatory intent");
+  assert.ok(gi > 0 && gi < s.indexOf("whole-board questions") && gi < s.indexOf("positioning screens in trader phrasing"),
+    "the causal guard must run before every local mapping in nlResolve");
+  // The client's analyst/planner classifier must mirror it (ctx.mode wins server-side, so a
+  // client-only or server-only fix would each leave one path broken).
+  assert.ok(s.includes("function termCausal") && s.includes("termCausal(text)?'analyst':'planner'"),
+    "termAsk must classify via the shared causal test");
+  // Transcript: recorded for LOCAL answers too (complaints are usually about a local card), and
+  // the tail rides every ask.
+  assert.ok(s.includes("function termHistPush"), "session transcript recorder missing");
+  assert.ok(s.includes("termHistPush(line, line)") && s.includes("termHistPush(line,'\u2192 '+nl+' (computed locally)')"),
+    "local exchanges (grammar + NL) must enter the transcript");
+  assert.ok(s.includes("hist:_termHist.slice(-6)"), "the transcript tail must ride the /api/ask body");
+  assert.ok(s.includes("termHistPush(text,d.answer||'')") && s.includes("termHistPush(text,'\u2192 '+d.query)"),
+    "AI exchanges (analyst answer / planner query) must enter the transcript");
+});
+
+test("askBoard -15: causal routes analyst anywhere in the sentence; history + scoped headlines ride the payload; the cache is history-salted", async () => {
+  const { createPoller } = require("../src/poller");
+  const calls = [];
+  const respond = (txt) => ({ ok: true, json: async () => ({ content: [{ type: "text", text: txt }], stop_reason: "end_turn" }) });
+  let nextResponse = respond("DRAM is down on sector-wide memory weakness; no verified headline explains it.");
+  const aiFetch = async (url, opts) => { calls.push(JSON.parse(opts.body)); return nextResponse; };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    loadAiReports: () => null, saveAiReports: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+  const now = Date.now();
+  p.seedRowNow("xyz:DRAM", { px: 40, ticker: "DRAM", uni: "xyz" });
+  p.newsIngestNow([
+    { id: 1, tk: "DRAM", h: "DRAM guides down on pricing", src: "s", url: "u", pub: now - 2 * 3600e3 },
+    { id: 2, tk: null, h: "Fed holds rates", src: "s", url: "u", pub: now - 3600e3 },
+  ]);
+  const uni = [{ t: "DRAM", px: 40, d1: -6.7 }];
+  // 1) mid-sentence causal, NO ctx.mode: the server's own classifier must pick analyst.
+  const r1 = await p.askBoard("what could be causing DRAM dump today", { scope: "stocks", universe: uni });
+  assert.ok(r1.ok, r1.error || "");
+  assert.equal(r1.mode, "analyst", "mid-sentence causal intent must route to the analyst, never the planner/card path");
+  // The user payload is a JSON string inside the transport body — parse it rather than string-
+  // matching escaped quotes, so the assertions read what the MODEL reads.
+  const userPayload = (call) => { const m = (call.messages || []).find((x) => x.role === "user");
+    const c = typeof m.content === "string" ? m.content : m.content.map((x) => x.text || "").join("");
+    return JSON.parse(c.slice(c.indexOf("{"))); };
+  const pay1 = userPayload(calls[calls.length - 1]);
+  assert.ok((pay1.news || []).some((n) => n.h === "DRAM guides down on pricing"), "the ticker's verified headline must ride the analyst payload");
+  assert.ok((pay1.news || []).some((n) => n.h === "Fed holds rates"), "macro tape headlines ride too");
+  assert.ok(!pay1.history, "no transcript sent -> no history key fabricated");
+  // 2) follow-up with history: the transcript must reach the model, and the cache must NOT serve
+  //    call 1's answer for different words — nor the same words under a different history.
+  const h = [{ q: "why is DRAM dumping so much today", a: "DRAM d1 -6.7%" }];
+  const r2 = await p.askBoard("not what I asked", { scope: "stocks", universe: uni, mode: "analyst", hist: h });
+  assert.ok(r2.ok, r2.error || "");
+  const pay2 = userPayload(calls[calls.length - 1]);
+  assert.ok(Array.isArray(pay2.history) && pay2.history[0].q === "why is DRAM dumping so much today",
+    "the session transcript must ride the analyst payload — statelessness was the original failure");
+  assert.ok((pay2.news || []).some((n) => n.h === "DRAM guides down on pricing"), "history mentions the ticker -> its headlines still attach to the follow-up");
+  const n2 = calls.length;
+  const r3 = await p.askBoard("not what I asked", { scope: "stocks", universe: uni, mode: "analyst",
+    hist: [{ q: "why is SOL pumping", a: "SOL d1 +9%" }] });
+  assert.ok(r3.ok && !r3.cached, "same literal words after a DIFFERENT conversation must not serve the cached complaint");
+  assert.equal(calls.length, n2 + 1, "the history-salted cache must trigger a fresh model call");
+  const r4 = await p.askBoard("not what I asked", { scope: "stocks", universe: uni, mode: "analyst", hist: h });
+  assert.ok(r4.cached, "the same words under the SAME history hit the cache — budget is still protected");
+  // 3) source pins on the server classifier: causal set unanchored, opener set anchored.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/const ASK_CAUSAL_RE = /.test(pol) && /if \(ASK_CAUSAL_RE\.test\(s\)\) return "analyst";/.test(pol),
+    "classifyAsk must test causal intent anywhere in the sentence");
+  assert.ok(pol.includes("context.history") && pol.includes("context.news"), "both system prompts must describe the new context blocks");
+});
+
+// One poller, one confirmed board row, full episode lifecycle. Mirrors the actionable -10 seed
+// (10 resolved winners -> the tretest claim confirms) so the settled record is exercised against
+// the same machinery the live board runs, not a synthetic shortcut.
+function settledPoller() {
+  const { createPoller } = require("../src/poller");
+  const COIN = "xyz:SETL";
+  const saved = [];
+  const closed = [];
+  for (let i = 0; i < 10; i++)
+    closed.push({ key: COIN + "|tretest#h" + i, coin: COIN, ticker: "SETL", ev: "tretest", status: "resolved",
+      realized: 1.4, t0: Date.now() - (60 + i) * 86400e3, tR: Date.now() - (55 + i) * 86400e3, psd: "long", pn: 1 });
+  const store = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
+    saveLedger: (b) => saved.push(b), loadLedger: () => ({ ts: Date.now(), open: [], closed }),
+    saveTriggers: () => {}, loadTriggers: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const now = Date.now(), HOUR_ = 3600e3, DAY_ = 86400e3, endH = Math.floor(now / HOUR_), N = 16 * 24;
+  const hourly = [];
+  for (let i = 0; i < N; i++) { const t = (endH - N + i) * HOUR_, c = 100 * Math.pow(1.0005, i);
+    hourly.push({ t, o: c, h: c * 1.001, l: c * 0.999, c, v: 1 }); }
+  const px = hourly[N - 1].c * 1.0005, daily = [];
+  for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
+    daily.push({ t: (Math.floor(now / DAY_) - 60 + i) * DAY_, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
+  p.seedRowNow(COIN, { px, ticker: "SETL", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
+  p.hydrateLedgerNow(); p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+  return { p, COIN, px, hourly, saved, HOUR_, DAY_, endH };
+}
+
+test("settled -15: an episode opens at first appearance, flicker folds instead of duplicating, and the payload ships the record", () => {
+  const { p, COIN, px } = settledPoller();
+  const a = p.getActionable();
+  assert.equal(a.count, 1, "precondition: the seeded setup confirms onto the board");
+  assert.ok(a.rows[0].k && a.rows[0].k.startsWith(COIN + "|"), "board rows must carry their claim key");
+  let st = p.boardEpStateNow();
+  assert.equal(st.open.length, 1, "first appearance opens exactly one episode");
+  assert.ok(st.since > 0, "the record stamps its own out-of-sample epoch");
+  const ep = st.open[0];
+  assert.equal(ep.k, a.rows[0].k);
+  assert.ok(ep.markShow > 0 && ep.fired > 0 && ep.void > 0 && ep.target > 0 && ep.tShow > 0, "the show stamp freezes marks and geometry");
+  assert.ok(ep.cls === "rr" || ep.cls === "ev", "the episode carries the board's own class tag (the 2+1 / grinders split)");
+  // Payload shape: settled rides the actionable payload, per-universe, class-split.
+  assert.ok(a.settled && a.settled.perUni && a.settled.perUni.stocks, "settled block missing from the payload");
+  assert.equal(a.settled.perUni.stocks.open, 1);
+  assert.equal(a.settled.perUni.stocks.all.n, 0, "nothing resolved yet — the record starts at zero, no backfill");
+  // Flicker: walk the mark through the void (untakeable), rebuild, restore, rebuild — SAME episode.
+  p.seedRowNow(COIN, { px: px * 0.5 }); p.buildActionableNow();
+  st = p.boardEpStateNow();
+  assert.equal(st.open.length, 1, "a dropped row does not resolve or delete its episode");
+  assert.ok(st.open[0].off > 0, "the drop is marked");
+  p.seedRowNow(COIN, { px }); p.buildActionableNow();
+  st = p.boardEpStateNow();
+  assert.equal(st.open.length, 1, "reappearance is the SAME episode — oscillation never manufactures sample size");
+  assert.equal(st.open[0].flick, 1, "…and the fold is counted");
+  assert.equal(st.open[0].tShow, ep.tShow, "the original show stamp stands");
+  const a2 = p.getActionable();
+  assert.equal(a2.settled.perUni.stocks.flick, 1, "the fold is disclosed on the payload");
+});
+
+test("settled -15: resolution is inherited from the claim — target touch, both-touch pessimism, and the spine-gap approx label", () => {
+  const C = require("../src/compute");
+  // epResolve unit truths first: the walk, the pessimism, the honesty flag.
+  const H = 3600e3, t0 = 1000 * H;
+  const mkC = (i, o, h, l, c) => [t0 + i * H, o, h, l, c, 1];
+  { const r = C.epResolve([mkC(1, 100, 101, 99, 100), mkC(2, 100, 111, 99.5, 110)], t0, t0 + 5 * H, "long", 95, 110);
+    assert.equal(r.kind, "target"); assert.equal(r.tHit, t0 + 2 * H); }
+  { const r = C.epResolve([mkC(1, 100, 112, 94, 100)], t0, t0 + 5 * H, "long", 95, 110);
+    assert.equal(r.kind, "void", "a candle spanning BOTH levels scores pessimistically as the void — an unseen intrabar sequence is never scored as the win"); }
+  { const r = C.epResolve([mkC(1, 100, 101, 99, 100)], t0, t0 + 5 * H, "long", 95, 110);
+    assert.equal(r.kind, "expired"); assert.equal(r.approx, false); }
+  { const r = C.epResolve([], t0, t0 + 5 * H, "long", 95, 110);
+    assert.equal(r.kind, "expired"); assert.equal(r.approx, true, "no candles in the window: touch state unknowable, and the flag says so"); }
+  { const r = C.epResolve([mkC(1, 100, 101, 89, 92)], t0, t0 + 5 * H, "short", 105, 90);
+    assert.equal(r.kind, "target", "short side mirrors: target below, void above"); }
+  // epScore: void is exactly -1R at ANY basis; target pays the frozen distance in the basis's risk unit.
+  assert.equal(C.epScore("long", 100, 95, 110, "void", null), -1);
+  assert.equal(C.epScore("long", 100, 95, 110, "target", null), 2);
+  assert.equal(C.epScore("long", 102, 95, 110, "target", null), +((110 - 102) / 7).toFixed(2), "the shown-mark basis prices the same exit against its own risk");
+  assert.equal(C.epScore("long", 100, 95, 110, "expired", 103), 0.6);
+  assert.equal(C.epScore("short", 100, 105, 90, "expired", 97), 0.6);
+  assert.equal(C.epScore("long", 100, 95, 110, "expired", null), null, "no exit price at expiry -> unscoreable, never guessed");
+  // Now the machinery end-to-end: extend the spine past the show stamp with a target-touch candle,
+  // close the claim, and sweep.
+  const { p, COIN, px, hourly, HOUR_, endH } = settledPoller();
+  const ep = p.boardEpStateNow().open[0];
+  const tgt = ep.target;
+  const later = hourly.concat([{ t: (endH + 2) * HOUR_, o: px, h: tgt * 1.01, l: px * 0.999, c: tgt, v: 1 }]);
+  p.seedRowNow(COIN, { px, hourlyRaw: later });
+  assert.ok(p.ledgerCloseNow(ep.k, { realized: 2.1, tR: (endH + 4) * HOUR_ }), "harness close must find the open claim");
+  p.buildActionableNow();
+  const st = p.boardEpStateNow();
+  assert.equal(st.open.length, 0, "the resolved claim's episode leaves the open set");
+  assert.equal(st.closed.length, 1, "…and enters the settled record — ON or OFF the board, once shown always scored");
+  const done = st.closed[0];
+  assert.equal(done.kind, "target");
+  assert.ok(!done.approx, "spine covered the window — no approx label");
+  assert.ok(Math.abs(done.rE - (tgt - done.fired) / Math.abs(done.fired - done.void)) < 0.02, "R@fire is the frozen distance over the frozen risk");
+  assert.ok(Math.abs(done.rM - (tgt - done.markShow) / Math.abs(done.markShow - done.void)) < 0.02, "R@shown prices the same exit against the first-shown basis");
+  assert.ok(done.held > 0 && done.tRes > done.tShow, "held runs from first show to the deciding touch");
+  const a = p.getActionable();
+  const u = a.settled.perUni.stocks;
+  assert.equal(u.all.n, 1); assert.equal(u.all.t, 1);
+  const bucket = u.cls[done.cls === "ev" ? "ev" : "rr"];
+  assert.equal(bucket.n, 1, "the episode lands in its OWN class bucket — the 2+1/grinders split includes every outcome, level touches and all");
+  assert.equal(u.all.hit, 1); assert.ok(u.all.avgE > 0 && u.all.avgM > 0);
+  assert.ok(u.lat != null, "lateness (avg@fire - avg@shown) ships computed server-side");
+});
+
+test("settled -15: the record persists inside the ledger blob and survives a restart; the ETag moves on a resolution", () => {
+  const { p, COIN, px, hourly, saved, HOUR_, endH } = settledPoller();
+  const sig0 = p.getActionable().dataTs;
+  const ep = p.boardEpStateNow().open[0];
+  const later = hourly.concat([{ t: (endH + 2) * HOUR_, o: px, h: px * 1.001, l: ep.void * 0.99, c: ep.void, v: 1 }]);
+  p.seedRowNow(COIN, { px, hourlyRaw: later });
+  p.ledgerCloseNow(ep.k, { realized: -1.2, tR: (endH + 4) * HOUR_ });
+  p.buildActionableNow();
+  assert.equal(p.boardEpStateNow().closed[0].kind, "void");
+  assert.equal(p.boardEpStateNow().closed[0].rE, -1, "a void exit is exactly -1R");
+  assert.ok(p.getActionable().dataTs !== sig0, "a resolution with an unchanged live board must still bust the ETag");
+  p.persistLedger();
+  const blob = saved[saved.length - 1];
+  assert.ok(blob.board && Array.isArray(blob.board.closed) && blob.board.closed.length === 1 && blob.board.since > 0,
+    "the episode log rides the ledger blob — no new storage surface");
+  // Restart: a fresh poller hydrating that blob carries the record forward.
+  const { createPoller } = require("../src/poller");
+  const store2 = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
+    saveLedger: () => {}, loadLedger: () => blob, saveTriggers: () => {}, loadTriggers: () => null };
+  const p2 = createPoller({ dex: "xyz", store: store2, log: () => {}, version: "test", crypto: false });
+  p2.hydrateLedgerNow();
+  const st2 = p2.boardEpStateNow();
+  assert.equal(st2.closed.length, 1, "resolved episodes survive the restart");
+  assert.equal(st2.closed[0].kind, "void");
+  assert.equal(st2.since, blob.board.since, "the out-of-sample epoch survives too — a deploy is not a reset");
+  // A pre-episode blob (no `board`) hydrates exactly as before.
+  const store3 = Object.assign({}, store2, { loadLedger: () => ({ ts: Date.now(), open: [], closed: [] }) });
+  const p3 = createPoller({ dex: "xyz", store: store3, log: () => {}, version: "test", crypto: false });
+  p3.hydrateLedgerNow();
+  assert.equal(p3.boardEpStateNow().closed.length, 0);
+  assert.equal(p3.boardEpStateNow().since, 0);
+});
+
+test("settled -15: the client renders the server's record and never re-scores an episode", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(s.includes("function actSettled") && s.includes("function actEpDetail") && s.includes("function actSettledWire"),
+    "settled renderer missing");
+  assert.ok(s.includes("h+=actSettled(d,wantU);") && s.includes("actSettledWire(box);"), "settled section not mounted in renderActionable");
+  assert.ok(s.includes("d.settled") && s.includes("st.perUni[wantU]"), "the section must read the payload's settled block, scoped like every other record surface");
+  // One-code-path: no client-side episode scoring — rE/rM/hit/avg/pf are formatted, never derived.
+  assert.ok(!/epScore|epResolve/.test(s), "episode scoring must never exist client-side");
+  assert.ok(s.includes("2+1 \\u2014 \\u22652:1 at fire") && s.includes("grinders \\u2014 sub-2:1, +EV"),
+    "the stats table must carry the class split — the same rr/ev families the board's checkboxes filter");
+  assert.ok(s.includes("t/v/x"), "each class row must disclose its outcome split — level touches live INSIDE the class buckets");
+  assert.ok(s.includes("flicker") && s.includes("unscoreable") && s.includes("approx"), "the strip must disclose folds, drops and spine-gap scores");
+  assert.ok(s.includes("out of sample since"), "the record must state its own epoch");
+  for (const cls of ["act-set", "act-set-strip", "act-set-t", "act-set-eps", "act-set-det", "act-set-mut"])
+    assert.ok(css.includes("." + cls), `missing CSS for settled class: ${cls}`);
 });
