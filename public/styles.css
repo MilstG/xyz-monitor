@@ -1148,6 +1148,7 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
   border-bottom-color:rgba(90,140,220,.35)}
 .macrostrip.result:hover{background:linear-gradient(90deg,rgba(90,140,220,.16),rgba(90,140,220,.04))}
 .macrostrip.result .ms-g,.macrostrip.result .ms-when{color:var(--blue)}
+.macrostrip[hidden]{display:none}   /* author display:flex above overrides the UA [hidden] rule — same trap as .term-panel; restore it so the armed/dark state actually hides */
 #tab-calendar .tabdot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--accent);
   vertical-align:top;margin-left:3px}
 /* Calendar tab macro rows: blue-chipped, faintly tinted — never confusable with an earnings row */
