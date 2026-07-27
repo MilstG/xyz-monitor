@@ -6749,7 +6749,14 @@ test("triggers -05: browser transport is a consumer only, and the toast surface 
   assert.ok(s.includes("function fireTrigger") && s.includes("updateBell()"), "trigger fires must update the bell");
   // Settings live in the bell panel, not in the board's filter row (which would be a second,
   // competing alert-configuration surface).
-  assert.ok(s.includes('id="at-on"') && s.includes('id="at-late"') && s.includes('id="at-ev"'), "trigger settings missing from the alerts panel");
+  // Same invariant, new shape (-09): the three thresholds are now free numeric inputs built by a
+  // shared helper rather than three hardcoded <select>s, and R:R joined them — but they still live
+  // in the bell panel and nowhere else, which is what this pin is actually protecting.
+  assert.ok(s.includes('id="at-on"'), "the trigger toggle stays in the alerts panel");
+  assert.ok(/for\(const \[id,key\] of \[\['at-ev','minEV'\],\['at-rr','minRR'\],\['at-late','maxLate'\]\]\)/.test(s),
+    "EV, R:R and lateness must all be wired, in the panel");
+  assert.ok(/const numIn=\(id,val,ph,tip\)=>/.test(s) && /type="number" step="0\.05"/.test(s),
+    "thresholds are free numeric inputs — the old three-option selects could not express an arbitrary floor");
   assert.ok(!s.includes('id="at-proven"'), "the proven-only toggle must be gone — the stream is confirmed-only upstream");
   assert.ok(s.includes("trig:{ on:false"), "trigger alerts must default OFF");
   assert.ok(s.includes("A.trig") && s.includes("trig:state.alerts.trig"), "trigger config must persist alongside the alert rules");
@@ -7742,14 +7749,14 @@ function pushHarness(responses) {
 test("push: fully dormant without TG_BOT_TOKEN — no state, no calls, no surprises", async () => {
   delete process.env.TG_BOT_TOKEN;
   const { p, calls } = pushHarness();
-  const st = p.getPush();
+  const st = p.getPush("own-a", false);
   assert.equal(st.enabled, false, "reported as off so the panel can say so instead of looking broken");
   assert.deepEqual(st.recipients, []);
   await p.pushUpdatesNow();
   await p.pushDrainNow();
   p.pushTickNow();
   assert.equal(calls.length, 0, "an unconfigured deploy must never reach out to Telegram");
-  assert.equal(p.pushTest().ok, false, "test fire is honest about being unavailable");
+  assert.equal(p.pushTest(null, "own-a", false).ok, false, "test fire is honest about being unavailable");
 });
 
 test("push: link codes are single-use, expiring, and a new recipient starts CAUGHT UP", () => {
@@ -7761,14 +7768,14 @@ test("push: link codes are single-use, expiring, and a new recipient starts CAUG
   assert.equal(p.pushBindNow("ZZZZZZ", 111, "nobody").ok, false, "a code that was never minted is refused");
   assert.equal(p.pushBindNow("bad", 111, "nobody").error, "bad-code", "malformed codes never reach the store");
 
-  const mint = p.pushMintCode();
+  const mint = p.pushMintCode("own-a");
   assert.ok(/^[A-HJ-NP-Z2-9]{6}$/.test(mint.code));
   assert.ok(mint.expiresAt > Date.now());
   const ok = p.pushBindNow(mint.code.toLowerCase(), 5551234567, "milst");
   assert.equal(ok.ok, true, "case-insensitive, because it is typed on a phone");
   assert.equal(p.pushBindNow(mint.code, 222, "someone else").ok, false, "codes are SINGLE USE — a shared screenshot cannot link a stranger");
 
-  const st = p.getPush();
+  const st = p.getPush("own-a", false);
   assert.equal(st.recipients.length, 1);
   assert.equal(st.recipients[0].name, "milst");
   assert.ok(!st.recipients[0].chat.includes("undefined"));
@@ -7783,7 +7790,7 @@ test("push: link codes are single-use, expiring, and a new recipient starts CAUG
 test("push: the boot rule is a lookback, not a mute — the deploy notice survives it", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p } = pushHarness();
-  const mint = p.pushMintCode();
+  const mint = p.pushMintCode("own-a");
   p.pushBindNow(mint.code, 999, "milst");
 
   // An event that fired long before this boot: the cursor must advance past it WITHOUT sending.
@@ -7804,9 +7811,9 @@ test("push: the boot rule is a lookback, not a mute — the deploy notice surviv
 test("push: per-recipient cursors are independent — one strict filter cannot silence everyone else", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p } = pushHarness();
-  const a = p.pushMintCode(); p.pushBindNow(a.code, 1001, "a");
-  const b = p.pushMintCode(); p.pushBindNow(b.code, 1002, "b");
-  p.pushSetClasses("1002", ["setup"]);   // b wants setups only
+  const a = p.pushMintCode("own-a"); p.pushBindNow(a.code, 1001, "a");
+  const b = p.pushMintCode("own-a"); p.pushBindNow(b.code, 1002, "b");
+  p.pushSetClasses("1002", ["setup"], "own-a", false);   // b wants setups only
 
   p.pushOpsNow("deploy", "build test is live");
   p.pushTickNow();
@@ -7824,7 +7831,7 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
   // 429: their number, not ours, and the item stays queued.
   {
     const { p, calls } = pushHarness([{ status: 429, body: { ok: false, description: "Too Many Requests", parameters: { retry_after: 7 } } }]);
-    const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+    const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
     p.pushOpsNow("x", "y"); p.pushTickNow();
     await p.pushDrainNow();
     assert.equal(calls.length, 1);
@@ -7835,11 +7842,11 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
   // 403: the recipient blocked the bot. Mute (so the panel can say WHY) and purge their backlog.
   {
     const { p } = pushHarness([{ status: 403, body: { ok: false, description: "Forbidden: bot was blocked by the user" } }]);
-    const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+    const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
     p.pushOpsNow("x", "y"); p.pushTickNow();
     p.pushOpsNow("x2", "y2"); p.pushTickNow();
     await p.pushDrainNow();
-    const st = p.getPush();
+    const st = p.getPush("own-a", false);
     assert.equal(st.recipients[0].muted, true, "muted, not deleted — a vanished row looks like a bug");
     assert.ok(/blocked/i.test(st.recipients[0].lastErr), "the reason is kept and shown");
     assert.equal(p.pushStateNow().queue, 0, "their whole backlog is purged rather than retried forever");
@@ -7848,12 +7855,12 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
   {
     const { p } = pushHarness([{ status: 400, body: { ok: false, description: "Bad Request: can't parse entities" } },
       { status: 200, body: { ok: true, result: {} } }]);
-    const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+    const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
     p.pushOpsNow("x", "y"); p.pushTickNow();
     p.pushOpsNow("x2", "y2"); p.pushTickNow();
     await p.pushDrainNow();
     assert.equal(p.pushStateNow().queue, 1, "the undeliverable message is dropped so the queue keeps moving");
-    assert.ok(/parse entities/.test(p.getPush().lastErr), "the API's own words are surfaced — this is what a bad message looks like from the outside");
+    assert.ok(/parse entities/.test(p.getPush("own-a", false).lastErr), "the API's own words are surfaced — this is what a bad message looks like from the outside");
   }
   delete process.env.TG_BOT_TOKEN;
 });
@@ -7861,7 +7868,7 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
 test("push outbox: success paces sends and the queue is bounded with the loss disclosed", async () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p, calls } = pushHarness();
-  const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+  const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
   p.pushOpsNow("one", "1"); p.pushTickNow();
   p.pushOpsNow("two", "2"); p.pushTickNow();
   await p.pushDrainNow();
@@ -7884,29 +7891,29 @@ test("push commands: /start binds, /stop unlinks, offset advances, junk is ignor
   // command replays on every poll forever.
   queue.push(reply([upd(10, "/start ZZZZZZ")]));
   await p.pushUpdatesNow();
-  assert.equal(p.getPush().recipients.length, 0, "an invalid code binds nobody");
+  assert.equal(p.getPush("own-a", false).recipients.length, 0, "an invalid code binds nobody");
   assert.equal(p.pushStateNow().offset, 11, "the offset advances even for a rejected command");
 
   // The real round trip, with a code this server actually minted.
-  const code = p.pushMintCode().code;
+  const code = p.pushMintCode("own-a").code;
   queue.push(reply([upd(11, "/start " + code)]));
   await p.pushUpdatesNow();
-  const linked = p.getPush().recipients;
+  const linked = p.getPush("own-a", false).recipients;
   assert.equal(linked.length, 1, "a minted code binds the chat that carried it");
   assert.equal(linked[0].name, "milst", "the display name comes from Telegram, not from a form nobody fills in");
 
   // Non-command chatter must not touch state.
   queue.push(reply([upd(12, "hello?"), { update_id: 13 }, { update_id: 14, message: { chat: { id: 1 } } }]));
   await p.pushUpdatesNow();
-  assert.equal(p.getPush().recipients.length, 1, "junk, empty updates and text-less messages are ignored without throwing");
+  assert.equal(p.getPush("own-a", false).recipients.length, 1, "junk, empty updates and text-less messages are ignored without throwing");
   assert.equal(p.pushStateNow().offset, 15);
 
   queue.push(reply([upd(15, "/stop")]));
   await p.pushUpdatesNow();
-  assert.equal(p.getPush().recipients.length, 0, "/stop unlinks from the DM itself — nobody should need the panel to make it stop");
+  assert.equal(p.getPush("own-a", false).recipients.length, 0, "/stop unlinks from the DM itself — nobody should need the panel to make it stop");
 
   // An unlink of an unknown chat is a clean failure, not a throw.
-  assert.equal(p.pushUnlink("5551234567").ok, false);
+  assert.equal(p.pushUnlink("5551234567", "own-a", false).ok, false);
   delete process.env.TG_BOT_TOKEN;
 });
 
@@ -7951,16 +7958,16 @@ test("push ops lane: the stall watchdog is edge-triggered in BOTH directions", (
 test("push: state survives a restart, and hydrate restores cursors rather than replaying the ring", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p, store } = pushHarness();
-  const m = p.pushMintCode();
+  const m = p.pushMintCode("own-a");
   p.pushBindNow(m.code, 777, "milst");
-  p.pushSetClasses("777", ["ops"]);
+  p.pushSetClasses("777", ["ops"], "own-a", false);
   const saved = store.saved;
   assert.ok(saved && saved.recipients.length === 1, "recipients are persisted the moment they link");
   assert.deepEqual(saved.recipients[0].classes, ["ops"]);
   assert.ok(Number.isFinite(saved.recipients[0].cur), "the delivery cursor is persisted WITH the recipient — a split write could replay or eat a backlog");
 
-  assert.equal(p.pushSetClasses("777", []).classes, null, "an empty selection normalises to all classes");
-  assert.equal(p.pushSetClasses("nobody", ["ops"]).ok, false);
+  assert.equal(p.pushSetClasses("777", [], "own-a", false).classes, null, "an empty selection normalises to all classes");
+  assert.equal(p.pushSetClasses("nobody", ["ops"], "own-a", false).ok, false);
   delete process.env.TG_BOT_TOKEN;
 });
 
@@ -8259,7 +8266,9 @@ test("client: the feed is the record — fire* interrupt only, and read state is
     "the notification body comes from the shared formatter, not a private string");
 
   // Unread survives a reload because it is a persisted sequence watermark, not a counter.
-  assert.ok(/function alertUnread\(\)[\s\S]{0,220}e\.seq\|\|0\)>\(A\.seenSeq\|\|0\)/.test(app), "unread is computed against the watermark");
+  assert.ok(/function alertUnread\(\)[\s\S]{0,320}A\.seenSeq\|\|0/.test(app), "unread is computed against the watermark");
+  assert.ok(/const floor=Math\.max\(A\.seenSeq\|\|0, A\.clearedSeq\|\|0\);/.test(app),
+    "…and against the clear watermark too, or the badge counts rows the panel no longer shows");
   assert.ok(/seenSeq:state\.alerts\.seenSeq/.test(app), "the watermark is persisted");
   assert.ok(/Number\.isFinite\(d\.seenSeq\)\) state\.alerts\.seenSeq=d\.seenSeq/.test(app), "…and restored");
   assert.ok(/if\(pop\.hidden\)\{[^}]*alertMarkRead\(\);[^}]*\}/.test(app),
@@ -8302,7 +8311,7 @@ test("the deploy notice is quiet; the stall watchdog is not", () => {
     savePush: () => {}, loadPush: () => null };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
     pushFetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, result: {} }) }) });
-  const m = p.pushMintCode(); p.pushBindNow(m.code, 5551234567, "milst");
+  const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 5551234567, "milst");
 
   p.pushOpsNow("deploy", "build test is live", "info", true);
   const rec = p.getTriggers(0).events.filter((e) => e.kind === "ops");
@@ -8426,13 +8435,13 @@ test("rule scan: CRUD, scoping, cooldown, and no detonation when a rule is added
   p.seedRowNow("BBB", { ticker: "BBB", px: 100, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
   p.buildSnapshotNow();
 
-  assert.equal(p.getRules().rules.length, 0);
-  const add = p.addRule({ metric: "h1", op: ">", value: 5 });
+  assert.equal(p.getRules("own-a", false).rules.length, 0);
+  const add = p.addRule({ metric: "h1", op: ">", value: 5 }, "own-a");
   assert.equal(add.ok, true);
   assert.ok(add.rule.id > 0 && add.rule.text.includes("1h %"), "the rule ships a human label, built once, server-side");
-  assert.equal(p.addRule({ metric: "bogus", op: ">", value: 1 }).ok, false);
+  assert.equal(p.addRule({ metric: "bogus", op: ">", value: 1 }, "own-a").ok, false);
 
-  const ruleEvents = () => p.getTriggers(0).events.filter((e) => e.kind === "rule");
+  const ruleEvents = () => p.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule");
 
   // AAA is ALREADY +10% when the rule is written. That is a state, not an event.
   p.ruleScanNow();
@@ -8458,15 +8467,15 @@ test("rule scan: CRUD, scoping, cooldown, and no detonation when a rule is added
   assert.ok(!ruleEvents().some((e) => e.coin === "BBB"));
 
   // Deleting a rule takes its edge state with it.
-  assert.equal(p.deleteRule(add.rule.id).ok, true);
-  assert.equal(p.getRules().rules.length, 0);
-  assert.equal(p.deleteRule(999).ok, false);
+  assert.equal(p.deleteRule(add.rule.id, "own-a", false).ok, true);
+  assert.equal(p.getRules("own-a", false).rules.length, 0);
+  assert.equal(p.deleteRule(999, "own-a", false).ok, false);
 });
 
 test("rule scan: reads the SNAPSHOT payload, so an alert can never disagree with the board", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const fn = pol.slice(pol.indexOf("function ruleScan()"), pol.indexOf("function getRules()"));
+  const fn = pol.slice(pol.indexOf("function ruleScan()"), pol.indexOf("function getRules(owner, isAdmin)"));
   assert.ok(/const snap = snapshotCache;/.test(fn),
     "rules must evaluate against the payload the client renders, not the live row objects");
   assert.ok(!/rows\.get\(/.test(fn), "reading the live rows here would let an alert quote a number the board isn't showing");
@@ -8488,12 +8497,12 @@ test("rules survive a restart WITH their edge state, so a redeploy re-announces 
   const { p, saved } = ruleHarness();
   p.seedRowNow("AAA", { ticker: "AAA", px: 100, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
   p.buildSnapshotNow();
-  p.addRule({ metric: "h1", op: ">", value: 5, note: "breakout watch" });
+  p.addRule({ metric: "h1", op: ">", value: 5, note: "breakout watch" }, "own-a");
   p.ruleScanNow();                                    // arms
   p.seedRowNow("AAA", { px: 112 }); p.buildSnapshotNow(); p.ruleScanNow();   // fires
-  assert.equal(p.getTriggers(0).events.filter((e) => e.kind === "rule").length, 1);
+  assert.equal(p.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule").length, 1);
 
-  const blob = p.getRules();
+  const blob = p.getRules("own-a", false);
   assert.equal(blob.rules[0].note, "breakout watch");
   assert.ok(blob.metrics.length > 8 && blob.ops.includes("cross_up"), "the catalog ships with the rules so the client never hardcodes it");
 
@@ -8702,9 +8711,9 @@ test("quiet hours: window maths, midnight wrap, and what pierces", () => {
 test("quiet hours DELAY rather than drop, and cannot block the queue behind them", async () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p, calls } = pushHarness();
-  const m = p.pushMintCode(); p.pushBindNow(m.code, 5551234567, "milst");
+  const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 5551234567, "milst");
   // A window that is certainly open right now, whatever hour the suite runs at.
-  p.pushSetPrefs("5551234567", { quiet: { from: 0, to: 24 - 1e-9, tz: 0 } });
+  p.pushSetPrefs("5551234567", { quiet: { from: 0, to: 24 - 1e-9, tz: 0 } }, "own-a", false);
   p.pushSetBootNow(Date.now() - 60e3);
 
   p.pushOpsNow("poller stalled", "no poll for 20 min", "warn");   // pierces
@@ -8714,7 +8723,7 @@ test("quiet hours DELAY rather than drop, and cannot block the queue behind them
 
   const st = p.pushStateNow();
   assert.equal(st.queue, 0);
-  assert.ok(p.getPush().recipients[0].quietNow, "the panel can say the recipient is currently quiet");
+  assert.ok(p.getPush("own-a", false).recipients[0].quietNow, "the panel can say the recipient is currently quiet");
   delete process.env.TG_BOT_TOKEN;
 });
 
@@ -8779,4 +8788,178 @@ test("the drain picks the first ELIGIBLE item, so a deferred message cannot head
   const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
   assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
   assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 3, "success, 4xx drop and give-up all remove by index");
+});
+
+// ===== Per-person alerts (build 2026.07.27-08) ==================================================
+// The hole this closes: alert delivery was designed per-person, but the app has one shared site
+// password and no user accounts, so there was no "person" for the management surface to scope to.
+// The first Telegram linked became a global row every visitor could see, and rules were a single
+// shared list. Ownership is now a signed, unguessable per-browser handle; admin overrides.
+
+function twoUserHarness() {
+  const { createPoller } = require("../src/poller");
+  let saved = null, savedRules = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    savePush: (d) => { saved = d; }, loadPush: () => saved,
+    saveRules: (d) => { savedRules = d; }, loadRules: () => savedRules };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
+    pushFetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, result: {} }) }) });
+  return p;
+}
+
+test("recipients are per-browser: two people link independently and cannot see each other", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const p = twoUserHarness();
+  const ca = p.pushMintCode("own-a"); p.pushBindNow(ca.code, 1111111111, "milst");
+  const cb = p.pushMintCode("own-b"); p.pushBindNow(cb.code, 2222222222, "friend");
+
+  const a = p.getPush("own-a", false), b = p.getPush("own-b", false);
+  assert.equal(a.recipients.length, 1, "each browser sees exactly its own");
+  assert.equal(a.recipients[0].name, "milst");
+  assert.equal(b.recipients[0].name, "friend");
+  assert.equal(a.othersLinked, 1, "…and is told others exist without being shown who");
+  assert.ok(!JSON.stringify(a.recipients).includes("friend"), "another person's telegram must not appear anywhere in the payload");
+
+  // A pending link code is private too: handing the newest code to every visitor would let two
+  // people linking at once redeem each other's.
+  p.pushMintCode("own-a");
+  assert.ok(p.getPush("own-a", false).code, "the minting browser sees its code");
+  assert.equal(p.getPush("own-b", false).code, null, "nobody else does");
+
+  // Management is scoped, and a refusal is distinguishable from a missing row.
+  assert.equal(p.pushUnlink("2222222222", "own-a", false).error, "forbidden", "you cannot unlink someone else's telegram");
+  assert.equal(p.pushSetClasses("2222222222", ["ops"], "own-a", false).error, "forbidden");
+  assert.equal(p.pushSetPrefs("2222222222", { digestHour: 8 }, "own-a", false).error, "forbidden");
+  // A test fire with no chat named must hit only your own phone, never someone else's.
+  const t = p.pushTest(null, "own-a", false);
+  assert.equal(t.sent, 1, "a test fire is scoped to the caller's own recipients");
+  assert.equal(p.pushTest("2222222222", "own-a", false).error, "cooldown", "…and naming another person's chat is refused (cooldown here, forbidden otherwise)");
+
+  // Admin sees and manages everything.
+  const adm = p.getPush("own-c", true);
+  assert.equal(adm.recipients.length, 2);
+  assert.equal(adm.admin, true);
+  assert.equal(adm.othersLinked, 0, "admin has no hidden remainder");
+  assert.ok(adm.recipients.some((r) => r.mine === false), "rows the admin does not own are marked, not disguised as theirs");
+  assert.equal(p.pushUnlink("2222222222", "own-c", true).ok, true, "admin can revoke anyone");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("rules are per-person: private lists, per-person cap, and events that stay with their author", () => {
+  const p = twoUserHarness();
+  p.seedRowNow("AAA", { ticker: "AAA", px: 100, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
+  p.buildSnapshotNow();
+
+  const ra = p.addRule({ metric: "h1", op: ">", value: 5, note: "mine" }, "own-a");
+  p.addRule({ metric: "d1", op: "<", value: -5, note: "theirs" }, "own-b");
+  assert.equal(ra.ok, true);
+
+  const a = p.getRules("own-a", false), b = p.getRules("own-b", false);
+  assert.equal(a.rules.length, 1);
+  assert.equal(a.rules[0].note, "mine");
+  assert.equal(a.othersRules, 1, "you can tell the engine is working for others without seeing what they watch");
+  assert.ok(!JSON.stringify(a.rules).includes("theirs"));
+  assert.equal(b.rules[0].note, "theirs");
+  assert.equal(p.getRules("own-c", true).rules.length, 2, "admin sees every rule");
+
+  assert.equal(p.deleteRule(ra.rule.id, "own-b", false).error, "forbidden", "you cannot delete someone else's rule");
+  assert.equal(p.deleteRule(ra.rule.id, "own-c", true).ok, true, "admin can");
+
+  // A personal rule produces a personal EVENT. Without this the ring would carry one person's
+  // thresholds into everyone else's bell log and phone.
+  const r2 = p.addRule({ metric: "h1", op: ">", value: 5 }, "own-b");
+  assert.ok(r2.ok);
+  p.ruleScanNow();                                                   // arms
+  p.seedRowNow("AAA", { px: 112 }); p.buildSnapshotNow(); p.ruleScanNow();   // fires
+  const mine = p.getTriggers(0, "own-b", false).events.filter((e) => e.kind === "rule");
+  assert.equal(mine.length, 1, "the author sees their own rule firing");
+  assert.equal(p.getTriggers(0, "own-a", false).events.filter((e) => e.kind === "rule").length, 0,
+    "…and nobody else does");
+  assert.equal(p.getTriggers(0, "own-c", true).events.filter((e) => e.kind === "rule").length, 1, "admin sees it");
+
+  // Market and server events stay shared — they are about the tape, not about you.
+  p.pushOpsNow("poller stalled", "x", "warn");
+  for (const who of [["own-a", false], ["own-b", false]])
+    assert.ok(p.getTriggers(0, who[0], who[1]).events.some((e) => e.kind === "ops"),
+      "ops events are shared by construction");
+});
+
+test("ownership is a signed handle, not a guessable id, and legacy rows stay admin-managed", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // Signed so it cannot be forged, random so it cannot be guessed, HttpOnly so page script cannot
+  // read it. It grants nothing except management of the recipients linked from that browser.
+  assert.ok(/const OWNER_SECRET = crypto\.createHash/.test(srv) && /function signOwner/.test(srv));
+  assert.ok(/crypto\.timingSafeEqual/.test(srv.slice(srv.indexOf("function ownerOf"), srv.indexOf("function ensureOwner"))),
+    "handle verification must be constant-time like every other token check here");
+  assert.ok(/crypto\.randomBytes\(12\)/.test(srv), "the id must be random, not derived from anything a visitor controls");
+  assert.ok(/xyzown=" \+ signOwner\(id\) \+ cookieAttrs\(req, 400 \* 24 \* 3600\) \+ "; HttpOnly"/.test(srv));
+
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // Ownerless rows predate this build. Adopting them by "first visitor to look" would hand one
+  // person's linked Telegram to whoever opened the panel next.
+  assert.ok(/return !!\(rec && rec\.owner && owner && rec\.owner === owner\);/.test(pol),
+    "an absent owner must never match an absent caller — that is the adoption hole");
+  assert.ok(/admin-managed rather than adopted/.test(pol) || /admin-managed, never silently adopted/.test(pol),
+    "the legacy-row decision is documented where it is made");
+  // /stop is the escape hatch that needs no cookie: the command arrives FROM the chat.
+  assert.ok(/if \(had\) pushUnlink\(chat, null, true\);/.test(pol));
+  assert.ok(/control of the\n        \/\/ Telegram account is a stronger claim than any browser handle/.test(pol));
+});
+
+// ===== Alerts panel: density, precision, clearing (build 2026.07.27-09) =========================
+
+test("panel: sections collapse, class chips wrap, and repeated rows collapse with a count", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+
+  // Four stacked blocks plus a log had turned the panel into a wall.
+  assert.ok(/const sec=\(k,title,note,body,extra\)=>/.test(app), "sections are built by one helper, not four hand-rolled headers");
+  for (const k of ["'trig'", "'rules'", "'deliv'", "'recent'"]) assert.ok(app.includes("sec(" + k), `section ${k} missing`);
+  assert.ok(/open:\{ trig:false, rules:false, deliv:true, recent:true \}/.test(app), "collapse state has sane defaults");
+  assert.ok(/open:state\.alerts\.open/.test(app) && /if\(d\.open&&typeof d\.open==='object'\)/.test(app), "…and persists");
+  assert.ok(/\.asec-h\{/.test(css) && /\.asec-b\{/.test(css));
+
+  // Nine classes overflowed a single row and the last chip was cut off the panel.
+  assert.ok(/flex-wrap:wrap">\$\{chips\}/.test(app), "the class chip row must wrap");
+
+  // Ten identical deploy lines carry as much information as one line saying it happened ten times,
+  // and they were burying every setup and ledger event under them.
+  assert.ok(/if\(last && last\.kind===e\.kind && last\.text===e\.text\)\{ last\.n=\(last\.n\|\|1\)\+1; continue; \}/.test(app),
+    "consecutive identical rows must collapse");
+  assert.ok(/e\.n>1\?` <span class="sec"[\s\S]{0,80}\\u00d7\$\{e\.n\}/.test(app), "…and disclose the count rather than hiding the repeats");
+});
+
+test("panel: thresholds are precise, cover R:R, and drive both surfaces from one control", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // R:R was in the client state from the start with no way to set it — the board's own grinder /
+  // windfall split is exactly the filter someone wants on an alert.
+  assert.ok(/numIn\('at-rr',T\.minRR/.test(app), "R:R at fire must be settable");
+  assert.ok(/numIn\('at-ev',T\.minEV/.test(app) && /numIn\('at-late',T\.maxLate/.test(app));
+  assert.ok(/step="0\.05"/.test(app), "0.05 steps — the old selects offered three fixed values each");
+
+  // Two places to set the same number is how they end up disagreeing.
+  assert.ok(/const syncTrig=\(\)=>/.test(app) && /pushAct\('\/api\/alerts\/prefs',\{chat:r\.chat, trig:/.test(app),
+    "one control must write the in-tab filter AND the telegram thresholds");
+  assert.ok(/for\(const r of rs\) if\(r\.mine\)/.test(app), "…and only onto recipients this browser owns");
+
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/if \("trig" in p\)/.test(pol), "the prefs route must accept thresholds");
+  assert.ok(/r\.trig = \{\};/.test(pol), "written whole, not merged — a partial write leaves a threshold the panel is not showing");
+});
+
+test("clearing is a per-browser view watermark, never a deletion from the record", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/clearedSeq:0/.test(app) && /clearedSeq:state\.alerts\.clearedSeq/.test(app), "the watermark exists and persists");
+  assert.ok(/A\.feed\.filter\(e=>\(e\.seq\|\|0\)>\(A\.clearedSeq\|\|0\)\)/.test(app), "the log renders above the watermark");
+  // The ring is the record. A client deleting from it would mean the phone and the panel could
+  // disagree about what happened, which is the failure this whole system exists to avoid.
+  assert.ok(!/\/api\/triggers[\s\S]{0,80}method:'DELETE'/.test(app), "there must be no client path that deletes server events");
+  assert.ok(/other devices and the telegram history are untouched/.test(app),
+    "the control must say what it actually does — 'clear' implying deletion would be a lie");
+  assert.ok(/if\(\(A\.seenSeq\|\|0\)<hi\) A\.seenSeq=hi;/.test(app), "clearing also marks read, or the badge counts invisible rows");
 });
