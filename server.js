@@ -10,7 +10,7 @@ const { createPoller } = require("./src/poller");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.26-02";
+const VERSION = "2026.07.26-03";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -432,7 +432,7 @@ async function main() {
   // ages a bar, or its geometry re-prices against the live mark.
   fastify.get("/api/actionable", (req, reply) =>
     serveCached(req, reply, poller.getActionable(),
-      { ts: 0, dataTs: 0, params: {}, coverage: {}, proven: [], unproven: [], count: 0 }));
+      { ts: 0, dataTs: 0, params: {}, coverage: {}, rows: [], count: 0 }));
   // Earnings calendar for the xyz equity universe (Finnhub-fed, 6h server refresh). ETag rides
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
