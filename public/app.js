@@ -4222,7 +4222,7 @@ function renderActionable(){
   const rows=(d.rows||[]).filter(r=>r.uni===wantU&&(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)&&((r.cls==='ev')?showEV:showRR)).slice().sort(actCmp);
   let h='';
   { const mn=macroNextC();
-    if(mn&&mn.diff<=1) h+=`<div class="sec" style="font-size:11.5px;margin-bottom:8px;color:var(--blue)" data-tip="universe-wide scheduled binary \u2014 rows whose remaining horizon contains the event carry a \u25c6; flagged, never filtered. Applies to crypto exactly as to equities.">\u25c6 ${esc(mn.e.label)} ${mn.diff===0?'today':'tomorrow'} (${macroDayLbl(mn.e.d)}, ${macroTimeLbl(mn.e)}) \u2014 inside every open horizon \u2265${mn.diff===0?1:2}d; flagged per row, never filtered</div>`; }
+    if(mn&&mn.diff<=2) h+=`<div class="sec" style="font-size:11.5px;margin-bottom:8px;color:var(--blue)" data-tip="universe-wide scheduled binary \u2014 rows whose remaining horizon contains the event carry a \u25c6; flagged, never filtered. Applies to crypto exactly as to equities.">\u25c6 ${esc(mn.e.label)} ${mn.diff===0?'today':mn.diff===1?'tomorrow':macroDayLbl(mn.e.d)} (${macroDayLbl(mn.e.d)}, ${macroTimeLbl(mn.e)}) \u2014 inside every open horizon \u2265${Math.max(1,mn.diff)}d; flagged per row, never filtered</div>`; }
   if(!rows.length){
     h+=`<div class="msg">Nothing confirmed at a swing trigger right now.`
       +`${c.openClaims!=null?` ${c.openClaims} open claim(s) scanned across both universes`:''}`
@@ -4428,9 +4428,14 @@ function renderMacroStrip(){
     cls+=' result';
     const e=rec.e;
     h=`<span class="ms-g">\u25c6</span><span><b>${esc(e.label)}</b> <span class="ms-when">released ${macroTimeLbl(e)}</span> <span class="sec2">\u00b7</span> <span class="sec2">${macroValHtml(e)}</span></span>`;
-  } else if(nxt&&nxt.diff<=1){
+  } else if(nxt&&nxt.diff<=2){
     const e=nxt.e;
-    h=`<span class="ms-g">\u26a0</span><span><b>${esc(e.label)}</b> <span class="ms-when">${nxt.diff===0?'today':'tomorrow'}</span> <span class="sec2">\u00b7 ${macroDayLbl(e.d)}, ${macroTimeLbl(e)}${e.prior?` \u00b7 ${macroValHtml(e).replace(/<[^>]+>/g,'')}`:''}</span></span>`;
+    let when=nxt.diff===0?'today':nxt.diff===1?'tomorrow':macroDayLbl(e.d);
+    let lead=esc(e.label);
+    if(e.k==='FOMC'&&e.d1){ const d1f=earnDiffC(e.d1);
+      if(d1f===1){ lead='FOMC meeting begins'; when='tomorrow'; }
+      else if(d1f===0){ lead='FOMC meeting underway'; when='day 1 of 2'; } }
+    h=`<span class="ms-g">\u26a0</span><span><b>${lead}</b> <span class="ms-when">${when}</span> <span class="sec2">\u00b7 ${e.k==='FOMC'?`decision ${macroDayLbl(e.d)}, ${macroTimeLbl(e)}`:`${macroDayLbl(e.d)}, ${macroTimeLbl(e)}`}${e.prior?` \u00b7 ${macroValHtml(e).replace(/<[^>]+>/g,'')}`:''}</span></span>`;
   }
   if(h){ box.className=cls; box.innerHTML=h; box.hidden=false;
     if(tab&&!tab.querySelector('.tabdot')) tab.insertAdjacentHTML('beforeend','<span class="tabdot"></span>');
@@ -6337,7 +6342,7 @@ earnings:`
 <div class="hlp-h">Interaction with Signals</div>
 <p>Session-spanning claims (breakout, breakdown, outsized gap, overnight drift) firing on a name that reports ≤1 day out wear an <i>earnings</i> flag and have their <b>evidence contribution capped</b> (same 8-point cap as the no-live-edge guard) and can't be ★ prime. Why: the historical base rates weren't conditioned on a known binary catalyst sitting inside the horizon — this is a stated <b>prior</b>, not a measured expectancy, and it's labeled as such on the card. The condition's intensity is untouched; only borrowed statistical confidence is trimmed. Every such claim is also <b>tagged in the ledger</b> (E in the claim history), and once ≥5 tagged claims resolve per event, the Signals tab shows the earnings-window record next to the ordinary one — over time the guard stops being a prior and becomes a measured base rate.</p>
 <div class="hlp-h">Macro rows — FOMC and the print calendar</div>
-<p>Interleaved with earnings by ET day: <b>FOMC decisions</b> (statement 2:00 PM ET, presser 2:30; <b>SEP</b> chip = dot-plot meeting) from the Fed's published schedule, and <b>CPI · nonfarm payrolls · PPI · retail sales · GDP · PCE</b> (all 8:30 ET) from FRED's release schedule. These are <b>universe-wide</b> — an FOMC decision moves BTC as hard as it moves SPX, so the rows, the global banner and every flag apply to both scopes. The banner under the nav appears when the next event lands <b>today or tomorrow</b> (ET) on every tab, and flips to a blue <b>result strip</b> for the rest of the ET day once the print is out.</p>
+<p>Interleaved with earnings by ET day: <b>FOMC decisions</b> (statement 2:00 PM ET, presser 2:30; <b>SEP</b> chip = dot-plot meeting) from the Fed's published schedule, and <b>CPI · nonfarm payrolls · PPI · retail sales · GDP · PCE</b> (all 8:30 ET) from FRED's release schedule. These are <b>universe-wide</b> — an FOMC decision moves BTC as hard as it moves SPX, so the rows, the global banner and every flag apply to both scopes. The banner under the nav appears when the next event is <b>\u22642 ET days out</b> on every tab, and flips to a blue <b>result strip</b> for the rest of the ET day once the print is out.</p>
 <div class="hlp-h">Macro rows — what the numbers are (and aren't)</div>
 <p>Upcoming rows show the <b>prior</b> — the previous print, labeled by its reference month. It is <b>not a consensus estimate</b>: no street-estimate feed exists in this system, so macro rows never claim a beat/miss vs expectations. Once released, a row reads <b>prior → actual</b>; between the ET release clock and FRED's data landing (typically under an hour) it says <i>"released — actual pending"</i> instead of dressing a stale month as the print. FOMC rows resolve to <b>held / cut / hiked</b> against the range going in. Dates come from the agencies' published schedules and can move.</p>
 <div class="hlp-h">Macro × Signals, Actionable, AI reports</div>
