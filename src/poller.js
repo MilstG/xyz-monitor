@@ -16,7 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { momPair, spearmanIC, duelStats } = require("./compute");
-const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
+const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
@@ -145,7 +145,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const ANALYTICS_LAZY_CD = 20 * 1000;   // at most one on-demand build attempt per universe per 20s
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
-  let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0;   // /api/trend — lazy, memoized, ETag rides content
+  let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0, trendByCoin = new Map();   // /api/trend — lazy, memoized, ETag rides content
   const earnMap = new Map();   // ticker -> sorted upcoming [{d, s, eps}] for badge/guard proximity lookups
   let earnPrints = [], earnHistDone = false, earnStudy = {};   // past prints (persisted, self-accruing) + per-ticker reaction stats
   let earnVoids = new Set();   // operator tombstones (ticker|date): feed-garbage prints, permanently ignored at every ingest point
@@ -898,6 +898,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function markSig(m) {
     return m.coin + "|" + m.px + "," + m.prevDay + "," + m.funding + "," + m.vol + "," + m.oi + ","
       + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0) + "," + (m.cascT || 0) + "," + (m.liq24 || 0)
+      + "," + (m.tscore == null ? "" : m.tscore) + "," + (m.e21d == null ? "" : m.e21d)
       + "|" + (m.ref ? JSON.stringify(m.ref) : "") + (m.feat ? JSON.stringify(m.feat) : "")
       + (m.red ? JSON.stringify(m.red) : "") + (m.rvol ? JSON.stringify(m.rvol) : "")
       + (m.doi ? JSON.stringify(m.doi) : "") + (m.fundByWin ? JSON.stringify(m.fundByWin) : "") + ";";
@@ -950,12 +951,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // 24h liquidation volume (aggregated CEX, USD source-converted): the SAME memoized rollup
       // object the drawer chips serve — one code path, board and drawer can never disagree.
       const droll = r.uni === "main" && cz ? czRoll.get(r.coin) : null;
+      const tb = trendByCoin.get(r.coin);
       return {
         fundPct, red, rvol,
         casc: casc || undefined, cascT: casc ? casc.t : undefined,
         liq24: droll ? (droll.ll24 || 0) + (droll.sl24 || 0) : undefined,
         liqL24: droll ? droll.ll24 : undefined, liqS24: droll ? droll.sl24 : undefined,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
+        // Signed so ONE metric expresses both sides: +4 fully stacked up, -4 fully stacked down.
+        tscore: tb ? (tb.side === "long" ? tb.score : -tb.score) : undefined,
+        e21d: (tb && tb.e21 > 0 && r.px > 0) ? rnd((r.px / tb.e21 - 1) * 100, 2) : undefined,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
         oracle: sig(r.oracle, 9), d1: rnd(r.d1, 4),
@@ -4058,6 +4063,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     setInterval(safeTick(ruleScan, "ruleScan"), 15 * 1000);
     setInterval(safeTick(earnScan, "earnScan"), 60 * 60 * 1000);
     setInterval(safeTick(regimeScan, "regimeScan"), 15 * 60 * 1000);
+    setInterval(safeTick(trendScan, "trendScan"), 5 * 60 * 1000);
+    // One full pass seeds every name's state before anything may fire — otherwise the first scan
+    // after a deploy announces every 4/4 stack on the board as if it had just arrived.
+    setTimeout(() => { try { trendScan(); } catch (_) {} trendPrimed = true; log("trend alerts primed"); }, 6 * 60 * 1000);
     setInterval(safeTick(coverageScan, "coverageScan"), 10 * 60 * 1000);
     setInterval(safeTick(digestTick, "digestTick"), 5 * 60 * 1000);
     // The EDGAR rotation covers 2 names a minute, so a full roster pass takes ~40 minutes. Priming
@@ -4457,6 +4466,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       sides[s][u].map((e) => [e.coin, e.score, e.retest, e.read, e.age])))]);
     if (sigTrend !== trendSig) { trendSig = sigTrend; trendVer = Date.now(); }
     trendBuilt = now;
+    // Coin -> board state, indexed once here so the snapshot stamp, the rule metrics and the trend
+    // scan all read the SAME numbers the Trend tab renders. Re-deriving a ladder anywhere else is
+    // exactly how a board and an alert start disagreeing.
+    trendByCoin = new Map();
+    for (const side of ["long", "short"]) for (const uni of ["crypto", "stocks"]) {
+      for (const e of (sides[side][uni] || [])) {
+        const d1 = e.tf && e.tf.D1;
+        const prev = trendByCoin.get(e.coin);
+        // A name can appear on both boards across timeframes; keep the stronger read.
+        if (prev && prev.score >= e.score) continue;
+        trendByCoin.set(e.coin, { side, uni, score: e.score, retest: e.retest || null,
+          e21: d1 && d1.e21 > 0 ? d1.e21 : null, e13: d1 && d1.e13 > 0 ? d1.e13 : null, age: e.age });
+      }
+    }
     trendCache = { ts: now, dataTs: trendVer,
       params: { ema: [13, 21], tfs: TREND_TFS, retestBars: 3, top: TREND_TOP },
       coverage: { included: scanned, excluded },
@@ -6065,10 +6088,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // An event with an `owner` belongs to one person: it exists because of a rule they wrote, so it
   // is theirs to see. Everything else — setups, ledger outcomes, filings, ops — is about the market
   // or the server and is shared by construction.
+  // OWNERSHIP only. Deliberately separate from the admin-class gate below: the delivery path also
+  // calls this, and folding the two together blocked ops for operators (a recipient is not "admin"
+  // in the see-everyone's-events sense just because they may receive server health).
   const evVisible = (e, owner, isAdmin) => !e.owner || isAdmin || (!!owner && e.owner === owner);
+  // Admin-only CLASSES, for the in-app feed. Hiding the chip while still shipping the events would
+  // leave the public bell log narrating server faults nobody outside the operator can act on.
+  const evClassOk = (e, isAdmin) => !PUSH_ADMIN_CLASSES.includes(e.kind) || !!isAdmin;
   function getTriggers(sinceSeq, owner, isAdmin) {
     const since = Number.isFinite(+sinceSeq) ? +sinceSeq : null;
-    const vis = trigEvents.filter((e) => evVisible(e, owner, isAdmin));
+    const vis = trigEvents.filter((e) => evClassOk(e, isAdmin) && evVisible(e, owner, isAdmin));
     const evs = since == null ? vis.slice(-40) : vis.filter((e) => e.seq > since);
     // `events` and `recent` answer two different questions and a consumer needs both in one round
     // trip: events = what has happened since MY cursor (what to interrupt for, exactly once), and
@@ -6120,6 +6149,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (!r || !r.chat) continue;
       pushRecipients.set(String(r.chat), {
         owner: typeof r.owner === "string" ? r.owner : "",
+        // Recipients linked before ownership existed were linked by the operator, so they keep
+        // operator privileges rather than silently losing their ops alerts.
+        admin: r.admin === undefined ? !r.owner : !!r.admin,
         chat: String(r.chat), name: r.name || String(r.chat), since: +r.since || Date.now(),
         cur: +r.cur || 0, classes: Array.isArray(r.classes) ? r.classes.filter((c) => PUSH_CLASSES.includes(c)) : null,
         trig: r.trig && typeof r.trig === "object" ? r.trig : {},
@@ -6174,12 +6206,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (isAdmin) return true;
     return !!(rec && rec.owner && owner && rec.owner === owner);
   }
-  function pushMintCode(owner) {
+  function pushMintCode(owner, isAdmin) {
     const now = Date.now();
     for (const [c, v] of pushCodes) if (now - v.t > PUSH_LINK_TTL) pushCodes.delete(c);
     let code = "";
     for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[Math.floor(Math.random() * PUSH_CODE_ALPHABET.length)];
-    pushCodes.set(code, { t: now, owner: owner || "" });
+    pushCodes.set(code, { t: now, owner: owner || "", admin: !!isAdmin });
     return { ok: true, code, expiresAt: now + PUSH_LINK_TTL };
   }
   function pushBind(code, chat, name) {
@@ -6196,6 +6228,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // that generated it. A re-link from a different browser transfers ownership, which is the
       // right behaviour: proving you control the Telegram account is the stronger claim.
       owner: rec.owner || (prev ? prev.owner : "") || "",
+      // Admin-ness is stamped at LINK time from the browser that minted the code. Re-linking is how
+      // it changes, which is deliberate: an alert channel whose contents silently change when a
+      // cookie expires elsewhere is worse than one you re-authorise on purpose.
+      admin: !!rec.admin || (prev ? !!prev.admin : false),
       chat: key, name: name || key, since: prev ? prev.since : Date.now(),
       // A new recipient starts CAUGHT UP, never with the backlog: the ring holds up to 200 events
       // and nobody wants their first message from this bot to be two hundred stale setups.
@@ -6883,6 +6919,55 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ok: true, quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {} };
   }
 
+
+  // ---- trend class: full stacks and D1 ribbon crosses -------------------------------------------
+  // The Trend board's RETEST badge already reaches you as a `setup` (it is a ledgered claim with
+  // frozen geometry). Nothing else about the board did. Two events are added, and only two:
+  //
+  //   entry  — a name arriving at a FULL 4/4 stack it did not hold before. Rare by construction.
+  //   cross  — the D1 13/21 ribbon flipping sign. D1 only: H12 and H4 crosses are where the volume
+  //            of crossings lives, and at ~144 names they would be a feed, not an alert.
+  //
+  // Both are persistent-state transitions, so both carry the same re-arm discipline as regime and
+  // coverage: state in force at first sight is seeded, never announced.
+  const trendState = new Map();   // coin -> { score, sign }
+  let trendPrimed = false;
+  function trendScan() {
+    const now = Date.now();
+    if (!trendCache || now - trendBuilt > TREND_MS) { try { buildTrend(); } catch (_) { return 0; } }
+    if (!trendByCoin.size) return 0;
+    let fired = 0;
+    for (const [coin, tb] of trendByCoin) {
+      const r = rows.get(coin);
+      if (!r || r.delisted) continue;
+      const sign = (tb.e13 > 0 && tb.e21 > 0) ? (tb.e13 > tb.e21 ? 1 : -1) : 0;
+      const prev = trendState.get(coin);
+      trendState.set(coin, { score: tb.score, sign });
+      if (!trendPrimed || !prev) continue;   // first pass seeds the whole board silently
+      // 1. Full stack reached. Only the ARRIVAL fires; sitting at 4/4 for a week says nothing new.
+      if (tb.score >= 4 && prev.score < 4) {
+        emitTrig("trend", { coin, t: r.ticker || coin, side: tb.side, sub: "stack", score: tb.score,
+          tf: "D1", px: r.px, e21: tb.e21, title: "full 4/4 stack",
+          text: `every rung aligned ${tb.side === "long" ? "up" : "down"}${tb.age != null ? ` \u00b7 trend age ${tb.age}d` : ""}` }, now);
+        fired++;
+        continue;   // one event per name per scan: a cross that arrives with the stack is the stack
+      }
+      // 2. D1 ribbon cross. Sign 0 (a rung without both EMAs) is unknown, not a flip — treating it
+      //    as one would fire on every gap in the ladder.
+      if (sign !== 0 && prev.sign !== 0 && sign !== prev.sign) {
+        emitTrig("trend", { coin, t: r.ticker || coin, side: sign > 0 ? "long" : "short", sub: "cross",
+          score: tb.score, tf: "D1", px: r.px, e21: tb.e21,
+          title: "D1 13/21 cross " + (sign > 0 ? "up" : "down"),
+          text: "the daily ribbon flipped " + (sign > 0 ? "bullish" : "bearish") }, now);
+        fired++;
+      }
+    }
+    // Names that left the board entirely lose their state, so a return is a genuinely new episode.
+    for (const c of [...trendState.keys()]) if (!trendByCoin.has(c)) trendState.delete(c);
+    if (fired) { persistTriggers(); log(`trend alerts: ${fired} event(s)`); }
+    return fired;
+  }
+
   function pushTest(chat, owner, isAdmin) {
     if (!pushOn()) return { ok: false, error: "disabled" };
     const now = Date.now();
@@ -6910,7 +6995,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return {
       ts: now, dataTs: pushVer,
       enabled: pushOn(),
-      classes: PUSH_CLASSES, defaultClasses: PUSH_DEFAULT_CLASSES, rates: getClassRates(),
+      classes: PUSH_CLASSES, defaultClasses: PUSH_DEFAULT_CLASSES, adminClasses: PUSH_ADMIN_CLASSES, rates: getClassRates(),
       lookbackMs: PUSH_GRACE_MS, bootAt: pushBootAt,   // the boot rule is a lookback window, not a countdown — nothing is "waiting" to unmute
       admin: !!isAdmin,
       // Counted, never listed: a visitor should know the bot serves other people without being shown
@@ -6919,7 +7004,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       recipients: visible.map((r) => ({
         mine: pushOwns(r, owner, false),
         chat: r.chat, mask: pushMask(r.chat), name: r.name, since: r.since,
-        classes: r.classes, muted: !!r.muted, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
+        classes: r.classes, muted: !!r.muted, admin: !!r.admin, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
         quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {},
         quietNow: !!(r.quiet && inQuietWindow(now, r.quiet)),
         sentHour: (r.sent || []).filter((t) => now - t < 3600e3).length })),
@@ -7025,6 +7110,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getClassRates,
     pushSetPrefs,
     regimeScanNow: regimeScan,
+    trendScanNow: trendScan,
+    trendPrimeNow: () => { trendPrimed = true; },
+    trendIndexNow: () => trendByCoin,
     coverageScanNow: coverageScan,
     digestTickNow: digestTick,
     buildDigestNow: buildDigest,

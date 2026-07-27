@@ -3550,7 +3550,12 @@ function trigEligible(row, cfg) {
 // `ledger` is the DEATH side of a claim the `setup` class already announced: its void level taken,
 // its target reached, or its horizon resolved. Deliberately one class rather than three — nobody
 // wants to subscribe to target-hits but not stop-hits, and the message says which it is.
-const PUSH_CLASSES = ["setup", "ledger", "rule", "filing", "earnings", "ai", "regime", "coverage", "ops"];
+const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "filing", "earnings", "ai", "regime", "coverage", "ops"];
+// Classes only an operator should receive. Ops is server health — a stalled poller is actionable if
+// you can redeploy and noise if you cannot, and the group should not be woken by the plumbing.
+// Enforced in delivery AND in the in-app feed, not just hidden in the panel: a class the public
+// cannot act on should not be readable either.
+const PUSH_ADMIN_CLASSES = ["ops"];
 // Which classes a recipient gets when they have NOT chosen. The deploy-notice mistake in miniature:
 // a class that seems informative in isolation becomes noise at its real frequency, and "all classes
 // by default" means every new class I add silently starts spamming everyone already linked. So the
@@ -3595,6 +3600,7 @@ function pushEligible(ev, sub) {
   if (!PUSH_CLASSES.includes(kind)) return false;
   // An explicit selection is honoured exactly; an absent one falls back to the DEFAULT set rather
   // than to everything, so adding a class cannot retroactively subscribe anyone.
+  if (PUSH_ADMIN_CLASSES.includes(kind) && !s.admin) return false;
   if (Array.isArray(s.classes) && s.classes.length) { if (!s.classes.includes(kind)) return false; }
   else if (!PUSH_DEFAULT_CLASSES.includes(kind)) return false;
   if (kind === "ops") return true;                 // ops has no thresholds — it is already rare by construction
@@ -3606,7 +3612,7 @@ function pushEligible(ev, sub) {
   // wrote. Layering the setup thresholds on top would silently veto somebody's own alert.
   if (kind === "rule") return true;
   if (kind === "filing" || kind === "earnings" || kind === "ai") return true;
-  if (kind === "regime" || kind === "coverage") return true;
+  if (kind === "regime" || kind === "coverage" || kind === "trend") return true;
   return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
 }
 
@@ -3614,90 +3620,121 @@ function pushEligible(ev, sub) {
 // geometry, the evidence, the link. Fixed order matters more here than on screen — this arrives at
 // 3am on a phone and the eye needs to land on the void level in the same place every time.
 // Returns null for an unformattable event rather than shipping a half-message.
+// Telegram's HTML subset has no colour, so the app's terminal look is carried by the two things it
+// DOES have: a monospace <pre> block, and glyphs. The geometry goes in <pre> so the numbers column-
+// align exactly as they do on the board; everything else stays prose. One leading glyph per message
+// and a side dot — enough to sort a class at a glance on a lock screen, not enough to become soup.
+const PUSH_GLYPH = { setup: "\u26a1", ledger: "\u23f1", rule: "\u{1f4d0}", trend: "\u{1f4c8}",
+  filing: "\u{1f4c4}", earnings: "\u{1f4c5}", ai: "\u{1f9e0}", regime: "\u{1f30a}",
+  coverage: "\u26a0\ufe0f", ops: "\u{1f527}" };
+const sideDot = (s) => (s === "long" ? "\u{1f7e2}" : s === "short" ? "\u{1f534}" : "");
+const sideWord = (s) => (s === "long" ? "LONG" : s === "short" ? "SHORT" : String(s || "").toUpperCase());
+// Right-pads labels so a <pre> block reads as a table rather than a run-on. Telegram renders <pre>
+// in a fixed-width face, so this actually lines up on every client.
+function preRows(rows) {
+  const keep = rows.filter((r) => r && r[1] != null && r[1] !== "");
+  if (!keep.length) return "";
+  const w = Math.max.apply(null, keep.map((r) => r[0].length));
+  return "<pre>" + keep.map((r) => tgEsc(r[0].padEnd(w) + "  " + r[1])).join("\n") + "</pre>";
+}
+const pxs = (v) => (v == null || !isFinite(v) ? null : String(+(+v).toPrecision(6)));
+const nums = (v, d, sign) => (v == null || !isFinite(v) ? null
+  : (sign && v >= 0 ? "+" : "") + (+v).toFixed(d == null ? 2 : d));
+
 function pushFmt(ev, opts) {
   if (!ev) return null;
   const o = opts || {};
   const kind = ev.kind || "setup";
+  const g = PUSH_GLYPH[kind] || "";
+  const base = o.baseUrl ? String(o.baseUrl).replace(/\/+$/, "") : "";
+  const name = tgEsc(ev.t || ev.coin || "");
+  const link = (label) => (base && ev.coin
+    ? '<a href="' + tgEsc(base + "/#t=" + encodeURIComponent(ev.coin)) + '">' + tgEsc(label) + " \u2192</a>" : "");
+  const out = (lines) => lines.filter(Boolean).join("\n");
+
   if (kind === "ops") {
-    const tag = ev.level === "warn" ? "\u26a0 " : "";
-    return tag + "<b>" + tgEsc(ev.title || "ops") + "</b>\n" + tgEsc(ev.text || "");
+    return out([(ev.level === "warn" ? "\u26a0\ufe0f" : g) + " <b>" + tgEsc(ev.title || "ops") + "</b>",
+      tgEsc(ev.text || "")]);
   }
-  if (!ev.coin) return null;
-  const name = tgEsc(ev.t || ev.coin);
+  if (!ev.coin && kind !== "regime") return null;
+
+  if (kind === "setup") {
+    const head = g + " <b>" + name + "</b> " + sideDot(ev.side) + " " + sideWord(ev.side)
+      + " \u00b7 " + tgEsc(ev.label || ev.ev || "")
+      + (ev.tf ? " \u00b7 " + tgEsc(ev.tf) : "")
+      + (ev.cls === "ev" ? " \u00b7 grinder" : "")
+      + (ev.prime === true ? " \u2b50" : "");
+    const geo = preRows([
+      ["entry", pxs(ev.entry)], ["void", pxs(ev.void)], ["target", pxs(ev.target)],
+      ["R:R", ev.rr && ev.rr.gross != null ? nums(ev.rr.gross, 1) : null],
+    ]);
+    const rec = ev.rec || {};
+    const eline = [nums(ev.evR, 2, true) != null ? "EV " + nums(ev.evR, 2, true) + "R" : null,
+      rec.n != null ? "n=" + rec.n : null,
+      rec.hit != null ? "hit " + Math.round(rec.hit * 100) + "%" : null,
+      rec.avgR != null ? "avg " + nums(rec.avgR, 2, true) + "R" : null,
+      ev.late != null ? "late " + nums(ev.late, 2, true) + "R" : null].filter(Boolean).join(" \u00b7 ");
+    return out([head, geo, eline, ev.earn ? "\u26a0\ufe0f earnings inside the horizon" : "", link("open " + (ev.t || ev.coin))]);
+  }
+
+  if (kind === "ledger") {
+    const mark = ev.sub === "stop" ? "\u26d4" : ev.sub === "target" ? "\u{1f3af}" : "\u{1f3c1}";
+    const verb = ev.sub === "stop" ? "void taken" : ev.sub === "target" ? "target reached" : "resolved";
+    const head = mark + " <b>" + name + "</b> " + sideDot(ev.side) + " " + sideWord(ev.side)
+      + " \u00b7 " + tgEsc(ev.label || ev.ev || "") + " \u2014 " + verb;
+    let body;
+    if (ev.sub === "resolved") {
+      const win = Number.isFinite(ev.realized) && ev.realized > 0;
+      body = preRows([
+        ["outcome", (Number.isFinite(ev.realized) ? (win ? "\u{1f7e9} " : "\u{1f7e5} ") + nums(ev.realized, 2, true) + (ev.unit || "R") : "\u2014")],
+        ["stopped", ev.stopped ? "yes, en route" : null],
+        ["held", ev.held || null],
+      ]);
+    } else {
+      body = preRows([["level", pxs(ev.level)], ["entry", pxs(ev.entry)], ["open", ev.held || null]]);
+    }
+    return out([head, body, link("open " + (ev.t || ev.coin))]);
+  }
+
+  if (kind === "trend") {
+    const up = ev.side === "long";
+    const head = (up ? "\u{1f4c8}" : "\u{1f4c9}") + " <b>" + name + "</b> " + sideDot(ev.side)
+      + " \u00b7 " + tgEsc(ev.title || "");
+    const body = preRows([["score", ev.score != null ? ev.score + "/4" : null],
+      ["tf", ev.tf || null], ["mark", pxs(ev.px)], ["EMA21", pxs(ev.e21)]]);
+    return out([head, body, tgEsc(ev.text || ""), link("open " + (ev.t || ev.coin))]);
+  }
+
+  if (kind === "rule") {
+    const head = g + " <b>" + name + "</b> \u00b7 " + tgEsc(ev.rule || (ev.label + " " + ev.op + " " + ev.value));
+    const body = preRows([["now", ev.now == null ? null : String(ev.now)], ["note", ev.note || null]]);
+    return out([head, body, link("open " + (ev.t || ev.coin))]);
+  }
+
   if (kind === "filing") {
-    const l1 = "<b>" + name + "</b> \u00b7 " + tgEsc(ev.form || "filing");
-    const l2 = tgEsc(ev.h || "");
-    const l3 = ev.url ? '<a href="' + tgEsc(ev.url) + '">read the filing</a>' : "";
-    return [l1, l2, l3].filter(Boolean).join("\n");
+    return out([g + " <b>" + name + "</b> \u00b7 " + tgEsc(ev.form || "filing"),
+      tgEsc(ev.h || ""),
+      ev.url ? '<a href="' + tgEsc(ev.url) + '">read the filing \u2192</a>' : ""]);
   }
   if (kind === "earnings") {
-    const l1 = "<b>" + name + "</b> \u00b7 reports " + tgEsc(ev.when || "soon")
+    const head = g + " <b>" + name + "</b> \u00b7 reports " + tgEsc(ev.when || "soon")
       + (ev.session ? " (" + tgEsc(ev.session) + ")" : "");
-    const l2 = ev.claim ? "you have an open " + tgEsc(ev.claim) + " claim on it" : "";
-    const base2 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
-    const l3 = base2 ? '<a href="' + tgEsc(base2 + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
-    return [l1, l2, l3].filter(Boolean).join("\n");
+    return out([head, ev.claim ? "you hold an open <b>" + tgEsc(ev.claim) + "</b> claim on it" : "",
+      link("open " + (ev.t || ev.coin))]);
   }
   if (kind === "ai") {
-    const l1 = "<b>" + name + "</b> \u00b7 analyst read flipped: " + tgEsc(ev.from || "?") + " \u2192 " + tgEsc(ev.to || "?");
-    const l2 = tgEsc(ev.note || "");
-    const base3 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
-    const l3 = base3 ? '<a href="' + tgEsc(base3 + "/#t=" + encodeURIComponent(ev.coin)) + '">open the report</a>' : "";
-    return [l1, l2, l3].filter(Boolean).join("\n");
+    const head = g + " <b>" + name + "</b> \u00b7 analyst read flipped";
+    const body = preRows([["from", ev.from || null], ["to", ev.to || null]]);
+    return out([head, body, tgEsc(ev.note || ""), link("open the report")]);
   }
   if (kind === "regime") {
-    const l1 = "<b>" + tgEsc(ev.scope === "main" ? "crypto" : "stocks") + " positioning</b> \u00b7 " + tgEsc(ev.title || "");
-    const l2 = tgEsc(ev.text || "");
-    return [l1, l2].filter(Boolean).join("\n");
+    return out([g + " <b>" + tgEsc(ev.scope === "main" ? "crypto" : "stocks") + " positioning</b> \u00b7 " + tgEsc(ev.title || ""),
+      tgEsc(ev.text || "")]);
   }
   if (kind === "coverage") {
-    const l1 = "\u26a0 <b>" + tgEsc(ev.t || ev.coin || "?") + "</b> \u00b7 data gap";
-    const l2 = tgEsc(ev.text || "");
-    return [l1, l2].filter(Boolean).join("\n");
+    return out([g + " <b>" + name + "</b> \u00b7 data gap", tgEsc(ev.text || ""), link("open " + (ev.t || ev.coin))]);
   }
-  if (kind === "rule") {
-    const l1 = "<b>" + name + "</b> \u00b7 " + tgEsc(ev.rule || (ev.label + " " + ev.op + " " + ev.value));
-    const l2 = "now " + tgEsc(ev.now == null ? "\u2014" : String(ev.now)) + (ev.note ? " \u00b7 " + tgEsc(ev.note) : "");
-    const base1 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
-    const l3 = base1 ? '<a href="' + tgEsc(base1 + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
-    return [l1, l2, l3].filter(Boolean).join("\n");
-  }
-  if (kind === "ledger") {
-    const sideL = ev.side === "long" ? "LONG" : ev.side === "short" ? "SHORT" : tgEsc(ev.side || "");
-    const head = ev.sub === "stop" ? "\u26d4 void taken" : ev.sub === "target" ? "\u2713 target reached" : "resolved";
-    const l1 = "<b>" + name + "</b> \u00b7 " + sideL + " \u00b7 " + tgEsc(ev.label || ev.ev || "") + " \u2014 " + head;
-    let l2;
-    if (ev.sub === "resolved") {
-      const r = ev.realized;
-      l2 = (r == null || !isFinite(r) ? "outcome \u2014" : (r >= 0 ? "+" : "") + (+r).toFixed(2) + (ev.unit || "R"))
-        + " at horizon" + (ev.stopped ? " \u00b7 stopped out en route" : "")
-        + (ev.held != null ? " \u00b7 held " + ev.held : "");
-    } else {
-      l2 = "level " + (ev.level == null ? "\u2014" : String(ev.level))
-        + " \u00b7 entry " + (ev.entry == null ? "\u2014" : String(ev.entry))
-        + (ev.held != null ? " \u00b7 open " + ev.held : "");
-    }
-    const base0 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
-    const l3 = base0 ? '<a href="' + tgEsc(base0 + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
-    return [l1, l2, l3].filter(Boolean).join("\n");
-  }
-  const side = ev.side === "long" ? "LONG" : ev.side === "short" ? "SHORT" : tgEsc(ev.side || "");
-  const num = (v, d) => (v == null || !isFinite(v) ? "\u2014" : (+v).toFixed(d == null ? 2 : d));
-  const px = (v) => (v == null || !isFinite(v) ? "\u2014" : String(v));
-  const l1 = "<b>" + name + "</b> \u00b7 " + side + " \u00b7 " + tgEsc(ev.label || ev.ev || "")
-    + (ev.tf ? " \u00b7 " + tgEsc(ev.tf) : "") + (ev.cls === "ev" ? " \u00b7 grinder" : "")
-    + (ev.prime === true ? " \u2605" : "");
-  const l2 = "entry " + px(ev.entry) + " \u00b7 void " + px(ev.void) + " \u00b7 target " + px(ev.target)
-    + (ev.rr && ev.rr.gross != null ? " \u00b7 R:R " + num(ev.rr.gross, 1) : "");
-  const rec = ev.rec || {};
-  const l3 = "EV " + num(ev.evR, 2) + "R \u00b7 n=" + (rec.n == null ? "\u2014" : rec.n)
-    + " \u00b7 hit " + (rec.hit == null ? "\u2014" : Math.round(rec.hit * 100) + "%")
-    + " \u00b7 avg " + num(rec.avgR, 2) + "R"
-    + (ev.late != null ? " \u00b7 late " + num(ev.late, 2) + "R" : "")
-    + (ev.earn ? " \u00b7 \u26a0 earnings" : "");
-  const base = o.baseUrl ? String(o.baseUrl).replace(/\/+$/, "") : "";
-  const l4 = base ? '<a href="' + tgEsc(base + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
-  return [l1, l2, l3, l4].filter(Boolean).join("\n");
+  return null;
 }
 
 // Telegram caps a sendMessage body at 4096 chars, so a burst is batched into as few messages as
@@ -3755,6 +3792,14 @@ const RULE_METRICS = [
   { k: "doiD1", label: "\u0394OI 1d %", unit: "%", get: (r) => (r.doi && r.doi.d1 != null && isFinite(r.doi.d1) ? r.doi.d1 : null) },
   { k: "doiD7", label: "\u0394OI 7d %", unit: "%", get: (r) => (r.doi && r.doi.d7 != null && isFinite(r.doi.d7) ? r.doi.d7 : null) },
   { k: "liq24", label: "24h liquidations", unit: "M", scale: 1e6, get: (r) => (r.liq24 != null && isFinite(r.liq24) ? r.liq24 : null) },
+  // Trend, stamped onto the row from the SAME board the Trend tab renders. Signed on purpose:
+  // +4 is a fully stacked uptrend, -4 a fully stacked downtrend, 0 neither. That makes one metric
+  // express both sides and lets `abs>` mean "strongly trending either way", which is the question
+  // people actually ask. Absent (null) for names the board never scored — an honest gap, not a 0.
+  { k: "tscore", label: "trend score (±4)", unit: "", get: (r) => (r.tscore != null && isFinite(r.tscore) ? r.tscore : null) },
+  // Distance from the mark to the D1 EMA21, in %. Negative = below it. The retest zone lives near
+  // zero, so "|x| < 1" is "sitting on the ribbon" and a large positive is "extended above it".
+  { k: "e21d", label: "dist to D1 EMA21 %", unit: "%", live: 1, get: (r) => (r.e21d != null && isFinite(r.e21d) ? r.e21d : null) },
 ];
 const RULE_BY_K = {};
 for (const m of RULE_METRICS) RULE_BY_K[m.k] = m;
@@ -3896,6 +3941,7 @@ module.exports.piercesQuiet = piercesQuiet;
 module.exports.validateQuiet = validateQuiet;
 module.exports.PUSH_CLASSES = PUSH_CLASSES;
 module.exports.PUSH_DEFAULT_CLASSES = PUSH_DEFAULT_CLASSES;
+module.exports.PUSH_ADMIN_CLASSES = PUSH_ADMIN_CLASSES;
 module.exports.PUSH_CODE_ALPHABET = PUSH_CODE_ALPHABET;
 module.exports.tgEsc = tgEsc;
 module.exports.pushCodeOk = pushCodeOk;
