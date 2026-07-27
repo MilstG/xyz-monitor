@@ -260,6 +260,7 @@ function maybePullSidecars(){
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
   if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
+  renderMacroStrip();   // cheap re-derive so the strip flips at 8:30 / 14:00 ET between pulls
   if(Date.now()-_newsLast > 3*60*1000) loadNews();   // rotation lands new names every minute server-side
 }
 function applySnapshot(s){
@@ -4196,6 +4197,7 @@ function actDetail(r){
   h+=`</div><div class="ad-sc">if it works, target pays <b class="pos">+${actRR(R.gross)}R</b> \u00b7 if it fails, the void costs <b class="neg">\u22121.00R</b></div>`
     +`<div class="ad-x">Leaves the board at ${r.bars==null?'\u2014':''}${_actMaxBars} bars in trigger or if price passes ${fmtPrice(r.void)}. R:R is frozen at fire — ${_actMinRR} is the line between the 2:1+ and grinder families, not an exit.</div>`;
   if(r.earn) h+=`<div class="ad-w">\u26a0 earnings in ${r.earn.days}d (${esc(r.earn.s)}) \u2014 inside the ${r.horizonD}d horizon. Flagged, not filtered: a scheduled binary is a prior the base rate cannot see.</div>`;
+  if(r.mac&&r.mac.length) for(const m of r.mac) h+=`<div class="ad-w" style="color:var(--blue)">\u25c6 ${esc(m.label)} ${m.days===0?'today':m.days===1?'tomorrow':'in '+m.days+'d'} (${esc(m.d)}, ${esc(m.tEt)} ET) \u2014 a universe-wide scheduled binary inside the ${r.horizonD}d horizon. Flagged, not filtered \u2014 same contract as earnings.</div>`;
   h+=`<div class="ad-a"><button class="btn" data-rep="${esc(r.coin)}">AI report \u2192</button>`
     +`<button class="btn" data-dr="${esc(r.coin)}">Open ${esc(r.t)}</button></div></div>`;
   return h;
@@ -4219,6 +4221,8 @@ function renderActionable(){
   const wantU=state.scope==='crypto'?'crypto':'stocks';
   const rows=(d.rows||[]).filter(r=>r.uni===wantU&&(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)&&((r.cls==='ev')?showEV:showRR)).slice().sort(actCmp);
   let h='';
+  { const mn=macroNextC();
+    if(mn&&mn.diff<=1) h+=`<div class="sec" style="font-size:11.5px;margin-bottom:8px;color:var(--blue)" data-tip="universe-wide scheduled binary \u2014 rows whose remaining horizon contains the event carry a \u25c6; flagged, never filtered. Applies to crypto exactly as to equities.">\u25c6 ${esc(mn.e.label)} ${mn.diff===0?'today':'tomorrow'} (${macroDayLbl(mn.e.d)}, ${macroTimeLbl(mn.e)}) \u2014 inside every open horizon \u2265${mn.diff===0?1:2}d; flagged per row, never filtered</div>`; }
   if(!rows.length){
     h+=`<div class="msg">Nothing confirmed at a swing trigger right now.`
       +`${c.openClaims!=null?` ${c.openClaims} open claim(s) scanned across both universes`:''}`
@@ -4235,7 +4239,7 @@ function renderActionable(){
     for(const r of rows){
       const sc=r.side==='long'?'pos':'neg', op=!!_actOpen[r.coin+'|'+r.side];
       h+=`<tr class="act-row${op?' open':''}" data-key="${esc(r.coin+'|'+r.side)}" data-coin="${esc(r.coin)}">`
-        +`<td class="${sc}">${op?'\u25be ':''}<span class="tk">${esc(r.t)}</span>${r.earn?' <i class="act-warn" title="earnings inside the horizon">\u26a0</i>':''}</td>`
+        +`<td class="${sc}">${op?'\u25be ':''}<span class="tk">${esc(r.t)}</span>${r.earn?' <i class="act-warn" title="earnings inside the horizon">\u26a0</i>':''}${r.mac&&r.mac.length?` <i class="act-mwarn" data-tip="${esc(r.mac.map(m=>m.label+' '+(m.days===0?'today':m.days===1?'tomorrow':'in '+m.days+'d')+' ('+m.tEt+' ET)').join(' \u00b7 '))} \u2014 universe-wide scheduled binar${r.mac.length===1?'y':'ies'} inside the horizon">\u25c6</i>`:''}</td>`
         +`<td class="sec">${esc(r.label)} <span class="act-tf">${esc(r.tf)}</span>${r.cls==='ev'?' <span class="act-tf" title="below 2:1 at fire, positive expectancy — the win-often family">grinder</span>':''}${r.also&&r.also.length?` <span class="act-also" title="${esc(r.also.map(a=>a.label).join(', '))}">+${r.also.length}</span>`:''}</td>`
         +`<td style="text-align:right">${actAgo(Date.now()-r.t0)}</td>`
         +`<td class="sec" style="text-align:right">${fmtPrice(r.fired)}</td>`
@@ -4339,6 +4343,7 @@ async function loadEarnings(){
       const m=new Map();
       for(const e of d.entries){ let a=m.get(e.t); if(!a){a=[];m.set(e.t,a);} a.push(e); }   // server ships date-sorted
       state.earn=m;
+      wireMacroStrip(); renderMacroStrip();   // the banner rides this payload — every tab, both scopes
       if(el('view-earnings')&&!el('view-earnings').hidden) renderEarnings();
       render();   // paint/refresh the E badges without waiting for the next snapshot cycle
     }
@@ -4347,6 +4352,93 @@ async function loadEarnings(){
 // Nearest upcoming report for a ticker: {diff, e}. Past entries (stale cache mid-window) skipped.
 function earnNext(t){ const a=state.earn&&state.earn.get(t); if(!a) return null;
   for(const e of a){ const d=earnDiffC(e.d); if(d!=null&&d>=0) return {diff:d,e}; } return null; }
+// ===== macro calendar (client) =====
+// Universe-wide scheduled binaries (FOMC + FRED prints) ride the earnings payload. State is
+// derived HERE on the ET clock — mirroring the server's macroEntryState — so a row flips at
+// 8:30 / 14:00 ET between the <=10-min pulls, not whenever the server happens to refresh.
+const _etHmFmt=new Intl.DateTimeFormat('en-GB',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false});
+function macroStateC(e){ if(!e||!e.d) return 'upcoming'; if(e.actual!=null) return 'released';
+  const df=earnDiffC(e.d); if(df==null) return 'upcoming'; if(df<0) return 'released'; if(df>0) return 'upcoming';
+  const parts=_etHmFmt.format(Date.now()).split(':'); let h=+parts[0]; if(h===24) h=0;
+  const hh=+(e.tEt||'08:30').slice(0,2), mm=+(e.tEt||'08:30').slice(3,5);
+  return (h>hh||(h===hh&&+parts[1]>=mm))?'released':'upcoming'; }
+function macroList(){ const d=state.earnPayload; return d&&Array.isArray(d.macro)?d.macro:[]; }
+function macroNextC(){ let best=null;
+  for(const e of macroList()){ if(macroStateC(e)!=='upcoming') continue; const df=earnDiffC(e.d);
+    if(df==null||df<0) continue; if(!best||df<best.diff||(df===best.diff&&(e.tEt||'')<(best.e.tEt||''))) best={diff:df,e}; }
+  return best; }
+function macroRecentC(){ let best=null;
+  for(const e of macroList()){ if(macroStateC(e)!=='released') continue; const df=earnDiffC(e.d);
+    if(df==null||df<-2) continue; if(!best||e.d>best.e.d||(e.d===best.e.d&&(e.tEt||'')>(best.e.tEt||''))) best={diff:df,e}; }
+  return best; }
+function macroTimeLbl(e){ const hh=+(e.tEt||'08:30').slice(0,2);
+  return hh>=13?((hh-12)+':'+(e.tEt||'').slice(3)+' PM ET'):(hh+':'+(e.tEt||'08:30').slice(3)+' AM ET'); }
+function macroRangeFmt(s){ return s&&s.lo!=null?`${(+s.lo).toFixed(2)}\u2013${(+s.hi).toFixed(2)}%`:''; }
+function macroStatFmt(e,s){ if(!s) return '';
+  const sg=(v)=>v>0?'+'+v:''+v;
+  if(e.k==='FOMC') return `target <b>${macroRangeFmt(s)}</b>`;
+  if(e.k==='CPI'||e.k==='PCE') return `YoY <b>${s.yoy}%</b>${s.core!=null?` \u00b7 core <b>${s.core}%</b>`:''}`;
+  if(e.k==='NFP') return `<b>${sg(s.chgK)}k</b>${s.unemp!=null?` \u00b7 unemp <b>${s.unemp}%</b>`:''}`;
+  if(e.k==='PPI') return `YoY <b>${s.yoy}%</b>`;
+  if(e.k==='RETAIL') return `MoM <b>${sg(s.mom)}%</b>`;
+  if(e.k==='GDP') return `QoQ SAAR <b>${sg(s.qoq)}%</b>`;
+  return ''; }
+function macroMonthLbl(m){ if(!m||!/^\d{4}-\d{2}/.test(m)) return '';
+  return new Date(m+'-15T12:00:00Z').toLocaleDateString('en-US',{month:'short',timeZone:'UTC'}); }
+// Row value cell: upcoming = prior as reference (labeled by month — the prior PRINT, never a
+// consensus; none exists in this feed); released = prior -> actual, or the honest pending state
+// between the ET clock flip and FRED's data landing.
+function macroValHtml(e){
+  const st=macroStateC(e);
+  if(e.k==='FOMC'){
+    if(st==='released'){
+      if(e.actual){ const held=e.prior&&e.prior.lo===e.actual.lo&&e.prior.hi===e.actual.hi;
+        return held?`<b>held ${macroRangeFmt(e.actual)}</b>`
+          :`${macroRangeFmt(e.prior)} \u2192 <b>${macroRangeFmt(e.actual)}</b> (${+e.actual.hi<+e.prior.hi?'cut':'hiked'})`; }
+      return `<span class="macro-pend" data-tip="the statement is out (2:00 PM ET has passed) but the daily target-range series hasn\u2019t landed the new value yet \u2014 fills on the next FRED pass, typically within the hour">released \u2014 range pending (FRED lag)</span>`;
+    }
+    return `${macroStatFmt(e,e.prior)}${e.prior?' <span class="sec">(going in)</span>':''} \u00b7 presser 2:30`;
+  }
+  if(st==='released'){
+    if(e.actual) return `${e.prior?macroStatFmt(e,e.prior).replace(/<\/?b>/g,'')+' \u2192 ':''}${macroStatFmt(e,e.actual)}${e.actual.m?` <span class="sec">(${macroMonthLbl(e.actual.m)})</span>`:''}`;
+    return `<span class="macro-pend" data-tip="the release clock has passed but the series hasn\u2019t updated on FRED yet \u2014 the actual fills on the next pass, typically within the hour">released \u2014 actual pending (FRED lag)</span>`;
+  }
+  return e.prior?`prior ${macroStatFmt(e,e.prior)}${e.prior.m?` <span class="sec">(${macroMonthLbl(e.prior.m)})</span>`:''}`:'<span class="sec">\u2014</span>';
+}
+function macroRowHtml(e,extra){
+  const tip=e.k==='FOMC'
+    ?`FOMC \u2014 statement 2:00 PM ET, presser 2:30.${e.sep?' SEP / dot-plot meeting.':' No SEP at this meeting.'} Prior = the target range going in. Universe-wide \u2014 applies to crypto exactly as to equities.`
+    :`${esc(e.label)} \u2014 scheduled ${macroTimeLbl(e)} (source schedule via FRED; the agency can reschedule). Prior = the previous print, labeled by reference month \u2014 NOT a consensus estimate; no street consensus exists in this feed. Universe-wide \u2014 applies to crypto exactly as to equities.`;
+  return `<div class="earn-row mrow${extra||''}">`
+    +`<span class="earn-mk" data-tip="${esc(tip)}">${esc(e.k)}</span>`
+    +(e.sep?`<span class="earn-mk sepchip" data-tip="Summary of Economic Projections \u2014 dot plot at this meeting (Mar / Jun / Sep / Dec)">SEP</span>`:'')
+    +`<span class="macro-nm">${esc(e.label)}</span>`
+    +`<span class="earn-sess">${macroTimeLbl(e)}</span>`
+    +`<span class="sec" style="flex:1">${macroValHtml(e)}</span>`
+    +`</div>`;
+}
+// The global strip: next macro event when it lands today/tomorrow (ET) — amber; once released,
+// the result strip (blue) for the rest of the ET day. Every tab, both scopes; click -> Calendar.
+function renderMacroStrip(){
+  const box=el('macrostrip'); if(!box) return;
+  const tab=el('tab-calendar');
+  const rec=macroRecentC(), nxt=macroNextC();
+  let h='', cls='macrostrip';
+  if(rec&&rec.diff===0){
+    cls+=' result';
+    const e=rec.e;
+    h=`<span class="ms-g">\u25c6</span><span><b>${esc(e.label)}</b> <span class="ms-when">released ${macroTimeLbl(e)}</span> <span class="sec2">\u00b7</span> <span class="sec2">${macroValHtml(e)}</span></span>`;
+  } else if(nxt&&nxt.diff<=1){
+    const e=nxt.e;
+    h=`<span class="ms-g">\u26a0</span><span><b>${esc(e.label)}</b> <span class="ms-when">${nxt.diff===0?'today':'tomorrow'}</span> <span class="sec2">\u00b7 ${macroDayLbl(e.d)}, ${macroTimeLbl(e)}${e.prior?` \u00b7 ${macroValHtml(e).replace(/<[^>]+>/g,'')}`:''}</span></span>`;
+  }
+  if(h){ box.className=cls; box.innerHTML=h; box.hidden=false;
+    if(tab&&!tab.querySelector('.tabdot')) tab.insertAdjacentHTML('beforeend','<span class="tabdot"></span>');
+  } else { box.hidden=true; const d=tab&&tab.querySelector('.tabdot'); if(d) d.remove(); }
+}
+function macroDayLbl(d){ return new Date(d+'T12:00:00Z').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}); }
+function wireMacroStrip(){ const box=el('macrostrip');
+  if(box&&!box._w){ box._w=true; box.addEventListener('click',()=>showView('earnings')); } }
 // Markets-table badge: solid = reports TODAY, hollow = tomorrow (ET). Nothing beyond that —
 // the tab carries the full window; the table only flags what can hit the next session.
 function earnBadge(r){
@@ -4481,9 +4573,9 @@ function renderEarnings(){
   const src=`<span class="sec" style="font-size:11px">${d.error
     ?`<span style="color:var(--down)">feed error: ${esc(d.error)}</span>${asOf?` \u00b7 showing last good fetch (${ageMin>=60?Math.round(ageMin/60)+'h':ageMin+'m'} old)`:''}`
     :(asOf?`as of ${asOf.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}${stale?` <span style="color:var(--accent)">\u00b7 ${Math.round(ageMin/60)}h stale</span>`:''} \u00b7 source: ${esc(d.source||'finnhub')}`:'never fetched')}</span>`;
-  const head=`<div class="controls" style="margin-bottom:10px"><span style="font-weight:600">Earnings calendar <span class="sec" style="font-weight:400">\u00b7 last 2 + next ${d.windowDays||14} days, ET</span></span><span style="margin-left:auto"></span>${src}</div>`;
+  const head=`<div class="controls" style="margin-bottom:10px"><span style="font-weight:600">Calendar <span class="sec" style="font-weight:400">\u00b7 earnings + macro \u00b7 last 2 + next ${d.windowDays||14} days, ET</span></span><span style="margin-left:auto"></span>${src}</div>`;
   const covered=new Set((d.entries||[]).map(e=>e.t)).size;
-  const cov=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:12px" data-tip="eligibility = live xyz EQUITIES; indices, ETFs, FX, commodities, thematics and pre-IPO synthetics never report. Foreign listings without a US symbol are eligible but absent from the feed \u2014 shown as uncovered, never guessed. A name missing here means the feed has no report scheduled in the window OR does not cover it.">${d.entries&&d.entries.length?`<b>${d.entries.length}</b> report${d.entries.length===1?'':'s'} across <b>${covered}</b> ticker${covered===1?'':'s'}`:'No reports in the window'} \u00b7 ${d.eligible||0} eligible equities in the universe \u00b7 names the feed doesn\u2019t cover simply don\u2019t appear</div>`;
+  const cov=`<div class="sec" style="font-size:11.5px;line-height:1.55;margin-bottom:12px" data-tip="eligibility = live xyz EQUITIES; indices, ETFs, FX, commodities, thematics and pre-IPO synthetics never report. Foreign listings without a US symbol are eligible but absent from the feed \u2014 shown as uncovered, never guessed. A name missing here means the feed has no report scheduled in the window OR does not cover it.">${d.entries&&d.entries.length?`<b>${d.entries.length}</b> report${d.entries.length===1?'':'s'} across <b>${covered}</b> ticker${covered===1?'':'s'}`:'No reports in the window'} \u00b7 ${d.eligible||0} eligible equities in the universe \u00b7 names the feed doesn\u2019t cover simply don\u2019t appear${(()=>{const ml=macroList();const up=ml.filter(e=>macroStateC(e)==='upcoming').length;return ` \u00b7 <span data-tip="universe-wide macro binaries: FOMC decisions (static Fed schedule) + CPI / NFP / PPI / retail / GDP / PCE (FRED schedule). Prior shown as reference \u2014 no street consensus exists in this feed, so rows read prior \u2192 actual + the tape\u2019s reaction, never beat/miss vs estimates.">${up} macro event${up===1?'':'s'} in the window</span>${d.macroErr?` <span style="color:var(--down)" data-tip="the FOMC table still serves \u2014 only the FRED-fed print rows and their numbers are degraded">(FRED: ${esc(d.macroErr)})</span>`:''}`})()}</div>`;
   if(d.error&&!(d.entries&&d.entries.length)){
     box.innerHTML=head+cov+`<div class="msg">No earnings data.<br><span class="sec" style="font-size:11px">${d.error==='FINNHUB_TOKEN not set'?'Set <b>FINNHUB_TOKEN</b> in the Railway service variables (free key from finnhub.io) and redeploy.':'The feed is unreachable \u2014 the server retries every 30 minutes.'}</span></div>`;
     return;
@@ -4516,23 +4608,51 @@ function renderEarnings(){
       }
     }
   }
+  { const mrep=macroList().filter(e=>{const df=earnDiffC(e.d);return df!=null&&df<0&&df>=-2&&macroStateC(e)==='released';})
+      .sort((a,b)=>a.d>b.d?-1:a.d<b.d?1:((a.tEt||'')>(b.tEt||'')?-1:1));
+    if(mrep.length){ let mh=''; let lastD=null;
+      for(const e of mrep){ if(e.d!==lastD){ lastD=e.d; const df=earnDiffC(e.d);
+          mh+=`<div class="earn-day">MACRO \u00b7 REPORTED \u00b7 ${df===-1?'YESTERDAY \u00b7 ':''}${macroDayLbl(e.d).toUpperCase()}</div>`; }
+        mh+=macroRowHtml(e); }
+      repHtml=mh+repHtml; } }
+  // Upcoming day groups: union of earnings dates and macro dates (macro rows first inside a day
+  // — they carry real clocks; earnings sessions don't). Today-released macro rows stay under
+  // TODAY with their actuals; only prior ET days graduate to the REPORTED block above.
   const groups=new Map();
   for(const e of d.entries||[]){ const diff=earnDiffC(e.d); if(diff==null||diff<0) continue;
     let g=groups.get(e.d); if(!g){g={d:e.d,diff,rows:[]};groups.set(e.d,g);} g.rows.push(e); }
-  if(!groups.size&&!rep.length){ box.innerHTML=head+cov+'<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>'; return; }
+  const mgroups=new Map();
+  for(const e of macroList()){ const diff=earnDiffC(e.d); if(diff==null||diff<0) continue;
+    let g=mgroups.get(e.d); if(!g){g=[];mgroups.set(e.d,g);} g.push(e);
+    if(e.k==='FOMC'&&e.d1&&macroStateC(e)==='upcoming'){ const d1f=earnDiffC(e.d1);
+      if(d1f!=null&&d1f>=0){ let g1=mgroups.get(e.d1); if(!g1){g1=[];mgroups.set(e.d1,g1);}
+        g1.push({_fomc1:true,e}); } } }
+  if(!groups.size&&!mgroups.size&&!repHtml){ box.innerHTML=head+cov+'<div class="msg">No upcoming events in the next '+(d.windowDays||14)+' days for this universe.</div>'; return; }
   let html=head+cov+repHtml;
-  if(!groups.size){
+  if(!groups.size&&!mgroups.size){
     html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
     box.innerHTML=html;
     box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
   wireEarnVoid(box);
     return;
   }
-  for(const g of groups.values()){
+  const allDates=[...new Set([...groups.keys(),...mgroups.keys()])].sort();
+  for(const dd of allDates){
+    const g=groups.get(dd)||{d:dd,diff:earnDiffC(dd),rows:[]};
+    const mg=mgroups.get(dd)||[];
     const dt=new Date(g.d+'T12:00:00Z');
     const lbl=dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'UTC'}).toUpperCase();
     const tag=g.diff===0?'TODAY \u00b7 ':g.diff===1?'TOMORROW \u00b7 ':'';
     html+=`<div class="earn-day${g.diff<=1?' hot':''}">${tag}${lbl}<span class="sec" style="margin-left:8px;text-transform:none;letter-spacing:0">${g.diff===0?'':g.diff===1?'in 1 day':'in '+g.diff+' days'}</span></div>`;
+    for(const me of mg){
+      if(me._fomc1){ const e=me.e;
+        html+=`<div class="earn-row mrow" style="opacity:.85">`
+          +`<span class="earn-mk" data-tip="day one of the two-day meeting \u2014 no statement today; the decision lands tomorrow 2:00 PM ET">FOMC</span>`
+          +`<span class="macro-nm">FOMC meeting begins</span><span class="earn-sess">day 1 of 2</span>`
+          +`<span class="sec" style="flex:1">decision ${macroDayLbl(e.d)} 2:00 PM ET${e.prior?` \u00b7 target <b>${macroRangeFmt(e.prior)}</b>`:''}</span></div>`;
+        continue; }
+      html+=macroRowHtml(me);
+    }
     g.rows.sort((a,b)=>{ const wa=state.watch.has(a.coin)?0:1, wb=state.watch.has(b.coin)?0:1; return wa-wb; });   // stable: watchlist floats up, session order preserved within each half
     for(const e of g.rows){
       const starred=state.watch.has(e.coin);
@@ -4545,7 +4665,7 @@ function renderEarnings(){
         +`</div>`;
     }
   }
-  html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst.</div>`;
+  html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst. Macro rows work the same way universe-wide \u2014 an FOMC/CPI/NFP print \u2264 1 day out flags session-spanning signals on <b>both</b> universes with the same cap, and events inside an open setup\u2019s horizon are flagged on the Actionable board (\u25c6) and in AI reports. Macro dates come from the Fed\u2019s published schedule and FRED; prior values are the previous print (labeled by month), never consensus \u2014 no street-estimate feed exists here, so there is no beat/miss verdict, only prior \u2192 actual and the tape.</div>`;
   box.innerHTML=html;
   box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
   wireEarnVoid(box);
@@ -5170,7 +5290,8 @@ function sigCardHtml(gr, rank, collapsible){
     const flags=(g.unproven&&!g.pooled?' <i class="sig-unp" data-tip="fewer than 8 historical occurrences and no usable pooled sample \u2014 a flag, not an edge">unproven</i>':'')
       +(g.negexp?' <i class="sig-unp bad" data-tip="this base rate has NEGATIVE expectancy \u2014 past occurrences of this event lost money on average under its own sign convention. Evidence score zeroed; shown for awareness, ranked as noise.">neg exp</i>':'')
       +(g.noedge?' <i class="sig-unp bad" data-tip="the LIVE out-of-sample record for this event type shows no edge (\u226510 resolved, <50% hit) \u2014 evidence score capped">no live edge</i>':'')
-      +(g.earn?` <i class="sig-unp warn" data-tip="earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${esc(g.earn.s)} ${esc(g.earn.d)}, ET) \u2014 a known binary catalyst inside this claim's horizon. The base rate wasn't sampled around scheduled prints, so this is a stated PRIOR, not measured expectancy: evidence contribution capped at 8 (same mechanism as the no-live-edge guard), prime disabled. Condition intensity untouched.">earnings ${g.earn.prox===0?'today':'\u22641d'}</i>`:'');
+      +(g.earn?` <i class="sig-unp warn" data-tip="earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${esc(g.earn.s)} ${esc(g.earn.d)}, ET) \u2014 a known binary catalyst inside this claim's horizon. The base rate wasn't sampled around scheduled prints, so this is a stated PRIOR, not measured expectancy: evidence contribution capped at 8 (same mechanism as the no-live-edge guard), prime disabled. Condition intensity untouched.">earnings ${g.earn.prox===0?'today':'\u22641d'}</i>`:'')
+      +(g.mac?` <i class="sig-unp" style="color:var(--blue)" data-tip="${esc(g.mac.label)} ${g.mac.prox===0?'TODAY':'tomorrow'} (${esc(g.mac.d)}, ${esc(g.mac.tEt)} ET) \u2014 a universe-wide scheduled binary inside this claim's horizon, on crypto exactly as on equities. ${g.macguard?'Evidence contribution capped at 8 (same mechanism and cap as the earnings guard).':'Evidence already capped by the earnings guard \u2014 one binary ahead or two, the borrowed confidence is trimmed once.'} Condition intensity untouched.">\u25c6 ${esc(g.mac.k.toLowerCase())} ${g.mac.prox===0?'today':'\u22641d'}</i>`:'');
     s+=`<div class="sig${g.prime?' prime':''}">`
       +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
       +`<span class="sig-line1">${g.prime?'<i class="sig-prime" data-tip="prime setup: \u226560% hit, positive expectancy, sound structure (R/R \u22651.2 where levels exist), not unproven/decayed/no-edge \u2014 the bars this signal clears to earn emphasis">\u2605 prime</i>':''}<span class="sig-read">${esc(g.reading)}</span>`
@@ -5187,7 +5308,7 @@ function sigRowHtml(gr, rank){
     const cu=(st)=>st&&st.unit==='R'?'R':'%';
     const hist=g.study&&g.study.n>=8?` \u00b7 on ${g.ticker} (n=${g.study.n}): med ${g.study.med>=0?'+':''}${g.study.med}${cu(g.study)}, ${Math.round(g.study.hit*100)}% hit`
       :(g.pooled?` \u00b7 pooled (n=${g.pooled.n}): med ${g.pooled.med>=0?'+':''}${g.pooled.med}${cu(g.pooled)}, ${Math.round(g.pooled.hit*100)}% hit`:'');
-    return `<span class="sig-chip" data-tip="${esc(g.reading+hist+(g.play&&g.play.bias?` \u00b7 play: ${g.play.bias}`:'')+(g.earn?` \u00b7 earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${g.earn.s})`:''))}">${esc(g.label)}${g.noedge||g.earn?' \u26a0':''}</span>`;
+    return `<span class="sig-chip" data-tip="${esc(g.reading+hist+(g.play&&g.play.bias?` \u00b7 play: ${g.play.bias}`:'')+(g.earn?` \u00b7 earnings ${g.earn.prox===0?'TODAY':'tomorrow'} (${g.earn.s})`:'')+(g.mac?` \u00b7 ${g.mac.label} ${g.mac.prox===0?'TODAY':'tomorrow'} (${g.mac.tEt} ET)`:''))}">${esc(g.label)}${g.noedge||g.earn?' \u26a0':''}${g.mac?' \u25c6':''}</span>`;
   }).join('');
   const anyPrime=gr.sigs.some(x=>x.prime);
   return `<div class="sigc${anyPrime?' prime':''}" data-exp="${esc(gr.coin)}" data-tip="click to expand the full card \u2014 readings, base rates, playbook">`
@@ -6214,7 +6335,13 @@ earnings:`
 <div class="hlp-h">Live context columns</div>
 <p>Day move, 24h volume and ADR on each row come from the live snapshot already in your browser — so a Thursday with eight prints reads at a glance as one that matters and seven that don't. ★ watchlist names float to the top of each day.</p>
 <div class="hlp-h">Interaction with Signals</div>
-<p>Session-spanning claims (breakout, breakdown, outsized gap, overnight drift) firing on a name that reports ≤1 day out wear an <i>earnings</i> flag and have their <b>evidence contribution capped</b> (same 8-point cap as the no-live-edge guard) and can't be ★ prime. Why: the historical base rates weren't conditioned on a known binary catalyst sitting inside the horizon — this is a stated <b>prior</b>, not a measured expectancy, and it's labeled as such on the card. The condition's intensity is untouched; only borrowed statistical confidence is trimmed. Every such claim is also <b>tagged in the ledger</b> (E in the claim history), and once ≥5 tagged claims resolve per event, the Signals tab shows the earnings-window record next to the ordinary one — over time the guard stops being a prior and becomes a measured base rate.</p>`,
+<p>Session-spanning claims (breakout, breakdown, outsized gap, overnight drift) firing on a name that reports ≤1 day out wear an <i>earnings</i> flag and have their <b>evidence contribution capped</b> (same 8-point cap as the no-live-edge guard) and can't be ★ prime. Why: the historical base rates weren't conditioned on a known binary catalyst sitting inside the horizon — this is a stated <b>prior</b>, not a measured expectancy, and it's labeled as such on the card. The condition's intensity is untouched; only borrowed statistical confidence is trimmed. Every such claim is also <b>tagged in the ledger</b> (E in the claim history), and once ≥5 tagged claims resolve per event, the Signals tab shows the earnings-window record next to the ordinary one — over time the guard stops being a prior and becomes a measured base rate.</p>
+<div class="hlp-h">Macro rows — FOMC and the print calendar</div>
+<p>Interleaved with earnings by ET day: <b>FOMC decisions</b> (statement 2:00 PM ET, presser 2:30; <b>SEP</b> chip = dot-plot meeting) from the Fed's published schedule, and <b>CPI · nonfarm payrolls · PPI · retail sales · GDP · PCE</b> (all 8:30 ET) from FRED's release schedule. These are <b>universe-wide</b> — an FOMC decision moves BTC as hard as it moves SPX, so the rows, the global banner and every flag apply to both scopes. The banner under the nav appears when the next event lands <b>today or tomorrow</b> (ET) on every tab, and flips to a blue <b>result strip</b> for the rest of the ET day once the print is out.</p>
+<div class="hlp-h">Macro rows — what the numbers are (and aren't)</div>
+<p>Upcoming rows show the <b>prior</b> — the previous print, labeled by its reference month. It is <b>not a consensus estimate</b>: no street-estimate feed exists in this system, so macro rows never claim a beat/miss vs expectations. Once released, a row reads <b>prior → actual</b>; between the ET release clock and FRED's data landing (typically under an hour) it says <i>"released — actual pending"</i> instead of dressing a stale month as the print. FOMC rows resolve to <b>held / cut / hiked</b> against the range going in. Dates come from the agencies' published schedules and can move.</p>
+<div class="hlp-h">Macro × Signals, Actionable, AI reports</div>
+<p>A macro event ≤1 ET day out flags session-spanning signals on <b>both universes</b> with the same 8-point evidence cap as the earnings guard (applied once — a claim already capped for earnings isn't trimmed twice), and stamps the claim in the ledger for a future conditioned split. On the <b>Actionable</b> board, events inside a setup's remaining horizon show a blue <b>◆</b> — flagged, never filtered. <b>AI reports</b> receive the same events as deterministic flags plus context, and the analyst is required to acknowledge any event inside the scenario horizon in the read and the plan. Absent a <b>FRED_KEY</b> the FOMC schedule still serves (it's a static table); only the print rows and their numbers degrade, with the reason shown on the coverage line.</p>`,
 backtest:`
 <div class="hlp-h">What it is</div>
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>

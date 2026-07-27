@@ -1132,3 +1132,31 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .act-set-det{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:2px 20px;
   padding:8px 12px;font-size:11.5px;line-height:1.7;color:var(--muted);border-left:2px solid var(--accent)}
 .act-set-det b{color:var(--text);font-weight:400}
+
+/* ===== macro calendar ===== */
+/* Global strip: next universe-wide macro binary (today/tomorrow ET), every tab, both scopes.
+   Amber = upcoming; .result (blue) = released today, showing prior -> actual + reaction. */
+.macrostrip{display:flex;align-items:baseline;gap:8px;padding:6px 14px;font-size:12.5px;cursor:pointer;
+  background:linear-gradient(90deg,rgba(230,167,60,.10),rgba(230,167,60,.02));
+  border-bottom:1px solid rgba(230,167,60,.30);font-family:var(--mono)}
+.macrostrip:hover{background:linear-gradient(90deg,rgba(230,167,60,.16),rgba(230,167,60,.04))}
+.macrostrip .ms-g{color:var(--accent);font-weight:700}
+.macrostrip b{font-weight:600}
+.macrostrip .ms-when{color:var(--accent)}
+.macrostrip .sec2{color:var(--muted)}
+.macrostrip.result{background:linear-gradient(90deg,rgba(90,140,220,.10),rgba(90,140,220,.02));
+  border-bottom-color:rgba(90,140,220,.35)}
+.macrostrip.result:hover{background:linear-gradient(90deg,rgba(90,140,220,.16),rgba(90,140,220,.04))}
+.macrostrip.result .ms-g,.macrostrip.result .ms-when{color:var(--blue)}
+#tab-calendar .tabdot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--accent);
+  vertical-align:top;margin-left:3px}
+/* Calendar tab macro rows: blue-chipped, faintly tinted — never confusable with an earnings row */
+.earn-row.mrow{background:color-mix(in srgb,var(--blue) 5%,var(--panel))}
+.earn-row.mrow:hover{background:color-mix(in srgb,var(--blue) 10%,var(--panel))}
+.earn-mk{font-size:10px;padding:0 5px;line-height:16px;border-radius:3px;border:1px solid var(--blue);
+  color:var(--blue);font-family:var(--mono);min-width:44px;text-align:center}
+.earn-mk.sepchip{border-color:color-mix(in srgb,var(--blue) 55%,transparent);color:color-mix(in srgb,var(--blue) 70%,var(--muted));min-width:0}
+.macro-nm{font-weight:600;min-width:160px}
+.macro-pend{color:var(--muted);font-style:italic}
+/* Actionable / signals macro flag — blue diamond, distinct from the amber earnings warn */
+.act-mwarn{color:var(--blue);font-style:normal;cursor:help}
