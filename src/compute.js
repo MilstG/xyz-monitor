@@ -4138,3 +4138,43 @@ module.exports.resolveFeatures = resolveFeatures;
 module.exports.featureGateFor = featureGateFor;
 module.exports.featureCounts = featureCounts;
 module.exports.featureSettable = featureSettable;
+
+// ===== settled-board episode scoring (build 2026.07.27-15) ======================================
+// The actionable board's own out-of-sample record: every suggestion it ever surfaced is an
+// "episode", stamped at first appearance and scored when the underlying claim resolves. These two
+// helpers are the pure math half of that record; the poller owns the state machine.
+//
+// epResolve walks the hourly spine between first-show and the claim's resolution asking one
+// question: which frozen level was touched first? A candle that spans BOTH levels resolves
+// pessimistically as the void — an intrabar sequence the spine cannot see is never scored as the
+// win. `approx` is the honesty flag: no candles covered the window (a restart trimmed the spine),
+// so a touch was unknowable and the episode can only be scored at its endpoints, disclosed.
+function epResolve(candles, tShow, tEnd, side, voidLv, target) {
+  const long = side === "long";
+  let seen = false;
+  if (Array.isArray(candles)) for (const k of candles) {
+    const t = k[0];
+    if (t <= tShow) continue;
+    if (t > tEnd) break;
+    seen = true;
+    if (long ? k[3] <= voidLv : k[2] >= voidLv) return { kind: "void", tHit: t, approx: false };
+    if (long ? k[2] >= target : k[3] <= target) return { kind: "target", tHit: t, approx: false };
+  }
+  return { kind: "expired", tHit: null, approx: !seen };
+}
+// One episode, one entry basis, one number. The void exit is exactly -1R at ANY entry basis
+// (risk is measured to the same void), a target exit pays the frozen distance in that basis's own
+// risk unit, and an expiry scores wherever the tape sat when the horizon lapsed. Called twice per
+// episode — once at the fire mark (were the plans good) and once at the first-shown mark (what
+// acting on the board got) — so the gap between the two IS the board's measured lateness.
+function epScore(side, entryBasis, voidLv, target, kind, exitPx) {
+  const risk = Math.abs(entryBasis - voidLv);
+  if (!(risk > 0) || !(entryBasis > 0)) return null;
+  const sgn = side === "long" ? 1 : -1;
+  if (kind === "void") return -1;
+  if (kind === "target") return +((sgn * (target - entryBasis)) / risk).toFixed(2);
+  if (!(exitPx > 0)) return null;
+  return +((sgn * (exitPx - entryBasis)) / risk).toFixed(2);
+}
+module.exports.epResolve = epResolve;
+module.exports.epScore = epScore;

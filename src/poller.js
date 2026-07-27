@@ -15,7 +15,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
-const { momPair, spearmanIC, duelStats } = require("./compute");
+const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
@@ -1238,6 +1238,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (d.closed.length > 4000 && store.archiveClosed) store.archiveClosed(d.closed.slice(0, d.closed.length - 4000));
       ledgerClosed = d.closed.slice(-4000);
     }
+    // Settled-board record restore: episodes ride the same blob (see persistLedger). Shape-guarded
+    // so a pre-episode blob (no `board`) hydrates exactly as before, and a corrupt entry is
+    // dropped rather than crashing the boot. Open episodes whose claims resolved while the server
+    // was down are NOT dropped here — the next buildActionable's sweep resolves them normally.
+    if (d.board && typeof d.board === "object") {
+      boardEpSince = Number.isFinite(+d.board.since) ? +d.board.since : 0;
+      boardEpDropped = Number.isFinite(+d.board.dropped) ? +d.board.dropped : 0;
+      if (Array.isArray(d.board.open)) for (const ep of d.board.open)
+        if (ep && typeof ep.k === "string" && ep.tShow > 0 && ep.void > 0) boardEp.set(ep.k, ep);
+      if (Array.isArray(d.board.closed))
+        boardEpClosed = d.board.closed.filter((e) => e && typeof e.k === "string" && e.kind && Number.isFinite(e.rE)).slice(-BOARD_EP_KEEP);
+    }
     // Pre-epoch crypto purge. The -101 removal un-enrolled the main universe and dropped its
     // stored claims wholesale. The engine is back (2026.07.26-08) with log-space geometry, so the
     // purge is no longer permanent — but it is not lifted either: every crypto claim stamped
@@ -1340,7 +1352,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function persistLedger() {
     if (!ledgerDirty) return;
     store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm],
-      present: [...presentSince].map(([k, v]) => [k, v.t]) });   // presence timelines survive restarts — a deploy is not a lapse
+      present: [...presentSince].map(([k, v]) => [k, v.t]),   // presence timelines survive restarts — a deploy is not a lapse
+      board: { since: boardEpSince, dropped: boardEpDropped, open: [...boardEp.values()], closed: boardEpClosed.slice(-BOARD_EP_KEEP) } });   // the board's own record rides the same blob — no new storage surface
     ledgerDirty = false;
   }
   // Per-ticker signal history for the drawer: every VISIBLE claim the engine ever made on one
@@ -5583,9 +5596,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     + "<TICKER> ; <TICKER> <field> ; signals [TICKER] ; corr <A> <B> ; diverge <TICKER> ; vs <A> <B> ; "
     + "earnings [TICKER|today|tomorrow|week|recent] ; news [TICKER] ; breadth [d1|d7|d30] ; sectors [d1|d7|d30] ; reports";
   const ASK_PLANNER_SYS = "You translate a trader's natural-language question about a markets dashboard into EXACTLY ONE query in this grammar, and output ONLY that query — no prose, no backticks, no explanation.\nGrammar: " + ASK_GRAMMAR
-    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>. If the question cannot be expressed in this grammar, output exactly: NONE";
-  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Every entry in context.markets is one market's live fields (absent keys mean that value is genuinely unavailable for that name): name = the company's common name, px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. NUMBERS RULE: every price, %, level or figure you cite must come from these fields or simple arithmetic on them (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma) — never invent or estimate a figure that is not in or derivable from the data. IDENTITY RULE: for what a company IS or what it makes — its products, business lines, sub-industry, competitors — you MAY use well-known general knowledge, but ONLY about tickers present in context.markets, and NEVER name a company that is not in that list. When an answer leans on general knowledge rather than the live fields, note that briefly. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
-  function classifyAsk(q) { return /^\s*(why|explain|how come|what if|what would|what happens|reason|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(q || "") ? "analyst" : "planner"; }
+    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>. context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current question may be a follow-up — resolve it against that context, and a complaint about a prior answer means the ORIGINAL question was answered wrongly, so re-map the original intent. If the question cannot be expressed in this grammar, output exactly: NONE";
+  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Every entry in context.markets is one market's live fields (absent keys mean that value is genuinely unavailable for that name): name = the company's common name, px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. NUMBERS RULE: every price, %, level or figure you cite must come from these fields or simple arithmetic on them (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma) — never invent or estimate a figure that is not in or derivable from the data. IDENTITY RULE: for what a company IS or what it makes — its products, business lines, sub-industry, competitors — you MAY use well-known general knowledge, but ONLY about tickers present in context.markets, and NEVER name a company that is not in that list. When an answer leans on general knowledge rather than the live fields, note that briefly. context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current message may be a follow-up — resolve pronouns and complaints against it, and a message like 'not what I asked' means a prior answer missed the ORIGINAL question, so answer that original question properly now. context.news, when present, holds the ONLY headlines you may reference ({h} = headline, {tk} = verified ticker or null for macro tape, {ageH} = hours old): for 'why is X moving' questions, cite a matching headline when one plausibly explains the move, and say plainly when none does — then read the tape (sector.rel via sector peers in context.markets, beta, funding, volume) instead of inventing a catalyst. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
+  // Causal/explanatory intent routes to the analyst wherever it sits in the sentence — the
+  // anchored-only version classified "what could be causing DRAM dump today" as planner, which
+  // mapped it to a bare ticker card: a "why" answered with a number. The anchored set stays for
+  // the openers that only signal analyst intent at the head of a question.
+  const ASK_CAUSAL_RE = /\b(why|how come|caus(?:e|es|ed|ing)|reasons?|explain|driving|what happened|going on|behind (?:the|this|its))\b/i;
+  function classifyAsk(q) { const s = String(q || "");
+    if (ASK_CAUSAL_RE.test(s)) return "analyst";
+    return /^\s*(what if|what would|what happens|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(s) ? "analyst" : "planner"; }
   function askQueryValid(str, tickerSet) {
     const s = String(str || "").trim(); if (!s || /^none$/i.test(s)) return false;
     const p = s.split(/\s+/), h = p[0].toLowerCase(), H = p[0].toUpperCase();
@@ -5601,8 +5621,18 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (!q) return withBudget({ ok: false, error: "empty question" });
     if (!AI_KEY() && !aiFetch) return withBudget({ ok: false, disabled: true, error: "AI fallback needs an API key on the server (OPENAI_API_KEY / ANTHROPIC_API_KEY)" });
     ctx = ctx || {};
+    // Session history, sanitized hard: caps on count and length, strings only. Statelessness was
+    // the terminal's original sin — "not what I asked" arrived alone and the analyst truthfully
+    // said it could only see those four words. The transcript rides every call now.
+    const hist = Array.isArray(ctx.hist) ? ctx.hist.slice(-6)
+      .map((h) => h && typeof h === "object" ? { q: String(h.q || "").slice(0, 300), a: String(h.a || "").slice(0, 500) } : null)
+      .filter((h) => h && h.q) : [];
     const normQ = q.toLowerCase().replace(/\s+/g, " ").trim();
-    const cached = askCache.get(normQ);
+    // The cache key carries the last prior exchange: the same literal words are a DIFFERENT
+    // question after a different conversation ("not what I asked" must never serve another
+    // session's cached complaint).
+    const cacheKey = normQ + "|h:" + (hist.length ? hist[hist.length - 1].q.toLowerCase().replace(/\s+/g, " ").slice(0, 80) : "");
+    const cached = askCache.get(cacheKey);
     if (cached && Date.now() - cached.at < ASK_CACHE_TTL) return withBudget(Object.assign({ cached: true }, cached.res));   // a cache hit never burns budget
     const now = Date.now();
     while (askHits.length && askHits[0] < now - ASK_WINDOW_MS) askHits.shift();
@@ -5627,15 +5657,38 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (!c.ok) c = await callModel(AI_MODEL_FALLBACK, payload, { system: sys, maxTokens: maxTok, effort: AI_ASK_EFFORT });
       return c;
     };
+    // Headlines for the analyst: per-name verified items for any ticker the question mentions
+    // (or the whole history mentions — a follow-up rarely repeats the name), plus a few macro
+    // tape items. The prompt's news rule makes these the only citable headlines, so a causal
+    // question gets the actual catalyst when one exists and an honest "no headline explains it"
+    // when one doesn't.
+    const askNews = (() => {
+      if (!newsItems.length) return null;
+      const txt = (q + " " + hist.map((h) => h.q).join(" ")).toUpperCase();
+      const words = new Set(txt.split(/[^A-Z0-9]+/).filter(Boolean));
+      const want = new Set([...tickerSet].filter((t) => words.has(t)));
+      const now2 = Date.now(), out = [];
+      const push = (a) => out.push({ h: String(a.h || "").slice(0, 200), tk: a.tk || null, ageH: Math.max(0, Math.round((now2 - (a.pub || now2)) / HOUR)) });
+      const sorted = newsItems.slice().sort((a, b) => (b.pub || 0) - (a.pub || 0));
+      for (const a of sorted) { if (out.length >= 6) break; if (a.rel === 1 && a.tk && want.has(String(a.tk).toUpperCase())) push(a); }
+      let macro = 0;
+      for (const a of sorted) { if (macro >= 4) break; if (!a.tk && !a.fl) { push(a); macro++; } }
+      return out.length ? out : null;
+    })();
     const analyst = async () => {
-      const c = await callBoth(ASK_ANALYST_SYS, { question: q, scope: ctx.scope || null, markets }, 2600);
+      const payload = { question: q, scope: ctx.scope || null, markets };
+      if (hist.length) payload.history = hist;
+      if (askNews) payload.news = askNews;
+      const c = await callBoth(ASK_ANALYST_SYS, payload, 2600);
       return c.ok ? { ok: true, mode: "analyst", answer: c.text.trim(), marketsN: markets.length }
                   : { ok: false, error: c.error || "model call failed" };
     };
     const mode0 = ctx.mode === "analyst" || ctx.mode === "planner" ? ctx.mode : classifyAsk(q);
     let res;
     if (mode0 === "planner") {
-      const c = await callBoth(ASK_PLANNER_SYS, { question: q, scope: ctx.scope || null, tickers: [...tickerSet] }, 1500);
+      const pp = { question: q, scope: ctx.scope || null, tickers: [...tickerSet] };
+      if (hist.length) pp.history = hist;
+      const c = await callBoth(ASK_PLANNER_SYS, pp, 1500);
       if (!c.ok) res = { ok: false, error: c.error || "model call failed" };
       else {
         const query = c.text.trim().split("\n")[0].replace(/^`+|`+$/g, "").trim();
@@ -5644,7 +5697,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     } else res = await analyst();
     res.model = AI_MODEL; res.provider = AI_PROVIDER;
     if (res.ok) { askDay.count++; persistAiReports();   // a real model call landed — burn one, persist the counter
-      askCache.set(normQ, { at: Date.now(), res }); if (askCache.size > 200) askCache.clear(); }
+      askCache.set(cacheKey, { at: Date.now(), res }); if (askCache.size > 200) askCache.clear(); }
     return withBudget(res);
   }
 
@@ -5801,6 +5854,98 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   function actClass(rr) { return rr && rr.gross >= ACT_MIN_RR ? "rr" : "ev"; }
   const ACT_MS = 60 * 1000;            // memo window; inputs move on signal builds, not per request
   let actCache = null, actBuilt = 0, actSig = "", actVer = 0;
+
+  // ===== settled board record (build 2026.07.27-15) ============================================
+  // The board's OWN out-of-sample record: every suggestion it ever surfaced becomes an "episode"
+  // the moment it first appears, stamped with everything the board was claiming at that instant —
+  // the frozen geometry, the displayed R:R/EV/record, the setup class, and crucially the live mark.
+  // The stamp never changes. When the underlying ledger claim resolves, the episode resolves with
+  // it — ON or OFF the board: dropping a row is a display decision, and the record does not get to
+  // forget what it recommended. Once shown, always scored.
+  //
+  // One episode per claim key. A row that blinks off (the mark wobbles through a gate) and returns
+  // while its claim is still open is the SAME episode — flick counts the fold, the original stamp
+  // stands. Without this, a choppy tape logs one setup five times and manufactures sample size.
+  //
+  // Two scores per resolved episode, split by the row's frozen CLASS (rr = the ">=2:1 at fire"
+  // family, ev = the sub-2:1 positive-expectancy grinders — actClass's split, not a new one):
+  //   rE — realized R at the fire mark, the basis the family record was scored on ("were the plans
+  //        good"); rM — realized R from the mark at FIRST APPEARANCE ("what acting on the board
+  //        got"). avg(rE) - avg(rM) is the board's measured lateness cost.
+  // Outcome kind comes from epResolve's walk of the hourly spine (void touch / target touch /
+  // expired between them; a both-touch candle is pessimistically the void). The record starts at
+  // zero on deploy — past appearances were never logged, and no backfill is claimed.
+  const BOARD_EP_KEEP = 400;    // resolved episodes retained (memory + persistence)
+  const BOARD_EP_SHIP = 120;    // shipped on the payload, newest last
+  let boardEp = new Map();      // claim key -> open episode
+  let boardEpClosed = [];       // resolved episodes, oldest first
+  let boardEpSince = 0;         // first scan ever — the record's own out-of-sample epoch
+  let boardEpDropped = 0;       // shown but unscoreable (claim voided/purged, or no exit price) — disclosed, never silent
+
+  function boardEpScan(board, now) {
+    if (!boardEpSince) { boardEpSince = now; ledgerDirty = true; }
+    const present = new Set();
+    for (const rw of board) {
+      if (!rw.k) continue;
+      present.add(rw.k);
+      const ep = boardEp.get(rw.k);
+      if (ep) { if (ep.off) { ep.flick = (ep.flick || 0) + 1; ep.off = 0; ledgerDirty = true; } continue; }
+      boardEp.set(rw.k, { k: rw.k, coin: rw.coin, t: rw.t, uni: rw.uni, ev: rw.ev, label: rw.label,
+        cls: rw.cls, side: rw.side, tShow: now, markShow: rw.entry, fired: rw.fired,
+        void: rw.void, target: rw.target, rr: rw.rr ? rw.rr.gross : null, evR: rw.evR,
+        rec: rw.rec ? { n: rw.rec.n, hit: rw.rec.hit } : null, tFire: rw.t0, flick: 0, off: 0 });
+      ledgerDirty = true;
+    }
+    // merge losers were never SHOWN — only the merged winner opened an episode; a row missing this
+    // build marks off (the flicker gate), it does not resolve anything.
+    for (const ep of boardEp.values()) if (!present.has(ep.k) && !ep.off) { ep.off = now; ledgerDirty = true; }
+  }
+
+  function boardEpSweep(now) {
+    for (const [k, ep] of [...boardEp]) {
+      if (ledgerOpen.has(k)) continue;   // claim still live — the episode waits, shown or not
+      boardEp.delete(k); ledgerDirty = true;
+      let cl = null;   // recent closes live at the tail; scan backwards
+      for (let i = ledgerClosed.length - 1; i >= 0; i--) if (ledgerClosed[i].key === k) { cl = ledgerClosed[i]; break; }
+      if (!cl || cl.status !== "resolved") { boardEpDropped++; continue; }
+      const tEnd = cl.tR || now;
+      const hs = getHourly(ep.coin);
+      const res = epResolve(hs, ep.tShow, tEnd, ep.side, ep.void, ep.target);
+      const exitPx = res.kind === "expired" ? priceAsOf(hs, tEnd, 3 * HOUR) : null;
+      const rE = epScore(ep.side, ep.fired, ep.void, ep.target, res.kind, exitPx);
+      const rM = epScore(ep.side, ep.markShow, ep.void, ep.target, res.kind, exitPx);
+      if (rE == null || rM == null) { boardEpDropped++; continue; }   // no exit price at expiry — unscoreable, counted
+      const done = { k: ep.k, coin: ep.coin, t: ep.t, uni: ep.uni, ev: ep.ev, label: ep.label,
+        cls: ep.cls, side: ep.side, tShow: ep.tShow, markShow: ep.markShow, fired: ep.fired,
+        void: ep.void, target: ep.target, rr: ep.rr, evR: ep.evR, rec: ep.rec, tFire: ep.tFire,
+        flick: ep.flick || 0, tRes: tEnd, kind: res.kind, rE, rM,
+        held: Math.max(0, (res.tHit || tEnd) - ep.tShow) };
+      if (res.approx) done.approx = 1;   // spine gap: touch state unknowable, scored at endpoints — labeled
+      boardEpClosed.push(done);
+      if (boardEpClosed.length > BOARD_EP_KEEP) boardEpClosed = boardEpClosed.slice(-BOARD_EP_KEEP);
+    }
+  }
+
+  function boardSettled() {
+    const mk = () => ({ n: 0, t: 0, v: 0, x: 0, approx: 0, hit: null, avgE: null, avgM: null, pf: null, _w: 0, _sE: 0, _sM: 0, _gw: 0, _gl: 0 });
+    const uniObj = () => ({ cls: { rr: mk(), ev: mk() }, all: mk(), lat: null, open: 0, flick: 0 });
+    const per = { stocks: uniObj(), crypto: crypto ? uniObj() : null };
+    const add = (b, e) => { b.n++; b[e.kind === "target" ? "t" : e.kind === "void" ? "v" : "x"]++;
+      if (e.approx) b.approx++;
+      if (e.rE > 0) { b._w++; b._gw += e.rE; } else b._gl += -e.rE;
+      b._sE += e.rE; b._sM += e.rM; };
+    const fin = (b) => { if (b.n) { b.hit = +(b._w / b.n).toFixed(3); b.avgE = +(b._sE / b.n).toFixed(2);
+      b.avgM = +(b._sM / b.n).toFixed(2); b.pf = b._gl > 0 ? +(b._gw / b._gl).toFixed(2) : null; }
+      delete b._w; delete b._sE; delete b._sM; delete b._gw; delete b._gl; return b; };
+    for (const e of boardEpClosed) { const u = per[e.uni]; if (!u) continue;
+      add(u.cls[e.cls === "ev" ? "ev" : "rr"], e); add(u.all, e); u.flick += e.flick || 0; }
+    for (const ep of boardEp.values()) { const u = per[ep.uni]; if (u) { u.open++; u.flick += ep.flick || 0; } }
+    for (const key of ["stocks", "crypto"]) { const u = per[key]; if (!u) continue;
+      fin(u.cls.rr); fin(u.cls.ev); fin(u.all);
+      u.lat = u.all.n ? +(u.all.avgE - u.all.avgM).toFixed(2) : null; }
+    return { since: boardEpSince || null, dropped: boardEpDropped, perUni: per,
+      episodes: boardEpClosed.slice(-BOARD_EP_SHIP) };
+  }
   // Labels come from the two places that already own them — the signals engine's EV_LABEL and the
   // strategy panel's STRAT_DEFS — so a renamed setup can't read one way here and another there.
   const ACT_LABEL = (() => {
@@ -5918,7 +6063,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         if (ep && ep.diff != null && ep.diff * DAY <= meta.horizonMs) earn = { d: ep.e.d, s: ep.e.s, days: ep.diff };
       }
       cands.push({
-        coin: e.coin, t: r.ticker, uni: r.uni === "main" ? "crypto" : "stocks", side,
+        // k = the underlying claim's ledger key. The settled record is keyed on it — one episode
+        // per claim, however often the row blinks. Ships on the payload (harmless) but the client
+        // never renders it.
+        k: e.key, coin: e.coin, t: r.ticker, uni: r.uni === "main" ? "crypto" : "stocks", side,
         ev: e.ev, label: ACT_LABEL[e.ev] || e.ev, shadow, cls: actClass(rr),
         // Fire-time prime verdict, already frozen on the claim by the signals engine. Shown as a
         // badge, NOT enforced — see actConfirm on why its hit>=0.6 floor is not a gate here.
@@ -5939,10 +6087,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const board = mergeActionable(cands).sort((a, b) => (b.t0 || 0) - (a.t0 || 0)
       || (b.evR == null ? -Infinity : b.evR) - (a.evR == null ? -Infinity : a.evR)
       || (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
-    const sigA = JSON.stringify(board.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.gross, x.evR]));
-    if (sigA !== actSig) { actSig = sigA; actVer = Date.now(); }
+    // Episode lifecycle runs INSIDE the build, on the poller's clock — an episode opens whether or
+    // not anyone has the tab open, exactly like the trigger stream below. Scan (open/fold) before
+    // sweep (resolve): a row present this build whose claim resolved this same build still gets
+    // its flicker fold recorded before the sweep closes it.
+    boardEpScan(board, now);
+    boardEpSweep(now);
+    const settled = boardSettled();
+    const sigA = JSON.stringify(board.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.gross, x.evR]))
+      // the settled record must bust the ETag: a resolution or a new episode changes the tab's
+      // content with an unchanged live board
+      + "|" + boardEpClosed.length + "|" + (boardEpClosed.length ? boardEpClosed[boardEpClosed.length - 1].k : "") + "|" + boardEp.size + "|" + boardEpDropped;
+    if (sigA !== actSig) { actSig = sigA; actVer = Math.max(Date.now(), actVer + 1); }   // monotonic: two content changes in one ms must not share an ETag
     actBuilt = now;
-    actCache = { ts: now, dataTs: actVer,
+    actCache = { ts: now, dataTs: actVer, settled,
       params: { minHorizonDays: ACT_MIN_HZ / DAY, minHorizonDaysCrypto: crypto ? ACT_MIN_HZ_MAIN / DAY : null, maxBars: ACT_MAX_BARS, minRR: ACT_MIN_RR,
         recMinN: ACT_REC_MIN_N, netOfCarry: true, tfs: ["D1", "H12", "H4"],
         gate: "confirmed", requires: ["n>=" + ACT_REC_MIN_N, "avgR>0", "EV>0", "R:R<=" + ACT_MAX_RR, "!noedge"], rrFloor: ACT_MIN_RR },
@@ -7180,6 +7338,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     ledgerOpenNow: () => ledgerOpen,             // harness: reach the open claims to stage geometry
     resolveLedgerNow: resolveLedger,             // harness: force resolution without waiting out a horizon
     buildActionableNow: buildActionable,   // harness: force an actionable rebuild without waiting out the memo
+    boardEpStateNow: () => ({ open: [...boardEp.values()], closed: boardEpClosed.slice(), since: boardEpSince, dropped: boardEpDropped }),   // harness: the settled record's raw state
+    ledgerCloseNow: (key, patch) => {   // harness: resolve one open claim in place so episode settlement is testable without waiting out a horizon
+      const e = ledgerOpen.get(key); if (!e) return false;
+      ledgerOpen.delete(key);
+      ledgerClosed.push(Object.assign(e, { status: "resolved", tR: Date.now() }, patch || {}));
+      ledgerDirty = true; return true;
+    },
     hydrateTriggersNow: hydrateTriggers,   // harness: restore announced-set/event log without a boot
     trigStateNow: () => ({ seq: trigSeq, seen: trigSeen.size, events: trigEvents.length, firstBuild: trigFirstBuild }),
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
