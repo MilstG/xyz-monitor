@@ -4007,7 +4007,8 @@ async function pushAct(url, body){
 // the trend chart modal: EVERY level on this board (entry, void, target) arrives on the payload,
 // frozen by the ledger at fire time — the client never re-derives a level, and never recomputes
 // reward:risk. Carry-netting, expectancy and rank are the server's; this file renders them.
-// The ledger takes no crypto claims (the main-universe signal engine was removed), so this board
+// Cross-universe since the crypto engine's return (2026.07.26-08): rows arrive universe-tagged
+// and the scope toggle picks one list at a time — crypto and stocks never share a sort order.
 // is xyz-only and says so rather than showing an empty crypto scope.
 let _act=null,_actLast=0,_actInflight=false,_actWired=false,_actSide='all';
 async function loadActionable(){
@@ -4040,6 +4041,95 @@ let _actSort={k:'ago',d:1}, _actOpen={};
 function actSortLoad(){ try{ const d=JSON.parse(store.get(ASKEY)||'null');
   if(d&&typeof d.k==='string'&&(d.d===1||d.d===-1)) _actSort=d; }catch(_){ } }
 function actSortSave(){ try{ store.set(ASKEY,JSON.stringify(_actSort)); }catch(_){} }
+// ===== settled board record =====
+// The board's own out-of-sample record, rendered below the live list. EVERY number here arrives
+// on the payload (d.settled), stamped server-side at first appearance and at resolution — the
+// client formats and sums shipped counts, it never re-scores an episode. Split by the SAME class
+// tag the live board's checkboxes filter on: "2+1" = the >=2:1-at-fire family, grinders = the
+// sub-2:1 positive-EV family; each bucket includes every outcome its episodes reached (target,
+// void, expired) — a grinder that tagged its modest target belongs to the grinders row.
+let _actEpOpen={}, _actSetOpen=(store.get('actSettled')==='1');
+function actSetPct(x){ return x==null?'\u2014':Math.round(x*100)+'%'; }
+function actSetR(x){ return x==null?'\u2014':`<span class="${x>0?'pos':x<0?'neg':'sec'}">${x>0?'+':''}${x.toFixed(2)}R</span>`; }
+function actSetDays(ms){ return ms==null?'\u2014':(ms/86400000).toFixed(1)+'d'; }
+function actSettled(d,wantU){
+  const st=d&&d.settled, u=st&&st.perUni&&st.perUni[wantU];
+  let h=`<div class="act-set"><div class="act-set-h dsec" data-settgl style="cursor:pointer" data-tip="the board's own out-of-sample record: every suggestion it ever surfaced, stamped at first appearance and scored when the underlying claim resolved \u2014 on or off the board. Once shown, always scored. Click to ${_actSetOpen?'collapse':'expand'}">${_actSetOpen?'\u25be':'\u25b8'} Settled \u2014 every suggestion this board ever showed, scored${st&&st.since?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 out of sample since ${new Date(st.since).toISOString().slice(0,10)}</span>`:''}</div>`;
+  if(!u||(!u.all.n&&!u.open)){
+    h+=_actSetOpen?`<div class="sec" style="font-size:11.5px;padding:4px 2px">No episodes in this scope yet \u2014 the record opens with the first suggestion the board surfaces and scores when its claim resolves. Starting from zero is the point: nothing here is backfilled.</div>`:'';
+    return h+`</div>`;
+  }
+  const a=u.all;
+  h+=`<div class="act-set-strip">`
+    +`<span data-tip="every distinct suggestion that ever appeared in this scope \u2014 one episode per underlying claim, flicker reappearances folded into the original">shown <b>${a.n+u.open}</b></span>`
+    +`<span data-tip="episodes whose claim is still inside its horizon \u2014 they score when it resolves, whether or not the row is still on the board">open <b>${u.open}</b></span>`
+    +`<span data-tip="episodes whose claim resolved \u2014 scored from the geometry frozen at first appearance">resolved <b>${a.n}</b></span>`
+    +(u.lat!=null?`<span data-tip="avg R at the fire mark minus avg R from the first-shown mark \u2014 the measured cost of the board surfacing late (confirmation, record and EV gates all delay a row)">lateness ${actSetR(-Math.abs(u.lat)===u.lat?u.lat:u.lat)}</span>`:'')
+    +(u.flick?`<span data-tip="rows that dropped off (the mark wobbled through a gate) and reappeared \u2014 folded into their original episode so oscillation never manufactures sample size">${u.flick} flicker${u.flick===1?'':'s'} folded</span>`:'')
+    +(st.dropped?`<span data-tip="episodes shown but unscoreable \u2014 the claim was voided or purged, or no exit price survived. Counted, never silently gone.">${st.dropped} unscoreable</span>`:'')
+    +(a.approx?`<span data-tip="episodes scored with a gap in the hourly spine (a restart trimmed it): level touches were unknowable, so they scored at their endpoints \u2014 labeled, not hidden">${a.approx} approx</span>`:'')
+    +`</div>`;
+  if(!_actSetOpen) return h+`</div>`;
+  const row=(lbl,tip,b,mut)=>`<tr${mut?' class="act-set-mut"':''}><td><span data-tip="${esc(tip)}">${lbl}</span></td>`
+    +`<td style="text-align:right">${b.n}</td>`
+    +`<td style="text-align:right" class="sec">${b.n?`${b.t}t / ${b.v}v / ${b.x}x`:'\u2014'}</td>`
+    +`<td style="text-align:right">${b.n?`<span class="${b.hit>=0.5?'pos':'neg'}">${actSetPct(b.hit)}</span>`:'\u2014'}</td>`
+    +`<td style="text-align:right">${actSetR(b.avgE)}</td>`
+    +`<td style="text-align:right">${actSetR(b.avgM)}</td>`
+    +`<td style="text-align:right">${b.pf!=null?b.pf.toFixed(2):'\u2014'}</td></tr>`;
+  h+=`<table class="act-set-t"><thead><tr><th></th>`
+    +`<th data-tip="resolved episodes in this bucket" style="text-align:right">n</th>`
+    +`<th data-tip="how those resolutions split: t = target touched, v = void touched, x = expired between the levels" style="text-align:right">t/v/x</th>`
+    +`<th data-tip="share of resolved episodes positive at the fire mark" style="text-align:right">hit</th>`
+    +`<th data-tip="avg realized R at the fire mark \u2014 the basis the family record was scored on: were the plans good" style="text-align:right">avg @fire</th>`
+    +`<th data-tip="avg realized R from the live mark at FIRST appearance \u2014 what acting on the board actually got" style="text-align:right">avg @shown</th>`
+    +`<th data-tip="gross win R \u00f7 gross loss R, at the fire mark" style="text-align:right">pf</th></tr></thead><tbody>`
+    +row('2+1 \u2014 \u22652:1 at fire','the level-triggered family: frozen R:R cleared 2:1 at fire. All of its outcomes \u2014 targets, voids, expiries \u2014 are in this row.',u.cls.rr)
+    +row('grinders \u2014 sub-2:1, +EV','the statistical family: below 2:1 at fire, positive expectancy anyway. All of its outcomes are here too \u2014 a grinder that tagged its modest target counts exactly like a 2+1 that tagged its big one.',u.cls.ev)
+    +row('all resolved','both families combined \u2014 the whole record',a,true)
+    +`</tbody></table>`;
+  const eps=(st.episodes||[]).filter(e=>e.uni===wantU).slice().reverse();
+  if(eps.length){
+    h+=`<table class="trend-t act-set-eps"><thead><tr><th>name</th><th>event</th><th>class</th><th>side</th>`
+      +`<th data-tip="when the row first appeared on the board" style="text-align:right">shown</th>`
+      +`<th data-tip="how the claim resolved: target / void touched first, or expired between them (a candle spanning both scores pessimistically as the void)">outcome</th>`
+      +`<th data-tip="realized R at the fire mark" style="text-align:right">R@fire</th>`
+      +`<th data-tip="realized R from the mark at first appearance" style="text-align:right">R@shown</th>`
+      +`<th data-tip="first appearance to resolution (or to the level touch that decided it)" style="text-align:right">held</th><th></th></tr></thead><tbody>`;
+    for(const e of eps){ const op=!!_actEpOpen[e.k];
+      const oc=e.kind==='target'?'pos':e.kind==='void'?'neg':'sec';
+      h+=`<tr class="act-set-ep" data-epk="${esc(e.k)}"><td class="${e.side==='long'?'pos':'neg'}"><span class="tk">${esc(e.t)}</span></td>`
+        +`<td class="sec">${esc(e.label||e.ev)}</td>`
+        +`<td class="sec">${e.cls==='ev'?'grinder':'2+1'}</td>`
+        +`<td class="${e.side==='long'?'pos':'neg'}">${e.side}</td>`
+        +`<td class="sec" style="text-align:right">${actAgo(Date.now()-e.tShow)}</td>`
+        +`<td class="${oc}">${e.kind}${e.approx?' \u2248':''}</td>`
+        +`<td style="text-align:right">${actSetR(e.rE)}</td>`
+        +`<td style="text-align:right">${actSetR(e.rM)}</td>`
+        +`<td class="sec" style="text-align:right">${actSetDays(e.held)}</td>`
+        +`<td>${op?'\u25be':'\u25b8'}</td></tr>`;
+      if(op) h+=`<tr class="act-detrow"><td colspan="10">${actEpDetail(e)}</td></tr>`;
+    }
+    h+=`</tbody></table>`;
+  }
+  h+=`<div class="sec" style="font-size:10.5px;margin-top:6px">All stamps and scores are frozen server-side at first appearance and at resolution \u2014 this section renders them and never re-derives. The record started at zero when this feature shipped; nothing before it is claimed.</div></div>`;
+  return h;
+}
+function actEpDetail(e){
+  const risk=Math.abs(e.fired-e.void), riskPct=e.fired?(risk/e.fired*100):null;
+  return `<div class="act-set-det">`
+    +`<span>first shown <b>${new Date(e.tShow).toISOString().slice(0,16).replace('T',' ')}</b> at mark <b>${fmtPrice(e.markShow)}</b>${e.tFire?` \u00b7 claim fired <b>${actAgo(e.tShow-e.tFire)}</b> earlier`:''}</span>`
+    +`<span>frozen: fired <b>${fmtPrice(e.fired)}</b> \u00b7 void <b>${fmtPrice(e.void)}</b> \u00b7 target <b>${fmtPrice(e.target)}</b>${riskPct!=null?` \u00b7 risk <b>${riskPct.toFixed(2)}%</b>`:''}</span>`
+    +`<span>displayed at show: r:r <b>${e.rr!=null?e.rr.toFixed(2):'\u2014'}</b> \u00b7 ev <b>${e.evR!=null?(e.evR>0?'+':'')+e.evR.toFixed(2)+'R':'\u2014'}</b>${e.rec&&e.rec.n?` \u00b7 rec <b>${Math.round(e.rec.hit*100)}%\u00b7${e.rec.n}</b>`:''}</span>`
+    +`<span>resolved <b>${e.tRes?new Date(e.tRes).toISOString().slice(0,16).replace('T',' '):'\u2014'}</b> \u2014 <b>${e.kind}</b>${e.approx?' <span class="sec" data-tip="hourly-spine gap over this window: level touches were unknowable, scored at the endpoints">(approx \u2014 spine gap)</span>':''}${e.flick?` \u00b7 ${e.flick} flicker${e.flick===1?'':'s'} folded`:''}</span>`
+    +`</div>`;
+}
+function actSettledWire(box){
+  const tg=box.querySelector('[data-settgl]');
+  if(tg) tg.addEventListener('click',()=>{ _actSetOpen=!_actSetOpen; try{ store.set('actSettled',_actSetOpen?'1':'0'); }catch(_){} renderActionable(); });
+  box.querySelectorAll('tr.act-set-ep').forEach(tr=>tr.addEventListener('click',()=>{
+    const k=tr.dataset.epk; _actEpOpen[k]=!_actEpOpen[k]; renderActionable(); }));
+}
 function actRR(x){ return x!=null&&isFinite(x)?(+x).toFixed(2):'\u2014'; }
 function actEV(x){ return x!=null&&isFinite(x)?((x>=0?'+':'')+(+x).toFixed(2)):'\u2014'; }
 function actLate(x){ return x!=null&&isFinite(x)?((x>=0?'+':'')+(+x).toFixed(2)):'\u2014'; }
@@ -4161,10 +4251,12 @@ function renderActionable(){
     }
     h+=`</tbody></table>`;
   }
+  h+=actSettled(d,wantU);
   h+=`<div class="act-foot"><b style="color:var(--text)">Confirmed only.</b> A row appears here only if the setup has at least ${p.recMinN||8} resolved out-of-sample fires, those fires paid on average, this entry still models positive expectancy after carry and lateness, and net R:R is at least ${_actMinRR}. Most events in the ledger do not clear that \u2014 which is the honest result of testing them, and why this board is often short or empty. Setups still earning a record are not shown here; the strategy panel tracks those. `
     +`<b style="color:var(--text)">Fired</b> is the mark frozen when the claim opened \u2014 the entry its record was scored on; <b style="color:var(--text)">Now</b> is live, and <b style="color:var(--text)">Late</b> is the gap in the setup's own risk unit. Void and target are the claim's geometry, frozen at fire time and never re-derived here. R:R is net of expected funding over the horizon. `
-    +`Horizons of ${p.minHorizonDays||3}d or longer only (${(p.tfs||['D1','H12','H4']).join(' \u00b7 ')}). Equities only \u2014 the ledger takes no crypto claims. Not investment advice.</div>`;
+    +`Horizons of ${p.minHorizonDays||3}d or longer only (${(p.tfs||['D1','H12','H4']).join(' \u00b7 ')}). Both universes, scoped by the toggle above \u2014 crypto and stocks never share this list. Not investment advice.</div>`;
   box.innerHTML=h;
+  actSettledWire(box);
   box.querySelectorAll('th[data-sk]').forEach(th=>th.addEventListener('click',()=>{
     const k=th.dataset.sk;
     if(_actSort.k===k) _actSort.d=-_actSort.d; else _actSort={k,d:1};
@@ -6106,7 +6198,7 @@ actionable:`
 <div class="hlp-h">Age, and falling off</div>
 <p><b>Age</b> is bars in trigger measured in the setup's own timeframe — a daily retest on its ninth bar is not the same animal as one on its first. A row leaves the board when it ages past 10 bars, when its reward:risk from the live mark drops under 1.2, or when price passes its void and the geometry stops being tradeable from here. None of that is a judgement about the setup; it is the arithmetic of entering <i>now</i> rather than at the fire.</p>
 <div class="hlp-h">Flags</div>
-<p>⚠ marks a scheduled earnings print <i>inside</i> the setup's horizon — a binary the base rate cannot see. It is flagged, never filtered: standing aside is your call, and the post-earnings-drift setup deliberately trades the aftermath. A <b>+n</b> chip means other detectors fired on the same name and side; they are corroboration, not extra trades, and they never overwrite the winning claim's levels. Horizons of 3d or longer only (D1 · H12 · H4) — the ledger takes no crypto claims, so this board is equities only.</p>
+<p>⚠ marks a scheduled earnings print <i>inside</i> the setup's horizon — a binary the base rate cannot see. It is flagged, never filtered: standing aside is your call, and the post-earnings-drift setup deliberately trades the aftermath. A <b>+n</b> chip means other detectors fired on the same name and side; they are corroboration, not extra trades, and they never overwrite the winning claim's levels. Horizons of 3d or longer only (D1 · H12 · H4); crypto runs its own compressed floor. Both universes, scoped by the toggle — never mixed in one list.</p>
 `,
 earnings:`
 <div class="hlp-h">What it shows</div>
@@ -6506,6 +6598,12 @@ function nlResolve(text){ const rawWords=text.split(/\s+/); const s=' '+text.toL
   const win=termWin(s); const n=(s.match(/\b(\d{1,3})\b/)||[])[1];
   if(/\b(help|how do i|what can|commands)\b/.test(s)) return 'help';
   if(/\b(clear|reset|wipe)\b/.test(s)) return 'clear';
+  // Causal / explanatory intent -> the analyst, ALWAYS. "why is DRAM dumping so much today"
+  // contains a ticker and the word "today", and the field scan below happily turned that into a
+  // bare `DRAM d1` card — a "why" answered with a number, which is the exact ticker-degradation
+  // failure the escalation contract forbids. A ticker inside a causal question is context for the
+  // AI, never the answer. Runs before every local mapping; mirrored server-side in classifyAsk.
+  if(/\bwhy\b|\bhow come\b|\bcaus(e|es|ed|ing)\b|\bexplain\b|\breasons?\b|\bdriving\b|\bwhat happened\b|\bgoing on\b|\bbehind (the|this|its)\b/.test(s)) return null;
   // ---- whole-board questions (no ticker needed) ----
   if(/\bbreadth\b/.test(s)||/\b(hows?|how is|how are|how does|whats) the (market|tape|board)\b/.test(s)
     ||/\b(market|tape) (doing|look|looking|today)\b/.test(s)||/\bhow many (names? )?(are )?(up|down|green|red)\b/.test(s)
@@ -6625,11 +6723,19 @@ function termCompactUniverse(){ const rnd=v=>(v==null||!isFinite(v))?null:+v.toF
 function termThinking(){ const d=document.createElement('div'); d.className='tp-blk';
   d.innerHTML=`<span class="tp-badge ai">AI</span> <span class="tp-line"><span class="amber tp-think">thinking…</span></span>`;
   termEl('termScroll').appendChild(d); termScrollDown(); return d; }
+// Session transcript. Statelessness made the AI blind to its own conversation — "not what I
+// asked" arrived alone and the analyst could only shrug at four words. Every exchange (local OR
+// AI: a complaint is usually about a LOCAL answer) is recorded and the tail rides every /api/ask,
+// so follow-ups resolve against what was actually said. Session-scoped, never persisted.
+let _termHist=[];
+function termHistPush(q,a){ _termHist.push({q:String(q||'').slice(0,300), a:String(a||'').slice(0,500)}); if(_termHist.length>8) _termHist.shift(); }
+function termCausal(text){ return /\bwhy\b|\bhow come\b|\bcaus(e|es|ed|ing)\b|\bexplain\b|\breasons?\b|\bdriving\b|\bwhat happened\b|\bgoing on\b|\bbehind (the|this|its)\b/i.test(text)
+  || /^\s*(what if|what would|what happens|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(text); }
 async function termAsk(text){
-  const mode=/^\s*(why|explain|how come|what if|what would|what happens|reason|should i|do you think|is it|are they|which is better|compare|walk me)\b/i.test(text)?'analyst':'planner';
+  const mode=termCausal(text)?'analyst':'planner';
   const uni=termCompactUniverse(); const think=termThinking();
   try{
-    const r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({q:text, ctx:{scope:state.scope, mode, universe:uni}})});
+    const r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({q:text, ctx:{scope:state.scope, mode, universe:uni, hist:_termHist.slice(-6)}})});
     const d=await r.json().catch(()=>({})); think.remove();
     if(d&&d.askDayLeft!=null) renderAskBudget(d.askDayLeft, d.askPerDay);   // reflect the spend immediately
     if(d&&d.disabled) return termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
@@ -6637,8 +6743,8 @@ async function termAsk(text){
       if(d&&d.error==='ai-locked'){ termSetLock(true); return termOutAI(`AI is locked for this session. Run <b>admin unlock &lt;password&gt;</b> to enable AI answers <span class="tp-trans">(local commands like a ticker, <span class="ex" data-tcmd="top funding">top funding</span> or <span class="ex" data-tcmd="signals">signals</span> still work without it)</span>.`); }
       if(d&&d.error==='ask-daily-cap') return termOutAI(`daily AI limit reached — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
-    if(d.mode==='planner'&&d.query){ termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
-    if(d.mode==='analyst'){ const tail=d.askDayLeft!=null?` · <span style="color:${d.askDayLeft<=Math.max(1,(d.askPerDay||40)*0.25)?'var(--accent)':'var(--faint)'}">${d.askDayLeft} ask ${d.askDayLeft===1?'call':'calls'} left today</span>`:''; return termOutAI(`${tesc(d.answer||'').replace(/\n/g,'<br>')}\n<span class="tp-trans">— reasoned over ${d.marketsN||uni.length} live markets · ${tesc(d.model||'ai')}${d.cached?' · cached':''}${tail}</span>`); }
+    if(d.mode==='planner'&&d.query){ termHistPush(text,'→ '+d.query); termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
+    if(d.mode==='analyst'){ termHistPush(text,d.answer||''); const tail=d.askDayLeft!=null?` · <span style="color:${d.askDayLeft<=Math.max(1,(d.askPerDay||40)*0.25)?'var(--accent)':'var(--faint)'}">${d.askDayLeft} ask ${d.askDayLeft===1?'call':'calls'} left today</span>`:''; return termOutAI(`${tesc(d.answer||'').replace(/\n/g,'<br>')}\n<span class="tp-trans">— reasoned over ${d.marketsN||uni.length} live markets · ${tesc(d.model||'ai')}${d.cached?' · cached':''}${tail}</span>`); }
     return termErr('empty response');
   }catch(e){ think.remove(); termErr('ask failed — '+tesc(e.message)); }
 }
@@ -6658,9 +6764,9 @@ function termRun(raw){ const line=raw.trim(); if(!line) return;
     return termAdminReset(adm[1]); }
   termEcho(line);
   const p=line.split(/\s+/);
-  if(termGrammarComplete(p)) return termExec(line);   // unambiguous, complete command — run it (no badge, you typed it)
+  if(termGrammarComplete(p)){ termHistPush(line, line); return termExec(line); }   // unambiguous, complete command — run it (no badge, you typed it)
   const nl=nlResolve(line);                            // Tier 2 — local NL intent
-  if(nl){ termOutTrans(nl); return termExec(nl); }
+  if(nl){ termHistPush(line,'→ '+nl+' (computed locally)'); termOutTrans(nl); return termExec(nl); }
   return termAsk(line);                                // Tier 3 — AI fallback (stub)
 }
 async function termAdminReset(pw){
