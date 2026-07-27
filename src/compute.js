@@ -3503,6 +3503,116 @@ function trigEligible(row, cfg) {
   return true;
 }
 
+// ===== telegram push transport (pure layer) ====================================================
+// Second consumer of the SAME sequenced trigger stream the browser toast reads. Everything that
+// decides what a message says or who gets it lives here as pure functions, so the wire transport
+// in poller.js is nothing but "fetch this URL with this body" and the whole decision surface is
+// testable without a network. Deliberately NOT a re-implementation of eligibility: the setup class
+// delegates to trigEligible, so a rule change can never make Telegram and the browser announce
+// different things — the drift this stream was built to prevent.
+
+// Canonical push classes. `setup` is the existing trigger stream; `ops` is the server telling on
+// itself (deploys, stalls, degraded feeds). Every later slice adds its class HERE and nowhere else.
+// NB: the field is `kind`, not `cls` — actionable rows already carry a `cls` (the R:R class) and
+// a collision would silently mis-route every message on the board.
+const PUSH_CLASSES = ["setup", "ops"];
+
+// Telegram parse_mode=HTML understands exactly five entities; everything else must be escaped or
+// the API rejects the whole message with a 400 and the alert is lost. Ampersand first — escaping it
+// after the angle brackets would double-escape the entities we just introduced.
+function tgEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Link codes: 6 chars from an unambiguous alphabet (no O/0, I/1 — these get read off a screen and
+// typed into a phone). Validation is pure and case-insensitive; minting lives in the poller because
+// it needs randomness and TTL state.
+const PUSH_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function pushCodeOk(s) {
+  return typeof s === "string" && /^[A-HJ-NP-Z2-9]{6}$/.test(s.trim().toUpperCase());
+}
+function pushCodeNorm(s) { return typeof s === "string" ? s.trim().toUpperCase() : ""; }
+
+// Per-recipient delivery filter. Two gates, in order: does this person want this CLASS at all, and
+// (for setups) does the event clear the thresholds they set? The class gate is the one that makes
+// per-person DMs worth having over a group chat — same rules for everyone, different phones.
+// An absent `classes` means all classes: a freshly linked recipient gets everything until they
+// narrow it, because silence on a new link reads as a broken wire.
+function pushEligible(ev, sub) {
+  if (!ev) return false;
+  const s = sub || {};
+  if (s.muted) return false;
+  const kind = ev.kind || "setup";
+  if (!PUSH_CLASSES.includes(kind)) return false;
+  if (Array.isArray(s.classes) && s.classes.length && !s.classes.includes(kind)) return false;
+  if (kind === "ops") return true;                 // ops has no thresholds — it is already rare by construction
+  return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
+}
+
+// One message per event, in the fixed four-line grammar the signal cards use: what fired, the
+// geometry, the evidence, the link. Fixed order matters more here than on screen — this arrives at
+// 3am on a phone and the eye needs to land on the void level in the same place every time.
+// Returns null for an unformattable event rather than shipping a half-message.
+function pushFmt(ev, opts) {
+  if (!ev) return null;
+  const o = opts || {};
+  const kind = ev.kind || "setup";
+  if (kind === "ops") {
+    const tag = ev.level === "warn" ? "\u26a0 " : "";
+    return tag + "<b>" + tgEsc(ev.title || "ops") + "</b>\n" + tgEsc(ev.text || "");
+  }
+  if (!ev.coin) return null;
+  const name = tgEsc(ev.t || ev.coin);
+  const side = ev.side === "long" ? "LONG" : ev.side === "short" ? "SHORT" : tgEsc(ev.side || "");
+  const num = (v, d) => (v == null || !isFinite(v) ? "\u2014" : (+v).toFixed(d == null ? 2 : d));
+  const px = (v) => (v == null || !isFinite(v) ? "\u2014" : String(v));
+  const l1 = "<b>" + name + "</b> \u00b7 " + side + " \u00b7 " + tgEsc(ev.label || ev.ev || "")
+    + (ev.tf ? " \u00b7 " + tgEsc(ev.tf) : "") + (ev.prime === true ? " \u2605" : "");
+  const l2 = "entry " + px(ev.entry) + " \u00b7 void " + px(ev.void) + " \u00b7 target " + px(ev.target)
+    + (ev.rr && ev.rr.gross != null ? " \u00b7 R:R " + num(ev.rr.gross, 1) : "");
+  const rec = ev.rec || {};
+  const l3 = "EV " + num(ev.evR, 2) + "R \u00b7 n=" + (rec.n == null ? "\u2014" : rec.n)
+    + " \u00b7 hit " + (rec.hit == null ? "\u2014" : Math.round(rec.hit * 100) + "%")
+    + " \u00b7 avg " + num(rec.avgR, 2) + "R"
+    + (ev.late != null ? " \u00b7 late " + num(ev.late, 2) + "R" : "")
+    + (ev.earn ? " \u00b7 \u26a0 earnings" : "");
+  const base = o.baseUrl ? String(o.baseUrl).replace(/\/+$/, "") : "";
+  const l4 = base ? '<a href="' + tgEsc(base + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
+  return [l1, l2, l3, l4].filter(Boolean).join("\n");
+}
+
+// Telegram caps a sendMessage body at 4096 chars, so a burst is batched into as few messages as
+// possible rather than one per event — and the batch is CAPPED, with the overflow disclosed as a
+// count instead of silently dropped. Same honest-null rule the UI uses for suppressed signals.
+const PUSH_MSG_MAX = 3800, PUSH_BATCH_MAX = 8;
+function pushBatch(msgs, opts) {
+  const o = opts || {};
+  const cap = o.max || PUSH_BATCH_MAX, lim = o.limit || PUSH_MSG_MAX;
+  const list = (msgs || []).filter((m) => typeof m === "string" && m);
+  if (!list.length) return [];
+  const take = list.slice(0, cap), extra = list.length - take.length;
+  const out = [];
+  let cur = "";
+  for (const m of take) {
+    const next = cur ? cur + "\n\n" + m : m;
+    if (next.length > lim && cur) { out.push(cur); cur = m; }
+    else cur = next;
+  }
+  if (cur) out.push(cur);
+  if (extra > 0 && out.length) out[out.length - 1] += "\n\n<i>+" + extra + " more held \u2014 batch cap</i>";
+  return out;
+}
+
+module.exports.PUSH_CLASSES = PUSH_CLASSES;
+module.exports.PUSH_CODE_ALPHABET = PUSH_CODE_ALPHABET;
+module.exports.tgEsc = tgEsc;
+module.exports.pushCodeOk = pushCodeOk;
+module.exports.pushCodeNorm = pushCodeNorm;
+module.exports.pushEligible = pushEligible;
+module.exports.pushFmt = pushFmt;
+module.exports.pushBatch = pushBatch;
+
 module.exports.lateR = lateR;
 module.exports.trigKey = trigKey;
 module.exports.trigEligible = trigEligible;

@@ -16,7 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { momPair, spearmanIC, duelStats } = require("./compute");
-const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible } = require("./compute");
+const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, PUSH_CLASSES, PUSH_CODE_ALPHABET } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -124,7 +124,7 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -4008,6 +4008,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
     // Announced-trigger set: without this a redeploy re-announces the whole live board.
     if (hydrateTriggers()) log(`Restored trigger state: ${trigSeen.size} announced setup(s), seq ${trigSeq}`);
+    // ---- telegram push transport --------------------------------------------------------------
+    // Fully dormant without a token: no timers, no writes, no noise. Same one-variable rollback
+    // discipline as CRYPTO=0 — unset TG_BOT_TOKEN and the feature is simply not there.
+    pushBootAt = Date.now();
+    if (pushOn()) {
+      const linked = hydratePush();
+      log(`Telegram push: ENABLED — ${linked} linked recipient(s), stream cursor at seq ${trigSeq}` +
+        (PUBLIC_URL() ? `, deep links to ${PUBLIC_URL()}` : ", no PUBLIC_URL set (messages carry no deep link)"));
+      pushOps("deploy", `build ${version || "dev"} is live`);
+      setInterval(() => { pushUpdatesTick().catch((e) => log("push updates failed (isolated): " + (e && e.message))); }, PUSH_UPDATES_MS);
+      setInterval(() => { pushDrain().catch((e) => log("push drain failed (isolated): " + (e && e.message))); }, PUSH_DRAIN_MS);
+      setInterval(safeTick(pushStreamTick, "pushStreamTick"), 5 * 1000);
+      setInterval(safeTick(pushHealthTick, "pushHealthTick"), 60 * 1000);
+    } else {
+      log("Telegram push: disabled (no TG_BOT_TOKEN)");
+    }
     log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), classifier ${AI_CLASSIFY_MODEL}, TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     if (crypto) czBoot();
     hydrateDuel();
@@ -5882,7 +5898,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const d = store.loadTriggers ? store.loadTriggers() : null;
     if (!d) return false;
     if (Array.isArray(d.seen)) for (const kv of d.seen) if (Array.isArray(kv) && typeof kv[0] === "string") trigSeen.set(kv[0], +kv[1] || 0);
-    if (Array.isArray(d.events)) trigEvents = d.events.filter((e) => e && typeof e.coin === "string").slice(-TRIG_RING);
+    if (Array.isArray(d.events)) trigEvents = d.events
+      .filter((e) => e && (typeof e.coin === "string" || e.kind === "ops"))
+      .map((e) => (e.kind ? e : Object.assign({ kind: "setup" }, e)))   // pre-`kind` events are setups — that is all the ring held
+      .slice(-TRIG_RING);
     trigSeq = Number.isFinite(d.seq) ? d.seq : (trigEvents.length ? trigEvents[trigEvents.length - 1].seq || 0 : 0);
     return true;
   }
@@ -5893,6 +5912,31 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     store.saveTriggers({ seq: trigSeq, seen: [...trigSeen.entries()], events: trigEvents.slice(-TRIG_RING) });
     trigDirty = false;
   }
+  // ONE emitter for the ONE stream. Every class — setups today, ops here, the rest in later
+  // slices — enters the ring through this function and is stamped with its `kind`, so a consumer
+  // (browser toast, Telegram, anything after) filters on a field that always exists rather than
+  // inferring class from which fields happen to be present. Legacy events persisted before this
+  // stamp existed read as "setup" at hydrate, which is what they are.
+  // NB: `kind`, not `cls` — actionable rows already carry a `cls` (the R:R class).
+  function emitTrig(kind, obj, now) {
+    const ev = Object.assign({ seq: ++trigSeq, at: now || Date.now(), kind }, obj);
+    trigEvents.push(ev);
+    if (trigEvents.length > TRIG_RING) trigEvents = trigEvents.slice(-TRIG_RING);
+    trigDirty = true;
+    return ev;
+  }
+  // The ops lane: the server telling on itself. Edge-triggered by construction — every caller
+  // holds its own "already reported" flag and clears it on recovery, because an ops alert that
+  // repeats every tick is worse than no ops alert at all (you learn to ignore the channel, and
+  // then you miss the real one). Cheap enough to be unconditional: if nobody is linked, the event
+  // still enters the ring and the panel shows it.
+  function pushOps(title, text, level) {
+    const ev = emitTrig("ops", { title: String(title || "ops"), text: String(text || ""), level: level || "info" });
+    persistTriggers();
+    log(`ops event: ${title} — ${text}`);
+    return ev;
+  }
+
   // Called with the freshly ranked board. Emits one event per newly-seen claim.
   //
   // The anti-blast rule: on the FIRST build after a boot, a new key only announces if the claim
@@ -5908,11 +5952,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (trigSeen.has(k)) continue;
       trigSeen.set(k, now); trigDirty = true;
       if (trigFirstBuild && !(row.t0 > 0 && now - row.t0 <= TRIG_GRACE_MS)) continue;   // seeded, not announced
-      const ev = Object.assign({ seq: ++trigSeq, at: now }, row);
+      const ev = emitTrig("setup", row, now);
       delete ev.also;   // the event is one claim; corroboration is a board concern
-      trigEvents.push(ev); fresh.push(ev);
+      fresh.push(ev);
     }
-    if (trigEvents.length > TRIG_RING) trigEvents = trigEvents.slice(-TRIG_RING);
     trigFirstBuild = false;
     if (trigDirty) persistTriggers();
     if (fresh.length) log(`triggers: ${fresh.length} new setup(s) — ${fresh.map((e) => e.t + " " + e.side).join(", ")}`);
@@ -5927,6 +5970,318 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ts: Date.now(), dataTs: trigSeq, seq: trigSeq,
       params: { ring: TRIG_RING, graceMs: TRIG_GRACE_MS, seenTtlMs: TRIG_SEEN_TTL },
       known: trigSeen.size, events: evs, count: evs.length };
+  }
+
+
+  // ---- telegram push: the wire (slice A) -----------------------------------------------------
+  // A SECOND consumer of the stream above, on exactly the same footing as the browser toast. It
+  // owns no notion of what is worth announcing — pushEligible/pushFmt in compute.js decide that,
+  // shared with the browser — so this block is only three mechanical concerns: who is linked, how
+  // a message reaches Telegram without tripping their rate limits, and what happens when it fails.
+  //
+  // Dormant without TG_BOT_TOKEN: no timers armed, no state written, no log noise. The feature
+  // does not exist on a deploy that hasn't been given a bot.
+  const PUSH_LINK_TTL = 10 * 60 * 1000;     // a link code is read off a screen and typed into a phone
+  const PUSH_SEND_GAP = 3000;               // 1 msg / 3s — Telegram's per-chat ceiling is ~20/min
+  const PUSH_CAP_HOUR = 20;                 // per-recipient hourly cap; overflow is DISCLOSED, not dropped silently
+  const PUSH_QUEUE_MAX = 50;                // bounded outbox — an unreachable chat cannot grow memory without limit
+  const PUSH_GRACE_MS = 5 * 60 * 1000;      // startup grace: the ring may hold events nobody was listening for
+  const PUSH_UPDATES_MS = 20 * 1000;        // getUpdates poll — no webhook, no public URL, no extra Railway config
+  const PUSH_DRAIN_MS = 1000;               // outbox tick; the gap above does the actual pacing
+  const PUSH_MAX_TRIES = 5;
+  const PUSH_LOG_RING = 40;
+  const pushFetch = pushFetchOpt || ((...a) => fetch(...a));
+  const PUSH_TOKEN = () => process.env.TG_BOT_TOKEN || "";
+  const pushOn = () => !!PUSH_TOKEN();
+  const PUBLIC_URL = () => process.env.PUBLIC_URL || "";
+
+  let pushRecipients = new Map();   // chat -> { chat, name, since, cur, classes, trig, muted, lastOk, lastErr }
+  let pushCodes = new Map();        // CODE -> { t }
+  let pushOffset = 0;               // getUpdates high-water mark
+  let pushQueue = [];               // [{ chat, text, tries, at }]
+  let pushHoldUntil = 0;            // global send pacing / 429 backoff
+  let pushSending = false, pushDirty = false, pushBootAt = Date.now();
+  let pushDropped = 0, pushLog = [], pushLastErr = null, pushLastTest = 0, pushVer = 0;
+  let pushStall = false;            // edge state for the poller-stall ops alert
+
+  function hydratePush() {
+    const d = store.loadPush ? store.loadPush() : null;
+    if (!d) return 0;
+    if (Array.isArray(d.recipients)) for (const r of d.recipients) {
+      if (!r || !r.chat) continue;
+      pushRecipients.set(String(r.chat), {
+        chat: String(r.chat), name: r.name || String(r.chat), since: +r.since || Date.now(),
+        cur: +r.cur || 0, classes: Array.isArray(r.classes) ? r.classes.filter((c) => PUSH_CLASSES.includes(c)) : null,
+        trig: r.trig && typeof r.trig === "object" ? r.trig : {},
+        muted: !!r.muted, lastOk: +r.lastOk || null, lastErr: r.lastErr || null });
+    }
+    if (Number.isFinite(d.offset)) pushOffset = d.offset;
+    return pushRecipients.size;
+  }
+  function persistPush() {
+    pushVer++;
+    if (!store.savePush) return;
+    store.savePush({ ts: Date.now(), offset: pushOffset, recipients: [...pushRecipients.values()] });
+    pushDirty = false;
+  }
+
+  // Chat ids are shown to the whole group in the delivery panel, so they are masked there — a chat
+  // id is enough to attempt contact, and the panel is not the place to hand one over.
+  const pushMask = (chat) => { const s = String(chat); return s.length <= 4 ? s : "\u2026" + s.slice(-4); };
+
+  async function tgApi(method, body) {
+    const token = PUSH_TOKEN();
+    if (!token) return { ok: false, error: "disabled" };
+    let res, j = null;
+    try {
+      res = await pushFetch(`https://api.telegram.org/bot${token}/${method}`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+    } catch (e) { return { ok: false, error: "network: " + (e && e.message) }; }
+    try { j = await res.json(); } catch (_) {}
+    if (!res.ok || !j || j.ok !== true) {
+      return { ok: false, status: res.status,
+        // Telegram puts the actual reason in `description` — surfacing it verbatim is the whole
+        // difference between "alerts don't work" and "the token is wrong", and I cannot reach
+        // api.telegram.org from a dev sandbox to find out for you.
+        error: (j && j.description) || ("http " + (res && res.status)),
+        retryAfter: j && j.parameters && +j.parameters.retry_after };
+    }
+    return { ok: true, result: j.result };
+  }
+
+  // ---- linking: /start CODE ------------------------------------------------------------------
+  // The code exists so a mistyped chat id cannot silently route someone's alerts to a stranger.
+  // Binding is proved in one direction: the server mints, the human carries it into a DM the bot
+  // can see, and only then is a chat id trusted. Codes are single-use and short-lived.
+  function pushMintCode() {
+    const now = Date.now();
+    for (const [c, v] of pushCodes) if (now - v.t > PUSH_LINK_TTL) pushCodes.delete(c);
+    let code = "";
+    for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[Math.floor(Math.random() * PUSH_CODE_ALPHABET.length)];
+    pushCodes.set(code, { t: now });
+    return { ok: true, code, expiresAt: now + PUSH_LINK_TTL };
+  }
+  function pushBind(code, chat, name) {
+    const c = pushCodeNorm(code);
+    if (!pushCodeOk(c)) return { ok: false, error: "bad-code" };
+    const rec = pushCodes.get(c);
+    if (!rec) return { ok: false, error: "bad-code" };
+    if (Date.now() - rec.t > PUSH_LINK_TTL) { pushCodes.delete(c); return { ok: false, error: "expired" }; }
+    pushCodes.delete(c);
+    const key = String(chat);
+    const prev = pushRecipients.get(key);
+    pushRecipients.set(key, {
+      chat: key, name: name || key, since: prev ? prev.since : Date.now(),
+      // A new recipient starts CAUGHT UP, never with the backlog: the ring holds up to 200 events
+      // and nobody wants their first message from this bot to be two hundred stale setups.
+      cur: trigSeq, classes: prev ? prev.classes : null, trig: prev ? prev.trig : {},
+      muted: false, lastOk: null, lastErr: null });
+    persistPush();
+    log(`push: linked recipient ${name || key} (${pushMask(key)})`);
+    return { ok: true, chat: key };
+  }
+  function pushUnlink(chat) {
+    const key = String(chat);
+    if (!pushRecipients.has(key)) return { ok: false, error: "unknown" };
+    pushRecipients.delete(key);
+    pushQueue = pushQueue.filter((q) => q.chat !== key);
+    persistPush();
+    log(`push: unlinked recipient ${pushMask(key)}`);
+    return { ok: true };
+  }
+  function pushSetClasses(chat, classes) {
+    const r = pushRecipients.get(String(chat));
+    if (!r) return { ok: false, error: "unknown" };
+    r.classes = Array.isArray(classes) ? classes.filter((c) => PUSH_CLASSES.includes(c)) : null;
+    if (r.classes && !r.classes.length) r.classes = null;   // an empty selection means "everything", not "silence" — muting is its own control
+    persistPush();
+    return { ok: true, classes: r.classes };
+  }
+
+  async function pushUpdatesTick() {
+    if (!pushOn()) return;
+    const r = await tgApi("getUpdates", { offset: pushOffset || undefined, timeout: 0, allowed_updates: ["message"] });
+    if (!r.ok) { pushLastErr = r.error; return; }
+    pushLastErr = null;
+    for (const u of r.result || []) {
+      if (Number.isFinite(u.update_id)) pushOffset = Math.max(pushOffset, u.update_id + 1);
+      const m = u.message;
+      if (!m || !m.chat || typeof m.text !== "string") continue;
+      const chat = m.chat.id, name = (m.from && (m.from.first_name || m.from.username)) || String(chat);
+      const txt = m.text.trim();
+      const start = txt.match(/^\/start(?:@\S+)?\s+(\S+)/i);
+      if (start) {
+        const res = pushBind(start[1], chat, name);
+        pushEnqueue(String(chat), res.ok
+          ? "<b>Linked.</b>\nYou'll get alerts here. Send /stop to unlink."
+          : (res.error === "expired" ? "That code has expired \u2014 generate a new one in the alerts panel."
+            : "That code isn't valid \u2014 check the alerts panel for a current one."), true);
+        continue;
+      }
+      if (/^\/stop(?:@\S+)?$/i.test(txt)) {
+        const had = pushRecipients.has(String(chat));
+        if (had) pushUnlink(chat);
+        pushEnqueue(String(chat), had ? "<b>Unlinked.</b>\nNo further alerts will be sent here." : "You weren't linked.", true);
+        continue;
+      }
+      if (/^\/(status|help)(?:@\S+)?$/i.test(txt)) {
+        const r2 = pushRecipients.get(String(chat));
+        pushEnqueue(String(chat), r2
+          ? "<b>Linked</b> \u00b7 classes: " + (r2.classes && r2.classes.length ? r2.classes.join(", ") : "all")
+            + "\n/stop to unlink."
+          : "Not linked. Open the alerts panel for a link code, then send /start CODE.", true);
+      }
+    }
+    if (pushOffset) persistPush();
+  }
+
+  // ---- outbox ---------------------------------------------------------------------------------
+  // Bounded, paced, and never silently lossy: an overflow increments a counter the panel shows and
+  // the next delivered message discloses. `force` bypasses the per-recipient hourly cap for replies
+  // to a human who just typed a command at the bot — a /stop confirmation is not an alert.
+  function pushEnqueue(chat, text, force) {
+    if (!text) return;
+    if (pushQueue.length >= PUSH_QUEUE_MAX) { pushQueue.shift(); pushDropped++; }
+    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force });
+  }
+  function pushRecent(chat, now) {
+    const r = pushRecipients.get(String(chat));
+    if (!r) return 0;
+    r.sent = (r.sent || []).filter((t) => now - t < 3600e3);
+    return r.sent.length;
+  }
+  async function pushDrain() {
+    if (pushSending || !pushQueue.length || !pushOn()) return;
+    const now = Date.now();
+    if (now < pushHoldUntil) return;
+    const item = pushQueue[0];
+    if (!item.force && pushRecent(item.chat, now) >= PUSH_CAP_HOUR) {
+      // Held, not dropped. The cap protects the channel from becoming unreadable; the disclosure
+      // protects you from believing silence means nothing fired.
+      pushHoldUntil = now + 60 * 1000;
+      return;
+    }
+    pushSending = true;
+    try {
+      const held = pushDropped;
+      const body = held > 0 ? item.text + "\n\n<i>+" + held + " alert(s) dropped \u2014 outbox overflow</i>" : item.text;
+      const r = await tgApi("sendMessage",
+        { chat_id: item.chat, text: body, parse_mode: "HTML", disable_web_page_preview: true });
+      const rec = pushRecipients.get(item.chat);
+      if (r.ok) {
+        if (held > 0) pushDropped -= held;
+        pushQueue.shift();
+        if (rec) { rec.lastOk = now; rec.lastErr = null; rec.sent = (rec.sent || []).concat(now); }
+        pushHoldUntil = now + PUSH_SEND_GAP;
+        pushLogAdd({ t: now, chat: pushMask(item.chat), ok: true });
+        pushDirty = true;
+      } else if (r.status === 429) {
+        pushHoldUntil = now + Math.max(1000, (r.retryAfter || 5) * 1000);   // their number, not ours
+        item.tries++;
+        pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: "429 rate limit" });
+      } else if (r.status === 403) {
+        // Blocked or deactivated. Mute rather than unlink: the panel should say WHY someone stopped
+        // getting alerts, and an auto-removed row looks like a bug.
+        pushQueue = pushQueue.filter((q) => q.chat !== item.chat);
+        if (rec) { rec.muted = true; rec.lastErr = r.error || "blocked"; }
+        persistPush();
+        pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: "blocked \u2014 muted" });
+        log(`push: ${pushMask(item.chat)} blocked the bot — muted`);
+      } else if (r.status >= 400 && r.status < 500) {
+        // A malformed message must never wedge the queue behind itself.
+        pushQueue.shift();
+        if (rec) rec.lastErr = r.error;
+        pushLastErr = r.error;
+        pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: r.error });
+        log(`push: dropped an undeliverable message to ${pushMask(item.chat)} — ${r.error}`);
+      } else {
+        item.tries++;
+        pushHoldUntil = now + Math.min(60000, 2000 * Math.pow(2, item.tries));
+        if (item.tries >= PUSH_MAX_TRIES) {
+          pushQueue.shift();
+          pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: "gave up after " + item.tries + " tries" });
+        }
+        pushLastErr = r.error;
+      }
+    } finally { pushSending = false; }
+  }
+  function pushLogAdd(e) { pushLog.unshift(e); if (pushLog.length > PUSH_LOG_RING) pushLog.pop(); pushVer++; }
+
+  // ---- stream consumption ---------------------------------------------------------------------
+  // Per-recipient cursor, advanced whether or not an event cleared that person's filter: a filtered
+  // event is HANDLED, not pending. A shared cursor would mean the strictest subscriber's filter
+  // silently decided what everyone else could still receive.
+  function pushStreamTick() {
+    if (!pushOn() || !pushRecipients.size) return;
+    const now = Date.now();
+    const base = PUBLIC_URL();
+    // The startup rule is a LOOKBACK, not a mute: an event older than the boot minus the grace
+    // window advances the cursor but is never sent. A blanket "stay quiet for 5 minutes after boot"
+    // would swallow the deploy notice itself — the one message that proves the wire survived the
+    // deploy — and would still let a two-hour-old backlog through once the timer expired. Same
+    // shape as trigScan's anti-blast rule: seeded, not announced.
+    const floor = pushBootAt - PUSH_GRACE_MS;
+    for (const rec of pushRecipients.values()) {
+      if (rec.muted) continue;
+      const evs = trigEvents.filter((e) => e.seq > (rec.cur || 0));
+      if (!evs.length) continue;
+      rec.cur = trigSeq;
+      const msgs = evs.filter((e) => (e.at || 0) >= floor && pushEligible(e, rec))
+        .map((e) => pushFmt(e, { baseUrl: base })).filter(Boolean);
+      for (const text of pushBatch(msgs)) pushEnqueue(rec.chat, text);
+      pushDirty = true;
+    }
+    if (pushDirty) persistPush();
+  }
+
+  // Poller-stall watchdog. Edge-triggered both ways: one alert when the data goes cold, one when it
+  // comes back. This is the class that tells you the alert pipe itself is alive — if deploys stop
+  // arriving, nothing else here can be trusted either.
+  const PUSH_STALL_MS = 10 * 60 * 1000;
+  function pushHealthTick() {
+    const now = Date.now();
+    if (!lastPoll) return;
+    const cold = now - lastPoll > PUSH_STALL_MS;
+    if (cold && !pushStall) {
+      pushStall = true;
+      pushOps("poller stalled", `no successful universe poll for ${Math.round((now - lastPoll) / 60000)} min \u2014 the board is serving stale marks`, "warn");
+    } else if (!cold && pushStall) {
+      pushStall = false;
+      pushOps("poller recovered", "universe polling resumed \u2014 marks are live again");
+    }
+  }
+
+  function pushTest(chat) {
+    if (!pushOn()) return { ok: false, error: "disabled" };
+    const now = Date.now();
+    if (now - pushLastTest < 30 * 1000) return { ok: false, error: "cooldown" };
+    const targets = chat ? [String(chat)] : [...pushRecipients.keys()];
+    if (!targets.length) return { ok: false, error: "no-recipients" };
+    pushLastTest = now;
+    for (const c of targets) {
+      pushEnqueue(c, `<b>Test alert</b>\nbuild ${version || "dev"} \u00b7 the wire works.`, true);
+    }
+    return { ok: true, sent: targets.length };
+  }
+
+  function getPush() {
+    const now = Date.now();
+    const codes = [...pushCodes.entries()].filter(([, v]) => now - v.t <= PUSH_LINK_TTL)
+      .map(([code, v]) => ({ code, expiresAt: v.t + PUSH_LINK_TTL }));
+    return {
+      ts: now, dataTs: pushVer,
+      enabled: pushOn(),
+      classes: PUSH_CLASSES,
+      lookbackMs: PUSH_GRACE_MS, bootAt: pushBootAt,   // the boot rule is a lookback window, not a countdown — nothing is "waiting" to unmute
+      recipients: [...pushRecipients.values()].map((r) => ({
+        chat: r.chat, mask: pushMask(r.chat), name: r.name, since: r.since,
+        classes: r.classes, muted: !!r.muted, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
+        sentHour: (r.sent || []).filter((t) => now - t < 3600e3).length })),
+      code: codes.length ? codes[codes.length - 1] : null,
+      queue: pushQueue.length, dropped: pushDropped, capHour: PUSH_CAP_HOUR,
+      holdMs: Math.max(0, pushHoldUntil - now), lastErr: pushLastErr,
+      log: pushLog.slice(0, 12),
+    };
   }
 
   function getActionable() {
@@ -6000,6 +6355,22 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     getTrendPair,
     getActionable,
     getTriggers,
+    getPush,
+    pushMintCode,
+    pushUnlink,
+    pushSetClasses,
+    pushTest,
+    pushOpsNow: pushOps,                       // harness + later slices: emit an ops event without a real fault
+    pushBindNow: pushBind,                     // harness: bind a chat without a live /start round trip
+    hydratePushNow: hydratePush,               // harness: restore recipients without a boot
+    pushTickNow: pushStreamTick,               // harness: consume the stream on demand
+    pushDrainNow: pushDrain,                   // harness: drain the outbox against an injected transport
+    pushUpdatesNow: pushUpdatesTick,           // harness: process a getUpdates payload without waiting out the poll
+    pushHealthNow: pushHealthTick,             // harness: run the stall watchdog against a forced lastPoll
+    pushStateNow: () => ({ queue: pushQueue.length, hold: pushHoldUntil, dropped: pushDropped,
+      recipients: pushRecipients.size, codes: pushCodes.size, offset: pushOffset, bootAt: pushBootAt }),
+    pushSetBootNow: (t) => { pushBootAt = t; },   // harness: exercise the boot lookback deterministically
+    pushSetPollNow: (t) => { lastPoll = t; },     // harness: age the poll clock so the stall watchdog is testable without waiting 10 minutes
     buildActionableNow: buildActionable,   // harness: force an actionable rebuild without waiting out the memo
     hydrateTriggersNow: hydrateTriggers,   // harness: restore announced-set/event log without a boot
     trigStateNow: () => ({ seq: trigSeq, seen: trigSeen.size, events: trigEvents.length, firstBuild: trigFirstBuild }),
