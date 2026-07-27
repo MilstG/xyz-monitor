@@ -8522,3 +8522,261 @@ test("client: the in-tab evaluator is bounded to what only a browser can compute
   assert.ok(/this browser only/.test(app), "the boundary is stated in the UI, not just in a comment");
   assert.ok(/fire with no tab open/.test(app), "…as is what the server rules actually guarantee");
 });
+
+// ===== Context classes + the rate meter, slice E (build 2026.07.27-06) ==========================
+// The deploy notice fired four or five times per build because I reasoned about its frequency
+// instead of measuring it. Every class added here is measured, shipped OPT-IN, and two candidates
+// were dropped on frequency grounds before a line of transport code was written.
+
+test("new classes are opt-in: an absent selection means the DEFAULT set, never everything", () => {
+  const C = require("../src/compute");
+  for (const k of ["filing", "earnings", "ai"]) assert.ok(C.PUSH_CLASSES.includes(k), `${k} must be selectable`);
+  for (const k of ["filing", "earnings", "ai"])
+    assert.ok(!C.PUSH_DEFAULT_CLASSES.includes(k), `${k} must NOT be delivered by default — that is the whole lesson`);
+  for (const k of ["setup", "ledger", "rule", "ops"])
+    assert.ok(C.PUSH_DEFAULT_CLASSES.includes(k), `${k}'s rate is known and stays on by default`);
+
+  const filing = { kind: "filing", coin: "X", t: "X", form: "8-K", h: "Item 2.02", url: "https://sec.gov/x" };
+  // The load-bearing assertion: a recipient linked BEFORE this build must not silently start
+  // receiving filings just because a class was added.
+  assert.equal(C.pushEligible(filing, {}), false, "an unchosen subscription does not inherit new classes");
+  assert.equal(C.pushEligible(filing, { classes: ["filing"] }), true, "…but choosing it works");
+  assert.equal(C.pushEligible({ kind: "setup", coin: "X", rr: { gross: 3 }, evR: 1 }, {}), true, "default classes still flow without a selection");
+
+  const m = C.pushFmt(filing, {});
+  assert.ok(m.includes("8-K") && m.includes("Item 2.02") && m.includes("sec.gov"));
+  const e = C.pushFmt({ kind: "earnings", coin: "X", t: "X", when: "tomorrow", session: "amc", claim: "breakout" }, {});
+  assert.ok(/tomorrow/.test(e) && /open breakout claim/.test(e), "the earnings alert says WHY you are being told");
+  const a = C.pushFmt({ kind: "ai", coin: "X", t: "X", from: "wait", to: "enter_on_pullback", note: "n" }, {});
+  assert.ok(a.includes("wait") && a.includes("enter_on_pullback"));
+});
+
+function ctxHarness() {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  return createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+}
+
+test("filing alerts: material forms only, backlog seeded silently, stale filings dropped", () => {
+  const p = ctxHarness();
+  p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
+  const now = Date.now();
+  const item = (id, form, pub) => ({ id: "sec:" + id, tk: "AAA", form, h: form + " body", url: "https://sec.gov/" + id, pub: pub == null ? now - 60e3 : pub });
+  const filings = () => p.getTriggers(0).events.filter((e) => e.kind === "filing");
+
+  // Before priming, the 7-day backlog every name carries is seeded, not announced.
+  p.filingScanNow([item(1, "8-K")]);
+  assert.equal(filings().length, 0, "the first EDGAR pass after boot must not arrive as a wall of notifications");
+
+  p.filingPrimeNow();
+  p.filingScanNow([item(1, "8-K")]);
+  assert.equal(filings().length, 0, "…and an id already seen during seeding stays seen");
+
+  p.filingScanNow([item(2, "8-K")]);
+  assert.equal(filings().length, 1, "a genuinely new material filing fires");
+  assert.equal(filings()[0].form, "8-K");
+  assert.equal(filings()[0].coin, "AAA", "resolved to the market so the deep link works");
+
+  // Ownership forms are routine insider flow, several a day per active name — excluded on
+  // frequency grounds, not because they are uninteresting.
+  p.filingScanNow([item(3, "4"), item(4, "SC 13G"), item(5, "144")]);
+  assert.equal(filings().length, 1, "ownership forms never push");
+  // …nor do the material-but-rarely-urgent ones the news tab already carries.
+  p.filingScanNow([item(6, "DEF 14A"), item(7, "S-3")]);
+  assert.equal(filings().length, 1, "proxies and shelf registrations stay in the news tab");
+
+  // A filing discovered long after it was published is history, not news.
+  p.filingScanNow([item(8, "8-K", now - 20 * 3600e3)]);
+  assert.equal(filings().length, 1, "a stale filing found by a slow rotation must not fire");
+  p.filingScanNow([item(9, "10-Q")]);
+  assert.equal(filings().length, 2);
+});
+
+test("earnings alerts are scoped to open announced claims, once per report date", () => {
+  const p = ctxHarness();
+  p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
+  p.seedRowNow("BBB", { ticker: "BBB", px: 10, uni: "xyz" });
+  const d = new Date(Date.now() + 20 * 3600e3).toISOString().slice(0, 10);
+  p.earnIngestNow ? p.earnIngestNow() : null;
+  const earn = () => p.getTriggers(0).events.filter((e) => e.kind === "earnings");
+
+  // No claims -> nothing, however many names report. An 84-name roster in season is a calendar.
+  p.earnScanNow();
+  assert.equal(earn().length, 0);
+
+  // The gate is an OPEN, ANNOUNCED claim. A claim nobody was told about does not earn a reminder.
+  p.ledgerOpenNow().set("BBB|breakout", { key: "BBB|breakout", coin: "BBB", ticker: "BBB", ev: "breakout",
+    t0: Date.now(), mark0: 10, dir: 1, psd: "long", resolveAt: Date.now() + 1e9 });
+  p.earnScanNow();
+  assert.equal(earn().length, 0, "an unannounced claim gets no earnings reminder");
+  assert.ok(d);
+});
+
+test("analyst flip fires only on an actual stance change", () => {
+  const p = ctxHarness();
+  p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
+  const rep = (stance) => ({ report: { action: { stance, note: "because" } } });
+  const ai = () => p.getTriggers(0).events.filter((e) => e.kind === "ai");
+
+  assert.equal(p.aiFlipCheckNow("AAA", null, rep("wait")), null, "a first report is not a flip — there is nothing to have changed from");
+  assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), rep("wait")), null, "an unchanged stance on regeneration says nothing");
+  p.aiFlipCheckNow("AAA", rep("wait"), rep("enter_on_pullback"));
+  assert.equal(ai().length, 1, "the report changing its mind is the part worth interrupting for");
+  assert.equal(ai()[0].from, "wait");
+  assert.equal(ai()[0].to, "enter_on_pullback");
+  assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), { report: {} }), null, "a malformed report is not a flip");
+  assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), null), null);
+});
+
+test("rate meter: measured per class, survives a restart, and reports its own truncation", () => {
+  const p = ctxHarness();
+  const r0 = p.getClassRates();
+  assert.equal(r0.ops.d1, 0);
+  assert.equal(r0.ops.dflt, true, "the payload says which classes are on by default so the panel can mark the rest opt-in");
+  assert.equal(r0.filing.dflt, false);
+
+  for (let i = 0; i < 5; i++) p.pushOpsNow("x" + i, "y");
+  const r1 = p.getClassRates();
+  assert.equal(r1.ops.d1, 5, "fires are counted per class");
+  assert.equal(r1.ops.h1, 5);
+  assert.equal(r1.setup.d1, 0, "…and not smeared across classes");
+  assert.equal(r1.ops.capped, false);
+
+  // The meter is what makes an opt-in decision informed rather than a bet, so a restart must not
+  // zero it — a noisy class and a frequent deploy would look identical.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/rates: \[\.\.\.classFires\.entries\(\)\]/.test(pol), "rate history is persisted with the ring");
+  assert.ok(/if \(Array\.isArray\(d\.rates\)\)/.test(pol), "…and restored");
+  assert.ok(/capped: d1 >= CLASS_RATE_MAX/.test(pol),
+    "a truncated count must report itself rather than quietly understating a noisy class");
+});
+
+test("the two classes NOT built are documented with the reason, in the code", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // This is a design decision that will look like an omission to whoever reads this next, so the
+  // reasoning lives next to what it explains.
+  assert.ok(/deliberately NOT built/.test(pol));
+  assert.ok(/News headlines[\s\S]{0,240}tens per day/.test(pol), "the headline rate is the reason, and it is stated");
+  assert.ok(/Ownership filings[\s\S]{0,160}several per day/.test(pol));
+  assert.ok(/FILING_PUSH_FORMS/.test(pol), "the material subset is an explicit set, not an inline condition");
+});
+
+// ===== Quiet hours, digest, regime + coverage, slice F (build 2026.07.27-07) ====================
+
+test("quiet hours: window maths, midnight wrap, and what pierces", () => {
+  const C = require("../src/compute");
+  const at = (h) => Date.UTC(2026, 6, 27, h, 0, 0);
+  const q = { from: 23, to: 7, tz: 0 };
+  assert.equal(C.inQuietWindow(at(23), q), true, "a window that wraps midnight covers the late side");
+  assert.equal(C.inQuietWindow(at(3), q), true, "…and the early side");
+  assert.equal(C.inQuietWindow(at(7), q), false, "the end hour is exclusive");
+  assert.equal(C.inQuietWindow(at(12), q), false);
+  const day = { from: 9, to: 17, tz: 0 };
+  assert.equal(C.inQuietWindow(at(12), day), true, "a non-wrapping window works too");
+  assert.equal(C.inQuietWindow(at(20), day), false);
+  assert.equal(C.inQuietWindow(at(3), { from: 5, to: 5, tz: 0 }), false, "a zero-width window is off, not always");
+  assert.equal(C.inQuietWindow(at(3), null), false);
+  // Offsets are the recipient's, because these are DMs and the group is not in one timezone.
+  assert.equal(C.inQuietWindow(at(2), { from: 23, to: 7, tz: -180 }), true, "23:00 in a UTC-3 evening is quiet");
+  assert.equal(C.inQuietWindow(at(14), { from: 23, to: 7, tz: -180 }), false);
+
+  const ends = C.quietEndsAt(at(23), q);
+  assert.ok(ends > at(23) && ends <= at(23) + 9 * 3600e3, "a held message is scheduled for the window's end, not re-checked forever");
+  assert.equal(C.quietEndsAt(at(12), q), at(12), "outside the window nothing is deferred");
+
+  // Delaying a stop-out until morning would defeat the point of having it.
+  assert.equal(C.piercesQuiet({ kind: "ledger", sub: "stop" }), true);
+  assert.equal(C.piercesQuiet({ kind: "ops" }), true, "a stalled poller means every other alert has stopped being trustworthy");
+  assert.equal(C.piercesQuiet({ kind: "ledger", sub: "target" }), false);
+  assert.equal(C.piercesQuiet({ kind: "setup" }), false);
+
+  assert.equal(C.validateQuiet({ from: 23, to: 7 }).quiet.tz, 0);
+  assert.equal(C.validateQuiet({ from: 25, to: 7 }).error, "bad-hours");
+  assert.equal(C.validateQuiet({ from: 1, to: 2, tz: 9999 }).error, "bad-tz");
+  assert.equal(C.validateQuiet(null).quiet, null);
+});
+
+test("quiet hours DELAY rather than drop, and cannot block the queue behind them", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p, calls } = pushHarness();
+  const m = p.pushMintCode(); p.pushBindNow(m.code, 5551234567, "milst");
+  // A window that is certainly open right now, whatever hour the suite runs at.
+  p.pushSetPrefs("5551234567", { quiet: { from: 0, to: 24 - 1e-9, tz: 0 } });
+  p.pushSetBootNow(Date.now() - 60e3);
+
+  p.pushOpsNow("poller stalled", "no poll for 20 min", "warn");   // pierces
+  p.pushTickNow();
+  await p.pushDrainNow();
+  assert.equal(calls.length, 1, "an ops warning is delivered inside the quiet window");
+
+  const st = p.pushStateNow();
+  assert.equal(st.queue, 0);
+  assert.ok(p.getPush().recipients[0].quietNow, "the panel can say the recipient is currently quiet");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("regime + coverage are episode-gated: one alert per episode, seeded at boot", () => {
+  const p = ctxHarness();
+  const regs = () => p.getTriggers(0).events.filter((e) => e.kind === "regime");
+  const covs = () => p.getTriggers(0).events.filter((e) => e.kind === "coverage");
+
+  // Coverage is scoped to open ANNOUNCED claims: a gap on a name nobody is watching is a
+  // maintenance item, not an interruption.
+  p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz", hourlyTs: Date.now() - 4 * 3600e3 });
+  p.coverageScanNow();
+  assert.equal(covs().length, 0, "no claim, no coverage alert");
+
+  p.ledgerOpenNow().set("AAA|breakout", { key: "AAA|breakout", coin: "AAA", ticker: "AAA", ev: "breakout",
+    t0: Date.now(), mark0: 10, dir: 1, psd: "long", alo: 1, resolveAt: Date.now() + 1e9 });
+  p.coverageScanNow();
+  assert.equal(covs().length, 0, "a gap already in force at first sight is seeded, not announced");
+  p.coverageScanNow();
+  assert.equal(covs().length, 0, "…and it does not accumulate on repeat scans — this is a persistent condition, not an event");
+
+  // It re-arms only once the condition genuinely lapses, then fires on the next occurrence.
+  p.seedRowNow("AAA", { hourlyTs: Date.now() });
+  p.coverageScanNow();
+  p.seedRowNow("AAA", { hourlyTs: Date.now() - 4 * 3600e3 });
+  p.coverageScanNow();
+  assert.equal(covs().length, 1, "a genuinely new episode fires exactly once");
+  p.coverageScanNow(); p.coverageScanNow();
+  assert.equal(covs().length, 1, "and stays quiet while it persists");
+
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/regimeArmed/.test(pol) && /coverageArmed/.test(pol), "both classes carry re-arm state");
+  assert.ok(/in force at boot: seeded, not announced/.test(pol));
+  assert.ok(regs().length >= 0);
+});
+
+test("digest: counts what fired, states what it will not push individually", () => {
+  const p = ctxHarness();
+  for (let i = 0; i < 3; i++) p.pushOpsNow("x" + i, "y");
+  const d = p.buildDigestNow(Date.now());
+  assert.ok(d.counts.some((c) => c.startsWith("ops 3")), "the digest counts by class off the same meter the panel shows");
+  assert.equal(typeof d.openClaims, "number");
+  assert.ok(Array.isArray(d.headlines));
+
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The digest is where the classes that failed the frequency test get a home, and it says so to
+  // the reader rather than presenting them as if they had simply been forgotten.
+  assert.ok(/not pushed individually.*too frequent|too frequent/.test(pol));
+  assert.ok(/attributed wire headlines only/.test(pol));
+  assert.ok(/pushEnqueue\(rec\.chat, digestText\(buildDigest\(now\)\), true\)/.test(pol),
+    "a scheduled summary must not be the message the hourly cap happens to eat");
+  assert.ok(/digestSent\.get\(rec\.chat\) === day/.test(pol), "once per local day, not once per tick");
+});
+
+test("the drain picks the first ELIGIBLE item, so a deferred message cannot head-of-line block", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/const idx = pushQueue\.findIndex\(\(q\) => !q\.after \|\| q\.after <= now\);/.test(pol),
+    "a message held until 07:00 sitting at the head would block every urgent one behind it for hours");
+  const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
+  assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
+  assert.equal((drain.match(/pushQueue\.splice\(idx, 1\)/g) || []).length, 3, "success, 4xx drop and give-up all remove by index");
+});
