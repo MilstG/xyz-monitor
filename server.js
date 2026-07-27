@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.26-05";
+const VERSION = "2026.07.26-06";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -386,12 +386,16 @@ async function main() {
     else log(`Feature gate: ${shut.length} admin-state feature(s) (${ADMIN_DAYS}d admin lease; AI spend still needs a separate unlock)`);
   }
 
-  // Feature visibility: GET is never gated (the client needs the resolved set to render at all, and a
-  // public caller legitimately reads its OWN set — it contains no admin-only detail beyond key names).
-  // POST is admin-only, enforced in the poller so the check cannot be bypassed by a second caller.
+  // Both verbs are admin-only. GET was briefly open on the reasoning that a caller may read its own
+  // resolved set — but the client gets that from the injected shell (window.__FLAGS), and the ONLY
+  // caller of this route is the panel. Leaving it open therefore bought nothing and let a public
+  // visitor enumerate every feature key and learn which ones are admin-only, which contradicts the
+  // choice that gated features leave no trace. Still in FEATURE_NEVER_GATE, so no flag write can lock
+  // the panel out of reading its own state — the admin check here is a separate axis from the gate.
   fastify.get("/api/features", (req, reply) => {
     reply.header("cache-control", "no-store");
-    return poller.getFeatures(isAdmin(req));
+    if (!isAdmin(req)) return reply.code(403).send({ error: "forbidden" });
+    return poller.getFeatures(true);
   });
   // 8 KB cap — the payload is { key, state }; anything larger is malformed or hostile (413).
   fastify.post("/api/features", { bodyLimit: 8 * 1024 }, async (req, reply) => {
