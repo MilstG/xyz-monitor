@@ -6787,6 +6787,20 @@ test("triggers -05: browser transport is a consumer only, and the toast surface 
   for (const lb of ["'Fired'", "'Now'", "'Late'", "'Ago'", "'Rec'"])
     assert.ok(s.includes("lb:" + lb), `board must carry the ${lb} column`);
   assert.ok(!/r\.entry\s*[-/]\s*r\.fired/.test(s), "client must not recompute lateness locally");
+
+  // Direction must survive a reader who cannot separate green from red. The collapsed row carried
+  // the side ONLY as a pos/neg tint on the ticker cell until 2026.07.27-20 — which also read like a
+  // day-change tint, so a short was indistinguishable from a name that happened to be down.
+  assert.ok(/<span class="act-side \$\{sd\}"/.test(s), "the collapsed row must render an explicit side chip");
+  assert.ok(/\$\{esc\(r\.side\)\}<\/span>/.test(s), "the chip must print the side as a word, not a glyph or colour alone");
+  assert.ok(/const sd=r\.side==='long'\?'l':'s'/.test(s), "chip modifier must be derived from the payload's side");
+  assert.ok(!/const sc=r\.side==='long'\?'pos':'neg'/.test(s),
+    "the ticker cell must no longer be tinted by side — colour alone is not an encoding");
+  for (const cls of ["act-side", "act-side.l", "act-side.s"])
+    assert.ok(css.includes("." + cls), `missing CSS for side chip class: ${cls}`);
+  // Both directions must be spelled out somewhere a hover can reach them.
+  assert.ok(s.includes("the claim pays if price rises") && s.includes("the claim pays if price falls"),
+    "each side must explain which way the trade and its void run");
 });
 
 test("triggers -06: R:R is the board's kill switch, set at 2.0, with no second lateness gate", () => {
@@ -9913,7 +9927,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-20"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-21"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
