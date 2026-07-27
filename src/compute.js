@@ -3523,6 +3523,13 @@ function trigEligible(row, cfg) {
   if (c.minRR != null) { if (!row.rr || !(row.rr.gross >= c.minRR)) return false; }   // gross since -10: net retired with the carry-in-ratio contract
   if (c.maxLate != null) { if (row.late != null && row.late > c.maxLate) return false; }
   if (c.sides && c.sides.length && !c.sides.includes(row.side)) return false;
+  // Setup FAMILY, using the board's own `cls` stamp so the two surfaces cannot disagree about which
+  // family a row belongs to. "rr" = frozen ratio clears the 2:1 line (level-triggered: breakouts,
+  // retests — win big, less often). "ev" = below it with positive expectancy anyway (sigma-built:
+  // big moves, funding divergences — win small, more often). Both clear the same record and EV
+  // gates; they are different TRADES, not different quality, which is why this is a filter and not
+  // a score. An empty or absent list means both.
+  if (Array.isArray(c.cls) && c.cls.length && !c.cls.includes(row.cls)) return false;
   if (Array.isArray(c.muted) && c.muted.includes(row.coin)) return false;
   if (c.noEarnings && row.earn) return false;
   return true;
@@ -3678,7 +3685,8 @@ function pushFmt(ev, opts) {
   const num = (v, d) => (v == null || !isFinite(v) ? "\u2014" : (+v).toFixed(d == null ? 2 : d));
   const px = (v) => (v == null || !isFinite(v) ? "\u2014" : String(v));
   const l1 = "<b>" + name + "</b> \u00b7 " + side + " \u00b7 " + tgEsc(ev.label || ev.ev || "")
-    + (ev.tf ? " \u00b7 " + tgEsc(ev.tf) : "") + (ev.prime === true ? " \u2605" : "");
+    + (ev.tf ? " \u00b7 " + tgEsc(ev.tf) : "") + (ev.cls === "ev" ? " \u00b7 grinder" : "")
+    + (ev.prime === true ? " \u2605" : "");
   const l2 = "entry " + px(ev.entry) + " \u00b7 void " + px(ev.void) + " \u00b7 target " + px(ev.target)
     + (ev.rr && ev.rr.gross != null ? " \u00b7 R:R " + num(ev.rr.gross, 1) : "");
   const rec = ev.rec || {};

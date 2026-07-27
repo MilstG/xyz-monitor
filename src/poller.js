@@ -6858,10 +6858,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (minEV === undefined || minRR === undefined || maxLate === undefined) return { ok: false, error: "bad-trig" };
       // Written as a whole object, not merged: a partial write would leave a threshold set from a
       // previous edit that the panel is no longer showing.
+      // Setup family, validated against the board's own two-value vocabulary rather than accepted
+      // as free text — an unrecognised value here would silently filter every setup out.
+      let cls = null;
+      if (t.cls != null) {
+        if (!Array.isArray(t.cls)) return { ok: false, error: "bad-trig" };
+        cls = t.cls.filter((c) => c === "rr" || c === "ev");
+        if (cls.length !== t.cls.length) return { ok: false, error: "bad-class" };
+        if (!cls.length) cls = null;   // an empty list means both, never "silence"
+      }
       r.trig = {};
       if (minEV != null) r.trig.minEV = minEV;
       if (minRR != null) r.trig.minRR = minRR;
       if (maxLate != null) r.trig.maxLate = maxLate;
+      if (cls && cls.length === 1) r.trig.cls = cls;   // both selected == no filter; storing it would just be noise
     }
     if ("digestHour" in p) {
       const h = p.digestHour;
