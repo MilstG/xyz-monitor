@@ -867,8 +867,12 @@ test("crypto engine purge: stored crypto claims leave the ledger at hydrate (air
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["+'x']||d.records[", "const shPanel=d&&d.shadows&&d.shadows.xyz;",
-    "b.dataset.view!=='corr' && b.dataset.view!=='backtest' && b.dataset.view!=='sessions';",
-    "v!=='corr' && v!=='backtest' && v!=='sessions') v='markets'",
+    // The longhand per-tab crypto filter was collapsed into CRYPTO_VIEWS in -05 (it had already
+    // drifted from showView's duplicate copy once). Same property, asserted at its new home.
+    "const CRYPTO_VIEWS=new Set(['markets','trend','report','corr','backtest','sessions'])",
+    // showView's inline crypto redirect collapsed into tabVisible() in -05; the fallback to markets
+    // (and markets being PINNED public so the fallback can never itself be gated) is the property.
+    "if(!tabVisible(v)) v='markets';",
     "rw.uni==='main'){ box.innerHTML=''; return; } }   // crypto: no signal engine (-101)",
     "strategy shadows (earning their record)"])
     assert.ok(app.includes(pin), `client xyz-only pin missing: ${pin}`);
@@ -1981,7 +1985,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   assert.ok(s.includes("CORR._intraday") && s.includes("function paintCorr"), "crypto corr shared painter / intraday flag missing");
   assert.ok(s.includes("function syncCorrLookback") && /\[\['4h','4h'\],\['1d','1d'\],\['7d','7d'\]\]/.test(s), "scope-aware 4h/1d/7d lookback missing");
   assert.ok(s.includes("function alignedIntraday") && s.includes("CORR._bars"), "crypto pair-view intraday alignment missing");
-  assert.ok(/v!=='report' && v!=='corr'/.test(s), "corr tab must be un-gated for crypto scope in showView");
+  assert.ok(s.includes("'report','corr'") && s.includes("const CRYPTO_VIEWS"), "report and corr must remain in-scope for crypto (CRYPTO_VIEWS, which replaced showView's inline gate in -05)");
   // COMP/G runs on both universes via one axis-generic seam: equities align daily closes (axis =
   // day-ms), crypto reads the matrix's intraday closes (CORR._bars on CORR._times). The anchor is a
   // timestamp, not a day-int, and the button is no longer hidden on crypto. Reverting any of these
@@ -4292,8 +4296,9 @@ test("backtest v2 manifest: seventeen-signal roster, scope seam, data gates, sec
   assert.ok(s.includes("function btAnn()") && s.includes("state.scope==='crypto'?365:BT_ANN"), "scope-aware annualization missing");
   assert.ok(s.includes("if(state.view==='backtest') drawBacktest();"), "scope flip must re-run the open tab");
   // the tab is un-gated for crypto in BOTH gates (visibility + navigation)
-  assert.equal((s.match(/v!=='report' && v!=='corr' && v!=='backtest'/g) || []).length, 1, "showView crypto gate must include backtest");
-  assert.ok(s.includes("b.dataset.view!=='backtest'"), "applyScope tab visibility must include backtest");
+  assert.equal((s.match(/const CRYPTO_VIEWS=new Set\(/g) || []).length, 1, "exactly one crypto scope list may exist (it replaced showView's inline gate in -05)");
+  assert.ok(new RegExp("const CRYPTO_VIEWS=new Set\\(\\[[^\\]]*'backtest'").test(s), "backtest must be in-scope for crypto");
+  assert.ok(/applyTabVisibility\(\);   \/\/ scope AND flags/.test(s), "applyScope must delegate tab visibility to the single applier (its own per-tab list was removed in -05)");
   // level columns: aligned arrays + coverage counts, longer lookbacks, named benchmark in the legend
   assert.ok(s.includes("pxm, him, vom, oim, hiCov, voCov, oiCov"), "level-column matrix outputs missing");
   assert.ok(s.includes("[60,'60d'],[120,'120d']"), "60/120d lookbacks missing");
@@ -5815,7 +5820,7 @@ test("-17 client + server wiring manifest: dual-universe route, tz-aware rendere
     "function _szTz()", "function _szCash()",
     "state.analyticsCrypto=", "function syncAnalyticsSlot()",
     "'/api/analytics?u=crypto'",
-    "b.dataset.view!=='sessions'",                            // sessions survives the crypto tab filter
+    "'backtest','sessions'",                                  // sessions survives the crypto tab filter (now via CRYPTO_VIEWS)
     "if(cash!==false){",                                      // clock scaffold suppresses the cash arc for crypto
     "sd.isCrypto",                                            // session decomposition renderer is universe-aware
     "chart('utcday','UTC day",                               // and draws the UTC-day leg
@@ -6603,11 +6608,18 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  // Hidden by a declarative list, not by editing markup — so un-hiding is one word and the
-  // difference between "hidden" and "deleted" stays legible to the next reader.
-  assert.ok(/const HIDDEN_TABS=new Set\(\['backtest','actionable'\]\)/.test(s), "backtest and actionable must both be hidden via HIDDEN_TABS");
+  // HIDDEN_TABS was retired in 2026.07.26-05: the same two tabs are now admin-state entries in the
+  // server manifest, so the hide is expressed ONCE and an admin can actually see them. The list must
+  // not come back — a second visibility list beside the manifest is the drift this work removed.
+  const C = require("../src/compute");
+  assert.ok(!/HIDDEN_TABS/.test(s), "HIDDEN_TABS must stay deleted — the manifest owns tab visibility now");
+  for (const v of ["backtest", "actionable"])
+    assert.equal(C.featureState({}, v), "admin", `${v} must default to admin in the manifest (it used to be in HIDDEN_TABS)`);
   assert.ok(s.includes("function applyTabVisibility"), "tab visibility applier missing");
   assert.ok(/applyTabOrder\(\); applyTabVisibility\(\);/.test(s), "visibility must be applied on the initial nav pass");
+  // The applier must evaluate EVERY tab, not just members of a hide-list, or a flag flipped to public
+  // in the panel would leave the tab stuck hidden until someone edited app.js.
+  assert.ok(/t\.hidden = !tabVisible\(t\.dataset\.view\)/.test(s), "applyTabVisibility must both hide and un-hide via tabVisible");
   assert.ok(/applyTabVisibility==='function'\) applyTabVisibility\(\)/.test(s), "visibility must be re-applied when the strip is rebuilt at runtime");
   assert.ok(/nav\.tabs \.tab\[hidden\]\{display:none\}/.test(css), "a display rule on .tab must not be able to silently un-hide a hidden tab");
   // The feature is NOT withdrawn: markup, view section, renderers, help and the deep link all live.
@@ -6619,16 +6631,16 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   // the one added this build (which it did not, until now).
   assert.ok(/\{v:'backtest',label:'Backtest'\}/.test(s), "backtest must remain findable in the command palette");
   assert.ok(/\{v:'actionable',label:'Actionable'\}/.test(s), "the actionable tab must be listed in the command palette");
-  // Only backtest is hidden — this guard fails loudly if the list quietly grows.
-  const m = s.match(/const HIDDEN_TABS=new Set\(\[([^\]]*)\]\)/);
-  assert.ok(m, "HIDDEN_TABS not found");
-  assert.equal(m[1].split(",").filter((x) => x.trim()).length, 2, "exactly two tabs should be hidden — review any addition to HIDDEN_TABS");
-  // A hidden tab MUST stay reachable by URL, or hiding it removes it. The old applyHash whitelist
-  // silently omitted actionable, signals and news, which made #actionable a no-op.
+  // ...but the palette must FILTER on visibility, because it is a third route into a view that is
+  // independent of the nav strip: without this, a gated tab stays reachable by name.
+  assert.ok(/CMDK_TABS\.filter\(t=>tabVisible\(t\.v\)/.test(s), "the command palette must filter on tabVisible");
+  // HASH_VIEWS stays COMPLETE — the routing table lists every view, and the gate is applied at
+  // dispatch. That is the difference from the old posture: an admin's #backtest still works, a public
+  // caller's does not. A short routing table would instead make a tab unreachable for everyone.
   assert.ok(/const HASH_VIEWS=new Set\(/.test(s), "hash routing must be a declared view set, not an inline whitelist");
   for (const v of ["actionable", "backtest", "signals", "news", "markets", "trend", "report"])
     assert.ok(new RegExp("'" + v + "'").test(s.match(/const HASH_VIEWS=new Set\(\[[^\]]*\]\)/)[0]), `#${v} must be routable`);
-  assert.ok(s.includes("if(HASH_VIEWS.has(h)) showView(h);"), "applyHash must route via the view set");
+  assert.ok(s.includes("if(HASH_VIEWS.has(h) && tabVisible(h)) showView(h);"), "applyHash must route via the view set AND the gate");
   const hv = s.indexOf("const HASH_VIEWS"), ah = s.indexOf("function applyHash");
   assert.ok(hv > 0 && hv < ah, "HASH_VIEWS must be declared before applyHash");
 });
@@ -6694,23 +6706,26 @@ test("tabs: every HIDDEN_TABS entry matches a real nav button, and every hidden 
   assert.ok(nav, "nav.tabs block not found — applyTabVisibility's selector would find nothing");
   const views = [...nav[0].matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]);
   assert.ok(views.length >= 10, `suspiciously few nav tabs: ${views.length}`);
-  const hm = app.match(/const HIDDEN_TABS=new Set\(\[([^\]]*)\]\)/);
-  assert.ok(hm, "HIDDEN_TABS not found");
-  const hidden = hm[1].split(",").map((x) => x.trim().replace(/'/g, "")).filter(Boolean);
+  // The hide list moved server-side in -05: the manifest's admin-state tabs are the hidden set now.
+  const C = require("../src/compute");
+  const hidden = C.FEATURES.filter((f) => f.kind === "tab" && !f.runtime && C.featureState({}, f.key) === "admin").map((f) => f.key);
+  assert.ok(hidden.length >= 1, "at least one tab is expected to be admin-only by default");
   // Join: no orphan hide entries, and each intended tab really is covered.
   for (const h of hidden)
-    assert.ok(views.includes(h), `HIDDEN_TABS names '${h}' but no nav button has data-view="${h}" — the hide is a no-op`);
+    assert.ok(views.includes(h), `the manifest gates tab '${h}' but no nav button has data-view="${h}" — the gate is a no-op`);
   for (const want of ["backtest", "actionable"])
-    assert.ok(hidden.includes(want) && views.includes(want), `${want} must be present in the nav AND listed as hidden`);
+    assert.ok(hidden.includes(want) && views.includes(want), `${want} must be present in the nav AND gated by the manifest`);
   // The applier must key off the same attribute the markup uses.
-  assert.ok(/HIDDEN_TABS\.has\(t\.dataset\.view\)/.test(app), "applyTabVisibility must match on dataset.view, the attribute the nav actually carries");
+  assert.ok(/tabVisible\(t\.dataset\.view\)/.test(app), "applyTabVisibility must match on dataset.view, the attribute the nav actually carries");
   assert.ok(/document\.querySelector\('nav\.tabs'\)/.test(app), "applyTabVisibility must query the nav that exists in the markup");
   // Hiding a tab must never strand it: each hidden view has to remain routable by hash.
   const hv = app.match(/const HASH_VIEWS=new Set\(\[([^\]]*)\]\)/);
   assert.ok(hv, "HASH_VIEWS not found");
   const routable = hv[1].split(",").map((x) => x.trim().replace(/'/g, "")).filter(Boolean);
+  // Still required, with a changed meaning: HASH_VIEWS stays complete so an ADMIN's #backtest resolves.
+  // The gate is applied at dispatch (applyHash checks tabVisible), not by shortening the routing table.
   for (const h of hidden)
-    assert.ok(routable.includes(h), `hidden tab '${h}' is not in HASH_VIEWS — hiding it would remove it from the app entirely`);
+    assert.ok(routable.includes(h), `gated tab '${h}' is not in HASH_VIEWS — an admin's deep link would dead-end`);
   // And every nav tab should be routable, hidden or not, so a shared link never dead-ends.
   for (const v of views)
     assert.ok(routable.includes(v), `nav tab '${v}' has no hash route — #${v} would silently do nothing`);
@@ -6755,16 +6770,10 @@ test("features: manifest covers every tab in the markup, and every entry is real
   for (const m of cm[0].matchAll(/\{v:'([a-z]+)'/g))
     assert.ok(keys.has(m[1]), `command palette offers "${m[1]}" which has no FEATURES entry`);
 
-  // The manifest must not contradict HIDDEN_TABS while both exist. Phase 2 deletes HIDDEN_TABS and
-  // lets the manifest own tab visibility outright; until then a tab hidden by one list and called
-  // public by the other is a live disagreement, which is the whole failure mode this work removes.
-  const hid = app.match(/const HIDDEN_TABS=new Set\(\[([^\]]*)\]\)/);
-  assert.ok(hid, "HIDDEN_TABS not found — if it was deleted, this assertion moves to the manifest-owns-visibility test");
-  for (const m of hid[1].matchAll(/'([a-z]+)'/g)) {
-    assert.ok(keys.has(m[1]), `HIDDEN_TABS hides "${m[1]}" which has no FEATURES entry`);
-    assert.notEqual(C.featureState({}, m[1]), "public",
-      `tab "${m[1]}" is in HIDDEN_TABS but its manifest default is public — the two lists disagree`);
-  }
+  // HIDDEN_TABS is gone as of 2026.07.26-05 — the manifest is the only tab-visibility list. The
+  // agreement assertion that used to live here became "there is nothing left to agree with", which
+  // is pinned in the manifest-owns-visibility test instead.
+  assert.ok(!/HIDDEN_TABS/.test(app), "a second tab-visibility list must not reappear beside the manifest");
 
   // kind and state vocabulary are closed sets; a typo'd def would resolve through to FEATURE_DEFAULT
   // and quietly hide a feature that was meant to be public.
@@ -6983,5 +6992,61 @@ test("server: feature gate runs after the site gate, returns 403, and both /api/
   // Honest-null: an unset ADMIN_PASSWORD closes every admin-state feature to everyone. Say it at boot
   // rather than letting it present as "the Actionable tab stopped working".
   assert.ok(srv.includes("WARN: ADMIN_PASSWORD is unset"), "boot must warn when no admin cookie can ever be minted");
-  assert.ok(srv.includes('const VERSION = "2026.07.26-04"'), "build stamp must be bumped for this delivery");
+  // Shape, not a literal: pinning the exact stamp would fail on every subsequent build, which trains
+  // people to edit the test instead of reading it.
+  assert.ok(/const VERSION = "2026\.\d{2}\.\d{2}-\d+";/.test(srv), "build stamp must keep the 2026.MM.DD-NN form");
+});
+
+// ===== admin panel, phase 2: client enforcement =================================================
+test("client flags: the injection slot exists, is pre-paint, and the server's copy matches it byte-for-byte", () => {
+  const fs = require("fs"), path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const SLOT = "window.__FLAGS=null;window.__ADMIN=false;";
+  assert.ok(html.includes(SLOT), "index.html must carry the flag slot the server substitutes into");
+  // Byte-identical, or the boot-time split silently misses and every caller gets the unsubstituted
+  // shell — tabs show, routes 403, and nothing in the UI explains why. Same failure class as the
+  // asset-tag drift the stamper already warns about, so it gets the same kind of guard.
+  assert.ok(srv.includes('const FLAG_SLOT = "' + SLOT + '"'), "server FLAG_SLOT must match index.html exactly");
+  // Pre-paint: the slot must precede the app.js tag, or the client reads window.__FLAGS before it is set.
+  assert.ok(html.indexOf(SLOT) < html.indexOf('src="/app.js"'), "the flag slot must load BEFORE app.js");
+  assert.ok(html.indexOf(SLOT) < html.indexOf("<body"), "the flag slot must be in <head> so a gated tab never paints");
+  // Split once at boot, concat per request — not a 23 KB string scan on every hit.
+  assert.ok(srv.includes("const [INDEX_HEAD, INDEX_TAIL]"), "the shell must be split once at boot");
+  assert.ok(/INDEX_HEAD \+ boot \+ INDEX_TAIL/.test(srv), "serveIndex must concat the injected boot script");
+  assert.ok(/serveIndex[\s\S]{0,600}resolveFeatures\(poller\.getFlags\(\), admin\)/.test(srv), "the injected set must be server-resolved for THIS caller");
+  // Per-audience body is only safe because the shell is uncacheable. If this header ever goes, a
+  // shared cache could hand a public visitor the admin shell.
+  assert.ok(/serveIndex = \(req, reply\) => \{[\s\S]{0,700}cache-control", "no-store"/.test(srv), "the audience-specific shell MUST stay no-store");
+  assert.ok(srv.includes("WARN: index.html flag slot missing"), "a missing slot must be announced at boot, not silently ignored");
+});
+
+test("client flags: tabVisible is the single composition point and every entry path uses it", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // Reads the injected set; never re-derives a visibility from a raw flag.
+  assert.ok(/const FLAGS = \(window\.__FLAGS && typeof window\.__FLAGS==='object'\) \? window\.__FLAGS : null;/.test(s), "FLAGS must read the injected set defensively");
+  assert.ok(/const IS_ADMIN = !!window\.__ADMIN;/.test(s), "IS_ADMIN marker must be read");
+  // Fail OPEN on a missing injection, deliberately: the shell is no-store so it should be impossible,
+  // and the server gate is authoritative — a cosmetic leak beats an app with no tabs at all.
+  assert.ok(/function featureOn\(key\)\{ return FLAGS \? !!FLAGS\[key\] : true; \}/.test(s), "featureOn must degrade to visible when injection is absent");
+  assert.ok(/function tabVisible\(v\)\{ return inScope\(v\) && featureOn\(v\); \}/.test(s), "tabVisible must compose scope AND flags");
+  for (const [what, re] of [
+    ["nav strip", /t\.hidden = !tabVisible\(t\.dataset\.view\)/],
+    ["showView", /if\(!tabVisible\(v\)\) v='markets';/],
+    ["applyScope", /if\(!tabVisible\(state\.view\)\) \{ showView\('markets'\); \}/],
+    ["hash deep link", /HASH_VIEWS\.has\(h\) && tabVisible\(h\)/],
+    ["command palette", /CMDK_TABS\.filter\(t=>tabVisible\(t\.v\)/],
+    ["treemap installer", /btn\.hidden = !tabVisible\('treemap'\)/],
+    ["treemap deep link", /==='treemap' && typeof showView==='function' && tabVisible\('treemap'\)/],
+  ]) assert.ok(re.test(s), `${what} must route its visibility decision through tabVisible`);
+  // Exactly one crypto scope list, and none of the old longhand per-tab comparisons may survive
+  // anywhere — those duplicates are what drifted apart before.
+  assert.equal((s.match(/const CRYPTO_VIEWS=new Set\(/g) || []).length, 1, "exactly one crypto scope list");
+  assert.ok(!/dataset\.view!=='(markets|trend|report|corr|backtest|sessions)'/.test(s), "no longhand per-tab scope comparison may survive");
+  assert.ok(!/v!=='report' && v!=='corr'/.test(s), "showView's inline crypto gate must be gone");
+  // markets is the fallback target, so it must be un-gateable — asserted at the manifest, because a
+  // gateable fallback would let a public user bounce into a view they cannot see and render nothing.
+  const C = require("../src/compute");
+  assert.equal(C.featureState({ markets: "off" }, "markets"), "public", "the showView fallback target must be pinned public");
 });
