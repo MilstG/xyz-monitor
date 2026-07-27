@@ -6123,8 +6123,9 @@ document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));
 document.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>setScope(b.dataset.scope)));
 // ===== nav tabs: drag to reorder, order persisted per browser =====
-// Tabs live between the scope switcher and the theme button; themeBtn is the insertion anchor
-// so a moved tab can never land in the right-side button cluster.
+// Tabs live between the scope switcher and the right-side control cluster. #tabSpacer is the
+// insertion anchor — a dedicated element rather than whichever button happens to sit first, so a
+// moved tab can never land among the controls and no anchor dies when a control is removed.
 const TABKEY='xyzmon.tabs.v1';
 function saveTabOrder(){ try{ const nav=document.querySelector('nav.tabs');
   store.set(TABKEY, JSON.stringify([...nav.querySelectorAll('.tab')].map(t=>t.dataset.view))); }catch(_){} }
@@ -6143,7 +6144,7 @@ function applyTabVisibility(){
 }
 function applyTabOrder(){ let ord; try{ ord=JSON.parse(store.get(TABKEY)||'null'); }catch(_){ ord=null; }
   const nav=document.querySelector('nav.tabs'); if(!nav||!Array.isArray(ord)||!ord.length) return;
-  const anchor=el('themeBtn');
+  const anchor=el('tabSpacer');
   const byView={}; nav.querySelectorAll('.tab').forEach(t=>{ byView[t.dataset.view]=t; });
   for(const v of ord){ const t=byView[v]; if(t){ nav.insertBefore(t,anchor); delete byView[v]; } }
   for(const v in byView) nav.insertBefore(byView[v],anchor);   // tabs shipped AFTER the order was saved still show, appended in default order
@@ -6168,24 +6169,11 @@ applyTabOrder(); applyTabVisibility(); wireTabDrag();
 { const lb=el('logoutBtn'); if(lb && /(^|;\s*)xyzauth=1/.test(document.cookie)){ lb.hidden=false;
     lb.addEventListener('click',()=>{ location.href='/logout'; }); } }
 applyScope();
-(function(){ const isAmber=()=>document.documentElement.getAttribute('data-theme')==='amber';
-  const setLabel=()=>{ const b=el('themeBtn'); if(b) b.textContent = isAmber()?'◐ dark':'◐ amber'; };
-  setLabel();
-  el('themeBtn').addEventListener('click',()=>{
-    if(isAmber()){ document.documentElement.removeAttribute('data-theme'); store.set('xyzmon.theme','dark'); }
-    else { document.documentElement.setAttribute('data-theme','amber'); store.set('xyzmon.theme','amber'); }
-    setLabel();
-    render(); if(!el('view-sectors').hidden) renderSectors(); if(!el('view-corr').hidden) renderCorr();
-  });
-})();
-// ===== row density: cozy (default) vs compact — one html attribute, CSS does the rest =====
-function applyDensity(mode){ if(mode==='compact') document.documentElement.setAttribute('data-density','compact');
-  else document.documentElement.removeAttribute('data-density');
-  const b=el('densBtn'); if(b) b.textContent = mode==='compact'?'▤ cozy':'▤ compact'; }
-(function(){ const cur=()=>document.documentElement.getAttribute('data-density')==='compact'?'compact':'cozy';
-  applyDensity(cur());   // the pre-paint script already set the attribute; this just syncs the button label
-  const b=el('densBtn'); if(b) b.addEventListener('click',()=>{ const next=cur()==='compact'?'cozy':'compact';
-    applyDensity(next); store.set('xyzmon.density',next); }); })();
+// ===== theme + density: one of each, no toggles ===============================================
+// The amber palette and the cozy/compact switch were both removed. There is one terminal theme in
+// styles.css and compact is the only density, so there is nothing here to restore, persist or
+// re-render on — the whole surface is CSS. Kept as a note so the next reader doesn't go looking
+// for the wiring that used to live at this line.
 
 // ===== focused ticker: set by any drawer open, shown in the statusline, follows across tabs =====
 function updateFocusChip(){ const c=el('focusChip'); if(!c) return;
@@ -7211,8 +7199,8 @@ function renderTreemap(){
     // tab button
     const nav=document.querySelector('nav.tabs')||document.querySelector('.tabs');
     if(nav){ const btn=document.createElement('button'); btn.className='tab'; btn.dataset.view='treemap'; btn.textContent='Treemap';
-      const theme=document.getElementById('themeBtn');
-      if(theme && theme.parentNode===nav) nav.insertBefore(btn,theme); else nav.appendChild(btn);
+      const anchor=document.getElementById('tabSpacer');
+      if(anchor && anchor.parentNode===nav) nav.insertBefore(btn,anchor); else nav.appendChild(btn);
       // This installer runs on DOMContentLoaded — AFTER the boot applyScope() pass that hides
       // non-markets tabs in crypto scope. Without this line a page loaded in crypto scope
       // shows a stray Treemap tab until the next scope switch re-runs applyScope().

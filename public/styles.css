@@ -7,6 +7,25 @@
   --disp:'Space Grotesk',system-ui,sans-serif;
 }
 *{box-sizing:border-box}
+
+/* ===== `hidden` means hidden ===================================================================
+   Any author rule that sets display beats the UA's [hidden]{display:none} on ORIGIN, not
+   specificity — so every component that styles its own display silently loses the attribute, and
+   markup written as hidden paints anyway. This file had spot-patched it three separate times
+   (.tab, .term-panel, .macrostrip) and it still shipped four live cases: the logout button showed
+   to signed-out viewers, the "filters active" dot was permanently lit, the movers row and the
+   focus chip rendered their empty/placeholder state into the bar. One list, stated once. The
+   suite audits it: any future class that carries hidden AND sets its own display fails here.
+   Not !important — .corrtip legitimately toggles itself with an inline display while keeping the
+   attribute, and an !important rule would break it. Attribute specificity is enough. ===== */
+.btn[hidden]{display:none}
+.tab[hidden]{display:none}
+.movers[hidden]{display:none}
+.filt-dot[hidden]{display:none}
+.regimestrip[hidden]{display:none}
+.macrostrip[hidden]{display:none}
+.term-panel[hidden]{display:none}
+#focusChip[hidden]{display:none}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
   -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1;}
 body{padding:18px 18px 60px;max-width:1620px;margin:0 auto;}
@@ -51,10 +70,16 @@ header{display:flex;flex-wrap:wrap;align-items:flex-end;gap:18px 28px;
 .benchnote b{color:var(--muted);font-weight:500}
 .countdown{font-family:var(--mono);font-size:13px;color:var(--muted)}
 .countdown b{color:var(--accent);font-weight:600}
-.statusline{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:4px 12px;
-  margin:-6px 0 16px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+/* Status bar. Was right-aligned free-floating text, which left most of a 1620px row empty and read
+   as a stray fragment rather than a bar. Now it is a panel strip the width of the app: server state
+   reads left, freshness + focus pin right, and the dead space in between is the bar itself. */
+.statusline{display:flex;flex-wrap:wrap;align-items:center;gap:5px 12px;
+  margin:-2px 0 14px;padding:7px 14px;background:var(--panel);border:1px solid var(--border);
+  border-radius:8px;font-family:var(--mono);font-size:12px;color:var(--muted)}
 .statusline b{color:var(--text);font-weight:500}
 .statusline .st-sep{color:var(--faint)}
+.statusline .st-right{display:flex;flex-wrap:wrap;align-items:center;gap:5px 12px;margin-left:auto}
+@media (max-width:680px){ .statusline .st-right{margin-left:0} }
 .flbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted)}
 .fnum{width:78px;background:var(--panel);border:1px solid var(--border);color:var(--text);
   font-family:var(--mono);font-size:12.5px;padding:7px 9px;border-radius:6px;outline:none;text-align:right}
@@ -231,9 +256,10 @@ footer code{font-family:var(--mono);color:var(--muted)}
 .tab.active{color:var(--text);border-bottom-color:var(--accent)}
 .tab:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .tab{user-select:none;-webkit-user-select:none}
-/* Belt to the hidden attribute's braces: .tab sets no display today, so [hidden] already wins,
-   but a future display rule on .tab would silently un-hide every hidden tab. */
-nav.tabs .tab[hidden]{display:none}
+/* The divider between tabs and controls. Zero width; its only job is to absorb the slack, which
+   also makes it the one stable insertion anchor for tab ordering. */
+.tabspacer{margin-left:auto}
+.tabs .tabbtn{align-self:center;padding:6px 12px;margin-bottom:5px}
 .tab.dragging{opacity:.35}
 
 /* correlation heatmap */
@@ -328,43 +354,6 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 /* ranked leaders rows (Sectors → leaders view) */
 .lrow{cursor:pointer;border-radius:4px;padding:2px 4px}
 .lrow:hover{background:rgba(227,165,60,.08)}
-
-/* ============ Bloomberg terminal theme (new palette) ============
-   #000000 base · #fb8b1e orange (headers/labels/active) · #0068ff blue
-   (benchmark + interactive) · #4af6c3 mint up · #ff433d red down.
-   Neutral off-white body text; orange + blue do the standout work.
-   Attribute key stays "amber" so the toggle wiring + reset flag are untouched. */
-:root[data-theme="amber"]{
-  --bg:#000000; --panel:#0a0a0a; --panel2:#121212; --border:#262626;
-  --text:#e6e4df; --muted:#8b8b8b; --faint:#565656;
-  --accent:#fb8b1e; --accent-dim:#8a4d10; --blue:#0068ff;
-  --up:#4af6c3; --down:#ff433d; --grid:#161616;
-  --disp:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
-}
-:root[data-theme="amber"] body{ letter-spacing:.1px; }
-:root[data-theme="amber"] .wordmark{ letter-spacing:0; }
-:root[data-theme="amber"] .seg button.active{ background:var(--accent); color:#000; }
-:root[data-theme="amber"] .btn.on{ background:var(--accent); color:#000; }
-:root[data-theme="amber"] .wrap thead th .arw{ color:var(--accent); }
-:root[data-theme="amber"] .tab.active{ color:var(--accent); border-bottom-color:var(--accent); }
-:root[data-theme="amber"] .wrap thead th{ color:var(--accent); }
-:root[data-theme="amber"] .cp-sub{ color:var(--accent); }
-:root[data-theme="amber"] .hd{ color:var(--accent); }
-:root[data-theme="amber"] .cp-head,
-:root[data-theme="amber"] .stat .v{ color:var(--text); }
-:root[data-theme="amber"] a{ color:var(--blue); }
-:root[data-theme="amber"] .search input:focus{ border-color:var(--blue); }
-:root[data-theme="amber"] .wrap tbody tr:hover td{ background:rgba(251,139,30,.055); }
-:root[data-theme="amber"] .wrap tbody tr:hover td:first-child{ background:#191308; }
-:root[data-theme="amber"] table.ptbl tbody tr:hover td{ background:rgba(251,139,30,.07); }
-:root[data-theme="amber"] .lrow:hover{ background:rgba(251,139,30,.08); }
-:root[data-theme="amber"] .benchrow td:first-child{ box-shadow:inset 3px 0 0 var(--blue); }
-:root[data-theme="amber"] .benchrow td{ background:rgba(0,104,255,.08); }
-:root[data-theme="amber"] ::selection{ background:var(--blue); color:#fff; }
-:root[data-theme="amber"] ::-webkit-scrollbar{ width:10px; height:10px; }
-:root[data-theme="amber"] ::-webkit-scrollbar-track{ background:#000; }
-:root[data-theme="amber"] ::-webkit-scrollbar-thumb{ background:#2c2c2c; border-radius:5px; }
-:root[data-theme="amber"] ::-webkit-scrollbar-thumb:hover{ background:#454545; }
 
 /* ===== market regime strip ===== */
 .regimestrip{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;
@@ -737,7 +726,6 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .term-panel{position:fixed;bottom:18px;right:18px;z-index:119;width:440px;max-width:calc(100vw - 24px);height:min(540px,78vh);
   display:flex;flex-direction:column;background:linear-gradient(180deg,#12161d,#0f1319);
   border:1px solid #2c3644;border-radius:12px;overflow:hidden;box-shadow:0 22px 64px rgba(0,0,0,.62)}
-.term-panel[hidden]{display:none}   /* an author display:flex above overrides the UA [hidden] rule — restore it so minimize/Esc hides the panel */
 .tp-bar{display:flex;align-items:center;gap:9px;padding:9px 13px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.02);font-size:11.5px;color:var(--muted)}
 .tp-dot{width:8px;height:8px;border-radius:50%;background:var(--up)}
 .tp-brand{font-family:var(--disp);color:var(--text);font-size:12.5px;font-weight:500}.tp-brand b{color:var(--accent)}
@@ -878,16 +866,21 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .wrap tbody tr.krow td,.wrap tbody tr.krow th{background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .wrap tbody tr.krow td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
 
-/* ===== compact density — one attribute tightens every table ===== */
-[data-density="compact"] .wrap tbody td{font-size:12px;padding:4px 9px}
-[data-density="compact"] .wrap tbody th{padding:4px 9px}
-[data-density="compact"] .wrap thead th{font-size:10px;padding-top:6px;padding-bottom:6px}
-[data-density="compact"] .stat .v{font-size:15px}
-[data-density="compact"] .chip{font-size:11px;padding:3px 7px}
-[data-density="compact"] .movers{margin-bottom:10px}
-[data-density="compact"] .sigrec-t td,[data-density="compact"] .sigrec-t th{padding:3px 7px;font-size:11.5px}
-[data-density="compact"] .earn-row{padding-top:4px;padding-bottom:4px}
-[data-density="compact"] .ptbl td,[data-density="compact"] .ptbl th{padding:3px 7px;font-size:11.5px}
+/* ===== compact density — now unconditional =====================================================
+   These sat behind a cozy/compact toggle, gated on a density attribute set on <html>. Compact is
+   the only density the app ships now, so the gate is gone and the rules stand on their own. The
+   :root prefix is not decoration: it carries exactly the same specificity weight the attribute selector did (0,1,0),
+   so every one of these still wins against the base rule it was written to beat — dropping it
+   would silently hand .ptbl back to the higher-specificity `table.ptbl td` rule above. ===== */
+:root .wrap tbody td{font-size:12px;padding:4px 9px}
+:root .wrap tbody th{padding:4px 9px}
+:root .wrap thead th{font-size:10px;padding-top:6px;padding-bottom:6px}
+:root .stat .v{font-size:15px}
+:root .chip{font-size:11px;padding:3px 7px}
+:root .movers{margin-bottom:10px}
+:root .sigrec-t td,:root .sigrec-t th{padding:3px 7px;font-size:11.5px}
+:root .earn-row{padding-top:4px;padding-bottom:4px}
+:root .ptbl td,:root .ptbl th{padding:3px 7px;font-size:11.5px}
 
 /* ===== mobile suite (-100): touch targets, sticky ticker column, full-width drawer ===== */
 @media (hover:none) and (pointer:coarse){
@@ -1154,7 +1147,6 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
   border-bottom-color:rgba(90,140,220,.35)}
 .macrostrip.result:hover{background:linear-gradient(90deg,rgba(90,140,220,.16),rgba(90,140,220,.04))}
 .macrostrip.result .ms-g,.macrostrip.result .ms-when{color:var(--blue)}
-.macrostrip[hidden]{display:none}   /* author display:flex above overrides the UA [hidden] rule — same trap as .term-panel; restore it so the armed/dark state actually hides */
 #tab-calendar .tabdot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--accent);
   vertical-align:top;margin-left:3px}
 /* Calendar tab macro rows: blue-chipped, faintly tinted — never confusable with an earnings row */

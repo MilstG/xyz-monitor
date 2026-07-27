@@ -15,7 +15,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <script>window.__FLAGS=null;window.__ADMIN=false;</script>
-<script>try{var K='xyzmon.theme',RV='xyzmon.themeReset.v2';if(!localStorage.getItem(RV)){localStorage.setItem(K,'dark');localStorage.setItem(RV,'1');}if(localStorage.getItem(K)==='amber')document.documentElement.setAttribute('data-theme','amber');if(localStorage.getItem('xyzmon.density')==='compact')document.documentElement.setAttribute('data-density','compact');}catch(e){}</script>
+<!-- One terminal theme, one row density. Nothing left to restore before paint — this only clears the
+     dead preference keys so a browser that used the old toggles doesn't carry them forever. -->
+<script>try{['xyzmon.theme','xyzmon.themeReset.v2','xyzmon.density'].forEach(function(k){localStorage.removeItem(k);});}catch(e){}</script>
 </head>
 <body>
 <header>
@@ -40,9 +42,10 @@
   <span class="st-item">updated <b id="s-upd">—</b></span>
   <span class="st-sep">·</span>
   <span class="st-item" title="server build — if this doesn't match the latest delivery, the deploy is stale">build <b id="ver">—</b></span>
-  <span class="st-sep">·</span>
-  <span class="st-item freshtray" id="freshtray" title="data-source freshness — green fresh, amber aging, red stale or fetch-failing"></span>
-  <span id="focusChip" hidden><span class="st-sep">·</span><button class="fchip-t" id="focusChipT" title="focused ticker — follows you across tabs; click to reopen the drawer">◎ —</button><button class="fchip-x" id="focusChipX" title="clear the focused ticker">✕</button></span>
+  <span class="st-right">
+    <span class="st-item freshtray" id="freshtray" title="data-source freshness — green fresh, amber aging, red stale or fetch-failing"></span>
+    <span id="focusChip" hidden><button class="fchip-t" id="focusChipT" title="focused ticker — follows you across tabs; click to reopen the drawer">◎ —</button><button class="fchip-x" id="focusChipX" title="clear the focused ticker">✕</button></span>
+  </span>
 </div>
 
 <nav class="tabs" title="Drag a tab to reorder — the order is saved in this browser">
@@ -61,10 +64,12 @@
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
   <button class="tab" data-view="report" title="AI analyst report — everything this server holds on one ticker (trend ladder, signals &amp; track record, positioning, earnings, flags) compiled and synthesized by an AI analyst (Claude or GPT, per server config) into a plain-language read with scenarios, R/R and an annotated chart. Cached for everyone; regenerate unlocks on TTL expiry or material change.">Report</button>
   <button class="tab" data-view="admin" id="tab-admin" title="Feature visibility — choose what the group sees and what stays admin-only. Server-enforced: a gated tab is absent from the markup and its routes 403.">Admin</button>
-  <button class="btn" id="themeBtn" style="margin-left:auto;align-self:center;padding:6px 11px" title="Switch between the default terminal theme and a Bloomberg-style amber theme">◐ amber</button>
-  <button class="btn" id="densBtn" style="align-self:center;padding:6px 11px" title="Row density — compact tightens every table for more rows per screen; saved in this browser">▤ compact</button>
-  <button class="btn" id="helpBtn" style="align-self:center;padding:6px 12px;font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
-  <button class="btn" id="logoutBtn" hidden style="align-self:center;padding:6px 11px" title="Sign out — clears this browser's session; the shared password gets you back in">⎋</button>
+  <!-- Everything before this spacer is a tab; everything after it is a control. It is the single
+       insertion anchor for saved tab order and for the self-installing Treemap tab, so neither
+       depends on whichever button happens to sit first in the right-hand cluster. -->
+  <span class="tabspacer" id="tabSpacer" aria-hidden="true"></span>
+  <button class="btn tabbtn" id="helpBtn" style="font-weight:600" title="How to read this tab — what every column, chart and score means and how to interpret it">?</button>
+  <button class="btn tabbtn" id="logoutBtn" hidden title="Sign out — clears this browser's session; the shared password gets you back in">⎋</button>
 </nav>
 
 <div class="macrostrip" id="macrostrip" hidden></div>
