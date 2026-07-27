@@ -6718,3 +6718,151 @@ test("tabs: every HIDDEN_TABS entry matches a real nav button, and every hidden 
   for (const h of hidden)
     assert.ok(html.includes(`id="view-${h}"`), `hidden tab '${h}' has no view section — showView would redirect to markets`);
 });
+
+// ===== admin panel, phase 0: the manifest is the single source of truth =========================
+test("features: manifest covers every tab in the markup, and every entry is real", () => {
+  const fs = require("fs"), path = require("path");
+  const C = require("../src/compute");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+
+  const keys = new Set(C.FEATURES.map((f) => f.key));
+  assert.equal(keys.size, C.FEATURES.length, "duplicate key in FEATURES — two entries would fight over one state");
+
+  // Markup -> manifest. THIS is the assertion that makes fail-closed safe: ship a tab without an
+  // entry and the suite fails here, instead of the tab being silently invisible to the group.
+  const tabs = [...html.matchAll(/data-view="([a-z]+)"/g)].map((m) => m[1]);
+  for (const v of new Set(tabs))
+    assert.ok(keys.has(v), `tab "${v}" exists in index.html but has no FEATURES entry — add one (fail-closed would hide it silently)`);
+
+  // Manifest -> markup, for the static tabs only. runtime:true entries are injected by JS
+  // (Treemap self-installs on DOMContentLoaded) so they legitimately have no data-view in the file.
+  for (const f of C.FEATURES) {
+    if (f.kind !== "tab" || f.runtime) continue;
+    assert.ok(tabs.indexOf(f.key) >= 0, `FEATURES lists tab "${f.key}" but index.html has no data-view for it — dead entry`);
+    assert.ok(html.includes(`id="view-${f.key}"`), `FEATURES tab "${f.key}" has no view section`);
+  }
+  for (const f of C.FEATURES) {
+    if (f.kind !== "tab" || !f.runtime) continue;
+    assert.ok(app.includes(`'view-${f.key}'`) || app.includes(`view-${f.key}`), `runtime tab "${f.key}" is claimed to self-install but app.js never builds view-${f.key}`);
+  }
+
+  // Every tab reachable from the command palette must be in the manifest too. Cmd+K is a SECOND
+  // way into a view: hiding the tab button while leaving the palette entry ungated would let a
+  // public user walk straight into an admin tab.
+  const cm = app.match(/const CMDK_TABS=\[[\s\S]*?\];/);
+  assert.ok(cm, "CMDK_TABS list not found — the palette is a second entry point and must stay auditable");
+  for (const m of cm[0].matchAll(/\{v:'([a-z]+)'/g))
+    assert.ok(keys.has(m[1]), `command palette offers "${m[1]}" which has no FEATURES entry`);
+
+  // The manifest must not contradict HIDDEN_TABS while both exist. Phase 2 deletes HIDDEN_TABS and
+  // lets the manifest own tab visibility outright; until then a tab hidden by one list and called
+  // public by the other is a live disagreement, which is the whole failure mode this work removes.
+  const hid = app.match(/const HIDDEN_TABS=new Set\(\[([^\]]*)\]\)/);
+  assert.ok(hid, "HIDDEN_TABS not found — if it was deleted, this assertion moves to the manifest-owns-visibility test");
+  for (const m of hid[1].matchAll(/'([a-z]+)'/g)) {
+    assert.ok(keys.has(m[1]), `HIDDEN_TABS hides "${m[1]}" which has no FEATURES entry`);
+    assert.notEqual(C.featureState({}, m[1]), "public",
+      `tab "${m[1]}" is in HIDDEN_TABS but its manifest default is public — the two lists disagree`);
+  }
+
+  // kind and state vocabulary are closed sets; a typo'd def would resolve through to FEATURE_DEFAULT
+  // and quietly hide a feature that was meant to be public.
+  for (const f of C.FEATURES) {
+    assert.ok(f.kind === "tab" || f.kind === "act", `entry "${f.key}" has unknown kind "${f.kind}"`);
+    assert.ok(C.FEATURE_STATES.indexOf(f.def) >= 0, `entry "${f.key}" has invalid default "${f.def}"`);
+    assert.ok(f.label && f.label.length <= 32, `entry "${f.key}" needs a short human label`);
+  }
+});
+
+test("features: every manifest route is registered in server.js exactly once", () => {
+  const fs = require("fs"), path = require("path");
+  const C = require("../src/compute");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // Same class of guard as the route-manifest test: a feature pointing at a route that does not
+  // exist means the gate silently protects nothing (the phantom /api/unlocks failure, again).
+  for (const f of C.FEATURES) {
+    for (const r of f.routes || []) {
+      const sp = r.indexOf(" ");
+      const verb = sp > 0 ? r.slice(0, sp).toLowerCase() : null;
+      const p = sp > 0 ? r.slice(sp + 1) : r;
+      const hits = [...srv.matchAll(new RegExp(`fastify\\.(get|post)\\("${p.replace(/[/]/g, "\\/")}"`, "g"))];
+      assert.ok(hits.length >= 1, `feature "${f.key}" claims route ${r} which server.js never registers`);
+      if (verb) assert.ok(hits.some((h) => h[1] === verb), `feature "${f.key}" claims ${r} but no fastify.${verb} for that path`);
+    }
+  }
+  // Nothing in the never-gate set may also be claimed by a feature — gating the unlock path is a
+  // one-way door (no cookie, no way to mint one, no way back in without a redeploy).
+  for (const f of C.FEATURES)
+    for (const r of f.routes || [])
+      assert.ok(!C.FEATURE_NEVER_GATE.has(r.replace(/^[A-Z]+ /, "")), `feature "${f.key}" claims never-gateable route ${r}`);
+  for (const p of ["/api/health", "/login", "/logout", "/api/ai-unlock", "/api/ai-lock"])
+    assert.ok(C.FEATURE_NEVER_GATE.has(p), `${p} must be permanently ungateable`);
+});
+
+test("features: resolver fails closed, honours pins, and 'off' means nobody", () => {
+  const C = require("../src/compute");
+  // Unlisted key -> admin. A feature shipped without an entry is invisible to the group, not exposed.
+  assert.equal(C.featureState({}, "does-not-exist"), "admin", "unlisted key must fail closed");
+  assert.equal(C.featureVisible({}, "does-not-exist", false), false, "public user cannot see an unlisted key");
+  assert.equal(C.featureVisible({}, "does-not-exist", true), true, "admin can see an unlisted key");
+
+  // Markets is pinned: a bad flag write must not be able to leave a public user on a blank app.
+  assert.equal(C.featureState({ markets: "off" }, "markets"), "public", "a pinned feature ignores stored flags");
+  assert.equal(C.featureVisible({ markets: "admin" }, "markets", false), true, "markets stays visible to everyone");
+
+  // off beats admin — that is the whole point of having a third state.
+  assert.equal(C.featureVisible({ signals: "off" }, "signals", true), false, "'off' hides the feature from admin too");
+  assert.equal(C.featureVisible({ signals: "admin" }, "signals", true), true);
+  assert.equal(C.featureVisible({ signals: "admin" }, "signals", false), false);
+
+  // Stored override beats the manifest default in both directions.
+  assert.equal(C.featureState({ backtest: "public" }, "backtest"), "public", "an override can open a default-admin feature");
+  assert.equal(C.featureState({ trend: "admin" }, "trend"), "admin", "an override can close a default-public feature");
+
+  const pub = C.resolveFeatures({}, false), adm = C.resolveFeatures({}, true);
+  assert.equal(Object.keys(pub).length, C.FEATURES.length, "resolveFeatures must return every key");
+  assert.ok(pub.markets === true && adm.markets === true);
+  assert.ok(Object.keys(pub).filter((k) => pub[k]).length < Object.keys(adm).filter((k) => adm[k]).length,
+    "admin must resolve strictly more than public with default flags");
+});
+
+test("features: flag sanitizer drops unknown keys and bad states instead of coercing", () => {
+  const C = require("../src/compute");
+  const out = C.featureFlagsSanitize({ signals: "admin", markets: "public", bogus: "public", trend: "PUBLIC", news: 1, report: null });
+  assert.deepEqual(out, { signals: "admin", markets: "public" }, "only known key + valid state pairs survive");
+  assert.deepEqual(C.featureFlagsSanitize(null), {}, "null input is an empty flag set, not a throw");
+  assert.deepEqual(C.featureFlagsSanitize("nope"), {}, "a non-object flags file degrades to defaults");
+  // A typo'd key must NOT fall through to a real feature's state — that is the bug the manifest exists
+  // to prevent, and it would be invisible without this assertion.
+  assert.equal(Object.prototype.hasOwnProperty.call(C.featureFlagsSanitize({ signal: "off" }), "signals"), false);
+});
+
+test("features: route gate is method-aware, honours never-gate, and lets unclaimed routes through", () => {
+  const C = require("../src/compute");
+  const flags = { report: "public", "ai.generate": "admin", signals: "admin" };
+
+  // A public GET and an admin POST share /api/ai-report. The method-specific mapping must win, or
+  // reading a cached report would require admin (too strict) or generating one would not (too loose).
+  assert.equal(C.featureGateFor("GET", "/api/ai-report?coin=X", flags, false), null, "public may read a cached report");
+  assert.equal(C.featureGateFor("POST", "/api/ai-report", flags, false), "ai.generate", "public may not spend budget generating one");
+  assert.equal(C.featureGateFor("POST", "/api/ai-report", flags, true), null, "admin may generate");
+
+  // Path-wide mapping applies to every method.
+  assert.equal(C.featureGateFor("GET", "/api/signals", flags, false), "signals");
+  assert.equal(C.featureGateFor("GET", "/api/signals", flags, true), null);
+
+  // Never-gate wins even if a flag would otherwise close it.
+  assert.equal(C.featureGateFor("GET", "/api/health", { markets: "off" }, false), null, "healthcheck can never be gated");
+  assert.equal(C.featureGateFor("POST", "/api/ai-unlock", flags, false), null, "the escalation path can never be gated");
+
+  // Unclaimed route passes — the deliberate asymmetry. If this ever flips, every unlisted route
+  // 403s and the app goes dark on deploy; read the ASYMMETRY note in compute.js before changing it.
+  assert.equal(C.featureGateFor("GET", "/api/nothing-claims-this", flags, false), null);
+  // Query strings must not defeat the gate.
+  assert.equal(C.featureGateFor("GET", "/api/signals?u=crypto&x=1", flags, false), "signals");
+
+  const c = C.featureCounts({});
+  assert.equal(c.total, C.FEATURES.length);
+  assert.equal(c.public + c.admin + c.off, c.total, "every feature lands in exactly one bucket");
+});
