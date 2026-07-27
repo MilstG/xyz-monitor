@@ -1944,7 +1944,8 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
       <button class="btn full" id="ar-add" style="justify-content:center">Add alert</button>
     </div>
     <div class="cphead">Rules (${A.rules.length})</div>${rulesHtml}
-    <div class="cphead">Recent <span class="sec" style="text-transform:none;letter-spacing:0">· fires only while this tab is open</span></div>${logHtml}
+    <div class="cphead">Delivery <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 telegram DMs, sent with no tab open</span></div>${buildPushSection()}
+    <div class="cphead">Recent <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 in-tab log; telegram delivery is independent</span></div>${logHtml}
     <label class="copt" style="margin-top:8px"><input type="checkbox" id="ar-notify" ${A.notify?'checked':''} ${navail?'':'disabled'}/> Browser notifications${navail?'':' (unavailable here)'}</label>
     <button class="btn" id="ar-clear" style="width:100%;justify-content:center;margin-top:6px">Clear log</button>`;
   el('ar-add').onclick=addAlertRule;
@@ -1956,7 +1957,11 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   el('at-ev').addEventListener('change',e=>{ T.minEV=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
   el('at-late').addEventListener('change',e=>{ T.maxLate=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
   pop.querySelectorAll('[data-unmute]').forEach(x=>x.addEventListener('click',()=>{
-    T.muted=T.muted.filter(c=>c!==x.dataset.unmute); saveAlerts(); buildAlertsPanel(); })); }
+    T.muted=T.muted.filter(c=>c!==x.dataset.unmute); saveAlerts(); buildAlertsPanel(); }));
+  const pl=el('p-link'); if(pl) pl.addEventListener('click',()=>pushAct('/api/alerts/link'));
+  const pt=el('p-test'); if(pt) pt.addEventListener('click',()=>pushAct('/api/alerts/test'));
+  pop.querySelectorAll('[data-punlink]').forEach(x=>x.addEventListener('click',()=>{
+    if(confirm('Unlink this recipient? They stop receiving alerts immediately.')) pushAct('/api/alerts/unlink',{chat:x.dataset.punlink}); })); }
 function addAlertRule(){ const A=state.alerts, tIn=el('ar-ticker').value.trim().toUpperCase(); let coin='';
   if(tIn){ for(const r of state.rows.values()){ if(r.ticker.toUpperCase()===tIn||r.coin.toUpperCase()===tIn){ coin=r.coin; break; } }
     if(!coin){ el('ar-ticker').classList.add('bad'); return; } }
@@ -3583,6 +3588,7 @@ function trigSeqSet(n){ try{ store.set(TSEQ,String(n)); }catch(_){} }
 // board and the alert can't disagree about which setups are worth surfacing.
 function trigEligibleClient(ev,c){
   if(!ev) return false;
+  if((ev.kind||'setup')!=='setup') return false;   // ops events ride the same ring; they get their own presentation
   if(c.minEV!=null && (ev.evR==null || ev.evR<c.minEV)) return false;
   if(c.minRR!=null && !(ev.rr && ev.rr.gross>=c.minRR)) return false;
   if(c.maxLate!=null && ev.late!=null && ev.late>c.maxLate) return false;
@@ -3598,7 +3604,10 @@ async function loadTriggers(){
     // First run on this device: adopt the server's high-water mark WITHOUT firing. Otherwise
     // turning alerts on would immediately replay the whole retained ring at you.
     if(cur==null){ trigSeqSet(d.seq||0); return; }
-    for(const ev of d.events){ if(trigEligibleClient(ev,A.trig)) fireTrigger(ev); }
+    for(const ev of d.events){
+      if((ev.kind||'setup')==='ops'){ fireOps(ev); continue; }
+      if(trigEligibleClient(ev,A.trig)) fireTrigger(ev);
+    }
     if(d.seq!=null) trigSeqSet(d.seq);
   }catch(_){ /* cursor unadvanced — the next poll retries the same window, nothing is lost */ }
 }
@@ -3634,6 +3643,68 @@ function pushTrigToast(ev){
     saveAlerts(); t.remove(); if(!el('alertpop').hidden) buildAlertsPanel(); });
   w.appendChild(t);
   setTimeout(()=>{ if(!t.isConnected) return; t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 15000);
+}
+
+// Ops events share the ring but not the presentation: there is no geometry to show and no name to
+// mute, so they land in the bell log as a plain line. Deliberately quiet — no toast for an info
+// event, one for a warning, because a deploy notice that interrupts you is a notice you will turn
+// off, and then the stall warning goes with it.
+function fireOps(ev){
+  const A=state.alerts;
+  const text=`${ev.title}${ev.text?' — '+ev.text:''}`;
+  A.log.unshift({t:ev.at||Date.now(), text, ops:1}); if(A.log.length>60) A.log.pop();
+  A.unseen++; updateBell();
+  if(ev.level==='warn') pushToast('\u26a0 '+text);
+  if(!el('alertpop').hidden) buildAlertsPanel();
+}
+
+// ===== alert delivery (telegram push) =====
+// The panel is a thin view over /api/alerts. Every decision — who is linked, which classes they
+// take, whether the wire is healthy — lives on the server, because the alerts have to keep flowing
+// with no tab open at all. This screen only reads and edits that state.
+let pushState=null, pushBusy=false;
+async function loadPush(){
+  try{ pushState=await fetchJSON('/api/alerts'); }
+  catch(_){ pushState=null; }
+  if(!el('alertpop').hidden) buildAlertsPanel();
+}
+function pushCodeLeft(c){
+  if(!c||!c.expiresAt) return '';
+  const ms=c.expiresAt-Date.now(); if(ms<=0) return 'expired';
+  const m=Math.floor(ms/60000), sec=Math.floor((ms%60000)/1000);
+  return m+':'+String(sec).padStart(2,'0');
+}
+function buildPushSection(){
+  const P=pushState;
+  if(!P) return '<div class="sec" style="font-size:12px;padding:4px">Delivery state unavailable \u2014 the server did not answer.</div>';
+  if(!P.enabled) return '<div class="sec" style="font-size:12px;padding:4px">Telegram push is off \u2014 set <b>TG_BOT_TOKEN</b> on the server to enable it. Nothing else changes while it is unset.</div>';
+  const recips=P.recipients&&P.recipients.length? P.recipients.map(r=>{
+    const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
+    const tip=r.muted?(r.lastErr||'muted'):(r.lastOk?('last delivery '+fmtAge(Date.now()-r.lastOk)+' ago'):'linked, nothing delivered yet');
+    const cls=(r.classes&&r.classes.length)?r.classes.join(', '):'all classes';
+    return `<div class="arule"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${esc(cls)} \u00b7 ${r.sentHour}/${P.capHour}h</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span></div>`;
+  }).join('') : '<div class="sec" style="font-size:12px;padding:4px">Nobody linked yet.</div>';
+  const code=P.code&&pushCodeLeft(P.code)!=='expired'
+    ? `<div class="pushcode"><div class="sec" style="font-size:11px">DM the bot <b>/start ${esc(P.code.code)}</b></div><div class="pcode">${esc(P.code.code)}</div><div class="sec" style="font-size:11px">expires in ${esc(pushCodeLeft(P.code))}</div></div>`
+    : '';
+  const errs=P.lastErr?`<div class="sec neg" style="font-size:11px;padding:2px 4px" data-tip="verbatim from the Telegram API \u2014 this is what a bad token or chat looks like">${esc(P.lastErr)}</div>`:'';
+  const logHtml=P.log&&P.log.length? P.log.slice(0,6).map(e=>`<div class="alog"><span class="at">${new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</span> ${esc(e.chat)} ${e.ok?'<span class="pos">sent</span>':'<span class="neg">'+esc(e.err||'failed')+'</span>'}</div>`).join('') : '';
+  return `${recips}${code}${errs}
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button class="btn" id="p-link" style="flex:1;justify-content:center">Link telegram</button>
+      <button class="btn" id="p-test" style="flex:1;justify-content:center" ${P.recipients&&P.recipients.length?'':'disabled'}>Test fire</button>
+    </div>
+    <div class="sec" style="font-size:11px;margin-top:5px">queue ${P.queue}${P.dropped?' \u00b7 <span class="neg">'+P.dropped+' dropped</span>':''} \u00b7 cap ${P.capHour}/h per person</div>${logHtml}`;
+}
+async function pushAct(url, body){
+  if(pushBusy) return null;
+  pushBusy=true;
+  try{
+    const res=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
+    const d=await res.json().catch(()=>null);
+    return d;
+  }catch(_){ return null; }
+  finally{ pushBusy=false; await loadPush(); }
 }
 
 // ===== actionable tab =====
@@ -5443,6 +5514,7 @@ el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly;
 el('drawerbg').addEventListener('click', closeDetail);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && state.detail) closeDetail(); });
 el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('alertpop');
+  if(pop.hidden) loadPush();   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
   if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); state.alerts.unseen=0; updateBell(); }
   else { pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('alertpop');
