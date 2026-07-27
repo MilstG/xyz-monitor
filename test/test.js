@@ -2039,7 +2039,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
     "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries",
-    "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols",
+    "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols",
     "openCmdk", "closeCmdk", "cmdkRender", "cmdkActivate", "aiFmtCountdown", "aiFmtAgo", "aiTickCountdown",
     "updateFreshTray", "renderFreshTray",
     "termRun", "termExec", "nlResolve", "termScreen", "termTop", "termSignals", "termCorr", "termDiverge", "termCard", "termOpen", "termClose",
@@ -2069,7 +2069,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7",
     "macrostrip", "MACRO \\u00b7 REPORTED", "act-mwarn", "mrow", "d.macroErr", "tabdot",
     "nxt.diff<=2", "mn.diff<=2", "FOMC meeting begins",
-    "xyzmon.density", "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs",
+    "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs",
     "key:'momp'", "/api/duel", "momentum2:", "r.momWhy",
     "c.structLevels", "detected structural level(s) drawn faint"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
@@ -2154,7 +2154,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
       "name = the company's common name", "NUMBERS RULE", "IDENTITY RULE"])
       assert.ok(polSrc.includes(pin), `analyst legend out of sync with shipped context: ${pin}`);
   }
-  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "densBtn", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand", "compg"]) {
+  for (const id of ["helpBtn", "helpmodal", "sighist-q", "sighist-ev", "sighist-panel", "dledger", "earnings-body", "view-earnings", "logoutBtn", "tabSpacer", "focusChip", "cmdk", "cmdk-q", "freshtray", "termFab", "termPanel", "termCmd", "termExpand", "compg"]) {
     if (id === "dledger") continue;   // dledger is injected by JS, not static markup
     assert.ok(html.includes(`id="${id}"`), `missing markup id: ${id}`);
   }
@@ -3503,10 +3503,14 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  // Density: pre-paint restore in the shell (no flash), attribute-driven CSS, persisted preference.
-  assert.ok(html.includes("xyzmon.density"), "density pre-paint restore missing from index.html");
-  assert.ok(css.includes('[data-density="compact"] .wrap tbody td'), "compact table CSS missing");
-  assert.ok(app.includes("store.set('xyzmon.density'"), "density persistence missing");
+  // Density (rewritten 2026.07.27-23): the toggle is gone and compact is the only density. The
+  // rules must survive as unconditional CSS — deleting the attribute without keeping the selector
+  // weight would silently drop compact back to the base padding, which is the exact failure this
+  // pins. Both halves are asserted: the rule still exists, and nothing can turn it off again.
+  assert.ok(css.includes(":root .wrap tbody td{font-size:12px"), "compact table CSS missing");
+  assert.ok(!css.includes("[data-density"), "the density attribute selector must be gone — compact is the only density");
+  assert.ok(!app.includes("xyzmon.density") && !app.includes("densBtn"), "density toggle wiring must be gone");
+  assert.ok(!html.includes('id="densBtn"'), "density button must be gone from the markup");
   // Keyboard nav: slash-search map, j/k movement, re-applied highlight after each render.
   for (const pin of ["kmoveSel(1)", "kmoveSel(-1)", "CSS.escape(state.ksel)", "applyKsel();   // innerHTML rebuild"])
     assert.ok(app.includes(pin), `keyboard nav pin missing: ${pin}`);
@@ -3516,6 +3520,83 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
   assert.ok(app.includes("state.focus && state.rows.has(state.focus)"), "report-tab focus fallback missing");
   for (const id of ["focusChipT", "focusChipX"]) assert.ok(html.includes(`id="${id}"`), `focus chip markup missing: ${id}`);
   assert.ok(css.includes(".fchip-t{"), "focus chip CSS missing");
+});
+
+test("UI -23: amber theme removed, one density, status bar reformatted", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+
+  // The amber palette is gone from all three files — not just unreachable, absent. A leftover
+  // :root[data-theme] block is 30 lines of dead cascade nobody can trigger or notice rotting.
+  for (const [name, src] of [["styles.css", css], ["app.js", app], ["index.html", html]])
+    assert.ok(!src.includes("data-theme"), `amber theme residue in ${name}`);
+  assert.ok(!html.includes('id="themeBtn"') && !app.includes("themeBtn"), "theme button must be gone");
+  assert.ok(!app.includes("xyzmon.theme"), "theme persistence must be gone");
+
+  // Tab ordering and the self-installing Treemap tab both anchored on themeBtn. Removing a button
+  // that two independent systems used as a DOM landmark is exactly how tabs end up appended after
+  // the controls, so the anchor is now an element that exists for that job and nothing else.
+  assert.ok(html.includes('id="tabSpacer"'), "tab/control divider missing from the markup");
+  assert.ok(css.includes(".tabspacer{margin-left:auto}"), "the spacer must absorb the slack");
+  assert.equal((app.match(/el\('tabSpacer'\)|getElementById\('tabSpacer'\)/g) || []).length, 2,
+    "both the saved-order pass and the Treemap installer must anchor on the spacer");
+
+  // Status bar: a panel strip with a right-pinned tray, not right-aligned floating text.
+  assert.ok(/\.statusline\{[^}]*background:var\(--panel\)/.test(css), "status bar must read as a strip");
+  assert.ok(!/\.statusline\{[^}]*justify-content:flex-end/.test(css), "the old right-float layout must be gone");
+  assert.ok(/\.statusline \.st-right\{[^}]*margin-left:auto/.test(css), "freshness tray must pin right");
+  assert.ok(html.includes('class="st-right"'), "st-right wrapper missing from the markup");
+
+  // The chip's own display rule outranked [hidden], so it sat in the bar showing "◎ —" forever.
+  assert.ok(css.includes("#focusChip[hidden]{display:none}"), "hidden focus chip must actually hide");
+});
+
+test("UI -23: the [hidden] attribute is honoured by every element that styles its own display", () => {
+  // This is the generalized form of the focus-chip bug, and it is a bug CLASS, not an instance.
+  // An author `display:` rule beats the UA's [hidden]{display:none} on origin regardless of
+  // specificity, so any component that sets its own display quietly stops responding to the
+  // attribute — and the markup that declared it hidden paints anyway. styles.css had already
+  // spot-patched this three times without anyone noticing four more live cases.
+  //
+  // So this doesn't pin a list. It derives one: every class/id in index.html that carries a bare
+  // `hidden` attribute, cross-referenced against every rule in styles.css that gives that same
+  // selector a display other than none. Anything in the intersection must also have an
+  // X[hidden]{display:none} rule. Add a hideable component that styles its display and forget the
+  // companion rule, and this fails before it ships.
+  const fs = require("fs"), path = require("path");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+
+  const hideable = new Set();
+  for (const [, attrs] of html.matchAll(/<\w+((?:"[^"]*"|'[^']*'|[^>"'])*)>/g)) {
+    if (!/(^|\s)hidden(\s|$|=)/.test(attrs.replace(/aria-hidden/g, ""))) continue;
+    const cls = /class="([^"]*)"/.exec(attrs), id = /id="([^"]*)"/.exec(attrs);
+    if (cls) for (const c of cls[1].trim().split(/\s+/)) if (c) hideable.add("." + c);
+    if (id) hideable.add("#" + id[1]);
+  }
+  assert.ok(hideable.size >= 20, `expected a real set of hideable elements, got ${hideable.size}`);
+
+  const guarded = new Set();
+  for (const m of css.matchAll(/(^|[\s,{}])([.#][\w-]+)\[hidden\]\s*\{[^}]*display\s*:\s*none/g)) guarded.add(m[2]);
+
+  const unguarded = [];
+  for (const m of css.matchAll(/(^|\})\s*([^{}@]+?)\s*\{([^}]*)\}/g)) {
+    const body = m[3], d = /(?:^|;)\s*display\s*:\s*([\w-]+)/.exec(body);
+    if (!d || d[1] === "none") continue;
+    for (const part of m[2].split(",").map((x) => x.trim())) {
+      if (!hideable.has(part) || guarded.has(part)) continue;
+      unguarded.push(`${part} sets display:${d[1]} but has no ${part}[hidden]{display:none}`);
+    }
+  }
+  assert.deepEqual([...new Set(unguarded)], [],
+    "hideable elements that will paint despite the hidden attribute:\n  " + [...new Set(unguarded)].join("\n  "));
+
+  // And the four that were live when this was written stay fixed by name, so a refactor that
+  // guts the derivation above still can't quietly reintroduce them.
+  for (const sel of [".btn", ".movers", ".filt-dot", ".regimestrip"])
+    assert.ok(css.includes(`${sel}[hidden]{display:none}`), `regression: ${sel} lost its hidden guard`);
 });
 
 test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wired", () => {
@@ -6841,7 +6922,9 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   // in the panel would leave the tab stuck hidden until someone edited app.js.
   assert.ok(/t\.hidden = !tabVisible\(t\.dataset\.view\)/.test(s), "applyTabVisibility must both hide and un-hide via tabVisible");
   assert.ok(/applyTabVisibility==='function'\) applyTabVisibility\(\)/.test(s), "visibility must be re-applied when the strip is rebuilt at runtime");
-  assert.ok(/nav\.tabs \.tab\[hidden\]\{display:none\}/.test(css), "a display rule on .tab must not be able to silently un-hide a hidden tab");
+  // The guard moved into the consolidated [hidden] block at the top of styles.css in -23; it is the
+  // same guarantee, stated once for every hideable component instead of per-component.
+  assert.ok(/\.tab\[hidden\]\{display:none\}/.test(css), "a display rule on .tab must not be able to silently un-hide a hidden tab");
   // The feature is NOT withdrawn: markup, view section, renderers, help and the deep link all live.
   assert.ok(html.includes('data-view="backtest"') && html.includes('id="view-backtest"'), "backtest markup must survive the hide");
   assert.ok(s.includes("backtest:`"), "backtest help entry must survive the hide");
@@ -9931,7 +10014,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-22"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-23"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
