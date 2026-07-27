@@ -6062,9 +6062,14 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // The stream, for any transport. `seq` is the high-water mark: a consumer stores the last seq it
   // handled and takes everything above it, which is restart-safe and refresh-safe in a way that a
   // timestamp comparison is not.
-  function getTriggers(sinceSeq) {
+  // An event with an `owner` belongs to one person: it exists because of a rule they wrote, so it
+  // is theirs to see. Everything else — setups, ledger outcomes, filings, ops — is about the market
+  // or the server and is shared by construction.
+  const evVisible = (e, owner, isAdmin) => !e.owner || isAdmin || (!!owner && e.owner === owner);
+  function getTriggers(sinceSeq, owner, isAdmin) {
     const since = Number.isFinite(+sinceSeq) ? +sinceSeq : null;
-    const evs = since == null ? trigEvents.slice(-40) : trigEvents.filter((e) => e.seq > since);
+    const vis = trigEvents.filter((e) => evVisible(e, owner, isAdmin));
+    const evs = since == null ? vis.slice(-40) : vis.filter((e) => e.seq > since);
     // `events` and `recent` answer two different questions and a consumer needs both in one round
     // trip: events = what has happened since MY cursor (what to interrupt for, exactly once), and
     // recent = the last N regardless of cursor (what to DISPLAY). Deriving the display list from
@@ -6073,7 +6078,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ts: Date.now(), dataTs: trigSeq, seq: trigSeq,
       params: { ring: TRIG_RING, graceMs: TRIG_GRACE_MS, seenTtlMs: TRIG_SEEN_TTL, recent: TRIG_RECENT },
       known: trigSeen.size, events: evs, count: evs.length,
-      recent: trigEvents.slice(-TRIG_RECENT) };
+      recent: vis.slice(-TRIG_RECENT) };
   }
 
 
@@ -6114,6 +6119,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (Array.isArray(d.recipients)) for (const r of d.recipients) {
       if (!r || !r.chat) continue;
       pushRecipients.set(String(r.chat), {
+        owner: typeof r.owner === "string" ? r.owner : "",
         chat: String(r.chat), name: r.name || String(r.chat), since: +r.since || Date.now(),
         cur: +r.cur || 0, classes: Array.isArray(r.classes) ? r.classes.filter((c) => PUSH_CLASSES.includes(c)) : null,
         trig: r.trig && typeof r.trig === "object" ? r.trig : {},
@@ -6160,12 +6166,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // The code exists so a mistyped chat id cannot silently route someone's alerts to a stranger.
   // Binding is proved in one direction: the server mints, the human carries it into a DM the bot
   // can see, and only then is a chat id trusted. Codes are single-use and short-lived.
-  function pushMintCode() {
+  // Who may see and manage a recipient. Admin always; otherwise only the browser that linked it.
+  // Recipients carrying no owner predate per-browser linking — they are treated as admin-managed
+  // rather than adopted by whoever looks next, because "the first visitor to open the panel inherits
+  // someone else's Telegram" is exactly the failure this is fixing.
+  function pushOwns(rec, owner, isAdmin) {
+    if (isAdmin) return true;
+    return !!(rec && rec.owner && owner && rec.owner === owner);
+  }
+  function pushMintCode(owner) {
     const now = Date.now();
     for (const [c, v] of pushCodes) if (now - v.t > PUSH_LINK_TTL) pushCodes.delete(c);
     let code = "";
     for (let i = 0; i < 6; i++) code += PUSH_CODE_ALPHABET[Math.floor(Math.random() * PUSH_CODE_ALPHABET.length)];
-    pushCodes.set(code, { t: now });
+    pushCodes.set(code, { t: now, owner: owner || "" });
     return { ok: true, code, expiresAt: now + PUSH_LINK_TTL };
   }
   function pushBind(code, chat, name) {
@@ -6178,6 +6192,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const key = String(chat);
     const prev = pushRecipients.get(key);
     pushRecipients.set(key, {
+      // The owner rides in on the CODE, so redeeming it in Telegram binds the chat to the browser
+      // that generated it. A re-link from a different browser transfers ownership, which is the
+      // right behaviour: proving you control the Telegram account is the stronger claim.
+      owner: rec.owner || (prev ? prev.owner : "") || "",
       chat: key, name: name || key, since: prev ? prev.since : Date.now(),
       // A new recipient starts CAUGHT UP, never with the backlog: the ring holds up to 200 events
       // and nobody wants their first message from this bot to be two hundred stale setups.
@@ -6188,18 +6206,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     log(`push: linked recipient ${name || key} (${pushMask(key)})`);
     return { ok: true, chat: key };
   }
-  function pushUnlink(chat) {
+  function pushUnlink(chat, owner, isAdmin) {
     const key = String(chat);
     if (!pushRecipients.has(key)) return { ok: false, error: "unknown" };
+    if (!pushOwns(pushRecipients.get(key), owner, isAdmin)) return { ok: false, error: "forbidden" };
     pushRecipients.delete(key);
     pushQueue = pushQueue.filter((q) => q.chat !== key);
     persistPush();
     log(`push: unlinked recipient ${pushMask(key)}`);
     return { ok: true };
   }
-  function pushSetClasses(chat, classes) {
+  function pushSetClasses(chat, classes, owner, isAdmin) {
     const r = pushRecipients.get(String(chat));
     if (!r) return { ok: false, error: "unknown" };
+    if (!pushOwns(r, owner, isAdmin)) return { ok: false, error: "forbidden" };
     r.classes = Array.isArray(classes) ? classes.filter((c) => PUSH_CLASSES.includes(c)) : null;
     // An empty selection resets to the DEFAULT set, not to everything and not to silence. Muting is
     // its own control, and "everything" now includes opt-in classes nobody should land in by
@@ -6231,7 +6251,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       }
       if (/^\/stop(?:@\S+)?$/i.test(txt)) {
         const had = pushRecipients.has(String(chat));
-        if (had) pushUnlink(chat);
+        // Authorised by construction: this command arrived FROM that chat, and control of the
+        // Telegram account is a stronger claim than any browser handle. /stop must always work —
+        // it is the one escape hatch that needs no panel, no cookie and no admin.
+        if (had) pushUnlink(chat, null, true);
         pushEnqueue(String(chat), had ? "<b>Unlinked.</b>\nNo further alerts will be sent here." : "You weren't linked.", true);
         continue;
       }
@@ -6342,7 +6365,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const evs = trigEvents.filter((e) => e.seq > (rec.cur || 0));
       if (!evs.length) continue;
       rec.cur = trigSeq;
-      const keep = evs.filter((e) => (e.at || 0) >= floor && pushEligible(e, rec));
+      const keep = evs.filter((e) => (e.at || 0) >= floor && evVisible(e, rec.owner, false) && pushEligible(e, rec));
       // Split by whether the event pierces this recipient's quiet window. Held messages are
       // scheduled for the window's end rather than dropped, so nothing the log records is ever
       // missing from the phone — it just arrives at a civilised hour.
@@ -6490,7 +6513,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (Array.isArray(d.rules)) {
       for (const r of d.rules) {
         const v = validateRule(r);
-        if (v.ok) { v.rule.id = r.id || ++ruleSeq; alertRules.push(v.rule); }
+        // Rules written before per-person ownership existed carry no owner. Same treatment as
+        // ownerless recipients: admin-managed, never silently adopted by the next visitor.
+        if (v.ok) { v.rule.id = r.id || ++ruleSeq; v.rule.owner = typeof r.owner === "string" ? r.owner : ""; alertRules.push(v.rule); }
       }
     }
     if (Number.isFinite(d.seq)) ruleSeq = Math.max(ruleSeq, d.seq);
@@ -6542,6 +6567,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         ruleLastFire.set(key, now);
         rulesDirty = true; fired++;
         emitTrig("rule", {
+          // A personal rule produces a personal event. Without this the ring would carry one
+          // person's thresholds to everyone else's phone and bell log — the same leak the shared
+          // recipient list had, one layer down.
+          owner: rule.owner || "",
           coin: row.coin, t: row.ticker || row.coin, uni: row.uni,
           ruleId: rule.id, metric: rule.metric, label: m.label, op: rule.op, value: rule.value,
           note: rule.note || "", now: ruleFmtValue(m, val), rule: ruleLabel(rule),
@@ -6557,27 +6586,37 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return fired;
   }
 
-  function getRules() {
-    return { ts: Date.now(), dataTs: ruleSeq, max: RULE_MAX,
+  const ruleOwns = (r, owner, isAdmin) => isAdmin || !!(r && r.owner && owner && r.owner === owner);
+  function getRules(owner, isAdmin) {
+    const mine = alertRules.filter((r) => ruleOwns(r, owner, isAdmin));
+    return { ts: Date.now(), dataTs: ruleSeq, max: RULE_MAX, admin: !!isAdmin,
+      // Counted, not listed. Someone should be able to tell the engine is doing work for other
+      // people without being shown what they are watching.
+      othersRules: alertRules.length - mine.length,
       metrics: RULE_METRICS.map((m) => ({ k: m.k, label: m.label, unit: m.unit, scale: m.scale || null })),
       ops: RULE_OPS, opLabels: RULE_OP_LABEL,
       defaultCooldownMs: RULE_DEFAULT_COOLDOWN,
-      rules: alertRules.map((r) => Object.assign({}, r, { text: ruleLabel(r) })) };
+      rules: mine.map((r) => Object.assign({}, r, { text: ruleLabel(r), mine: ruleOwns(r, owner, false) })) };
   }
-  function addRule(rule) {
-    if (alertRules.length >= RULE_MAX) return { ok: false, error: "cap" };
+  function addRule(rule, owner) {
+    // The cap is PER PERSON now that rules are personal — one prolific author must not be able to
+    // exhaust the list for everyone else.
+    if (alertRules.filter((r) => r.owner === (owner || "")).length >= RULE_MAX) return { ok: false, error: "cap" };
     const v = validateRule(rule);
     if (!v.ok) return v;
     v.rule.id = ++ruleSeq;
+    v.rule.owner = owner || "";
     alertRules.push(v.rule);
     persistRules();
     return { ok: true, rule: Object.assign({}, v.rule, { text: ruleLabel(v.rule) }) };
   }
-  function deleteRule(id) {
+  function deleteRule(id, owner, isAdmin) {
     const n = +id;
+    const target = alertRules.find((r) => r.id === n);
+    if (!target) return { ok: false, error: "unknown" };
+    if (!ruleOwns(target, owner, isAdmin)) return { ok: false, error: "forbidden" };
     const before = alertRules.length;
     alertRules = alertRules.filter((r) => r.id !== n);
-    if (alertRules.length === before) return { ok: false, error: "unknown" };
     for (const map of [ruleArmed, ruleLastFire, rulePrev])
       for (const k of [...map.keys()]) if (k.startsWith(n + "|")) map.delete(k);
     persistRules();
@@ -6802,14 +6841,27 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     }
     return sent;
   }
-  function pushSetPrefs(chat, prefs) {
+  function pushSetPrefs(chat, prefs, owner, isAdmin) {
     const r = pushRecipients.get(String(chat));
     if (!r) return { ok: false, error: "unknown" };
+    if (!pushOwns(r, owner, isAdmin)) return { ok: false, error: "forbidden" };
     const p = prefs || {};
     if ("quiet" in p) {
       const v = validateQuiet(p.quiet);
       if (!v.ok) return v;
       r.quiet = v.quiet;
+    }
+    if ("trig" in p) {
+      const t = p.trig || {};
+      const nOrNull = (v) => (v == null || v === "" ? null : (Number.isFinite(+v) ? +v : undefined));
+      const minEV = nOrNull(t.minEV), minRR = nOrNull(t.minRR), maxLate = nOrNull(t.maxLate);
+      if (minEV === undefined || minRR === undefined || maxLate === undefined) return { ok: false, error: "bad-trig" };
+      // Written as a whole object, not merged: a partial write would leave a threshold set from a
+      // previous edit that the panel is no longer showing.
+      r.trig = {};
+      if (minEV != null) r.trig.minEV = minEV;
+      if (minRR != null) r.trig.minRR = minRR;
+      if (maxLate != null) r.trig.maxLate = maxLate;
     }
     if ("digestHour" in p) {
       const h = p.digestHour;
@@ -6818,15 +6870,18 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       else r.digestHour = +h;
     }
     persistPush();
-    return { ok: true, quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null };
+    return { ok: true, quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {} };
   }
 
-  function pushTest(chat) {
+  function pushTest(chat, owner, isAdmin) {
     if (!pushOn()) return { ok: false, error: "disabled" };
     const now = Date.now();
     if (now - pushLastTest < 30 * 1000) return { ok: false, error: "cooldown" };
-    const targets = chat ? [String(chat)] : [...pushRecipients.keys()];
-    if (!targets.length) return { ok: false, error: "no-recipients" };
+    // Scoped: a test fire must never let one visitor ping another visitor's phone. With no chat
+    // named it hits only the caller's OWN recipients (admin: all of them).
+    const targets = (chat ? [String(chat)] : [...pushRecipients.keys()])
+      .filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : "no-recipients" };
     pushLastTest = now;
     for (const c of targets) {
       pushEnqueue(c, `<b>Test alert</b>\nbuild ${version || "dev"} \u00b7 the wire works.`, true);
@@ -6834,19 +6889,28 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ok: true, sent: targets.length };
   }
 
-  function getPush() {
+  function getPush(owner, isAdmin) {
     const now = Date.now();
-    const codes = [...pushCodes.entries()].filter(([, v]) => now - v.t <= PUSH_LINK_TTL)
+    // A pending code is shown only to the browser that asked for it. Previously the newest code was
+    // handed to every visitor, so two people linking at once could redeem each other's.
+    const codes = [...pushCodes.entries()]
+      .filter(([, v]) => now - v.t <= PUSH_LINK_TTL && (isAdmin || (v.owner || "") === (owner || "")))
       .map(([code, v]) => ({ code, expiresAt: v.t + PUSH_LINK_TTL }));
+    const visible = [...pushRecipients.values()].filter((r) => pushOwns(r, owner, isAdmin));
     return {
       ts: now, dataTs: pushVer,
       enabled: pushOn(),
       classes: PUSH_CLASSES, defaultClasses: PUSH_DEFAULT_CLASSES, rates: getClassRates(),
       lookbackMs: PUSH_GRACE_MS, bootAt: pushBootAt,   // the boot rule is a lookback window, not a countdown — nothing is "waiting" to unmute
-      recipients: [...pushRecipients.values()].map((r) => ({
+      admin: !!isAdmin,
+      // Counted, never listed: a visitor should know the bot serves other people without being shown
+      // who they are.
+      othersLinked: pushRecipients.size - visible.length,
+      recipients: visible.map((r) => ({
+        mine: pushOwns(r, owner, false),
         chat: r.chat, mask: pushMask(r.chat), name: r.name, since: r.since,
         classes: r.classes, muted: !!r.muted, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
-        quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null,
+        quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {},
         quietNow: !!(r.quiet && inQuietWindow(now, r.quiet)),
         sentHour: (r.sent || []).filter((t) => now - t < 3600e3).length })),
       code: codes.length ? codes[codes.length - 1] : null,
