@@ -806,7 +806,7 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
   assert.ok(pol.includes("let swingFails = 0, swingErr = null;"), "counters reset per build");
   assert.ok(pol.includes("strategy shadows failed on ${swingFails} market(s)"), "failures log once per build, visibly");
   const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
-  assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 4, "every daily-close detector coerces (reclaim, failbrk, mapull + roundfr since -12)");
+  assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 7, "every daily-close detector coerces (reclaim, failbrk, mapull, roundfr + swpull/basebrk/regime200 since -20)");
 });
 
 test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the ledger, post-epoch claims survive", () => {
@@ -965,8 +965,8 @@ test("crypto enrollment: a whitelist and a geometry gate — and the arithmetic 
   // small-n rescue, it is contamination
   assert.ok(pol.includes('const acOf = (r) => (r.uni === "main" ? "Crypto" : (classifyCached(r.ticker).assetClass || "Other"));'),
     "crypto pools separately from every equity asset class");
-  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext"])'),
-    "R-united ledger set carries the crypto-native events");
+  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj"])'),
+    "R-united ledger set carries the crypto-native events + the -20 swing shadows");
   for (const gone of ["oc24: oiChg24", "cryptoSetupsLive"])
     assert.ok(!pol.includes(gone), `retired -87 remnant must not return: ${gone}`);
   // countU is BACK, and must count kept conditions rather than the capped transport slice —
@@ -3194,11 +3194,14 @@ test("client + server integrity: the Report tab ships end to end (markers, style
     assert.ok(pol.includes(frag), `poller.js missing AI engine marker: ${frag}`);
   for (const frag of ["saveAiReports", "loadAiReports", "ai-reports.json"])
     assert.ok(sto.includes(frag), `store.js missing AI persistence marker: ${frag}`);
-  // The 90d crypto daily retention is a constant, and BOTH the fetch and the payload cap must ride it —
-  // a bare "40" or "MAIN_HIST_DAYS" left behind in either spot silently shrinks the window back.
-  assert.ok(/const MAIN_DAILY_DAYS = 9\d;/.test(pol), "crypto daily retention must be ~90d via MAIN_DAILY_DAYS");
+  // Crypto daily RETENTION deepened to 370d (-20: MA200 / structural levels / swing shadows) while
+  // the WIRE stays at the 92 bars the clients render — both are constants, and the fetch must ride
+  // retention while the payload cap rides the wire constant. A bare number left behind in either
+  // spot silently shrinks a window back.
+  assert.ok(/const MAIN_DAILY_DAYS = 370;/.test(pol), "crypto daily retention must be 370d via MAIN_DAILY_DAYS");
+  assert.ok(/const MAIN_DAILY_PAYLOAD = 92;/.test(pol), "crypto daily wire payload must stay 92 bars via MAIN_DAILY_PAYLOAD");
   assert.ok(pol.includes("now - MAIN_DAILY_DAYS * DAY"), "crypto daily fetch must use MAIN_DAILY_DAYS");
-  assert.ok(pol.includes("dr.slice(-(MAIN_DAILY_DAYS + 2))"), "crypto daily payload cap must ride MAIN_DAILY_DAYS");
+  assert.ok(pol.includes("dr.slice(-(MAIN_DAILY_PAYLOAD + 2))"), "crypto daily payload cap must ride MAIN_DAILY_PAYLOAD");
 });
 
 test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Terra→Sol fallback on refusal", async () => {
@@ -9910,11 +9913,235 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-19"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-20"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
   const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of [".macrostrip", ".macrostrip.result", ".macrostrip[hidden]{display:none}", ".earn-row.mrow", ".earn-mk", ".act-mwarn"])
     assert.ok(cs.includes(pin), "css pin missing: " + pin);
+});
+
+// ================================================================================================
+// swing-horizon batch (build 2026.07.27-20): touch-mode resolution, structural targets, the
+// symmetric bracket track, the MA200 regime tag, and the 370d crypto daily deepening.
+// ================================================================================================
+
+test("swing -20: bracketTouch — first touch wins, same-candle ties to the stop, windows respected", () => {
+  const C = require("../src/compute");
+  const H = 3600e3, t0 = 1000 * H;
+  const bar = (h, t, hi, lo) => [t0 + h * H, t, hi, lo, t, 1];
+  // long claim, stop 97 / target 106: target's candle comes first
+  const tapeT = [bar(1, 100, 100.5, 99.5), bar(2, 103, 106.2, 102.5), bar(3, 96, 97.5, 95.9)];
+  const rT = C.bracketTouch(tapeT, t0, t0 + 10 * H, "long", 97, 106);
+  assert.ok(rT && rT.hit === "target" && rT.level === 106, "target touched first");
+  // same tape, stop's candle first
+  const tapeS = [bar(1, 100, 100.5, 99.5), bar(2, 96.5, 100.2, 96.4), bar(3, 107, 107.5, 106.5)];
+  const rS = C.bracketTouch(tapeS, t0, t0 + 10 * H, "long", 97, 106);
+  assert.ok(rS && rS.hit === "stop" && rS.level === 97, "stop touched first even though the target follows");
+  // ONE candle spanning both levels: hourly ordering is unknowable -> conservative stop
+  const rBoth = C.bracketTouch([bar(1, 100, 106.5, 96.5)], t0, t0 + 10 * H, "long", 97, 106);
+  assert.ok(rBoth && rBoth.hit === "stop", "a candle touching BOTH counts as the stop");
+  // short mirror: stop ABOVE entry, target BELOW
+  const rShort = C.bracketTouch([bar(1, 100, 100.4, 99.6), bar(2, 95, 96, 93.8)], t0, t0 + 10 * H, "short", 104, 94);
+  assert.ok(rShort && rShort.hit === "target" && rShort.level === 94, "short mirror: low through the target");
+  // window bounds: a touch AT t0 is excluded (t <= t0), one past tEnd is excluded (t > tEnd)
+  assert.equal(C.bracketTouch([bar(0, 100, 107, 99)], t0, t0 + 10 * H, "long", 97, 106), null, "touch at t0 excluded");
+  assert.equal(C.bracketTouch([bar(20, 100, 107, 99)], t0, t0 + 10 * H, "long", 97, 106), null, "touch past tEnd excluded");
+  // both levels are REQUIRED — this primitive resolves brackets, not single levels
+  assert.equal(C.bracketTouch(tapeT, t0, t0 + 10 * H, "long", null, 106), null, "no stop -> null");
+  assert.equal(C.bracketTouch(tapeT, t0, t0 + 10 * H, "sideways", 97, 106), null, "unknown side -> null");
+});
+
+test("swing -20: nextLevelAbove reads the shipping detector and refuses trivially-close levels", () => {
+  const C = require("../src/compute");
+  // flat closes make no pivots; two 115-highs (k=3 clearance) cluster into one resistance level
+  const lvlBars = [];
+  for (let i = 0; i < 120; i++) {
+    const spike = i === 30 || i === 50;
+    lvlBars.push({ c: 100, h: spike ? 115 : 100, l: 100 });
+  }
+  const t = C.nextLevelAbove(lvlBars, 105, 2, 2);
+  assert.ok(t != null && Math.abs(t - 115) < 0.01, `the 115 cluster is the next level above, got ${t}`);
+  // a floor above every detected level -> null, never a substitute
+  assert.equal(C.nextLevelAbove(lvlBars, 114.5, 2, 2), null, "no level clears the min-distance floor");
+  const flat = lvlBars.map((b) => ({ c: b.c, h: 100, l: 100 }));
+  assert.equal(C.nextLevelAbove(flat, 105, 2, 2), null, "no pivots at all -> null");
+});
+
+test("swing -20: detectSwingPull — rising MA50, a real leg, the band, and a structural target", () => {
+  const C = require("../src/compute");
+  const closes = [];
+  for (let i = 0; i < 95; i++) closes.push([i, 80 + i * 0.25]);            // slow ramp to 103.5
+  for (let i = 95; i < 105; i++) closes.push([i, 112]);                    // the leg (inside last 20)
+  for (let i = 105; i < 120; i++) closes.push([i, 112 - (i - 104) * 0.5]); // pullback toward the MA
+  const lvlBars = [];
+  for (let i = 0; i < 120; i++) lvlBars.push({ c: 100, h: (i === 30 || i === 50) ? 115 : 100, l: 100 });
+  // px pinned AT the computed MA50 so the band condition is exact, not a lucky constant
+  const c = closes.map((k) => k[1]);
+  const m0 = c.slice(70, 120).reduce((a, x) => a + x, 0) / 50;
+  const sp = C.detectSwingPull(closes, m0, 2, lvlBars);
+  assert.ok(sp, "fires with every leg holding");
+  assert.ok(Math.abs(sp.ma - m0) < 0.01, "ma is the MA50");
+  assert.ok(sp.stop < m0 && Math.abs(sp.stop - m0 * 0.97) < 0.01, "void 1.5 sigma below the MA");
+  assert.ok(Math.abs(sp.target - 115) < 0.01, "target is the next structural level");
+  assert.ok(sp.stop < m0 && m0 < sp.target, "tradeable geometry");
+  // falling MA -> null (same tape reversed)
+  const rev = closes.map((k, i) => [i, closes[closes.length - 1 - i][1]]);
+  assert.equal(C.detectSwingPull(rev, m0, 2, lvlBars), null, "falling MA50: no swing pullback");
+  // no qualifying level -> null, never an invented target
+  const flat = lvlBars.map((b) => ({ c: 100, h: 100, l: 100 }));
+  assert.equal(C.detectSwingPull(closes, m0, 2, flat), null, "no structural target -> no claim");
+});
+
+test("swing -20: detectBaseBreak — a real base, a fresh break, and BOTH target schools", () => {
+  const C = require("../src/compute");
+  const closes = [];
+  for (let i = 0; i < 77; i++) closes.push([i, 96 + ((i * 7) % 13) / 2]);  // base: 96..102, ~6.3% range
+  closes.push([77, 100.1]); closes.push([78, 100.4]); closes.push([79, 102.8]);  // fresh breakout close
+  const lvlBars = [];
+  for (let i = 0; i < 80; i++) lvlBars.push({ c: 99, h: (i === 20 || i === 40) ? 110 : 99, l: 99 });
+  const bb = C.detectBaseBreak(closes, 103, 2, lvlBars);
+  assert.ok(bb, "fires on the fresh break");
+  assert.ok(Math.abs(bb.hi - 102) < 0.01 && Math.abs(bb.lo - 96) < 0.01, `base bounds detected (${bb.hi}/${bb.lo})`);
+  assert.ok(Math.abs(bb.stop - 102 * 0.98) < 0.01, "void 1 sigma back inside the base");
+  assert.ok(Math.abs(bb.targetP - 108) < 0.01, "projected target = base height above the break");
+  assert.ok(Math.abs(bb.targetL - 110) < 0.01, "structural target = next level above");
+  // stale break (two closes already above) -> null
+  const stale = closes.slice(0, 77).concat([[77, 102.5], [78, 102.6], [79, 102.8]]);
+  assert.equal(C.detectBaseBreak(stale, 103, 2, lvlBars), null, "stale breakout: no claim");
+  // a trend is not a base
+  const trend = []; for (let i = 0; i < 80; i++) trend.push([i, 80 + i * 0.5]);
+  assert.equal(C.detectBaseBreak(trend, 121, 2, lvlBars), null, "range past the cap: not a base");
+});
+
+test("swing -20: regime200 — 2-bit stamp, honest null under 210 closes", () => {
+  const C = require("../src/compute");
+  const up = []; for (let i = 0; i < 220; i++) up.push([i, 100 + i * 0.3]);
+  assert.equal(C.regime200(up, 200), 3, "above a rising MA200");
+  assert.equal(C.regime200(up, 50), 1, "below a rising MA200");
+  const dn = up.map((k, i) => [i, up[up.length - 1 - i][1]]);
+  assert.equal(C.regime200(dn, 50), 0, "below a falling MA200");
+  assert.equal(C.regime200(dn, 500), 2, "above a falling MA200");
+  assert.equal(C.regime200(up.slice(0, 200), 100), null, "under 210 closes: honest unknown");
+});
+
+test("swing -20: EV_META — touch-mode convention, timeouts, crypto overrides inherit resolve", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3;
+  for (const ev of ["swpull", "basebrk", "basepj"]) {
+    assert.equal(C.EV_META[ev].resolve, "touch", `${ev} resolves by first touch`);
+    assert.equal(C.EV_META[ev].horizonMs, 30 * DAY_, `${ev} times out at 30d on the equity clock`);
+  }
+  // crypto compressed clock: only the timeout differs; resolve:"touch" must survive the merge
+  const fs = require("fs"), path = require("path");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const pin of [
+    'swpull:   { horizonMs: 10 * DAY,  horizon: "first touch of target/void within 10d',
+    'basebrk:  { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d',
+    'basepj:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d',
+  ]) assert.ok(cmp.includes(pin), `EV_META_MAIN override pin missing: ${pin}`);
+  // the merge that carries resolve through is the same evMeta Object.assign as every override
+  assert.ok(cmp.includes("return o ? Object.assign({}, base, o) : base;"), "evMeta merge intact");
+});
+
+test("swing -20: poller wiring manifest — fire sites, resolver, rosters, glossary, panel, client", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    'openLedger(r, "swpull"', 'openLedger(r, "basebrk"', 'openLedger(r, "basepj"',
+    "stp: sp.stop, tgt: sp.target, tm: 1",                       // touch mode + ABSOLUTE frozen target ride extra
+    "stp: bb.stop, tgt: bb.targetL, tm: 1",
+    "stp: bb.stop, tgt: bb.targetP, tm: 1",
+    "const br = bracketTouch(hs, e.t0, Math.min(e.resolveAt, now), sideE, e.stp, e.tgt);",   // early-touch scan
+    'if (br) { pTouch = br.level; tEnd = br.t; e.rb = br.hit === "target" ? "t" : "s"; }',
+    "else if (now < e.resolveAt) continue;",                     // untouched + not expired -> still live
+    "if (e.tm === 1 && e.rb) e.realizedB = realized;",           // touch claims: tracks coincide
+    "e.realizedB = br ? +(sgn * (br.level / p0 - 1) * 100).toFixed(2) : realized;",          // symmetric track
+    'if (now < e.resolveAt && !(e.tm === 1 && e.stp != null && e.tgt != null)) continue;',   // per-pass gate
+    "const b0 = priceAsOf(bh, e.t0, 3 * HOUR), b1 = priceAsOf(bh, tEnd, 3 * HOUR);",         // BTC leg on the live window
+    '"swpull", "basebrk", "basepj",',                            // MAIN_EVS enrollment
+    'tm: "touch-mode claim', 'rb: "bracket outcome', 'realizedB: "bracket-track outcome', 'r2: "MA200 regime at fire',
+    "if (r._r2 != null) e.r2 = r._r2;",                          // regime stamp at claim creation
+    'ev: "swpull", uni: "both"', 'ev: "basebrk", uni: "both"', 'ev: "basepj", uni: "both"',  // shadow panel rows
+    "delete e.tgt; delete e.tm; }",                              // crypto scrub degrades touch mode honestly
+    "nB: b.retsB.length, hitB:",                                 // bracket aggregation in the record
+  ]) assert.ok(pol.includes(pin), `poller.js missing -20 pin: ${pin}`);
+  // exactly one bracketTouch call per resolver concern: the touch-mode scan and the parallel track
+  assert.equal((pol.match(/bracketTouch\(/g) || []).length, 2, "two resolver call sites, no strays");
+  assert.ok(pol.includes("stopTouched, bracketTouch,"), "primitive imported alongside stopTouched");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["tch hit", "tch med", "tch pf", "r.hitB", "r.medB", "r.pfB", 'colspan="10"'])
+    assert.ok(app.includes(pin), `app.js missing -20 pin: ${pin}`);
+});
+
+test("swing -20: resolver end-to-end — early target touch, stop-out, still-live, timeout MTM", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), H = 3600e3, DAY_ = 86400e3;
+  const mk = (coin, extra) => Object.assign({ key: coin + "|swpull#0", coin, ticker: coin, ev: "swpull",
+    t0: now - 6 * DAY_, mark0: 100, dir: 1, score0: 0, sd0: 2, psd: "long", pn: 1,
+    stp: 97, tgt: 106, tm: 1, vi: 0, resolveAt: now + 24 * DAY_ }, extra || {});
+  const fixture = { ts: now, rearm: [], variants: null, closed: [],
+    open: [mk("xyz:TGT"), mk("xyz:STP"), mk("xyz:LIVE"), mk("xyz:MTM", { resolveAt: now - DAY_ })] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  // spines: 160h of hourly bars; shape(h) returns [px, hi, lo] for the bar h hours ago
+  const spine = (shape) => { const hs = []; for (let i = 160; i >= 0; i--) {
+    const [px, hi, lo] = shape(i); hs.push({ t: now - i * H, o: px, h: hi, l: lo, c: px, v: 1 }); } return hs; };
+  const flat = (i) => [101, 101.4, 100.6];                                        // touches nothing, ever
+  p.seedRowNow("xyz:TGT",  { px: 105, hourlyTs: now, hourlyRaw: spine((i) => i === 50 ? [105.5, 106.3, 104.8] : [100, 100.4, 99.6]) });
+  p.seedRowNow("xyz:STP",  { px: 100, hourlyTs: now, hourlyRaw: spine((i) => i === 70 ? [97.5, 100.1, 96.8] : [100, 100.3, 99.7]) });
+  p.seedRowNow("xyz:LIVE", { px: 101, hourlyTs: now, hourlyRaw: spine(flat) });
+  p.seedRowNow("xyz:MTM",  { px: 101, hourlyTs: now, hourlyRaw: spine(flat) });
+  p.buildSignalsNow();
+  const x = p.getLedgerExport();
+  const done = Object.fromEntries(x.closed.filter((e) => e.ev === "swpull").map((e) => [e.coin, e]));
+  const open = Object.fromEntries(x.open.filter((e) => e.ev === "swpull").map((e) => [e.coin, e]));
+  // TGT: resolved EARLY (resolveAt is 24d away), at the target, in R, tracks coinciding
+  assert.ok(done["xyz:TGT"] && done["xyz:TGT"].status === "resolved", "target claim resolved 24d before its timeout");
+  assert.equal(done["xyz:TGT"].rb, "t", "bracket outcome: target first");
+  assert.ok(Math.abs(done["xyz:TGT"].realized - 3) < 0.15, `resolved AT the frozen target: (106/100-1)/sigma2 = 3R, got ${done["xyz:TGT"].realized}`);
+  assert.equal(done["xyz:TGT"].stopped, false, "not stopped");
+  assert.ok(Math.abs(done["xyz:TGT"].realizedB - done["xyz:TGT"].realized) < 1e-9, "touch claims: bracket === realized by construction");
+  // STP: resolved early at the void, negative, stopped
+  assert.ok(done["xyz:STP"] && done["xyz:STP"].rb === "s" && done["xyz:STP"].stopped === true, "void first-touch");
+  assert.ok(Math.abs(done["xyz:STP"].realized - (-1.5)) < 0.15, `resolved AT the frozen void: (97/100-1)/sigma2 = -1.5R, got ${done["xyz:STP"].realized}`);
+  // LIVE: nothing touched, timeout far away -> still open, scanned but untouched
+  assert.ok(open["xyz:LIVE"] && !done["xyz:LIVE"], "untouched claim with a live timeout stays open");
+  // MTM: nothing touched, timeout passed -> at-horizon mark, the honest 'went nowhere'
+  assert.ok(done["xyz:MTM"] && done["xyz:MTM"].rb === "m", "timeout resolves mark-to-market");
+  assert.ok(Math.abs(done["xyz:MTM"].realized) < 0.2, `flat tape MTM outcome ~0R, got ${done["xyz:MTM"].realized}`);
+});
+
+test("swing -20: the symmetric bracket track exposes the old one-sided bias on fixed-horizon claims", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), H = 3600e3, DAY_ = 86400e3;
+  // a NON-touch claim (reclaim, 5d convention) carrying both frozen levels: price rides through
+  // the target mid-window and gives most of it back by horizon. The at-horizon leg books the
+  // fade; the bracket leg books the touch — the exact bias the old record carried.
+  const fixture = { ts: now, rearm: [], variants: null, closed: [],
+    open: [{ key: "xyz:BIAS|reclaim#0", coin: "xyz:BIAS", ticker: "xyz:BIAS", ev: "reclaim",
+      t0: now - 6 * DAY_, mark0: 100, dir: 1, score0: 0, sd0: 2, psd: "long", pn: 1,
+      stp: 95, tgt: 103, vi: 0, resolveAt: now - DAY_ }] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  const hs = []; for (let i = 160; i >= 0; i--) {
+    let px = 100, hi = 100.4, lo = 99.6;
+    if (i <= 80 && i > 60) { px = 103.5; hi = 104.2; lo = 102.8; }      // the ride through 103
+    if (i <= 60) { px = 100.5; hi = 100.9; lo = 100.1; }                // the fade into horizon
+    hs.push({ t: now - i * H, o: px, h: hi, l: lo, c: px, v: 1 });
+  }
+  p.seedRowNow("xyz:BIAS", { px: 100.5, hourlyTs: now, hourlyRaw: hs });
+  p.buildSignalsNow();
+  const e = p.getLedgerExport().closed.find((k) => k.coin === "xyz:BIAS");
+  assert.ok(e && e.status === "resolved", "claim resolved at its fixed horizon as always");
+  assert.equal(e.rb, "t", "bracket walk saw the target touched first");
+  assert.ok(Math.abs(e.realized - 0.25) < 0.15, `at-horizon leg books the fade (~0.25R), got ${e.realized}`);
+  assert.ok(Math.abs(e.realizedB - 1.5) < 0.15, `bracket leg books the touch ((103/100-1)/sigma2 = 1.5R), got ${e.realizedB}`);
+  assert.ok(e.realizedB > e.realized, "the symmetric track recovers what the one-sided cap threw away");
+  assert.equal(e.stopped, false, "void never touched — the stop-aware leg still coincides with at-horizon");
 });
