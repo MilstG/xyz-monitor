@@ -2168,6 +2168,7 @@ function admLabel(st){ return st==='public'?'public':st==='admin'?'admin':'off';
 // Everyone's linked telegram accounts, in the admin panel rather than the bell. Collapsed by
 // default and deliberately plain: this is an operator's roster for revoking access, not a place to
 // tune somebody else's subscriptions — those are theirs, set from their own browser.
+let admRecOpen={};
 function renderAdmRecips(){
   const h=el('admRecH'), b=el('admRecB'), n=el('admRecN');
   if(!h||!b) return;
@@ -2178,13 +2179,33 @@ function renderAdmRecips(){
   if(b.hidden) return;
   if(!P){ b.innerHTML='<div class="msg">Open the alerts bell once to load delivery state.</div>'; return; }
   if(!P.admin){ b.innerHTML='<div class="msg">Admin only.</div>'; return; }
+  // Editable, not just readable. Revoke-only lasted exactly one build before the operator asked
+  // where the controls went — fair: whoever runs the bot fields the "why am I getting X" messages,
+  // so the roster edits classes in place. Writes ride the same routes the owner uses, with the
+  // admin override the server already honoured; the person's own panel shows the change on next open.
+  const dflt=P.defaultClasses||[];
+  const adminCls=P.adminClasses||['ops'];
   b.innerHTML=rows.length? rows.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
-    const cls=(r.classes&&r.classes.length)?r.classes.join(', '):'default set';
-    return `<div class="arule"><span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${esc(cls)} \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':(r.owned?' \u00b7 another browser':' \u00b7 unclaimed')}</span></span>`
+    const openR=!!admRecOpen[r.chat];
+    const on=(c)=>(r.classes&&r.classes.length)?r.classes.includes(c):dflt.includes(c);
+    const nOn=(P.classes||[]).filter(c=>on(c)&&(!adminCls.includes(c)||r.admin)).length;
+    const chips=openR?(P.classes||[]).filter(c=>!adminCls.includes(c)||r.admin).map(c=>
+      `<button type="button" class="cdtf${on(c)?' on':''}" data-apcls="${esc(c)}" data-apchat="${esc(r.chat)}">${esc(c)}</button>`).join(''):'';
+    return `<div class="arule" style="flex-wrap:wrap"><span class="arec-h" data-admexp="${esc(r.chat)}"><span class="asec-c">${openR?'\u25be':'\u25b8'}</span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${nOn} class(es) \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':(r.owned?' \u00b7 another browser':' \u00b7 unclaimed')}</span></span>`
       +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
-      +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span></div>`; }).join('')
+      +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span>`
+      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`:'')+`</div>`; }).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>';
+  b.querySelectorAll('[data-admexp]').forEach(x=>x.addEventListener('click',()=>{
+    admRecOpen[x.dataset.admexp]=!admRecOpen[x.dataset.admexp]; renderAdmRecips(); }));
+  b.querySelectorAll('[data-apcls]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=rows.find(r=>r.chat===x.dataset.apchat); if(!rec) return;
+    const all=(P.classes||[]).filter(c=>!adminCls.includes(c)||rec.admin);
+    let cur=(rec.classes&&rec.classes.length)?rec.classes.slice():dflt.filter(c=>all.includes(c));
+    const c=x.dataset.apcls;
+    cur = cur.includes(c) ? cur.filter(v=>v!==c) : cur.concat([c]);
+    pushAct('/api/alerts/classes',{chat:rec.chat, classes:cur}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-admclaim]').forEach(x=>x.addEventListener('click',()=>{
     pushAct('/api/alerts/claim',{chat:x.dataset.admclaim}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-admunlink]').forEach(x=>x.addEventListener('click',()=>{
