@@ -981,11 +981,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     csig += "#" + (offHours.closed ? 1 : 0) + ":" + (offHours.closeT || 0) + ":" + (offHours.openT || 0)
       + "#" + warmH + "," + warmD
       + "#" + sig(curCorr, 6) + "," + curCorrPct + "," + curCorrN + "," + regimeHist.length
-      + "#" + tapeXyz.redBars + "," + (crypto ? tapeMain.redBars : 0);
+      + "#" + tapeXyz.redBars + "," + (crypto ? tapeMain.redBars : 0)
+      // The alert sequence rides the signature deliberately. A fired alert IS something the client
+      // renders (the bell badge), and the snapshot object is FROZEN while the signature holds — so
+      // shipping alertVer without signing it would hand every client a permanently stale sequence
+      // exactly when the board is quiet, which is when alerts matter most.
+      + "#" + trigSeq;
     if (snapshotCache && lastSnapSig === csig) return;   // nothing a client renders changed — keep the object
     lastSnapSig = csig; snapVer = Date.now();
     snapshotCache = {
       ts: snapVer, dataTs: snapVer, dex, benchCoin,
+      // Lets the client pull the alert feed on the poll it already makes, instead of a second
+      // timer with its own cadence and its own idea of "now".
+      alertVer: trigSeq,
       benchMain: crypto ? MAIN_BENCH : null, mainMarkets: mainMkts, markets,
       redBars: { xyz: tapeXyz.redBars, main: crypto ? tapeMain.redBars : 0 },
       v: version || null,
@@ -4026,7 +4034,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // consumer either — a transport's configuration silently deciding what the canonical stream
     // was allowed to contain. The stream is transport-agnostic by design; this restores that.
     pushBootAt = Date.now();
-    pushOps("deploy", `build ${version || "dev"} is live`);
+    // QUIET by construction. Railway redeploys on every pushed file, so a build delivered in four
+    // or five uploads produced four or five identical notifications. The line still enters the
+    // ring — it is what explains a reset cursor or a run of bt:1 claims when reading the log back
+    // — but it never reaches a phone. The wire proves itself through the stall watchdog and the
+    // test-fire button instead, neither of which fires on a routine deploy.
+    pushOps("deploy", `build ${version || "dev"} is live`, "info", true);
     setInterval(safeTick(pushHealthTick, "pushHealthTick"), 60 * 1000);
     setInterval(safeTick(levelScan, "levelScan"), LVL_SCAN_MS);
     // Fully dormant without a token: no outbound timers, no writes, no noise. Same one-variable
@@ -5905,6 +5918,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // user's own settings while Telegram reads them from server config, without either censoring
   // the record of what actually fired.
   const TRIG_RING = 200;              // events retained for late-joining consumers
+  const TRIG_RECENT = 40;             // events shipped for DISPLAY on every pull, cursor-independent
   const TRIG_SEEN_TTL = 21 * DAY;     // prune announced keys past any plausible swing horizon
   const TRIG_GRACE_MS = 2 * HOUR;     // see below — the anti-blast rule on the first build
   let trigSeen = new Map();           // trigKey -> ts announced
@@ -5947,8 +5961,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // repeats every tick is worse than no ops alert at all (you learn to ignore the channel, and
   // then you miss the real one). Cheap enough to be unconditional: if nobody is linked, the event
   // still enters the ring and the panel shows it.
-  function pushOps(title, text, level) {
-    const ev = emitTrig("ops", { title: String(title || "ops"), text: String(text || ""), level: level || "info" });
+  function pushOps(title, text, level, quiet) {
+    const ev = emitTrig("ops", Object.assign({ title: String(title || "ops"), text: String(text || ""), level: level || "info" },
+      quiet ? { quiet: 1 } : null));
     persistTriggers();
     log(`ops event: ${title} — ${text}`);
     return ev;
@@ -5990,9 +6005,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   function getTriggers(sinceSeq) {
     const since = Number.isFinite(+sinceSeq) ? +sinceSeq : null;
     const evs = since == null ? trigEvents.slice(-40) : trigEvents.filter((e) => e.seq > since);
+    // `events` and `recent` answer two different questions and a consumer needs both in one round
+    // trip: events = what has happened since MY cursor (what to interrupt for, exactly once), and
+    // recent = the last N regardless of cursor (what to DISPLAY). Deriving the display list from
+    // the cursor is what made the old in-tab log evaporate on refresh — the events had been
+    // consumed, so there was nothing left to render.
     return { ts: Date.now(), dataTs: trigSeq, seq: trigSeq,
-      params: { ring: TRIG_RING, graceMs: TRIG_GRACE_MS, seenTtlMs: TRIG_SEEN_TTL },
-      known: trigSeen.size, events: evs, count: evs.length };
+      params: { ring: TRIG_RING, graceMs: TRIG_GRACE_MS, seenTtlMs: TRIG_SEEN_TTL, recent: TRIG_RECENT },
+      known: trigSeen.size, events: evs, count: evs.length,
+      recent: trigEvents.slice(-TRIG_RECENT) };
   }
 
 

@@ -3569,6 +3569,13 @@ function pushCodeNorm(s) { return typeof s === "string" ? s.trim().toUpperCase()
 // narrow it, because silence on a new link reads as a broken wire.
 function pushEligible(ev, sub) {
   if (!ev) return false;
+  // Recorded, not delivered. Some events are worth having in the log — they explain later
+  // artifacts — while being worth nothing as an interruption. A deploy notice is the case that
+  // taught this: the app redeploys on every individual file push, so a single build fired four or
+  // five identical DMs. That is not a health check, it is a spam generator. The flag lives on the
+  // EVENT rather than in the transport so the in-app log and the bot can't disagree about what
+  // happened, only about what was worth a notification.
+  if (ev.quiet) return false;
   const s = sub || {};
   if (s.muted) return false;
   const kind = ev.kind || "setup";
