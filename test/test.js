@@ -6984,6 +6984,11 @@ test("server: feature gate runs after the site gate, returns 403, and both /api/
   // chain in an async hook. This must RETURN the reply.
   assert.ok(/return reply\.code\(403\)[\s\S]{0,140}feature-gated/.test(srv), "the gate must RETURN a 403 reply (async hook lifecycle)");
   assert.ok(srv.includes('feature: blocked'), "the 403 must name the blocking feature so a log is debuggable");
+  // Both verbs admin-only: an open GET let a public visitor enumerate every feature key and see which
+  // were admin-only, which contradicts gated features leaving no trace. The client never needs this
+  // route — it reads its resolved set from the injected shell.
+  assert.ok(/fastify\.get\("\/api\/features"[\s\S]{0,220}if \(!isAdmin\(req\)\) return reply\.code\(403\)/.test(srv),
+    "GET /api/features must require admin");
   for (const r of ['fastify.get("/api/features"', 'fastify.post("/api/features"']) {
     const n = srv.split(r).length - 1;
     assert.equal(n, 1, `${r} must be registered exactly once (got ${n})`);
@@ -7029,8 +7034,12 @@ test("client flags: tabVisible is the single composition point and every entry p
   assert.ok(/const IS_ADMIN = !!window\.__ADMIN;/.test(s), "IS_ADMIN marker must be read");
   // Fail OPEN on a missing injection, deliberately: the shell is no-store so it should be impossible,
   // and the server gate is authoritative — a cosmetic leak beats an app with no tabs at all.
-  assert.ok(/function featureOn\(key\)\{ return FLAGS \? !!FLAGS\[key\] : true; \}/.test(s), "featureOn must degrade to visible when injection is absent");
-  assert.ok(/function tabVisible\(v\)\{ return inScope\(v\) && featureOn\(v\); \}/.test(s), "tabVisible must compose scope AND flags");
+  // Reads FLAGS_VIEW (not FLAGS) since -06, so "view as public" can swap the whole resolved set in
+  // one assignment. Still degrades to visible when nothing was injected.
+  assert.ok(/function featureOn\(key\)\{ return FLAGS_VIEW \? !!FLAGS_VIEW\[key\] : true; \}/.test(s), "featureOn must read FLAGS_VIEW and degrade to visible when injection is absent");
+  assert.ok(/let FLAGS_VIEW = FLAGS;/.test(s), "FLAGS_VIEW must start as the injected set");
+  assert.ok(/function tabVisible\(v\)\{ if\(v==='admin'\) return IS_ADMIN; return inScope\(v\) && featureOn\(v\); \}/.test(s),
+    "tabVisible must compose scope AND flags, with the panel itself keyed off IS_ADMIN");
   for (const [what, re] of [
     ["nav strip", /t\.hidden = !tabVisible\(t\.dataset\.view\)/],
     ["showView", /if\(!tabVisible\(v\)\) v='markets';/],
@@ -7049,4 +7058,85 @@ test("client flags: tabVisible is the single composition point and every entry p
   // gateable fallback would let a public user bounce into a view they cannot see and render nothing.
   const C = require("../src/compute");
   assert.equal(C.featureState({ markets: "off" }, "markets"), "public", "the showView fallback target must be pinned public");
+});
+
+
+// ===== admin panel, phase 3: the switchboard =====================================================
+test("admin panel: the panel's own key is locked open-proof and shut-proof", () => {
+  const C = require("../src/compute");
+  // lock:true is the mirror of pin. Two states must be unreachable through the thing that controls
+  // them: making the panel public hands the switchboard to the group; turning it off locks the
+  // operator out with no way back except a redeploy.
+  assert.equal(C.featureState({ admin: "public" }, "admin"), "admin", "no write can make the panel public");
+  assert.equal(C.featureState({ admin: "off" }, "admin"), "admin", "no write can turn the panel off");
+  assert.equal(C.featureSettable("admin"), false, "the panel key must not be settable");
+  assert.equal(C.featureSettable("markets"), false, "the pinned fallback must not be settable either");
+  assert.equal(C.featureSettable("signals"), true, "ordinary features stay settable");
+  // Neither lock may be smuggled in through a hand-edited flags.json.
+  assert.deepEqual(C.featureFlagsSanitize({ admin: "public", markets: "off", news: "admin" }), { news: "admin" },
+    "the sanitizer must drop both locked and pinned keys");
+  // Visible to admin, invisible to public, in both resolutions.
+  assert.equal(C.resolveFeatures({}, true).admin, true);
+  assert.equal(C.resolveFeatures({}, false).admin, false);
+});
+
+test("admin panel: setFlag refuses the locked key and getFeatures ships both audiences", () => {
+  const { createPoller } = require("../src/poller");
+  let written = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    loadFlags: () => null, saveFlags: (o) => { written = o; return true; } };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  assert.equal(p.setFlag("admin", "public", true).error, "locked", "the panel key is refused, not silently resolved past");
+  assert.equal(written, null, "a refused write must not touch the volume");
+
+  const f = p.getFeatures(true);
+  // "view as public" swaps in a SERVER-resolved set; if this ever went missing the client would have
+  // to recompute a public view from raw states, which is the re-derivation rule this project forbids.
+  assert.ok(f.resolvedPublic && typeof f.resolvedPublic === "object", "getFeatures must ship the public resolution too");
+  assert.equal(f.resolved.admin, true);
+  assert.equal(f.resolvedPublic.admin, false);
+  assert.ok(Object.keys(f.resolvedPublic).length === Object.keys(f.resolved).length, "both resolutions must cover the same keys");
+  // Every row carries what the panel needs to decide control vs static chip.
+  for (const m of f.manifest)
+    assert.equal(typeof m.settable, "boolean", `manifest row ${m.key} must declare settable`);
+});
+
+test("admin panel: markup, wiring and the no-draft-state write path are all present", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Markup: tab, section, and every id the renderer writes into.
+  assert.ok(html.includes('data-view="admin"') && html.includes('id="view-admin"'), "admin tab + section must exist");
+  for (const id of ["adm-count", "adm-prev", "adm-rows", "adm-foot", "admVap"])
+    assert.ok(html.includes('id="' + id + '"'), `admin panel markup missing #${id}`);
+  // Wiring: dispatch, visibility, and the double-check that a non-admin can never open it even if the
+  // markup is present (a forged xyzadmin=1 marker gets an empty tab, never data).
+  assert.ok(/setHidden\('view-admin', v!=='admin'\)/.test(app), "showView must toggle the admin section");
+  assert.ok(/if\(v==='admin'\)\{ if\(el\('view-admin'\)&&IS_ADMIN\) openAdmin\(\); else \{ showView\('markets'\); return; \} \}/.test(app),
+    "showView must refuse the admin view when the caller is not admin");
+  assert.ok(/async function openAdmin\(\)\{ if\(!IS_ADMIN\) return;/.test(app), "openAdmin must guard on IS_ADMIN");
+  assert.ok(app.includes("fetchJSON('/api/features')"), "the panel must read its state from the server");
+  // No save button: each toggle writes one key, optimistically, and rolls back on refusal. A draft
+  // state is another way for the panel and the server to disagree.
+  assert.ok(/row\.state=state; _admBusy=key; renderAdmin\(\);/.test(app), "the write must paint optimistically");
+  assert.ok((app.match(/row\.state=prev;/g) || []).length >= 2, "both the HTTP-failure and network-failure paths must roll back");
+  assert.ok(/_adm=d\.features\|\|_adm;/.test(app), "the panel must reconcile with the server's resolved state, not the requested one");
+  assert.ok(!/adm-save|admSave/.test(app), "there must be no save button — writes are immediate");
+  // view-as-public swaps a server-resolved set, and never strands the operator on a gated view.
+  assert.ok(/FLAGS_VIEW = _admVap \? \(_adm\.resolvedPublic\|\|FLAGS\) : FLAGS;/.test(app), "the toggle must swap in the server-resolved public set");
+  assert.ok(/if\(!tabVisible\(state\.view\)\) showView\('markets'\);/.test(app), "toggling must rescue the active view if it becomes gated");
+  assert.ok(app.includes("el('admVap'); if(vb) vb.addEventListener('click',toggleViewAsPublic)"), "the toggle must be wired null-safely");
+  // The panel uses the app's real toast helper. `toast(...)` does not exist and would throw at the
+  // exact moment a write failed — i.e. only in the path nobody exercises by hand.
+  assert.ok(app.includes("pushToast('Could not change "), "failure path must use pushToast, the function that actually exists");
+  assert.ok(!/[^h]\btoast\('/.test(app), "no call to a non-existent toast() helper may survive");
+  // Hover on every row: the key + route list is the load-bearing detail, per the standing requirement
+  // that every element carrying data responds to hover.
+  assert.ok(css.includes(".adm-row:hover"), "rows must respond to hover");
+  assert.ok(css.includes(".adm-row:hover .adm-key"), "the key/route line must surface on hover");
+  // States must be readable as words, not colour alone — the amber theme recolours everything.
+  assert.ok(/\.adm-b\.on\.public|\.adm-b\.on\.admin|\.adm-b\.on\.off/.test(css), "each state needs its own style");
+  assert.ok(/>'\+v\+'</.test(app) || app.includes("+v+'</button>"), "each control must print its state as a word");
 });
