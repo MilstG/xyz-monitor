@@ -6296,25 +6296,38 @@ test("actionable -01: carry is signed by side, scaled by horizon, and expressed 
   assert.equal(carryR(null), null, "null input rejected");
 });
 
-test("actionable -02: netRR folds carry into reward only, and rejects geometry that isn't tradeable from here", () => {
+test("actionable -02: netRR is pure price geometry — carry can never move it, and never did belong in it", () => {
+  // Carry used to fold into the reward leg, so R:R and EV both carried a funding term. That let a
+  // sub-threshold setup clear the ACT_MIN_RR gate on funding alone, and it mixed a flow that
+  // accrues on TIME HELD into a ratio that resolves on PRICE. Funding is also an extrapolation of
+  // the current rate across the horizon, not a rate anyone locked. It is disclosed on its own line
+  // and kept out of the ratio and the expectancy entirely.
   const { netRR, carryR } = require("../src/compute");
   const DAY = 86400e3;
   const base = { side: "long", entry: 100, stop: 95, target: 115 };
   const gross = netRR(base);
   assert.equal(gross.gross, 3, "15% reward over 5% risk = 3.0");
-  assert.equal(gross.net, 3, "no carry supplied => net equals gross");
-  assert.equal(gross.carryKnown, false, "and the payload says the carry is unknown rather than zero");
+  assert.equal(gross.net, undefined, "there is no net ratio any more — a single ratio, and it is the price geometry");
+  assert.equal(gross.carryR, undefined, "and no carry term rides along inside it");
   const carry = carryR({ side: "long", entry: 100, stop: 95, horizonMs: 10 * DAY, fundingHourly: 0.0001 });
-  const net = netRR(Object.assign({}, base, { carry }));
-  assert.equal(net.gross, 3, "gross is untouched by carry");
-  assert.ok(net.net < net.gross, "a paying long nets below gross");
-  assert.equal(net.riskPct, gross.riskPct, "carry must NOT move the risk leg — the void distance is unchanged by funding");
-  assert.ok(Math.abs(net.net - (net.gross + net.carryR)) < 0.011, "net = gross + carry in R");
-  assert.equal(net.carryKnown, true, "carry disclosed as known");
-  // A short paid to wait nets ABOVE gross — the ranking consequence that makes netting worth doing.
+  assert.ok(carry && Number.isFinite(carry.r), "carry is still computed — it is real money and stays disclosed");
+  const withCarry = netRR(Object.assign({}, base, { carry }));
+  assert.deepEqual(withCarry, gross, "passing carry to netRR changes NOTHING — the ratio cannot be moved by funding");
+  // A short paid to wait USED to net above gross, which is precisely the ranking consequence that
+  // made this wrong: it moved setups up the board on funding rather than on geometry.
   const sc = carryR({ side: "short", entry: 100, stop: 105, horizonMs: 10 * DAY, fundingHourly: 0.0001 });
+  assert.ok(sc.r > 0, "a short in a crowded-long name is still paid to hold — the fact is real, it just is not a ratio term");
   const sn = netRR({ side: "short", entry: 100, stop: 105, target: 85, carry: sc });
-  assert.ok(sn.net > sn.gross, "a short in a crowded-long name is paid to hold, so net exceeds gross");
+  assert.equal(sn.gross, 3, "and its ratio is the price geometry alone, carry or no carry");
+
+  // The bug this whole change came from: R:R computed against a LIVE mark climbs as price
+  // approaches the void, because risk is the denominator. Same frozen claim, two entries.
+  const atFire = netRR({ side: "short", entry: 13.668, stop: 13.780, target: 13.667 });
+  const atNow = netRR({ side: "short", entry: 13.751, stop: 13.780, target: 13.667 });
+  assert.ok(atFire.gross < 0.05, `the claim as frozen framed essentially no reward, got ${atFire.gross}`);
+  assert.ok(atNow.gross > 2.8, `...yet against the drifted mark the same claim scores like a strong setup, got ${atNow.gross}`);
+  assert.ok(atNow.gross / atFire.gross > 100,
+    "the live-mark ratio is two orders of magnitude better than the trade actually claimed — the board must use the frozen one");
   // Geometry that can't be entered from here returns null — this is what silently expires a row
   // once price has walked through the void, rather than leaving a stale line on the board.
   assert.equal(netRR({ side: "long", entry: 100, stop: 105, target: 115 }), null, "long with the void above entry rejected");
@@ -6409,7 +6422,7 @@ test("actionable -06: the CONFIRMED gate drops negative-expectancy setups instea
   // single instance's geometry, which is exactly why avg > 0 is checked separately.
   assert.ok(setupEV(0.35, 2.5, 20, 8) > 0, "a 35% hit at 2.5R models positive on this instance...");
   const rr = netRR({ side: "long", entry: 100, stop: 95, target: 115 });
-  assert.equal(rr.net, 3, "...while the geometry check stays independent of the record");
+  assert.equal(rr.gross, 3, "...while the geometry check stays independent of the record");
 }, );
 
 test("actionable -07: the board reads the ledger's frozen geometry and never re-derives a level", () => {
@@ -6469,7 +6482,8 @@ test("actionable -08: geometry that is no longer tradeable is counted, and the c
   p.buildActionableNow();
   const a2 = p.getActionable();
   assert.equal(a2.count, 0, "still nothing suggested");
-  assert.ok(a2.coverage.noGeometry >= 1, "and the reason is now that the geometry is not tradeable from here");
+  assert.ok(a2.coverage.untakeable >= 1,
+    "and the reason is its own counter now: a claim can be perfectly framed at fire and already dead at the live mark, which is a different fact from the frozen geometry never having made sense");
   assert.ok(a2.coverage.openClaims >= 1, "the underlying claim is still open in the ledger — the board dropped it, the record did not");
   assert.equal(a2.coverage.confirmed, 0, "confirmed count is explicit, not inferred from an empty array");
 });
@@ -6492,8 +6506,10 @@ test("actionable -09: client renders the server's numbers and states the carry c
   // It formats what the server ranked. A local arithmetic path here is exactly how the board and
   // the record start disagreeing about the same trade.
   assert.ok(!/act[A-Za-z]*\s*=\s*[^;]*rewardPct\s*\/\s*riskPct/.test(s), "client must not recompute R:R locally");
-  assert.ok(!/r\.rr\.gross\s*\+\s*r\.(carry|rr)\.\w*[Rr]\b/.test(s), "client must not recompute net R:R locally");
-  assert.ok(s.includes("actRR(r.rr.net)") && s.includes("actEV(r.evR)"), "client must render the server's net R:R and expectancy verbatim");
+  assert.ok(!/r\.rr\.gross\s*\+\s*r\.(carry|rr)\.\w*[Rr]\b/.test(s), "client must not add carry back into R:R locally");
+  assert.ok(s.includes("actRR(r.rr.gross)") && s.includes("actEV(r.evR)"), "client must render the server's frozen R:R and expectancy verbatim");
+  assert.ok(!s.includes("r.rr.net") && !s.includes("rr.carryKnown"), "no client path reads the retired net/carry-in-ratio fields");
+  assert.ok(s.includes("not counted in R:R or EV"), "the carry line states plainly that it is excluded from both");
   assert.ok(!s.includes('">No record yet'), "there is no second section any more — unconfirmed setups are not shown at all");
   // Hover contract: every column header explains itself, and the full audit trail lives in the
   // click-to-expand trade card rather than a cramped row tooltip.
@@ -6733,7 +6749,12 @@ test("triggers -06: R:R is the board's kill switch, set at 2.0, with no second l
   // Because R:R is repriced from the live mark every build, a chased setup dies at this gate on
   // its own. A separate lateness-based expiry would be a second gate that could disagree with it.
   assert.ok(!/ACT_MAX_LATE|lateExpire|maxLateDrop/.test(pol), "lateness must not be a second expiry gate — the R:R floor already kills chased setups");
-  assert.ok(/if \(!rr \|\| !\(rr\.net >= ACT_MIN_RR\)\) return "thinRR";/.test(pol), "the floor must be enforced inside the gate, against the LIVE-mark R:R");
+  assert.ok(/if \(!rr \|\| !\(rr\.gross >= ACT_MIN_RR\)\) return "thinRR";/.test(pol),
+    "the floor is enforced inside the gate against the FROZEN fire-mark R:R — against a live-mark ratio it was a filter that loosened as price approached the void");
+  assert.ok(pol.includes("const rr = netRR({ side, entry: e.mark0, stop: e.stp, target });"),
+    "R:R is computed from the fire mark, never the live price");
+  assert.ok(pol.includes("if (!tradeableNow(side, r.px, e.stp, target)) { rej.untakeable++; continue; }"),
+    "liveness is checked separately, so 'still takeable' never contaminates 'what was claimed'");
 });
 
 test("tabs: backtest is hidden from the strip by default without withdrawing the feature", () => {
@@ -6806,7 +6827,7 @@ test("actionable -10: the gate rejects each way independently, and never silentl
   assert.equal(good.count, 1, "a family with 10 resolved winners IS suggested");
   assert.equal(good.rows[0].rec.n, 10);
   assert.ok(good.rows[0].evR > 0, "and carries a positive expectancy");
-  assert.ok(good.rows[0].rr.net >= 2.0, "and clears the R:R floor");
+  assert.ok(good.rows[0].rr.gross >= 2.0, "and clears the R:R floor");
 
   // Same edge, too few fires: the record cannot speak yet.
   assert.equal(mk(rec(7, 1.4)).coverage.norecord, 1, "7 resolved fires is below the floor");
