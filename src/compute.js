@@ -3543,7 +3543,7 @@ function trigEligible(row, cfg) {
 // `ledger` is the DEATH side of a claim the `setup` class already announced: its void level taken,
 // its target reached, or its horizon resolved. Deliberately one class rather than three — nobody
 // wants to subscribe to target-hits but not stop-hits, and the message says which it is.
-const PUSH_CLASSES = ["setup", "ledger", "ops"];
+const PUSH_CLASSES = ["setup", "ledger", "rule", "ops"];
 
 // Telegram parse_mode=HTML understands exactly five entities; everything else must be escaped or
 // the API rejects the whole message with a 400 and the alert is lost. Ampersand first — escaping it
@@ -3586,6 +3586,9 @@ function pushEligible(ev, sub) {
   // was already announced, so re-applying the setup thresholds here would mean being told a trade
   // opened and never told it died — the worst possible asymmetry in an alert channel.
   if (kind === "ledger") return true;
+  // A rule event has already passed the only filter that could apply to it: the rule its author
+  // wrote. Layering the setup thresholds on top would silently veto somebody's own alert.
+  if (kind === "rule") return true;
   return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
 }
 
@@ -3603,6 +3606,13 @@ function pushFmt(ev, opts) {
   }
   if (!ev.coin) return null;
   const name = tgEsc(ev.t || ev.coin);
+  if (kind === "rule") {
+    const l1 = "<b>" + name + "</b> \u00b7 " + tgEsc(ev.rule || (ev.label + " " + ev.op + " " + ev.value));
+    const l2 = "now " + tgEsc(ev.now == null ? "\u2014" : String(ev.now)) + (ev.note ? " \u00b7 " + tgEsc(ev.note) : "");
+    const base1 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
+    const l3 = base1 ? '<a href="' + tgEsc(base1 + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
+    return [l1, l2, l3].filter(Boolean).join("\n");
+  }
   if (kind === "ledger") {
     const sideL = ev.side === "long" ? "LONG" : ev.side === "short" ? "SHORT" : tgEsc(ev.side || "");
     const head = ev.sub === "stop" ? "\u26d4 void taken" : ev.sub === "target" ? "\u2713 target reached" : "resolved";
@@ -3661,6 +3671,131 @@ function pushBatch(msgs, opts) {
   if (extra > 0 && out.length) out[out.length - 1] += "\n\n<i>+" + extra + " more held \u2014 batch cap</i>";
   return out;
 }
+
+
+// ===== user-authored metric rules (pure layer) ==================================================
+// The threshold alerts, moved off the browser. Two things forced this: rules in localStorage only
+// evaluate while a tab is open (so they cannot reach a phone), and each browser held its own list
+// (so the group could not share one).
+//
+// The catalog is deliberately RESTRICTED to metrics the server itself owns on the mapped snapshot
+// row. Squeeze, momentum and beta are derived in the browser from raw features against the user's
+// selected analysis window; porting them here would mean either the same math in two files, or
+// shipping a value per window on every row. Both are worse than the honest boundary: those three
+// stay in-tab, labelled as such, and everything below survives a closed laptop.
+//
+// Every getter reads the SAME mapped row the client renders, so an alert and the board can never
+// disagree about a number.
+const pctFrom = (px, ref) => (px > 0 && ref > 0 ? (px / ref - 1) * 100 : null);
+const RULE_METRICS = [
+  { k: "px", label: "price", unit: "$", live: 1, get: (r) => r.px },
+  { k: "h1", label: "1h %", unit: "%", live: 1, get: (r) => (r.ref ? pctFrom(r.px, r.ref.p1h) : null) },
+  { k: "h4", label: "4h %", unit: "%", live: 1, get: (r) => (r.ref ? pctFrom(r.px, r.ref.p4h) : null) },
+  { k: "d1", label: "1d %", unit: "%", live: 1, get: (r) => (r.d1 != null && isFinite(r.d1) ? r.d1 : null) },
+  { k: "d7", label: "7d %", unit: "%", live: 1, get: (r) => (r.ref ? pctFrom(r.px, r.ref.p7d) : null) },
+  { k: "d30", label: "30d %", unit: "%", live: 1, get: (r) => (r.ref ? pctFrom(r.px, r.ref.p30d) : null) },
+  { k: "fundAPR", label: "funding APR %", unit: "%", get: (r) => (r.funding != null && isFinite(r.funding) ? r.funding * 24 * 365 * 100 : null) },
+  { k: "fundPct", label: "funding percentile", unit: "", get: (r) => (r.fundPct != null && isFinite(r.fundPct) ? r.fundPct : null) },
+  // Mark vs oracle in basis points. Both legs are on the row, so this is server-owned despite the
+  // client having derived it for itself until now.
+  { k: "prem", label: "premium (bp)", unit: "bp", live: 1, get: (r) => (r.px > 0 && r.oracle > 0 ? (r.px / r.oracle - 1) * 10000 : null) },
+  { k: "vol", label: "24h volume", unit: "M", scale: 1e6, get: (r) => (r.vol != null && isFinite(r.vol) ? r.vol : null) },
+  { k: "oi", label: "open interest", unit: "M", scale: 1e6, get: (r) => (r.oi != null && isFinite(r.oi) ? r.oi : null) },
+  { k: "rvol", label: "relative volume", unit: "\u00d7", get: (r) => (r.rvol != null && isFinite(r.rvol) ? r.rvol : null) },
+  { k: "doiD1", label: "\u0394OI 1d %", unit: "%", get: (r) => (r.doi && r.doi.d1 != null && isFinite(r.doi.d1) ? r.doi.d1 : null) },
+  { k: "doiD7", label: "\u0394OI 7d %", unit: "%", get: (r) => (r.doi && r.doi.d7 != null && isFinite(r.doi.d7) ? r.doi.d7 : null) },
+  { k: "liq24", label: "24h liquidations", unit: "M", scale: 1e6, get: (r) => (r.liq24 != null && isFinite(r.liq24) ? r.liq24 : null) },
+];
+const RULE_BY_K = {};
+for (const m of RULE_METRICS) RULE_BY_K[m.k] = m;
+const RULE_OPS = [">", "<", "abs>", "cross_up", "cross_dn"];
+
+// Hysteresis. A value parked exactly on a threshold crosses it dozens of times an hour on noise
+// alone; edge-triggering without a band turns that into dozens of identical alerts and then a muted
+// channel. The rule re-arms only once the value has retreated by `band` (default 2% of the
+// threshold's own magnitude, floored so a threshold of 0 still has a band).
+function ruleBand(rule) {
+  if (rule && Number.isFinite(rule.band) && rule.band >= 0) return rule.band;
+  const v = Math.abs(rule && Number.isFinite(rule.value) ? rule.value : 0);
+  return Math.max(v * 0.02, 1e-9);
+}
+
+// Returns "fire" | "arm" | "hold" | null.
+//   fire = the condition just became true and the rule was armed
+//   arm  = the value retreated past the hysteresis band; the rule may fire again
+//   hold = nothing to do
+//   null = unevaluable (missing data) — NEVER a fire, and never silently treated as false either
+function ruleEval(rule, row, armed, prevValue) {
+  if (!rule || !row) return null;
+  const m = RULE_BY_K[rule.metric];
+  if (!m) return null;
+  if (!RULE_OPS.includes(rule.op)) return null;
+  const raw = m.get(row);
+  if (raw == null || !isFinite(raw)) return null;
+  const target = m.scale ? rule.value * m.scale : rule.value;
+  const band = ruleBand(rule) * (m.scale || 1);
+  if (rule.op === "cross_up" || rule.op === "cross_dn") {
+    // A cross needs two observations by definition; the first sighting of a market can only
+    // establish the baseline, never fire. Treating a missing previous value as "was on the other
+    // side" would fire every rule on every restart.
+    if (prevValue == null || !isFinite(prevValue)) return "hold";
+    if (rule.op === "cross_up") return prevValue <= target && raw > target ? "fire" : "hold";
+    return prevValue >= target && raw < target ? "fire" : "hold";
+  }
+  const hit = rule.op === ">" ? raw > target : rule.op === "<" ? raw < target : Math.abs(raw) > Math.abs(target);
+  if (hit) return armed ? "fire" : "hold";
+  // Re-arm only past the band, not at the bare threshold.
+  const clear = rule.op === ">" ? raw < target - band
+    : rule.op === "<" ? raw > target + band
+    : Math.abs(raw) < Math.abs(target) - band;
+  return !armed && clear ? "arm" : "hold";
+}
+
+function ruleFmtValue(m, v) {
+  if (v == null || !isFinite(v)) return "\u2014";
+  if (m.scale) return (v / m.scale).toFixed(1) + m.unit;
+  if (m.unit === "%") return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+  if (m.unit === "bp") return (v >= 0 ? "+" : "") + v.toFixed(1) + "bp";
+  if (m.unit === "$") return String(+(+v).toPrecision(6));
+  if (m.unit === "\u00d7") return v.toFixed(2) + "\u00d7";
+  return String(Math.round(v * 100) / 100);
+}
+const RULE_OP_LABEL = { ">": "above", "<": "below", "abs>": "|x| above", cross_up: "crosses up through", cross_dn: "crosses down through" };
+function ruleLabel(rule) {
+  const m = RULE_BY_K[rule && rule.metric];
+  if (!m) return "";
+  const scope = rule.coin ? rule.coin : rule.uni === "main" ? "any crypto" : rule.uni === "xyz" ? "any stock" : "any market";
+  return scope + " \u00b7 " + m.label + " " + (RULE_OP_LABEL[rule.op] || rule.op) + " " + rule.value + (m.unit === "%" ? "%" : m.unit === "M" ? "M" : "");
+}
+
+// Validation is strict and returns a REASON, because a rule silently coerced into something the
+// author didn't mean is worse than a rejected one — it fires forever and nobody knows why.
+function validateRule(rule) {
+  if (!rule || typeof rule !== "object") return { ok: false, error: "not-an-object" };
+  if (!RULE_BY_K[rule.metric]) return { ok: false, error: "unknown-metric" };
+  if (!RULE_OPS.includes(rule.op)) return { ok: false, error: "unknown-op" };
+  if (!Number.isFinite(+rule.value)) return { ok: false, error: "bad-value" };
+  if (rule.coin != null && typeof rule.coin !== "string") return { ok: false, error: "bad-coin" };
+  if (rule.uni != null && rule.uni !== "xyz" && rule.uni !== "main") return { ok: false, error: "bad-universe" };
+  if (rule.band != null && (!Number.isFinite(+rule.band) || +rule.band < 0)) return { ok: false, error: "bad-band" };
+  if (rule.cooldownMs != null && (!Number.isFinite(+rule.cooldownMs) || +rule.cooldownMs < 0)) return { ok: false, error: "bad-cooldown" };
+  return { ok: true, rule: {
+    id: rule.id || null, metric: rule.metric, op: rule.op, value: +rule.value,
+    coin: rule.coin || "", uni: rule.uni || "", band: rule.band != null ? +rule.band : null,
+    cooldownMs: rule.cooldownMs != null ? +rule.cooldownMs : null,
+    note: typeof rule.note === "string" ? rule.note.slice(0, 80) : "",
+  } };
+}
+
+module.exports.RULE_METRICS = RULE_METRICS;
+module.exports.RULE_BY_K = RULE_BY_K;
+module.exports.RULE_OPS = RULE_OPS;
+module.exports.RULE_OP_LABEL = RULE_OP_LABEL;
+module.exports.ruleBand = ruleBand;
+module.exports.ruleEval = ruleEval;
+module.exports.ruleLabel = ruleLabel;
+module.exports.ruleFmtValue = ruleFmtValue;
+module.exports.validateRule = validateRule;
 
 module.exports.PUSH_CLASSES = PUSH_CLASSES;
 module.exports.PUSH_CODE_ALPHABET = PUSH_CODE_ALPHABET;

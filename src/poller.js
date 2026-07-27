@@ -16,7 +16,8 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { momPair, spearmanIC, duelStats } = require("./compute");
-const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_CODE_ALPHABET } = require("./compute");
+const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_CODE_ALPHABET,
+  RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -571,6 +572,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (oi != null) { r.oiBase = oi; r.oi = r.px != null ? oi * r.px : null; }
       r.d1 = (r.px != null && r.prevDay) ? (r.px - r.prevDay) / r.prevDay * 100 : r.d1;
     }
+    // Fast lane. Level alerts read the LIVE mark, so they can run on the socket's cadence (~2s)
+    // instead of waiting out their own 30s timer — and a void being taken is the one alert in this
+    // system where the difference between 2 and 30 seconds is the difference between acting on it
+    // and reading about it. Deliberately not extended to the metric rules: those read the snapshot
+    // payload so they cannot outrun it without disagreeing with the board.
+    try { if (typeof levelScan === "function") levelScan(); }
+    catch (e) { log("levelScan on ws tick failed (isolated): " + (e && e.message)); }
     if (crypto && mainOrder.length) {
       try {
         let ma = null;
@@ -4042,6 +4050,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     pushOps("deploy", `build ${version || "dev"} is live`, "info", true);
     setInterval(safeTick(pushHealthTick, "pushHealthTick"), 60 * 1000);
     setInterval(safeTick(levelScan, "levelScan"), LVL_SCAN_MS);
+    { const n = hydrateRules(); if (n) log(`Restored ${n} alert rule(s) — edge state restored too, so a redeploy re-announces nothing already in breach`); }
+    // Chained to the snapshot cadence rather than given its own timer: the rules read the snapshot
+    // payload, so evaluating on any other clock would mean judging a number the board isn't showing.
+    setInterval(safeTick(ruleScan, "ruleScan"), 15 * 1000);
     // Fully dormant without a token: no outbound timers, no writes, no noise. Same one-variable
     // rollback discipline as CRYPTO=0 — unset TG_BOT_TOKEN and the transport is simply not there.
     if (pushOn()) {
@@ -6385,6 +6397,122 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return fired;
   }
 
+
+  // ---- user-authored metric rules: the scan (slice D) -------------------------------------------
+  // Evaluated against the SNAPSHOT PAYLOAD, not the live row objects. That is deliberate: the
+  // payload is byte-for-byte what the client renders, so an alert saying "1h % above 5" can never
+  // disagree with the number on the board. The cost is that rule latency is the snapshot cadence
+  // (15s) rather than the WebSocket's ~2s — the right trade for a threshold, and the level alerts
+  // that genuinely need speed run off the live mark instead (see levelScan).
+  const RULE_MAX = 60;                       // a bounded, shared list; past this it is a screener, not an alert
+  const RULE_DEFAULT_COOLDOWN = 30 * 60e3;
+  const RULE_STATE_MAX = 4000;               // bounded edge state — 60 rules x the roster, with headroom
+  let alertRules = [], ruleSeq = 0;
+  const ruleArmed = new Map();               // ruleId|coin -> true once the value has cleared the band
+  const ruleLastFire = new Map();            // ruleId|coin -> ts
+  const rulePrev = new Map();                // ruleId|coin -> previous value (cross detection)
+  let rulesDirty = false;
+
+  function hydrateRules() {
+    const d = store.loadRules ? store.loadRules() : null;
+    if (!d) return 0;
+    if (Array.isArray(d.rules)) {
+      for (const r of d.rules) {
+        const v = validateRule(r);
+        if (v.ok) { v.rule.id = r.id || ++ruleSeq; alertRules.push(v.rule); }
+      }
+    }
+    if (Number.isFinite(d.seq)) ruleSeq = Math.max(ruleSeq, d.seq);
+    for (const r of alertRules) if (r.id > ruleSeq) ruleSeq = r.id;
+    // Edge state is restored so a redeploy does not re-announce every rule already in breach —
+    // the same failure the trigger stream's anti-blast rule exists to prevent.
+    if (Array.isArray(d.armed)) for (const k of d.armed) if (typeof k === "string") ruleArmed.set(k, true);
+    if (Array.isArray(d.fired)) for (const kv of d.fired) if (Array.isArray(kv) && typeof kv[0] === "string") ruleLastFire.set(kv[0], +kv[1] || 0);
+    return alertRules.length;
+  }
+  function persistRules() {
+    if (!store.saveRules) return;
+    store.saveRules({ ts: Date.now(), seq: ruleSeq, rules: alertRules,
+      armed: [...ruleArmed.keys()].slice(-RULE_STATE_MAX),
+      fired: [...ruleLastFire.entries()].slice(-RULE_STATE_MAX) });
+    rulesDirty = false;
+  }
+  function ruleScopeRows(rule, snap) {
+    const all = (snap.markets || []).concat(snap.mainMarkets || []);
+    if (rule.coin) { const r = all.find((x) => x.coin === rule.coin); return r ? [r] : []; }
+    if (rule.uni) return all.filter((x) => x.uni === rule.uni);
+    return all;
+  }
+  function ruleScan() {
+    if (!alertRules.length) return 0;
+    const snap = snapshotCache;
+    if (!snap || !Array.isArray(snap.markets)) return 0;
+    const now = Date.now();
+    let fired = 0;
+    for (const rule of alertRules) {
+      const m = RULE_BY_K[rule.metric];
+      if (!m) continue;
+      const cool = rule.cooldownMs != null ? rule.cooldownMs : RULE_DEFAULT_COOLDOWN;
+      for (const row of ruleScopeRows(rule, snap)) {
+        if (row.delisted) continue;
+        const key = rule.id + "|" + row.coin;
+        const prev = rulePrev.get(key);
+        // An unseen (rule, market) pair starts DISARMED: a rule added while a market is already in
+        // breach describes a state, not an event, and announcing it would mean every new rule
+        // detonates across the roster the moment it is saved. It arms the first time the value sits
+        // cleanly outside the band.
+        const verdict = ruleEval(rule, row, ruleArmed.get(key) === true, prev);
+        const val = m.get(row);
+        if (val != null && isFinite(val)) rulePrev.set(key, val);
+        if (verdict === "arm") { ruleArmed.set(key, true); rulesDirty = true; continue; }
+        if (verdict !== "fire") continue;
+        if (now - (ruleLastFire.get(key) || 0) < cool) continue;
+        ruleArmed.set(key, false);
+        ruleLastFire.set(key, now);
+        rulesDirty = true; fired++;
+        emitTrig("rule", {
+          coin: row.coin, t: row.ticker || row.coin, uni: row.uni,
+          ruleId: rule.id, metric: rule.metric, label: m.label, op: rule.op, value: rule.value,
+          note: rule.note || "", now: ruleFmtValue(m, val), rule: ruleLabel(rule),
+        }, now);
+      }
+    }
+    // Bound the edge maps: 60 rules across two rosters is small, but a long-lived process with
+    // churning listings would otherwise grow these forever.
+    for (const map of [ruleArmed, ruleLastFire, rulePrev])
+      if (map.size > RULE_STATE_MAX) { const drop = map.size - RULE_STATE_MAX; let i = 0; for (const k of map.keys()) { if (i++ >= drop) break; map.delete(k); } }
+    if (fired) { persistTriggers(); log(`rule alerts: ${fired} fired`); }
+    if (rulesDirty) persistRules();
+    return fired;
+  }
+
+  function getRules() {
+    return { ts: Date.now(), dataTs: ruleSeq, max: RULE_MAX,
+      metrics: RULE_METRICS.map((m) => ({ k: m.k, label: m.label, unit: m.unit, scale: m.scale || null })),
+      ops: RULE_OPS, opLabels: RULE_OP_LABEL,
+      defaultCooldownMs: RULE_DEFAULT_COOLDOWN,
+      rules: alertRules.map((r) => Object.assign({}, r, { text: ruleLabel(r) })) };
+  }
+  function addRule(rule) {
+    if (alertRules.length >= RULE_MAX) return { ok: false, error: "cap" };
+    const v = validateRule(rule);
+    if (!v.ok) return v;
+    v.rule.id = ++ruleSeq;
+    alertRules.push(v.rule);
+    persistRules();
+    return { ok: true, rule: Object.assign({}, v.rule, { text: ruleLabel(v.rule) }) };
+  }
+  function deleteRule(id) {
+    const n = +id;
+    const before = alertRules.length;
+    alertRules = alertRules.filter((r) => r.id !== n);
+    if (alertRules.length === before) return { ok: false, error: "unknown" };
+    for (const map of [ruleArmed, ruleLastFire, rulePrev])
+      for (const k of [...map.keys()]) if (k.startsWith(n + "|")) map.delete(k);
+    persistRules();
+    return { ok: true, removed: before - alertRules.length };
+  }
+
   function pushTest(chat) {
     if (!pushOn()) return { ok: false, error: "disabled" };
     const now = Date.now();
@@ -6506,6 +6634,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     pushSetBootNow: (t) => { pushBootAt = t; },   // harness: exercise the boot lookback deterministically
     pushSetPollNow: (t) => { lastPoll = t; },     // harness: age the poll clock so the stall watchdog is testable without waiting 10 minutes
     levelScanNow: levelScan,                     // harness: run the live level scan on demand
+    getRules,
+    addRule,
+    deleteRule,
+    ruleScanNow: ruleScan,                       // harness: evaluate the rule list against the current snapshot
+    hydrateRulesNow: hydrateRules,               // harness: restore rules + edge state without a boot
     ledgerOpenNow: () => ledgerOpen,             // harness: reach the open claims to stage geometry
     resolveLedgerNow: resolveLedger,             // harness: force resolution without waiting out a horizon
     buildActionableNow: buildActionable,   // harness: force an actionable rebuild without waiting out the memo

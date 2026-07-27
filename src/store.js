@@ -23,6 +23,7 @@ function openStore(dataDir) {
   const tgFile = path.join(dataDir, "tgchannels.json");
   const trigFile = path.join(dataDir, "triggers.json");
   const pushFile = path.join(dataDir, "alertpush.json");   // telegram recipients + delivery cursor
+  const rulesFile = path.join(dataDir, "alertrules.json");  // user-authored metric rules (group-shared)
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
   const flagsFile = path.join(dataDir, "flags.json");     // admin feature-visibility overrides
@@ -263,6 +264,21 @@ function openStore(dataDir) {
     // and the cursor is state — but they must be written together or a crash between two files
     // could leave a recipient whose cursor says "you're caught up" and silently eat their backlog.
     // One atomic file, same tmp+rename discipline as the ledger.
+    // User-authored metric rules. CONFIG in the strongest sense — somebody sat and typed these —
+    // so they get their own file: a corrupt delivery blob or a trimmed cache must never be able to
+    // take the rule list with it. Same tmp+rename discipline as the ledger.
+    saveRules(data) {
+      try {
+        const tmp = rulesFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, rulesFile);
+      } catch (_) {}
+    },
+    loadRules() {
+      try { if (fs.existsSync(rulesFile)) return JSON.parse(fs.readFileSync(rulesFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
     savePush(data) {
       try {
         const tmp = pushFile + ".tmp";
