@@ -6829,8 +6829,10 @@ test("features: resolver fails closed, honours pins, and 'off' means nobody", ()
 
 test("features: flag sanitizer drops unknown keys and bad states instead of coercing", () => {
   const C = require("../src/compute");
-  const out = C.featureFlagsSanitize({ signals: "admin", markets: "public", bogus: "public", trend: "PUBLIC", news: 1, report: null });
-  assert.deepEqual(out, { signals: "admin", markets: "public" }, "only known key + valid state pairs survive");
+  // markets is deliberately absent from this case: it is PINNED, and pinned keys are dropped
+  // wholesale (asserted separately). Use unpinned keys to test the key/state vocabulary itself.
+  const out = C.featureFlagsSanitize({ signals: "admin", sectors: "public", bogus: "public", trend: "PUBLIC", news: 1, report: null });
+  assert.deepEqual(out, { signals: "admin", sectors: "public" }, "only known key + valid state pairs survive");
   assert.deepEqual(C.featureFlagsSanitize(null), {}, "null input is an empty flag set, not a throw");
   assert.deepEqual(C.featureFlagsSanitize("nope"), {}, "a non-object flags file degrades to defaults");
   // A typo'd key must NOT fall through to a real feature's state — that is the bug the manifest exists
@@ -6865,4 +6867,121 @@ test("features: route gate is method-aware, honours never-gate, and lets unclaim
   const c = C.featureCounts({});
   assert.equal(c.total, C.FEATURES.length);
   assert.equal(c.public + c.admin + c.off, c.total, "every feature lands in exactly one bucket");
+});
+
+// ===== admin panel, phase 1: server state, identity, route gate ================================
+test("features: sanitizer drops a stored state for a pinned key (latent-trap class)", () => {
+  const C = require("../src/compute");
+  // Inert today because featureState checks the pin first — LIVE the moment anyone removes the pin.
+  // A value written in flags.json must never be able to activate via an edit in compute.js.
+  const out = C.featureFlagsSanitize({ markets: "off", signals: "admin" });
+  assert.equal(Object.prototype.hasOwnProperty.call(out, "markets"), false, "a pinned key must not survive sanitization");
+  assert.equal(out.signals, "admin", "unpinned keys are untouched");
+});
+
+test("store: flags.json round-trips, is written atomically, and an absent file is not an error", () => {
+  const { openStore } = require("../src/store");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "flags-"));
+  try {
+    const s = openStore(dir);
+    assert.equal(s.loadFlags(), null, "no file yet is null, not a throw — first boot is the normal case");
+    assert.equal(s.saveFlags({ signals: "admin" }), true);
+    assert.deepEqual(s.loadFlags(), { signals: "admin" }, "round-trip");
+    assert.ok(fs.existsSync(path.join(dir, "flags.json")));
+    assert.ok(!fs.existsSync(path.join(dir, "flags.json.tmp")), "the temp file must be renamed away, never left behind");
+    // Corrupt file degrades to defaults instead of taking the boot down with it.
+    fs.writeFileSync(path.join(dir, "flags.json"), "{not json");
+    assert.equal(s.loadFlags(), null, "unparseable flags file degrades to null");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  // tmp+rename pinned in source: a plain writeFileSync here would let a crash mid-write reopen
+  // whatever had been closed, silently, on the next boot.
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(/saveFlags\(obj\)[\s\S]{0,320}flagsFile \+ "\.tmp"[\s\S]{0,220}renameSync/.test(st), "saveFlags must be tmp+rename atomic");
+});
+
+test("poller: setFlag is admin-only, refuses pinned and invalid input, and persists what it accepts", () => {
+  const { createPoller } = require("../src/poller");
+  let written = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    loadFlags: () => ({ signals: "admin" }), saveFlags: (o) => { written = o; return true; } };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+
+  assert.deepEqual(p.getFlags(), { signals: "admin" }, "stored flags hydrate through the sanitizer");
+  assert.equal(p.setFlag("signals", "public", false).error, "forbidden", "a non-admin caller cannot write");
+  assert.equal(written, null, "a forbidden write must not touch the volume");
+  assert.equal(p.setFlag("markets", "off", true).error, "pinned", "pinned keys are refused, not silently resolved past");
+  assert.equal(p.setFlag("nope", "public", true).error, "unknown-feature");
+  assert.equal(p.setFlag("signals", "PUBLIC", true).error, "bad-state", "state vocabulary is closed");
+  assert.equal(written, null, "no rejected write reached the volume");
+
+  const ok = p.setFlag("signals", "public", true);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.state, "public");
+  assert.deepEqual(written, { signals: "public" }, "the accepted write is persisted");
+  assert.equal(p.getFlags().signals, "public", "in-memory state follows the write");
+  // The response carries the fresh resolved set so the panel never has to guess what it produced.
+  assert.ok(ok.features && ok.features.resolved && ok.features.counts, "setFlag must return the resolved set");
+
+  // A failed disk write must not leave memory ahead of the volume — that is how a flag "comes back"
+  // after a redeploy and nobody can explain why.
+  const p2 = createPoller({ dex: "xyz", store: Object.assign({}, store, { loadFlags: () => null, saveFlags: () => false }), log: () => {}, version: "test" });
+  assert.equal(p2.setFlag("signals", "admin", true).error, "write-failed");
+  assert.equal(p2.getFlags().signals, undefined, "memory must not advance past a failed persist");
+
+  const f = p.getFeatures(false), fa = p.getFeatures(true);
+  assert.equal(f.admin, false); assert.equal(fa.admin, true);
+  assert.equal(f.manifest.length, require("../src/compute").FEATURES.length, "getFeatures ships the whole manifest");
+  assert.ok(f.manifest.every((m) => m.key && m.kind && m.label && m.state), "every manifest row carries a resolved state");
+});
+
+test("server: admin-view lease is a distinct secret from the AI unlock, fails closed, browser-only", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // Distinct label. With a shared secret an xyzai token would validate as xyzadm and the deliberately
+  // short AI-spend lease would silently become a 30-day one.
+  assert.ok(srv.includes("xyzmon-admin-view|"), "admin-view secret must derive from ADMIN_PASSWORD under its own label");
+  assert.ok(srv.includes("xyzmon-ai-unlock|"), "the AI unlock secret must still exist separately");
+  assert.notEqual(srv.indexOf("xyzmon-admin-view|"), srv.indexOf("xyzmon-ai-unlock|"), "the two secrets must not be the same expression");
+  assert.ok(srv.includes("function signAdminView") && srv.includes("function adminViewOk"), "admin-view signer/verifier missing");
+  assert.ok(/adminViewOk[\s\S]{0,140}!ADMIN_PASSWORD/.test(srv), "adminViewOk must fail closed when ADMIN_PASSWORD is unset");
+  assert.ok(/"xyzadm=" \+ \(token \|\| "x"\)[\s\S]{0,120}HttpOnly/.test(srv), "the xyzadm token cookie must be HttpOnly");
+  assert.ok(srv.includes('"xyzadmin=1"'), "a JS-visible marker must exist so the client can render the Admin affordance");
+  // No header/Basic path to admin: isAdmin reads the cookie and nothing else.
+  assert.ok(/const isAdmin = \(req\) => adminViewOk\(getCookie\(req, "xyzadm"\)\)/.test(srv), "isAdmin must be cookie-only (no header bypass)");
+  assert.ok(!/x-admin/i.test(srv), "there must be no header bypass for admin");
+  // The login damper is spent, not the terminal-unlock lockout — otherwise a group member with a fat
+  // finger could lock the operator out of the panel.
+  assert.ok(srv.includes("function adminPwOk"), "login needs its own constant-time admin compare");
+  assert.ok(/adminPwOk[\s\S]{0,220}timingSafeEqual/.test(srv), "adminPwOk must be constant-time");
+  assert.ok(/if \(adminPwOk\(pw\)\)[\s\S]{0,400}setAdminCookies/.test(srv), "login must mint the admin lease when the admin password is used");
+  assert.ok(/fastify\.get\("\/logout"[\s\S]{0,400}setAdminCookies\(reply, req, 0, null\)[\s\S]{0,200}clearAiUnlockCookie/.test(srv),
+    "logout must drop the admin lease AND the AI unlock — never leave a stale elevation behind");
+  // Terminal escalation grants the view too, so `admin unlock` and admin-password login agree.
+  assert.ok(/setAiUnlockCookie\(reply, req, signAiUnlock[\s\S]{0,400}setAdminCookies/.test(srv), "the terminal unlock must also grant the admin view");
+});
+
+test("server: feature gate runs after the site gate, returns 403, and both /api/features routes exist once", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // Ordering is load-bearing: an unauthenticated caller must get 401 (log in), not 403 (you are not
+  // admin). Fastify runs onRequest hooks in registration order, so source order IS the contract.
+  const iSite = srv.indexOf('if (u.startsWith("/api/")) return reply.code(401)');
+  const iGate = srv.indexOf("featureGateFor(req.method, req.url");
+  assert.ok(iSite > 0 && iGate > 0, "both gates must exist");
+  assert.ok(iGate > iSite, "the feature gate must be registered AFTER the site gate or 403 masks 401");
+  // The same Fastify lifecycle trap the site gate documents: reply.send() alone does not stop the
+  // chain in an async hook. This must RETURN the reply.
+  assert.ok(/return reply\.code\(403\)[\s\S]{0,140}feature-gated/.test(srv), "the gate must RETURN a 403 reply (async hook lifecycle)");
+  assert.ok(srv.includes('feature: blocked'), "the 403 must name the blocking feature so a log is debuggable");
+  for (const r of ['fastify.get("/api/features"', 'fastify.post("/api/features"']) {
+    const n = srv.split(r).length - 1;
+    assert.equal(n, 1, `${r} must be registered exactly once (got ${n})`);
+  }
+  assert.ok(/fastify\.post\("\/api\/features", \{ bodyLimit/.test(srv), "the write route needs a body cap");
+  // Honest-null: an unset ADMIN_PASSWORD closes every admin-state feature to everyone. Say it at boot
+  // rather than letting it present as "the Actionable tab stopped working".
+  assert.ok(srv.includes("WARN: ADMIN_PASSWORD is unset"), "boot must warn when no admin cookie can ever be minted");
+  assert.ok(srv.includes('const VERSION = "2026.07.26-04"'), "build stamp must be bumped for this delivery");
 });
