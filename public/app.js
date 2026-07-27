@@ -1684,7 +1684,6 @@ function shVal(v,unit){ if(v==null) return '<span class="na">\u2014</span>';
 function shLeft(resolveAt){ const left=resolveAt-Date.now(); return left>0?(left>=86400000?(left/86400000).toFixed(1)+'d':(left/3600000).toFixed(0)+'h'):'due'; }
 async function loadDrawerLedger(coin){
   const box=el('dledger'); if(!box) return;
-  { const rw=state.rows.get(coin); if(rw&&rw.uni==='main'){ box.innerHTML=''; return; } }   // crypto: no signal engine (-101), no record section — same pattern as the news box
   try{
     const d=await fetchJSON('/api/ledger?coin='+encodeURIComponent(coin));
     if(state.detail!==coin || !box.isConnected) return;
@@ -2074,7 +2073,7 @@ function featureOn(key){ return FLAGS_VIEW ? !!FLAGS_VIEW[key] : true; }
 // Crypto scope is Markets + Trend + Report + Correlation + Backtest + Sessions by design (the signal
 // engine is xyz-only since -101). This set was written out longhand in two places that had already
 // drifted apart once; it lives here now and both callers read it.
-const CRYPTO_VIEWS=new Set(['markets','trend','report','corr','backtest','sessions']);
+const CRYPTO_VIEWS=new Set(['markets','trend','report','corr','backtest','sessions','signals','actionable']);
 // NOT named inScope: that name was already taken at the top of this file by the predicate that
 // decides whether a market ROW belongs to the active universe. Function declarations hoist, so the
 // later definition silently won, activeRows() started asking "is this row object one of the six
@@ -4407,7 +4406,7 @@ function closeTrendChart(){ const bg=el('tchartbg'), m=el('tchartmodal'); if(bg)
 { const bg=el('tchartbg'); if(bg) bg.addEventListener('click',closeTrendChart);
   document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const m=el('tchartmodal'); if(m&&!m.hidden) closeTrendChart(); } }); }
 
-const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge',tretest:'Trend retest (long)',tretestdn:'Trend retest (short)'};
+const EV_LABELS={bigmove:'Big move',breakout:'30d-high breakout',breakdown:'30d-low breakdown',volshift:'Vol expansion',gap:'Outsized gap',fundflip:'Funding flip',squeeze:'Squeeze setup',unwind:'Long unwind',oiflush:'OI flush',fpdiv:'Funding\u2013price divergence',coil:'Range compression',ondrift:'Overnight drift',prem:'Premium dislocation',volume:'Volume surge',tretest:'Trend retest (long)',tretestdn:'Trend retest (short)',casc:'Cascade exhaustion',fundext:'Funding extreme'};
 const EV_TIP={
   bigmove:'Today\u2019s move is \u22652\u03c3 of this market\u2019s own trailing 30d daily returns. History measures whether such moves continued (positive) or faded (negative) the next day, signed with the move.',
   breakout:'First close/mark above the prior 30-day high. History: forward 5d return after past first-crosses on this market.',
@@ -4418,6 +4417,8 @@ const EV_TIP={
   unwind:'Crowded longs paying funding while OI builds and price sits near range lows \u2014 the bearish mirror of the squeeze. Their liquidation is the seller of last resort.',oiflush:'7d \u0394OI collapsed below \u22122\u03c3 of this market\u2019s own distribution while price fell \u2014 forced deleveraging exhausting itself. Flushes measure positions destroyed, not price traveled; the claim is a 5d bottoming thesis.',fpdiv:'Funding trajectory diverging from the tape: strength while funding falls = shorts pressing into a rising market (squeeze-adjacent, long); weakness while funding rises = longs averaging down into a falling one (fragile, short). 3d horizon, with the divergence.',coil:'10d realized vol in the bottom decile of its own trailing 120 observations \u2014 the spring is loaded, direction unknown. Context only: it never claims a side; it exists to corroborate a breakout or breakdown firing OUT of the compression.',ondrift:'This market\u2019s summed off-hours drift over ~21 closed windows sits \u22652\u03c3 from the universe. The claim covers ONLY the next 5 overnight windows held close\u2192open \u2014 the structural edge of a venue where cash-hours assets trade 24/7. Ships without a backtest study by design: it earns trust purely out of sample.',prem:'Perp price dislocated from oracle vs its own 7-day premium baseline. During closed cash sessions this IS the live price discovery for the synthetic.',
   volume:'24h volume is a multiple of this market\u2019s own 30d norm \u2014 a context flag that amplifies whatever else is firing.',
   tretest:'The Trend board\u2019s RETEST badge, promoted to a ledgered claim: a \u22653/4 stacked uptrend whose retesting rung probed the 13/21 EMA zone while the close held EMA21. Frozen at fire \u2014 entry = mark, void = that rung\u2019s EMA21, target = the rung\u2019s prior swing high. 5d horizon. Ships without a backtest study by design: the record is earned purely out of sample.',
+  casc:'Crypto only. A 15-minute bucket where one side\u2019s forced-liquidation notional spiked \u22653\u03c3 above its own trailing 24h WHILE open interest fell in the same bucket \u2014 flow that actually cleared positioning \u2014 and whose flush extreme has held since. Longs carried out \u2192 long the exhaustion; shorts \u2192 short it. Void = the flush wick, target = the pre-cascade level: both prices the tape printed, so this claim needs no \u03c3 construction at all. Trigger reads aggregated CEX data (Coinalyze) while the claim resolves on the Hyperliquid mark \u2014 that venue mismatch is real and deliberate, not an oversight. 12h horizon, record earned purely out of sample.',
+  fundext:'Crypto only. Funding sitting at the \u226590th or \u226410th percentile of this name\u2019s OWN 31-day distribution, with the same side holding across the trailing window \u2014 the persistence floor is what makes it one episode rather than one print. Faded: crowded longs \u2192 short, crowded shorts \u2192 long. Target = the geometric middle of the 30d range, void = 1.5\u03c3 beyond where the crowd is defending. 2d horizon, no in-sample study \u2014 it earns its record live.',
   tretestdn:'The short mirror of the trend retest: a \u22653/4 stacked downtrend whose rung rallied into the 13/21 zone while the close held below EMA21. Void = that rung\u2019s EMA21, target = prior swing low, 5d horizon, record earned out of sample.',
 };
 // Structured playbook row: side pill (LONG/SHORT/FADE/WATCH), levels with live distance from
@@ -4752,13 +4753,23 @@ function recCurveSvg(curve){
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function ledgerRosterScoped(){
-  // xyz-only roster: the crypto side of the signal engine was removed at -101, and this tab
-  // with it — the scope split this function used to serve no longer exists.
+  // The roster of events that CAN ledger a claim in the active scope — it drives the "awaiting
+  // first claim" entries, so a wrong answer here reads as either a lie ("awaiting" for an event
+  // this universe never runs) or a silent omission (a live event missing from its own record
+  // strip). Mirrors the server's MAIN_EVS / XYZ_ONLY_EVS split exactly; the suite pins both
+  // lists against each other so they cannot drift apart.
+  if(state.scope==='crypto')
+    return ['bigmove','breakout','breakdown','fundflip','oiflush','fpdiv','tretest','tretestdn','casc','fundext'];
   return ['bigmove','breakout','breakdown','gap','fundflip','squeeze','unwind','oiflush','fpdiv','prem','ondrift','tretest','tretestdn'];
 }
+// Record sets ship keyed by universe ('m' = crypto/main, 'x' = xyz). One helper so every consumer
+// reads the same set for the active scope — the -101 client hardcoded 'x' in two places, which
+// would now silently show the equity record under a crypto board.
+const MAIN_ONLY_EV=new Set(['casc','fundext']);   // mirrors the server's MAIN_ONLY_EVS
+function sigRecKey(thr,pr){ return String(thr)+(pr?'p':'')+(state.scope==='crypto'?'m':'x'); }
 function sigRecordHtml(d){
   const thr=sigMovePref(), pr=sigPrimePref();
-  const rs=(d&&d.records&&(d.records[String(thr)+(pr?'p':'')+'x']||d.records[String(thr)+(pr?'p':'')]))||d||{};
+  const rs=(d&&d.records&&(d.records[sigRecKey(thr,pr)]||d.records[String(thr)+(pr?'p':'')]))||d||{};
   const rc=rs.record||{};
   const evs=Object.keys(rc);
   let fired=0,resolved=0,wins=0,open=0,nS=0,winsS=0;
@@ -4857,7 +4868,7 @@ function sigRecordHtml(d){
     }
     s+=sigSec('tuning','sigrec-sub','self-tuning (shadow variants)',`Bounded self-improvement: each gated event runs 2\u20133 candidate thresholds. Only the incumbent emits visible signals \u2014 but ALL variants (incumbent included) silently ledger shadow claims on identical bookkeeping, so the comparison is out-of-sample and apples-to-apples. A challenger is promoted only with \u226530 resolutions on BOTH sides, expectancy beating the incumbent by \u22650.08 native units and positive, and no hit-rate collapse. Promotions are logged, persisted, and reversible by the same rule. This searches a small fixed hypothesis space under out-of-sample discipline \u2014 it cannot re-fit freely.`,tun);
   }
-  const shPanel=d&&d.shadows&&d.shadows.xyz;
+  const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);
   if(shPanel&&shPanel.length){
     let shd='';
     for(const g of shPanel){
@@ -4901,7 +4912,7 @@ function renderSignals(){
     const sl=el('sig-segslot'); if(sl&&sl.innerHTML!==seg){ sl.innerHTML=seg; bindSigControls(sl); } }
   const intro='';
   let rec='';
-  const rsTop=(d&&d.records&&(d.records[String(mvThr)+(prOn?'p':'')+'x']||d.records[String(mvThr)+(prOn?'p':'')]))||d||{};
+  const rsTop=(d&&d.records&&(d.records[sigRecKey(mvThr,prOn)]||d.records[String(mvThr)+(prOn?'p':'')]))||d||{};
   const recSrc=rsTop.record||{};
   // Every event capable of ledgering a claim renders via ledgerRosterScoped(): zero-claim
   // roster members appear as explicit "awaiting first claim" entries — without this,
@@ -4915,15 +4926,19 @@ function renderSignals(){
     // outrank rows with actual outcomes
     const evOrder=Object.keys(recSrc).sort((a,b)=>((recSrc[b].resolved||0)-(recSrc[a].resolved||0))||((recSrc[b].open||0)-(recSrc[a].open||0)));
     for(const ev of evOrder){ const r=recSrc[ev]; if(!r) continue;
+      // n vs tape-days: only worth the pixels once they actually diverge (cl < n means the
+      // claims clustered, which is the whole point of showing it)
+      const clTxt = r.cl>0 && r.cl<r.resolved ? ` across ${r.cl}d` : '';
+      const xTxt = r.avgX!=null ? ` \u00b7 vs BTC ${r.avgX>=0?'+':''}${r.avgX}${r.unit}` : '';
       const live = r.resolved>0
-        ? `${Math.round((r.hit||0)*100)}% hit \u00b7 med ${r.med>=0?'+':''}${r.med}${r.unit} (n=${r.resolved})`
+        ? `${Math.round((r.hit||0)*100)}% hit \u00b7 med ${r.med>=0?'+':''}${r.med}${r.unit} (n=${r.resolved}${clTxt})${xTxt}`
         : `${r.open||0} open, none resolved yet`;
       const bad = r.resolved>=10 && r.hit<0.5 && r.med<=0;
       const good = r.resolved>=10 && r.hit>=0.55 && r.med>0;
-      recBody+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 out-of-sample record: every firing ledgered at its mark, resolved at the stated horizon under the study\u2019s own sign convention \u00b7 what actually happened after the engine spoke`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
+      recBody+=`<span class="rec${bad?' bad':(good?' good':'')}" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 out-of-sample record: every firing ledgered at its mark, resolved at the stated horizon under the study\u2019s own sign convention \u00b7 what actually happened after the engine spoke${r.cl>0&&r.cl<r.resolved?` \u00b7 those ${r.resolved} claims fired across only ${r.cl} distinct UTC day(s) \u2014 they are NOT ${r.resolved} independent observations, and on a universe this correlated the effective sample is closer to the day count`:''}${r.avgX!=null?` \u00b7 vs BTC = the same claims resolved net of the benchmark's move over each claim's own window (n=${r.nX}): raw tells you what the trade returned, this tells you whether the event added anything beyond being long crypto`:''}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> ${live}${bad?' \u00b7 <i>capped</i>':''}</span>`;
     }
     for(const ev of ledgerRosterScoped()){ if(recSrc[ev]) continue;
-      recBody+=`<span class="rec await" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 in the ledger roster \u2014 no claim has fired yet under the current gates${ev==='tretest'||ev==='tretestdn'?' (stocks/macro universe only: crypto retests never ledger)':''}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> awaiting first claim</span>`;
+      recBody+=`<span class="rec await" data-tip="${esc(`${(EV_TIP[ev]||ev).split('.')[0]} \u00b7 in the ledger roster \u2014 no claim has fired yet under the current gates${MAIN_ONLY_EV.has(ev)?' (crypto universe only \u2014 no equity analogue exists in this data)':''}`)}"><b>${esc(EV_LABELS[ev]||ev)}</b> awaiting first claim</span>`;
     }
     recBody+='</div>';
     // Earnings-conditioned split: shown only past n>=5 resolved earnings-window claims per
