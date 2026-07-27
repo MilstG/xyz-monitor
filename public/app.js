@@ -3584,7 +3584,7 @@ function trigSeqSet(n){ try{ store.set(TSEQ,String(n)); }catch(_){} }
 function trigEligibleClient(ev,c){
   if(!ev) return false;
   if(c.minEV!=null && (ev.evR==null || ev.evR<c.minEV)) return false;
-  if(c.minRR!=null && !(ev.rr && ev.rr.net>=c.minRR)) return false;
+  if(c.minRR!=null && !(ev.rr && ev.rr.gross>=c.minRR)) return false;
   if(c.maxLate!=null && ev.late!=null && ev.late>c.maxLate) return false;
   if(Array.isArray(c.muted) && c.muted.includes(ev.coin)) return false;
   return true;
@@ -3604,7 +3604,7 @@ async function loadTriggers(){
 }
 function fireTrigger(ev){
   const A=state.alerts;
-  const rr=ev.rr&&ev.rr.net!=null?(+ev.rr.net).toFixed(2):'—';
+  const rr=ev.rr&&ev.rr.gross!=null?(+ev.rr.gross).toFixed(2):'—';
   const evs=ev.evR!=null?((ev.evR>=0?'+':'')+(+ev.evR).toFixed(2)+'R'):'no record';
   const text=`${ev.t} ${ev.side.toUpperCase()} · ${ev.label} · R:R ${rr} · EV ${evs}`;
   A.log.unshift({t:Date.now(), text}); if(A.log.length>60) A.log.pop();
@@ -3624,7 +3624,7 @@ function pushTrigToast(ev){
   t.innerHTML=`<div class="tt-h"><span class="tt-lbl">NEW TRIGGER</span><span class="ax" data-x="1" title="dismiss">✕</span></div>`
     +`<div class="tt-n"><b class="${sideCls}">${esc(ev.t)}</b> <span class="${sideCls}">${esc(ev.side.toUpperCase())}</span> <span class="sec">${esc(ev.label)}</span></div>`
     +`<div class="tt-g">fired ${fmtPrice(ev.fired)} · void ${fmtPrice(ev.void)} · target ${fmtPrice(ev.target)}</div>`
-    +`<div class="tt-g">R:R ${ev.rr&&ev.rr.net!=null?(+ev.rr.net).toFixed(2):'—'} net · EV ${ev.evR!=null?((ev.evR>=0?'+':'')+(+ev.evR).toFixed(2)+'R'):'no record'} · late <span class="${lateCls}">${late}</span></div>`
+    +`<div class="tt-g">R:R ${ev.rr&&ev.rr.gross!=null?(+ev.rr.gross).toFixed(2):'—'} at fire · EV ${ev.evR!=null?((ev.evR>=0?'+':'')+(+ev.evR).toFixed(2)+'R'):'no record'} · late <span class="${lateCls}">${late}</span></div>`
     +(ev.earn?`<div class="tt-w">⚠ earnings ${ev.earn.days}d out — inside the ${ev.horizonD}d horizon</div>`:'')
     +`<div class="tt-a"><button class="btn" data-rep="1">AI report →</button><button class="btn" data-mute="1">Mute ${esc(ev.t)}</button></div>`;
   t.querySelector('[data-x]').addEventListener('click',()=>t.remove());
@@ -3696,7 +3696,7 @@ const ACT_COLS=[
   {k:'evR',  lb:'EV',     al:'right', tip:'Expectancy in R for entering THIS instance here: hit\u00d7(net R:R) \u2212 (1\u2212hit)\u00d71.'},
   {k:'rec',  lb:'Rec',    al:'right', tip:'Out-of-sample record for this setup: hit rate and resolved fires.'}];
 function actCell(r,k){
-  if(k==='rr') return r.rr?r.rr.net:null;
+  if(k==='rr') return r.rr?r.rr.gross:null;
   if(k==='rec') return r.rec?r.rec.n:null;
   if(k==='ago') return r.t0?(Date.now()-r.t0):null;
   return r[k];
@@ -3723,20 +3723,21 @@ function actHead(){
 function actDetail(r){
   const rec=r.rec||{}, R=r.rr||{};
   const g=[];
-  g.push(['the trade',`enter ${fmtPrice(r.entry)} \u00b7 void ${fmtPrice(r.void)} \u00b7 target ${fmtPrice(r.target)}`]);
+  g.push(['the claim',`fired ${fmtPrice(r.fired)} \u00b7 void ${fmtPrice(r.void)} \u00b7 target ${fmtPrice(r.target)} \u2014 all three frozen at fire`]);
   g.push(['the record',rec.n?`${Math.round(rec.hit*100)}% hit \u00b7 n=${rec.n} resolved \u00b7 avg ${rec.avgR>=0?'+':''}${rec.avgR}R`:'no resolved fires']);
-  g.push(['risk / reward',`${R.riskPct}% to void \u00b7 ${R.rewardPct}% to target`]);
-  g.push(['R:R',`${actRR(R.gross)} gross \u2192 <b>${actRR(R.net)} net</b>`]);
-  g.push(['carry',R.carryKnown?`${r.carry.aprPct>=0?'+':''}${r.carry.aprPct}% APR over ${r.horizonD}d = ${actEV(R.carryR)}R ${R.carryR>=0?'(paid to hold)':'(you pay)'}`:'funding unavailable \u2014 R:R shown gross']);
-  g.push(['expectancy',`<b class="act-ev">${actEV(r.evR)}R</b> = hit\u00d7net \u2212 (1\u2212hit)\u00d71`]);
+  g.push(['risk / reward',`${R.riskPct}% to void \u00b7 ${R.rewardPct}% to target \u2014 measured from the fire mark`]);
+  g.push(['R:R',`<b>${actRR(R.gross)}</b> at fire \u00b7 price geometry only`]);
+  g.push(['carry',r.carry&&r.carry.aprPct!=null?`${r.carry.aprPct>=0?'+':''}${r.carry.aprPct}% APR over ${r.horizonD}d = ${actEV(r.carry.r)}R ${r.carry.r>=0?'(paid to hold)':'(you pay)'} \u2014 not counted in R:R or EV`:'funding unavailable']);
+  g.push(['expectancy',`<b class="act-ev">${actEV(r.evR)}R</b> = hit\u00d7R:R \u2212 (1\u2212hit)\u00d71`]);
+  g.push(['taking it now',`${fmtPrice(r.entry)} \u2014 ${r.late==null?'lateness unavailable':(r.late<0?`${actLate(-r.late)}R of the claim's risk already spent against you`:`${actLate(r.late)}R of the move already made`)}`]);
   g.push(['fired',`${actAgo(Date.now()-r.t0)} ago \u00b7 ${r.bars==null?'\u2014':r.bars} ${r.tf} bar(s) in trigger`]);
-  g.push(['lateness',r.late==null?'unavailable':`${actLate(r.late)}R ${r.late<=0?'\u2014 the market came back, you enter better than the record did':'of your stop spent before entry'}`]);
+  g.push(['lateness',r.late==null?'unavailable':`${actLate(r.late)}R ${r.late<0?'\u2014 price moved AGAINST the claim: better entry price, but that much less room to the void than the record\u2019s fires had':'of the claim\u2019s move already made before entry'}`]);
   let h=`<div class="act-det"><div class="ad-h"><b class="${r.side==='long'?'pos':'neg'}">${esc(r.t)} ${esc(r.side.toUpperCase())}</b> \u00b7 ${esc(r.label)} on the ${esc(r.tf)} rung \u00b7 ${r.horizonD}d horizon`
     +(r.prime===true?' <span class="ad-badge" title="This setup was prime at fire time by the signals engine\u2019s heuristic: hit \u2265 60%, positive average, clean structure, no earnings. Shown, not enforced \u2014 a lower-hit setup at high R:R is still worth taking.">prime at fire</span>':'')
     +(r.also&&r.also.length?` \u00b7 <span class="sec">corroborated by ${esc(r.also.map(a=>a.label).join(', '))}</span>`:'')+`</div><div class="ad-g">`;
   for(const [k,v] of g) h+=`<div class="ad-k">${k}</div><div class="ad-v">${v}</div>`;
-  h+=`</div><div class="ad-sc">if it works, target pays <b class="pos">+${actRR(R.net)}R</b> \u00b7 if it fails, the void costs <b class="neg">\u22121.00R</b></div>`
-    +`<div class="ad-x">Leaves the board at ${r.bars==null?'\u2014':''}${_actMaxBars} bars in trigger, if price passes ${fmtPrice(r.void)}, or if net R:R falls under ${_actMinRR}.</div>`;
+  h+=`</div><div class="ad-sc">if it works, target pays <b class="pos">+${actRR(R.gross)}R</b> \u00b7 if it fails, the void costs <b class="neg">\u22121.00R</b></div>`
+    +`<div class="ad-x">Leaves the board at ${r.bars==null?'\u2014':''}${_actMaxBars} bars in trigger, if price passes ${fmtPrice(r.void)}, or if its R:R falls under ${_actMinRR}.</div>`;
   if(r.earn) h+=`<div class="ad-w">\u26a0 earnings in ${r.earn.days}d (${esc(r.earn.s)}) \u2014 inside the ${r.horizonD}d horizon. Flagged, not filtered: a scheduled binary is a prior the base rate cannot see.</div>`;
   h+=`<div class="ad-a"><button class="btn" data-rep="${esc(r.coin)}">AI report \u2192</button>`
     +`<button class="btn" data-dr="${esc(r.coin)}">Open ${esc(r.t)}</button></div></div>`;
@@ -3767,7 +3768,8 @@ function renderActionable(){
       +`${c.negev?` \u00b7 ${c.negev} negative-EV from here`:''}`
       +`${c.thinRR?` \u00b7 ${c.thinRR} below R:R ${_actMinRR}`:''}`
       +`${c.expired?` \u00b7 ${c.expired} aged out`:''}`
-      +`${c.noGeometry?` \u00b7 ${c.noGeometry} no longer tradeable from here`:''}.`
+      +`${c.noGeometry?` \u00b7 ${c.noGeometry} whose frozen geometry never framed a trade`:''}`
+      +`${c.untakeable?` \u00b7 ${c.untakeable} no longer takeable from here`:''}.`
       +` This board suggests only confirmed setups \u2014 an empty board is a real answer.</div>`;
   } else {
     h+=`<table class="trend-t act-tbl">${actHead()}<tbody>`;
@@ -3782,7 +3784,7 @@ function renderActionable(){
         +`<td style="text-align:right" class="${actLateCls(r.late)}">${actLate(r.late)}</td>`
         +`<td class="neg" style="text-align:right">${fmtPrice(r.void)}</td>`
         +`<td class="sec" style="text-align:right">${fmtPrice(r.target)}</td>`
-        +`<td style="text-align:right">${actRR(r.rr.net)}${r.rr.carryKnown?'':'<span class="act-note" title="funding unavailable for this market \u2014 the figure is gross">*</span>'}</td>`
+        +`<td style="text-align:right">${actRR(r.rr.gross)}</td>`
         +`<td class="act-ev" style="text-align:right">${actEV(r.evR)}</td>`
         +`<td class="sec act-rec" style="text-align:right">${r.rec&&r.rec.n?Math.round(r.rec.hit*100)+'%\u00b7'+r.rec.n:'\u2014'}</td>`
         +`</tr>`;
