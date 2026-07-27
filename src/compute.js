@@ -1389,6 +1389,114 @@ function detectLevels(daily, px, sd30, opts) {
   return { k, tauPct: +tauPct.toFixed(3), minN, n: keep.length, items: keep };
 }
 
+// ---- volume profile (build 2026.07.27-22) ----------------------------------------------------
+// Where the volume actually transacted, from the daily OHLCV composite the poller assembles.
+// Each bar's volume is distributed UNIFORMLY across every price bin its [l, h] range spans —
+// close-only attribution lies on wide bars, and uniform-in-range is the honest zero-assumption
+// spread at daily granularity. Bin width scales to the name's own sd30 so a $2 perp and a $400
+// equity produce comparable maps. Composite recency: bars inside `recentMs` of the last bar
+// count at `recentW` (the 365d-anchor + weighted-90d-recent convention, hand-set and disclosed
+// in the UI). Output: POC (max bin), 70% value area grown greedily from the POC, and HVN/LVN —
+// interior local maxima/minima against the median bin, prominence-capped to the top 5 each.
+// Everything quantized to 9 significant figures (the app-wide sig convention).
+function volumeProfile(bars, sd30, opts) {
+  const o = opts || {};
+  const q = (x) => +(+x).toPrecision(9);
+  const binPct = Number.isFinite(o.binPct) && o.binPct > 0 ? o.binPct : Math.max((sd30 > 0 ? 0.35 * sd30 : 0.7), 0.2);
+  const recentMs = Number.isFinite(o.recentMs) && o.recentMs > 0 ? o.recentMs : 90 * 86400e3;
+  const recentW = Number.isFinite(o.recentW) && o.recentW > 0 ? o.recentW : 1.5;
+  const maxBins = Number.isFinite(o.maxBins) && o.maxBins >= 8 ? Math.round(o.maxBins) : 120;
+  const b = Array.isArray(bars) ? bars.filter((k) => k && k.c > 0 && k.v > 0) : [];
+  if (b.length < 20) return null;                                   // a profile of a handful of bars is noise wearing a histogram
+  let lo = Infinity, hi = -Infinity, tLast = -Infinity;
+  for (const k of b) { if (k.l < lo) lo = k.l; if (k.h > hi) hi = k.h; if (k.t > tLast) tLast = k.t; }
+  if (!(lo > 0) || !(hi > lo)) return null;
+  // Bin width from binPct of the range midpoint, bounded so the grid stays sane on wide ranges.
+  const mid = (lo + hi) / 2;
+  let bw = mid * binPct / 100;
+  const nBins = Math.min(maxBins, Math.max(8, Math.ceil((hi - lo) / bw)));
+  bw = (hi - lo) / nBins;
+  const vols = new Array(nBins).fill(0);
+  const cut = tLast - recentMs;
+  for (const k of b) {
+    const w = (k.t >= cut ? recentW : 1) * k.v;
+    const l = Math.max(lo, Math.min(k.l, k.h)), h = Math.min(hi, Math.max(k.l, k.h));
+    let i0 = Math.min(nBins - 1, Math.max(0, Math.floor((l - lo) / bw)));
+    let i1 = Math.min(nBins - 1, Math.max(0, h >= hi ? nBins - 1 : Math.floor((h - lo) / bw)));
+    if (i1 < i0) i1 = i0;
+    const per = w / (i1 - i0 + 1);                                  // uniform across the bins the bar's range spans
+    for (let i = i0; i <= i1; i++) vols[i] += per;
+  }
+  const vTot = vols.reduce((a, x) => a + x, 0);
+  if (!(vTot > 0)) return null;
+  let pocI = 0; for (let i = 1; i < nBins; i++) if (vols[i] > vols[pocI]) pocI = i;
+  // 70% value area: grow greedily from the POC toward whichever neighbor bin holds more volume.
+  let vaLoI = pocI, vaHiI = pocI, acc = vols[pocI];
+  while (acc < 0.7 * vTot && (vaLoI > 0 || vaHiI < nBins - 1)) {
+    const dn = vaLoI > 0 ? vols[vaLoI - 1] : -1, up = vaHiI < nBins - 1 ? vols[vaHiI + 1] : -1;
+    if (up >= dn) { vaHiI++; acc += vols[vaHiI]; } else { vaLoI--; acc += vols[vaLoI]; }
+  }
+  const center = (i) => lo + (i + 0.5) * bw;
+  const med = vols.slice().sort((a, z) => a - z)[Math.floor(nBins / 2)] || 0;
+  const hvn = [], lvn = [];
+  for (let i = 1; i < nBins - 1; i++) {                             // interior only — the range edges are artifacts of the window, not nodes
+    if (med > 0 && vols[i] >= vols[i - 1] && vols[i] >= vols[i + 1] && vols[i] >= 1.25 * med)
+      hvn.push({ p: q(center(i)), v: q(vols[i] / vTot) });
+    if (med > 0 && vols[i] <= vols[i - 1] && vols[i] <= vols[i + 1] && vols[i] <= 0.6 * med)
+      lvn.push({ p: q(center(i)), v: q(vols[i] / vTot) });
+  }
+  hvn.sort((a, z) => z.v - a.v); lvn.sort((a, z) => a.v - z.v);
+  return { binPct: q(binPct), lo: q(lo), hi: q(hi), nBars: b.length, recentW,
+    poc: q(center(pocI)), vaLo: q(lo + vaLoI * bw), vaHi: q(lo + (vaHiI + 1) * bw),
+    bins: vols.map((v, i) => [q(center(i)), q(v / vTot)]),          // [price, share-of-total]
+    hvn: hvn.slice(0, 5), lvn: lvn.slice(0, 5) };
+}
+
+// ---- unified level map (build 2026.07.27-22) --------------------------------------------------
+// One ranked list from every honest level source this app holds, each entry carrying provenance
+// flags so nothing pretends to be what it is not. Confluence: sources clustering within the same
+// tau detectLevels uses (0.4 x sd30, floored 0.5%) merge into one entry whose weight is the SUM
+// of the hand-set source weights below — a structural level sitting inside an HVN with the
+// EMA200 nearby outranks any alone. Weights are hand-set with disclosure (exported for the UI
+// tooltip) until the profile-level study earns measured replacements; an unweighted list is
+// unusable in the meantime and pretending otherwise helps no one. LVNs are traversal features
+// (thin volume = less friction), NOT support — they are in the map for target-path reasoning
+// and carry the lowest weight; consumers wanting anchors filter them out by provenance.
+const LVL_MAP_W = { str: 1.0, hvn: 0.8, e200: 0.7, e50: 0.6, lvn: 0.5 };
+function levelMap(parts, px, sd30) {
+  if (!parts || !(px > 0)) return null;
+  const q = (x) => +(+x).toPrecision(9);
+  const raw = [];
+  if (parts.str && Array.isArray(parts.str.items))
+    for (const it of parts.str.items) if (it && it.v > 0) raw.push({ v: +it.v, src: "str", side: it.side || null, n: it.n });
+  if (parts.vp) {
+    for (const h of parts.vp.hvn || []) if (h && h.p > 0) raw.push({ v: +h.p, src: "hvn" });
+    for (const l of parts.vp.lvn || []) if (l && l.p > 0) raw.push({ v: +l.p, src: "lvn" });
+  }
+  if (parts.e50 > 0) raw.push({ v: +parts.e50, src: "e50" });
+  if (parts.e200 > 0) raw.push({ v: +parts.e200, src: "e200" });
+  if (!raw.length) return null;
+  raw.sort((a, z) => a.v - z.v);
+  const tau = Math.max(sd30 > 0 ? 0.4 * sd30 : 0, 0.5) / 100;       // same clustering tolerance detectLevels ships
+  const clusters = [];
+  let cur = null;
+  for (const p of raw) {
+    if (cur && Math.abs(p.v / cur.ref - 1) <= tau) {
+      cur.mem.push(p);
+      cur.ref = cur.mem.reduce((a, x) => a + x.v, 0) / cur.mem.length;
+    } else { cur = { ref: p.v, mem: [p] }; clusters.push(cur); }
+  }
+  const out = clusters.map((c) => {
+    const srcs = [...new Set(c.mem.map((m) => m.src))];
+    const w = srcs.reduce((a, sN) => a + (LVL_MAP_W[sN] || 0), 0);
+    const st = c.mem.find((m) => m.src === "str");
+    return { v: q(c.ref), srcs, w: +w.toFixed(2),
+      side: st ? st.side : null, nTouch: st ? st.n : null,
+      distPct: +((c.ref / px - 1) * 100).toFixed(2) };
+  }).sort((a, z) => a.v - z.v);
+  return { tauPct: +(tau * 100).toFixed(3), weights: LVL_MAP_W, n: out.length, items: out };
+}
+
 // ---- structural-level outcome study (pure) ---------------------------------------------------
 // detectLevels ALREADY decides which levels this app draws and which levels an AI void is allowed
 // to snap to (AI_SNAP_TOL). Nothing has ever measured whether those levels do anything. This walks
@@ -1429,7 +1537,8 @@ function studyBars(daily) {
     if (!Number.isFinite(c) || !(c > 0)) continue;
     const hr = +d.h, lr = +d.l;
     const h = Number.isFinite(hr) && hr > 0 ? hr : c, l = Number.isFinite(lr) && lr > 0 ? lr : c;
-    b.push({ t: +d.t || 0, h: Math.max(h, c), l: Math.min(l, c), c });
+    const v = +d.v;   // carried through since -22 (volume profile study path); absent/invalid -> 0, never NaN
+    b.push({ t: +d.t || 0, h: Math.max(h, c), l: Math.min(l, c), c, v: Number.isFinite(v) && v > 0 ? v : 0 });
   }
   return b;
 }
@@ -1448,13 +1557,21 @@ function levelOutcomes(daily, sd30, opts) {
   const b = studyBars(daily);
   if (b.length < minBars + horizon + 1 || !(sd30 > 0)) return { n: 0, events: [], horizon, stride };
   const dOpts = { k: o.k, tauMult: o.tauMult, minN: o.minN, max: o.max, minBars };
+  // Injectable detector (-22): the walk-forward scoring, the touch/hold semantics and the
+  // permutation control are level-source-agnostic — o.detect lets ANY candidate level source
+  // (the volume profile's HVN/LVN first) run through the IDENTICAL audit the structural
+  // detector faces, against the identical placebo. Default reproduces the shipped behavior
+  // byte-for-byte. The contract: detect(prefixBars, px, sd30) -> { items: [{v, side, n, ageD}],
+  // tauPct } or null — and it sees the PREFIX ONLY, same as detectLevels always has.
+  const detect = typeof o.detect === "function" ? o.detect
+    : (pb, px2, sd2) => detectLevels(pb, px2, sd2, dOpts);
   const events = [];
   for (let i = minBars; i < b.length - horizon; i += stride) {
     const px = b[i].c;
     if (!(px > 0)) continue;
     // Detector sees the prefix ONLY. Rebuilding the slice each stride is the honest cost of not
     // letting a single future bar leak into the levels being scored.
-    const lv = detectLevels(b.slice(0, i + 1), px, sd30, dOpts);
+    const lv = detect(b.slice(0, i + 1), px, sd30);
     if (!lv || !lv.items.length) continue;
     const tau = Math.max(lv.tauPct, 0.1) / 100;
     for (const it of lv.items) {
@@ -2618,8 +2735,9 @@ function bucketCandles(hourly, hours, HOUR) {
     const h = k[2] != null && isFinite(+k[2]) ? +k[2] : c;
     const l = k[3] != null && isFinite(+k[3]) ? +k[3] : c;
     const b = Math.floor(t / W) * W;
-    if (!cur || cur.t !== b) { if (cur) out.push(cur); cur = { t: b, o: k[1] != null && isFinite(+k[1]) ? +k[1] : c, h, l, c }; }
-    else { cur.c = c; if (h > cur.h) cur.h = h; if (l < cur.l) cur.l = l; }
+    const v = k[5] != null && isFinite(+k[5]) && +k[5] > 0 ? +k[5] : 0;   // volume summed through since -22 (profile study path); additive — every prior consumer reads t/o/h/l/c only
+    if (!cur || cur.t !== b) { if (cur) out.push(cur); cur = { t: b, o: k[1] != null && isFinite(+k[1]) ? +k[1] : c, h, l, c, v }; }
+    else { cur.c = c; if (h > cur.h) cur.h = h; if (l < cur.l) cur.l = l; cur.v += v; }
   }
   if (cur) out.push(cur);
   return out;
@@ -2938,7 +3056,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,

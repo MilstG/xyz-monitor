@@ -8,7 +8,7 @@ const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFea
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, FOMC_DECISIONS } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, regime200, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, regime200, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -915,6 +915,50 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       + (m.red ? JSON.stringify(m.red) : "") + (m.rvol ? JSON.stringify(m.rvol) : "")
       + (m.doi ? JSON.stringify(m.doi) : "") + (m.fundByWin ? JSON.stringify(m.fundByWin) : "") + ";";
   }
+  // ---- volume profile + unified level map (build 2026.07.27-22) ------------------------------
+  // One memoized {vp, map} per name. Bars: dailyRaw for depth (370d equity AND crypto since -20),
+  // OVERLAID with the spine-derived daily buckets where they cover — the buckets carry the true
+  // low and the summed hourly volume, which dailyRaw structurally lacks (no l; v absent on some
+  // warm-cache bars). The recent window — exactly the part the profile's 1.5x recency weight
+  // emphasizes — therefore rides true OHLCV; the old anchor degrades to half-range honestly.
+  // detectLevels, the profile, and the EMA50/200 all read the SAME merged bars, so the map's
+  // sources can never disagree about what a day looked like. Memo key: daily length + bucket
+  // count — the profile moves when a day lands or the spine grows an hour, never on the 15s tick.
+  function volMapFor(r) {
+    const dr = r && r.dailyRaw;
+    if (!Array.isArray(dr) || dr.length < 30 || !(r.px > 0)) return null;
+    const db = bucketsFor(r, 24);
+    const memoK = dr.length + "|" + (Array.isArray(db) ? db.length : 0);
+    if (r._vpK === memoK && r._vpM !== undefined) return r._vpM;
+    let out = null;
+    try {
+      const byDay = new Map();
+      if (Array.isArray(db)) for (const b of db) if (b && isFinite(+b.t) && b.o != null) byDay.set(Math.floor(+b.t / DAY), b);
+      const bars = [];
+      for (const k of dr) {
+        if (!k || !isFinite(+k.t) || !(+k.c > 0)) continue;
+        const ov = byDay.get(Math.floor(+k.t / DAY));
+        if (ov) bars.push({ t: +k.t, c: +ov.c, h: +ov.h, l: +ov.l, v: ov.v > 0 ? +ov.v : (+k.v > 0 ? +k.v : 0) });
+        else { const c = +k.c, h = +k.h; bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: c, v: +k.v > 0 ? +k.v : 0 }); }
+      }
+      const closes = bars.map((k) => [k.t, k.c]);
+      const sd30 = retStd(dailyRets(closes).slice(-30), 15);
+      if (bars.length >= 60 && sd30 > 0) {
+        const vp = volumeProfile(bars, sd30);
+        const str = detectLevels(bars, r.px, sd30);
+        // EMA50/200 over the daily closes (chart-language dynamic levels, tagged as such in the
+        // map — the AI validator's ban on EMAs-as-chart-levels is a different consumer and stands)
+        const ema = (N) => { if (closes.length < N + 10) return null;
+          const k2 = 2 / (N + 1); let e = closes[0][1];
+          for (let i = 1; i < closes.length; i++) e = closes[i][1] * k2 + e * (1 - k2);
+          return e > 0 ? e : null; };
+        const map = levelMap({ str, vp, e50: ema(50), e200: ema(200) }, r.px, sd30);
+        if (vp || map) out = { vp, map, sd30: +sd30.toFixed(3), dexVol: r.uni === "xyz" };
+      }
+    } catch (_) { out = null; }
+    r._vpK = memoK; r._vpM = out;
+    return out;
+  }
   function buildSnapshot() {
     sampleRegime();
     const tapeXyz = tapeStatsFor("xyz", activeMarkets());
@@ -964,8 +1008,35 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // object the drawer chips serve — one code path, board and drawer can never disagree.
       const droll = r.uni === "main" && cz ? czRoll.get(r.coin) : null;
       const tb = trendByCoin.get(r.coin);
+      // Swing-R available (-22): distance to the next level-map target in the TREND direction /
+      // distance to the D1 EMA21 void — how much structural room the next swing trade has, per
+      // unit of risk, ranked universe-wide BEFORE any signal fires. Target = nearest map entry
+      // on the trend side with confluence weight >= 0.7, pure-LVN entries excluded (thin volume
+      // is a traversal feature, not a destination). Requires a trend side (the board's own) and
+      // a live EMA21 — anything missing is an honest dash, never a guess. Levels are frozen-ish
+      // (the map moves on daily cadence); the RATIO is computed here against the snapshot mark,
+      // same convention as e21d.
+      let swr, swrT, swrV, swrS;
+      try {
+        const vm = volMapFor(r);
+        const e21v = tb && tb.e21 > 0 ? tb.e21 : null;
+        if (vm && vm.map && e21v && tb && r.px > 0) {
+          const distV = Math.abs(r.px / e21v - 1) * 100;
+          let tgt = null;
+          for (const it of vm.map.items) {
+            if (!(it.w >= 0.7) || (it.srcs.length === 1 && it.srcs[0] === "lvn")) continue;
+            if (tb.side === "long" ? it.v > r.px * 1.005 : it.v < r.px * 0.995) {
+              if (tgt == null || (tb.side === "long" ? it.v < tgt.v : it.v > tgt.v)) tgt = it;
+            }
+          }
+          if (tgt && distV > 0.05) {
+            swr = +((Math.abs(tgt.v / r.px - 1) * 100) / distV).toFixed(2);
+            swrT = tgt.v; swrV = sig(e21v, 9); swrS = tgt.srcs.join("+");
+          }
+        }
+      } catch (_) {}
       return {
-        fundPct, red, rvol,
+        fundPct, red, rvol, swr, swrT, swrV, swrS,
         casc: casc || undefined, cascT: casc ? casc.t : undefined,
         liq24: droll ? (droll.ll24 || 0) + (droll.sl24 || 0) : undefined,
         liqL24: droll ? droll.ll24 : undefined, liqS24: droll ? droll.sl24 : undefined,
@@ -3123,7 +3194,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function buildLevelsStudy(U) {
     U = U || analyticsUniverse("stocks");
     const eq = U.roster().filter((r) => U.studyEligible(r));
-    const pooled = []; let contributing = 0, skippedThin = 0;
+    const pooled = [], pooledVp = []; let contributing = 0, contributingVp = 0, skippedThin = 0;
     for (const r of eq) {
       const db = bucketsFor(r, 24);
       if (!Array.isArray(db) || db.length < LVL_MINBARS + LVL_HORIZON + 2) { skippedThin++; continue; }
@@ -3139,13 +3210,37 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (r._lvSrc !== db) {
         r._lvSrc = db;
         r._lvEv = levelOutcomes(bars, sd30, { stride: LVL_STRIDE, horizon: LVL_HORIZON, minBars: LVL_MINBARS }).events;
+        // Profile-level audit (-22): the walk-forward HVNs through the IDENTICAL scoring loop
+        // and permutation control the structural detector faces — before the level map's
+        // hand-set hvn weight is ever replaced by a measured one, this is the measurement.
+        // HVN only: an LVN's claim is traversal (thin volume = less friction), which a
+        // touch/hold study structurally cannot score — auditing it here would test a claim
+        // nobody made. Wider stride bounds the per-prefix profile rebuild cost; the memo
+        // contract (spine-ref identity) is shared with the structural pass, one cadence.
+        r._vpEv = levelOutcomes(bars, sd30, { stride: LVL_STRIDE + 2, horizon: LVL_HORIZON, minBars: LVL_MINBARS,
+          detect: (pb, px2, sd2) => {
+            const vp2 = volumeProfile(pb, sd2);
+            if (!vp2 || !vp2.hvn.length) return null;
+            return { tauPct: Math.max(sd2 > 0 ? 0.4 * sd2 : 0, 0.5),
+              items: vp2.hvn.map((h) => ({ v: h.p, side: h.p >= px2 ? "res" : "sup", n: 1, ageD: 0 })) };
+          } }).events;
       }
       if (r._lvEv.length) { contributing++; for (const e of r._lvEv) pooled.push(e); }
+      if (r._vpEv && r._vpEv.length) { contributingVp++; for (const e of r._vpEv) pooledVp.push(e); }
     }
     if (contributing < LVL_MIN_EQ) return { pending: true, count: contributing, need: LVL_MIN_EQ };
     const st = levelStudy(pooled, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
     st.coverage = { tickers: contributing, skippedThin, windowDays: U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS,
       minBars: LVL_MINBARS, stride: LVL_STRIDE };
+    // The HVN report card: same aggregator, same floors, same distance buckets — directly
+    // comparable to the structural section above it. Until this shows excess over the matched
+    // placebo, the level map's hvn weight stays labeled hand-set and nothing downstream may
+    // cite an HVN as a measured edge.
+    if (pooledVp.length) {
+      st.profile = levelStudy(pooledVp, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });
+      st.profile.coverage = { tickers: contributingVp, source: "hvn", stride: LVL_STRIDE + 2,
+        note: "walk-forward volume-profile HVNs scored by the structural study's own loop and permutation control; LVNs are traversal features and are not auditable by touch/hold" };
+    }
     // Per-ticker verdicts through the SAME aggregator with the SAME floors — one code path. The
     // distance buckets ship per name so the chart follows the scope selector; most per-name cells
     // sit under the floor by construction and render as honest dim slots disclosing their n.
@@ -4667,7 +4762,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     const out = [];
     for (const k of src) { if (isFinite(+k.t) && isFinite(+k.c)) out.push(q(k)); }
-    return { coin, tf: key, px: r.px != null && isFinite(+r.px) ? sig(+r.px, 9) : null, minBars: 26, candles: out };
+    // Volume profile rides the chart payload (-22): same serveKeyed key (the coin stamp folds the
+    // spine, whose growth is exactly what moves the memoized profile), no new route, and the
+    // report chart + trend modal read ONE object — the histogram can never disagree with the map.
+    const vm = volMapFor(r);
+    return { coin, tf: key, px: r.px != null && isFinite(+r.px) ? sig(+r.px, 9) : null, minBars: 26, candles: out,
+      vp: vm && vm.vp ? vm.vp : null, dexVol: r.uni === "xyz" || undefined };
   }
 
   // ---- trend leaderboard (served at /api/trend) ----
