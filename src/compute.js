@@ -2809,7 +2809,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   // candle behaviour + time pivots + per-ticker scopes (build 2026.07.24-13)
   candleType, candleEvents, candlePool, pivotPool, anatomyTickerSummary, CANDLE_TYPES, PIVOT_EARLY_H,
   // crypto signal engine (build 2026.07.26-08): log-space claim geometry + crypto horizons
-  logLevel, logExtend, claimGeometryOk, clusterDays, evMeta, capPerUniverse, EV_META_MAIN };
+  logLevel, logExtend, claimGeometryOk, clusterDays, evMeta, capPerUniverse, tradeableNow, EV_META_MAIN };
 
 // ---- stop geometry validation ----------------------------------------------------------------
 // An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it
@@ -3395,11 +3395,16 @@ function netRR(o) {
   const riskPct = (Math.abs(entry - stop) / entry) * 100;
   const rewardPct = (Math.abs(target - entry) / entry) * 100;
   if (!(riskPct > 0) || !(rewardPct > 0)) return null;
-  const gross = rewardPct / riskPct;
-  const cr = o.carry && Number.isFinite(o.carry.r) ? o.carry.r : null;
-  return { riskPct: +riskPct.toFixed(3), rewardPct: +rewardPct.toFixed(3),
-    gross: +gross.toFixed(2), net: cr == null ? +gross.toFixed(2) : +(gross + cr).toFixed(2),
-    carryR: cr, carryKnown: cr != null };
+  return { riskPct: +riskPct.toFixed(3), rewardPct: +rewardPct.toFixed(3), gross: +(rewardPct / riskPct).toFixed(2) };
+}
+// Is this claim still takeable at the live mark? A separate question from what the geometry
+// claimed at fire, and it keeps its own answer: the void can be tagged or the target already
+// through while the frozen ratio remains exactly what it always was. Folding these two together
+// is what let a dead-or-drifted setup keep scoring against fire-time numbers.
+function tradeableNow(side, px, stop, target) {
+  if (!(px > 0) || !(stop > 0) || !(target > 0)) return false;
+  if (!stopGeometryOk(side, px, stop)) return false;                 // void already on the wrong side
+  return side === "long" ? target > px : target < px;                // target already through
 }
 
 // Expectancy in R for ONE instance: the event's out-of-sample hit rate applied to THIS instance's

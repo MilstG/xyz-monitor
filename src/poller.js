@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
-const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade } = require("./compute");
+const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
@@ -5688,7 +5688,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (!rec || !(rec.n >= ACT_REC_MIN_N)) return "norecord";
     if (!(rec.avgR > 0)) return "negexp";   // field is avgR, per actRecord — not avg
     if (evR == null || !(evR > 0)) return "negev";
-    if (!rr || !(rr.net >= ACT_MIN_RR)) return "thinRR";
+    if (!rr || !(rr.gross >= ACT_MIN_RR)) return "thinRR";
     if (liveNoEdge(ev)) return "noedge";
     return null;
   }
@@ -5726,7 +5726,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return recMemo.get(k);
     };
     const cands = [];
-    const rej = { expired: 0, noGeometry: 0, thinRR: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
+    const rej = { expired: 0, noGeometry: 0, untakeable: 0, thinRR: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
     for (const e of ledgerOpen.values()) {
       if (e.ev === "airead") continue;                          // the analyst's own claim, not a setup
       const r = rows.get(e.coin);
@@ -5758,12 +5758,27 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const tf = e.tf && ACT_TF_MS[e.tf] ? e.tf : "D1";
       const bars = barsInTrigger(e.t0, now, tf);
       if (bars != null && bars > ACT_MAX_BARS) { rej.expired++; continue; }
-      const carry = carryR({ side, entry: r.px, stop: e.stp, horizonMs: meta.horizonMs, fundingHourly: r.funding });
-      const rr = netRR({ side, entry: r.px, stop: e.stp, target, carry });
-      if (!rr) { rej.noGeometry++; continue; }                   // void passed or target already through
+      // Carry is computed against the FROZEN entry so it describes the claim, not a drifting mark.
+      // It is disclosed as its own line and deliberately never folded into R:R or EV: funding
+      // accrues on time held while R:R resolves on price, it is an extrapolation of the current
+      // rate rather than a locked one, and folding it in let a sub-threshold setup clear the
+      // ACT_MIN_RR gate on funding alone.
+      const carry = carryR({ side, entry: e.mark0, stop: e.stp, horizonMs: meta.horizonMs, fundingHourly: r.funding });
+      // R:R is FROZEN at the fire mark. Computing it against the live price made the ratio climb
+      // as price approached the void — risk is the denominator, so an entry one tick from
+      // invalidation scored an unbounded R:R and sorted straight to the top of the board, which
+      // meant the board ranked on proximity to being stopped out. It also silently broke the EV:
+      // rec.hit was measured on claims entered AT FIRE, and applying that hit rate to a
+      // much-closer-to-void entry overstates expectancy by exactly however far the mark has
+      // drifted. A frozen ratio and a fire-measured hit rate describe the same trade again.
+      const rr = netRR({ side, entry: e.mark0, stop: e.stp, target });
+      if (!rr) { rej.noGeometry++; continue; }                   // the claim's own geometry never made sense
+      // Separately: is it still takeable HERE? A claim can be perfectly framed at fire and already
+      // dead now. Different question, own reject reason.
+      if (!tradeableNow(side, r.px, e.stp, target)) { rej.untakeable++; continue; }
       const shadow = e.vi != null;
       const rec = recOf(e.ev, shadow);
-      const evR = setupEV(rec.hit, rr.net, rec.n, ACT_REC_MIN_N);
+      const evR = setupEV(rec.hit, rr.gross, rec.n, ACT_REC_MIN_N);
       // Gate BEFORE the merge, deliberately: merging first could let an unconfirmed candidate with
       // a flattering EV win a name+side and then be rejected, losing a confirmed row that was
       // sitting right behind it. Gate first, and the merge only ever arbitrates between setups
@@ -5799,7 +5814,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const board = mergeActionable(cands).sort((a, b) => (b.t0 || 0) - (a.t0 || 0)
       || (b.evR == null ? -Infinity : b.evR) - (a.evR == null ? -Infinity : a.evR)
       || (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
-    const sigA = JSON.stringify(board.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.net, x.evR]));
+    const sigA = JSON.stringify(board.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.gross, x.evR]));
     if (sigA !== actSig) { actSig = sigA; actVer = Date.now(); }
     actBuilt = now;
     actCache = { ts: now, dataTs: actVer,
