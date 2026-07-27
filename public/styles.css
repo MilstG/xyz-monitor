@@ -1025,3 +1025,25 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 /* Late past half a risk unit: still tradeable, but you are chasing and the row should say so. */
 .act-tbl .act-late-bad{color:var(--accent)}
 @media(max-width:480px){ .toast-wrap{left:12px;right:12px;max-width:none} }
+
+/* ---- actionable board: sortable head, expanded trade card ------------------------------------ */
+.act-th{cursor:pointer;user-select:none}
+.act-th:hover{color:var(--text)}
+.act-th.on{color:var(--accent)}
+.act-tbl .act-tf{color:var(--faint);font-size:9.5px}
+.act-tbl .act-rec{font-size:10.5px}
+.act-tbl tr.act-row.open{background:var(--panel2)}
+.act-tbl tr.act-detrow td{padding:0 0 9px 0;border-bottom:1px solid var(--grid)}
+.act-det{background:var(--panel2);border-left:2px solid var(--accent);padding:11px 13px;
+  font-family:var(--mono);font-size:11.5px;line-height:1.7}
+.act-det .ad-h{font-size:12.5px;color:var(--text);margin-bottom:8px}
+.act-det .ad-badge{font-size:9.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--accent);
+  border:1px solid var(--accent-dim);border-radius:4px;padding:1px 5px;margin-left:5px;cursor:help}
+.act-det .ad-g{display:grid;grid-template-columns:auto 1fr;gap:2px 14px}
+.act-det .ad-k{color:var(--muted);white-space:nowrap}
+.act-det .ad-v{color:var(--text)}
+.act-det .ad-sc,.act-det .ad-x{margin-top:8px;padding-top:7px;border-top:1px solid var(--grid);color:var(--muted)}
+.act-det .ad-x{margin-top:5px;padding-top:0;border-top:none;font-size:10.5px}
+.act-det .ad-w{margin-top:7px;padding-top:6px;border-top:1px solid var(--grid);color:var(--accent);font-size:10.5px}
+.act-det .ad-a{display:flex;gap:6px;margin-top:10px}
+.act-det .ad-a .btn{font-size:10.5px;padding:4px 9px}

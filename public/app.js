@@ -123,7 +123,9 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   alerts:{ rules:[], log:[], unseen:0, notify:false,
     // Trigger alerts are NOT user-authored rules — they're a standing subscription to "any new
     // setup passing these filters", so they sit alongside A.rules rather than inside it.
-    trig:{ on:false, provenOnly:true, minEV:0.30, maxLate:0.50, minRR:1.5, muted:[] } } };
+    // No provenOnly here: the server's stream now carries only CONFIRMED setups, so the filter
+    // would be a no-op that implies unconfirmed alerts are possible. minRR tracks the board's gate.
+    trig:{ on:false, minEV:0.30, maxLate:0.50, minRR:2.0, muted:[] } } };
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -1927,9 +1929,8 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   const T=A.trig;
   const mutedHtml=T.muted.length? T.muted.map(c=>`<span class="arule" style="display:inline-flex;margin:0 4px 4px 0"><span>${esc(tickerOf(c))}</span><span class="ax" data-unmute="${esc(c)}" title="unmute">✕</span></span>`).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nothing muted.</div>';
-  pop.innerHTML=`<div class="cphead">Trigger alerts <span class="sec" style="text-transform:none;letter-spacing:0">· new swing setups</span></div>
+  pop.innerHTML=`<div class="cphead">Trigger alerts <span class="sec" style="text-transform:none;letter-spacing:0">· new confirmed setups only</span></div>
     <label class="copt"><input type="checkbox" id="at-on" ${T.on?'checked':''}/> Alert on new triggers</label>
-    <label class="copt"><input type="checkbox" id="at-proven" ${T.provenOnly?'checked':''}/> Proven setups only</label>
     <div class="arule-form" style="margin-top:6px">
       <select id="at-ev" title="Minimum expectancy to interrupt you for."><option value="">any EV</option><option value="0"${T.minEV===0?' selected':''}>EV &ge; 0</option><option value="0.3"${T.minEV===0.3?' selected':''}>EV &ge; +0.30R</option><option value="0.5"${T.minEV===0.5?' selected':''}>EV &ge; +0.50R</option></select>
       <select id="at-late" title="An alert on a setup that already ran away from its fire is noise, not an opportunity."><option value="">any lateness</option><option value="0.25"${T.maxLate===0.25?' selected':''}>late &le; 0.25R</option><option value="0.5"${T.maxLate===0.5?' selected':''}>late &le; 0.50R</option><option value="1"${T.maxLate===1?' selected':''}>late &le; 1.00R</option></select>
@@ -1953,7 +1954,6 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   el('ar-notify').addEventListener('change',e=>toggleNotify(e.target.checked));
   el('ar-clear').onclick=()=>{ A.log=[]; A.unseen=0; updateBell(); buildAlertsPanel(); };
   el('at-on').addEventListener('change',e=>{ T.on=e.target.checked; saveAlerts(); if(T.on) loadTriggers(); });
-  el('at-proven').addEventListener('change',e=>{ T.provenOnly=e.target.checked; saveAlerts(); });
   el('at-ev').addEventListener('change',e=>{ T.minEV=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
   el('at-late').addEventListener('change',e=>{ T.maxLate=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
   pop.querySelectorAll('[data-unmute]').forEach(x=>x.addEventListener('click',()=>{
@@ -1980,9 +1980,13 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.trig&&typeof d.trig==='object') state.alerts.trig=Object.assign(state.alerts.trig,d.trig,{muted:Array.isArray(d.trig.muted)?d.trig.muted:[]}); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
+const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable']);
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
-  if(h==='sectors'||h==='corr'||h==='markets'||h==='sessions'||h==='backtest'||h==='earnings'||h==='trend'||h==='report') showView(h); }
+  // Every view name is routable, not a hand-kept subset. The old whitelist silently omitted
+  // actionable, signals and news — which made #actionable a no-op, i.e. a hidden tab would have
+  // been unreachable by the very URL that is supposed to reach it.
+  if(HASH_VIEWS.has(h)) showView(h); }
 let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
@@ -3462,7 +3466,6 @@ function trigSeqSet(n){ try{ store.set(TSEQ,String(n)); }catch(_){} }
 // board and the alert can't disagree about which setups are worth surfacing.
 function trigEligibleClient(ev,c){
   if(!ev) return false;
-  if(c.provenOnly && ev.unproven) return false;
   if(c.minEV!=null && (ev.evR==null || ev.evR<c.minEV)) return false;
   if(c.minRR!=null && !(ev.rr && ev.rr.net>=c.minRR)) return false;
   if(c.maxLate!=null && ev.late!=null && ev.late>c.maxLate) return false;
@@ -3538,102 +3541,147 @@ function openActionable(){
       _actSide=b.dataset.aside;
       seg.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));
       renderActionable(); });
-    ['act-provenonly','act-noearn'].forEach(id=>{ const c=el(id); if(c) c.addEventListener('change',renderActionable); });
+    const ce=el('act-noearn'); if(ce) ce.addEventListener('change',renderActionable);
+    const rs=el('act-sortreset'); if(rs) rs.addEventListener('click',()=>{ _actSort={k:'ago',d:1}; actSortSave(); renderActionable(); });
+    actSortLoad();
   }
   renderActionable();
   if(Date.now()-_actLast>60*1000) loadActionable();
 }
+// ---- board renderer ----------------------------------------------------------------------
+// Every number here arrives on the payload. The client sorts and formats; it never re-derives a
+// level, a reward:risk, an expectancy or a lateness. Sorting is the ONE thing it owns.
+const ASKEY='xyzmon.act.sort.v1';
+let _actSort={k:'ago',d:1}, _actOpen={};
+function actSortLoad(){ try{ const d=JSON.parse(store.get(ASKEY)||'null');
+  if(d&&typeof d.k==='string'&&(d.d===1||d.d===-1)) _actSort=d; }catch(_){ } }
+function actSortSave(){ try{ store.set(ASKEY,JSON.stringify(_actSort)); }catch(_){} }
 function actRR(x){ return x!=null&&isFinite(x)?(+x).toFixed(2):'\u2014'; }
+function actEV(x){ return x!=null&&isFinite(x)?((x>=0?'+':'')+(+x).toFixed(2)):'\u2014'; }
 function actLate(x){ return x!=null&&isFinite(x)?((x>=0?'+':'')+(+x).toFixed(2)):'\u2014'; }
 // Colour reads the trade, not the sign: coming back to you is good, running away is not.
 function actLateCls(x){ if(x==null||!isFinite(x)) return 'sec'; if(x<=0) return 'pos'; return x>0.5?'act-late-bad':'sec'; }
-function actEV(x){ return x!=null&&isFinite(x)?((x>=0?'+':'')+(+x).toFixed(2)):'\u2014'; }
-// Row tooltip: the full audit trail behind the two numbers that do the ranking. Gross vs net is
-// spelled out here rather than in a column so the carry drag is legible without widening the board.
-function actRowTip(r){
-  const L=[];
-  L.push(`${r.label} \u00b7 ${r.side} \u00b7 ${r.tf} rung \u00b7 ${r.horizonD}d horizon`);
-  if(r.also&&r.also.length) L.push('corroborating: '+r.also.map(a=>a.label+(a.unproven?' (unproven)':'')).join(', '));
-  L.push(`record: ${r.rec.n?`${Math.round(r.rec.hit*100)}% hit \u00b7 n=${r.rec.n} resolved \u00b7 avg ${r.rec.avgR>=0?'+':''}${r.rec.avgR}R`:'no resolved fires yet'}`);
-  L.push(`fired at ${r.fired} \u00b7 now ${r.entry}`);
-  L.push(r.late==null?'lateness unavailable':`late ${actLate(r.late)}R ${r.late<=0?'\u2014 the market came back, you can enter better than the record\u2019s entry':'\u2014 that much of your stop distance is spent before entry'}`);
-  L.push(`risk to void ${r.rr.riskPct}% \u00b7 reward to target ${r.rr.rewardPct}%`);
-  L.push(`R:R gross ${actRR(r.rr.gross)}`);
-  if(r.rr.carryKnown) L.push(`carry over ${r.horizonD}d: ${r.carry.aprPct>=0?'+':''}${r.carry.aprPct}% APR = ${r.carry.costPct}% of notional = ${actEV(r.rr.carryR)}R ${r.rr.carryR>=0?'(paid to hold)':'(you pay)'}`);
-  else L.push('carry: funding unavailable \u2014 R:R shown gross');
-  L.push(`R:R net ${actRR(r.rr.net)}`);
-  L.push(r.evR!=null?`expectancy ${actEV(r.evR)}R = hit\u00d7net \u2212 (1\u2212hit)\u00d71`:'expectancy unavailable \u2014 record below the 8-fire floor');
-  L.push(`in trigger: ${r.bars==null?'\u2014':r.bars} ${r.tf} bar(s)${r.stale?' \u2014 going stale':''}`);
-  if(r.earn) L.push(`earnings ${r.earn.days}d out (${r.earn.s}) \u2014 INSIDE the horizon`);
-  return L.join('\n');
+// Elapsed since the claim fired, in the units a person thinks in.
+function actAgo(ms){ if(ms==null||!isFinite(ms)||ms<0) return '\u2014';
+  const m=Math.floor(ms/60000); if(m<60) return m+'m';
+  if(m<1440){ const h=Math.floor(m/60), r=m%60; return h+'h'+(r?' '+r+'m':''); }
+  const d=Math.floor(m/1440), h=Math.floor((m%1440)/60); return d+'d'+(h?' '+h+'h':''); }
+const ACT_COLS=[
+  {k:'t',    lb:'Ticker', al:'left'},
+  {k:'ev',   lb:'Setup',  al:'left'},
+  {k:'ago',  lb:'Ago',    al:'right', tip:'Time since the claim fired. The default sort, newest first.'},
+  {k:'fired',lb:'Fired',  al:'right', tip:'The mark frozen when the claim opened \u2014 the entry its record was scored on.'},
+  {k:'entry',lb:'Now',    al:'right', tip:'The live mark. Reward:risk is priced from here, so a setup the market walks away from decays off the board on its own.'},
+  {k:'late', lb:'Late',   al:'right', tip:'Distance from the fire in the setup\u2019s OWN risk unit. +0.60R means over half your stop distance is spent before you are in. Negative means the market came back and you enter better than the record did.'},
+  {k:'void', lb:'Void',   al:'right', tip:'The claim\u2019s frozen invalidation level. Never recomputed here.'},
+  {k:'target',lb:'Target',al:'right', tip:'The claim\u2019s frozen target.'},
+  {k:'rr',   lb:'R:R',    al:'right', tip:'Reward:risk NET of expected funding across the horizon.'},
+  {k:'evR',  lb:'EV',     al:'right', tip:'Expectancy in R for entering THIS instance here: hit\u00d7(net R:R) \u2212 (1\u2212hit)\u00d71.'},
+  {k:'rec',  lb:'Rec',    al:'right', tip:'Out-of-sample record for this setup: hit rate and resolved fires.'}];
+function actCell(r,k){
+  if(k==='rr') return r.rr?r.rr.net:null;
+  if(k==='rec') return r.rec?r.rec.n:null;
+  if(k==='ago') return r.t0?(Date.now()-r.t0):null;
+  return r[k];
 }
-function actRows(list){
-  let h='';
-  for(const r of list){
-    const sideCls=r.side==='long'?'pos':'neg';
-    const also=(r.also&&r.also.length)?` <span class="act-also" title="${esc(r.also.map(a=>a.label).join(', '))}">+${r.also.length}</span>`:'';
-    h+=`<tr data-coin="${esc(r.coin)}" title="${esc(actRowTip(r))}">`
-      +`<td class="${sideCls}"><span class="tk">${esc(r.t)}</span>${r.earn?' <i class="act-warn" title="earnings inside the horizon">\u26a0</i>':''}</td>`
-      +`<td class="sec">${esc(r.label)}${also}</td>`
-      +`<td class="sec" style="text-align:center">${esc(r.tf)}</td>`
-      +`<td class="sec" style="text-align:right">${fmtPrice(r.fired)}</td>`
-      +`<td style="text-align:right">${fmtPrice(r.entry)}</td>`
-      +`<td style="text-align:right" class="${actLateCls(r.late)}">${actLate(r.late)}</td>`
-      +`<td class="neg" style="text-align:right">${fmtPrice(r.void)}</td>`
-      +`<td class="sec" style="text-align:right">${fmtPrice(r.target)}</td>`
-      +`<td style="text-align:right">${actRR(r.rr.net)}${r.rr.carryKnown?'':'<span class="act-note" title="funding unavailable for this market \u2014 the figure is gross">*</span>'}</td>`
-      +`<td class="act-ev" style="text-align:right">${actEV(r.evR)}</td>`
-      +`<td style="text-align:right" class="${r.stale?'act-stale':'sec'}">${r.bars==null?'\u2014':r.bars}</td>`
-      +`</tr>`;
-  }
+function actCmp(a,b){
+  const k=_actSort.k, d=_actSort.d;
+  if(k==='t'||k==='ev'){ const x=String(a[k]||''), y=String(b[k]||'');
+    return (x<y?-1:x>y?1:0)*d; }
+  let x=actCell(a,k), y=actCell(b,k);
+  // Nulls always sort last, in BOTH directions. Reversing a column must never float a row with
+  // no value to the top as though it had the best one.
+  const xn=(x==null||!isFinite(x)), yn=(y==null||!isFinite(y));
+  if(xn&&yn) return 0; if(xn) return 1; if(yn) return -1;
+  return (y-x)*d;
+}
+function actHead(){
+  let h='<thead><tr>';
+  for(const c of ACT_COLS){ const on=_actSort.k===c.k, ar=on?(_actSort.d===1?' \u25be':' \u25b4'):'';
+    h+=`<th data-sk="${c.k}" title="${esc((c.tip?c.tip+' \u00b7 ':'')+'click to sort')}" class="act-th${on?' on':''}" style="text-align:${c.al}">${esc(c.lb)}${ar}</th>`; }
+  return h+'</tr></thead>';
+}
+// Expanded trade card. Says what the trade is, what the record behind it is, and every condition
+// that would take it off the board — all from the payload.
+function actDetail(r){
+  const rec=r.rec||{}, R=r.rr||{};
+  const g=[];
+  g.push(['the trade',`enter ${fmtPrice(r.entry)} \u00b7 void ${fmtPrice(r.void)} \u00b7 target ${fmtPrice(r.target)}`]);
+  g.push(['the record',rec.n?`${Math.round(rec.hit*100)}% hit \u00b7 n=${rec.n} resolved \u00b7 avg ${rec.avgR>=0?'+':''}${rec.avgR}R`:'no resolved fires']);
+  g.push(['risk / reward',`${R.riskPct}% to void \u00b7 ${R.rewardPct}% to target`]);
+  g.push(['R:R',`${actRR(R.gross)} gross \u2192 <b>${actRR(R.net)} net</b>`]);
+  g.push(['carry',R.carryKnown?`${r.carry.aprPct>=0?'+':''}${r.carry.aprPct}% APR over ${r.horizonD}d = ${actEV(R.carryR)}R ${R.carryR>=0?'(paid to hold)':'(you pay)'}`:'funding unavailable \u2014 R:R shown gross']);
+  g.push(['expectancy',`<b class="act-ev">${actEV(r.evR)}R</b> = hit\u00d7net \u2212 (1\u2212hit)\u00d71`]);
+  g.push(['fired',`${actAgo(Date.now()-r.t0)} ago \u00b7 ${r.bars==null?'\u2014':r.bars} ${r.tf} bar(s) in trigger`]);
+  g.push(['lateness',r.late==null?'unavailable':`${actLate(r.late)}R ${r.late<=0?'\u2014 the market came back, you enter better than the record did':'of your stop spent before entry'}`]);
+  let h=`<div class="act-det"><div class="ad-h"><b class="${r.side==='long'?'pos':'neg'}">${esc(r.t)} ${esc(r.side.toUpperCase())}</b> \u00b7 ${esc(r.label)} on the ${esc(r.tf)} rung \u00b7 ${r.horizonD}d horizon`
+    +(r.prime===true?' <span class="ad-badge" title="This setup was prime at fire time by the signals engine\u2019s heuristic: hit \u2265 60%, positive average, clean structure, no earnings. Shown, not enforced \u2014 a lower-hit setup at high R:R is still worth taking.">prime at fire</span>':'')
+    +(r.also&&r.also.length?` \u00b7 <span class="sec">corroborated by ${esc(r.also.map(a=>a.label).join(', '))}</span>`:'')+`</div><div class="ad-g">`;
+  for(const [k,v] of g) h+=`<div class="ad-k">${k}</div><div class="ad-v">${v}</div>`;
+  h+=`</div><div class="ad-sc">if it works, target pays <b class="pos">+${actRR(R.net)}R</b> \u00b7 if it fails, the void costs <b class="neg">\u22121.00R</b></div>`
+    +`<div class="ad-x">Leaves the board at ${r.bars==null?'\u2014':''}${_actMaxBars} bars in trigger, if price passes ${fmtPrice(r.void)}, or if net R:R falls under ${_actMinRR}.</div>`;
+  if(r.earn) h+=`<div class="ad-w">\u26a0 earnings in ${r.earn.days}d (${esc(r.earn.s)}) \u2014 inside the ${r.horizonD}d horizon. Flagged, not filtered: a scheduled binary is a prior the base rate cannot see.</div>`;
+  h+=`<div class="ad-a"><button class="btn" data-rep="${esc(r.coin)}">AI report \u2192</button>`
+    +`<button class="btn" data-dr="${esc(r.coin)}">Open ${esc(r.t)}</button></div></div>`;
   return h;
 }
-const ACT_HEAD=`<thead><tr>`
-  +`<th>Ticker</th><th>Setup</th><th style="text-align:center">TF</th>`
-  +`<th style="text-align:right" title="The mark frozen when the claim opened \u2014 the entry its track record was scored on.">Fired</th>`
-  +`<th style="text-align:right" title="The live mark \u2014 what entering now costs. Reward:risk is priced from here, not from the fire-time mark, so a setup the market has walked away from decays off the board on its own.">Now</th>`
-  +`<th style="text-align:right" title="How far price has travelled from the fire, in the setup's OWN risk unit. +0.60R means over half your stop distance is already spent before you are in, so you are taking a worse trade than the record describes. Negative means the market came back and you can enter better than the fire.">Late</th>`
-  +`<th style="text-align:right" title="The claim's frozen invalidation level, stamped at fire time. Never recomputed.">Void</th>`
-  +`<th style="text-align:right" title="The claim's frozen target, stamped at fire time.">Target</th>`
-  +`<th style="text-align:right" title="Reward:risk NET of expected funding across the setup's horizon. Hover a row for the gross figure and the carry drag.">R:R</th>`
-  +`<th style="text-align:right" title="Expectancy in R for entering THIS instance here: hit\u00d7(net R:R) \u2212 (1\u2212hit)\u00d71, using the event's out-of-sample hit rate. Blank below 8 resolved fires.">EV</th>`
-  +`<th style="text-align:right" title="Bars in trigger, in this setup's own timeframe. A daily retest on its ninth bar is not the same animal as one on its first.">Age</th>`
-  +`</tr></thead>`;
+let _actMaxBars=10, _actMinRR='2.00';
 function renderActionable(){
   const box=el('act-body'); if(!box) return;
   const d=_act;
   if(!d){ box.innerHTML='<div class="msg">Loading\u2026</div>'; return; }
   const asof=el('act-asof');
   if(asof) asof.textContent=d.ts?('as of '+new Date(d.ts).toLocaleTimeString()):'';
-  const provenOnly=!!(el('act-provenonly')&&el('act-provenonly').checked);
-  const noEarn=!!(el('act-noearn')&&el('act-noearn').checked);
-  const flt=(a)=>(a||[]).filter(r=>(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn));
-  const P=flt(d.proven), U=provenOnly?[]:flt(d.unproven);
   const p=d.params||{}, c=d.coverage||{};
+  _actMaxBars=p.maxBars||10; _actMinRR=(p.minRR||2).toFixed(2);
+  const noEarn=!!(el('act-noearn')&&el('act-noearn').checked);
+  const rows=(d.rows||[]).filter(r=>(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)).slice().sort(actCmp);
   let h='';
-  if(!P.length&&!U.length){
-    h+=`<div class="msg">Nothing at a swing trigger right now under these filters. `
-      +`${c.openClaims!=null?`${c.openClaims} open claim(s) scanned`:''}`
-      +`${c.thinRR?` \u00b7 ${c.thinRR} rejected on reward:risk below ${p.minRR}`:''}`
-      +`${c.expired?` \u00b7 ${c.expired} aged past ${p.maxBars} bars`:''}`
-      +`${c.noGeometry?` \u00b7 ${c.noGeometry} without tradeable geometry from here`:''}.</div>`;
+  if(!rows.length){
+    h+=`<div class="msg">Nothing confirmed at a swing trigger right now.`
+      +`${c.openClaims!=null?` ${c.openClaims} open claim(s) scanned`:''}`
+      +`${c.norecord?` \u00b7 ${c.norecord} without a record yet`:''}`
+      +`${c.negexp?` \u00b7 ${c.negexp} whose record is flat or negative`:''}`
+      +`${c.negev?` \u00b7 ${c.negev} negative-EV from here`:''}`
+      +`${c.thinRR?` \u00b7 ${c.thinRR} below R:R ${_actMinRR}`:''}`
+      +`${c.expired?` \u00b7 ${c.expired} aged out`:''}`
+      +`${c.noGeometry?` \u00b7 ${c.noGeometry} no longer tradeable from here`:''}.`
+      +` This board suggests only confirmed setups \u2014 an empty board is a real answer.</div>`;
+  } else {
+    h+=`<table class="trend-t act-tbl">${actHead()}<tbody>`;
+    for(const r of rows){
+      const sc=r.side==='long'?'pos':'neg', op=!!_actOpen[r.coin+'|'+r.side];
+      h+=`<tr class="act-row${op?' open':''}" data-key="${esc(r.coin+'|'+r.side)}" data-coin="${esc(r.coin)}">`
+        +`<td class="${sc}">${op?'\u25be ':''}<span class="tk">${esc(r.t)}</span>${r.earn?' <i class="act-warn" title="earnings inside the horizon">\u26a0</i>':''}</td>`
+        +`<td class="sec">${esc(r.label)} <span class="act-tf">${esc(r.tf)}</span>${r.also&&r.also.length?` <span class="act-also" title="${esc(r.also.map(a=>a.label).join(', '))}">+${r.also.length}</span>`:''}</td>`
+        +`<td style="text-align:right">${actAgo(Date.now()-r.t0)}</td>`
+        +`<td class="sec" style="text-align:right">${fmtPrice(r.fired)}</td>`
+        +`<td style="text-align:right">${fmtPrice(r.entry)}</td>`
+        +`<td style="text-align:right" class="${actLateCls(r.late)}">${actLate(r.late)}</td>`
+        +`<td class="neg" style="text-align:right">${fmtPrice(r.void)}</td>`
+        +`<td class="sec" style="text-align:right">${fmtPrice(r.target)}</td>`
+        +`<td style="text-align:right">${actRR(r.rr.net)}${r.rr.carryKnown?'':'<span class="act-note" title="funding unavailable for this market \u2014 the figure is gross">*</span>'}</td>`
+        +`<td class="act-ev" style="text-align:right">${actEV(r.evR)}</td>`
+        +`<td class="sec act-rec" style="text-align:right">${r.rec&&r.rec.n?Math.round(r.rec.hit*100)+'%\u00b7'+r.rec.n:'\u2014'}</td>`
+        +`</tr>`;
+      if(op) h+=`<tr class="act-detrow"><td colspan="${ACT_COLS.length}">${actDetail(r)}</td></tr>`;
+    }
+    h+=`</tbody></table>`;
   }
-  if(P.length){
-    h+=`<div class="act-h">Proven \u2014 ranked by expectancy <span class="sec">${P.length} row(s)</span></div>`
-      +`<table class="trend-t act-tbl">${ACT_HEAD}<tbody>${actRows(P)}</tbody></table>`;
-  }
-  if(U.length){
-    h+=`<div class="act-h">No record yet \u2014 ranked by net R:R <span class="sec">${U.length} row(s)</span></div>`
-      +`<table class="trend-t act-tbl">${ACT_HEAD}<tbody>${actRows(U)}</tbody></table>`;
-  }
-  h+=`<div class="act-foot"><b style="color:var(--text)">Fired</b> is the mark frozen when the claim opened \u2014 the entry its record was scored on; <b style="color:var(--text)">Now</b> is live, and <b style="color:var(--text)">Late</b> is the gap between them in the setup's own risk unit. <b style="color:var(--text)">void</b> and <b style="color:var(--text)">target</b> are the claim's geometry, frozen at fire time and never re-derived here. `
-    +`<b style="color:var(--text)">R:R is net of expected funding</b> across the setup's horizon \u2014 at days-to-weeks holds carry is a real slice of R, and it flips sign: a short in a name paying to be short is paid to wait. Hover any row for gross vs net and the full record. `
-    +`<b style="color:var(--text)">EV</b> prices this instance's own geometry with the event's out-of-sample hit rate, and is blank below ${p.recMinN||8} resolved fires \u2014 those rows sit in their own section rather than being handed a fabricated rank. `
-    +`Horizons of ${p.minHorizonDays||3}d or longer only (${(p.tfs||['D1','H12','H4']).join(' \u00b7 ')}); a setup drops off after ${p.maxBars||10} bars in trigger or once its void is passed. `
-    +`The ledger takes no crypto claims, so this board is the equity universe only. Not investment advice.</div>`;
+  h+=`<div class="act-foot"><b style="color:var(--text)">Confirmed only.</b> A row appears here only if the setup has at least ${p.recMinN||8} resolved out-of-sample fires, those fires paid on average, this entry still models positive expectancy after carry and lateness, and net R:R is at least ${_actMinRR}. Most events in the ledger do not clear that \u2014 which is the honest result of testing them, and why this board is often short or empty. Setups still earning a record are not shown here; the strategy panel tracks those. `
+    +`<b style="color:var(--text)">Fired</b> is the mark frozen when the claim opened \u2014 the entry its record was scored on; <b style="color:var(--text)">Now</b> is live, and <b style="color:var(--text)">Late</b> is the gap in the setup's own risk unit. Void and target are the claim's geometry, frozen at fire time and never re-derived here. R:R is net of expected funding over the horizon. `
+    +`Horizons of ${p.minHorizonDays||3}d or longer only (${(p.tfs||['D1','H12','H4']).join(' \u00b7 ')}). Equities only \u2014 the ledger takes no crypto claims. Not investment advice.</div>`;
   box.innerHTML=h;
-  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{
-    const cn=tr.dataset.coin; if(state.rows.has(cn)){ showView('markets'); openDetail(cn); } }));
+  box.querySelectorAll('th[data-sk]').forEach(th=>th.addEventListener('click',()=>{
+    const k=th.dataset.sk;
+    if(_actSort.k===k) _actSort.d=-_actSort.d; else _actSort={k,d:1};
+    actSortSave(); renderActionable(); }));
+  box.querySelectorAll('tr.act-row').forEach(tr=>tr.addEventListener('click',()=>{
+    const k=tr.dataset.key; _actOpen[k]=!_actOpen[k]; renderActionable(); }));
+  box.querySelectorAll('[data-rep]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
+    showView('report'); if(typeof reportOpenFor==='function') reportOpenFor(b.dataset.rep); }));
+  box.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
+    const cn=b.dataset.dr; if(state.rows.has(cn)){ showView('markets'); openDetail(cn); } }));
 }
 
 // ===== signals tab =====
@@ -5317,7 +5365,7 @@ function saveTabOrder(){ try{ const nav=document.querySelector('nav.tabs');
 // the whole API surface behind a hidden tab stay live and tested, so this is a display decision
 // and un-hiding is a one-word change here. The tab remains reachable by deep link (#backtest) and
 // through the command palette — hidden from the strip, not withdrawn from the app.
-const HIDDEN_TABS=new Set(['backtest']);
+const HIDDEN_TABS=new Set(['backtest','actionable']);
 function applyTabVisibility(){
   const nav=document.querySelector('nav.tabs'); if(!nav) return;
   nav.querySelectorAll('.tab').forEach(t=>{ if(HIDDEN_TABS.has(t.dataset.view)) t.hidden=true; });
@@ -6699,6 +6747,8 @@ setInterval(aiTickCountdown,1000);
 // Trigger cursor: polled on its own cadence so an alert lands whether or not the Actionable
 // tab is the one you're looking at. Server-side detection means nothing is missed while closed.
 setInterval(loadTriggers,60*1000); setTimeout(loadTriggers,4000);
+// Ago is elapsed wall-clock, so a static render goes stale. Cheap repaint, only while visible.
+setInterval(()=>{ if(state.view==='actionable'&&_act) renderActionable(); },30*1000);
 function aiMatches(qs){ qs=(qs||'').trim().toUpperCase(); if(!qs) return [];
   const out=[];
   for(const r of state.rows.values()){ if(r.delisted) continue;
