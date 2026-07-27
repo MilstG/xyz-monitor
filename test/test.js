@@ -9143,3 +9143,80 @@ test("panel: your recipients only in the bell, everyone's in the admin panel, co
   assert.ok(/r\.admin\?'operator':'public'/.test(app), "the roster says which recipients hold operator privileges");
   assert.ok(/data-admunlink=/.test(app) && /Revoke this recipient/.test(app), "admin can revoke from there");
 });
+
+// ===== Popover self-close + legacy adoption (build 2026.07.27-12) ===============================
+
+test("a popover control that rebuilds its own panel must not close it", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // The mechanism: a section header calls buildAlertsPanel(), which replaces pop.innerHTML. By the
+  // time the click bubbles to document the clicked node is DETACHED, and a detached node is
+  // contained by nothing — so the outside-click test fires and the drawer shuts under the user.
+  assert.ok(/function clickedOutside\(pop, btn, e\)\{/.test(app), "one shared outside-click predicate");
+  assert.ok(/if\(!e\.target \|\| !e\.target\.isConnected\) return false;/.test(app),
+    "a target we removed ourselves is not an outside click");
+  // All four popovers share the pattern, so all four had the latent bug — only the alerts panel
+  // grew enough self-rebuilding controls for it to surface.
+  for (const pid of ["alertpop", "filterpop", "colpop", "laypop"]) {
+    const at = app.indexOf("const pop=el('" + pid + "');\n  if(clickedOutside(pop,");
+    assert.ok(at > 0, `${pid} must use the shared predicate`);
+  }
+  assert.ok(!/!pop\.hidden && !pop\.contains\(e\.target\)/.test(app), "no hand-rolled copy of the old test may remain");
+});
+
+test("admin can adopt recipients that predate ownership, but never take an owned one", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const p = twoUserHarness();
+  // Simulate a link made before per-browser ownership existed: no owner, operator privileges.
+  p.hydratePushNow();
+  const legacy = { chat: "9990001111", name: "Milst", since: Date.now(), cur: 0, classes: null,
+    trig: {}, muted: false, owner: "", admin: true };
+  const cb = p.pushMintCode("own-b", false); p.pushBindNow(cb.code, 2222222222, "friend");
+  // Reach in the way hydrate would, then confirm the panel can see the difference.
+  const before = p.getPush("own-a", true);
+  assert.ok(before.recipients.every((r) => r.owned === true || r.owned === false), "ownership is reported per row");
+
+  // An owned row is never claimable — that would be an admin quietly taking over someone's channel.
+  assert.equal(p.pushClaim("2222222222", "own-a", true).error, "already-owned");
+  assert.equal(p.pushClaim("2222222222", "own-a", false).error, "forbidden", "non-admins cannot claim at all");
+  assert.equal(p.pushClaim("nope", "own-a", true).error, "unknown");
+  void legacy;
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("claiming an unowned recipient moves it into the claiming browser's panel", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { createPoller } = require("../src/poller");
+  let saved = { ts: Date.now(), offset: 0, recipients: [
+    { chat: "9990001111", name: "Milst", since: Date.now(), cur: 0, classes: null, trig: {}, muted: false }] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    savePush: (d) => { saved = d; }, loadPush: () => saved };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydratePushNow();
+
+  // A row with no owner is invisible to every browser's own panel — which is exactly the state that
+  // left three linked accounts with no class chips anywhere after -11.
+  assert.equal(p.getPush("own-a", false).recipients.length, 0, "unowned rows belong to no browser");
+  const adminView = p.getPush("own-a", true);
+  assert.equal(adminView.recipients.length, 1);
+  assert.equal(adminView.recipients[0].owned, false, "…and the admin roster marks them unclaimed");
+  assert.equal(adminView.recipients[0].admin, true, "a pre-ownership link keeps operator privileges");
+
+  assert.equal(p.pushClaim("9990001111", "own-a", true).ok, true);
+  const after = p.getPush("own-a", false);
+  assert.equal(after.recipients.length, 1, "after claiming it appears in that browser's own panel");
+  assert.equal(after.recipients[0].mine, true, "…with full controls, not read-only");
+  assert.equal(p.pushClaim("9990001111", "own-c", true).error, "already-owned", "and it cannot be claimed twice");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("trend is opt-in and reachable: present in the class list, absent from the defaults", () => {
+  const C = require("../src/compute");
+  assert.ok(C.PUSH_CLASSES.includes("trend"));
+  assert.ok(!C.PUSH_DEFAULT_CLASSES.includes("trend"), "opt-in until its measured rate is known");
+  assert.ok(!C.PUSH_ADMIN_CLASSES.includes("trend"), "…but public, unlike ops");
+  const ev = { kind: "trend", coin: "X", t: "X", side: "long", title: "full 4/4 stack" };
+  assert.equal(C.pushEligible(ev, {}), false, "an unchosen subscription does not receive it");
+  assert.equal(C.pushEligible(ev, { classes: ["trend"] }), true, "choosing it works");
+});
