@@ -1981,12 +1981,31 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable']);
+// ===== feature visibility: ONE composition point ===============================================
+// Server-resolved, injected pre-paint into the shell (window.__FLAGS). Never re-derived here from a
+// raw flag — the same one-code-path rule the chart annotations follow. Before this, four places
+// decided whether a tab was visible (a client hide list, applyScope's loop, showView's crypto
+// redirect and the Treemap installer's own hide) and they could disagree; tabVisible() is the only
+// answer now, and the suite fails if a second list reappears.
+// Missing injection degrades to SHOWING everything rather than a blank app: the shell is served
+// no-store so this should be impossible, and the server gate is authoritative either way — a
+// cosmetic leak beats an app with no tabs.
+const FLAGS = (window.__FLAGS && typeof window.__FLAGS==='object') ? window.__FLAGS : null;
+const IS_ADMIN = !!window.__ADMIN;
+function featureOn(key){ return FLAGS ? !!FLAGS[key] : true; }
+// Crypto scope is Markets + Trend + Report + Correlation + Backtest + Sessions by design (the signal
+// engine is xyz-only since -101). This set was written out longhand in two places that had already
+// drifted apart once; it lives here now and both callers read it.
+const CRYPTO_VIEWS=new Set(['markets','trend','report','corr','backtest','sessions']);
+function inScope(v){ return state.scope!=='crypto' || CRYPTO_VIEWS.has(v); }
+function tabVisible(v){ return inScope(v) && featureOn(v); }
 function applyHash(){ let h; try{ h=decodeURIComponent(location.hash.replace(/^#/,'')); }catch(_){ h=''; }
   if(h.indexOf('t=')===0){ const coin=h.slice(2); showView('markets'); if(state.rows.has(coin)) openDetail(coin); return; }
   // Every view name is routable, not a hand-kept subset. The old whitelist silently omitted
   // actionable, signals and news — which made #actionable a no-op, i.e. a hidden tab would have
   // been unreachable by the very URL that is supposed to reach it.
-  if(HASH_VIEWS.has(h)) showView(h); }
+  // showView re-checks anyway, but stopping here keeps a gated #hash from clearing the active view.
+  if(HASH_VIEWS.has(h) && tabVisible(h)) showView(h); }
 let _analyticsInflight=false;
 function renderSessions(){ drawSessions(); loadAnalytics(); }
 async function loadAnalytics(){
@@ -3410,10 +3429,10 @@ function applyScope(){
   // ticker, so the same tab serves both universes regardless of scope. Signals left this
   // list at -101: the crypto side of the signal engine was removed, so the tab has nothing
   // true to show in crypto scope.
-  document.querySelectorAll('.tabs .tab').forEach(b=>{ b.hidden = cr && b.dataset.view!=='markets' && b.dataset.view!=='trend' && b.dataset.view!=='report' && b.dataset.view!=='corr' && b.dataset.view!=='backtest' && b.dataset.view!=='sessions'; });
+  applyTabVisibility();   // scope AND flags, composed in one place — this loop used to duplicate the scope half and drift from showView's copy
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
 
-  if(cr && state.view!=='markets' && state.view!=='trend' && state.view!=='report' && state.view!=='corr' && state.view!=='backtest' && state.view!=='sessions') { showView('markets'); }
+  if(!tabVisible(state.view)) { showView('markets'); }   // a scope flip OR a flag change can strand the active view
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
@@ -3424,7 +3443,10 @@ function applyScope(){
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
 }
 function showView(v){
-  if(state.scope==='crypto' && v!=='markets' && v!=='trend' && v!=='report' && v!=='corr' && v!=='backtest' && v!=='sessions') v='markets';   // crypto scope: Markets + Trend + Report + Correlation + Backtest + Sessions (-17); signal engine stays xyz-only
+  // Falls through to Markets when the target is out of scope OR gated. markets is PINNED public in
+  // the manifest precisely so this fallback can never itself be gated — otherwise a public user
+  // could be bounced into a view they cannot see and end up with no rendered tab at all.
+  if(!tabVisible(v)) v='markets';
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
@@ -5365,10 +5387,13 @@ function saveTabOrder(){ try{ const nav=document.querySelector('nav.tabs');
 // the whole API surface behind a hidden tab stay live and tested, so this is a display decision
 // and un-hiding is a one-word change here. The tab remains reachable by deep link (#backtest) and
 // through the command palette — hidden from the strip, not withdrawn from the app.
-const HIDDEN_TABS=new Set(['backtest','actionable']);
+// The old client-side hide list is gone: 'backtest' and 'actionable' are now admin-state entries in
+// the server manifest, which is the same hide expressed once instead of twice. Every tab is evaluated, so this
+// both hides AND un-hides — a flag flipped in the panel takes effect on the next load with no
+// markup change, and nothing can be left stuck hidden by a stale list.
 function applyTabVisibility(){
   const nav=document.querySelector('nav.tabs'); if(!nav) return;
-  nav.querySelectorAll('.tab').forEach(t=>{ if(HIDDEN_TABS.has(t.dataset.view)) t.hidden=true; });
+  nav.querySelectorAll('.tab').forEach(t=>{ t.hidden = !tabVisible(t.dataset.view); });
 }
 function applyTabOrder(){ let ord; try{ ord=JSON.parse(store.get(TABKEY)||'null'); }catch(_){ ord=null; }
   const nav=document.querySelector('nav.tabs'); if(!nav||!Array.isArray(ord)||!ord.length) return;
@@ -5650,7 +5675,9 @@ function closeCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'); if(bg)bg.hidden=true;
 function cmdkOpen(){ const m=el('cmdk'); return m&&!m.hidden; }
 function cmdkRender(qs){ const list=el('cmdk-list'); if(!list) return;
   qs=(qs||'').trim();
-  const tabHits=qs?CMDK_TABS.filter(t=>t.label.toLowerCase().includes(qs.toLowerCase())||t.v.includes(qs.toLowerCase())):CMDK_TABS.slice(0,0);
+  // Cmd+K is a THIRD way into a view, independent of the nav strip. Filtering here is not cosmetic:
+  // without it a gated tab stays reachable by name even with its button gone.
+  const tabHits=qs?CMDK_TABS.filter(t=>tabVisible(t.v)&&(t.label.toLowerCase().includes(qs.toLowerCase())||t.v.includes(qs.toLowerCase()))):CMDK_TABS.slice(0,0);
   const mk=aiMatches(qs).slice(0,8);
   _cmdkRows=[];
   let html='';
@@ -6422,7 +6449,7 @@ function renderTreemap(){
       // This installer runs on DOMContentLoaded — AFTER the boot applyScope() pass that hides
       // non-markets tabs in crypto scope. Without this line a page loaded in crypto scope
       // shows a stray Treemap tab until the next scope switch re-runs applyScope().
-      btn.hidden = (state.scope==='crypto');
+      btn.hidden = !tabVisible('treemap');   // was scope-only; now scope AND flags, same rule as every other tab
       // Join the systems that wired the static tabs before this one existed: saved tab order
       // (so a persisted position for treemap applies on load) and drag-to-reorder (idempotent).
       if(typeof applyTabOrder==='function') applyTabOrder();
@@ -6464,7 +6491,7 @@ function renderTreemap(){
 
     // deep link (#treemap on load) — not in crypto scope, which is Markets-only by design;
     // without the guard the treemap section would render on top of the markets table.
-    if((location.hash||'').replace(/^#/,'')==='treemap' && typeof showView==='function' && state.scope!=='crypto'){
+    if((location.hash||'').replace(/^#/,'')==='treemap' && typeof showView==='function' && tabVisible('treemap')){
       showView('treemap'); sec.hidden=false; renderTreemap(); }
   }
 
