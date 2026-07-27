@@ -921,6 +921,31 @@ function stopTouched(candles, t0, tEnd, dir, stp) {
   return seen ? false : null;   // null = no candles in window, touch state unknowable
 }
 
+// Live level-touch test for an OPEN claim, in the same sign convention stopTouched uses at
+// resolution. `bar` is an optional packed 5m candle [t,o,h,l,c,v]: the live mark alone misses a
+// wick that took the level and came back between two scans, which is exactly the touch that
+// matters. Returns false rather than null for missing inputs — an unknowable touch must not
+// announce, and the resolver's candle-based determination remains the record either way.
+//
+// The geometry, not the side, decides the comparison: a stop sits on the loss side of entry and a
+// target on the profit side, so for a long the stop is BELOW and the target ABOVE, and for a short
+// the mirror. Keying off `side` alone is what produced the stop-aware win fabricator this codebase
+// already had to repair once.
+function levelHit(side, kind, level, px, bar) {
+  if (!(level > 0)) return false;
+  if (side !== "long" && side !== "short") return false;
+  if (kind !== "stop" && kind !== "target") return false;
+  const below = (side === "long") === (kind === "stop");   // long+stop and short+target sit below entry
+  const lo = bar && bar.length > 3 && bar[3] > 0 ? bar[3] : null;
+  const hi = bar && bar.length > 2 && bar[2] > 0 ? bar[2] : null;
+  if (below) {
+    if (px > 0 && px <= level) return true;
+    return lo != null && lo <= level;
+  }
+  if (px > 0 && px >= level) return true;
+  return hi != null && hi >= level;
+}
+
 // ---- swing setups (higher-timeframe, human-tradeable) --------------------------------------
 // Pure detectors over the daily close series [[t, close], ...]; the poller shadow-ledgers
 // fires with frozen geometry (vi=0 — invisible everywhere until the record earns promotion).
@@ -3515,7 +3540,10 @@ function trigEligible(row, cfg) {
 // itself (deploys, stalls, degraded feeds). Every later slice adds its class HERE and nowhere else.
 // NB: the field is `kind`, not `cls` — actionable rows already carry a `cls` (the R:R class) and
 // a collision would silently mis-route every message on the board.
-const PUSH_CLASSES = ["setup", "ops"];
+// `ledger` is the DEATH side of a claim the `setup` class already announced: its void level taken,
+// its target reached, or its horizon resolved. Deliberately one class rather than three — nobody
+// wants to subscribe to target-hits but not stop-hits, and the message says which it is.
+const PUSH_CLASSES = ["setup", "ledger", "ops"];
 
 // Telegram parse_mode=HTML understands exactly five entities; everything else must be escaped or
 // the API rejects the whole message with a 400 and the alert is lost. Ampersand first — escaping it
@@ -3547,6 +3575,10 @@ function pushEligible(ev, sub) {
   if (!PUSH_CLASSES.includes(kind)) return false;
   if (Array.isArray(s.classes) && s.classes.length && !s.classes.includes(kind)) return false;
   if (kind === "ops") return true;                 // ops has no thresholds — it is already rare by construction
+  // The ledger class is bounded by construction too: it can only speak about a claim whose birth
+  // was already announced, so re-applying the setup thresholds here would mean being told a trade
+  // opened and never told it died — the worst possible asymmetry in an alert channel.
+  if (kind === "ledger") return true;
   return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
 }
 
@@ -3564,6 +3596,25 @@ function pushFmt(ev, opts) {
   }
   if (!ev.coin) return null;
   const name = tgEsc(ev.t || ev.coin);
+  if (kind === "ledger") {
+    const sideL = ev.side === "long" ? "LONG" : ev.side === "short" ? "SHORT" : tgEsc(ev.side || "");
+    const head = ev.sub === "stop" ? "\u26d4 void taken" : ev.sub === "target" ? "\u2713 target reached" : "resolved";
+    const l1 = "<b>" + name + "</b> \u00b7 " + sideL + " \u00b7 " + tgEsc(ev.label || ev.ev || "") + " \u2014 " + head;
+    let l2;
+    if (ev.sub === "resolved") {
+      const r = ev.realized;
+      l2 = (r == null || !isFinite(r) ? "outcome \u2014" : (r >= 0 ? "+" : "") + (+r).toFixed(2) + (ev.unit || "R"))
+        + " at horizon" + (ev.stopped ? " \u00b7 stopped out en route" : "")
+        + (ev.held != null ? " \u00b7 held " + ev.held : "");
+    } else {
+      l2 = "level " + (ev.level == null ? "\u2014" : String(ev.level))
+        + " \u00b7 entry " + (ev.entry == null ? "\u2014" : String(ev.entry))
+        + (ev.held != null ? " \u00b7 open " + ev.held : "");
+    }
+    const base0 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
+    const l3 = base0 ? '<a href="' + tgEsc(base0 + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
+    return [l1, l2, l3].filter(Boolean).join("\n");
+  }
   const side = ev.side === "long" ? "LONG" : ev.side === "short" ? "SHORT" : tgEsc(ev.side || "");
   const num = (v, d) => (v == null || !isFinite(v) ? "\u2014" : (+v).toFixed(d == null ? 2 : d));
   const px = (v) => (v == null || !isFinite(v) ? "\u2014" : String(v));
@@ -3611,6 +3662,7 @@ module.exports.pushCodeOk = pushCodeOk;
 module.exports.pushCodeNorm = pushCodeNorm;
 module.exports.pushEligible = pushEligible;
 module.exports.pushFmt = pushFmt;
+module.exports.levelHit = levelHit;
 module.exports.pushBatch = pushBatch;
 
 module.exports.lateR = lateR;

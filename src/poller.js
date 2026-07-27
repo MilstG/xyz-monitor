@@ -16,7 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { momPair, spearmanIC, duelStats } = require("./compute");
-const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, PUSH_CLASSES, PUSH_CODE_ALPHABET } = require("./compute");
+const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_CODE_ALPHABET } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -1390,6 +1390,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           psd: "published play side (long/short) — outcome sign follows this when present",
           sd0: "30d daily sigma at fire (R normalization); an R-united event WITHOUT sd0 is a legacy %-outcome entry",
           stp: "void level frozen at fire (stop-aware track)", mv: "playbook-target distance from mark at fire, %",
+          tgt: "playbook target level frozen at fire (absolute price)",
+          alo: "this claim's opening was announced to the alert transports", als: "its void level has been announced as taken",
+          alt: "its target has been announced as reached",
           score0: "signal score at fire", pr: "prime flag at fire", conf: "confluence flag at fire",
           bt: "opened on the first post-boot build (condition may predate the stamp)", eg: "episode-gap flag",
           tal: "daily trend ribbon aligned with the claim's side at fire (1/0; absent = unknown at fire)",
@@ -1545,6 +1548,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         resolveAt: resolveAtFor(ev, Date.now(), r.uni),
       }, signalsBuildCount <= 1 ? { bt: 1 } : null,   // opened on the FIRST build after a restart/deploy: the condition may predate this stamp — flagged so identical boot-time timestamps explain themselves
       vi != null ? { vi } : null, mv != null ? { mv } : null,
+      // The absolute target, frozen alongside the void. `mv` is a rounded distance and cannot be
+      // turned back into a price without drift, and the level alerts must compare against exactly
+      // the number the claim published — not a reconstruction of it.
+      tgt0 != null && vi == null ? { tgt: tgt0 } : null,
       // Geometry gate: a stop is only stamped when it sits on the LOSS side of entry for the
       // claim's effective side. A composite firing away from its assumed range edge produces
       // mechanically inverted levels; stamping one turns the stop-aware track into a win
@@ -1684,6 +1691,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (e.realizedS == null && e.vi == null) e.realizedS = realized;   // no stop / unknowable touch -> tracks coincide
       e.status = "resolved"; e.realized = realized; e.win = realized > 0; e.tR = now;
       if (e.realizedS != null) e.winS = e.realizedS > 0;
+      // Close the loop for anyone who was told this claim opened. Emitted HERE, inside the
+      // resolver's own close path, so the number in the message is the number that entered the
+      // record — a separate scan reading the closed list later could disagree with it.
+      if (e.alo === 1 && e.vi == null) emitLedgerEvent(e, "resolved", null, now);
       ledgerClosed.push(e); ledgerOpen.delete(key); ledgerDirty = true;
       rearm.add(key);   // no re-entry until the condition lapses for a full build
     }
@@ -4008,21 +4019,27 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
     // Announced-trigger set: without this a redeploy re-announces the whole live board.
     if (hydrateTriggers()) log(`Restored trigger state: ${trigSeen.size} announced setup(s), seq ${trigSeq}`);
-    // ---- telegram push transport --------------------------------------------------------------
-    // Fully dormant without a token: no timers, no writes, no noise. Same one-variable rollback
-    // discipline as CRYPTO=0 — unset TG_BOT_TOKEN and the feature is simply not there.
+    // ---- alert detection + transports -----------------------------------------------------------
+    // DETECTION is armed unconditionally; only DELIVERY is gated on a configured bot. Slice A got
+    // this wrong: the level scan and the health watchdog sat inside the token check, which meant a
+    // deploy without TG_BOT_TOKEN produced no ops events and no death notices for the browser
+    // consumer either — a transport's configuration silently deciding what the canonical stream
+    // was allowed to contain. The stream is transport-agnostic by design; this restores that.
     pushBootAt = Date.now();
+    pushOps("deploy", `build ${version || "dev"} is live`);
+    setInterval(safeTick(pushHealthTick, "pushHealthTick"), 60 * 1000);
+    setInterval(safeTick(levelScan, "levelScan"), LVL_SCAN_MS);
+    // Fully dormant without a token: no outbound timers, no writes, no noise. Same one-variable
+    // rollback discipline as CRYPTO=0 — unset TG_BOT_TOKEN and the transport is simply not there.
     if (pushOn()) {
       const linked = hydratePush();
       log(`Telegram push: ENABLED — ${linked} linked recipient(s), stream cursor at seq ${trigSeq}` +
         (PUBLIC_URL() ? `, deep links to ${PUBLIC_URL()}` : ", no PUBLIC_URL set (messages carry no deep link)"));
-      pushOps("deploy", `build ${version || "dev"} is live`);
       setInterval(() => { pushUpdatesTick().catch((e) => log("push updates failed (isolated): " + (e && e.message))); }, PUSH_UPDATES_MS);
       setInterval(() => { pushDrain().catch((e) => log("push drain failed (isolated): " + (e && e.message))); }, PUSH_DRAIN_MS);
       setInterval(safeTick(pushStreamTick, "pushStreamTick"), 5 * 1000);
-      setInterval(safeTick(pushHealthTick, "pushHealthTick"), 60 * 1000);
     } else {
-      log("Telegram push: disabled (no TG_BOT_TOKEN)");
+      log("Telegram push: disabled (no TG_BOT_TOKEN) — detection still runs; events reach the in-app bell log");
     }
     log(`AI reports: ${AI_KEY() ? "ENABLED" : "disabled (no ANTHROPIC_API_KEY / OPENAI_API_KEY)"} — provider ${AI_PROVIDER}, model ${AI_MODEL} (fallback ${AI_MODEL_FALLBACK}), classifier ${AI_CLASSIFY_MODEL}, TTL ${Math.round(AI_TTL_MS / 60000)} min, ${aiReports.size} cached report(s) restored`);
     if (crypto) czBoot();
@@ -5954,6 +5971,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (trigFirstBuild && !(row.t0 > 0 && now - row.t0 <= TRIG_GRACE_MS)) continue;   // seeded, not announced
       const ev = emitTrig("setup", row, now);
       delete ev.also;   // the event is one claim; corroboration is a board concern
+      // Mark the underlying claim as ANNOUNCED. This is what entitles it to a death notice later:
+      // the ledger class only ever speaks about claims whose birth was announced, so nobody is told
+      // a void was taken on a setup they were never told about — and, just as importantly, nobody
+      // is told about a birth and then left to find out about the death from the board.
+      const le = ledgerOpen.get(row.coin + "|" + row.ev);
+      if (le && le.vi == null) { le.alo = 1; ledgerDirty = true; }
       fresh.push(ev);
     }
     trigFirstBuild = false;
@@ -6251,6 +6274,96 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     }
   }
 
+
+  // ---- ledger class: the death notice (slice B) ------------------------------------------------
+  // The setup class tells you a claim opened. Without this, that is the ONLY thing the channel ever
+  // says — you get told about entries and are left to discover exits from the board, which makes an
+  // alert stream actively misleading rather than merely incomplete. Three moments close the loop:
+  // the void level being taken, the target being reached, and the horizon resolving.
+  //
+  // Scope is deliberately tight: only claims stamped `alo` (announced) and only non-shadow claims.
+  // A claim nobody heard about does not get a death notice.
+  const LVL_SCAN_MS = 30 * 1000;
+  let lvlLast = 0;
+  const pushDur = (ms) => {
+    if (!(ms > 0)) return null;
+    const h = ms / 3600e3;
+    return h < 1 ? Math.max(1, Math.round(ms / 60000)) + "m" : h < 48 ? h.toFixed(1) + "h" : Math.round(h / 24) + "d";
+  };
+  function emitLedgerEvent(e, sub, level, now) {
+    const t = now || Date.now();
+    const side = e.psd || (e.dir >= 0 ? "long" : "short");
+    return emitTrig("ledger", {
+      coin: e.coin, t: e.ticker || e.coin, side, ev: e.ev, label: EV_LABEL[e.ev] || e.ev, sub,
+      level: level != null ? level : null,
+      entry: e.mark0 != null && isFinite(e.mark0) ? e.mark0 : null,
+      held: pushDur(t - (e.t0 || t)),
+      realized: sub === "resolved" && Number.isFinite(e.realized) ? e.realized : null,
+      unit: sub === "resolved" ? unitOf(e.ev) : null,
+      stopped: sub === "resolved" ? e.stopped === true : null,
+      t0: e.t0 || null,
+    }, t);
+  }
+  // Live level scan. Two detectors, because neither alone is honest: the live mark catches the
+  // common case, and the 5m bars since the last scan catch the wick that took the level and came
+  // back while nobody was looking. Even together they are a LIVE approximation — the ledger's
+  // stop-aware record is still decided by the resolver against the hourly spine, and the two can
+  // legitimately differ. The alert is a heads-up, not the bookkeeping.
+  function levelScan() {
+    const now = Date.now();
+    const since = lvlLast || (now - LVL_SCAN_MS);
+    lvlLast = now;
+    // Group by coin so the 5m range query runs once per NAME, not once per claim.
+    const byCoin = new Map();
+    for (const e of ledgerOpen.values()) {
+      if (e.vi != null || e.alo !== 1) continue;
+      const wantStop = e.stp != null && e.als !== 1, wantTgt = e.tgt != null && e.alt !== 1;
+      if (!wantStop && !wantTgt) continue;
+      if (!byCoin.has(e.coin)) byCoin.set(e.coin, []);
+      byCoin.get(e.coin).push(e);
+    }
+    if (!byCoin.size) return 0;
+    let fired = 0;
+    for (const [coin, ents] of byCoin) {
+      const r = rows.get(coin);
+      const px = r && r.px > 0 ? r.px : 0;
+      // Collapse every closed 5m bar since the last scan into one high/low envelope. Missing or
+      // disabled candle storage degrades to the live mark alone — a narrower detector, never a
+      // wrong one.
+      let bar = null;
+      try {
+        if (store.readCandles && store.candlesEnabled && store.candlesEnabled()) {
+          const bars = store.readCandles(coin, since - 5 * 60 * 1000, now);
+          if (bars && bars.length) {
+            let hi = -Infinity, lo = Infinity;
+            for (const b of bars) { if (b[2] > hi) hi = b[2]; if (b[3] > 0 && b[3] < lo) lo = b[3]; }
+            if (isFinite(hi) && isFinite(lo)) bar = [now, 0, hi, lo, 0, 0];
+          }
+        }
+      } catch (_) { bar = null; }
+      if (!px && !bar) continue;
+      for (const e of ents) {
+        const side = e.psd || (e.dir >= 0 ? "long" : "short");
+        if (e.stp != null && e.als !== 1 && levelHit(side, "stop", e.stp, px, bar)) {
+          // A claim whose void is taken is DEAD for alerting purposes, so its target is retired in
+          // the same breath. Relying on `continue` alone only held within a single scan: on the
+          // next one the target was still unstamped, and a later run up to it announced a target
+          // reached on a claim that had already stopped out — the most misleading message this
+          // class could possibly send.
+          e.als = 1; e.alt = 1; ledgerDirty = true; fired++;
+          emitLedgerEvent(e, "stop", e.stp, now);
+          continue;
+        }
+        if (e.tgt != null && e.alt !== 1 && levelHit(side, "target", e.tgt, px, bar)) {
+          e.alt = 1; ledgerDirty = true; fired++;
+          emitLedgerEvent(e, "target", e.tgt, now);
+        }
+      }
+    }
+    if (fired) { persistTriggers(); persistLedger(); log(`ledger alerts: ${fired} level event(s)`); }
+    return fired;
+  }
+
   function pushTest(chat) {
     if (!pushOn()) return { ok: false, error: "disabled" };
     const now = Date.now();
@@ -6371,6 +6484,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       recipients: pushRecipients.size, codes: pushCodes.size, offset: pushOffset, bootAt: pushBootAt }),
     pushSetBootNow: (t) => { pushBootAt = t; },   // harness: exercise the boot lookback deterministically
     pushSetPollNow: (t) => { lastPoll = t; },     // harness: age the poll clock so the stall watchdog is testable without waiting 10 minutes
+    levelScanNow: levelScan,                     // harness: run the live level scan on demand
+    ledgerOpenNow: () => ledgerOpen,             // harness: reach the open claims to stage geometry
+    resolveLedgerNow: resolveLedger,             // harness: force resolution without waiting out a horizon
     buildActionableNow: buildActionable,   // harness: force an actionable rebuild without waiting out the memo
     hydrateTriggersNow: hydrateTriggers,   // harness: restore announced-set/event log without a boot
     trigStateNow: () => ({ seq: trigSeq, seen: trigSeen.size, events: trigEvents.length, firstBuild: trigFirstBuild }),
