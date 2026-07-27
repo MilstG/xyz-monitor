@@ -3529,6 +3529,8 @@ function applyScope(){
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
   if(state.view==='sessions'){ syncAnalyticsSlot(); drawSessions(); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
+  if(state.view==='signals') renderSignals();       // scope flip re-filters the cards to the new universe
+  if(state.view==='actionable') renderActionable();  // ...and the actionable board with them
   setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
   buildHead(); render(); updateAggregates(); updateMovers(); updateBenchNote();
   renderRegimeStrip();   // stocks: correlation regime; crypto: the crypto tape strip
@@ -3750,11 +3752,16 @@ function renderActionable(){
   const p=d.params||{}, c=d.coverage||{};
   _actMaxBars=p.maxBars||10; _actMinRR=(p.minRR||2).toFixed(2);
   const noEarn=!!(el('act-noearn')&&el('act-noearn').checked);
-  const rows=(d.rows||[]).filter(r=>(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)).slice().sort(actCmp);
+  // Scope filter, same rule as the Signals tab: rows arrive universe-tagged ('crypto' / 'stocks')
+  // and the board serves one universe at a time. Without this an equity setup sits in the crypto
+  // board's sort order competing on R:R against perps — two universes in one ranked list, which is
+  // the merged view the scope split exists to prevent.
+  const wantU=state.scope==='crypto'?'crypto':'stocks';
+  const rows=(d.rows||[]).filter(r=>r.uni===wantU&&(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)).slice().sort(actCmp);
   let h='';
   if(!rows.length){
     h+=`<div class="msg">Nothing confirmed at a swing trigger right now.`
-      +`${c.openClaims!=null?` ${c.openClaims} open claim(s) scanned`:''}`
+      +`${c.openClaims!=null?` ${c.openClaims} open claim(s) scanned across both universes`:''}`
       +`${c.norecord?` \u00b7 ${c.norecord} without a record yet`:''}`
       +`${c.negexp?` \u00b7 ${c.negexp} whose record is flat or negative`:''}`
       +`${c.negev?` \u00b7 ${c.negev} negative-EV from here`:''}`
@@ -3835,8 +3842,12 @@ async function loadSignals(){
 }
 function setSigTabBadge(){
   const tb=el('tab-signals'), d=state.signals; if(!tb) return;
-  // count is the xyz universe's live-condition total — the only universe the engine serves (-101)
-  const n=d?(d.count||0):0;
+  // Scoped: the badge speaks for the universe on screen. countU carries the true per-universe
+  // live-condition totals (kept, not the capped transport slice), so the number moves with reality.
+  // Falls back to the whole-engine count only on a payload predating countU.
+  const u = state.scope==='crypto' ? 'm' : 'x';
+  const cu = d&&d.countU&&d.countU[u]!=null ? d.countU[u] : (d?(d.count||0):0);
+  const n = cu||0;
   tb.textContent = n>0 ? `Signals (${n})` : 'Signals';
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
@@ -4908,7 +4919,7 @@ function renderSignals(){
   // One control row (build -69): the static history search/dropdown, the intro text, and the
   // prime/move/view segments all share the line — rendered into static slots so the inputs
   // keep their state across re-renders.
-  { const it=el('sig-introtxt'); if(it) it.innerHTML=`<span data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?).">Live conditions \u00b7 <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited${(()=>{const cu=d&&d.count;const sh=(d&&d.signals?d.signals.length:0);return cu>sh?` \u00b7 top <b>${sh}</b> of <b>${cu}</b>`:'';})()}</span>`;
+  { const it=el('sig-introtxt'); if(it) it.innerHTML=`<span data-tip="Scoring: how unusual the condition is right now (0\u201350) + historical edge \u2014 this market's own base rate when it has \u22658 occurrences, else the asset-class pooled base rate at a 30% discount, else a token score. Event types whose LIVE track record shows no edge get their evidence capped automatically. Signals decay past their horizon and drop at 2\u00d7. Nothing here is a prediction \u2014 the full scoring model is in the tab help (?).">Live conditions \u00b7 <b>unusualness \u00d7 historical edge</b> \u00b7 self-audited${(()=>{const u=state.scope==='crypto'?'m':'x';const cu=d&&d.countU&&d.countU[u]!=null?d.countU[u]:(d&&d.count);const sh=(d&&d.signals?d.signals.filter(g=>g.uni===(state.scope==='crypto'?'main':'xyz')).length:0);return cu>sh?` \u00b7 top <b>${sh}</b> of <b>${cu}</b>`:'';})()}</span>`;
     const sl=el('sig-segslot'); if(sl&&sl.innerHTML!==seg){ sl.innerHTML=seg; bindSigControls(sl); } }
   const intro='';
   let rec='';
@@ -4955,12 +4966,21 @@ function renderSignals(){
     }
     rec='<div style="margin-top:22px"></div>'+sigSec('recstrip','dsec','Record by event','compact per-event record \u2014 the same ledger the accuracy table details, one chip per event type \u00b7 includes the earnings-conditioned split where n allows',recBody);
   }
-  if(!d||!d.signals||!d.signals.length){
-    box.innerHTML=intro+`<div class="msg">No unusual stocks/macro conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
+  const _wantUni = state.scope === 'crypto' ? 'main' : 'xyz';
+  if(!d||!d.signals||!d.signals.filter(g=>g.uni===_wantUni).length){
+    box.innerHTML=intro+`<div class="msg">No unusual ${state.scope==='crypto'?'crypto':'stocks/macro'} conditions firing right now \u2014 this tape is quiet.${warmCount()}<br><span class="sec" style="font-size:11px">Premium baselines, event studies and the live track record all accrue server-side; early after a cold start this list is naturally sparse.</span></div>`+sigRecordHtml(d)+rec;
     bindSigControls(box); return;
   }
   let hiddenN=0;
-  const scoped = d.signals;   // xyz-only payload: crypto left the signal engine at -101, and this tab left the crypto scope with it
+  // Scope filter. The payload carries BOTH universes (one build, one ETag, per-universe transport
+  // lanes), and every other surface on this tab is already scoped: the record sets via sigRecKey,
+  // the awaiting roster via ledgerRosterScoped, the shadow panel via d.shadows[scope]. Leaving the
+  // CARDS unscoped put crypto cards directly above an equity track record — the two describing
+  // different universes while sitting in one column, which is the board/ledger disagreement this
+  // codebase forbids rather than a cosmetic wrinkle. It also breaks the app's founding promise that
+  // the two universes never share a view.
+  const wantUni = state.scope === 'crypto' ? 'main' : 'xyz';
+  const scoped = d.signals.filter(g => g.uni === wantUni);
   const sigs = (mvThr>0||prOn) ? scoped.filter(g=>{
     const m=sigMove(g);
     const ok=(mvThr===0||(m!=null&&m>=mvThr))&&(!prOn||g.prime);
