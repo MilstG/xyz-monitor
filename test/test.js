@@ -2055,7 +2055,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "mompCell", "renderDuelSection", "duelSvg", "duelDivergence", "loadDuelData", "duelRoll", "colAdjacent",
     "loadActionable", "openActionable", "renderActionable", "actHead", "actDetail", "actCmp", "actCell", "actRR", "actEV",
     "actLate", "actLateCls", "actAgo", "actSortLoad", "actSortSave",
-    "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet"];
+    "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet",
+    "fireOps", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -2196,7 +2197,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/duel", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/ai-report", "/api/ai-reports", "/api/health",
     "/api/actionable", "/api/triggers",
-    "/api/export/ledger", "/api/news", "/api/news/channels",
+    "/api/export/ledger", "/api/news", "/api/news/channels", "/api/alerts",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
@@ -7636,4 +7637,346 @@ test("degenerate void: a stop that lands on the entry cannot reach the board, ho
   p4.buildActionableNow();
   assert.equal(p4.getActionable().coverage.degenerate, 0,
     "a real void at 0.75 sigma is NOT degenerate — this guard must not become a filter on tight setups");
+});
+
+// ===== Telegram push transport, slice A: the wire (build 2026.07.27-01) =========================
+// Everything here is the DELIVERY layer. What counts as a new setup is the trigger stream's job and
+// is already covered above — these tests exist because the transport is the one part of this
+// feature I cannot verify against the real service from a dev sandbox (api.telegram.org is not
+// reachable from the build environment), so every failure mode it can hit is exercised against an
+// injected transport instead: rate limits, blocked recipients, malformed messages, restarts.
+
+test("push pure layer: escaping, code validation, eligibility, formatting, batching", () => {
+  const C = require("../src/compute");
+
+  // HTML escaping: ampersand FIRST, or the entities we introduce get double-escaped and Telegram
+  // rejects the whole message with a 400 — a silently lost alert.
+  assert.equal(C.tgEsc("a & b < c > d"), "a &amp; b &lt; c &gt; d");
+  assert.equal(C.tgEsc("<b>x</b>"), "&lt;b&gt;x&lt;/b&gt;");
+  assert.equal(C.tgEsc(null), "");
+
+  // Link codes are read off a screen and typed into a phone, so the alphabet drops every glyph
+  // pair a human confuses. If this ever regresses, people mistype codes and blame the bot.
+  for (const ch of "O0I1") assert.ok(!C.PUSH_CODE_ALPHABET.includes(ch), `ambiguous char ${ch} must not be mintable`);
+  assert.ok(C.pushCodeOk("K7M2QX"));
+  assert.ok(C.pushCodeOk(" k7m2qx "), "case and surrounding space tolerated — people paste sloppily");
+  assert.ok(!C.pushCodeOk("K7M2Q"), "wrong length rejected");
+  assert.ok(!C.pushCodeOk("K7M2QO"), "ambiguous glyph rejected");
+  assert.ok(!C.pushCodeOk(""), "empty rejected");
+  assert.equal(C.pushCodeNorm(" k7m2qx "), "K7M2QX");
+
+  const setup = { kind: "setup", coin: "HOOD", t: "HOOD", side: "long", ev: "breakout", label: "breakout",
+    tf: "D1", entry: 42.1, void: 40.5, target: 47, rr: { gross: 2.4 }, evR: 0.55,
+    rec: { n: 12, hit: 0.58, avgR: 0.4 }, late: 0.2 };
+
+  // The setup gate DELEGATES to trigEligible rather than re-implementing it. This assert is the
+  // whole reason the browser and the bot cannot drift into announcing different things.
+  assert.equal(C.pushEligible(setup, {}), true, "no subscription filter interrupts for everything");
+  assert.equal(C.pushEligible(setup, { trig: { minEV: 0.9 } }), false, "setup thresholds are the SHARED trigEligible gate");
+  assert.equal(C.pushEligible(setup, { trig: { minRR: 2 } }), true);
+  assert.equal(C.pushEligible(setup, { muted: true }), false, "a muted recipient receives nothing");
+  assert.equal(C.pushEligible(setup, { classes: ["ops"] }), false, "class gate excludes unsubscribed classes");
+  assert.equal(C.pushEligible(setup, { classes: [] }), true, "an EMPTY class list means all classes, not silence — muting is its own control");
+  assert.equal(C.pushEligible({ kind: "nonsense" }, {}), false, "an unknown class is never delivered");
+
+  const ops = { kind: "ops", title: "deploy", text: "build x is live" };
+  assert.equal(C.pushEligible(ops, { trig: { minEV: 99 } }), true, "setup thresholds must not silence ops — that is how you lose the stall warning");
+  assert.equal(C.pushEligible(ops, { classes: ["setup"] }), false);
+
+  const m = C.pushFmt(setup, { baseUrl: "https://x.example" });
+  const lines = m.split("\n");
+  assert.equal(lines.length, 4, "fixed four-line grammar — the eye lands on the void level in the same place every time");
+  assert.ok(lines[0].includes("HOOD") && lines[0].includes("LONG"));
+  assert.ok(lines[1].includes("void 40.5") && lines[1].includes("R:R 2.4"), "geometry on line 2");
+  assert.ok(lines[2].includes("n=12") && lines[2].includes("58%"), "evidence on line 3");
+  assert.ok(lines[3].includes("https://x.example/#t=HOOD"), "deep link on line 4");
+  assert.ok(!C.pushFmt(setup, {}).includes("<a href"), "no PUBLIC_URL means no link, not a broken one");
+  assert.equal(C.pushFmt({ kind: "setup" }), null, "an unformattable event yields null, never a half-message");
+  assert.ok(C.pushFmt({ kind: "ops", title: "poller stalled", text: "x", level: "warn" }).startsWith("\u26a0 "));
+
+  // A ticker or label carrying markup cannot break out into the message body.
+  const evil = C.pushFmt(Object.assign({}, setup, { t: "<script>x</script>" }), {});
+  assert.ok(!evil.includes("<script>") && evil.includes("&lt;script&gt;"), "event text is escaped before it reaches parse_mode=HTML");
+
+  // Batching: bounded, and the overflow is DISCLOSED rather than silently dropped.
+  const many = Array.from({ length: 12 }, (_, i) => "msg" + i);
+  const out = C.pushBatch(many);
+  assert.ok(out.length >= 1);
+  assert.ok(out.join("\n").includes("+4 more held"), "events past the batch cap are counted in the message, not vanished");
+  const long = C.pushBatch(["a".repeat(3000), "b".repeat(3000)]);
+  assert.equal(long.length, 2, "a batch that would exceed Telegram's body limit splits instead of being rejected");
+  assert.deepEqual(C.pushBatch([]), []);
+});
+
+// Shared harness: a poller with an injected transport that records every call and replays queued
+// responses. No network, no timers — every tick is driven explicitly.
+function pushHarness(responses) {
+  const { createPoller } = require("../src/poller");
+  const calls = [];
+  let saved = null;
+  const queue = (responses || []).slice();   // mutable: tests push replies after minting a real code
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    savePush: (d) => { saved = d; }, loadPush: () => saved };
+  const pushFetch = async (url, opts) => {
+    calls.push({ url, body: JSON.parse((opts && opts.body) || "{}") });
+    const r = queue.length ? queue.shift() : { ok: true, result: {} };
+    return { ok: r.status == null || (r.status >= 200 && r.status < 300), status: r.status || 200,
+      json: async () => (r.body != null ? r.body : { ok: true, result: r.result != null ? r.result : {} }) };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, pushFetch });
+  return { p, calls, queue, store: { get saved() { return saved; } } };
+}
+
+test("push: fully dormant without TG_BOT_TOKEN — no state, no calls, no surprises", async () => {
+  delete process.env.TG_BOT_TOKEN;
+  const { p, calls } = pushHarness();
+  const st = p.getPush();
+  assert.equal(st.enabled, false, "reported as off so the panel can say so instead of looking broken");
+  assert.deepEqual(st.recipients, []);
+  await p.pushUpdatesNow();
+  await p.pushDrainNow();
+  p.pushTickNow();
+  assert.equal(calls.length, 0, "an unconfigured deploy must never reach out to Telegram");
+  assert.equal(p.pushTest().ok, false, "test fire is honest about being unavailable");
+});
+
+test("push: link codes are single-use, expiring, and a new recipient starts CAUGHT UP", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p } = pushHarness();
+  p.pushOpsNow("seed", "an event that predates the link");
+  p.pushOpsNow("seed2", "another");
+
+  assert.equal(p.pushBindNow("ZZZZZZ", 111, "nobody").ok, false, "a code that was never minted is refused");
+  assert.equal(p.pushBindNow("bad", 111, "nobody").error, "bad-code", "malformed codes never reach the store");
+
+  const mint = p.pushMintCode();
+  assert.ok(/^[A-HJ-NP-Z2-9]{6}$/.test(mint.code));
+  assert.ok(mint.expiresAt > Date.now());
+  const ok = p.pushBindNow(mint.code.toLowerCase(), 5551234567, "milst");
+  assert.equal(ok.ok, true, "case-insensitive, because it is typed on a phone");
+  assert.equal(p.pushBindNow(mint.code, 222, "someone else").ok, false, "codes are SINGLE USE — a shared screenshot cannot link a stranger");
+
+  const st = p.getPush();
+  assert.equal(st.recipients.length, 1);
+  assert.equal(st.recipients[0].name, "milst");
+  assert.ok(!st.recipients[0].chat.includes("undefined"));
+  assert.equal(st.recipients[0].mask, "\u20264567", "the panel is shared with the group, so chat ids are masked there — a chat id is enough to attempt contact");
+
+  // The backlog rule: linking must not deliver the ring's history.
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 0, "a fresh recipient's cursor starts at the live seq — no two hundred stale setups as a welcome");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push: the boot rule is a lookback, not a mute — the deploy notice survives it", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p } = pushHarness();
+  const mint = p.pushMintCode();
+  p.pushBindNow(mint.code, 999, "milst");
+
+  // An event that fired long before this boot: the cursor must advance past it WITHOUT sending.
+  p.pushSetBootNow(Date.now());
+  const stale = p.pushOpsNow("old", "fired while nobody was listening");
+  stale.at = Date.now() - 60 * 60 * 1000;
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 0, "a pre-boot backlog is seeded, not announced");
+
+  // …but an event emitted now goes out immediately. A blanket post-boot mute would swallow exactly
+  // this message — the one that proves the wire survived the deploy.
+  p.pushOpsNow("deploy", "build test is live");
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 1, "the deploy notice is delivered, not held behind a grace timer");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push: per-recipient cursors are independent — one strict filter cannot silence everyone else", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p } = pushHarness();
+  const a = p.pushMintCode(); p.pushBindNow(a.code, 1001, "a");
+  const b = p.pushMintCode(); p.pushBindNow(b.code, 1002, "b");
+  p.pushSetClasses("1002", ["setup"]);   // b wants setups only
+
+  p.pushOpsNow("deploy", "build test is live");
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 1, "only the subscriber to that class is queued");
+
+  // b's cursor still advanced: a filtered event is HANDLED, not left pending forever.
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 1, "a second tick must not re-queue an event that was already decided on");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging the queue", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+
+  // 429: their number, not ours, and the item stays queued.
+  {
+    const { p, calls } = pushHarness([{ status: 429, body: { ok: false, description: "Too Many Requests", parameters: { retry_after: 7 } } }]);
+    const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+    p.pushOpsNow("x", "y"); p.pushTickNow();
+    await p.pushDrainNow();
+    assert.equal(calls.length, 1);
+    const st = p.pushStateNow();
+    assert.equal(st.queue, 1, "a rate-limited message is retried, never discarded");
+    assert.ok(st.hold - Date.now() > 6000, "the backoff uses Telegram's retry_after, not a guess");
+  }
+  // 403: the recipient blocked the bot. Mute (so the panel can say WHY) and purge their backlog.
+  {
+    const { p } = pushHarness([{ status: 403, body: { ok: false, description: "Forbidden: bot was blocked by the user" } }]);
+    const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+    p.pushOpsNow("x", "y"); p.pushTickNow();
+    p.pushOpsNow("x2", "y2"); p.pushTickNow();
+    await p.pushDrainNow();
+    const st = p.getPush();
+    assert.equal(st.recipients[0].muted, true, "muted, not deleted — a vanished row looks like a bug");
+    assert.ok(/blocked/i.test(st.recipients[0].lastErr), "the reason is kept and shown");
+    assert.equal(p.pushStateNow().queue, 0, "their whole backlog is purged rather than retried forever");
+  }
+  // 400: a malformed message must not sit at the head of the queue blocking every alert behind it.
+  {
+    const { p } = pushHarness([{ status: 400, body: { ok: false, description: "Bad Request: can't parse entities" } },
+      { status: 200, body: { ok: true, result: {} } }]);
+    const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+    p.pushOpsNow("x", "y"); p.pushTickNow();
+    p.pushOpsNow("x2", "y2"); p.pushTickNow();
+    await p.pushDrainNow();
+    assert.equal(p.pushStateNow().queue, 1, "the undeliverable message is dropped so the queue keeps moving");
+    assert.ok(/parse entities/.test(p.getPush().lastErr), "the API's own words are surfaced — this is what a bad message looks like from the outside");
+  }
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push outbox: success paces sends and the queue is bounded with the loss disclosed", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p, calls } = pushHarness();
+  const m = p.pushMintCode(); p.pushBindNow(m.code, 1, "a");
+  p.pushOpsNow("one", "1"); p.pushTickNow();
+  p.pushOpsNow("two", "2"); p.pushTickNow();
+  await p.pushDrainNow();
+  assert.equal(calls.length, 1, "one send per drain");
+  assert.ok(p.pushStateNow().hold > Date.now(), "the next send is paced — Telegram's per-chat ceiling is ~20/min");
+  await p.pushDrainNow();
+  assert.equal(calls.length, 1, "the pacing hold is respected rather than busy-looping the API");
+  assert.equal(calls[0].body.parse_mode, "HTML");
+  assert.equal(calls[0].body.disable_web_page_preview, true, "a link preview would bury the geometry under a page card");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push commands: /start binds, /stop unlinks, offset advances, junk is ignored", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p, queue } = pushHarness();
+  const upd = (id, text) => ({ update_id: id, message: { chat: { id: 5551234567 }, from: { first_name: "milst" }, text } });
+  const reply = (result) => ({ body: { ok: true, result } });
+
+  // A code that was never minted binds nobody — but the offset still advances, or the same bad
+  // command replays on every poll forever.
+  queue.push(reply([upd(10, "/start ZZZZZZ")]));
+  await p.pushUpdatesNow();
+  assert.equal(p.getPush().recipients.length, 0, "an invalid code binds nobody");
+  assert.equal(p.pushStateNow().offset, 11, "the offset advances even for a rejected command");
+
+  // The real round trip, with a code this server actually minted.
+  const code = p.pushMintCode().code;
+  queue.push(reply([upd(11, "/start " + code)]));
+  await p.pushUpdatesNow();
+  const linked = p.getPush().recipients;
+  assert.equal(linked.length, 1, "a minted code binds the chat that carried it");
+  assert.equal(linked[0].name, "milst", "the display name comes from Telegram, not from a form nobody fills in");
+
+  // Non-command chatter must not touch state.
+  queue.push(reply([upd(12, "hello?"), { update_id: 13 }, { update_id: 14, message: { chat: { id: 1 } } }]));
+  await p.pushUpdatesNow();
+  assert.equal(p.getPush().recipients.length, 1, "junk, empty updates and text-less messages are ignored without throwing");
+  assert.equal(p.pushStateNow().offset, 15);
+
+  queue.push(reply([upd(15, "/stop")]));
+  await p.pushUpdatesNow();
+  assert.equal(p.getPush().recipients.length, 0, "/stop unlinks from the DM itself — nobody should need the panel to make it stop");
+
+  // An unlink of an unknown chat is a clean failure, not a throw.
+  assert.equal(p.pushUnlink("5551234567").ok, false);
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push ops lane: the stall watchdog is edge-triggered in BOTH directions", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p } = pushHarness();
+  const opsCount = () => p.getTriggers(0).events.filter((e) => e.kind === "ops").length;
+
+  p.pushHealthNow();
+  assert.equal(opsCount(), 0, "no poll history yet is a cold boot, not a fault");
+
+  p.pushSetPollNow(Date.now());
+  p.pushHealthNow();
+  assert.equal(opsCount(), 0, "a healthy poller says nothing");
+
+  // Go cold: exactly one alert, however many ticks run. An ops channel that repeats every minute
+  // is a channel you mute, and then the real warning goes with it.
+  p.pushSetPollNow(Date.now() - 20 * 60 * 1000);
+  p.pushHealthNow();
+  p.pushHealthNow();
+  p.pushHealthNow();
+  assert.equal(opsCount(), 1, "the stall fires ONCE, not once per tick");
+  const stall = p.getTriggers(0).events.filter((e) => e.kind === "ops").pop();
+  assert.equal(stall.level, "warn");
+  assert.ok(/stalled/i.test(stall.title));
+
+  // Recovery is its own edge — without it, silence after a stall is ambiguous.
+  p.pushSetPollNow(Date.now());
+  p.pushHealthNow();
+  p.pushHealthNow();
+  assert.equal(opsCount(), 2, "recovery announces exactly once too");
+  assert.ok(/recovered/i.test(p.getTriggers(0).events.pop().title));
+
+  // …and the pair can happen again. A latched flag that never re-arms would report the first
+  // outage of a deploy's life and nothing after it.
+  p.pushSetPollNow(Date.now() - 20 * 60 * 1000);
+  p.pushHealthNow();
+  assert.equal(opsCount(), 3, "the watchdog re-arms for the next outage");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push: state survives a restart, and hydrate restores cursors rather than replaying the ring", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p, store } = pushHarness();
+  const m = p.pushMintCode();
+  p.pushBindNow(m.code, 777, "milst");
+  p.pushSetClasses("777", ["ops"]);
+  const saved = store.saved;
+  assert.ok(saved && saved.recipients.length === 1, "recipients are persisted the moment they link");
+  assert.deepEqual(saved.recipients[0].classes, ["ops"]);
+  assert.ok(Number.isFinite(saved.recipients[0].cur), "the delivery cursor is persisted WITH the recipient — a split write could replay or eat a backlog");
+
+  assert.equal(p.pushSetClasses("777", []).classes, null, "an empty selection normalises to all classes");
+  assert.equal(p.pushSetClasses("nobody", ["ops"]).ok, false);
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("push: the trigger ring carries a kind on every event and legacy events read as setups", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { p } = pushHarness();
+  p.pushOpsNow("deploy", "build test is live");
+  const evs = p.getTriggers(0).events;
+  assert.ok(evs.length >= 1);
+  assert.equal(evs[evs.length - 1].kind, "ops", "every emitted event is class-stamped so consumers filter on a field that always exists");
+  // `cls` is already taken on actionable rows (the R:R class); a collision there would mis-route
+  // every message on the board, so the class field must stay `kind`.
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes('function emitTrig(kind, obj, now)'), "one emitter owns the ring");
+  assert.equal((pol.match(/trigEvents\.push\(/g) || []).length, 1, "exactly ONE push site into the ring — a second would bypass the kind stamp and the trim");
+  assert.ok(pol.includes('Object.assign({ kind: "setup" }, e)'), "events persisted before the kind stamp must hydrate as setups");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("server: alert delivery routes registered once, body-capped, cooldown mapped to 429", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  for (const r of ["/api/alerts/link", "/api/alerts/unlink", "/api/alerts/classes", "/api/alerts/test"])
+    assert.equal(srv.split(`fastify.post("${r}"`).length - 1, 1, `POST ${r} must be registered exactly once`);
+  assert.equal(srv.split('fastify.get("/api/alerts"').length - 1, 1, "GET /api/alerts exactly once");
+  assert.ok(/get\("\/api\/alerts"[\s\S]{0,200}no-store/.test(srv), "delivery state must be no-store — a cached link code is an expired link code");
+  for (const r of ["/api/alerts/link", "/api/alerts/unlink", "/api/alerts/classes", "/api/alerts/test"])
+    assert.ok(new RegExp(`post\\("${r.replace(/\//g, "\\/")}", \\{ bodyLimit`).test(srv), `${r} must carry a body cap`);
+  assert.ok(/alerts\/test[\s\S]{0,400}error === "cooldown"[\s\S]{0,60}429/.test(srv), "test-fire cooldown must map to 429");
 });
