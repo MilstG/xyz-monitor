@@ -3543,7 +3543,13 @@ function trigEligible(row, cfg) {
 // `ledger` is the DEATH side of a claim the `setup` class already announced: its void level taken,
 // its target reached, or its horizon resolved. Deliberately one class rather than three — nobody
 // wants to subscribe to target-hits but not stop-hits, and the message says which it is.
-const PUSH_CLASSES = ["setup", "ledger", "rule", "ops"];
+const PUSH_CLASSES = ["setup", "ledger", "rule", "filing", "earnings", "ai", "regime", "coverage", "ops"];
+// Which classes a recipient gets when they have NOT chosen. The deploy-notice mistake in miniature:
+// a class that seems informative in isolation becomes noise at its real frequency, and "all classes
+// by default" means every new class I add silently starts spamming everyone already linked. So the
+// default set is frozen to the four whose rates are known, and every class added after is OPT-IN —
+// visible in the panel with its measured fires-per-day next to it, subscribed only on purpose.
+const PUSH_DEFAULT_CLASSES = ["setup", "ledger", "rule", "ops"];
 
 // Telegram parse_mode=HTML understands exactly five entities; everything else must be escaped or
 // the API rejects the whole message with a 400 and the alert is lost. Ampersand first — escaping it
@@ -3580,7 +3586,10 @@ function pushEligible(ev, sub) {
   if (s.muted) return false;
   const kind = ev.kind || "setup";
   if (!PUSH_CLASSES.includes(kind)) return false;
-  if (Array.isArray(s.classes) && s.classes.length && !s.classes.includes(kind)) return false;
+  // An explicit selection is honoured exactly; an absent one falls back to the DEFAULT set rather
+  // than to everything, so adding a class cannot retroactively subscribe anyone.
+  if (Array.isArray(s.classes) && s.classes.length) { if (!s.classes.includes(kind)) return false; }
+  else if (!PUSH_DEFAULT_CLASSES.includes(kind)) return false;
   if (kind === "ops") return true;                 // ops has no thresholds — it is already rare by construction
   // The ledger class is bounded by construction too: it can only speak about a claim whose birth
   // was already announced, so re-applying the setup thresholds here would mean being told a trade
@@ -3589,6 +3598,8 @@ function pushEligible(ev, sub) {
   // A rule event has already passed the only filter that could apply to it: the rule its author
   // wrote. Layering the setup thresholds on top would silently veto somebody's own alert.
   if (kind === "rule") return true;
+  if (kind === "filing" || kind === "earnings" || kind === "ai") return true;
+  if (kind === "regime" || kind === "coverage") return true;
   return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
 }
 
@@ -3606,6 +3617,37 @@ function pushFmt(ev, opts) {
   }
   if (!ev.coin) return null;
   const name = tgEsc(ev.t || ev.coin);
+  if (kind === "filing") {
+    const l1 = "<b>" + name + "</b> \u00b7 " + tgEsc(ev.form || "filing");
+    const l2 = tgEsc(ev.h || "");
+    const l3 = ev.url ? '<a href="' + tgEsc(ev.url) + '">read the filing</a>' : "";
+    return [l1, l2, l3].filter(Boolean).join("\n");
+  }
+  if (kind === "earnings") {
+    const l1 = "<b>" + name + "</b> \u00b7 reports " + tgEsc(ev.when || "soon")
+      + (ev.session ? " (" + tgEsc(ev.session) + ")" : "");
+    const l2 = ev.claim ? "you have an open " + tgEsc(ev.claim) + " claim on it" : "";
+    const base2 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
+    const l3 = base2 ? '<a href="' + tgEsc(base2 + "/#t=" + encodeURIComponent(ev.coin)) + '">open ' + name + "</a>" : "";
+    return [l1, l2, l3].filter(Boolean).join("\n");
+  }
+  if (kind === "ai") {
+    const l1 = "<b>" + name + "</b> \u00b7 analyst read flipped: " + tgEsc(ev.from || "?") + " \u2192 " + tgEsc(ev.to || "?");
+    const l2 = tgEsc(ev.note || "");
+    const base3 = opts && opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
+    const l3 = base3 ? '<a href="' + tgEsc(base3 + "/#t=" + encodeURIComponent(ev.coin)) + '">open the report</a>' : "";
+    return [l1, l2, l3].filter(Boolean).join("\n");
+  }
+  if (kind === "regime") {
+    const l1 = "<b>" + tgEsc(ev.scope === "main" ? "crypto" : "stocks") + " positioning</b> \u00b7 " + tgEsc(ev.title || "");
+    const l2 = tgEsc(ev.text || "");
+    return [l1, l2].filter(Boolean).join("\n");
+  }
+  if (kind === "coverage") {
+    const l1 = "\u26a0 <b>" + tgEsc(ev.t || ev.coin || "?") + "</b> \u00b7 data gap";
+    const l2 = tgEsc(ev.text || "");
+    return [l1, l2].filter(Boolean).join("\n");
+  }
   if (kind === "rule") {
     const l1 = "<b>" + name + "</b> \u00b7 " + tgEsc(ev.rule || (ev.label + " " + ev.op + " " + ev.value));
     const l2 = "now " + tgEsc(ev.now == null ? "\u2014" : String(ev.now)) + (ev.note ? " \u00b7 " + tgEsc(ev.note) : "");
@@ -3797,7 +3839,55 @@ module.exports.ruleLabel = ruleLabel;
 module.exports.ruleFmtValue = ruleFmtValue;
 module.exports.validateRule = validateRule;
 
+// ---- quiet hours ------------------------------------------------------------------------------
+// Per-recipient because these are DMs: two people in the group can be in different timezones and
+// want different windows. Stored as local hours plus that person's UTC offset in minutes, so the
+// server never has to guess a zone and a DST change is the recipient's own to re-set.
+//
+// A quiet window DELAYS; it never drops. An alert suppressed and forgotten is strictly worse than
+// one that arrives late, because the log and the phone would then disagree about what happened.
+function inQuietWindow(nowMs, q) {
+  if (!q || !Number.isFinite(q.from) || !Number.isFinite(q.to)) return false;
+  if (q.from === q.to) return false;   // a zero-width window is "off", not "always"
+  const tz = Number.isFinite(q.tz) ? q.tz : 0;
+  const d = new Date(nowMs + tz * 60000);
+  const h = d.getUTCHours() + d.getUTCMinutes() / 60;
+  return q.from < q.to ? (h >= q.from && h < q.to) : (h >= q.from || h < q.to);   // the second branch wraps midnight
+}
+// When the current window ends, in ms. Used to schedule a held message rather than re-checking it
+// on every drain tick.
+function quietEndsAt(nowMs, q) {
+  if (!inQuietWindow(nowMs, q)) return nowMs;
+  const tz = Number.isFinite(q.tz) ? q.tz : 0;
+  const d = new Date(nowMs + tz * 60000);
+  const h = d.getUTCHours() + d.getUTCMinutes() / 60;
+  let ahead = q.to - h;
+  if (ahead <= 0) ahead += 24;
+  return nowMs + Math.ceil(ahead * 3600e3);
+}
+// What quiet hours cannot silence. A void being taken is a position going wrong right now, and a
+// stalled poller means every other alert has stopped being trustworthy — delaying either until
+// morning would defeat the point of having them.
+function piercesQuiet(ev) {
+  if (!ev) return false;
+  if (ev.kind === "ops") return true;
+  return ev.kind === "ledger" && ev.sub === "stop";
+}
+function validateQuiet(q) {
+  if (q == null) return { ok: true, quiet: null };
+  if (typeof q !== "object") return { ok: false, error: "bad-quiet" };
+  const from = +q.from, to = +q.to, tz = q.tz == null ? 0 : +q.tz;
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from >= 24 || to < 0 || to >= 24) return { ok: false, error: "bad-hours" };
+  if (!Number.isFinite(tz) || tz < -840 || tz > 840) return { ok: false, error: "bad-tz" };
+  return { ok: true, quiet: { from, to, tz } };
+}
+
+module.exports.inQuietWindow = inQuietWindow;
+module.exports.quietEndsAt = quietEndsAt;
+module.exports.piercesQuiet = piercesQuiet;
+module.exports.validateQuiet = validateQuiet;
 module.exports.PUSH_CLASSES = PUSH_CLASSES;
+module.exports.PUSH_DEFAULT_CLASSES = PUSH_DEFAULT_CLASSES;
 module.exports.PUSH_CODE_ALPHABET = PUSH_CODE_ALPHABET;
 module.exports.tgEsc = tgEsc;
 module.exports.pushCodeOk = pushCodeOk;

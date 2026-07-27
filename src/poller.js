@@ -16,7 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { momPair, spearmanIC, duelStats } = require("./compute");
-const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_CODE_ALPHABET,
+const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
@@ -3412,6 +3412,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const { items } = parseEdgarAtom(await res.text(), m.ticker, now);
         edgarStat.ok++; edgarStat.lastOk = now; edgarStat.lastItems = items.length;
         got = got.concat(items);
+        try { filingScan(items); }
+        catch (e2) { log("filingScan failed (isolated, filings still land in the news tab): " + (e2 && e2.message)); }
       } catch (e) {
         edgarStat.fail++; edgarStat.lastErr = "fetch failed: " + (e && e.message); edgarStat.lastErrAt = now;
         if (edgarLastLogged !== "fetch") { edgarLastLogged = "fetch"; log("EDGAR: " + edgarStat.lastErr); }
@@ -4054,6 +4056,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Chained to the snapshot cadence rather than given its own timer: the rules read the snapshot
     // payload, so evaluating on any other clock would mean judging a number the board isn't showing.
     setInterval(safeTick(ruleScan, "ruleScan"), 15 * 1000);
+    setInterval(safeTick(earnScan, "earnScan"), 60 * 60 * 1000);
+    setInterval(safeTick(regimeScan, "regimeScan"), 15 * 60 * 1000);
+    setInterval(safeTick(coverageScan, "coverageScan"), 10 * 60 * 1000);
+    setInterval(safeTick(digestTick, "digestTick"), 5 * 60 * 1000);
+    // The EDGAR rotation covers 2 names a minute, so a full roster pass takes ~40 minutes. Priming
+    // only after that means the 7-day backlog every name carries is seeded silently instead of
+    // arriving as a wall of notifications on the first deploy of the day.
+    setTimeout(() => { filingPrimed = true; log("filing alerts primed — the EDGAR backlog has been seeded silently"); }, 45 * 60 * 1000);
     // Fully dormant without a token: no outbound timers, no writes, no noise. Same one-variable
     // rollback discipline as CRYPTO=0 — unset TG_BOT_TOKEN and the transport is simply not there.
     if (pushOn()) {
@@ -5403,8 +5413,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
             // The evidence the void was checked against, frozen with the report: re-deriving these
             // client-side would let the chart disagree with the validator that accepted the read.
             structLevels: (ctx.levels && Array.isArray(ctx.levels.items)) ? ctx.levels.items : [] }); })() };
+    const prevRep = aiReports.get(coin);
     aiReports.set(coin, rep);
     persistAiReports();
+    try { aiFlipCheck(coin, prevRep, rep); }
+    catch (e) { log("aiFlipCheck failed (isolated, the report still stands): " + (e && e.message)); }
     return rep;
   }
   function aiPublic(rep) {
@@ -5946,13 +5959,19 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       .map((e) => (e.kind ? e : Object.assign({ kind: "setup" }, e)))   // pre-`kind` events are setups — that is all the ring held
       .slice(-TRIG_RING);
     trigSeq = Number.isFinite(d.seq) ? d.seq : (trigEvents.length ? trigEvents[trigEvents.length - 1].seq || 0 : 0);
+    // Rate history survives the restart: a meter that zeroes on every deploy would under-report
+    // exactly the classes worth measuring, since a noisy class and a frequent deploy look alike.
+    if (Array.isArray(d.rates)) for (const kv of d.rates)
+      if (Array.isArray(kv) && typeof kv[0] === "string" && Array.isArray(kv[1]))
+        classFires.set(kv[0], kv[1].filter((t) => Number.isFinite(t)));
     return true;
   }
   function persistTriggers() {
     if (!store.saveTriggers) return;
     const cut = Date.now() - TRIG_SEEN_TTL;
     for (const [k, t] of trigSeen) if (t < cut) trigSeen.delete(k);
-    store.saveTriggers({ seq: trigSeq, seen: [...trigSeen.entries()], events: trigEvents.slice(-TRIG_RING) });
+    store.saveTriggers({ seq: trigSeq, seen: [...trigSeen.entries()], events: trigEvents.slice(-TRIG_RING),
+      rates: [...classFires.entries()].map(([k, a]) => [k, a.slice(-CLASS_RATE_MAX)]) });
     trigDirty = false;
   }
   // ONE emitter for the ONE stream. Every class — setups today, ops here, the rest in later
@@ -5961,8 +5980,37 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // inferring class from which fields happen to be present. Legacy events persisted before this
   // stamp existed read as "setup" at hydrate, which is what they are.
   // NB: `kind`, not `cls` — actionable rows already carry a `cls` (the R:R class).
+  // Rolling per-class fire counts. This exists because I shipped a deploy notice that fired four
+  // or five times per build and only found out when it became annoying. Guessing a class's
+  // frequency from the roster size is not good enough; measuring it is cheap. The panel shows
+  // fires-per-day next to each class so a subscription is an informed choice rather than a bet.
+  const CLASS_RATE_MAX = 400;   // per class; ~17/hour sustained before the window truncates
+  const classFires = new Map();   // kind -> [ts, ...] within 24h
+  function noteClassFire(kind, t) {
+    let a = classFires.get(kind);
+    if (!a) { a = []; classFires.set(kind, a); }
+    a.push(t);
+    const cut = t - 24 * 3600e3;
+    while (a.length && a[0] < cut) a.shift();
+    if (a.length > CLASS_RATE_MAX) a.splice(0, a.length - CLASS_RATE_MAX);
+  }
+  function getClassRates() {
+    const now = Date.now(), out = {};
+    for (const k of PUSH_CLASSES) {
+      const a = classFires.get(k) || [];
+      const cut = now - 24 * 3600e3, h = now - 3600e3;
+      const d1 = a.filter((t) => t >= cut).length;
+      out[k] = { d1, h1: a.filter((t) => t >= h).length,
+        // The count is truncated at the cap, so a very noisy class reports "400+" rather than a
+        // number that quietly understates it.
+        capped: d1 >= CLASS_RATE_MAX,
+        dflt: PUSH_DEFAULT_CLASSES.includes(k) };
+    }
+    return out;
+  }
   function emitTrig(kind, obj, now) {
     const ev = Object.assign({ seq: ++trigSeq, at: now || Date.now(), kind }, obj);
+    noteClassFire(kind, ev.at);
     trigEvents.push(ev);
     if (trigEvents.length > TRIG_RING) trigEvents = trigEvents.slice(-TRIG_RING);
     trigDirty = true;
@@ -6069,7 +6117,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         chat: String(r.chat), name: r.name || String(r.chat), since: +r.since || Date.now(),
         cur: +r.cur || 0, classes: Array.isArray(r.classes) ? r.classes.filter((c) => PUSH_CLASSES.includes(c)) : null,
         trig: r.trig && typeof r.trig === "object" ? r.trig : {},
-        muted: !!r.muted, lastOk: +r.lastOk || null, lastErr: r.lastErr || null });
+        muted: !!r.muted, lastOk: +r.lastOk || null, lastErr: r.lastErr || null,
+        quiet: (r.quiet && Number.isFinite(r.quiet.from) && Number.isFinite(r.quiet.to))
+          ? { from: +r.quiet.from, to: +r.quiet.to, tz: +r.quiet.tz || 0 } : null,
+        digestHour: Number.isFinite(r.digestHour) ? +r.digestHour : null });
     }
     if (Number.isFinite(d.offset)) pushOffset = d.offset;
     return pushRecipients.size;
@@ -6131,6 +6182,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // A new recipient starts CAUGHT UP, never with the backlog: the ring holds up to 200 events
       // and nobody wants their first message from this bot to be two hundred stale setups.
       cur: trigSeq, classes: prev ? prev.classes : null, trig: prev ? prev.trig : {},
+      quiet: prev ? prev.quiet : null, digestHour: prev ? prev.digestHour : null,
       muted: false, lastOk: null, lastErr: null });
     persistPush();
     log(`push: linked recipient ${name || key} (${pushMask(key)})`);
@@ -6149,7 +6201,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const r = pushRecipients.get(String(chat));
     if (!r) return { ok: false, error: "unknown" };
     r.classes = Array.isArray(classes) ? classes.filter((c) => PUSH_CLASSES.includes(c)) : null;
-    if (r.classes && !r.classes.length) r.classes = null;   // an empty selection means "everything", not "silence" — muting is its own control
+    // An empty selection resets to the DEFAULT set, not to everything and not to silence. Muting is
+    // its own control, and "everything" now includes opt-in classes nobody should land in by
+    // accidentally clearing a selection.
+    if (r.classes && !r.classes.length) r.classes = null;
     persistPush();
     return { ok: true, classes: r.classes };
   }
@@ -6195,10 +6250,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // Bounded, paced, and never silently lossy: an overflow increments a counter the panel shows and
   // the next delivered message discloses. `force` bypasses the per-recipient hourly cap for replies
   // to a human who just typed a command at the bot — a /stop confirmation is not an alert.
-  function pushEnqueue(chat, text, force) {
+  function pushEnqueue(chat, text, force, after) {
     if (!text) return;
     if (pushQueue.length >= PUSH_QUEUE_MAX) { pushQueue.shift(); pushDropped++; }
-    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force });
+    pushQueue.push({ chat: String(chat), text, tries: 0, at: Date.now(), force: !!force, after: after || 0 });
   }
   function pushRecent(chat, now) {
     const r = pushRecipients.get(String(chat));
@@ -6210,7 +6265,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (pushSending || !pushQueue.length || !pushOn()) return;
     const now = Date.now();
     if (now < pushHoldUntil) return;
-    const item = pushQueue[0];
+    // First ELIGIBLE item, not the first item. A message scheduled for the end of a quiet window
+    // sitting at the head would otherwise block every urgent one behind it for hours — the same
+    // head-of-line failure the undeliverable-message drop had to fix.
+    const idx = pushQueue.findIndex((q) => !q.after || q.after <= now);
+    if (idx < 0) return;
+    const item = pushQueue[idx];
     if (!item.force && pushRecent(item.chat, now) >= PUSH_CAP_HOUR) {
       // Held, not dropped. The cap protects the channel from becoming unreadable; the disclosure
       // protects you from believing silence means nothing fired.
@@ -6226,7 +6286,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const rec = pushRecipients.get(item.chat);
       if (r.ok) {
         if (held > 0) pushDropped -= held;
-        pushQueue.shift();
+        pushQueue.splice(idx, 1);
         if (rec) { rec.lastOk = now; rec.lastErr = null; rec.sent = (rec.sent || []).concat(now); }
         pushHoldUntil = now + PUSH_SEND_GAP;
         pushLogAdd({ t: now, chat: pushMask(item.chat), ok: true });
@@ -6245,7 +6305,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         log(`push: ${pushMask(item.chat)} blocked the bot — muted`);
       } else if (r.status >= 400 && r.status < 500) {
         // A malformed message must never wedge the queue behind itself.
-        pushQueue.shift();
+        pushQueue.splice(idx, 1);
         if (rec) rec.lastErr = r.error;
         pushLastErr = r.error;
         pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: r.error });
@@ -6254,7 +6314,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         item.tries++;
         pushHoldUntil = now + Math.min(60000, 2000 * Math.pow(2, item.tries));
         if (item.tries >= PUSH_MAX_TRIES) {
-          pushQueue.shift();
+          pushQueue.splice(idx, 1);
           pushLogAdd({ t: now, chat: pushMask(item.chat), ok: false, err: "gave up after " + item.tries + " tries" });
         }
         pushLastErr = r.error;
@@ -6282,9 +6342,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const evs = trigEvents.filter((e) => e.seq > (rec.cur || 0));
       if (!evs.length) continue;
       rec.cur = trigSeq;
-      const msgs = evs.filter((e) => (e.at || 0) >= floor && pushEligible(e, rec))
-        .map((e) => pushFmt(e, { baseUrl: base })).filter(Boolean);
-      for (const text of pushBatch(msgs)) pushEnqueue(rec.chat, text);
+      const keep = evs.filter((e) => (e.at || 0) >= floor && pushEligible(e, rec));
+      // Split by whether the event pierces this recipient's quiet window. Held messages are
+      // scheduled for the window's end rather than dropped, so nothing the log records is ever
+      // missing from the phone — it just arrives at a civilised hour.
+      const quiet = rec.quiet && inQuietWindow(now, rec.quiet);
+      const live = quiet ? keep.filter(piercesQuiet) : keep;
+      const held = quiet ? keep.filter((e) => !piercesQuiet(e)) : [];
+      for (const text of pushBatch(live.map((e) => pushFmt(e, { baseUrl: base })).filter(Boolean)))
+        pushEnqueue(rec.chat, text);
+      if (held.length) {
+        const after = quietEndsAt(now, rec.quiet);
+        for (const text of pushBatch(held.map((e) => pushFmt(e, { baseUrl: base })).filter(Boolean), { max: 20 }))
+          pushEnqueue(rec.chat, "<i>held overnight</i>\n" + text, false, after);
+      }
       pushDirty = true;
     }
     if (pushDirty) persistPush();
@@ -6513,6 +6584,243 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ok: true, removed: before - alertRules.length };
   }
 
+
+  // ---- context classes: filings, earnings proximity, analyst flips (slice E) --------------------
+  // All three ship OPT-IN (see PUSH_DEFAULT_CLASSES): they enter the ring and the in-app log
+  // immediately, and reach a phone only once someone has seen the measured rate and chosen them.
+  //
+  // Two candidate classes were deliberately NOT built. News headlines: the wire runs a per-name
+  // rotation across the whole roster, so attributed headlines land at tens per day — that is a tab
+  // to read, not an interruption. Ownership filings (Forms 3/4/5/144/13G): routine insider flow,
+  // several per day per active name. Both would have been noise wearing an alert's clothes.
+
+  const FILING_SEEN_MAX = 600;
+  const filingSeen = new Set();           // accession ids already announced
+  let filingPrimed = false;               // first pass after boot seeds silently
+  // Material forms only, and only the ones that actually move a mark. SEC_MATERIAL also carries
+  // DEF 14A and S-3 shelf registrations, which are real but rarely urgent; they stay in the news
+  // tab. This set is the "stop what you are doing" subset.
+  const FILING_PUSH_FORMS = new Set(["8-K", "8-K/A", "10-K", "10-Q", "SC 13D", "SC 13D/A", "6-K", "425"]);
+  function filingScan(items) {
+    if (!Array.isArray(items) || !items.length) return 0;
+    const now = Date.now();
+    let fired = 0;
+    for (const a of items) {
+      if (!a || !a.id || !a.tk) continue;
+      if (filingSeen.has(a.id)) continue;
+      filingSeen.add(a.id);
+      if (!FILING_PUSH_FORMS.has(a.form)) continue;
+      // The first rotation after a boot sees a 7-day backlog it was never listening for. Same
+      // anti-blast rule as the trigger stream: seeded, not announced.
+      if (!filingPrimed) continue;
+      if (!(a.pub > 0) || now - a.pub > 6 * HOUR) continue;   // a filing found late is history, not news
+      const r = [...rows.values()].find((x) => x.ticker === a.tk && !x.delisted);
+      emitTrig("filing", { coin: r ? r.coin : a.tk, t: a.tk, form: a.form, h: a.h || "", url: a.url || null, pub: a.pub }, now);
+      fired++;
+    }
+    if (filingSeen.size > FILING_SEEN_MAX) {
+      const drop = filingSeen.size - FILING_SEEN_MAX; let i = 0;
+      for (const k of filingSeen) { if (i++ >= drop) break; filingSeen.delete(k); }
+    }
+    if (fired) { persistTriggers(); log(`filing alerts: ${fired} material filing(s)`); }
+    return fired;
+  }
+
+  // Earnings proximity, scoped HARD. An 84-name roster in reporting season prints a dozen names a
+  // day, which is a calendar, not an alert. The gate that makes this rare and useful at once: only
+  // names carrying an OPEN, ANNOUNCED claim — you were told to look at it, and now the thing that
+  // decides it is a day away.
+  const earnAlerted = new Map();   // ticker|date -> ts
+  function earnScan() {
+    const now = Date.now();
+    let fired = 0;
+    const seen = new Set();
+    for (const e of ledgerOpen.values()) {
+      if (e.vi != null || e.alo !== 1) continue;
+      const tk = e.ticker;
+      if (!tk || seen.has(tk)) continue;
+      seen.add(tk);
+      const prox = earnProx(tk);
+      if (!prox || prox.diff > 1) continue;          // today or tomorrow only
+      const key = tk + "|" + prox.e.d;
+      if (earnAlerted.has(key)) continue;
+      earnAlerted.set(key, now);
+      emitTrig("earnings", { coin: e.coin, t: tk, when: prox.diff === 0 ? "today" : "tomorrow",
+        session: prox.e.s || null, date: prox.e.d, claim: EV_LABEL[e.ev] || e.ev }, now);
+      fired++;
+    }
+    // Bounded: one entry per ticker per report date, and report dates stop mattering once past.
+    if (earnAlerted.size > 400) { const drop = earnAlerted.size - 400; let i = 0; for (const k of earnAlerted.keys()) { if (i++ >= drop) break; earnAlerted.delete(k); } }
+    if (fired) { persistTriggers(); log(`earnings alerts: ${fired} name(s) reporting within a day with an open claim`); }
+    return fired;
+  }
+
+  // Analyst action flip. The AI report is regenerated on a cooldown, usually by hand, so this is
+  // structurally rare — and a read moving from "wait" to a side (or back) is the report changing
+  // its mind, which is the only part of a regeneration worth interrupting anyone for. Emitted from
+  // the generation path, comparing against the stance the previous cached report published.
+  function aiFlipCheck(coin, prevRep, nextRep) {
+    try {
+      const a = prevRep && prevRep.report && prevRep.report.action;
+      const b = nextRep && nextRep.report && nextRep.report.action;
+      if (!a || !b || !a.stance || !b.stance) return null;
+      if (a.stance === b.stance) return null;
+      const r = rows.get(coin);
+      return emitTrig("ai", { coin, t: (r && r.ticker) || coin, from: a.stance, to: b.stance,
+        note: typeof b.note === "string" ? b.note.slice(0, 160) : "" });
+    } catch (_) { return null; }
+  }
+
+
+  // ---- regime + coverage classes, and the daily digest (slice F) --------------------------------
+  // Both classes are PERSISTENT CONDITIONS rather than events, which is the trap: crowding stays
+  // extreme for days and a stale market stays stale until someone fixes it. Announced naively they
+  // would repeat on every scan. Each therefore carries the ledger's re-arm discipline — one episode,
+  // one alert, and it only re-arms once the condition has genuinely lapsed.
+  const REGIME_CROWD_EXT = 35;      // net crowding (long-extreme % minus short-extreme %) either way
+  const REGIME_OIZ_EXT = 2;         // aggregate OI stretch, in sigma of its own 60d history
+  const regimeArmed = new Map();    // scope|kind -> false while the condition is in force
+  function regimeScan() {
+    const now = Date.now();
+    let fired = 0;
+    let reg = null;
+    try { reg = buildRegime(); } catch (_) { return 0; }
+    if (!reg) return 0;
+    for (const scope of ["xyz", "main"]) {
+      const g = reg[scope];
+      if (!g || g.pending) continue;
+      const checks = [
+        { kind: "crowd", v: g.crowd && g.crowd.netCrowd, ext: REGIME_CROWD_EXT,
+          title: (v) => (v > 0 ? "longs crowded" : "shorts crowded"),
+          text: (v) => `net crowding ${v > 0 ? "+" : ""}${v} across ${g.crowd.pctNames} names with a funding percentile` },
+        { kind: "oiz", v: g.lev && g.lev.oiZ, ext: REGIME_OIZ_EXT,
+          title: (v) => (v > 0 ? "leverage stretched" : "leverage flushed"),
+          text: (v) => `aggregate open interest ${v > 0 ? "+" : ""}${(+v).toFixed(1)}\u03c3 vs its own 60d history` },
+      ];
+      for (const c of checks) {
+        if (c.v == null || !isFinite(c.v)) continue;
+        const key = scope + "|" + c.kind;
+        const hot = Math.abs(c.v) >= c.ext;
+        if (!hot) { if (regimeArmed.get(key) === false) regimeArmed.set(key, true); continue; }
+        if (regimeArmed.get(key) === false) continue;   // still the same episode
+        if (!regimeArmed.has(key)) { regimeArmed.set(key, false); continue; }   // in force at boot: seeded, not announced
+        regimeArmed.set(key, false);
+        emitTrig("regime", { scope, sub: c.kind, title: c.title(c.v), text: c.text(c.v), value: c.v }, now);
+        fired++;
+      }
+    }
+    if (fired) persistTriggers();
+    return fired;
+  }
+
+  // Coverage, scoped the same way the earnings class is: a data gap on a name nobody is watching is
+  // a maintenance item for the coverage panel, not an interruption. A data gap on a name carrying an
+  // OPEN, ANNOUNCED claim is different — every number you were given about that claim is now being
+  // computed from a stale spine, and you should know before you act on it.
+  const COVERAGE_STALE_MS = 90 * 60 * 1000;
+  const coverageArmed = new Map();
+  function coverageScan() {
+    const now = Date.now();
+    let fired = 0;
+    const live = new Set();
+    for (const e of ledgerOpen.values()) {
+      if (e.vi != null || e.alo !== 1) continue;
+      const r = rows.get(e.coin);
+      if (!r || r.delisted) continue;
+      live.add(e.coin);
+      const age = now - (r.hourlyTs || 0);
+      const stale = r.hourlyTs > 0 && age > COVERAGE_STALE_MS;
+      const key = e.coin;
+      if (!stale) { if (coverageArmed.get(key) === false) coverageArmed.set(key, true); continue; }
+      if (coverageArmed.get(key) === false) continue;
+      if (!coverageArmed.has(key)) { coverageArmed.set(key, false); continue; }
+      coverageArmed.set(key, false);
+      emitTrig("coverage", { coin: e.coin, t: e.ticker || e.coin,
+        text: `hourly spine last refreshed ${Math.round(age / 60000)} min ago \u2014 the open ${EV_LABEL[e.ev] || e.ev} claim's live numbers are running on stale data` }, now);
+      fired++;
+    }
+    for (const k of [...coverageArmed.keys()]) if (!live.has(k)) coverageArmed.delete(k);
+    if (fired) persistTriggers();
+    return fired;
+  }
+
+  // ---- daily digest ------------------------------------------------------------------------------
+  // This is where the classes that failed the frequency test in slice E finally get a home. News
+  // headlines land at tens per day, which is unusable as interruptions and perfectly fine as a
+  // once-a-day list. The digest is also the honest counterweight to quiet hours and the hourly cap:
+  // it states what the day actually contained, including what was suppressed.
+  const DIGEST_MAX_HEADLINES = 8;
+  function buildDigest(now) {
+    const t = now || Date.now();
+    const cut = t - 24 * 3600e3;
+    const rates = getClassRates();
+    const lines = [];
+    for (const k of PUSH_CLASSES) {
+      const n = rates[k] ? rates[k].d1 : 0;
+      if (n > 0) lines.push(k + " " + (rates[k].capped ? "400+" : n));
+    }
+    const open = [...ledgerOpen.values()].filter((e) => e.vi == null && e.alo === 1).length;
+    const heads = [];
+    try {
+      const news = newsCache && Array.isArray(newsCache.items) ? newsCache.items : [];
+      for (const a of news) {
+        if (heads.length >= DIGEST_MAX_HEADLINES) break;
+        if (!a || !a.tk || !(a.pub >= cut) || a.tg || a.form) continue;   // attributed wire headlines only
+        heads.push(a.tk + " \u2014 " + String(a.h || "").slice(0, 110));
+      }
+    } catch (_) {}
+    return { at: t, counts: lines, openClaims: open, headlines: heads };
+  }
+  function digestText(d) {
+    const parts = ["<b>Daily digest</b>"];
+    parts.push(d.counts.length ? d.counts.join(" \u00b7 ") : "nothing fired in the last 24h");
+    parts.push(d.openClaims + " open announced claim(s)");
+    if (d.headlines.length) {
+      parts.push("");
+      parts.push("<b>Headlines</b> <i>(not pushed individually \u2014 too frequent)</i>");
+      for (const h of d.headlines) parts.push("\u00b7 " + tgEsc(h));
+    }
+    return parts.join("\n");
+  }
+  const digestSent = new Map();   // chat -> YYYY-MM-DD already sent
+  function digestTick() {
+    if (!pushOn() || !pushRecipients.size) return 0;
+    const now = Date.now();
+    let sent = 0;
+    for (const rec of pushRecipients.values()) {
+      if (rec.muted || !Number.isFinite(rec.digestHour)) continue;
+      const tz = (rec.quiet && Number.isFinite(rec.quiet.tz)) ? rec.quiet.tz : 0;
+      const local = new Date(now + tz * 60000);
+      const day = local.toISOString().slice(0, 10);
+      if (digestSent.get(rec.chat) === day) continue;
+      if (local.getUTCHours() !== rec.digestHour) continue;
+      digestSent.set(rec.chat, day);
+      // force: a digest is a scheduled summary, not one of the day's alerts, so it should not be
+      // the message the hourly cap happens to eat.
+      pushEnqueue(rec.chat, digestText(buildDigest(now)), true);
+      sent++;
+    }
+    return sent;
+  }
+  function pushSetPrefs(chat, prefs) {
+    const r = pushRecipients.get(String(chat));
+    if (!r) return { ok: false, error: "unknown" };
+    const p = prefs || {};
+    if ("quiet" in p) {
+      const v = validateQuiet(p.quiet);
+      if (!v.ok) return v;
+      r.quiet = v.quiet;
+    }
+    if ("digestHour" in p) {
+      const h = p.digestHour;
+      if (h == null || h === "") r.digestHour = null;
+      else if (!Number.isFinite(+h) || +h < 0 || +h > 23) return { ok: false, error: "bad-hour" };
+      else r.digestHour = +h;
+    }
+    persistPush();
+    return { ok: true, quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null };
+  }
+
   function pushTest(chat) {
     if (!pushOn()) return { ok: false, error: "disabled" };
     const now = Date.now();
@@ -6533,11 +6841,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return {
       ts: now, dataTs: pushVer,
       enabled: pushOn(),
-      classes: PUSH_CLASSES,
+      classes: PUSH_CLASSES, defaultClasses: PUSH_DEFAULT_CLASSES, rates: getClassRates(),
       lookbackMs: PUSH_GRACE_MS, bootAt: pushBootAt,   // the boot rule is a lookback window, not a countdown — nothing is "waiting" to unmute
       recipients: [...pushRecipients.values()].map((r) => ({
         chat: r.chat, mask: pushMask(r.chat), name: r.name, since: r.since,
         classes: r.classes, muted: !!r.muted, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
+        quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null,
+        quietNow: !!(r.quiet && inQuietWindow(now, r.quiet)),
         sentHour: (r.sent || []).filter((t) => now - t < 3600e3).length })),
       code: codes.length ? codes[codes.length - 1] : null,
       queue: pushQueue.length, dropped: pushDropped, capHour: PUSH_CAP_HOUR,
@@ -6638,6 +6948,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     addRule,
     deleteRule,
     ruleScanNow: ruleScan,                       // harness: evaluate the rule list against the current snapshot
+    getClassRates,
+    pushSetPrefs,
+    regimeScanNow: regimeScan,
+    coverageScanNow: coverageScan,
+    digestTickNow: digestTick,
+    buildDigestNow: buildDigest,
+    filingScanNow: filingScan,                   // harness: feed parsed EDGAR items without a fetch
+    earnScanNow: earnScan,                       // harness: run the proximity check on demand
+    aiFlipCheckNow: aiFlipCheck,                 // harness: compare two report objects directly
+    filingPrimeNow: () => { filingPrimed = true; },   // harness: skip the 45-minute seeding window
     hydrateRulesNow: hydrateRules,               // harness: restore rules + edge state without a boot
     ledgerOpenNow: () => ledgerOpen,             // harness: reach the open claims to stage geometry
     resolveLedgerNow: resolveLedger,             // harness: force resolution without waiting out a horizon
