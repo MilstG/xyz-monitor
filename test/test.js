@@ -9310,3 +9310,80 @@ test("admin edits any recipient's classes from the roster; a person's own contro
   assert.equal(p.pushSetClasses("2222222222", ["setup"], "own-a", false).error, "forbidden");
   assert.equal(p.pushSetClasses("2222222222", ["setup", "trend"], "own-a", true).ok, true, "the admin override is a server capability, not a UI trick");
 });
+
+// ===== build 2026.07.27-14: hardening pass (audit items 1-6) ==================================
+
+test("ws watchdog: a mute socket that never closes is force-closed into the reconnect path", () => {
+  const fs = require("fs"), path = require("path");
+  const hl = fs.readFileSync(path.join(__dirname, "..", "src", "hyperliquid.js"), "utf8");
+  assert.ok(hl.includes("const WS_STALE_MS = 120000"), "staleness threshold pinned at 120s — two missed ping cycles of total silence");
+  assert.ok(/if \(Date\.now\(\) - lastMsg > WS_STALE_MS\) \{ try \{ ws\.close\(\); \} catch \(_\) \{\} return; \}/.test(hl),
+    "the ping tick must check staleness BEFORE pinging and force-close a zombie — close() routes into onclose -> backoff -> reconnect");
+  assert.ok(/onopen[\s\S]{0,200}lastMsg = Date\.now\(\)/.test(hl),
+    "the watchdog is armed at open, so a socket that never delivers even one message is also caught");
+  // The recovery path the watchdog feeds must still exist exactly as designed.
+  assert.ok(hl.includes("ws.onclose = () => { clearInterval(pingT); retry(); };"), "onclose still clears the ping timer and retries");
+});
+
+test("telegram lane fails fast: tgApi carries a real 15s abort signal to every call", async () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("signal: AbortSignal.timeout(15000)"),
+    "a stalled Telegram request must abort in 15s — the outbox drains sequentially, so one hang stalls the whole alert lane");
+  // Functional: the signal actually reaches the fetch options on a live call path.
+  process.env.TG_BOT_TOKEN = "test-token";
+  let seenSignal = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    savePush: () => {}, loadPush: () => null };
+  const pushFetch = async (url, opts) => {
+    seenSignal = opts && opts.signal;
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: [] }) };
+  };
+  const { createPoller } = require("../src/poller");
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, pushFetch });
+  await p.pushUpdatesNow();
+  assert.ok(seenSignal instanceof AbortSignal, "the timeout signal must ride the actual request, not just exist in source");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("crash containment + fuller shutdown: every timer-cadence persist gets a final flush", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // Node crashes the process on an unhandled rejection; without handlers a crash drops up to
+  // 10 min of spine plus buffered deriv appends. Both handlers must exist and route to the flush.
+  assert.ok(srv.includes('process.on("unhandledRejection", (e) => crashFlush("unhandledRejection", e))'), "unhandledRejection flushes before exit");
+  assert.ok(srv.includes('process.on("uncaughtException", (e) => crashFlush("uncaughtException", e))'), "uncaughtException flushes before exit");
+  assert.ok(srv.includes("process.exit(1)") && /crashFlush[\s\S]{0,600}store\.close\(\)/.test(srv),
+    "the crash path still exits nonzero (Railway restarts) and drains the store's append buffers on the way out");
+  // Graceful shutdown flushes MORE than the crash path: triggers, push state, and the awaited spine.
+  for (const call of ["poller.persistTriggers()", "poller.persistPush()", "await poller.persistHourly()"])
+    assert.ok(srv.includes(call), `shutdown must call ${call} — it was previously left to the last interval tick`);
+  assert.ok(srv.includes("let shuttingDown = false"), "re-entry guard: a second signal (or a crash mid-shutdown) must not double-flush");
+  // The final-flush surface must actually be exported by the poller, not assumed.
+  assert.ok(/persistHourly: \(\) => persistHourly\(\),\s*\n\s*persistTriggers,\s*\n\s*persistPush,/.test(pol),
+    "poller exports persistHourly/persistTriggers/persistPush for the shutdown and crash paths");
+});
+
+test("baseline security headers ride every response", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/addHook\("onSend"[\s\S]{0,400}x-content-type-options[\s\S]{0,100}nosniff/.test(srv), "nosniff on everything — no MIME confusion across the JSON/HTML mix");
+  assert.ok(/x-frame-options", "DENY"/.test(srv), "framing forbidden outright — a framed login page is a phishing kit");
+  assert.ok(/referrer-policy", "same-origin"/.test(srv), "versioned asset URLs and API paths stay inside the origin");
+});
+
+test("stamped assets cache immutable; everything else still force-revalidates", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes('req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && !req.url.startsWith("/api/")'),
+    "exact whole-query match against the CURRENT build, 200s only, never on /api/ — a stale stamp falls back to revalidation and no future v-param route can be frozen for a year");
+  assert.ok(srv.includes('"public, max-age=31536000, immutable"'),
+    "current-stamp requests cache immutable — the -84 lesson made free instead of merely cheap");
+  assert.ok(srv.includes('setHeaders(res) { res.setHeader("cache-control", "no-cache"); }'),
+    "everything unstamped still force-revalidates at the static route");
+  // The shell must still be the thing that mints stamped URLs, or immutable serves nothing.
+  assert.ok(srv.includes('src="/app.js?v=${VERSION}"') && srv.includes('href="/styles.css?v=${VERSION}"'),
+    "the boot-time shell rewrite is the sole source of stamped URLs — the cache-buster IS the URL");
+});
