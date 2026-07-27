@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.27-13";
+const VERSION = "2026.07.27-14";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -495,14 +495,39 @@ async function main() {
 
   // threshold: don't spend gzip CPU on bodies under 1 KB (health, channel lists, empty fallbacks) —
   // the compressed result is no smaller and often larger. Big payloads (snapshot, analytics) still compress.
+  // Baseline hardening headers on EVERY response (API, shell, login page, static assets alike).
+  // nosniff stops MIME confusion across the JSON/HTML mix; DENY forbids framing outright —
+  // nothing here is ever legitimately embedded, and a framed login page is a phishing kit;
+  // same-origin referrer keeps versioned asset URLs and API paths from leaking to any external
+  // link a report might one day carry. Deliberately NO Content-Security-Policy: the audience-
+  // injected flag slot is an inline script by design, and a nonce pipeline buys nothing for a
+  // password-gated single-page tool.
+  fastify.addHook("onSend", async (req, reply) => {
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("x-frame-options", "DENY");
+    reply.header("referrer-policy", "same-origin");
+    // Two-tier asset caching. Requests carrying the CURRENT build stamp (?v=<VERSION>) may
+    // cache forever: the shell rewrites those URLs every deploy, so the URL itself is the
+    // cache-buster and a new build is a new URL — immutable is safe by construction and saves
+    // a revalidation round-trip per asset per load (app.js alone is ~700 KB raw). Everything
+    // else — unstamped fetches, stale stamps from an old shell — keeps the static route's
+    // forced revalidation, so a browser can never heuristically cache its way into the
+    // "I deployed but I don't see it" failure the no-cache default exists for. Exact string
+    // match on the whole query: a stale ?v= from last build fails the match and falls back to
+    // revalidation, never to a year of wrong code.
+    const q = req.url.indexOf("?");
+    if (q >= 0 && req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && !req.url.startsWith("/api/"))
+      reply.header("cache-control", "public, max-age=31536000, immutable");
+  });
+
   await fastify.register(require("@fastify/compress"), { global: true, encodings: ["gzip", "deflate"], threshold: 1024 });
   await fastify.register(require("@fastify/static"), {
     root: path.join(__dirname, "public"),
     prefix: "/",
     index: false,   // index.html is served by the explicit routes below, version-stamped
-    // Force revalidation on every static asset. Without this, browsers heuristically cache
-    // app.js/styles.css and a fresh deploy can look like nothing changed until a hard refresh —
-    // the exact "I deployed but I don't see it" failure. ETags make revalidation a cheap 304.
+    // Force revalidation by default; the stamped-asset immutable tier is applied in the onSend
+    // hook below, which sees the request URL — setHeaders here only sees the raw response, and
+    // the query string needed to verify the stamp is not reliably reachable from it.
     setHeaders(res) { res.setHeader("cache-control", "no-cache"); },
   });
 
@@ -851,6 +876,41 @@ async function main() {
 
 main().catch((e) => { console.error(e); process.exit(1); });
 
-function shutdown() { try { poller.persistFeatures(); } catch (_) {} try { poller.persistLedger(); } catch (_) {} store.close(); process.exit(0); }
+// Graceful stop: flush EVERYTHING that persists on a timer, not just features + ledger — the
+// hourly spine (10-min cadence), trigger dedupe state, and push recipients were previously left
+// to whatever their last interval wrote. Railway's SIGTERM grace window is ample for the awaited
+// spine stream; the guard makes a second signal during the flush a no-op instead of a re-entry.
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try { poller.persistFeatures(); } catch (_) {}
+  try { poller.persistLedger(); } catch (_) {}
+  try { poller.persistTriggers(); } catch (_) {}
+  try { poller.persistPush(); } catch (_) {}
+  try { await poller.persistHourly(); } catch (_) {}
+  try { store.close(); } catch (_) {}
+  process.exit(0);
+}
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+
+// Crash containment: Node >= 15 hard-crashes the process on ANY unhandled rejection, and with
+// timer-cadence persistence a bare crash can drop up to 10 min of spine plus the buffered deriv
+// appends. Keep the crash-by-default semantics (a rejection that escaped every isolated catch is
+// a bug, and Railway restarts us) but spend the last moment on synchronous flushes — store.close()
+// drains the append buffers and closes SQLite cleanly. No awaits here: the process is in an
+// undefined state and the sync path must not depend on a live event loop.
+function crashFlush(kind, err) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try { console.error(`[crash] ${kind}: ${(err && err.stack) || err}`); } catch (_) {}
+  try { poller.persistFeatures(); } catch (_) {}
+  try { poller.persistLedger(); } catch (_) {}
+  try { poller.persistTriggers(); } catch (_) {}
+  try { poller.persistPush(); } catch (_) {}
+  try { store.close(); } catch (_) {}
+  process.exit(1);
+}
+process.on("unhandledRejection", (e) => crashFlush("unhandledRejection", e));
+process.on("uncaughtException", (e) => crashFlush("uncaughtException", e));
