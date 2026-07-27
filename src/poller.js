@@ -7127,10 +7127,26 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   //
   // Both are persistent-state transitions, so both carry the same re-arm discipline as regime and
   // coverage: state in force at first sight is seeded, never announced.
-  const trendState = new Map();   // coin -> { score, sign }
+  //
+  // Boundary flap is the failure mode of both (build -16, the COPPER double): a 4/4 hugging the H1
+  // alignment edge drops to 3/4 for one scan and returns, and every return is technically a fresh
+  // arrival. Two gates, both episode-shaped, kill it:
+  //
+  //   stack — the drop must HOLD: score < 4 for TREND_REARM_SCANS consecutive scans before the
+  //           event re-arms, so a one-scan dip is the same episode still standing. Belt-and-
+  //           suspenders under that, TREND_STACK_CD floors the gap between fires per name, so even
+  //           a legitimately re-crossing boundary-hugger cannot become a feed.
+  //   cross — announced only after the flipped sign has HELD for TREND_CROSS_CONFIRM consecutive
+  //           scans. A flip that reverts inside the window fires nothing at all — deliberately no
+  //           cooldown here, because suppressing a genuine second flip would leave the last
+  //           announcement pointing the wrong way (the ops-lane lesson: both directions or neither).
+  const TREND_REARM_SCANS = 3;          // scans score must hold below 4 before the stack re-arms (~15 min)
+  const TREND_STACK_CD = 12 * 3600e3;   // per-name floor between stack fires
+  const TREND_CROSS_CONFIRM = 3;        // consecutive scans a flipped D1 sign must hold to be announced
+  const trendState = new Map();   // coin -> { score, sign, retest, below, stackAt, pendSign, pendRun }
   let trendPrimed = false;
-  function trendScan() {
-    const now = Date.now();
+  function trendScan(tNow) {
+    const now = Number.isFinite(tNow) ? tNow : Date.now();
     if (!trendCache || now - trendBuilt > TREND_MS) { try { buildTrend(); } catch (_) { return 0; } }
     if (!trendByCoin.size) return 0;
     let fired = 0;
@@ -7139,10 +7155,27 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (!r || r.delisted) continue;
       const sign = (tb.e13 > 0 && tb.e21 > 0) ? (tb.e13 > tb.e21 ? 1 : -1) : 0;
       const prev = trendState.get(coin);
-      trendState.set(coin, { score: tb.score, sign, retest: tb.retest || null });
-      if (!trendPrimed || !prev) continue;   // first pass seeds the whole board silently
-      // 1. Full stack reached. Only the ARRIVAL fires; sitting at 4/4 for a week says nothing new.
-      if (tb.score >= 4 && prev.score < 4) {
+      if (!trendPrimed || !prev) {   // first pass seeds the whole board silently
+        // A name seeded below 4 counts as fully armed: the hold exists to kill re-fires of a KNOWN
+        // stack, not to make a genuinely new name's first arrival late.
+        trendState.set(coin, { score: tb.score, sign, retest: tb.retest || null,
+          below: tb.score < 4 ? TREND_REARM_SCANS : 0, stackAt: 0, pendSign: 0, pendRun: 0 });
+        continue;
+      }
+      // `sign` here is the CONFIRMED ribbon direction; the observed one lives in the pend fields
+      // until it earns confirmation. `below` counts consecutive completed scans under 4/4.
+      const next = { score: tb.score, sign: prev.sign, retest: tb.retest || null,
+        below: tb.score < 4 ? Math.min((prev.below || 0) + 1, 999) : 0,
+        stackAt: prev.stackAt || 0, pendSign: prev.pendSign || 0, pendRun: prev.pendRun || 0 };
+      // 1. Full stack reached. Only the ARRIVAL fires; sitting at 4/4 for a week says nothing new —
+      //    and a one-scan wobble through 3/4 is sitting, not arriving (the hold), and a re-arrival
+      //    inside the cooldown is a boundary being hugged, not news. A rise that either gate
+      //    suppresses is consumed: `below` resets at 4/4, so the drop-and-hold must happen again.
+      if (tb.score >= 4 && prev.score < 4 && (prev.below || 0) >= TREND_REARM_SCANS
+          && now - (prev.stackAt || 0) >= TREND_STACK_CD) {
+        next.stackAt = now;
+        next.sign = sign; next.pendSign = 0; next.pendRun = 0;   // the cross is the stack — adopt, don't re-announce
+        trendState.set(coin, next);
         emitTrig("trend", { coin, t: r.ticker || coin, side: tb.side, sub: "stack", score: tb.score,
           tf: "D1", px: r.px, e21: tb.e21, title: "full 4/4 stack",
           text: `every rung aligned ${tb.side === "long" ? "up" : "down"}${tb.age != null ? ` \u00b7 trend age ${tb.age}d` : ""}` }, now);
@@ -7156,21 +7189,33 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       //    that record exists this is the only way a retest reaches you at all — which, with a young
       //    tretest ledger, is precisely why trend retests looked nonexistent.
       if (tb.retest && !prev.retest) {
+        trendState.set(coin, next);
         emitTrig("trend", { coin, t: r.ticker || coin, side: tb.side, sub: "retest", score: tb.score,
           tf: tb.retest, px: r.px, e21: tb.e21, title: tb.retest + " retest of the 13/21 zone",
           text: `pullback into the ribbon of a ${tb.score}/4 stacked ${tb.side === "long" ? "uptrend" : "downtrend"}, close holding EMA21` }, now);
         fired++;
-        continue;
+        continue;   // a pending cross survives the retest scan and confirms on its own clock
       }
-      // 3. D1 ribbon cross. Sign 0 (a rung without both EMAs) is unknown, not a flip — treating it
-      //    as one would fire on every gap in the ladder.
-      if (sign !== 0 && prev.sign !== 0 && sign !== prev.sign) {
-        emitTrig("trend", { coin, t: r.ticker || coin, side: sign > 0 ? "long" : "short", sub: "cross",
-          score: tb.score, tf: "D1", px: r.px, e21: tb.e21,
-          title: "D1 13/21 cross " + (sign > 0 ? "up" : "down"),
-          text: "the daily ribbon flipped " + (sign > 0 ? "bullish" : "bearish") }, now);
-        fired++;
+      // 3. D1 ribbon cross, debounced. Sign 0 (a rung without both EMAs) is unknown, not a flip —
+      //    treating it as one would fire on every gap in the ladder, and it resets the pending
+      //    count rather than feeding it (silence over noise). A flip out of 0 is adoption, not a
+      //    flip: it confirms silently, exactly as the old direct comparison behaved.
+      if (sign === 0 || sign === prev.sign) { next.pendSign = 0; next.pendRun = 0; }
+      else {
+        next.pendRun = (prev.pendSign === sign ? (prev.pendRun || 0) : 0) + 1;
+        next.pendSign = sign;
+        if (next.pendRun >= TREND_CROSS_CONFIRM) {
+          next.sign = sign; next.pendSign = 0; next.pendRun = 0;
+          if (prev.sign !== 0) {
+            emitTrig("trend", { coin, t: r.ticker || coin, side: sign > 0 ? "long" : "short", sub: "cross",
+              score: tb.score, tf: "D1", px: r.px, e21: tb.e21,
+              title: "D1 13/21 cross " + (sign > 0 ? "up" : "down"),
+              text: "the daily ribbon flipped " + (sign > 0 ? "bullish" : "bearish") }, now);
+            fired++;
+          }
+        }
       }
+      trendState.set(coin, next);
     }
     // Names that left the board entirely lose their state, so a return is a genuinely new episode.
     for (const c of [...trendState.keys()]) if (!trendByCoin.has(c)) trendState.delete(c);
@@ -7348,6 +7393,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     hydrateTriggersNow: hydrateTriggers,   // harness: restore announced-set/event log without a boot
     trigStateNow: () => ({ seq: trigSeq, seen: trigSeen.size, events: trigEvents.length, firstBuild: trigFirstBuild }),
     buildTrendNow: buildTrend,   // harness: force a trend-board rebuild without waiting out the memo
+    seedTrendNow: (coin, tb) => {   // harness: place a synthetic board read so trendScan's episode gates are testable without candle history; freezes the memo so a fake clock can't trigger a rebuild mid-test
+      trendByCoin.set(coin, tb);
+      if (!trendCache) trendCache = { ts: Date.now() };
+      trendBuilt = Number.MAX_SAFE_INTEGER / 2;
+    },
     seedRowNow: (coin, fields) => {   // harness: seed a synthetic market so builds are testable without network; main-universe seeds join the main roster exactly as the refresh would place them
       const r = Object.assign(getRow(coin), fields);
       if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = packHours(r.hourlyRaw);   // seed the packed spine exactly as refreshHourly/hydrate would (accepts object or packed input)
