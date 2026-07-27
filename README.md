@@ -141,6 +141,20 @@ before — the tab explains what's missing and no badges render. One HTTP GET pe
 signals (breakout, breakdown, gap, overnight drift) on names reporting ≤1 day out are flagged
 and have their evidence contribution capped — a stated prior, labeled as such on the card.
 
+## Optional: macro calendar (FRED)
+
+The Calendar tab interleaves universe-wide macro events with earnings: FOMC decisions come
+from the Fed's published schedule (a static table in `src/compute.js` — no key needed, extend
+it when the Fed publishes the next year), and CPI / nonfarm payrolls / PPI / retail sales /
+GDP / PCE come from FRED's release schedule. For the FRED side, get a free API key at
+fred.stlouisfed.org (API Keys) and set `FRED_KEY` as a Railway variable. Without it the FOMC
+rows still serve and the tab explains what's missing. ~12 paced GETs per refresh (~4/day)
+against FRED's 120/min budget; Hyperliquid untouched. Prior values are the previous print —
+FRED carries no street consensus, so macro rows read prior → actual + the tape's reaction,
+never beat/miss vs estimates. A macro event ≤1 ET day out flags session-spanning signals on
+both universes with the same evidence cap as the earnings guard, shows a global banner on
+every tab, and is flagged on the Actionable board and in AI reports.
+
 ## Optional: shared-password access
 
 By default the site is public to anyone with the link. To require a shared password, set
