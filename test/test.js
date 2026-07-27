@@ -9220,3 +9220,93 @@ test("trend is opt-in and reachable: present in the class list, absent from the 
   assert.equal(C.pushEligible(ev, {}), false, "an unchosen subscription does not receive it");
   assert.equal(C.pushEligible(ev, { classes: ["trend"] }), true, "choosing it works");
 });
+
+// ===== Episode persistence, retest alerts, admin editing, catalog gaps (2026.07.27-13) ==========
+
+test("episode state survives a restart — the fix that makes trend/regime/coverage real", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { createPoller } = require("../src/poller");
+  let trigBlob = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => trigBlob, saveTriggers: (d) => { trigBlob = d; } };
+  const mk = () => createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+
+  // Process 1 seeds a coverage episode (stale spine on an announced claim) and dies.
+  const p1 = mk(); p1.hydrateTriggersNow && p1.hydrateTriggersNow();
+  p1.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz", hourlyTs: Date.now() - 4 * 3600e3 });
+  p1.ledgerOpenNow().set("AAA|breakout", { key: "AAA|breakout", coin: "AAA", ticker: "AAA", ev: "breakout",
+    t0: Date.now(), mark0: 10, dir: 1, psd: "long", alo: 1, resolveAt: Date.now() + 1e9 });
+  p1.coverageScanNow();   // seeds (in force at first sight), persists
+  assert.ok(trigBlob && trigBlob.episodes && Array.isArray(trigBlob.episodes.coverage) && trigBlob.episodes.coverage.length,
+    "episode maps are persisted with the ring — this app deploys once per pushed FILE, and unpersisted seeds meant every deploy re-muted every scan");
+
+  // Process 2 boots, restores the seed, and the STILL-stale market must not re-announce…
+  const p2 = mk(); p2.hydrateTriggersNow && p2.hydrateTriggersNow();
+  p2.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz", hourlyTs: Date.now() - 5 * 3600e3 });
+  p2.ledgerOpenNow().set("AAA|breakout", { key: "AAA|breakout", coin: "AAA", ticker: "AAA", ev: "breakout",
+    t0: Date.now(), mark0: 10, dir: 1, psd: "long", alo: 1, resolveAt: Date.now() + 1e9 });
+  p2.coverageScanNow();
+  const covs = p2.getTriggers(0, null, true).events.filter((e) => e.kind === "coverage");
+  assert.equal(covs.length, 0, "a restored seed is a seed — the restart is not a new episode");
+
+  // …but a transition that spans the restart DOES fire: recovery in p2, then stale again.
+  p2.seedRowNow("AAA", { hourlyTs: Date.now() }); p2.coverageScanNow();
+  p2.seedRowNow("AAA", { hourlyTs: Date.now() - 4 * 3600e3 }); p2.coverageScanNow();
+  assert.equal(p2.getTriggers(0, null, true).events.filter((e) => e.kind === "coverage").length, 1,
+    "the transition fires exactly once, across as many deploys as it spans");
+
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/if \(trendState\.size\) trendPrimed = true;/.test(pol) && /if \(filingSeen\.size\) filingPrimed = true;/.test(pol),
+    "restored state IS the seed — keeping the priming delay after a restore would only eat real transitions");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("retest-badge arrivals are trend events — visible before the ledger family earns its record", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const fn = pol.slice(pol.indexOf("function trendScan()"), pol.indexOf("function pushTest("));
+  assert.ok(/if \(tb\.retest && !prev\.retest\)/.test(fn), "the badge APPEARING fires; the badge persisting does not");
+  assert.ok(/sub: "retest"/.test(fn));
+  // The load-bearing comment: the ledger's setup alert for tretest waits on a proven record
+  // (n >= 8 resolved). Until then the badge arrival is the only path a retest has to a phone,
+  // which is why "trend retests are nonexistent" was true before this.
+  assert.ok(/waits for the event family to prove a record/.test(fn));
+  const C = require("../src/compute");
+  const m = C.pushFmt({ kind: "trend", coin: "N", t: "NVDA", side: "long", sub: "retest", score: 3,
+    tf: "H12", px: 120, e21: 118, title: "H12 retest of the 13/21 zone", text: "pullback into the ribbon" }, {});
+  assert.ok(m.includes("H12 retest") && /^tf\s+H12$/m.test(m.slice(m.indexOf("<pre>") + 5, m.indexOf("</pre>"))));
+});
+
+test("rule catalog carries the board's windowed columns, not a subset of them", () => {
+  const C = require("../src/compute");
+  const keys = C.RULE_METRICS.map((m) => m.k);
+  for (const k of ["doiH1", "doiH4", "doiD30", "fundD1", "fundD7", "hi30", "lo30", "vwap30"])
+    assert.ok(keys.includes(k), `${k} was a board column with no alert path`);
+  const row = { px: 98, feat: { hi30: 100, lo30: 80, vwap30: 95 }, doi: { h1: 1.2, h4: 3.4, d30: -8 },
+    fundByWin: { d1: 0.0001, d7: 0.00005 } };
+  assert.ok(Math.abs(C.RULE_BY_K.hi30.get(row) - -2) < 1e-9, "% from the 30d high is negative below it — 'hi30 > -2' is the breakout-watch question");
+  assert.ok(Math.abs(C.RULE_BY_K.lo30.get(row) - 22.5) < 1e-9);
+  assert.ok(Math.abs(C.RULE_BY_K.fundD1.get(row) - 0.0001 * 24 * 365 * 100) < 1e-9, "windowed funding is annualised like the point-in-time metric");
+  assert.equal(C.RULE_BY_K.doiD30.get(row), -8);
+  assert.equal(C.RULE_BY_K.hi30.get({ px: 98 }), null, "a row without the feature block is null, never a guess");
+});
+
+test("admin edits any recipient's classes from the roster; a person's own controls are untouched", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // The roster edits in place, over the same route the owner uses — the server already honoured the
+  // admin override, the UI had simply stopped offering it.
+  assert.ok(/data-apcls=/.test(app) && /data-apchat=/.test(app), "the admin roster has class chips");
+  assert.ok(/pushAct\('\/api\/alerts\/classes',\{chat:rec\.chat, classes:cur\}\)\.then\(\(\)=>renderAdmRecips\(\)\)/.test(app),
+    "admin writes ride the normal classes route");
+  assert.ok(/data-admexp=/.test(app), "rows expand on demand — three recipients of chips is the wall the bell panel just escaped");
+  // Public users' own controls: still built for every recipient the bell panel shows.
+  assert.ok(/data-pcls=/.test(app) && /data-pquiet=/.test(app) && /data-pdig=/.test(app),
+    "self-service class/quiet/digest controls remain in the bell panel");
+  // And the server still enforces that a NON-admin cannot write someone else's subscriptions.
+  const p = twoUserHarness();
+  const cb = p.pushMintCode("own-b", false); p.pushBindNow(cb.code, 2222222222, "friend");
+  assert.equal(p.pushSetClasses("2222222222", ["setup"], "own-a", false).error, "forbidden");
+  assert.equal(p.pushSetClasses("2222222222", ["setup", "trend"], "own-a", true).ok, true, "the admin override is a server capability, not a UI trick");
+});
