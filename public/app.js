@@ -126,6 +126,13 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
     // ring rather than in this tab's memory. `log` is what remains local — the in-tab metric
     // rules, which still evaluate here until their server-side replacement lands.
     feed:[], seenSeq:0, alertVer:null,
+    // clearedSeq hides everything up to a point for THIS browser. The ring is the record and a
+    // client has no business deleting from it, so "clear" is a view watermark, and the panel says
+    // so rather than implying the history is gone.
+    clearedSeq:0,
+    // Collapsed sections, persisted. The panel had grown to four stacked blocks and a wall of log
+    // rows; everything below is still one click away, it just is not all shouting at once.
+    open:{ trig:false, rules:false, deliv:true, recent:true },
     // Trigger alerts are NOT user-authored rules — they're a standing subscription to "any new
     // setup passing these filters", so they sit alongside A.rules rather than inside it.
     // No provenOnly here: the server's stream now carries only CONFIRMED setups, so the filter
@@ -1926,7 +1933,8 @@ function pushToast(text){ const w=el('toastwrap'); const t=document.createElemen
 // in-memory counter reset to zero on every refresh, so anything that fired while you were away
 // was invisible by the time you looked — the exact failure this slice exists to fix.
 function alertUnread(){ const A=state.alerts;
-  return A.feed.filter(e=>(e.seq||0)>(A.seenSeq||0)).length + A.unseen; }
+  const floor=Math.max(A.seenSeq||0, A.clearedSeq||0);
+  return A.feed.filter(e=>(e.seq||0)>floor).length + A.unseen; }
 function updateBell(){ const b=el('bellBadge'), n=alertUnread(); b.textContent=n>99?'99+':String(n); b.classList.toggle('show', n>0); }
 // Marks everything currently held as read and persists the watermark, so the badge stays cleared
 // across a refresh and across devices' own separate reading.
@@ -1968,8 +1976,9 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   const opOpts=(ruleState&&ruleState.ops||['>','<']).map(o=>`<option value="${esc(o)}">${esc((ruleState&&ruleState.opLabels&&ruleState.opLabels[o])||o)}</option>`).join('');
   const srvRules=(ruleState&&ruleState.rules)||[];
   const srvHtml=srvRules.length? srvRules.map(rl=>
-      `<div class="arule"><span>${esc(rl.text||rl.metric)}${rl.note?' <span class="sec">'+esc(rl.note)+'</span>':''}</span><span class="ax" data-sdel="${rl.id}" title="delete">\u2715</span></div>`).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">No shared rules yet.</div>';
+      `<div class="arule"><span>${esc(rl.text||rl.metric)}${rl.mine?'':' <span class="sec" data-tip="written from another browser \u2014 visible because you are admin">(not yours)</span>'}${rl.note?' <span class="sec">'+esc(rl.note)+'</span>':''}</span><span class="ax" data-sdel="${rl.id}" title="delete">\u2715</span></div>`).join('')
+    : '<div class="sec" style="font-size:12px;padding:4px">You have no rules yet.</div>';
+  const otherRules=(ruleState&&ruleState.othersRules)||0;
   const rulesHtml=A.rules.length? A.rules.map(rl=>{ const m=AM_BY[rl.metric];
     return `<div class="arule"><span>${rl.coin?esc(tickerOf(rl.coin)):'<span class="sec">any</span>'} \u00b7 ${esc(m?m.label:rl.metric)} ${rl.op} ${rl.value}</span><span class="ax" data-del="${rl.id}" title="delete">\u2715</span></div>`; }).join('')
     : '';
@@ -1978,53 +1987,88 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   // in-tab rule fires (die with the tab, until their server-side replacement lands).
   const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec'],
     filing:['FILING',''], earnings:['EARN','sec'], ai:['AI',''], regime:['REGIME','sec'], coverage:['GAP','neg']};
-  const feedRows=A.feed.map(e=>({t:e.at||0, seq:e.seq||0,
+  const feedRows=A.feed.filter(e=>(e.seq||0)>(A.clearedSeq||0)).map(e=>({t:e.at||0, seq:e.seq||0,
     kind:(e.kind||'setup'), sub:e.sub||null, text:alertText(e), coin:e.coin||null}));
   const localRows=A.log.map(e=>({t:e.t, seq:0, kind:'rule', sub:null, text:e.text, coin:null}));
-  const merged=feedRows.concat(localRows).sort((a,b)=>(b.t||0)-(a.t||0)).slice(0,14);
+  // Collapse consecutive identical-text rows into one with a count. Ten "deploy — build X is live"
+  // lines in a row carry exactly as much information as one line saying it happened ten times, and
+  // they were burying every setup and ledger event under them.
+  const sorted=feedRows.concat(localRows).sort((a,b)=>(b.t||0)-(a.t||0));
+  const merged=[];
+  for(const e of sorted){
+    const last=merged[merged.length-1];
+    if(last && last.kind===e.kind && last.text===e.text){ last.n=(last.n||1)+1; continue; }
+    merged.push(Object.assign({},e));
+    if(merged.length>=14) break;
+  }
   const logHtml=merged.length? merged.map(e=>{
     const tag=ATAG[e.kind]||['?','']; 
     const lbl=e.kind==='ledger'&&e.sub==='stop'?['VOID','neg']:e.kind==='ledger'&&e.sub==='target'?['TGT','pos']:e.kind==='ledger'?['RES','sec']:tag;
     const unread=e.seq>0&&e.seq>(A.seenSeq||0);
     return `<div class="alog${unread?' aunread':''}"><span class="at">${e.t?new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}):'\u2014'}</span>`
-      +`<span class="atag ${lbl[1]}">${lbl[0]}</span> ${esc(e.text)}</div>`; }).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">Nothing has fired yet.</div>';
+      +`<span class="atag ${lbl[1]}">${lbl[0]}</span> ${esc(e.text)}${e.n>1?` <span class="sec" data-tip="repeated ${e.n} times \u2014 collapsed">\u00d7${e.n}</span>`:''}</div>`; }).join('')
+    : `<div class="sec" style="font-size:12px;padding:4px">${(A.clearedSeq||0)>0?'Cleared. New events will appear here.':'Nothing has fired yet.'}</div>`;
   const navail=(typeof Notification!=='undefined');
   const T=A.trig;
   const mutedHtml=T.muted.length? T.muted.map(c=>`<span class="arule" style="display:inline-flex;margin:0 4px 4px 0"><span>${esc(tickerOf(c))}</span><span class="ax" data-unmute="${esc(c)}" title="unmute">✕</span></span>`).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nothing muted.</div>';
-  pop.innerHTML=`<div class="cphead">Trigger alerts <span class="sec" style="text-transform:none;letter-spacing:0">· new confirmed setups only</span></div>
-    <label class="copt"><input type="checkbox" id="at-on" ${T.on?'checked':''}/> Alert on new triggers</label>
-    <div class="arule-form" style="margin-top:6px">
-      <select id="at-ev" title="Minimum expectancy to interrupt you for."><option value="">any EV</option><option value="0"${T.minEV===0?' selected':''}>EV &ge; 0</option><option value="0.3"${T.minEV===0.3?' selected':''}>EV &ge; +0.30R</option><option value="0.5"${T.minEV===0.5?' selected':''}>EV &ge; +0.50R</option></select>
-      <select id="at-late" title="An alert on a setup that already ran away from its fire is noise, not an opportunity."><option value="">any lateness</option><option value="0.25"${T.maxLate===0.25?' selected':''}>late &le; 0.25R</option><option value="0.5"${T.maxLate===0.5?' selected':''}>late &le; 0.50R</option><option value="1"${T.maxLate===1?' selected':''}>late &le; 1.00R</option></select>
-    </div>
-    <div class="cphead">Muted (${T.muted.length})</div>${mutedHtml}
-    <div class="cphead">New alert</div>
-    <div class="arule-form">
-      <input id="ar-ticker" class="full" placeholder="Ticker (blank = any market)" autocomplete="off" spellcheck="false"/>
-      <select id="ar-metric">${metricOpts}</select>
-      <select id="ar-op">${opOpts}</select>
-      <input id="ar-val" class="full" placeholder="Threshold (e.g. 5 for 5%, 50 for 50M)" autocomplete="off" spellcheck="false"/>
-      <button class="btn full" id="ar-add" style="justify-content:center">Add alert</button>
-    </div>
-    <div class="cphead">Rules (${srvRules.length}) <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 shared \u00b7 evaluated server-side, fire with no tab open</span></div>${srvHtml}
-    ${A.rules.length?`<div class="cphead">This browser only (${A.rules.length}) <span class="sec" style="text-transform:none;letter-spacing:0" data-tip="squeeze, momentum and beta are derived in your browser against the analysis window you have selected, so there is no single server-side value to alert on. These fire only while this tab is open and never reach telegram.">\u00b7 why?</span></div>${rulesHtml}`:''}
-    <div class="cphead">Delivery <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 telegram DMs, sent with no tab open</span></div>${buildPushSection()}
-    <div class="cphead">Recent <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 server-held \u2014 survives a closed tab; RULE rows are this browser only</span></div>${logHtml}
-    <label class="copt" style="margin-top:8px"><input type="checkbox" id="ar-notify" ${A.notify?'checked':''} ${navail?'':'disabled'}/> Browser notifications${navail?'':' (unavailable here)'}</label>
+  // Collapsible sections. Four stacked blocks plus a log had turned the panel into a wall; the
+  // header is now a toggle and the open/closed state persists per browser.
+  const O=A.open||{};
+  const sec=(k,title,note,body,extra)=>`<div class="asec-h${O[k]?' on':''}" data-asec="${k}"><span class="asec-c">${O[k]?'\u25be':'\u25b8'}</span>${title}${note?` <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 ${note}</span>`:''}${extra||''}</div>${O[k]?`<div class="asec-b">${body}</div>`:''}`;
+  const numIn=(id,val,ph,tip)=>`<label class="anum" data-tip="${esc(tip)}"><span>${ph}</span><input id="${id}" type="number" step="0.05" value="${val==null?'':val}" placeholder="any"/></label>`;
+  pop.innerHTML=
+    sec('trig','Trigger alerts','new confirmed setups only',
+      `<label class="copt"><input type="checkbox" id="at-on" ${T.on?'checked':''}/> Alert on new triggers</label>
+       <div class="anum-row">
+         ${numIn('at-ev',T.minEV,'EV \u2265','Minimum expectancy, in R, to interrupt you for. Blank = any. Applies to this browser AND your telegram.')}
+         ${numIn('at-rr',T.minRR,'R:R \u2265','Minimum reward-to-risk FROZEN AT FIRE. The board classes anything under 2.0 as a grinder rather than a windfall \u2014 neither is wrong, but they are different trades. Blank = any.')}
+         ${numIn('at-late',T.maxLate,'late \u2264','How far the setup has already run from its fire, in its own risk unit. An alert on a setup that already spent its edge is noise. Blank = any.')}
+       </div>
+       <div class="sec" style="font-size:10.5px;margin-top:4px">these thresholds apply to the in-tab toasts and to your telegram delivery</div>
+       <div class="cphead" style="margin-top:8px">Muted (${T.muted.length})</div>${mutedHtml}`)
+    + sec('rules',`Rules (${srvRules.length})`,'private to you \u00b7 evaluated server-side, fire with no tab open',
+      `<div class="arule-form">
+        <input id="ar-ticker" class="full" placeholder="Ticker (blank = any market)" autocomplete="off" spellcheck="false"/>
+        <select id="ar-metric">${metricOpts}</select>
+        <select id="ar-op">${opOpts}</select>
+        <input id="ar-val" class="full" placeholder="Threshold (e.g. 5 for 5%, 50 for 50M)" autocomplete="off" spellcheck="false"/>
+        <button class="btn full" id="ar-add" style="justify-content:center">Add alert</button>
+       </div>${srvHtml}${otherRules>0?`<div class="sec" style="font-size:11px;padding:2px 4px">${otherRules} rule(s) written by other people \u2014 not shown</div>`:''}
+       ${A.rules.length?`<div class="cphead" style="margin-top:8px">This browser only (${A.rules.length}) <span class="sec" style="text-transform:none;letter-spacing:0" data-tip="squeeze, momentum and beta are derived in your browser against the analysis window you have selected, so there is no single server-side value to alert on. These fire only while this tab is open and never reach telegram.">\u00b7 why?</span></div>${rulesHtml}`:''}`)
+    + sec('deliv','Delivery','your own telegram \u00b7 DMs sent with no tab open', buildPushSection())
+    + sec('recent','Recent','server-held \u2014 survives a closed tab', logHtml,
+        `<span class="asec-x" data-aclear="1" data-tip="hides everything currently listed, for this browser only. The server\u2019s ring is the record and is never edited from here \u2014 other devices and the telegram history are untouched.">clear</span>`)
+    + `<label class="copt" style="margin-top:8px"><input type="checkbox" id="ar-notify" ${A.notify?'checked':''} ${navail?'':'disabled'}/> Browser notifications${navail?'':' (unavailable here)'}</label>
     <button class="btn" id="ar-clear" style="width:100%;justify-content:center;margin-top:6px">Mark all read</button>`;
-  el('ar-add').onclick=addAlertRule;
+  pop.querySelectorAll('[data-asec]').forEach(x=>x.addEventListener('click',e=>{
+    if(e.target.closest('[data-aclear]')) return;
+    const k=x.dataset.asec; A.open[k]=!A.open[k]; saveAlerts(); buildAlertsPanel(); }));
+  const clr=pop.querySelector('[data-aclear]');
+  if(clr) clr.addEventListener('click',e=>{ e.stopPropagation();
+    let hi=A.clearedSeq||0; for(const ev of A.feed) if((ev.seq||0)>hi) hi=ev.seq||0;
+    A.clearedSeq=hi; A.log=[]; A.unseen=0; if((A.seenSeq||0)<hi) A.seenSeq=hi;
+    saveAlerts(); updateBell(); buildAlertsPanel(); });
+  const addBtn=el('ar-add'); if(addBtn) addBtn.onclick=addAlertRule;
   pop.querySelectorAll('[data-sdel]').forEach(x=>x.addEventListener('click',()=>ruleAct({del:+x.dataset.sdel})));
-  el('ar-val').addEventListener('keydown',e=>{ if(e.key==='Enter') addAlertRule(); });
+  const valIn=el('ar-val'); if(valIn) valIn.addEventListener('keydown',e=>{ if(e.key==='Enter') addAlertRule(); });
   pop.querySelectorAll('[data-del]').forEach(x=>x.addEventListener('click',()=>deleteAlertRule(+x.dataset.del)));
   el('ar-notify').addEventListener('change',e=>toggleNotify(e.target.checked));
   // The server's ring is the record; a client cannot and should not delete from it. "Read" is the
   // only state a browser owns here, so that is the only thing this button changes.
   el('ar-clear').onclick=()=>{ alertMarkRead(); buildAlertsPanel(); };
-  el('at-on').addEventListener('change',e=>{ T.on=e.target.checked; saveAlerts(); if(T.on) loadTriggers(); });
-  el('at-ev').addEventListener('change',e=>{ T.minEV=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
-  el('at-late').addEventListener('change',e=>{ T.maxLate=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
+  const onBox=el('at-on'); if(onBox) onBox.addEventListener('change',e=>{ T.on=e.target.checked; saveAlerts(); if(T.on) loadTriggers(); });
+  // One control writes both sides: the in-tab filter and the same thresholds on every telegram
+  // recipient this browser owns. Two places to set the same number is how they end up disagreeing.
+  const syncTrig=()=>{ saveAlerts();
+    const rs=(pushState&&pushState.recipients)||[];
+    for(const r of rs) if(r.mine) pushAct('/api/alerts/prefs',{chat:r.chat, trig:{minEV:T.minEV, minRR:T.minRR, maxLate:T.maxLate}}); };
+  for(const [id,key] of [['at-ev','minEV'],['at-rr','minRR'],['at-late','maxLate']]){
+    const n=el(id); if(!n) continue;
+    n.addEventListener('change',e=>{ const v=e.target.value.trim();
+      T[key]=v===''?null:parseFloat(v);
+      if(T[key]!=null&&!isFinite(T[key])) T[key]=null;
+      syncTrig(); }); }
   pop.querySelectorAll('[data-unmute]').forEach(x=>x.addEventListener('click',()=>{
     T.muted=T.muted.filter(c=>c!==x.dataset.unmute); saveAlerts(); buildAlertsPanel(); }));
   const pl=el('p-link'); if(pl) pl.addEventListener('click',()=>pushAct('/api/alerts/link'));
@@ -2079,11 +2123,14 @@ function toggleNotify(on){ const A=state.alerts;
   if(on && typeof Notification!=='undefined'){ if(Notification.permission==='granted'){ A.notify=true; }
     else { Notification.requestPermission().then(p=>{ A.notify=(p==='granted'); saveAlerts(); if(!el('alertpop').hidden) buildAlertsPanel(); }); return; } }
   else A.notify=false; saveAlerts(); }
-function saveAlerts(){ store.set(AKEY, JSON.stringify({rules:state.alerts.rules, notify:state.alerts.notify, trig:state.alerts.trig, seenSeq:state.alerts.seenSeq})); }
+function saveAlerts(){ store.set(AKEY, JSON.stringify({rules:state.alerts.rules, notify:state.alerts.notify, trig:state.alerts.trig,
+  seenSeq:state.alerts.seenSeq, clearedSeq:state.alerts.clearedSeq, open:state.alerts.open})); }
 function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch(_){ d=null; } if(!d) return;
   if(Array.isArray(d.rules)) state.alerts.rules=d.rules.filter(r=>r&&AM_BY[r.metric]); state.alerts.notify=!!d.notify;
   if(d.trig&&typeof d.trig==='object') state.alerts.trig=Object.assign(state.alerts.trig,d.trig,{muted:Array.isArray(d.trig.muted)?d.trig.muted:[]});
-  if(Number.isFinite(d.seenSeq)) state.alerts.seenSeq=d.seenSeq; }
+  if(Number.isFinite(d.seenSeq)) state.alerts.seenSeq=d.seenSeq;
+  if(Number.isFinite(d.clearedSeq)) state.alerts.clearedSeq=d.clearedSeq;
+  if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
@@ -3819,6 +3866,8 @@ function buildPushSection(){
   const P=pushState;
   if(!P) return '<div class="sec" style="font-size:12px;padding:4px">Delivery state unavailable \u2014 the server did not answer.</div>';
   if(!P.enabled) return '<div class="sec" style="font-size:12px;padding:4px">Telegram push is off \u2014 set <b>TG_BOT_TOKEN</b> on the server to enable it. Nothing else changes while it is unset.</div>';
+  const others=(P.othersLinked||0);
+  const othersNote=others>0?`<div class="sec" style="font-size:11px;padding:2px 4px">${others} other recipient(s) linked by other people \u2014 not shown here${P.admin?'':' (admin can see and manage all)'}</div>`:'';
   const recips=P.recipients&&P.recipients.length? P.recipients.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const tip=r.muted?(r.lastErr||'muted'):(r.lastOk?('last delivery '+fmtAge(Date.now()-r.lastOk)+' ago'):'linked, nothing delivered yet');
@@ -3842,19 +3891,19 @@ function buildPushSection(){
       return `<button type="button" class="cdtf${on(c)?' on':''}" data-pcls="${esc(c)}" data-pchat="${esc(r.chat)}" data-tip="${esc((CTIP[c]||c)+(optIn?' \u00b7 opt-in: not delivered unless you select it':''))}">${esc(c)}${per?` <i style="font-style:normal;opacity:.6">${esc(per)}</i>`:''}</button>`; }).join('');
     const q=r.quiet, qLbl=q?`${String(q.from).padStart(2,'0')}:00\u2013${String(q.to).padStart(2,'0')}:00`:'off';
     const dLbl=r.digestHour!=null?`${String(r.digestHour).padStart(2,'0')}:00`:'off';
-    return `<div class="arule" style="flex-wrap:wrap"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.sentHour}/${P.capHour}h${r.quietNow?' \u00b7 <b>quiet now</b>':''}</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span>`
-      +`<span style="display:flex;gap:4px;width:100%;margin-top:4px;flex-wrap:wrap">${chips}</span>`
+    return `<div class="arule" style="flex-wrap:wrap"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)}${r.mine?'':' <span class="sec" data-tip="linked from another browser \u2014 visible because you are admin">(not yours)</span>'} <span class="sec">${esc(r.mask)} \u00b7 ${r.sentHour}/${P.capHour}h${r.quietNow?' \u00b7 <b>quiet now</b>':''}</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span>`
+      +`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`
       +`<span style="display:flex;gap:6px;width:100%;margin-top:4px;align-items:center">`
       +`<button type="button" class="cdtf${q?' on':''}" data-pquiet="${esc(r.chat)}" data-tip="quiet hours delay non-urgent alerts until the window ends \u2014 they are never dropped. A void being taken and a poller stall always pierce.">quiet ${esc(qLbl)}</button>`
       +`<button type="button" class="cdtf${r.digestHour!=null?' on':''}" data-pdig="${esc(r.chat)}" data-tip="one daily summary: what fired by class, open claims, and the attributed headlines that are too frequent to push individually">digest ${esc(dLbl)}</button>`
       +`</span></div>`;
-  }).join('') : '<div class="sec" style="font-size:12px;padding:4px">Nobody linked yet.</div>';
+  }).join('') : '<div class="sec" style="font-size:12px;padding:4px">You haven\u2019t linked a telegram account yet.</div>';
   const code=P.code&&pushCodeLeft(P.code)!=='expired'
     ? `<div class="pushcode"><div class="sec" style="font-size:11px">DM the bot <b>/start ${esc(P.code.code)}</b></div><div class="pcode">${esc(P.code.code)}</div><div class="sec" style="font-size:11px">expires in ${esc(pushCodeLeft(P.code))}</div></div>`
     : '';
   const errs=P.lastErr?`<div class="sec neg" style="font-size:11px;padding:2px 4px" data-tip="verbatim from the Telegram API \u2014 this is what a bad token or chat looks like">${esc(P.lastErr)}</div>`:'';
   const logHtml=P.log&&P.log.length? P.log.slice(0,6).map(e=>`<div class="alog"><span class="at">${new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</span> ${esc(e.chat)} ${e.ok?'<span class="pos">sent</span>':'<span class="neg">'+esc(e.err||'failed')+'</span>'}</div>`).join('') : '';
-  return `${recips}${code}${errs}
+  return `${recips}${othersNote}${code}${errs}
     <div style="display:flex;gap:6px;margin-top:6px">
       <button class="btn" id="p-link" style="flex:1;justify-content:center">Link telegram</button>
       <button class="btn" id="p-test" style="flex:1;justify-content:center" ${P.recipients&&P.recipients.length?'':'disabled'}>Test fire</button>
