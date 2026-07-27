@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.27-07";
+const VERSION = "2026.07.27-09";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -26,6 +26,44 @@ const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
 const SESSION_SECRET = process.env.SESSION_SECRET
   ? crypto.createHash("sha256").update(String(process.env.SESSION_SECRET)).digest()
   : crypto.createHash("sha256").update(`xyzmon-session|${SITE_USER}|${SITE_PASSWORD}`).digest();
+// ---- per-browser alert ownership -----------------------------------------------------------
+// The app has ONE shared site password and no user accounts, so there is no "who" to attribute a
+// linked Telegram account to. That was a real hole: alert delivery was designed per-person, but the
+// management surface had no notion of person, so the first Telegram linked became a global row every
+// visitor could see and nobody else could add alongside meaningfully.
+//
+// This is the smallest thing that closes it without inventing a login system: an opaque, signed,
+// long-lived handle minted per browser. It is not a privilege — it grants nothing except the ability
+// to see and manage the recipients linked FROM that browser. It is signed so it cannot be forged,
+// and random so it cannot be guessed; whoever holds it controls those recipients, exactly like the
+// session cookie itself. Admin sees and manages everything regardless.
+const OWNER_SECRET = crypto.createHash("sha256").update(`xyzmon-alert-owner|${SITE_USER}|${SITE_PASSWORD}`).digest();
+function signOwner(id) {
+  return id + "." + crypto.createHmac("sha256", OWNER_SECRET).update("own|" + id).digest("base64url");
+}
+function ownerOf(tok) {
+  if (!tok || typeof tok !== "string" || tok.length > 128) return null;
+  const i = tok.indexOf(".");
+  if (i <= 0) return null;
+  const id = tok.slice(0, i);
+  let ok = false;
+  try {
+    const want = Buffer.from(signOwner(id));
+    const got = Buffer.from(tok);
+    ok = want.length === got.length && crypto.timingSafeEqual(want, got);
+  } catch (_) { ok = false; }
+  return ok ? id : null;
+}
+// Reads the caller's handle, minting one if they don't have it yet. Lazy on purpose: a visitor who
+// never opens the alerts panel never gets a cookie.
+function ensureOwner(req, reply) {
+  const existing = ownerOf(getCookie(req, "xyzown"));
+  if (existing) return existing;
+  const id = crypto.randomBytes(12).toString("base64url");
+  reply.header("set-cookie", "xyzown=" + signOwner(id) + cookieAttrs(req, 400 * 24 * 3600) + "; HttpOnly");
+  return id;
+}
+
 // AI admin gate. AI generation (ask-terminal fallback + report generation) is LOCKED by default
 // and only opens after someone enters ADMIN_PASSWORD via `admin unlock` in the terminal. The
 // unlock is a stateless HMAC cookie (xyzai), signed with a secret derived from ADMIN_PASSWORD —
@@ -546,41 +584,47 @@ async function main() {
   // not. no-store because the whole value is "what is new since MY cursor", which is per-caller.
   fastify.get("/api/triggers", (req, reply) => {
     const since = req.query && req.query.since;
-    return reply.header("cache-control", "no-store").send(poller.getTriggers(since));
+    // Owner-scoped: rule events belong to whoever wrote the rule and must not appear in anyone
+    // else's bell log. Market and server events are shared and unaffected.
+    return reply.header("cache-control", "no-store").send(poller.getTriggers(since, ensureOwner(req, reply), isAdmin(req)));
   });
 
   // ---- alert delivery (telegram push, slice A) ------------------------------------------------
   // Delivery state for the alerts panel: who is linked, the live link code, outbox depth, and the
   // last delivery outcomes. no-store — the whole payload is "what is true right now", and a link
   // code served from a cache is a code that has already expired.
-  fastify.get("/api/alerts", (req, reply) =>
-    reply.header("cache-control", "no-store").send(poller.getPush()));
+  fastify.get("/api/alerts", (req, reply) => {
+    const own = ensureOwner(req, reply);
+    return reply.header("cache-control", "no-store").send(poller.getPush(own, isAdmin(req)));
+  });
   // Mint a single-use link code. The code, not the chat id, is what the human carries into the DM:
   // binding is proved in one direction so a typo cannot route someone's alerts to a stranger.
   fastify.post("/api/alerts/link", { bodyLimit: 4 * 1024 }, (req, reply) => {
-    const r = poller.pushMintCode();
+    // The code carries the minting browser's handle, so whoever redeems it in Telegram is bound to
+    // THAT browser — the link and the ownership are established in one step, unforgeably.
+    const r = poller.pushMintCode(ensureOwner(req, reply));
     return reply.code(r.ok ? 200 : 400).send(r);
   });
   fastify.post("/api/alerts/unlink", { bodyLimit: 4 * 1024 }, (req, reply) => {
-    const r = poller.pushUnlink(String((req.body && req.body.chat) || ""));
-    return reply.code(r.ok ? 200 : 400).send(r);
+    const r = poller.pushUnlink(String((req.body && req.body.chat) || ""), ensureOwner(req, reply), isAdmin(req));
+    return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   // Per-recipient quiet hours and digest time. Separate from the class selection because they are
   // scheduling, not subscription — the same event can be wanted and still not wanted at 3am.
   fastify.post("/api/alerts/prefs", { bodyLimit: 8 * 1024 }, (req, reply) => {
     const b = req.body || {};
-    const r = poller.pushSetPrefs(String(b.chat || ""), b);
-    return reply.code(r.ok ? 200 : 400).send(r);
+    const r = poller.pushSetPrefs(String(b.chat || ""), b, ensureOwner(req, reply), isAdmin(req));
+    return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   fastify.post("/api/alerts/classes", { bodyLimit: 8 * 1024 }, (req, reply) => {
     const b = req.body || {};
-    const r = poller.pushSetClasses(String(b.chat || ""), Array.isArray(b.classes) ? b.classes : null);
-    return reply.code(r.ok ? 200 : 400).send(r);
+    const r = poller.pushSetClasses(String(b.chat || ""), Array.isArray(b.classes) ? b.classes : null, ensureOwner(req, reply), isAdmin(req));
+    return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   // Test fire: the only way to prove the wire without waiting for a real setup — and the only way
   // I can hand over a feature whose transport I cannot reach from a dev sandbox.
   fastify.post("/api/alerts/test", { bodyLimit: 4 * 1024 }, (req, reply) => {
-    const r = poller.pushTest((req.body && req.body.chat) || null);
+    const r = poller.pushTest((req.body && req.body.chat) || null, ensureOwner(req, reply), isAdmin(req));
     if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
@@ -588,12 +632,15 @@ async function main() {
   // User-authored metric rules: the threshold alerts, group-shared and server-evaluated so they
   // keep firing with every tab closed. no-store — the list is small and edits must be visible to
   // the next reader immediately.
-  fastify.get("/api/alerts/rules", (req, reply) =>
-    reply.header("cache-control", "no-store").send(poller.getRules()));
+  fastify.get("/api/alerts/rules", (req, reply) => {
+    const own = ensureOwner(req, reply);
+    return reply.header("cache-control", "no-store").send(poller.getRules(own, isAdmin(req)));
+  });
   fastify.post("/api/alerts/rules", { bodyLimit: 16 * 1024 }, (req, reply) => {
     const b = req.body || {};
-    const r = b.del != null ? poller.deleteRule(b.del) : poller.addRule(b);
-    return reply.code(r.ok ? 200 : 400).send(r);
+    const own = ensureOwner(req, reply);
+    const r = b.del != null ? poller.deleteRule(b.del, own, isAdmin(req)) : poller.addRule(b, own);
+    return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
 
   // Actionable board: names currently at a swing trigger, funding-net and ranked by expectancy.
