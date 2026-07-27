@@ -967,8 +967,14 @@ test("crypto enrollment: a whitelist and a geometry gate — and the arithmetic 
     "crypto pools separately from every equity asset class");
   assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext"])'),
     "R-united ledger set carries the crypto-native events");
-  for (const gone of ["oc24: oiChg24", "cryptoSetupsLive", "countU"])
+  for (const gone of ["oc24: oiChg24", "cryptoSetupsLive"])
     assert.ok(!pol.includes(gone), `retired -87 remnant must not return: ${gone}`);
+  // countU is BACK, and must count kept conditions rather than the capped transport slice —
+  // summing the payload would under-report the moment either lane fills.
+  assert.ok(pol.includes("for (const g of kept) { if (g.uni === \"main\") cntM++; else cntX++; }"),
+    "per-universe live totals are counted over kept, not over the capped payload");
+  assert.ok(pol.includes("countU: { x: cntX, m: crypto ? cntM : null }"),
+    "countU ships the split, with an explicit null for a crypto-disabled deployment");
 });
 
 test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
@@ -1087,8 +1093,10 @@ test("transport cap: per-universe lanes so a volatile crypto day cannot evict th
   assert.ok(pol.includes("const top = crypto ? capPerUniverse(kept, 40, 40) : kept.slice(0, 40);"),
     "the build routes through the lanes when crypto is enabled and keeps the plain slice when it is not");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const pin of ["function setSigTabBadge()", "const n=d?(d.count||0):0;"])
-    assert.ok(app.includes(pin), `badge pin missing: ${pin}`);
+  for (const pin of ["function setSigTabBadge()",
+    "const u = state.scope==='crypto' ? 'm' : 'x';",
+    "d&&d.countU&&d.countU[u]!=null ? d.countU[u] : (d?(d.count||0):0)"])
+    assert.ok(app.includes(pin), `scoped badge pin missing: ${pin}`);
 });
 
 test("AI sector classification: enum-validated, write-once, static map wins, three strikes to macro", async () => {
@@ -7448,4 +7456,99 @@ test("crypto claim geometry: no path stamps a level the gate refuses, shadows in
   p.seedRowNow("DOGE", { px: 100, ticker: "DOGE", uni: "main" });
   const e5 = p.openLedgerNow("DOGE", "breakout", { score: 5, reading: "", play: { side: "long", stop: 99.98, target: 103 } }, 1, { sd0: 1.5 });
   assert.equal(e5.stp, undefined, "the same hair-thin void is refused on crypto");
+});
+
+test("scope isolation: neither board ever shows the other universe's rows, executed not pinned", () => {
+  // The payload carries both universes on purpose — one build, one ETag, per-universe transport
+  // lanes. Every surface that consumes it must then re-scope, and the failure mode is not a blank
+  // screen: it is crypto cards sitting directly above an equity track record, or an equity setup
+  // competing on R:R inside a crypto ranking. Both look entirely normal and are silently wrong,
+  // which is why this executes the real filter expressions instead of pinning their source.
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+
+  // The two filters, lifted verbatim from the shipped client and run against a mixed payload.
+  const sigFilter = (signals, scope) => {
+    const wantUni = scope === 'crypto' ? 'main' : 'xyz';
+    return signals.filter(g => g.uni === wantUni);
+  };
+  const actFilter = (rows, scope) => {
+    const wantU = scope === 'crypto' ? 'crypto' : 'stocks';
+    return rows.filter(r => r.uni === wantU);
+  };
+  // ...and the source must contain exactly these expressions, so the copies above cannot drift
+  // into testing something the client does not do.
+  assert.ok(src.includes("const wantUni = state.scope === 'crypto' ? 'main' : 'xyz';") &&
+    src.includes("const scoped = d.signals.filter(g => g.uni === wantUni);"),
+    "the signals card filter ships in the form under test");
+  assert.ok(src.includes("const wantU=state.scope==='crypto'?'crypto':'stocks';") &&
+    src.includes("(d.rows||[]).filter(r=>r.uni===wantU&&"),
+    "the actionable row filter ships in the form under test");
+
+  // Signals: the payload's universe tag is 'main' / 'xyz' (the poller's own row key).
+  const signals = [
+    { coin: "ETH", uni: "main", ev: "casc" }, { coin: "SOL", uni: "main", ev: "bigmove" },
+    { coin: "xyz:NVDA", uni: "xyz", ev: "gap" }, { coin: "xyz:AAPL", uni: "xyz", ev: "prem" },
+  ];
+  assert.deepEqual(sigFilter(signals, "stocks").map((g) => g.coin), ["xyz:NVDA", "xyz:AAPL"],
+    "stocks scope shows only equity cards");
+  assert.deepEqual(sigFilter(signals, "crypto").map((g) => g.coin), ["ETH", "SOL"],
+    "crypto scope shows only crypto cards");
+  // the crypto-native and xyz-only events specifically must not cross over
+  assert.ok(!sigFilter(signals, "stocks").some((g) => g.ev === "casc"), "cascade never appears under a stocks board");
+  assert.ok(!sigFilter(signals, "crypto").some((g) => g.ev === "gap" || g.ev === "prem"),
+    "gap and premium never appear under a crypto board");
+
+  // Actionable: the board's tag is 'crypto' / 'stocks' (the row is already display-shaped). Two
+  // different vocabularies for the same split, which is exactly how a copy-pasted filter goes
+  // wrong — the wrong key silently matches nothing and the board renders empty.
+  const rows = [
+    { coin: "ETH", uni: "crypto", side: "long" }, { coin: "xyz:NVDA", uni: "stocks", side: "long" },
+  ];
+  assert.deepEqual(actFilter(rows, "crypto").map((r) => r.coin), ["ETH"], "crypto board: crypto rows only");
+  assert.deepEqual(actFilter(rows, "stocks").map((r) => r.coin), ["xyz:NVDA"], "stocks board: equity rows only");
+  assert.equal(actFilter(rows, "crypto").length + actFilter(rows, "stocks").length, rows.length,
+    "the two scopes partition the board exactly — no row is dropped by both filters, none counted twice");
+
+  // A scope flip must REPAINT, or the filter is correct and invisible for up to a poll interval.
+  assert.ok(src.includes("if(state.view==='signals') renderSignals();") &&
+    src.includes("if(state.view==='actionable') renderActionable();"),
+    "applyScope repaints both scoped boards on a flip");
+
+  // Both tabs are reachable in crypto scope in the first place.
+  assert.ok(/CRYPTO_VIEWS=new Set\(\[[^\]]*'signals'[^\]]*\]\)/.test(src) &&
+    /CRYPTO_VIEWS=new Set\(\[[^\]]*'actionable'[^\]]*\]\)/.test(src),
+    "Signals and Actionable are in scope for crypto");
+});
+
+test("scoped badge and header count read the universe on screen, from kept totals", () => {
+  // The badge is the one number visible without opening the tab, so a whole-engine count under a
+  // crypto board would advertise equity conditions the board does not contain. It reads countU,
+  // which the server computes over KEPT conditions — the transport cap must never move it.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  const DAY_ = 86400e3, HOUR_ = 3600e3, now = Date.now();
+  const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100 * Math.pow(1.0005, 61 - i), o: 100, h: 103, l: 98, v: 1e6 }); return d; };
+  const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) { const c = 100 + Math.sin(i / 9); h.push({ t: now - i * HOUR_, o: c, h: c + 0.7, l: c - 0.7, c, v: 1e5 }); } return h; };
+  p.seedRowNow("ETH", { px: 112, ticker: "ETH", uni: "main", vol: 5e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
+  p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
+  p.buildDailyNow();
+  p.buildSignalsNow();
+  const d = p.getSignals();
+  assert.ok(d.countU && Number.isInteger(d.countU.x) && Number.isInteger(d.countU.m), "countU ships both universes as integers");
+  assert.equal(d.countU.x + d.countU.m, d.count, "the split sums to the whole-engine total — no condition uncounted or double-counted");
+  const inPayload = (u) => d.signals.filter((g) => g.uni === u).length;
+  assert.ok(d.countU.m >= inPayload("main"), "the crypto total is at least what the capped payload carries");
+  assert.ok(d.countU.x >= inPayload("xyz"), "same for equities");
+  assert.ok(d.countU.m > 0 && d.countU.x > 0, "both universes actually produced conditions in this fixture");
+
+  // crypto:false must ship an explicit null, not a zero — "not served" and "served, none firing"
+  // are different facts and a zero badge would claim the second
+  const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p2.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
+  p2.buildDailyNow();
+  p2.buildSignalsNow();
+  assert.equal(p2.getSignals().countU.m, null, "crypto disabled: m is null, never 0");
 });
