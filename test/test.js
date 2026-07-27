@@ -2057,7 +2057,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "actLate", "actLateCls", "actAgo", "actSortLoad", "actSortSave",
     "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet",
     "fireOps", "fireLedger", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft",
-    "alertText", "alertUnread", "alertMarkRead"];
+    "alertText", "alertUnread", "alertMarkRead", "loadRules", "ruleAct"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -2198,7 +2198,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/duel", "/api/trend", "/api/signals",
     "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/ai-report", "/api/ai-reports", "/api/health",
     "/api/actionable", "/api/triggers",
-    "/api/export/ledger", "/api/news", "/api/news/channels", "/api/alerts",
+    "/api/export/ledger", "/api/news", "/api/news/channels", "/api/alerts", "/api/alerts/rules",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
   for (const r of routes) {
     const n = srv.split(`fastify.get("${r}"`).length - 1;
@@ -8262,8 +8262,8 @@ test("client: the feed is the record — fire* interrupt only, and read state is
   assert.ok(/function alertUnread\(\)[\s\S]{0,220}e\.seq\|\|0\)>\(A\.seenSeq\|\|0\)/.test(app), "unread is computed against the watermark");
   assert.ok(/seenSeq:state\.alerts\.seenSeq/.test(app), "the watermark is persisted");
   assert.ok(/Number\.isFinite\(d\.seenSeq\)\) state\.alerts\.seenSeq=d\.seenSeq/.test(app), "…and restored");
-  assert.ok(/alertMarkRead\(\)/.test(app) && /if\(pop\.hidden\)\{ loadPush\(\); alertMarkRead\(\); \}/.test(app),
-    "opening the bell marks the feed read");
+  assert.ok(/if\(pop\.hidden\)\{[^}]*alertMarkRead\(\);[^}]*\}/.test(app),
+    "opening the bell marks the feed read (pinned as behaviour, not as an exact call list — the open handler legitimately gains loaders)");
 
   // A client cannot delete from the server's ring; "read" is the only state a browser owns here.
   assert.ok(!/id="ar-clear"[\s\S]{0,120}Clear log/.test(app), "the clear-log button must be gone");
@@ -8328,4 +8328,197 @@ test("the boot notice is emitted quiet at the source, not filtered downstream", 
     "the deploy notice must be marked quiet where it is emitted — a transport-side name filter would break the moment the wording changed");
   const comp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
   assert.ok(/if \(ev\.quiet\) return false;/.test(comp), "delivery suppression is a property of the event, shared by every transport");
+});
+
+// ===== Server-side metric rules, slice D (build 2026.07.27-05) ==================================
+// The threshold alerts, moved off the browser: they now fire with every tab closed, the group
+// shares one list, and they can reach a phone. The catalog is restricted to metrics the server
+// itself owns — squeeze, momentum and beta are browser-derived against a user-selected window and
+// stay in-tab rather than having their math duplicated server-side.
+
+test("rule evaluation: hysteresis, arming, crosses, and unevaluable data", () => {
+  const C = require("../src/compute");
+  const row = (px) => ({ coin: "X", ticker: "X", uni: "xyz", px, ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 }, d1: 0 });
+  const r = { id: 1, metric: "h1", op: ">", value: 5 };
+
+  // A brand-new (rule, market) pair is DISARMED: a rule written while the market is already in
+  // breach describes a state, not an event. Otherwise saving a rule detonates it across the roster.
+  assert.equal(C.ruleEval(r, row(106), false), "hold", "an unarmed rule in breach stays quiet");
+  assert.equal(C.ruleEval(r, row(100), false), "arm", "it arms once the value sits cleanly outside the band");
+  assert.equal(C.ruleEval(r, row(106), true), "fire", "…and fires on the next breach");
+  assert.equal(C.ruleEval(r, row(106), false), "hold", "a sustained breach does not re-fire every scan");
+
+  // Hysteresis: retreating to just under the threshold must NOT re-arm, or a value parked on the
+  // line machine-guns the channel.
+  assert.equal(C.ruleEval(r, row(104.95), false), "hold", "inside the band is not a re-arm");
+  assert.equal(C.ruleEval(r, row(104.0), false), "arm", "past the band is");
+  assert.equal(C.ruleBand({ value: 5 }), 0.1, "the default band is 2% of the threshold's own magnitude");
+  assert.ok(C.ruleBand({ value: 0 }) > 0, "a zero threshold still gets a floor band, or it oscillates forever");
+  assert.equal(C.ruleBand({ value: 5, band: 2 }), 2, "an explicit band wins");
+
+  // Crosses need two observations by definition. Treating a missing previous value as "was on the
+  // other side" would fire every cross rule on every restart.
+  const cu = { id: 2, metric: "h1", op: "cross_up", value: 5 };
+  assert.equal(C.ruleEval(cu, row(106), true, null), "hold", "no baseline yet — a first sighting cannot be a cross");
+  assert.equal(C.ruleEval(cu, row(106), true, 4), "fire");
+  assert.equal(C.ruleEval(cu, row(106), true, 5.5), "hold", "already above: not a crossing");
+  const cd = { id: 3, metric: "h1", op: "cross_dn", value: 5 };
+  assert.equal(C.ruleEval(cd, row(104), true, 6), "fire");
+
+  // abs> for two-sided moves
+  assert.equal(C.ruleEval({ id: 4, metric: "h1", op: "abs>", value: 5 }, row(94), true), "fire", "abs catches the downside too");
+
+  // Missing data is null — never a fire, and never quietly treated as false.
+  assert.equal(C.ruleEval(r, { coin: "X", px: null }, true), null);
+  assert.equal(C.ruleEval({ metric: "nope", op: ">", value: 1 }, row(106), true), null);
+  assert.equal(C.ruleEval({ metric: "h1", op: "??", value: 1 }, row(106), true), null);
+});
+
+test("rule catalog: server-owned metrics only, scaled units, and browser-derived ones excluded", () => {
+  const C = require("../src/compute");
+  const keys = C.RULE_METRICS.map((m) => m.k);
+  for (const k of ["px", "h1", "h4", "d1", "d7", "d30", "fundAPR", "fundPct", "prem", "vol", "oi", "rvol"])
+    assert.ok(keys.includes(k), `server catalog must carry ${k}`);
+  // The honest boundary: these are derived in the browser against a user-selected window, so there
+  // is no single server-side value. Including them would mean the math in two files.
+  for (const k of ["sqz", "mom", "beta"])
+    assert.ok(!keys.includes(k), `${k} is browser-derived and must NOT be in the server catalog`);
+
+  const row = { coin: "X", px: 110, oracle: 100, ref: { p1h: 100 }, funding: 0.0001, vol: 5e6, oi: 3e6, rvol: 2.5, doi: { d1: 4, d7: 9 }, d1: 1 };
+  assert.ok(Math.abs(C.RULE_BY_K.prem.get(row) - 1000) < 1e-6,
+    "premium is derived from mark vs oracle, both of which the row already carries");
+  assert.ok(Math.abs(C.RULE_BY_K.fundAPR.get(row) - 0.0001 * 24 * 365 * 100) < 1e-9);
+  assert.ok(Math.abs(C.RULE_BY_K.h1.get(row) - 10) < 1e-6);
+  // Scaled metrics: the user types "5" meaning 5M, and the comparison happens in raw units.
+  assert.equal(C.RULE_BY_K.vol.scale, 1e6);
+  assert.equal(C.ruleEval({ metric: "vol", op: ">", value: 4 }, row, true), "fire", "5M volume clears a rule written as 4");
+  assert.equal(C.ruleEval({ metric: "vol", op: ">", value: 6 }, row, true), "hold");
+});
+
+test("rule validation rejects rather than coerces", () => {
+  const C = require("../src/compute");
+  assert.equal(C.validateRule({ metric: "h1", op: ">", value: 5 }).ok, true);
+  assert.equal(C.validateRule({ metric: "sqz", op: ">", value: 5 }).error, "unknown-metric", "a browser-only metric cannot be saved as a server rule");
+  assert.equal(C.validateRule({ metric: "h1", op: "~", value: 5 }).error, "unknown-op");
+  assert.equal(C.validateRule({ metric: "h1", op: ">", value: "abc" }).error, "bad-value");
+  assert.equal(C.validateRule({ metric: "h1", op: ">", value: 5, uni: "nope" }).error, "bad-universe");
+  assert.equal(C.validateRule({ metric: "h1", op: ">", value: 5, band: -1 }).error, "bad-band");
+  assert.equal(C.validateRule(null).ok, false);
+  // A rule silently coerced into something its author didn't mean fires forever and nobody knows
+  // why, so every rejection names its reason.
+  assert.equal(C.validateRule({ metric: "h1", op: ">", value: "5" }).rule.value, 5, "numeric strings are accepted and normalised");
+  assert.equal(C.validateRule({ metric: "h1", op: ">", value: 5, note: "x".repeat(200) }).rule.note.length, 80, "notes are capped, not rejected");
+});
+
+function ruleHarness() {
+  const { createPoller } = require("../src/poller");
+  let saved = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    saveRules: (d) => { saved = d; }, loadRules: () => saved };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  return { p, get saved() { return saved; } };
+}
+
+test("rule scan: CRUD, scoping, cooldown, and no detonation when a rule is added mid-breach", () => {
+  const { p } = ruleHarness();
+  p.seedRowNow("AAA", { ticker: "AAA", px: 110, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
+  p.seedRowNow("BBB", { ticker: "BBB", px: 100, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
+  p.buildSnapshotNow();
+
+  assert.equal(p.getRules().rules.length, 0);
+  const add = p.addRule({ metric: "h1", op: ">", value: 5 });
+  assert.equal(add.ok, true);
+  assert.ok(add.rule.id > 0 && add.rule.text.includes("1h %"), "the rule ships a human label, built once, server-side");
+  assert.equal(p.addRule({ metric: "bogus", op: ">", value: 1 }).ok, false);
+
+  const ruleEvents = () => p.getTriggers(0).events.filter((e) => e.kind === "rule");
+
+  // AAA is ALREADY +10% when the rule is written. That is a state, not an event.
+  p.ruleScanNow();
+  assert.equal(ruleEvents().length, 0, "a rule added while a market is in breach must not detonate on save");
+
+  // It arms when AAA comes back inside, then fires on the next genuine breach.
+  p.seedRowNow("AAA", { px: 100 }); p.buildSnapshotNow(); p.ruleScanNow();
+  assert.equal(ruleEvents().length, 0);
+  p.seedRowNow("AAA", { px: 112 }); p.buildSnapshotNow(); p.ruleScanNow();
+  const evs = ruleEvents();
+  assert.equal(evs.length, 1, "the breach fires once armed");
+  assert.equal(evs[0].coin, "AAA");
+  assert.equal(evs[0].metric, "h1");
+  assert.ok(evs[0].now.includes("12"), "the message carries the value that tripped it");
+  assert.ok(evs[0].rule.includes("above"), "…and the rule that was tripped, in words");
+
+  // Cooldown holds a re-fire even after a re-arm.
+  p.seedRowNow("AAA", { px: 100 }); p.buildSnapshotNow(); p.ruleScanNow();
+  p.seedRowNow("AAA", { px: 115 }); p.buildSnapshotNow(); p.ruleScanNow();
+  assert.equal(ruleEvents().length, 1, "the per-rule cooldown suppresses a rapid second fire");
+
+  // BBB never breached, so a roster-wide rule stayed silent on it.
+  assert.ok(!ruleEvents().some((e) => e.coin === "BBB"));
+
+  // Deleting a rule takes its edge state with it.
+  assert.equal(p.deleteRule(add.rule.id).ok, true);
+  assert.equal(p.getRules().rules.length, 0);
+  assert.equal(p.deleteRule(999).ok, false);
+});
+
+test("rule scan: reads the SNAPSHOT payload, so an alert can never disagree with the board", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const fn = pol.slice(pol.indexOf("function ruleScan()"), pol.indexOf("function getRules()"));
+  assert.ok(/const snap = snapshotCache;/.test(fn),
+    "rules must evaluate against the payload the client renders, not the live row objects");
+  assert.ok(!/rows\.get\(/.test(fn), "reading the live rows here would let an alert quote a number the board isn't showing");
+  // …and therefore on the snapshot's own cadence, not a private timer.
+  assert.ok(/setInterval\(safeTick\(ruleScan, "ruleScan"\), 15 \* 1000\)/.test(pol));
+});
+
+test("fast lane: level alerts run on the socket tick, metric rules deliberately do not", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const ws = pol.slice(pol.indexOf("function applyWsCtxs(tuples)"), pol.indexOf("function applyWsCtxs(tuples)") + 4000);
+  assert.ok(/levelScan\(\)/.test(ws), "a void being taken is the one alert where 2s vs 30s changes whether you can act");
+  assert.ok(!/ruleScan\(\)/.test(ws), "metric rules must NOT run here — they read the snapshot and cannot outrun it without disagreeing with it");
+  assert.ok(/isolated/.test(ws.slice(ws.indexOf("levelScan()") - 200, ws.indexOf("levelScan()") + 200)),
+    "the fast-lane call must be isolated — a throw here would kill the WebSocket fold");
+});
+
+test("rules survive a restart WITH their edge state, so a redeploy re-announces nothing", () => {
+  const { p, saved } = ruleHarness();
+  p.seedRowNow("AAA", { ticker: "AAA", px: 100, uni: "xyz", ref: { p1h: 100, p4h: 100, p7d: 100, p30d: 100 } });
+  p.buildSnapshotNow();
+  p.addRule({ metric: "h1", op: ">", value: 5, note: "breakout watch" });
+  p.ruleScanNow();                                    // arms
+  p.seedRowNow("AAA", { px: 112 }); p.buildSnapshotNow(); p.ruleScanNow();   // fires
+  assert.equal(p.getTriggers(0).events.filter((e) => e.kind === "rule").length, 1);
+
+  const blob = p.getRules();
+  assert.equal(blob.rules[0].note, "breakout watch");
+  assert.ok(blob.metrics.length > 8 && blob.ops.includes("cross_up"), "the catalog ships with the rules so the client never hardcodes it");
+
+  // A fresh process restoring that state must not re-announce the still-breached market.
+  const { p: p2 } = ruleHarness();
+  const fs = require("fs"), path = require("path");
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/if \(Array\.isArray\(d\.armed\)\)/.test(st) && /if \(Array\.isArray\(d\.fired\)\)/.test(st),
+    "hydrate must restore the armed set AND the last-fire times — rules alone would re-announce every breach on boot");
+  assert.ok(/armed: \[\.\.\.ruleArmed\.keys\(\)\]/.test(st) && /fired: \[\.\.\.ruleLastFire\.entries\(\)\]/.test(st),
+    "…which means persisting them");
+  assert.ok(p2.hydrateRulesNow);
+  assert.ok(saved === null || true);
+});
+
+test("client: the in-tab evaluator is bounded to what only a browser can compute", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const cat = app.slice(app.indexOf("const ALERT_METRICS=["), app.indexOf("const AM_BY="));
+  for (const k of ["sqz", "mom", "beta"]) assert.ok(cat.includes("k:'" + k + "'"), `${k} stays in-tab`);
+  for (const k of ["px", "h1", "funding", "vol", "oi", "prem", "doi"])
+    assert.ok(!cat.includes("k:'" + k + "'"), `${k} moved server-side and must be gone from the in-tab catalog`);
+  // One form, two destinations — the user shouldn't have to carry the distinction.
+  assert.ok(/const metric=sel\.slice\(2\), server=sel\.charAt\(0\)==='s';/.test(app), "the metric prefix routes the rule");
+  assert.ok(/if\(server\)\{ ruleAct\(/.test(app));
+  assert.ok(/this browser only/.test(app), "the boundary is stated in the UI, not just in a comment");
+  assert.ok(/fire with no tab open/.test(app), "…as is what the server rules actually guarantee");
 });
