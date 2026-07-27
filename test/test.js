@@ -3599,6 +3599,55 @@ test("UI -23: the [hidden] attribute is honoured by every element that styles it
     assert.ok(css.includes(`${sel}[hidden]{display:none}`), `regression: ${sel} lost its hidden guard`);
 });
 
+test("UI -24: session-wide controls live outside every per-view section", () => {
+  // The alerts bell shipped inside #view-markets. showView() hides that whole section on any other
+  // tab, so the bell AND its unread badge vanished the moment you left Markets — while alerts kept
+  // firing from the poller, which is exactly when the badge is the only thing telling you.
+  //
+  // Same derivation shape as the [hidden] audit: rather than pinning "bellwrap is at line N", find
+  // the byte span of every view section in index.html and assert no globally-scoped control id
+  // falls inside one. Anything that must be reachable from every tab belongs to the shell.
+  const fs = require("fs"), path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+
+  // Every id showView() toggles is a per-view section; derive the list from app.js so a new view
+  // is covered the day it ships rather than the day someone remembers to add it here.
+  const views = [...app.matchAll(/setHidden\('(view-[\w-]+)'/g)].map((m) => m[1]);
+  assert.ok(views.length >= 8, `expected showView to toggle a real set of views, found ${views.length}`);
+
+  const spans = [];
+  for (const v of views) {
+    const open = html.indexOf(`id="${v}"`);
+    if (open < 0) continue;             // injected at runtime (treemap); nothing static to contain
+    const start = html.lastIndexOf("<", open);
+    let depth = 0, i = start;
+    for (const m of html.slice(start).matchAll(/<(\/?)(?:div|section)\b[^>]*?(\/?)>/g)) {
+      if (m[2] === "/") continue;
+      depth += m[1] ? -1 : 1;
+      if (depth === 0) { i = start + m.index + m[0].length; break; }
+    }
+    spans.push([v, start, i]);
+  }
+  assert.ok(spans.length >= 8, "could not resolve the view sections in index.html");
+
+  // Controls the user must be able to reach or read from any tab.
+  for (const id of ["bellBtn", "bellBadge", "alertpop", "helpBtn", "logoutBtn", "tabSpacer", "focusChip", "freshtray"]) {
+    const at = html.indexOf(`id="${id}"`);
+    assert.ok(at > 0, `missing global control: ${id}`);
+    const trapped = spans.find(([, s0, s1]) => at > s0 && at < s1);
+    assert.ok(!trapped, `${id} is nested inside ${trapped && trapped[0]} — it will disappear on every other tab`);
+  }
+
+  // The bell sits in the status bar tray specifically: .tabs gets overflow-x:auto below 680px,
+  // which would clip the 340px popup, so the tab strip is not an option for this one.
+  const tray = html.slice(html.indexOf('class="st-right"'), html.indexOf("</div>", html.indexOf('class="st-right"')));
+  assert.ok(tray.includes('id="bellBtn"'), "the bell belongs in the status bar tray");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(/\.stbell\{/.test(css), "the bell needs its strip-scale variant or it towers over the status bar");
+  assert.ok(/\.stbell \.bell-badge\{[^}]*position:static/.test(css), "the corner pip must re-flow inline at strip scale");
+});
+
 test("mobile suite -100: touch parity, mobile preset and PWA shell are fully wired", () => {
   // Four surfaces in one build, each pinned across every file it touches. The service worker is
   // additionally pinned to be CACHE-FREE: a fetch handler that intercepts nothing. Any future
@@ -10014,7 +10063,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-23"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-24"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
