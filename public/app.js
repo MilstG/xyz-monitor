@@ -137,7 +137,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
     // setup passing these filters", so they sit alongside A.rules rather than inside it.
     // No provenOnly here: the server's stream now carries only CONFIRMED setups, so the filter
     // would be a no-op that implies unconfirmed alerts are possible. minRR tracks the board's gate.
-    trig:{ on:false, minEV:0.30, maxLate:0.50, minRR:2.0, muted:[] } } };
+    trig:{ on:false, minEV:0.30, maxLate:0.50, minRR:2.0, cls:['rr','ev'], muted:[] } } };
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -2025,6 +2025,14 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
          ${numIn('at-rr',T.minRR,'R:R \u2265','Minimum reward-to-risk FROZEN AT FIRE. The board classes anything under 2.0 as a grinder rather than a windfall \u2014 neither is wrong, but they are different trades. Blank = any.')}
          ${numIn('at-late',T.maxLate,'late \u2264','How far the setup has already run from its fire, in its own risk unit. An alert on a setup that already spent its edge is noise. Blank = any.')}
        </div>
+       <div class="anum-row" style="margin-top:6px">
+         ${['rr','ev'].map(c=>{
+           const onC=!Array.isArray(T.cls)||!T.cls.length||T.cls.includes(c);
+           return `<button type="button" class="cdtf${onC?' on':''}" data-acls="${c}" style="flex:1" data-tip="${esc(c==='rr'
+             ?'Setups whose frozen R:R at fire clears 2:1 \u2014 level-triggered trades (breakouts, trend retests) with the stop at a real chart level. Win big, less often.'
+             :'Setups below 2:1 at fire whose expectancy is still positive \u2014 the statistical family (big moves, funding divergences) built on median outcomes against a 1\u03c3 void. Win small, more often. Every one still clears the same record and EV gates.')}">${c==='rr'?'2:1+ setups':'positive-EV grinders'}</button>`;
+         }).join('')}
+       </div>
        <div class="sec" style="font-size:10.5px;margin-top:4px">these thresholds apply to the in-tab toasts and to your telegram delivery</div>
        <div class="cphead" style="margin-top:8px">Muted (${T.muted.length})</div>${mutedHtml}`)
     + sec('rules',`Rules (${srvRules.length})`,'private to you \u00b7 evaluated server-side, fire with no tab open',
@@ -2062,7 +2070,15 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   // recipient this browser owns. Two places to set the same number is how they end up disagreeing.
   const syncTrig=()=>{ saveAlerts();
     const rs=(pushState&&pushState.recipients)||[];
-    for(const r of rs) if(r.mine) pushAct('/api/alerts/prefs',{chat:r.chat, trig:{minEV:T.minEV, minRR:T.minRR, maxLate:T.maxLate}}); };
+    for(const r of rs) if(r.mine) pushAct('/api/alerts/prefs',{chat:r.chat, trig:{minEV:T.minEV, minRR:T.minRR, maxLate:T.maxLate, cls:T.cls}}); };
+  pop.querySelectorAll('[data-acls]').forEach(x=>x.addEventListener('click',()=>{
+    const c=x.dataset.acls;
+    let cur=Array.isArray(T.cls)&&T.cls.length?T.cls.slice():['rr','ev'];
+    cur = cur.includes(c) ? cur.filter(v=>v!==c) : cur.concat([c]);
+    // Turning both off would read as "no setup alerts" but persist as "both" — refuse the
+    // ambiguous state; the master toggle above is how you turn setups off.
+    if(!cur.length) return;
+    T.cls=cur; syncTrig(); buildAlertsPanel(); }));
   for(const [id,key] of [['at-ev','minEV'],['at-rr','minRR'],['at-late','maxLate']]){
     const n=el(id); if(!n) continue;
     n.addEventListener('change',e=>{ const v=e.target.value.trim();
@@ -3741,6 +3757,7 @@ function trigEligibleClient(ev,c){
   if(c.minEV!=null && (ev.evR==null || ev.evR<c.minEV)) return false;
   if(c.minRR!=null && !(ev.rr && ev.rr.gross>=c.minRR)) return false;
   if(c.maxLate!=null && ev.late!=null && ev.late>c.maxLate) return false;
+  if(Array.isArray(c.cls) && c.cls.length && !c.cls.includes(ev.cls)) return false;
   if(Array.isArray(c.muted) && c.muted.includes(ev.coin)) return false;
   return true;
 }
