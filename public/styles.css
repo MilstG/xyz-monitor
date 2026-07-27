@@ -1107,3 +1107,10 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .anum{flex:1;display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--muted)}
 .anum input{width:100%;padding:4px 6px;font-family:var(--mono);font-size:12px}
 .arule{flex-wrap:wrap}
+.arec-h{display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;min-width:0}
+.arec-h:hover{color:var(--accent)}
+.adm-recip{border:1px solid var(--border);border-radius:6px;margin-bottom:14px;background:var(--panel)}
+.adm-recip-h{display:flex;align-items:center;gap:7px;cursor:pointer;padding:9px 11px;font-size:11px;
+  text-transform:uppercase;letter-spacing:.9px;color:var(--muted);user-select:none}
+.adm-recip-h:hover{color:var(--text)}
+#admRecB{padding:0 11px 10px}

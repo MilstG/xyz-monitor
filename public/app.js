@@ -132,7 +132,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
     clearedSeq:0,
     // Collapsed sections, persisted. The panel had grown to four stacked blocks and a wall of log
     // rows; everything below is still one click away, it just is not all shouting at once.
-    open:{ trig:false, rules:false, deliv:true, recent:true },
+    open:{ trig:false, rules:false, deliv:true, recent:true }, openRec:{},
     // Trigger alerts are NOT user-authored rules — they're a standing subscription to "any new
     // setup passing these filters", so they sit alongside A.rules rather than inside it.
     // No provenOnly here: the server's stream now carries only CONFIRMED setups, so the filter
@@ -1951,6 +1951,7 @@ function alertText(ev){
   if(k==='filing') return `${ev.t} \u00b7 ${ev.form} \u00b7 ${ev.h||''}`;
   if(k==='earnings') return `${ev.t} reports ${ev.when}${ev.session?' ('+ev.session+')':''}${ev.claim?' \u00b7 open '+ev.claim+' claim':''}`;
   if(k==='ai') return `${ev.t} \u00b7 analyst read flipped: ${ev.from} \u2192 ${ev.to}`;
+  if(k==='trend') return `${ev.t} \u00b7 ${ev.title}${ev.score!=null?' \u00b7 '+ev.score+'/4':''}${ev.text?' \u00b7 '+ev.text:''}`;
   if(k==='regime') return `${ev.scope==='main'?'crypto':'stocks'} positioning \u00b7 ${ev.title} \u00b7 ${ev.text||''}`;
   if(k==='coverage') return `\u26a0 ${ev.t} \u00b7 data gap \u00b7 ${ev.text||''}`;
   if(k==='rule') return `${ev.t} \u00b7 ${ev.rule||(ev.label+' '+ev.op+' '+ev.value)} \u00b7 now ${ev.now||'\u2014'}${ev.note?' \u00b7 '+ev.note:''}`;
@@ -1986,7 +1987,8 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   // which: server-held events (survive a refresh, a closed tab, a redeploy) and this browser's own
   // in-tab rule fires (die with the tab, until their server-side replacement lands).
   const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec'],
-    filing:['FILING',''], earnings:['EARN','sec'], ai:['AI',''], regime:['REGIME','sec'], coverage:['GAP','neg']};
+    filing:['FILING',''], earnings:['EARN','sec'], ai:['AI',''], regime:['REGIME','sec'], coverage:['GAP','neg'],
+    trend:['TREND','pos']};
   const feedRows=A.feed.filter(e=>(e.seq||0)>(A.clearedSeq||0)).map(e=>({t:e.at||0, seq:e.seq||0,
     kind:(e.kind||'setup'), sub:e.sub||null, text:alertText(e), coin:e.coin||null}));
   const localRows=A.log.map(e=>({t:e.t, seq:0, kind:'rule', sub:null, text:e.text, coin:null}));
@@ -2103,6 +2105,8 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     // now differs from "all" — sending [] would silently unsubscribe the opt-in classes the user
     // just turned on.
     pushAct('/api/alerts/classes',{chat:rec.chat, classes:cur}); }));
+  pop.querySelectorAll('[data-prec]').forEach(x=>x.addEventListener('click',()=>{
+    const c=x.dataset.prec; A.openRec[c]=!A.openRec[c]; buildAlertsPanel(); }));
   pop.querySelectorAll('[data-pquiet]').forEach(x=>x.addEventListener('click',()=>{
     const rec=((pushState&&pushState.recipients)||[]).find(r=>r.chat===x.dataset.pquiet); if(!rec) return;
     if(rec.quiet){ pushAct('/api/alerts/prefs',{chat:rec.chat, quiet:null}); return; }
@@ -2161,7 +2165,33 @@ async function loadAdmin(){
   catch(e){ _adm={error:String(e&&e.message||e)}; }
   renderAdmin(); }
 function admLabel(st){ return st==='public'?'public':st==='admin'?'admin':'off'; }
+// Everyone's linked telegram accounts, in the admin panel rather than the bell. Collapsed by
+// default and deliberately plain: this is an operator's roster for revoking access, not a place to
+// tune somebody else's subscriptions — those are theirs, set from their own browser.
+function renderAdmRecips(){
+  const h=el('admRecH'), b=el('admRecB'), n=el('admRecN');
+  if(!h||!b) return;
+  const P=pushState;
+  const rows=(P&&P.recipients)||[];
+  if(n) n.textContent=P?`\u00b7 ${rows.length} linked`:'';
+  h.querySelector('.asec-c').textContent=b.hidden?'\u25b8':'\u25be';
+  if(b.hidden) return;
+  if(!P){ b.innerHTML='<div class="msg">Open the alerts bell once to load delivery state.</div>'; return; }
+  if(!P.admin){ b.innerHTML='<div class="msg">Admin only.</div>'; return; }
+  b.innerHTML=rows.length? rows.map(r=>{
+    const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
+    const cls=(r.classes&&r.classes.length)?r.classes.join(', '):'default set';
+    return `<div class="arule"><span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${esc(cls)} \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':''}</span></span>`
+      +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span></div>`; }).join('')
+    : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>';
+  b.querySelectorAll('[data-admunlink]').forEach(x=>x.addEventListener('click',()=>{
+    if(!confirm('Revoke this recipient? They stop receiving alerts immediately and must re-link.')) return;
+    pushAct('/api/alerts/unlink',{chat:x.dataset.admunlink}).then(()=>renderAdmRecips()); }));
+}
 function renderAdmin(){
+  { const h=el('admRecH'), b=el('admRecB');
+    if(h&&!h._wired){ h._wired=1; h.addEventListener('click',()=>{ b.hidden=!b.hidden; renderAdmRecips(); }); }
+    if(!pushState) loadPush().then(()=>renderAdmRecips()); else renderAdmRecips(); }
   const host=el('adm-rows'); if(!host) return;
   if(!_adm){ host.innerHTML='<div class="msg">Loading…</div>'; return; }
   if(_adm.error){ host.innerHTML='<div class="msg">Could not load feature state — '+esc(_adm.error)+'</div>'; return; }
@@ -3883,9 +3913,13 @@ function buildPushSection(){
   const P=pushState;
   if(!P) return '<div class="sec" style="font-size:12px;padding:4px">Delivery state unavailable \u2014 the server did not answer.</div>';
   if(!P.enabled) return '<div class="sec" style="font-size:12px;padding:4px">Telegram push is off \u2014 set <b>TG_BOT_TOKEN</b> on the server to enable it. Nothing else changes while it is unset.</div>';
-  const others=(P.othersLinked||0);
-  const othersNote=others>0?`<div class="sec" style="font-size:11px;padding:2px 4px">${others} other recipient(s) linked by other people \u2014 not shown here${P.admin?'':' (admin can see and manage all)'}</div>`:'';
-  const recips=P.recipients&&P.recipients.length? P.recipients.map(r=>{
+  // The bell panel shows YOUR recipients and nobody else's — with three linked accounts and nine
+  // class chips each it had become a wall of controls for people you cannot help. Admin's view of
+  // everyone lives in the admin panel now, collapsed, where managing other people belongs.
+  const mineOnly=(P.recipients||[]).filter(r=>r.mine);
+  const others=(P.othersLinked||0)+((P.recipients||[]).length-mineOnly.length);
+  const othersNote=others>0?`<div class="sec" style="font-size:11px;padding:2px 4px">${others} recipient(s) linked by other people${P.admin?' \u2014 manage them in the Admin tab':''}</div>`:'';
+  const recips=mineOnly.length? mineOnly.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const tip=r.muted?(r.lastErr||'muted'):(r.lastOk?('last delivery '+fmtAge(Date.now()-r.lastOk)+' ago'):'linked, nothing delivered yet');
     // Matches the server: an absent selection means the DEFAULT classes, not all of them.
@@ -3902,25 +3936,31 @@ function buildPushSection(){
       coverage:'a name you hold an open, announced claim on is running on a stale spine \u2014 its live numbers are being computed from old data',
       ops:'server health: poller stalls and recoveries. Deploy notices are recorded in the log but never pushed'};
     const rates=(P.rates)||{};
-    const chips=(P.classes||[]).map(c=>{
+    const adminCls=P.adminClasses||['ops'];
+    const chips=(P.classes||[]).filter(c=>!adminCls.includes(c)||r.admin).map(c=>{
       const rt=rates[c]||{}, per=rt.d1==null?'':(rt.capped?'400+':rt.d1)+'/d';
       const optIn=rt.dflt===false;
       return `<button type="button" class="cdtf${on(c)?' on':''}" data-pcls="${esc(c)}" data-pchat="${esc(r.chat)}" data-tip="${esc((CTIP[c]||c)+(optIn?' \u00b7 opt-in: not delivered unless you select it':''))}">${esc(c)}${per?` <i style="font-style:normal;opacity:.6">${esc(per)}</i>`:''}</button>`; }).join('');
     const q=r.quiet, qLbl=q?`${String(q.from).padStart(2,'0')}:00\u2013${String(q.to).padStart(2,'0')}:00`:'off';
     const dLbl=r.digestHour!=null?`${String(r.digestHour).padStart(2,'0')}:00`:'off';
-    return `<div class="arule" style="flex-wrap:wrap"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)}${r.mine?'':' <span class="sec" data-tip="linked from another browser \u2014 visible because you are admin">(not yours)</span>'} <span class="sec">${esc(r.mask)} \u00b7 ${r.sentHour}/${P.capHour}h${r.quietNow?' \u00b7 <b>quiet now</b>':''}</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span>`
-      +`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`
+    const openR=!!A.openRec[r.chat];
+    const nOn=(P.classes||[]).filter(c=>on(c)&&(!adminCls.includes(c)||r.admin)).length;
+    return `<div class="arule" style="flex-wrap:wrap">`
+      +`<span class="arec-h" data-prec="${esc(r.chat)}"><span class="asec-c">${openR?'\u25be':'\u25b8'}</span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${nOn} class(es) \u00b7 ${r.sentHour}/${P.capHour}h${r.quietNow?' \u00b7 <b>quiet</b>':''}</span></span>`
+      +`<span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span>`
+      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`
       +`<span style="display:flex;gap:6px;width:100%;margin-top:4px;align-items:center">`
       +`<button type="button" class="cdtf${q?' on':''}" data-pquiet="${esc(r.chat)}" data-tip="quiet hours delay non-urgent alerts until the window ends \u2014 they are never dropped. A void being taken and a poller stall always pierce.">quiet ${esc(qLbl)}</button>`
       +`<button type="button" class="cdtf${r.digestHour!=null?' on':''}" data-pdig="${esc(r.chat)}" data-tip="one daily summary: what fired by class, open claims, and the attributed headlines that are too frequent to push individually">digest ${esc(dLbl)}</button>`
-      +`</span></div>`;
+      +`</span>`:'')+`</div>`;
   }).join('') : '<div class="sec" style="font-size:12px;padding:4px">You haven\u2019t linked a telegram account yet.</div>';
+  void othersNote;
   const code=P.code&&pushCodeLeft(P.code)!=='expired'
     ? `<div class="pushcode"><div class="sec" style="font-size:11px">DM the bot <b>/start ${esc(P.code.code)}</b></div><div class="pcode">${esc(P.code.code)}</div><div class="sec" style="font-size:11px">expires in ${esc(pushCodeLeft(P.code))}</div></div>`
     : '';
   const errs=P.lastErr?`<div class="sec neg" style="font-size:11px;padding:2px 4px" data-tip="verbatim from the Telegram API \u2014 this is what a bad token or chat looks like">${esc(P.lastErr)}</div>`:'';
   const logHtml=P.log&&P.log.length? P.log.slice(0,6).map(e=>`<div class="alog"><span class="at">${new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</span> ${esc(e.chat)} ${e.ok?'<span class="pos">sent</span>':'<span class="neg">'+esc(e.err||'failed')+'</span>'}</div>`).join('') : '';
-  return `${recips}${othersNote}${code}${errs}
+  return `${recips}${others>0?othersNote:''}${code}${errs}
     <div style="display:flex;gap:6px;margin-top:6px">
       <button class="btn" id="p-link" style="flex:1;justify-content:center">Link telegram</button>
       <button class="btn" id="p-test" style="flex:1;justify-content:center" ${P.recipients&&P.recipients.length?'':'disabled'}>Test fire</button>
