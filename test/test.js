@@ -7698,19 +7698,26 @@ test("push pure layer: escaping, code validation, eligibility, formatting, batch
   assert.equal(C.pushEligible({ kind: "nonsense" }, {}), false, "an unknown class is never delivered");
 
   const ops = { kind: "ops", title: "deploy", text: "build x is live" };
-  assert.equal(C.pushEligible(ops, { trig: { minEV: 99 } }), true, "setup thresholds must not silence ops — that is how you lose the stall warning");
-  assert.equal(C.pushEligible(ops, { classes: ["setup"] }), false);
+  assert.equal(C.pushEligible(ops, { admin: true, trig: { minEV: 99 } }), true, "setup thresholds must not silence ops — that is how you lose the stall warning");
+  assert.equal(C.pushEligible(ops, { admin: true, classes: ["setup"] }), false);
+  assert.equal(C.pushEligible(ops, {}), false, "ops is operator-only: a public recipient never receives server-health alerts");
 
   const m = C.pushFmt(setup, { baseUrl: "https://x.example" });
-  const lines = m.split("\n");
-  assert.equal(lines.length, 4, "fixed four-line grammar — the eye lands on the void level in the same place every time");
-  assert.ok(lines[0].includes("HOOD") && lines[0].includes("LONG"));
-  assert.ok(lines[1].includes("void 40.5") && lines[1].includes("R:R 2.4"), "geometry on line 2");
-  assert.ok(lines[2].includes("n=12") && lines[2].includes("58%"), "evidence on line 3");
-  assert.ok(lines[3].includes("https://x.example/#t=HOOD"), "deep link on line 4");
+  // Fixed grammar, now rendered the way the app looks: header, a MONOSPACE geometry block, the
+  // evidence line, the link. The <pre> is load-bearing — Telegram has no colour, so column-aligned
+  // numbers are what carries the terminal feel, and the eye still lands on the void in one place.
+  assert.ok(/^\u26a1 <b>HOOD<\/b> \u{1F7E2} LONG/u.test(m), "header: class glyph, name, side dot, side");
+  assert.ok(m.includes("<pre>") && m.includes("</pre>"), "geometry rides a preformatted block");
+  const pre = m.slice(m.indexOf("<pre>") + 5, m.indexOf("</pre>"));
+  assert.ok(/^entry\s+42\.1$/m.test(pre) && /^void\s+40\.5$/m.test(pre) && /^R:R\s+2\.4$/m.test(pre),
+    "labels are padded to a common width so the block reads as a table");
+  assert.ok(m.includes("n=12") && m.includes("58%"), "the evidence line survives");
+  assert.ok(m.includes("https://x.example/#t=HOOD"), "deep link last");
+  assert.ok(C.pushFmt(Object.assign({}, setup, { side: "short" }), {}).includes("\u{1F534}"), "the side dot flips with the side");
   assert.ok(!C.pushFmt(setup, {}).includes("<a href"), "no PUBLIC_URL means no link, not a broken one");
+  assert.ok(!C.pushFmt(setup, {}).includes("<pre></pre>"), "an empty geometry block must not be emitted");
   assert.equal(C.pushFmt({ kind: "setup" }), null, "an unformattable event yields null, never a half-message");
-  assert.ok(C.pushFmt({ kind: "ops", title: "poller stalled", text: "x", level: "warn" }).startsWith("\u26a0 "));
+  assert.ok(C.pushFmt({ kind: "ops", title: "poller stalled", text: "x", level: "warn" }).startsWith("\u26a0\ufe0f"));
 
   // A ticker or label carrying markup cannot break out into the message body.
   const evil = C.pushFmt(Object.assign({}, setup, { t: "<script>x</script>" }), {});
@@ -7768,7 +7775,7 @@ test("push: link codes are single-use, expiring, and a new recipient starts CAUG
   assert.equal(p.pushBindNow("ZZZZZZ", 111, "nobody").ok, false, "a code that was never minted is refused");
   assert.equal(p.pushBindNow("bad", 111, "nobody").error, "bad-code", "malformed codes never reach the store");
 
-  const mint = p.pushMintCode("own-a");
+  const mint = p.pushMintCode("own-a", true);
   assert.ok(/^[A-HJ-NP-Z2-9]{6}$/.test(mint.code));
   assert.ok(mint.expiresAt > Date.now());
   const ok = p.pushBindNow(mint.code.toLowerCase(), 5551234567, "milst");
@@ -7790,7 +7797,7 @@ test("push: link codes are single-use, expiring, and a new recipient starts CAUG
 test("push: the boot rule is a lookback, not a mute — the deploy notice survives it", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p } = pushHarness();
-  const mint = p.pushMintCode("own-a");
+  const mint = p.pushMintCode("own-a", true);
   p.pushBindNow(mint.code, 999, "milst");
 
   // An event that fired long before this boot: the cursor must advance past it WITHOUT sending.
@@ -7811,9 +7818,9 @@ test("push: the boot rule is a lookback, not a mute — the deploy notice surviv
 test("push: per-recipient cursors are independent — one strict filter cannot silence everyone else", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p } = pushHarness();
-  const a = p.pushMintCode("own-a"); p.pushBindNow(a.code, 1001, "a");
-  const b = p.pushMintCode("own-a"); p.pushBindNow(b.code, 1002, "b");
-  p.pushSetClasses("1002", ["setup"], "own-a", false);   // b wants setups only
+  const a = p.pushMintCode("own-a", true); p.pushBindNow(a.code, 1001, "a");
+  const b = p.pushMintCode("own-b", true); p.pushBindNow(b.code, 1002, "b");
+  p.pushSetClasses("1002", ["setup"], "own-b", false);   // b wants setups only
 
   p.pushOpsNow("deploy", "build test is live");
   p.pushTickNow();
@@ -7831,7 +7838,7 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
   // 429: their number, not ours, and the item stays queued.
   {
     const { p, calls } = pushHarness([{ status: 429, body: { ok: false, description: "Too Many Requests", parameters: { retry_after: 7 } } }]);
-    const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
+    const m = p.pushMintCode("own-a", true); p.pushBindNow(m.code, 1, "a");
     p.pushOpsNow("x", "y"); p.pushTickNow();
     await p.pushDrainNow();
     assert.equal(calls.length, 1);
@@ -7842,7 +7849,7 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
   // 403: the recipient blocked the bot. Mute (so the panel can say WHY) and purge their backlog.
   {
     const { p } = pushHarness([{ status: 403, body: { ok: false, description: "Forbidden: bot was blocked by the user" } }]);
-    const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
+    const m = p.pushMintCode("own-a", true); p.pushBindNow(m.code, 1, "a");
     p.pushOpsNow("x", "y"); p.pushTickNow();
     p.pushOpsNow("x2", "y2"); p.pushTickNow();
     await p.pushDrainNow();
@@ -7855,7 +7862,7 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
   {
     const { p } = pushHarness([{ status: 400, body: { ok: false, description: "Bad Request: can't parse entities" } },
       { status: 200, body: { ok: true, result: {} } }]);
-    const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
+    const m = p.pushMintCode("own-a", true); p.pushBindNow(m.code, 1, "a");
     p.pushOpsNow("x", "y"); p.pushTickNow();
     p.pushOpsNow("x2", "y2"); p.pushTickNow();
     await p.pushDrainNow();
@@ -7868,7 +7875,7 @@ test("push outbox: 429 honours retry_after, 403 mutes, 4xx drops without wedging
 test("push outbox: success paces sends and the queue is bounded with the loss disclosed", async () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p, calls } = pushHarness();
-  const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 1, "a");
+  const m = p.pushMintCode("own-a", true); p.pushBindNow(m.code, 1, "a");
   p.pushOpsNow("one", "1"); p.pushTickNow();
   p.pushOpsNow("two", "2"); p.pushTickNow();
   await p.pushDrainNow();
@@ -7895,7 +7902,7 @@ test("push commands: /start binds, /stop unlinks, offset advances, junk is ignor
   assert.equal(p.pushStateNow().offset, 11, "the offset advances even for a rejected command");
 
   // The real round trip, with a code this server actually minted.
-  const code = p.pushMintCode("own-a").code;
+  const code = p.pushMintCode("own-a", true).code;
   queue.push(reply([upd(11, "/start " + code)]));
   await p.pushUpdatesNow();
   const linked = p.getPush("own-a", false).recipients;
@@ -7920,7 +7927,7 @@ test("push commands: /start binds, /stop unlinks, offset advances, junk is ignor
 test("push ops lane: the stall watchdog is edge-triggered in BOTH directions", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p } = pushHarness();
-  const opsCount = () => p.getTriggers(0).events.filter((e) => e.kind === "ops").length;
+  const opsCount = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "ops").length;
 
   p.pushHealthNow();
   assert.equal(opsCount(), 0, "no poll history yet is a cold boot, not a fault");
@@ -7936,7 +7943,7 @@ test("push ops lane: the stall watchdog is edge-triggered in BOTH directions", (
   p.pushHealthNow();
   p.pushHealthNow();
   assert.equal(opsCount(), 1, "the stall fires ONCE, not once per tick");
-  const stall = p.getTriggers(0).events.filter((e) => e.kind === "ops").pop();
+  const stall = p.getTriggers(0, null, true).events.filter((e) => e.kind === "ops").pop();
   assert.equal(stall.level, "warn");
   assert.ok(/stalled/i.test(stall.title));
 
@@ -7945,7 +7952,7 @@ test("push ops lane: the stall watchdog is edge-triggered in BOTH directions", (
   p.pushHealthNow();
   p.pushHealthNow();
   assert.equal(opsCount(), 2, "recovery announces exactly once too");
-  assert.ok(/recovered/i.test(p.getTriggers(0).events.pop().title));
+  assert.ok(/recovered/i.test(p.getTriggers(0, null, true).events.pop().title));
 
   // …and the pair can happen again. A latched flag that never re-arms would report the first
   // outage of a deploy's life and nothing after it.
@@ -7958,7 +7965,7 @@ test("push ops lane: the stall watchdog is edge-triggered in BOTH directions", (
 test("push: state survives a restart, and hydrate restores cursors rather than replaying the ring", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p, store } = pushHarness();
-  const m = p.pushMintCode("own-a");
+  const m = p.pushMintCode("own-a", true);
   p.pushBindNow(m.code, 777, "milst");
   p.pushSetClasses("777", ["ops"], "own-a", false);
   const saved = store.saved;
@@ -7975,7 +7982,7 @@ test("push: the trigger ring carries a kind on every event and legacy events rea
   process.env.TG_BOT_TOKEN = "test-token";
   const { p } = pushHarness();
   p.pushOpsNow("deploy", "build test is live");
-  const evs = p.getTriggers(0).events;
+  const evs = p.getTriggers(0, null, true).events;
   assert.ok(evs.length >= 1);
   assert.equal(evs[evs.length - 1].kind, "ops", "every emitted event is class-stamped so consumers filter on a field that always exists");
   // `cls` is already taken on actionable rows (the R:R class); a collision there would mis-route
@@ -8050,7 +8057,8 @@ test("ledger class: eligible without thresholds, and formatted in its own gramma
   assert.ok(/target/.test(tgt) && tgt.includes("47"));
   const res = C.pushFmt({ kind: "ledger", sub: "resolved", coin: "X", t: "X", side: "short",
     ev: "breakdown", label: "breakdown", realized: -0.82, unit: "R", stopped: true, held: "6d" }, {});
-  assert.ok(res.includes("-0.82R") && /stopped out/.test(res), "a stopped-out resolution says so — the number alone hides how it got there");
+  assert.ok(res.includes("-0.82R") && /stopped/.test(res), "a stopped-out resolution says so — the number alone hides how it got there");
+  assert.ok(res.includes("\u{1F7E5}"), "and a losing outcome is marked, not just signed — a minus sign is easy to miss on a phone");
   const flat = C.pushFmt({ kind: "ledger", sub: "resolved", coin: "X", t: "X", side: "long", ev: "e", realized: null }, {});
   assert.ok(flat.includes("\u2014"), "an unresolvable outcome renders as an honest dash, not a zero");
 });
@@ -8069,7 +8077,7 @@ test("ledger alerts: only announced claims get a death notice, and each level fi
   open.set("AAA|breakout", mk("AAA", { alo: 1 }));    // announced
   open.set("BBB|breakout", mk("BBB"));                // never announced
 
-  const ledgerEvents = () => p.getTriggers(0).events.filter((e) => e.kind === "ledger");
+  const ledgerEvents = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "ledger");
 
   p.seedRowNow("AAA", { px: 42 }); p.seedRowNow("BBB", { px: 42 });
   p.levelScanNow();
@@ -8109,7 +8117,7 @@ test("ledger alerts: target fires independently, and the void takes precedence i
 
   p.seedRowNow("CCC", { px: 47.5 });
   p.levelScanNow();
-  const evs = p.getTriggers(0).events.filter((e) => e.kind === "ledger");
+  const evs = p.getTriggers(0, null, true).events.filter((e) => e.kind === "ledger");
   assert.equal(evs.length, 1);
   assert.equal(evs[0].sub, "target");
   assert.equal(evs[0].level, 47);
@@ -8118,7 +8126,7 @@ test("ledger alerts: target fires independently, and the void takes precedence i
   p.ledgerOpenNow().set("CCC|bigmove#1", { key: "CCC|bigmove#1", coin: "CCC", ticker: "CCC", ev: "bigmove",
     t0: Date.now(), mark0: 42, dir: 1, psd: "long", stp: 46, alo: 1, vi: 1, resolveAt: Date.now() + 1e9 });
   p.levelScanNow();
-  assert.equal(p.getTriggers(0).events.filter((e) => e.kind === "ledger").length, 1,
+  assert.equal(p.getTriggers(0, null, true).events.filter((e) => e.kind === "ledger").length, 1,
     "shadow variants ledger silently — they must never reach an alert channel");
 });
 
@@ -8178,21 +8186,21 @@ test("trigger stream: `recent` is cursor-independent, `events` is not — one pu
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   for (let i = 0; i < 5; i++) p.pushOpsNow("ev" + i, "text " + i);
 
-  const all = p.getTriggers();
+  const all = p.getTriggers(undefined, null, true);
   assert.equal(all.recent.length, 5, "recent ships regardless of cursor — this is the DISPLAY list");
   assert.equal(all.seq, 5);
 
-  const caught = p.getTriggers(5);
+  const caught = p.getTriggers(5, null, true);
   assert.equal(caught.events.length, 0, "a caught-up cursor has nothing to interrupt for…");
   assert.equal(caught.recent.length, 5, "…but the display list is still there. Deriving display from the cursor is what made the old log evaporate on refresh.");
 
-  const partial = p.getTriggers(3);
+  const partial = p.getTriggers(3, null, true);
   assert.equal(partial.events.length, 2, "the cursor still governs what fires");
   assert.equal(partial.recent.length, 5);
   assert.equal(partial.params.recent, 40, "the display cap is disclosed in params, not implicit");
 
   for (let i = 0; i < 60; i++) p.pushOpsNow("x" + i, "y");
-  assert.equal(p.getTriggers().recent.length, 40, "the display list is capped independently of the 200-event ring");
+  assert.equal(p.getTriggers(undefined, null, true).recent.length, 40, "the display list is capped independently of the 200-event ring");
 });
 
 test("snapshot: alertVer ships AND rides the content signature, so a fired alert can't go stale", () => {
@@ -8294,12 +8302,12 @@ test("client: the feed is the record — fire* interrupt only, and read state is
 test("quiet events are recorded but never delivered", () => {
   const C = require("../src/compute");
   const ev = { kind: "ops", title: "deploy", text: "build x is live", quiet: 1 };
-  assert.equal(C.pushEligible(ev, {}), false, "a quiet event is not delivered to a default subscriber");
-  assert.equal(C.pushEligible(ev, { classes: ["ops"] }), false, "…nor to someone who explicitly subscribed to its class");
-  assert.equal(C.pushEligible(Object.assign({}, ev, { quiet: 0 }), {}), true, "the flag is what suppresses it, not the class");
+  assert.equal(C.pushEligible(ev, { admin: true }), false, "a quiet event is not delivered to a default subscriber");
+  assert.equal(C.pushEligible(ev, { admin: true, classes: ["ops"] }), false, "…nor to someone who explicitly subscribed to its class");
+  assert.equal(C.pushEligible(Object.assign({}, ev, { quiet: 0 }), { admin: true }), true, "the flag is what suppresses it, not the class");
   // The flag sits on the EVENT, so every transport agrees about what happened and differs only on
   // what was worth interrupting for.
-  assert.equal(C.pushEligible({ kind: "ops", title: "poller stalled", level: "warn" }, {}), true,
+  assert.equal(C.pushEligible({ kind: "ops", title: "poller stalled", level: "warn" }, { admin: true }), true,
     "ops that matter still deliver — suppressing the whole class would take the stall warning with it");
 });
 
@@ -8311,10 +8319,10 @@ test("the deploy notice is quiet; the stall watchdog is not", () => {
     savePush: () => {}, loadPush: () => null };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
     pushFetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, result: {} }) }) });
-  const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 5551234567, "milst");
+  const m = p.pushMintCode("own-a", true); p.pushBindNow(m.code, 5551234567, "milst");
 
   p.pushOpsNow("deploy", "build test is live", "info", true);
-  const rec = p.getTriggers(0).events.filter((e) => e.kind === "ops");
+  const rec = p.getTriggers(0, null, true).events.filter((e) => e.kind === "ops");
   assert.equal(rec.length, 1, "the deploy line is still IN the ring — it explains a reset cursor when you read the log back");
   assert.equal(rec[0].quiet, 1);
   p.pushTickNow();
@@ -8325,7 +8333,7 @@ test("the deploy notice is quiet; the stall watchdog is not", () => {
   p.pushHealthNow();
   p.pushTickNow();
   assert.equal(p.pushStateNow().queue, 1, "the stall warning still delivers");
-  const stall = p.getTriggers(0).events.filter((e) => e.kind === "ops").pop();
+  const stall = p.getTriggers(0, null, true).events.filter((e) => e.kind === "ops").pop();
   assert.ok(!stall.quiet, "the watchdog's events are not quiet");
   delete process.env.TG_BOT_TOKEN;
 });
@@ -8555,7 +8563,7 @@ test("new classes are opt-in: an absent selection means the DEFAULT set, never e
   const m = C.pushFmt(filing, {});
   assert.ok(m.includes("8-K") && m.includes("Item 2.02") && m.includes("sec.gov"));
   const e = C.pushFmt({ kind: "earnings", coin: "X", t: "X", when: "tomorrow", session: "amc", claim: "breakout" }, {});
-  assert.ok(/tomorrow/.test(e) && /open breakout claim/.test(e), "the earnings alert says WHY you are being told");
+  assert.ok(/tomorrow/.test(e) && /open <b>breakout<\/b> claim/.test(e), "the earnings alert says WHY you are being told");
   const a = C.pushFmt({ kind: "ai", coin: "X", t: "X", from: "wait", to: "enter_on_pullback", note: "n" }, {});
   assert.ok(a.includes("wait") && a.includes("enter_on_pullback"));
 });
@@ -8572,7 +8580,7 @@ test("filing alerts: material forms only, backlog seeded silently, stale filings
   p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
   const now = Date.now();
   const item = (id, form, pub) => ({ id: "sec:" + id, tk: "AAA", form, h: form + " body", url: "https://sec.gov/" + id, pub: pub == null ? now - 60e3 : pub });
-  const filings = () => p.getTriggers(0).events.filter((e) => e.kind === "filing");
+  const filings = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "filing");
 
   // Before priming, the 7-day backlog every name carries is seeded, not announced.
   p.filingScanNow([item(1, "8-K")]);
@@ -8626,7 +8634,7 @@ test("analyst flip fires only on an actual stance change", () => {
   const p = ctxHarness();
   p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
   const rep = (stance) => ({ report: { action: { stance, note: "because" } } });
-  const ai = () => p.getTriggers(0).events.filter((e) => e.kind === "ai");
+  const ai = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "ai");
 
   assert.equal(p.aiFlipCheckNow("AAA", null, rep("wait")), null, "a first report is not a flip — there is nothing to have changed from");
   assert.equal(p.aiFlipCheckNow("AAA", rep("wait"), rep("wait")), null, "an unchanged stance on regeneration says nothing");
@@ -8711,7 +8719,7 @@ test("quiet hours: window maths, midnight wrap, and what pierces", () => {
 test("quiet hours DELAY rather than drop, and cannot block the queue behind them", async () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const { p, calls } = pushHarness();
-  const m = p.pushMintCode("own-a"); p.pushBindNow(m.code, 5551234567, "milst");
+  const m = p.pushMintCode("own-a", true); p.pushBindNow(m.code, 5551234567, "milst");
   // A window that is certainly open right now, whatever hour the suite runs at.
   p.pushSetPrefs("5551234567", { quiet: { from: 0, to: 24 - 1e-9, tz: 0 } }, "own-a", false);
   p.pushSetBootNow(Date.now() - 60e3);
@@ -8729,8 +8737,8 @@ test("quiet hours DELAY rather than drop, and cannot block the queue behind them
 
 test("regime + coverage are episode-gated: one alert per episode, seeded at boot", () => {
   const p = ctxHarness();
-  const regs = () => p.getTriggers(0).events.filter((e) => e.kind === "regime");
-  const covs = () => p.getTriggers(0).events.filter((e) => e.kind === "coverage");
+  const regs = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "regime");
+  const covs = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "coverage");
 
   // Coverage is scoped to open ANNOUNCED claims: a gap on a name nobody is watching is a
   // maintenance item, not an interruption.
@@ -8811,8 +8819,8 @@ function twoUserHarness() {
 test("recipients are per-browser: two people link independently and cannot see each other", () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const p = twoUserHarness();
-  const ca = p.pushMintCode("own-a"); p.pushBindNow(ca.code, 1111111111, "milst");
-  const cb = p.pushMintCode("own-b"); p.pushBindNow(cb.code, 2222222222, "friend");
+  const ca = p.pushMintCode("own-a", true); p.pushBindNow(ca.code, 1111111111, "milst");
+  const cb = p.pushMintCode("own-b", false); p.pushBindNow(cb.code, 2222222222, "friend");
 
   const a = p.getPush("own-a", false), b = p.getPush("own-b", false);
   assert.equal(a.recipients.length, 1, "each browser sees exactly its own");
@@ -8823,7 +8831,7 @@ test("recipients are per-browser: two people link independently and cannot see e
 
   // A pending link code is private too: handing the newest code to every visitor would let two
   // people linking at once redeem each other's.
-  p.pushMintCode("own-a");
+  p.pushMintCode("own-a", true);
   assert.ok(p.getPush("own-a", false).code, "the minting browser sees its code");
   assert.equal(p.getPush("own-b", false).code, null, "nobody else does");
 
@@ -8880,9 +8888,9 @@ test("rules are per-person: private lists, per-person cap, and events that stay 
 
   // Market and server events stay shared — they are about the tape, not about you.
   p.pushOpsNow("poller stalled", "x", "warn");
-  for (const who of [["own-a", false], ["own-b", false]])
+  for (const who of [["own-a", true], ["own-b", true]])
     assert.ok(p.getTriggers(0, who[0], who[1]).events.some((e) => e.kind === "ops"),
-      "ops events are shared by construction");
+      "ops events are shared among operators");
 });
 
 test("ownership is a signed handle, not a guessable id, and legacy rows stay admin-managed", () => {
@@ -9021,4 +9029,117 @@ test("the family filter is validated server-side and named in the message", () =
   assert.ok(/if\(!cur\.length\) return;/.test(app), "turning both families off is refused — the master toggle is how you stop setup alerts");
   assert.ok(/trig:\{minEV:T\.minEV, minRR:T\.minRR, maxLate:T\.maxLate, cls:T\.cls\}/.test(app),
     "the family choice syncs to telegram alongside the other thresholds, from the same control");
+});
+
+// ===== Trend class, ops gating, message look, panel density (build 2026.07.27-11) ===============
+
+test("trend metrics ride the same board the Trend tab renders, signed to cover both sides", () => {
+  const C = require("../src/compute");
+  const keys = C.RULE_METRICS.map((m) => m.k);
+  assert.ok(keys.includes("tscore") && keys.includes("e21d"));
+  // Signed so ONE metric asks the question people actually ask: abs> 3 is "strongly trending either
+  // way", and > 3 is "strongly trending up". Two separate long/short metrics could not express the
+  // first without a second rule.
+  assert.equal(C.RULE_BY_K.tscore.get({ tscore: -4 }), -4);
+  assert.equal(C.ruleEval({ metric: "tscore", op: "abs>", value: 3 }, { tscore: -4 }, true), "fire");
+  assert.equal(C.ruleEval({ metric: "tscore", op: ">", value: 3 }, { tscore: -4 }, true), "hold");
+  // A name the board never scored is null, not 0 — "no trend read" and "neutral" are different.
+  assert.equal(C.ruleEval({ metric: "tscore", op: "<", value: 1 }, { coin: "X" }, true), null);
+  assert.equal(C.RULE_BY_K.e21d.get({ e21d: -0.4 }), -0.4);
+
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/trendByCoin = new Map\(\);/.test(pol) && /trendByCoin\.get\(r\.coin\)/.test(pol),
+    "the stamp must read one index built where the board is built");
+  assert.ok(/\(m\.tscore == null \? "" : m\.tscore\)/.test(pol),
+    "the stamp must ride the content signature, or a frozen snapshot serves a stale trend score");
+});
+
+test("trend events: full stacks and D1 crosses only, seeded on the first pass", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const fn = pol.slice(pol.indexOf("function trendScan()"), pol.indexOf("function pushTest("));
+  // H12/H4 crossings at ~144 names would be a feed, not an alert. Stated where it is decided.
+  assert.ok(/D1 only/.test(pol.slice(pol.indexOf("trend class: full stacks"), pol.indexOf("const trendState"))));
+  assert.ok(/tb\.score >= 4 && prev\.score < 4/.test(fn), "only the ARRIVAL at 4/4 fires");
+  assert.ok(/sign !== 0 && prev\.sign !== 0 && sign !== prev\.sign/.test(fn),
+    "an unknown ribbon (a rung missing an EMA) is not a flip — treating it as one fires on every ladder gap");
+  assert.ok(/if \(!trendPrimed \|\| !prev\) continue;/.test(fn), "the first pass seeds the board silently");
+  assert.ok(/for \(const c of \[\.\.\.trendState\.keys\(\)\]\) if \(!trendByCoin\.has\(c\)\) trendState\.delete\(c\);/.test(fn),
+    "a name leaving the board drops its state, so a return is a genuinely new episode");
+  assert.ok(/continue;   \/\/ one event per name per scan/.test(fn));
+});
+
+test("ops is operator-only, in delivery AND in the feed", () => {
+  const C = require("../src/compute");
+  assert.deepEqual(C.PUSH_ADMIN_CLASSES, ["ops"]);
+  const ops = { kind: "ops", title: "poller stalled", level: "warn" };
+  assert.equal(C.pushEligible(ops, { admin: true }), true);
+  assert.equal(C.pushEligible(ops, {}), false, "a public recipient never receives server health");
+  assert.equal(C.pushEligible(ops, { classes: ["ops"] }), false, "…and cannot opt in by naming the class");
+
+  process.env.TG_BOT_TOKEN = "test-token";
+  const p = twoUserHarness();
+  const ca = p.pushMintCode("own-a", true); p.pushBindNow(ca.code, 1111111111, "operator");
+  const cb = p.pushMintCode("own-b", false); p.pushBindNow(cb.code, 2222222222, "public");
+  p.pushSetBootNow(Date.now() - 60e3);
+  p.pushOpsNow("poller stalled", "no poll for 20 min", "warn");
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 1, "exactly one recipient — the operator — is queued");
+
+  // Hiding the chip while still shipping the events would leave the public bell log narrating
+  // faults nobody outside the operator can act on.
+  assert.equal(p.getTriggers(0, "own-b", false).events.filter((e) => e.kind === "ops").length, 0,
+    "ops is filtered from the public feed, not merely from the panel");
+  assert.ok(p.getTriggers(0, "own-a", true).events.some((e) => e.kind === "ops"), "the operator still sees it");
+
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // These two gates must stay separate: folding them together blocked ops for operators, because
+  // the delivery path passes isAdmin=false for ownership purposes.
+  assert.ok(/const evVisible = \(e, owner, isAdmin\) => !e\.owner/.test(pol), "evVisible is ownership only");
+  assert.ok(/const evClassOk = \(e, isAdmin\)/.test(pol), "the admin-class gate is its own predicate");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("telegram messages carry the app's look: glyphs, side dots, aligned monospace geometry", () => {
+  const C = require("../src/compute");
+  const geo = (m) => m.slice(m.indexOf("<pre>") + 5, m.indexOf("</pre>"));
+  const stop = C.pushFmt({ kind: "ledger", sub: "stop", coin: "H", t: "H", side: "long", ev: "breakout",
+    label: "breakout", level: 40.5, entry: 42.1, held: "3h" }, {});
+  assert.ok(stop.startsWith("\u26d4"), "a void being taken leads with the same glyph the board uses");
+  assert.ok(/^level\s+40\.5$/m.test(geo(stop)));
+  const tgt = C.pushFmt({ kind: "ledger", sub: "target", coin: "H", t: "H", side: "long", ev: "e", level: 47 }, {});
+  assert.ok(tgt.startsWith("\u{1F3AF}"));
+
+  const tr = C.pushFmt({ kind: "trend", coin: "N", t: "NVDA", side: "long", sub: "stack", score: 4,
+    tf: "D1", px: 120, e21: 114, title: "full 4/4 stack", text: "every rung aligned up" }, {});
+  assert.ok(tr.startsWith("\u{1F4C8}") && tr.includes("NVDA"));
+  assert.ok(/^score\s+4\/4$/m.test(geo(tr)));
+  assert.ok(C.pushFmt({ kind: "trend", coin: "N", t: "N", side: "short", title: "x" }, {}).startsWith("\u{1F4C9}"),
+    "a downtrend leads with the down glyph — direction readable before a word is");
+
+  // Escaping still holds inside the preformatted block, or a ticker with markup breaks the message.
+  const evil = C.pushFmt({ kind: "rule", coin: "X", t: "<b>X", rule: "r", now: "<i>1" }, {});
+  assert.ok(!/<b>X/.test(evil) && evil.includes("&lt;"), "content is escaped before it reaches parse_mode=HTML");
+});
+
+test("panel: your recipients only in the bell, everyone's in the admin panel, collapsed", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  // Three linked accounts x nine class chips had turned the bell into a wall of controls for people
+  // you cannot help.
+  assert.ok(/const mineOnly=\(P\.recipients\|\|\[\]\)\.filter\(r=>r\.mine\);/.test(app),
+    "the bell panel lists only your own recipients");
+  assert.ok(/data-prec=/.test(app) && /openRec\[r\.chat\]/.test(app), "each recipient collapses to a summary line");
+  assert.ok(/\$\{nOn\} class\(es\)/.test(app), "…whose summary still says how many classes are on");
+  assert.ok(/filter\(c=>!adminCls\.includes\(c\)\|\|r\.admin\)/.test(app),
+    "the ops chip is not offered to a recipient who cannot receive ops");
+
+  assert.ok(html.includes('id="admRecH"') && html.includes('id="admRecB"'), "the admin roster has markup");
+  assert.ok(/<div id="admRecB" hidden>/.test(html), "…and is collapsed by default");
+  assert.ok(/function renderAdmRecips\(\)/.test(app));
+  assert.ok(/r\.admin\?'operator':'public'/.test(app), "the roster says which recipients hold operator privileges");
+  assert.ok(/data-admunlink=/.test(app) && /Revoke this recipient/.test(app), "admin can revoke from there");
 });
