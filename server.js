@@ -6,11 +6,12 @@ const zlib = require("zlib");
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
+const { featureGateFor } = require("./src/compute");
 
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.26-03";
+const VERSION = "2026.07.26-04";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -34,6 +35,15 @@ const SESSION_SECRET = process.env.SESSION_SECRET
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const AI_UNLOCK_SECRET = crypto.createHash("sha256").update(`xyzmon-ai-unlock|${ADMIN_PASSWORD}`).digest();
 const AI_UNLOCK_MS = 24 * 3600 * 1000;   // hard ceiling on an unlock's life, even if the browser restores its session
+// Admin VIEW is a separate, longer lease than the AI unlock above, and deliberately so: seeing the
+// admin tabs costs nothing, while generating a report spends real OpenAI budget. Merging them would
+// force one of the two to be wrong — either you re-authenticate to look at a table, or a 30-day
+// cookie can spend money. So: xyzadm = 30d admin view, xyzai = browser-session AI spend, both
+// derived from ADMIN_PASSWORD (rotate it and every outstanding token of BOTH kinds dies).
+// The label in the secret differs from the AI one on purpose — with a shared secret an xyzai token
+// would validate as xyzadm and the short lease would silently become a long one.
+const ADMIN_VIEW_SECRET = crypto.createHash("sha256").update(`xyzmon-admin-view|${ADMIN_PASSWORD}`).digest();
+const ADMIN_DAYS = Number(process.env.ADMIN_DAYS || 30);
 
 function log(msg) { console.log(new Date().toISOString() + " " + msg); }
 
@@ -193,6 +203,39 @@ function aiCookieAttrs(req, clear) {
 function setAiUnlockCookie(reply, req, token) { reply.header("set-cookie", "xyzai=" + token + aiCookieAttrs(req, false)); }
 function clearAiUnlockCookie(reply, req) { reply.header("set-cookie", "xyzai=x" + aiCookieAttrs(req, true)); }
 
+// ===== admin-view cookie (HttpOnly, 30d, HMAC-signed) =====
+// Same stateless shape as the session token. Two cookies go out together: xyzadm carries the signed
+// token, xyzadmin=1 is a JS-visible marker with no secret in it (forging it gets you an Admin tab
+// whose every route still 403s — the server never trusts it). Fastify appends repeated set-cookie
+// headers rather than overwriting, so this composes with setSessionCookies in one response.
+function signAdminView(expMs) {
+  return expMs + "." + crypto.createHmac("sha256", ADMIN_VIEW_SECRET).update("adm|" + expMs).digest("base64url");
+}
+function adminViewOk(tok) {
+  if (!ADMIN_PASSWORD || !tok || tok.length > 128) return false;   // unset admin password => fail closed
+  const dot = tok.indexOf(".");
+  if (dot < 1) return false;
+  const exp = Number(tok.slice(0, dot));
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const a = Buffer.from(tok), b = Buffer.from(signAdminView(exp));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function setAdminCookies(reply, req, maxAgeSec, token) {
+  reply.header("set-cookie", [
+    "xyzadm=" + (token || "x") + cookieAttrs(req, maxAgeSec) + "; HttpOnly",
+    "xyzadmin=1" + cookieAttrs(req, maxAgeSec),
+  ]);
+}
+// Constant-time ADMIN_PASSWORD compare for the login route. Deliberately NOT poller.checkAdminPassword:
+// that one carries its own sliding lockout for the terminal unlock, and burning it on ordinary group
+// logins would let a member with a fat finger lock the operator out of the panel. /login has its own
+// per-IP damper, which is the right one to spend here.
+function adminPwOk(pw) {
+  if (!ADMIN_PASSWORD) return false;
+  const a = Buffer.from(String(pw == null ? "" : pw), "utf8"), b = Buffer.from(ADMIN_PASSWORD, "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 // Brute-force damper for /login: 8 wrong passwords from one IP = 15 min lockout. In-memory —
 // a restart clears it, which is fine; this is a speed bump, not a vault. Map is size-capped
 // so a spoofed-IP flood can't grow it unbounded.
@@ -270,6 +313,10 @@ async function main() {
     return false;
   };
 
+  // True when the caller holds a valid admin-view cookie. Browser-only by design: there is no header
+  // or Basic-auth path to admin, so a leaked script credential cannot flip feature visibility.
+  const isAdmin = (req) => adminViewOk(getCookie(req, "xyzadm"));
+
   // Always-on guard for the paid AI-escalation endpoints. These spend real OpenAI/Anthropic budget,
   // so they must never answer an unauthenticated caller — including when SITE_PASSWORD is UNSET, a
   // posture where the rest of the (read-only, cache-served) site is deliberately open. Unauthed here
@@ -312,23 +359,79 @@ async function main() {
     log(`Access control: shared-password protection ENABLED (login page + ${SESSION_DAYS}d sessions; Basic auth still accepted for scripts)`);
   }
 
+  // ===== feature gate =====
+  // Registered LAST so it runs after the site gate: an unauthenticated caller must get 401 (log in),
+  // not 403 (you are not admin) — the two mean different things and the client acts on the difference.
+  // The mapping route -> feature key lives in the manifest; FEATURE_NEVER_GATE (health, login, logout,
+  // the unlock pair, /api/features) is honoured inside featureGateFor, so the escalation path can
+  // never be closed by a flag write. Routes no feature claims pass through untouched — see the
+  // ASYMMETRY note in compute.js before changing that.
+  fastify.addHook("onRequest", async (req, reply) => {
+    const blocked = featureGateFor(req.method, req.url, poller.getFlags(), isAdmin(req));
+    if (!blocked) return;
+    // Same lifecycle rule as the site gate above: RETURN the reply or the handler still runs and
+    // double-sends. 403 not 404 — hiding the route's existence is the client's job (it never renders
+    // a gated affordance), and a lying status code would make this impossible to debug from a log.
+    return reply.code(403).header("cache-control", "no-store").send({ error: "feature-gated", feature: blocked });
+  });
+  {
+    // Honest-null: with no ADMIN_PASSWORD set, nobody can hold an admin cookie, so every feature whose
+    // resolved state is "admin" is closed to EVERYONE including the operator. That is the correct
+    // fail-closed posture, but it is silent, so say it out loud once at boot rather than letting it
+    // present as "the Actionable tab stopped working".
+    const shut = require("./src/compute").FEATURES
+      .filter((f) => require("./src/compute").featureState(poller.getFlags(), f.key) === "admin").map((f) => f.key);
+    if (!ADMIN_PASSWORD && shut.length)
+      log(`WARN: ADMIN_PASSWORD is unset — no admin cookie can be minted, so ${shut.length} admin-state feature(s) are closed to everyone: ${shut.join(", ")}`);
+    else log(`Feature gate: ${shut.length} admin-state feature(s) (${ADMIN_DAYS}d admin lease; AI spend still needs a separate unlock)`);
+  }
+
+  // Feature visibility: GET is never gated (the client needs the resolved set to render at all, and a
+  // public caller legitimately reads its OWN set — it contains no admin-only detail beyond key names).
+  // POST is admin-only, enforced in the poller so the check cannot be bypassed by a second caller.
+  fastify.get("/api/features", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    return poller.getFeatures(isAdmin(req));
+  });
+  // 8 KB cap — the payload is { key, state }; anything larger is malformed or hostile (413).
+  fastify.post("/api/features", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const b = req.body || {};
+    const r = poller.setFlag(String(b.key || ""), String(b.state || ""), isAdmin(req));
+    return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
+  });
+
   // Login/logout exist regardless of the gate so a stale xyzauth cookie can always be cleared.
+  // One prompt, two outcomes: the shared password grants a session, ADMIN_PASSWORD grants a session
+  // AND the admin-view lease. Admin implies site access, so there is no third password and no second
+  // login screen. The admin branch is checked FIRST and independently of SITE_PASSWORD, so the panel
+  // is still reachable in the deliberately-open posture where no site password is set.
   fastify.post("/login", async (req, reply) => {
-    if (!SITE_PASSWORD) return { ok: true };   // gate disabled — nothing to check
     const ip = String(req.headers["x-forwarded-for"] || req.ip).split(",")[0].trim();
     const lockedMin = loginLockedFor(ip);
     if (lockedMin) { reply.code(429); return { ok: false, error: `too many attempts — locked for ${lockedMin} min` }; }
     const b = req.body || {};
+    const pw = String(b.password == null ? "" : b.password);
+    if (adminPwOk(pw)) {
+      loginFails.delete(ip);
+      setSessionCookies(reply, req, SESSION_DAYS * 86400, signSession(Date.now() + SESSION_DAYS * 864e5));
+      setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5));
+      log("admin view granted via login");
+      return { ok: true, admin: true };
+    }
+    if (!SITE_PASSWORD) return { ok: true, admin: false };   // gate disabled — nothing further to check
     const user = (b.user == null || b.user === "") ? SITE_USER : String(b.user);   // page sends password only; SITE_USER is implied
-    if (!credsOk(user, String(b.password == null ? "" : b.password))) {
+    if (!credsOk(user, pw)) {
       loginFail(ip); reply.code(401); return { ok: false, error: "wrong password" };
     }
     loginFails.delete(ip);
     setSessionCookies(reply, req, SESSION_DAYS * 86400, signSession(Date.now() + SESSION_DAYS * 864e5));
-    return { ok: true };
+    return { ok: true, admin: false };
   });
   fastify.get("/logout", async (req, reply) => {
     setSessionCookies(reply, req, 0, null);   // Max-Age=0 deletes both cookies
+    setAdminCookies(reply, req, 0, null);     // signing out drops elevation — never leave a stale admin lease
+    clearAiUnlockCookie(reply, req);          // and the AI unlock, which outlives nothing
     return reply.redirect("/", 303);   // v5-forward signature (url, code) — the old order is deprecated
   });
 
@@ -589,7 +692,10 @@ async function main() {
     const r = poller.checkAdminPassword(String((req.body || {}).password || ""));
     if (!r.ok) return reply.code(r.error === "rate" ? 429 : r.error === "not-configured" ? 503 : 403).send(r);
     setAiUnlockCookie(reply, req, signAiUnlock(Date.now() + AI_UNLOCK_MS));
-    return reply.code(200).send({ ok: true, ttlMs: AI_UNLOCK_MS });
+    // The terminal path is also an escalation path: someone who proves ADMIN_PASSWORD here gets the
+    // admin view too, so `admin unlock` works identically to logging in with the admin password.
+    setAdminCookies(reply, req, ADMIN_DAYS * 86400, signAdminView(Date.now() + ADMIN_DAYS * 864e5));
+    return reply.code(200).send({ ok: true, ttlMs: AI_UNLOCK_MS, admin: true });
   });
   // Drop the unlock early (`admin lock`). No password needed to LOCK — locking never grants anything.
   fastify.post("/api/ai-lock", async (req, reply) => {
@@ -601,7 +707,7 @@ async function main() {
   // terminal show the right lock state on open without exposing the HttpOnly cookie to page JS.
   fastify.get("/api/ai-status", (req, reply) => {
     reply.header("cache-control", "no-store");
-    return { gated: !!ADMIN_PASSWORD, unlocked: aiUnlockOk(getCookie(req, "xyzai")) };
+    return { gated: !!ADMIN_PASSWORD, unlocked: aiUnlockOk(getCookie(req, "xyzai")), admin: isAdmin(req) };
   });
   // Recent AI reports across all tickers — the Report tab's shared feed.
   fastify.get("/api/ai-reports", (req, reply) => {
