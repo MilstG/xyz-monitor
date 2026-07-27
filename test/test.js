@@ -6401,7 +6401,16 @@ test("actionable -06: the CONFIRMED gate drops negative-expectancy setups instea
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   // The gate is a single function so there is exactly one place that decides what gets suggested.
   assert.ok(/function actConfirm\(rec, evR, rr, ev\)/.test(pol), "actConfirm gate missing");
-  for (const cond of ['return "norecord"', 'return "negexp"', 'return "negev"', 'return "thinRR"', 'return "noedge"'])
+  // thinRR left this list deliberately: freezing R:R at fire exposed that sigma-built setups
+  // (target = study median vs a 1-sigma void) run 0.5-1.0x BY CONSTRUCTION, so a 2:1 gate deleted
+  // that whole family the moment the ratio stopped being drift-inflated. The floor is a row CLASS
+  // now — 'rr' clears it, 'ev' rides on positive expectancy — and the client's checkboxes pick
+  // which families show. EV>0 stays the hard gate for both.
+  assert.ok(!pol.includes('"thinRR"'), "thinRR fully retired from the gate and the tallies");
+  assert.ok(pol.includes('function actClass(rr) { return rr && rr.gross >= ACT_MIN_RR ? "rr" : "ev"; }'),
+    "the floor classifies instead of rejecting");
+  assert.ok(pol.includes("shadow, cls: actClass(rr),"), "and every row carries its class to the client");
+  for (const cond of ['return "norecord"', 'return "negexp"', 'return "negev"', 'return "noedge"'])
     assert.ok(pol.includes(cond), `gate must reject with a named reason: ${cond}`);
   // Both expectancy tests are required and they are NOT the same test. avg is retrospective (did
   // this family pay); EV is prospective on this instance (does it still pay from here).
@@ -6449,7 +6458,8 @@ test("actionable -07: the board reads the ledger's frozen geometry and never re-
   assert.equal(a.params.netOfCarry, true, "the payload declares that R:R is net of carry");
   assert.equal(a.params.recMinN, 8, "and discloses the record floor");
   assert.equal(a.params.gate, "confirmed", "and names the gate it applied");
-  assert.deepEqual(a.params.requires, ["n>=8", "avgR>0", "EV>0", "R:R>=2.0", "R:R<=20", "!noedge"], "the gate's conditions ship with the payload so the UI can state them — including the CEILING, because a ratio can now be rejected for being absurdly high as well as too low");
+  assert.deepEqual(a.params.requires, ["n>=8", "avgR>0", "EV>0", "R:R<=20", "!noedge"], "the gate's conditions ship with the payload — the 2:1 floor left them because it no longer rejects anything, while the R:R<=20 ceiling stays: an absurd ratio is still an artifact");
+  assert.equal(a.params.rrFloor, 2, "the floor ships separately, as the family boundary");
   // Nothing confirmed means nothing announced — the stream inherits the gate by construction.
   assert.equal(p.getTriggers().seq, 0, "an unconfirmed setup never reaches the trigger stream");
   // Swing gate is by horizon, so short-horizon events can never leak onto a swing board.
@@ -6567,7 +6577,7 @@ test("triggers -01: lateness is measured in the setup's own risk unit, against t
 
 test("triggers -02: eligibility is per-transport and never gates the stream", () => {
   const { trigEligible, trigKey } = require("../src/compute");
-  const row = { coin: "xyz:AMD", side: "long", ev: "tretest", t0: 5, evR: 0.52, rr: { net: 2.31 }, late: 0.10, earn: null };
+  const row = { coin: "xyz:AMD", side: "long", ev: "tretest", t0: 5, evR: 0.52, rr: { gross: 2.31 }, late: 0.10, earn: null };   // gross since -10 — a net-shaped fixture here would test a payload the server no longer ships
   assert.equal(trigEligible(row, {}), true, "an empty config interrupts for everything");
   // There is deliberately NO provenOnly option: the server's stream carries only confirmed
   // setups now, so such a filter would imply unconfirmed alerts are possible. It isn't.
@@ -6576,6 +6586,12 @@ test("triggers -02: eligibility is per-transport and never gates the stream", ()
   assert.equal(trigEligible(row, { minEV: 0.6 }), false, "EV below the floor filtered");
   assert.equal(trigEligible(row, { minRR: 2.5 }), false, "R:R below the floor filtered");
   assert.equal(trigEligible(row, { minRR: 1.5 }), true, "R:R above the floor passes");
+  // Regression: after -10 renamed net -> gross, this function kept reading row.rr.net, so any
+  // configured minRR silently rejected EVERY row — the alert stream went quiet with no error.
+  const fs0 = require("fs"), path0 = require("path");
+  const cSrc0 = fs0.readFileSync(path0.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(cSrc0.includes("row.rr.gross >= c.minRR") && !cSrc0.includes("row.rr.net"),
+    "trigEligible reads gross; a stale rr.net read here is invisible until every alert stops firing");
   // The rule that makes alerting usable rather than annoying: don't wake someone for a setup
   // that has already run away from its own entry.
   assert.equal(trigEligible(Object.assign({}, row, { late: 0.9 }), { maxLate: 0.5 }), false, "a chased setup is filtered out of alerts");
@@ -6749,8 +6765,9 @@ test("triggers -06: R:R is the board's kill switch, set at 2.0, with no second l
   // Because R:R is repriced from the live mark every build, a chased setup dies at this gate on
   // its own. A separate lateness-based expiry would be a second gate that could disagree with it.
   assert.ok(!/ACT_MAX_LATE|lateExpire|maxLateDrop/.test(pol), "lateness must not be a second expiry gate — the R:R floor already kills chased setups");
-  assert.ok(/if \(!rr \|\| !\(rr\.gross >= ACT_MIN_RR\)\) return "thinRR";/.test(pol),
-    "the floor is enforced inside the gate against the FROZEN fire-mark R:R — against a live-mark ratio it was a filter that loosened as price approached the void");
+  assert.ok(!/return "thinRR";/.test(pol),
+    "the R:R floor is not a kill switch any more — EV>0 is the hard gate for both families, and the floor only names which family a row belongs to");
+  assert.ok(pol.includes("rrFloor: ACT_MIN_RR"), "the payload discloses the family boundary so the UI can label the checkboxes honestly");
   assert.ok(pol.includes("const rr = netRR({ side, entry: e.mark0, stop: e.stp, target });"),
     "R:R is computed from the fire mark, never the live price");
   assert.ok(pol.includes("if (!tradeableNow(side, r.px, e.stp, target)) { rej.untakeable++; continue; }"),
@@ -6843,7 +6860,7 @@ test("actionable -10: the gate rejects each way independently, and never silentl
 
   // Coverage always accounts for every scanned claim, so an empty board can always be explained.
   for (const a of [good, mk(rec(7, 1.4)), losing]) {
-    const c = a.coverage, dropped = c.expired + c.noGeometry + c.thinRR + c.norecord + c.negexp + c.negev + c.noedge;
+    const c = a.coverage, dropped = c.expired + c.noGeometry + (c.degenerate || 0) + (c.untakeable || 0) + c.norecord + c.negexp + c.negev + c.noedge;
     assert.equal(c.confirmed + dropped, 1, "every scanned claim is either confirmed or counted against a reason");
     assert.ok(c.openClaims >= 1, "and the open-claim count is always disclosed");
   }
