@@ -2538,7 +2538,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     sigTickers.clear();
     for (const g of kept) if (g.uni === "xyz") sigTickers.add(String(g.ticker).toUpperCase());
     buildNewsPayload();   // sig/ed badge stamps ride the signals cadence; content hash gates the ETag bump
-    signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, shown: top.length, signals: top,
+    // Per-universe live totals. `count` stays the whole-engine number (both universes) so nothing
+    // reading it changes meaning; countU carries the split the scoped tab actually needs. These
+    // count KEPT conditions, not the transport slice — the badge must move with reality while the
+    // cap is only a transport decision. Restored with the crypto engine: countU was retired at
+    // -101 as dead weight when one universe was served, and a scoped badge is impossible without it
+    // (summing the capped payload would silently under-report the moment either lane fills).
+    let cntX = 0, cntM = 0;
+    for (const g of kept) { if (g.uni === "main") cntM++; else cntX++; }
+    signalsCache = { ts: now, dataTs: signalsVer, count: kept.length, countU: { x: cntX, m: crypto ? cntM : null },
+      shown: top.length, signals: top,
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
     persistLedger();
