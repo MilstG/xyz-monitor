@@ -22,6 +22,7 @@ function openStore(dataDir) {
   const newsFile = path.join(dataDir, "news.json");
   const tgFile = path.join(dataDir, "tgchannels.json");
   const trigFile = path.join(dataDir, "triggers.json");
+  const pushFile = path.join(dataDir, "alertpush.json");   // telegram recipients + delivery cursor
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
   const flagsFile = path.join(dataDir, "flags.json");     // admin feature-visibility overrides
@@ -257,6 +258,23 @@ function openStore(dataDir) {
     // re-announces the entire live board, which is exactly the failure that makes an alerting
     // feature get switched off on day two. A missing file is a FIRST BOOT and is handled by the
     // caller as a silent seed, never as "nothing has fired yet".
+    // Telegram push: linked recipients, their per-class subscriptions, the stream cursor and the
+    // getUpdates offset. Recipients are CONFIG (they cost a human a phone interaction to recreate),
+    // and the cursor is state — but they must be written together or a crash between two files
+    // could leave a recipient whose cursor says "you're caught up" and silently eat their backlog.
+    // One atomic file, same tmp+rename discipline as the ledger.
+    savePush(data) {
+      try {
+        const tmp = pushFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, pushFile);
+      } catch (_) {}
+    },
+    loadPush() {
+      try { if (fs.existsSync(pushFile)) return JSON.parse(fs.readFileSync(pushFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
     saveTriggers(data) {
       try {
         const tmp = trigFile + ".tmp";
