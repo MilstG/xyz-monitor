@@ -1960,6 +1960,17 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     T.muted=T.muted.filter(c=>c!==x.dataset.unmute); saveAlerts(); buildAlertsPanel(); }));
   const pl=el('p-link'); if(pl) pl.addEventListener('click',()=>pushAct('/api/alerts/link'));
   const pt=el('p-test'); if(pt) pt.addEventListener('click',()=>pushAct('/api/alerts/test'));
+  pop.querySelectorAll('[data-pcls]').forEach(x=>x.addEventListener('click',()=>{
+    const P=pushState; if(!P) return;
+    const rec=(P.recipients||[]).find(r=>r.chat===x.dataset.pchat); if(!rec) return;
+    const all=P.classes||[];
+    let cur=(rec.classes&&rec.classes.length)?rec.classes.slice():all.slice();
+    const c=x.dataset.pcls;
+    cur = cur.includes(c) ? cur.filter(v=>v!==c) : cur.concat([c]);
+    // Turning the last class off would read as silence but persist as "all" — mute is a separate
+    // control, so refuse the ambiguous state instead of quietly inverting the intent.
+    if(!cur.length){ return; }
+    pushAct('/api/alerts/classes',{chat:rec.chat, classes:cur.length===all.length?[]:cur}); }));
   pop.querySelectorAll('[data-punlink]').forEach(x=>x.addEventListener('click',()=>{
     if(confirm('Unlink this recipient? They stop receiving alerts immediately.')) pushAct('/api/alerts/unlink',{chat:x.dataset.punlink}); })); }
 function addAlertRule(){ const A=state.alerts, tIn=el('ar-ticker').value.trim().toUpperCase(); let coin='';
@@ -3605,7 +3616,9 @@ async function loadTriggers(){
     // turning alerts on would immediately replay the whole retained ring at you.
     if(cur==null){ trigSeqSet(d.seq||0); return; }
     for(const ev of d.events){
-      if((ev.kind||'setup')==='ops'){ fireOps(ev); continue; }
+      const k=ev.kind||'setup';
+      if(k==='ops'){ fireOps(ev); continue; }
+      if(k==='ledger'){ fireLedger(ev); continue; }
       if(trigEligibleClient(ev,A.trig)) fireTrigger(ev);
     }
     if(d.seq!=null) trigSeqSet(d.seq);
@@ -3658,6 +3671,27 @@ function fireOps(ev){
   if(!el('alertpop').hidden) buildAlertsPanel();
 }
 
+// A claim's death, from the same ring its birth came through. Deliberately NOT filtered by the
+// trigger thresholds: those decide whether a setup is worth interrupting you for, and once you
+// HAVE been interrupted, being told the void was taken is not optional. Only the void hit gets a
+// toast — the target and the horizon resolution are for the log.
+function fireLedger(ev){
+  const A=state.alerts;
+  const head=ev.sub==='stop'?'\u26d4 void taken':ev.sub==='target'?'\u2713 target':'resolved';
+  let tail;
+  if(ev.sub==='resolved'){
+    const r=ev.realized;
+    tail=(r==null?'\u2014':(r>=0?'+':'')+(+r).toFixed(2)+(ev.unit||'R'))+(ev.stopped?' (stopped en route)':'');
+  } else tail=(ev.level!=null?fmtPrice(ev.level):'\u2014')+(ev.held?' \u00b7 held '+ev.held:'');
+  const text=`${ev.t} ${String(ev.side||'').toUpperCase()} \u00b7 ${ev.label} \u2014 ${head} \u00b7 ${tail}`;
+  A.log.unshift({t:ev.at||Date.now(), text, led:1}); if(A.log.length>60) A.log.pop();
+  A.unseen++; updateBell();
+  if(ev.sub==='stop') pushToast(text);
+  if(ev.sub==='stop' && A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){
+    try{ new Notification('Trade[XYZ] \u2014 void taken',{body:text}); }catch(_){} }
+  if(!el('alertpop').hidden) buildAlertsPanel();
+}
+
 // ===== alert delivery (telegram push) =====
 // The panel is a thin view over /api/alerts. Every decision — who is linked, which classes they
 // take, whether the wire is healthy — lives on the server, because the alerts have to keep flowing
@@ -3681,8 +3715,9 @@ function buildPushSection(){
   const recips=P.recipients&&P.recipients.length? P.recipients.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const tip=r.muted?(r.lastErr||'muted'):(r.lastOk?('last delivery '+fmtAge(Date.now()-r.lastOk)+' ago'):'linked, nothing delivered yet');
-    const cls=(r.classes&&r.classes.length)?r.classes.join(', '):'all classes';
-    return `<div class="arule"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${esc(cls)} \u00b7 ${r.sentHour}/${P.capHour}h</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span></div>`;
+    const on=(c)=>!r.classes||!r.classes.length||r.classes.includes(c);
+    const chips=(P.classes||[]).map(c=>`<button type="button" class="cdtf${on(c)?' on':''}" data-pcls="${esc(c)}" data-pchat="${esc(r.chat)}" data-tip="${esc(c==='setup'?'new confirmed setups':c==='ledger'?'void taken, target reached, horizon resolved \u2014 only for claims you were already told about. Level hits are detected LIVE (mark + 5m bars, ~30s); the ledger\u2019s stop-aware record is still decided by the resolver against the hourly spine, so a fast wick can enter the record without having alerted':'server health: deploys, poller stalls, degraded feeds')}">${esc(c)}</button>`).join('');
+    return `<div class="arule" style="flex-wrap:wrap"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.sentHour}/${P.capHour}h</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span><span style="display:flex;gap:4px;width:100%;margin-top:4px">${chips}</span></div>`;
   }).join('') : '<div class="sec" style="font-size:12px;padding:4px">Nobody linked yet.</div>';
   const code=P.code&&pushCodeLeft(P.code)!=='expired'
     ? `<div class="pushcode"><div class="sec" style="font-size:11px">DM the bot <b>/start ${esc(P.code.code)}</b></div><div class="pcode">${esc(P.code.code)}</div><div class="sec" style="font-size:11px">expires in ${esc(pushCodeLeft(P.code))}</div></div>`
