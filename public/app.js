@@ -3769,6 +3769,7 @@ function renderActionable(){
       +`${c.thinRR?` \u00b7 ${c.thinRR} below R:R ${_actMinRR}`:''}`
       +`${c.expired?` \u00b7 ${c.expired} aged out`:''}`
       +`${c.noGeometry?` \u00b7 ${c.noGeometry} whose frozen geometry never framed a trade`:''}`
+      +`${c.degenerate?` \u00b7 ${c.degenerate} whose void sat on top of the entry (ratio is an artifact)`:''}`
       +`${c.untakeable?` \u00b7 ${c.untakeable} no longer takeable from here`:''}.`
       +` This board suggests only confirmed setups \u2014 an empty board is a real answer.</div>`;
   } else {
