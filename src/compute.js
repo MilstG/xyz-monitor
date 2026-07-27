@@ -3342,7 +3342,12 @@ function featureFlagsSanitize(raw) {
   const out = {};
   if (!raw || typeof raw !== "object") return out;
   for (const k in raw) {
-    if (!FEATURE_BY_KEY.has(k)) continue;
+    const f = FEATURE_BY_KEY.get(k);
+    if (!f) continue;
+    // A stored state for a PINNED key is dropped, not kept-and-ignored. Keeping it would be inert
+    // today (featureState checks the pin first) and live the moment anyone removed the pin — a
+    // change in one file silently activating a value written in another. Never persist it at all.
+    if (f.pin) continue;
     const v = raw[k];
     if (FEATURE_STATES.indexOf(v) < 0) continue;
     out[k] = v;

@@ -3,6 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
+const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -5345,6 +5346,51 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (!okPw) { adminFails.push(now); return { ok: false, error: "bad-password" }; }
     return { ok: true };
   }
+  // ===== feature visibility state (admin panel) =================================================
+  // Stored overrides live on the volume; the MANIFEST in compute.js owns defaults and the pinned/
+  // never-gate invariants. Sanitized on load, so a hand-edited or half-written flags.json degrades
+  // to defaults per key instead of throwing the boot. Held here (not in server.js) for the same
+  // reason every other cache is: the poller is the one thing that owns persisted state.
+  // Optional-chained on purpose: the store interface GREW here, and hard-calling a method that older
+  // callers (and every existing test stub) do not provide would take the whole poller down at
+  // construction. Absent methods degrade to "no overrides, cannot persist" — manifest defaults only.
+  let featureFlags = featureFlagsSanitize(store.loadFlags ? store.loadFlags() : null);
+  function getFlags() { return featureFlags; }
+  // Everything the panel needs in one read: the manifest, the raw overrides, the resolved set for
+  // THIS caller, and the public-facing counts. Resolved server-side on purpose — the client must
+  // never re-derive a visibility from a raw flag (same one-code-path rule as the chart annotations).
+  function getFeatures(isAdmin) {
+    return {
+      ts: Date.now(),
+      admin: !!isAdmin,
+      states: FEATURE_STATES,
+      flags: featureFlags,
+      counts: featureCounts(featureFlags),
+      resolved: resolveFeatures(featureFlags, isAdmin),
+      manifest: FEATURES.map((f) => ({ key: f.key, kind: f.kind, label: f.label,
+        state: featureState(featureFlags, f.key), pin: !!f.pin, routes: f.routes || [] })),
+    };
+  }
+  // One key per call — the panel writes optimistically and rolls back on failure, so a batch write
+  // would make a partial failure ambiguous. Returns the fresh resolved set so the caller never has
+  // to guess what the write produced (a pinned key, for instance, ignores the requested state).
+  function setFlag(key, state, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "forbidden" };
+    const entry = FEATURES.find((f) => f.key === key);
+    if (!entry) return { ok: false, error: "unknown-feature" };
+    // Refuse pinned keys outright rather than accepting the write and quietly resolving past it.
+    // A 200 whose resolved state differs from the requested one reads as a successful write in the
+    // panel and in any log; the honest answer is that this key is not settable.
+    if (entry.pin) return { ok: false, error: "pinned" };
+    if (FEATURE_STATES.indexOf(state) < 0) return { ok: false, error: "bad-state" };
+    const next = Object.assign({}, featureFlags);
+    next[key] = state;
+    const clean = featureFlagsSanitize(next);
+    if (!store.saveFlags || !store.saveFlags(clean)) return { ok: false, error: "write-failed" };
+    featureFlags = clean;
+    log(`feature "${key}" set to ${state} (resolved ${featureState(clean, key)})`);
+    return { ok: true, key, state: featureState(clean, key), features: getFeatures(true) };
+  }
   function resetAiDay(password) {
     const chk = checkAdminPassword(password);
     if (!chk.ok) return chk;
@@ -5639,6 +5685,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
+    getFlags, getFeatures, setFlag,   // feature-visibility state (admin panel)
     getEarnings: () => {
       if (!earnCache) return earnCache;
       // filings links overlay at serve time (filings arrive continuously between the 6h

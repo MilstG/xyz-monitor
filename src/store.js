@@ -24,6 +24,7 @@ function openStore(dataDir) {
   const trigFile = path.join(dataDir, "triggers.json");
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
+  const flagsFile = path.join(dataDir, "flags.json");     // admin feature-visibility overrides
   const duelFile = path.join(dataDir, "duel.json");         // score-duel daily snapshots + rank-IC series
   const derivFile = path.join(dataDir, "derivs.log");        // Coinalyze 15-min rows: coin\tts\tlongLiq\tshortLiq\toi
   const derivMapFile = path.join(dataDir, "derivmap.json");  // resolved base-asset -> Coinalyze symbol map
@@ -304,6 +305,24 @@ function openStore(dataDir) {
     },
     loadAiReports() {
       try { if (fs.existsSync(aiFile)) return JSON.parse(fs.readFileSync(aiFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    // Feature-visibility overrides set from the admin panel: { "<featureKey>": "public"|"admin"|"off" }.
+    // Tiny and rewritten whole, but atomic like everything else on the volume — a truncated write here
+    // would resolve every key back to its manifest default on the next boot, silently reopening
+    // whatever had been closed. Absent file is the normal first-boot state, not an error: the
+    // manifest defaults ARE the initial configuration.
+    saveFlags(obj) {
+      try {
+        const tmp = flagsFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(obj || {}));
+        fs.renameSync(tmp, flagsFile);
+        return true;
+      } catch (_) { return false; }
+    },
+    loadFlags() {
+      try { if (fs.existsSync(flagsFile)) return JSON.parse(fs.readFileSync(flagsFile, "utf8")); }
       catch (_) {}
       return null;
     },
