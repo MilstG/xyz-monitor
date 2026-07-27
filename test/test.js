@@ -1729,7 +1729,7 @@ test("earnings<->filings join: the release links once it's live, tiered preferen
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["const entries = linkEarningsFilings(earnCache.entries, flItems", "if (sig !== earnLnSig) { earnLnSig = sig; earnLnVer = Date.now(); }",
-    "dataTs: Math.max(earnCache.dataTs || 0, earnLnVer)"])
+    "dataTs: Math.max(earnCache.dataTs || 0, earnLnVer, macroCache ? (macroCache.dataTs || 0) : 0)"])
     assert.ok(pol.includes(pin), `earnings-link pin missing: ${pin}`);
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["function earnFilingHtml(e)", "earnFilingHtml(e)", "the earnings release itself",
@@ -2035,6 +2035,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
+    "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
+    "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
     "openTrendChart", "closeTrendChart", "loadTrendChart", "renderTrendChart", "tcCandleSvg", "tcEmaSeries",
     "applyDensity", "updateFocusChip", "applyKsel", "kmoveSel", "applyMobileCols",
@@ -2065,6 +2067,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
   }
   for (const frag of ["const HELP={", "const SHOW_CLAIM_CURVE", "conflWith", "claim0", "presentSince|sighist-ev", "/api/earnings", "eb0", "earnSplit", "d.recent||", "REPORTED \\u00b7",
+    "macrostrip", "MACRO \\u00b7 REPORTED", "act-mwarn", "mrow", "d.macroErr", "tabdot",
     "xyzmon.density", "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs",
     "key:'momp'", "/api/duel", "momentum2:", "r.momWhy",
     "c.structLevels", "detected structural level(s) drawn faint"]) {
@@ -9740,4 +9743,177 @@ test("settled -15: the client renders the server's record and never re-scores an
   assert.ok(s.includes("out of sample since"), "the record must state its own epoch");
   for (const cls of ["act-set", "act-set-strip", "act-set-t", "act-set-eps", "act-set-det", "act-set-mut"])
     assert.ok(css.includes("." + cls), `missing CSS for settled class: ${cls}`);
+});
+
+// ===================== macro calendar (build -17) =====================
+test("macro: FOMC decision table pins the published Fed schedule through Jan 2028", () => {
+  const { FOMC_DECISIONS } = require("../src/compute");
+  // 8 decisions in 2026, 8 in 2027, 1 in Jan 2028 — federalreserve.gov/monetarypolicy/fomccalendars.htm
+  assert.equal(FOMC_DECISIONS.length, 17);
+  const y26 = FOMC_DECISIONS.filter((f) => f.d.startsWith("2026")), y27 = FOMC_DECISIONS.filter((f) => f.d.startsWith("2027"));
+  assert.equal(y26.length, 8); assert.equal(y27.length, 8);
+  // spot-pins against the published schedule
+  assert.ok(FOMC_DECISIONS.some((f) => f.d === "2026-07-29" && f.sep === false), "Jul 29 2026 decision (no SEP)");
+  assert.ok(FOMC_DECISIONS.some((f) => f.d === "2026-09-16" && f.sep === true), "Sep 16 2026 is a SEP meeting");
+  assert.ok(FOMC_DECISIONS.some((f) => f.d === "2027-06-09" && f.sep === true), "Jun 9 2027 (tentative) is a SEP meeting");
+  assert.ok(FOMC_DECISIONS.some((f) => f.d === "2028-01-26"), "Jan 26 2028 decision");
+  // SEP rides Mar/Jun/Sep/Dec — exactly 4 per full year
+  assert.equal(y26.filter((f) => f.sep).length, 4);
+  assert.equal(y27.filter((f) => f.sep).length, 4);
+  // strictly ascending, all valid dates
+  for (let i = 0; i < FOMC_DECISIONS.length; i++) {
+    assert.match(FOMC_DECISIONS[i].d, /^\d{4}-\d{2}-\d{2}$/);
+    if (i) assert.ok(FOMC_DECISIONS[i].d > FOMC_DECISIONS[i - 1].d, "table must stay date-sorted");
+  }
+});
+
+test("macro: FRED release-name resolution is exact-match-or-absent, never a guess", () => {
+  const { parseFredReleases, parseFredReleasesDates, MACRO_RELEASES } = require("../src/compute");
+  const feed = { releases: [
+    { id: 10, name: "Consumer Price Index" },
+    { id: 50, name: "Employment Situation" },
+    { id: 53, name: "Gross Domestic Product" },
+    { id: 46, name: "producer price index" },            // case-insensitive match
+    { id: 999, name: "Consumer Price Index Research" },  // near-name must NOT hijack CPI
+    { id: 9, name: "Advance Monthly Sales for Retail and Food Services" },
+  ] };
+  const ids = parseFredReleases(feed, MACRO_RELEASES);
+  assert.equal(ids.get("CPI"), 10);
+  assert.equal(ids.get("NFP"), 50);
+  assert.equal(ids.get("GDP"), 53);
+  assert.equal(ids.get("PPI"), 46);
+  assert.equal(ids.get("RETAIL"), 9);
+  assert.equal(ids.get("PCE"), undefined, "a release FRED renamed resolves to nothing — absent, never guessed");
+  // dates: filtered to OUR ids, deduped, malformed dropped
+  const idToK = new Map([[10, "CPI"], [50, "NFP"]]);
+  const out = parseFredReleasesDates({ release_dates: [
+    { release_id: 10, date: "2026-08-12" }, { release_id: 10, date: "2026-08-12" },
+    { release_id: 50, date: "2026-08-07" }, { release_id: 46, date: "2026-08-13" },
+    { release_id: 10, date: "garbage" },
+  ] }, idToK);
+  assert.deepEqual(out, [{ k: "CPI", d: "2026-08-12" }, { k: "NFP", d: "2026-08-07" }]);
+  assert.deepEqual(parseFredReleasesDates({}, idToK), [], "missing array is empty, not a throw");
+});
+
+test("macro: buildMacroEntries merges the FOMC table with FRED dates inside the window, date-sorted", () => {
+  const { buildMacroEntries } = require("../src/compute");
+  // now = Mon Jul 27 2026, 16:00Z. Window +14d back 2d contains the Jul 29 FOMC decision.
+  const now = Date.UTC(2026, 6, 27, 16, 0);
+  const ent = buildMacroEntries([
+    { k: "NFP", d: "2026-08-07" }, { k: "CPI", d: "2026-08-05" },
+    { k: "CPI", d: "2026-08-12" },                                  // 16d out — beyond +14d
+    { k: "RETAIL", d: "2026-07-24" },                               // -3d — beyond the 2d back window
+  ], now, 14, 2);
+  assert.deepEqual(ent.map((e) => e.k + "|" + e.d),
+    ["FOMC|2026-07-29", "CPI|2026-08-05", "NFP|2026-08-07"]);
+  const fomc = ent[0];
+  assert.equal(fomc.tEt, "14:00");
+  assert.equal(fomc.sep, false);
+  assert.equal(fomc.d1, "2026-07-28", "day one of the two-day meeting rides the entry for display");
+  assert.equal(ent[1].tEt, "08:30");
+  assert.equal(ent[2].label, "Nonfarm payrolls");
+});
+
+test("macro: macroEntryState flips on the ET clock or actual-presence — the single arbiter", () => {
+  const { macroEntryState } = require("../src/compute");
+  const S = macroEntryState;
+  const fomc = { d: "2026-07-29", tEt: "14:00" }, cpi = { d: "2026-08-12", tEt: "08:30" };
+  // July = EDT (UTC-4): 13:00 ET = 17:00Z, 14:00 ET = 18:00Z
+  assert.equal(S(fomc, Date.UTC(2026, 6, 29, 17, 0)), "upcoming", "13:00 ET on decision day — statement not out");
+  assert.equal(S(fomc, Date.UTC(2026, 6, 29, 18, 0)), "released", "14:00 ET sharp — out");
+  assert.equal(S(fomc, Date.UTC(2026, 6, 28, 12, 0)), "upcoming", "day before");
+  assert.equal(S(fomc, Date.UTC(2026, 6, 30, 12, 0)), "released", "day after");
+  assert.equal(S(cpi, Date.UTC(2026, 7, 12, 12, 29)), "upcoming", "8:29 ET");
+  assert.equal(S(cpi, Date.UTC(2026, 7, 12, 12, 30)), "released", "8:30 ET sharp");
+  assert.equal(S({ d: "2026-08-12", tEt: "08:30", actual: { yoy: 2.4 } }, Date.UTC(2026, 7, 1)), "released",
+    "an actual present overrides the clock");
+});
+
+test("macro: stat reducers demand exact-period matches — null over approximation", () => {
+  const { yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth } = require("../src/compute");
+  const idx = []; // 14 months of a clean index: Jun 2025 .. Jul 2026
+  for (let i = 0; i < 14; i++) {
+    const y = 2025 + Math.floor((5 + i) / 12), m = ((5 + i) % 12) + 1;
+    idx.push([`${y}-${String(m).padStart(2, "0")}-01`, 100 * Math.pow(1.002, i)]);
+  }
+  const yy = yoyPct(idx);
+  assert.equal(yy.m, "2026-07");
+  assert.ok(Math.abs(yy.v - 2.4) < 0.1, "12 months of 0.2%/mo compounds to ~2.4% YoY, got " + yy.v);
+  // a gap at the 12-back month yields null, never a nearest-neighbor read
+  const gappy = idx.filter((o) => o[0] !== "2025-07-01");
+  assert.equal(yoyPct(gappy), null);
+  const mm = momPct([["2026-06-01", 100], ["2026-07-01", 100.6]]);
+  assert.ok(Math.abs(mm.v - 0.6) < 0.001 && mm.m === "2026-07");
+  assert.equal(momPct([["2026-05-01", 100], ["2026-07-01", 100.6]]), null, "non-adjacent months refuse to pretend");
+  const jd = momDelta([["2026-06-01", 159800], ["2026-07-01", 159947]]);
+  assert.equal(jd.v, 147);
+  assert.equal(lastObs([["2026-07-24", 3.75]]).v, 3.75);
+  // reference periods: monthlies cover the prior month; GDP the latest COMPLETE quarter
+  assert.equal(macroExpectedObsMonth("CPI", "2026-08-12"), "2026-07");
+  assert.equal(macroExpectedObsMonth("GDP", "2026-07-30"), "2026-04", "July release = Q2 advance, obs at quarter start");
+  assert.equal(macroExpectedObsMonth("GDP", "2026-08-27"), "2026-04", "August second estimate still covers Q2");
+  assert.equal(macroExpectedObsMonth("GDP", "2026-10-29"), "2026-07", "late-Oct release = Q3 advance");
+  assert.equal(macroExpectedObsMonth("GDP", "2026-02-26"), "2025-10", "Feb release covers Q4 of the prior year");
+  assert.equal(macroExpectedObsMonth("FOMC", "2026-07-29"), null);
+});
+
+test("macro: macroWithin returns upcoming events inside a horizon, day-granular like the earnings guard", () => {
+  const { macroWithin } = require("../src/compute");
+  const now = Date.UTC(2026, 6, 27, 16, 0);   // Mon Jul 27, noon ET
+  const DAY = 24 * 3600 * 1000;
+  const ents = [
+    { k: "FOMC", label: "FOMC rate decision", d: "2026-07-29", tEt: "14:00", sep: false },
+    { k: "NFP", label: "Nonfarm payrolls", d: "2026-08-07", tEt: "08:30" },
+    { k: "RETAIL", label: "Retail sales", d: "2026-07-24", tEt: "08:30" },   // released — out
+  ];
+  const w = macroWithin(ents, now, 8 * DAY);
+  assert.deepEqual(w.map((m) => m.k), ["FOMC"], "8d horizon contains the decision (2d) but not NFP (11d)");
+  assert.equal(w[0].days, 2);
+  assert.deepEqual(macroWithin(ents, now, 12 * DAY).map((m) => m.k), ["FOMC", "NFP"]);
+});
+
+test("macro: store roundtrip — warm cache same contract as earnings", () => {
+  const { openStore } = require("../src/store");
+  const os = require("os"), path = require("path"), fs = require("fs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzmacro-"));
+  const st = openStore(dir);
+  assert.equal(st.loadMacro(), null, "cold store reads null, never throws");
+  const data = { ts: 123, entries: [{ k: "FOMC", d: "2026-07-29", tEt: "14:00" }],
+    stats: { CPI: { cur: { yoy: 2.6, m: "2026-06" }, prev: { yoy: 2.7, m: "2026-05" } } }, ids: [["CPI", 10]] };
+  st.saveMacro(data);
+  assert.deepEqual(st.loadMacro(), data);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("macro -17 manifest: fetch engine, guards, payload fold, report contract — pinned end to end", () => {
+  // Source-manifest guard, same philosophy as the client-integrity test: each of these silently
+  // deleted would pass node --check while gutting the feature.
+  const fs = require("fs"), path = require("path");
+  const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    "async function fetchMacro()", "api.stlouisfed.org/fred/", "process.env.FRED_KEY",
+    "include_release_dates_with_no_data", 'realtime_end: "9999-12-31"',
+    "function macroProx(nowMs)", "function loadMacroCache()", "function macroCrossed()",
+    "g.mac = mp", "g.macguard = true", "mG.mg = 1",                    // signals guard + ledger stamp
+    "macroWithin(macroCache && macroCache.entries || [], now, meta.horizonMs)",   // actionable
+    "ctx.macro = { next: mn, recent: mr }",                            // report context
+    'kind: "macro_event"',                                             // deterministic report flag
+    "context.macro, when present",                                     // prompt contract
+    "macro: macroCache && Array.isArray(macroCache.entries)",          // payload fold
+    "store.saveMacro", "loadMacroCache(); } catch",
+  ]) assert.ok(pl.includes(pin), "poller pin missing: " + pin);
+  assert.equal(pl.match(/async function fetchMacro\(\)/g).length, 1, "one fetch engine, exactly");
+  // one guard block: the macro trim must not apply when the earnings guard already trimmed
+  assert.ok(pl.includes("if (!g.earnguard && g.evp > 8)"), "single-trim rule: capped once, not twice");
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
+    assert.ok(st.includes(pin), "store pin missing: " + pin);
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-17"'), "build stamp");
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
+    assert.ok(ht.includes(pin), "index pin missing: " + pin);
+  const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const pin of [".macrostrip", ".macrostrip.result", ".earn-row.mrow", ".earn-mk", ".act-mwarn"])
+    assert.ok(cs.includes(pin), "css pin missing: " + pin);
 });
