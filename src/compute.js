@@ -3281,3 +3281,146 @@ module.exports.actionableBetter = actionableBetter;
 module.exports.mergeActionable = mergeActionable;
 module.exports.ACT_TF_MS = ACT_TF_MS;
 module.exports.ACT_TF_RANK = ACT_TF_RANK;
+
+// ===== feature visibility manifest (admin panel, phase 0) ======================================
+// ONE canonical list of every gateable surface. Before this, visibility lived in four places that
+// could disagree: the data-view buttons in index.html, showView's setHidden list, applyScope's
+// crypto hide loop, and HIDDEN_TABS. The admin panel is a VIEW ONTO THIS ARRAY, never a second list
+// beside it — which is why the suite pins every data-view tab in index.html to an entry here. A new
+// tab with no entry is a suite failure, not a discovery three weeks later.
+//
+// state: 'public' | 'admin' | 'off'. 'off' means nobody, including admin — it parks something broken
+// without implying it is secret. Unlisted keys resolve to FEATURE_DEFAULT ('admin'): fail closed, so
+// a feature shipped without a manifest entry is invisible to the group rather than silently exposed.
+//
+// ASYMMETRY, deliberate: KEYS fail closed, ROUTES do not. A route that no entry claims stays
+// ungated, because the alternative is every unlisted route 403ing and the whole app going dark on
+// the first deploy. The tab half of that gap is closed mechanically (manifest test); the route half
+// is closed by review. Do not "fix" this by defaulting routes closed — read the test comment first.
+const FEATURE_DEFAULT = "admin";
+const FEATURE_STATES = ["public", "admin", "off"];
+
+// Routes that can NEVER be gated, whatever the manifest or flags say. Gating the unlock route is a
+// one-way door: no admin cookie, no way to mint one, no way back in without a redeploy. /api/health
+// must stay open or Railway's healthcheck 401s and the deploy restart-loops (same reason the site
+// gate exempts it). Enforced in code, not by convention — featureGateFor consults this first.
+const FEATURE_NEVER_GATE = new Set(["/api/health", "/login", "/logout",
+  "/api/ai-unlock", "/api/ai-lock", "/api/ai-status", "/api/features"]);
+
+// pin:true — always public, never gateable. Markets is the fallback every gated view falls through
+// to; if it could be hidden, a public user would land on a blank app with no way out.
+// runtime:true — the tab is injected by JS at load (Treemap self-installs) rather than living in
+// index.html, so the markup-scanning half of the manifest test must not demand a data-view for it.
+const FEATURES = [
+  { key: "markets",    kind: "tab", label: "Markets",     def: "public", pin: true, routes: ["/api/snapshot", "/api/daily", "/api/series", "/api/candles"] },
+  { key: "trend",      kind: "tab", label: "Trend",       def: "public", routes: ["/api/trend"] },
+  { key: "sectors",    kind: "tab", label: "Sectors",     def: "public", routes: [] },
+  { key: "corr",       kind: "tab", label: "Correlation", def: "public", routes: ["/api/corr-crypto"] },
+  { key: "sessions",   kind: "tab", label: "Sessions",    def: "public", routes: ["/api/analytics"] },
+  { key: "signals",    kind: "tab", label: "Signals",     def: "public", routes: ["/api/signals", "/api/ledger", "/api/triggers"] },
+  { key: "earnings",   kind: "tab", label: "Earnings",    def: "public", routes: ["/api/earnings"] },
+  { key: "news",       kind: "tab", label: "News",        def: "public", routes: ["/api/news", "/api/news/channels"] },
+  { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
+  { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
+  { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },
+  { key: "treemap",    kind: "tab", label: "Treemap",     def: "public", runtime: true, routes: [] },
+  { key: "ai.generate",   kind: "act", label: "AI report generation", def: "admin",  routes: ["POST /api/ai-report"] },
+  { key: "ai.ask",        kind: "act", label: "Terminal AI fallback", def: "admin",  routes: ["POST /api/ask"] },
+  { key: "ai.reset",      kind: "act", label: "AI budget reset",      def: "admin",  routes: ["POST /api/ai-reset"] },
+  { key: "export.ledger", kind: "act", label: "Ledger CSV export",    def: "public", routes: ["/api/export/ledger"] },
+  { key: "news.write",    kind: "act", label: "Edit news channels",   def: "admin",  routes: ["POST /api/news/channels"] },
+  { key: "earnings.void", kind: "act", label: "Void an earnings row", def: "admin",  routes: ["POST /api/earnings/void"] },
+  { key: "derivs.refresh", kind: "act", label: "Force derivs refresh", def: "admin", routes: ["POST /api/derivs/refresh"] },
+];
+
+const FEATURE_BY_KEY = new Map(FEATURES.map((f) => [f.key, f]));
+
+// Stored flags arrive from a JSON file on the volume and from an admin POST — both untrusted enough
+// to sanitize. Unknown keys and non-states are DROPPED rather than coerced: a typo'd key silently
+// resolving to a real feature's state is exactly the class of bug the manifest exists to prevent.
+function featureFlagsSanitize(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const k in raw) {
+    if (!FEATURE_BY_KEY.has(k)) continue;
+    const v = raw[k];
+    if (FEATURE_STATES.indexOf(v) < 0) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+// Resolution order: pinned manifest entry > stored override > manifest default > FEATURE_DEFAULT.
+// A pin beats a stored flag on purpose — it is the guard that a bad write can't lock everyone out.
+function featureState(flags, key) {
+  const f = FEATURE_BY_KEY.get(key);
+  if (!f) return FEATURE_DEFAULT;
+  if (f.pin) return "public";
+  const s = flags && flags[key];
+  if (FEATURE_STATES.indexOf(s) >= 0) return s;
+  return FEATURE_STATES.indexOf(f.def) >= 0 ? f.def : FEATURE_DEFAULT;
+}
+
+function featureVisible(flags, key, isAdmin) {
+  const s = featureState(flags, key);
+  if (s === "off") return false;          // off means nobody — admin included
+  return s === "public" || !!isAdmin;
+}
+
+// The whole resolved set for one audience. This is what gets injected into the shell and what the
+// client reads; the client never re-derives a state from a raw flag, same one-code-path rule the
+// chart annotations follow.
+function resolveFeatures(flags, isAdmin) {
+  const out = {};
+  for (const f of FEATURES) out[f.key] = featureVisible(flags, f.key, isAdmin);
+  return out;
+}
+
+// route -> owning feature key. Built from the manifest so a route can never be gated by a key that
+// isn't in it. Methodless entries match any method; "POST /x" matches that method only, which is how
+// a public GET and an admin POST can share one path (/api/ai-report is exactly that).
+function featureRouteIndex() {
+  const exact = new Map(), any = new Map();
+  for (const f of FEATURES) {
+    for (const r of f.routes || []) {
+      const sp = r.indexOf(" ");
+      if (sp > 0) exact.set(r.slice(0, sp).toUpperCase() + " " + r.slice(sp + 1), f.key);
+      else any.set(r, f.key);
+    }
+  }
+  return { exact, any };
+}
+const FEATURE_ROUTES = featureRouteIndex();
+
+// Returns the feature key BLOCKING this request, or null when it may proceed. Method-specific
+// mapping wins over the path-wide one: POST /api/ai-report is gated by ai.generate even though the
+// GET on the same path belongs to the (possibly public) report tab.
+function featureGateFor(method, url, flags, isAdmin) {
+  const p = String(url || "").split("?")[0];
+  if (FEATURE_NEVER_GATE.has(p)) return null;
+  const m = String(method || "GET").toUpperCase();
+  const key = FEATURE_ROUTES.exact.get(m + " " + p) || FEATURE_ROUTES.any.get(p);
+  if (!key) return null;                                  // unclaimed route — see the ASYMMETRY note
+  return featureVisible(flags, key, isAdmin) ? null : key;
+}
+
+// Panel readout: how much of the app a public user currently sees.
+function featureCounts(flags) {
+  let pub = 0, adm = 0, off = 0;
+  for (const f of FEATURES) {
+    const s = featureState(flags, f.key);
+    if (s === "public") pub++; else if (s === "off") off++; else adm++;
+  }
+  return { total: FEATURES.length, public: pub, admin: adm, off: off };
+}
+
+module.exports.FEATURES = FEATURES;
+module.exports.FEATURE_STATES = FEATURE_STATES;
+module.exports.FEATURE_DEFAULT = FEATURE_DEFAULT;
+module.exports.FEATURE_NEVER_GATE = FEATURE_NEVER_GATE;
+module.exports.featureFlagsSanitize = featureFlagsSanitize;
+module.exports.featureState = featureState;
+module.exports.featureVisible = featureVisible;
+module.exports.resolveFeatures = resolveFeatures;
+module.exports.featureGateFor = featureGateFor;
+module.exports.featureCounts = featureCounts;
