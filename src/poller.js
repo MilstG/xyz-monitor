@@ -8,7 +8,7 @@ const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFea
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, FOMC_DECISIONS } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, regime200, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -52,12 +52,17 @@ const MAIN_SPINE_DAYS = 90;           // crypto HOURLY PRICE-spine window (-17):
                                       // purpose — the OI 5-min archive and funding stay 31d (storage cost);
                                       // only the price candles deepen. HL backfills the whole window in one
                                       // candleSnapshot call, so it fills on the first refresh after deploy.
-const MAIN_DAILY_DAYS = 92;           // crypto DAILY-candle window: 90d of chart plus EMA21 seed headroom.
-                                      // Hourly stays 31d — the bump serves the D1 ladder rung, the drawer's
-                                      // 90d sparkline, and the AI report's daily chart; Hyperliquid backfills
-                                      // the whole window in one call, so it fills on the first refresh cycle.
+const MAIN_DAILY_DAYS = 370;          // crypto DAILY-candle RETENTION (-20: was 92): 370d so MA200, the
+                                      // structural-level detector and the swing-horizon shadows run at the
+                                      // same daily depth the equity side does. Hyperliquid serves ~5000
+                                      // candles per snapshot, so the deeper window is STILL one call and
+                                      // fills on the first refresh cycle after deploy. Hourly stays 31d.
+const MAIN_DAILY_PAYLOAD = 92;        // crypto DAILY bars ON THE WIRE (/api/daily): the drawer sparkline and
+                                      // AI chart read 90d — retention deepened for the detectors, not to
+                                      // quadruple every client's payload. Server-side consumers read the
+                                      // full dailyRaw depth directly.
 const MAIN_HOURLY_WEIGHT = 35;        // 90d spine pull (-17): one candleSnapshot, same request weight
-const MAIN_DAILY_WEIGHT = 8;          // 92d daily pull (same request weight — one candleSnapshot either way)
+const MAIN_DAILY_WEIGHT = 8;          // 370d daily pull (same request weight — one candleSnapshot either way)
 const HOURLY_TAIL_WEIGHT = 20;        // steady-state refresh only pulls the last ~48h and merges — cheaper than the old full-window re-pull
 // ---- Coinalyze derivatives context (crypto universe only) -------------------------------------
 // Aggregated CEX liquidations + OI as CONTEXT for the Hyperliquid names — a different venue
@@ -1064,7 +1069,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const r of mainMarkets()) {
       const hs = getHourly(r.coin);
       const dr = dailyTuples(r, hs);
-      if (dr && dr.length) daily[r.coin] = dr.slice(-(MAIN_DAILY_DAYS + 2));
+      if (dr && dr.length) daily[r.coin] = dr.slice(-(MAIN_DAILY_PAYLOAD + 2));   // -20: retention deepened to 370d for the detectors; the wire stays at the 90d the clients render
       if (oi) { const os = oiDailySeries(r.coin); if (os) oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); }
       const fh = getFunding(r.coin);
       if (fh.length) {
@@ -1147,6 +1152,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     "fundflip", "oiflush", "fpdiv", "tretest", "tretestdn",
     "casc", "fundext",                                        // crypto-native
     "reclaim", "failbrk", "mapull", "wickfill", "roundfr",     // shadows
+    "swpull", "basebrk", "basepj",                             // swing-horizon touch-mode shadows (-20)
     "airead",                                                  // the Report tab's own record (never was this engine's)
   ]);
   const XYZ_ONLY_EVS = new Set(["gap", "gapfade", "ondrift", "pead", "sweep", "prem", "squeeze", "unwind"]);
@@ -1229,7 +1235,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -1439,6 +1445,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           tal: "daily trend ribbon aligned with the claim's side at fire (1/0; absent = unknown at fire)",
           realized: "at-horizon outcome, play-signed, in the event's unit",
           realizedS: "stop-aware outcome (void-level-capped)", stopped: "void level touched before horizon",
+          tm: "touch-mode claim: first touch of the frozen target or void resolves it (untouched -> at-horizon mark at the timeout)",
+          rb: "bracket outcome: t = target touched first, s = void touched first, m = neither (at-horizon)",
+          realizedB: "bracket-track outcome — capped at whichever frozen level was touched FIRST, at-horizon otherwise (symmetric fix to the stop-only cap; accrues from build -20)",
+          r2: "MA200 regime at fire: +2 mark above MA200, +1 MA200 rising (3..0); absent = under 210 daily closes at fire",
           fnd: "funding rate at fire", fndP: "funding percentile vs this market's own 31d hourly history (>=96 samples)",
           oi5: "5d open-interest change % at fire", rngP: "position in the 30d range at fire (0=low, 1=high)",
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
@@ -1632,8 +1642,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const tE = e.mark0 * (1 + (sideE === "long" ? 1 : -1) * e.mv / 100);
           if (!claimGeometryOk(sideE, e.mark0, null, tE, sdE)) { e.gv = 1; delete e.mv; }
         }
+        // Touch-mode claims (-20) carry an ABSOLUTE frozen target through `extra` — gate it like
+        // every other level. A failing target drops touch mode with it: first-touch resolution
+        // against an artifact level is worse than no resolution convention at all; the claim
+        // degrades to the at-horizon mark, which is the honest fallback everywhere else.
+        if (e.tgt != null && !claimGeometryOk(sideE, e.mark0, null, e.tgt, sdE)) { e.gv = 1; delete e.tgt; delete e.tm; }
         if (geoRefused) e.gv = 1;
       }
+      // MA200 regime at fire (-20): stamped for every claim (shadows included) when the row's
+      // daily depth allows it — 2 = mark above the MA200, +1 = MA200 rising; absent = under 210
+      // daily closes at fire, an honest unknown. Computed once per row per build in pass 2 and
+      // read here so a per-fire MA walk never happens. The record SPLITS by this later; nothing
+      // gates on it — whether below-200 pullbacks deserve exclusion is the ledger's question.
+      if (r._r2 != null) e.r2 = r._r2;
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -1641,7 +1662,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function resolveLedger() {
     const now = Date.now();
     for (const [key, e] of ledgerOpen) {
-      if (now < e.resolveAt) continue;
+      // Touch-mode claims (-20) are scanned EVERY pass: a target hit on day 3 resolves on day 3,
+      // not day 30 — the record accrues at the pace the trades actually conclude. Everything else
+      // keeps the fixed-horizon gate unchanged.
+      if (now < e.resolveAt && !(e.tm === 1 && e.stp != null && e.tgt != null)) continue;
       let realized = null;
       if (e.ev === "ondrift") {
         const hs = getHourly(e.coin);
@@ -1666,8 +1690,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         }
       } else {
         const hs = getHourly(e.coin);
+        const sideE = e.psd || (e.dir >= 0 ? "long" : "short");
+        // Touch-mode resolution (-20): the first touch of the frozen target or void IS the
+        // outcome (bracketTouch — conservative: a candle touching both counts as the stop). No
+        // touch yet and the timeout not reached -> the claim stays live. Untouched at the
+        // timeout -> the same at-horizon mark every other claim records ("went nowhere" over a
+        // 30d window is real information, not a void). tEnd is the claim's ACTUAL window end —
+        // the touch time on an early resolution — and the BTC-excess leg reads it too, so the
+        // benchmark is measured over exactly the days the claim was alive.
+        let tEnd = e.resolveAt, pTouch = null;
+        if (e.tm === 1 && e.stp != null && e.tgt != null) {
+          const br = bracketTouch(hs, e.t0, Math.min(e.resolveAt, now), sideE, e.stp, e.tgt);
+          if (br) { pTouch = br.level; tEnd = br.t; e.rb = br.hit === "target" ? "t" : "s"; }
+          else if (now < e.resolveAt) continue;
+          else e.rb = "m";
+        }
         const p0 = priceAsOf(hs, e.t0, 3 * HOUR) || e.mark0;
-        const p1 = priceAsOf(hs, e.resolveAt, 3 * HOUR);
+        const p1 = pTouch != null ? pTouch : priceAsOf(hs, tEnd, 3 * HOUR);
         if (p0 > 0 && p1 > 0) {
           // Outcomes are signed with the PLAY the engine published (psd, stamped at fire), not
           // the event: for the one family where they differ — proven gap faders — event-signing
@@ -1681,7 +1720,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // Applies to ANY claim carrying a stop — strategy shadows (gapfade/reclaim/mapull)
           // stamp one at fire; plain threshold-variant shadows never do, so nothing changes
           // for them. This is what lets a shadow strategy accrue a stop-disciplined record.
-          if (e.stp != null) {
+          if (e.tm === 1 && e.rb) {
+            // Touch-mode: the bracket walk already decided the outcome — realized IS the touched
+            // level's distance (or the at-horizon mark on "m"), so the stop-disciplined leg
+            // coincides with it by construction. No second walk, no way to disagree.
+            e.stopped = e.rb === "s";
+            e.realizedS = realized;
+          } else if (e.stp != null) {
             // The touch side follows where the stop SITS relative to entry, not e.dir: a proven
             // gap-FADER's void lies in the continuation direction (above entry on an up-gap,
             // dir=+1) — keying on e.dir would call the stop "touched" on the first candle.
@@ -1693,6 +1738,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             else if (touched === false) { e.stopped = false; e.realizedS = realized; }
             }
           }
+          // Symmetric bracket track (-20): the stop-aware leg caps the void but lets a target
+          // touch evaporate by horizon — a one-sided discipline that biased every stop-aware
+          // record downward, worst on exactly the slow setups the swing work exists for.
+          // realizedB caps BOTH sides: first touch of either frozen level is the outcome,
+          // at-horizon otherwise. Accrues from this build forward on any claim carrying both
+          // levels (n trails, same posture as when stop-tracking began at -22). Touch-mode
+          // claims coincide with their own resolution by construction.
+          if (e.tm === 1 && e.rb) e.realizedB = realized;
+          else if (e.stp != null && e.tgt != null && e.gv !== 1) {
+            const br = bracketTouch(hs, e.t0, e.resolveAt, sideE, e.stp, e.tgt);
+            e.rb = br ? (br.hit === "target" ? "t" : "s") : "m";
+            e.realizedB = br ? +(sgn * (br.level / p0 - 1) * 100).toFixed(2) : realized;
+          }
           // Sigma-normalize EVERY R-united claim: the studies claim in R, so the ledger must
           // resolve in R. The original condition listed only bigmove/breakout/fundflip —
           // breakdown/oiflush/fpdiv joined the roster later with sd0 stamped but never applied,
@@ -1700,7 +1758,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // study↔live Bayesian blend. rn=1 marks the entry as resolved-normalized (the epoch
           // marker the hydrate-time repair of stored entries keys on).
           if (R_LEDGER_EVS.has(e.ev) && e.sd0 > 0) {
+            const rawB = e.realizedB;   // captured before `realized` is rescaled below
+            if (rawB != null) e.realizedB = e.rb === "m" ? null : +(rawB / e.sd0).toFixed(2);   // "m" leg re-tied to the normalized realized just after
             realized = +(realized / e.sd0).toFixed(2);   // same R units the study claims — claimed vs live stays apples-to-apples
+            if (e.realizedB === null) e.realizedB = realized;   // the at-horizon bracket leg IS realized, in whatever unit realized is in
             if (e.realizedS != null) e.realizedS = e.stopped ? +(e.realizedS / e.sd0).toFixed(2) : realized;
             e.rn = 1;
           }
@@ -1714,7 +1775,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // never a zero (a null rx and rx=0 mean opposite things).
           if (e.coin && !String(e.coin).includes(":") && e.coin !== MAIN_BENCH) {
             const bh = getHourly(MAIN_BENCH);
-            const b0 = priceAsOf(bh, e.t0, 3 * HOUR), b1 = priceAsOf(bh, e.resolveAt, 3 * HOUR);
+            const b0 = priceAsOf(bh, e.t0, 3 * HOUR), b1 = priceAsOf(bh, tEnd, 3 * HOUR);   // tEnd = touch time on an early touch-mode resolution — the benchmark covers exactly the claim's live window
             if (b0 > 0 && b1 > 0) {
               const bench = (b1 / b0 - 1) * 100;
               let rx = sgn * ((p1 / p0 - 1) * 100 - bench);   // same side sign the raw leg used
@@ -1756,7 +1817,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function buildRecordSet(res, openEntries) {
     const per = {};
     for (const e of res) {
-      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [], retsS: [], winsS: 0, stopped: 0, nS: 0, ents: [], retsX: [], winsX: 0 });
+      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [], retsS: [], winsS: 0, stopped: 0, nS: 0, ents: [], retsX: [], winsX: 0, retsB: [], winsB: 0, tchT: 0, tchS: 0, tchM: 0 });
       b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
       b.ents.push(e);
       // BTC-excess leg, crypto only (rx is stamped only for main claims). Kept in its own bucket
@@ -1764,6 +1825,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // questions and the panel shows both.
       if (e.rx != null && Number.isFinite(e.rx)) { b.retsX.push(e.rx); if (e.rx > 0) b.winsX++; }
       if (e.realizedS != null) { b.nS++; b.retsS.push(e.realizedS); if (e.winS) b.winsS++; if (e.stopped) b.stopped++; }
+      // symmetric bracket leg (-20): outcomes capped at whichever frozen level was touched FIRST
+      if (e.realizedB != null && Number.isFinite(e.realizedB)) {
+        b.retsB.push(e.realizedB); if (e.realizedB > 0) b.winsB++;
+        if (e.rb === "t") b.tchT++; else if (e.rb === "s") b.tchS++; else b.tchM++;
+      }
       if (e.claim && Number.isFinite(e.claim.med)) b.claims.push(e.claim.med);
     }
     const out = {};
@@ -1795,6 +1861,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         Object.assign(out[ev], { nS: b.nS, hitS: +(b.winsS / b.nS).toFixed(2), medS: smS.n ? smS.med : null,
           avgS: smS.n ? smS.avg : null, pfS: wS.length && lS.length && lsSum !== 0 ? +(wsSum / Math.abs(lsSum)).toFixed(2) : null,
           stopped: b.stopped });
+      }
+      if (b.retsB.length) {   // bracket track (-20): both frozen levels honored, first touch wins
+        const smB = summarizeEvents(b.retsB);
+        const wB = b.retsB.filter((x) => x > 0), lB = b.retsB.filter((x) => x <= 0);
+        const wbSum = wB.reduce((a, c) => a + c, 0), lbSum = lB.reduce((a, c) => a + c, 0);
+        Object.assign(out[ev], { nB: b.retsB.length, hitB: +(b.winsB / b.retsB.length).toFixed(2),
+          medB: smB.n ? smB.med : null, avgB: smB.n ? smB.avg : null,
+          pfB: wB.length && lB.length && lbSum !== 0 ? +(wbSum / Math.abs(lbSum)).toFixed(2) : null,
+          tchT: b.tchT, tchS: b.tchS, tchM: b.tchM });
       }
     }
     for (const e of openEntries) (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++;
@@ -1833,7 +1908,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1953,6 +2028,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       tip: "the short mirror: a fresh break ABOVE the prior 30d high that the mark has already lost \u2014 stop at the flush high, target the measured move below. 5d horizon. Motivated by the live record: breakout continuation ran negative expectancy." },
     { ev: "mapull", uni: "both", label: "MA50 pullback", unit: "R",
       tip: "rising 50d MA, price pulled back from >=4% above to touch it \u2014 long at the MA, stop 1\u03c3 below it, target the prior 30d closing high. 10d horizon." },
+    { ev: "swpull", uni: "both", label: "swing MA50 pullback", unit: "R",
+      tip: "the swing-clock MA50 pullback: rising 50d MA, a >=2\u03c3 leg to pull back from, mark at the MA band \u2014 void 1.5\u03c3 below the MA, target the NEXT STRUCTURAL LEVEL >=2\u03c3 above. Touch-resolved: the first touch of target or void closes the claim (untouched at 30d [10d crypto] resolves at the horizon mark). This is the first ledger convention that can observe a multi-week trade at all." },
+    { ev: "basebrk", uni: "both", label: "base breakout \u00b7 structural target", unit: "R",
+      tip: "a 60-session base (total range capped at max(8%, 3\u03c3)) broken by a fresh close the mark still holds \u2014 void 1\u03c3 back inside the base, target the next structural level above. Touch-resolved at 30d [15d crypto]. Runs in parallel with the projected-target variant on IDENTICAL detections \u2014 the record decides which target school nets more R." },
+    { ev: "basepj", uni: "both", label: "base breakout \u00b7 projected target", unit: "R",
+      tip: "the SAME base-breakout detection with the measured-move target: base height projected above the break \u2014 bigger, hit less often. Touch-resolved at 30d [15d crypto]. The structural-target twin ledgers beside it; neither is promoted by argument." },
     { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
       tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
     { ev: "sweep", uni: "xyz", label: "liquidity sweep (5m)", unit: "R",
@@ -2104,6 +2185,43 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             openLedger(r, "mapull", { score: 0, reading: "" }, 1,
               { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: mp.stop,
                 mv: +(Math.abs(mp.target / r.px - 1) * 100).toFixed(2) }, 0);
+          // ---- swing-horizon touch-mode shadows (-20) --------------------------------------
+          // Structural targets from the daily-depth level detector, first-touch resolution
+          // (tm=1 rides through `extra`; the frozen ABSOLUTE target ships as tgt so the
+          // resolver and the level walk read exactly the claimed number, never a
+          // reconstruction). lvlBars map dailyRaw for detectLevels: h rides the stored high
+          // when present and falls back to the close (post-warm-boot bars); the low side falls
+          // back likewise — these are LONG structures whose targets read HIGHS, so the
+          // low-side blindness the levels study routes around does not bite here. The MA200
+          // regime stamp is computed here once per row (r._r2) and read by openLedger at claim
+          // creation; events firing EARLIER in the same pass read the prior build's stamp —
+          // one build of staleness on a 200-session average is immaterial, and the first build
+          // after boot simply leaves them unstamped (absent = honest unknown).
+          { const r2v = regime200(closes, r.px);
+            if (r2v != null) r._r2 = r2v; else delete r._r2; }
+          const lvlBars = r.dailyRaw && r.dailyRaw.length >= 60
+            ? r.dailyRaw.map((k) => { const c = +k.c, h = +k.h; return { c, h: Number.isFinite(h) && h > 0 ? h : c, l: c }; })
+            : null;
+          if (lvlBars) {
+            const sp = detectSwingPull(closes, r.px, sd30, lvlBars);
+            if (sp && stopGeometryOk("long", r.px, sp.stop))
+              openLedger(r, "swpull", { score: 0, reading: "" }, 1,
+                { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: sp.stop, tgt: sp.target, tm: 1,
+                  mv: +(Math.abs(sp.target / r.px - 1) * 100).toFixed(2) }, 0);
+            const bb = detectBaseBreak(closes, r.px, sd30, lvlBars);
+            if (bb && stopGeometryOk("long", r.px, bb.stop)) {
+              // one detection, two claim geometries: the record — not an argument — decides
+              // whether the measured move or the next structural level nets more R here
+              if (bb.targetL != null)
+                openLedger(r, "basebrk", { score: 0, reading: "" }, 1,
+                  { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: bb.stop, tgt: bb.targetL, tm: 1,
+                    mv: +(Math.abs(bb.targetL / r.px - 1) * 100).toFixed(2) }, 0);
+              if (bb.targetP != null)
+                openLedger(r, "basepj", { score: 0, reading: "" }, 1,
+                  { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: bb.stop, tgt: bb.targetP, tm: 1,
+                    mv: +(Math.abs(bb.targetP / r.px - 1) * 100).toFixed(2) }, 0);
+            }
+          }
           // post-earnings drift, xyz only: enter with a completed outsized reaction (the
           // detector enforces completeness, freshness and the 1.5σ magnitude floor)
           if (r.uni === "xyz" && r.dailyRaw && r.dailyRaw.length >= 25) {

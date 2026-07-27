@@ -598,6 +598,15 @@ const EV_META = {
   airead:   { horizonMs: 5 * DAY,  horizon: "next 5d, the analyst report's own read", studyKey: null },  // AI analyst accountability claim
   casc:     { horizonMs: 12 * HOUR, horizon: "next 12h, off the exhausted cascade", studyKey: null },   // crypto-native ledger event
   fundext:  { horizonMs: 2 * DAY,  horizon: "next 2d, fading the crowded side",     studyKey: null },   // crypto-native ledger event
+  // ---- swing-horizon shadows (build 2026.07.27-20): touch-mode resolution ---------------------
+  // resolve:"touch" claims resolve at the FIRST touch of their frozen target or void (bracketTouch,
+  // conservative same-candle -> stop) rather than at a fixed-horizon mark; horizonMs is the maxMs
+  // timeout — untouched claims resolve at-horizon there like every other claim ("went nowhere" is
+  // real information, not a void). This is what lets the ledger observe slow structural trades at
+  // all: a 20% target that needs three weeks scored as day-5 noise under the fixed convention.
+  swpull:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the swing MA50", studyKey: null },
+  basebrk:  { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the base breakout (structural target)", studyKey: null },
+  basepj:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the base breakout (projected target)", studyKey: null },
 };
 // ---- crypto horizon overrides ------------------------------------------------------------------
 // A 5d horizon on a name printing 12%/day is a +/-27% window: the claim resolves on tape noise
@@ -620,6 +629,12 @@ const EV_META_MAIN = {
   failbrk:  { horizonMs: 2 * DAY,   horizon: "next 2d, fading the failed breakout" },
   mapull:   { horizonMs: 4 * DAY,   horizon: "next 4d, off the rising MA50" },
   wickfill: { horizonMs: DAY,       horizon: "next 1d, filling the outsized wick" },
+  // swing touch-mode events on the compressed clock — resolve:"touch" is INHERITED from the base
+  // entry through evMeta's merge, so only the timeout differs (a 30d window on a name printing
+  // 12%/day is a claim about BTC's month, not the structure).
+  swpull:   { horizonMs: 10 * DAY,  horizon: "first touch of target/void within 10d, off the swing MA50" },
+  basebrk:  { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the base breakout (structural target)" },
+  basepj:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the base breakout (projected target)" },
 };
 // Resolution meta for one (event, universe) pair. Crypto reads the override when one exists and
 // falls back to the shared entry otherwise, so a new event is automatically defined for both.
@@ -946,6 +961,28 @@ function levelHit(side, kind, level, px, bar) {
   return hi != null && hi >= level;
 }
 
+// ---- bracket-touch detection (build 2026.07.27-20) --------------------------------------------
+// Walks hourly candles in (t0, tEnd] and reports which of a claim's two frozen levels was touched
+// FIRST — the resolution primitive for touch-mode claims and the symmetric parallel track on
+// everything else. The stop-aware track alone was one-sided: it capped the void but let a target
+// touch evaporate by horizon, biasing every record downward on slow setups. Same conservative
+// posture as stopTouched: hourly granularity makes intra-candle ordering unknowable, so a candle
+// that touches BOTH levels counts as the stop. Candles are [t, o, h, l, c, v].
+// Returns { hit: "target"|"stop", level, t } or null (neither level touched in the window).
+function bracketTouch(candles, t0, tEnd, side, stp, tgt) {
+  if (!Array.isArray(candles) || (side !== "long" && side !== "short")) return null;
+  if (!(stp > 0) || !(tgt > 0)) return null;
+  const long = side === "long";
+  for (const k of candles) {
+    const t = k[0];
+    if (t <= t0) continue;
+    if (t > tEnd) break;
+    if (long ? k[3] <= stp : k[2] >= stp) return { hit: "stop", level: stp, t };
+    if (long ? k[2] >= tgt : k[3] <= tgt) return { hit: "target", level: tgt, t };
+  }
+  return null;
+}
+
 // ---- swing setups (higher-timeframe, human-tradeable) --------------------------------------
 // Pure detectors over the daily close series [[t, close], ...]; the poller shadow-ledgers
 // fires with frozen geometry (vi=0 — invisible everywhere until the record earns promotion).
@@ -1009,6 +1046,86 @@ function detectFailBrk(closes, px) {
   if (!(stop > px && target < px) || !(target > 0)) return null;
   return { level: +hi.toPrecision(6), stop: +stop.toPrecision(6), target: +target.toPrecision(6) };
 }
+// ---- swing-horizon setups (build 2026.07.27-20): touch-resolved, structural targets ----------
+// The distributional playbooks can only target the median move at a 3-10d horizon — which on a
+// liquid name IS 2-3%. These detectors target STRUCTURE instead: the next detected level in the
+// trade direction, or the base's own measured move — the geometry that honestly produces 10-25%
+// targets — and their claims resolve by first touch (see EV_META resolve:"touch"), so a trade
+// that needs three weeks can be observed at all. Long structures first, same posture as the
+// original swing shadows; short mirrors earn slots later if these prove out.
+//
+// Structural target helper: the nearest detectLevels level ABOVE the mark at a tradeable
+// distance (>= minSd x sd30). Null when no level qualifies — the caller treats that as "no
+// claim", never substitutes an artifact price. lvlBars follow detectLevels' daily-bar shape.
+function nextLevelAbove(lvlBars, px, sd30, minSd) {
+  if (!(px > 0)) return null;
+  const lv = detectLevels(lvlBars, px, sd30, { minBars: 60 });
+  if (!lv || !lv.items || !lv.items.length) return null;
+  const floor = px * (1 + (Number.isFinite(minSd) && minSd > 0 ? minSd : 1.5) * (sd30 > 0 ? sd30 : 1) / 100);
+  let best = null;
+  for (const it of lv.items) if (it.v > floor && (best == null || it.v < best)) best = it.v;
+  return best != null ? +best.toPrecision(6) : null;
+}
+// Swing MA50 pullback: the swing-clock sibling of detectMAPull (which keeps its own tighter
+// definition and 10d record untouched — mixing resolution conventions inside one event bucket
+// would poison the comparability the ledger exists for). MA50 rising vs 10 sessions ago, a real
+// leg to pull back FROM (>= 2σ above the MA within 20 closes), mark inside a swing-width band at
+// the MA. Void = 1.5σ below the MA; target = next structural level >= 2σ away. Null unless every
+// leg holds and stop < px < target.
+function detectSwingPull(closes, px, sd30, lvlBars) {
+  if (!Array.isArray(closes) || closes.length < 120 || !(px > 0) || !(sd30 > 0)) return null;
+  const c = closes.map((k) => +k[1]);   // COERCE — see detectMAPull
+  const ma = (end, n) => { let s = 0; for (let i = end - n; i < end; i++) s += c[i]; return s / n; };
+  const m0 = ma(c.length, 50), m10 = ma(c.length - 10, 50);
+  if (!(m0 > 0) || !(m0 > m10)) return null;                         // MA50 rising on the swing clock
+  let hi20 = -Infinity;
+  for (let i = c.length - 20; i < c.length; i++) if (c[i] > hi20) hi20 = c[i];
+  if (!(hi20 >= m0 * (1 + 2 * sd30 / 100))) return null;            // a real leg to pull back from
+  if (!(px <= m0 * 1.015 && px >= m0 * 0.985)) return null;         // at the MA band, swing tolerance
+  const stop = m0 * (1 - 1.5 * sd30 / 100);
+  const target = nextLevelAbove(lvlBars, px, sd30, 2);
+  if (target == null || !(stop > 0 && stop < px && target > px)) return null;
+  return { ma: +m0.toPrecision(6), stop: +stop.toPrecision(6), target };
+}
+// Base breakout: a multi-month consolidation (60 sessions, total range capped at
+// max(8%, 3σ30) — a BASE, not a trend) broken by a fresh close (within 2 sessions) that the
+// mark still holds. Void = 1σ back inside the base. TWO targets, ledgered as parallel events on
+// one detection so the record — not an argument — decides which school nets more R here:
+//   targetP (basepj): base height projected above the break — bigger, hit less often;
+//   targetL (basebrk): next structural level >= 1σ above — smaller, where sellers actually
+//   showed up before. Either may be null (no qualifying level / projection already run over);
+// the caller opens only the claims whose target exists.
+function detectBaseBreak(closes, px, sd30, lvlBars) {
+  if (!Array.isArray(closes) || closes.length < 80 || !(px > 0) || !(sd30 > 0)) return null;
+  const c = closes.map((k) => +k[1]);   // COERCE — see detectMAPull
+  let hi = -Infinity, lo = Infinity;
+  for (let i = c.length - 63; i < c.length - 3; i++) { if (c[i] > hi) hi = c[i]; if (c[i] < lo) lo = c[i]; }
+  if (!Number.isFinite(hi) || !(lo > 0) || !(hi > lo)) return null;
+  if (!((hi / lo - 1) * 100 <= Math.max(8, 3 * sd30))) return null;  // it was a base, not a trend
+  if (!(c[c.length - 1] > hi)) return null;                          // the breakout close happened
+  if (!(c[c.length - 2] <= hi || c[c.length - 3] <= hi)) return null; // and it is fresh
+  if (!(px > hi)) return null;                                       // the mark still holds the break
+  const stop = hi * (1 - sd30 / 100);
+  if (!(stop > 0 && stop < px)) return null;
+  const tP = +(hi + (hi - lo)).toPrecision(6);
+  const tL = nextLevelAbove(lvlBars, px, sd30, 1);
+  return { hi: +hi.toPrecision(6), lo: +lo.toPrecision(6), stop: +stop.toPrecision(6),
+    targetP: tP > px ? tP : null,
+    targetL: tL != null && tL > px ? tL : null };
+}
+// MA200 regime tag: pullbacks-to-50 above a rising 200 and below a falling one are different
+// trades — this stamps which one each claim fired into, so the record can SPLIT by regime
+// instead of a gate deciding it upfront. Returns 0..3 (+2 mark above MA200, +1 MA200 rising vs
+// 10 sessions ago) or null under 210 closes — an honest unknown, never a guess.
+function regime200(closes, px) {
+  if (!Array.isArray(closes) || closes.length < 210 || !(px > 0)) return null;
+  const c = closes.map((k) => +k[1]);   // COERCE — see detectMAPull
+  const ma = (end) => { let s = 0; for (let i = end - 200; i < end; i++) s += c[i]; return s / 200; };
+  const m0 = ma(c.length), m10 = ma(c.length - 10);
+  if (!(m0 > 0) || !(m10 > 0)) return null;
+  return (px > m0 ? 2 : 0) + (m0 > m10 ? 1 : 0);
+}
+
 // Post-earnings drift (xyz only): a reaction bigger than 1.5x the name's own daily σ tends to
 // keep drifting its own way for weeks — entered AFTER the reaction session is complete (there
 // is at least one bar past the reaction index), within 3 sessions of it, drifting WITH the
@@ -2821,7 +2938,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
