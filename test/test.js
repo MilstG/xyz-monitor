@@ -7038,8 +7038,13 @@ test("client flags: tabVisible is the single composition point and every entry p
   // one assignment. Still degrades to visible when nothing was injected.
   assert.ok(/function featureOn\(key\)\{ return FLAGS_VIEW \? !!FLAGS_VIEW\[key\] : true; \}/.test(s), "featureOn must read FLAGS_VIEW and degrade to visible when injection is absent");
   assert.ok(/let FLAGS_VIEW = FLAGS;/.test(s), "FLAGS_VIEW must start as the injected set");
-  assert.ok(/function tabVisible\(v\)\{ if\(v==='admin'\) return IS_ADMIN; return inScope\(v\) && featureOn\(v\); \}/.test(s),
+  assert.ok(/function tabVisible\(v\)\{ if\(v==='admin'\) return IS_ADMIN; return viewInScope\(v\) && featureOn\(v\); \}/.test(s),
     "tabVisible must compose scope AND flags, with the panel itself keyed off IS_ADMIN");
+  // The view predicate must NOT be called inScope: that name belongs to the ROW predicate, and a
+  // hoisted redefinition made activeRows() return zero rows in crypto scope (the -05 blackout).
+  assert.ok(/function viewInScope\(v\)/.test(s), "the view-scope predicate must be named viewInScope");
+  assert.ok(/function inScope\(r\)\{ return \(r\.uni==='main'\)===\(state\.scope==='crypto'\); \}/.test(s),
+    "the row-scope predicate must survive untouched — activeRows() feeds the board through it");
   for (const [what, re] of [
     ["nav strip", /t\.hidden = !tabVisible\(t\.dataset\.view\)/],
     ["showView", /if\(!tabVisible\(v\)\) v='markets';/],
@@ -7139,4 +7144,27 @@ test("admin panel: markup, wiring and the no-draft-state write path are all pres
   // States must be readable as words, not colour alone — the amber theme recolours everything.
   assert.ok(/\.adm-b\.on\.public|\.adm-b\.on\.admin|\.adm-b\.on\.off/.test(css), "each state needs its own style");
   assert.ok(/>'\+v\+'</.test(app) || app.includes("+v+'</button>"), "each control must print its state as a word");
+});
+
+
+test("client integrity: no top-level function name is declared twice in any shipped file", () => {
+  // The -05 crypto blackout was a hoisted redefinition: a new inScope(view) silently replaced the
+  // existing inScope(row), so activeRows() asked "is this row object one of the crypto view names",
+  // got false for every row, and the crypto board rendered empty — while the stocks board quietly
+  // showed BOTH universes because the same predicate short-circuited to true there.
+  //
+  // The old guard checked duplicates only for names on a hand-kept `need` list, so a collision with
+  // any unlisted function passed. This one is exhaustive by construction: every top-level
+  // declaration in every shipped file, no list to forget to update. Anchored to column 0 on purpose
+  // — nested/IIFE-local helpers may legitimately reuse a name (public/app.js has its own esc() inside
+  // the Treemap installer) and cannot shadow anything outside their closure.
+  const fs = require("fs"), path = require("path");
+  for (const rel of ["public/app.js", "src/poller.js", "src/compute.js", "src/store.js", "server.js"]) {
+    const src = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
+    const seen = new Map();
+    for (const m of src.matchAll(/^function ([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/gm))
+      seen.set(m[1], (seen.get(m[1]) || 0) + 1);
+    const dupes = [...seen].filter(([, n]) => n > 1).map(([k, n]) => `${k} (x${n})`);
+    assert.deepEqual(dupes, [], `${rel} declares the same top-level function more than once: ${dupes.join(", ")} — the later declaration hoists over the earlier one and silently wins`);
+  }
 });
