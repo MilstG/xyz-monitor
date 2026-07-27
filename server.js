@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.26-13";
+const VERSION = "2026.07.27-01";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -547,6 +547,35 @@ async function main() {
   fastify.get("/api/triggers", (req, reply) => {
     const since = req.query && req.query.since;
     return reply.header("cache-control", "no-store").send(poller.getTriggers(since));
+  });
+
+  // ---- alert delivery (telegram push, slice A) ------------------------------------------------
+  // Delivery state for the alerts panel: who is linked, the live link code, outbox depth, and the
+  // last delivery outcomes. no-store — the whole payload is "what is true right now", and a link
+  // code served from a cache is a code that has already expired.
+  fastify.get("/api/alerts", (req, reply) =>
+    reply.header("cache-control", "no-store").send(poller.getPush()));
+  // Mint a single-use link code. The code, not the chat id, is what the human carries into the DM:
+  // binding is proved in one direction so a typo cannot route someone's alerts to a stranger.
+  fastify.post("/api/alerts/link", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    const r = poller.pushMintCode();
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+  fastify.post("/api/alerts/unlink", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    const r = poller.pushUnlink(String((req.body && req.body.chat) || ""));
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+  fastify.post("/api/alerts/classes", { bodyLimit: 8 * 1024 }, (req, reply) => {
+    const b = req.body || {};
+    const r = poller.pushSetClasses(String(b.chat || ""), Array.isArray(b.classes) ? b.classes : null);
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+  // Test fire: the only way to prove the wire without waiting for a real setup — and the only way
+  // I can hand over a feature whose transport I cannot reach from a dev sandbox.
+  fastify.post("/api/alerts/test", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    const r = poller.pushTest((req.body && req.body.chat) || null);
+    if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
+    return reply.code(r.ok ? 200 : 400).send(r);
   });
 
   // Actionable board: names currently at a swing trigger, funding-net and ranked by expectancy.
