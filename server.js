@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.27-11";
+const VERSION = "2026.07.27-12";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -604,6 +604,10 @@ async function main() {
     // THAT browser — the link and the ownership are established in one step, unforgeably.
     const r = poller.pushMintCode(ensureOwner(req, reply), isAdmin(req));
     return reply.code(r.ok ? 200 : 400).send(r);
+  });
+  fastify.post("/api/alerts/claim", { bodyLimit: 4 * 1024 }, (req, reply) => {
+    const r = poller.pushClaim(String((req.body && req.body.chat) || ""), ensureOwner(req, reply), isAdmin(req));
+    return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : 400)).send(r);
   });
   fastify.post("/api/alerts/unlink", { bodyLimit: 4 * 1024 }, (req, reply) => {
     const r = poller.pushUnlink(String((req.body && req.body.chat) || ""), ensureOwner(req, reply), isAdmin(req));
