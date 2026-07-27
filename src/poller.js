@@ -6199,7 +6199,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     let res, j = null;
     try {
       res = await pushFetch(`https://api.telegram.org/bot${token}/${method}`,
-        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+        // The only fetch in the repo that had no abort signal: a stalled connection here would
+        // hang for undici's ~5-minute defaults, and the outbox drains SEQUENTIALLY — one hung
+        // request stalls the whole alert lane. Fail in 15s as the existing "network:" error so
+        // the retry/backoff semantics downstream are untouched.
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
+          signal: AbortSignal.timeout(15000) });
     } catch (e) { return { ok: false, error: "network: " + (e && e.message) }; }
     try { j = await res.json(); } catch (_) {}
     if (!res.ok || !j || j.ok !== true) {
@@ -7256,6 +7261,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     buildAnalyticsNow: buildAnalytics, // harness: run one analytics build synchronously (regime aggregate path)
     persistFeatures,
     persistLedger: () => { ledgerDirty = true; persistLedger(); },
+    // Final-flush surface for the shutdown and crash paths: everything that otherwise persists
+    // on a timer gets one more write on the way out. Each is idempotent, cheap, and safe to
+    // call at any moment; persistHourly is the only async one (NDJSON stream) and shutdown
+    // awaits it, while the crash path skips it — the spine self-heals from REST on boot.
+    persistHourly: () => persistHourly(),
+    persistTriggers,
+    persistPush,
     // Rich health: fail/backoff counts, backfill queue depth, rate-limiter utilization and
     // WS status make "it looks stale" diagnosable from /api/health instead of Railway logs.
     stats: () => {

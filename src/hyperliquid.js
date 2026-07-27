@@ -9,6 +9,13 @@
 // silently on older runtimes.
 const API = "https://api.hyperliquid.xyz/info";
 const WS_URL = "wss://api.hyperliquid.xyz/ws";
+// Zombie-socket watchdog threshold: a half-open TCP connection (peer gone, no FIN ever
+// arrives) fires NO onclose, so the reconnect path never runs — the socket sits "open" and
+// mute forever while REST quietly carries the load. The subscription pushes sub-second and
+// pongs answer within the 45s ping cadence, so 120s of total silence on a socket that claims
+// to be open is not a quiet market — it is a dead peer. The ping tick force-closes it, which
+// routes into the normal onclose -> backoff -> reconnect path.
+const WS_STALE_MS = 120000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const limiter = (() => {
@@ -91,9 +98,16 @@ function createUniverseSocket({ onCtxs, log }) {
     try { ws = new WebSocket(WS_URL); } catch (_) { retry(); return; }
     ws.onopen = () => {
       backoff = 1000;
+      lastMsg = Date.now();   // arm the watchdog at open, so a socket that never delivers a single message is also caught
       try { ws.send(JSON.stringify({ method: "subscribe", subscription: { type: "allDexsAssetCtxs" } })); } catch (_) {}
       clearInterval(pingT);
-      pingT = setInterval(() => { try { if (ws && ws.readyState === 1) ws.send('{"method":"ping"}'); } catch (_) {} }, 45000);
+      pingT = setInterval(() => {
+        // Watchdog first: total silence past the threshold means the peer is gone even though
+        // the socket claims open — force-close so onclose fires and the backoff reconnect runs.
+        // Repeat fires while CLOSING are harmless (close() no-ops / throws into the catch).
+        if (Date.now() - lastMsg > WS_STALE_MS) { try { ws.close(); } catch (_) {} return; }
+        try { if (ws && ws.readyState === 1) ws.send('{"method":"ping"}'); } catch (_) {}
+      }, 45000);
     };
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
