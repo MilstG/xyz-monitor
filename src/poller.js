@@ -3,6 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
+const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
@@ -92,6 +93,11 @@ const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept lev
 const WICK_FRAC = 0.55;                    // min wick share of the bar's range for a fill claim (dominant wick, not a doji tail)
 const WICK_SIZE_MULT = 1.1;                // the wick bar's range vs its own trailing-30 median — a real bar, not noise
 const RNDF_LO_BAND = 0.05, RNDF_HI_BAND = 0.6;   // round-figure approach band, x the name's own sd30
+// ---- crypto-native ledger events (build 2026.07.26-08) ---------------------------------------
+const CASC_LOOK_MS = 24 * HOUR;            // how far back a liquidation cascade still counts as the operative structure
+const FUNDEXT_HI = 90, FUNDEXT_LO = 10;    // funding percentile (own 31d) that counts as a crowded side
+const FUNDEXT_HOURS = 24;                  // window the extreme's side must hold across — this is what makes it an EPISODE
+const FUNDEXT_MIN_SAMPLES = 8;             // ...and the minimum hourly samples inside it before the claim is allowed to open
 const REGIME_LOOKBACK = 30;           // days of daily returns for the market-wide correlation
 const REGIME_TOPN = 40;               // correlation is measured across the top-N markets by volume
 const REGIME_SAMPLE_MS = 30 * 60 * 1000;  // append one correlation sample to history every 30 min
@@ -1092,7 +1098,42 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     oiflush: "OI flush", fpdiv: "Funding\u2013price divergence", coil: "Range compression",
     ondrift: "Overnight drift",
     tretest: "Trend retest (long)", tretestdn: "Trend retest (short)",
+    casc: "Cascade exhaustion", fundext: "Funding extreme",
   };
+  // ---- crypto enrollment (build 2026.07.26-08) ------------------------------------------------
+  // The crypto side of the engine returns, as a WHITELIST rather than the blanket re-admission
+  // that -87 attempted. Three classes of event are excluded, each for a structural reason and not
+  // as a hedge:
+  //   * impossible on a 24/7 tape — gap, gapfade, ondrift have no session boundary to measure;
+  //     pead has no earnings; sweep's "prior session" does not exist as a distinct object.
+  //   * no analogue — prem exists to price HIP-3 synthetics against their oracle while the cash
+  //     market is shut. Main-dex oracle premium is arbitraged tight and carries nothing.
+  //   * geometry not yet trustworthy — squeeze and unwind fire on a composite that routinely
+  //     resolves away from the range edge their levels assume. The log-space rewrite stops them
+  //     producing negative prices, but an inverted-at-fire level is still an inverted level, so
+  //     they stay out of the crypto roster until the equity record says the trigger itself works.
+  // Everything else runs, on crypto horizons, with claimGeometryOk enforcing the levels. casc and
+  // fundext are crypto-only by nature (there is no equity liquidation cascade in our data).
+  const MAIN_EVS = new Set([
+    "bigmove", "breakout", "breakdown", "volshift", "coil", "volume",
+    "fundflip", "oiflush", "fpdiv", "tretest", "tretestdn",
+    "casc", "fundext",                                        // crypto-native
+    "reclaim", "failbrk", "mapull", "wickfill", "roundfr",     // shadows
+    "airead",                                                  // the Report tab's own record (never was this engine's)
+  ]);
+  const XYZ_ONLY_EVS = new Set(["gap", "gapfade", "ondrift", "pead", "sweep", "prem", "squeeze", "unwind"]);
+  const MAIN_ONLY_EVS = new Set(["casc", "fundext"]);
+  // One gate every fire site and openLedger consults, so "which events does this universe run"
+  // has exactly one answer in the codebase.
+  function evAllowed(uni, ev) {
+    if (uni === "main") return MAIN_EVS.has(ev);
+    return !MAIN_ONLY_EVS.has(ev);
+  }
+  // Epoch of the rebuilt crypto engine. Stored crypto claims older than this were opened under the
+  // additive geometry that produced negative targets — re-admitting them would seed the fresh
+  // out-of-sample record with exactly the fabrications the gate now refuses to stamp. So the -101
+  // purge stays, bounded to the pre-epoch era instead of running forever.
+  const CRYPTO_EPOCH = Date.UTC(2026, 6, 26);   // 2026-07-26T00:00:00Z
   // Daily-step OI series from the sampled history: nearest sample within 12h of each UTC
   // midnight. Feeds the flush study; cheap because hist is already in memory.
   function oiDailySeries(coin) {
@@ -1160,7 +1201,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   let variantState = { bigmove: { inc: 1, hist: [] }, gap: { inc: 1, hist: [] }, squeeze: { inc: 1, hist: [] }, fundflip: { inc: 1, hist: [] }, unwind: { inc: 1, hist: [] }, oiflush: { inc: 1, hist: [] } };
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
-  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead"]);
+  const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext"]);
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -1176,21 +1217,24 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       if (d.closed.length > 4000 && store.archiveClosed) store.archiveClosed(d.closed.slice(0, d.closed.length - 4000));
       ledgerClosed = d.closed.slice(-4000);
     }
-    // Crypto engine purge (-101): the main universe was un-enrolled from the signal engine, so
-    // its stored claims — open AND closed, shadows included — leave the record entirely. A dead
-    // engine's history in the aggregates would be exactly the stale-record dishonesty the ledger
-    // exists to prevent. Universe is structural (xyz coins carry ":" in the id, main coins do
-    // not — the same test shadowRecord always used); airead entries are exempt (the Report
-    // tab's analyst record serves both universes and its engine is alive). Idempotent: after
-    // the first boot there is nothing left to drop.
+    // Pre-epoch crypto purge. The -101 removal un-enrolled the main universe and dropped its
+    // stored claims wholesale. The engine is back (2026.07.26-08) with log-space geometry, so the
+    // purge is no longer permanent — but it is not lifted either: every crypto claim stamped
+    // BEFORE the epoch was opened under the additive arithmetic that produced negative targets and
+    // voids multiples of price away. Re-admitting those would seed a supposedly out-of-sample
+    // record with exactly the fabrications claimGeometryOk now refuses, and the ledger's whole
+    // worth is that its record is honest. So the era is dropped and the new engine starts from a
+    // real zero. Universe is structural (xyz coins carry ":" in the id, main coins do not);
+    // airead is exempt as always. Idempotent — after the first boot there is nothing left to drop.
     {
-      const cryptoEng = (e) => e && e.coin && !String(e.coin).includes(":") && e.ev !== "airead";
+      const preEpoch = (e) => e && e.coin && !String(e.coin).includes(":") && e.ev !== "airead"
+        && !(+e.t0 >= CRYPTO_EPOCH);
       let pOpen = 0, pClosed = 0;
-      for (const [k, e] of [...ledgerOpen]) if (cryptoEng(e)) { ledgerOpen.delete(k); pOpen++; }
-      const kept = ledgerClosed.filter((e) => !cryptoEng(e));
+      for (const [k, e] of [...ledgerOpen]) if (preEpoch(e)) { ledgerOpen.delete(k); pOpen++; }
+      const kept = ledgerClosed.filter((e) => !preEpoch(e));
       pClosed = ledgerClosed.length - kept.length;
       ledgerClosed = kept;
-      if (pOpen || pClosed) { ledgerDirty = true; log(`Crypto engine purge: dropped ${pOpen} open and ${pClosed} closed crypto claim(s) from the ledger (airead kept)`); }
+      if (pOpen || pClosed) { ledgerDirty = true; log(`Pre-epoch crypto purge: dropped ${pOpen} open and ${pClosed} closed crypto claim(s) opened before the geometry fix (airead kept)`); }
     }
     // Unit repair: breakdown/oiflush/fpdiv claims resolved before the normalization fix carry
     // raw-% outcomes despite an R-united claim — sd0 was stamped at fire but never applied at
@@ -1365,17 +1409,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       ts: Date.now(),
     };
   }
-  function resolveAtFor(ev, t0) {
-    if (ev === "gap" || ev === "gapfade") {   // resolves at the close of the next cash session after firing
-      for (const ses of marketSessions(t0, t0 + 6 * DAY)) if (ses.close > t0 && ses.open > t0) return ses.close;
-      return t0 + 3 * DAY;
+  // Universe-aware: the session-calendar branches are xyz by construction (the events that use
+  // them do not run on a 24/7 tape at all), and every other event reads evMeta, which serves the
+  // compressed crypto clock for main rows. Wall-clock only for crypto — no calendar walk, because
+  // there is no calendar.
+  function resolveAtFor(ev, t0, uni) {
+    if (uni !== "main") {
+      if (ev === "gap" || ev === "gapfade") {   // resolves at the close of the next cash session after firing
+        for (const ses of marketSessions(t0, t0 + 6 * DAY)) if (ses.close > t0 && ses.open > t0) return ses.close;
+        return t0 + 3 * DAY;
+      }
+      if (ev === "ondrift") {
+        let n = 0;
+        for (const ses of marketSessions(t0, t0 + 20 * DAY)) { if (ses.close <= t0) continue; n++; if (n === 6) return ses.open; }
+        return t0 + 10 * DAY;
+      }
     }
-    if (ev === "ondrift") {
-      let n = 0;
-      for (const ses of marketSessions(t0, t0 + 20 * DAY)) { if (ses.close <= t0) continue; n++; if (n === 6) return ses.open; }
-      return t0 + 10 * DAY;
-    }
-    const m = EV_META[ev];
+    const m = evMeta(ev, uni);
     return t0 + ((m && m.horizonMs) || DAY);
   }
   // ---- fire-time context stamp -------------------------------------------------------------
@@ -1432,24 +1482,56 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         }
         c.ses = inSes ? "rth" : (prevClose != null && nextOpen != null && nextOpen - prevClose > DAY ? "wknd" : "on");
       }
+      // Crypto has no session, but it does have a liquidity clock: the Asia / Europe / US-overlap
+      // split is the closest honest analogue, and it is the slice most likely to explain a crypto
+      // event's record (a cascade at 04:00 UTC is a different animal from one at 14:00). UTC hour
+      // buckets, not exchange sessions — nothing here pretends a venue opens or closes.
+      if (r.uni === "main") {
+        const h = new Date(t0).getUTCHours();
+        c.hod = h < 7 ? "asia" : (h < 12 ? "eu" : (h < 21 ? "us" : "late"));
+      }
     } catch (_) {}
     return c;
   }
   function openLedger(r, ev, sigEntry, dir, extra, vi) {
-    // Crypto engine removal (-101): the main universe opens NO signal or shadow claims.
-    // airead is exempt — that is the Report tab's analyst-accountability record, which
-    // serves both universes and is not this engine's. Belt to the loop's suspenders:
-    // even a future caller that forgets the enrollment rule cannot ledger a crypto claim.
-    if (r && r.uni === "main" && ev !== "airead") return null;
+    // Universe enrollment, single-sourced through evAllowed: the crypto side runs the whitelisted
+    // roster (MAIN_EVS) and nothing else, the equity side runs everything except the two
+    // crypto-native events. Belt to the fire sites' suspenders — even a caller that forgets the
+    // rule cannot ledger an event its universe does not run.
+    if (r && !evAllowed(r.uni, ev)) return null;
     const key = r.coin + "|" + ev + (vi != null ? "#" + vi : "");
+    const main = r && r.uni === "main";
     // mv = playbook-target distance from the mark at fire time, in % — lets the record be
     // sliced by actionable magnitude, matching the client's move filter exactly.
-    const mv = vi == null && sigEntry.play && sigEntry.play.target != null && r.px > 0
-      ? +(Math.abs(sigEntry.play.target / r.px - 1) * 100).toFixed(2) : null;
-    const stp = vi == null && sigEntry.play && sigEntry.play.stop != null && sigEntry.play.stop > 0
+    const psd0 = sigEntry.play && (sigEntry.play.side === "long" || sigEntry.play.side === "short")
+      ? sigEntry.play.side : (extra && extra.psd) || null;
+    // Crypto claim-geometry gate: at 12-40%/day the loss-side check alone lets through voids a
+    // hair from the mark and targets that are pure artifact. Levels that fail the gate are simply
+    // NOT stamped — the claim still opens and resolves at-horizon, which is the honest degradation.
+    // A refusal here is logged nowhere and costs nothing; stamping a bad level cost the whole
+    // crypto engine last time. xyz keeps the original loss-side-only rule so its record stays
+    // comparable across this build.
+    const sdG = extra && extra.sd0 > 0 ? extra.sd0 : null;
+    const geoOk = (lvl, kind) => {
+      if (lvl == null || !(lvl > 0) || !(r.px > 0)) return false;
+      if (!main) return true;
+      if (!psd0) return false;   // crypto levels require a known side to be gated at all
+      return kind === "stop"
+        ? claimGeometryOk(psd0, r.px, lvl, null, sdG)
+        : claimGeometryOk(psd0, r.px, null, lvl, sdG);
+    };
+    const tgt0 = sigEntry.play && sigEntry.play.target != null && geoOk(sigEntry.play.target, "target")
+      ? sigEntry.play.target : null;
+    const mv = vi == null && tgt0 != null && r.px > 0
+      ? +(Math.abs(tgt0 / r.px - 1) * 100).toFixed(2) : null;
+    const stp = vi == null && sigEntry.play && sigEntry.play.stop != null && geoOk(sigEntry.play.stop, "stop")
       ? +(+sigEntry.play.stop).toPrecision(6) : null;   // void level frozen at fire — the stop-aware track resolves against it
-    const psd = vi == null && sigEntry.play && (sigEntry.play.side === "long" || sigEntry.play.side === "short")
-      ? sigEntry.play.side : null;   // trade side per the playbook; e.dir is the EVENT sign (a gap-fader's dir is the gap, not the trade)
+    // Forensic marker: a level WAS offered and the gate refused it. Distinguishes "this event type
+    // has no void" (fundflip) from "this claim's void was an artifact" (a collapsed coin's range
+    // arithmetic) when the record is audited later. Same key the hydrate repair uses.
+    const geoRefused = main && vi == null && sigEntry.play
+      && ((sigEntry.play.stop != null && stp == null) || (sigEntry.play.target != null && tgt0 == null));
+    const psd = vi == null ? psd0 : null;   // trade side per the playbook; e.dir is the EVENT sign (a gap-fader's dir is the gap, not the trade)
     firedNow.add(key);
     if (rearm.has(key)) return null;   // episode already scored — wait for the condition to lapse
     let e = ledgerOpen.get(key);
@@ -1460,7 +1542,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         mark0: r.px, dir: dir == null ? 1 : dir,
         score0: sigEntry.score, reading0: sigEntry.reading,
         claim: sigEntry.study || null,
-        resolveAt: resolveAtFor(ev, Date.now()),
+        resolveAt: resolveAtFor(ev, Date.now(), r.uni),
       }, signalsBuildCount <= 1 ? { bt: 1 } : null,   // opened on the FIRST build after a restart/deploy: the condition may predate this stamp — flagged so identical boot-time timestamps explain themselves
       vi != null ? { vi } : null, mv != null ? { mv } : null,
       // Geometry gate: a stop is only stamped when it sits on the LOSS side of entry for the
@@ -1486,6 +1568,24 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       // key could never mask a core claim field even if one were ever added carelessly; the
       // stamp's keys are all novel today and the export glossary documents each.
       Object.assign(e, fireCtx(r, t0));
+      // Crypto geometry scrub, AFTER extra has been folded in. The shadow fire sites hand their
+      // stop and target distance through `extra`, which lands past the visible path's gate — so
+      // the gate is applied once more here, against the assembled entry, where every source of a
+      // level has already written. Deliberately NOT gated on `vi`: shadows are exactly the path
+      // that bypasses the visible check, so exempting them would leave the hole this block exists
+      // to close. A failing void drops the stop-aware leg (gv marks it for forensics, matching the
+      // hydrate repair's convention); a failing target drops mv, so the frozen-target
+      // reconstruction downstream yields null rather than an artifact price.
+      if (main) {
+        const sideE = e.psd || (e.dir >= 0 ? "long" : "short");
+        const sdE = e.sd0 > 0 ? e.sd0 : null;
+        if (e.stp != null && !claimGeometryOk(sideE, e.mark0, e.stp, null, sdE)) { e.gv = 1; delete e.stp; }
+        if (e.mv != null && e.mark0 > 0) {
+          const tE = e.mark0 * (1 + (sideE === "long" ? 1 : -1) * e.mv / 100);
+          if (!claimGeometryOk(sideE, e.mark0, null, tE, sdE)) { e.gv = 1; delete e.mv; }
+        }
+        if (geoRefused) e.gv = 1;
+      }
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -1556,6 +1656,25 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
             if (e.realizedS != null) e.realizedS = e.stopped ? +(e.realizedS / e.sd0).toFixed(2) : realized;
             e.rn = 1;
           }
+          // ---- BTC-excess leg (crypto only) --------------------------------------------------
+          // Sixty perps at ~0.8 correlation to BTC means a raw record measures the tape at least
+          // as much as the signal: forty longs firing into a green week all "win" for one reason.
+          // So every crypto claim resolves TWICE — raw, and net of BTC's move over the claim's own
+          // exact window, both in the same units. rx is the honest read of whether the event added
+          // anything beyond being long crypto; raw stays the headline because it is what a trade
+          // would have returned. Absent when BTC's spine can't cover the window — an honest gap,
+          // never a zero (a null rx and rx=0 mean opposite things).
+          if (e.coin && !String(e.coin).includes(":") && e.coin !== MAIN_BENCH) {
+            const bh = getHourly(MAIN_BENCH);
+            const b0 = priceAsOf(bh, e.t0, 3 * HOUR), b1 = priceAsOf(bh, e.resolveAt, 3 * HOUR);
+            if (b0 > 0 && b1 > 0) {
+              const bench = (b1 / b0 - 1) * 100;
+              let rx = sgn * ((p1 / p0 - 1) * 100 - bench);   // same side sign the raw leg used
+              if (R_LEDGER_EVS.has(e.ev) && e.sd0 > 0) rx = rx / e.sd0;
+              e.rx = +rx.toFixed(2);
+              e.bmv = +bench.toFixed(2);   // BTC's own move over the window, for the autopsy
+            }
+          }
         }
       }
       if (realized == null) {
@@ -1585,8 +1704,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   function buildRecordSet(res, openEntries) {
     const per = {};
     for (const e of res) {
-      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [], retsS: [], winsS: 0, stopped: 0, nS: 0 });
+      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [], retsS: [], winsS: 0, stopped: 0, nS: 0, ents: [], retsX: [], winsX: 0 });
       b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
+      b.ents.push(e);
+      // BTC-excess leg, crypto only (rx is stamped only for main claims). Kept in its own bucket
+      // so the raw record never silently becomes an excess record — they answer different
+      // questions and the panel shows both.
+      if (e.rx != null && Number.isFinite(e.rx)) { b.retsX.push(e.rx); if (e.rx > 0) b.winsX++; }
       if (e.realizedS != null) { b.nS++; b.retsS.push(e.realizedS); if (e.winS) b.winsS++; if (e.stopped) b.stopped++; }
       if (e.claim && Number.isFinite(e.claim.med)) b.claims.push(e.claim.med);
     }
@@ -1601,7 +1725,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         avgLoss: l.length ? +(lSum / l.length).toFixed(2) : null,
         pf: w.length && l.length && lSum !== 0 ? +(wSum / Math.abs(lSum)).toFixed(2) : null,   // profit factor: gross wins / gross losses
         claimMed: b.claims.length ? +(b.claims.reduce((a, c) => a + c, 0) / b.claims.length).toFixed(2) : null,
+        // Independence disclosure. n counts claims; cl counts the distinct UTC days they fired on.
+        // On a universe correlated ~0.8 to one benchmark these diverge hard — forty longs opened
+        // into one green day is n=40 and cl=1, and reading that as forty independent draws is the
+        // single easiest way to fool yourself with this ledger. Shown next to n, always.
+        cl: clusterDays(b.ents),
         open: 0, unit: unitOf(ev) };
+      if (b.retsX.length) {   // BTC-excess parallel track: did the event beat simply being long crypto
+        const smX = summarizeEvents(b.retsX);
+        Object.assign(out[ev], { nX: b.retsX.length, hitX: +(b.winsX / b.retsX.length).toFixed(2),
+          medX: smX.n ? smX.med : null, avgX: smX.n ? smX.avg : null });
+      }
       if (b.nS) {   // stop-aware parallel track: outcome had the void level been honored as a stop
         const smS = summarizeEvents(b.retsS);
         const wS = b.retsS.filter((x) => x > 0), lS = b.retsS.filter((x) => x <= 0);
@@ -1647,7 +1781,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -1758,7 +1892,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
   // same ledger entries, computed server-side once per build — the client renders, never
   // re-derives. Labels/tips ship from here so the panel and the engine can't drift apart.
   const STRAT_DEFS = [
-    { ev: "gapfade", uni: "both", label: "universal gap fade", unit: "%",
+    { ev: "gapfade", uni: "xyz", label: "universal gap fade", unit: "%",
       split: [{ vi: 0, tag: "void 1.0\u03c3" }, { vi: 1, tag: "void 1.5\u03c3" }],
       tip: "every >=1\u03c3 gap, faded toward the prior close REGARDLESS of the per-name fade/continue record \u2014 the out-of-sample test of roster-wide gap mean reversion. Two void widths (1.0x and 1.5x this market's own gap \u03c3) run side by side on identical entries." },
     { ev: "reclaim", uni: "both", label: "breakdown reclaim", unit: "R",
@@ -1792,13 +1926,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       avg: b.r.length ? +(b.r.reduce((a, x) => a + x, 0) / b.r.length).toFixed(2) : null,
       avgS: b.s.length ? +(b.s.reduce((a, x) => a + x, 0) / b.s.length).toFixed(2) : null,
     };
-    // One panel: the xyz universe is the only one enrolled since the crypto engine removal
-    // (-101). The bucket's structural universe key stays — it is what keeps any stray main
-    // entry from ever counting into an xyz aggregate.
+    // Both panels again (2026.07.26-08). The bucket's structural universe key never changed —
+    // it is what keeps a stray main entry from ever counting into an xyz aggregate — so restoring
+    // the crypto panel is one extra call, not a rework. STRAT_DEFS' `uni` field decides which
+    // strategies each panel lists: gapfade/pead/sweep are xyz-only because a 24/7 tape has no gap
+    // and no earnings, and the crypto panel simply does not show them.
     const panel = (u) => STRAT_DEFS.filter((d) => d.uni === "both" || d.uni === u)
       .map((d) => ({ ev: d.ev, label: d.label, unit: d.unit, tip: d.tip,
         rows: (d.split || [{ vi: 0, tag: null }]).map((sp) => Object.assign({ tag: sp.tag || null }, stat(agg.get(d.ev + "|" + sp.vi + "|" + u)))) }));
-    return { xyz: panel("xyz") };
+    return { xyz: panel("xyz"), main: crypto ? panel("main") : null };
   }
   let signalsBuildCount = 0;   // builds since process start — build #1 is the post-boot catch-up where in-force conditions all open at once
   function buildSignals() {
@@ -1816,22 +1952,26 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       const g = pool[ac] || (pool[ac] = {});
       (g[ev + ":" + key] || (g[ev + ":" + key] = [])).push(...raws);
     };
-    const acOf = (r) => classifyCached(r.ticker).assetClass || "Other";
+    // Crypto gets its own pooling bucket rather than an equity asset class. classifyCached would
+    // happily label a perp "Other" and pool BTC's breakout outcomes with a utility's — the small-n
+    // rescue is only a rescue when the prior it borrows is from something comparable.
+    const acOf = (r) => (r.uni === "main" ? "Crypto" : (classifyCached(r.ticker).assetClass || "Other"));
     let swingFails = 0, swingErr = null;   // strategy-shadow failures: counted per build, logged once, never fatal
     // per-ticker earnings prints for the pead shadow: built once per build, tiny array
     const earnPrintsByTk = new Map();
     for (const pr of earnPrints) { let a = earnPrintsByTk.get(pr.t); if (!a) { a = []; earnPrintsByTk.set(pr.t, a); } a.push(pr); }
-    // pass 1: studies + pooling feed — xyz universe ONLY. Crypto enrollment (added -87,
-    // removed -101) is gone BY DECISION, not by accident: the absolute-range playbook
-    // geometry produced impossible claims on collapsed coins (negative price targets,
-    // voids multiples of price away) and the crypto side of the engine was retired rather
-    // than repaired. activeMarkets() is xyz-pure by design — iterating it alone IS the
-    // removal. Crypto rows still flow through Markets/Trend/Report untouched; only signals,
-    // studies, the ledger, pooling and every shadow strategy exclude them (enforced again
-    // by openLedger's own universe guard, airead excepted — the Report tab's accountability
-    // record is the analyst's, not this engine's).
+    // pass 1: studies + pooling feed — BOTH universes (build 2026.07.26-08). The -101 removal
+    // un-enrolled crypto because the additive playbook geometry produced impossible claims on
+    // collapsed coins (negative price targets, voids multiples of price away). That was an
+    // arithmetic bug, not a verdict on the signals, and it is fixed at the source: playbook now
+    // computes crypto levels multiplicatively (ctx.logGeo) and claimGeometryOk refuses anything
+    // that still lands wrong. What -87 got wrong was re-admitting EVERYTHING; this enrollment is
+    // a whitelist (MAIN_EVS via evAllowed), on crypto horizons (evMeta), with the BTC-excess leg
+    // and the tape-day cluster count carrying the honesty this universe specifically needs.
+    // Pooling stays universe-SEPARATED: an asset-class bucket that mixed BTC with NVDA would be
+    // exactly the cross-universe contamination the scope split exists to prevent.
     const prepped = [];
-    for (const r of activeMarkets()) {
+    for (const r of activeMarkets().concat(crypto ? mainMarkets() : [])) {
       if (r.delisted || r.px == null) continue;
       const closes = dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;
       const st = studiesFor(r, closes, dayFunding);
@@ -1862,9 +2002,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (zMove >= vBM) {
           const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"), "R");
           const sig = mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${zMove.toFixed(1)}\u03c3 ${dir > 0 ? "up" : "down"})`,
-            (zMove - vBM) * 20 + 20, evd, { horizon: EV_META.bigmove.horizon });
+            (zMove - vBM) * 20 + 20, evd, { horizon: evMeta("bigmove", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);   // R -> % via this market's own sigma
-            sig.play = playbook("bigmove", { px: r.px, dir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+            sig.play = playbook("bigmove", { logGeo: r.uni === "main", px: r.px, dir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
           out.push(sig); openLedger(r, "bigmove", sig, dir, { sd0: +sd30.toFixed(3) });
         }
       }
@@ -1874,9 +2014,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (hi > 0 && r.px > hi && closes[closes.length - 2][1] <= hi) {
           const evd = evidence(st.breakout && st.breakout.d5, "breakout", pooledFor(ac, "breakout", "d5"), "R");
           const sig = mkSignal(r, "breakout", `mark ${((r.px / hi - 1) * 100).toFixed(1)}% above the prior 30d high`,
-            ((r.px / hi - 1) * 100) * 12 + 15, evd, { horizon: EV_META.breakout.horizon });
+            ((r.px / hi - 1) * 100) * 12 + 15, evd, { horizon: evMeta("breakout", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
-            sig.play = playbook("breakout", { px: r.px, level: hi, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+            sig.play = playbook("breakout", { logGeo: r.uni === "main", px: r.px, level: hi, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
           out.push(sig); if (sd30 > 0) openLedger(r, "breakout", sig, 1, { sd0: +sd30.toFixed(3) });
         }
         let lo = Infinity;
@@ -1884,9 +2024,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (isFinite(lo) && lo > 0 && r.px < lo && closes[closes.length - 2][1] >= lo) {
           const evd = evidence(st.breakdown && st.breakdown.d5, "breakdown", pooledFor(ac, "breakdown", "d5"), "R");
           const sig = mkSignal(r, "breakdown", `mark ${((1 - r.px / lo) * 100).toFixed(1)}% below the prior 30d low`,
-            ((1 - r.px / lo) * 100) * 12 + 15, evd, { horizon: EV_META.breakdown.horizon });
+            ((1 - r.px / lo) * 100) * 12 + 15, evd, { horizon: evMeta("breakdown", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
-            sig.play = playbook("breakdown", { px: r.px, level: lo, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+            sig.play = playbook("breakdown", { logGeo: r.uni === "main", px: r.px, level: lo, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
           out.push(sig); if (sd30 > 0) openLedger(r, "breakdown", sig, -1, { sd0: +sd30.toFixed(3) });
         }
         // ---- swing shadow setups (findings follow-on): higher-timeframe, human-tradeable
@@ -1968,9 +2108,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
             if (zF <= -incVal("oiflush") && r.d7 < 0) {
               const evd = evidence(st.oiflush.d5, "oiflush", pooledFor(ac, "oiflush", "d5"), "R");
               const sig = mkSignal(r, "oiflush", `\u0394OI7d ${doiNow.d7.toFixed(1)}% (${zF.toFixed(1)}\u03c3 flush) into a ${r.d7.toFixed(1)}% decline`,
-                (-zF - incVal("oiflush")) * 18 + 18, evd, { horizon: EV_META.oiflush.horizon });
+                (-zF - incVal("oiflush")) * 18 + 18, evd, { horizon: evMeta("oiflush", r.uni).horizon });
               { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
-                sig.play = playbook("oiflush", { px: r.px, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+                sig.play = playbook("oiflush", { logGeo: r.uni === "main", px: r.px, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
               out.push(sig); if (sd30 > 0) openLedger(r, "oiflush", sig, 1, { sd0: +sd30.toFixed(3) });
             }
           }
@@ -1986,10 +2126,73 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
             if (dDir) {
               const evd = evidence(st.fpdiv.d3, "fpdiv", pooledFor(ac, "fpdiv", "d3"), "R");
               const sig = mkSignal(r, "fpdiv", `${dDir > 0 ? "strength" : "weakness"} (${z7.toFixed(1)}\u03c3 7d) while funding ${dDir > 0 ? "falls" : "rises"} \u2014 ${dDir > 0 ? "shorts pressing" : "longs averaging down"}`,
-                (Math.abs(z7) - 0.8) * 20 + 16, evd, { horizon: EV_META.fpdiv.horizon });
+                (Math.abs(z7) - 0.8) * 20 + 16, evd, { horizon: evMeta("fpdiv", r.uni).horizon });
               { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
-                sig.play = playbook("fpdiv", { px: r.px, dir: dDir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
+                sig.play = playbook("fpdiv", { logGeo: r.uni === "main", px: r.px, dir: dDir, sd30, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
               out.push(sig); openLedger(r, "fpdiv", sig, dDir, { sd0: +sd30.toFixed(3) });
+            }
+          }
+        }
+        // ---- crypto-native: cascade exhaustion ------------------------------------------------
+        // The flagship crypto event, and the reason this universe is worth enrolling at all — no
+        // equity analogue exists in our data. czCasc already flags buckets where a side's forced
+        // liquidation notional spiked >=3sigma of its own trailing 24h WITH open interest dropping
+        // in the same bucket: flow that actually cleared positioning, not just a busy bar. This
+        // turns the latest such bucket into a claim whose void is the flush wick and whose target
+        // is the pre-cascade close — both prices the tape printed, so there is no sigma
+        // construction for claimGeometryOk to clamp. Aggregated CEX data (Coinalyze) drives the
+        // trigger while the claim resolves on OUR Hyperliquid mark; that venue mismatch is real
+        // and is disclosed on the card rather than smoothed over. Isolated in its own try: the
+        // deriv lane is an optional external dependency and must never take the board down.
+        if (r.uni === "main" && sd30 > 0 && cz) {
+          try {
+            const cf = latestCascade(czCasc.get(r.coin), now, CASC_LOOK_MS);
+            const ce = cf ? detectCascExhaust(cf, getHourly(r.coin), r.px, { now }) : null;
+            if (ce) {
+              const evd = evidence(null, "casc", null, "R");
+              const ageH = Math.max(1, Math.round(ce.ageMs / HOUR));
+              const sigC = mkSignal(r, "casc",
+                `${ce.side === "long" ? "long" : "short"}-side cascade ${ageH}h ago \u2014 ${ce.liq >= 1e9 ? (ce.liq/1e9).toFixed(1)+"B" : ce.liq >= 1e6 ? (ce.liq/1e6).toFixed(1)+"M" : Math.round(ce.liq/1e3)+"K"} force-liquidated in one 15m bucket, OI ${ce.doiPct != null ? (ce.doiPct > 0 ? "+" : "") + ce.doiPct.toFixed(1) + "%" : "down"} with it; the flush ${ce.side === "long" ? "low" : "high"} has held since`,
+                Math.max(10, 34 - ageH), evd, { horizon: evMeta("casc", r.uni).horizon, cexsrc: 1 });
+              sigC.play = playbook("casc", { side: ce.side, stop: ce.stop, target: ce.target, doiPct: ce.doiPct });
+              out.push(sigC);
+              openLedger(r, "casc", sigC, ce.side === "long" ? 1 : -1,
+                { sd0: +sd30.toFixed(3), cliq: ce.liq, cdoi: ce.doiPct, cage: ageH });
+            }
+          } catch (e) { swingFails++; swingErr = (e && e.message) || String(e); }
+        }
+        // ---- crypto-native: persistent funding extreme ----------------------------------------
+        // The retired fundext, back with the thing it lacked: an episode definition. Funding at a
+        // percentile extreme is a PERSISTENT condition — it can sit at the 97th percentile for
+        // days — so a naive trigger serially re-opens claims on one episode and reports n=40 for
+        // what is one observation. The ledger's rearm gate handles the re-entry, and the
+        // persistence floor here (the condition must have been in force for FUNDEXT_HOURS of its
+        // own history, not just this print) is what makes the episode an episode. Faded: crowded
+        // long -> short it. Target is the geometric range mid, an observed structure; void a
+        // 1.5sigma multiple beyond where the crowd is defending.
+        if (r.uni === "main" && sd30 > 0 && r.funding != null && isFinite(r.funding)) {
+          const fp = fundPctileNow(r.coin, r.funding, now);
+          if (fp != null && (fp >= FUNDEXT_HI || fp <= FUNDEXT_LO)) {
+            const crowdedLong = fp >= FUNDEXT_HI;
+            const fDir = crowdedLong ? -1 : 1;   // the FADE direction
+            // persistence: the same side's extreme must hold across the recent history, not one print
+            const fh = getFunding(r.coin);
+            let held = 0;
+            for (let i = fh.length - 1; i >= 0 && fh[i][0] >= now - FUNDEXT_HOURS * HOUR; i--) {
+              const v = fh[i][1];
+              if (!isFinite(v)) continue;
+              if (crowdedLong ? v > 0 : v < 0) held++; else { held = 0; break; }
+            }
+            if (held >= FUNDEXT_MIN_SAMPLES) {
+              const fAPR = r.funding * 24 * 365 * 100;
+              const evd = evidence(null, "fundext", null, "R");
+              const sigF = mkSignal(r, "fundext",
+                `funding ${fAPR >= 0 ? "+" : ""}${fAPR.toFixed(0)}% APR \u2014 ${fp}th percentile of its own 31d, crowded ${crowdedLong ? "long" : "short"} for ${held}h+`,
+                Math.abs(fp - 50) * 0.5 + 12, evd, { horizon: evMeta("fundext", r.uni).horizon });
+              sigF.play = playbook("fundext", { logGeo: true, dir: fDir, px: r.px, sd30, pct: fp,
+                hi30: r.feat ? r.feat.hi30 : null, lo30: r.feat ? r.feat.lo30 : null });
+              out.push(sigF);
+              openLedger(r, "fundext", sigF, fDir, { sd0: +sd30.toFixed(3), fxp: fp, fxh: held });
             }
           }
         }
@@ -2003,7 +2206,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           if (cur > p90) {
             const evd = evidence(st.volshift && st.volshift.d5, "volshift", pooledFor(ac, "volshift", "d5"), "R");
             const sig = mkSignal(r, "volshift", `10d vol ${cur.toFixed(1)}%/d vs p90 ${p90.toFixed(1)}%/d`,
-              (cur / p90 - 1) * 60 + 12, evd, { horizon: EV_META.volshift.horizon });
+              (cur / p90 - 1) * 60 + 12, evd, { horizon: evMeta("volshift", r.uni).horizon });
             sig.play = playbook("volshift", {});
             out.push(sig);   // no ledger: no directional claim to resolve
           }
@@ -2044,7 +2247,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
               + (exc != null ? ` \u00b7 S&P ${gBench >= 0 ? "+" : ""}${gBench.toFixed(2)}%, excess ${exc >= 0 ? "+" : ""}${exc.toFixed(2)}%` : "");
             const sig = mkSignal(r, "gap", reading,
               (Math.abs(g) / st.gap.sd) * 14 + (exc != null ? Math.min(16, Math.abs(exc) / st.gap.sd * 12) : 0),
-              evd, { horizon: EV_META.gap.horizon });
+              evd, { horizon: evMeta("gap", r.uni).horizon });
             sig.play = playbook("gap", { px: r.px, closePx: pc, gapDir: g >= 0 ? 1 : -1, gapSd: st.gap.sd, med: gs0 ? gs0.med : null, n: gs0 ? gs0.n : 0 });   // playbook detects the fade from the EVENT-signed record
             out.push(sig); openLedger(r, "gap", sig, g >= 0 ? 1 : -1);
           }
@@ -2059,8 +2262,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         if (s0 !== 0 && run >= incVal("fundflip")) {
           const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"), "R");
           const sig = mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
-            22, evd, { horizon: EV_META.fundflip.horizon });
-          sig.play = playbook("fundflip", { dir: s0, px: r.px, sd30 });   // px + σ give the play its 1σ stop (findings ops item 3)
+            22, evd, { horizon: evMeta("fundflip", r.uni).horizon });
+          sig.play = playbook("fundflip", { logGeo: r.uni === "main", dir: s0, px: r.px, sd30 });   // px + σ give the play its 1σ stop (findings ops item 3)
           out.push(sig); if (sd30 > 0) openLedger(r, "fundflip", sig, s0, { sd0: +sd30.toFixed(3) });
         }
       }
@@ -2077,7 +2280,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           if (sqz >= incVal("squeeze")) {
             const evd = evidence(null, "squeeze", null, "%");
             const sig = mkSignal(r, "squeeze", `score ${sqz} \u2014 shorts paying ${Math.abs(fAPR).toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
-              (sqz - incVal("squeeze")) * 1.1 + 15, evd, { horizon: EV_META.squeeze.horizon });
+              (sqz - incVal("squeeze")) * 1.1 + 15, evd, { horizon: evMeta("squeeze", r.uni).horizon });
             sig.play = playbook("squeeze", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
             out.push(sig); openLedger(r, "squeeze", sig, 1);
           }
@@ -2094,7 +2297,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           if (unw >= incVal("unwind")) {
             const evd = evidence(null, "unwind", null, "%");
             const sig = mkSignal(r, "unwind", `score ${unw} \u2014 longs paying ${fAPR.toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
-              (unw - incVal("unwind")) * 1.1 + 15, evd, { horizon: EV_META.unwind.horizon });
+              (unw - incVal("unwind")) * 1.1 + 15, evd, { horizon: evMeta("unwind", r.uni).horizon });
             sig.play = playbook("unwind", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
             out.push(sig); openLedger(r, "unwind", sig, -1);
           }
@@ -2114,7 +2317,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       }
       if (f && f.volBase > 0 && r.vol != null && r.vol / f.volBase >= 2.5) {
         const sig = mkSignal(r, "volume", `24h volume ${(r.vol / f.volBase).toFixed(1)}\u00d7 its 30d norm`,
-          (r.vol / f.volBase - 2.5) * 10 + 12, { pts: 6, unproven: true }, { horizon: EV_META.volume.horizon });
+          (r.vol / f.volBase - 2.5) * 10 + 12, { pts: 6, unproven: true }, { horizon: evMeta("volume", r.uni).horizon });
         sig.play = playbook("volume", {});
         out.push(sig);
       }
@@ -2122,7 +2325,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
         // Context only: no ledger claim, no direction. Feeds direction-aware confluence — a
         // breakout/breakdown firing OUT of compression is the configuration worth extra score.
         const sig = mkSignal(r, "coil", `10d realized vol at its ${st.coil.pct}th pctile of the trailing 120 \u2014 coiled`,
-          (10 - st.coil.pct) * 1.5 + 10, { pts: 6, unproven: true }, { horizon: EV_META.coil.horizon });
+          (10 - st.coil.pct) * 1.5 + 10, { pts: 6, unproven: true }, { horizon: evMeta("coil", r.uni).horizon });
         sig.play = playbook("coil", {});
         out.push(sig);
       }
@@ -2137,15 +2340,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     // (null-tolerant: no valid swing -> no target, mv stays null, the claim still ledgers with
     // its stop-aware leg). Board score / rung / rrv / age ride along as recorded features —
     // recorded, NOT gated: the ledger decides which slices earn trust, not the trigger.
-    // Stocks/macro universe only, like every ledgered event; crypto enrollment is the separate
-    // crypto-signals project. Outcomes in raw % (not sigma-R): there is no in-sample study to
-    // stay unit-compatible with — this event earns its record purely out of sample.
+    // Stocks AND crypto (2026.07.26-08): this is the cleanest transfer in the whole roster,
+    // because its geometry was never a sigma construction — the void is the retesting rung's own
+    // EMA21 and the target is that rung's prior swing, both values the ladder already computed and
+    // the board already rendered. Nothing here needed the log-space rewrite; it needed only the
+    // enrollment. trendCache carries a .crypto board with identical shape (retest / swing / e21),
+    // so the loop widens by one key. Outcomes in raw % (not sigma-R): there is no in-sample study
+    // to stay unit-compatible with — this event earns its record purely out of sample, per
+    // universe, on that universe's own horizon (3d crypto, 5d stocks).
     {
       if (!trendCache || now - trendBuilt > TREND_MS) { try { buildTrend(); } catch (e) { log("buildTrend error in signals: " + (e && e.message)); } }
       if (trendCache) {
         for (const side of ["long", "short"]) {
           const ev = side === "long" ? "tretest" : "tretestdn";
-          for (const e of (trendCache[side].stocks || [])) {
+          const boards = crypto
+            ? (trendCache[side].stocks || []).concat(trendCache[side].crypto || [])
+            : (trendCache[side].stocks || []);
+          for (const e of boards) {
             if (!e.retest) continue;
             const r = rows.get(e.coin);
             if (!r || r.delisted || !(r.px > 0)) continue;
@@ -2158,8 +2369,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
               + (e.age != null ? ` \u00b7 trend age ${e.age}${e.ageCap ? "+" : ""}d` : "");
             const sigT = mkSignal(r, ev, reading,
               10 + 8 * e.score + (e.rrv != null && e.rrv <= 1 ? 6 : 0),   // quiet pullbacks (rrv <= 1x) read healthier than fought ones — small nudge, recorded either way
-              evd, { horizon: EV_META[ev].horizon });
-            sigT.play = playbook(ev, { tf: e.retest, score: e.score, e21: cell.e21, swing: e.swing != null ? e.swing : null, px: r.px });
+              evd, { horizon: evMeta(ev, r.uni).horizon });
+            sigT.play = playbook(ev, { logGeo: r.uni === "main", tf: e.retest, score: e.score, e21: cell.e21, swing: e.swing != null ? e.swing : null, px: r.px });
             out.push(sigT);
             openLedger(r, ev, sigT, dir, { tf: e.retest, tsc: e.score, rrv: e.rrv != null ? +e.rrv.toFixed(2) : null, tage: e.age != null ? e.age : null });
           }
@@ -2188,7 +2399,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
           const dir = d30 > 0 ? 1 : -1;
           const evd = evidence(null, "ondrift", null, "%");
           const sig = mkSignal(r, "ondrift", `${d30 >= 0 ? "+" : ""}${d30.toFixed(1)}% off-hours drift over ~21 windows (${z.toFixed(1)}\u03c3 vs universe)`,
-            (Math.abs(z) - 2) * 16 + 18, evd, { horizon: EV_META.ondrift.horizon });
+            (Math.abs(z) - 2) * 16 + 18, evd, { horizon: evMeta("ondrift", r.uni).horizon });
           sig.play = playbook("ondrift", { dir });
           out.push(sig); openLedger(r, "ondrift", sig, dir);
         }
@@ -2196,6 +2407,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
     }
     const kept = [], live = new Set();
     for (const g of out) {
+      // Universe enrollment applied to the CARD as well as the claim. openLedger's guard stops a
+      // disallowed event from ledgering, but a card with no claim behind it would still render —
+      // a crypto squeeze setup showing a play whose levels the gate just refused to freeze is
+      // precisely the board/ledger disagreement this codebase forbids. One gate, both paths.
+      if (!evAllowed(g.uni, g.ev)) continue;
       // Earnings guard: a report today/tomorrow (ET) sits inside the horizon of session-spanning
       // claims. The study sample excludes no prints, but a known binary catalyst ahead is a PRIOR
       // the base rate can't see — so the evidence contribution is capped at the same 8 points the
@@ -2283,15 +2499,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt })
       }
     }
     kept.sort((a, b) => b.score - a.score);
-    // The PAYLOAD is capped at the top 40 by score; the COUNT is the true number of live
-    // conditions. Serving top.length as the count pinned the tab badge at "40" forever the
-    // moment the universe produced >=40 concurrent conditions — the badge must move with
-    // reality, the payload cap is a transport decision. `shown` carries the cap for the client.
-    const top = kept.slice(0, 40);   // single-universe transport: plain top-40 by score (per-universe lanes retired with the crypto engine, -101)
+    // The PAYLOAD is capped by score; the COUNT is the true number of live conditions. Serving
+    // top.length as the count pinned the tab badge at "40" forever the moment the universe
+    // produced >=40 concurrent conditions — the badge must move with reality, the payload cap is
+    // a transport decision. `shown` carries the cap for the client.
+    // Per-universe lanes are BACK (they were retired at -101 as dead weight when only one universe
+    // was enrolled). With both enrolled a plain top-40 is not a neutral cap: crypto's sigma makes
+    // its intensity terms structurally larger, so on any volatile crypto day the lane would fill
+    // with perps and the equity board — the one with the long record — would silently vanish from
+    // its own tab. Each universe gets its own budget and neither can crowd out the other.
+    const top = crypto ? capPerUniverse(kept, 40, 40) : kept.slice(0, 40);
     const shadows = shadowRecord();
-    const shSig = (a) => a.map((g) => g.rows.map((r) => r.n + ":" + r.open).join(".")).join(",");
+    const shSig = (a) => (a || []).map((g) => g.rows.map((r) => r.n + ":" + r.open).join(".")).join(",");
     const sig = kept.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",")
-      + "|" + shSig(shadows.xyz);   // shadow record changes must bust the ETag too
+      + "|" + shSig(shadows.xyz) + "|" + shSig(shadows.main);   // shadow record changes must bust the ETag too, both panels
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
     for (const k of rearm) if (!firedNow.has(k)) rearm.delete(k);   // condition lapsed -> episode over, key re-armed
     const variants = Object.keys(VARIANTS).map((ev) => ({
@@ -5421,6 +5642,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // away from the trigger, and a setup whose void has already been passed drops off the board on
   // its own (netRR returns null on inverted geometry) rather than lingering as a stale row.
   const ACT_MIN_HZ = 3 * DAY;          // days-to-weeks only — 1d events belong to the Signals tab
+  const ACT_MIN_HZ_MAIN = 2 * DAY;     // crypto floor: the roster runs compressed horizons, so the equity floor would exclude nearly all of it
   const ACT_MAX_BARS = 10;             // bars in trigger before a setup is considered gone stale
   // Hard floor on net reward:risk. Doubles as the board's kill switch: because R:R is repriced
   // from the LIVE mark every build, a setup that gets chased dies here on its own — no separate
@@ -5497,18 +5719,32 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const cands = [];
     const rej = { expired: 0, noGeometry: 0, thinRR: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
     for (const e of ledgerOpen.values()) {
-      const meta = EV_META[e.ev];
-      if (!meta || !(meta.horizonMs >= ACT_MIN_HZ)) continue;   // swing horizons only
       if (e.ev === "airead") continue;                          // the analyst's own claim, not a setup
-      const side = e.psd || (e.dir >= 0 ? "long" : "short");
-      if (side !== "long" && side !== "short") continue;
       const r = rows.get(e.coin);
       if (!r || r.delisted || !(r.px > 0)) continue;
       if (r.uni === "main" && !crypto) continue;
+      // Horizon meta follows the UNIVERSE (2026.07.26-08). Reading the shared EV_META here would
+      // price every crypto setup against an equity horizon: a crypto breakout resolves in 2d, and
+      // carryR/horizonD/EV would all have been computed against 5d.
+      const meta = evMeta(e.ev, r.uni);
+      // Swing horizons only — sub-threshold events belong to the Signals tab. The floor is
+      // per-universe because "swing" is a different length on a 24/7 tape running compressed
+      // horizons: at the equity floor of 3d almost the entire crypto roster would be excluded and
+      // the crypto board would ship permanently empty for a reason no one could see. At 2d the
+      // crypto swing setups qualify while the genuinely fast events (casc 12h, bigmove 12h,
+      // wickfill 1d) correctly stay out.
+      const minHz = r.uni === "main" ? ACT_MIN_HZ_MAIN : ACT_MIN_HZ;
+      if (!meta || !(meta.horizonMs >= minHz)) continue;
+      const side = e.psd || (e.dir >= 0 ? "long" : "short");
+      if (side !== "long" && side !== "short") continue;
       // Frozen geometry, read verbatim: the void is the claim's stamped stop, the target is
       // reconstructed from the stamped target distance against the fire-time mark. No level here
-      // is computed from live data.
-      if (!(e.stp > 0) || e.mv == null || !Number.isFinite(+e.mv) || !(e.mark0 > 0)) { noGeom++; continue; }
+      // is computed from live data. (Pre-existing crash fixed here: this counter was an undeclared
+      // `noGeom`, so under "use strict" every claim without a stamped stop or target distance threw
+      // a ReferenceError out of the build. getActionable swallows it and logs, so the symptom was an
+      // Actionable board that went silently stale for a memo window at a time — fundflip stamps a
+      // null target by design, which is enough to trip it.)
+      if (!(e.stp > 0) || e.mv == null || !Number.isFinite(+e.mv) || !(e.mark0 > 0)) { rej.noGeometry++; continue; }
       const target = side === "long" ? e.mark0 * (1 + +e.mv / 100) : e.mark0 * (1 - +e.mv / 100);
       const tf = e.tf && ACT_TF_MS[e.tf] ? e.tf : "D1";
       const bars = barsInTrigger(e.t0, now, tf);
@@ -5558,7 +5794,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (sigA !== actSig) { actSig = sigA; actVer = Date.now(); }
     actBuilt = now;
     actCache = { ts: now, dataTs: actVer,
-      params: { minHorizonDays: ACT_MIN_HZ / DAY, maxBars: ACT_MAX_BARS, minRR: ACT_MIN_RR,
+      params: { minHorizonDays: ACT_MIN_HZ / DAY, minHorizonDaysCrypto: crypto ? ACT_MIN_HZ_MAIN / DAY : null, maxBars: ACT_MAX_BARS, minRR: ACT_MIN_RR,
         recMinN: ACT_REC_MIN_N, netOfCarry: true, tfs: ["D1", "H12", "H4"],
         gate: "confirmed", requires: ["n>=" + ACT_REC_MIN_N, "avgR>0", "EV>0", "R:R>=" + ACT_MIN_RR.toFixed(1), "!noedge"] },
       coverage: Object.assign({ confirmed: board.length, openClaims: ledgerOpen.size }, rej),
@@ -5785,6 +6021,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
+    resolveLedgerNow: resolveLedger,   // harness: resolve due claims against the seeded spines without waiting out a build cycle
     buildDailyNow: buildDaily,       // harness: populate daily closes so the signals loop has inputs
     buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
     buildAnalyticsNow: buildAnalytics, // harness: run one analytics build synchronously (regime aggregate path)

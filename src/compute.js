@@ -596,23 +596,77 @@ const EV_META = {
   wickfill: { horizonMs: 3 * DAY,  horizon: "next 3d, filling the outsized wick", studyKey: null },            // shadow swing setup (xyz)
   roundfr:  { horizonMs: 2 * DAY,  horizon: "next 2d, fading into the round figure", studyKey: null },         // shadow swing setup (xyz)
   airead:   { horizonMs: 5 * DAY,  horizon: "next 5d, the analyst report's own read", studyKey: null },  // AI analyst accountability claim
+  casc:     { horizonMs: 12 * HOUR, horizon: "next 12h, off the exhausted cascade", studyKey: null },   // crypto-native ledger event
+  fundext:  { horizonMs: 2 * DAY,  horizon: "next 2d, fading the crowded side",     studyKey: null },   // crypto-native ledger event
 };
+// ---- crypto horizon overrides ------------------------------------------------------------------
+// A 5d horizon on a name printing 12%/day is a +/-27% window: the claim resolves on tape noise
+// rather than on the setup, and the record measures BTC's week instead of the signal. Crypto runs
+// the same events on a compressed clock. Only horizonMs/horizon differ — sign conventions, study
+// keys and units are shared with EV_META by construction, so claimed-vs-live stays comparable
+// within a universe (never ACROSS one: a 2d crypto breakout record and a 5d equity breakout
+// record are different claims and the panels keep them apart).
+const EV_META_MAIN = {
+  bigmove:  { horizonMs: 12 * HOUR, horizon: "next 12h, signed with the move" },
+  breakout: { horizonMs: 2 * DAY,   horizon: "next 2d" },
+  breakdown:{ horizonMs: 2 * DAY,   horizon: "next 2d, signed with the breakdown" },
+  volshift: { horizonMs: 2 * DAY,   horizon: "next 2d" },
+  fundflip: { horizonMs: 2 * DAY,   horizon: "next 2d, toward the new crowd" },
+  oiflush:  { horizonMs: 2 * DAY,   horizon: "next 2d (bottoming thesis)" },
+  fpdiv:    { horizonMs: 2 * DAY,   horizon: "next 2d, with the divergence" },
+  tretest:  { horizonMs: 3 * DAY,   horizon: "next 3d, with the stacked trend" },
+  tretestdn:{ horizonMs: 3 * DAY,   horizon: "next 3d, with the stacked downtrend" },
+  reclaim:  { horizonMs: 2 * DAY,   horizon: "next 2d, off the failed breakdown" },
+  failbrk:  { horizonMs: 2 * DAY,   horizon: "next 2d, fading the failed breakout" },
+  mapull:   { horizonMs: 4 * DAY,   horizon: "next 4d, off the rising MA50" },
+  wickfill: { horizonMs: DAY,       horizon: "next 1d, filling the outsized wick" },
+};
+// Resolution meta for one (event, universe) pair. Crypto reads the override when one exists and
+// falls back to the shared entry otherwise, so a new event is automatically defined for both.
+function evMeta(ev, uni) {
+  const base = EV_META[ev];
+  if (!base) return null;
+  if (uni !== "main") return base;
+  const o = EV_META_MAIN[ev];
+  return o ? Object.assign({}, base, o) : base;
+}
 // Mechanical playbook per signal: implied bias, computed target/invalidation levels from the
 // market's own stats, and the one corroborating thing to watch. A description of the setup —
 // explicitly NOT advice; the ledger decides which event types have earned any trust.
 function playbook(ev, ctx) {
   const f2 = (x) => (x == null || !Number.isFinite(x) ? null : +x.toPrecision(6));
+  // ctx.logGeo: multiplicative level geometry, set by the caller for crypto rows. When false
+  // (every xyz call site) these helpers reduce to the EXACT additive arithmetic shipped before,
+  // so the equity record stays byte-comparable across this build. See claimGeometryOk.
+  const LG = ctx.logGeo === true;
+  // signed k-sigma offset from a base level
+  const offSd = (base, kSd) => {
+    if (base == null || !(base > 0) || !Number.isFinite(kSd)) return null;
+    const s = ctx.sd30 > 0 ? ctx.sd30 : 1;
+    return LG ? logLevel(base, kSd, s) : f2(base * (1 + (kSd * s) / 100));
+  };
+  // signed percentage offset from a base level (study medians arrive already in %)
+  const offPct = (base, kPct) => {
+    if (base == null || !(base > 0) || kPct == null || !Number.isFinite(kPct)) return null;
+    return LG ? f2(base * Math.exp(kPct / 100)) : f2(base * (1 + kPct / 100));
+  };
+  // extend `from` by k spans of the lo..hi range — log-space when LG, so a 0.382-span extension
+  // below the range low lands at lo*exp(-0.382*ln(hi/lo)) instead of a negative price
+  const ext = (from, k, lo, hi) => {
+    if (from == null || !(from > 0) || !(lo > 0) || !(hi > lo) || !Number.isFinite(k)) return null;
+    return LG ? logExtend(from, k, lo, hi) : f2(from + k * (hi - lo));
+  };
   switch (ev) {
     case "bigmove": {
       const up = ctx.dir >= 0, sgn = up ? 1 : -1;
       return { side: up ? "long" : "short", bias: "continuation " + (up ? "up" : "down"),
-        target: f2(ctx.px * (1 + sgn * Math.abs(ctx.med != null ? ctx.med : 0.5) / 100)),
-        stop: f2(ctx.px * (1 - sgn * (ctx.sd30 || 1) / 100)),
+        target: offPct(ctx.px, sgn * Math.abs(ctx.med != null ? ctx.med : 0.5)),
+        stop: offSd(ctx.px, -sgn),
         watch: "volume staying elevated \u2014 a thrust on fading volume is the fade setup instead" };
     }
     case "breakout":
       return { side: "long", bias: "continuation while above the breakout level",
-        target: f2(ctx.px * (1 + Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        target: offPct(ctx.px, Math.abs(ctx.med != null ? ctx.med : 1)),
         stop: f2(ctx.level),
         watch: "a close back below the prior 30d high = failed breakout, the signal is void" };
     case "gap": {
@@ -635,23 +689,23 @@ function playbook(ev, ctx) {
     }
     case "breakdown":
       return { side: "short", bias: "continuation while below the breakdown level",
-        target: f2(ctx.px * (1 - Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
+        target: offPct(ctx.px, -Math.abs(ctx.med != null ? ctx.med : 1)),
         stop: f2(ctx.level),
         watch: "a close back above the prior 30d low = failed breakdown, the signal is void" };
     case "unwind": {
       // Bearish mirror of the squeeze: crowded LONGS paying funding + OI building + price near
       // range LOWS. Target extends BELOW the range for the same reason squeeze extends above it.
-      const rngU = ctx.hi30 != null && ctx.lo30 != null ? ctx.hi30 - ctx.lo30 : null;
+      // In log space (crypto) the extension is a ratio of the range, so it can never cross zero —
+      // the additive form produced negative price targets on any name whose 30d range spans >2.6x.
       return { side: "short", bias: "unwind-biased while longs keep paying AND \u0394OI holds",
-        target: f2(rngU != null ? ctx.lo30 - 0.382 * rngU : null),
-        stop: f2(rngU != null ? ctx.hi30 - 0.25 * rngU : null),
+        target: ext(ctx.lo30, -0.382, ctx.lo30, ctx.hi30),
+        stop: ext(ctx.hi30, -0.25, ctx.lo30, ctx.hi30),
         watch: "\u0394OI(7d) rolling negative = longs already liquidating; funding flipping negative = the crowd has left \u2014 the setup is spent" };
     }
     case "oiflush": {
-      const sgn = 1;
       return { side: "long", bias: "capitulation \u2014 forced deleveraging exhausting into a decline",
-        target: f2(ctx.px * (1 + Math.abs(ctx.med != null ? ctx.med : 1) / 100)),
-        stop: f2(ctx.px * (1 - (ctx.sd30 || 1) / 100)),
+        target: offPct(ctx.px, Math.abs(ctx.med != null ? ctx.med : 1)),
+        stop: offSd(ctx.px, -1),
         watch: "\u0394OI stabilizing or turning up = the flush is complete; continued OI bleed = the knife is still falling" };
     }
     case "fpdiv": {
@@ -659,8 +713,8 @@ function playbook(ev, ctx) {
       return { side: up ? "long" : "short",
         bias: up ? "price strength while funding falls \u2014 shorts pressing into a rising tape (stubborn crowd, squeeze-adjacent)"
                  : "price weakness while funding rises \u2014 longs averaging down into a falling tape (fragile crowd)",
-        target: f2(ctx.px * (1 + sg * Math.abs(ctx.med != null ? ctx.med : 0.8) / 100)),
-        stop: f2(ctx.px * (1 - sg * (ctx.sd30 || 1) / 100)),
+        target: offPct(ctx.px, sg * Math.abs(ctx.med != null ? ctx.med : 0.8)),
+        stop: offSd(ctx.px, -sg),
         watch: "funding re-converging with price = the divergence resolved \u2014 the setup is spent" };
     }
     case "ondrift":
@@ -676,17 +730,16 @@ function playbook(ev, ctx) {
         // (findings ops item 3 — every prior fundflip claim resolved at-horizon only). Null when
         // the caller can't supply px/σ, preserving the legacy no-stop shape.
         stop: ctx.px != null && ctx.px > 0 && ctx.sd30 > 0
-          ? f2(ctx.px * (1 - (ctx.dir >= 0 ? 1 : -1) * ctx.sd30 / 100)) : null,
+          ? offSd(ctx.px, -(ctx.dir >= 0 ? 1 : -1)) : null,
         watch: "funding flipping straight back voids it; funding STAYING flipped for 2+ days is the confirmation" };
     case "squeeze": {
       // Target is a measured-move EXTENSION above the range (hi30 + 0.382 x range), not the
       // range top: the trigger rewards price already near the high, so targeting hi30 itself
       // produced structurally inverted R/R at exactly the moments the signal fired. Squeezes
       // resolve through the range, not to it.
-      const rng = ctx.hi30 != null && ctx.lo30 != null ? ctx.hi30 - ctx.lo30 : null;
       return { side: "long", bias: "squeeze-biased while shorts keep paying AND \u0394OI holds",
-        target: f2(rng != null ? ctx.hi30 + 0.382 * rng : null),
-        stop: f2(rng != null ? ctx.lo30 + 0.25 * rng : null),
+        target: ext(ctx.hi30, 0.382, ctx.lo30, ctx.hi30),
+        stop: ext(ctx.lo30, 0.25, ctx.lo30, ctx.hi30),
         watch: "\u0394OI(7d) turning negative = shorts covering, spring released \u2014 the setup is spent" };
     }
     case "prem":
@@ -694,6 +747,28 @@ function playbook(ev, ctx) {
         bias: ctx.prem >= 0 ? "perp rich \u2014 reversion toward oracle (short the perp side)" : "perp cheap \u2014 reversion toward oracle (long the perp side)",
         target: f2(ctx.oracle), stop: null,
         watch: ctx.closed ? "whether the cash open confirms the perp's level or snaps it back to the oracle" : "persistence \u2014 a dislocation that survives arb for hours is information, not noise" };
+    case "casc": {
+      // Cascade exhaustion (crypto). Geometry is entirely OBSERVED — the flush wick and the
+      // pre-cascade level are prices the tape printed — which is precisely why this is the
+      // flagship crypto event rather than a sigma construction that has to be clamped.
+      const L = ctx.side === "long";
+      return { side: L ? "long" : "short",
+        bias: `forced ${L ? "long" : "short"} liquidation cleared positioning (OI ${ctx.doiPct != null ? ctx.doiPct.toFixed(1) + "%" : "down"} in the bucket) and the flush ${L ? "low" : "high"} has held \u2014 ${L ? "exhaustion bounce" : "squeeze exhaustion"} back toward the pre-cascade level`,
+        target: f2(ctx.target), stop: f2(ctx.stop),
+        watch: `a ${L ? "break of the flush low" : "push through the squeeze high"} = the cascade was continuation, not exhaustion \u2014 the claim is void` };
+    }
+    case "fundext": {
+      // Persistent funding extreme: the crowd is maximally one-sided against its OWN 31d
+      // distribution. Fade the crowd. Target is the range midpoint (an observed structure),
+      // void a sigma multiple beyond the extreme the crowd is defending.
+      const L = ctx.dir >= 0;   // dir = the FADE direction (crowded long -> short it, so dir<0)
+      const mid = ctx.hi30 > ctx.lo30 ? Math.sqrt(ctx.hi30 * ctx.lo30) : null;   // geometric mid — scale-free
+      return { side: L ? "long" : "short",
+        bias: `funding at its ${ctx.pct != null ? ctx.pct + "th" : "own"} percentile of 31d \u2014 crowded ${L ? "short" : "long"}, faded toward the range middle`,
+        target: mid != null && ((L && mid > ctx.px) || (!L && mid < ctx.px)) ? f2(mid) : null,
+        stop: offSd(ctx.px, L ? -1.5 : 1.5),
+        watch: "funding decaying back toward its median = the crowd is unwinding on its own; a percentile extreme that persists for days is the setup, one print is not" };
+    }
     case "tretest": case "tretestdn": {
       // The trend board's retest, frozen into ledger geometry at fire time: entry = the mark,
       // void = the retesting rung's EMA21 (the ladder's own level — a close beyond it is the
@@ -2732,7 +2807,9 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   // ledger shadow pair (build 2026.07.24-12): outsized-wick fill + round-number front-run
   detectWickFill, detectRoundFront, roundStep,
   // candle behaviour + time pivots + per-ticker scopes (build 2026.07.24-13)
-  candleType, candleEvents, candlePool, pivotPool, anatomyTickerSummary, CANDLE_TYPES, PIVOT_EARLY_H };
+  candleType, candleEvents, candlePool, pivotPool, anatomyTickerSummary, CANDLE_TYPES, PIVOT_EARLY_H,
+  // crypto signal engine (build 2026.07.26-08): log-space claim geometry + crypto horizons
+  logLevel, logExtend, claimGeometryOk, clusterDays, evMeta, capPerUniverse, EV_META_MAIN };
 
 // ---- stop geometry validation ----------------------------------------------------------------
 // An invalidation level must sit on the LOSS side of entry: below the mark for a long, above it
@@ -2748,6 +2825,100 @@ function stopGeometryOk(side, mark0, stp) {
   if (side === "short") return stp > mark0;
   return false;
 }
+
+// ---- log-space claim geometry (the crypto gate) -----------------------------------------------
+// stopGeometryOk above answers one question — is the void on the loss side — and that was enough
+// for a universe whose daily sigma is ~1-2%. It is NOT enough at 12-40%/day: additive level
+// arithmetic (`lo30 - 0.382 * (hi30 - lo30)`, `px * (1 - k*sd/100)`) produces negative prices,
+// voids multiples of price away, and targets that are pure artifact. That is the exact failure
+// that retired the crypto engine at -101; it was an arithmetic bug, not a statistical verdict.
+//
+// Two primitives replace the arithmetic:
+//   logLevel(px, k, sd) — a k-sigma offset as a RATIO, px*exp(k*sd/100). First-order identical to
+//                         px*(1 + k*sd/100) at equity sigma, and provably positive at any sigma.
+//   logExtend(from, k, lo, hi) — extend a level by k spans of the lo..hi range, measured in log
+//                         space, so "0.382 of the range below the low" can never cross zero.
+// And one gate, claimGeometryOk, which every crypto claim must clear before its levels are
+// stamped: the void strictly on the loss side, the target strictly on the profit side, both
+// inside a 3x band of the mark, and the void between 0.1 and 5 sigma out. Closer than 0.1σ is
+// noise wearing a stop's clothing (the first candle takes it); further than 5σ is a different
+// thesis. A claim that fails the gate still LEDGERS — it just carries no stop-aware leg and no
+// target, resolving at-horizon only. Refusing the level is the honest degradation; inventing one
+// is what fabricated wins last time.
+//
+// Deliberately scoped to crypto. The xyz record was earned under the additive geometry, and
+// silently changing the formula mid-record would make every future claim incomparable to the
+// hundreds already resolved. One universe, one geometry, forever comparable.
+const GEO_MIN_SD = 0.1;             // void floor in daily-sigma units
+const GEO_MAX_SD = 5;               // void ceiling in daily-sigma units
+const GEO_MAX_LN = Math.log(3);     // no level further than a 3x band from the mark
+function logLevel(px, kSigma, sdPct) {
+  if (!(px > 0) || !Number.isFinite(kSigma)) return null;
+  const s = sdPct > 0 ? sdPct : 1;
+  const v = px * Math.exp((kSigma * s) / 100);
+  return Number.isFinite(v) && v > 0 ? +v.toPrecision(6) : null;
+}
+function logExtend(from, k, lo, hi) {
+  if (!(from > 0) || !Number.isFinite(k) || !(lo > 0) || !(hi > lo)) return null;
+  const v = from * Math.exp(k * Math.log(hi / lo));
+  return Number.isFinite(v) && v > 0 ? +v.toPrecision(6) : null;
+}
+function claimGeometryOk(side, px, stop, target, sdPct, opts) {
+  const o = opts || {};
+  if (!(px > 0) || (side !== "long" && side !== "short")) return false;
+  const sgn = side === "long" ? 1 : -1;
+  const minSd = o.minSd > 0 ? o.minSd : GEO_MIN_SD;
+  const maxSd = o.maxSd > 0 ? o.maxSd : GEO_MAX_SD;
+  const maxLn = o.maxLn > 0 ? o.maxLn : GEO_MAX_LN;
+  if (stop != null) {
+    if (!Number.isFinite(+stop) || !(+stop > 0)) return false;
+    const d = Math.log(+stop / px);
+    if (sgn * d >= 0) return false;                     // must be strictly on the loss side
+    if (Math.abs(d) > maxLn) return false;              // outside the 3x band: artifact, not a level
+    if (sdPct > 0) {
+      const sd = (Math.abs(d) * 100) / sdPct;
+      if (sd < minSd || sd > maxSd) return false;
+    }
+  }
+  if (target != null) {
+    if (!Number.isFinite(+target) || !(+target > 0)) return false;
+    const d = Math.log(+target / px);
+    if (sgn * d <= 0) return false;                     // must be strictly on the profit side
+    if (Math.abs(d) > maxLn) return false;
+  }
+  return true;
+}
+// Per-universe transport lanes. A single global top-N cap is not universe-neutral once both
+// universes are enrolled: crypto's daily sigma is 5-20x the equity side's, so its intensity terms
+// (which are sigma multiples) are structurally larger and a plain sort would hand the whole payload
+// to perps on any volatile day — the equity board would disappear from its own tab without a single
+// error. Each universe fills its own budget by score, and the merged list is re-sorted so the
+// client's ordering is still globally meaningful. Retired at -101 when only one universe existed;
+// back at 2026.07.26-08 for exactly the reason it was written.
+function capPerUniverse(sigs, xyzMax, mainMax) {
+  if (!Array.isArray(sigs)) return [];
+  const nx = xyzMax > 0 ? xyzMax : 40, nm = mainMax > 0 ? mainMax : 40;
+  const x = [], m = [];
+  for (const g of sigs) {
+    if (!g) continue;
+    if (g.uni === "main") { if (m.length < nm) m.push(g); }
+    else if (x.length < nx) x.push(g);
+  }
+  return x.concat(m).sort((a, b) => (b.score || 0) - (a.score || 0));
+}
+// Distinct UTC calendar days spanned by a set of claims. Sixty perps at ~0.8 correlation to BTC
+// do not produce sixty independent observations when they all fire on the same red day — this is
+// what lets the accuracy panel say "n=112 across 9 tape days" instead of implying 112 draws.
+function clusterDays(entries) {
+  if (!Array.isArray(entries) || !entries.length) return 0;
+  const d = new Set();
+  for (const e of entries) { const t = e && +e.t0; if (Number.isFinite(t) && t > 0) d.add(Math.floor(t / 86400000)); }
+  return d.size;
+}
+// Declared with const, so they cannot ride the hoisted function list in the main exports object.
+module.exports.GEO_MIN_SD = GEO_MIN_SD;
+module.exports.GEO_MAX_SD = GEO_MAX_SD;
+module.exports.GEO_MAX_LN = GEO_MAX_LN;
 
 // ---- play-signed stats for fade playbooks ------------------------------------------------------
 // The gap study is EVENT-signed: positive = the gap continued. For a market whose record says
@@ -3119,10 +3290,67 @@ function aggDerivHourly(rows) {
   for (const b of out) { b[1] = Math.round(b[1]); b[2] = Math.round(b[2]); if (b[3] != null) b[3] = Math.round(b[3]); }
   return out;
 }
+// ---- cascade exhaustion (the crypto-native ledger event) --------------------------------------
+// cascadeFlags above answers "did forced flow clear positioning". This turns the most recent such
+// bucket into a tradeable claim with geometry the tape actually printed, no sigma construction and
+// therefore nothing for claimGeometryOk to clamp:
+//   long-side cascade  (longs force-sold, price down) -> LONG the exhaustion
+//     void   = the flush LOW across the cascade window (a new low says it was continuation)
+//     target = the pre-cascade level (the close of the last bar before the cascade bucket)
+//   short-side cascade (shorts force-bought, price up) -> SHORT the exhaustion, mirrored
+// Gates: the cascade must be aged enough that the dust settled (minAgeMs) and fresh enough to
+// still be the operative structure (maxAgeMs), and the mark must sit strictly BETWEEN the flush
+// extreme and the pre-cascade level — beyond the extreme the thesis is already dead, past the
+// level the move is already made. Both checks are what stop this from firing on stale history.
+//   casc  : one flag from cascadeFlags — { t, side, liq, doiPct }
+//   hours : hourly candles [t,o,h,l,c,v] ascending (the price spine)
+function detectCascExhaust(casc, hours, px, opts) {
+  const o = opts || {};
+  const minAge = o.minAgeMs > 0 ? o.minAgeMs : 3600000;            // 1h
+  const maxAge = o.maxAgeMs > 0 ? o.maxAgeMs : 24 * 3600000;       // 24h
+  const now = Number.isFinite(o.now) ? o.now : Date.now();
+  if (!casc || !Array.isArray(hours) || hours.length < 4 || !(px > 0)) return null;
+  const t = +casc.t;
+  if (!Number.isFinite(t)) return null;
+  const age = now - t;
+  if (!(age >= minAge && age <= maxAge)) return null;
+  const long = casc.side === "long";                               // longs were liquidated
+  if (!long && casc.side !== "short") return null;
+  // the flush window: the hour containing the cascade bucket plus the two that follow
+  const wFrom = Math.floor(t / 3600000) * 3600000, wTo = wFrom + 3 * 3600000;
+  let ext = null, pre = null;
+  for (const k of hours) {
+    const kt = +k[0];
+    if (!Number.isFinite(kt)) continue;
+    if (kt < wFrom) { const c = +k[4]; if (Number.isFinite(c) && c > 0) pre = c; continue; }
+    if (kt > wTo) break;
+    const hi = +k[2], lo = +k[3], c = +k[4];
+    const h = Number.isFinite(hi) && hi > 0 ? hi : c, l = Number.isFinite(lo) && lo > 0 ? lo : c;
+    if (long) { if (Number.isFinite(l) && l > 0 && (ext == null || l < ext)) ext = l; }
+    else { if (Number.isFinite(h) && h > 0 && (ext == null || h > ext)) ext = h; }
+  }
+  if (!(ext > 0) || !(pre > 0)) return null;                       // no flush wick, or no pre-cascade level
+  if (long ? !(pre > ext) : !(pre < ext)) return null;             // the cascade did not move price the way its side implies
+  if (long ? !(px > ext && px < pre) : !(px < ext && px > pre)) return null;
+  return { side: long ? "long" : "short", stop: +ext.toPrecision(6), target: +pre.toPrecision(6),
+    level: +pre.toPrecision(6), ageMs: age, liq: casc.liq != null ? casc.liq : null,
+    doiPct: casc.doiPct != null ? casc.doiPct : null };
+}
+// Most recent flag within `withinMs`, or null. Small helper so the fire site never has to reason
+// about ordering (cascadeFlags emits ascending, and both sides can flag the same bucket).
+function latestCascade(flags, now, withinMs) {
+  if (!Array.isArray(flags) || !flags.length) return null;
+  const cut = (Number.isFinite(now) ? now : Date.now()) - (withinMs > 0 ? withinMs : 24 * 3600000);
+  let best = null;
+  for (const f of flags) { if (!f || !Number.isFinite(+f.t) || +f.t < cut) continue; if (!best || +f.t > +best.t) best = f; }
+  return best;
+}
 module.exports.czMergeHistory = czMergeHistory;
 module.exports.cascadeFlags = cascadeFlags;
 module.exports.derivRollup = derivRollup;
 module.exports.aggDerivHourly = aggDerivHourly;
+module.exports.detectCascExhaust = detectCascExhaust;
+module.exports.latestCascade = latestCascade;
 
 // ---- actionable board: carry-netting, expectancy, merge/rank (build 2026.07.26-01) ----------
 // Swing scope is days-to-weeks off D1/H12/H4, and at that horizon perpetual funding stops being
