@@ -1887,21 +1887,17 @@ function buildLayoutMenu(){ const pop=el('laypop'); const names=Object.keys(stat
 }
 
 // ===== alerts (in-tab, edge-triggered) =====
+// What remains of the in-tab evaluator. Everything the SERVER can compute moved there in -05, so
+// these rules keep firing with no tab open and reach Telegram. The three below stayed because they
+// are derived HERE, in this browser, from raw features against the analysis window you happen to
+// have selected — so there is no single server-side value to alert on. Porting them would mean the
+// same math living in two files, which is the drift this codebase refuses everywhere else.
+// They are labelled "this browser" in the panel and die with the tab; that is the honest boundary,
+// not an oversight.
 const ALERT_METRICS=[
-  {k:'px',label:'Price',unit:'$',get:r=>r.px},
-  {k:'h1',label:'1h %',unit:'%',get:r=>r.h1},
-  {k:'h4',label:'4h %',unit:'%',get:r=>r.h4},
-  {k:'d1',label:'1d %',unit:'%',get:r=>r.d1},
-  {k:'d7',label:'7d %',unit:'%',get:r=>r.d7},
-  {k:'d30',label:'30d %',unit:'%',get:r=>r.d30},
-  {k:'funding',label:'Funding APR %',unit:'%',get:r=>r.funding!=null?r.funding*24*365*100:null},
-  {k:'prem',label:'Premium (bp)',unit:'bp',get:r=>r.prem},
   {k:'sqz',label:'Squeeze (0-100)',unit:'',get:r=>r.sqz},
   {k:'mom',label:'Momentum',unit:'',get:r=>r.mom},
-  {k:'doi',label:'ΔOI %',unit:'%',get:r=>r.doi},
   {k:'beta',label:'Beta',unit:'',get:r=>r.beta},
-  {k:'vol',label:'24h Vol (M)',unit:'M',get:r=>r.vol,scale:1e6},
-  {k:'oi',label:'OI (M)',unit:'M',get:r=>r.oi,scale:1e6},
 ];
 const AM_BY={}; ALERT_METRICS.forEach(m=>AM_BY[m.k]=m);
 const AKEY='xyzmon.alerts.v1';
@@ -1944,6 +1940,7 @@ function alertMarkRead(){ const A=state.alerts;
 function alertText(ev){
   const k=ev.kind||'setup';
   if(k==='ops') return `${ev.title||'ops'}${ev.text?' \u2014 '+ev.text:''}`;
+  if(k==='rule') return `${ev.t} \u00b7 ${ev.rule||(ev.label+' '+ev.op+' '+ev.value)} \u00b7 now ${ev.now||'\u2014'}${ev.note?' \u00b7 '+ev.note:''}`;
   if(k==='ledger'){
     const head=ev.sub==='stop'?'\u26d4 void taken':ev.sub==='target'?'\u2713 target':'resolved';
     let tail;
@@ -1957,10 +1954,20 @@ function alertText(ev){
   return `${ev.t} ${String(ev.side||'').toUpperCase()} \u00b7 ${ev.label} \u00b7 R:R ${rr} \u00b7 EV ${evs}`;
 }
 function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
-  const metricOpts=ALERT_METRICS.map(m=>`<option value="${m.k}">${esc(m.label)}</option>`).join('');
+  // ONE form. The metric chosen decides where the rule lives: server metrics become shared,
+  // persistent, Telegram-capable rules; the three browser-derived ones stay in this tab. Two
+  // separate forms would make the user carry that distinction; a labelled dropdown does it for them.
+  const srvMetrics=(ruleState&&ruleState.metrics)||[];
+  const metricOpts=srvMetrics.map(m=>`<option value="s:${esc(m.k)}">${esc(m.label)}</option>`).join('')
+    +(ALERT_METRICS.length?`<optgroup label="this browser only">${ALERT_METRICS.map(m=>`<option value="l:${m.k}">${esc(m.label)}</option>`).join('')}</optgroup>`:'');
+  const opOpts=(ruleState&&ruleState.ops||['>','<']).map(o=>`<option value="${esc(o)}">${esc((ruleState&&ruleState.opLabels&&ruleState.opLabels[o])||o)}</option>`).join('');
+  const srvRules=(ruleState&&ruleState.rules)||[];
+  const srvHtml=srvRules.length? srvRules.map(rl=>
+      `<div class="arule"><span>${esc(rl.text||rl.metric)}${rl.note?' <span class="sec">'+esc(rl.note)+'</span>':''}</span><span class="ax" data-sdel="${rl.id}" title="delete">\u2715</span></div>`).join('')
+    : '<div class="sec" style="font-size:12px;padding:4px">No shared rules yet.</div>';
   const rulesHtml=A.rules.length? A.rules.map(rl=>{ const m=AM_BY[rl.metric];
-    return `<div class="arule"><span>${rl.coin?esc(tickerOf(rl.coin)):'<span class="sec">any</span>'} · ${esc(m?m.label:rl.metric)} ${rl.op} ${rl.value}</span><span class="ax" data-del="${rl.id}" title="delete">✕</span></div>`; }).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">No rules yet.</div>';
+    return `<div class="arule"><span>${rl.coin?esc(tickerOf(rl.coin)):'<span class="sec">any</span>'} \u00b7 ${esc(m?m.label:rl.metric)} ${rl.op} ${rl.value}</span><span class="ax" data-del="${rl.id}" title="delete">\u2715</span></div>`; }).join('')
+    : '';
   // The log is a MERGE of two sources with different lifetimes, and the tag column says which is
   // which: server-held events (survive a refresh, a closed tab, a redeploy) and this browser's own
   // in-tab rule fires (die with the tab, until their server-side replacement lands).
@@ -1991,16 +1998,18 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     <div class="arule-form">
       <input id="ar-ticker" class="full" placeholder="Ticker (blank = any market)" autocomplete="off" spellcheck="false"/>
       <select id="ar-metric">${metricOpts}</select>
-      <select id="ar-op"><option value="&gt;">above &gt;</option><option value="&lt;">below &lt;</option></select>
+      <select id="ar-op">${opOpts}</select>
       <input id="ar-val" class="full" placeholder="Threshold (e.g. 5 for 5%, 50 for 50M)" autocomplete="off" spellcheck="false"/>
       <button class="btn full" id="ar-add" style="justify-content:center">Add alert</button>
     </div>
-    <div class="cphead">Rules (${A.rules.length})</div>${rulesHtml}
+    <div class="cphead">Rules (${srvRules.length}) <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 shared \u00b7 evaluated server-side, fire with no tab open</span></div>${srvHtml}
+    ${A.rules.length?`<div class="cphead">This browser only (${A.rules.length}) <span class="sec" style="text-transform:none;letter-spacing:0" data-tip="squeeze, momentum and beta are derived in your browser against the analysis window you have selected, so there is no single server-side value to alert on. These fire only while this tab is open and never reach telegram.">\u00b7 why?</span></div>${rulesHtml}`:''}
     <div class="cphead">Delivery <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 telegram DMs, sent with no tab open</span></div>${buildPushSection()}
     <div class="cphead">Recent <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 server-held \u2014 survives a closed tab; RULE rows are this browser only</span></div>${logHtml}
     <label class="copt" style="margin-top:8px"><input type="checkbox" id="ar-notify" ${A.notify?'checked':''} ${navail?'':'disabled'}/> Browser notifications${navail?'':' (unavailable here)'}</label>
     <button class="btn" id="ar-clear" style="width:100%;justify-content:center;margin-top:6px">Mark all read</button>`;
   el('ar-add').onclick=addAlertRule;
+  pop.querySelectorAll('[data-sdel]').forEach(x=>x.addEventListener('click',()=>ruleAct({del:+x.dataset.sdel})));
   el('ar-val').addEventListener('keydown',e=>{ if(e.key==='Enter') addAlertRule(); });
   pop.querySelectorAll('[data-del]').forEach(x=>x.addEventListener('click',()=>deleteAlertRule(+x.dataset.del)));
   el('ar-notify').addEventListener('change',e=>toggleNotify(e.target.checked));
@@ -2031,10 +2040,13 @@ function addAlertRule(){ const A=state.alerts, tIn=el('ar-ticker').value.trim().
   if(tIn){ for(const r of state.rows.values()){ if(r.ticker.toUpperCase()===tIn||r.coin.toUpperCase()===tIn){ coin=r.coin; break; } }
     if(!coin){ el('ar-ticker').classList.add('bad'); return; } }
   el('ar-ticker').classList.remove('bad');
-  const metric=el('ar-metric').value, op=el('ar-op').value, val=parseFloat(el('ar-val').value);
+  const sel=el('ar-metric').value, op=el('ar-op').value, val=parseFloat(el('ar-val').value);
   if(!isFinite(val)){ el('ar-val').classList.add('bad'); return; } el('ar-val').classList.remove('bad');
-  A.rules.push({id:Date.now()+Math.floor(Math.random()*1000), coin, metric, op, value:val});
+  const metric=sel.slice(2), server=sel.charAt(0)==='s';
   el('ar-ticker').value=''; el('ar-val').value='';
+  if(server){ ruleAct({metric, op, value:val, coin}); return; }
+  // A browser-derived metric only supports the two comparisons this tab can evaluate.
+  A.rules.push({id:Date.now()+Math.floor(Math.random()*1000), coin, metric, op:(op==='<'?'<':'>'), value:val});
   saveAlerts(); buildAlertsPanel(); render(); }
 function deleteAlertRule(id){ const A=state.alerts; A.rules=A.rules.filter(r=>r.id!==id);
   for(const k of [...alertFired]) if(k.startsWith(id+':')) alertFired.delete(k);
@@ -3755,7 +3767,19 @@ function fireLedger(ev){
 // The panel is a thin view over /api/alerts. Every decision — who is linked, which classes they
 // take, whether the wire is healthy — lives on the server, because the alerts have to keep flowing
 // with no tab open at all. This screen only reads and edits that state.
-let pushState=null, pushBusy=false;
+let pushState=null, pushBusy=false, ruleState=null;
+async function loadRules(){
+  try{ ruleState=await fetchJSON('/api/alerts/rules'); }
+  catch(_){ ruleState=null; }
+  if(!el('alertpop').hidden) buildAlertsPanel();
+}
+async function ruleAct(body){
+  try{
+    const res=await fetch('/api/alerts/rules',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
+    await res.json().catch(()=>null);
+  }catch(_){}
+  await loadRules();
+}
 async function loadPush(){
   try{ pushState=await fetchJSON('/api/alerts'); }
   catch(_){ pushState=null; }
@@ -5608,7 +5632,7 @@ el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly;
 el('drawerbg').addEventListener('click', closeDetail);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && state.detail) closeDetail(); });
 el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('alertpop');
-  if(pop.hidden){ loadPush(); alertMarkRead(); }   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
+  if(pop.hidden){ loadPush(); loadRules(); alertMarkRead(); }   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
   if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); updateBell(); }
   else { pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('alertpop');
