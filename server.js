@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.27-04";
+const VERSION = "2026.07.27-05";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -575,6 +575,17 @@ async function main() {
   fastify.post("/api/alerts/test", { bodyLimit: 4 * 1024 }, (req, reply) => {
     const r = poller.pushTest((req.body && req.body.chat) || null);
     if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+
+  // User-authored metric rules: the threshold alerts, group-shared and server-evaluated so they
+  // keep firing with every tab closed. no-store — the list is small and edits must be visible to
+  // the next reader immediately.
+  fastify.get("/api/alerts/rules", (req, reply) =>
+    reply.header("cache-control", "no-store").send(poller.getRules()));
+  fastify.post("/api/alerts/rules", { bodyLimit: 16 * 1024 }, (req, reply) => {
+    const b = req.body || {};
+    const r = b.del != null ? poller.deleteRule(b.del) : poller.addRule(b);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
 
