@@ -6449,7 +6449,7 @@ test("actionable -07: the board reads the ledger's frozen geometry and never re-
   assert.equal(a.params.netOfCarry, true, "the payload declares that R:R is net of carry");
   assert.equal(a.params.recMinN, 8, "and discloses the record floor");
   assert.equal(a.params.gate, "confirmed", "and names the gate it applied");
-  assert.deepEqual(a.params.requires, ["n>=8", "avgR>0", "EV>0", "R:R>=2.0", "!noedge"], "the gate's conditions ship with the payload so the UI can state them");
+  assert.deepEqual(a.params.requires, ["n>=8", "avgR>0", "EV>0", "R:R>=2.0", "R:R<=20", "!noedge"], "the gate's conditions ship with the payload so the UI can state them — including the CEILING, because a ratio can now be rejected for being absurdly high as well as too low");
   // Nothing confirmed means nothing announced — the stream inherits the gate by construction.
   assert.equal(p.getTriggers().seq, 0, "an unconfirmed setup never reaches the trigger stream");
   // Swing gate is by horizon, so short-horizon events can never leak onto a swing board.
@@ -7572,4 +7572,51 @@ test("scoped badge and header count read the universe on screen, from kept total
   p2.buildDailyNow();
   p2.buildSignalsNow();
   assert.equal(p2.getSignals().countU.m, null, "crypto disabled: m is null, never 0");
+});
+
+test("degenerate void: a stop that lands on the entry cannot reach the board, however good the ratio looks", () => {
+  // Real board row, 2026-07-27. PALLADIUM short, unwind on D1: fired 1287.40, void 1287.85,
+  // target 1109.61. The void is 45 cents on a 1287 instrument — 0.035% — while the target is
+  // 13.81% away, so the ratio comes out at 395:1 and setupEV turns a 60% hit rate into an
+  // expectancy of +236R. Nothing about that is a trade. Risk is the denominator, and when the
+  // void collapses onto the mark the ratio measures the collapse, not the setup.
+  //
+  // The unwind and squeeze playbooks are the structural source: their voids are a fixed fraction
+  // of the 30d range (hi30 - 0.25 x range) regardless of where price actually sits in that range.
+  // Reverse the levels here and the range is 1169.76-1327.22 with price at 1287.40 — 75% of the
+  // way up, which is exactly where that formula puts the void. The trigger is supposed to fire
+  // near the range LOWS; it fired at three-quarters, and the void landed on the entry.
+  const { netRR } = require("../src/compute");
+  const rr = netRR({ side: "short", entry: 1287.40, stop: 1287.85, target: 1109.61 });
+  assert.ok(rr.gross > 390, `the artifact is reproducible: ${rr.gross}`);
+  assert.ok(rr.riskPct < 0.04, `and it comes from a void 0.035% away, got ${rr.riskPct}%`);
+
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p2.seedRowNow("xyz:PALLADIUM", { px: 1287.20, ticker: "PALLADIUM", uni: "xyz" });
+  const e = p2.openLedgerNow("xyz:PALLADIUM", "unwind",
+    { score: 9, reading: "", play: { side: "short", stop: 1287.85, target: 1109.61 } }, -1, { sd0: 1.2 });
+  assert.ok(e && e.stp === 1287.85, "the claim itself still opens and still records — this guard is the BOARD's, not the ledger's");
+  p2.buildActionableNow();
+  const a = p2.getActionable();
+  assert.equal(a.rows.length, 0, "and it never reaches the board");
+  assert.equal(a.coverage.degenerate, 1, "counted under its own reason, so an empty board can always say why");
+
+  // the three checks are independent — each must reject on its own
+  const p3 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p3.seedRowNow("xyz:AAA", { px: 100, ticker: "AAA", uni: "xyz" });
+  // no sd0 stamped: the absolute 5bp floor has to carry it alone
+  p3.openLedgerNow("xyz:AAA", "unwind", { score: 9, reading: "", play: { side: "short", stop: 100.02, target: 90 } }, -1, {});
+  p3.buildActionableNow();
+  assert.equal(p3.getActionable().coverage.degenerate, 1, "a 2bp void is refused with no volatility stamp to judge it by");
+
+  // a legitimately tight-but-real setup survives: 0.9% void on a 1.2% sigma name, ratio 3.3
+  const p4 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p4.seedRowNow("xyz:BBB", { px: 100, ticker: "BBB", uni: "xyz" });
+  p4.openLedgerNow("xyz:BBB", "breakout", { score: 9, reading: "", play: { side: "long", stop: 99.1, target: 103 } }, 1, { sd0: 1.2 });
+  p4.buildActionableNow();
+  assert.equal(p4.getActionable().coverage.degenerate, 0,
+    "a real void at 0.75 sigma is NOT degenerate — this guard must not become a filter on tight setups");
 });
