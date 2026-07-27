@@ -1940,6 +1940,11 @@ function alertMarkRead(){ const A=state.alerts;
 function alertText(ev){
   const k=ev.kind||'setup';
   if(k==='ops') return `${ev.title||'ops'}${ev.text?' \u2014 '+ev.text:''}`;
+  if(k==='filing') return `${ev.t} \u00b7 ${ev.form} \u00b7 ${ev.h||''}`;
+  if(k==='earnings') return `${ev.t} reports ${ev.when}${ev.session?' ('+ev.session+')':''}${ev.claim?' \u00b7 open '+ev.claim+' claim':''}`;
+  if(k==='ai') return `${ev.t} \u00b7 analyst read flipped: ${ev.from} \u2192 ${ev.to}`;
+  if(k==='regime') return `${ev.scope==='main'?'crypto':'stocks'} positioning \u00b7 ${ev.title} \u00b7 ${ev.text||''}`;
+  if(k==='coverage') return `\u26a0 ${ev.t} \u00b7 data gap \u00b7 ${ev.text||''}`;
   if(k==='rule') return `${ev.t} \u00b7 ${ev.rule||(ev.label+' '+ev.op+' '+ev.value)} \u00b7 now ${ev.now||'\u2014'}${ev.note?' \u00b7 '+ev.note:''}`;
   if(k==='ledger'){
     const head=ev.sub==='stop'?'\u26d4 void taken':ev.sub==='target'?'\u2713 target':'resolved';
@@ -1971,13 +1976,14 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   // The log is a MERGE of two sources with different lifetimes, and the tag column says which is
   // which: server-held events (survive a refresh, a closed tab, a redeploy) and this browser's own
   // in-tab rule fires (die with the tab, until their server-side replacement lands).
-  const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec']};
+  const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec'],
+    filing:['FILING',''], earnings:['EARN','sec'], ai:['AI',''], regime:['REGIME','sec'], coverage:['GAP','neg']};
   const feedRows=A.feed.map(e=>({t:e.at||0, seq:e.seq||0,
     kind:(e.kind||'setup'), sub:e.sub||null, text:alertText(e), coin:e.coin||null}));
   const localRows=A.log.map(e=>({t:e.t, seq:0, kind:'rule', sub:null, text:e.text, coin:null}));
   const merged=feedRows.concat(localRows).sort((a,b)=>(b.t||0)-(a.t||0)).slice(0,14);
   const logHtml=merged.length? merged.map(e=>{
-    const tag=ATAG[e.kind]||['?',''];
+    const tag=ATAG[e.kind]||['?','']; 
     const lbl=e.kind==='ledger'&&e.sub==='stop'?['VOID','neg']:e.kind==='ledger'&&e.sub==='target'?['TGT','pos']:e.kind==='ledger'?['RES','sec']:tag;
     const unread=e.seq>0&&e.seq>(A.seenSeq||0);
     return `<div class="alog${unread?' aunread':''}"><span class="at">${e.t?new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}):'\u2014'}</span>`
@@ -2027,13 +2033,31 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     const P=pushState; if(!P) return;
     const rec=(P.recipients||[]).find(r=>r.chat===x.dataset.pchat); if(!rec) return;
     const all=P.classes||[];
-    let cur=(rec.classes&&rec.classes.length)?rec.classes.slice():all.slice();
+    let cur=(rec.classes&&rec.classes.length)?rec.classes.slice():((P.defaultClasses||all).slice());
     const c=x.dataset.pcls;
     cur = cur.includes(c) ? cur.filter(v=>v!==c) : cur.concat([c]);
     // Turning the last class off would read as silence but persist as "all" — mute is a separate
     // control, so refuse the ambiguous state instead of quietly inverting the intent.
     if(!cur.length){ return; }
-    pushAct('/api/alerts/classes',{chat:rec.chat, classes:cur.length===all.length?[]:cur}); }));
+    // Always send the explicit list. Collapsing "all selected" to [] used to mean "default", which
+    // now differs from "all" — sending [] would silently unsubscribe the opt-in classes the user
+    // just turned on.
+    pushAct('/api/alerts/classes',{chat:rec.chat, classes:cur}); }));
+  pop.querySelectorAll('[data-pquiet]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=((pushState&&pushState.recipients)||[]).find(r=>r.chat===x.dataset.pquiet); if(!rec) return;
+    if(rec.quiet){ pushAct('/api/alerts/prefs',{chat:rec.chat, quiet:null}); return; }
+    const v=(prompt('Quiet hours, local 24h (e.g. 23-7). Blank to turn off.','23-7')||'').trim();
+    if(!v) return;
+    const m=v.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/); if(!m){ alert('Use a from-to range like 23-7.'); return; }
+    // The browser knows the reader's offset; asking them for it would be a worse question than one
+    // they can already answer wrongly.
+    pushAct('/api/alerts/prefs',{chat:rec.chat, quiet:{from:+m[1], to:+m[2], tz:-new Date().getTimezoneOffset()}}); }));
+  pop.querySelectorAll('[data-pdig]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=((pushState&&pushState.recipients)||[]).find(r=>r.chat===x.dataset.pdig); if(!rec) return;
+    if(rec.digestHour!=null){ pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour:null}); return; }
+    const v=(prompt('Send the daily digest at which local hour? (0-23)','8')||'').trim();
+    if(v==='') return;
+    pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour:+v}); }));
   pop.querySelectorAll('[data-punlink]').forEach(x=>x.addEventListener('click',()=>{
     if(confirm('Unlink this recipient? They stop receiving alerts immediately.')) pushAct('/api/alerts/unlink',{chat:x.dataset.punlink}); })); }
 function addAlertRule(){ const A=state.alerts, tIn=el('ar-ticker').value.trim().toUpperCase(); let coin='';
@@ -3798,9 +3822,32 @@ function buildPushSection(){
   const recips=P.recipients&&P.recipients.length? P.recipients.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const tip=r.muted?(r.lastErr||'muted'):(r.lastOk?('last delivery '+fmtAge(Date.now()-r.lastOk)+' ago'):'linked, nothing delivered yet');
-    const on=(c)=>!r.classes||!r.classes.length||r.classes.includes(c);
-    const chips=(P.classes||[]).map(c=>`<button type="button" class="cdtf${on(c)?' on':''}" data-pcls="${esc(c)}" data-pchat="${esc(r.chat)}" data-tip="${esc(c==='setup'?'new confirmed setups':c==='ledger'?'void taken, target reached, horizon resolved \u2014 only for claims you were already told about. Level hits are detected LIVE (mark + 5m bars, ~30s); the ledger\u2019s stop-aware record is still decided by the resolver against the hourly spine, so a fast wick can enter the record without having alerted':'server health: deploys, poller stalls, degraded feeds')}">${esc(c)}</button>`).join('');
-    return `<div class="arule" style="flex-wrap:wrap"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.sentHour}/${P.capHour}h</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span><span style="display:flex;gap:4px;width:100%;margin-top:4px">${chips}</span></div>`;
+    // Matches the server: an absent selection means the DEFAULT classes, not all of them.
+    const dflt=P.defaultClasses||P.classes||[];
+    const on=(c)=>(r.classes&&r.classes.length)?r.classes.includes(c):dflt.includes(c);
+    const CTIP={
+      setup:'new confirmed setups',
+      ledger:'void taken, target reached, horizon resolved \u2014 only for claims you were already told about. Level hits are detected LIVE (mark + 5m bars, ~2s off the socket); the ledger\u2019s stop-aware record is still decided by the resolver against the hourly spine, so a fast wick can enter the record without having alerted',
+      rule:'your own threshold rules, evaluated server-side against the snapshot the board renders',
+      filing:'material SEC filings only \u2014 8-K, 10-K/Q, 13D, 6-K, 425. Ownership forms (3/4/5/144/13G) are deliberately excluded: routine insider flow, several a day per active name',
+      earnings:'a name you hold an open, announced claim on reports today or tomorrow. Scoped to open claims on purpose \u2014 the full roster in season is a calendar, not an alert',
+      ai:'a cached analyst report changed its action stance on regeneration (wait \u2192 a side, or back)',
+      regime:'tape-wide positioning extremes \u2014 crowding and leverage stretch. Episode-gated: one alert per episode, re-armed only once the condition lapses',
+      coverage:'a name you hold an open, announced claim on is running on a stale spine \u2014 its live numbers are being computed from old data',
+      ops:'server health: poller stalls and recoveries. Deploy notices are recorded in the log but never pushed'};
+    const rates=(P.rates)||{};
+    const chips=(P.classes||[]).map(c=>{
+      const rt=rates[c]||{}, per=rt.d1==null?'':(rt.capped?'400+':rt.d1)+'/d';
+      const optIn=rt.dflt===false;
+      return `<button type="button" class="cdtf${on(c)?' on':''}" data-pcls="${esc(c)}" data-pchat="${esc(r.chat)}" data-tip="${esc((CTIP[c]||c)+(optIn?' \u00b7 opt-in: not delivered unless you select it':''))}">${esc(c)}${per?` <i style="font-style:normal;opacity:.6">${esc(per)}</i>`:''}</button>`; }).join('');
+    const q=r.quiet, qLbl=q?`${String(q.from).padStart(2,'0')}:00\u2013${String(q.to).padStart(2,'0')}:00`:'off';
+    const dLbl=r.digestHour!=null?`${String(r.digestHour).padStart(2,'0')}:00`:'off';
+    return `<div class="arule" style="flex-wrap:wrap"><span><b class="${dot}" data-tip="${esc(tip)}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.sentHour}/${P.capHour}h${r.quietNow?' \u00b7 <b>quiet now</b>':''}</span></span><span class="ax" data-punlink="${esc(r.chat)}" title="unlink">\u2715</span>`
+      +`<span style="display:flex;gap:4px;width:100%;margin-top:4px;flex-wrap:wrap">${chips}</span>`
+      +`<span style="display:flex;gap:6px;width:100%;margin-top:4px;align-items:center">`
+      +`<button type="button" class="cdtf${q?' on':''}" data-pquiet="${esc(r.chat)}" data-tip="quiet hours delay non-urgent alerts until the window ends \u2014 they are never dropped. A void being taken and a poller stall always pierce.">quiet ${esc(qLbl)}</button>`
+      +`<button type="button" class="cdtf${r.digestHour!=null?' on':''}" data-pdig="${esc(r.chat)}" data-tip="one daily summary: what fired by class, open claims, and the attributed headlines that are too frequent to push individually">digest ${esc(dLbl)}</button>`
+      +`</span></div>`;
   }).join('') : '<div class="sec" style="font-size:12px;padding:4px">Nobody linked yet.</div>';
   const code=P.code&&pushCodeLeft(P.code)!=='expired'
     ? `<div class="pushcode"><div class="sec" style="font-size:11px">DM the bot <b>/start ${esc(P.code.code)}</b></div><div class="pcode">${esc(P.code.code)}</div><div class="sec" style="font-size:11px">expires in ${esc(pushCodeLeft(P.code))}</div></div>`
