@@ -9063,16 +9063,115 @@ test("trend metrics ride the same board the Trend tab renders, signed to cover b
 test("trend events: full stacks and D1 crosses only, seeded on the first pass", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const fn = pol.slice(pol.indexOf("function trendScan()"), pol.indexOf("function pushTest("));
+  const fn = pol.slice(pol.indexOf("function trendScan(tNow)"), pol.indexOf("function pushTest("));
   // H12/H4 crossings at ~144 names would be a feed, not an alert. Stated where it is decided.
   assert.ok(/D1 only/.test(pol.slice(pol.indexOf("trend class: full stacks"), pol.indexOf("const trendState"))));
   assert.ok(/tb\.score >= 4 && prev\.score < 4/.test(fn), "only the ARRIVAL at 4/4 fires");
-  assert.ok(/sign !== 0 && prev\.sign !== 0 && sign !== prev\.sign/.test(fn),
-    "an unknown ribbon (a rung missing an EMA) is not a flip — treating it as one fires on every ladder gap");
-  assert.ok(/if \(!trendPrimed \|\| !prev\) continue;/.test(fn), "the first pass seeds the board silently");
+  // The COPPER double (-16): every gate must sit ON the fire condition, not near it.
+  assert.ok(/prev\.below \|\| 0\) >= TREND_REARM_SCANS/.test(fn),
+    "a stack only fires after the drop HELD — a one-scan dip through 3/4 is the same episode");
+  assert.ok(/now - \(prev\.stackAt \|\| 0\) >= TREND_STACK_CD/.test(fn),
+    "…and never twice per name inside the cooldown, however legitimate the re-cross");
+  assert.ok(/if \(sign === 0 \|\| sign === prev\.sign\) \{ next\.pendSign = 0; next\.pendRun = 0; \}/.test(fn),
+    "an unknown ribbon (a rung missing an EMA) is not a flip, and it resets the pending count — silence over noise");
+  assert.ok(/next\.pendRun >= TREND_CROSS_CONFIRM/.test(fn),
+    "a D1 flip is announced only after it HELD — a flip that reverts inside the window fires nothing");
+  assert.ok(/if \(prev\.sign !== 0\) \{/.test(fn), "a flip out of 0 is adoption, not a flip — it confirms silently");
+  assert.ok(/if \(!trendPrimed \|\| !prev\) \{/.test(fn), "the first pass seeds the board silently");
+  assert.ok(/below: tb\.score < 4 \? TREND_REARM_SCANS : 0/.test(fn),
+    "a name seeded below 4 is armed — the hold kills re-fires of a known stack, not a new name's first arrival");
   assert.ok(/for \(const c of \[\.\.\.trendState\.keys\(\)\]\) if \(!trendByCoin\.has\(c\)\) trendState\.delete\(c\);/.test(fn),
     "a name leaving the board drops its state, so a return is a genuinely new episode");
   assert.ok(/continue;   \/\/ one event per name per scan/.test(fn));
+});
+
+function trendHarness() {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    saveRules: () => {}, loadRules: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("CU", { ticker: "COPPER", px: 6.39, uni: "xyz", ref: { p1h: 6.3, p4h: 6.3, p7d: 6.3, p30d: 6.3 } });
+  p.trendPrimeNow();
+  return p;
+}
+
+test("stack episode gates: the COPPER double cannot happen — a wobble is one fire, not two", () => {
+  const p = trendHarness();
+  const stacks = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "stack").length;
+  const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
+  const seed = (score, t) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score, retest: null, e13: 6.38, e21: 6.33, age: 2 }); p.trendScanNow(t); };
+
+  seed(3, t0);                                 // first sight: seeded silently, armed by construction
+  assert.equal(stacks(), 0, "state in force at first sight is seeded, never announced");
+  seed(4, t0 + 5 * M);
+  assert.equal(stacks(), 1, "a new name's first arrival at 4/4 fires on the old one-scan cadence");
+
+  // The screenshot, replayed: one scan at 3/4, straight back to 4/4 thirty minutes after the fire.
+  seed(3, t0 + 10 * M);
+  seed(4, t0 + 15 * M);
+  assert.equal(stacks(), 1, "a one-scan dip through 3/4 is the same episode still standing — no re-fire");
+
+  // Even a HELD drop re-arms into the cooldown wall.
+  seed(3, t0 + 20 * M); seed(3, t0 + 25 * M); seed(3, t0 + 30 * M);
+  seed(4, t0 + 35 * M);
+  assert.equal(stacks(), 1, "armed, but inside the 12h per-name floor — still one fire");
+
+  // Past the cooldown WITHOUT a fresh held drop: the suppressed rise consumed the arm.
+  seed(3, t0 + 13 * 60 * M);
+  seed(4, t0 + 13 * 60 * M + 5 * M);
+  assert.equal(stacks(), 1, "a suppressed rise resets `below` — the drop-and-hold must happen again");
+
+  // The genuine article: held drop, past the floor. This is the fire the gates exist to protect.
+  seed(3, t0 + 14 * 60 * M); seed(3, t0 + 14 * 60 * M + 5 * M); seed(3, t0 + 14 * 60 * M + 10 * M);
+  seed(4, t0 + 14 * 60 * M + 15 * M);
+  assert.equal(stacks(), 2, "a real re-cross — held below, outside the cooldown — still reaches you");
+});
+
+test("cross debounce: a flip announces only after it holds, and a revert inside the window is silence", () => {
+  const p = trendHarness();
+  const crosses = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "cross");
+  const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
+  let t = t0;
+  const seed = (e13, e21) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score: 3, retest: null, e13, e21, age: 2 }); p.trendScanNow(t); t += 5 * M; };
+
+  seed(6.38, 6.33);                            // sign +1, seeded
+  seed(6.30, 6.33);                            // flip observed — pending, not announced
+  assert.equal(crosses().length, 0, "one flipped scan is an observation, not an announcement");
+  seed(6.38, 6.33);                            // revert inside the window
+  seed(6.38, 6.33);
+  assert.equal(crosses().length, 0, "a flip that reverts fires NOTHING — the flap is silent in both directions");
+
+  seed(6.30, 6.33); seed(6.30, 6.33);          // flip holds…
+  assert.equal(crosses().length, 0, "…still inside the confirm window");
+  seed(6.30, 6.33);                            // third consecutive flipped scan
+  assert.equal(crosses().length, 1, "the flip announces once it has HELD");
+  assert.equal(crosses()[0].side, "short");
+  seed(6.30, 6.33); seed(6.30, 6.33);
+  assert.equal(crosses().length, 1, "a confirmed sign persisting says nothing new");
+
+  // Unknown rungs feed nobody: sign 0 resets the pending count and never counts as a flip.
+  seed(6.38, 6.33); seed(6.38, 6.33);          // pending flip back up, 2 of 3…
+  seed(0, 6.33);                               // …a ladder gap wipes the pending count
+  seed(6.38, 6.33); seed(6.38, 6.33);
+  assert.equal(crosses().length, 1, "the gap reset the count — two held scans after it are not three");
+  seed(6.38, 6.33);
+  assert.equal(crosses().length, 2, "the flip back up completes its own held window and announces");
+  assert.equal(crosses()[1].side, "long");
+});
+
+test("trend state restored from an older build (no gate fields) is armed conservatively, never crashed on", () => {
+  const p = trendHarness();
+  const stacks = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "stack").length;
+  const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
+  // A -15 process persisted exactly this shape: score/sign/retest, nothing else.
+  p.hydrateTriggersNow({ seq: 0, seen: [], events: [], episodes: { trend: [["CU", { score: 3, sign: 1, retest: null }]] } });
+  const seed = (score, t) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score, retest: null, e13: 6.38, e21: 6.33, age: 2 }); p.trendScanNow(t); };
+  seed(4, t0);
+  assert.equal(stacks(), 0, "missing `below` reads as 0 — the rise waits for a fresh held drop, it does not throw");
+  seed(3, t0 + 5 * M); seed(3, t0 + 10 * M); seed(3, t0 + 15 * M);
+  seed(4, t0 + 20 * M);
+  assert.equal(stacks(), 1, "…and three held scans later the same rise fires, missing `stackAt` reading as no cooldown");
 });
 
 test("ops is operator-only, in delivery AND in the feed", () => {
@@ -9270,7 +9369,7 @@ test("episode state survives a restart — the fix that makes trend/regime/cover
 test("retest-badge arrivals are trend events — visible before the ledger family earns its record", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const fn = pol.slice(pol.indexOf("function trendScan()"), pol.indexOf("function pushTest("));
+  const fn = pol.slice(pol.indexOf("function trendScan(tNow)"), pol.indexOf("function pushTest("));
   assert.ok(/if \(tb\.retest && !prev\.retest\)/.test(fn), "the badge APPEARING fires; the badge persisting does not");
   assert.ok(/sub: "retest"/.test(fn));
   // The load-bearing comment: the ledger's setup alert for tretest waits on a proven record
