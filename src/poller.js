@@ -14,7 +14,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { momPair, spearmanIC, duelStats } = require("./compute");
-const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, rankActionable, ACT_TF_MS, lateR, trigKey, trigEligible } = require("./compute");
+const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible } = require("./compute");
 const { classify, nameAliases, companyName } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -5370,11 +5370,45 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // its own (netRR returns null on inverted geometry) rather than lingering as a stale row.
   const ACT_MIN_HZ = 3 * DAY;          // days-to-weeks only — 1d events belong to the Signals tab
   const ACT_MAX_BARS = 10;             // bars in trigger before a setup is considered gone stale
-  // Hard floor on net reward:risk. Doubles as the board's only kill switch: because R:R is
-  // repriced from the LIVE mark every build, a setup that gets chased dies here on its own — no
-  // separate "too late" rule is needed, and the two can never disagree about the same row.
-  const ACT_MIN_RR = 1.5;
+  // Hard floor on net reward:risk. Doubles as the board's kill switch: because R:R is repriced
+  // from the LIVE mark every build, a setup that gets chased dies here on its own — no separate
+  // "too late" rule is needed, and the two can never disagree about the same row.
+  const ACT_MIN_RR = 2.0;
   const ACT_REC_MIN_N = 8;             // resolved fires before an event's hit rate may price EV
+  // CONFIRMED gate. This board makes SUGGESTIONS, and most events in the ledger do not deserve
+  // one: the record is full of families whose realized expectancy is flat or negative, which is
+  // the honest outcome of testing things out of sample. An earlier cut of this board gated only
+  // on "does a hit rate exist" (n >= 8) and let negative-expectancy families through to sort at
+  // the bottom — a list of things not worth doing, presented as things to do.
+  //
+  // A row is now shown ONLY if all of these hold. Anything failing is DROPPED, not demoted:
+  //   n >= ACT_REC_MIN_N      a record exists at all
+  //   avg > 0                 those fires actually paid, on average, out of sample
+  //   evR > 0                 and THIS entry still models positive after carry and lateness
+  //   net R:R >= ACT_MIN_RR   the geometry is worth a swing slot
+  //   !noedge                 not on the engine's hard no-live-edge guard
+  //
+  // avg and evR are deliberately both required and are not the same test. avg is retrospective —
+  // did this family pay. evR is prospective on this instance — does it still pay from here, at
+  // this price, with this funding. A family with a strong average that has been chased to a thin
+  // R:R fails evR while passing avg, and should not be suggested.
+  //
+  // Setups still accruing a record are NOT shown here and do not get a second section: the
+  // strategy panel (STRAT_DEFS / shadowRecord) already exists to watch them earn one.
+  //
+  // Note on hit rate: the engine's `prime` heuristic also requires hit >= 0.6. That is
+  // deliberately NOT enforced here — a 45%-hit setup at 3:1 is excellent, and low-hit /
+  // high-payoff is precisely the swing profile. The fire-time prime verdict already stamped on
+  // the claim (e.pr) ships as a badge instead, so the information is visible without over-
+  // filtering. Enforcing it would be one added condition in actConfirm.
+  function actConfirm(rec, evR, rr, ev) {
+    if (!rec || !(rec.n >= ACT_REC_MIN_N)) return "norecord";
+    if (!(rec.avgR > 0)) return "negexp";   // field is avgR, per actRecord — not avg
+    if (evR == null || !(evR > 0)) return "negev";
+    if (!rr || !(rr.net >= ACT_MIN_RR)) return "thinRR";
+    if (liveNoEdge(ev)) return "noedge";
+    return null;
+  }
   const ACT_MS = 60 * 1000;            // memo window; inputs move on signal builds, not per request
   let actCache = null, actBuilt = 0, actSig = "", actVer = 0;
   // Labels come from the two places that already own them — the signals engine's EV_LABEL and the
@@ -5409,7 +5443,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return recMemo.get(k);
     };
     const cands = [];
-    let expired = 0, noGeom = 0, thinRR = 0;
+    const rej = { expired: 0, noGeometry: 0, thinRR: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
     for (const e of ledgerOpen.values()) {
       const meta = EV_META[e.ev];
       if (!meta || !(meta.horizonMs >= ACT_MIN_HZ)) continue;   // swing horizons only
@@ -5426,14 +5460,19 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const target = side === "long" ? e.mark0 * (1 + +e.mv / 100) : e.mark0 * (1 - +e.mv / 100);
       const tf = e.tf && ACT_TF_MS[e.tf] ? e.tf : "D1";
       const bars = barsInTrigger(e.t0, now, tf);
-      if (bars != null && bars > ACT_MAX_BARS) { expired++; continue; }
+      if (bars != null && bars > ACT_MAX_BARS) { rej.expired++; continue; }
       const carry = carryR({ side, entry: r.px, stop: e.stp, horizonMs: meta.horizonMs, fundingHourly: r.funding });
       const rr = netRR({ side, entry: r.px, stop: e.stp, target, carry });
-      if (!rr) { noGeom++; continue; }                          // void passed or target already through
-      if (!(rr.net >= ACT_MIN_RR)) { thinRR++; continue; }
+      if (!rr) { rej.noGeometry++; continue; }                   // void passed or target already through
       const shadow = e.vi != null;
       const rec = recOf(e.ev, shadow);
       const evR = setupEV(rec.hit, rr.net, rec.n, ACT_REC_MIN_N);
+      // Gate BEFORE the merge, deliberately: merging first could let an unconfirmed candidate with
+      // a flattering EV win a name+side and then be rejected, losing a confirmed row that was
+      // sitting right behind it. Gate first, and the merge only ever arbitrates between setups
+      // that were each independently worth suggesting.
+      const why = actConfirm(rec, evR, rr, e.ev);
+      if (why) { rej[why] = (rej[why] || 0) + 1; continue; }
       // Earnings inside the horizon is a binary the base rate cannot see. Flagged, never filtered
       // — standing aside is the reader's call, and pead deliberately trades the aftermath.
       let earn = null;
@@ -5444,7 +5483,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       cands.push({
         coin: e.coin, t: r.ticker, uni: r.uni === "main" ? "crypto" : "stocks", side,
         ev: e.ev, label: ACT_LABEL[e.ev] || e.ev, shadow,
-        unproven: shadow || evR == null,
+        // Fire-time prime verdict, already frozen on the claim by the signals engine. Shown as a
+        // badge, NOT enforced — see actConfirm on why its hit>=0.6 floor is not a gate here.
+        prime: e.pr === true ? true : (e.pr === false ? false : null),
         tf, t0: e.t0, bars, stale: bars != null && bars >= Math.ceil(ACT_MAX_BARS * 0.7),
         // Both marks, always. `fired` is the entry the track record was scored on; `entry` is
         // what buying now costs. `late` is the distance between them in the setup's own risk
@@ -5455,21 +5496,24 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         horizonD: +(meta.horizonMs / DAY).toFixed(0), earn,
       });
     }
-    const ranked = rankActionable(mergeActionable(cands));
-    const sigA = JSON.stringify([ranked.proven, ranked.unproven].map((a) =>
-      a.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.net, x.evR])));
+    // Newest first: the default the board opens on. The client may re-sort any column, but the
+    // server ships a deterministic order so a cold render is never arbitrary.
+    // NB: not named `rows` — that identifier is the poller's markets Map at module scope.
+    const board = mergeActionable(cands).sort((a, b) => (b.t0 || 0) - (a.t0 || 0)
+      || (b.evR == null ? -Infinity : b.evR) - (a.evR == null ? -Infinity : a.evR)
+      || (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
+    const sigA = JSON.stringify(board.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.net, x.evR]));
     if (sigA !== actSig) { actSig = sigA; actVer = Date.now(); }
     actBuilt = now;
     actCache = { ts: now, dataTs: actVer,
       params: { minHorizonDays: ACT_MIN_HZ / DAY, maxBars: ACT_MAX_BARS, minRR: ACT_MIN_RR,
-        recMinN: ACT_REC_MIN_N, netOfCarry: true, tfs: ["D1", "H12", "H4"] },
-      coverage: { candidates: cands.length, expired, noGeometry: noGeom, thinRR,
-        openClaims: ledgerOpen.size },
-      proven: ranked.proven, unproven: ranked.unproven,
-      count: ranked.proven.length + ranked.unproven.length };
+        recMinN: ACT_REC_MIN_N, netOfCarry: true, tfs: ["D1", "H12", "H4"],
+        gate: "confirmed", requires: ["n>=" + ACT_REC_MIN_N, "avgR>0", "EV>0", "R:R>=" + ACT_MIN_RR.toFixed(1), "!noedge"] },
+      coverage: Object.assign({ confirmed: board.length, openClaims: ledgerOpen.size }, rej),
+      rows: board, count: board.length };
     // Detection runs on the poller's clock as part of the build, so a trigger is recorded whether
     // or not anyone has the tab open — the precondition for any push transport.
-    try { trigScan(ranked.proven.concat(ranked.unproven), now); }
+    try { trigScan(board, now); }
     catch (err) { log("trigScan error (isolated, board still served): " + (err && err.message)); }
   }
   // ---- trigger stream (Telegram-ready foundation) --------------------------------------------
@@ -5547,7 +5591,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (!actCache || now - actBuilt > ACT_MS) {
       try { buildActionable(); } catch (err) { log("buildActionable error: " + (err && err.message)); }
     }
-    return actCache || { ts: Date.now(), dataTs: 0, params: {}, coverage: {}, proven: [], unproven: [], count: 0 };
+    return actCache || { ts: Date.now(), dataTs: 0, params: {}, coverage: {}, rows: [], count: 0 };
   }
 
   return {

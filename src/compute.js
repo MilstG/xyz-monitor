@@ -3194,13 +3194,12 @@ function barsInTrigger(t0, now, tf) {
   return Math.floor((now - t0) / w);
 }
 
-// Precedence when one name fires several setups at once. Proven geometry outranks unproven
-// outright — an unproven detector never overwrites a levelled claim's void or target. Then
-// expectancy, then the higher timeframe, then the earlier fire.
+// Precedence when one name fires several confirmed setups at once. Every candidate reaching this
+// point has already cleared the confirmed gate, so there is no proven/unproven tier left to break:
+// it is expectancy, then the higher timeframe, then the earlier fire.
 function actionableBetter(a, b) {
   if (!a) return false;
   if (!b) return true;
-  if (!!a.unproven !== !!b.unproven) return !a.unproven;
   const ae = a.evR == null ? -Infinity : a.evR, be = b.evR == null ? -Infinity : b.evR;
   if (ae !== be) return ae > be;
   const at = ACT_TF_RANK[a.tf] == null ? -1 : ACT_TF_RANK[a.tf];
@@ -3233,19 +3232,6 @@ function mergeActionable(cands) {
   return out;
 }
 
-// Split and rank. Proven rows sort by expectancy — the number that actually orders candidates.
-// Unproven rows have no honest expectancy, so they sort by net reward:risk in their own section
-// rather than being handed a fabricated rank inside the main one.
-function rankActionable(rows) {
-  const proven = [], unproven = [];
-  for (const r of (Array.isArray(rows) ? rows : [])) (r && r.unproven ? unproven : proven).push(r);
-  const netOf = (r) => (r && r.rr && Number.isFinite(r.rr.net) ? r.rr.net : -Infinity);
-  proven.sort((a, b) => ((b.evR == null ? -Infinity : b.evR) - (a.evR == null ? -Infinity : a.evR))
-    || (netOf(b) - netOf(a)) || (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
-  unproven.sort((a, b) => (netOf(b) - netOf(a)) || (a.coin < b.coin ? -1 : a.coin > b.coin ? 1 : 0));
-  return { proven, unproven };
-}
-
 // How far price has travelled from the fire mark, measured in the setup's OWN risk unit rather
 // than percent. This is the number that says whether you are taking the trade the record was
 // scored on: the record's entry was mark0, and every unit of R spent getting to the live mark is
@@ -3269,13 +3255,12 @@ function trigKey(row) {
   return row.coin + "|" + row.side + "|" + row.ev + "|" + (row.t0 || 0);
 }
 
-// Per-transport eligibility. The event stream is canonical and carries EVERY new trigger; each
-// channel decides what it is willing to interrupt someone for. Kept pure and shared so the
-// browser toast and a future Telegram push cannot drift into announcing different things.
+// Per-transport eligibility. The event stream is canonical and carries every new CONFIRMED
+// trigger; each channel decides what it is willing to interrupt someone for. Kept pure and shared
+// so the browser toast and a future Telegram push cannot drift into announcing different things.
 function trigEligible(row, cfg) {
   if (!row) return false;
   const c = cfg || {};
-  if (c.provenOnly && row.unproven) return false;
   if (c.minEV != null) { if (row.evR == null || row.evR < c.minEV) return false; }
   if (c.minRR != null) { if (!row.rr || !(row.rr.net >= c.minRR)) return false; }
   if (c.maxLate != null) { if (row.late != null && row.late > c.maxLate) return false; }
@@ -3294,6 +3279,5 @@ module.exports.setupEV = setupEV;
 module.exports.barsInTrigger = barsInTrigger;
 module.exports.actionableBetter = actionableBetter;
 module.exports.mergeActionable = mergeActionable;
-module.exports.rankActionable = rankActionable;
 module.exports.ACT_TF_MS = ACT_TF_MS;
 module.exports.ACT_TF_RANK = ACT_TF_RANK;
