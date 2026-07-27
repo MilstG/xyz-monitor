@@ -2056,7 +2056,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "loadActionable", "openActionable", "renderActionable", "actHead", "actDetail", "actCmp", "actCell", "actRR", "actEV",
     "actLate", "actLateCls", "actAgo", "actSortLoad", "actSortSave",
     "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet",
-    "fireOps", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft"];
+    "fireOps", "fireLedger", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -7979,4 +7979,170 @@ test("server: alert delivery routes registered once, body-capped, cooldown mappe
   for (const r of ["/api/alerts/link", "/api/alerts/unlink", "/api/alerts/classes", "/api/alerts/test"])
     assert.ok(new RegExp(`post\\("${r.replace(/\//g, "\\/")}", \\{ bodyLimit`).test(srv), `${r} must carry a body cap`);
   assert.ok(/alerts\/test[\s\S]{0,400}error === "cooldown"[\s\S]{0,60}429/.test(srv), "test-fire cooldown must map to 429");
+});
+
+// ===== Ledger alert class, slice B: the death notice (build 2026.07.27-02) ======================
+// The setup class announces a claim's birth. This class closes the loop — void taken, target
+// reached, horizon resolved — because a channel that only ever reports entries is worse than one
+// that reports nothing: it reads like a complete picture while being half of one.
+
+test("levelHit: geometry, not side, decides the comparison — and a wick counts", () => {
+  const { levelHit } = require("../src/compute");
+  // A long's stop sits BELOW entry, its target ABOVE; a short mirrors. Keying off side alone is
+  // what produced the stop-aware win fabricator this codebase already had to repair once.
+  assert.equal(levelHit("long", "stop", 40, 39.9), true);
+  assert.equal(levelHit("long", "stop", 40, 40.1), false);
+  assert.equal(levelHit("long", "target", 47, 47.2), true);
+  assert.equal(levelHit("long", "target", 47, 46.9), false);
+  assert.equal(levelHit("short", "stop", 50, 50.4), true, "a short's void is ABOVE entry");
+  assert.equal(levelHit("short", "stop", 50, 49.6), false);
+  assert.equal(levelHit("short", "target", 42, 41.5), true, "a short's target is BELOW entry");
+  assert.equal(levelHit("short", "target", 42, 42.5), false);
+
+  // The wick case: the mark is back above the level, but a 5m bar took it while nobody looked.
+  // This is precisely the touch that matters, and the live mark alone cannot see it.
+  const bar = [0, 41, 41.5, 39.5, 41, 0];   // packed [t,o,h,l,c,v]
+  assert.equal(levelHit("long", "stop", 40, 41, bar), true, "an intrabar low takes the void even when the mark recovered");
+  assert.equal(levelHit("long", "stop", 39, 41, bar), false, "…but only if the low actually reached it");
+  assert.equal(levelHit("short", "stop", 41.2, 41, bar), true, "the intrabar HIGH is what takes a short's void");
+
+  // Unknowable inputs must not announce. A false alarm on a stop is worse than a missed one.
+  assert.equal(levelHit("long", "stop", 0, 39), false);
+  assert.equal(levelHit(null, "stop", 40, 39), false);
+  assert.equal(levelHit("long", "nonsense", 40, 39), false);
+  assert.equal(levelHit("long", "stop", 40, 0), false, "no mark and no bar is not a touch");
+});
+
+test("ledger class: eligible without thresholds, and formatted in its own grammar", () => {
+  const C = require("../src/compute");
+  assert.ok(C.PUSH_CLASSES.includes("ledger"));
+  const stop = { kind: "ledger", sub: "stop", coin: "HOOD", t: "HOOD", side: "long",
+    ev: "breakout", label: "breakout", level: 40.5, entry: 42.1, held: "3.2h" };
+
+  // Setup thresholds must NOT reach this class. Being told a trade opened and never told it died
+  // is the worst asymmetry an alert channel can have.
+  assert.equal(C.pushEligible(stop, { trig: { minEV: 99, minRR: 99 } }), true);
+  assert.equal(C.pushEligible(stop, { classes: ["setup"] }), false, "…but an explicit class opt-out is still honoured");
+  assert.equal(C.pushEligible(stop, { muted: true }), false);
+
+  const m = C.pushFmt(stop, { baseUrl: "https://x.example" });
+  assert.ok(m.includes("void taken") && m.includes("40.5") && m.includes("HOOD"));
+  assert.ok(m.includes("https://x.example/#t=HOOD"));
+  const tgt = C.pushFmt(Object.assign({}, stop, { sub: "target", level: 47 }), {});
+  assert.ok(/target/.test(tgt) && tgt.includes("47"));
+  const res = C.pushFmt({ kind: "ledger", sub: "resolved", coin: "X", t: "X", side: "short",
+    ev: "breakdown", label: "breakdown", realized: -0.82, unit: "R", stopped: true, held: "6d" }, {});
+  assert.ok(res.includes("-0.82R") && /stopped out/.test(res), "a stopped-out resolution says so — the number alone hides how it got there");
+  const flat = C.pushFmt({ kind: "ledger", sub: "resolved", coin: "X", t: "X", side: "long", ev: "e", realized: null }, {});
+  assert.ok(flat.includes("\u2014"), "an unresolvable outcome renders as an honest dash, not a zero");
+});
+
+test("ledger alerts: only announced claims get a death notice, and each level fires exactly once", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    savePush: () => {}, loadPush: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("AAA", { ticker: "AAA", px: 42, uni: "xyz" });
+  p.seedRowNow("BBB", { ticker: "BBB", px: 42, uni: "xyz" });
+  const open = p.ledgerOpenNow();
+  const mk = (coin, extra) => Object.assign({ key: coin + "|breakout", coin, ticker: coin, ev: "breakout",
+    t0: Date.now() - 3600e3, mark0: 42, dir: 1, psd: "long", stp: 40, tgt: 47, resolveAt: Date.now() + 1e9 }, extra);
+  open.set("AAA|breakout", mk("AAA", { alo: 1 }));    // announced
+  open.set("BBB|breakout", mk("BBB"));                // never announced
+
+  const ledgerEvents = () => p.getTriggers(0).events.filter((e) => e.kind === "ledger");
+
+  p.seedRowNow("AAA", { px: 42 }); p.seedRowNow("BBB", { px: 42 });
+  p.levelScanNow();
+  assert.equal(ledgerEvents().length, 0, "a claim sitting between its levels says nothing");
+
+  // Both breach. Only the announced one is entitled to speak.
+  p.seedRowNow("AAA", { px: 39.5 }); p.seedRowNow("BBB", { px: 39.5 });
+  p.levelScanNow();
+  const evs = ledgerEvents();
+  assert.equal(evs.length, 1, "a claim nobody was told about does not get a death notice");
+  assert.equal(evs[0].coin, "AAA");
+  assert.equal(evs[0].sub, "stop");
+  assert.equal(evs[0].level, 40);
+  assert.equal(evs[0].side, "long");
+  assert.ok(evs[0].held, "how long it was open is part of the story");
+
+  // Repeat scans must not re-announce: price stays below the void for hours.
+  p.levelScanNow(); p.levelScanNow();
+  assert.equal(ledgerEvents().length, 1, "the void is taken ONCE — a level that stays breached is not news every 30 seconds");
+  assert.equal(open.get("AAA|breakout").als, 1, "the stamp lives on the claim, so a restart cannot re-announce it");
+
+  // A dead claim has nothing to say about its target, even if price later runs there.
+  p.seedRowNow("AAA", { px: 48 });
+  p.levelScanNow();
+  assert.equal(ledgerEvents().length, 1, "a stopped-out claim does not later report reaching its target");
+  assert.equal(open.get("AAA|breakout").alt, 1, "the void hit retires the target in the same breath, not just for the rest of this scan");
+});
+
+test("ledger alerts: target fires independently, and the void takes precedence in one scan", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("CCC", { ticker: "CCC", px: 42, uni: "xyz" });
+  p.ledgerOpenNow().set("CCC|breakout", { key: "CCC|breakout", coin: "CCC", ticker: "CCC", ev: "breakout",
+    t0: Date.now() - 7200e3, mark0: 42, dir: 1, psd: "long", stp: 40, tgt: 47, alo: 1, resolveAt: Date.now() + 1e9 });
+
+  p.seedRowNow("CCC", { px: 47.5 });
+  p.levelScanNow();
+  const evs = p.getTriggers(0).events.filter((e) => e.kind === "ledger");
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0].sub, "target");
+  assert.equal(evs[0].level, 47);
+
+  // A shadow-variant claim is internal bookkeeping and never surfaces to a transport.
+  p.ledgerOpenNow().set("CCC|bigmove#1", { key: "CCC|bigmove#1", coin: "CCC", ticker: "CCC", ev: "bigmove",
+    t0: Date.now(), mark0: 42, dir: 1, psd: "long", stp: 46, alo: 1, vi: 1, resolveAt: Date.now() + 1e9 });
+  p.levelScanNow();
+  assert.equal(p.getTriggers(0).events.filter((e) => e.kind === "ledger").length, 1,
+    "shadow variants ledger silently — they must never reach an alert channel");
+});
+
+test("ledger alerts: resolution is emitted from the resolver's own close path", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  // Pinned structurally: emitted INSIDE the resolver, so the number in the message is the number
+  // that entered the record. A separate scan over the closed list could disagree with it.
+  assert.ok(/e\.status = "resolved"[\s\S]{0,700}emitLedgerEvent\(e, "resolved"/.test(pol),
+    "the resolution notice must be emitted from the resolver's close path, not reconstructed later");
+  assert.ok(/if \(e\.alo === 1 && e\.vi == null\) emitLedgerEvent/.test(pol),
+    "only announced, non-shadow claims resolve out loud");
+  assert.ok(p.resolveLedgerNow);
+});
+
+test("ledger alerts: detection is armed regardless of whether a transport is configured", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // Slice A armed the level scan and the health watchdog inside the token check, which let a
+  // transport's configuration silently decide what the canonical stream was allowed to contain.
+  // The scan and the watchdog must sit OUTSIDE the `if (pushOn())` block.
+  const boot = pol.slice(pol.indexOf("alert detection + transports"), pol.indexOf("AI reports: ${AI_KEY()"));
+  const gateAt = boot.indexOf("if (pushOn())");
+  assert.ok(gateAt > 0, "the delivery gate still exists");
+  const before = boot.slice(0, gateAt);
+  assert.ok(before.includes("levelScan"), "the level scan is armed unconditionally");
+  assert.ok(before.includes("pushHealthTick"), "the health watchdog is armed unconditionally");
+  assert.ok(before.includes('pushOps("deploy"'), "the deploy notice reaches the in-app log with no bot configured");
+  const after = boot.slice(gateAt);
+  for (const f of ["pushUpdatesTick", "pushDrain", "pushStreamTick"])
+    assert.ok(after.includes(f), `${f} is outbound and must stay behind the token gate`);
+  assert.ok(!before.includes("pushDrain("), "nothing outbound may run without a token");
+});
+
+test("ledger alerts: the target level is FROZEN on the claim, not reconstructed from mv", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("tgt0 != null && vi == null ? { tgt: tgt0 } : null"),
+    "the absolute target is stamped at fire — mv is a rounded distance and cannot be turned back into a price");
+  assert.ok(/tgt: "playbook target level frozen at fire/.test(pol), "the export glossary documents the new stamp");
+  for (const k of ["alo:", "als:", "alt:"]) assert.ok(pol.includes(k), `glossary entry missing for ${k}`);
 });
