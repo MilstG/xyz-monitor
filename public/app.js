@@ -3659,6 +3659,7 @@ function openActionable(){
       seg.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));
       renderActionable(); });
     const ce=el('act-noearn'); if(ce) ce.addEventListener('change',renderActionable);
+    for(const id of ['act-cls-rr','act-cls-ev']){ const c=el(id); if(c) c.addEventListener('change',renderActionable); }
     const rs=el('act-sortreset'); if(rs) rs.addEventListener('click',()=>{ _actSort={k:'ago',d:1}; actSortSave(); renderActionable(); });
     actSortLoad();
   }
@@ -3737,7 +3738,7 @@ function actDetail(r){
     +(r.also&&r.also.length?` \u00b7 <span class="sec">corroborated by ${esc(r.also.map(a=>a.label).join(', '))}</span>`:'')+`</div><div class="ad-g">`;
   for(const [k,v] of g) h+=`<div class="ad-k">${k}</div><div class="ad-v">${v}</div>`;
   h+=`</div><div class="ad-sc">if it works, target pays <b class="pos">+${actRR(R.gross)}R</b> \u00b7 if it fails, the void costs <b class="neg">\u22121.00R</b></div>`
-    +`<div class="ad-x">Leaves the board at ${r.bars==null?'\u2014':''}${_actMaxBars} bars in trigger, if price passes ${fmtPrice(r.void)}, or if its R:R falls under ${_actMinRR}.</div>`;
+    +`<div class="ad-x">Leaves the board at ${r.bars==null?'\u2014':''}${_actMaxBars} bars in trigger or if price passes ${fmtPrice(r.void)}. R:R is frozen at fire — ${_actMinRR} is the line between the 2:1+ and grinder families, not an exit.</div>`;
   if(r.earn) h+=`<div class="ad-w">\u26a0 earnings in ${r.earn.days}d (${esc(r.earn.s)}) \u2014 inside the ${r.horizonD}d horizon. Flagged, not filtered: a scheduled binary is a prior the base rate cannot see.</div>`;
   h+=`<div class="ad-a"><button class="btn" data-rep="${esc(r.coin)}">AI report \u2192</button>`
     +`<button class="btn" data-dr="${esc(r.coin)}">Open ${esc(r.t)}</button></div></div>`;
@@ -3753,12 +3754,14 @@ function renderActionable(){
   const p=d.params||{}, c=d.coverage||{};
   _actMaxBars=p.maxBars||10; _actMinRR=(p.minRR||2).toFixed(2);
   const noEarn=!!(el('act-noearn')&&el('act-noearn').checked);
+  // The two families, reader's choice. Unchecking both is read as 'show nothing', honestly.
+  const showRR=!el('act-cls-rr')||el('act-cls-rr').checked, showEV=!el('act-cls-ev')||el('act-cls-ev').checked;
   // Scope filter, same rule as the Signals tab: rows arrive universe-tagged ('crypto' / 'stocks')
   // and the board serves one universe at a time. Without this an equity setup sits in the crypto
   // board's sort order competing on R:R against perps — two universes in one ranked list, which is
   // the merged view the scope split exists to prevent.
   const wantU=state.scope==='crypto'?'crypto':'stocks';
-  const rows=(d.rows||[]).filter(r=>r.uni===wantU&&(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)).slice().sort(actCmp);
+  const rows=(d.rows||[]).filter(r=>r.uni===wantU&&(_actSide==='all'||r.side===_actSide)&&!(noEarn&&r.earn)&&((r.cls==='ev')?showEV:showRR)).slice().sort(actCmp);
   let h='';
   if(!rows.length){
     h+=`<div class="msg">Nothing confirmed at a swing trigger right now.`
@@ -3766,7 +3769,6 @@ function renderActionable(){
       +`${c.norecord?` \u00b7 ${c.norecord} without a record yet`:''}`
       +`${c.negexp?` \u00b7 ${c.negexp} whose record is flat or negative`:''}`
       +`${c.negev?` \u00b7 ${c.negev} negative-EV from here`:''}`
-      +`${c.thinRR?` \u00b7 ${c.thinRR} below R:R ${_actMinRR}`:''}`
       +`${c.expired?` \u00b7 ${c.expired} aged out`:''}`
       +`${c.noGeometry?` \u00b7 ${c.noGeometry} whose frozen geometry never framed a trade`:''}`
       +`${c.degenerate?` \u00b7 ${c.degenerate} whose void sat on top of the entry (ratio is an artifact)`:''}`
@@ -3778,7 +3780,7 @@ function renderActionable(){
       const sc=r.side==='long'?'pos':'neg', op=!!_actOpen[r.coin+'|'+r.side];
       h+=`<tr class="act-row${op?' open':''}" data-key="${esc(r.coin+'|'+r.side)}" data-coin="${esc(r.coin)}">`
         +`<td class="${sc}">${op?'\u25be ':''}<span class="tk">${esc(r.t)}</span>${r.earn?' <i class="act-warn" title="earnings inside the horizon">\u26a0</i>':''}</td>`
-        +`<td class="sec">${esc(r.label)} <span class="act-tf">${esc(r.tf)}</span>${r.also&&r.also.length?` <span class="act-also" title="${esc(r.also.map(a=>a.label).join(', '))}">+${r.also.length}</span>`:''}</td>`
+        +`<td class="sec">${esc(r.label)} <span class="act-tf">${esc(r.tf)}</span>${r.cls==='ev'?' <span class="act-tf" title="below 2:1 at fire, positive expectancy — the win-often family">grinder</span>':''}${r.also&&r.also.length?` <span class="act-also" title="${esc(r.also.map(a=>a.label).join(', '))}">+${r.also.length}</span>`:''}</td>`
         +`<td style="text-align:right">${actAgo(Date.now()-r.t0)}</td>`
         +`<td class="sec" style="text-align:right">${fmtPrice(r.fired)}</td>`
         +`<td style="text-align:right">${fmtPrice(r.entry)}</td>`
