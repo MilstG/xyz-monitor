@@ -4979,7 +4979,7 @@ test("levels study -10: studyBars mirrors detectLevels' coercion and degrades cl
   const b = studyBars([{ t: 1, h: 11, l: 9, c: 10 }, { t: 2, c: 20 }, { t: 3, h: 5, l: 8, c: 6 },
     { t: 4, c: 0 }, { t: 5, c: "12", h: "13", l: "11" }, null, { t: 6, c: NaN }]);
   assert.equal(b.length, 4, "only bars with a usable positive close survive");
-  assert.deepEqual(b[1], { t: 2, h: 20, l: 20, c: 20 }, "closes-only bar becomes a zero-range bar, not a dropped one");
+  assert.deepEqual(b[1], { t: 2, h: 20, l: 20, c: 20, v: 0 }, "closes-only bar becomes a zero-range bar, not a dropped one (v carried as 0 since -22)");
   assert.ok(b[2].h >= b[2].c && b[2].l <= b[2].c, "a close outside its own range is repaired, matching detectLevels");
   assert.equal(b[3].c, 12, "string OHLC is coerced (sqlite/feed paths hand back strings)");
   assert.deepEqual(studyBars(null), [], "non-array input returns empty, never throws");
@@ -5090,9 +5090,13 @@ test("levels study -10: manifest — engine, control and exports are pinned", ()
     assert.ok(cmp.includes(pin), `compute.js missing -10 pin: ${pin}`);
   for (const f of ["normCdf", "touchBaseline", "studyBars", "levelOutcomes", "levelStudy"])
     assert.equal((cmp.match(new RegExp("function " + f + "\\(", "g")) || []).length, 1, `exactly one ${f} definition`);
-  // the study must consume the SHIPPING detector, not a private copy or a tuned variant
-  assert.ok(/const lv = detectLevels\(b\.slice\(0, i \+ 1\), px, sd30, dOpts\);/.test(cmp),
-    "levelOutcomes must call detectLevels on the PREFIX with pass-through opts (one code path)");
+  // the study must consume the SHIPPING detector, not a private copy or a tuned variant. Since
+  // -22 the detector is injectable (the HVN audit rides the same loop), so the pin moves to the
+  // DEFAULT closure: detectLevels with pass-through opts, and the walk feeding it the prefix only.
+  assert.ok(/const detect = typeof o\.detect === "function" \? o\.detect\s*\n\s*: \(pb, px2, sd2\) => detectLevels\(pb, px2, sd2, dOpts\);/.test(cmp),
+    "levelOutcomes' default detector must be the shipping detectLevels with pass-through opts (one code path)");
+  assert.ok(/const lv = detect\(b\.slice\(0, i \+ 1\), px, sd30\);/.test(cmp),
+    "the walk hands the detector the PREFIX only — injected or default alike");
   assert.ok(cmp.includes("// The null for a SET of levels is the mean of each level's own touch probability"),
     "the Jensen note must survive — it explains why grouped cells average per-event controls");
   assert.ok(!/const bs = rows\.map\(\(e\) => touchBaseline\(e\.distSd, horizon\)\)/.test(cmp),
@@ -9927,7 +9931,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-21"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-22"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -10158,4 +10162,132 @@ test("swing -20: the symmetric bracket track exposes the old one-sided bias on f
   assert.ok(Math.abs(e.realizedB - 1.5) < 0.15, `bracket leg books the touch ((103/100-1)/sigma2 = 1.5R), got ${e.realizedB}`);
   assert.ok(e.realizedB > e.realized, "the symmetric track recovers what the one-sided cap threw away");
   assert.equal(e.stopped, false, "void never touched — the stop-aware leg still coincides with at-horizon");
+});
+
+// ================================================================================================
+// level intelligence batch (build 2026.07.27-22): volume profile, unified level map, the HVN
+// audit through the structural study's own loop, the Swing R screener column, and the chart
+// histogram. Every weight hand-set here is disclosed in the UI and awaits the audit's verdict.
+// ================================================================================================
+
+test("levels -22: volumeProfile — range distribution, POC, value area, HVN/LVN, recency weight", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 320 * DAY_;
+  const mk = (i, c, v) => ({ t: t0 + i * DAY_, c, h: c + 1, l: c - 1, v });
+  const bars = [];
+  for (let i = 0; i < 300; i++) {
+    if (i >= 100 && i < 140) bars.push(mk(i, 110, 5000));       // heavy transaction cluster
+    else if (i >= 140 && i < 150) bars.push(mk(i, 105, 100));   // thin traverse
+    else bars.push(mk(i, 100, 1000));
+  }
+  const vp = C.volumeProfile(bars, 2);
+  assert.ok(vp && vp.bins.length >= 8, "profile built");
+  assert.ok(Math.abs(vp.bins.reduce((a, b) => a + b[1], 0) - 1) < 1e-6, "bin shares sum to 1");
+  // POC in the 100-region: 260 bars x 1000 outweighs 40 x 5000 after range spreading? No — the
+  // profile answers where volume TRANSACTED: 40x5000=200k at 110 vs 250x1000=250k at 100 -> 100
+  assert.ok(vp.poc > 98 && vp.poc < 102, `POC sits in the dominant-volume region, got ${vp.poc}`);
+  assert.ok(vp.vaLo <= vp.poc && vp.vaHi >= vp.poc, "value area contains the POC");
+  const vaShare = vp.bins.filter((b) => b[0] >= vp.vaLo && b[0] <= vp.vaHi).reduce((a, b) => a + b[1], 0);
+  assert.ok(vaShare >= 0.7 - 1e-9, `value area covers >=70% of volume, got ${(vaShare * 100).toFixed(1)}%`);
+  assert.ok(vp.hvn.some((h) => Math.abs(h.p - 110) < 2), "the 110 cluster is an HVN");
+  assert.ok(vp.hvn.length <= 5 && vp.lvn.length <= 5, "node lists prominence-capped");
+  // recency: the same two volume masses, but the 110 cluster in the FINAL 90d — weight 1.5x
+  // must tilt the POC to it (5000x40x1.5=300k vs 250k)
+  const recent = bars.map((b, i) => (i >= 100 && i < 140 ? Object.assign({}, b, { t: t0 + (270 + (i - 100) / 2) * DAY_ }) : b));
+  const vpR = C.volumeProfile(recent, 2);
+  assert.ok(vpR.poc > 108, `recency weighting tilts the POC to the recent cluster, got ${vpR.poc}`);
+  assert.equal(C.volumeProfile(bars.slice(0, 10), 2), null, "under 20 bars: no profile, not a noisy one");
+  assert.equal(C.volumeProfile(bars.map((b) => ({ t: b.t, c: b.c, h: b.h, l: b.l, v: 0 })), 2), null, "zero volume everywhere: null, never fabricated");
+});
+
+test("levels -22: levelMap — tau clustering, confluence weight sums, provenance survives", () => {
+  const C = require("../src/compute");
+  assert.deepEqual(C.LVL_MAP_W, { str: 1.0, hvn: 0.8, e200: 0.7, e50: 0.6, lvn: 0.5 }, "hand-set weights exported for the UI disclosure");
+  const vp = { hvn: [{ p: 110.1, v: 0.1 }, { p: 95, v: 0.05 }], lvn: [{ p: 104, v: 0.01 }] };
+  const str = { items: [{ v: 110.4, side: "res", n: 4 }, { v: 90, side: "sup", n: 2 }] };
+  const lm = C.levelMap({ str, vp, e50: 100.2, e200: 99.9 }, 103, 2);
+  assert.ok(lm && lm.n >= 4, "map built");
+  const conf = lm.items.find((it) => it.srcs.includes("str") && it.srcs.includes("hvn"));
+  assert.ok(conf && Math.abs(conf.v - 110.25) < 0.15, "110.4 structure + 110.1 HVN cluster within tau (0.8% at sd30=2)");
+  assert.ok(Math.abs(conf.w - 1.8) < 0.01, `confluence weight = sum of source weights (1.0+0.8), got ${conf.w}`);
+  assert.equal(conf.side, "res", "structural provenance (side, touches) survives the merge");
+  const emas = lm.items.find((it) => it.srcs.includes("e50") && it.srcs.includes("e200"));
+  assert.ok(emas && Math.abs(emas.w - 1.3) < 0.01, "EMA pair clusters at 0.7+0.6");
+  const lvn = lm.items.find((it) => it.srcs.length === 1 && it.srcs[0] === "lvn");
+  assert.ok(lvn && lvn.w === 0.5, "a lone LVN carries the lowest weight and its provenance");
+  assert.equal(C.levelMap({ str: { items: [] } }, 100, 2), null, "no sources: null map");
+});
+
+test("levels -22: levelOutcomes detector injection — prefix-only contract, default untouched", () => {
+  const C = require("../src/compute");
+  const bars = [];
+  for (let i = 0; i < 120; i++) bars.push({ t: i, c: 100 + Math.sin(i / 7) * 3, h: 101 + Math.sin(i / 7) * 3, l: 99 + Math.sin(i / 7) * 3, v: 1000 });
+  const seen = [];
+  const r = C.levelOutcomes(bars, 2, { stride: 10, horizon: 5, minBars: 60,
+    detect: (pb, px, sd) => { seen.push(pb.length); return { tauPct: 0.8, items: [{ v: px * 1.05, side: "res", n: 1, ageD: 0 }] }; } });
+  assert.ok(seen.length >= 4, "injected detector invoked along the walk");
+  for (let i = 1; i < seen.length; i++) assert.ok(seen[i] > seen[i - 1], "each call sees a strictly longer prefix");
+  assert.ok(seen[seen.length - 1] < bars.length, "the detector never sees the full series — the horizon tail stays out of sample");
+  assert.ok(r.events.length >= 4 && r.events.every((e) => Number.isFinite(e.plTouch) || e.plTouch === null), "events scored through the identical loop, permutation control included");
+});
+
+test("levels -22: bucketCandles sums volume through — the profile's spine-overlay fuel", () => {
+  const C = require("../src/compute");
+  const H = 3600e3;
+  const hourly = [[0, 100, 101, 99, 100, 10], [H, 100, 102, 99, 101, 15], [24 * H, 101, 103, 100, 102, 7]];
+  const b = C.bucketCandles(hourly, 24, H);
+  assert.equal(b.length, 2);
+  assert.equal(b[0].v, 25, "same-day hourly volumes sum");
+  assert.equal(b[1].v, 7);
+  const noV = C.bucketCandles([[0, 100, 101, 99, 100]], 24, H);
+  assert.equal(noV[0].v, 0, "missing volume reads as 0, never NaN");
+});
+
+test("levels -22: poller end-to-end — profile rides the chart payload, memo holds, dex caveat flagged", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const dailyRaw = []; for (let i = 90; i >= 1; i--) dailyRaw.push({ t: now - i * DAY_, c: 100 + (i % 7), h: 101 + (i % 7), v: 1000 + (i % 3) * 200 });
+  const hourlyRaw = []; for (let i = 200; i >= 0; i--) { const c = 100 + (i % 5); hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.5, l: c - 0.5, c, v: 12 }); }
+  p.seedRowNow("xyz:VPX", { px: 103, dailyRaw, hourlyRaw, hourlyTs: now });
+  const d = p.getTfCandles("xyz:VPX", "1d");
+  assert.ok(d && d.vp && Array.isArray(d.vp.bins) && d.vp.bins.length >= 8, "volume profile ships with the chart payload");
+  assert.equal(d.dexVol, true, "xyz payload carries the dex-volume caveat flag");
+  assert.ok(d.vp.poc > 99 && d.vp.poc < 108, `POC inside the traded range, got ${d.vp.poc}`);
+  const d2 = p.getTfCandles("xyz:VPX", "4h");
+  assert.ok(d2.vp && d2.vp.poc === d.vp.poc, "same memoized profile object across tf calls — histogram and map cannot disagree");
+});
+
+test("levels -22: wiring manifest — poller assembly, snapshot column, study audit, client surfaces", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    "function volMapFor(r)",
+    "const vp = volumeProfile(bars, sd30);",
+    "const map = levelMap({ str, vp, e50: ema(50), e200: ema(200) }, r.px, sd30);",
+    "r._vpK = memoK; r._vpM = out;",                                    // daily-cadence memo, never the 15s tick
+    "fundPct, red, rvol, swr, swrT, swrV, swrS,",                       // Swing R rides the snapshot row
+    'swrS = tgt.srcs.join("+");',
+    'it.srcs.length === 1 && it.srcs[0] === "lvn"',                     // LVNs excluded as targets
+    "vp: vm && vm.vp ? vm.vp : null, dexVol:",                          // chart payload carries profile + caveat
+    "st.profile = levelStudy(pooledVp, { horizon: LVL_HORIZON, cellFloor: LVL_CELL_FLOOR });",
+    "stride: LVL_STRIDE + 2",                                           // audit stride bounds the prefix-profile cost
+    "detect: (pb, px2, sd2) => {",                                      // HVN audit rides the injectable detector
+  ]) assert.ok(pol.includes(pin), `poller.js missing -22 pin: ${pin}`);
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "{key:'swr', label:'Swing R'",
+    "hand-set weights (str 1.0 \\u00b7 hvn 0.8 \\u00b7 e200 0.7 \\u00b7 e50 0.6 \\u00b7 lvn 0.5)",  // disclosure lives where the number is
+    "data-aivp",                                                        // VP toggle
+    "dex volume profile histogram (build -22)",
+    "DEX volume",                                                       // the honesty caveat, verbatim class
+    "Volume-profile HVNs (audit)",                                      // the report card row
+    "state.report.vp=state.report.vp===false?true:false;",
+  ]) assert.ok(app.includes(pin), `app.js missing -22 pin: ${pin}`);
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(cmp.includes("const LVL_MAP_W = { str: 1.0, hvn: 0.8, e200: 0.7, e50: 0.6, lvn: 0.5 };"), "weights pinned at the definition");
+  for (const f of ["volumeProfile", "levelMap"])
+    assert.equal((cmp.match(new RegExp("^function " + f + "\\(", "mg")) || []).length, 1, `exactly one ${f} definition`);
 });
