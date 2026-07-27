@@ -6252,6 +6252,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     log(`push: unlinked recipient ${pushMask(key)}`);
     return { ok: true };
   }
+  // Adopt a recipient that predates per-browser ownership. Restricted to UNOWNED rows on purpose:
+  // claiming a row someone else owns would be an admin quietly taking over another person's alert
+  // channel, which is a different thing entirely from tidying up legacy state.
+  function pushClaim(chat, owner, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "forbidden" };
+    if (!owner) return { ok: false, error: "no-owner" };
+    const r = pushRecipients.get(String(chat));
+    if (!r) return { ok: false, error: "unknown" };
+    if (r.owner) return { ok: false, error: "already-owned" };
+    r.owner = owner;
+    persistPush();
+    log(`push: ${pushMask(r.chat)} claimed by an admin browser`);
+    return { ok: true, chat: r.chat };
+  }
   function pushSetClasses(chat, classes, owner, isAdmin) {
     const r = pushRecipients.get(String(chat));
     if (!r) return { ok: false, error: "unknown" };
@@ -7004,7 +7018,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       recipients: visible.map((r) => ({
         mine: pushOwns(r, owner, false),
         chat: r.chat, mask: pushMask(r.chat), name: r.name, since: r.since,
-        classes: r.classes, muted: !!r.muted, admin: !!r.admin, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
+        classes: r.classes, muted: !!r.muted, admin: !!r.admin, owned: !!r.owner, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
         quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {},
         quietNow: !!(r.quiet && inQuietWindow(now, r.quiet)),
         sentHour: (r.sent || []).filter((t) => now - t < 3600e3).length })),
@@ -7109,6 +7123,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     ruleScanNow: ruleScan,                       // harness: evaluate the rule list against the current snapshot
     getClassRates,
     pushSetPrefs,
+    pushClaim,
     regimeScanNow: regimeScan,
     trendScanNow: trendScan,
     trendPrimeNow: () => { trendPrimed = true; },
