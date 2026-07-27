@@ -1088,3 +1088,6 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 /* alert delivery: link code + recipient rows in the bell panel */
 .pushcode{margin:6px 0;padding:8px;background:var(--panel2);border:1px dashed var(--border);border-radius:4px;text-align:center}
 .pcode{font-size:17px;letter-spacing:3px;color:var(--accent);margin:3px 0;font-family:var(--mono)}
+.alog .atag{display:inline-block;min-width:44px;font-size:9.5px;letter-spacing:.7px;color:var(--muted);margin-right:5px}
+.alog .atag.pos{color:var(--up)} .alog .atag.neg{color:var(--down)}
+.alog.aunread{border-left:2px solid var(--accent);padding-left:5px}

@@ -121,6 +121,11 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, regime:{ sel:'all' }, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false,
+    // feed = the server's own recent event list, re-read on every pull. This is the log now: it
+    // survives a refresh and a closed laptop, because the events live in the poller's persisted
+    // ring rather than in this tab's memory. `log` is what remains local — the in-tab metric
+    // rules, which still evaluate here until their server-side replacement lands.
+    feed:[], seenSeq:0, alertVer:null,
     // Trigger alerts are NOT user-authored rules — they're a standing subscription to "any new
     // setup passing these filters", so they sit alongside A.rules rather than inside it.
     // No provenOnly here: the server's stream now carries only CONFIRMED setups, so the filter
@@ -252,6 +257,11 @@ function maybePullSidecars(){
 }
 function applySnapshot(s){
   if(!s||!Array.isArray(s.markets)) return;
+  // Checked BEFORE the content short-circuit below. An idle board is exactly when an alert matters
+  // most, and returning early on an unchanged dataTs would have skipped the alert pull precisely
+  // then. alertVer rides the snapshot's content signature server-side, so a fired alert always
+  // bumps dataTs too — this stays correct either way.
+  if(s.alertVer!=null && s.alertVer!==state.alerts.alertVer){ state.alerts.alertVer=s.alertVer; loadTriggers(); }
   // Content short-circuit: the server freezes dataTs while nothing a client renders has changed
   // (see buildSnapshot's content signature), so an unchanged poll — the norm off-hours, and every
   // 304 — arrives with the SAME dataTs. Skip the full 140-market row-walk + table innerHTML rebuild
@@ -1916,14 +1926,56 @@ function fireAlert(rule,r,v,m){ const A=state.alerts;
   if(!el('alertpop').hidden) buildAlertsPanel(); }
 function pushToast(text){ const w=el('toastwrap'); const t=document.createElement('div'); t.className='toast'; t.textContent=text; w.appendChild(t);
   setTimeout(()=>{ t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 6500); }
-function updateBell(){ const b=el('bellBadge'), n=state.alerts.unseen; b.textContent=n>99?'99+':String(n); b.classList.toggle('show', n>0); }
+// Unread = server events past the persisted read watermark, PLUS local in-tab fires. The old
+// in-memory counter reset to zero on every refresh, so anything that fired while you were away
+// was invisible by the time you looked — the exact failure this slice exists to fix.
+function alertUnread(){ const A=state.alerts;
+  return A.feed.filter(e=>(e.seq||0)>(A.seenSeq||0)).length + A.unseen; }
+function updateBell(){ const b=el('bellBadge'), n=alertUnread(); b.textContent=n>99?'99+':String(n); b.classList.toggle('show', n>0); }
+// Marks everything currently held as read and persists the watermark, so the badge stays cleared
+// across a refresh and across devices' own separate reading.
+function alertMarkRead(){ const A=state.alerts;
+  let hi=A.seenSeq||0; for(const e of A.feed) if((e.seq||0)>hi) hi=e.seq||0;
+  A.seenSeq=hi; A.unseen=0; saveAlerts(); updateBell(); }
+// ONE formatter for every server event kind, shared by the toast path and the panel. Previously
+// each fire* built its own string and pushed it into a local array; the panel then rendered that
+// array, so the displayed history and the notification could drift apart and neither survived a
+// reload. Now the panel renders the server's list through this, and fire* only interrupts.
+function alertText(ev){
+  const k=ev.kind||'setup';
+  if(k==='ops') return `${ev.title||'ops'}${ev.text?' \u2014 '+ev.text:''}`;
+  if(k==='ledger'){
+    const head=ev.sub==='stop'?'\u26d4 void taken':ev.sub==='target'?'\u2713 target':'resolved';
+    let tail;
+    if(ev.sub==='resolved'){ const r=ev.realized;
+      tail=(r==null?'\u2014':(r>=0?'+':'')+(+r).toFixed(2)+(ev.unit||'R'))+(ev.stopped?' (stopped en route)':''); }
+    else tail=(ev.level!=null?fmtPrice(ev.level):'\u2014')+(ev.held?' \u00b7 held '+ev.held:'');
+    return `${ev.t} ${String(ev.side||'').toUpperCase()} \u00b7 ${ev.label} \u2014 ${head} \u00b7 ${tail}`;
+  }
+  const rr=ev.rr&&ev.rr.gross!=null?(+ev.rr.gross).toFixed(2):'\u2014';
+  const evs=ev.evR!=null?((ev.evR>=0?'+':'')+(+ev.evR).toFixed(2)+'R'):'no record';
+  return `${ev.t} ${String(ev.side||'').toUpperCase()} \u00b7 ${ev.label} \u00b7 R:R ${rr} \u00b7 EV ${evs}`;
+}
 function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   const metricOpts=ALERT_METRICS.map(m=>`<option value="${m.k}">${esc(m.label)}</option>`).join('');
   const rulesHtml=A.rules.length? A.rules.map(rl=>{ const m=AM_BY[rl.metric];
     return `<div class="arule"><span>${rl.coin?esc(tickerOf(rl.coin)):'<span class="sec">any</span>'} · ${esc(m?m.label:rl.metric)} ${rl.op} ${rl.value}</span><span class="ax" data-del="${rl.id}" title="delete">✕</span></div>`; }).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">No rules yet.</div>';
-  const logHtml=A.log.length? A.log.slice(0,12).map(e=>`<div class="alog"><span class="at">${new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</span> ${esc(e.text)}</div>`).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">Nothing triggered yet.</div>';
+  // The log is a MERGE of two sources with different lifetimes, and the tag column says which is
+  // which: server-held events (survive a refresh, a closed tab, a redeploy) and this browser's own
+  // in-tab rule fires (die with the tab, until their server-side replacement lands).
+  const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec']};
+  const feedRows=A.feed.map(e=>({t:e.at||0, seq:e.seq||0,
+    kind:(e.kind||'setup'), sub:e.sub||null, text:alertText(e), coin:e.coin||null}));
+  const localRows=A.log.map(e=>({t:e.t, seq:0, kind:'rule', sub:null, text:e.text, coin:null}));
+  const merged=feedRows.concat(localRows).sort((a,b)=>(b.t||0)-(a.t||0)).slice(0,14);
+  const logHtml=merged.length? merged.map(e=>{
+    const tag=ATAG[e.kind]||['?',''];
+    const lbl=e.kind==='ledger'&&e.sub==='stop'?['VOID','neg']:e.kind==='ledger'&&e.sub==='target'?['TGT','pos']:e.kind==='ledger'?['RES','sec']:tag;
+    const unread=e.seq>0&&e.seq>(A.seenSeq||0);
+    return `<div class="alog${unread?' aunread':''}"><span class="at">${e.t?new Date(e.t).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}):'\u2014'}</span>`
+      +`<span class="atag ${lbl[1]}">${lbl[0]}</span> ${esc(e.text)}</div>`; }).join('')
+    : '<div class="sec" style="font-size:12px;padding:4px">Nothing has fired yet.</div>';
   const navail=(typeof Notification!=='undefined');
   const T=A.trig;
   const mutedHtml=T.muted.length? T.muted.map(c=>`<span class="arule" style="display:inline-flex;margin:0 4px 4px 0"><span>${esc(tickerOf(c))}</span><span class="ax" data-unmute="${esc(c)}" title="unmute">✕</span></span>`).join('')
@@ -1945,14 +1997,16 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     </div>
     <div class="cphead">Rules (${A.rules.length})</div>${rulesHtml}
     <div class="cphead">Delivery <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 telegram DMs, sent with no tab open</span></div>${buildPushSection()}
-    <div class="cphead">Recent <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 in-tab log; telegram delivery is independent</span></div>${logHtml}
+    <div class="cphead">Recent <span class="sec" style="text-transform:none;letter-spacing:0">\u00b7 server-held \u2014 survives a closed tab; RULE rows are this browser only</span></div>${logHtml}
     <label class="copt" style="margin-top:8px"><input type="checkbox" id="ar-notify" ${A.notify?'checked':''} ${navail?'':'disabled'}/> Browser notifications${navail?'':' (unavailable here)'}</label>
-    <button class="btn" id="ar-clear" style="width:100%;justify-content:center;margin-top:6px">Clear log</button>`;
+    <button class="btn" id="ar-clear" style="width:100%;justify-content:center;margin-top:6px">Mark all read</button>`;
   el('ar-add').onclick=addAlertRule;
   el('ar-val').addEventListener('keydown',e=>{ if(e.key==='Enter') addAlertRule(); });
   pop.querySelectorAll('[data-del]').forEach(x=>x.addEventListener('click',()=>deleteAlertRule(+x.dataset.del)));
   el('ar-notify').addEventListener('change',e=>toggleNotify(e.target.checked));
-  el('ar-clear').onclick=()=>{ A.log=[]; A.unseen=0; updateBell(); buildAlertsPanel(); };
+  // The server's ring is the record; a client cannot and should not delete from it. "Read" is the
+  // only state a browser owns here, so that is the only thing this button changes.
+  el('ar-clear').onclick=()=>{ alertMarkRead(); buildAlertsPanel(); };
   el('at-on').addEventListener('change',e=>{ T.on=e.target.checked; saveAlerts(); if(T.on) loadTriggers(); });
   el('at-ev').addEventListener('change',e=>{ T.minEV=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
   el('at-late').addEventListener('change',e=>{ T.maxLate=e.target.value===''?null:parseFloat(e.target.value); saveAlerts(); });
@@ -1989,10 +2043,11 @@ function toggleNotify(on){ const A=state.alerts;
   if(on && typeof Notification!=='undefined'){ if(Notification.permission==='granted'){ A.notify=true; }
     else { Notification.requestPermission().then(p=>{ A.notify=(p==='granted'); saveAlerts(); if(!el('alertpop').hidden) buildAlertsPanel(); }); return; } }
   else A.notify=false; saveAlerts(); }
-function saveAlerts(){ store.set(AKEY, JSON.stringify({rules:state.alerts.rules, notify:state.alerts.notify, trig:state.alerts.trig})); }
+function saveAlerts(){ store.set(AKEY, JSON.stringify({rules:state.alerts.rules, notify:state.alerts.notify, trig:state.alerts.trig, seenSeq:state.alerts.seenSeq})); }
 function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch(_){ d=null; } if(!d) return;
   if(Array.isArray(d.rules)) state.alerts.rules=d.rules.filter(r=>r&&AM_BY[r.metric]); state.alerts.notify=!!d.notify;
-  if(d.trig&&typeof d.trig==='object') state.alerts.trig=Object.assign(state.alerts.trig,d.trig,{muted:Array.isArray(d.trig.muted)?d.trig.muted:[]}); }
+  if(d.trig&&typeof d.trig==='object') state.alerts.trig=Object.assign(state.alerts.trig,d.trig,{muted:Array.isArray(d.trig.muted)?d.trig.muted:[]});
+  if(Number.isFinite(d.seenSeq)) state.alerts.seenSeq=d.seenSeq; }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
 const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
@@ -3607,32 +3662,44 @@ function trigEligibleClient(ev,c){
   return true;
 }
 async function loadTriggers(){
-  const A=state.alerts; if(!A.trig.on) return;
+  // Deliberately NOT gated on A.trig.on. That toggle governs whether a new SETUP interrupts you;
+  // it was never meant to decide whether ops events, void hits and resolutions are recorded at
+  // all. Gating the whole pull on it meant a user who turned setup toasts off silently lost the
+  // bell log too.
+  const A=state.alerts;
   const cur=trigSeqGet();
   try{
     const d=await fetchJSON('/api/triggers'+(cur!=null?('?since='+cur):''));
     if(!d||!Array.isArray(d.events)) return;
-    // First run on this device: adopt the server's high-water mark WITHOUT firing. Otherwise
-    // turning alerts on would immediately replay the whole retained ring at you.
-    if(cur==null){ trigSeqSet(d.seq||0); return; }
+    // The display list is adopted WHOLESALE from the server on every pull, cursor or no cursor.
+    // That is what makes the panel show what fired overnight: the ring is the record, this tab is
+    // just a window onto it.
+    if(Array.isArray(d.recent)) A.feed=d.recent.slice().reverse();
+    if(d.alertVer!=null) A.alertVer=d.alertVer;
+    // First run on this device: adopt the server's high-water mark WITHOUT firing — but the feed
+    // has already been taken above, so the panel still opens onto real history rather than blank.
+    if(cur==null){ trigSeqSet(d.seq||0);
+      // …and start the badge clean: forty retained events are history, not forty things you have
+      // not read yet.
+      if(!A.seenSeq){ A.seenSeq=d.seq||0; saveAlerts(); }
+      updateBell(); if(!el('alertpop').hidden) buildAlertsPanel(); return; }
     for(const ev of d.events){
       const k=ev.kind||'setup';
       if(k==='ops'){ fireOps(ev); continue; }
       if(k==='ledger'){ fireLedger(ev); continue; }
-      if(trigEligibleClient(ev,A.trig)) fireTrigger(ev);
+      if(A.trig.on && trigEligibleClient(ev,A.trig)) fireTrigger(ev);
     }
     if(d.seq!=null) trigSeqSet(d.seq);
   }catch(_){ /* cursor unadvanced — the next poll retries the same window, nothing is lost */ }
 }
+// INTERRUPT only. The event is already in A.feed (server truth) by the time this runs, so nothing
+// here writes to a log — a second copy is exactly how the badge, the panel and the toast used to
+// be able to disagree about what had happened.
 function fireTrigger(ev){
   const A=state.alerts;
-  const rr=ev.rr&&ev.rr.gross!=null?(+ev.rr.gross).toFixed(2):'—';
-  const evs=ev.evR!=null?((ev.evR>=0?'+':'')+(+ev.evR).toFixed(2)+'R'):'no record';
-  const text=`${ev.t} ${ev.side.toUpperCase()} · ${ev.label} · R:R ${rr} · EV ${evs}`;
-  A.log.unshift({t:Date.now(), text}); if(A.log.length>60) A.log.pop();
-  A.unseen++; updateBell(); pushTrigToast(ev);
+  updateBell(); pushTrigToast(ev);
   if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){
-    try{ new Notification('Trade[XYZ] — new trigger',{body:text}); }catch(_){} }
+    try{ new Notification('Trade[XYZ] — new trigger',{body:alertText(ev)}); }catch(_){} }
   if(!el('alertpop').hidden) buildAlertsPanel();
 }
 // Richer than pushToast's one-liner: a trigger is only useful with its geometry attached, and the
@@ -3663,11 +3730,8 @@ function pushTrigToast(ev){
 // event, one for a warning, because a deploy notice that interrupts you is a notice you will turn
 // off, and then the stall warning goes with it.
 function fireOps(ev){
-  const A=state.alerts;
-  const text=`${ev.title}${ev.text?' — '+ev.text:''}`;
-  A.log.unshift({t:ev.at||Date.now(), text, ops:1}); if(A.log.length>60) A.log.pop();
-  A.unseen++; updateBell();
-  if(ev.level==='warn') pushToast('\u26a0 '+text);
+  updateBell();
+  if(ev.level==='warn') pushToast('\u26a0 '+alertText(ev));
   if(!el('alertpop').hidden) buildAlertsPanel();
 }
 
@@ -3677,18 +3741,13 @@ function fireOps(ev){
 // toast — the target and the horizon resolution are for the log.
 function fireLedger(ev){
   const A=state.alerts;
-  const head=ev.sub==='stop'?'\u26d4 void taken':ev.sub==='target'?'\u2713 target':'resolved';
-  let tail;
-  if(ev.sub==='resolved'){
-    const r=ev.realized;
-    tail=(r==null?'\u2014':(r>=0?'+':'')+(+r).toFixed(2)+(ev.unit||'R'))+(ev.stopped?' (stopped en route)':'');
-  } else tail=(ev.level!=null?fmtPrice(ev.level):'\u2014')+(ev.held?' \u00b7 held '+ev.held:'');
-  const text=`${ev.t} ${String(ev.side||'').toUpperCase()} \u00b7 ${ev.label} \u2014 ${head} \u00b7 ${tail}`;
-  A.log.unshift({t:ev.at||Date.now(), text, led:1}); if(A.log.length>60) A.log.pop();
-  A.unseen++; updateBell();
-  if(ev.sub==='stop') pushToast(text);
-  if(ev.sub==='stop' && A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){
-    try{ new Notification('Trade[XYZ] \u2014 void taken',{body:text}); }catch(_){} }
+  updateBell();
+  if(ev.sub==='stop'){
+    const text=alertText(ev);
+    pushToast(text);
+    if(A.notify && typeof Notification!=='undefined' && Notification.permission==='granted'){
+      try{ new Notification('Trade[XYZ] \u2014 void taken',{body:text}); }catch(_){} }
+  }
   if(!el('alertpop').hidden) buildAlertsPanel();
 }
 
@@ -5549,8 +5608,8 @@ el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly;
 el('drawerbg').addEventListener('click', closeDetail);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && state.detail) closeDetail(); });
 el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('alertpop');
-  if(pop.hidden) loadPush();   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
-  if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); state.alerts.unseen=0; updateBell(); }
+  if(pop.hidden){ loadPush(); alertMarkRead(); }   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
+  if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); updateBell(); }
   else { pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('alertpop');
   if(pop && !pop.hidden && !pop.contains(e.target) && !el('bellBtn').contains(e.target)){ pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
@@ -7015,7 +7074,9 @@ function aiTickCountdown(){
 setInterval(aiTickCountdown,1000);
 // Trigger cursor: polled on its own cadence so an alert lands whether or not the Actionable
 // tab is the one you're looking at. Server-side detection means nothing is missed while closed.
-setInterval(loadTriggers,60*1000); setTimeout(loadTriggers,4000);
+// The alert pull now rides applySnapshot's alertVer check, so this is only a cold-start prime plus
+// a slow safety net for the case where the snapshot path itself is wedged.
+setTimeout(loadTriggers,4000); setInterval(loadTriggers,5*60*1000);
 // Ago is elapsed wall-clock, so a static render goes stale. Cheap repaint, only while visible.
 setInterval(()=>{ if(state.view==='actionable'&&_act) renderActionable(); },30*1000);
 function aiMatches(qs){ qs=(qs||'').trim().toUpperCase(); if(!qs) return [];
