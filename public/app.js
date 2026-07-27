@@ -53,6 +53,12 @@ const COLS=[
   {key:'vol30', label:'Vol (ann)', type:'num', tip:'Annualized realized volatility from hourly returns over ~30 days.', td:r=>volCell(r)},
   {key:'adr', label:'Avg Range', type:'num', tip:'Average daily range: mean of each completed day\u2019s (high − low) / close, over the window (7d, or 30d when the 30d window is selected). Reads as "on a typical day this moves X%."', td:r=>adrCell(r)},
   {key:'dd', label:'vs 30d hi', type:'num', tip:'Distance below the 30-day high (0% = sitting at the high).', td:r=>ddCell(r)},
+  {key:'swr', label:'Swing R', type:'num', def:'desc',
+    tip:'Swing R available \u2014 structural room for the NEXT swing trade, per unit of risk: distance to the nearest unified-level-map target in the trend direction \u00f7 distance to the D1 EMA21 void. The map merges detected structure, volume-profile HVN/LVN, and the daily EMA50/200, confluence-weighted \u2014 hand-set weights (str 1.0 \u00b7 hvn 0.8 \u00b7 e200 0.7 \u00b7 e50 0.6 \u00b7 lvn 0.5), disclosed until the levels study earns measured ones; pure-LVN entries are excluded as targets (thin volume is a path, not a destination). Stocks: profile is DEX volume \u2014 this venue\u2019s tape, not the cash market. Needs a stacked trend side and a live EMA21 \u2014 dash otherwise. Sort descending to find where the big structural trades are BEFORE any signal fires. Hover a cell for target, sources, void.',
+    td:r=>{ if(r.swr==null) return '<td class="sec">\u2014</td>';
+      const t=`target ${fmtPrice(r.swrT)} (${r.swrS}) \u00b7 void ${fmtPrice(r.swrV)} (D1 EMA21) \u00b7 ${r.swr}R of structural room in the trend direction \u00b7 map levels move on daily cadence; ratio measured at snapshot against the mark`;
+      const cls=r.swr>=3?'pos':(r.swr<1?'neg':'');
+      return `<td class="${cls}" title="${esc(t)}">${(+r.swr).toFixed(1)}R</td>`; }},
   {key:'ddy', label:'vs YTD hi', type:'num', tip:'Distance below the year\u2019s highest DAILY CLOSE (0% = making the YTD high now). Closes-based \u2014 intraday highs aren\u2019t retained at daily granularity, so this is the honest computable basis, same convention as the MA columns. Names listed this year use their full-life high (which IS their YTD high). Crypto: 31d retention only reaches Jan 1 in January \u2014 outside that, an honest dash.', td:r=>ddyCell(r)},
   {key:'yopen', label:'Y open', type:'num', tip:'Open of the first UTC day of the year. Perps trade continuously, so the yearly open IS the prior day\u2019s close, taken from the daily-close series. Names listed this year use their first close \u2014 their true opening level. Green when price is above it, red below; hover for the distance. Crypto: 31d retention only reaches Jan 1 in January.', td:r=>openCell(r,'yopen','yearly open')},
   {key:'mopen', label:'M open', type:'num', tip:'Open of the first UTC day of the current month \u2014 the prior day\u2019s close on a continuously-traded perp. Names listed this month use their first close. Green when price is above it, red below; hover for the distance.', td:r=>openCell(r,'mopen','monthly open')},
@@ -2912,10 +2918,14 @@ function renderLevels(lv){
   const side={res:'Resistance',sup:'Support',flip:'Flip — served both sides'};
   if(!one) for(const k of ['res','sup','flip']) if(lv.bySide[k]) rows.push(lvlHoldRow(side[k],lv.bySide[k],lv.cellFloor));
   for(const k of ['2','3','4+']) if(srcT&&srcT[k]) rows.push(lvlHoldRow(k+'-touch levels',srcT[k],lv.cellFloor));
+  // Volume-profile HVN audit (-22): same loop, same placebo, same floors as everything above —
+  // directly comparable. Until this row shows excess over control, the level map's hvn weight
+  // is hand-set and no HVN may be cited as a measured edge.
+  if(!one && lv.profile && lv.profile.overall) rows.push(lvlHoldRow('Volume-profile HVNs (audit)',Object.assign({n:lv.profile.n,medBeyondSd:null},lv.profile.overall),lv.profile.cellFloor||lv.cellFloor));
   const table=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:640px"><thead><tr>`+
     `<th>group</th><th>n</th><th>touch</th><th>vs ctl</th><th>hold</th><th>hold ctl</th><th>vs ctl</th><th>run past</th>`+
     `</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
-  const cap2=sCap('Hold = the touch bar closed back on the side price came from; run past = how far a BROKEN level was exceeded before the horizon — the stop-run cost of a void parked there. The touch-count split audits the detector\'s own minimum (2 touches): if 2-touch rows show no hold edge over control while 4+ does, the snap rule is anchoring AI voids to noise. Out of sample by construction; the control is matched per event, validated unbiased on pooled random walks. <b>Hover</b> a row for the full readout.');
+  const cap2=sCap('Hold = the touch bar closed back on the side price came from; run past = how far a BROKEN level was exceeded before the horizon — the stop-run cost of a void parked there. The touch-count split audits the detector\'s own minimum (2 touches): if 2-touch rows show no hold edge over control while 4+ does, the snap rule is anchoring AI voids to noise. Out of sample by construction; the control is matched per event, validated unbiased on pooled random walks. <b>Hover</b> a row for the full readout. The <b>Volume-profile HVNs</b> row runs walk-forward profile nodes through this same loop and control \u2014 the measurement that decides whether the level map\u2019s hand-set hvn weight ever becomes an earned one. LVNs are traversal features (thin volume), not touch/hold claims, and are deliberately not audited here.');
   return head+controls+chart+cap1+table+cap2;
 }
 // ---- session anatomy (sections.anatomy) ----
@@ -7505,6 +7515,7 @@ HELP.report=`
 <div class="hlp-h">What this is</div>
 <p>One ticker, everything this server holds on it — trend ladder (D1 · H12 · H4), live signals with their frozen claim geometry, this name's own out-of-sample track record, positioning (OI, funding), benchmark decomposition, volatility regime, divergence flags, coverage gaps, and (equities) earnings event risk and sector context — compiled into one context object and synthesized by the configured model — <b>Claude Fable 5</b> or <b>GPT-5.6 Sol</b> depending on which provider key the server carries, with an automatic same-family fallback — into a plain-language read. The card footer names the model that actually produced each report.</p>
 <div class="hlp-h">What the numbers are</div>
+<p>The <b>VP</b> toggle overlays the volume profile \u2014 where volume actually transacted over a 365d composite (last 90d weighted 1.5\u00d7), with the POC dotted and high-volume nodes accented. On stocks this is <b>DEX volume</b>: this venue\u2019s tape, not the cash market \u2014 real positioning information for trading here, and labelled for exactly what it is. HVNs are audited against a matched placebo in Analytics \u00b7 Levels before any of it earns weight beyond the disclosed hand-set map.</p>
 <p>The <b>risk unit</b> is the distance from the price at generation to the void level — when a live claim exists, the void IS that claim's frozen stop (the model cannot move it). Per-scenario <b>R/R</b> and the <b>expected value</b> are computed server-side from the validated levels and probabilities, never taken from the model's prose. Scenario odds are anchored on the name's own base rates; where n is thin, the card says so.</p>
 <div class="hlp-h">Cache &amp; regenerate</div>
 <p>Reports are cached for <i>everyone</i> — one generation serves the whole group. Regenerate unlocks when the TTL expires or on material change (a new claim opened, a claim resolved, an earnings print landed); the reason shows on the card. The cooldown is enforced server-side, so the cache is the group's rate limit by construction.</p>
@@ -7692,6 +7703,10 @@ function renderAiReport(d,coin){
     box.querySelectorAll('[data-aitf]').forEach(x=>x.classList.toggle('on',x===el2));
     const hd=el2.closest('.dsec'); if(hd) hd.firstChild.textContent=(state.report.tf==='1d'?'Daily':state.report.tf==='12h'?'12-hour':'4-hour')+' chart · key levels and events marked';
     aiReportChart(coin,c); }));
+  box.querySelectorAll('[data-aivp]').forEach(el2=>el2.addEventListener('click',()=>{
+    state.report.vp=state.report.vp===false?true:false;
+    el2.classList.toggle('on',state.report.vp!==false);
+    aiReportChart(coin,c); }));
   if(state.report.gen) renderAiGenState(coin,true);
   aiReportChart(coin,c);
   aiLoadClaims(coin);
@@ -7733,7 +7748,7 @@ async function aiLoadClaims(coin){
 }
 function aiChartTfSeg(coin,c){
   const cur=state.report.tf||'1d';
-  return `<div class="dsec" style="display:flex;align-items:center;gap:8px">${cur==='1d'?'Daily':cur==='12h'?'12-hour':'4-hour'} chart · key levels and events marked<span class="cdtf-seg" style="margin-left:auto">${['1d','12h','4h'].map(t=>`<button class="cdtf ai-tf${t===cur?' on':''}" data-aitf="${t}">${t.toUpperCase()}</button>`).join('')}</span></div>`;
+  return `<div class="dsec" style="display:flex;align-items:center;gap:8px">${cur==='1d'?'Daily':cur==='12h'?'12-hour':'4-hour'} chart · key levels and events marked<span class="cdtf-seg" style="margin-left:auto">${['1d','12h','4h'].map(t=>`<button class="cdtf ai-tf${t===cur?' on':''}" data-aitf="${t}">${t.toUpperCase()}</button>`).join('')}<button class="cdtf ai-vp${state.report.vp!==false?' on':''}" data-aivp="1" title="volume profile \u2014 where the volume transacted (365d composite, last 90d \u00d71.5). POC dotted, HVNs accented, per-bin hover. Stocks: DEX volume \u2014 this venue\u2019s tape, not the cash market.">VP</button></span></div>`;
 }
 async function aiReportChart(coin,c){
   const box=el('ai-chart'); if(!box) return;
@@ -7771,6 +7786,25 @@ async function aiReportChart(coin,c){
     let s='';
     for(const v of ticks){ const y=Y(v).toFixed(1);
       s+=`<line x1="${pl}" y1="${y}" x2="${W-pr}" y2="${y}" stroke="var(--grid)" stroke-width="1"/><text x="${W-pr+5}" y="${(+y+3).toFixed(1)}" class="lc-tick">${axf(v)}</text>`; }
+    // ===== dex volume profile histogram (build -22) =====
+    // Right-anchored inside the plot, drawn BEFORE structure and price so it reads as terrain the
+    // tape moves through, never competing with the annotations. Bin fill: HVNs accented, POC as a
+    // dotted line; every bin carries a hover readout (price, share, node type, value area) with
+    // the composite convention and the dex-volume caveat stated where the number is, not in a
+    // footnote nobody reads. Toggleable (VP button); levels for the map ride the same server
+    // object, so the histogram and the screener's Swing R column can never disagree.
+    if(state.report.vp!==false && d.vp && Array.isArray(d.vp.bins) && d.vp.bins.length){
+      const vp=d.vp; let maxV=0; for(const b of vp.bins) if(b[1]>maxV) maxV=b[1];
+      if(maxV>0){ const HW=64, x1=W-pr, bh=Math.max(1.4,(H-pt-pb)/vp.bins.length*0.86);
+        for(const [pV,share] of vp.bins){ if(pV<lo||pV>hi) continue;
+          const y=Y(pV), w2=Math.max(0.6,HW*share/maxV);
+          const isH=vp.hvn.some(h2=>h2.p===pV), isL=vp.lvn.some(l2=>l2.p===pV), isP=pV===vp.poc;
+          const inVA=pV>=vp.vaLo&&pV<=vp.vaHi;
+          s+=`<rect x="${(x1-w2).toFixed(1)}" y="${(y-bh/2).toFixed(1)}" width="${w2.toFixed(1)}" height="${bh.toFixed(1)}" fill="${isH?'var(--accent)':'var(--muted)'}" fill-opacity="${isH?'0.32':inVA?'0.16':'0.10'}"/>`
+            +`<rect x="${(x1-HW).toFixed(1)}" y="${(y-bh/2).toFixed(1)}" width="${HW}" height="${bh.toFixed(1)}" fill="transparent" data-tip="${esc(`${fmtPrice(pV)} \u00b7 ${(share*100).toFixed(1)}% of transacted volume${isP?' \u00b7 POC \u2014 highest-volume price':''}${isH?' \u00b7 HVN \u2014 high-volume node (audited vs placebo in Analytics \u00b7 Levels)':''}${isL?' \u00b7 LVN \u2014 thin, price traverses fast':''}${inVA?' \u00b7 inside the 70% value area':''} \u00b7 365d composite, last 90d weighted ${vp.recentW}\u00d7${d.dexVol?' \u00b7 DEX volume \u2014 this venue\u2019s tape, not the cash market':''}`)}"/>`; }
+        if(vp.poc>=lo&&vp.poc<=hi) s+=`<line x1="${pl}" y1="${Y(vp.poc).toFixed(1)}" x2="${x1}" y2="${Y(vp.poc).toFixed(1)}" stroke="var(--accent)" stroke-width="1" stroke-opacity="0.5" stroke-dasharray="1 3"/>`;
+      }
+    }
     // Structural levels: the confirmed pivot clusters the analyst's void had to land on. Drawn
     // here — before price, faint — so they read as the evidence behind the read rather than
     // competing with the void/target annotations. Deliberately unlabelled: up to eight of them
