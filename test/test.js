@@ -9910,11 +9910,11 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-18"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-19"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
   const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const pin of [".macrostrip", ".macrostrip.result", ".earn-row.mrow", ".earn-mk", ".act-mwarn"])
+  for (const pin of [".macrostrip", ".macrostrip.result", ".macrostrip[hidden]{display:none}", ".earn-row.mrow", ".earn-mk", ".act-mwarn"])
     assert.ok(cs.includes(pin), "css pin missing: " + pin);
 });
