@@ -2075,13 +2075,19 @@ function featureOn(key){ return FLAGS_VIEW ? !!FLAGS_VIEW[key] : true; }
 // engine is xyz-only since -101). This set was written out longhand in two places that had already
 // drifted apart once; it lives here now and both callers read it.
 const CRYPTO_VIEWS=new Set(['markets','trend','report','corr','backtest','sessions']);
-function inScope(v){ return state.scope!=='crypto' || CRYPTO_VIEWS.has(v); }
-// The Admin tab keys off IS_ADMIN, not the flag set, and deliberately bypasses inScope. It is the
+// NOT named inScope: that name was already taken at the top of this file by the predicate that
+// decides whether a market ROW belongs to the active universe. Function declarations hoist, so the
+// later definition silently won, activeRows() started asking "is this row object one of the six
+// crypto view names" (always false), and the crypto board rendered zero rows while the stocks board
+// showed both universes. Shipped in -05, fixed in -07. The suite now fails on ANY duplicate
+// top-level declaration, not just names someone remembered to list.
+function viewInScope(v){ return state.scope!=='crypto' || CRYPTO_VIEWS.has(v); }
+// The Admin tab keys off IS_ADMIN, not the flag set, and deliberately bypasses viewInScope. It is the
 // control surface for every other flag, so making it flag-driven would be circular: "view as public"
 // swaps in the public set, which hides the panel, which removes the toggle that turns it back off.
 // The manifest still carries an `admin` entry with lock:true so the markup->manifest join holds and
 // no write can ever open it; this line is what keeps the switchboard reachable while it is in use.
-function tabVisible(v){ if(v==='admin') return IS_ADMIN; return inScope(v) && featureOn(v); }
+function tabVisible(v){ if(v==='admin') return IS_ADMIN; return viewInScope(v) && featureOn(v); }
 // featureOn reads FLAGS_VIEW, not FLAGS, so "view as public" can swap the whole resolved set in one
 // assignment. Both sets come from the server; nothing here recomputes a visibility.
 let FLAGS_VIEW = FLAGS;
