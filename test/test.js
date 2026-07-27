@@ -2056,7 +2056,8 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "loadActionable", "openActionable", "renderActionable", "actHead", "actDetail", "actCmp", "actCell", "actRR", "actEV",
     "actLate", "actLateCls", "actAgo", "actSortLoad", "actSortSave",
     "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet",
-    "fireOps", "fireLedger", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft"];
+    "fireOps", "fireLedger", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft",
+    "alertText", "alertUnread", "alertMarkRead"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -6727,14 +6728,24 @@ test("triggers -05: browser transport is a consumer only, and the toast surface 
   // ever decides for itself what counts as "new", a future Telegram push has a second opinion.
   assert.ok(s.includes("/api/triggers"), "client must consume the server trigger stream");
   assert.ok(s.includes("function trigSeqGet") && s.includes("function trigSeqSet"), "cursor persistence missing");
-  assert.ok(s.includes("if(cur==null){ trigSeqSet(d.seq||0); return; }"), "first run on a device must adopt the high-water mark without firing the retained ring");
+  // Same invariant, new shape (-03): the first run still adopts the high-water mark without
+  // firing, but it now also takes the display list and initialises the read watermark, so a new
+  // device opens onto real history with a clean badge instead of a blank panel.
+  assert.ok(/if\(cur==null\)\{ trigSeqSet\(d\.seq\|\|0\);/.test(s), "first run on a device must adopt the high-water mark without firing the retained ring");
+  const lt0 = s.slice(s.indexOf("async function loadTriggers()"), s.indexOf("function fireTrigger("));
+  assert.ok(lt0.indexOf("if(cur==null)") < lt0.indexOf("for(const ev of d.events)"), "…and it must return BEFORE the firing loop");
   // Dedup belongs to the poller: the client must hold a single integer cursor, not a set of keys.
   // (Checked as identifiers, not prose — the comments in app.js legitimately discuss the concept.)
   for (const ident of ["trigSeen", "trigKeys", "seenTriggers", "firedKeys"])
     assert.ok(!new RegExp("(let|const|var)\\s+" + ident + "\\b").test(s), `client must not keep its own announced-set (${ident}) — dedup belongs to the poller`);
   assert.ok(/store\.get\(TSEQ\)/.test(s) && /store\.set\(TSEQ/.test(s), "the client's entire memory of what it has shown must be one persisted sequence number");
-  // Fires land in the SHARED alert log so the bell badge and Recent list cover both kinds.
-  assert.ok(/A\.log\.unshift\(\{t:Date\.now\(\), text\}\)/.test(s), "trigger fires must land in the shared alert log");
+  // Fires land in the SHARED alert surface so the bell badge and Recent list cover both kinds.
+  // The shared surface moved (-03): it used to be a local array each fire* pushed into, which
+  // reset on refresh. It is now the server's own recent list, adopted on every pull — so the
+  // invariant is that trigger events reach the SAME feed and badge as every other class, not that
+  // a particular local array is written to.
+  assert.ok(/A\.feed=d\.recent/.test(s), "trigger fires must land in the shared, server-held feed");
+  assert.ok(/function alertUnread\(\)/.test(s) && /A\.feed\.filter/.test(s), "the bell badge must count that shared feed");
   assert.ok(s.includes("function fireTrigger") && s.includes("updateBell()"), "trigger fires must update the bell");
   // Settings live in the bell panel, not in the board's filter row (which would be a second,
   // competing alert-configuration surface).
@@ -8145,4 +8156,176 @@ test("ledger alerts: the target level is FROZEN on the claim, not reconstructed 
     "the absolute target is stamped at fire — mv is a rounded distance and cannot be turned back into a price");
   assert.ok(/tgt: "playbook target level frozen at fire/.test(pol), "the export glossary documents the new stamp");
   for (const k of ["alo:", "als:", "alt:"]) assert.ok(pol.includes(k), `glossary entry missing for ${k}`);
+});
+
+// ===== In-app alert sink, slice C (build 2026.07.27-03) =========================================
+// The bell log used to live in this tab's memory: it reset on every refresh, so anything that
+// fired while the laptop was shut was invisible by the time anyone looked. The server already held
+// a persisted ring; the client just wasn't reading it. This slice makes the panel a WINDOW onto
+// that ring rather than a second, shorter-lived copy of it.
+
+test("trigger stream: `recent` is cursor-independent, `events` is not — one pull serves both jobs", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  for (let i = 0; i < 5; i++) p.pushOpsNow("ev" + i, "text " + i);
+
+  const all = p.getTriggers();
+  assert.equal(all.recent.length, 5, "recent ships regardless of cursor — this is the DISPLAY list");
+  assert.equal(all.seq, 5);
+
+  const caught = p.getTriggers(5);
+  assert.equal(caught.events.length, 0, "a caught-up cursor has nothing to interrupt for…");
+  assert.equal(caught.recent.length, 5, "…but the display list is still there. Deriving display from the cursor is what made the old log evaporate on refresh.");
+
+  const partial = p.getTriggers(3);
+  assert.equal(partial.events.length, 2, "the cursor still governs what fires");
+  assert.equal(partial.recent.length, 5);
+  assert.equal(partial.params.recent, 40, "the display cap is disclosed in params, not implicit");
+
+  for (let i = 0; i < 60; i++) p.pushOpsNow("x" + i, "y");
+  assert.equal(p.getTriggers().recent.length, 40, "the display list is capped independently of the 200-event ring");
+});
+
+test("snapshot: alertVer ships AND rides the content signature, so a fired alert can't go stale", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+
+  p.buildSnapshotNow();
+  const a = p.getSnapshot();
+  assert.equal(a.alertVer, 0, "the sequence ships from the first build");
+  p.buildSnapshotNow();
+  assert.strictEqual(p.getSnapshot(), a, "an unchanged board still keeps the same object — this must not become a per-build rebuild");
+
+  // The load-bearing case: the board is idle (nothing a client renders has moved) and an alert
+  // fires. The snapshot object is FROZEN while the signature holds, so without the sequence in the
+  // signature the client would be handed a permanently stale alertVer — and would never pull —
+  // exactly when the board is quiet, which is when alerts matter most.
+  p.pushOpsNow("deploy", "build test is live");
+  p.buildSnapshotNow();
+  const b = p.getSnapshot();
+  assert.notStrictEqual(b, a, "a fired alert rebuilds the snapshot object");
+  assert.equal(b.alertVer, 1, "…carrying the new sequence");
+  assert.ok(b.dataTs > a.dataTs, "and bumping dataTs, so the ETag revalidates and the client falls through its own short-circuit");
+});
+
+test("client: the alert pull rides the snapshot poll and is not gated on the setup toggle", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+
+  // The alertVer check must sit BEFORE applySnapshot's unchanged-dataTs early return, or an idle
+  // board skips the alert pull precisely when it matters.
+  const fn = app.slice(app.indexOf("function applySnapshot(s){"));
+  const verAt = fn.indexOf("s.alertVer"), shortAt = fn.indexOf("s.dataTs===state.dataTs");
+  assert.ok(verAt > 0 && shortAt > 0, "both the alertVer check and the content short-circuit exist");
+  assert.ok(verAt < shortAt, "the alertVer check must precede the content short-circuit");
+
+  // `trig.on` governs whether a SETUP interrupts you. Gating the whole pull on it silently threw
+  // away the ops and ledger history for anyone who turned setup toasts off.
+  const lt = app.slice(app.indexOf("async function loadTriggers()"), app.indexOf("function fireTrigger("));
+  assert.ok(!/if\(!A\.trig\.on\) return;/.test(lt), "the feed pull must not be gated on the setup toggle");
+  assert.ok(/A\.trig\.on && trigEligibleClient/.test(lt), "…the toggle gates FIRING instead");
+  assert.ok(lt.indexOf("A.feed=d.recent") < lt.indexOf("if(cur==null)"),
+    "the display list must be adopted BEFORE the first-run early return, or a new device opens onto a blank panel");
+  assert.ok(/if\(!A\.seenSeq\)\{ A\.seenSeq=d\.seq/.test(lt),
+    "a first-run device starts the badge clean — forty retained events are history, not forty unread items");
+
+  // The 60s standalone timer is replaced by the snapshot-driven pull plus a slow safety net.
+  assert.ok(!/setInterval\(loadTriggers,60\*1000\)/.test(app), "the old 60s alert timer must be gone");
+  assert.ok(/setInterval\(loadTriggers,5\*60\*1000\)/.test(app), "a slow safety net remains for a wedged snapshot path");
+});
+
+test("client: the feed is the record — fire* interrupt only, and read state is a persisted watermark", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+
+  // A second copy of the event list is exactly how the badge, the panel and the toast could
+  // disagree about what had happened. Only the local metric rules (fireAlert) still write a log.
+  for (const fn of ["fireTrigger", "fireOps", "fireLedger"]) {
+    const body = app.slice(app.indexOf("function " + fn + "(ev)"), app.indexOf("function " + fn + "(ev)") + 900);
+    assert.ok(!/A\.log\.unshift/.test(body), `${fn} must not keep its own copy of the event`);
+    assert.ok(!/A\.unseen\+\+/.test(body), `${fn} must not hand-count unread — the watermark does that`);
+  }
+  assert.ok(/function fireAlert\([\s\S]{0,400}A\.log\.unshift/.test(app),
+    "in-tab metric rules still keep a local log until their server-side replacement lands");
+
+  // One formatter, shared by the toast path and the panel.
+  assert.ok(/function alertText\(ev\)/.test(app));
+  for (const k of ["'ops'", "'ledger'"]) assert.ok(app.includes("if(k===" + k), `alertText must handle the ${k} class`);
+  assert.ok(/new Notification\('Trade\[XYZ\] — new trigger',\{body:alertText\(ev\)\}\)/.test(app),
+    "the notification body comes from the shared formatter, not a private string");
+
+  // Unread survives a reload because it is a persisted sequence watermark, not a counter.
+  assert.ok(/function alertUnread\(\)[\s\S]{0,220}e\.seq\|\|0\)>\(A\.seenSeq\|\|0\)/.test(app), "unread is computed against the watermark");
+  assert.ok(/seenSeq:state\.alerts\.seenSeq/.test(app), "the watermark is persisted");
+  assert.ok(/Number\.isFinite\(d\.seenSeq\)\) state\.alerts\.seenSeq=d\.seenSeq/.test(app), "…and restored");
+  assert.ok(/alertMarkRead\(\)/.test(app) && /if\(pop\.hidden\)\{ loadPush\(\); alertMarkRead\(\); \}/.test(app),
+    "opening the bell marks the feed read");
+
+  // A client cannot delete from the server's ring; "read" is the only state a browser owns here.
+  assert.ok(!/id="ar-clear"[\s\S]{0,120}Clear log/.test(app), "the clear-log button must be gone");
+  assert.ok(/Mark all read/.test(app));
+  assert.ok(/el\('ar-clear'\)\.onclick=\(\)=>\{ alertMarkRead\(\)/.test(app), "…and it only moves the watermark");
+
+  // Provenance is visible: server-held rows and this-browser-only rows are tagged differently.
+  assert.ok(/const ATAG=\{setup:/.test(app) && /rule:\['RULE'/.test(app),
+    "the log must say which rows survive a closed tab and which are local");
+  assert.ok(/survives a closed tab/.test(app), "the panel states the guarantee it now actually provides");
+});
+
+// ===== Quiet ops events (build 2026.07.27-04) ==================================================
+// Regression guard for a design mistake, not a code one: the deploy notice was justified as free
+// proof the wire was alive, on the assumption that a deploy is rare. It is not — this app
+// redeploys on every individual file push, so one build shipped in five uploads fired five
+// identical DMs. The event still belongs in the log; it never belonged on a phone.
+
+test("quiet events are recorded but never delivered", () => {
+  const C = require("../src/compute");
+  const ev = { kind: "ops", title: "deploy", text: "build x is live", quiet: 1 };
+  assert.equal(C.pushEligible(ev, {}), false, "a quiet event is not delivered to a default subscriber");
+  assert.equal(C.pushEligible(ev, { classes: ["ops"] }), false, "…nor to someone who explicitly subscribed to its class");
+  assert.equal(C.pushEligible(Object.assign({}, ev, { quiet: 0 }), {}), true, "the flag is what suppresses it, not the class");
+  // The flag sits on the EVENT, so every transport agrees about what happened and differs only on
+  // what was worth interrupting for.
+  assert.equal(C.pushEligible({ kind: "ops", title: "poller stalled", level: "warn" }, {}), true,
+    "ops that matter still deliver — suppressing the whole class would take the stall warning with it");
+});
+
+test("the deploy notice is quiet; the stall watchdog is not", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    savePush: () => {}, loadPush: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
+    pushFetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, result: {} }) }) });
+  const m = p.pushMintCode(); p.pushBindNow(m.code, 5551234567, "milst");
+
+  p.pushOpsNow("deploy", "build test is live", "info", true);
+  const rec = p.getTriggers(0).events.filter((e) => e.kind === "ops");
+  assert.equal(rec.length, 1, "the deploy line is still IN the ring — it explains a reset cursor when you read the log back");
+  assert.equal(rec[0].quiet, 1);
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 0, "…and reaches nobody's phone");
+
+  // A stall is exactly what an ops channel is for, and must still get through.
+  p.pushSetPollNow(Date.now() - 20 * 60 * 1000);
+  p.pushHealthNow();
+  p.pushTickNow();
+  assert.equal(p.pushStateNow().queue, 1, "the stall warning still delivers");
+  const stall = p.getTriggers(0).events.filter((e) => e.kind === "ops").pop();
+  assert.ok(!stall.quiet, "the watchdog's events are not quiet");
+  delete process.env.TG_BOT_TOKEN;
+});
+
+test("the boot notice is emitted quiet at the source, not filtered downstream", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/pushOps\("deploy", `build \$\{version \|\| "dev"\} is live`, "info", true\)/.test(pol),
+    "the deploy notice must be marked quiet where it is emitted — a transport-side name filter would break the moment the wording changed");
+  const comp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(/if \(ev\.quiet\) return false;/.test(comp), "delivery suppression is a property of the event, shared by every transport");
 });
