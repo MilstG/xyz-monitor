@@ -8963,3 +8963,62 @@ test("clearing is a per-browser view watermark, never a deletion from the record
     "the control must say what it actually does — 'clear' implying deletion would be a lie");
   assert.ok(/if\(\(A\.seenSeq\|\|0\)<hi\) A\.seenSeq=hi;/.test(app), "clearing also marks read, or the badge counts invisible rows");
 });
+
+// ===== Setup-family filter (build 2026.07.27-10) ================================================
+// The actionable board splits confirmed setups into two structurally different families and lets
+// you show either. The alert channel could not, so "R:R >= 2" was the only way to express "just the
+// level-triggered ones" — and that is a threshold standing in for a category, which silently drops
+// the odd sigma-built setup that happens to clear 2:1.
+
+test("trigEligible filters by setup family using the board's own cls stamp", () => {
+  const { trigEligible } = require("../src/compute");
+  const rr = { coin: "A", side: "long", cls: "rr", rr: { gross: 3.1 }, evR: 0.5 };
+  const ev = { coin: "B", side: "long", cls: "ev", rr: { gross: 0.8 }, evR: 0.4 };
+
+  assert.equal(trigEligible(rr, {}), true, "no filter means both families");
+  assert.equal(trigEligible(ev, {}), true);
+  assert.equal(trigEligible(rr, { cls: [] }), true, "an empty list means both, never silence");
+  assert.equal(trigEligible(ev, { cls: [] }), true);
+  assert.equal(trigEligible(rr, { cls: ["rr", "ev"] }), true);
+
+  assert.equal(trigEligible(rr, { cls: ["rr"] }), true, "2:1+ only lets the level-triggered family through");
+  assert.equal(trigEligible(ev, { cls: ["rr"] }), false);
+  assert.equal(trigEligible(ev, { cls: ["ev"] }), true, "grinders only");
+  assert.equal(trigEligible(rr, { cls: ["ev"] }), false);
+
+  // The point of having this as a category rather than a ratio threshold: a sigma-built setup that
+  // happens to clear 2:1 is still a grinder, and an R:R floor would have let it through.
+  const evHighRR = { coin: "C", side: "long", cls: "ev", rr: { gross: 2.6 }, evR: 0.4 };
+  assert.equal(trigEligible(evHighRR, { minRR: 2 }), true, "an R:R floor alone cannot express the family");
+  assert.equal(trigEligible(evHighRR, { cls: ["rr"] }), false, "…the family filter can");
+
+  // Family and thresholds compose rather than override.
+  assert.equal(trigEligible(rr, { cls: ["rr"], minEV: 0.9 }), false);
+});
+
+test("the family filter is validated server-side and named in the message", () => {
+  const C = require("../src/compute");
+  // The board tags the grinder family on screen; the DM should say the same word rather than
+  // leaving you to infer it from the ratio.
+  const m = C.pushFmt({ kind: "setup", coin: "B", t: "B", side: "long", ev: "bigmove", label: "big move",
+    cls: "ev", rr: { gross: 0.8 }, evR: 0.4, rec: {} }, {});
+  assert.ok(m.includes("grinder"), "a grinder says so in the message");
+  const m2 = C.pushFmt({ kind: "setup", coin: "A", t: "A", side: "long", ev: "breakout", label: "breakout",
+    cls: "rr", rr: { gross: 3 }, evR: 0.5, rec: {} }, {});
+  assert.ok(!m2.includes("grinder"), "…and the other family does not carry a label it doesn't need");
+
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/c === "rr" \|\| c === "ev"/.test(pol), "the family list is validated against a closed vocabulary");
+  assert.ok(/error: "bad-class"/.test(pol), "an unrecognised family is rejected — accepting it would filter every setup out silently");
+  assert.ok(/if \(cls && cls\.length === 1\) r\.trig\.cls = cls;/.test(pol), "both-selected stores nothing rather than a no-op filter");
+
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // One vocabulary: the alert control must use the board's exact words for the split.
+  assert.ok(/2:1\+ setups/.test(app) && /positive-EV grinders/.test(app), "the alert filter reuses the board's labels verbatim");
+  assert.ok(/if\(Array\.isArray\(c\.cls\) && c\.cls\.length && !c\.cls\.includes\(ev\.cls\)\) return false;/.test(app),
+    "the client mirror must match the shared gate exactly");
+  assert.ok(/if\(!cur\.length\) return;/.test(app), "turning both families off is refused — the master toggle is how you stop setup alerts");
+  assert.ok(/trig:\{minEV:T\.minEV, minRR:T\.minRR, maxLate:T\.maxLate, cls:T\.cls\}/.test(app),
+    "the family choice syncs to telegram alongside the other thresholds, from the same control");
+});
