@@ -3495,7 +3495,7 @@ function trigEligible(row, cfg) {
   if (!row) return false;
   const c = cfg || {};
   if (c.minEV != null) { if (row.evR == null || row.evR < c.minEV) return false; }
-  if (c.minRR != null) { if (!row.rr || !(row.rr.net >= c.minRR)) return false; }
+  if (c.minRR != null) { if (!row.rr || !(row.rr.gross >= c.minRR)) return false; }   // gross since -10: net retired with the carry-in-ratio contract
   if (c.maxLate != null) { if (row.late != null && row.late > c.maxLate) return false; }
   if (c.sides && c.sides.length && !c.sides.includes(row.side)) return false;
   if (Array.isArray(c.muted) && c.muted.includes(row.coin)) return false;

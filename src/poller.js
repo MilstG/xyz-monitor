@@ -5659,7 +5659,6 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const ACT_MIN_RR = 2.0;
   const ACT_MAX_RR = 20;             // above this the void is a rounding error, not a level
   const ACT_MIN_VOID_PCT = 0.05;     // absolute floor: a void inside 5bps of the mark is not a stop
-  const ACT_MIN_VOID_SD = 0.15;      // ...and in the name's own daily sigma, when the claim carries one
   const ACT_REC_MIN_N = 8;             // resolved fires before an event's hit rate may price EV
   // CONFIRMED gate. This board makes SUGGESTIONS, and most events in the ledger do not deserve
   // one: the record is full of families whose realized expectancy is flat or negative, which is
@@ -5691,10 +5690,21 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (!rec || !(rec.n >= ACT_REC_MIN_N)) return "norecord";
     if (!(rec.avgR > 0)) return "negexp";   // field is avgR, per actRecord — not avg
     if (evR == null || !(evR > 0)) return "negev";
-    if (!rr || !(rr.gross >= ACT_MIN_RR)) return "thinRR";
     if (liveNoEdge(ev)) return "noedge";
     return null;
   }
+  // Row class, not a gate (2026.07.26-13). Freezing R:R at fire exposed that the roster is two
+  // structurally different families: level-triggered setups (breakout, tretest, reclaim) whose
+  // stop sits at a real chart level close to entry and whose frozen ratios run 2-8x, and
+  // sigma-built setups (bigmove, fpdiv, mapull) whose target is the study MEDIAN against a 1-sigma
+  // void — 0.5-1.0x at fire, by construction, forever. The old 2:1 floor silently deleted the
+  // second family the moment the ratio stopped being drift-inflated. Neither family is wrong:
+  // one wins big rarely, the other wins small often, and EV>0 (which both must still clear) is
+  // the number that actually prices that difference. So the floor became a TAG and the reader
+  // chooses which families the board shows — server ships both, classified, and the client's
+  // checkboxes filter. "rr" = frozen ratio clears ACT_MIN_RR; "ev" = it does not, but the
+  // expectancy is positive anyway: a grinder, not a windfall.
+  function actClass(rr) { return rr && rr.gross >= ACT_MIN_RR ? "rr" : "ev"; }
   const ACT_MS = 60 * 1000;            // memo window; inputs move on signal builds, not per request
   let actCache = null, actBuilt = 0, actSig = "", actVer = 0;
   // Labels come from the two places that already own them — the signals engine's EV_LABEL and the
@@ -5729,7 +5739,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return recMemo.get(k);
     };
     const cands = [];
-    const rej = { expired: 0, noGeometry: 0, degenerate: 0, untakeable: 0, thinRR: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
+    const rej = { expired: 0, noGeometry: 0, degenerate: 0, untakeable: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
     for (const e of ledgerOpen.values()) {
       if (e.ev === "airead") continue;                          // the analyst's own claim, not a setup
       const r = rows.get(e.coin);
@@ -5783,14 +5793,17 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // and squeeze playbooks are the usual source, because their voids are a fixed fraction of the
       // 30d range regardless of where price actually sits in it, so whenever price happens to sit at
       // that same fraction the void collapses onto the mark.
-      // Three independent checks, because sd0 is not stamped on every older claim and no single one
-      // covers every shape: the claim's own volatility when it has one, an absolute floor in percent
-      // when it does not, and a ceiling on the ratio itself that needs neither.
-      const sdC = e.sd0 > 0 ? e.sd0 : null;
+      // Two checks, deliberately NOT a sigma floor. Level-triggered events (breakout, tretest,
+      // reclaim) put the void AT the level, and at fire the level is close to the mark by
+      // construction — that closeness IS the trade, and on a high-sigma crypto name it can sit
+      // well under any reasonable fraction of daily sigma while being a perfectly real stop. A
+      // sigma floor here rejected exactly the setups whose geometry is most trustworthy (the
+      // first version of this guard did, and blanked the crypto board's tretest rows). What
+      // separates PALLADIUM's artifact from ETH's breakout is not sigma — it is that the ratio
+      // itself is absurd and the void is inside the bid-ask. Hence: an absolute 5bp floor, and a
+      // ceiling on the ratio that no genuine swing claim reaches.
       const voidPct = (Math.abs(e.mark0 - e.stp) / e.mark0) * 100;
-      if (rr.gross > ACT_MAX_RR || voidPct < ACT_MIN_VOID_PCT || (sdC != null && voidPct / sdC < ACT_MIN_VOID_SD)) {
-        rej.degenerate++; continue;
-      }
+      if (rr.gross > ACT_MAX_RR || voidPct < ACT_MIN_VOID_PCT) { rej.degenerate++; continue; }
       // Separately: is it still takeable HERE? A claim can be perfectly framed at fire and already
       // dead now. Different question, own reject reason.
       if (!tradeableNow(side, r.px, e.stp, target)) { rej.untakeable++; continue; }
@@ -5812,7 +5825,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       }
       cands.push({
         coin: e.coin, t: r.ticker, uni: r.uni === "main" ? "crypto" : "stocks", side,
-        ev: e.ev, label: ACT_LABEL[e.ev] || e.ev, shadow,
+        ev: e.ev, label: ACT_LABEL[e.ev] || e.ev, shadow, cls: actClass(rr),
         // Fire-time prime verdict, already frozen on the claim by the signals engine. Shown as a
         // badge, NOT enforced — see actConfirm on why its hit>=0.6 floor is not a gate here.
         prime: e.pr === true ? true : (e.pr === false ? false : null),
@@ -5838,7 +5851,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     actCache = { ts: now, dataTs: actVer,
       params: { minHorizonDays: ACT_MIN_HZ / DAY, minHorizonDaysCrypto: crypto ? ACT_MIN_HZ_MAIN / DAY : null, maxBars: ACT_MAX_BARS, minRR: ACT_MIN_RR,
         recMinN: ACT_REC_MIN_N, netOfCarry: true, tfs: ["D1", "H12", "H4"],
-        gate: "confirmed", requires: ["n>=" + ACT_REC_MIN_N, "avgR>0", "EV>0", "R:R>=" + ACT_MIN_RR.toFixed(1), "R:R<=" + ACT_MAX_RR, "!noedge"] },
+        gate: "confirmed", requires: ["n>=" + ACT_REC_MIN_N, "avgR>0", "EV>0", "R:R<=" + ACT_MAX_RR, "!noedge"], rrFloor: ACT_MIN_RR },
       coverage: Object.assign({ confirmed: board.length, openClaims: ledgerOpen.size }, rej),
       rows: board, count: board.length };
     // Detection runs on the poller's clock as part of the build, so a trigger is recorded whether
