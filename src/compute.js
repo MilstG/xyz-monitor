@@ -3309,9 +3309,16 @@ const FEATURE_NEVER_GATE = new Set(["/api/health", "/login", "/logout",
 
 // pin:true — always public, never gateable. Markets is the fallback every gated view falls through
 // to; if it could be hidden, a public user would land on a blank app with no way out.
+// lock:true — the mirror image: always admin, never openable. The panel is the control surface for
+// every other flag, so a write that made it public would hand the whole switchboard to the group, and
+// a write that turned it off would lock the operator out with no way back except a redeploy. Both
+// locks exist for the same reason: the two states that must not be reachable through the thing they
+// control. featureState honours them ahead of any stored value, setFlag refuses them, and the
+// sanitizer drops them so a hand-edited flags.json cannot smuggle one in either.
 // runtime:true — the tab is injected by JS at load (Treemap self-installs) rather than living in
 // index.html, so the markup-scanning half of the manifest test must not demand a data-view for it.
 const FEATURES = [
+  { key: "admin",      kind: "tab", label: "Admin",       def: "admin",  lock: true, routes: [] },
   { key: "markets",    kind: "tab", label: "Markets",     def: "public", pin: true, routes: ["/api/snapshot", "/api/daily", "/api/series", "/api/candles"] },
   { key: "trend",      kind: "tab", label: "Trend",       def: "public", routes: ["/api/trend"] },
   { key: "sectors",    kind: "tab", label: "Sectors",     def: "public", routes: [] },
@@ -3347,7 +3354,7 @@ function featureFlagsSanitize(raw) {
     // A stored state for a PINNED key is dropped, not kept-and-ignored. Keeping it would be inert
     // today (featureState checks the pin first) and live the moment anyone removed the pin — a
     // change in one file silently activating a value written in another. Never persist it at all.
-    if (f.pin) continue;
+    if (f.pin || f.lock) continue;
     const v = raw[k];
     if (FEATURE_STATES.indexOf(v) < 0) continue;
     out[k] = v;
@@ -3361,6 +3368,7 @@ function featureState(flags, key) {
   const f = FEATURE_BY_KEY.get(key);
   if (!f) return FEATURE_DEFAULT;
   if (f.pin) return "public";
+  if (f.lock) return "admin";
   const s = flags && flags[key];
   if (FEATURE_STATES.indexOf(s) >= 0) return s;
   return FEATURE_STATES.indexOf(f.def) >= 0 ? f.def : FEATURE_DEFAULT;
@@ -3410,6 +3418,12 @@ function featureGateFor(method, url, flags, isAdmin) {
 }
 
 // Panel readout: how much of the app a public user currently sees.
+// Settable = neither locked open nor locked shut. The panel renders the rest as read-only rather than
+// offering a control whose write would be refused.
+function featureSettable(key) {
+  const f = FEATURE_BY_KEY.get(key);
+  return !!f && !f.pin && !f.lock;
+}
 function featureCounts(flags) {
   let pub = 0, adm = 0, off = 0;
   for (const f of FEATURES) {
@@ -3429,3 +3443,4 @@ module.exports.featureVisible = featureVisible;
 module.exports.resolveFeatures = resolveFeatures;
 module.exports.featureGateFor = featureGateFor;
 module.exports.featureCounts = featureCounts;
+module.exports.featureSettable = featureSettable;

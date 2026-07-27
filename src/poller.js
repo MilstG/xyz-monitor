@@ -3,7 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
-const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts } = require("./compute");
+const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -5367,8 +5367,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       flags: featureFlags,
       counts: featureCounts(featureFlags),
       resolved: resolveFeatures(featureFlags, isAdmin),
+      // Both audiences resolved SERVER-side. The panel's "view as public" swaps this in wholesale
+      // rather than recomputing a public view from raw states in the browser — the client must never
+      // re-derive a visibility, which is the same rule the chart annotations follow.
+      resolvedPublic: resolveFeatures(featureFlags, false),
       manifest: FEATURES.map((f) => ({ key: f.key, kind: f.kind, label: f.label,
-        state: featureState(featureFlags, f.key), pin: !!f.pin, routes: f.routes || [] })),
+        state: featureState(featureFlags, f.key), pin: !!f.pin, lock: !!f.lock,
+        settable: featureSettable(f.key), routes: f.routes || [] })),
     };
   }
   // One key per call — the panel writes optimistically and rolls back on failure, so a batch write
@@ -5382,6 +5387,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // A 200 whose resolved state differs from the requested one reads as a successful write in the
     // panel and in any log; the honest answer is that this key is not settable.
     if (entry.pin) return { ok: false, error: "pinned" };
+    if (entry.lock) return { ok: false, error: "locked" };   // the panel's own key — see the lock note in compute.js
     if (FEATURE_STATES.indexOf(state) < 0) return { ok: false, error: "bad-state" };
     const next = Object.assign({}, featureFlags);
     next[key] = state;
