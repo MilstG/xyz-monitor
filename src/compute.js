@@ -3792,6 +3792,19 @@ const RULE_METRICS = [
   { k: "doiD1", label: "\u0394OI 1d %", unit: "%", get: (r) => (r.doi && r.doi.d1 != null && isFinite(r.doi.d1) ? r.doi.d1 : null) },
   { k: "doiD7", label: "\u0394OI 7d %", unit: "%", get: (r) => (r.doi && r.doi.d7 != null && isFinite(r.doi.d7) ? r.doi.d7 : null) },
   { k: "liq24", label: "24h liquidations", unit: "M", scale: 1e6, get: (r) => (r.liq24 != null && isFinite(r.liq24) ? r.liq24 : null) },
+  // ΔOI on every window the board shows, not just the two I happened to pick first. All read the
+  // same windowed object the screener columns render.
+  { k: "doiH1", label: "ΔOI 1h %", unit: "%", get: (r) => (r.doi && r.doi.h1 != null && isFinite(r.doi.h1) ? r.doi.h1 : null) },
+  { k: "doiH4", label: "ΔOI 4h %", unit: "%", get: (r) => (r.doi && r.doi.h4 != null && isFinite(r.doi.h4) ? r.doi.h4 : null) },
+  { k: "doiD30", label: "ΔOI 30d %", unit: "%", get: (r) => (r.doi && r.doi.d30 != null && isFinite(r.doi.d30) ? r.doi.d30 : null) },
+  // Time-weighted funding over the window, annualised — the corroboration column next to ΔOI.
+  { k: "fundD1", label: "funding 1d avg APR %", unit: "%", get: (r) => (r.fundByWin && r.fundByWin.d1 != null && isFinite(r.fundByWin.d1) ? r.fundByWin.d1 * 24 * 365 * 100 : null) },
+  { k: "fundD7", label: "funding 7d avg APR %", unit: "%", get: (r) => (r.fundByWin && r.fundByWin.d7 != null && isFinite(r.fundByWin.d7) ? r.fundByWin.d7 * 24 * 365 * 100 : null) },
+  // Range position: % below the 30d high (always <= 0 at the high) and % above the 30d low.
+  // "hi30 > -2" is "within 2% of the monthly high" — the breakout-watch question as a threshold.
+  { k: "hi30", label: "% from 30d high", unit: "%", live: 1, get: (r) => (r.feat && r.feat.hi30 > 0 && r.px > 0 ? (r.px / r.feat.hi30 - 1) * 100 : null) },
+  { k: "lo30", label: "% from 30d low", unit: "%", live: 1, get: (r) => (r.feat && r.feat.lo30 > 0 && r.px > 0 ? (r.px / r.feat.lo30 - 1) * 100 : null) },
+  { k: "vwap30", label: "% from 30d vwap", unit: "%", live: 1, get: (r) => (r.feat && r.feat.vwap30 > 0 && r.px > 0 ? (r.px / r.feat.vwap30 - 1) * 100 : null) },
   // Trend, stamped onto the row from the SAME board the Trend tab renders. Signed on purpose:
   // +4 is a fully stacked uptrend, -4 a fully stacked downtrend, 0 neither. That makes one metric
   // express both sides and lets `abs>` mean "strongly trending either way", which is the question

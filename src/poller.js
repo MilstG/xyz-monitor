@@ -5987,6 +5987,14 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (Array.isArray(d.rates)) for (const kv of d.rates)
       if (Array.isArray(kv) && typeof kv[0] === "string" && Array.isArray(kv[1]))
         classFires.set(kv[0], kv[1].filter((t) => Number.isFinite(t)));
+    const ep = d.episodes || {};
+    const loadMap = (arr, map) => { if (Array.isArray(arr)) for (const kv of arr) if (Array.isArray(kv)) map.set(kv[0], kv[1]); };
+    loadMap(ep.trend, trendState); loadMap(ep.regime, regimeArmed); loadMap(ep.coverage, coverageArmed); loadMap(ep.earn, earnAlerted);
+    if (Array.isArray(ep.filings)) for (const id of ep.filings) if (typeof id === "string") filingSeen.add(id);
+    // Restored state IS the seed, so the priming delay would only eat real transitions. A genuinely
+    // fresh boot (nothing restored) still gets the full silent seeding pass.
+    if (trendState.size) trendPrimed = true;
+    if (filingSeen.size) filingPrimed = true;
     return true;
   }
   function persistTriggers() {
@@ -5994,7 +6002,18 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const cut = Date.now() - TRIG_SEEN_TTL;
     for (const [k, t] of trigSeen) if (t < cut) trigSeen.delete(k);
     store.saveTriggers({ seq: trigSeq, seen: [...trigSeen.entries()], events: trigEvents.slice(-TRIG_RING),
-      rates: [...classFires.entries()].map(([k, a]) => [k, a.slice(-CLASS_RATE_MAX)]) });
+      rates: [...classFires.entries()].map(([k, a]) => [k, a.slice(-CLASS_RATE_MAX)]),
+      // Episode state rides along. Without this, every deploy re-seeded every scan silently — and
+      // this app deploys once per pushed FILE, so a trend cross had to complete entirely between
+      // two deploys to ever fire. "The trend alerts don't exist" was the accurate description of
+      // the result. Persisting the seeds is what turns these classes from theoretical into real.
+      episodes: {
+        trend: [...trendState.entries()].slice(-500),
+        regime: [...regimeArmed.entries()],
+        coverage: [...coverageArmed.entries()].slice(-200),
+        filings: [...filingSeen].slice(-FILING_SEEN_MAX),
+        earn: [...earnAlerted.entries()].slice(-400),
+      } });
     trigDirty = false;
   }
   // ONE emitter for the ONE stream. Every class — setups today, ops here, the rest in later
@@ -6711,7 +6730,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const drop = filingSeen.size - FILING_SEEN_MAX; let i = 0;
       for (const k of filingSeen) { if (i++ >= drop) break; filingSeen.delete(k); }
     }
-    if (fired) { persistTriggers(); log(`filing alerts: ${fired} material filing(s)`); }
+    persistTriggers();   // the seen-set must survive the deploy, or the backlog re-arrives as news
+    if (fired) log(`filing alerts: ${fired} material filing(s)`);
     return fired;
   }
 
@@ -6798,7 +6818,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         fired++;
       }
     }
-    if (fired) persistTriggers();
+    persistTriggers();   // seeds and re-arms matter to the NEXT process as much as fires do
     return fired;
   }
 
@@ -6829,7 +6849,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       fired++;
     }
     for (const k of [...coverageArmed.keys()]) if (!live.has(k)) coverageArmed.delete(k);
-    if (fired) persistTriggers();
+    persistTriggers();   // seeds and re-arms matter to the NEXT process as much as fires do
     return fired;
   }
 
@@ -6956,7 +6976,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (!r || r.delisted) continue;
       const sign = (tb.e13 > 0 && tb.e21 > 0) ? (tb.e13 > tb.e21 ? 1 : -1) : 0;
       const prev = trendState.get(coin);
-      trendState.set(coin, { score: tb.score, sign });
+      trendState.set(coin, { score: tb.score, sign, retest: tb.retest || null });
       if (!trendPrimed || !prev) continue;   // first pass seeds the whole board silently
       // 1. Full stack reached. Only the ARRIVAL fires; sitting at 4/4 for a week says nothing new.
       if (tb.score >= 4 && prev.score < 4) {
@@ -6966,7 +6986,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         fired++;
         continue;   // one event per name per scan: a cross that arrives with the stack is the stack
       }
-      // 2. D1 ribbon cross. Sign 0 (a rung without both EMAs) is unknown, not a flip — treating it
+      // 2. RETEST badge arrival — the board's own read of a pullback into the 13/21 zone with the
+      //    close holding EMA21, on whichever rung it flagged. This is the SAME condition the ledger
+      //    enrolls as a claim; the difference is the alert fires on the badge APPEARING, while the
+      //    ledger's setup alert waits for the event family to prove a record (n >= 8 resolved). Until
+      //    that record exists this is the only way a retest reaches you at all — which, with a young
+      //    tretest ledger, is precisely why trend retests looked nonexistent.
+      if (tb.retest && !prev.retest) {
+        emitTrig("trend", { coin, t: r.ticker || coin, side: tb.side, sub: "retest", score: tb.score,
+          tf: tb.retest, px: r.px, e21: tb.e21, title: tb.retest + " retest of the 13/21 zone",
+          text: `pullback into the ribbon of a ${tb.score}/4 stacked ${tb.side === "long" ? "uptrend" : "downtrend"}, close holding EMA21` }, now);
+        fired++;
+        continue;
+      }
+      // 3. D1 ribbon cross. Sign 0 (a rung without both EMAs) is unknown, not a flip — treating it
       //    as one would fire on every gap in the ladder.
       if (sign !== 0 && prev.sign !== 0 && sign !== prev.sign) {
         emitTrig("trend", { coin, t: r.ticker || coin, side: sign > 0 ? "long" : "short", sub: "cross",
@@ -6978,7 +7011,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     }
     // Names that left the board entirely lose their state, so a return is a genuinely new episode.
     for (const c of [...trendState.keys()]) if (!trendByCoin.has(c)) trendState.delete(c);
-    if (fired) { persistTriggers(); log(`trend alerts: ${fired} event(s)`); }
+    // Persist even without a fire: the transitions BETWEEN fires (seeding, re-arms, state drift)
+    // are exactly what the next process needs to judge the next transition correctly.
+    persistTriggers();
+    if (fired) log(`trend alerts: ${fired} event(s)`);
     return fired;
   }
 
