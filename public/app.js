@@ -2181,9 +2181,12 @@ function renderAdmRecips(){
   b.innerHTML=rows.length? rows.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const cls=(r.classes&&r.classes.length)?r.classes.join(', '):'default set';
-    return `<div class="arule"><span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${esc(cls)} \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':''}</span></span>`
+    return `<div class="arule"><span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${esc(cls)} \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':(r.owned?' \u00b7 another browser':' \u00b7 unclaimed')}</span></span>`
+      +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
       +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span></div>`; }).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>';
+  b.querySelectorAll('[data-admclaim]').forEach(x=>x.addEventListener('click',()=>{
+    pushAct('/api/alerts/claim',{chat:x.dataset.admclaim}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-admunlink]').forEach(x=>x.addEventListener('click',()=>{
     if(!confirm('Revoke this recipient? They stop receiving alerts immediately and must re-link.')) return;
     pushAct('/api/alerts/unlink',{chat:x.dataset.admunlink}).then(()=>renderAdmRecips()); }));
@@ -5788,8 +5791,18 @@ el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('a
   if(pop.hidden){ loadPush(); loadRules(); alertMarkRead(); }   // delivery state is server-truth; read it fresh every open (a link code expires in 10 min)
   if(pop.hidden){ buildAlertsPanel(); pop.hidden=false; el('bellBtn').setAttribute('aria-expanded','true'); updateBell(); }
   else { pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
+// A control that rebuilds its own popover destroys the element that was clicked. By the time the
+// click bubbles to document, e.target is DETACHED — and a detached node is contained by nothing, so
+// the "did they click outside?" test says yes and the popover closes under the user's finger. Every
+// popover here rebuilds itself from some control, so all four shared the bug; only the alerts panel
+// grew enough re-rendering controls for it to become obvious.
+function clickedOutside(pop, btn, e){
+  if(!pop || pop.hidden) return false;
+  if(!e.target || !e.target.isConnected) return false;   // we removed it ourselves — not an outside click
+  return !pop.contains(e.target) && (!btn || !btn.contains(e.target));
+}
 document.addEventListener('click',e=>{ const pop=el('alertpop');
-  if(pop && !pop.hidden && !pop.contains(e.target) && !el('bellBtn').contains(e.target)){ pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
+  if(clickedOutside(pop, el('bellBtn'), e)){ pop.hidden=true; el('bellBtn').setAttribute('aria-expanded','false'); } });
 function applyNumFilters(){
   for(const id of ['volMin','volMax','oiMin','oiMax']){ const inp=el(id), v=parseAmount(inp.value);
     if(Number.isNaN(v)) inp.classList.add('bad'); else { inp.classList.remove('bad'); state.filters[id]=v; } }
@@ -5808,7 +5821,7 @@ el('filtersBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el
   if(pop.hidden){ pop.hidden=false; el('filtersBtn').setAttribute('aria-expanded','true'); const m=el('volMin'); if(m) m.focus(); }
   else { pop.hidden=true; el('filtersBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('filterpop');
-  if(pop && !pop.hidden && !pop.contains(e.target) && !el('filtersBtn').contains(e.target)){ pop.hidden=true; el('filtersBtn').setAttribute('aria-expanded','false'); } });
+  if(clickedOutside(pop, el('filtersBtn'), e)){ pop.hidden=true; el('filtersBtn').setAttribute('aria-expanded','false'); } });
 function buildColMenu(){ const pop=el('colpop'); let h='<div class="cphead">Show columns · drag headers to reorder</div>';
   for(const key of state.colOrder){ const c=COL_BY_KEY[key]; if(!c) continue;
     const dis=c.hideable===false, checked=!state.colHidden.has(key);
@@ -5823,12 +5836,12 @@ el('colsBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('c
   if(pop.hidden){ buildColMenu(); pop.hidden=false; el('colsBtn').setAttribute('aria-expanded','true'); }
   else { pop.hidden=true; el('colsBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('colpop');
-  if(pop && !pop.hidden && !pop.contains(e.target) && !el('colsBtn').contains(e.target)){ pop.hidden=true; el('colsBtn').setAttribute('aria-expanded','false'); } });
+  if(clickedOutside(pop, el('colsBtn'), e)){ pop.hidden=true; el('colsBtn').setAttribute('aria-expanded','false'); } });
 el('layBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('laypop');
   if(pop.hidden){ buildLayoutMenu(); pop.hidden=false; el('layBtn').setAttribute('aria-expanded','true'); }
   else { pop.hidden=true; el('layBtn').setAttribute('aria-expanded','false'); } });
 document.addEventListener('click',e=>{ const pop=el('laypop');
-  if(pop && !pop.hidden && !pop.contains(e.target) && !el('layBtn').contains(e.target)){ pop.hidden=true; el('layBtn').setAttribute('aria-expanded','false'); } });
+  if(clickedOutside(pop, el('layBtn'), e)){ pop.hidden=true; el('layBtn').setAttribute('aria-expanded','false'); } });
 function setWindow(tf){ state.tf=tf;
   document.querySelectorAll('#tfseg button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
   document.querySelectorAll('#sectf button').forEach(x=>x.classList.toggle('active',x.dataset.tf===tf));
