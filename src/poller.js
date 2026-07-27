@@ -5657,6 +5657,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // from the LIVE mark every build, a setup that gets chased dies here on its own — no separate
   // "too late" rule is needed, and the two can never disagree about the same row.
   const ACT_MIN_RR = 2.0;
+  const ACT_MAX_RR = 20;             // above this the void is a rounding error, not a level
+  const ACT_MIN_VOID_PCT = 0.05;     // absolute floor: a void inside 5bps of the mark is not a stop
+  const ACT_MIN_VOID_SD = 0.15;      // ...and in the name's own daily sigma, when the claim carries one
   const ACT_REC_MIN_N = 8;             // resolved fires before an event's hit rate may price EV
   // CONFIRMED gate. This board makes SUGGESTIONS, and most events in the ledger do not deserve
   // one: the record is full of families whose realized expectancy is flat or negative, which is
@@ -5726,7 +5729,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return recMemo.get(k);
     };
     const cands = [];
-    const rej = { expired: 0, noGeometry: 0, untakeable: 0, thinRR: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
+    const rej = { expired: 0, noGeometry: 0, degenerate: 0, untakeable: 0, thinRR: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
     for (const e of ledgerOpen.values()) {
       if (e.ev === "airead") continue;                          // the analyst's own claim, not a setup
       const r = rows.get(e.coin);
@@ -5773,6 +5776,21 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // drifted. A frozen ratio and a fire-measured hit rate describe the same trade again.
       const rr = netRR({ side, entry: e.mark0, stop: e.stp, target });
       if (!rr) { rej.noGeometry++; continue; }                   // the claim's own geometry never made sense
+      // Degenerate-void guard. Risk is the denominator, so a void a few basis points from the fire
+      // mark does not produce a tight setup — it produces an artifact: a 0.035% void against a 13.8%
+      // target is 395:1, and setupEV turns that into an expectancy of +236R. No swing trade has ever
+      // had those numbers; what it has is a stop level that landed on top of the entry. The unwind
+      // and squeeze playbooks are the usual source, because their voids are a fixed fraction of the
+      // 30d range regardless of where price actually sits in it, so whenever price happens to sit at
+      // that same fraction the void collapses onto the mark.
+      // Three independent checks, because sd0 is not stamped on every older claim and no single one
+      // covers every shape: the claim's own volatility when it has one, an absolute floor in percent
+      // when it does not, and a ceiling on the ratio itself that needs neither.
+      const sdC = e.sd0 > 0 ? e.sd0 : null;
+      const voidPct = (Math.abs(e.mark0 - e.stp) / e.mark0) * 100;
+      if (rr.gross > ACT_MAX_RR || voidPct < ACT_MIN_VOID_PCT || (sdC != null && voidPct / sdC < ACT_MIN_VOID_SD)) {
+        rej.degenerate++; continue;
+      }
       // Separately: is it still takeable HERE? A claim can be perfectly framed at fire and already
       // dead now. Different question, own reject reason.
       if (!tradeableNow(side, r.px, e.stp, target)) { rej.untakeable++; continue; }
@@ -5820,7 +5838,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     actCache = { ts: now, dataTs: actVer,
       params: { minHorizonDays: ACT_MIN_HZ / DAY, minHorizonDaysCrypto: crypto ? ACT_MIN_HZ_MAIN / DAY : null, maxBars: ACT_MAX_BARS, minRR: ACT_MIN_RR,
         recMinN: ACT_REC_MIN_N, netOfCarry: true, tfs: ["D1", "H12", "H4"],
-        gate: "confirmed", requires: ["n>=" + ACT_REC_MIN_N, "avgR>0", "EV>0", "R:R>=" + ACT_MIN_RR.toFixed(1), "!noedge"] },
+        gate: "confirmed", requires: ["n>=" + ACT_REC_MIN_N, "avgR>0", "EV>0", "R:R>=" + ACT_MIN_RR.toFixed(1), "R:R<=" + ACT_MAX_RR, "!noedge"] },
       coverage: Object.assign({ confirmed: board.length, openClaims: ledgerOpen.size }, rej),
       rows: board, count: board.length };
     // Detection runs on the poller's clock as part of the build, so a trigger is recorded whether
