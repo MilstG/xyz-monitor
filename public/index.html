@@ -45,6 +45,16 @@
   <span class="st-right">
     <span class="st-item freshtray" id="freshtray" title="data-source freshness — green fresh, amber aging, red stale or fetch-failing"></span>
     <span id="focusChip" hidden><button class="fchip-t" id="focusChipT" title="focused ticker — follows you across tabs; click to reopen the drawer">◎ —</button><button class="fchip-x" id="focusChipX" title="clear the focused ticker">✕</button></span>
+    <!-- Alerts is a session control, not a markets control: it fires from the poller regardless of
+         which tab is open, so it lives in the global status bar rather than inside #view-markets,
+         where showView() used to hide it — and its unread badge — on every other tab. -->
+    <div class="bellwrap">
+      <button class="btn stbell" id="bellBtn" aria-haspopup="true" aria-expanded="false" title="Alerts — triggers, ledger events and ops notices for this browser">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span class="bell-badge" id="bellBadge">0</span>
+      </button>
+      <div class="alertpop" id="alertpop" hidden></div>
+    </div>
   </span>
 </div>
 
@@ -127,13 +137,6 @@
     <div class="colpop" id="colpop" hidden></div>
   </div>
   <button class="btn" id="mktExport" title="Download the current table as CSV">↓ CSV</button>
-  <div class="bellwrap">
-    <button class="btn" id="bellBtn" aria-haspopup="true" aria-expanded="false" title="Alerts">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Alerts
-      <span class="bell-badge" id="bellBadge">0</span>
-    </button>
-    <div class="alertpop" id="alertpop" hidden></div>
-  </div>
 </div>
 
 <div class="movers" id="movers" hidden>
