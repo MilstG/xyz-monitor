@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-07"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -12244,4 +12244,68 @@ test("-06 end to end: create/list/drop against a live roster, ratio candles + EM
   assert.ok(!p.dropBasket("MINE").ok, "double-drop refused");
   assert.notEqual(p.getBasketsStamp(), st0, "registry stamp moved — cached /api/baskets keys die with it");
   assert.equal(saved.list.length, 0, "persisted registry reflects the drop");
+});
+
+// ===== COMP/G loading-state honesty + [hidden] guard (build 2026.07.28-07) =====================
+// The field report: an empty corr-tab visit racing /api/daily painted COMP/G as a lineless chart
+// with a NaN anchor label, never healed, and the un-guarded spread-mode base select read as a
+// forced basket comparison. Two fixes, both executed here — the render must SAY it's loading,
+// the daily hook must repaint it out of that state, and cg-basectl must actually hide.
+
+test("-07 COMP/G: no-history render is an honest loading line (no fake chart, no NaN), and heals when daily lands", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {}, removeChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 300 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch,
+    ct: global.clearTimeout, ci: global.clearInterval };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: { baskets: true }, __ADMIN: true };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  try {
+    const api = new Function(app + "\n;return {state, COMPG, renderCompg};")();
+    const DAY = 86400e3, today = Math.floor(Date.now() / DAY) * DAY;
+    const names = ["AAA", "BBB", "CCC", "DDD"];
+    api.state.scope = "stocks"; api.state.view = "corr";
+    names.forEach((tk, ix) => api.state.rows.set("xyz:" + tk, { coin: "xyz:" + tk, ticker: tk, uni: "xyz", px: 100, daily: null, delisted: false }));
+    api.COMPG.sel = names.slice(); api.COMPG.off = new Set(); api.COMPG.mode = "index"; api.COMPG.base = "__basket";
+    api.COMPG.win = 30; api.COMPG.anchorTs = (Math.floor(Date.now() / DAY) - 30) * DAY; api.COMPG.closed = false;
+    api.renderCompg();
+    const h0 = els["compg"].innerHTML;
+    assert.ok(api.COMPG._empty, "empty state flagged for the self-heal hook");
+    assert.ok(/Loading daily history/.test(h0), "the render SAYS it's waiting");
+    assert.ok(/0\/4 selected names/.test(h0), "and counts what's landed");
+    assert.equal((h0.match(/<path /g) || []).length, 0, "no fake chart");
+    assert.ok(!/NaN/.test(h0), "no NaN anchor label");
+    // history lands -> the same call the daily hook makes repaints a real chart
+    names.forEach((tk, ix) => { api.state.rows.get("xyz:" + tk).daily =
+      Array.from({ length: 120 }, (_, i) => ({ t: today - (119 - i) * DAY, c: 100 * (ix + 1) * (1 + i * 0.001) })); });
+    api.renderCompg();
+    const h1 = els["compg"].innerHTML;
+    assert.ok(!api.COMPG._empty, "empty flag cleared");
+    assert.equal((h1.match(/<path /g) || []).length, 4, "one line per name the moment data exists");
+    assert.ok(!/Loading daily history/.test(h1), "loading copy gone");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
+});
+
+test("-07 wiring: the daily hook repaints COMP/G out of empty, and cg-basectl's [hidden] guard exists", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("if(COMPG._empty && el('compg') && !el('compg').hidden) renderCompg()"),
+    "daily-arrival hook carries the self-heal repaint");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".cg-basectl[hidden]{display:none}"),
+    "the spread-mode base select hides when hidden — runtime-templated hidden escaped the markup audit; this pin closes that hole");
 });
