@@ -1019,7 +1019,7 @@ test("news feed: merge purity, payload badge stamps, full wiring chain", () => {
   assert.ok(srv.includes('error: "not fetched yet"') && srv.split('fastify.get("/api/news"').length - 1 === 1, "route registered once with an honest fallback");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["function renderNews()", "function fillDrawerNews()", "function newsRow(",
-    "id=\"dnews\"", "all ${esc(r.ticker)} news", "no headlines in the last 72h",
+    "id=\"dnews\"", "all ${esc(r.ticker)} news", "headlines in the last 72h",
     "if(v==='news'){ if(el('view-news')) openNews();", "nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}"])
     assert.ok(app.includes(pin), `news client pin missing: ${pin}`);
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
@@ -1228,7 +1228,7 @@ test("news relevance pipeline: no off-universe leaks — gate, AI verdicts, re-t
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   for (const pin of ["newsMode='universe'", "filings are exclusive BOTH ways",
-    "relevance verdict pending", "a.sec==='off-topic'?' off'", "const isMacroName=!!(r.assetClass&&r.assetClass!=='Equity')",
+    "relevance verdict pending", "a.sec==='off-topic'?' off'", "const lane=r.mlane||null;",
     "attribution AI-verified", "no verified headlines for this name in the last 72h"])
     assert.ok(app.includes(pin), `lane pin missing: ${pin}`);
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11643,4 +11643,197 @@ test("board promotion path -02: a matured shadow record carries its family onto 
   assert.equal(row.rec.n, 8, "gated on the family's own out-of-sample record");
   assert.ok(row.rec.avgR > 0 && row.evR > 0, "and only because that record models positive from here");
   assert.ok(row.rr && row.rr.gross >= 2, "the tight void is what buys the R:R the sigma constructions never could");
+});
+
+// ===== display names + gated macro news lane (build 2026.07.28-03) =============================
+// Two shipped changes, one test block. (1) A ticker now carries the instrument behind it, from a
+// static label table. (2) The drawer's macro-tape fallback — previously "anything not an Equity
+// gets the raw general tape", which put the identical five headlines in the EWZ drawer and the
+// JPY drawer — is gated on per-instrument topics, server-side.
+
+test("displayName: a label table, separate from the headline-alias table, null when unseeded", () => {
+  const { displayName, companyName, DISPLAY_NAMES, CRYPTO_NAMES } = require("../src/sectors");
+  assert.equal(displayName("EWZ"), "iShares MSCI Brazil ETF");
+  assert.equal(displayName("ewz"), "iShares MSCI Brazil ETF", "case-insensitive");
+  assert.equal(displayName("JPY"), "Japanese yen");
+  assert.equal(displayName("CL"), "WTI crude oil", "the CL collision resolves to crude here too, not Colgate");
+  assert.equal(displayName("BTC", "main"), "Bitcoin");
+  assert.equal(displayName("BRK.B"), "Berkshire Hathaway (class B)");
+  assert.equal(displayName("BRKB"), "Berkshire Hathaway (class B)", "the dot-stripped form resolves to the same name");
+  // Unseeded is null, never a guess and never the ticker echoed back — the caller decides to omit.
+  assert.equal(displayName("TOTALLYMADEUPXYZ"), null);
+  assert.equal(displayName(""), null);
+  assert.equal(displayName(null), null);
+  assert.equal(displayName("EWZ", "main"), null, "an equity-universe label must not leak into a crypto lookup");
+  assert.equal(displayName("NVDA", "main"), null);
+  // The whole point of a separate table: COMPANY_NAMES holds MATCH FRAGMENTS tuned for substring
+  // hits, and rendering those as labels would put "Procter" and "Snap " on screen. Pin the split.
+  assert.equal(companyName("PG"), "Procter");
+  assert.equal(displayName("PG"), "Procter & Gamble");
+  assert.equal(companyName("SNAP"), "Snap ");
+  assert.equal(displayName("SNAP"), "Snap Inc.");
+  // No empty or whitespace-only labels in either table — an empty string renders an empty line.
+  for (const [t, v] of Object.entries(DISPLAY_NAMES).concat(Object.entries(CRYPTO_NAMES)))
+    assert.ok(typeof v === "string" && v.trim().length > 1, `display name for ${t} must be a real label`);
+  // Pre-IPO synthetics must SAY they are synthetics — the label is where that disclosure lives.
+  for (const t of ["SPCX", "OPENAI", "ANTHROPIC", "XAI"])
+    assert.ok(/pre-IPO synthetic/.test(DISPLAY_NAMES[t]), `${t} label must disclose it is a synthetic`);
+});
+
+test("macroLane: scoped topics, broad tape, or no lane at all — never a bare fallback", () => {
+  const { macroLane, MACRO_LANES } = require("../src/sectors");
+  // The screenshot bug, both names: each now declares its own topics rather than sharing the tape.
+  const ewz = macroLane("EWZ"), jpy = macroLane("JPY");
+  assert.ok(ewz && ewz.topics.includes("Brazil") && ewz.label === "Brazil");
+  assert.ok(jpy && jpy.topics.includes("yen") && jpy.label === "Japan");
+  assert.ok(!ewz.topics.some((t) => jpy.topics.includes(t)), "the two lanes that produced the bug must not overlap at all");
+  // Broad: the instrument IS the tape. Declared, not inferred from asset class.
+  assert.equal(macroLane("SP500").broad, true);
+  assert.equal(macroLane("VIX").broad, true);
+  assert.equal(macroLane("DXY").broad, true);
+  // An equity has no lane — that is what makes "no headlines" the honest equity answer.
+  assert.equal(macroLane("NVDA"), null);
+  assert.equal(macroLane("AAPL"), null);
+  assert.equal(macroLane("BTC", "main"), null, "the crypto drawer has no news feed, so it gets no lane");
+  // Shape invariant: broad lanes carry no topics, scoped lanes carry a label AND a non-empty list.
+  for (const [t, L] of Object.entries(MACRO_LANES)) {
+    if (L.broad) { assert.ok(!L.topics, `${t} is broad and must not also declare topics`); continue; }
+    assert.ok(typeof L.label === "string" && L.label.length, `${t} scoped lane needs a label`);
+    assert.ok(Array.isArray(L.topics) && L.topics.length, `${t} scoped lane needs topics`);
+    for (const k of L.topics) assert.ok(typeof k === "string" && k.trim().length >= 2, `${t} topic "${k}" too short to gate on`);
+  }
+});
+
+test("topicHit: word-boundary, not substring — the gate aliasHit could not be", () => {
+  const { topicHit } = require("../src/compute");
+  assert.equal(topicHit("Petrobras lifts diesel prices as Brent holds", ["Brazil", "Petrobras"]), true);
+  assert.equal(topicHit("BCB holds Selic at 15%", ["Selic", "Copom"]), true);
+  assert.equal(topicHit("bank of japan holds rates", ["Bank of Japan"]), true, "phrases match as phrases, case-insensitively");
+  // The reason this is not aliasHit: substring matching seeds macro drawers with garbage.
+  assert.equal(topicHit("A toil of a day for the cayenne trade", ["oil", "yen"]), false,
+    "substring matching would have fired on toil/cayenne — the boundary rule is the whole point");
+  assert.equal(topicHit("Citizens Financial reports", ["yen"]), false);
+  assert.equal(topicHit("Yen weakens past 160 as Ueda holds", ["yen"]), true, "a real hit still lands");
+  // No topics = no match. A name without a declared lane can never accidentally collect the tape.
+  assert.equal(topicHit("anything at all", []), false);
+  assert.equal(topicHit("anything at all", null), false);
+  assert.equal(topicHit("", ["Brazil"]), false);
+});
+
+test("macro lane wiring: the server decides which tape headline is which macro name's news", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const now = Date.now();
+  p.seedRowNow("xyz:EWZ", { ticker: "EWZ", px: 36, uni: "xyz", vol: 1e6 });
+  p.seedRowNow("xyz:JPY", { ticker: "JPY", px: 0.0067, uni: "xyz", vol: 1e6 });
+  p.seedRowNow("xyz:SP500", { ticker: "SP500", px: 6100, uni: "xyz", vol: 1e6 });
+  p.seedRowNow("xyz:NVDA", { ticker: "NVDA", px: 180, uni: "xyz", vol: 1e6 });
+  const d = p.newsIngestNow([
+    { id: 1, tk: null, h: "Petrobras lifts diesel prices as Brazil fuel policy shifts", src: "Reuters", url: "u", pub: now - 1e6 },
+    { id: 2, tk: null, h: "Bank of Japan holds, yen slips past 160", src: "Reuters", url: "u", pub: now - 2e6 },
+    { id: 3, tk: null, h: "Seagate 4Q revenue beats estimates", src: "trad_fin", url: "u", pub: now - 3e6 },
+    { id: 4, tk: "NVDA", h: "Nvidia unveils next-gen accelerator", src: "Reuters", url: "u", pub: now - 4e6 },
+  ]);
+  const by = new Map(d.items.map((a) => [a.id, a]));
+  const tags = (id) => by.get(id).mtk || [];
+  // The exact bug from the screenshots: one macro headline reaching two unrelated macro drawers.
+  assert.ok(tags(1).includes("EWZ"), "the Brazil headline is EWZ's news");
+  assert.ok(!tags(1).includes("JPY"), "…and is NOT the yen's news — this is the bug, pinned");
+  assert.ok(tags(2).includes("JPY") && !tags(2).includes("EWZ"), "and symmetrically the other way");
+  // A generic earnings print belongs to neither scoped name, but IS the broad tape's news.
+  assert.ok(!tags(3).includes("EWZ") && !tags(3).includes("JPY"),
+    "an unrelated print reaches no scoped drawer — the filler the old fallback shipped");
+  for (const id of [1, 2, 3]) assert.ok(tags(id).includes("SP500"), "broad-lane names take the whole tape by declaration");
+  // Verified company items keep their own name and never enter a macro lane.
+  assert.equal(by.get(4).tk, "NVDA");
+  assert.equal(by.get(4).mtk, undefined, "a verified company headline is never also macro-lane news");
+  // A name outside the live universe can never be stamped, however well its topics match.
+  for (const a of d.items) for (const T of (a.mtk || []))
+    assert.ok(["EWZ", "JPY", "SP500"].includes(T), `stamped a ticker not in the roster: ${T}`);
+  // Row payload carries the label and the lane, so the client re-derives neither.
+  const snap = p.buildSnapshotNow() || p.getSnapshot();
+  const row = (t) => snap.markets.find((m) => m.ticker === t);
+  assert.equal(row("EWZ").nm, "iShares MSCI Brazil ETF");
+  assert.equal(row("EWZ").mlane.label, "Brazil");
+  assert.equal(row("SP500").mlane.broad, true);
+  assert.equal(row("NVDA").nm, "NVIDIA Corp.");
+  assert.equal(row("NVDA").mlane, undefined, "an equity ships no lane — the drawer then says 'no headlines'");
+});
+
+test("macro lane, rendered: the drawer shows a scoped tape, an honest empty, or nothing at all", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i >= 0, `${name} not found in app.js`);
+    let d = 0;
+    for (let k = app.indexOf("{", i); k < app.length; k++) { if (app[k] === "{") d++; if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); } }
+  };
+  // Execute the real function against a stub DOM — an existence pin would not have caught the
+  // original bug either, because the old code DID render, just with the wrong rows in it.
+  const mk = (rows, news, detail) => new Function(
+    "const boxes={};\nconst el=(id)=>boxes[id]||(boxes[id]={innerHTML:'',onclick:null});\n" +
+    "const esc=(x)=>String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;');\n" +
+    "const fmtAge=()=>'1m';\nconst newsRow=(a)=>'<div class=\"nrow\" data-id=\"'+a.id+'\">'+esc(a.h)+'</div>';\n" +
+    "let newsFilter=null,newsMode='all';const showView=()=>{};\n" +
+    "const state={detail:" + JSON.stringify(detail) + ",rows:new Map(" + JSON.stringify(rows) + "),news:" + JSON.stringify(news) + "};\n" +
+    grab("fillDrawerNews") + "\nfillDrawerNews();\nreturn boxes.dnews.innerHTML;")();
+  const now = Date.now();
+  const news = { fetchedAt: now, items: [
+    { id: 1, tk: null, h: "Petrobras lifts diesel prices", mtk: ["EWZ", "SP500"] },
+    { id: 2, tk: null, h: "Bank of Japan holds, yen slips", mtk: ["JPY", "SP500"] },
+    { id: 3, tk: null, h: "Seagate 4Q revenue beats", mtk: ["SP500"] },
+  ] };
+  const ewz = ["xyz:EWZ", { coin: "xyz:EWZ", ticker: "EWZ", uni: "xyz", assetClass: "ETF", nm: "iShares MSCI Brazil ETF", mlane: { label: "Brazil", topics: ["Brazil", "Petrobras"] } }];
+  const jpy = ["xyz:JPY", { coin: "xyz:JPY", ticker: "JPY", uni: "xyz", assetClass: "FX", nm: "Japanese yen", mlane: { label: "Japan", topics: ["yen", "Bank of Japan"] } }];
+  const spx = ["xyz:SP500", { coin: "xyz:SP500", ticker: "SP500", uni: "xyz", assetClass: "Index", mlane: { broad: true } }];
+  const nvda = ["xyz:NVDA", { coin: "xyz:NVDA", ticker: "NVDA", uni: "xyz", assetClass: "Equity", nm: "NVIDIA Corp." }];
+  const eur = ["xyz:EURX", { coin: "xyz:EURX", ticker: "EURX", uni: "xyz", assetClass: "FX" }];   // macro, no seeded lane
+
+  const h1 = mk([ewz, jpy, spx, nvda, eur], news, "xyz:EWZ");
+  assert.ok(h1.includes('data-id="1"'), "the Brazil headline renders in the Brazil drawer");
+  assert.ok(!h1.includes('data-id="2"') && !h1.includes('data-id="3"'),
+    "and neither the yen item nor the unrelated print does — the screenshot bug, rendered");
+  assert.ok(h1.includes("macro tape \u00b7 Brazil"), "the header names the scope, so the reader knows a filter ran");
+  assert.ok(/1 of 3 tape items matched/.test(h1), "provenance line states how much of the tape survived");
+  assert.ok(h1.includes("gated on Brazil"), "…and what it was gated on");
+
+  const h2 = mk([ewz, jpy, spx, nvda, eur], news, "xyz:JPY");
+  assert.ok(h2.includes('data-id="2"') && !h2.includes('data-id="1"'), "symmetric on the other name");
+
+  const h3 = mk([ewz, jpy, spx, nvda, eur], news, "xyz:SP500");
+  for (const id of [1, 2, 3]) assert.ok(h3.includes('data-id="' + id + '"'), "a broad-lane name still takes the whole tape");
+  assert.ok(!/tape items matched/.test(h3), "and shows no gate provenance, because no gate ran");
+
+  const h4 = mk([ewz, jpy, spx, nvda, eur], news, "xyz:NVDA");
+  assert.ok(!/data-id="/.test(h4), "an equity with no per-name news gets NO tape rows");
+  assert.ok(h4.includes("no headlines in the last 72h") && !h4.includes("no matching headlines"),
+    "and the equity wording is unchanged — this behaviour was already correct");
+
+  const h5 = mk([ewz, jpy, spx, nvda, eur], news, "xyz:EURX");
+  assert.ok(!/data-id="/.test(h5), "a macro name with no seeded lane gets nothing rather than the raw tape");
+
+  // A lane whose topics match nothing today says so, instead of falling back to unrelated items.
+  const h6 = mk([ewz, jpy, spx, nvda, eur], { fetchedAt: now, items: [{ id: 3, tk: null, h: "Seagate 4Q revenue beats", mtk: ["SP500"] }] }, "xyz:EWZ");
+  assert.ok(!/data-id="/.test(h6) && h6.includes("no matching headlines in the last 72h"),
+    "zero matches is stated, not papered over");
+  assert.ok(/0 of 1 tape item matched/.test(h6), "singular/plural handled, and the zero is disclosed");
+});
+
+test("display-name client wiring: drawer head, board tooltip, report head, style", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(app.includes('${r.nm?`<div class="dname"'), "drawer head renders the name line only when a name exists");
+  assert.ok(app.includes("r.nm?r.nm+' \\u00b7 '+r.coin:r.coin"), "board ticker tooltip carries the name");
+  assert.ok(app.includes("${r&&r.nm?esc(r.nm)+' \u00b7 ':''}"), "AI report head carries the name");
+  assert.ok(css.includes(".drawer .dname{"), "the name line has a style rule");
+  // The name must never be an empty rendered element: the guard is the ternary, not a CSS :empty.
+  assert.ok(!/class="dname"[^>]*>\$\{esc\(r\.nm\|\|''\)\}/.test(app), "no unconditional name element");
+  assert.ok(pol.includes("nm: displayName(r.ticker, r.uni) || undefined,"), "server ships the label, client never derives it");
+  assert.ok(pol.includes("mlane: macroLane(r.ticker, r.uni) || undefined,"), "server ships the lane, client never derives it");
+  assert.ok(!/topicHit\(/.test(app), "the topic gate must NOT run client-side — one code path, server-owned");
 });
