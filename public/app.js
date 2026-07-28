@@ -2946,6 +2946,72 @@ function renderLevels(lv){
 // Four descriptive base-rate panels off one per-session record pass. Descriptive means
 // descriptive: openQ conditions on the realized range (readable only after the fact) and the
 // captions say so. Rates are day-pooled; the honest n is days/weeks, never ticker-sessions.
+// ---- EMA200 trend events (sections.ema200, build -26) ----
+// Close-confirmed crosses + retests of the 200-EMA vs matched placebo. Crosses come as
+// tf.cross.{up,dn}.{raw,buf,2cl} cells; retests ride the structural-level study's own
+// aggregator (tf.retest.bySide.sup/res), so those rows are column-compatible with the
+// section above. Everything renders from the server payload — nothing re-derived here.
+function emaXCell(c,floor,dip){
+  if(!c) return '<td class="dim2">·</td><td class="dim2">·</td><td class="dim2">·</td><td class="dim2">·</td><td class="dim2">·</td><td class="dim2">·</td>';
+  if(c.hit==null) return `<td>${c.n}</td><td class="dim2">·</td><td class="dim2">·</td><td class="dim2">·</td><td class="dim2" data-tip="n=${c.n} sits under the ${floor}-event floor — the cell publishes its n and nothing else; an early rate on this few events is a coin path wearing a percentage">under floor</td><td class="dim2">·</td>`;
+  const ex=Math.round((c.hit-c.placebo)*100);
+  return `<td>${c.n}</td><td class="${c.med>0?'pos':c.med<0?'neg':''}">${c.med>0?'+':''}${c.med.toFixed(2)}σ</td>`
+    +`<td>${Math.round(c.hit*100)}%</td><td class="sec">${Math.round(c.placebo*100)}%</td>`
+    +`<td class="${ex>0?'pos':ex<0?'neg':''}" data-tip="hit ${Math.round(c.hit*100)}% vs matched placebo ${Math.round(c.placebo*100)}% on n=${c.n}${dip?' · '+dip:''}">${ex>0?'+':''}${ex}pp</td>`
+    +`<td class="sec" data-tip="share of fired events that closed back through the line within 5 bars — the whipsaw tax this confirmation variant pays down">${Math.round(c.whip*100)}%</td>`;
+}
+function emaRtRow(label,cell,floor,tip){
+  if(!cell||cell.n==null) return '';
+  const under=cell.holdRate==null;
+  const hb=cell.holdBaseline, ex=(!under&&hb!=null)?Math.round((cell.holdRate-hb)*100):null;
+  return `<tr data-tip="${esc(tip)}"><td>${label} <span class="pill2">levels loop</span></td><td>${cell.n}</td>`
+    +(under?`<td class="dim2">·</td><td class="dim2">·</td><td class="dim2">·</td><td class="dim2" data-tip="touched-level events under the hold floor — publishes n only">under floor</td><td class="dim2">·</td>`
+    :`<td class="sec" data-tip="share of detected EMA-level events that were touched inside the horizon">${cell.touchRate!=null?Math.round(cell.touchRate*100)+'%':'·'}</td>`
+      +`<td>${Math.round(cell.holdRate*100)}% <i class="ft">hold</i></td><td class="sec">${hb!=null?Math.round(hb*100)+'%':'·'}</td>`
+      +`<td class="${ex>0?'pos':ex<0?'neg':''}">${ex!=null?(ex>0?'+':'')+ex+'pp':'·'}</td><td class="dim2">—</td>`)+'</tr>';
+}
+function renderEma200(em){
+  const head=sHead('EMA200 trend events','close-confirmed crosses and retests of the most common trend EMA — does the line earn the reverence · study tier, nothing trades');
+  const ctrl=`<div class="s-ctrls"><span class="rt" data-tip="Walk-forward: the EMA is SMA-seeded exactly as every other EMA in the app, events fire only on CLOSED candles, forward outcomes measured strictly after the firing bar in the rung's own bar-σ. Placebo: deterministic permutation anchors resolved through the identical loop — excess is edge over matched noise, not over a formula. Re-arm: after a stream fires it stays blocked until ${em.rearm} consecutive closes on the far side reset the episode; blocked fires are counted on the TF header hover, never silently eaten. Tail events whose horizon runs past the tape are excluded whole.">close-confirmed · re-arm ${em.rearm} closes · horizon ${em.horizons['1d']} bars (D1) · ${em.horizons['4h']} bars (H4) · placebo-matched · hover anything</span></div>`;
+  // ---- the variant duel: event hit vs matched placebo, per TF x direction x confirmation ----
+  const groups=[]; for(const tf of ['1d','4h']){ const T=em.tf[tf]; if(!T) continue;
+    for(const d of ['up','dn']) groups.push({g:(tf==='1d'?'D1':'H4')+(d==='up'?' brk-out':' brk-dn'),rows:['raw','buf','2cl'].map(v=>[v,T.cross[d][v]])}); }
+  let sv='',x=14; const Y0=96,SC=2.6;
+  for(const grp of groups){ const x0=x;
+    for(const [v,c] of grp.rows){
+      if(!c||c.hit==null){ sv+=`<rect x="${x}" y="${Y0-18}" width="9" height="18" fill="var(--grid)" data-tip="${grp.g} · ${v}: ${c?('n='+c.n+' — under the '+em.cellFloor+'-event floor, publishes nothing'):'no events yet'}"/><rect x="${x+10}" y="${Y0-18}" width="9" height="18" fill="var(--grid)" fill-opacity="0.6"/>`; }
+      else{ const h1=Math.max(2,(c.hit*100-35)*SC),h2=Math.max(2,(c.placebo*100-35)*SC);
+        sv+=`<rect x="${x}" y="${(Y0-h1).toFixed(1)}" width="9" height="${h1.toFixed(1)}" fill="var(--accent)" data-tip="${grp.g} · ${v}: hit ${Math.round(c.hit*100)}% vs placebo ${Math.round(c.placebo*100)}% → excess ${c.excess>0?'+':''}${Math.round(c.excess*100)}pp (n=${c.n})"/>`
+          +`<rect x="${x+10}" y="${(Y0-h2).toFixed(1)}" width="9" height="${h2.toFixed(1)}" fill="var(--dim2,#3a465a)" data-tip="${grp.g} · ${v}: matched placebo ${Math.round(c.placebo*100)}%"/>`; }
+      sv+=`<text x="${x+9}" y="${Y0+10}" fill="var(--faint)" font-size="8" text-anchor="middle">${v}</text>`; x+=30; }
+    sv+=`<text x="${(x0+x-30+9)/2}" y="${Y0+21}" fill="var(--muted)" font-size="8.5" text-anchor="middle">${grp.g}</text>`; x+=14; }
+  sv+=`<line x1="8" y1="${Y0}" x2="${x}" y2="${Y0}" stroke="var(--grid)"/>`;
+  const chart=sCard(`<div style="overflow-x:auto"><svg viewBox="0 0 ${x+6} 124" width="${x+6}" height="124">${sv}</svg></div><div class="s-cap" style="margin:6px 0 0">orange = event hit · grey = matched placebo · dim = under the ${em.cellFloor}-event floor</div>`);
+  const cap1=sCap('<b>Three definitions duel per side</b> — raw close-cross, ≥'+em.bufSd+'σ buffered close, and two-consecutive-close — because "the" EMA200 break has no canonical definition and picking one by hand is how false precision starts. Whichever variant shows excess over its matched placebo (and survives out of sample) becomes a ledger shadow candidate; the others are the disclosed cost of asking. Crosses fire on <b>closed candles only</b> — an intrabar poke that closes back never counts.');
+  // ---- the table ----
+  const VL={raw:'raw close',buf:'≥'+em.bufSd+'σ buffer','2cl':'2-close confirm'};
+  let rows='';
+  for(const tf of ['1d','4h']){ const T=em.tf[tf]; if(!T) continue;
+    const sup=T.suppressed, supTxt=`chop suppressed by the re-arm gate: raw ${sup.raw} · buf ${sup.buf} · 2cl ${sup['2cl']}`;
+    rows+=`<tr class="tfh"><td colspan="7" data-tip="${esc(`${T.contributing} names contributing · ${T.n} cross events pooled · ${supTxt}`)}">${tf==='1d'?`D1 · horizon ${em.horizons['1d']} bars · both universes (crypto dailies 370d)`:`H4 · horizon ${em.horizons['4h']} bars (≈14d) · both universes (crypto: 90d spine → the walk is thin by construction, disclosed not hidden)`}</td></tr>`;
+    for(const d of ['up','dn']) for(const v of ['raw','buf','2cl'])
+      rows+=`<tr data-tip="${esc(`${d==='up'?'Breakout':'Breakdown'} — ${VL[v]}. Outcome signed with the event's direction: a breakdown that falls scores POSITIVE. σ = this rung's own bar volatility. ${supTxt}`)}"><td>${d==='up'?'Breakout':'Breakdown'} — ${VL[v]}</td>${emaXCell(T.cross[d][v],em.cellFloor)}</tr>`;
+    if(T.retest){
+      rows+=emaRtRow('Support retest (bullish)',T.retest.bySide&&T.retest.bySide.sup,T.retest.cellFloor,'EMA200 fed through the injectable level audit as a walk-forward level: intrabar touch from ABOVE, HELD = the touch bar closed back above — the bullish retest. Same touch/hold loop and permutation control as the Structural level validation section; rows directly comparable.');
+      rows+=emaRtRow('Resistance retest (bearish)',T.retest.bySide&&T.retest.bySide.res,T.retest.cellFloor,'Touch from BELOW into an overhead EMA200, HELD = the close rejected back under — the bearish retest. Same loop and control as the structural study.');
+    }
+  }
+  const table=`<div class="s-card" style="overflow-x:auto"><table class="ptbl" style="min-width:680px"><thead><tr>`
+    +`<th>event</th><th data-tip="episodes fired after the re-arm gate — chop dupes suppressed; counts on the TF header hover">n</th>`
+    +`<th data-tip="median forward move over the horizon from the firing close, in the rung's own bar-σ, signed with the event's direction">fwd med</th>`
+    +`<th data-tip="share of events whose forward move went the event's way — for retest rows this is the HOLD rate">hit</th>`
+    +`<th data-tip="matched permutation placebo through the identical resolution loop — the honest null for this tape's drift and discreteness">placebo</th>`
+    +`<th data-tip="hit − placebo, percentage points. The only column that means anything.">excess</th>`
+    +`<th data-tip="share of fires that closed back through the line within 5 bars — the whipsaw tax each confirmation variant is trying to buy down. Retests: not applicable">whip 5b</th>`
+    +`</tr></thead><tbody>${rows}</tbody></table></div>`;
+  const cap2=sCap('<b>Reading it:</b> the excess column is the whole panel — everything else is context for it. Crosses resolve at a fixed forward horizon in σ units; retests ride the structural-level study\u2019s own touch/hold loop and control, so their rows read one-to-one against the section above. <b>Whip 5b</b> is the tax each confirmation variant pays down: raw fires earliest and chops hardest, 2-close fires latest and chops least — the excess column says whether the patience was paid for. H12 is out (the crypto spine cannot converge an EMA200 there); the H4 crypto walk is thin and says so. Nothing here trades: a variant showing excess graduates to a shadow event and earns its record out of sample like everything else.');
+  return head+ctrl+chart+cap1+table+cap2;
+}
 function anMfeSvg(m){
   const labs=m.edges.map((e,i)=>(i?m.edges[i-1]:0)+'–'+e).concat([m.edges[m.edges.length-1]+'+']);
   const n=labs.length, W=560,H=240,pl=44,pr=14,pt=14,pb=36;
@@ -3214,6 +3280,10 @@ function drawSessions(){
   const lv = a.sections && a.sections.levels;
   let lvBlock='', lvPend='';
   if(lv && !lv.pending && !lv.disabled) lvBlock = renderLevels(lv);
+  const em = a.sections && a.sections.ema200;
+  let emBlock='', emPend='';
+  if(em && !em.pending && !em.disabled) emBlock = renderEma200(em);
+  else if(!em||!em.disabled) emPend = sgPendRow('EMA200 trend events', em?`computing \u2014 needs \u2265${em.need||5} names with \u2265226 closed daily bars (have ${em.count||0})`:'close-confirmed crosses &amp; retests vs a matched control','\u2605\u2605\u2605\u2606\u2606');
   else if(!lv||!lv.disabled) lvPend = sgPendRow('Structural level validation', lv?`computing \u2014 needs \u2265${lv.need||5} equities with \u226571 closed daily bars off the spine (have ${lv.count||0})`:'touch &amp; hold vs a matched control','\u2605\u2605\u2605\u2605\u2606');
   const an = a.sections && a.sections.anatomy;
   let anBlock='', cbBlock='', pvBlock='', anPend='', cbPend='', pvPend='';
@@ -3261,7 +3331,7 @@ function drawSessions(){
     if(cl&&!cl.pending) p.push(`${cl.count} markets clustered${(cl.oddballs&&cl.oddballs.length)?` \u00b7 ${cl.oddballs.length} oddballs`:''}`);
     return p.join(' \u00b7 ')||'computing'; };
   // ---- assemble ----
-  const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||anBlock||cbBlock||pvBlock;
+  const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||emBlock||anBlock||cbBlock||pvBlock;
   const isCr = !!(a && a.isCrypto);
   // Only studies this universe actually publishes can hold back the all-live footer, and the count
   // is derived from the live payload rather than hard-coded — crypto ships a five-study Holds +
@@ -3270,7 +3340,7 @@ function drawSessions(){
   const gate=[sdPend,anPend,cbPend,pvPend]
     .concat(onG('clocks')?[hcPend,ovPend,sePend]:[])
     .concat(onG('week')?[dowPend]:[])
-    .concat(onG('structure')?[clPend,lvPend]:[]);
+    .concat(onG('structure')?[clPend,lvPend,emPend]:[]);
   const allLive = anySections && !gate.some(Boolean);
   const nStudies = 1/*regime*/+4/*decomp, anatomy, candles, pivots*/
     +(onG('clocks')?3:0)+(onG('week')?1:0)+(onG('structure')?2:0);
@@ -3281,7 +3351,7 @@ function drawSessions(){
     holds:()=>sgSection('holds','Holds',vHolds(),[{html:flagship},{pend:sdPend},{html:anBlock},{pend:anPend},{html:cbBlock},{pend:cbPend},{html:pvBlock},{pend:pvPend}]),
     clocks:()=>sgSection('clocks','Clocks',vClocks(),[{html:clocks},{pend:hcPend},{html:overlay},{pend:ovPend},{html:seBlock},{pend:sePend}]),
     week:()=>sgSection('week','Week',vWeek(),[{html:dowBlock},{pend:dowPend}]),
-    structure:()=>sgSection('structure','Structure',vStructure(),[{html:clBlock},{pend:clPend},{html:lvBlock},{pend:lvPend}]),
+    structure:()=>sgSection('structure','Structure',vStructure(),[{html:clBlock},{pend:clPend},{html:lvBlock},{pend:lvPend},{html:emBlock},{pend:emPend}]),
   };
   const groups = sessGroups().map(g=>GROUP_BODY[g.id]()).join('');
   host.innerHTML=title+status+bar+jump+groups+foot;

@@ -1169,3 +1169,9 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .macro-pend{color:var(--muted);font-style:italic}
 /* Actionable / signals macro flag — blue diamond, distinct from the amber earnings warn */
 .act-mwarn{color:var(--blue);font-style:normal;cursor:help}
+
+/* EMA200 trend events (-26): TF block headers, under-floor dim cells, the levels-loop tag */
+.ptbl tr.tfh td{color:var(--accent);font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;padding-top:12px;cursor:help}
+.ptbl td.dim2,.ptbl .dim2{color:#38414f}
+.pill2{display:inline-block;border:1px solid var(--border);border-radius:4px;padding:0 5px;font-size:10px;color:var(--muted);margin-left:6px}
+.ft{font-style:normal;color:var(--faint);font-size:10px}
