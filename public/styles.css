@@ -143,6 +143,10 @@ svg.tspark{width:62px;height:18px;display:inline-block;vertical-align:middle}
 .drawer.show{transform:translateX(0)}
 .drawer .dhead{font-family:var(--disp);font-size:22px;font-weight:600;color:var(--text);display:flex;align-items:baseline;gap:10px}
 .drawer .dsub{font-family:var(--mono);font-size:12px;color:var(--muted);margin:2px 0 14px}
+/* the instrument behind the ticker (build 2026.07.28-03) — sits between the symbol and the
+   coin/price line. Absent, not blank, when the name isn't seeded: no empty row is reserved. */
+.drawer .dname{font-family:var(--mono);font-size:12px;color:color-mix(in srgb,var(--text) 78%,transparent);margin:5px 0 0}
+.drawer .dname+.dsub{margin-top:3px}
 .dgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;margin:12px 0 16px}
 .dstat{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12.5px;border-bottom:1px solid var(--grid);padding:5px 0}
 .dstat .dk{color:var(--muted)} .dstat .dv{color:var(--text);font-weight:500}

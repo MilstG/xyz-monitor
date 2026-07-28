@@ -15,7 +15,7 @@ const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, windo
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
-    td:r=>`<td><span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}</td>`},
+    td:r=>`<td><span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}</td>`},
   {key:'px', label:'Price', type:'num',
     td:r=>`<td class="px${r.flash?' flash-'+r.flash:''}">${fmtPrice(r.px)}</td>`},
   {key:'funding', label:'Funding (APR)', type:'num',
@@ -1557,6 +1557,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div class="dhead">${esc(r.ticker)}
       <span class="star${starred?' on':''}" id="dstar" style="font-size:16px;cursor:pointer">${starred?'★':'☆'}</span>
       <button class="dclose" id="dclose" title="close">✕</button></div>
+    ${r.nm?`<div class="dname" data-tip="the instrument behind the ticker — static server-side map; a name that isn\u2019t seeded shows no line rather than a guess">${esc(r.nm)}</div>`:''}
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized into a plain-language read with scenarios and R/R">AI report →</span></div>
     ${earnDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
@@ -5386,19 +5387,40 @@ function fillDrawerNews(){
   const r=state.rows.get(state.detail); if(!r) return;
   if(r.uni==='main'){ box.innerHTML=''; return; }   // news is an xyz-universe feature
   const d=state.news, now=Date.now();
-  const isEq=(a)=>a.tk&&r.ticker&&a.tk.toUpperCase()===String(r.ticker).toUpperCase();
+  const T=String(r.ticker||'').toUpperCase();
+  const isEq=(a)=>a.tk&&r.ticker&&a.tk.toUpperCase()===T;
   const mine=d&&d.items?d.items.filter(isEq):[];
-  // The macro-tape fallback exists ONLY for macro instruments (FX, commodities, indices) —
-  // names that structurally can't have company news. An equity with a quiet 72h says "no
-  // headlines", full stop: filling a company's drawer with unrelated macro items dresses
-  // absence up as content.
-  const isMacroName=!!(r.assetClass&&r.assetClass!=='Equity');
-  const tape=(isMacroName&&d&&d.items)?d.items.filter(a=>!a.tk&&a.sec!=='off-topic'&&!a.pend).slice(0,5):[];
-  const list=(mine.length?mine:tape).slice(0,5);
-  let s=`<div class="dsec" data-tip="${mine.length?'per-name headlines from the 72h store \u00b7 evicted on publish time':(isMacroName?'this is a macro instrument with no company feed \u2014 showing the general macro tape':'no verified headlines for this name in the last 72h \u2014 coverage refreshes every few minutes')}">${mine.length?`News \u2014 last 72h \u00b7 ${Math.min(5,mine.length)} of ${mine.length}`:(isMacroName?'News \u2014 macro tape':'News \u2014 last 72h')}</div>`;
+  // The macro-tape lane (build 2026.07.28-03). It used to be "any name that isn't an Equity gets
+  // the raw general tape", which put the same five headlines — a Seagate print, a Medicare item —
+  // in the Brazil ETF drawer AND the yen drawer. Honestly labelled and still filler: the one lane
+  // in the news pipeline with no relevance gate at all. Now the server declares the lane (r.mlane)
+  // and stamps each tape headline with the macro names it is actually news for (a.mtk); the
+  // client only reads those decisions. Broad-lane names (the S&P, the VIX, the dollar index) are
+  // stamped onto everything because the general tape genuinely IS their news. A name with no lane
+  // — every equity, and any macro instrument whose topics aren't seeded — gets no tape at all and
+  // says "no headlines", which is the truth.
+  const lane=r.mlane||null;
+  const pool=(lane&&d&&d.items)?d.items.filter(a=>!a.tk&&!a.pend&&Array.isArray(a.mtk)&&a.mtk.indexOf(T)>=0):[];
+  const useTape=!mine.length&&!!lane;
+  const list=(mine.length?mine:pool).slice(0,5);
+  const scope=lane?(lane.broad?'broad':(lane.label||'scoped')):null;
+  const head=mine.length?`News \u2014 last 72h \u00b7 ${Math.min(5,mine.length)} of ${mine.length}`
+    :(useTape?`News \u2014 macro tape${lane.broad?'':' \u00b7 '+esc(scope)}`:'News \u2014 last 72h');
+  const tip=mine.length?'per-name headlines from the 72h store \u00b7 evicted on publish time'
+    :(useTape?(lane.broad
+        ?'this instrument tracks the whole tape \u2014 the general macro feed IS its news, ungated by design'
+        :'this is a macro instrument with no company feed \u2014 the general tape, gated to headlines that actually name '+scope+'; anything else is not this name\u2019s news and is not shown')
+      :'no verified headlines for this name in the last 72h \u2014 coverage refreshes every few minutes');
+  let s=`<div class="dsec" data-tip="${esc(tip)}">${head}</div>`;
   if(!d||!d.items){ s+=`<div class="sec" style="font-size:11px">news feed loading\u2026</div>`; box.innerHTML=s; return; }
-  if(!list.length){ s+=`<div class="nrow" style="border-style:dashed;border-width:1px 0"><span class="sec" style="font-size:11px">no headlines in the last 72h</span></div>`; }
+  if(!list.length){ s+=`<div class="nrow" style="border-style:dashed;border-width:1px 0"><span class="sec" style="font-size:11px">no ${useTape?'matching ':''}headlines in the last 72h</span></div>`; }
   else s+=`<div class="nlist">${list.map(a=>newsRow(a,now,true)).join('')}</div>`;
+  // Provenance line for the gated lane: how much of the tape survived the gate, and on what. A
+  // reader who sees two rows where a neighbouring drawer shows five is entitled to know why.
+  if(useTape&&!lane.broad){
+    const tot=d.items.filter(a=>!a.tk&&!a.pend).length;
+    s+=`<div class="sec" style="font-size:10px;margin-top:4px" data-tip="${esc('word-boundary matched against: '+(lane.topics||[]).join(', '))}">${pool.length} of ${tot} tape item${tot===1?'':'s'} matched \u00b7 gated on ${esc((lane.topics||[]).slice(0,5).join(', '))}${(lane.topics||[]).length>5?'\u2026':''}</div>`;
+  }
   s+=`<div style="display:flex;gap:10px;align-items:center;margin-top:5px"><span id="dnews-all" class="sec" style="cursor:pointer;font-size:11px;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the News tab filtered to this name">all ${esc(r.ticker)} news \u2192</span><span style="flex:1"></span>${d.fetchedAt?`<span class="sec" style="font-size:10.5px">fetched ${fmtAge(now-d.fetchedAt)} ago</span>`:''}</div>`;
   box.innerHTML=s;
   const fb=el('dnews-all'); if(fb) fb.onclick=()=>{ newsFilter=String(r.ticker); newsMode='all'; showView('news'); };
@@ -7834,7 +7856,7 @@ function renderAiReport(d,coin){
     :'<span class="sec">No frozen void level on this name right now — per-scenario R/R and EV are not computable, and the card won\u2019t fabricate them.</span>';
   box.innerHTML=`
     <div class="ai-head"><span class="tk">${esc(tk)}</span>
-      <span class="sec">${uni==='crypto'?'Hyperliquid perp · crypto':'xyz-dex perp · stocks'}</span>
+      <span class="sec">${r&&r.nm?esc(r.nm)+' · ':''}${uni==='crypto'?'Hyperliquid perp · crypto':'xyz-dex perp · stocks'}</span>
       <span class="px">${fmtPrice(livePx)}</span>${chg}
       ${aiBiasBadge(d)}</div>
     ${(()=>{const ar=d.analystRecord;if(!ar)return'';const o=ar.overall||{},m=ar.thisName||{};
