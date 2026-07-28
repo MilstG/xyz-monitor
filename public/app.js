@@ -4092,7 +4092,11 @@ function pushCodeLeft(c){
   return m+':'+String(sec).padStart(2,'0');
 }
 function buildPushSection(){
-  const P=pushState;
+  // `A` is a caller-local in buildAlertsPanel, not a global. This function is called from inside
+  // that one's template concatenation, which reads like shared scope and is not — the collapsed
+  // per-recipient state below needs its own reference to the same store, or every call that gets
+  // as far as a linked recipient throws before the panel's innerHTML is ever assigned.
+  const P=pushState, A=state.alerts;
   if(!P) return '<div class="sec" style="font-size:12px;padding:4px">Delivery state unavailable \u2014 the server did not answer.</div>';
   if(!P.enabled) return '<div class="sec" style="font-size:12px;padding:4px">Telegram push is off \u2014 set <b>TG_BOT_TOKEN</b> on the server to enable it. Nothing else changes while it is unset.</div>';
   // The bell panel shows YOUR recipients and nobody else's — with three linked accounts and nine
