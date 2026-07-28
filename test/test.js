@@ -10247,7 +10247,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-29"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-30"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -10993,4 +10993,50 @@ test("now -29: delta is signed WITH the claim, and the bracket bar only exists w
   assert.equal(fn.brkBar("long", 100, 105, null, 115), null, "no frozen void: no bar");
   assert.equal(fn.brkBar("long", 100, 105, 95, null), null, "no frozen target: no bar");
   assert.equal(fn.brkBar("long", 100, 105, 100, 115), null, "a void AT the mark has no scale to measure against");
+});
+
+// ===== panel builders must own the scopes they read (build 2026.07.27-30) =======================
+// A real break, class not instance: buildPushSection read `A.openRec`, but `A` is a caller-local in
+// buildAlertsPanel (`const pop=..., A=state.alerts`). Because buildPushSection is invoked from
+// inside that caller's own template concatenation, the code reads as if the scope were shared. It
+// is not. The throw landed BEFORE `pop.innerHTML=h`, so the panel kept its last-rendered markup and
+// every control's handler — each of which ends by calling buildAlertsPanel() to re-render — became
+// a silent no-op. Nothing looked broken; nothing worked. It only fired once a linked recipient
+// existed, since `mineOnly.map` is the only path that reaches the reference, which is why it sat
+// latent for three commits and read as a regression from an unrelated DOM move.
+//
+// Derived, not pinned: brace-match every top-level function in app.js and require that any body
+// referencing a bare `A.` also declares `A`. Any future builder split out of buildAlertsPanel that
+// carries an `A.` read along with it fails here.
+test("every function reading the `A.` alerts alias declares it (no borrowed caller scope)", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const re = /^function\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)\s*\{/gm;
+  const offenders = [];
+  let m, checked = 0;
+  while ((m = re.exec(s))) {
+    const name = m[1], params = m[2];
+    // brace-match the body from the opening brace
+    let i = m.index + m[0].length - 1, depth = 0, end = -1;
+    for (; i < s.length; i++) {
+      const c = s[i];
+      if (c === "{") depth++;
+      else if (c === "}") { depth--; if (!depth) { end = i; break; } }
+    }
+    if (end < 0) continue;
+    const body = s.slice(m.index + m[0].length, end);
+    if (!/(^|[^A-Za-z0-9_$.])A\s*\./.test(body)) continue;   // doesn't read the alias at all
+    checked++;
+    // A declarator list may hold other initialisers before A (`const P=pushState, A=state.alerts`)
+    // and may destructure (`const [i,j]=pr, A=rows[i]`) — scan the whole statement, stop at the
+    // semicolon. renderPairPanel legitimately binds its own unrelated `A` this way.
+    const declares = /(?:const|let|var)\s+[^;]*?\bA\s*=/.test(body)
+      || /(^|[,\s])A(\s*=|\s*,|\s*$)/.test(params);
+    if (!declares) offenders.push(name);
+  }
+  assert.ok(checked > 0, "the scan must actually find functions reading the alias — a silent zero would pass vacuously");
+  assert.deepEqual(offenders, [], "these read `A.` without declaring A: " + offenders.join(", "));
+  // The specific site, so a future refactor that drops the alias from buildPushSection is named.
+  assert.ok(/function buildPushSection\(\)\{[\s\S]{0,600}?const P=pushState, A=state\.alerts;/.test(s),
+    "buildPushSection must hold its own reference to the alerts store");
 });
