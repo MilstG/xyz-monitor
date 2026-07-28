@@ -1952,13 +1952,27 @@ function alertMarkRead(){ const A=state.alerts;
 // each fire* built its own string and pushed it into a local array; the panel then rendered that
 // array, so the displayed history and the notification could drift apart and neither survived a
 // reload. Now the panel renders the server's list through this, and fire* only interrupts.
+// The confirmation stamp a close-confirmed trend event carries: which candle close made it true
+// (UTC — Hyperliquid buckets are UTC on both universes) and, when the live board ran ahead of that
+// close, the first intrabar sighting. Same fields the Telegram message renders (compute.trendWhen);
+// bell log and phone read ONE event and can never disagree about when a trend began.
+function trendWhenTxt(ev){
+  if(!ev||ev.confAt==null||!isFinite(+ev.confAt)) return '';
+  const hm=ts=>{const d=new Date(+ts);return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};
+  const md=ts=>{const d=new Date(+ts);return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+' '+d.getUTCDate();};
+  let s=`confirmed ${ev.confTf||ev.tf||''} close ${hm(ev.confAt)} UTC`;
+  if(ev.seenAt!=null&&isFinite(+ev.seenAt)&&+ev.seenAt<+ev.confAt)
+    s+=` \u00b7 first seen ${md(ev.seenAt)===md(ev.confAt)?'':md(ev.seenAt)+' '}${hm(ev.seenAt)}`;
+  return s;
+}
 function alertText(ev){
   const k=ev.kind||'setup';
   if(k==='ops') return `${ev.title||'ops'}${ev.text?' \u2014 '+ev.text:''}`;
   if(k==='filing') return `${ev.t} \u00b7 ${ev.form} \u00b7 ${ev.h||''}`;
   if(k==='earnings') return `${ev.t} reports ${ev.when}${ev.session?' ('+ev.session+')':''}${ev.claim?' \u00b7 open '+ev.claim+' claim':''}`;
   if(k==='ai') return `${ev.t} \u00b7 analyst read flipped: ${ev.from} \u2192 ${ev.to}`;
-  if(k==='trend') return `${ev.t} \u00b7 ${ev.title}${ev.score!=null?' \u00b7 '+ev.score+'/4':''}${ev.text?' \u00b7 '+ev.text:''}`;
+  if(k==='trend'){ const w=trendWhenTxt(ev);
+    return `${ev.t} \u00b7 ${ev.title}${ev.score!=null?' \u00b7 '+ev.score+'/4':''}${ev.text?' \u00b7 '+ev.text:''}${w?' \u00b7 \u23f1 '+w:''}`; }
   if(k==='regime') return `${ev.scope==='main'?'crypto':'stocks'} positioning \u00b7 ${ev.title} \u00b7 ${ev.text||''}`;
   if(k==='coverage') return `\u26a0 ${ev.t} \u00b7 data gap \u00b7 ${ev.text||''}`;
   if(k==='rule') return `${ev.t} \u00b7 ${ev.rule||(ev.label+' '+ev.op+' '+ev.value)} \u00b7 now ${ev.now||'\u2014'}${ev.note?' \u00b7 '+ev.note:''}`;
