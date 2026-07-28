@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-07"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-08"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -12308,4 +12308,205 @@ test("-07 wiring: the daily hook repaints COMP/G out of empty, and cg-basectl's 
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".cg-basectl[hidden]{display:none}"),
     "the spread-mode base select hides when hidden — runtime-templated hidden escaped the markup audit; this pin closes that hole");
+});
+
+// ===== macro class + earnings calendar leg (build 2026.07.28-08) ================================
+// Two gaps closed at once. The FRED/FOMC calendar had no push class at all — it reached the board,
+// the arming banner and the AI report context, but never a transport, so "enable FOMC alerts" was
+// selecting something that did not exist. And the earnings class was scoped so hard (open ANNOUNCED
+// claim only) that a subscriber holding nothing got permanent silence from a subscribed class,
+// which reads exactly like a broken wire. The scoping was right; the missing piece was the
+// calendar itself, which is now one batched message a day rather than a dozen interruptions.
+
+test("macro is a real, selectable, opt-in push class", () => {
+  const C = require("../src/compute");
+  assert.ok(C.PUSH_CLASSES.includes("macro"), "the class must exist before a chip can subscribe to it");
+  assert.ok(!C.PUSH_DEFAULT_CLASSES.includes("macro"),
+    "opt-in until its measured rate is known — adding a class never retroactively subscribes anyone");
+  assert.ok(!C.PUSH_ADMIN_CLASSES.includes("macro"), "a CPI print is not server plumbing");
+  assert.equal(C.pushEligible({ kind: "macro", k: "CPI" }, {}), false, "an unchosen subscription does not inherit it");
+  assert.equal(C.pushEligible({ kind: "macro", k: "CPI" }, { classes: ["macro"] }), true, "…but choosing it works");
+  assert.equal(C.pushEligible({ kind: "macro", k: "CPI" }, { classes: ["macro"], muted: true }), false, "muting still wins");
+});
+
+test("macro messages: no ticker required, prior is never dressed as consensus, a pending actual says so", () => {
+  const C = require("../src/compute");
+  // The coin guard exists to drop malformed events. Macro has no coin BY CONSTRUCTION — a CPI
+  // print moves the whole board — so it has to be let through explicitly, not by accident.
+  const ahead = C.pushFmt({ kind: "macro", k: "CPI", label: "CPI", sub: "ahead", d: "2026-08-12",
+    tEt: "08:30", prior: { yoy: 2.9, core: 3.1, m: "2026-06" } }, {});
+  assert.ok(ahead && /CPI/.test(ahead), "a ticker-less macro event still formats");
+  assert.ok(/tomorrow/.test(ahead) && /08:30 ET/.test(ahead), "the day-ahead leg says when");
+  assert.ok(/prior/.test(ahead) && /2\.9% YoY/.test(ahead) && /core 3\.1%/.test(ahead));
+  assert.ok(/no street consensus/.test(ahead),
+    "FRED carries no estimates — calling the prior an expectation would be the single most misleading thing this channel could do");
+  assert.ok(!/beat|miss/.test(ahead), "and nothing here may read as a beat or a miss");
+
+  const imm = C.pushFmt({ kind: "macro", k: "NFP", label: "Nonfarm payrolls", sub: "imminent", mins: 23,
+    d: "2026-08-07", tEt: "08:30", prior: { chgK: 147, unemp: 4.1, m: "2026-06" } }, {});
+  assert.ok(/in 23 min/.test(imm) && /\+147k/.test(imm) && /unemployment 4\.1%/.test(imm));
+
+  const res = C.pushFmt({ kind: "macro", k: "CPI", label: "CPI", sub: "result", d: "2026-08-12",
+    prior: { yoy: 2.9, core: 3.1, m: "2026-06" }, actual: { yoy: 2.6, core: 3.0, m: "2026-07" } }, {});
+  assert.ok(/actual/.test(res) && /2\.6% YoY/.test(res) && /prior/.test(res) && /2\.9% YoY/.test(res),
+    "the result leg reads prior -> actual, both from the SAME structured objects the calendar tab renders");
+  assert.ok(/Jul 2026/.test(res), "and states the reference period, not the release date");
+
+  // A passed release clock with no series behind it is the honest-null case: the poller does not
+  // emit a result leg at all, but a hand-built one must still refuse to invent a number.
+  const pend = C.pushFmt({ kind: "macro", k: "CPI", label: "CPI", sub: "result", d: "2026-08-12", prior: { yoy: 2.9, m: "2026-06" } }, {});
+  assert.ok(/hasn/.test(pend) && !/actual  /.test(pend), "no actual means the message says so rather than shipping a blank row");
+
+  const fomc = C.pushFmt({ kind: "macro", k: "FOMC", label: "FOMC rate decision", sub: "result",
+    d: "2026-07-29", tEt: "14:00", prior: { lo: 3.75, hi: 4.0 }, actual: { lo: 3.5, hi: 3.75 } }, {});
+  assert.ok(/3\.50\u20133\.75%/.test(fomc) && /cut/.test(fomc), "a lower range is a cut, derived from the numbers, never from a label");
+  const held = C.pushFmt({ kind: "macro", k: "FOMC", label: "FOMC rate decision", sub: "result",
+    d: "2026-07-29", prior: { lo: 3.75, hi: 4.0 }, actual: { lo: 3.75, hi: 4.0 } }, {});
+  assert.ok(/held/.test(held), "an unchanged range is HELD — not a 0bp 'hike'");
+  const sep = C.pushFmt({ kind: "macro", k: "FOMC", label: "FOMC rate decision", sub: "ahead",
+    d: "2026-09-16", tEt: "14:00", sep: true, prior: { lo: 3.5, hi: 3.75 } }, {});
+  assert.ok(/dot plot/.test(sep), "the projection meetings are the ones worth standing aside for");
+});
+
+test("macroStatText: one reducer per release, honest null over a fabricated number", () => {
+  const C = require("../src/compute");
+  assert.equal(C.macroStatText("CPI", { yoy: 2.9, core: 3.1 }), "2.9% YoY \u00b7 core 3.1%");
+  assert.equal(C.macroStatText("CPI", { yoy: 2.9 }), "2.9% YoY", "a missing core is dropped, not zeroed");
+  assert.equal(C.macroStatText("NFP", { chgK: -12, unemp: 4.3 }), "-12k \u00b7 unemployment 4.3%");
+  assert.equal(C.macroStatText("RETAIL", { mom: 0.6 }), "+0.6% MoM");
+  assert.equal(C.macroStatText("GDP", { qoq: 3 }), "3.0% QoQ ann.");
+  assert.equal(C.macroStatText("PPI", {}), null, "an empty stat is null — never 'NaN%' on a lock screen");
+  assert.equal(C.macroStatText("CPI", null), null);
+  assert.equal(C.macroStatText("FOMC", { lo: 3.75, hi: 4 }), "3.75\u20134.00%");
+  assert.equal(C.macroMonthText("2026-07"), "Jul 2026");
+  assert.equal(C.macroMonthText("garbage"), null);
+});
+
+test("macroScan: cold boot seeds silently, then each leg fires exactly once", () => {
+  const { etDayStr } = require("../src/compute");
+  const p = ctxHarness();
+  const DAYMS = 24 * 3600e3;
+  const now = Date.now();
+  const tomorrow = etDayStr(now + DAYMS);
+  const macro = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "macro");
+
+  // A calendar that is already populated at boot is the normal case — the warm cache is on disk.
+  // Announcing it would mean every deploy re-detonating tomorrow's CPI.
+  p.macroSeedNow([{ k: "CPI", label: "CPI", d: tomorrow, tEt: "08:30", prior: { yoy: 2.9, m: "2026-06" } }]);
+  p.macroScanNow();
+  assert.equal(macro().length, 0, "the first pass after a cold boot seeds, never announces");
+
+  // A genuinely new event arriving after priming fires its day-ahead leg.
+  p.macroSeedNow([
+    { k: "CPI", label: "CPI", d: tomorrow, tEt: "08:30", prior: { yoy: 2.9, m: "2026-06" } },
+    { k: "NFP", label: "Nonfarm payrolls", d: tomorrow, tEt: "08:30", prior: { chgK: 147, m: "2026-06" } },
+  ]);
+  p.macroScanNow();
+  assert.equal(macro().length, 1, "one new calendar row, one alert");
+  assert.equal(macro()[0].sub, "ahead");
+  assert.equal(macro()[0].k, "NFP");
+  assert.equal(macro()[0].coin, undefined, "macro carries no ticker — scoping it to one would misdescribe the event");
+
+  p.macroScanNow(); p.macroScanNow();
+  assert.equal(macro().length, 1, "re-scanning the same calendar is silent — the leg is keyed k|date|sub");
+
+  // The result leg waits for the NUMBER, not the clock: the same row with an actual attached is a
+  // new leg, and only then.
+  p.macroSeedNow([
+    { k: "CPI", label: "CPI", d: tomorrow, tEt: "08:30", prior: { yoy: 2.9, m: "2026-06" } },
+    { k: "NFP", label: "Nonfarm payrolls", d: tomorrow, tEt: "08:30", prior: { chgK: 147, m: "2026-06" },
+      actual: { chgK: 88, unemp: 4.2, m: "2026-07" } },
+  ]);
+  p.macroScanNow();
+  const legs = macro();
+  assert.equal(legs.length, 2);
+  assert.equal(legs[1].sub, "result");
+  assert.equal(legs[1].actual.chgK, 88, "the structured stat rides the event — the formatter owns the wording, not the poller");
+  p.macroScanNow();
+  assert.equal(macro().length, 2, "a result announces once");
+});
+
+test("macro + earnings-preview episode state survives a redeploy", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // This app redeploys once per pushed FILE. Un-persisted seed state is what made the trend class
+  // theoretical for eight builds; the same trap applies verbatim to a CPI print and to a
+  // once-a-day calendar message.
+  assert.ok(/macro: \[\.\.\.macroAlerted\.entries\(\)\]/.test(pol), "the macro seed set is persisted");
+  assert.ok(/earnPrevDay: earnPrevDay \|\| null/.test(pol), "the preview's day stamp is persisted");
+  assert.ok(/loadMap\(ep\.macro, macroAlerted\)/.test(pol), "…and restored");
+  assert.ok(/if \(typeof ep\.earnPrevDay === "string"\) earnPrevDay = ep\.earnPrevDay/.test(pol));
+  assert.ok(/if \(macroAlerted\.size\) macroPrimed = true/.test(pol),
+    "restored state IS the seed — re-running the silent pass would eat the first real transition");
+  assert.ok(/setInterval\(safeTick\(macroScan, "macroScan"\), 5 \* 60 \* 1000\)/.test(pol),
+    "5-minute cadence: the imminent leg is a 60-minute window against an 08:30/14:00 ET clock");
+  assert.ok(/setInterval\(safeTick\(earnPreviewScan, "earnPreviewScan"\), 10 \* 60 \* 1000\)/.test(pol));
+});
+
+test("earnings preview: one batched message a day, silent when the calendar is empty", () => {
+  const { etDayStr } = require("../src/compute");
+  const p = ctxHarness();
+  const DAYMS = 24 * 3600e3;
+  const now = Date.now();
+  const tomorrow = etDayStr(now + DAYMS), today = etDayStr(now);
+  const prev = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "earnings" && e.sub === "preview");
+
+  p.seedRowNow("AAA", { ticker: "AAA", px: 10, uni: "xyz" });
+  p.seedRowNow("BBB", { ticker: "BBB", px: 10, uni: "xyz" });
+
+  // Nothing scheduled anywhere: the daily gate still closes, but no message is sent. An empty
+  // calendar is silence — a "0 reports tomorrow" DM every evening is how a channel gets muted.
+  p.earnPrevResetNow();
+  p.earnRebuildNow([]);
+  assert.equal(p.earnPreviewNow(), 0);
+  assert.equal(prev().length, 0);
+
+  p.earnPrevResetNow();
+  p.earnRebuildNow([
+    { coin: "xyz:AAA", t: "AAA", d: tomorrow, s: "AMC", eps: 1.42, epsA: null },
+    { coin: "xyz:BBB", t: "BBB", d: today, s: "BMO", eps: 0.5, epsA: 0.61 },
+  ]);
+  const fired = p.earnPreviewNow();
+  // The 17:00 ET gate is real, so this only emits in the evening window; both branches are
+  // asserted rather than one being assumed.
+  if (fired) {
+    const e = prev()[0];
+    assert.equal(e.tomorrow.length, 1);
+    assert.equal(e.tomorrow[0].t, "AAA");
+    assert.equal(e.reported.length, 1);
+    assert.equal(e.reported[0].epsA, 0.61);
+    assert.equal(e.coin, undefined, "the calendar is roster-wide — it belongs to no single name");
+    assert.equal(p.earnPreviewNow(), 0, "and it is once per ET day, not once per scan");
+    const C = require("../src/compute");
+    const msg = C.pushFmt(e, {});
+    assert.ok(/Earnings calendar/.test(msg) && /AAA/.test(msg) && /BBB/.test(msg));
+    assert.ok(/beat/.test(msg), "a reported print carries its verdict");
+    assert.ok(/not a consensus/.test(msg), "same honesty rule as the macro lane");
+  } else {
+    assert.equal(prev().length, 0, "before 17:00 ET the preview holds — and holds silently");
+  }
+});
+
+test("the widened earnings class did not weaken the claim-scoped leg", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The scoping was never the bug. If a later slice ever loosens THIS gate, an 84-name roster in
+  // season becomes a dozen interruptions a day and the class gets muted — which is the failure
+  // the batched preview exists to avoid having to risk.
+  const scan = pol.slice(pol.indexOf("function earnScan()"), pol.indexOf("function earnPreviewScan()"));
+  assert.ok(/if \(e\.vi != null \|\| e\.alo !== 1\) continue;/.test(scan), "shadows and unannounced claims stay excluded");
+  assert.ok(/prox\.diff > 1/.test(scan), "today or tomorrow only");
+  const C = require("../src/compute");
+  assert.ok(/open <b>breakout<\/b> claim/.test(C.pushFmt({ kind: "earnings", coin: "X", t: "X", when: "tomorrow", session: "amc", claim: "breakout" }, {})),
+    "the urgent leg's message is untouched by the preview branch");
+});
+
+test("client: the macro class and the preview shape are renderable in the bell log", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/macro:\['MACRO','sec'\]/.test(app), "the log needs a tag or the class renders untagged");
+  assert.ok(/if\(k==='macro'\)/.test(app), "…and a renderer, or it renders as a setup and lies");
+  assert.ok(/if\(ev\.sub==='preview'\)/.test(app), "the two earnings shapes are told apart client-side too");
+  assert.ok(/macro:'universe-wide scheduled binaries/.test(app), "the chip carries its own tooltip");
+  assert.ok(/17:00 ET/.test(app), "the earnings tooltip states when the calendar leg lands");
 });
