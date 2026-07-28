@@ -9498,6 +9498,216 @@ test("telegram + bell carry the confirmation line from ONE event", () => {
   assert.ok(/k==='trend'/.test(app) && /trendWhenTxt\(ev\)/.test(app), "alertText's trend branch reads the shared stamp");
 });
 
+// ===== ma200 alert lane (build 2026.07.27-32) ==================================================
+// The 200-EMA notification class: reclaim / breakdown / bullish + bearish retest on H4 and D1,
+// close-confirmed on the rung's own candle, full roster. The detector IS the -26/-28 vocabulary
+// (buffered cross, far-side arm, clear-air retest) so the alert and the study cannot disagree.
+
+// Daily fixture builder: `spec` maps bar index offsets FROM THE END to overrides; base is a
+// gently alternating series (nonzero ret sigma) around `lvl` so the 200-EMA seeds near it.
+function maDaily(n, lvl, spec, t0) {
+  const DAYMS = 86400e3;
+  const bars = [];
+  for (let i = 0; i < n; i++) {
+    const c = lvl * (1 + (i % 2 ? 0.004 : -0.004));
+    bars.push({ t: t0 + i * DAYMS, c, h: c, l: c });
+  }
+  for (const k in (spec || {})) {
+    const idx = n - 1 - (+k);
+    bars[idx] = Object.assign({}, bars[idx], spec[k], { t: bars[idx].t });
+  }
+  return bars;
+}
+function maSd(bars) {
+  const C = require("../src/compute");
+  return C.retStd(C.dailyRets(bars.map((b) => [b.t, b.c])).slice(-90), 15);
+}
+
+test("emaAlertState: the four shapes, in the study's own vocabulary", () => {
+  const C = require("../src/compute");
+  const t0 = Date.UTC(2025, 6, 1, 0, 0, 0), DAYMS = 86400e3;
+
+  // RECLAIM: five closes below the line, then a buffered close back above it.
+  const rec = maDaily(220, 100, { 5: { c: 97, h: 97, l: 97 }, 4: { c: 97, h: 97, l: 97 },
+    3: { c: 97, h: 97, l: 97 }, 2: { c: 97, h: 97, l: 97 }, 1: { c: 97, h: 97, l: 97 },
+    0: { c: 104, h: 104, l: 104 } }, t0);
+  const evR = C.emaAlertState(rec, maSd(rec));
+  assert.ok(evR && evR.sub === "reclaim" && evR.side === "long");
+  assert.equal(evR.held, 5, "held = the consecutive closes the below side had before the cross");
+  assert.equal(evR.barT, t0 + 219 * DAYMS, "the event is stamped with ITS OWN closed bar");
+
+  // BREAKDOWN: the exact mirror.
+  const brk = maDaily(220, 100, { 5: { c: 103, h: 103, l: 103 }, 4: { c: 103, h: 103, l: 103 },
+    3: { c: 103, h: 103, l: 103 }, 2: { c: 103, h: 103, l: 103 }, 1: { c: 103, h: 103, l: 103 },
+    0: { c: 96, h: 96, l: 96 } }, t0);
+  const evB = C.emaAlertState(brk, maSd(brk));
+  assert.ok(evB && evB.sub === "breakdown" && evB.side === "short");
+  // 6, not 5: the alternating base's +0.4% bar just before the override run also sits above the
+  // line, so it joins the above-run — held counts the TRUE run, not the fixture's override width.
+  assert.equal(evB.held, 6);
+
+  // An UNBUFFERED cross — closes above but hugging the line — is silence: the -26 duel picked
+  // the buffered variant precisely for its whipsaw tax, and the alert honours the same pick.
+  const hug = maDaily(220, 100, { 4: { c: 99, h: 99, l: 99 }, 3: { c: 99, h: 99, l: 99 },
+    2: { c: 99, h: 99, l: 99 }, 1: { c: 99, h: 99, l: 99 } }, t0);
+  const lineHug = C.emaLast(hug.slice(0, 219).map((b) => b.c).concat([100]), 200);
+  hug[219] = { t: hug[219].t, c: lineHug + 0.01, h: lineHug + 0.01, l: lineHug + 0.01 };
+  assert.equal(C.emaAlertState(hug, maSd(hug)), null, "a close on the line is not a buffered cross");
+
+  // CHOP — alternating sides — arms nothing in either direction.
+  const chop = maDaily(220, 100, { 4: { c: 103 }, 3: { c: 97 }, 2: { c: 103 }, 1: { c: 97 }, 0: { c: 103, h: 103, l: 103 } }, t0);
+  assert.equal(C.emaAlertState(chop, maSd(chop)), null, "straddling closes never satisfy the far-side arm");
+
+  // BULLISH RETEST: rising series, prior bar in clear air, last bar's LOW probes the line while
+  // the close holds above.
+  const up = [];
+  for (let i = 0; i < 220; i++) { const c = 100 * Math.pow(1.002, i) * (1 + (i % 2 ? 0.002 : -0.002));
+    up.push({ t: t0 + i * DAYMS, c, h: c, l: c }); }
+  const eUp = C.emaLast(up.map((b) => b.c), 200);
+  up[219] = { t: up[219].t, c: up[219].c, h: up[219].c, l: eUp - 0.01 };
+  const evT = C.emaAlertState(up, maSd(up));
+  assert.ok(evT && evT.sub === "retest" && evT.side === "long", "touch + hold + clear-air prior = bullish retest");
+  assert.equal(evT.probe, +(eUp - 0.01).toPrecision(9), "the probe extreme ships with the event");
+  assert.ok(evT.held > 0);
+
+  // BEARISH RETEST: the falling mirror — the HIGH probes, the close rejects.
+  const dn = [];
+  for (let i = 0; i < 220; i++) { const c = 130 * Math.pow(0.998, i) * (1 + (i % 2 ? 0.002 : -0.002));
+    dn.push({ t: t0 + i * DAYMS, c, h: c, l: c }); }
+  const eDn = C.emaLast(dn.map((b) => b.c), 200);
+  dn[219] = { t: dn[219].t, c: dn[219].c, h: eDn + 0.01, l: dn[219].c };
+  const evS = C.emaAlertState(dn, maSd(dn));
+  assert.ok(evS && evS.sub === "retest" && evS.side === "short", "rejection from below = bearish retest");
+
+  // SECOND touch of the same episode is silence: the prior bar itself touched, so the clear-air
+  // arm fails — a level being hugged is one fight, not a feed.
+  const hug2 = up.map((b) => Object.assign({}, b));
+  const eUpP = C.emaLast(up.slice(0, 219).map((b) => b.c), 200);   // the PRIOR bar's own line
+  hug2[218] = { t: hug2[218].t, c: hug2[218].c, h: hug2[218].c, l: eUpP - 0.01 };
+  assert.equal(C.emaAlertState(hug2, maSd(hug2)), null);
+
+  // Closes-only bars (warm-cache dailies) cannot fabricate a touch: h/l degrade to the close.
+  const co = up.map((b) => ({ t: b.t, c: b.c }));
+  assert.equal(C.emaAlertState(co, maSd(up)), null, "no recorded extremes, no retest — honest degradation");
+
+  // Depth floor: EMA200 cannot seed under 216 bars — null, never a shorter-MA substitute.
+  assert.equal(C.emaAlertState(rec.slice(-200), maSd(rec)), null);
+});
+
+test("ma200 lane: seeds silently, fires once per closed bar, carries confAt and the sighting", () => {
+  const p = trendHarness();
+  const evs = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "ma200");
+  const DAYMS = 86400e3;
+  const t0 = Date.UTC(2025, 6, 1, 0, 0, 0);
+  const nBars = 240;
+  const dEnd = t0 + nBars * DAYMS;              // first instant after the last fixture bar closes
+  // A name sitting BELOW its 200 with the below-state held: the reclaim's launch pad.
+  const below = {};
+  for (let k = 0; k < 8; k++) below[k] = { c: 96, h: 96, l: 96 };
+  const daily = maDaily(nBars, 100, below, t0);
+  p.seedRowNow("EMA", { ticker: "EMAT", px: 96, uni: "xyz", dailyRaw: daily, hourlyRaw: [] });
+  p.ma200PrimeNow();
+
+  // Scans inside the still-open next day: the closed series is unchanged — nothing can exist yet.
+  p.ma200ScanNow(dEnd + 3600e3);
+  assert.equal(evs().length, 0, "no new close, no event — by construction, not by filter");
+
+  // The mark rips above the line intraday: the LIVE shape appears, the closed one does not.
+  p.seedRowNow("EMA", { px: 104 });
+  const tSee = dEnd + 5 * 3600e3;
+  p.ma200ScanNow(tSee);
+  p.ma200ScanNow(dEnd + 9 * 3600e3);
+  assert.equal(evs().length, 0, "an intrabar reclaim is a sighting, never an alert");
+
+  // The day closes above: append the closed bar, advance past its end — the reclaim now EXISTS.
+  const daily2 = daily.concat([{ t: dEnd, c: 104, h: 104.5, l: 95.8 }]);
+  p.seedRowNow("EMA", { dailyRaw: daily2, px: 104 });
+  p.ma200ScanNow(dEnd + DAYMS + 60e3);
+  const e1 = evs();
+  assert.equal(e1.length, 1, "the closed arrival fires exactly once");
+  assert.equal(e1[0].sub, "reclaim"); assert.equal(e1[0].side, "long"); assert.equal(e1[0].tf, "D1");
+  assert.equal(e1[0].confTf, "D1");
+  assert.equal(e1[0].confAt, dEnd + DAYMS, "confAt is the daily close that made it true");
+  assert.equal(e1[0].seenAt, tSee, "the first intrabar sighting rides the event");
+  assert.ok(e1[0].seenAt < e1[0].confAt);
+  assert.ok(e1[0].held >= 8, "the message knows how long the below side held");
+
+  // The same closed bar across later scans — and across a redeploy — never announces twice.
+  p.ma200ScanNow(dEnd + DAYMS + 10 * 60e3);
+  assert.equal(evs().length, 1);
+  const snap = JSON.parse(JSON.stringify({ seq: 0, seen: [], events: [],
+    episodes: { ma200: [...p.ma200StateNow().entries()] } }));
+  const p2 = trendHarness();
+  p2.seedRowNow("EMA", { ticker: "EMAT", px: 104, uni: "xyz", dailyRaw: daily2, hourlyRaw: [] });
+  p2.hydrateTriggersNow(snap);
+  p2.ma200ScanNow(dEnd + DAYMS + 20 * 60e3);
+  assert.equal(p2.getTriggers(0, null, true).events.filter((e) => e.kind === "ma200").length, 0,
+    "the fired-bar stamp is persisted state — a redeploy re-announces nothing");
+
+  // A fresh process WITHOUT the persisted state seeds the standing event silently (priming path).
+  const p3 = trendHarness();
+  p3.seedRowNow("EMA", { ticker: "EMAT", px: 104, uni: "xyz", dailyRaw: daily2, hourlyRaw: [] });
+  p3.ma200ScanNow(dEnd + DAYMS + 60e3);   // unprimed first look
+  p3.ma200PrimeNow();
+  p3.ma200ScanNow(dEnd + DAYMS + 10 * 60e3);
+  assert.equal(p3.getTriggers(0, null, true).events.filter((e) => e.kind === "ma200").length, 0,
+    "state in force at first sight is seeded, never announced");
+});
+
+test("ma200 class: selectable, opt-in, and the message carries the -25 stamp", () => {
+  const C = require("../src/compute");
+  assert.ok(C.PUSH_CLASSES.includes("ma200"));
+  assert.ok(!C.PUSH_DEFAULT_CLASSES.includes("ma200"), "opt-in until its measured rate is known — adding a class never retroactively subscribes anyone");
+  const ev = { kind: "ma200", coin: "SOL", t: "SOL", side: "long", sub: "reclaim", tf: "D1",
+    px: 214.36, ema: 198.4, dist: 8.04, held: 47, confTf: "D1", confAt: Date.UTC(2026, 6, 27, 0, 0),
+    seenAt: Date.UTC(2026, 6, 26, 14, 20), title: "D1 EMA200 reclaim",
+    text: "closed back above the 200 after 47 D1 bars below it" };
+  assert.equal(C.pushEligible(ev, { classes: ["ma200"] }), true);
+  assert.equal(C.pushEligible(ev, {}), false, "absent selection = the DEFAULT set, which excludes it");
+  const m = C.pushFmt(ev, { baseUrl: "https://x.example" });
+  assert.ok(m.includes("D1 EMA200 reclaim"));
+  assert.ok(/^EMA200\s+198\.4$/m.test(m.slice(m.indexOf("<pre>") + 5, m.indexOf("</pre>"))), "the line itself is in the geometry block");
+  assert.ok(m.includes("held    47 D1 bars"), "how long the prior side held is the message's own quality signal");
+  assert.ok(m.includes("\u23f1 confirmed D1 close 00:00 UTC"), "the confirming close is the alert's time");
+  assert.ok(m.includes("first seen Jul 26 14:20"));
+  // A retest ships its probe; a cross does not fabricate one.
+  const rt = C.pushFmt({ kind: "ma200", coin: "H", t: "HYPE", side: "long", sub: "retest", tf: "H4",
+    px: 47.92, ema: 46.8, dist: 2.39, held: 88, probe: 46.71, confTf: "H4",
+    confAt: Date.UTC(2026, 6, 27, 8, 0), title: "H4 bullish retest of EMA200",
+    text: "pullback probed the 200 from above, close held it" }, {});
+  assert.ok(rt.includes("probe   46.71"));
+  assert.ok(!m.includes("probe"), "no probe on a cross event");
+});
+
+test("ma200 lane manifest: closed source, dedup by the bar itself, full-roster scope — pinned", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const fn = pol.slice(pol.indexOf("function ma200Scan(tNow)"), pol.indexOf("function pushTest("));
+  assert.ok(/emaAlertState\(bars, sdTf\)/.test(fn), "ONE detector — the study's vocabulary — decides every event");
+  assert.ok(/closedBars\(src, MA200_TFS\[tf\], now\)/.test(pol), "the series is period-trimmed: a transition can only exist at a close");
+  assert.ok(/for \(const r of rows\.values\(\)\)/.test(fn) && /full roster, BOTH/i.test(pol.slice(pol.indexOf("ma200 class:"), pol.indexOf("const MA200_TFS"))),
+    "full roster, both universes — a 200 breakdown matters most on a name that is NOT trending");
+  assert.ok(/if \(ev && S\.fired\[key\] !== ev\.barT\) \{/.test(fn),
+    "dedup is the firing bar's OWN timestamp — the same closed bar never announces twice");
+  assert.ok(fn.indexOf("S.fired[key] !== ev.barT") < fn.indexOf("const lb = maLiveBars"),
+    "the fire is handled BEFORE the sighting upkeep — a closed event bar no longer matches the live shape, and upkeep first would wipe the stamp the fire discloses");
+  assert.ok(/if \(!maPrimed \|\| !S\.s\) \{ S\.s = 1; if \(key\) S\.fired\[key\] = ev\.barT; continue; \}/.test(fn),
+    "state in force at first sight is seeded, never announced — including a name arriving after priming");
+  assert.ok(/bars\.length < 216/.test(fn), "EMA200 that cannot seed is honest silence, not a shorter substitute");
+  assert.ok((fn.match(/emitTrig\("ma200"/g) || []).length === 1, "one emit site");
+  assert.ok(/S\.seen\[key\] != null && S\.seen\[key\] < confAt/.test(fn), "seenAt only when the sighting preceded the confirming close");
+  // Wiring: scheduler, priming, persistence, hydration, primed-on-restore.
+  assert.ok(/setInterval\(safeTick\(ma200Scan, "ma200Scan"\), 5 \* 60 \* 1000\);/.test(pol));
+  assert.ok(/maPrimed = true; log\("ma200 alerts primed"\)/.test(pol));
+  assert.ok(/ma200: \[\.\.\.maState\.entries\(\)\]\.slice\(-500\)/.test(pol));
+  assert.ok(/loadMap\(ep\.ma200, maState\)/.test(pol));
+  assert.ok(/if \(maState\.size\) maPrimed = true;/.test(pol),
+    "restored state IS the seed — keeping the priming delay after a restore would only eat real transitions");
+  // Client: the bell log reads the same event through the shared stamp.
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("if(k==='ma200')") && /ma200:\['MA200'/.test(app), "alertText branch + feed tag");
+});
+
 test("trend state restored from a pre-close-confirm build reseeds silently, never fires against a different ruler", () => {
   const p = trendHarness();
   const stacks = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "stack").length;
@@ -10247,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-31"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-32"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
