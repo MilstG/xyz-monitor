@@ -4328,7 +4328,12 @@ function trigEligible(row, cfg) {
 // `ledger` is the DEATH side of a claim the `setup` class already announced: its void level taken,
 // its target reached, or its horizon resolved. Deliberately one class rather than three — nobody
 // wants to subscribe to target-hits but not stop-hits, and the message says which it is.
-const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "ma200", "filing", "earnings", "ai", "regime", "coverage", "ops"];
+// `macro` is the universe-wide calendar lane: FOMC decisions and the six FRED-fed prints. It is
+// the one class with no ticker at all — a CPI release moves the whole board, so scoping it to a
+// name would be a lie about what the event is. Three sub-events per release (day-ahead, imminent,
+// result) at ~7 releases a month is ~20 messages a month, which is why it can fire individually
+// instead of being batched the way headlines are.
+const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "ma200", "filing", "earnings", "macro", "ai", "regime", "coverage", "ops"];
 // Classes only an operator should receive. Ops is server health — a stalled poller is actionable if
 // you can redeploy and noise if you cannot, and the group should not be woken by the plumbing.
 // Enforced in delivery AND in the in-app feed, not just hidden in the panel: a class the public
@@ -4390,6 +4395,9 @@ function pushEligible(ev, sub) {
   // wrote. Layering the setup thresholds on top would silently veto somebody's own alert.
   if (kind === "rule") return true;
   if (kind === "filing" || kind === "earnings" || kind === "ai") return true;
+  // Macro has no per-recipient threshold that would mean anything: there is no R:R on a CPI print
+  // and no ticker to mute. The class chip IS the control.
+  if (kind === "macro") return true;
   if (kind === "regime" || kind === "coverage" || kind === "trend" || kind === "ma200") return true;
   return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
 }
@@ -4403,7 +4411,7 @@ function pushEligible(ev, sub) {
 // align exactly as they do on the board; everything else stays prose. One leading glyph per message
 // and a side dot — enough to sort a class at a glance on a lock screen, not enough to become soup.
 const PUSH_GLYPH = { setup: "\u26a1", ledger: "\u23f1", rule: "\u{1f4d0}", trend: "\u{1f4c8}", ma200: "\u{1f4cf}",
-  filing: "\u{1f4c4}", earnings: "\u{1f4c5}", ai: "\u{1f9e0}", regime: "\u{1f30a}",
+  filing: "\u{1f4c4}", earnings: "\u{1f4c5}", macro: "\u{1f3db}\ufe0f", ai: "\u{1f9e0}", regime: "\u{1f30a}",
   coverage: "\u26a0\ufe0f", ops: "\u{1f527}" };
 const sideDot = (s) => (s === "long" ? "\u{1f7e2}" : s === "short" ? "\u{1f534}" : "");
 const sideWord = (s) => (s === "long" ? "LONG" : s === "short" ? "SHORT" : String(s || "").toUpperCase());
@@ -4434,7 +4442,10 @@ function pushFmt(ev, opts) {
     return out([(ev.level === "warn" ? "\u26a0\ufe0f" : g) + " <b>" + tgEsc(ev.title || "ops") + "</b>",
       tgEsc(ev.text || "")]);
   }
-  if (!ev.coin && kind !== "regime") return null;
+  // Three kinds legitimately have no ticker: regime (tape-wide), macro (universe-wide by
+  // construction) and the earnings PREVIEW (a roster-wide calendar, not one name's print).
+  // Everything else without a coin is a malformed event and says nothing rather than half a thing.
+  if (!ev.coin && kind !== "regime" && kind !== "macro" && !(kind === "earnings" && ev.sub === "preview")) return null;
 
   if (kind === "setup") {
     const head = g + " <b>" + name + "</b> " + sideDot(ev.side) + " " + sideWord(ev.side)
@@ -4514,10 +4525,81 @@ function pushFmt(ev, opts) {
       ev.url ? '<a href="' + tgEsc(ev.url) + '">read the filing \u2192</a>' : ""]);
   }
   if (kind === "earnings") {
+    // The roster-wide daily calendar. One message a day carrying tomorrow's scheduled prints and
+    // today's results, because the individual-name version of this is a dozen interruptions in
+    // season — the exact failure the claim-scoped leg below was built to avoid. Both legs live in
+    // one class on purpose: nobody wants the calendar without the alert or the reverse.
+    if (ev.sub === "preview") {
+      const up = Array.isArray(ev.tomorrow) ? ev.tomorrow : [];
+      const rep = Array.isArray(ev.reported) ? ev.reported : [];
+      const sess = (s) => (s === "BMO" ? "pre-market" : s === "AMC" ? "after close" : s === "DMH" ? "during hours" : "time TBD");
+      const lines = [g + " <b>Earnings calendar</b>"];
+      if (up.length) {
+        lines.push("");
+        lines.push("<b>Reporting tomorrow</b> \u00b7 " + up.length);
+        for (const e of up) lines.push("\u00b7 " + tgEsc(e.t) + " \u2014 " + tgEsc(sess(e.s))
+          + (Number.isFinite(+e.eps) ? " \u00b7 est " + (+e.eps).toFixed(2) : "")
+          + (e.claim ? " \u00b7 <b>open " + tgEsc(e.claim) + " claim</b>" : ""));
+        if (+ev.moreUp > 0) lines.push("<i>+" + Math.round(+ev.moreUp) + " more \u2014 list cap</i>");
+      }
+      if (rep.length) {
+        lines.push("");
+        lines.push("<b>Reported today</b> \u00b7 " + rep.length);
+        for (const e of rep) {
+          const has = Number.isFinite(+e.epsA) && Number.isFinite(+e.eps);
+          const verdict = has ? (+e.epsA > +e.eps ? "beat" : +e.epsA < +e.eps ? "miss" : "in line") : null;
+          lines.push("\u00b7 " + tgEsc(e.t) + " \u2014 "
+            + (Number.isFinite(+e.epsA)
+              ? "EPS " + (+e.epsA).toFixed(2) + (has ? " vs " + (+e.eps).toFixed(2) + " est \u00b7 " + verdict : "")
+              : "actual not in the feed yet")
+            + (Number.isFinite(+e.d1) ? " \u00b7 day " + (+e.d1 >= 0 ? "+" : "") + (+e.d1).toFixed(1) + "%" : ""));
+        }
+        if (+ev.moreRep > 0) lines.push("<i>+" + Math.round(+ev.moreRep) + " more \u2014 list cap</i>");
+      }
+      if (!up.length && !rep.length) return null;   // an empty calendar is silence, not a message
+      lines.push("");
+      lines.push("<i>estimates are the feed\u2019s, not a consensus \u2014 verdicts are EPS-only</i>");
+      // Joined directly rather than through out(): the blank separators are deliberate structure
+      // here and out() filters falsy lines, which would collapse the three blocks into one wall.
+      return lines.join("\n");
+    }
     const head = g + " <b>" + name + "</b> \u00b7 reports " + tgEsc(ev.when || "soon")
       + (ev.session ? " (" + tgEsc(ev.session) + ")" : "");
     return out([head, ev.claim ? "you hold an open <b>" + tgEsc(ev.claim) + "</b> claim on it" : "",
       link("open " + (ev.t || ev.coin))]);
+  }
+
+  if (kind === "macro") {
+    // Prior is a PRIOR, never a consensus: FRED carries no street estimates, so the message says
+    // "prior" and the result line reads prior -> actual. Dressing the prior up as an expectation
+    // would be the single most misleading thing this channel could do with a CPI print.
+    const lbl = tgEsc(ev.label || ev.k || "macro");
+    const prior = macroStatText(ev.k, ev.prior);
+    const actual = macroStatText(ev.k, ev.actual);
+    const clock = tgEsc((ev.tEt || "") + " ET");
+    if (ev.sub === "result") {
+      const head = g + " <b>" + lbl + "</b> \u00b7 released";
+      let body;
+      if (ev.k === "FOMC") {
+        const held = ev.actual && ev.prior && +ev.actual.lo === +ev.prior.lo && +ev.actual.hi === +ev.prior.hi;
+        body = actual
+          ? preRows([["target", actual], ["prior", prior], ["move", held ? "held" : (ev.actual && ev.prior && +ev.actual.hi < +ev.prior.hi ? "cut" : "hiked")]])
+          : null;
+      } else {
+        body = actual ? preRows([["actual", actual], ["prior", prior],
+          ["period", macroMonthText(ev.actual && ev.actual.m)]]) : null;
+      }
+      return out([head, body,
+        actual ? "" : "the release clock has passed but FRED hasn\u2019t published the series yet \u2014 the number follows on the next pass",
+        ev.sep === true ? "\u{1f4ca} projections (dot plot) accompany this decision" : ""]);
+    }
+    const when = ev.sub === "imminent"
+      ? (Number.isFinite(+ev.mins) ? "in " + Math.max(1, Math.round(+ev.mins)) + " min" : "shortly") + " \u00b7 " + clock
+      : "tomorrow \u00b7 " + clock;
+    return out([g + " <b>" + lbl + "</b> \u00b7 " + tgEsc(when),
+      prior ? preRows([["prior", prior], ["period", macroMonthText(ev.prior && ev.prior.m)]]) : null,
+      ev.k === "FOMC" ? "statement 2:00 ET, presser 2:30" + (ev.sep === true ? " \u00b7 projections (dot plot) due" : "") : "",
+      "<i>prior only \u2014 this feed carries no street consensus</i>"]);
   }
   if (kind === "ai") {
     const head = g + " <b>" + name + "</b> \u00b7 analyst read flipped";
@@ -5269,6 +5351,42 @@ function macroWithin(entries, nowMs, horizonMs) {
   }
   return out;
 }
+// Plain-text rendering of a macro stat object, keyed by the release. The SAME structured
+// {actual, prior} objects the calendar tab renders are what the push formatter receives, so the
+// number on a phone and the number on the board come from one source — the client's HTML variant
+// is a presentation of this same shape, never a second computation. Returns null (not a dash, not
+// a zero) when the stat is absent, so an unformattable print says nothing rather than inventing.
+const _MACRO_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function macroMonthText(m) {
+  if (!/^\d{4}-\d{2}$/.test(m || "")) return null;
+  return _MACRO_MON[+m.slice(5, 7) - 1] + " " + m.slice(0, 4);
+}
+function macroRangeText(r) {
+  if (!r || !Number.isFinite(+r.lo) || !Number.isFinite(+r.hi)) return null;
+  return (+r.lo).toFixed(2) + "\u2013" + (+r.hi).toFixed(2) + "%";
+}
+function macroStatText(k, s) {
+  if (!s) return null;
+  const pct = (v, d) => (Number.isFinite(+v) ? (+v >= 0 ? "+" : "") + (+v).toFixed(d == null ? 1 : d) + "%" : null);
+  if (k === "FOMC") return macroRangeText(s);
+  if (k === "CPI" || k === "PCE") {
+    if (!Number.isFinite(+s.yoy)) return null;
+    return (+s.yoy).toFixed(1) + "% YoY" + (Number.isFinite(+s.core) ? " \u00b7 core " + (+s.core).toFixed(1) + "%" : "");
+  }
+  if (k === "NFP") {
+    if (!Number.isFinite(+s.chgK)) return null;
+    return (+s.chgK >= 0 ? "+" : "") + Math.round(+s.chgK) + "k"
+      + (Number.isFinite(+s.unemp) ? " \u00b7 unemployment " + (+s.unemp).toFixed(1) + "%" : "");
+  }
+  if (k === "PPI") return Number.isFinite(+s.yoy) ? (+s.yoy).toFixed(1) + "% YoY" : null;
+  if (k === "RETAIL") { const v = pct(s.mom); return v ? v + " MoM" : null; }
+  if (k === "GDP") return Number.isFinite(+s.qoq) ? (+s.qoq).toFixed(1) + "% QoQ ann." : null;
+  return null;
+}
+module.exports.macroMonthText = macroMonthText;
+module.exports.macroRangeText = macroRangeText;
+module.exports.macroStatText = macroStatText;
+module.exports.etParts = etParts;
 module.exports.FOMC_DECISIONS = FOMC_DECISIONS;
 module.exports.MACRO_RELEASES = MACRO_RELEASES;
 module.exports.MACRO_LABEL = MACRO_LABEL;

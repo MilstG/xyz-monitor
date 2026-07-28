@@ -6,7 +6,7 @@ const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require(".
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
-const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, FOMC_DECISIONS } = require("./compute");
+const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, FOMC_DECISIONS } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -4750,6 +4750,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // payload, so evaluating on any other clock would mean judging a number the board isn't showing.
     setInterval(safeTick(ruleScan, "ruleScan"), 15 * 1000);
     setInterval(safeTick(earnScan, "earnScan"), 60 * 60 * 1000);
+    // The calendar lanes. Macro runs every 5 min because the imminent leg is a 60-minute window
+    // against an 08:30/14:00 ET clock — an hourly scan would miss it as often as it caught it.
+    // The first pass is deliberately early (the warm macro cache is already on disk by then) so a
+    // cold boot seeds against a populated window rather than an empty one.
+    setTimeout(safeTick(macroScan, "macroScan"), 90 * 1000);
+    setInterval(safeTick(macroScan, "macroScan"), 5 * 60 * 1000);
+    // The preview is a once-per-ET-day decision; 10 min is enough resolution for a 17:00 gate and
+    // keeps the scan off the hot path.
+    setInterval(safeTick(earnPreviewScan, "earnPreviewScan"), 10 * 60 * 1000);
     setInterval(safeTick(regimeScan, "regimeScan"), 15 * 60 * 1000);
     setInterval(safeTick(trendScan, "trendScan"), 5 * 60 * 1000);
     // One full pass seeds every name's state before anything may fire — otherwise the first scan
@@ -7101,12 +7110,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const ep = d.episodes || {};
     const loadMap = (arr, map) => { if (Array.isArray(arr)) for (const kv of arr) if (Array.isArray(kv)) map.set(kv[0], kv[1]); };
     loadMap(ep.trend, trendState); loadMap(ep.ma200, maState); loadMap(ep.regime, regimeArmed); loadMap(ep.coverage, coverageArmed); loadMap(ep.earn, earnAlerted);
+    loadMap(ep.macro, macroAlerted);
+    if (typeof ep.earnPrevDay === "string") earnPrevDay = ep.earnPrevDay;
     if (Array.isArray(ep.filings)) for (const id of ep.filings) if (typeof id === "string") filingSeen.add(id);
     // Restored state IS the seed, so the priming delay would only eat real transitions. A genuinely
     // fresh boot (nothing restored) still gets the full silent seeding pass.
     if (trendState.size) trendPrimed = true;
     if (maState.size) maPrimed = true;
     if (filingSeen.size) filingPrimed = true;
+    if (macroAlerted.size) macroPrimed = true;
     return true;
   }
   function persistTriggers() {
@@ -7126,6 +7138,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         coverage: [...coverageArmed.entries()].slice(-200),
         filings: [...filingSeen].slice(-FILING_SEEN_MAX),
         earn: [...earnAlerted.entries()].slice(-400),
+        // Without these two a redeploy re-announces the afternoon's CPI print and re-sends the
+        // daily calendar — and this app deploys once per pushed FILE. Same lesson as the trend
+        // seeds, one class later.
+        macro: [...macroAlerted.entries()].slice(-MACRO_ALERTED_MAX),
+        earnPrevDay: earnPrevDay || null,
       } });
     trigDirty = false;
   }
@@ -7882,6 +7899,111 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return fired;
   }
 
+  // The OTHER half of the earnings class: the roster-wide calendar, once a day, as ONE message.
+  // The claim-scoped leg above answers "the thing that decides your open trade is a day away" and
+  // is correctly silent when you hold nothing — which is exactly why it looked broken. This leg
+  // answers the different question ("what is coming, and what just landed") without becoming the
+  // dozen-interruptions-a-day feed that the scoping was built to prevent. Same class, because
+  // nobody wants one of these without the other; different sub, so the log can tell them apart.
+  const EARN_PREVIEW_ET_HOUR = 17;   // after the 16:00 cash close: today's prints are out, tomorrow's are still ahead
+  const EARN_PREVIEW_MAX = 20;       // per list; a single Telegram body caps at 4096 chars
+  let earnPrevDay = null;            // ET day already previewed (persisted — a redeploy must not re-send)
+  function earnPreviewScan() {
+    const now = Date.now();
+    const day = etDayStr(now);
+    if (earnPrevDay === day) return 0;
+    if (etParts(now).h < EARN_PREVIEW_ET_HOUR) return 0;
+    // Open announced claims, keyed by ticker: the calendar flags the names you actually have money
+    // on inline, so the scoped leg above stays the interruption and this stays the reference.
+    const claims = new Map();
+    for (const e of ledgerOpen.values()) {
+      if (e.vi != null || e.alo !== 1 || !e.ticker) continue;
+      if (!claims.has(e.ticker)) claims.set(e.ticker, EV_LABEL[e.ev] || e.ev);
+    }
+    const dayMove = new Map();
+    for (const r of rows.values()) if (r.ticker && !r.delisted && Number.isFinite(r.d1)) dayMove.set(r.ticker, r.d1);
+    const tomorrow = [], reported = [];
+    for (const [tk, arr] of earnMap) {
+      for (const e of arr) {
+        const df = earnDayDiff(e.d, now);
+        if (df === 1) { tomorrow.push({ t: tk, s: e.s || "TBD", eps: e.eps, claim: claims.get(tk) || undefined }); break; }
+        if (df === 0) { reported.push({ t: tk, s: e.s || "TBD", eps: e.eps, epsA: e.epsA, d1: dayMove.has(tk) ? dayMove.get(tk) : undefined }); break; }
+      }
+    }
+    // Marked sent even when there is nothing to say: the daily decision has been made, and a
+    // later tick must not re-open it just because a calendar refresh landed at 18:00.
+    earnPrevDay = day;
+    if (!tomorrow.length && !reported.length) { persistTriggers(); return 0; }
+    const sortT = (a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0);
+    tomorrow.sort(sortT); reported.sort(sortT);
+    emitTrig("earnings", { sub: "preview", d: day,
+      tomorrow: tomorrow.slice(0, EARN_PREVIEW_MAX), reported: reported.slice(0, EARN_PREVIEW_MAX),
+      moreUp: Math.max(0, tomorrow.length - EARN_PREVIEW_MAX) || undefined,
+      moreRep: Math.max(0, reported.length - EARN_PREVIEW_MAX) || undefined }, now);
+    persistTriggers();
+    log(`earnings preview: ${tomorrow.length} reporting tomorrow, ${reported.length} reported today`);
+    return 1;
+  }
+
+  // ---- macro class: the universe-wide calendar (FOMC + FRED) ------------------------------------
+  // The one class with no ticker. A CPI print moves the whole board, so scoping it to a name would
+  // misdescribe the event; `coin` is absent by construction and pushFmt lets it through explicitly.
+  // Three legs per release, and only three:
+  //
+  //   ahead     — the ET day before. Enough warning to size down or stand aside.
+  //   imminent  — inside the last hour before the release clock. The "don't get caught" leg.
+  //   result    — the actual, the moment FRED publishes the series (or the Fed's new target range).
+  //
+  // Same episode discipline as every other persistent-condition class: state true at first sight on
+  // a cold boot is SEEDED, never announced, and the seed set is persisted — otherwise a Railway
+  // deploy (one per pushed file) would re-announce the same CPI print all afternoon.
+  const MACRO_IMMINENT_MIN = 60;    // minutes before the release clock that the imminent leg opens
+  const MACRO_ALERTED_MAX = 300;    // ~7 releases/month x 3 legs — a year of headroom
+  const macroAlerted = new Map();   // k|d|sub -> ts
+  let macroPrimed = false;
+  function macroScan() {
+    const ent = macroCache && Array.isArray(macroCache.entries) ? macroCache.entries : [];
+    if (!ent.length) return 0;
+    const now = Date.now();
+    const et = etParts(now);
+    let fired = 0, seeded = 0;
+    for (const e of ent) {
+      if (!e || !e.k || !e.d) continue;
+      const df = earnDayDiff(e.d, now);
+      if (df == null) continue;
+      const state = macroEntryState(e, now);
+      const legs = [];
+      if (state === "upcoming" && df === 1) legs.push({ sub: "ahead" });
+      if (state === "upcoming" && df === 0) {
+        const hh = +(e.tEt || "08:30").slice(0, 2), mm = +(e.tEt || "08:30").slice(3, 5);
+        const mins = (hh * 60 + mm) - (et.h * 60 + et.mi);
+        if (mins >= 0 && mins <= MACRO_IMMINENT_MIN) legs.push({ sub: "imminent", mins });
+      }
+      // The result leg waits for the NUMBER, not the clock. A passed 08:30 with no series update
+      // is `pend` on the board and stays silent here — announcing "released" with nothing in it
+      // would be the false-precision failure this codebase refuses everywhere else.
+      if (e.actual != null) legs.push({ sub: "result" });
+      for (const leg of legs) {
+        const key = e.k + "|" + e.d + "|" + leg.sub;
+        if (macroAlerted.has(key)) continue;
+        macroAlerted.set(key, now);
+        if (!macroPrimed) { seeded++; continue; }
+        emitTrig("macro", Object.assign({ k: e.k, label: e.label || e.k, d: e.d, tEt: e.tEt || null,
+          sep: e.sep === true ? true : undefined,
+          prior: e.prior || null, actual: e.actual || null }, leg), now);
+        fired++;
+      }
+    }
+    if (macroAlerted.size > MACRO_ALERTED_MAX) {
+      const drop = macroAlerted.size - MACRO_ALERTED_MAX; let i = 0;
+      for (const k of macroAlerted.keys()) { if (i++ >= drop) break; macroAlerted.delete(k); }
+    }
+    if (!macroPrimed) { macroPrimed = true; if (seeded) log(`macro alerts primed: ${seeded} calendar leg(s) seeded silently`); }
+    if (fired || seeded) persistTriggers();
+    if (fired) log(`macro alerts: ${fired} calendar event(s)`);
+    return fired;
+  }
+
   // Analyst action flip. The AI report is regenerated on a cooldown, usually by hand, so this is
   // structurally rare — and a read moving from "wait" to a side (or back) is the report changing
   // its mind, which is the only part of a regeneration worth interrupting anyone for. Emitted from
@@ -8479,6 +8601,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     buildDigestNow: buildDigest,
     filingScanNow: filingScan,                   // harness: feed parsed EDGAR items without a fetch
     earnScanNow: earnScan,                       // harness: run the proximity check on demand
+    earnRebuildNow: rebuildEarnMap,              // harness: stage a calendar without a Finnhub round trip
+    earnPreviewNow: earnPreviewScan,             // harness: run the daily calendar without waiting for 17:00 ET
+    earnPrevResetNow: () => { earnPrevDay = null; },   // harness: re-open the once-a-day gate
+    macroScanNow: macroScan,                     // harness: run the calendar scan on demand
+    macroPrimeNow: () => { macroPrimed = true; },      // harness: skip the silent seeding pass
+    macroSeedNow: (entries) => { macroCache = { ts: Date.now(), dataTs: Date.now(), asOf: Date.now(), error: null, entries: entries || [], kinds: 1 }; },   // harness: stage a calendar without a FRED round trip
     aiFlipCheckNow: aiFlipCheck,                 // harness: compare two report objects directly
     filingPrimeNow: () => { filingPrimed = true; },   // harness: skip the 45-minute seeding window
     hydrateRulesNow: hydrateRules,               // harness: restore rules + edge state without a boot
