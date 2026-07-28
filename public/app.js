@@ -3284,7 +3284,7 @@ function drawSessions(){
   let emBlock='', emPend='';
   if(em && !em.pending && !em.disabled) emBlock = renderEma200(em);
   else if(!em||!em.disabled) emPend = sgPendRow('EMA200 trend events', em?`computing \u2014 needs \u2265${em.need||5} names with \u2265226 closed daily bars (have ${em.count||0})`:'close-confirmed crosses &amp; retests vs a matched control','\u2605\u2605\u2605\u2606\u2606');
-  else if(!lv||!lv.disabled) lvPend = sgPendRow('Structural level validation', lv?`computing \u2014 needs \u2265${lv.need||5} equities with \u226571 closed daily bars off the spine (have ${lv.count||0})`:'touch &amp; hold vs a matched control','\u2605\u2605\u2605\u2605\u2606');
+  else if(!lv||!lv.disabled) lvPend = sgPendRow('Structural level validation', lv?`computing \u2014 needs \u2265${lv.need||5} names with \u226571 closed daily bars off the spine (have ${lv.count||0})`:'touch &amp; hold vs a matched control','\u2605\u2605\u2605\u2605\u2606');
   const an = a.sections && a.sections.anatomy;
   let anBlock='', cbBlock='', pvBlock='', anPend='', cbPend='', pvPend='';
   if(an && !an.pending){ anBlock = renderAnatomy(an);
@@ -3329,6 +3329,7 @@ function drawSessions(){
     if(lv&&!lv.pending&&lv.overall&&lv.overall.excess!=null)
       p.push(`levels ${(lv.overall.excess>=0?'+':'')+(lv.overall.excess*100).toFixed(1)}pp vs control`);
     if(cl&&!cl.pending) p.push(`${cl.count} markets clustered${(cl.oddballs&&cl.oddballs.length)?` \u00b7 ${cl.oddballs.length} oddballs`:''}`);
+    if(em&&!em.pending&&em.tf&&em.tf['1d']&&em.tf['1d'].n) p.push(`ema200 ${em.tf['1d'].n} D1 events`);
     return p.join(' \u00b7 ')||'computing'; };
   // ---- assemble ----
   const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||emBlock||anBlock||cbBlock||pvBlock;
