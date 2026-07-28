@@ -25,6 +25,7 @@ function openStore(dataDir) {
   const trigFile = path.join(dataDir, "triggers.json");
   const pushFile = path.join(dataDir, "alertpush.json");   // telegram recipients + delivery cursor
   const rulesFile = path.join(dataDir, "alertrules.json");  // user-authored metric rules (group-shared)
+  const basketsFile = path.join(dataDir, "baskets.json");   // user-defined custom baskets (group-shared CONFIG)
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
   const flagsFile = path.join(dataDir, "flags.json");     // admin feature-visibility overrides
@@ -277,6 +278,22 @@ function openStore(dataDir) {
     },
     loadRules() {
       try { if (fs.existsSync(rulesFile)) return JSON.parse(fs.readFileSync(rulesFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    // Custom baskets: CONFIG like the rules above — somebody sat and typed a membership — so they
+    // get their own file with the same tmp+rename discipline; a corrupt cache can never take the
+    // registry with it. Built-in sector baskets are DERIVED at read time and never persisted here.
+    saveBaskets(data) {
+      try {
+        const tmp = basketsFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, basketsFile);
+        return true;
+      } catch (_) { return false; }
+    },
+    loadBaskets() {
+      try { if (fs.existsSync(basketsFile)) return JSON.parse(fs.readFileSync(basketsFile, "utf8")); }
       catch (_) {}
       return null;
     },

@@ -5,6 +5,7 @@ const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
+const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, FOMC_DECISIONS } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
@@ -6508,6 +6509,227 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { ok: true, perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
   }
 
+  // ===== Custom baskets + ratio pairs (build 2026.07.28-06) =====================================
+  // Synthetic EW instruments for the VISUAL layer: COMP/G virtual tickers, the manager panel, and
+  // the ratio candle chart. All math lives in compute.js (basketCloses / ratioCloses / emaSeries);
+  // this section is assembly only — resolve members against the live roster, align close series,
+  // and ship. Tier boundary, load-bearing: NOTHING here reaches the alert emitters, the signal
+  // fire sites, or the ledger. A basket is editable; an editable benchmark is not a benchmark.
+  // The registry is deployment-global CONFIG (own file, tmp+rename). When multi-user lands it
+  // becomes per-user — load/save stay behind persistBaskets/basketsSanitize so that migration is
+  // a one-liner, not a hunt.
+  const BASKET_SECTOR_SHORT = { "Information Technology": "TECH", "Communication Services": "COMMS",
+    "Consumer Discretionary": "DISC", "Consumer Staples": "STAPLES", "Health Care": "HEALTH",
+    "Financials": "FINS", "Industrials": "INDUS", "Energy": "ENERGY", "Materials": "MATS",
+    "Real Estate": "REALEST", "Utilities": "UTES" };
+  const RATIO_TFS = { "1h": 1, "4h": 4, "12h": 12, "1d": 24 };
+  const RATIO_EMA_SPAN = 200, RATIO_EMA_MIN = RATIO_EMA_SPAN + 5;   // emaSeries' own floor — the line exists honestly or not at all
+  const RATIO_SHOW_MAX = 400;   // candles ON THE WIRE; the EMA is computed over the FULL series first, then both are trimmed together
+
+  function basketsSanitize(raw) {
+    const out = [];
+    if (!raw || !Array.isArray(raw.list)) return out;
+    for (const b of raw.list) {
+      if (!b || typeof b.name !== "string" || !Array.isArray(b.members)) continue;
+      const name = b.name.toUpperCase();
+      if (!/^[A-Z][A-Z0-9]{1,11}$/.test(name)) continue;
+      const scope = b.scope === "crypto" ? "crypto" : "stocks";
+      const members = [...new Set(b.members.map((m) => String(m || "").toUpperCase()).filter(Boolean))].slice(0, BASKET_MAX_MEMBERS);
+      if (members.length < BASKET_MIN_MEMBERS) continue;
+      if (out.some((x) => x.name === name)) continue;
+      out.push({ name, scope, members, at: +b.at || Date.now() });
+      if (out.length >= BASKET_MAX_CUSTOM) break;
+    }
+    return out;
+  }
+  // Optional-chained like the flags store: an older store stub degrades to "no registry, cannot
+  // persist" instead of taking the poller down at construction.
+  let baskets = basketsSanitize(store.loadBaskets ? store.loadBaskets() : null);
+  let basketsRev = 0;
+  function persistBaskets() { if (store.saveBaskets) store.saveBaskets({ list: baskets }); basketsRev++; }
+
+  function basketScopeTickers(scope) {
+    const s = new Set();
+    for (const r of rows.values()) {
+      if (r.delisted) continue;
+      if ((scope === "crypto") !== (r.uni === "main")) continue;
+      s.add((r.ticker || "").toUpperCase());
+    }
+    return s;
+  }
+  function basketRowFor(scope, tk) {
+    tk = String(tk || "").toUpperCase();
+    for (const r of rows.values()) {
+      if (r.delisted) continue;
+      if ((scope === "crypto") !== (r.uni === "main")) continue;
+      if ((r.ticker || "").toUpperCase() === tk) return r;
+    }
+    return null;
+  }
+  // Built-in sector baskets, DERIVED from the live roster's classification on every read — they
+  // follow listings and delistings on their own and are never persisted. Uncapped membership by
+  // design: the member cap protects hand-typed registries, not the sector table.
+  function builtinBaskets() {
+    const groups = new Map();
+    for (const r of rows.values()) {
+      if (r.delisted || r.uni === "main") continue;
+      const c = classifyCached(r.ticker);
+      if (c.assetClass !== "Equity") continue;
+      const short = BASKET_SECTOR_SHORT[c.sector];
+      if (!short) continue;
+      let g = groups.get(short);
+      if (!g) { g = []; groups.set(short, g); }
+      g.push((r.ticker || "").toUpperCase());
+    }
+    const out = [];
+    for (const [name, members] of groups) if (members.length >= 3) out.push({ name, scope: "stocks", members: members.sort(), builtin: true });
+    out.sort((a, b) => (a.name < b.name ? -1 : 1));
+    return out;
+  }
+  function basketDefByName(nameU) {
+    return baskets.find((b) => b.name === nameU) || builtinBaskets().find((b) => b.name === nameU) || null;
+  }
+
+  // Align member close series on a shared axis and synthesize the EW index (compute.basketCloses).
+  // `pick` extracts [t, close] pairs from a row; used at daily AND hourly resolution.
+  function basketAligned(def, pick, quant) {
+    const maps = def.members.map((m) => {
+      const r = basketRowFor(def.scope, m), mm = new Map();
+      if (r) for (const [t, c] of pick(r)) { if (isFinite(t) && isFinite(c) && c > 0) mm.set(quant(t), c); }
+      return mm;
+    });
+    const axset = new Set();
+    maps.forEach((m) => m.forEach((_, t) => axset.add(t)));
+    const axis = [...axset].sort((a, b) => a - b);
+    const series = maps.map((m) => axis.map((t) => { const v = m.get(t); return v === undefined ? null : v; }));
+    const bc = basketCloses(series, BASKET_FLOOR);
+    let covN = 0;
+    for (let i = axis.length - 1; i >= 0; i--) if (bc.closes[i] != null) { covN = bc.cov[i]; break; }
+    return { axis, closes: bc.closes, cov: { n: covN, N: def.members.length } };
+  }
+  const pickDaily = (r) => (Array.isArray(r.dailyRaw) ? r.dailyRaw.map((k) => [+k.t, +k.c]) : []);
+  const pickHourly = (r) => (Array.isArray(r.hourlyRaw) ? r.hourlyRaw.map((k) => [+k[0], +k[4]]) : []);
+
+  // Daily series for the wire: valid slots only, as compact [dayMs, close] tuples. Invalid (sub-
+  // floor) days are simply ABSENT — the client's union-day alignment renders them as gaps, which
+  // is the disclosure: a basket day never exists as a renormalized guess.
+  function basketDailySeries(def) {
+    const a = basketAligned(def, pickDaily, (t) => Math.floor(t / DAY));
+    const daily = [];
+    for (let i = 0; i < a.axis.length; i++) if (a.closes[i] != null) daily.push([a.axis[i] * DAY, +a.closes[i].toFixed(4)]);
+    return { daily, cov: a.cov };
+  }
+  function basketHourlySeries(def) {
+    const a = basketAligned(def, pickHourly, (t) => t);
+    const times = [], closes = [];
+    for (let i = 0; i < a.axis.length; i++) if (a.closes[i] != null) { times.push(a.axis[i]); closes.push(a.closes[i]); }
+    return { times, closes, cov: a.cov };
+  }
+
+  function getBasketsPayload() {
+    const list = [];
+    for (const b of builtinBaskets()) { const s = basketDailySeries(b); list.push({ name: b.name, scope: b.scope, members: b.members, builtin: true, daily: s.daily, cov: s.cov }); }
+    for (const b of baskets) { const s = basketDailySeries(b); list.push({ name: b.name, scope: b.scope, members: b.members, builtin: false, daily: s.daily, cov: s.cov }); }
+    return { ts: Date.now(), floor: BASKET_FLOOR, maxMembers: BASKET_MAX_MEMBERS, maxCustom: BASKET_MAX_CUSTOM, rev: basketsRev, baskets: list };
+  }
+  // ETag key: registry revision + the daily-content version — a create/drop or a new daily close
+  // mints a fresh key, everything else 304s the (largest-in-this-family) payload away.
+  function getBasketsStamp() { return basketsRev + "|" + dailyVer; }
+
+  function createBasket(name, members) {
+    if (baskets.length >= BASKET_MAX_CUSTOM)
+      return { ok: false, error: `basket cap reached (${BASKET_MAX_CUSTOM}) \u2014 drop one first` };
+    const ms = [...new Set((members || []).map((m) => String(m || "").toUpperCase().trim()).filter(Boolean))];
+    if (!ms.length) return { ok: false, error: "no members given" };
+    // Scope inference: every member must resolve in exactly ONE universe. Baskets never cross the
+    // stocks/crypto separation, and a name listed in both (the SPX-memecoin shape) is refused as
+    // ambiguous rather than guessed at.
+    const sT = basketScopeTickers("stocks"), cT = basketScopeTickers("crypto");
+    const allS = ms.every((m) => sT.has(m)), allC = ms.every((m) => cT.has(m));
+    if (allS && allC) return { ok: false, error: "ambiguous membership \u2014 these names exist in BOTH universes; baskets never cross the stocks/crypto separation" };
+    if (!allS && !allC) {
+      const missS = ms.filter((m) => !sT.has(m)), missC = ms.filter((m) => !cT.has(m));
+      const closer = missS.length <= missC.length ? { scope: "stocks", miss: missS } : { scope: "crypto", miss: missC };
+      return { ok: false, error: `members must live in ONE universe \u2014 not in the ${closer.scope} universe: ${closer.miss.join(" ")}` };
+    }
+    const scope = allS ? "stocks" : "crypto";
+    const reserved = new Set([...SP_ALIASES.map((a) => a.toUpperCase()), "BTC",
+      ...baskets.map((b) => b.name), ...builtinBaskets().map((b) => b.name)]);
+    const v = validateBasket(name, ms, scope, { tickers: scope === "stocks" ? sT : cT, reserved });
+    if (!v.ok) return v;
+    const def = { name: v.name, scope, members: v.members, at: Date.now() };
+    baskets.push(def);
+    persistBaskets();
+    log(`basket ${def.name} created (${scope}, ${def.members.length} members)`);
+    const s = basketDailySeries(def);
+    return { ok: true, basket: { name: def.name, scope, members: def.members, builtin: false, cov: s.cov } };
+  }
+  function dropBasket(name) {
+    const nm = String(name || "").toUpperCase().trim();
+    const i = baskets.findIndex((b) => b.name === nm);
+    if (i < 0) return { ok: false, error: builtinBaskets().some((b) => b.name === nm) ? "built-in baskets are derived from the sector table \u2014 they cannot be dropped" : `no custom basket \u201c${nm}\u201d` };
+    baskets.splice(i, 1);
+    persistBaskets();
+    log(`basket ${nm} dropped`);
+    return { ok: true, name: nm };
+  }
+
+  // One ratio leg: a basket (custom or built-in) or a listed name, as hourly [times, closes].
+  function ratioLeg(nameU) {
+    const b = basketDefByName(nameU);
+    if (b) { const s = basketHourlySeries(b); return { scope: b.scope, times: s.times, closes: s.closes, cov: s.cov, basket: true, name: b.name }; }
+    for (const scope of ["stocks", "crypto"]) {
+      const r = basketRowFor(scope, nameU);
+      if (r) {
+        const times = [], closes = [];
+        for (const [t, c] of pickHourly(r)) if (isFinite(t) && isFinite(c) && c > 0) { times.push(t); closes.push(c); }
+        return { scope, times, closes, cov: null, basket: false, name: (r.ticker || nameU).toUpperCase() };
+      }
+    }
+    return null;
+  }
+  // Ratio candles, built HONESTLY: the ratio is computed at hourly resolution (the same spine the
+  // trend-ladder charts consume, basket legs synthesized hourly), then those hourly ratio closes
+  // are bucketed into 1H/4H/12H/1D candles via the SAME bucketCandles the ladder uses. Every
+  // O/H/L/C is therefore a real value of the 1H-sampled ratio — never numerator-high ÷
+  // denominator-low, which fabricates extremes that never traded — and extremes finer than 1H are
+  // honestly not captured (the client legend says so). EMA200 runs over the FULL bucketed series
+  // before the wire trim, and is null (with the reason) under emaSeries' own floor: no shorter
+  // EMA ever wears the 200 name. Display-only decoration on a synthetic series — it feeds no
+  // ladder, no emaAlertState, no alert class.
+  function getRatio(num, den, tf) {
+    const tfk = String(tf || "4h").toLowerCase();
+    const hours = RATIO_TFS[tfk];
+    if (!hours) return { ok: false, error: "tf must be one of 1h \u00b7 4h \u00b7 12h \u00b7 1d" };
+    const A = ratioLeg(String(num || "").toUpperCase().trim());
+    if (!A) return { ok: false, error: `unknown \u201c${String(num || "").toUpperCase()}\u201d \u2014 not a listed name or a basket` };
+    const B = ratioLeg(String(den || "").toUpperCase().trim());
+    if (!B) return { ok: false, error: `unknown \u201c${String(den || "").toUpperCase()}\u201d \u2014 not a listed name or a basket` };
+    if (A.name === B.name) return { ok: false, error: "numerator and denominator are the same series" };
+    if (A.scope !== B.scope) return { ok: false, error: "legs live in different universes \u2014 ratios never cross the stocks/crypto separation" };
+    // Intersection alignment (division needs both legs), then compute.ratioCloses — one code path.
+    const bm = new Map();
+    for (let i = 0; i < B.times.length; i++) bm.set(B.times[i], B.closes[i]);
+    const times = [], aArr = [], bArr = [];
+    for (let i = 0; i < A.times.length; i++) { const bv = bm.get(A.times[i]); if (bv === undefined) continue; times.push(A.times[i]); aArr.push(A.closes[i]); bArr.push(bv); }
+    const rc = ratioCloses(aArr, bArr);
+    const packed = [];
+    for (let i = 0; i < times.length; i++) if (rc[i] != null) packed.push([times[i], null, null, null, rc[i], 0]);
+    if (packed.length < 8) return { ok: false, error: "not enough overlapping hourly history for these two legs yet" };
+    const all = bucketCandles(packed, hours, HOUR);
+    const closes = all.map((k) => k.c);
+    const ema = emaSeries(closes, RATIO_EMA_SPAN);
+    const cut = Math.max(0, all.length - RATIO_SHOW_MAX);
+    const sig8 = (v) => +(+v).toPrecision(8);
+    const candles = all.slice(cut).map((k) => ({ t: k.t, o: sig8(k.o), h: sig8(k.h), l: sig8(k.l), c: sig8(k.c) }));
+    return { ok: true, num: A.name, den: B.name, scope: A.scope, tf: tfk, tfHours: hours,
+      candles, bars: all.length, shown: candles.length,
+      ema200: ema ? ema.slice(cut).map((v) => (v == null ? null : sig8(v))) : null,
+      emaSpan: RATIO_EMA_SPAN, emaMin: RATIO_EMA_MIN, emaReason: ema ? null : "insufficient_bars",
+      numBasket: A.basket, denBasket: B.basket, numCov: A.cov, denCov: B.cov,
+      spineDays: Math.round((times[times.length - 1] - times[0]) / DAY), floor: BASKET_FLOOR, ts: Date.now() };
+  }
+
   // ===== Actionable board — swing scope (build 2026.07.26-01) =================================
   // One cross-universe list of every name currently AT a swing trigger, with the entry, void and
   // target you would actually use, ranked by expectancy. The candidate set is the OPEN LEDGER
@@ -8300,6 +8522,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     newsIngestNow: (items) => { newsItems = mergeNews(newsItems, gateCompanyItems(items || []), Date.now()); newsFetchedAt = Date.now(); buildNewsPayload(); return newsCache; },   // harness: feed + payload without network — company items pass the relevance gate exactly as in production
     classifySecNow: () => classifySecTick(),   // harness: one classifier pass through the injected aiFetch transport
     getTgChannels,
+    // Custom baskets + ratio pairs (visual layer only — see the tier-boundary note at the section)
+    getBasketsPayload,
+    getBasketsStamp,
+    createBasket,
+    dropBasket,
+    getRatio,
     setTgChannels,
     tgIngestNow: (html, ch) => {   // harness: the full per-item pipeline (parse -> attribute -> merge -> payload) without network
       const { items } = parseTgPreview(html, ch, Date.now());

@@ -4830,6 +4830,11 @@ const FEATURES = [
   { key: "news.write",    kind: "act", label: "Edit news channels",   def: "admin",  routes: ["POST /api/news/channels"] },
   { key: "earnings.void", kind: "act", label: "Void an earnings row", def: "admin",  routes: ["POST /api/earnings/void"] },
   { key: "derivs.refresh", kind: "act", label: "Force derivs refresh", def: "admin", routes: ["POST /api/derivs/refresh"] },
+  // Custom baskets + ratio pair candles (build 2026.07.28-06). One key covers the registry, the
+  // COMP/G virtual tickers, the manager panel and the ratio chart — admin-only while it soaks.
+  // The plain (method-less) route strings gate every verb on both endpoints, so creation is
+  // exactly as open as the feature itself: no way to flag the panel off but leave the POST live.
+  { key: "baskets", kind: "act", label: "Custom baskets + ratio", def: "admin", routes: ["/api/baskets", "/api/ratio"] },
 ];
 
 const FEATURE_BY_KEY = new Map(FEATURES.map((f) => [f.key, f]));
@@ -4924,6 +4929,117 @@ function featureCounts(flags) {
   }
   return { total: FEATURES.length, public: pub, admin: adm, off: off };
 }
+
+// ===== Custom baskets + ratio pairs — pure math (build 2026.07.28-06) ==========================
+// Synthetic EW instruments for the VISUAL layer only: COMP/G virtual tickers, the picker, and the
+// ratio candle chart. Tier boundary, load-bearing: nothing built here may ever feed signal math,
+// the alert emitters, or the ledger — a basket is editable, and an editable benchmark is not a
+// benchmark. The suite pins that boundary (getRatio touches no fire site, PUSH_CLASSES gains no
+// basket/ratio class); rewiring it is a deliberate act, not an improvement.
+const BASKET_FLOOR = 0.6;         // a slot needs >=60% of members contributing or it renders as a gap
+const BASKET_MIN_MEMBERS = 2, BASKET_MAX_MEMBERS = 20, BASKET_MAX_CUSTOM = 12;
+
+// Validate a candidate basket. `ctx.tickers` = the live roster of the target scope (uppercased),
+// `ctx.reserved` = benchmark aliases + existing basket names. The name rules exist because of the
+// SPX-memecoin lesson: a basket wearing a benchmark alias (or any listed name) would silently
+// hijack every "vs X" read against it — refused with the reason, never quietly renamed.
+function validateBasket(name, members, scope, ctx) {
+  ctx = ctx || {};
+  const nm = String(name || "").toUpperCase().trim();
+  if (!/^[A-Z][A-Z0-9]{1,11}$/.test(nm))
+    return { ok: false, error: "name must be 2\u201312 chars, A\u2013Z / 0\u20139, starting with a letter" };
+  const reserved = ctx.reserved instanceof Set ? ctx.reserved : new Set();
+  if (reserved.has(nm))
+    return { ok: false, error: `\u201c${nm}\u201d collides with a benchmark alias or an existing basket \u2014 a basket wearing that name would silently hijack every \u201cvs ${nm}\u201d read` };
+  const tickers = ctx.tickers instanceof Set ? ctx.tickers : new Set();
+  if (tickers.has(nm))
+    return { ok: false, error: `\u201c${nm}\u201d is a listed ticker \u2014 a basket can never wear a listed name` };
+  const ms = [...new Set((members || []).map((m) => String(m || "").toUpperCase().trim()).filter(Boolean))];
+  if (ms.length < BASKET_MIN_MEMBERS || ms.length > BASKET_MAX_MEMBERS)
+    return { ok: false, error: `needs ${BASKET_MIN_MEMBERS}\u2013${BASKET_MAX_MEMBERS} members (got ${ms.length})` };
+  const missing = ms.filter((m) => !tickers.has(m));
+  if (missing.length)
+    return { ok: false, error: `not in the ${scope || "live"} universe: ${missing.join(" ")}` };
+  return { ok: true, name: nm, members: ms };
+}
+
+// EW daily-rebalanced synthetic index over PRE-ALIGNED member close series (one shared axis,
+// null = member not reporting that slot). Seeds at 100 on the first slot clearing the coverage
+// floor, then chains: each subsequent slot multiplies by exp(mean member log return), where a
+// member's return is measured from its close at the LAST VALID slot — so a gap slot nulls the
+// index (never renormalizes over whoever showed up) and the chain resumes honestly after it.
+// Returns { closes, cov, n }: closes[i] = index value | null, cov[i] = contributing members.
+// Resolution-agnostic on purpose: the same function synthesizes the daily leg (COMP/G) and the
+// hourly leg (ratio candles), and the client mirror (basketClosesClient) is duel-tested against
+// this exact implementation so the two runtimes can never drift.
+function basketCloses(seriesArr, floor) {
+  const N = Array.isArray(seriesArr) ? seriesArr.length : 0;
+  const L = N ? Math.max(...seriesArr.map((s) => (Array.isArray(s) ? s.length : 0))) : 0;
+  const closes = new Array(L).fill(null), cov = new Array(L).fill(0);
+  if (!N || !L) return { closes, cov, n: N };
+  const need = Math.ceil((floor == null ? BASKET_FLOOR : floor) * N);
+  const last = new Array(N).fill(null);   // member close at the last VALID basket slot
+  let idx = null;
+  for (let i = 0; i < L; i++) {
+    if (idx === null) {                    // seeking the seed slot
+      let cnt = 0;
+      for (let m = 0; m < N; m++) { const v = seriesArr[m][i]; if (v != null && isFinite(v) && v > 0) cnt++; }
+      cov[i] = cnt;
+      if (cnt < need) continue;
+      idx = 100; closes[i] = 100;
+      for (let m = 0; m < N; m++) { const v = seriesArr[m][i]; if (v != null && isFinite(v) && v > 0) last[m] = v; }
+      continue;
+    }
+    let sum = 0, cnt = 0;
+    for (let m = 0; m < N; m++) {
+      const v = seriesArr[m][i];
+      if (v != null && isFinite(v) && v > 0 && last[m] != null) { sum += Math.log(v / last[m]); cnt++; }
+    }
+    cov[i] = cnt;
+    if (cnt < need) continue;              // gap slot: index stays put, `last` untouched \u2014 returns accrue to the next valid slot
+    idx *= Math.exp(sum / cnt);
+    closes[i] = idx;
+    for (let m = 0; m < N; m++) { const v = seriesArr[m][i]; if (v != null && isFinite(v) && v > 0) last[m] = v; }
+  }
+  return { closes, cov, n: N };
+}
+
+// Elementwise null-propagating division for a ratio series: any slot where either leg is missing
+// (or the denominator is zero) is a gap, never an interpolation.
+function ratioCloses(a, b) {
+  const L = Math.min(Array.isArray(a) ? a.length : 0, Array.isArray(b) ? b.length : 0);
+  const out = new Array(L).fill(null);
+  for (let i = 0; i < L; i++) {
+    const x = a[i], y = b[i];
+    if (x != null && y != null && isFinite(x) && isFinite(y) && y !== 0) out[i] = x / y;
+  }
+  return out;
+}
+
+// Full EMA series with emaLast's exact construction (SMA seed over the first `span` bars, then
+// textbook recursion) so the two can never disagree \u2014 the suite pins series-tail === emaLast.
+// Nulls before the seed index; the WHOLE series is null under span+5 bars: the line either
+// exists honestly or not at all, never as a half-converged prefix wearing the span's name.
+function emaSeries(closes, span) {
+  if (!Array.isArray(closes) || closes.length < span + 5) return null;
+  const out = new Array(closes.length).fill(null);
+  let e = 0;
+  for (let i = 0; i < span; i++) { const v = +closes[i]; if (!isFinite(v)) return null; e += v; }
+  e /= span;
+  out[span - 1] = e;
+  const a = 2 / (span + 1);
+  for (let i = span; i < closes.length; i++) { const v = +closes[i]; if (!isFinite(v)) return null; e = a * v + (1 - a) * e; out[i] = e; }
+  return out;
+}
+
+module.exports.BASKET_FLOOR = BASKET_FLOOR;
+module.exports.BASKET_MIN_MEMBERS = BASKET_MIN_MEMBERS;
+module.exports.BASKET_MAX_MEMBERS = BASKET_MAX_MEMBERS;
+module.exports.BASKET_MAX_CUSTOM = BASKET_MAX_CUSTOM;
+module.exports.validateBasket = validateBasket;
+module.exports.basketCloses = basketCloses;
+module.exports.ratioCloses = ratioCloses;
+module.exports.emaSeries = emaSeries;
 
 module.exports.FEATURES = FEATURES;
 module.exports.FEATURE_STATES = FEATURE_STATES;
