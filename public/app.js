@@ -117,7 +117,7 @@ const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
-  sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
+  sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
   duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
@@ -1887,6 +1887,7 @@ let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
   colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly,
+  sectGrp:state.sect.grp,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
   updateLayoutBtn(); }, 250); }
 function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(_){ p=null; } if(!p) return;
@@ -1902,6 +1903,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(p.sortKey&&COL_BY_KEY[p.sortKey]){ state.sortKey=p.sortKey; state.sortDir=p.sortDir==='asc'?'asc':'desc'; }
   if(typeof p.filterText==='string') state.filter=p.filterText;
   if(Array.isArray(p.watch)) state.watch=new Set(p.watch);
+  if(p.sectGrp==='ind'||p.sectGrp==='sector') state.sect.grp=p.sectGrp;
   state.watchOnly=!!p.watchOnly; state._savedFilters=p.filters||null; }
 
 // ===== saved layouts (named views of the markets table) =====
@@ -3927,6 +3929,10 @@ function applyScope(){
 
   if(!tabVisible(state.view)) { showView('markets'); }   // a scope flip OR a flag change can strand the active view
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
+  // The industry layer is equities-only (crypto's sectors ARE its fine grouping) — the toggle
+  // hides in crypto scope rather than sitting there as a no-op. sectGrpActive() already treats
+  // crypto scope as 'sector', so the grouping key and the visible control can never disagree.
+  const gseg=el('sectgrp'); if(gseg) gseg.hidden=cr;
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
@@ -5834,15 +5840,36 @@ function zscores(arr){ const v=arr.filter(x=>x!=null&&isFinite(x));
   const m=v.reduce((a,b)=>a+b,0)/v.length, sd=stdev(v)||1;
   return arr.map(x=>(x!=null&&isFinite(x))?(x-m)/sd:0); }
 function sectorShort(name){ const M={'Information Technology':'Info Tech','Communication Services':'Comm Svcs','Consumer Discretionary':'Cons Disc','Consumer Staples':'Cons Stpl','Health Care':'Health','Real Estate':'Real Est'}; return M[name]||name; }
+// ===== grouping key (build -04) =====
+// The Sectors tab groups by ONE key everywhere — map, board, detail, cohesion, correlation.
+// grp='ind' switches that key to the server-shipped industry group; the wire contract is
+// `r.ind || r.sector` (the server only ships `ind` when it differs), so a name with no curated
+// industry lands in a group NAMED after its GICS sector — the board marks those "= sector"
+// instead of hiding them. Crypto scope has no industry layer (its sectors ARE the fine
+// grouping), so the toggle is inert and hidden there.
+function sectGrpActive(){ return state.sect.grp==='ind' && state.scope!=='crypto'; }
+function sectKeyOf(r){ return (sectGrpActive() ? (r.ind||r.sector) : r.sector) || 'Unclassified'; }
 
 function computeSectors(){
   const tfKey=TF_MAP[state.tf]||'d1', byVol=state.sect.wt!=='eq';
-  const groups=new Map();
-  for(const r of activeRows()){ const g=r.sector||'Unclassified';
+  const groups=new Map(), byInd=sectGrpActive();
+  for(const r of activeRows()){ const g=sectKeyOf(r);
     let o=groups.get(g); if(!o){ o={name:g, assetClass:r.assetClass||'—', members:[]}; groups.set(g,o); }
-    o.members.push(r); }
+    o.members.push(r);
+    // Mixed-class groups are a FEATURE of industry mode (Crypto-Fi holds equities beside a
+    // preferred; Memory/Storage holds the DRAM index) — the label must say so, not lie by
+    // wearing the first member's class.
+    if((r.assetClass||'—')!==o.assetClass) o.assetClass='Mixed'; }
   const list=[];
   for(const o of groups.values()){ const ms=o.members;
+    if(byInd){
+      // Parent-GICS provenance for the board (deduped short names), and the honest-fallback
+      // flag: a group is "= sector" iff NO member carries a curated industry — i.e. the group
+      // exists only because its members inherited their sector name.
+      const ps=[...new Set(ms.map(m=>m.sector||'Unclassified'))];
+      o.gics=ps.map(sectorShort).join(' / ');
+      o.fall=ms.every(m=>!m.ind);
+    }
     let wsum=0; for(const r of ms) if(byVol&&r.vol>0) wsum+=r.vol;
     const wOf=r=> byVol ? (wsum>0?((r.vol>0?r.vol:0)/wsum):1/ms.length) : 1/ms.length;
     const wavg=(sel)=>{ let s=0,ww=0; for(const r of ms){ const v=sel(r); if(v==null||!isFinite(v))continue; const wi=wOf(r); s+=wi*v; ww+=wi; } return ww>0?s/ww:null; };
@@ -5858,7 +5885,7 @@ function computeSectors(){
     const greenN=withRet.length?withRet.filter(r=>r[tfKey]>0).length:0;
     const momArr=ms.filter(r=>r.mom!=null&&isFinite(r.mom));
     const momUp=momArr.length?momArr.filter(r=>r.mom>0).length/momArr.length:null;
-    list.push({ name:o.name, assetClass:o.assetClass, n:ms.length, members:ms,
+    list.push({ name:o.name, assetClass:o.assetClass, n:ms.length, members:ms, gics:o.gics, fall:!!o.fall,
       ret, retEW, doi, rvol, relVol, totVol, totOI, green, greenN, greenT:withRet.length, momUp });
   }
   // rotation = capital direction (return + OI conviction) · heat = activity (volume + volatility)
@@ -5878,7 +5905,7 @@ function computeSectors(){
   const withDaily=activeRows().filter(r=>r.daily&&r.sector);
   const coh=new Map();
   if(withDaily.length>1){ const scL=({'7':7,'30':30,'90':90}[state.sect.corrTf]||30); const {C}=buildCorr(withDaily,scL);
-    const idxByG=new Map(); withDaily.forEach((r,i)=>{ const g=r.sector; (idxByG.get(g)||idxByG.set(g,[]).get(g)).push(i); });
+    const idxByG=new Map(); withDaily.forEach((r,i)=>{ const g=sectKeyOf(r); (idxByG.get(g)||idxByG.set(g,[]).get(g)).push(i); });
     for(const [g,idx] of idxByG){ let s=0,n=0; for(let a=0;a<idx.length;a++)for(let b=a+1;b<idx.length;b++){ const v=C[idx[a]][idx[b]]; if(v!=null&&isFinite(v)){s+=v;n++;} } coh.set(g,n?s/n:null); }
     SECT._corrCache={C, idxByG, rows:withDaily};
   } else SECT._corrCache=null;
@@ -5892,8 +5919,9 @@ function renderSectors(){
   if(!state.rows.size){ el('sect-map').innerHTML='<div class="msg">Markets still loading — switch back in a moment.</div>'; return; }
   computeDerived();
   const list=computeSectors();
+  const secNoun=sectGrpActive()?'industry group':'sector', secNounPl=sectGrpActive()?'industry groups':'sectors';
   const lg=el('sect-legend'); if(lg) lg.innerHTML = state.sect.mode==='leaders'
-    ? `<b>Leadership map</b> — where each sector sits vs the S&amp;P over the last <b>${leadersDays()}d</b>${leadersFloored()?' <span class="sec">(leadership needs a multi-day window, so intraday selections show 7d — use the rotation board below for shorter windows)</span>':''}. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> sectors are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume. The <b>dotted tail</b> behind each bubble is its recent path (oldest → now) — hover the tail dots for the values.`
+    ? `<b>Leadership map</b> — where each ${secNoun} sits vs the S&amp;P over the last <b>${leadersDays()}d</b>${leadersFloored()?' <span class="sec">(leadership needs a multi-day window, so intraday selections show 7d — use the rotation board below for shorter windows)</span>':''}. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> ${secNounPl} are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume. The <b>dotted tail</b> behind each bubble is its recent path (oldest → now) — hover the tail dots for the values.`
     : '<b>Flow map</b> — horizontal = capital direction (price + OI conviction) over the selected window, vertical = activity heat (volume + volatility). Top-right = accumulation, top-left = distribution. Bubble size = 24h volume.';
   if(state.sect.mode==='leaders'){
     const data=computeLeaders(list);
@@ -6067,7 +6095,7 @@ function leadersRankHtml(data){
       `<span class="cv ${ahead?'pos':'neg'}" style="width:56px;margin-left:0">${ahead?'+':''}${s.x.toFixed(1)}%</span>`+
       `<span style="width:16px;text-align:center">${arrow}</span>`+
       `<span class="cbar" style="width:${w}px;background:${ahead?'var(--up)':'var(--down)'};opacity:.55"></span></div>`; };
-  return `<div class="cp-sub" style="margin:16px 2px 8px">Sectors ranked vs the S&amp;P (${leadersDays()}d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ lead growing · ▼ shrinking · click a row to drill in</span></div>`+
+  return `<div class="cp-sub" style="margin:16px 2px 8px">${sectGrpActive()?'Industry groups':'Sectors'} ranked vs the S&amp;P (${leadersDays()}d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ lead growing · ▼ shrinking · click a row to drill in</span></div>`+
     sorted.map(li).join('');
 }
 function attachLeadersHandlers(){ el('sect-map').querySelectorAll('.lead, .lrow').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
@@ -6105,10 +6133,21 @@ function attachMapHandlers(){ el('sect-map').querySelectorAll('.bub').forEach(b=
 function heatBar(h){ const c=h>=66?'var(--accent)':h>=33?'var(--blue)':'var(--faint)'; return `<span style="display:inline-block;vertical-align:middle;width:46px;height:7px;border-radius:3px;background:var(--grid)"><span style="display:block;height:7px;border-radius:3px;width:${clamp(h,0,100)}%;background:${c}"></span></span>`; }
 function rotCell(d){ if(d==null)return '<span class="na">—</span>'; const s=d>0?'+':''; return `<span style="color:${momColor(d)};font-weight:600">${s}${Math.round(d)}</span>`; }
 function renderSectorBoard(list){
+  const byInd=sectGrpActive();
+  // Two honesty chips, industry mode only. «thin»: n<5 — the group's averages and its rank in
+  // the cross-group z-scores are noisier at that size; disclosed, never hidden. «= sector»: no
+  // member of this group carries a curated industry, so the group is just the GICS sector
+  // wearing its own name — italicized so a curated group and a fallback never look alike.
+  const nameCell=g=>{
+    const thin=byInd&&g.n<5?`<span class="sthin" title="${g.n} members — averages and cross-group z-scores are noisier at this size">thin</span>`:'';
+    const fall=byInd&&g.fall?`<span class="sthin" title="no industry split defined — this group is the GICS sector unchanged">= sector</span>`:'';
+    return `<td class="pp"${byInd&&g.fall?' style="font-style:italic"':''}>${esc(sectorShort(g.name))}${thin}${fall}</td>`;
+  };
   const rows=list.map(g=>{
     const sel=state.sect.sel===g.name?' style="background:rgba(227,165,60,.08)"':'';
     return `<tr data-sect="${esc(g.name)}"${sel}>`+
-      `<td class="pp">${esc(sectorShort(g.name))}</td>`+
+      nameCell(g)+
+      (byInd?`<td class="sec" style="text-align:left" title="parent GICS sector(s) of this group's members">${esc(g.gics||'—')}</td>`:'')+
       `<td class="sec" style="text-align:left">${esc(g.assetClass)}</td>`+
       `<td class="sec">${g.n}</td>`+
       `<td>${rotCell(g.rotation)}</td>`+
@@ -6121,9 +6160,9 @@ function renderSectorBoard(list){
       `<td class="sec" title="avg internal daily-return correlation">${g.cohesion==null?'·':g.cohesion.toFixed(2)}</td>`+
       `</tr>`;
   }).join('');
-  const head='<thead><tr><th>Sector</th><th style="text-align:left">Type</th><th>#</th><th title="capital direction: price + OI conviction, ranked across sectors">Rotation</th><th>Heat</th><th>Return</th><th title="avg open-interest change over the window">ΔOI</th><th title="% of members up">Breadth</th><th>24h Vol</th><th>OI</th><th title="avg internal correlation">Cohesion</th></tr></thead>';
-  el('sect-board').innerHTML=`<div class="cp-head" style="margin-bottom:10px">Sector rotation board <span class="sec" style="font-weight:400">— ${state.tf} window · ${state.sect.wt==='eq'?'equal-weighted':'volume-weighted'} · click a row or bubble for detail</span></div>`+
-    `<div style="overflow-x:auto"><table class="ptbl" style="min-width:760px">${head}<tbody>${rows}</tbody></table></div>`;
+  const head='<thead><tr><th>'+(byInd?'Industry':'Sector')+'</th>'+(byInd?'<th style="text-align:left" title="parent GICS sector(s)">GICS</th>':'')+'<th style="text-align:left">Type</th><th>#</th><th title="capital direction: price + OI conviction, ranked across '+(byInd?'industries':'sectors')+'">Rotation</th><th>Heat</th><th>Return</th><th title="avg open-interest change over the window">ΔOI</th><th title="% of members up">Breadth</th><th>24h Vol</th><th>OI</th><th title="avg internal correlation">Cohesion</th></tr></thead>';
+  el('sect-board').innerHTML=`<div class="cp-head" style="margin-bottom:10px">${byInd?'Industry':'Sector'} rotation board <span class="sec" style="font-weight:400">— ${state.tf} window · ${state.sect.wt==='eq'?'equal-weighted':'volume-weighted'}${byInd?' · finer groups, thinner samples — «thin» rows carry noisier stats':''} · click a row or bubble for detail</span></div>`+
+    `<div style="overflow-x:auto"><table class="ptbl" style="min-width:${byInd?820:760}px">${head}<tbody>${rows}</tbody></table></div>`;
   el('sect-board').querySelectorAll('tbody tr[data-sect]').forEach(tr=>tr.addEventListener('click',()=>{ state.sect.sel=tr.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); }));
 }
 function renderSectorDetail(){
@@ -6142,7 +6181,7 @@ function renderSectorDetail(){
     `<td class="sec">${fmtUsd(r.vol)}</td></tr>`;
   const st=(k,v)=>`<span>${k}<b>${v}</b></span>`;
   p.hidden=false;
-  p.innerHTML=`<div class="cp-head">${esc(sectorShort(g.name))} <span class="sec" style="font-weight:400">— ${esc(g.assetClass)} · ${g.n} markets · ${state.tf} window</span>`+
+  p.innerHTML=`<div class="cp-head">${esc(sectorShort(g.name))} <span class="sec" style="font-weight:400">— ${g.gics?esc(g.gics)+' · ':''}${esc(g.assetClass)} · ${g.n} markets · ${state.tf} window</span>`+
     `<button class="btn xtiny" id="sectDetClose" style="float:right">✕</button></div>`+
     `<div class="pairstats">${st('rotation ', rotCell(g.rotation))}${st('heat ', g.heat)}`+
       `${st('return ', g.ret==null?'—':`<span class="${g.ret>=0?'pos':'neg'}">${g.ret>=0?'+':''}${g.ret.toFixed(2)}%</span>`)}`+
@@ -6188,11 +6227,12 @@ function renderSectorCorr(list){
   bind();
 }
 function exportSectors(){ const list=SECT._rows; if(!list) return;
-  const head=['Sector','Type','Members','Rotation','Heat','Return%','DeltaOI%','Breadth%','Vol24h','OI','Cohesion'];
-  const body=list.map(g=>[g.name,g.assetClass,g.n, g.rotation!=null?Math.round(g.rotation):'', g.heat,
+  const byInd=sectGrpActive();
+  const head=[byInd?'Industry':'Sector',...(byInd?['GICS']:[]),'Type','Members','Rotation','Heat','Return%','DeltaOI%','Breadth%','Vol24h','OI','Cohesion'];
+  const body=list.map(g=>[g.name,...(byInd?[g.gics||'']:[]),g.assetClass,g.n, g.rotation!=null?Math.round(g.rotation):'', g.heat,
     g.ret!=null?g.ret.toFixed(2):'', g.doi!=null?g.doi.toFixed(2):'', g.green!=null?Math.round(g.green*100):'',
     g.totVol!=null?Math.round(g.totVol):'', g.totOI!=null?Math.round(g.totOI):'', g.cohesion!=null?g.cohesion.toFixed(3):'']);
-  downloadCSV(`xyz-sectors-${state.tf}.csv`,[head,...body]); }
+  downloadCSV(`xyz-${byInd?'industries':'sectors'}-${state.tf}.csv`,[head,...body]); }
 
 // ===== polling cycle + countdown =====
 let cycleTimer=null, nextCycle=0, dailyTimer=null;
@@ -6312,6 +6352,13 @@ document.querySelectorAll('#sectwt button').forEach(b=>{ if(b.dataset.wt===state
     document.querySelectorAll('#sectwt button').forEach(x=>x.classList.toggle('active',x===b));
     if(!el('view-sectors').hidden) renderSectors(); }); });
 el('sectExport').addEventListener('click', exportSectors);
+document.querySelectorAll('#sectgrp button').forEach(b=>{ if(b.dataset.grp===state.sect.grp)b.classList.add('active');
+  b.addEventListener('click',()=>{ state.sect.grp=b.dataset.grp;
+    document.querySelectorAll('#sectgrp button').forEach(x=>x.classList.toggle('active',x===b));
+    // A drill-in selection is a group NAME; the other grouping may not contain it. Clear rather
+    // than let a stale name pin a phantom row.
+    state.sect.sel=null; const dp=el('sect-detail'); if(dp) dp.hidden=true;
+    if(!el('view-sectors').hidden) renderSectors(); savePrefs(); }); });
 document.querySelectorAll('#sectmode button').forEach(b=>{ if(b.dataset.mode===state.sect.mode)b.classList.add('active');
   b.addEventListener('click',()=>{ state.sect.mode=b.dataset.mode;
     document.querySelectorAll('#sectmode button').forEach(x=>x.classList.toggle('active',x===b));
@@ -6477,6 +6524,8 @@ trend:`
 sectors:`
 <div class="hlp-h">Flow map (default)</div>
 <p>Each bubble is a sector. <b>Horizontal = capital direction</b>: a blend of return and OI-conviction — right means money flowing in <i>with</i> conviction, left means flowing out. <b>Vertical = heat</b>: activity from volume and volatility. So <b>top-right = accumulation</b> (in, loudly), <b>top-left = distribution</b> (out, loudly), and the bottom half is simply quiet. Bubble size = 24h volume. Click a bubble for the sector's members.</p>
+<div class="hlp-h">Grouping: sector vs industry</div>
+<p>The <b>grouping</b> toggle (equities scope only) re-cuts the whole tab — map, board, drill-in, cohesion, the pairwise matrix — by a finer curated <b>industry</b> layer: memory/storage split from semis split from software, banks from payments from crypto-fi, and so on. Groups may deliberately cross GICS sectors when that's how the tape trades (Crypto-Fi holds MSTR beside COIN; the DRAM index sits inside Memory/Storage) — the <b>GICS</b> column keeps the parent sector visible. Two honesty chips: <b>«thin»</b> marks groups under 5 members whose averages and cross-group ranks are noisier, and <b>«= sector»</b> marks names with no industry split, which inherit their GICS sector unchanged rather than disappearing. This is a <i>display grouping only</i> — signal-engine pooling and news badges stay on the 11-sector GICS map.</p>
 <div class="hlp-h">Leadership map</div>
 <p>Positioning vs the S&amp;P over the window. <b>Right of center = beating it, left = behind</b>. <b>Up = the lead is growing, down = shrinking</b>. That yields four regimes: <b class="pos">Leaders</b> (ahead &amp; pulling away), <b>Catching up</b> (behind but gaining — early rotation candidates), <b>Cooling</b> (ahead but fading — where leadership goes to die), <b class="neg">Laggards</b>. The interesting cells are the off-diagonal ones: a sector migrating from Catching-up toward Leaders is rotation happening in front of you. Intraday windows floor to 7d — leadership needs multi-day evidence.</p>
 <div class="hlp-h">Rotation board &amp; cohesion</div>

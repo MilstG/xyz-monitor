@@ -26,6 +26,9 @@
 .macrostrip[hidden]{display:none}
 .term-panel[hidden]{display:none}
 #focusChip[hidden]{display:none}
+.seg[hidden]{display:none}
+/* Industry-board honesty chips: «thin» (n<5, noisier stats) and «= sector» (fallback group). */
+.sthin{display:inline-block;font-size:9px;color:var(--muted);border:1px solid var(--border);border-radius:3px;padding:0 4px;margin-left:6px;letter-spacing:.04em;vertical-align:1px;font-style:normal;font-weight:400}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
   -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1;}
 body{padding:18px 18px 60px;max-width:1620px;margin:0 auto;}
