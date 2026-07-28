@@ -2061,7 +2061,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "termHistPush", "termCausal",
     "loadTriggers", "fireTrigger", "pushTrigToast", "trigEligibleClient", "trigSeqGet", "trigSeqSet",
     "fireOps", "fireLedger", "loadPush", "buildPushSection", "pushAct", "pushCodeLeft",
-    "alertText", "alertUnread", "alertMarkRead", "loadRules", "ruleAct"];
+    "alertText", "alertUnread", "alertMarkRead", "loadRules", "ruleAct", "trendWhenTxt"];
   for (const n of need) {
     assert.ok(defs[n] >= 1, `missing client function: ${n}`);
     assert.equal(defs[n], 1, `duplicate client function: ${n}`);
@@ -3990,7 +3990,7 @@ test("packed spine 2026.07.21-09: source wiring — packHours/hoursToObj boundar
   assert.ok(pol.includes("r.hourlyRaw = packHours(wide)") && pol.includes("concat(packedTail)"), "refreshHourly must pack fetched candles");
   assert.ok(pol.includes("packHours(arr).filter((k) => k[0] >= cut)"), "hydrateHourly must keep the packed shape");
   assert.ok(pol.includes("featuresFromHourly(hoursToObj(featWin)"), "featuresFromHourly must receive the object-shape view");
-  assert.equal((pol.match(/hoursToObj\(r?r?\.hourlyRaw\.slice\(-[A-Za-z0-9_]+\)\)/g) || []).length, 5, "every H1 rung adapts the packed slice to objects (trend, AI, retest, 1h chart, pair board) regardless of slice width");
+  assert.equal((pol.match(/hoursToObj\(r?r?\.hourlyRaw\.slice\(-[A-Za-z0-9_]+\)\)/g) || []).length, 6, "every H1 rung adapts the packed slice to objects (trend, closed-alert ladder, AI, retest, 1h chart, pair board) regardless of slice width");
   assert.ok(pol.includes("if (Array.isArray(r.hourlyRaw)) r.hourlyRaw = packHours(r.hourlyRaw);"), "seedRowNow must pack its spine input");
 });
 
@@ -9217,26 +9217,39 @@ test("trend metrics ride the same board the Trend tab renders, signed to cover b
     "the stamp must ride the content signature, or a frozen snapshot serves a stale trend score");
 });
 
-test("trend events: full stacks and D1 crosses only, seeded on the first pass", () => {
+test("trend events: close-confirmed on the closed ladder, seeded on the first pass", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const fn = pol.slice(pol.indexOf("function trendScan(tNow)"), pol.indexOf("function pushTest("));
   // H12/H4 crossings at ~144 names would be a feed, not an alert. Stated where it is decided.
   assert.ok(/D1 only/.test(pol.slice(pol.indexOf("trend class: full stacks"), pol.indexOf("const trendState"))));
-  assert.ok(/tb\.score >= 4 && prev\.score < 4/.test(fn), "only the ARRIVAL at 4/4 fires");
-  // The COPPER double (-16): every gate must sit ON the fire condition, not near it.
+  // The load-bearing change of -25: every transition is judged on the CLOSED ladder — the live
+  // board read (tb) supplies sighting stamps and message dressing, never a transition. An event
+  // can only come into existence at a candle close; the close IS the confirmation.
+  assert.ok(/const cl = trendClosed\(coin, tb, now\);/.test(fn), "the closed ladder is the transition's only truth source");
+  assert.ok(/if \(!cl\) continue;/.test(fn), "no closed read means silence, never a guess at a confirmation");
+  assert.ok(/closedLadder\(\{/.test(pol) && /closedBars\(r\.dailyRaw, DAY, now\)/.test(pol),
+    "trendClosed feeds compute.closedLadder with period-trimmed series — same rung sourcing as the board");
+  assert.ok(!/TREND_CROSS_CONFIRM/.test(pol),
+    "the scan-count debounce is GONE — closed state cannot revert between closes, so counting scans would only add lag");
+  assert.ok(/score >= 4 && prev\.score < 4/.test(fn), "only the ARRIVAL at 4/4 fires — on closed rungs");
+  // The COPPER double (-16): every gate must sit ON the fire condition, not near it. Boundary
+  // flap ACROSS closes is still real (H1 closes hourly), so the episode gates survive -25.
   assert.ok(/prev\.below \|\| 0\) >= TREND_REARM_SCANS/.test(fn),
     "a stack only fires after the drop HELD — a one-scan dip through 3/4 is the same episode");
   assert.ok(/now - \(prev\.stackAt \|\| 0\) >= TREND_STACK_CD/.test(fn),
     "…and never twice per name inside the cooldown, however legitimate the re-cross");
-  assert.ok(/if \(sign === 0 \|\| sign === prev\.sign\) \{ next\.pendSign = 0; next\.pendRun = 0; \}/.test(fn),
-    "an unknown ribbon (a rung missing an EMA) is not a flip, and it resets the pending count — silence over noise");
-  assert.ok(/next\.pendRun >= TREND_CROSS_CONFIRM/.test(fn),
-    "a D1 flip is announced only after it HELD — a flip that reverts inside the window fires nothing");
-  assert.ok(/if \(prev\.sign !== 0\) \{/.test(fn), "a flip out of 0 is adoption, not a flip — it confirms silently");
-  assert.ok(/if \(!trendPrimed \|\| !prev\) \{/.test(fn), "the first pass seeds the board silently");
-  assert.ok(/below: tb\.score < 4 \? TREND_REARM_SCANS : 0/.test(fn),
+  assert.ok(/sign !== 0 && prev\.sign !== 0 && sign !== prev\.sign/.test(fn),
+    "a closed D1 flip announces at its close; an unknown ribbon (sign 0) is not a flip");
+  assert.ok(/\} else if \(sign !== 0\) next\.sign = sign;/.test(fn),
+    "a flip out of 0 is adoption, not a flip — it confirms silently");
+  assert.ok(/if \(!trendPrimed \|\| !prev \|\| !prev\.tfSt\) \{/.test(fn),
+    "the first pass seeds silently — and a prev restored from a pre-close-confirm build (live-measured score, no tfSt) reseeds instead of firing against a different ruler");
+  assert.ok(/below: score < 4 \? TREND_REARM_SCANS : 0/.test(fn),
     "a name seeded below 4 is armed — the hold kills re-fires of a known stack, not a new name's first arrival");
+  // Every fire carries its confirming close; the sighting stamp only ships when it truly preceded it.
+  assert.ok((fn.match(/confTf/g) || []).length >= 6, "confTf/confAt ride all three sub-events");
+  assert.ok(/at < \+confAt \? at : undefined/.test(fn), "seenAt is disclosed only when it preceded the confirming close");
   assert.ok(/for \(const c of \[\.\.\.trendState\.keys\(\)\]\) if \(!trendByCoin\.has\(c\)\) trendState\.delete\(c\);/.test(fn),
     "a name leaving the board drops its state, so a return is a genuinely new episode");
   assert.ok(/continue;   \/\/ one event per name per scan/.test(fn));
@@ -9253,82 +9266,241 @@ function trendHarness() {
   return p;
 }
 
+// Closed-ladder override for the harness: seedTrendNow carries it as DATA on the board read (the
+// scan prefers tb.closed over rebuilding from candles), so episode gates are testable without
+// manufacturing 26-bar histories. `score` rungs align top-down; closeAt sits just behind the scan
+// clock the caller passes, like a real close would.
+function clOf(score, t, opts) {
+  const o = opts || {};
+  const tfs = ["D1", "H12", "H4", "H1"], tfSt = {}, closeAt = {};
+  tfs.forEach((tf, i) => { tfSt[tf] = i < score ? "up" : "roll"; closeAt[tf] = t - 60e3; });
+  return { sign: o.sign != null ? o.sign : 1, closeAt,
+    tf: { D1: { st: tfSt.D1 }, H12: { st: tfSt.H12 }, H4: { st: tfSt.H4 }, H1: { st: tfSt.H1 } },
+    long: { score, retest: o.retest || null }, short: { score: 0, retest: null } };
+}
+
 test("stack episode gates: the COPPER double cannot happen — a wobble is one fire, not two", () => {
   const p = trendHarness();
-  const stacks = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "stack").length;
+  const stacks = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "stack");
   const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
-  const seed = (score, t) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score, retest: null, e13: 6.38, e21: 6.33, age: 2 }); p.trendScanNow(t); };
+  // Live and closed agree throughout: this test is about the episode gates, not the whipsaw guard.
+  const seed = (score, t) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score, retest: null,
+    e13: 6.38, e21: 6.33, age: 2, closed: clOf(score, t) }); p.trendScanNow(t); };
 
   seed(3, t0);                                 // first sight: seeded silently, armed by construction
-  assert.equal(stacks(), 0, "state in force at first sight is seeded, never announced");
+  assert.equal(stacks().length, 0, "state in force at first sight is seeded, never announced");
   seed(4, t0 + 5 * M);
-  assert.equal(stacks(), 1, "a new name's first arrival at 4/4 fires on the old one-scan cadence");
+  assert.equal(stacks().length, 1, "a new name's first closed arrival at 4/4 fires on the old one-scan cadence");
+  // The confirming close rides the event: the rung whose CLOSED state completed the stack.
+  assert.equal(stacks()[0].confTf, "H1", "H1 was the rung that newly aligned — its close confirmed the stack");
+  assert.equal(stacks()[0].confAt, t0 + 5 * M - 60e3, "confAt is the candle close, not the scan clock");
 
   // The screenshot, replayed: one scan at 3/4, straight back to 4/4 thirty minutes after the fire.
   seed(3, t0 + 10 * M);
   seed(4, t0 + 15 * M);
-  assert.equal(stacks(), 1, "a one-scan dip through 3/4 is the same episode still standing — no re-fire");
+  assert.equal(stacks().length, 1, "a one-scan dip through 3/4 is the same episode still standing — no re-fire");
 
   // Even a HELD drop re-arms into the cooldown wall.
   seed(3, t0 + 20 * M); seed(3, t0 + 25 * M); seed(3, t0 + 30 * M);
   seed(4, t0 + 35 * M);
-  assert.equal(stacks(), 1, "armed, but inside the 12h per-name floor — still one fire");
+  assert.equal(stacks().length, 1, "armed, but inside the 12h per-name floor — still one fire");
 
   // Past the cooldown WITHOUT a fresh held drop: the suppressed rise consumed the arm.
   seed(3, t0 + 13 * 60 * M);
   seed(4, t0 + 13 * 60 * M + 5 * M);
-  assert.equal(stacks(), 1, "a suppressed rise resets `below` — the drop-and-hold must happen again");
+  assert.equal(stacks().length, 1, "a suppressed rise resets `below` — the drop-and-hold must happen again");
 
   // The genuine article: held drop, past the floor. This is the fire the gates exist to protect.
   seed(3, t0 + 14 * 60 * M); seed(3, t0 + 14 * 60 * M + 5 * M); seed(3, t0 + 14 * 60 * M + 10 * M);
   seed(4, t0 + 14 * 60 * M + 15 * M);
-  assert.equal(stacks(), 2, "a real re-cross — held below, outside the cooldown — still reaches you");
+  assert.equal(stacks().length, 2, "a real re-cross — held below, outside the cooldown — still reaches you");
 });
 
-test("cross debounce: a flip announces only after it holds, and a revert inside the window is silence", () => {
+test("cross: the closed D1 flip announces at its close, once — unknown is not a flip", () => {
   const p = trendHarness();
   const crosses = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "cross");
   const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
   let t = t0;
-  const seed = (e13, e21) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score: 3, retest: null, e13, e21, age: 2 }); p.trendScanNow(t); t += 5 * M; };
+  // Live EMAs track the closed sign here — the whipsaw guard has its own test below.
+  const seed = (sign) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score: 3, retest: null,
+    e13: sign > 0 ? 6.38 : sign < 0 ? 6.30 : 0, e21: 6.33, age: 2,
+    closed: clOf(3, t, { sign }) }); p.trendScanNow(t); t += 5 * M; };
 
-  seed(6.38, 6.33);                            // sign +1, seeded
-  seed(6.30, 6.33);                            // flip observed — pending, not announced
-  assert.equal(crosses().length, 0, "one flipped scan is an observation, not an announcement");
-  seed(6.38, 6.33);                            // revert inside the window
-  seed(6.38, 6.33);
-  assert.equal(crosses().length, 0, "a flip that reverts fires NOTHING — the flap is silent in both directions");
-
-  seed(6.30, 6.33); seed(6.30, 6.33);          // flip holds…
-  assert.equal(crosses().length, 0, "…still inside the confirm window");
-  seed(6.30, 6.33);                            // third consecutive flipped scan
-  assert.equal(crosses().length, 1, "the flip announces once it has HELD");
+  seed(1);                                     // sign +1, seeded
+  seed(-1);                                    // the closed daily sign flipped — a D1 close happened
+  assert.equal(crosses().length, 1, "the closed flip IS the confirmation — it announces immediately");
   assert.equal(crosses()[0].side, "short");
-  seed(6.30, 6.33); seed(6.30, 6.33);
+  assert.equal(crosses()[0].confTf, "D1", "a cross is always confirmed by the D1 close");
+  assert.equal(crosses()[0].confAt, t - 5 * M - 60e3, "confAt is the daily close that made it true");
+  seed(-1); seed(-1);
   assert.equal(crosses().length, 1, "a confirmed sign persisting says nothing new");
 
-  // Unknown rungs feed nobody: sign 0 resets the pending count and never counts as a flip.
-  seed(6.38, 6.33); seed(6.38, 6.33);          // pending flip back up, 2 of 3…
-  seed(0, 6.33);                               // …a ladder gap wipes the pending count
-  seed(6.38, 6.33); seed(6.38, 6.33);
-  assert.equal(crosses().length, 1, "the gap reset the count — two held scans after it are not three");
-  seed(6.38, 6.33);
-  assert.equal(crosses().length, 2, "the flip back up completes its own held window and announces");
+  // Unknown rungs feed nobody: sign 0 is a ladder gap, not a flip — in either direction.
+  seed(0);
+  assert.equal(crosses().length, 1, "a rung losing its EMAs is unknown, not a flip down");
+  seed(-1);
+  assert.equal(crosses().length, 1, "…and returning from unknown to the held sign is adoption, not news");
+  seed(1);
+  assert.equal(crosses().length, 2, "the genuine flip back up announces at ITS close");
   assert.equal(crosses()[1].side, "long");
 });
 
-test("trend state restored from an older build (no gate fields) is armed conservatively, never crashed on", () => {
+test("intrabar whipsaw never reaches the wire — the close decides, and the sighting is disclosed", () => {
+  const p = trendHarness();
+  const evs = (sub) => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === sub);
+  const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
+  const seed = (live, closedScore, t, liveE13) => { p.seedTrendNow("CU", { side: "long", uni: "stocks",
+    score: live, retest: null, e13: liveE13 == null ? 6.38 : liveE13, e21: 6.33, age: 2,
+    closed: clOf(closedScore, t) }); p.trendScanNow(t); };
+
+  seed(3, 3, t0);                              // seeded
+  // The live board runs to 4/4 on the mark; the closed rungs still say 3. The OLD scan announced
+  // this — it is exactly the 14:35 flip the daily close never ratified.
+  seed(4, 3, t0 + 5 * M);
+  seed(4, 3, t0 + 10 * M);
+  assert.equal(evs("stack").length, 0, "a live-only stack is intrabar whipsaw — nothing reaches the wire");
+  // A closed rung completes the stack: fires once, stamped with the close AND the first sighting.
+  seed(4, 4, t0 + 15 * M);
+  const st = evs("stack");
+  assert.equal(st.length, 1, "the closed arrival fires exactly once");
+  assert.equal(st[0].confAt, t0 + 15 * M - 60e3, "the confirming close is the candle, not the scan");
+  assert.equal(st[0].seenAt, t0 + 5 * M, "seenAt is the FIRST scan the live board ran ahead of the closes");
+  assert.ok(st[0].seenAt < st[0].confAt, "a sighting is only a sighting if it preceded the close");
+
+  // Same guard on the cross: live EMAs flip, closed sign holds — silence; then the close ratifies.
+  const p2 = trendHarness();
+  const cr = () => p2.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "cross");
+  let t = t0;
+  const s2 = (liveE13, sign) => { p2.seedTrendNow("CU", { side: "long", uni: "stocks", score: 3, retest: null,
+    e13: liveE13, e21: 6.33, age: 2, closed: clOf(3, t, { sign }) }); p2.trendScanNow(t); t += 5 * M; };
+  s2(6.38, 1);                                 // seeded, sign +1 live and closed
+  s2(6.30, 1); s2(6.30, 1);                    // live ribbon under — the closed daily has not closed under
+  assert.equal(cr().length, 0, "a live flip the close never ratified fires nothing at all");
+  s2(6.38, 1);                                 // live reverts — the sighting run is over, stamp cleared
+  s2(6.30, 1);                                 // fresh live flip…
+  s2(6.30, -1);                                // …and this time the D1 close ratifies it
+  assert.equal(cr().length, 1);
+  assert.equal(cr()[0].seenAt, t - 2 * 5 * M, "seenAt is the onset of the run that got confirmed, not a stale first flicker");
+});
+
+test("retest confirms on its own rung's close, and carries it", () => {
+  const p = trendHarness();
+  const rts = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "retest");
+  const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
+  const seed = (retest, liveRetest, t) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score: 3,
+    retest: liveRetest, e13: 6.38, e21: 6.33, age: 2, closed: clOf(3, t, { retest }) }); p.trendScanNow(t); };
+  seed(null, null, t0);                        // seeded
+  seed(null, "H4", t0 + 5 * M);                // the badge flickers on the live bar mid-period
+  assert.equal(rts().length, 0, "a live-bar badge is not a closed badge — nothing fires");
+  seed("H4", "H4", t0 + 10 * M);               // the H4 close holds the zone — the badge is real
+  assert.equal(rts().length, 1);
+  assert.equal(rts()[0].confTf, "H4", "the retesting rung's own close is the confirmation");
+  assert.equal(rts()[0].confAt, t0 + 10 * M - 60e3);
+  assert.equal(rts()[0].seenAt, t0 + 5 * M, "the live sighting preceding the close is disclosed");
+  seed("H4", "H4", t0 + 15 * M);
+  assert.equal(rts().length, 1, "the badge persisting says nothing new");
+});
+
+test("closedBars: only the unfinished tail is trimmed — history is closed by construction", () => {
+  const C = require("../src/compute");
+  const H = 3600e3, t0 = Date.UTC(2026, 6, 27, 0, 0, 0);
+  const bars = [0, 1, 2, 3].map((i) => ({ t: t0 + i * H, c: 10 + i }));
+  // At 03:30 the 03:00 bar is still forming; the three before it are done.
+  assert.equal(C.closedBars(bars, H, t0 + 3.5 * H).length, 3);
+  // Exactly at its end a bar IS closed: t + width <= now.
+  assert.equal(C.closedBars(bars, H, t0 + 4 * H).length, 4);
+  // A same-reference return when nothing is trimmed — no needless copy on the hot path.
+  const all = C.closedBars(bars, H, t0 + 5 * H);
+  assert.equal(all, bars);
+  assert.deepEqual(C.closedBars([], H, t0), []);
+  assert.deepEqual(C.closedBars(null, H, t0), []);
+});
+
+test("closedLadder: the rung's own last closed close is the ruler — no live mark anywhere", () => {
+  const C = require("../src/compute");
+  const H = 3600e3, t0 = Date.UTC(2026, 6, 1, 0, 0, 0);
+  const mk = (n, w, f) => Array.from({ length: n }, (_, i) => ({ t: t0 + i * w, c: f(i) }));
+  const up = (w) => mk(40, w, (i) => 100 + i);        // rising: last close > eF > eS on every construction
+  const dn = (w) => mk(40, w, (i) => 140 - i);
+  const tfc = { D1: up(24 * H), H12: up(12 * H), H4: up(4 * H), H1: up(H) };
+  const lad = C.closedLadder(tfc);
+  assert.equal(lad.sign, 1, "the closed D1 ribbon reads up");
+  assert.equal(lad.long.score, 4, "every closed rung is stacked");
+  assert.equal(lad.short.score, 0);
+  // closeAt is when the last CLOSED bar ends — the confirming-close timestamp an alert carries.
+  assert.equal(lad.closeAt.H1, t0 + 39 * H + H);
+  assert.equal(lad.closeAt.D1, t0 + 39 * 24 * H + 24 * H);
+  // A mirrored series mirrors: down stack, sign flipped.
+  const lad2 = C.closedLadder({ D1: dn(24 * H), H12: dn(12 * H), H4: dn(4 * H), H1: dn(H) });
+  assert.equal(lad2.sign, -1);
+  assert.equal(lad2.short.score, 4);
+  // Retest: a low probing the fast EMA on the H4 rung, close still above the slow — the FIRST
+  // qualifying rung high->low is the one reported, and only closed bars feed the probe.
+  const h4 = up(4 * H);
+  const eF = C.emaLast(h4.map((k) => +k.c), 13);
+  h4[h4.length - 1] = { t: h4[h4.length - 1].t, c: h4[h4.length - 1].c, l: eF - 0.01, h: h4[h4.length - 1].c };
+  const lad3 = C.closedLadder({ D1: up(24 * H), H12: up(12 * H), H4: h4, H1: up(H) });
+  assert.equal(lad3.long.retest, "H4");
+  // A rung short of history excludes the name, same rule as the board.
+  assert.equal(C.closedLadder({ D1: up(24 * H), H12: up(12 * H), H4: up(4 * H), H1: mk(10, H, (i) => 100 + i) }), null);
+  // A rung that clears the floor but cannot seed the slow MA is nodata, not a guess — and a
+  // nodata D1 leaves the sign 0: unknown, never neutral.
+  const short26 = mk(26, 24 * H, (i) => 100 + i);
+  const lad4 = C.closedLadder({ D1: short26, H12: up(12 * H), H4: up(4 * H), H1: up(H) }, 13, 200);
+  assert.ok(lad4 && lad4.tf.D1.st === "nodata" && lad4.sign === 0);
+});
+
+test("trendWhen: the confirming close in UTC, the sighting only when it truly preceded it", () => {
+  const C = require("../src/compute");
+  const conf = Date.UTC(2026, 6, 27, 0, 0, 0);
+  assert.equal(C.trendWhen({ confTf: "D1", confAt: conf }), "confirmed D1 close 00:00 UTC");
+  // A sighting on the prior UTC day carries its date; same-day carries none.
+  assert.equal(C.trendWhen({ confTf: "D1", confAt: conf, seenAt: Date.UTC(2026, 6, 26, 15, 40) }),
+    "confirmed D1 close 00:00 UTC \u00b7 first seen Jul 26 15:40");
+  assert.equal(C.trendWhen({ confTf: "H4", confAt: Date.UTC(2026, 6, 27, 8, 0), seenAt: Date.UTC(2026, 6, 27, 6, 15) }),
+    "confirmed H4 close 08:00 UTC \u00b7 first seen 06:15");
+  // A sighting at or after the close is not a sighting — omitted, never fabricated.
+  assert.equal(C.trendWhen({ confTf: "D1", confAt: conf, seenAt: conf }), "confirmed D1 close 00:00 UTC");
+  // No confirmation, no line: pre--25 events in the ring keep rendering without one.
+  assert.equal(C.trendWhen({ tf: "D1" }), null);
+  assert.equal(C.trendWhen(null), null);
+});
+
+test("telegram + bell carry the confirmation line from ONE event", () => {
+  const C = require("../src/compute");
+  const ev = { kind: "trend", coin: "SOL", t: "SOL", side: "long", sub: "stack", score: 4, tf: "D1",
+    px: 214.36, e21: 209.8, confTf: "D1", confAt: Date.UTC(2026, 6, 27, 0, 0),
+    seenAt: Date.UTC(2026, 6, 26, 15, 40), title: "full 4/4 stack", text: "every rung aligned up" };
+  const m = C.pushFmt(ev, {});
+  assert.ok(m.includes("\u23f1 confirmed D1 close 00:00 UTC"), "the phone shows which close made it true");
+  assert.ok(m.includes("first seen Jul 26 15:40"), "…and what the confirmation cost on this alert");
+  // An event without confAt (pre--25 ring content) renders exactly as before — no clock line.
+  const old = C.pushFmt({ kind: "trend", coin: "X", t: "X", side: "long", sub: "cross", score: 3,
+    tf: "D1", px: 1, e21: 1, title: "D1 13/21 cross up", text: "flip" }, {});
+  assert.ok(!old.includes("\u23f1"), "no confirmation data, no fabricated line");
+  // The web client's formatter mirrors the same fields (pinned as source, mirrored logic).
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/function trendWhenTxt\(ev\)/.test(app));
+  assert.ok(/confirmed \$\{ev\.confTf\|\|ev\.tf\|\|''\} close/.test(app), "the bell log names the confirming close");
+  assert.ok(/k==='trend'/.test(app) && /trendWhenTxt\(ev\)/.test(app), "alertText's trend branch reads the shared stamp");
+});
+
+test("trend state restored from a pre-close-confirm build reseeds silently, never fires against a different ruler", () => {
   const p = trendHarness();
   const stacks = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "trend" && e.sub === "stack").length;
   const M = 60e3, t0 = Date.UTC(2026, 6, 27, 12, 0, 0);
-  // A -15 process persisted exactly this shape: score/sign/retest, nothing else.
-  p.hydrateTriggersNow({ seq: 0, seen: [], events: [], episodes: { trend: [["CU", { score: 3, sign: 1, retest: null }]] } });
-  const seed = (score, t) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score, retest: null, e13: 6.38, e21: 6.33, age: 2 }); p.trendScanNow(t); };
+  // A -24 process persisted score/sign measured against the LIVE bar (plus pend fields the new
+  // code ignores). Judged against closed truth those numbers are a different ruler: the only safe
+  // move is one silent reseed — a boundary name must not fire a "stack arrival" on deploy.
+  p.hydrateTriggersNow({ seq: 0, seen: [], events: [], episodes: { trend: [["CU", { score: 3, sign: 1, retest: null, pendSign: 0, pendRun: 0 }]] } });
+  const seed = (score, t) => { p.seedTrendNow("CU", { side: "long", uni: "stocks", score, retest: null,
+    e13: 6.38, e21: 6.33, age: 2, closed: clOf(score, t) }); p.trendScanNow(t); };
   seed(4, t0);
-  assert.equal(stacks(), 0, "missing `below` reads as 0 — the rise waits for a fresh held drop, it does not throw");
+  assert.equal(stacks(), 0, "missing tfSt marks the old shape — reseeded silently, it does not throw and it does not fire");
   seed(3, t0 + 5 * M); seed(3, t0 + 10 * M); seed(3, t0 + 15 * M);
   seed(4, t0 + 20 * M);
-  assert.equal(stacks(), 1, "…and three held scans later the same rise fires, missing `stackAt` reading as no cooldown");
+  assert.equal(stacks(), 1, "…and three held scans later the same rise fires on the closed ladder");
 });
 
 test("ops is operator-only, in delivery AND in the feed", () => {
@@ -9527,7 +9699,7 @@ test("retest-badge arrivals are trend events — visible before the ledger famil
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const fn = pol.slice(pol.indexOf("function trendScan(tNow)"), pol.indexOf("function pushTest("));
-  assert.ok(/if \(tb\.retest && !prev\.retest\)/.test(fn), "the badge APPEARING fires; the badge persisting does not");
+  assert.ok(/if \(retest && !prev\.retest\)/.test(fn), "the CLOSED badge APPEARING fires; the badge persisting does not");
   assert.ok(/sub: "retest"/.test(fn));
   // The load-bearing comment: the ledger's setup alert for tretest waits on a proven record
   // (n >= 8 resolved). Until then the badge arrival is the only path a retest has to a phone,
@@ -10063,7 +10235,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-24"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-25"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
