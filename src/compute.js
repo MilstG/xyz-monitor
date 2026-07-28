@@ -1389,6 +1389,115 @@ function detectLevels(daily, px, sd30, opts) {
   return { k, tauPct: +tauPct.toFixed(3), minN, n: keep.length, items: keep };
 }
 
+// ---- EMA200 trend events (build 2026.07.27-26) ------------------------------------------------
+// Close-confirmed crosses of the 200-EMA — the most common trend line in retail and fund PM
+// playbooks alike — scored walk-forward against a deterministic permutation placebo. Three
+// definitions duel per side (raw close-cross, close >=bufSd*sigma beyond the line, two
+// consecutive closes) because "the" EMA200 break has no canonical definition: the data picks,
+// we do not. Events fire on CLOSED candles only — an intrabar poke that closes back never
+// counts, which is the entire false-trigger defense. Re-arm: after a stream fires, it stays
+// blocked until `rearm` consecutive closes on the FAR side reset the episode — chop around the
+// line is one fight, not five signals; blocked fires are counted and disclosed, never silently
+// eaten. Outcomes: signed with the event's direction (a breakdown that falls scores POSITIVE),
+// measured from the firing close over a fixed bar horizon, in units of the series' own bar
+// sigma. Tail events whose horizon runs past the data are EXCLUDED, never partially read.
+function emaCrossOutcomes(bars, sdTf, opts) {
+  const o = opts || {};
+  const N = Number.isFinite(o.N) && o.N >= 2 ? Math.round(o.N) : 200;
+  const horizon = Number.isFinite(o.horizon) && o.horizon >= 1 ? Math.round(o.horizon) : 14;
+  const rearm = Number.isFinite(o.rearm) && o.rearm >= 1 ? Math.round(o.rearm) : 3;
+  const bufSd = Number.isFinite(o.bufSd) && o.bufSd > 0 ? o.bufSd : 0.25;
+  const b = studyBars(bars);
+  const min = N + 10;
+  const empty = { n: 0, events: [], horizon, suppressed: { raw: 0, buf: 0, "2cl": 0 } };
+  if (b.length < min + horizon + 2 || !(sdTf > 0)) return empty;
+  const closes = b.map((k) => k.c);
+  // SMA-seeded EMA walk — the SAME construction emaLast and stackedRun use, so this study's
+  // line agrees to the last bit with every other EMA consumer in the app (the retest audit
+  // reads emaLast on prefixes; a different seed here would be a quiet second source of truth).
+  const k2 = 2 / (N + 1);
+  const ema = new Array(b.length).fill(null);
+  let e = 0;
+  for (let i = 0; i < b.length; i++) {
+    const c = closes[i];
+    if (i < N) { e += c; if (i === N - 1) { e /= N; ema[i] = e; } }
+    else { e = c * k2 + e * (1 - k2); ema[i] = e; }
+  }
+  const side = (i) => (closes[i] >= ema[i] ? 1 : -1);
+  const VRS = ["raw", "buf", "2cl"];
+  // Per (direction, variant) stream state. armed=false blocks fires; `opp` counts the
+  // consecutive far-side closes working toward the re-arm.
+  const st = {};
+  for (const d of [1, -1]) for (const v of VRS) st[d + v] = { armed: true, opp: 0 };
+  const suppressed = { raw: 0, buf: 0, "2cl": 0 };
+  const events = [];
+  const fire = (d, v, fi) => {
+    const S = st[d + v];
+    if (!S.armed) { suppressed[v]++; return; }
+    if (fi + horizon >= b.length) return;               // horizon runs past the tape: excluded whole
+    S.armed = false; S.opp = 0;
+    const p0 = closes[fi];
+    if (!(p0 > 0)) return;
+    const fwd = +((d * (closes[fi + horizon] / p0 - 1) * 100) / sdTf).toFixed(3);
+    let whip = false;
+    for (let j = fi + 1; j <= Math.min(fi + 5, b.length - 1); j++) if (side(j) === -d) { whip = true; break; }
+    // Deterministic permutation control (no PRNG — reproducible, testable): same horizon, same
+    // direction sign, anchors walked away from the event so the null carries THIS tape's drift
+    // and discreteness. What survives subtraction is the only thing measured: does the EMA
+    // condition add anything beyond being long (or short) this tape at random times?
+    let plN = 0, plHit = 0;
+    for (let m = 1; m <= PLACEBO_K; m++) {
+      const j = fi + m * PLACEBO_STEP * 5;
+      const jj = min + ((j - min) % Math.max(1, b.length - horizon - min));
+      if (jj === fi || !(closes[jj] > 0)) continue;
+      plN++;
+      if (d * (closes[jj + horizon] / closes[jj] - 1) > 0) plHit++;
+    }
+    events.push({ t: b[fi].t, dir: d > 0 ? "up" : "dn", vr: v, fwd, hit: fwd > 0, whip,
+      pl: plN ? +(plHit / plN).toFixed(4) : null });
+  };
+  for (let i = min; i < b.length; i++) {
+    const s0 = side(i - 1), s1 = side(i);
+    // Re-arm accounting runs on every bar for every stream — a blocked stream earns its way
+    // back only through `rearm` CONSECUTIVE closes on the far side; any close back resets.
+    for (const d of [1, -1]) for (const v of VRS) { const S = st[d + v];
+      if (!S.armed) { if (s1 === -d) { S.opp++; if (S.opp >= rearm) { S.armed = true; S.opp = 0; } } else S.opp = 0; } }
+    if (s1 === s0) continue;                            // no close-cross on this bar
+    const d = s1;                                       // +1 breakout, -1 breakdown
+    fire(d, "raw", i);
+    if (Math.abs(closes[i] / ema[i] - 1) * 100 >= bufSd * sdTf) fire(d, "buf", i);
+    // 2-close: the event IS the confirmation bar — its close is the entry the outcome measures
+    // from, so nothing here reads the future relative to its own firing point.
+    if (i + 1 < b.length && side(i + 1) === d) fire(d, "2cl", i + 1);
+  }
+  return { n: events.length, events, horizon, suppressed };
+}
+
+// Aggregate cross events into the served cells: per direction x variant, n / median forward /
+// hit / mean matched placebo / excess / 5-bar whipsaw share. Cells under the floor publish n
+// and nulls — an early rate on two dozen events is a coin path wearing a percentage.
+function emaCrossStudy(events, opts) {
+  const o = opts || {};
+  const floor = Number.isFinite(o.cellFloor) ? o.cellFloor : 30;
+  const cell = (rows) => {
+    if (!rows.length) return null;
+    const n = rows.length;
+    const pls = rows.map((e2) => e2.pl).filter(Number.isFinite);
+    const pl = pls.length ? pls.reduce((a, x) => a + x, 0) / pls.length : null;
+    const out = { n,
+      med: n >= floor ? +median(rows.map((e2) => e2.fwd)).toFixed(3) : null,
+      hit: n >= floor ? +(rows.filter((e2) => e2.hit).length / n).toFixed(4) : null,
+      placebo: n >= floor && pl != null ? +pl.toFixed(4) : null,
+      whip: n >= floor ? +(rows.filter((e2) => e2.whip).length / n).toFixed(4) : null };
+    out.excess = out.hit != null && out.placebo != null ? +(out.hit - out.placebo).toFixed(4) : null;
+    return out;
+  };
+  const out = { cellFloor: floor, up: {}, dn: {} };
+  for (const d of ["up", "dn"]) for (const v of ["raw", "buf", "2cl"])
+    out[d][v] = cell(events.filter((e2) => e2.dir === d && e2.vr === v));
+  return out;
+}
+
 // ---- volume profile (build 2026.07.27-22) ----------------------------------------------------
 // Where the volume actually transacted, from the daily OHLCV composite the poller assembles.
 // Each bar's volume is distributed UNIFORMLY across every price bin its [l, h] range spans —
@@ -3148,7 +3257,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   closedBars, closedLadder, trendWhen,

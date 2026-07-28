@@ -16,7 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
-const { closedBars, closedLadder } = require("./compute");
+const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
@@ -925,6 +925,25 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // detectLevels, the profile, and the EMA50/200 all read the SAME merged bars, so the map's
   // sources can never disagree about what a day looked like. Memo key: daily length + bucket
   // count — the profile moves when a day lands or the spine grows an hour, never on the 15s tick.
+  // The one merged daily-bar source (-22, extracted -26): dailyRaw for depth (370d both
+  // universes), overlaid with the spine-derived daily buckets where they cover — true lows and
+  // summed hourly volume that dailyRaw structurally lacks. The profile, the level map, and the
+  // EMA200 study all read THIS — three consumers, one definition of what a day looked like.
+  function mergedDailyBars(r) {
+    const dr = r && r.dailyRaw;
+    if (!Array.isArray(dr)) return [];
+    const db = bucketsFor(r, 24);
+    const byDay = new Map();
+    if (Array.isArray(db)) for (const b of db) if (b && isFinite(+b.t) && b.o != null) byDay.set(Math.floor(+b.t / DAY), b);
+    const bars = [];
+    for (const k of dr) {
+      if (!k || !isFinite(+k.t) || !(+k.c > 0)) continue;
+      const ov = byDay.get(Math.floor(+k.t / DAY));
+      if (ov) bars.push({ t: +k.t, c: +ov.c, h: +ov.h, l: +ov.l, v: ov.v > 0 ? +ov.v : (+k.v > 0 ? +k.v : 0) });
+      else { const c = +k.c, h = +k.h; bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: c, v: +k.v > 0 ? +k.v : 0 }); }
+    }
+    return bars;
+  }
   function volMapFor(r) {
     const dr = r && r.dailyRaw;
     if (!Array.isArray(dr) || dr.length < 30 || !(r.px > 0)) return null;
@@ -933,15 +952,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (r._vpK === memoK && r._vpM !== undefined) return r._vpM;
     let out = null;
     try {
-      const byDay = new Map();
-      if (Array.isArray(db)) for (const b of db) if (b && isFinite(+b.t) && b.o != null) byDay.set(Math.floor(+b.t / DAY), b);
-      const bars = [];
-      for (const k of dr) {
-        if (!k || !isFinite(+k.t) || !(+k.c > 0)) continue;
-        const ov = byDay.get(Math.floor(+k.t / DAY));
-        if (ov) bars.push({ t: +k.t, c: +ov.c, h: +ov.h, l: +ov.l, v: ov.v > 0 ? +ov.v : (+k.v > 0 ? +k.v : 0) });
-        else { const c = +k.c, h = +k.h; bars.push({ t: +k.t, c, h: isFinite(h) && h > 0 ? h : c, l: c, v: +k.v > 0 ? +k.v : 0 }); }
-      }
+      const bars = mergedDailyBars(r);
       const closes = bars.map((k) => [k.t, k.c]);
       const sd30 = retStd(dailyRets(closes).slice(-30), 15);
       if (bars.length >= 60 && sd30 > 0) {
@@ -2926,6 +2937,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const on = (g) => U.groups.indexOf(g) > -1;
     const DISABLED = { disabled: true };
     const lvSt = on("structure") ? buildLevelsStudy(U) : DISABLED;   // computed once; reused in sections below so sig and payload can never disagree
+    const emSt = on("structure") ? buildEma200Study(U) : DISABLED;   // same gate, same cadence, same memo contract as the levels study
     const lvSig = lvSt.disabled ? "off" : (lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`);
     const anSt = buildAnatomy(U);       // same one-computation contract as the levels study
     const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday ? anSt.monday.weeks : 0}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
@@ -2954,6 +2966,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           clusters: on("structure") ? buildClusters(hourClock) : DISABLED,
           seasonality: on("clocks") ? buildSeasonality(U) : DISABLED,
           levels: lvSt,
+          ema200: emSt,
           anatomy: anSt,
         };
       })(),
@@ -3253,6 +3266,75 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         buckets: one.buckets, far: one.far, cellFloor: one.cellFloor };
     }
     return st;
+  }
+
+  // ---- EMA200 trend events study (served in sections.ema200, build 2026.07.27-26) -------------
+  // Does the most-watched trend line earn the reverence: close-confirmed crosses (three
+  // confirmation variants dueling per side) and retests, walk-forward, vs matched permutation
+  // placebo. D1 rides mergedDailyBars (370d both universes since -20); H4 rides the spine
+  // buckets (180d equity, 90d crypto — the crypto H4 walk is thin by construction and the
+  // payload says so rather than hiding it). Forming bars trimmed via closedBars — the study's
+  // events are closed-candle events, same discipline the -25 alert lane enforces live. Retests
+  // ride the -22 injectable level audit with the walk-forward emaLast(200) as the level —
+  // identical touch/hold semantics and control as the structural study, directly comparable.
+  // Memo contract: per-name events recompute only when the spine-derived bucket array is
+  // replaced (~10 min), the 3-min analytics cadence reads cache — same as the levels study.
+  const EMA_TF = { "1d": { horizon: 14, stride: 5, minBars: 210 }, "4h": { horizon: 84, stride: 12, minBars: 210 } };
+  const EMA_MIN_EQ = 5, EMA_CELL_FLOOR = 30, EMA_REARM = 3, EMA_BUF_SD = 0.25;
+  function buildEma200Study(U) {
+    U = U || analyticsUniverse("stocks");
+    const eq = U.roster().filter((r) => U.studyEligible(r));
+    const now = Date.now();
+    const pool = { "1d": [], "4h": [] }, rpool = { "1d": [], "4h": [] };
+    const contrib = { "1d": 0, "4h": 0 };
+    const supp = { "1d": { raw: 0, buf: 0, "2cl": 0 }, "4h": { raw: 0, buf: 0, "2cl": 0 } };
+    for (const r of eq) {
+      const db = bucketsFor(r, 24);
+      if (r._emSrc !== db) {
+        r._emSrc = db;
+        const out = { ev: {}, rt: {} };
+        const src = { "1d": closedBars(mergedDailyBars(r), DAY, now), "4h": closedBars(bucketsFor(r, 4), 4 * HOUR, now) };
+        for (const tf of ["1d", "4h"]) {
+          const cfg = EMA_TF[tf], bars = src[tf];
+          if (!Array.isArray(bars) || bars.length < cfg.minBars + cfg.horizon + 2) continue;
+          // sigma in the rung's OWN bar units, so a 14-bar D1 move and an 84-bar H4 move are
+          // scored on each series' native volatility — comparable across names, honest per TF.
+          const closes = bars.map((k) => [k.t, k.c]);
+          const sdTf = retStd(dailyRets(closes).slice(-90), 15);
+          if (!(sdTf > 0)) continue;
+          out.ev[tf] = emaCrossOutcomes(bars, sdTf, { N: 200, horizon: cfg.horizon, rearm: EMA_REARM, bufSd: EMA_BUF_SD });
+          out.rt[tf] = levelOutcomes(bars, sdTf, { stride: cfg.stride, horizon: cfg.horizon, minBars: cfg.minBars,
+            detect: (pb, px2, sd2) => {
+              const e2 = emaLast(pb.map((k) => k.c), 200);
+              return e2 == null ? null : { tauPct: Math.max(sd2 > 0 ? 0.4 * sd2 : 0, 0.5),
+                items: [{ v: e2, side: e2 >= px2 ? "res" : "sup", n: 1, ageD: 0 }] };
+            } }).events;
+        }
+        r._emEv = out;
+      }
+      const o2 = r._emEv;
+      if (!o2) continue;
+      for (const tf of ["1d", "4h"]) {
+        if (o2.ev[tf] && o2.ev[tf].n) {
+          contrib[tf]++;
+          for (const e of o2.ev[tf].events) pool[tf].push(e);
+          for (const v in supp[tf]) supp[tf][v] += o2.ev[tf].suppressed[v] || 0;
+        }
+        if (o2.rt[tf]) for (const e of o2.rt[tf]) rpool[tf].push(e);
+      }
+    }
+    if (contrib["1d"] < EMA_MIN_EQ) return { pending: true, count: contrib["1d"], need: EMA_MIN_EQ };
+    const sec = { horizons: { "1d": EMA_TF["1d"].horizon, "4h": EMA_TF["4h"].horizon },
+      rearm: EMA_REARM, bufSd: EMA_BUF_SD, cellFloor: EMA_CELL_FLOOR, tf: {} };
+    for (const tf of ["1d", "4h"]) {
+      const rt = rpool[tf].length ? levelStudy(rpool[tf], { horizon: EMA_TF[tf].horizon, cellFloor: LVL_CELL_FLOOR }) : null;
+      sec.tf[tf] = { n: pool[tf].length, contributing: contrib[tf], suppressed: supp[tf],
+        cross: emaCrossStudy(pool[tf], { cellFloor: EMA_CELL_FLOOR }),
+        // bySide IS the bullish/bearish retest split: sup = touched from above and held (bullish
+        // support retest), res = rejected from below (bearish resistance retest).
+        retest: rt ? { n: rt.n, overall: rt.overall, bySide: rt.bySide, cellFloor: rt.cellFloor } : null };
+    }
+    return sec;
   }
 
   // ---- session anatomy (served in sections.anatomy) ------------------------------------------
