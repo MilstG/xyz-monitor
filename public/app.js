@@ -2342,7 +2342,23 @@ function alertText(ev){
   const k=ev.kind||'setup';
   if(k==='ops') return `${ev.title||'ops'}${ev.text?' \u2014 '+ev.text:''}`;
   if(k==='filing') return `${ev.t} \u00b7 ${ev.form} \u00b7 ${ev.h||''}`;
-  if(k==='earnings') return `${ev.t} reports ${ev.when}${ev.session?' ('+ev.session+')':''}${ev.claim?' \u00b7 open '+ev.claim+' claim':''}`;
+  if(k==='earnings'){
+    // Two shapes in one class: the roster-wide daily calendar and the claim-scoped single name.
+    // The log states which, because "AAPL reports tomorrow" and "9 names report tomorrow" are
+    // different messages and collapsing them would make the feed unreadable.
+    if(ev.sub==='preview'){
+      const up=(ev.tomorrow||[]).length+(+ev.moreUp||0), rp=(ev.reported||[]).length+(+ev.moreRep||0);
+      const names=(ev.tomorrow||[]).slice(0,6).map(e=>e.t).join(', ');
+      return `earnings calendar \u00b7 ${up} reporting tomorrow${names?' ('+names+(up>6?'\u2026':'')+')':''}${rp?` \u00b7 ${rp} reported today`:''}`;
+    }
+    return `${ev.t} reports ${ev.when}${ev.session?' ('+ev.session+')':''}${ev.claim?' \u00b7 open '+ev.claim+' claim':''}`;
+  }
+  if(k==='macro'){
+    const st=macroStatFmt({k:ev.k},ev.sub==='result'?ev.actual:ev.prior).replace(/<\/?b>/g,'').replace(/<span[^>]*>|<\/span>/g,'');
+    if(ev.sub==='result') return `${ev.label||ev.k} released \u00b7 ${st||'actual pending'}${ev.prior&&st?` (prior ${macroStatFmt({k:ev.k},ev.prior).replace(/<\/?b>/g,'')})`:''}`;
+    const when=ev.sub==='imminent'?(ev.mins!=null?`in ${Math.max(1,Math.round(ev.mins))} min`:'shortly'):'tomorrow';
+    return `${ev.label||ev.k} ${when} \u00b7 ${ev.tEt||''} ET${st?` \u00b7 prior ${st}`:''}`;
+  }
   if(k==='ai') return `${ev.t} \u00b7 analyst read flipped: ${ev.from} \u2192 ${ev.to}`;
   if(k==='trend'){ const w=trendWhenTxt(ev);
     return `${ev.t} \u00b7 ${ev.title}${ev.score!=null?' \u00b7 '+ev.score+'/4':''}${ev.text?' \u00b7 '+ev.text:''}${w?' \u00b7 \u23f1 '+w:''}`; }
@@ -2384,7 +2400,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   // in-tab rule fires (die with the tab, until their server-side replacement lands).
   const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec'],
     filing:['FILING',''], earnings:['EARN','sec'], ai:['AI',''], regime:['REGIME','sec'], coverage:['GAP','neg'],
-    trend:['TREND','pos'], ma200:['MA200','pos']};
+    trend:['TREND','pos'], ma200:['MA200','pos'], macro:['MACRO','sec']};
   const feedRows=A.feed.filter(e=>(e.seq||0)>(A.clearedSeq||0)).map(e=>({t:e.at||0, seq:e.seq||0,
     kind:(e.kind||'setup'), sub:e.sub||null, text:alertText(e), coin:e.coin||null}));
   const localRows=A.log.map(e=>({t:e.t, seq:0, kind:'rule', sub:null, text:e.text, coin:null}));
@@ -4433,7 +4449,8 @@ function buildPushSection(){
       ledger:'void taken, target reached, horizon resolved \u2014 only for claims you were already told about. Level hits are detected LIVE (mark + 5m bars, ~2s off the socket); the ledger\u2019s stop-aware record is still decided by the resolver against the hourly spine, so a fast wick can enter the record without having alerted',
       rule:'your own threshold rules, evaluated server-side against the snapshot the board renders',
       filing:'material SEC filings only \u2014 8-K, 10-K/Q, 13D, 6-K, 425. Ownership forms (3/4/5/144/13G) are deliberately excluded: routine insider flow, several a day per active name',
-      earnings:'a name you hold an open, announced claim on reports today or tomorrow. Scoped to open claims on purpose \u2014 the full roster in season is a calendar, not an alert',
+      earnings:'two legs. URGENT: a name you hold an open, announced claim on reports today or tomorrow. CALENDAR: one message at 17:00 ET listing tomorrow\u2019s scheduled prints and today\u2019s results across the whole roster \u2014 batched into a single daily message on purpose, because the per-name version in season is a dozen interruptions a day',
+      macro:'universe-wide scheduled binaries \u2014 FOMC decisions plus CPI / NFP / PPI / retail sales / GDP / PCE. Three messages per release: the ET day before, the last hour before the clock, and the actual once FRED publishes it. No ticker, because a CPI print moves the whole board. Prior only \u2014 this feed carries no street consensus, so nothing here is a beat or a miss',
       ai:'a cached analyst report changed its action stance on regeneration (wait \u2192 a side, or back)',
       ma200:'EMA200 events, close-confirmed on the rung\u2019s own candle (H4 + D1): reclaim, breakdown, and bullish/bearish retests \u2014 the study\u2019s buffered-cross and clear-air-retest definitions, full roster. Silent on names whose history can\u2019t seed a 200 yet',
       regime:'tape-wide positioning extremes \u2014 crowding and leverage stretch. Episode-gated: one alert per episode, re-armed only once the condition lapses',
