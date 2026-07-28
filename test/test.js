@@ -10247,7 +10247,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-30"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-31"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -10945,7 +10945,7 @@ test("now -29: the chip family is wired into both claim views, and the payload s
   assert.equal((app.match(/\$\{nowc\}/g) || []).length, 3, "now cell on all three row shapes (open, void, resolved)");
   assert.ok(/<th data-tip="live price against this claim[\s\S]{0,900}>now<\/th>/.test(app), "the now column header ships with its disclosure");
   // consumer 2: the signal card — both trigChip branches
-  assert.equal((app.match(/\+nowChip\(g\.coin,c\)/g) || []).length, 2, "the card's now chip rides BOTH trigChip branches (merged and diverged stamps)");
+  assert.equal((app.match(/\+nowChip\(g\.coin,c,\{scored:g\.scored\}\)/g) || []).length, 2, "the card's now chip rides BOTH trigChip branches (merged and diverged stamps), carrying the -31 resolution stub");
   // -29 bug fix: the fire mark is unconditional on the diverged branch
   assert.ok(app.includes("const atPx=c&&c.px!=null?` <span class=\"sec\">@ ${fmtPrice(c.px)}</span>`:(c?' <span class=\"na\">@ \\u2014</span>':'');"),
     "the claim's fire mark must ride the presence chip unconditionally — it used to vanish once the stamps diverged");
@@ -11039,4 +11039,87 @@ test("every function reading the `A.` alerts alias declares it (no borrowed call
   // The specific site, so a future refactor that drops the alias from buildPushSection is named.
   assert.ok(/function buildPushSection\(\)\{[\s\S]{0,600}?const P=pushState, A=state\.alerts;/.test(s),
     "buildPushSection must hold its own reference to the alerts store");
+});
+
+// ================================================================================================
+// post-resolution disclosure (build 2026.07.27-31): a signal whose episode already scored used to
+// render "now —" — technically honest, practically a hole, because the ledger HOLDS the answer.
+// The re-arm-parked signal now ships its resolution stub, the client says "scored +x.xR" instead
+// of nothing, and the ★ prime emphasis is withdrawn from what is, trade-wise, a corpse.
+// ================================================================================================
+
+test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime, and re-claims only after a genuine lapse", () => {
+  const { createPoller } = require("../src/poller");
+  const DAY_ = 86400e3, HOUR_ = 3600e3, now = Date.now();
+  // The resolved claim that parked the key, exactly as the resolver would have left it.
+  const fixture = { ts: now, rearm: ["xyz:NVDA|bigmove"], variants: null,
+    open: [],
+    closed: [
+      { key: "xyz:NVDA|bigmove", coin: "xyz:NVDA", ticker: "NVDA", ev: "bigmove", t0: now - 3 * DAY_,
+        tR: now - 6 * HOUR_, mark0: 100, dir: 1, sd0: 2, psd: "long", pn: 1, rn: 1,
+        status: "resolved", realized: 1.3, realizedS: 1.3, win: true, winS: true },
+      // an OLDER episode of the same key — resolution TIME must pick the newer one
+      { key: "xyz:NVDA|bigmove", coin: "xyz:NVDA", ticker: "NVDA", ev: "bigmove", t0: now - 30 * DAY_,
+        tR: now - 27 * DAY_, mark0: 80, dir: 1, sd0: 2, psd: "long", pn: 1, rn: 1,
+        status: "resolved", realized: -0.7, realizedS: -0.7, win: false, winS: false },
+    ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100 * Math.pow(1.0005, 61 - i), o: 100, h: 103, l: 98, v: 1e6 }); return d; };
+  const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) { const c = 100 + Math.sin(i / 9); h.push({ t: now - i * HOUR_, o: c, h: c + 0.7, l: c - 0.7, c, v: 1e5 }); } return h; };
+  const fire = () => { p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7,
+    dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
+    p.buildDailyNow(); p.buildSignalsNow(); };
+  fire();
+  const g1 = (p.getSignals().signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
+  assert.ok(g1, "the bigmove condition fires on the seeded tape");
+  assert.ok(!g1.claim0, "the re-arm gate refuses a serial re-claim, so no open claim ships");
+  assert.equal((p.getLedgerFor("xyz:NVDA").open || []).filter((e) => e.ev === "bigmove").length, 0,
+    "…and the ledger really holds no open bigmove claim");
+  assert.equal(g1.postres, true, "the signal is stamped post-resolution");
+  assert.ok(g1.scored, "the resolution stub ships instead of nothing");
+  assert.equal(g1.scored.realized, 1.3, "the NEWER episode's outcome — chosen by resolution time, never by array position");
+  assert.equal(g1.scored.unit, "R", "outcome carries its unit");
+  assert.equal(g1.scored.voided, false);
+  assert.equal(g1.scored.tR, now - 6 * HOUR_, "the resolution time ships for the 'ago' readout");
+  assert.ok(!g1.prime, "★ prime is withdrawn on a scored episode — the badge may not invite entry into a banked claim");
+  // the ETag signature must distinguish claim-backed from post-resolution at the same score
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes('(g.claim0 ? "c" + g.claim0.t : g.postres ? "p" : "")'),
+    "the signals ETag carries claim/postres state — a claim resolving into the stub busts the cache even at an unchanged score");
+  assert.ok(/if \(g\.prime\) \{ g\.prime = false; g\.score = Math\.max\(0, g\.score - 6\); \}/.test(pol),
+    "prime withdrawal also returns the +6 emphasis bonus it granted");
+  assert.ok(pol.includes("if (g.postres && g.scored) it.episodeScored ="),
+    "the AI report context states the episode outcome — the model must not read a claimless live condition as 'not yet claimed'");
+  // lapse: the condition clears for a build → the key re-arms
+  p.seedRowNow("xyz:NVDA", { px: 100, ticker: "NVDA", uni: "xyz", vol: 1e7,
+    dailyRaw: (() => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100, o: 100, h: 100.5, l: 99.5, v: 1e6 }); return d; })(),
+    hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 0 });
+  p.buildDailyNow(); p.buildSignalsNow();
+  assert.ok(!(p.getSignals().signals || []).some((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove"),
+    "flat tape: the condition genuinely lapses");
+  // refire: a genuinely new episode opens a FRESH claim and the stub is gone
+  fire();
+  const g2 = (p.getSignals().signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
+  assert.ok(g2, "the new episode fires");
+  assert.ok(g2.claim0, "…and opens a fresh claim — the gate parks episodes, it does not retire the event");
+  assert.ok(!g2.scored && !g2.postres, "the resolution stub belongs to the parked episode only, never to a live claim");
+});
+
+test("postres -31: the client renders the scored chip on the re-arm branch, dash only when there is truly nothing", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // the scored branch lives INSIDE nowChip's no-claim path, before the dash fallback
+  const i0 = app.indexOf("const sc=o.scored;");
+  const iDash = app.indexOf("no ledger claim behind this signal yet");
+  assert.ok(i0 > 0 && iDash > i0, "nowChip checks the scored stub before falling back to the bare dash");
+  assert.ok(app.includes("this episode already SCORED"), "the tooltip states what happened, not just that nothing is measurable");
+  assert.ok(app.includes("one episode, one claim"), "…and names the re-arm rule so the dash's replacement explains itself");
+  assert.ok(app.includes("pseudo-replication"), "…including WHY a serial re-claim is refused");
+  assert.ok(/scored \$\{val\}/.test(app), "the chip leads with the outcome");
+  // a voided settlement renders as void, never as a fabricated number
+  assert.ok(app.includes(`'<span class="na">void</span>'`), "a never-scored expiry is an honest void, not a number");
 });
