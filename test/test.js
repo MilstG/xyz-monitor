@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11836,4 +11836,107 @@ test("display-name client wiring: drawer head, board tooltip, report head, style
   assert.ok(pol.includes("nm: displayName(r.ticker, r.uni) || undefined,"), "server ships the label, client never derives it");
   assert.ok(pol.includes("mlane: macroLane(r.ticker, r.uni) || undefined,"), "server ships the lane, client never derives it");
   assert.ok(!/topicHit\(/.test(app), "the topic gate must NOT run client-side — one code path, server-owned");
+});
+
+// ===== industry grouping layer (build 2026.07.28-04) ===========================================
+// A curated industry table LAYERED on the GICS map: classify() now returns {assetClass, sector,
+// ind}, the board wire ships `ind` only when it differs, and the Sectors tab re-cuts by one
+// shared grouping key. These tests EXECUTE the real classifier (not string pins) and derive the
+// table's integrity from the table itself.
+
+test("-04 classify(): the industry layer rides on top of GICS, fallback ind===sector everywhere", () => {
+  const S = require("../src/sectors");
+  // The founding complaint: the memory complex, legible as its own group, GICS untouched.
+  for (const t of ["SNDK", "SKHX", "MU", "KIOXIA", "WDC", "STX", "SMSN"]) {
+    const c = S.classify(t);
+    assert.equal(c.sector, "Information Technology", t + " keeps its GICS sector");
+    assert.equal(c.ind, "Memory/Storage", t + " carries the Memory/Storage industry");
+  }
+  // Deliberate cross-GICS groups: the tape's grouping wins the industry, GICS keeps the sector.
+  assert.deepEqual([S.classify("MSTR").sector, S.classify("MSTR").ind], ["Information Technology", "Crypto-Fi"]);
+  assert.deepEqual([S.classify("COIN").sector, S.classify("COIN").ind], ["Financials", "Crypto-Fi"]);
+  assert.equal(S.classify("AAPL").ind, "Mega Platforms");
+  assert.equal(S.classify("AMZN").ind, "Mega Platforms", "Mega Platforms crosses into Cons Disc");
+  // Thematic price indices join the trade they price.
+  assert.equal(S.classify("DRAM").ind, "Memory/Storage");
+  assert.equal(S.classify("DRAM").assetClass, "Thematic", "…without losing their asset class");
+  // Pre-IPO synthetics carry industries too.
+  assert.equal(S.classify("OPENAI").ind, "AI Software");
+  assert.equal(S.classify("SPCX").ind, "Aero/Defense");
+  // Fallbacks: an unsplit equity, an index, FX, a commodity, the unknown — ind ALWAYS === sector.
+  for (const t of ["CAT", "SPX", "EURUSD", "XAU", "TOTALLYUNKNOWN"]) {
+    const c = S.classify(t);
+    assert.equal(c.ind, c.sector, t + ": no curated industry means ind falls back to sector, never undefined");
+  }
+  // Crypto main dex: its sub-sectors ARE the fine grouping; ind mirrors them exactly.
+  for (const t of ["BTC", "PEPE", "NOSUCHCOIN"]) {
+    const c = S.classify(t, "main");
+    assert.equal(c.ind, c.sector, "main-dex ind mirrors the crypto sector for " + t);
+  }
+  // The one GICS correction in this build: Zoom moved to Info Tech (its post-2023 GICS home).
+  assert.equal(S.classify("ZM").sector, "Information Technology", "ZM reclassified out of Comm Services");
+  assert.equal(S.classify("ZM").ind, "Software");
+});
+
+test("-04 IND table integrity: derived from the table, not pinned to it", () => {
+  const S = require("../src/sectors");
+  const gics = new Set(Object.keys(S.SECTOR_TICKERS));
+  const seen = new Map();
+  for (const [ind, arr] of Object.entries(S.IND_TICKERS)) {
+    // Group names must never collide with a GICS sector name or the sentinel: the client
+    // detects fallback groups by name, and a collision would silently merge curated members
+    // with fallback members under one label.
+    assert.ok(!gics.has(ind) && ind !== "Unclassified", "industry name collides with a sector name: " + ind);
+    for (const t of arr) {
+      // One industry per ticker — a duplicate would make classification order-dependent.
+      assert.ok(!seen.has(t), t + " appears in both '" + seen.get(t) + "' and '" + ind + "'");
+      seen.set(t, ind);
+      // Every entry must resolve through the real classifier to a known instrument that
+      // actually carries this industry — no orphan rows pointing at nothing.
+      const c = S.classify(t);
+      assert.notEqual(c.assetClass, "Unclassified", "IND entry '" + t + "' classifies as Unclassified — orphan row");
+      assert.equal(c.ind, ind, t + " must resolve to its own IND entry through classify()");
+    }
+  }
+  // The founding split must be real: Info Tech's curated industries cover the mega-bucket's
+  // heaviest names, so the sector lens is no longer the only lens.
+  for (const t of ["NVDA", "MU", "MSFT", "PANW", "AMAT"]) {
+    const c = S.classify(t);
+    assert.notEqual(c.ind, c.sector, t + " must carry a curated industry distinct from Info Tech");
+  }
+});
+
+test("-04 wiring manifest: server ships ind thin, client groups on ONE key, control persists", () => {
+  const fs = require("fs"), path = require("path");
+  const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Wire: shipped only when it differs — absence IS the fallback, by contract.
+  assert.ok(pl.includes("ind: cl.ind !== cl.sector ? cl.ind : undefined,"), "board wire ships ind thin");
+  // One grouping key for the whole tab: board grouping and cohesion/corr partition must both
+  // route through sectKeyOf, or the matrix could disagree with the board (one-code-path).
+  assert.ok(app.includes("function sectKeyOf(r){ return (sectGrpActive() ? (r.ind||r.sector) : r.sector) || 'Unclassified'; }"), "grouping key helper");
+  assert.ok(app.includes("for(const r of activeRows()){ const g=sectKeyOf(r);"), "computeSectors groups on the shared key");
+  assert.ok(app.includes("withDaily.forEach((r,i)=>{ const g=sectKeyOf(r);"), "cohesion partitions on the SAME key");
+  assert.equal((app.match(/const g=sectKeyOf\(r\)/g) || []).length, 2, "exactly the two grouping sites call the key — no third path, no bypass");
+  // The client must never re-derive an industry from a ticker: no industry TABLE client-side.
+  // (The help text may NAME groups as documentation; what's forbidden is a ticker→industry map.)
+  assert.ok(!/IND_TICKERS/.test(app) && !/['"]SNDK['"]\s*:/.test(app) && !/['"]SKHX['"]\s*:/.test(app),
+    "client consumes r.ind from the wire, never derives it");
+  // Crypto scope: the toggle is inert AND hidden — the key and the control can never disagree.
+  assert.ok(app.includes("state.sect.grp==='ind' && state.scope!=='crypto'"), "industry grouping is equities-only");
+  assert.ok(app.includes("const gseg=el('sectgrp'); if(gseg) gseg.hidden=cr;"), "the seg hides in crypto scope");
+  assert.ok(css.includes(".seg[hidden]{display:none}"), "hidden seg guarded against the display:inline-flex bug class");
+  // Honesty chips + provenance column exist, and the pref round-trips through the enum guard.
+  assert.ok(app.includes('«thin» rows carry noisier stats'), "thin-sample disclosure in the board caption");
+  assert.ok(app.includes("no industry split defined — this group is the GICS sector unchanged"), "visible = sector fallback");
+  assert.ok(app.includes("title=\"parent GICS sector(s) of this group's members\""), "GICS provenance column");
+  assert.ok(app.includes("sectGrp:state.sect.grp,"), "pref saved");
+  assert.ok(app.includes("if(p.sectGrp==='ind'||p.sectGrp==='sector') state.sect.grp=p.sectGrp;"), "pref restored through an enum guard");
+  assert.ok(css.includes(".sthin{"), "chip style exists");
+  for (const pin of ['id="sectgrp"', 'data-grp="sector"', 'data-grp="ind"']) assert.ok(ht.includes(pin), "index pin missing: " + pin);
+  // The founding fix stays fixed: ZM must not drift back into the Comm Services roster.
+  const sj = fs.readFileSync(path.join(__dirname, "..", "src", "sectors.js"), "utf8");
+  assert.ok(!/"SPOT","ROKU","ZM"/.test(sj), "ZM must stay out of Communication Services");
 });
