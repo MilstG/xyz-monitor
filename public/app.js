@@ -2052,6 +2052,8 @@ function alertText(ev){
   if(k==='ai') return `${ev.t} \u00b7 analyst read flipped: ${ev.from} \u2192 ${ev.to}`;
   if(k==='trend'){ const w=trendWhenTxt(ev);
     return `${ev.t} \u00b7 ${ev.title}${ev.score!=null?' \u00b7 '+ev.score+'/4':''}${ev.text?' \u00b7 '+ev.text:''}${w?' \u00b7 \u23f1 '+w:''}`; }
+  if(k==='ma200'){ const w=trendWhenTxt(ev);
+    return `${ev.t} ${String(ev.side||'').toUpperCase()} \u00b7 ${ev.title}${ev.held!=null?' \u00b7 held '+ev.held+' bars':''}${ev.text?' \u00b7 '+ev.text:''}${w?' \u00b7 \u23f1 '+w:''}`; }
   if(k==='regime') return `${ev.scope==='main'?'crypto':'stocks'} positioning \u00b7 ${ev.title} \u00b7 ${ev.text||''}`;
   if(k==='coverage') return `\u26a0 ${ev.t} \u00b7 data gap \u00b7 ${ev.text||''}`;
   if(k==='rule') return `${ev.t} \u00b7 ${ev.rule||(ev.label+' '+ev.op+' '+ev.value)} \u00b7 now ${ev.now||'\u2014'}${ev.note?' \u00b7 '+ev.note:''}`;
@@ -2088,7 +2090,7 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
   // in-tab rule fires (die with the tab, until their server-side replacement lands).
   const ATAG={setup:['SETUP','pos'], ledger:['LEDGER',''], ops:['OPS','sec'], rule:['RULE','sec'],
     filing:['FILING',''], earnings:['EARN','sec'], ai:['AI',''], regime:['REGIME','sec'], coverage:['GAP','neg'],
-    trend:['TREND','pos']};
+    trend:['TREND','pos'], ma200:['MA200','pos']};
   const feedRows=A.feed.filter(e=>(e.seq||0)>(A.clearedSeq||0)).map(e=>({t:e.at||0, seq:e.seq||0,
     kind:(e.kind||'setup'), sub:e.sub||null, text:alertText(e), coin:e.coin||null}));
   const localRows=A.log.map(e=>({t:e.t, seq:0, kind:'rule', sub:null, text:e.text, coin:null}));
@@ -4135,6 +4137,7 @@ function buildPushSection(){
       filing:'material SEC filings only \u2014 8-K, 10-K/Q, 13D, 6-K, 425. Ownership forms (3/4/5/144/13G) are deliberately excluded: routine insider flow, several a day per active name',
       earnings:'a name you hold an open, announced claim on reports today or tomorrow. Scoped to open claims on purpose \u2014 the full roster in season is a calendar, not an alert',
       ai:'a cached analyst report changed its action stance on regeneration (wait \u2192 a side, or back)',
+      ma200:'EMA200 events, close-confirmed on the rung\u2019s own candle (H4 + D1): reclaim, breakdown, and bullish/bearish retests \u2014 the study\u2019s buffered-cross and clear-air-retest definitions, full roster. Silent on names whose history can\u2019t seed a 200 yet',
       regime:'tape-wide positioning extremes \u2014 crowding and leverage stretch. Episode-gated: one alert per episode, re-armed only once the condition lapses',
       coverage:'a name you hold an open, announced claim on is running on a stale spine \u2014 its live numbers are being computed from old data',
       ops:'server health: poller stalls and recoveries. Deploy notices are recorded in the log but never pushed'};
