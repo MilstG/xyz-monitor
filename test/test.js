@@ -3003,7 +3003,7 @@ test("stackedRun: exact per-bar trend age — fresh stacks, breaks, caps, live-m
   assert.equal(stackedRun(mk(rise).slice(0, 20), null, "long"), null, "insufficient history is null");
 });
 
-// ===== AI analyst report ========================================================================
+// ===== AI analyst report =================================================================
 // The engine has three separable responsibilities, each tested without any network: (1) the
 // context compiler builds an honest, universe-tagged payload from data in memory; (2) the
 // validator accepts only schema-conforming model output, pins the void to frozen claim geometry,
@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11991,4 +11991,257 @@ test("-05 regression: applySnapshot carries `ind` into state.rows and the indust
     global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
   }
+});
+// ===== custom baskets + ratio candles (build 2026.07.28-06) ====================================
+// Synthetic EW instruments for the VISUAL layer. These tests execute the real math (never
+// eyeball-pin numbers), duel the client mirror against the server implementation on one ragged
+// fixture, execute the ratio SVG builder against a fixture payload (the -84 lesson: existence
+// pins don't prove wiring), and pin the tier boundary: baskets/ratios must never reach the
+// alert emitters, the signal fire sites, or the push-class registry.
+
+test("-06 basketCloses: EW log-return chaining, coverage floor as GAPS (never renormalized), gap-spanning resume", () => {
+  const C = require("../src/compute");
+  // EW math: slot k multiplies by exp(mean member log return)
+  const b = C.basketCloses([[100, 110, 121], [50, 50, 55]], 0.6);
+  assert.ok(Math.abs(b.closes[0] - 100) < 1e-9, "seeds at 100");
+  const want1 = 100 * Math.exp((Math.log(1.1) + 0) / 2);
+  assert.ok(Math.abs(b.closes[1] - want1) < 1e-9, "EW mean of member log returns, not price averaging");
+  assert.ok(Math.abs(b.closes[2] - want1 * Math.exp((Math.log(121 / 110) + Math.log(55 / 50)) / 2)) < 1e-9, "chains");
+  assert.deepEqual(b.cov, [2, 2, 2]);
+  // Floor: a slot with 1/3 contributing is a GAP (null) — the index does NOT renormalize over
+  // whoever showed up — and the chain resumes measuring each member from its close at the last
+  // VALID slot, spanning the gap honestly.
+  const g = C.basketCloses([[100, 110, null, 121], [100, null, null, 110], [100, null, null, 99]], 0.6);
+  assert.equal(g.closes[1], null, "1/3 < 60% floor -> gap");
+  assert.equal(g.closes[2], null, "0/3 -> gap");
+  const want3 = 100 * Math.exp((Math.log(1.21) + Math.log(1.10) + Math.log(0.99)) / 3);
+  assert.ok(Math.abs(g.closes[3] - want3) < 1e-9, "post-gap slot measures every member from the LAST VALID slot");
+  // No valid seed at all -> all null, never a fabricated start
+  const z = C.basketCloses([[null, null], [null, 5]], 0.6);
+  assert.deepEqual(z.closes, [null, null]);
+});
+
+test("-06 validateBasket: benchmark aliases, listed names and caps are refused with reasons", () => {
+  const C = require("../src/compute");
+  const ctx = { tickers: new Set(["AAPL", "MSFT", "NVDA"]), reserved: new Set(["SPX", "BTC"]) };
+  assert.equal(C.validateBasket("SPX", ["AAPL", "MSFT"], "stocks", ctx).ok, false, "benchmark alias refused — the SPX-memecoin lesson");
+  assert.equal(C.validateBasket("AAPL", ["MSFT", "NVDA"], "stocks", ctx).ok, false, "listed ticker refused as a name");
+  assert.equal(C.validateBasket("MAG2", ["AAPL"], "stocks", ctx).ok, false, "member floor (2)");
+  assert.equal(C.validateBasket("M", ["AAPL", "MSFT"], "stocks", ctx).ok, false, "name too short");
+  assert.equal(C.validateBasket("MAG2", ["AAPL", "TSLA"], "stocks", ctx).ok, false, "unknown member refused, not dropped");
+  const ok = C.validateBasket("mag2", ["aapl", "msft", "AAPL"], "stocks", ctx);
+  assert.ok(ok.ok, "happy path");
+  assert.equal(ok.name, "MAG2", "uppercased");
+  assert.deepEqual(ok.members, ["AAPL", "MSFT"], "deduped + uppercased");
+  assert.equal(C.BASKET_FLOOR, 0.6, "floor is a named constant, not a magic number");
+  assert.equal(C.BASKET_MAX_MEMBERS, 20);
+  assert.equal(C.BASKET_MAX_CUSTOM, 12);
+});
+
+test("-06 ratioCloses + emaSeries: null propagation, SMA seed, one EMA construction (tail === emaLast), no half-converged prefix", () => {
+  const C = require("../src/compute");
+  assert.deepEqual(C.ratioCloses([10, null, 30], [5, 5, 0]), [2, null, null], "missing leg OR zero denominator -> gap");
+  const closes = Array.from({ length: 40 }, (_, i) => 100 + i);
+  const es = C.emaSeries(closes, 21);
+  assert.equal(es[19], null, "null before the seed index");
+  assert.ok(es[20] != null, "SMA seed lands at span-1");
+  assert.ok(Math.abs(es[20] - closes.slice(0, 21).reduce((s, x) => s + x, 0) / 21) < 1e-9, "seed IS the SMA");
+  assert.ok(Math.abs(es[39] - C.emaLast(closes, 21)) < 1e-9, "series tail === emaLast — one construction, two callers");
+  assert.equal(C.emaSeries(closes.slice(0, 20), 21), null, "under span+5 the WHOLE series is null — the line exists honestly or not at all");
+  assert.equal(C.emaSeries(Array.from({ length: 204 }, () => 1), 200), null, "204 bars < 205 floor for the 200");
+  assert.ok(C.emaSeries(Array.from({ length: 205 }, () => 1), 200) != null, "205 bars clears it");
+});
+
+test("-06 client/server duel: basketClosesClient reproduces compute.basketCloses bit-identically on a ragged fixture", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i > -1, name + " present in app.js");
+    let d = 0, j = app.indexOf("{", i);
+    for (let k = j; k < app.length; k++) { if (app[k] === "{") d++; else if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); } }
+    throw new Error("unbalanced " + name);
+  };
+  const fn = new Function(grab("basketClosesClient") + "\nreturn basketClosesClient;")();
+  const C = require("../src/compute");
+  const fix = [
+    [100, 101, null, 103, 104, null, 107],
+    [200, 198, 197, null, 205, null, 210],
+    [50, 51, 52, 53, null, null, 55],
+    [10, null, 10, 11, 12, null, 13],
+  ];
+  for (const floor of [0.6, 0.5, 0.9]) {
+    assert.deepEqual(fn(fix, floor), C.basketCloses(fix, floor), "one math, two runtimes — floor " + floor);
+  }
+});
+
+test("-06 ratio candles behavioral: getRatio buckets honest closes-only OHLC, EMA200 over the full series, wire trim after", () => {
+  const C = require("../src/compute");
+  const HOUR = 3600e3;
+  // Reproduce the getRatio pipeline's math on a fixture: hourly ratio closes -> packed
+  // closes-only rows -> bucketCandles. Every O/H/L/C must be a real 1H-sampled ratio value.
+  const t0 = Math.floor(Date.now() / (4 * HOUR)) * 4 * HOUR;
+  const packed = [];
+  const vals = [2.0, 2.1, 1.9, 2.2, 2.05, 2.3, 2.25, 2.4];
+  for (let i = 0; i < vals.length; i++) packed.push([t0 + i * HOUR, null, null, null, vals[i], 0]);
+  const c4 = C.bucketCandles(packed, 4, HOUR);
+  assert.equal(c4.length, 2);
+  assert.deepEqual([c4[0].o, c4[0].h, c4[0].l, c4[0].c], [2.0, 2.2, 1.9, 2.2], "bucket OHLC = first/max/min/last of the SAMPLED ratio — never numHigh÷denLow");
+  assert.deepEqual([c4[1].o, c4[1].h, c4[1].l, c4[1].c], [2.05, 2.4, 2.05, 2.4]);
+  // EMA-over-full-then-trim: values at trimmed indices must equal the full-series EMA, i.e. the
+  // window can never re-seed the line.
+  const closes = Array.from({ length: 500 }, (_, i) => 100 + Math.sin(i / 9) * 5 + i * 0.01);
+  const full = C.emaSeries(closes, 200);
+  const cut = 500 - 400;
+  const shipped = full.slice(cut);
+  assert.equal(shipped.length, 400);
+  assert.ok(Math.abs(shipped[399] - C.emaLast(closes, 200)) < 1e-9, "trimmed tail still equals the full-history EMA");
+  // Seed rides the FULL series (index 199): after the 100-bar trim it lands at shipped index 99.
+  // The nulls before it are the honest seed window — the trim moves values, it never re-seeds.
+  assert.equal(shipped[98], null, "pre-seed bars stay null through the trim");
+  assert.ok(shipped[99] != null, "seed at full-series index 199, exactly where the SMA lands");
+});
+
+test("-06 tier boundary: baskets/ratio never reach the alert emitters, the fire sites, or the push classes", () => {
+  const fs = require("fs"), path = require("path");
+  const pj = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const grab = (src, sig) => {
+    const i = src.indexOf(sig);
+    assert.ok(i > -1, sig + " present");
+    let d = 0, j = src.indexOf("{", i);
+    for (let k = j; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) return src.slice(i, k + 1); } }
+    throw new Error("unbalanced " + sig);
+  };
+  // The entire ratio assembly must be inert: no push, no alert state, no claim machinery.
+  const gr = grab(pj, "function getRatio(");
+  const gb = grab(pj, "function getBasketsPayload(");
+  const gc = grab(pj, "function createBasket(");
+  for (const bad of ["pushBatch", "enqueueAlert", "emaAlertState", "recordClaim", "openClaim", "pushDrain", "maState"]) {
+    assert.ok(!gr.includes(bad), "getRatio touches " + bad + " — the tier boundary is breached");
+    assert.ok(!gb.includes(bad), "getBasketsPayload touches " + bad);
+    assert.ok(!gc.includes(bad), "createBasket touches " + bad);
+  }
+  // The push-class registry gains no basket/ratio class — there is nothing to subscribe to.
+  const C = require("../src/compute");
+  assert.ok(Array.isArray(C.PUSH_CLASSES) && !C.PUSH_CLASSES.some((c) => /basket|ratio/i.test(c)), "no basket/ratio push class exists");
+  // Manifest entry pinned: one key, admin default, BOTH routes gated by it.
+  const f = C.FEATURES.find((x) => x.key === "baskets");
+  assert.ok(f, "baskets manifest entry exists");
+  assert.equal(f.def, "admin", "admin-only while it soaks");
+  assert.deepEqual(f.routes, ["/api/baskets", "/api/ratio"], "both routes gated by the one key");
+  // Ratio constants: no shorter EMA can ever wear the 200 name.
+  assert.ok(pj.includes("RATIO_EMA_SPAN = 200"), "EMA span pinned at 200");
+  assert.ok(pj.includes("RATIO_EMA_MIN = RATIO_EMA_SPAN + 5"), "eligibility floor derives from the span, mirroring emaSeries");
+  assert.ok(gr.includes('"insufficient_bars"'), "machine-readable reason when the EMA cannot exist");
+});
+
+test("-06 ratio SVG behavioral: real candles render, the EMA path appears only when the series exists, rebase is a scalar transform", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i > -1, name + " present");
+    let d = 0, j = app.indexOf("{", i);
+    for (let k = j; k < app.length; k++) { if (app[k] === "{") d++; else if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); } }
+    throw new Error("unbalanced " + name);
+  };
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const ratioSvg = new Function("esc", grab("ratioSvg") + "\nreturn ratioSvg;")(esc);
+  const HOUR = 3600e3, t0 = 1700000000000;
+  const candles = Array.from({ length: 12 }, (_, i) => { const o = 2 + i * 0.01, c = o + (i % 2 ? 0.02 : -0.015); return { t: t0 + i * 4 * HOUR, o, h: Math.max(o, c) + 0.01, l: Math.min(o, c) - 0.01, c }; });
+  const ema = candles.map((k, i) => (i < 3 ? null : k.c - 0.005));
+  const d = { candles, ema200: ema };
+  const on = ratioSvg(d, { scale: "reb", ema: true });
+  assert.equal((on.svg.match(/class="rt-k"/g) || []).length, candles.length, "one candle body per bar — real markup, not an existence pin");
+  assert.ok(on.svg.includes('class="rt-ema"'), "EMA path present when the series exists and the toggle is on");
+  assert.ok(on.svg.includes('id="rt-cx"') && on.svg.includes('id="rt-hl"'), "crosshair + candle-highlight nodes exist for the hover wiring (standing rule: every chart hovers)");
+  assert.equal(on.pts.length, candles.length, "one hover point per candle");
+  const off = ratioSvg({ candles, ema200: null }, { scale: "reb", ema: true });
+  assert.ok(!off.svg.includes('class="rt-ema"'), "no EMA series -> no path, never a fabricated line");
+  // Rebase = scalar multiply: the first candle's open maps to 100 exactly.
+  const firstY = on.pts[0];
+  const raw = ratioSvg(d, { scale: "raw", ema: false });
+  assert.ok(raw.pts.length === candles.length && firstY, "raw mode renders the same bars");
+});
+
+test("-06 wiring pins: panels + guards + chip anatomy + verbs + honest copy exist end to end", () => {
+  const fs = require("fs"), path = require("path");
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(ht.includes('<div id="ratiopanel" class="corrpanel" hidden></div>'), "ratio panel div, born hidden");
+  assert.ok(ht.includes('<div id="basketpanel" class="corrpanel" hidden></div>'), "basket manager div, born hidden");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["function renderBasketPanel(", "function openRatio(", "function renderRatio(", "function ratioSvg(",
+    "function termBasket(", "function termRatio(", "function loadBaskets(", "function basketTip(", "function compgBasketBars(",
+    "if(h==='basket') return termBasket", "if(h==='ratio') return termRatio",
+    "renders as a GAP, never a renormalized guess",
+    "No shorter EMA ever wears the 200 name",
+    "intrabar extremes finer than 1H not captured",
+    "never enter signal math"]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
+  assert.ok(app.includes("\\u2b12"), "the \u2b12 basket glyph is part of the chip anatomy");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".cg-chip.bk{border-style:dashed}"), "basket chips are dashed — the anatomy IS the disclosure");
+  assert.ok(css.includes(".bk-new[hidden]{display:none}") && css.includes(".rt-ctrls[hidden]{display:none}"), "flex rules carry their [hidden] guards (the display-beats-hidden bug class)");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes('"/api/baskets"') && srv.includes('"/api/ratio"'), "both routes registered");
+  assert.ok(srv.includes('poller.getBasketsStamp()'), "ETag keys fold the registry stamp");
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(st.includes('baskets.json') && st.includes("saveBaskets") && st.includes("loadBaskets"), "registry persists on the volume, tmp+rename family");
+});
+
+test("-06 end to end: create/list/drop against a live roster, ratio candles + EMA eligibility + scope walls, registry persists", () => {
+  const { createPoller } = require("../src/poller");
+  let saved = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveBaskets: (d) => { saved = d; return true; }, loadBaskets: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const HOUR = 3600e3, DAY = 86400e3;
+  const now = Math.floor(Date.now() / HOUR) * HOUR;
+  // 4 equities with 30 daily closes + 60 hourly closes; one crypto main for the scope wall.
+  const seedEq = (tk, base) => {
+    const dailyRaw = Array.from({ length: 30 }, (_, i) => ({ t: now - (29 - i) * DAY, c: base * (1 + i * 0.002) }));
+    const hourlyRaw = Array.from({ length: 60 }, (_, i) => ({ t: now - (59 - i) * HOUR, c: base * (1 + i * 0.001) }));
+    p.seedRowNow("xyz:" + tk, { px: base, dailyRaw, hourlyRaw });
+  };
+  ["AAA", "BBB", "CCC", "DDD"].forEach((t, i) => seedEq(t, 100 * (i + 1)));
+  p.seedRowNow("SOL", { px: 150, hourlyRaw: Array.from({ length: 60 }, (_, i) => ({ t: now - (59 - i) * HOUR, c: 150 + i })) });
+  // create: happy path infers the stocks scope and persists
+  const c = p.createBasket("mine", ["aaa", "bbb", "ccc"]);
+  assert.ok(c.ok, "create: " + (c.error || "ok"));
+  assert.equal(c.basket.scope, "stocks", "scope inferred from members");
+  assert.ok(saved && saved.list.length === 1 && saved.list[0].name === "MINE", "registry persisted through the store");
+  // refusals, each with a stated reason
+  assert.ok(!p.createBasket("SPX", ["AAA", "BBB"]).ok, "benchmark alias refused");
+  assert.ok(!p.createBasket("AAA", ["BBB", "CCC"]).ok, "listed name refused");
+  assert.ok(!p.createBasket("MIXED", ["AAA", "SOL"]).ok, "cross-universe membership refused — the wall holds at create");
+  assert.ok(!p.createBasket("MINE2", ["AAA", "NOPE"]).ok, "unknown member refused, not silently dropped");
+  // payload: the basket rides with a server-synthesized daily series
+  const pay = p.getBasketsPayload();
+  const mine = pay.baskets.find((b) => b.name === "MINE");
+  assert.ok(mine && !mine.builtin && mine.daily.length >= 25, "daily synthesis shipped");
+  assert.ok(Math.abs(mine.daily[0][1] - 100) < 1e-6, "seeds at 100");
+  assert.equal(mine.cov.n, 3, "full coverage on the latest valid day");
+  // ratio: ticker ÷ ticker on a 60-hour spine — candles exist, EMA200 honestly null with the reason
+  const r1 = p.getRatio("AAA", "BBB", "4h");
+  assert.ok(r1.ok, "ratio ok: " + (r1.error || ""));
+  assert.ok(r1.candles.length >= 14, "4h candles from a 60h spine");
+  assert.equal(r1.ema200, null, "no EMA200 on a short spine");
+  assert.equal(r1.emaReason, "insufficient_bars", "machine-readable reason");
+  assert.equal(r1.emaMin, 205);
+  // every candle is a real sampled ratio: o/h/l/c all within the hour-sampled ratio envelope
+  for (const k of r1.candles) assert.ok(k.h >= Math.max(k.o, k.c) && k.l <= Math.min(k.o, k.c), "OHLC coherent");
+  // basket leg ÷ ticker works and carries coverage disclosure
+  const r2 = p.getRatio("MINE", "DDD", "1h");
+  assert.ok(r2.ok && r2.numBasket && !r2.denBasket, "basket numerator resolves");
+  assert.deepEqual(r2.numCov, { n: 3, N: 3 }, "leg coverage shipped for the legend");
+  // walls at read time too
+  assert.ok(!p.getRatio("AAA", "SOL", "4h").ok, "cross-universe ratio refused");
+  assert.ok(!p.getRatio("AAA", "AAA", "4h").ok, "self-ratio refused");
+  assert.ok(!p.getRatio("AAA", "BBB", "7h").ok, "unknown tf refused");
+  // drop: custom goes, built-ins (none seeded here) can't, and the stamp moves for the ETag
+  const st0 = p.getBasketsStamp();
+  assert.ok(p.dropBasket("MINE").ok, "drop custom");
+  assert.ok(!p.dropBasket("MINE").ok, "double-drop refused");
+  assert.notEqual(p.getBasketsStamp(), st0, "registry stamp moved — cached /api/baskets keys die with it");
+  assert.equal(saved.list.length, 0, "persisted registry reflects the drop");
 });
