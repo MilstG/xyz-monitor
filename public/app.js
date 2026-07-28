@@ -178,6 +178,65 @@ function momColor(m){ if(m==null||!isFinite(m))return 'var(--faint)';
   const t=clamp(Math.abs(m)/100,0,1), mut=[126,135,148], tg=m>=0?[70,185,126]:[229,96,77];
   return `rgb(${lerp(mut[0],tg[0],t)},${lerp(mut[1],tg[1],t)},${lerp(mut[2],tg[2],t)})`; }
 
+// ===== live "now" against an open claim (build 2026.07.27-29) =====
+// Three numbers a claim view has to state and until -29 did not: the price it fired at, the
+// price right now, and which way that is for THIS claim. The live mark is read from the
+// client's own streaming snapshot (state.rows) — never shipped in the cached ledger payload,
+// so the ETag economy and the 15s tick are untouched, and the number cannot disagree with the
+// screener because it IS the screener's number. Delta is signed WITH the claim: a short whose
+// price is falling reads GREEN, because the chip answers "is this claim currently winning",
+// not "is the chart up". A missing mark, a missing fire price, or a settled claim renders a
+// dash with a hover saying which — never a stale price, never a fabricated one.
+function liveMark(coin){ const r=coin?state.rows.get(coin):null;
+  return r&&!r.delisted&&r.px!=null&&isFinite(r.px)?+r.px:null; }
+// Signed % move from the claim's own mark, in the claim's own direction.
+function claimDelta(side,mark,px){
+  if(mark==null||!isFinite(mark)||mark<=0||px==null||!isFinite(px)) return null;
+  return (side==='short'?-1:1)*(px/mark-1)*100;
+}
+// Micro bracket bar: how much of the FROZEN bracket price has travelled, and toward which
+// level. Only for claims that froze both — a convention with no target has nothing to measure
+// travel against, and inventing a scale there would be exactly the false precision this app
+// refuses. Returns null when the geometry isn't there.
+function brkBar(side,mark,px,stp,tgt){
+  if(mark==null||px==null||stp==null||tgt==null) return null;
+  if(!(isFinite(mark)&&isFinite(px)&&isFinite(stp)&&isFinite(tgt))) return null;
+  const toT=tgt-mark, toS=stp-mark;
+  if(!(toT!==0&&toS!==0)) return null;
+  const mv=px-mark;
+  // fraction of the way toward whichever level the move points at, clamped at the level itself
+  const frac=clamp(Math.abs(mv)/Math.abs((mv>0)===(toT>0)?toT:toS),0,1);
+  const towardT=(mv>0)===(toT>0);
+  const w=(frac*50).toFixed(1);
+  return {frac, towardT,
+    html:`<span class="nowbrk"><i class="${towardT?'tgt':'stp'}" style="${towardT?'left:50%':'right:50%'};width:${w}%"></i><span class="z"></span></span>`};
+}
+// The shared chip. `c` is a claim-shaped object: {side, px|mark0, stp|stop, tgt, status}.
+// Settled claims deliberately get a dash: their trade is over and the outcome column owns the
+// answer — a live price on a claim that resolved three weeks ago is noise wearing information.
+function nowChip(coin,c,opts){
+  const o=opts||{}, wrap=o.wrap!==false;
+  const dash=(why)=>wrap?`<span class="nowchip" data-tip="${esc(why)}">now <span class="na">\u2014</span></span>`
+    :`<span class="na" data-tip="${esc(why)}">\u2014</span>`;
+  if(!c) return dash('no ledger claim behind this signal yet \u2014 nothing to measure a live price against');
+  if(c.status&&c.status!=='open')
+    return dash('this claim is settled \u2014 its trade is over and the outcome column states what happened. A live price here would be noise, not information.');
+  const px=liveMark(coin);
+  if(px==null) return dash('no live mark for this name in the loaded book \u2014 the other universe\u2019s snapshot isn\u2019t in the client, or the market is delisted. A dash rather than a stale price: the last value seen could be minutes old with no way to tell from here.');
+  const side=c.side||'long', mark=c.px!=null?+c.px:(c.mark0!=null?+c.mark0:null);
+  const stp=c.stp!=null?+c.stp:(c.stop!=null?+c.stop:null), tgt=c.tgt!=null?+c.tgt:null;
+  const d=claimDelta(side,mark,px);
+  const bb=brkBar(side,mark,px,stp,tgt);
+  const dTxt=d==null?'':` <span class="${d>0?'pos':d<0?'neg':'sec'}">${d>0?'+':''}${d.toFixed(1)}%</span>`;
+  const tip=`LIVE \u2014 ${fmtPrice(px)} now, read from the same streaming mark the board and screener use (never shipped in the cached ledger payload, so nothing here can disagree with the board).`
+    +(d==null?' The claim carries no fire mark, so no delta can be stated.'
+      :` \u0394 is signed WITH the claim: this is a ${side.toUpperCase()}, so ${side==='short'?'price falling':'price rising'} reads GREEN \u2014 the chip answers \u201cis this claim currently winning\u201d, not \u201cis the chart up\u201d. From ${fmtPrice(mark)} at fire: ${d>0?'+':''}${d.toFixed(2)}%.`)
+    +(bb?` Bracket: ${Math.round(bb.frac*100)}% of the way to the frozen ${bb.towardT?'target':'void'} (${fmtPrice(bb.towardT?tgt:stp)}); the frozen ${bb.towardT?'void':'target'} (${fmtPrice(bb.towardT?stp:tgt)}) is untouched. The claim resolves at the FIRST touch of either level, or at its horizon.`
+      :(stp==null&&tgt==null?' This convention froze no levels, so there is nothing to measure travel against \u2014 \u0394 only.':''));
+  const inner=`now <b>${fmtPrice(px)}</b>${dTxt}${bb?bb.html:''}`;
+  return wrap?`<span class="nowchip" data-tip="${esc(tip)}">${inner}</span>`:`<span data-tip="${esc(tip)}">${inner}</span>`;
+}
+
 // ===== row helpers =====
 function recomputeChanges(r){ const cur=r.px, ref=r.ref; if(cur==null||!ref)return;
   r.h1=ref.p1h?(cur-ref.p1h)/ref.p1h*100:null; r.h4=ref.p4h?(cur-ref.p4h)/ref.p4h*100:null;
@@ -1744,14 +1803,17 @@ function sigHistRow(e,withTicker){
   const tip=`fired ${shDate(e.t0)} at ${e.mark0!=null?fmtPrice(e.mark0):'\u2014'} \u00b7 score ${e.score0!=null?e.score0:'\u2014'} at fire`
     +(e.claimMed!=null?` \u00b7 claimed med ${(e.claimMed>=0?'+':'')+e.claimMed.toFixed(2)}${e.unit}`:'')
     +(e.status==='resolved'?' \u00b7 outcome is signed with the claim: positive = it went the way the signal implied':'');
+  // now: the live mark against THIS claim, client-computed (see nowChip). Open claims only — a
+  // settled claim's trade is over and the outcome column already owns the answer.
+  const nowc = `<td>${nowChip(e.coin||e.tk, { side:e.side, mark0:e.mark0, stp:e.stp, tgt:e.tgt, status:e.status }, { wrap:false })}</td>`;
   if(e.status==='open')
-    return `<tr data-tip="${esc(tip+` \u00b7 resolves in ${shLeft(e.resolveAt)}`)}">${tcell}<td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td><td class="sec">in ${shLeft(e.resolveAt)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="sec">open</td><td></td></tr>`;
+    return `<tr data-tip="${esc(tip+` \u00b7 resolves in ${shLeft(e.resolveAt)}`)}">${tcell}<td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td>${nowc}<td class="sec">in ${shLeft(e.resolveAt)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="sec">open</td><td></td></tr>`;
   if(e.status==='void')
-    return `<tr data-tip="${esc(tip+' \u00b7 could not be resolved (no usable price at horizon) \u2014 excluded from the record')}">${tcell}<td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td><td>${shDate(e.tR||e.t0)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="na">void</td><td></td></tr>`;
+    return `<tr data-tip="${esc(tip+' \u00b7 could not be resolved (no usable price at horizon) \u2014 excluded from the record')}">${tcell}<td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td>${nowc}<td>${shDate(e.tR||e.t0)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td class="na">void</td><td></td></tr>`;
   const sa=e.realizedS!=null&&e.realizedS!==e.realized
     ?`${shVal(e.realizedS,e.unit)}${e.stopped?' <span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':''}`
     :(e.stopped?'<span class="neg" data-tip="the frozen void level was touched before horizon">\u26d4</span>':'<span class="sec">\u2014</span>');
-  return `<tr data-tip="${esc(tip)}">${tcell}<td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td><td>${shDate(e.tR)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td>${shVal(e.realized,e.unit)}</td><td>${sa}</td></tr>`;
+  return `<tr data-tip="${esc(tip)}">${tcell}<td>${esc(e.label)}${flags}</td><td>${side}</td><td>${fired}</td><td>${mark}</td>${nowc}<td>${shDate(e.tR)}</td><td>${e.score0!=null?e.score0:'\u2014'}</td><td>${shVal(e.realized,e.unit)}</td><td>${sa}</td></tr>`;
 }
 async function loadSigHistory(f){
   const p=el('sighist-panel'); if(!p) return;
@@ -1769,7 +1831,7 @@ async function loadSigHistory(f){
     const rows=d.open.map(e=>sigHistRow(e,withTicker)).join('')+d.closed.map(e=>sigHistRow(e,withTicker)).join('');
     const capNote=d.closed.length>=150?' <span class="sec" data-tip="the ledger keeps the last 4,000 resolved claims; this view shows the most recent 150 matching">\u00b7 most recent 150 shown</span>':'';
     p.innerHTML=`<div class="cp-head">${title} <span class="sec" style="font-weight:400">\u2014 signal history${rec}${d.open.length?` \u00b7 ${d.open.length} open`:''}${capNote}</span> <button class="btn xtiny" id="sighist-close" title="close" style="float:right">\u2715</button></div>`
-      +(rows?`<table class="sigrec-t"><thead><tr>${withTicker?'<th>ticker</th>':''}<th>event</th><th>side</th><th data-tip="when THIS claim opened its own entry in the ledger (your local time) \u2014 every event instance stamps its own time. \u27f2 marks claims opened on the first build after a restart/deploy, where the condition may predate the stamp">fired</th><th data-tip="the mark THIS instance was triggered at \u2014 outcomes are measured from this price">mark</th><th data-tip="when it reached its horizon and was scored \u00b7 open claims show time remaining">resolved</th><th data-tip="signal score at fire time">score</th><th data-tip="at-horizon outcome, signed with the claim (positive = followed through), in the unit the study claims">outcome</th><th data-tip="stop-aware outcome: capped at the frozen void level when it was touched before horizon \u00b7 \u2014 when it coincides with at-horizon">\u26d4</th></tr></thead><tbody>${rows}</tbody></table>`
+      +(rows?`<table class="sigrec-t"><thead><tr>${withTicker?'<th>ticker</th>':''}<th>event</th><th>side</th><th data-tip="when THIS claim opened its own entry in the ledger (your local time) \u2014 every event instance stamps its own time. \u27f2 marks claims opened on the first build after a restart/deploy, where the condition may predate the stamp">fired</th><th data-tip="the mark THIS instance was triggered at \u2014 outcomes are measured from this price">mark</th><th data-tip="live price against this claim, computed here from the same streaming mark the board uses \u2014 never shipped in the cached ledger payload. \u0394 is signed WITH the claim: a short whose price is falling reads GREEN, because this column answers \u201cis this claim currently winning\u201d, not \u201cis the chart up\u201d. Touch-mode claims add a bracket bar: travel toward the frozen target (green, right) vs the frozen void (red, left). Settled claims show a dash \u2014 their outcome column already owns the answer">now</th><th data-tip="when it reached its horizon and was scored \u00b7 open claims show time remaining">resolved</th><th data-tip="signal score at fire time">score</th><th data-tip="at-horizon outcome, signed with the claim (positive = followed through), in the unit the study claims">outcome</th><th data-tip="stop-aware outcome: capped at the frozen void level when it was touched before horizon \u00b7 \u2014 when it coincides with at-horizon">\u26d4</th></tr></thead><tbody>${rows}</tbody></table>`
       :`<div class="sec" style="font-size:11.5px;padding:6px 2px">No claims match${f.ev?` \u2014 no ${esc(evLbl)} claim has ever fired${f.coin?` on ${esc(d.ticker||f.coin)}`:''}`:''}. The history starts with the first fire.</div>`);
     const cb=el('sighist-close'); if(cb) cb.onclick=()=>{ p.hidden=true; const q=el('sighist-q'); if(q) q.value=''; const ee=el('sighist-ev'); if(ee) ee.value=''; };
     p.querySelectorAll('[data-shtk]').forEach(c=>c.addEventListener('click',()=>{ const qi=el('sighist-q'); if(qi) qi.value=c.dataset.shtk; runSigHist(); }));
@@ -5355,9 +5417,15 @@ function trigChip(g){
   if(merged){
     const left=c.resolveAt!=null?c.resolveAt-Date.now():null;
     const tip=baseTip+` \u00b7 claim opened at ${c.px!=null?fmtPrice(c.px):'\u2014'}${c.boot?' on the first build after a restart/deploy (\u27f2)':''} \u2014 the outcome is measured from this mark${left!=null&&left>0?` \u00b7 resolves in ${fmtAge(left)}`:' \u00b7 resolution due'}`;
-    return `<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(tip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${c.px!=null?' @ '+fmtPrice(c.px):''}${(g.sinceBoot||c.boot)?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`;
+    return `<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(tip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${c.px!=null?' @ '+fmtPrice(c.px):''}${(g.sinceBoot||c.boot)?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`
+      +nowChip(g.coin,c);
   }
-  let s=`<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(baseTip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${g.sinceBoot?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`;
+  // -29: the claim's fire mark rides the presence chip UNCONDITIONALLY. It used to appear only
+  // on the merged branch (presence stamp == claim stamp), so the moment an episode aged and the
+  // two diverged, the one price every outcome is measured from silently vanished from the card.
+  const atPx=c&&c.px!=null?` <span class="sec">@ ${fmtPrice(c.px)}</span>`:(c?' <span class="na">@ \u2014</span>':'');
+  let s=`<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(baseTip+(c&&c.px!=null?` \u00b7 the LEDGER CLAIM behind it opened ${new Date(c.t).toLocaleString()} at ${fmtPrice(c.px)}; the outcome is measured from that mark, never from the live price`:''))}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${atPx}${g.sinceBoot?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`
+    +nowChip(g.coin,c);
   if(c&&c.t!=null){
     const left=c.resolveAt!=null?c.resolveAt-Date.now():null;
     const tip=`the LEDGER CLAIM this signal is scored against: opened ${new Date(c.t).toLocaleString()} at ${c.px!=null?fmtPrice(c.px):'\u2014'}${c.boot?' \u2014 \u27f2 on the first build after a restart/deploy (the condition may predate the stamp)':''}. One episode carries ONE claim even if the condition lapses and returns, so the claim can be older than the condition you are looking at \u2014 the outcome is measured from the claim's own mark and time.${left!=null?(left>0?` Resolves in ${fmtAge(left)}.`:' Resolution due.'):''}`;
