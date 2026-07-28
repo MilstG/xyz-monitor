@@ -10235,7 +10235,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-25"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-26"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -10594,4 +10594,165 @@ test("levels -22: wiring manifest — poller assembly, snapshot column, study au
   assert.ok(cmp.includes("const LVL_MAP_W = { str: 1.0, hvn: 0.8, e200: 0.7, e50: 0.6, lvn: 0.5 };"), "weights pinned at the definition");
   for (const f of ["volumeProfile", "levelMap"])
     assert.equal((cmp.match(new RegExp("^function " + f + "\\(", "mg")) || []).length, 1, `exactly one ${f} definition`);
+});
+
+// ================================================================================================
+// EMA200 trend-events batch (build 2026.07.27-26): close-confirmed crosses (three confirmation
+// variants dueling), the re-arm gate, sign conventions, the retest ride on the injectable level
+// audit, and the section wiring. The line every trend trader watches gets the same treatment as
+// every other claim in this app: walk-forward, placebo-matched, floors, nothing trades.
+// ================================================================================================
+
+test("ema200 -26: a wick through the line is NOT an event — closes decide, wicks never do", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 500 * DAY_;
+  // price below a falling-ish line throughout; one candle SPIKES far above intrabar but closes back below
+  const bars = [];
+  for (let i = 0; i < 300; i++) {
+    const c = 100 - i * 0.02;
+    bars.push({ t: t0 + i * DAY_, c, h: i === 250 ? c + 30 : c + 0.3, l: c - 0.3, v: 1 });
+  }
+  const r = C.emaCrossOutcomes(bars, 1.5, { horizon: 14 });
+  assert.equal(r.n, 0, "the spike candle closed back below — no cross fired, ever");
+});
+
+test("ema200 -26: chop around the line fires ONCE per episode — the re-arm gate eats the rest, and counts it", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 500 * DAY_;
+  const bars = [];
+  // long flat base so the SMA-seeded EMA sits at ~100, then a tight up/down chop straight
+  // across it: closes alternate 101.5 / 98.5 for 8 bars, then run up cleanly.
+  for (let i = 0; i < 230; i++) bars.push({ t: t0 + i * DAY_, c: 100, h: 100.3, l: 99.7, v: 1 });
+  for (let i = 230; i < 238; i++) { const c = i % 2 === 0 ? 101.5 : 98.5; bars.push({ t: t0 + i * DAY_, c, h: c + 0.3, l: c - 0.3, v: 1 }); }
+  for (let i = 238; i < 280; i++) bars.push({ t: t0 + i * DAY_, c: 102 + (i - 238) * 0.3, h: 102.5 + (i - 238) * 0.3, l: 101.5 + (i - 238) * 0.3, v: 1 });
+  const r = C.emaCrossOutcomes(bars, 1.5, { horizon: 14, rearm: 3 });
+  const rawUp = r.events.filter((e) => e.dir === "up" && e.vr === "raw");
+  assert.equal(rawUp.length, 1, `alternating closes are ONE up-episode, got ${rawUp.length}`);
+  assert.ok(r.suppressed.raw >= 3, `the gate counted the chop it ate (raw suppressed=${r.suppressed.raw})`);
+  // and the single event that DID fire is the first cross of the fight, whipsaw-flagged
+  assert.equal(rawUp[0].whip, true, "the surviving event honestly carries its 5-bar whipsaw flag");
+});
+
+test("ema200 -26: breakdown sign convention — a fall after a down-cross scores POSITIVE", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 600 * DAY_;
+  const bars = [];
+  for (let i = 0; i < 260; i++) bars.push({ t: t0 + i * DAY_, c: 100 + i * 0.02, h: 100.3 + i * 0.02, l: 99.7 + i * 0.02, v: 1 });
+  for (let i = 260; i < 340; i++) { const c = 105.2 - (i - 260) * 0.45; bars.push({ t: t0 + i * DAY_, c, h: c + 0.3, l: c - 0.3, v: 1 }); }
+  const r = C.emaCrossOutcomes(bars, 1.5, { horizon: 14 });
+  const dn = r.events.filter((e) => e.dir === "dn" && e.vr === "raw");
+  assert.ok(dn.length >= 1, "the down-cross fired");
+  assert.ok(dn[0].fwd > 0 && dn[0].hit === true, `price kept falling: the breakdown SCORES positive (fwd=${dn[0].fwd}σ)`);
+});
+
+test("ema200 -26: the three variants gate correctly — buffer needs distance, 2-close needs the next close", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 600 * DAY_;
+  // marginal cross: the crossing close sits a hair above the line (inside a 0.25σ buffer at
+  // σ=2 → 0.5% needed), next bar closes back below → raw fires, buf and 2cl both refuse
+  const bars = [];
+  for (let i = 0; i < 240; i++) bars.push({ t: t0 + i * DAY_, c: 100, h: 100.3, l: 99.7, v: 1 });
+  bars.push({ t: t0 + 240 * DAY_, c: 100.2, h: 100.5, l: 99.9, v: 1 });   // +0.2% over a ~100.0 EMA: under the 0.5% buffer
+  for (let i = 241; i < 300; i++) bars.push({ t: t0 + i * DAY_, c: 99.5, h: 99.8, l: 99.2, v: 1 });
+  const r = C.emaCrossOutcomes(bars, 2, { horizon: 14, bufSd: 0.25 });
+  const up = r.events.filter((e) => e.dir === "up");
+  assert.equal(up.filter((e) => e.vr === "raw").length, 1, "raw fires on the marginal close");
+  assert.equal(up.filter((e) => e.vr === "buf").length, 0, "buffer refuses a close inside 0.25σ of the line");
+  assert.equal(up.filter((e) => e.vr === "2cl").length, 0, "2-close refuses when the next close falls back");
+});
+
+test("ema200 -26: SMA-seeded walk agrees with emaLast — one EMA construction, bit for bit", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 600 * DAY_;
+  const bars = [];
+  for (let i = 0; i < 320; i++) { const c = 100 + Math.sin(i / 11) * 6 + i * 0.01; bars.push({ t: t0 + i * DAY_, c, h: c + 0.4, l: c - 0.4, v: 1 }); }
+  // reproduce the study's internal walk and pin its final value to emaLast on the same closes
+  const closes = bars.map((k) => k.c);
+  const ref = C.emaLast(closes, 200);
+  let e = 0; const k2 = 2 / 201;
+  for (let i = 0; i < closes.length; i++) { if (i < 200) { e += closes[i]; if (i === 199) e /= 200; } else e = closes[i] * k2 + e * (1 - k2); }
+  assert.ok(Math.abs(e - ref) < 1e-9, "the study's SMA-seeded walk IS emaLast's construction");
+  // and the source pins it so a drive-by 'simplification' back to closes[0]-seeding fails loudly
+  const fs = require("fs"), path = require("path");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(cmp.includes("if (i < N) { e += c; if (i === N - 1) { e /= N; ema[i] = e; } }"), "SMA seed pinned in emaCrossOutcomes");
+});
+
+test("ema200 -26: tail exclusion and study aggregation floors", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 600 * DAY_;
+  const bars = [];
+  for (let i = 0; i < 220; i++) bars.push({ t: t0 + i * DAY_, c: 100, h: 100.3, l: 99.7, v: 1 });
+  for (let i = 220; i < 226; i++) bars.push({ t: t0 + i * DAY_, c: 103, h: 103.3, l: 102.7, v: 1 });   // cross fires at 220, but only 5 bars remain
+  const r = C.emaCrossOutcomes(bars, 1.5, { horizon: 14 });
+  assert.equal(r.n, 0, "an event whose horizon runs past the tape is excluded whole — never a partial read");
+  const st = C.emaCrossStudy([{ dir: "up", vr: "raw", fwd: 1, hit: true, whip: false, pl: 0.5 }], { cellFloor: 30 });
+  assert.equal(st.up.raw.n, 1, "under-floor cell publishes its n");
+  assert.equal(st.up.raw.hit, null, "…and nothing else");
+  assert.equal(st.dn.raw, null, "empty stream: null cell, not a fabricated zero");
+});
+
+test("ema200 -26: poller + client wiring manifest — section, memo, retest ride, panel surfaces", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    "function buildEma200Study(U)",
+    'const EMA_TF = { "1d": { horizon: 14, stride: 5, minBars: 210 }, "4h": { horizon: 84, stride: 12, minBars: 210 } };',
+    "const EMA_MIN_EQ = 5, EMA_CELL_FLOOR = 30, EMA_REARM = 3, EMA_BUF_SD = 0.25;",
+    'closedBars(mergedDailyBars(r), DAY, now)',                    // D1 = the one merged source, forming day trimmed
+    'closedBars(bucketsFor(r, 4), 4 * HOUR, now)',                 // H4 = spine buckets, forming bucket trimmed
+    "const e2 = emaLast(pb.map((k) => k.c), 200);",                // retest rides the injectable audit on emaLast
+    "if (r._emSrc !== db) {",                                      // levels-study memo contract
+    "ema200: emSt,",                                               // section wired
+    "const emSt = on(\"structure\") ? buildEma200Study(U) : DISABLED;",
+    "function mergedDailyBars(r)",                                 // extracted, three consumers
+  ]) assert.ok(pol.includes(pin), `poller.js missing -26 pin: ${pin}`);
+  // one code path: volMapFor must now consume the extracted helper, not a private copy
+  assert.ok(/const bars = mergedDailyBars\(r\);/.test(pol), "volMapFor reads mergedDailyBars");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "function renderEma200(em)", "function emaXCell(", "function emaRtRow(",
+    "a.sections && a.sections.ema200",
+    "Support retest (bullish)", "Resistance retest (bearish)",
+    "whip 5b",
+    "closed candles only",
+    "{html:emBlock},{pend:emPend}",
+  ]) assert.ok(app.includes(pin), `app.js missing -26 pin: ${pin}`);
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const cls of [".ptbl tr.tfh td", ".pill2", ".ft"])
+    assert.ok(css.includes(cls), `styles.css missing -26 class: ${cls}`);
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const f of ["emaCrossOutcomes", "emaCrossStudy"])
+    assert.equal((cmp.match(new RegExp("^function " + f + "\\(", "mg")) || []).length, 1, `exactly one ${f} definition`);
+});
+
+test("ema200 -26: end-to-end through the analytics build — the section publishes off seeded rows", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  // six names, each with 320d of dailies crossing the EMA once and 200 spine hours (H4 stays
+  // thin on purpose — the D1 lane alone must be able to publish)
+  // real equity tickers: the stocks universe's studyEligible gates on assetClass === "Equity"
+  const TKS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG"];
+  for (let m = 0; m < 6; m++) {
+    const coin = "xyz:" + TKS[m], dailyRaw = [], hourlyRaw = [];
+    for (let i = 320; i >= 1; i--) {
+      const j = 320 - i;
+      const c = j < 260 ? 100 - j * 0.03 + m * 0.1 : (92.2 + m * 0.1) + (j - 260) * 0.4;
+      dailyRaw.push({ t: now - i * DAY_, c, h: c + 0.5, v: 500 });
+    }
+    for (let i = 200; i >= 0; i--) { const c = 110 + (i % 3); hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.4, l: c - 0.4, c, v: 5 }); }
+    p.seedRowNow(coin, { ticker: TKS[m], px: 112, dailyRaw, hourlyRaw, hourlyTs: now });
+  }
+  const a = p.buildAnalyticsNow();
+  const em = a && a.sections && a.sections.ema200;
+  assert.ok(em && !em.pending, `section published (got ${JSON.stringify(em && em.pending)})`);
+  const d1 = em.tf["1d"];
+  assert.ok(d1 && d1.contributing >= 5 && d1.n >= 5, `>=5 names contributed D1 cross events (n=${d1 && d1.n})`);
+  assert.ok(d1.cross.up.raw && d1.cross.up.raw.n >= 5, "the up-cross every tape carried was detected per name");
+  assert.ok(d1.retest && d1.retest.n > 0, "the retest audit accrued events through the injectable loop");
+  assert.equal(em.horizons["1d"], 14, "D1 horizon rides the agreed 14 bars");
+  assert.equal(em.horizons["4h"], 84, "H4 horizon rides 84 bars (14 sessions of six H4 bars)");
 });
