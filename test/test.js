@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-08"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-09"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -12509,4 +12509,146 @@ test("client: the macro class and the preview shape are renderable in the bell l
   assert.ok(/if\(ev\.sub==='preview'\)/.test(app), "the two earnings shapes are told apart client-side too");
   assert.ok(/macro:'universe-wide scheduled binaries/.test(app), "the chip carries its own tooltip");
   assert.ok(/17:00 ET/.test(app), "the earnings tooltip states when the calendar leg lands");
+});
+
+// ===== phase 2: Δ vs ⬒ column, matrix basket rows, pair legs, backtest yardstick (build 2026.07.28-09)
+// Every surface here EXECUTES on fixtures — the column math against a hand-computed EW mean, the
+// matrix row against pearson's own answer, the pair view and the curve against real markup — and
+// the tier boundary is re-pinned: r.dvb and the yardstick feed no rule engine, no alert, no stat.
+
+function _p2Harness(){
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {}, removeChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 300 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch,
+    ct: global.clearTimeout, ci: global.clearInterval };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: { baskets: true }, __ADMIN: true };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  const api = new Function(app + "\n;return {state, BASKETS, COMPG, CORR, computeDvb, dvbBasketDef, basketVirtualRow, corrBasketRows, buildCorr, renderPairPanel, btCurveSvg, dailyReturns, hoverReg:_hoverReg};")();
+  const restore = () => { global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f; };
+  return { api, els, restore };
+}
+
+test("-09 Δ vs ⬒: EW mean of the board's own fields, coverage floor dashes (never a thinner average)", () => {
+  const { api, restore } = _p2Harness();
+  try {
+    api.state.scope = "stocks"; api.state.tf = "4h";
+    const seed = (tk, h4) => api.state.rows.set("xyz:" + tk, { coin: "xyz:" + tk, ticker: tk, uni: "xyz", px: 100, h4, delisted: false });
+    seed("AAA", 2.0); seed("BBB", 4.0); seed("CCC", -3.0); seed("DDD", 1.0);
+    api.BASKETS.list = [{ name: "TRI", scope: "stocks", members: ["AAA", "BBB", "CCC"], builtin: false, daily: [] }];
+    api.state.dvbBasket = "TRI";
+    const rows = [...api.state.rows.values()];
+    api.computeDvb(rows);
+    const mean = (2.0 + 4.0 - 3.0) / 3;
+    for (const [tk, h4] of [["AAA", 2.0], ["BBB", 4.0], ["CCC", -3.0], ["DDD", 1.0]]) {
+      const r = api.state.rows.get("xyz:" + tk);
+      assert.ok(Math.abs(r.dvb - (h4 - mean)) < 1e-9, tk + ": own return minus the hand-computed EW mean");
+    }
+    // floor: strip the field from 2 of 3 members -> 1/3 < 60% -> every dvb nulls, no thinner mean
+    api.state.rows.get("xyz:BBB").h4 = null; api.state.rows.get("xyz:CCC").h4 = undefined;
+    api.computeDvb([...api.state.rows.values()]);
+    assert.equal(api.state.rows.get("xyz:AAA").dvb, null, "sub-floor coverage -> dash for a row WITH the field");
+    assert.equal(api.state.rows.get("xyz:CCC").dvb, undefined, "field not yet loaded stays a placeholder, not a dash");
+  } finally { restore(); }
+});
+
+test("-09 matrix basket rows: the virtual row rides the ticker's exact pearson path, built-ins gated by the toggle", () => {
+  const { api, restore } = _p2Harness();
+  try {
+    const DAY = 86400e3, today = Math.floor(Date.now() / DAY) * DAY;
+    api.state.scope = "stocks"; api.state.view = "corr";
+    const daily = Array.from({ length: 120 }, (_, i) => ({ t: today - (119 - i) * DAY, c: 100 * (1 + Math.sin(i / 5) * 0.02 + i * 0.001) }));
+    api.state.rows.set("xyz:AAA", { coin: "xyz:AAA", ticker: "AAA", uni: "xyz", px: 100, vol: 1, daily, delisted: false });
+    // basket shipped with the IDENTICAL series -> correlation with AAA must be exactly 1
+    api.BASKETS.list = [
+      { name: "MIRROR", scope: "stocks", members: ["AAA"], builtin: false, daily: daily.map(k => [k.t, k.c]) },
+      { name: "TECH", scope: "stocks", members: ["AAA"], builtin: true, daily: daily.map(k => [k.t, k.c]) },
+    ];
+    api.BASKETS.rev = 1;
+    api.state.corr.showBuiltins = false;
+    let bk = api.corrBasketRows();
+    assert.deepEqual(bk.map(r => r.ticker), ["MIRROR"], "customs always, built-ins held back by default");
+    api.state.corr.showBuiltins = true;
+    bk = api.corrBasketRows();
+    assert.deepEqual(bk.map(r => r.ticker).sort(), ["MIRROR", "TECH"], "toggle admits the derived rows");
+    const rows = [api.state.rows.get("xyz:AAA"), api.corrBasketRows()[0]];
+    const res = api.buildCorr(rows, 90);   // 90d window: ~90 overlapping days clears buildCorr's own minOv=45 floor
+    assert.ok(res.C[0][1] != null, "pair correlates (overlap clears the matrix's own floor)");
+    assert.ok(Math.abs(res.C[0][1] - 1) < 1e-9, "identical series -> ρ exactly 1: one math path, no basket special-casing");
+    assert.equal(res.C[0][1], res.C[1][0], "symmetric");
+  } finally { restore(); }
+});
+
+test("-09 pair view executes on basket × ticker: stats render, the ⬒ anatomy shows, nothing throws", () => {
+  const { api, els, restore } = _p2Harness();
+  try {
+    const DAY = 86400e3, today = Math.floor(Date.now() / DAY) * DAY;
+    api.state.scope = "stocks"; api.state.view = "corr"; api.state.corr.tf = "90";
+    const mkDaily = (f) => Array.from({ length: 120 }, (_, i) => ({ t: today - (119 - i) * DAY, c: f(i) }));
+    const row = { coin: "xyz:AAA", ticker: "AAA", uni: "xyz", px: 100, daily: mkDaily(i => 100 * (1 + Math.sin(i / 6) * 0.02 + i * 0.001)), delisted: false };
+    api.state.rows.set("xyz:AAA", row);
+    api.BASKETS.list = [{ name: "MAG2", scope: "stocks", members: ["AAA"], builtin: false,
+      daily: mkDaily(i => 50 * (1 + Math.cos(i / 7) * 0.015 + i * 0.0008)).map(k => [k.t, k.c]) }];
+    api.BASKETS.rev = 2;
+    const vrow = api.basketVirtualRow(api.BASKETS.list[0]);
+    api.CORR._rows = [vrow, row]; api.CORR._intraday = false; api.CORR._bars = null; api.CORR._times = null;
+    api.CORR._C = [[1, 0.5], [0.5, 1]]; api.CORR._N = [[0, 90], [90, 0]];
+    api.state.corr.pair = [0, 1];
+    api.renderPairPanel();
+    const h = els["pairpanel"].innerHTML;
+    assert.ok(/pairstats/.test(h), "β / z-score / rolling-ρ stats rendered on a virtual leg");
+    assert.ok(/bkg/.test(h) && /\u2b12/.test(h), "the basket leg wears its glyph in the pair head");
+    assert.ok(/pairratio/.test(h), "the candles button rides along — /api/ratio already speaks basket");
+  } finally { restore(); }
+});
+
+test("-09 backtest yardstick: dashed ⬒ line draws only when picked, hover carries it, stats stay untouched", () => {
+  const { api, restore } = _p2Harness();
+  try {
+    const days = Array.from({ length: 30 }, (_, i) => 20000 + i);
+    const ramp = (a) => Array.from({ length: 30 }, (_, i) => a + i * 0.002);
+    const res = { days, eq: ramp(1), eqg: ramp(1.001), eqb: ramp(0.999), eqew: ramp(0.998) };
+    const off = api.btCurveSvg(res, 15);
+    assert.ok(!/bt-vb/.test(off), "no pick -> no line, never a phantom overlay");
+    res.eqvb = ramp(0.997); res.vbName = "MAG7";
+    const on = api.btCurveSvg(res, 15);
+    assert.ok(/class="bt-vb"/.test(on) && /stroke-dasharray/.test(on), "picked -> dashed yardstick path renders");
+    // hover rows register via closure (_hoverReg), not the returned markup — read the registry
+    const ids = Object.keys(api.hoverReg); const last = api.hoverReg[ids[ids.length - 1]];
+    assert.ok(last && /\u2b12MAG7/.test(last.rows[10]), "hover rows carry the basket read at every bar");
+  } finally { restore(); }
+});
+
+test("-09 wiring pins: column registered + gated, prefs survive, toggle seg exists, tier copy states the boundary", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["key:'dvb'", "function computeDvb(", "function dvbCell(", "function dvbBasketDef(",
+    "function basketVirtualRow(", "function corrBasketRows(", "function syncCorrBk(",
+    "c.key==='dvb'&&!featureOn('baskets')",            // flag gate in visibleCols
+    "dvbBasket:state.dvbBasket||null",                  // prefs out
+    "p.dvbBasket",                                       // prefs in
+    "an editable basket is never the benchmark under signal math",   // tier copy, verbatim
+    "res.eqvb", "price-only EW",                         // backtest yardstick + honest label
+    "id=\"btVsB\""]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
+  assert.ok(app.includes("'vstape','dvb','dcap'"), "dvb sits in DEFAULT_ORDER");
+  assert.ok(app.includes("'vstape','dvb','dcap','hitr'"), "…and defaults hidden (opt-in lens)");
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(ht.includes('<div class="seg" id="corrbk" role="group" aria-label="Basket rows" hidden></div>'), "built-ins toggle seg, born hidden (.seg[hidden] guard already pinned)");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".dvb-pick{") && css.includes(".cmx th.bk span{border-bottom:1px dashed"), "picker + matrix anatomy styled");
+  // tier boundary holds server-side too: nothing in phase 2 touched the poller's alert machinery
+  const pj = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(!/dvb/.test(pj), "the Δ column is client-lens only — the server never learns it exists");
 });
