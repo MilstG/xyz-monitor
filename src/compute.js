@@ -607,6 +607,8 @@ const EV_META = {
   swpull:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the swing MA50", studyKey: null },
   basebrk:  { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the base breakout (structural target)", studyKey: null },
   basepj:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the base breakout (projected target)", studyKey: null },
+  emabrk:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the buffered EMA200 close-cross", studyKey: null },
+  emarts:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the held EMA200 retest", studyKey: null },
 };
 // ---- crypto horizon overrides ------------------------------------------------------------------
 // A 5d horizon on a name printing 12%/day is a +/-27% window: the claim resolves on tape noise
@@ -635,6 +637,8 @@ const EV_META_MAIN = {
   swpull:   { horizonMs: 10 * DAY,  horizon: "first touch of target/void within 10d, off the swing MA50" },
   basebrk:  { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the base breakout (structural target)" },
   basepj:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the base breakout (projected target)" },
+  emabrk:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the buffered EMA200 close-cross" },
+  emarts:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the held EMA200 retest" },
 };
 // Resolution meta for one (event, universe) pair. Crypto reads the override when one exists and
 // falls back to the shared entry otherwise, so a new event is automatically defined for both.
@@ -1387,6 +1391,66 @@ function detectLevels(daily, px, sd30, opts) {
   out.sort((a, z) => Math.abs(a.distPct) - Math.abs(z.distPct));
   const keep = out.slice(0, maxOut).sort((a, z) => z.v - a.v);
   return { k, tauPct: +tauPct.toFixed(3), minN, n: keep.length, items: keep };
+}
+
+// ---- EMA200 close-confirmed shadow detectors (build 2026.07.27-28) ----------------------------
+// Stage two of the -26 study: the two strongest priors go live as ledger shadows — the D1
+// buffered breakout and the D1 support-retest hold. Both are stateless single-shot detectors
+// over CLOSED daily bars (the caller trims the forming day): the "armed" requirement of the
+// study's re-arm gate becomes a hard shape condition here — consecutive far-side closes
+// immediately before the event — so a chop episode cannot re-fire day after day. Geometry is
+// frozen at fire like every touch-mode claim: void off the line itself, target the next
+// structural level >=2 sigma above (no level, no claim — a trade with nowhere to go is not a
+// trade). Long side only: these are the priors the study ships to adjudicate; the short
+// mirrors stay study-tier until the panel says they earn a stream.
+function detectEmaBreak(closes, px, sd30, lvlBars) {
+  if (!Array.isArray(closes) || closes.length < 216 || !(px > 0) || !(sd30 > 0)) return null;
+  const c = closes.map((k) => +k[1]);
+  const n = c.length, N = 200, k2 = 2 / (N + 1);
+  // the one EMA construction (SMA seed) — agrees with emaLast and the -26 study to the bit
+  const ema = new Array(n).fill(null);
+  let e = 0;
+  for (let i = 0; i < n; i++) { const v = c[i]; if (!Number.isFinite(v)) return null;
+    if (i < N) { e += v; if (i === N - 1) { e /= N; ema[i] = e; } } else { e = v * k2 + e * (1 - k2); ema[i] = e; } }
+  const L = n - 1;
+  if (ema[L] == null || ema[L - 4] == null) return null;
+  const above = (i) => c[i] >= ema[i];
+  // the cross, armed: last close above, the FOUR closes before it all below — the study's
+  // "3 consecutive far-side closes then the cross" written as a stateless shape
+  if (!above(L) || above(L - 1) || above(L - 2) || above(L - 3) || above(L - 4)) return null;
+  // and buffered: the confirming close clears the line by >=0.25 sigma — the variant the -26
+  // duel was built to adjudicate, chosen as the prior for its whipsaw tax vs speed balance
+  if ((c[L] / ema[L] - 1) * 100 < 0.25 * sd30) return null;
+  const target = nextLevelAbove(lvlBars, px, sd30, 2);
+  if (target == null) return null;
+  const stop = ema[L] * (1 - 0.5 * sd30 / 100);          // void: half a sigma back through the line
+  if (!(stop < px && px < target)) return null;
+  return { ema: +ema[L].toPrecision(9), stop: +stop.toPrecision(9), target };
+}
+function detectEmaRetest(bars, px, sd30, lvlBars) {
+  const b = studyBars(bars);
+  const n = b.length, N = 200;
+  if (n < 216 || !(px > 0) || !(sd30 > 0)) return null;
+  const k2 = 2 / (N + 1);
+  const ema = new Array(n).fill(null);
+  let e = 0;
+  for (let i = 0; i < n; i++) { const v = b[i].c;
+    if (i < N) { e += v; if (i === N - 1) { e /= N; ema[i] = e; } } else { e = v * k2 + e * (1 - k2); ema[i] = e; } }
+  const L = n - 1;
+  if (ema[L] == null || ema[L - 1] == null) return null;
+  const B = b[L], P = b[L - 1];
+  if (!(B.l <= ema[L] && ema[L] <= B.h)) return null;    // the touch: the closed bar's range brackets the line
+  if (!(B.c > ema[L])) return null;                      // HELD: closed back above — close-confirmed by construction
+  // came from clear air (a pullback INTO the line, not chop straddling it): the prior close sat
+  // >=0.25 sigma above ITS line and the prior bar did not itself touch — first touch of the
+  // episode, the stateless re-arm
+  if (!((P.c / ema[L - 1] - 1) * 100 >= 0.25 * sd30)) return null;
+  if (P.l <= ema[L - 1]) return null;
+  const target = nextLevelAbove(lvlBars, px, sd30, 2);
+  if (target == null) return null;
+  const stop = ema[L] * (1 - 1.0 * sd30 / 100);          // void: a full sigma below the line — the hold thesis dies there
+  if (!(stop < px && px < target)) return null;
+  return { ema: +ema[L].toPrecision(9), stop: +stop.toPrecision(9), target };
 }
 
 // ---- EMA200 trend events (build 2026.07.27-26) ------------------------------------------------
@@ -3257,7 +3321,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   closedBars, closedLadder, trendWhen,

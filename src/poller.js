@@ -8,7 +8,7 @@ const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFea
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, FOMC_DECISIONS } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, regime200, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -145,6 +145,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let benchCoin = null;
   let mainOrder = [], mainList = [], mainSel = new Set(), mainDay = 0;   // main-dex universe order / today's selection
   let snapshotCache = null, dailyCache = null, lastPoll = 0;
+  // Full-depth crypto daily tuples for the SIGNAL LOOP (-28). The -20 wire cap
+  // (MAIN_DAILY_PAYLOAD) was applied to dc.daily — which is also what the signals pass reads —
+  // so every crypto detector needing more than ~92 closes (swpull's MA50 at 120, regime200 at
+  // 210, the -28 EMA200 shadows at 216) was silently starved while the 370d retention sat
+  // unread. Two consumers, two maps: the wire keeps its cap, the loop reads this one.
+  const deepDaily = new Map();
   let snapVer = 0, lastSnapSig = "";   // /api/snapshot content clock: dataTs bumps only when a client-visible field changes (kept off the payload)
   let dailyVer = 0, dailySig = "";   // ETag version for /api/daily — bumps only when daily content changes
   let analyticsCache = null, analyticsVer = 0, analyticsSig = "";   // ETag version for /api/analytics (xyz)
@@ -1152,7 +1158,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const r of mainMarkets()) {
       const hs = getHourly(r.coin);
       const dr = dailyTuples(r, hs);
-      if (dr && dr.length) daily[r.coin] = dr.slice(-(MAIN_DAILY_PAYLOAD + 2));   // -20: retention deepened to 370d for the detectors; the wire stays at the 90d the clients render
+      if (dr && dr.length) {
+        deepDaily.set(r.coin, dr);                                 // full 370d for the signal loop — the whole point of the -20 retention
+        daily[r.coin] = dr.slice(-(MAIN_DAILY_PAYLOAD + 2));       // -20: the wire stays at the ~90d the clients render
+      }
       if (oi) { const os = oiDailySeries(r.coin); if (os) oi[r.coin] = os.map(([d, x]) => [d, sigq(x, 6)]); }
       const fh = getFunding(r.coin);
       if (fh.length) {
@@ -1236,6 +1245,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     "casc", "fundext",                                        // crypto-native
     "reclaim", "failbrk", "mapull", "wickfill", "roundfr",     // shadows
     "swpull", "basebrk", "basepj",                             // swing-horizon touch-mode shadows (-20)
+    "emabrk", "emarts",                                        // EMA200 close-confirmed shadows (-28)
     "airead",                                                  // the Report tab's own record (never was this engine's)
   ]);
   const XYZ_ONLY_EVS = new Set(["gap", "gapfade", "ondrift", "pead", "sweep", "prem", "squeeze", "unwind"]);
@@ -1991,7 +2001,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj", "emabrk", "emarts"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -2117,6 +2127,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       tip: "a 60-session base (total range capped at max(8%, 3\u03c3)) broken by a fresh close the mark still holds \u2014 void 1\u03c3 back inside the base, target the next structural level above. Touch-resolved at 30d [15d crypto]. Runs in parallel with the projected-target variant on IDENTICAL detections \u2014 the record decides which target school nets more R." },
     { ev: "basepj", uni: "both", label: "base breakout \u00b7 projected target", unit: "R",
       tip: "the SAME base-breakout detection with the measured-move target: base height projected above the break \u2014 bigger, hit less often. Touch-resolved at 30d [15d crypto]. The structural-target twin ledgers beside it; neither is promoted by argument." },
+    { ev: "emabrk", uni: "both", label: "EMA200 breakout (D1)", unit: "R",
+      tip: "close-confirmed D1 cross of the 200-EMA, buffered: the confirming CLOSE must clear the line by >=0.25\u03c3, with four closes below immediately before (the study's re-arm written as shape \u2014 chop cannot re-fire). Void half a \u03c3 back through the line, target the next structural level >=2\u03c3 above; no level, no claim. Touch-resolved, 30d [15d crypto]. Long side only \u2014 the -26 study's strongest prior; every other definition earns its stream through that panel first." },
+    { ev: "emarts", uni: "both", label: "EMA200 retest hold (D1)", unit: "R",
+      tip: "the bullish 200-EMA retest: a closed D1 bar TOUCHES the line from clear air above (prior close >=0.25\u03c3 over it, prior bar untouched \u2014 first touch of the episode) and CLOSES back above. Void a full \u03c3 below the line \u2014 the hold thesis dies there \u2014 target the next structural level >=2\u03c3 above. Touch-resolved, 30d [15d crypto]. Long side only; the bearish mirror stays study-tier until the -26 panel says it earns a stream." },
     { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
       tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
     { ev: "sweep", uni: "xyz", label: "liquidity sweep (5m)", unit: "R",
@@ -2189,7 +2203,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const prepped = [];
     for (const r of activeMarkets().concat(crypto ? mainMarkets() : [])) {
       if (r.delisted || r.px == null) continue;
-      const closes = dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;
+      const closes = deepDaily.get(r.coin) || dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
       const st = studiesFor(r, closes, dayFunding);
       const ac = acOf(r);
       if (st.bigmove && st.bigmove.raw) { feed(ac, "bigmove", "d1", st.bigmove.raw.d1); }
@@ -2304,6 +2318,27 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
                   { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: bb.stop, tgt: bb.targetP, tm: 1,
                     mv: +(Math.abs(bb.targetP / r.px - 1) * 100).toFixed(2) }, 0);
             }
+            // ---- EMA200 close-confirmed shadows (-28: stage two of the -26 study) ------------
+            // Two streams only — the study's strongest priors (D1 buffered breakout, D1 support
+            // retest hold), long side — not all twelve definitions; the study panel adjudicates
+            // the rest, and a variant that shows excess there earns its own stream the same way.
+            // Detectors read CLOSED daily bars only: the forming day is trimmed, so a cross that
+            // exists at 2pm and dies by the close never fires — the exact discipline the study
+            // measures. Touch-mode geometry frozen at fire, same convention as every -20 shadow.
+            const nowD = Date.now();
+            const ccl = closes.length && +closes[closes.length - 1][0] + DAY > nowD ? closes.slice(0, -1) : closes;
+            const eb = detectEmaBreak(ccl, r.px, sd30, lvlBars);
+            if (eb && stopGeometryOk("long", r.px, eb.stop))
+              openLedger(r, "emabrk", { score: 0, reading: "" }, 1,
+                { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: eb.stop, tgt: eb.target, tm: 1,
+                  mv: +(Math.abs(eb.target / r.px - 1) * 100).toFixed(2) }, 0);
+            // the retest needs true daily lows for the touch — mergedDailyBars carries them
+            // where the spine covers (which includes the firing bar by construction)
+            const er = detectEmaRetest(closedBars(mergedDailyBars(r), DAY, nowD), r.px, sd30, lvlBars);
+            if (er && stopGeometryOk("long", r.px, er.stop))
+              openLedger(r, "emarts", { score: 0, reading: "" }, 1,
+                { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: er.stop, tgt: er.target, tm: 1,
+                  mv: +(Math.abs(er.target / r.px - 1) * 100).toFixed(2) }, 0);
           }
           // post-earnings drift, xyz only: enter with a completed outsized reaction (the
           // detector enforces completeness, freshness and the 1.5σ magnitude floor)
