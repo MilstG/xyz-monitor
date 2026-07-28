@@ -609,6 +609,20 @@ const EV_META = {
   basepj:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the base breakout (projected target)", studyKey: null },
   emabrk:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the buffered EMA200 close-cross", studyKey: null },
   emarts:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the held EMA200 retest", studyKey: null },
+  // ---- structural-void families (build 2026.07.28-01) -----------------------------------------
+  // lvlhold/lvlrej: level-anchored ENTRIES — touch-resolved like every -20 shadow, both sides.
+  // unwind2/squeeze2: structural-void TWINS of the sigma-construct incumbents — same trigger,
+  // same target, same at-horizon resolution (a twin on a different clock would not be a duel),
+  // only the void changes. The stop-aware legs are the experiment.
+  lvlhold:  { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the held structural support", studyKey: null },
+  lvlrej:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the rejected structural resistance", studyKey: null },
+  unwind2:  { horizonMs: 3 * DAY,  horizon: "next 3d \u2014 the unwind's structural-void twin", studyKey: null },
+  squeeze2: { horizonMs: 3 * DAY,  horizon: "next 3d \u2014 the squeeze's structural-void twin", studyKey: null },
+  // vphold/vprej (build -02): the volume-node siblings of lvlhold/lvlrej — same touch mechanics,
+  // the other honest level source. Whether transacted-volume shelves defend like pivot clusters
+  // is the Phase-3 question, and it is answered here rather than in an argument.
+  vphold:   { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the held volume node", studyKey: null },
+  vprej:    { horizonMs: 30 * DAY, resolve: "touch", horizon: "first touch of target/void within 30d, off the rejected volume node", studyKey: null },
 };
 // ---- crypto horizon overrides ------------------------------------------------------------------
 // A 5d horizon on a name printing 12%/day is a +/-27% window: the claim resolves on tape noise
@@ -639,6 +653,10 @@ const EV_META_MAIN = {
   basepj:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the base breakout (projected target)" },
   emabrk:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the buffered EMA200 close-cross" },
   emarts:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the held EMA200 retest" },
+  lvlhold:  { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the held structural support" },
+  lvlrej:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the rejected structural resistance" },
+  vphold:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the held volume node" },
+  vprej:    { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the rejected volume node" },
 };
 // Resolution meta for one (event, universe) pair. Crypto reads the override when one exists and
 // falls back to the shared entry otherwise, so a new event is automatically defined for both.
@@ -1069,6 +1087,185 @@ function nextLevelAbove(lvlBars, px, sd30, minSd) {
   let best = null;
   for (const it of lv.items) if (it.v > floor && (best == null || it.v < best)) best = it.v;
   return best != null ? +best.toPrecision(6) : null;
+}
+// Short mirror of nextLevelAbove: the nearest detectLevels level BELOW the mark at a tradeable
+// distance (>= minSd x sd30). Same null discipline — no qualifying level means "no claim", never
+// an invented price. Reads true lows where the caller's bars carry them; on close-fallback bars
+// it degrades exactly as detectLevels does.
+function nearestLevelBelow(lvlBars, px, sd30, minSd) {
+  if (!(px > 0)) return null;
+  const lv = detectLevels(lvlBars, px, sd30, { minBars: 60 });
+  if (!lv || !lv.items || !lv.items.length) return null;
+  const ceil = px * (1 - (Number.isFinite(minSd) && minSd > 0 ? minSd : 1.5) * (sd30 > 0 ? sd30 : 1) / 100);
+  let best = null;
+  for (const it of lv.items) if (it.v > 0 && it.v < ceil && (best == null || it.v > best)) best = it.v;
+  return best != null ? +best.toPrecision(6) : null;
+}
+// ---- structural-void primitives (build 2026.07.28-01) ----------------------------------------
+// The thesis this build puts under measurement: a claim fired NEXT TO a confirmed level does not
+// need a sigma-wide constructed void — the level IS the invalidation, and the stop sits a small
+// buffer behind it, so most of the guessing a distributional stop encodes is simply gone. Nothing
+// here gates on that thesis; these functions only OFFER the level, and the ledger decides out of
+// sample whether the tighter stop's R:R gain survives its higher tag rate.
+//
+// structVoid: the void for a claim whose TRIGGER is not level-anchored (the unwind/squeeze twins) —
+// the nearest confirmed cluster strictly on the LOSS side of the mark inside a [minSd, maxSd]
+// sigma band, stop pushed `buf` sigma through it in LOG space (positive at any sigma). Inside
+// 0.3σ the level is on top of the entry (the PALLADIUM artifact wearing structure's clothing);
+// beyond 3σ it is a different thesis, not this trade's invalidation. The cluster's sup/res/flip
+// classification is deliberately NOT filtered here: any confirmed structure on the loss side is a
+// level the thesis dies through — the classification matters to an entry trigger, not to a void.
+// No cluster in band -> null, and the caller opens no twin: refusing the level is the honest
+// degradation, inventing one is what fabricated wins last time.
+function structVoid(bars, px, sd30, side, opts) {
+  const o = opts || {};
+  const minSd = o.minSd > 0 ? o.minSd : 0.3, maxSd = o.maxSd > 0 ? o.maxSd : 3;
+  const buf = o.buf > 0 ? o.buf : 0.5;
+  if (!(px > 0) || !(sd30 > 0) || (side !== "long" && side !== "short")) return null;
+  const lv = detectLevels(bars, px, sd30, { minBars: 60 });
+  if (!lv || !Array.isArray(lv.items) || !lv.items.length) return null;
+  const L = side === "long";
+  let best = null;
+  for (const it of lv.items) {
+    if (!it || !(it.v > 0)) continue;
+    if (L ? !(it.v < px) : !(it.v > px)) continue;            // loss side only
+    const d = Math.abs(Math.log(it.v / px)) * 100 / sd30;     // distance in daily-sigma units
+    if (d < minSd || d > maxSd) continue;
+    if (best == null || (L ? it.v > best.v : it.v < best.v)) best = it;
+  }
+  if (!best) return null;
+  const stop = +(best.v * Math.exp((L ? -1 : 1) * buf * sd30 / 100)).toPrecision(6);
+  if (L ? !(stop > 0 && stop < px) : !(stop > px)) return null;
+  return { lvl: +best.v.toPrecision(6), stop, n: best.n, ageD: best.ageD };
+}
+// detectLvlTouch: the level-anchored ENTRY — a held touch of confirmed structure, both sides.
+// Long: a CLOSED daily bar's low probes a confirmed sup/flip cluster inside the detector's own
+// tau band and the bar CLOSES back above the level (a probe that closes through is a breakdown's
+// business, not a hold's; a flush DEEPER than tau is the reclaim/sweep families' trade — this one
+// is the touch that never really broke). The probe is fresh (last `fresh` closed bars), the last
+// close still holds the level, and so does the mark. Short: the exact mirror at res/flip
+// clusters, reading highs. Stop = the level pushed half a sigma through in log space; target =
+// the next confirmed cluster >= minTgtSd away in the trade direction — no cluster on either leg,
+// no claim, honest null. Cluster touch count and age return as recorded features (lvn/lva
+// stamps): recorded, NOT gated — whether a 2-touch level deserves the trust of a 5-touch flip is
+// the ledger's question, not this detector's. bars follow mergedDailyBars' shape ({t,h,l,c}) and
+// must be CLOSED (caller trims the forming day) — an intrabar probe that dies by the close must
+// never fire, the same discipline the -28 EMA200 streams enforce.
+function detectLvlTouch(bars, px, sd30, side, opts) {
+  const o = opts || {};
+  const buf = o.buf > 0 ? o.buf : 0.5;                      // stop offset beyond the level, sigma units
+  const minTgtSd = o.minTgtSd > 0 ? o.minTgtSd : 1.5;
+  const fresh = o.fresh >= 1 ? Math.round(o.fresh) : 2;
+  if (!Array.isArray(bars) || bars.length < 60 || !(px > 0) || !(sd30 > 0)) return null;
+  if (side !== "long" && side !== "short") return null;
+  const L = side === "long";
+  const lv = detectLevels(bars, px, sd30, { minBars: 60 });
+  if (!lv || !Array.isArray(lv.items) || !lv.items.length || !(lv.tauPct > 0)) return null;
+  // nearest qualifying cluster on the ENTRY side of the mark: sup/flip below for a long,
+  // res/flip above for a short — the level the probe is defending
+  let best = null;
+  for (const it of lv.items) {
+    if (!it || !(it.v > 0)) continue;
+    if (L ? (it.side !== "sup" && it.side !== "flip") : (it.side !== "res" && it.side !== "flip")) continue;
+    if (L ? !(it.v < px) : !(it.v > px)) continue;
+    if (best == null || (L ? it.v > best.v : it.v < best.v)) best = it;
+  }
+  if (!best) return null;
+  const lvl = best.v, tau = lv.tauPct;
+  const inBand = (p) => Number.isFinite(p) && p > 0 && Math.abs(Math.log(p / lvl)) * 100 <= tau;
+  // fresh CLOSED probe: the bar's extreme reached the tau band and its CLOSE held the level
+  let hit = false;
+  for (let i = Math.max(0, bars.length - fresh); i < bars.length; i++) {
+    const b = bars[i]; if (!b) continue;
+    const ext = L ? +b.l : +b.h, c = +b.c;
+    if (!Number.isFinite(ext) || !Number.isFinite(c) || !(c > 0)) continue;
+    if (inBand(ext) && (L ? c > lvl : c < lvl)) { hit = true; break; }
+  }
+  if (!hit) return null;
+  const last = bars[bars.length - 1];
+  if (!last || !(+last.c > 0) || (L ? !(+last.c > lvl) : !(+last.c < lvl))) return null;   // the hold is still holding at the last close
+  if (L ? !(px > lvl) : !(px < lvl)) return null;                                          // and at the mark
+  const stop = +(lvl * Math.exp((L ? -1 : 1) * buf * sd30 / 100)).toPrecision(6);
+  const target = L ? nextLevelAbove(bars, px, sd30, minTgtSd) : nearestLevelBelow(bars, px, sd30, minTgtSd);
+  if (target == null) return null;
+  if (L ? !(stop > 0 && stop < px && target > px) : !(stop > px && target > 0 && target < px)) return null;
+  return { lvl: +lvl.toPrecision(6), stop, target, n: best.n, ageD: best.ageD };
+}
+// ---- volume-node touch (build 2026.07.28-02): Phase 3 of the structural-void programme --------
+// The volume profile's high-volume nodes are the OTHER honest level source this app holds —
+// prices where the market actually transacted, not statistical constructions. Nothing has ever
+// measured whether they defend the way pivot clusters do, so these primitives put that question
+// on the ledger out of sample instead of arguing about it.
+//
+// vpTouchNodes: the tradeable node list from one volumeProfile output — the POC plus every HVN
+// peak, deduped (the POC usually IS the tallest HVN; a duplicate would double-anchor) and sorted
+// ascending. Each node carries its share of total profile volume: acceptance is the VP analogue
+// of a pivot cluster's touch count, and it rides out as the recorded feature.
+function vpTouchNodes(vp) {
+  if (!vp || !(vp.poc > 0)) return null;
+  let pv = 0;
+  if (Array.isArray(vp.bins)) for (const b of vp.bins) if (b && b[1] > pv) pv = b[1];
+  const out = [{ p: +vp.poc, v: pv }];
+  const tol = (vp.binPct > 0 ? vp.binPct : 0.5) / 100;
+  for (const n of (vp.hvn || []))
+    if (n && n.p > 0 && Math.abs(n.p / vp.poc - 1) > tol) out.push({ p: +n.p, v: +n.v || 0 });
+  out.sort((a, z) => a.p - z.p);
+  return out;
+}
+// detectVpTouch: the held touch of a volume node — identical mechanics to detectLvlTouch so "a
+// touch" means the same thing across both level sources (tau follows detectLevels' own 0.4σ
+// convention, floored at 0.5%): a CLOSED daily bar's extreme probes the nearest node on the entry
+// side inside the tau band and the bar CLOSES back on the hold side, the last close and the mark
+// still hold, stop = the node pushed half a σ through in log space, target = the next node
+// >= minTgtSd away in the trade direction. Volume nodes carry no sup/res classification — any
+// node below the mark can act as acceptance for a long, any node above as supply for a short;
+// that symmetry is the family definition, and whether it deserves the pivot families' trust is
+// exactly what the ledger will answer. Null discipline identical: no node on either leg, no
+// claim, never an invented price.
+function detectVpTouch(nodes, bars, px, sd30, side, opts) {
+  const o = opts || {};
+  const buf = o.buf > 0 ? o.buf : 0.5;
+  const minTgtSd = o.minTgtSd > 0 ? o.minTgtSd : 1.5;
+  const fresh = o.fresh >= 1 ? Math.round(o.fresh) : 2;
+  if (!Array.isArray(nodes) || nodes.length < 2 || !Array.isArray(bars) || bars.length < 2) return null;
+  if (!(px > 0) || !(sd30 > 0) || (side !== "long" && side !== "short")) return null;
+  const L = side === "long";
+  const tau = Math.max(0.4 * sd30, 0.5);
+  // anchor: the nearest node on the ENTRY side of the mark
+  let anchor = null;
+  for (const n of nodes) {
+    if (!n || !(n.p > 0)) continue;
+    if (L ? !(n.p < px) : !(n.p > px)) continue;
+    if (anchor == null || (L ? n.p > anchor.p : n.p < anchor.p)) anchor = n;
+  }
+  if (!anchor) return null;
+  const lvl = anchor.p;
+  const inBand = (p) => Number.isFinite(p) && p > 0 && Math.abs(Math.log(p / lvl)) * 100 <= tau;
+  let hit = false;
+  for (let i = Math.max(0, bars.length - fresh); i < bars.length; i++) {
+    const b = bars[i]; if (!b) continue;
+    const ext = L ? +b.l : +b.h, c = +b.c;
+    if (!Number.isFinite(ext) || !Number.isFinite(c) || !(c > 0)) continue;
+    if (inBand(ext) && (L ? c > lvl : c < lvl)) { hit = true; break; }
+  }
+  if (!hit) return null;
+  const last = bars[bars.length - 1];
+  if (!last || !(+last.c > 0) || (L ? !(+last.c > lvl) : !(+last.c < lvl))) return null;
+  if (L ? !(px > lvl) : !(px < lvl)) return null;
+  const stop = +(lvl * Math.exp((L ? -1 : 1) * buf * sd30 / 100)).toPrecision(6);
+  // target: the next node past the minimum tradeable distance, VP-pure — mixing in pivot
+  // clusters here would blur which level source the record is measuring
+  const floor = px * Math.exp((L ? 1 : -1) * minTgtSd * sd30 / 100);
+  let target = null;
+  for (const n of nodes) {
+    if (!n || !(n.p > 0)) continue;
+    if (L ? !(n.p > floor) : !(n.p < floor)) continue;
+    if (target == null || (L ? n.p < target : n.p > target)) target = n.p;
+  }
+  if (target == null) return null;
+  target = +target.toPrecision(6);
+  if (L ? !(stop > 0 && stop < px && target > px) : !(stop > px && target > 0 && target < px)) return null;
+  return { lvl: +lvl.toPrecision(6), stop, target, vw: anchor.v };
 }
 // Swing MA50 pullback: the swing-clock sibling of detectMAPull (which keeps its own tighter
 // definition and 10d record untouched — mixing resolution conventions inside one event bucket
@@ -3379,7 +3576,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   closedBars, closedLadder, trendWhen,

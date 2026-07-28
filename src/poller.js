@@ -8,7 +8,7 @@ const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFea
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, FOMC_DECISIONS } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
-  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
+  EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -1246,9 +1246,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     "reclaim", "failbrk", "mapull", "wickfill", "roundfr",     // shadows
     "swpull", "basebrk", "basepj",                             // swing-horizon touch-mode shadows (-20)
     "emabrk", "emarts",                                        // EMA200 close-confirmed shadows (-28)
+    "lvlhold", "lvlrej", "vphold", "vprej",                    // structural-level + volume-node touch shadows (2026.07.28-01/-02)
     "airead",                                                  // the Report tab's own record (never was this engine's)
   ]);
-  const XYZ_ONLY_EVS = new Set(["gap", "gapfade", "ondrift", "pead", "sweep", "prem", "squeeze", "unwind"]);
+  // squeeze2/unwind2 follow their incumbents: the twins fire only where the visible squeeze/unwind
+  // fire, and those are xyz-only until the equity record says the trigger itself works.
+  const XYZ_ONLY_EVS = new Set(["gap", "gapfade", "ondrift", "pead", "sweep", "prem", "squeeze", "unwind", "squeeze2", "unwind2"]);
   const MAIN_ONLY_EVS = new Set(["casc", "fundext"]);
   // One gate every fire site and openLedger consults, so "which events does this universe run"
   // has exactly one answer in the codebase.
@@ -1547,6 +1550,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
           gw: "gapfade shadow only: void width as a multiple of the market's own gap σ (1.0 or 1.5)",
           emv: "pead shadow only: the frozen earnings-reaction move, %",
+          lvn: "structural-void families (lvlhold/lvlrej/squeeze2/unwind2): confirmed pivot touches on the anchoring cluster at fire",
+          lva: "structural-void families: days since that cluster's most recent touch, at fire",
+          vpw: "volume-node families (vphold/vprej): the anchoring node's share of total profile volume at fire, %",
           rm: "airead only: the model that authored the read (analyst accountability claims)",
           ses: "session bucket at fire, xyz only (rth / on / wknd)", dow: "UTC day-of-week at fire (0=Sun)",
         },
@@ -2001,7 +2007,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       recent };
   }
   const MV_THRESHOLDS = [0, 0.5, 1, 2];
-  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj", "emabrk", "emarts"]);
+  const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj", "emabrk", "emarts", "lvlhold", "lvlrej", "squeeze2", "unwind2", "vphold", "vprej"]);
   function recomputeRecord() {
     // Unit-epoch guard: entries opened before sigma-normalization (-16) lack sd0 and were
     // resolved in %, while the studies now claim in R. Mixing them poisons medians, averages,
@@ -2131,6 +2137,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       tip: "close-confirmed D1 cross of the 200-EMA, buffered: the confirming CLOSE must clear the line by >=0.25\u03c3, with four closes below immediately before (the study's re-arm written as shape \u2014 chop cannot re-fire). Void half a \u03c3 back through the line, target the next structural level >=2\u03c3 above; no level, no claim. Touch-resolved, 30d [15d crypto]. Long side only \u2014 the -26 study's strongest prior; every other definition earns its stream through that panel first." },
     { ev: "emarts", uni: "both", label: "EMA200 retest hold (D1)", unit: "R",
       tip: "the bullish 200-EMA retest: a closed D1 bar TOUCHES the line from clear air above (prior close >=0.25\u03c3 over it, prior bar untouched \u2014 first touch of the episode) and CLOSES back above. Void a full \u03c3 below the line \u2014 the hold thesis dies there \u2014 target the next structural level >=2\u03c3 above. Touch-resolved, 30d [15d crypto]. Long side only; the bearish mirror stays study-tier until the -26 panel says it earns a stream." },
+    { ev: "lvlhold", uni: "both", label: "structural support hold", unit: "R",
+      tip: "a CLOSED daily bar probes a confirmed sup/flip pivot cluster inside the level detector's own tau band and closes back above it, mark still holding \u2014 long the defended level. The void sits half a \u03c3 BEHIND the level: the invalidation is the level itself, not a sigma construction, which is the whole thesis under test. Target = the next confirmed cluster >=1.5\u03c3 above; no cluster on either leg, no claim. Touch-resolved at 30d [15d crypto]. Cluster touch count and age ride as recorded features (lvn/lva) so the record can split strong flips from weak 2-touch levels." },
+    { ev: "lvlrej", uni: "both", label: "structural resistance reject", unit: "R",
+      tip: "the short mirror: a closed daily high probes a confirmed res/flip cluster and closes back below, mark still under it \u2014 void half a \u03c3 above the level, target the next confirmed cluster >=1.5\u03c3 below. Touch-resolved at 30d [15d crypto], same lvn/lva feature stamps. Reads the TRUE highs the merged daily bars carry." },
+    { ev: "vphold", uni: "both", label: "volume-node hold", unit: "R",
+      tip: "the lvlhold mechanics on the OTHER honest level source: a closed daily bar probes the nearest volume node below (POC or high-volume node from the 90d-weighted profile) inside the same tau band and closes back above it \u2014 void half a \u03c3 behind the node, target the next node >=1.5\u03c3 above, VP-pure on both legs so the record measures ONE level source. Touch-resolved at 30d [15d crypto]. vpw stamps the node's share of profile volume: acceptance is the VP analogue of a touch count, and the record can split heavy shelves from thin ones later." },
+    { ev: "vprej", uni: "both", label: "volume-node reject", unit: "R",
+      tip: "the short mirror: a closed daily high probes the nearest node overhead and closes back below, mark still under it \u2014 void half a \u03c3 above the node, target the next node >=1.5\u03c3 below. Touch-resolved at 30d [15d crypto], same vpw stamp. Together with vphold this is the out-of-sample answer to whether volume shelves defend like pivot clusters \u2014 measured on the ledger, not argued from the chart." },
+    { ev: "squeeze2", uni: "xyz", label: "short squeeze \u00b7 structural void", unit: "R",
+      tip: "the squeeze's structural-void twin: fires ONLY when the visible squeeze fires, carries the SAME playbook target read verbatim, and swaps the range-formula void for the nearest confirmed cluster on the loss side (0.3\u20133\u03c3 out, stop half a \u03c3 through it). One variable isolated \u2014 the stop-aware duel against the incumbent answers whether the tight structural stop's R:R gain survives its higher tag rate. No cluster in band, no twin. 3d horizon, R-united; the incumbent's % record stays untouched." },
+    { ev: "unwind2", uni: "xyz", label: "long unwind \u00b7 structural void", unit: "R",
+      tip: "the unwind's structural-void twin \u2014 identical trigger and target, void on the nearest confirmed cluster overhead (0.3\u20133\u03c3, stop half a \u03c3 through). The PURRDAT case measured: a formula void at three-quarters of the 30d range vs a confirmed flip a fraction as far from entry. The record, not the chart, decides which stop earns the board. 3d horizon, R-united." },
     { ev: "pead", uni: "xyz", label: "post-earnings drift", unit: "R",
       tip: "an earnings reaction >=1.5\u03c3 of the name's own daily vol, entered only after the reaction session completes, drifting WITH the move \u2014 stop 1\u03c3 back through the reaction close. 10d horizon, stocks only; accrues at earnings-season pace." },
     { ev: "sweep", uni: "xyz", label: "liquidity sweep (5m)", unit: "R",
@@ -2339,6 +2357,50 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
               openLedger(r, "emarts", { score: 0, reading: "" }, 1,
                 { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: er.stop, tgt: er.target, tm: 1,
                   mv: +(Math.abs(er.target / r.px - 1) * 100).toFixed(2) }, 0);
+            // ---- structural-level touch shadows (2026.07.28-01) ------------------------------
+            // The thesis under measurement: a claim fired NEXT TO a confirmed level needs no
+            // sigma-wide guessed void — the level IS the invalidation, and the stop sits half a
+            // σ behind it. Long: a closed D1 low probes a confirmed sup/flip cluster inside the
+            // detector's own tau and closes back above; short: the mirror at res/flip, reading
+            // the true highs the merged bars carry. Target = the next confirmed cluster >=1.5σ
+            // in the trade direction — no cluster on either leg, no claim, honest null. Touch-
+            // resolved like every -20 shadow. Cluster touch count / age ride as recorded
+            // features (lvn/lva), recorded NOT gated: whether a 2-touch level earns the trust
+            // of a 5-touch flip is the ledger's question. Same closed-bar discipline as -28:
+            // the forming day is trimmed, so an intrabar probe that dies by the close never fires.
+            const cdbT = closedBars(mergedDailyBars(r), DAY, nowD);
+            const lhT = detectLvlTouch(cdbT, r.px, sd30, "long");
+            if (lhT && stopGeometryOk("long", r.px, lhT.stop))
+              openLedger(r, "lvlhold", { score: 0, reading: "" }, 1,
+                { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: lhT.stop, tgt: lhT.target, tm: 1,
+                  mv: +(Math.abs(lhT.target / r.px - 1) * 100).toFixed(2), lvn: lhT.n, lva: lhT.ageD }, 0);
+            const lrT = detectLvlTouch(cdbT, r.px, sd30, "short");
+            if (lrT && stopGeometryOk("short", r.px, lrT.stop))
+              openLedger(r, "lvlrej", { score: 0, reading: "" }, -1,
+                { sd0: +sd30.toFixed(3), psd: "short", pn: 1, stp: lrT.stop, tgt: lrT.target, tm: 1,
+                  mv: +(Math.abs(lrT.target / r.px - 1) * 100).toFixed(2), lvn: lrT.n, lva: lrT.ageD }, 0);
+            // ---- volume-node touch shadows (2026.07.28-02): Phase 3 --------------------------
+            // The same held-touch mechanics anchored on the OTHER honest level source: the
+            // profile's POC + high-volume nodes, read from volMapFor's memoized build — one
+            // computation, every consumer, the chart's VP and this fire site can never disagree
+            // about where a node sits. Whether transacted-volume shelves defend the way pivot
+            // clusters do has never been measured here; these two put it on the ledger out of
+            // sample. vpw stamps the anchoring node's share of profile volume — acceptance is
+            // the VP analogue of a touch count — recorded, not gated, like every feature stamp.
+            const vmT = volMapFor(r);
+            const vnodes = vmT && vmT.vp ? vpTouchNodes(vmT.vp) : null;
+            if (vnodes && vnodes.length >= 2) {
+              const vhT = detectVpTouch(vnodes, cdbT, r.px, sd30, "long");
+              if (vhT && stopGeometryOk("long", r.px, vhT.stop))
+                openLedger(r, "vphold", { score: 0, reading: "" }, 1,
+                  { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: vhT.stop, tgt: vhT.target, tm: 1,
+                    mv: +(Math.abs(vhT.target / r.px - 1) * 100).toFixed(2), vpw: +(vhT.vw * 100).toFixed(2) }, 0);
+              const vrT = detectVpTouch(vnodes, cdbT, r.px, sd30, "short");
+              if (vrT && stopGeometryOk("short", r.px, vrT.stop))
+                openLedger(r, "vprej", { score: 0, reading: "" }, -1,
+                  { sd0: +sd30.toFixed(3), psd: "short", pn: 1, stp: vrT.stop, tgt: vrT.target, tm: 1,
+                    mv: +(Math.abs(vrT.target / r.px - 1) * 100).toFixed(2), vpw: +(vrT.vw * 100).toFixed(2) }, 0);
+            }
           }
           // post-earnings drift, xyz only: enter with a completed outsized reaction (the
           // detector enforces completeness, freshness and the 1.5σ magnitude floor)
@@ -2571,6 +2633,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
               (sqz - incVal("squeeze")) * 1.1 + 15, evd, { horizon: evMeta("squeeze", r.uni).horizon });
             sig.play = playbook("squeeze", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
             out.push(sig); openLedger(r, "squeeze", sig, 1);
+            // Structural-void twin (2026.07.28-01): IDENTICAL trigger (this very fire), IDENTICAL
+            // target (the play's own level, read verbatim), same at-horizon resolution — ONLY the
+            // void changes: the nearest confirmed cluster on the loss side within 0.3-3σ, stop
+            // half a σ through it. One variable isolated: at ≥30 resolutions the stop-aware duel
+            // answers whether the tight structural stop's R:R gain survives its higher tag rate —
+            // measured, not argued. No cluster in band, no twin: the incumbent still ledgers, the
+            // twin only exists where the tape offers an invalidation to sit on. sd0 stamps the
+            // twin R-united; the incumbent's %-record predates the sigma epoch and stays untouched.
+            if (sd30 > 0) {
+              const sv = structVoid(closedBars(mergedDailyBars(r), DAY, now), r.px, sd30, "long");
+              const t2 = sig.play && Number.isFinite(sig.play.target) && sig.play.target > r.px ? sig.play.target : null;
+              if (sv && t2 != null && stopGeometryOk("long", r.px, sv.stop))
+                openLedger(r, "squeeze2", { score: 0, reading: "" }, 1,
+                  { sd0: +sd30.toFixed(3), psd: "long", pn: 1, stp: sv.stop, tgt: t2,
+                    mv: +(Math.abs(t2 / r.px - 1) * 100).toFixed(2), lvn: sv.n, lva: sv.ageD }, 0);
+            }
           }
         }
         // Bearish mirror: crowded LONGS paying + OI building + price near range LOWS.
@@ -2588,6 +2666,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
               (unw - incVal("unwind")) * 1.1 + 15, evd, { horizon: evMeta("unwind", r.uni).horizon });
             sig.play = playbook("unwind", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
             out.push(sig); openLedger(r, "unwind", sig, -1);
+            // Structural-void twin — the PURRDAT case: a formula void parked at three-quarters of
+            // the 30d range vs a confirmed flip a fraction as far from the entry. Same contract as
+            // the squeeze twin above: identical trigger and target, void on the nearest confirmed
+            // cluster overhead (0.3-3σ, stop half a σ through), no cluster in band -> no twin.
+            if (sd30 > 0) {
+              const sv = structVoid(closedBars(mergedDailyBars(r), DAY, now), r.px, sd30, "short");
+              const t2 = sig.play && Number.isFinite(sig.play.target) && sig.play.target > 0 && sig.play.target < r.px ? sig.play.target : null;
+              if (sv && t2 != null && stopGeometryOk("short", r.px, sv.stop))
+                openLedger(r, "unwind2", { score: 0, reading: "" }, -1,
+                  { sd0: +sd30.toFixed(3), psd: "short", pn: 1, stp: sv.stop, tgt: t2,
+                    mv: +(Math.abs(t2 / r.px - 1) * 100).toFixed(2), lvn: sv.n, lva: sv.ageD }, 0);
+            }
           }
         }
       }
