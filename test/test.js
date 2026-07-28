@@ -2047,6 +2047,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "renderRegime", "regimeCurveSvg", "wireRegimeControls",
     "drawSessions", "sgOpenSet", "sgToggle", "sgPendRow", "sgSection", "wireSessGroups",
     "sigSecOpen", "sigSecToggle", "sigSec",
+    "liveMark", "claimDelta", "brkBar", "nowChip",
     "syncAnalyticsSlot", "_szTz", "_szCash",
     "alignedDailyN", "openCompg", "renderCompg", "compgSeries", "compgSvg", "compgLegend", "compgWireChart", "termComp",
     "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
@@ -10246,7 +10247,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-28"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-29"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -10921,4 +10922,75 @@ test("ema200 shadows -28: crypto depth regression — a main-universe row's dete
   assert.ok(Array.isArray(wired) && wired.length <= 94, `wire payload stays capped (got ${wired && wired.length})`);
   // the crypto claim rides the compressed clock: 15d touch timeout, not the equity 30d
   assert.ok(e.resolveAt - e.t0 <= 15.5 * DAY_, "crypto emabrk timeout rides the 15d EV_META_MAIN override");
+});
+
+// ================================================================================================
+// live "now" batch (build 2026.07.27-29): the three numbers every claim view owes the reader —
+// the price it fired at, the price now, and which way that is FOR THIS CLAIM. Client-side join
+// against the streaming snapshot: the cached ledger payload is untouched by design.
+// ================================================================================================
+
+test("now -29: the chip family is wired into both claim views, and the payload stayed untouched", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // the shared helpers, each defined exactly once (the integrity manifest counts them too)
+  for (const f of ["liveMark", "claimDelta", "brkBar", "nowChip"])
+    assert.equal((app.match(new RegExp("^function " + f + "\\(", "gm")) || []).length, 1, `exactly one ${f}`);
+  // live mark comes from the client's OWN snapshot — never from the ledger payload
+  assert.ok(app.includes("function liveMark(coin){ const r=coin?state.rows.get(coin):null;"),
+    "liveMark must read state.rows (the streaming snapshot), not a ledger field");
+  // consumer 1: the history table — a now cell on every row shape, and the column header
+  assert.ok(app.includes("const nowc = `<td>${nowChip(e.coin||e.tk, { side:e.side, mark0:e.mark0, stp:e.stp, tgt:e.tgt, status:e.status }, { wrap:false })}</td>`;"),
+    "sigHistRow must build the now cell from the claim's own frozen fields");
+  assert.equal((app.match(/\$\{nowc\}/g) || []).length, 3, "now cell on all three row shapes (open, void, resolved)");
+  assert.ok(/<th data-tip="live price against this claim[\s\S]{0,900}>now<\/th>/.test(app), "the now column header ships with its disclosure");
+  // consumer 2: the signal card — both trigChip branches
+  assert.equal((app.match(/\+nowChip\(g\.coin,c\)/g) || []).length, 2, "the card's now chip rides BOTH trigChip branches (merged and diverged stamps)");
+  // -29 bug fix: the fire mark is unconditional on the diverged branch
+  assert.ok(app.includes("const atPx=c&&c.px!=null?` <span class=\"sec\">@ ${fmtPrice(c.px)}</span>`:(c?' <span class=\"na\">@ \\u2014</span>':'');"),
+    "the claim's fire mark must ride the presence chip unconditionally — it used to vanish once the stamps diverged");
+  // and the server payload did NOT grow a live price: that would bust the content ETag every tick
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(!/livePx|nowPx/.test(srv), "no live price in the served payload — the ETag economy stays intact");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const cls of [".nowchip", ".nowbrk", ".nowbrk i.tgt", ".nowbrk i.stp", ".nowbrk .z"])
+    assert.ok(css.includes(cls), `styles.css missing -29 class: ${cls}`);
+});
+
+test("now -29: delta is signed WITH the claim, and the bracket bar only exists where geometry does", () => {
+  // The two pure functions behind the chip, extracted from app.js and evaluated directly — the
+  // sign convention is the whole point of the column and must not be reasoned about by eye.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i > -1, name + " present");
+    let d = 0, j = app.indexOf("{", i);
+    for (let k = j; k < app.length; k++) { if (app[k] === "{") d++; else if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); } }
+    throw new Error("unbalanced " + name);
+  };
+  const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+  const fn = new Function("clamp", grab("claimDelta") + "\n" + grab("brkBar") + "\nreturn {claimDelta, brkBar};")(clamp);
+  // LONG: price up is ahead (positive); price down is behind
+  assert.ok(Math.abs(fn.claimDelta("long", 100, 110) - 10) < 1e-9, "long, price up: +10%");
+  assert.ok(Math.abs(fn.claimDelta("long", 100, 95) - -5) < 1e-9, "long, price down: -5%");
+  // SHORT: the mirror — price DOWN is the claim winning, and must read positive
+  assert.ok(fn.claimDelta("short", 100, 90) > 0, "short, price down: POSITIVE — the chip asks whether the CLAIM is winning");
+  assert.ok(Math.abs(fn.claimDelta("short", 100, 90) - 10) < 1e-9, "short, -10% price = +10% for the claim");
+  assert.ok(fn.claimDelta("short", 100, 110) < 0, "short, price up: negative");
+  assert.equal(fn.claimDelta("long", null, 110), null, "no fire mark: no delta, never a zero");
+  assert.equal(fn.claimDelta("long", 0, 110), null, "a zero mark can't anchor a percentage");
+  // bracket bar: long claim, mark 100, void 95, target 115
+  const up = fn.brkBar("long", 100, 107.5, 95, 115);
+  assert.ok(up && up.towardT === true && Math.abs(up.frac - 0.5) < 1e-9, "halfway to the target reads 50% toward target");
+  const dn = fn.brkBar("long", 100, 97.5, 95, 115);
+  assert.ok(dn && dn.towardT === false && Math.abs(dn.frac - 0.5) < 1e-9, "halfway to the void reads 50% toward void");
+  assert.ok(fn.brkBar("long", 100, 130, 95, 115).frac === 1, "past the level clamps at the level — never >100%");
+  // short mirror: target BELOW the mark, void above
+  const sh = fn.brkBar("short", 100, 95, 105, 90);
+  assert.ok(sh && sh.towardT === true && Math.abs(sh.frac - 0.5) < 1e-9, "short: halfway down to the target");
+  // no geometry -> no bar, ever
+  assert.equal(fn.brkBar("long", 100, 105, null, 115), null, "no frozen void: no bar");
+  assert.equal(fn.brkBar("long", 100, 105, 95, null), null, "no frozen target: no bar");
+  assert.equal(fn.brkBar("long", 100, 105, 100, 115), null, "a void AT the mark has no scale to measure against");
 });
