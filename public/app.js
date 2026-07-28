@@ -380,7 +380,13 @@ function applySnapshot(s){
     if(m.feat) r.feat=m.feat;
     if(m.doi) r.doiByWin=m.doi;
     if(m.fundByWin) r.fundByWin=m.fundByWin;
-    if(m.sector) r.sector=m.sector;
+    if(m.sector){ r.sector=m.sector;
+      // Industry group rides the same payload as sector, in LOCKSTEP: the wire ships `ind` only
+      // when it differs from sector, so its absence next to a present sector MEANS ind===sector —
+      // clear rather than keep, or a name whose industry is later removed from the curated table
+      // would wear a stale group on any long-lived page until reload. (Build -05: this line is the
+      // fix for -04's field-name-mismatch bug — the wire carried ind, this explicit merge dropped it.)
+      r.ind=(m.ind!==undefined)?m.ind:undefined; }
     r.fundPct=(m.fundPct!=null)?m.fundPct:r.fundPct;
     if(m.red!==undefined) r.red=m.red;             // {dcap,hit,n} or null — fixed 31d/4h red-tape resilience, server-computed
     if(m.rvol!==undefined) r.rvolByWin=m.rvol;     // {h1,h4,d1} clock-hour-matched relative volume, server-computed
