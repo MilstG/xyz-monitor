@@ -218,7 +218,24 @@ function nowChip(coin,c,opts){
   const o=opts||{}, wrap=o.wrap!==false;
   const dash=(why)=>wrap?`<span class="nowchip" data-tip="${esc(why)}">now <span class="na">\u2014</span></span>`
     :`<span class="na" data-tip="${esc(why)}">\u2014</span>`;
-  if(!c) return dash('no ledger claim behind this signal yet \u2014 nothing to measure a live price against');
+  if(!c){
+    // -31: a re-arm-parked episode is not "nothing" — its claim already resolved into the
+    // record, and the server ships that resolution. Render the outcome, not a dash: the reader's
+    // real question here is "did this already play out", and the answer is sitting in the ledger.
+    const sc=o.scored;
+    if(sc){
+      const ago=sc.tR!=null?fmtAge(Date.now()-sc.tR):null;
+      const val=sc.realized!=null
+        ?`<b class="${sc.realized>0?'pos':sc.realized<0?'neg':'sec'}">${sc.realized>0?'+':''}${sc.realized}${esc(sc.unit||'')}</b>`
+        :'<span class="na">void</span>';
+      const tip=`this episode already SCORED \u2014 the claim behind this signal ${sc.voided
+          ?'expired without a resolvable outcome (settled as void)'
+          :`resolved ${sc.realized!=null?(sc.realized>0?'+':'')+sc.realized+(sc.unit||''):'\u2014'}${sc.stopped?' by hitting its frozen void level':' at its horizon'}`}${ago?` ${ago} ago`:''} and is in the record. The condition has not lapsed since, so the re-arm gate refuses a second claim on the same episode \u2014 one episode, one claim; a serial re-claim would inflate n with pseudo-replication. A fresh claim opens only after the condition clears for a full build and then fires again. No live delta is shown because there is no open mark to measure against: the trade this record scored is over, and what you are looking at is its persistence, not a new setup.`;
+      const inner=`scored ${val}${ago?` <span class="sec">\u00b7 ${ago} ago</span>`:''}`;
+      return wrap?`<span class="nowchip" data-tip="${esc(tip)}">${inner}</span>`:`<span data-tip="${esc(tip)}">${inner}</span>`;
+    }
+    return dash('no ledger claim behind this signal yet \u2014 nothing to measure a live price against');
+  }
   if(c.status&&c.status!=='open')
     return dash('this claim is settled \u2014 its trade is over and the outcome column states what happened. A live price here would be noise, not information.');
   const px=liveMark(coin);
@@ -5422,14 +5439,14 @@ function trigChip(g){
     const left=c.resolveAt!=null?c.resolveAt-Date.now():null;
     const tip=baseTip+` \u00b7 claim opened at ${c.px!=null?fmtPrice(c.px):'\u2014'}${c.boot?' on the first build after a restart/deploy (\u27f2)':''} \u2014 the outcome is measured from this mark${left!=null&&left>0?` \u00b7 resolves in ${fmtAge(left)}`:' \u00b7 resolution due'}`;
     return `<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(tip)}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${c.px!=null?' @ '+fmtPrice(c.px):''}${(g.sinceBoot||c.boot)?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`
-      +nowChip(g.coin,c);
+      +nowChip(g.coin,c,{scored:g.scored});
   }
   // -29: the claim's fire mark rides the presence chip UNCONDITIONALLY. It used to appear only
   // on the merged branch (presence stamp == claim stamp), so the moment an episode aged and the
   // two diverged, the one price every outcome is measured from silently vanished from the card.
   const atPx=c&&c.px!=null?` <span class="sec">@ ${fmtPrice(c.px)}</span>`:(c?' <span class="na">@ \u2014</span>':'');
   let s=`<span class="sig-age${g.decayed?' dk':''}" data-tip="${esc(baseTip+(c&&c.px!=null?` \u00b7 the LEDGER CLAIM behind it opened ${new Date(c.t).toLocaleString()} at ${fmtPrice(c.px)}; the outcome is measured from that mark, never from the live price`:''))}">${g.decayed?'\u29d6 ':''}${fmtTrig(g.t0)}${g.age!=null?' \u00b7 '+fmtAge(g.age)+' ago':''}${atPx}${g.sinceBoot?' \u27f2':''}${g.decayed?' \u00b7 decaying':''}</span>`
-    +nowChip(g.coin,c);
+    +nowChip(g.coin,c,{scored:g.scored});
   if(c&&c.t!=null){
     const left=c.resolveAt!=null?c.resolveAt-Date.now():null;
     const tip=`the LEDGER CLAIM this signal is scored against: opened ${new Date(c.t).toLocaleString()} at ${c.px!=null?fmtPrice(c.px):'\u2014'}${c.boot?' \u2014 \u27f2 on the first build after a restart/deploy (the condition may predate the stamp)':''}. One episode carries ONE claim even if the condition lapses and returns, so the claim can be older than the condition you are looking at \u2014 the outcome is measured from the claim's own mark and time.${left!=null?(left>0?` Resolves in ${fmtAge(left)}.`:' Resolution due.'):''}`;
