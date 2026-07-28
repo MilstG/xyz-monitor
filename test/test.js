@@ -965,8 +965,8 @@ test("crypto enrollment: a whitelist and a geometry gate — and the arithmetic 
   // small-n rescue, it is contamination
   assert.ok(pol.includes('const acOf = (r) => (r.uni === "main" ? "Crypto" : (classifyCached(r.ticker).assetClass || "Other"));'),
     "crypto pools separately from every equity asset class");
-  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj", "emabrk", "emarts"])'),
-    "R-united ledger set carries the crypto-native events + the -20 swing and -28 EMA200 shadows");
+  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj", "emabrk", "emarts", "lvlhold", "lvlrej", "squeeze2", "unwind2", "vphold", "vprej"])'),
+    "R-united ledger set carries the crypto-native events + the -20 swing, -28 EMA200, and 07.28 structural-void + volume-node shadows");
   for (const gone of ["oc24: oiChg24", "cryptoSetupsLive"])
     assert.ok(!pol.includes(gone), `retired -87 remnant must not return: ${gone}`);
   // countU is BACK, and must count kept conditions rather than the capped transport slice —
@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-32"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11332,4 +11332,315 @@ test("postres -31: the client renders the scored chip on the re-arm branch, dash
   assert.ok(/scored \$\{val\}/.test(app), "the chip leads with the outcome");
   // a voided settlement renders as void, never as a fabricated number
   assert.ok(app.includes(`'<span class="na">void</span>'`), "a never-scored expiry is an honest void, not a number");
+});
+
+// ===== structural-void families (build 2026.07.28-01) ==========================================
+// Four shadows testing one thesis: a claim fired next to a confirmed level does not need a
+// sigma-wide constructed void — the level is the invalidation and the stop sits half a σ behind
+// it. lvlhold/lvlrej are level-anchored entries (touch-resolved); squeeze2/unwind2 are twins of
+// the sigma-construct incumbents, identical in trigger/target/clock, differing ONLY in the void —
+// the stop-aware duel is the experiment. Nothing gates on the thesis; the ledger measures it.
+
+// Shared tape builder: flat closes with confirmed pivot lows (support) and pivot highs
+// (resistance/target), plus mild alternation so sd30 is real. Pivots sit far enough apart that
+// their k=3 windows never overlap, and the alternation is period-2 so it can never mint a pivot
+// (equal values fail detectLevels' strict comparison by construction).
+function svBars(n, opts) {
+  const o = opts || {}, DAY_ = 86400e3, t0 = Date.now() - (n + 5) * DAY_, base = o.base || 104;
+  const bars = [];
+  for (let i = 0; i < n; i++) {
+    let c = base + (i >= n - 40 ? (i % 2 ? 0.4 : -0.4) : 0), h = c + 0.4, l = c - 0.4;
+    if (o.supAt && o.supAt.includes(i)) { c = o.sup; l = o.sup; h = c + 0.4; }   // the cluster IS the low
+    if (o.resAt && o.resAt.includes(i)) h = o.res;
+    bars.push({ t: t0 + i * DAY_, c, h, l });
+  }
+  return bars;
+}
+
+test("structural void -01: detectLvlTouch long — held probe of a confirmed support fires, everything sloppier refuses", () => {
+  const C = require("../src/compute");
+  // support cluster at 100 (two pivot-low closes), resistance/target cluster at 118
+  const bars = svBars(300, { supAt: [50, 80], sup: 100, resAt: [60, 90], res: 118 });
+  // last closed bar probes the level inside tau and CLOSES back above it
+  bars[299] = { t: bars[299].t, c: 103, h: 103.4, l: 100.2 };
+  const sd30 = 0.8;
+  const r = C.detectLvlTouch(bars, 103.5, sd30, "long");
+  assert.ok(r, "held probe of confirmed support must fire");
+  assert.ok(Math.abs(r.lvl - 100) < 0.5, `anchored on the 100 cluster, got ${r.lvl}`);
+  assert.ok(r.stop < r.lvl && r.stop > r.lvl * 0.99, `the stop is TIGHT — half a σ behind the level, not a range fraction away (got ${r.stop})`);
+  assert.ok(Math.abs(r.target - 118) < 0.5, `target = next confirmed cluster above, got ${r.target}`);
+  assert.equal(r.n, 2, "cluster touch count rides out as a recorded feature");
+  assert.ok(r.ageD >= 0, "and so does the cluster's age");
+  // risk from entry is a fraction of what a sigma-construct void would demand
+  assert.ok((103.5 - r.stop) / 103.5 * 100 < 4.2, "the guessing-game premium is gone: risk to void is a few percent, not a range fraction");
+  // no probe: the last bars never came near the level
+  const far = svBars(300, { supAt: [50, 80], sup: 100, resAt: [60, 90], res: 118 });
+  assert.equal(C.detectLvlTouch(far, 103.5, sd30, "long"), null, "no probe, no claim");
+  // probe that CLOSED through the level is a breakdown's business
+  const broke = svBars(300, { supAt: [50, 80], sup: 100, resAt: [60, 90], res: 118 });
+  broke[299] = { t: broke[299].t, c: 99.5, h: 103, l: 99.3 };
+  assert.equal(C.detectLvlTouch(broke, 99.6, sd30, "long"), null, "a close through the level is not a hold");
+  // a flush DEEPER than tau is the reclaim/sweep families' trade, not this one's
+  const deep = svBars(300, { supAt: [50, 80], sup: 100, resAt: [60, 90], res: 118 });
+  deep[299] = { t: deep[299].t, c: 103, h: 103.4, l: 97 };
+  assert.equal(C.detectLvlTouch(deep, 103.5, sd30, "long"), null, "a deep flush through the band belongs to the reclaim family");
+  // no structural target above -> no claim, never an invented one
+  const noTgt = svBars(300, { supAt: [50, 80], sup: 100 });
+  noTgt[299] = { t: noTgt[299].t, c: 103, h: 103.4, l: 100.2 };
+  assert.equal(C.detectLvlTouch(noTgt, 103.5, sd30, "long"), null, "nowhere to go is not a trade");
+  // monotone tape confirms no structure at all — honest null
+  const mono = [];
+  for (let i = 0; i < 300; i++) { const c = 100 * Math.pow(1.002, i); mono.push({ t: Date.now() - (300 - i) * 86400e3, c, h: c * 1.001, l: c * 0.999 }); }
+  assert.equal(C.detectLvlTouch(mono, mono[299].c * 1.001, 2, "long"), null, "a trend has no confirmed pivots to defend");
+});
+
+test("structural void -01: detectLvlTouch short mirror + nearestLevelBelow", () => {
+  const C = require("../src/compute");
+  // resistance cluster at 108 overhead, support/target cluster at 96 below
+  const bars = svBars(300, { supAt: [60, 90], sup: 96, resAt: [50, 80], res: 108 });
+  bars[299] = { t: bars[299].t, c: 104, h: 107.9, l: 103.6 };   // high probes 108 inside tau, closes back below
+  const sd30 = 0.8;
+  const r = C.detectLvlTouch(bars, 104.2, sd30, "short");
+  assert.ok(r, "rejected probe of confirmed resistance must fire");
+  assert.ok(Math.abs(r.lvl - 108) < 0.5, `anchored on the 108 cluster, got ${r.lvl}`);
+  assert.ok(r.stop > r.lvl && r.stop < r.lvl * 1.01, "void half a σ ABOVE the level — tight, on the invalidation");
+  assert.ok(Math.abs(r.target - 96) < 0.5, `target = next confirmed cluster below, got ${r.target}`);
+  // nearestLevelBelow directly: same null discipline as its long mirror
+  assert.ok(Math.abs(C.nearestLevelBelow(bars, 104.2, sd30, 1.5) - 96) < 0.5, "nearestLevelBelow finds the 96 cluster");
+  const none = svBars(300, { resAt: [50, 80], res: 108 });
+  assert.equal(C.nearestLevelBelow(none, 104.2, sd30, 1.5), null, "no qualifying level below is null, never an invented price");
+});
+
+test("structural void -01: structVoid — loss side only, sigma band enforced, stop through the level", () => {
+  const C = require("../src/compute");
+  const sd30 = 2;
+  // clusters at 98 (below) and 103 (above) around a 100.5 base; px = 100
+  const bars = svBars(300, { base: 100.5, supAt: [50, 80], sup: 98, resAt: [60, 90], res: 103 });
+  const s = C.structVoid(bars, 100, sd30, "short");
+  assert.ok(s && Math.abs(s.lvl - 103) < 0.5, "short void anchors on the overhead cluster");
+  assert.ok(s.stop > s.lvl, "stop pushed through the level, not sitting on it");
+  const l = C.structVoid(bars, 100, sd30, "long");
+  assert.ok(l && Math.abs(l.lvl - 98) < 0.5 && l.stop < l.lvl, "long mirror anchors below, stop beneath the level");
+  // out of band: a cluster 3.85σ away is a different thesis, not this trade's invalidation
+  const farB = svBars(300, { base: 100.5, resAt: [60, 90], res: 108 });
+  assert.equal(C.structVoid(farB, 100, sd30, "short"), null, "beyond 3σ: refused");
+  // on top of the entry: the PALLADIUM artifact wearing structure's clothing
+  const onTop = svBars(300, { base: 100.5, resAt: [60, 90], res: 104.55 });
+  assert.equal(C.structVoid(onTop, 104.5, sd30, "short"), null, "inside 0.3σ of the mark: refused");
+  // nothing on the loss side at all
+  const only = svBars(300, { base: 100.5, supAt: [50, 80], sup: 98 });
+  assert.equal(C.structVoid(only, 100, sd30, "short"), null, "no overhead structure, no short void — honest null");
+});
+
+test("structural void -01: EV_META convention, wiring manifest, panel rows, duel isolation pins", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3;
+  for (const ev of ["lvlhold", "lvlrej"]) {
+    assert.equal(C.EV_META[ev].resolve, "touch", `${ev} resolves by first touch`);
+    assert.equal(C.EV_META[ev].horizonMs, 30 * DAY_, `${ev} 30d equity timeout`);
+    assert.equal(C.evMeta(ev, "main").horizonMs, 15 * DAY_, `${ev} runs the compressed crypto clock`);
+  }
+  // the twins ride the incumbents' EXACT clock — a twin on a different horizon is not a duel
+  for (const [tw, inc] of [["unwind2", "unwind"], ["squeeze2", "squeeze"]]) {
+    assert.equal(C.EV_META[tw].horizonMs, C.EV_META[inc].horizonMs, `${tw} must resolve on ${inc}'s clock`);
+    assert.ok(!C.EV_META[tw].resolve, `${tw} is at-horizon like its incumbent, never touch-mode`);
+  }
+  for (const f of ["detectLvlTouch", "structVoid", "nearestLevelBelow"])
+    assert.equal((require("fs").readFileSync(require("path").join(__dirname, "..", "src", "compute.js"), "utf8")
+      .match(new RegExp("^function " + f + "\\(", "mg")) || []).length, 1, `exactly one ${f} definition`);
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    'openLedger(r, "lvlhold"', 'openLedger(r, "lvlrej"',
+    "stp: lhT.stop, tgt: lhT.target, tm: 1",                     // touch mode + frozen absolute levels
+    "stp: lrT.stop, tgt: lrT.target, tm: 1",
+    "lvn: lhT.n, lva: lhT.ageD", "lvn: lrT.n, lva: lrT.ageD",    // cluster features recorded, not gated
+    "const cdbT = closedBars(mergedDailyBars(r), DAY, nowD);",   // true highs/lows, forming day trimmed
+    '"lvlhold", "lvlrej",',                                      // MAIN_EVS: crypto fires these too
+    '"squeeze", "unwind", "squeeze2", "unwind2"]);',             // twins stay xyz-only with their incumbents
+    'ev: "lvlhold", uni: "both"', 'ev: "lvlrej", uni: "both"',   // shadow panel rows
+    'ev: "squeeze2", uni: "xyz"', 'ev: "unwind2", uni: "xyz"',
+    'lvn: "structural-void families',                            // export glossary documents the stamps
+    'lva: "structural-void families',
+  ]) assert.ok(pol.includes(pin), `poller.js missing 07.28-01 pin: ${pin}`);
+  // Duel isolation, pinned at the fire sites: the twins read the incumbent play's target
+  // VERBATIM and open only inside the incumbent's own visible-fire branch. Recomputing a target
+  // here would quietly turn a one-variable experiment into a two-variable one.
+  assert.ok(pol.includes('const sv = structVoid(closedBars(mergedDailyBars(r), DAY, now), r.px, sd30, "long");'),
+    "squeeze2 derives its void from merged closed bars at the fire");
+  assert.ok(pol.includes('const sv = structVoid(closedBars(mergedDailyBars(r), DAY, now), r.px, sd30, "short");'),
+    "unwind2 likewise");
+  assert.ok(pol.includes("Number.isFinite(sig.play.target) && sig.play.target > r.px ? sig.play.target : null"),
+    "squeeze2's target IS the incumbent's play target, read verbatim");
+  assert.ok(pol.includes("sig.play.target > 0 && sig.play.target < r.px ? sig.play.target : null"),
+    "unwind2's target likewise (with the positive-price guard the short side needs)");
+  const uq = pol.indexOf('openLedger(r, "unwind", sig, -1);'), u2 = pol.indexOf('openLedger(r, "unwind2"');
+  assert.ok(uq > 0 && u2 > uq, "the twin opens after — and only alongside — the visible unwind fire");
+});
+
+test("structural void -01: end-to-end — the held support probe fires as an invisible touch-mode claim with tight frozen geometry", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  // dailies (closes+highs; lows fall back to closes in the merge): support cluster at 100 from
+  // two pivot-low CLOSES, target cluster at 118 from two pivot highs, alternation for sd30.
+  // The probe itself arrives through the HOURLY spine: yesterday's daily bucket carries the true
+  // low that dailyRaw structurally lacks — exactly the overlay mergedDailyBars exists for.
+  const dayStart = Math.floor(now / DAY_) * DAY_;
+  const nD = 302, dailyRaw = [];
+  for (let i = 0; i < nD; i++) {
+    const t = dayStart - (nD - i) * DAY_;
+    let c = 104 + (i >= nD - 40 && i < nD - 1 ? (i % 2 ? 0.4 : -0.4) : 0), h = c + 0.4;
+    if (i === 50 || i === 80) { c = 100; h = 100.4; }
+    if (i === 60 || i === 90) h = 118;
+    if (i === nD - 1) { c = 103; h = 103.4; }   // yesterday — overlaid by the spine bucket below
+    dailyRaw.push({ t, c, h, v: 500 });
+  }
+  const hourlyRaw = [];
+  for (let i = 0; i < 24; i++) {   // yesterday, hour by hour: one hour probes 100.2, the day closes 103
+    const t = dayStart - DAY_ + i * H;
+    const lo = i === 12 ? 100.2 : 102.8, c = i === 23 ? 103 : 103.2;
+    hourlyRaw.push({ t, o: 103.2, h: 103.6, l: lo, c, v: 5 });
+  }
+  for (let t = dayStart; t <= now - H; t += H) hourlyRaw.push({ t, o: 103.5, h: 103.8, l: 103.2, c: 103.5, v: 5 });
+  p.seedRowNow("xyz:LVT", { ticker: "LVT", px: 103.5, dailyRaw, hourlyRaw, hourlyTs: now });
+  p.buildDailyNow();
+  p.buildSignalsNow();
+  const x = p.getLedgerExport();
+  const e = x.open.find((k) => k.coin === "xyz:LVT" && k.ev === "lvlhold");
+  assert.ok(e, "the level-hold shadow opened");
+  assert.equal(e.vi, 0, "invisible — a shadow earning its record, never a live signal");
+  assert.equal(e.psd, "long", "play-signed long");
+  assert.equal(e.tm, 1, "touch-resolved");
+  assert.ok(e.stp > 99 && e.stp < 100, `void half a σ behind the 100 level — TIGHT (got ${e.stp})`);
+  assert.ok(Math.abs(e.tgt - 118) < 0.5, `target frozen on the 118 cluster (got ${e.tgt})`);
+  assert.ok(e.sd0 > 0, "R-united at fire");
+  assert.equal(e.lvn, 2, "cluster touch count stamped as a recorded feature");
+  assert.ok(e.lva >= 0, "cluster age stamped alongside it");
+  assert.ok((e.mark0 - e.stp) / e.mark0 * 100 < 4.5, "risk to void is a few percent of entry — the thesis, frozen into the claim");
+});
+
+// ===== volume-node families + board promotion path (build 2026.07.28-02) =======================
+// Phase 3: the lvlhold/lvlrej mechanics on the other honest level source — the volume profile's
+// POC and high-volume nodes. Phase 4: proof that the promotion path needs no new machinery — a
+// shadow family that earns its out-of-sample record flows onto the actionable board through the
+// exact confirmed gate every family faces, carrying its tight structural void with it.
+
+test("vp families -02: vpTouchNodes — POC + HVN peaks, deduped, sorted, shares carried", () => {
+  const C = require("../src/compute");
+  const vp = { poc: 100, binPct: 0.5, bins: [[98, 0.1], [100, 0.3], [104, 0.2]],
+    hvn: [{ p: 100.2, v: 0.3 }, { p: 104, v: 0.2 }, { p: 96, v: 0.15 }] };
+  const n = C.vpTouchNodes(vp);
+  assert.ok(Array.isArray(n) && n.length === 3, "POC kept, its duplicate HVN deduped, the rest admitted");
+  assert.deepEqual(n.map((x) => x.p), [96, 100, 104], "ascending by price");
+  assert.equal(n.find((x) => x.p === 100).v, 0.3, "the POC carries the tallest bin's share");
+  assert.equal(C.vpTouchNodes(null), null, "no profile is an honest null");
+});
+
+test("vp families -02: detectVpTouch — held node probe fires tight, everything sloppier refuses", () => {
+  const C = require("../src/compute");
+  const nodes = [{ p: 96, v: 0.15 }, { p: 100, v: 0.3 }, { p: 118, v: 0.2 }];
+  const sd30 = 0.8;
+  const mkBars = (lastL, lastC) => {
+    const DAY_ = 86400e3, t0 = Date.now() - 70 * DAY_, bars = [];
+    for (let i = 0; i < 64; i++) bars.push({ t: t0 + i * DAY_, c: 103.5, h: 103.9, l: 103.1 });
+    bars.push({ t: t0 + 64 * DAY_, c: lastC, h: lastC + 0.4, l: lastL });
+    return bars;
+  };
+  const r = C.detectVpTouch(nodes, mkBars(100.2, 103), 103.5, sd30, "long");
+  assert.ok(r, "held probe of the node must fire");
+  assert.equal(r.lvl, 100, "anchored on the nearest node below");
+  assert.ok(r.stop < 100 && r.stop > 99, `void half a \u03c3 behind the node — tight (got ${r.stop})`);
+  assert.equal(r.target, 118, "target = next node in the trade direction, VP-pure");
+  assert.equal(r.vw, 0.3, "the node's volume share rides out as the recorded feature");
+  assert.equal(C.detectVpTouch(nodes, mkBars(103.1, 103.5), 103.5, sd30, "long"), null, "no probe, no claim");
+  assert.equal(C.detectVpTouch(nodes, mkBars(99.6, 99.7), 99.7, sd30, "long"), null, "a close through the node is not a hold");
+  assert.equal(C.detectVpTouch([{ p: 100, v: 0.3 }, { p: 96, v: 0.1 }], mkBars(100.2, 103), 103.5, sd30, "long"), null,
+    "no node on the target leg -> null, never an invented price");
+  // short mirror
+  const nodesS = [{ p: 96, v: 0.2 }, { p: 108, v: 0.3 }];
+  const DAY_ = 86400e3, t0 = Date.now() - 70 * DAY_, barsS = [];
+  for (let i = 0; i < 64; i++) barsS.push({ t: t0 + i * DAY_, c: 104, h: 104.4, l: 103.6 });
+  barsS.push({ t: t0 + 64 * DAY_, c: 104, h: 107.9, l: 103.6 });
+  const rs = C.detectVpTouch(nodesS, barsS, 104.2, sd30, "short");
+  assert.ok(rs && rs.lvl === 108 && rs.stop > 108 && rs.target === 96, "short mirror: overhead node, void above it, node target below");
+});
+
+test("vp families -02: EV_META convention + wiring manifest", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3;
+  for (const ev of ["vphold", "vprej"]) {
+    assert.equal(C.EV_META[ev].resolve, "touch", `${ev} resolves by first touch`);
+    assert.equal(C.EV_META[ev].horizonMs, 30 * DAY_, `${ev} 30d equity timeout`);
+    assert.equal(C.evMeta(ev, "main").horizonMs, 15 * DAY_, `${ev} runs the compressed crypto clock`);
+  }
+  const fs = require("fs"), path = require("path");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const f of ["vpTouchNodes", "detectVpTouch"])
+    assert.equal((cmp.match(new RegExp("^function " + f + "\\(", "mg")) || []).length, 1, `exactly one ${f} definition`);
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    'openLedger(r, "vphold"', 'openLedger(r, "vprej"',
+    "stp: vhT.stop, tgt: vhT.target, tm: 1", "stp: vrT.stop, tgt: vrT.target, tm: 1",
+    "vpw: +(vhT.vw * 100).toFixed(2)", "vpw: +(vrT.vw * 100).toFixed(2)",   // node share recorded, not gated
+    "const vmT = volMapFor(r);",                                            // ONE profile computation — chart and fire site agree
+    "const vnodes = vmT && vmT.vp ? vpTouchNodes(vmT.vp) : null;",
+    '"lvlhold", "lvlrej", "vphold", "vprej",',                              // MAIN_EVS enrollment
+    'ev: "vphold", uni: "both"', 'ev: "vprej", uni: "both"',                // shadow panel rows
+    'vpw: "volume-node families',                                           // export glossary documents the stamp
+  ]) assert.ok(pol.includes(pin), `poller.js missing -02 pin: ${pin}`);
+});
+
+test("board promotion path -02: a matured shadow record carries its family onto the actionable board — tight void, correct label, no new machinery", () => {
+  // Phase 4, proven end-to-end: the board's confirmed gate IS the promotion. Eight resolved
+  // out-of-sample lvlhold fires with positive expectancy hydrate from the persisted ledger, a
+  // fresh live fire opens from the tape, and the row surfaces through the same
+  // n>=8 / avgR>0 / EV>0 gate every family faces — flagged `shadow`, labeled from STRAT_DEFS,
+  // void frozen half a sigma behind the structural level. This is the PURRDAT fix landing on the
+  // board by record, not by argument.
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
+  const closed = [];
+  for (let i = 0; i < 8; i++) closed.push({
+    key: "xyz:OLD" + i + "|lvlhold#0", coin: "xyz:OLD" + i, ticker: "OLD" + i, ev: "lvlhold",
+    t0: now - (40 - i) * DAY_, tR: now - (10 - i) * DAY_, mark0: 100, dir: 1, psd: "long", pn: 1, vi: 0,
+    sd0: 1.2, stp: 99, tgt: 110, tm: 1, mv: 10, status: "resolved",
+    realized: i < 6 ? 1.5 : -1, win: i < 6, realizedS: i < 6 ? 1.5 : -1, winS: i < 6, stopped: i >= 6,
+  });
+  const store = { loadAll: () => new Map(), loadRegime: () => [], saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+    loadLedger: () => ({ ts: now, open: [], closed, rearm: [], variants: null }) };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();   // start() is never called in the harness — hydrate the persisted record explicitly
+  // the -01 e2e tape, verbatim: support cluster at 100 probed through the hourly spine's true low
+  const dayStart = Math.floor(now / DAY_) * DAY_;
+  const nD = 302, dailyRaw = [];
+  for (let i = 0; i < nD; i++) {
+    const t = dayStart - (nD - i) * DAY_;
+    let c = 104 + (i >= nD - 40 && i < nD - 1 ? (i % 2 ? 0.4 : -0.4) : 0), h = c + 0.4;
+    if (i === 50 || i === 80) { c = 100; h = 100.4; }
+    if (i === 60 || i === 90) h = 118;
+    if (i === nD - 1) { c = 103; h = 103.4; }
+    dailyRaw.push({ t, c, h, v: 500 });
+  }
+  const hourlyRaw = [];
+  for (let i = 0; i < 24; i++) {
+    const t = dayStart - DAY_ + i * H;
+    hourlyRaw.push({ t, o: 103.2, h: 103.6, l: i === 12 ? 100.2 : 102.8, c: i === 23 ? 103 : 103.2, v: 5 });
+  }
+  for (let t = dayStart; t <= now - H; t += H) hourlyRaw.push({ t, o: 103.5, h: 103.8, l: 103.2, c: 103.5, v: 5 });
+  p.seedRowNow("xyz:LVT", { ticker: "LVT", px: 103.5, dailyRaw, hourlyRaw, hourlyTs: now });
+  p.buildDailyNow();
+  p.buildSignalsNow();
+  p.buildActionableNow();
+  const a = p.getActionable();
+  const row = a.rows.find((x) => x.coin === "xyz:LVT" && x.ev === "lvlhold");
+  assert.ok(row, "the confirmed structural family reaches the board: " + JSON.stringify(a.coverage));
+  assert.equal(row.shadow, true, "honestly flagged as a shadow-record family");
+  assert.equal(row.label, "structural support hold", "labeled from STRAT_DEFS — one definition, panel and board agree");
+  assert.ok(row.void > 99 && row.void < 100, `the board's void IS the structural stop — tight, on the invalidation (got ${row.void})`);
+  assert.equal(row.rec.n, 8, "gated on the family's own out-of-sample record");
+  assert.ok(row.rec.avgR > 0 && row.evR > 0, "and only because that record models positive from here");
+  assert.ok(row.rr && row.rr.gross >= 2, "the tight void is what buys the R:R the sigma constructions never could");
 });
