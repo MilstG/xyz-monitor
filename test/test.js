@@ -806,7 +806,7 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
   assert.ok(pol.includes("let swingFails = 0, swingErr = null;"), "counters reset per build");
   assert.ok(pol.includes("strategy shadows failed on ${swingFails} market(s)"), "failures log once per build, visibly");
   const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
-  assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 7, "every daily-close detector coerces (reclaim, failbrk, mapull, roundfr + swpull/basebrk/regime200 since -20)");
+  assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 8, "every daily-close detector coerces (reclaim, failbrk, mapull, roundfr, swpull/basebrk/regime200 + emabrk since -28)");
 });
 
 test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the ledger, post-epoch claims survive", () => {
@@ -965,8 +965,8 @@ test("crypto enrollment: a whitelist and a geometry gate — and the arithmetic 
   // small-n rescue, it is contamination
   assert.ok(pol.includes('const acOf = (r) => (r.uni === "main" ? "Crypto" : (classifyCached(r.ticker).assetClass || "Other"));'),
     "crypto pools separately from every equity asset class");
-  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj"])'),
-    "R-united ledger set carries the crypto-native events + the -20 swing shadows");
+  assert.ok(pol.includes('const R_LEDGER_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj", "emabrk", "emarts"])'),
+    "R-united ledger set carries the crypto-native events + the -20 swing and -28 EMA200 shadows");
   for (const gone of ["oc24: oiChg24", "cryptoSetupsLive"])
     assert.ok(!pol.includes(gone), `retired -87 remnant must not return: ${gone}`);
   // countU is BACK, and must count kept conditions rather than the capped transport slice —
@@ -3202,6 +3202,12 @@ test("client + server integrity: the Report tab ships end to end (markers, style
   assert.ok(/const MAIN_DAILY_PAYLOAD = 92;/.test(pol), "crypto daily wire payload must stay 92 bars via MAIN_DAILY_PAYLOAD");
   assert.ok(pol.includes("now - MAIN_DAILY_DAYS * DAY"), "crypto daily fetch must use MAIN_DAILY_DAYS");
   assert.ok(pol.includes("dr.slice(-(MAIN_DAILY_PAYLOAD + 2))"), "crypto daily payload cap must ride MAIN_DAILY_PAYLOAD");
+  // -28: the cap is for the WIRE only. dc.daily doubles as the signal loop's input, and capping
+  // both starved every deep crypto detector (swpull at 120 closes, regime200 at 210, the EMA200
+  // shadows at 216) for eight builds while the 370d retention sat unread. The loop must read the
+  // deep map, and the deep map must be written before the wire slice.
+  assert.ok(pol.includes("deepDaily.set(r.coin, dr);"), "full crypto tuples stashed for the signal loop");
+  assert.ok(pol.includes("const closes = deepDaily.get(r.coin) || dc.daily[r.coin] || null"), "the signal loop prefers full depth");
 });
 
 test("ai report: OpenAI provider — Chat Completions shape, Bearer auth, Terra→Sol fallback on refusal", async () => {
@@ -10240,7 +10246,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-27"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-28"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -10760,4 +10766,159 @@ test("ema200 -26: end-to-end through the analytics build — the section publish
   assert.ok(d1.retest && d1.retest.n > 0, "the retest audit accrued events through the injectable loop");
   assert.equal(em.horizons["1d"], 14, "D1 horizon rides the agreed 14 bars");
   assert.equal(em.horizons["4h"], 84, "H4 horizon rides 84 bars (14 sessions of six H4 bars)");
+});
+
+// ================================================================================================
+// EMA200 shadow batch (build 2026.07.27-28): stage two of the -26 study — the two strongest
+// priors (D1 buffered breakout, D1 support-retest hold) go live as touch-mode ledger shadows.
+// Long side only, closed bars only, frozen geometry, structural targets, out-of-sample record.
+// ================================================================================================
+
+test("emabrk -28: fires on the armed, buffered, close-confirmed cross — and only on it", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 500 * DAY_;
+  const lvlBars = [];
+  for (let i = 0; i < 300; i++) lvlBars.push({ c: 100, h: (i === 60 || i === 90) ? 118 : 100, l: 100 });
+  const mk = (cs) => cs.map((c, i) => [t0 + i * DAY_, c]);
+  // 296 closes pinned at 100 (EMA converges to ~100), four below (armed window), then the cross
+  const base = new Array(296).fill(100);
+  const fires = mk(base.concat([98, 98, 98, 98, 104]));            // 4 below, close 4% above (>=0.25σ at σ=2 -> 0.5% needed)
+  const eb = C.detectEmaBreak(fires, 105, 2, lvlBars);
+  assert.ok(eb, "armed + buffered + confirmed: fires");
+  assert.ok(Math.abs(eb.target - 118) < 0.01, "target = next structural level above");
+  assert.ok(eb.stop < eb.ema && eb.ema < 105, "void half a sigma back through the line");
+  // NOT armed: only two closes below before the cross — the same fight re-firing
+  assert.equal(C.detectEmaBreak(mk(base.concat([102, 101, 98, 98, 104])), 105, 2, lvlBars), null,
+    "two far-side closes are not a reset — the re-arm shape refuses");
+  // NOT buffered: the confirming close sits a hair over the line
+  assert.equal(C.detectEmaBreak(mk(base.concat([98, 98, 98, 98, 100.2])), 100.3, 2, lvlBars), null,
+    "a marginal close inside 0.25 sigma of the line is the raw variant's trade, not this stream's");
+  // NOT confirmed: last close back below — there is no cross to speak of
+  assert.equal(C.detectEmaBreak(mk(base.concat([98, 98, 98, 104, 98])), 99, 2, lvlBars), null,
+    "the close decides; yesterday's excursion is nothing");
+  // no structural target -> no claim, never an invented one
+  const flat = lvlBars.map(() => ({ c: 100, h: 100, l: 100 }));
+  assert.equal(C.detectEmaBreak(fires, 105, 2, flat), null, "nowhere to go is not a trade");
+  assert.equal(C.detectEmaBreak(fires.slice(0, 210), 105, 2, lvlBars), null, "under 216 closes: honest null");
+});
+
+test("emarts -28: the held retest from clear air — touch, hold, first-of-episode, all required", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3, t0 = Date.now() - 500 * DAY_;
+  const lvlBars = [];
+  for (let i = 0; i < 300; i++) lvlBars.push({ c: 100, h: (i === 60 || i === 90) ? 118 : 100, l: 100 });
+  const bars = [];
+  for (let i = 0; i < 298; i++) bars.push({ t: t0 + i * DAY_, c: 100, h: 100.4, l: 99.6, v: 1 });
+  // prior bar: clear air above the ~100 line, untouched; last bar: dips through it, closes back above
+  bars.push({ t: t0 + 298 * DAY_, c: 102, h: 102.4, l: 101.2, v: 1 });
+  bars.push({ t: t0 + 299 * DAY_, c: 101, h: 102, l: 99.3, v: 1 });
+  const er = C.detectEmaRetest(bars, 101, 2, lvlBars);
+  assert.ok(er, "touched from above and HELD: fires");
+  assert.ok(Math.abs(er.target - 118) < 0.01 && er.stop < er.ema, "structural target above, void a sigma below the line");
+  // did NOT hold: the touch bar closed through — that is a breakdown's business, not a retest's
+  const broke = bars.slice(0, -1).concat([{ t: t0 + 299 * DAY_, c: 99.4, h: 102, l: 99.3, v: 1 }]);
+  assert.equal(C.detectEmaRetest(broke, 99.4, 2, lvlBars), null, "a close through the line is not a hold");
+  // no touch at all: the low never reached the line
+  const noTouch = bars.slice(0, -1).concat([{ t: t0 + 299 * DAY_, c: 101.5, h: 102, l: 100.9, v: 1 }]);
+  assert.equal(C.detectEmaRetest(noTouch, 101.5, 2, lvlBars), null, "no touch, no retest");
+  // chop straddling the line: the prior bar ALSO touched — not the first touch of the episode
+  const chop = bars.slice(0, -2).concat([
+    { t: t0 + 298 * DAY_, c: 100.6, h: 101, l: 99.5, v: 1 },
+    { t: t0 + 299 * DAY_, c: 101, h: 102, l: 99.3, v: 1 }]);
+  assert.equal(C.detectEmaRetest(chop, 101, 2, lvlBars), null, "the second touch of a straddle is the same fight, not a fresh retest");
+});
+
+test("ema200 shadows -28: EV_META convention, wiring manifest, panel rows, closed-bar trim", () => {
+  const C = require("../src/compute");
+  const DAY_ = 86400e3;
+  for (const ev of ["emabrk", "emarts"]) {
+    assert.equal(C.EV_META[ev].resolve, "touch", `${ev} resolves by first touch`);
+    assert.equal(C.EV_META[ev].horizonMs, 30 * DAY_, `${ev} 30d equity timeout`);
+  }
+  const fs = require("fs"), path = require("path");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  for (const pin of [
+    'emabrk:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the buffered EMA200 close-cross" },',
+    'emarts:   { horizonMs: 15 * DAY,  horizon: "first touch of target/void within 15d, off the held EMA200 retest" },',
+  ]) assert.ok(cmp.includes(pin), `EV_META_MAIN override pin missing: ${pin}`);
+  for (const f of ["detectEmaBreak", "detectEmaRetest"])
+    assert.equal((cmp.match(new RegExp("^function " + f + "\\(", "mg")) || []).length, 1, `exactly one ${f} definition`);
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    'openLedger(r, "emabrk"', 'openLedger(r, "emarts"',
+    "stp: eb.stop, tgt: eb.target, tm: 1",                        // touch mode + frozen absolute levels
+    "stp: er.stop, tgt: er.target, tm: 1",
+    "const ccl = closes.length && +closes[closes.length - 1][0] + DAY > nowD ? closes.slice(0, -1) : closes;",   // the forming day never reaches the detector
+    "detectEmaRetest(closedBars(mergedDailyBars(r), DAY, nowD), r.px, sd30, lvlBars)",                          // true lows for the touch, forming day trimmed
+    '"emabrk", "emarts",',                                        // MAIN_EVS: crypto fires these too
+    'ev: "emabrk", uni: "both"', 'ev: "emarts", uni: "both"',     // shadow panel rows, both universes
+  ]) assert.ok(pol.includes(pin), `poller.js missing -28 pin: ${pin}`);
+});
+
+test("ema200 shadows -28: end-to-end — the breakout fires as an invisible touch-mode claim with frozen geometry", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  // dailies: ~100 flat for the EMA anchor, four closes below, then the buffered cross — all
+  // CLOSED (t + DAY <= now); pivot highs at 118 give the structural target. Two pivots, k=3.
+  const dailyRaw = [];
+  const nD = 302;
+  for (let i = 0; i < nD; i++) {
+    const t = now - (nD - i) * DAY_ - H;   // every bar closed at least an hour ago
+    let c = 100, h = 100.4;
+    if (i === 60 || i === 90) h = 118;
+    if (i >= nD - 5 && i < nD - 1) { c = 98; h = 98.4; }
+    if (i === nD - 1) { c = 104; h = 104.4; }
+    dailyRaw.push({ t, c, h, v: 500 });
+  }
+  const hourlyRaw = [];
+  for (let i = 200; i >= 0; i--) { const c = 104 + (i % 3) * 0.1; hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.3, l: c - 0.3, c, v: 5 }); }
+  p.seedRowNow("xyz:EMB", { ticker: "EMB", px: 104.5, dailyRaw, hourlyRaw, hourlyTs: now });
+  p.buildDailyNow();
+  p.buildSignalsNow();
+  const x = p.getLedgerExport();
+  const e = x.open.find((k) => k.coin === "xyz:EMB" && k.ev === "emabrk");
+  assert.ok(e, "the breakout shadow opened");
+  assert.equal(e.vi, 0, "invisible — a shadow earning its record, never a live signal");
+  assert.equal(e.tm, 1, "touch-mode claim");
+  assert.ok(e.stp > 0 && e.tgt > 0 && e.stp < e.mark0 && e.mark0 < e.tgt, `frozen bracket around the mark (${e.stp} < ${e.mark0} < ${e.tgt})`);
+  assert.ok(Math.abs(e.tgt - 118) < 1.5, `target is the structural level, got ${e.tgt}`);
+  assert.equal(e.psd, "long", "long side only at stage two");
+});
+
+test("ema200 shadows -28: crypto depth regression — a main-universe row's detectors see all 370d, not the wire's 94", () => {
+  // The bug this pins: dc.daily (the /api/daily payload) was also the signal loop's input, and
+  // the -20 wire cap silently starved every crypto detector needing >92 closes. This builds a
+  // crypto poller, seeds a 300d spine-backed daily series with an armed EMA200 cross, and
+  // requires the shadow to OPEN — which is only possible if the loop read past the cap.
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  const nD = 302, dailyRaw = [];
+  for (let i = 0; i < nD; i++) {
+    const t = now - (nD - i) * DAY_ - H;
+    let c = 100, h = 100.4;
+    if (i === 60 || i === 90) h = 118;
+    if (i >= nD - 5 && i < nD - 1) { c = 98; h = 98.4; }
+    if (i === nD - 1) { c = 104; h = 104.4; }
+    dailyRaw.push({ t, c, h, v: 500 });
+  }
+  const hourlyRaw = [];
+  for (let i = 220; i >= 0; i--) { const c = 104 + (i % 3) * 0.1; hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.3, l: c - 0.3, c, v: 5 }); }
+  p.seedRowNow("MAINEMA", { uni: "main", ticker: "MAINEMA", px: 104.5, dailyRaw, hourlyRaw, hourlyTs: now });
+  p.buildDailyNow();
+  p.buildSignalsNow();
+  const x = p.getLedgerExport();
+  const e = x.open.find((k) => k.coin === "MAINEMA" && k.ev === "emabrk");
+  assert.ok(e, "the crypto breakout shadow opened — the loop read full depth past the wire cap");
+  // and the wire itself must STILL be capped — the fix must not have bloated the payload
+  const d = p.getDaily();
+  const wired = d && d.daily && d.daily["MAINEMA"];
+  assert.ok(Array.isArray(wired) && wired.length <= 94, `wire payload stays capped (got ${wired && wired.length})`);
+  // the crypto claim rides the compressed clock: 15d touch timeout, not the equity 30d
+  assert.ok(e.resolveAt - e.t0 <= 15.5 * DAY_, "crypto emabrk timeout rides the 15d EV_META_MAIN override");
 });
