@@ -342,6 +342,25 @@ svg.spark{width:100%;height:46px;display:block;margin:5px 0 2px}
 .cg-chip.off{opacity:.4}
 .cg-chip .cg-x{color:var(--faint);margin-left:2px}
 .cg-chip .cg-x:hover{color:var(--down)}
+/* baskets (build 2026.07.28-06): dashed border + ⬒ glyph so a synthetic series can never pass
+   for a listed name — the anatomy IS the disclosure */
+.cg-chip.bk{border-style:dashed}
+.bkg{color:var(--accent);font-size:10px}
+.cg-sg.bk .bkg{margin-right:2px}
+.cg-sg-r{float:right;color:var(--faint);font-size:9.5px;letter-spacing:.05em}
+.bk-builtin{color:var(--faint);font-size:9px;letter-spacing:.1em}
+.bk-mgr{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+.bk-mgr td{padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top}
+.bk-new{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.bk-new input{background:var(--panel2);border:1px solid var(--border);border-radius:3px;color:var(--text);font:inherit;padding:4px 8px}
+#bk-name{width:130px}
+#bk-members{flex:1;min-width:240px}
+.rt-ctrls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.rt-read{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;min-height:16px;margin-top:4px}
+.rt-leg{font-size:10.5px;color:var(--muted);margin-top:6px}
+.bk-new[hidden]{display:none}
+.rt-ctrls[hidden]{display:none}
+.rt-read[hidden]{display:none}
 .cg-anchorctl,.cg-basectl{display:flex;align-items:center;gap:6px}
 .cg-pill{background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;padding:2px 9px;font:inherit;cursor:pointer}
 .cg-pill.on{border-color:var(--accent-dim);color:var(--accent)}

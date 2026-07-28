@@ -1041,6 +1041,7 @@ function syncCorrLookback(){ const seg=el('corrtf'); if(!seg) return;
 }
 function openCorr(){
   syncCorrLookback();
+  loadBaskets(); renderBasketPanel(); renderRatio();   // baskets ride the Corr tab — gated inside each
   if(!state.rows.size){ el('corrwrap').innerHTML='<div class="msg">Markets still loading — switch back in a moment.</div>'; return; }
   if(state.scope==='crypto'){ renderCorr(); return; }
   const rows=corrScope(), have=rows.filter(r=>r.daily).length;
@@ -1221,7 +1222,7 @@ function renderPairPanel(){
   const rcap=z>1.5?`spread stretched high — ${esc(A.ticker)} rich vs ${esc(B.ticker)}`:(z<-1.5?`spread stretched low — ${esc(A.ticker)} cheap vs ${esc(B.ticker)}`:'spread near its mean (fair value)');
   p.hidden=false;
   p.innerHTML=`
-    <div class="cp-head">${esc(A.ticker)} ÷ ${esc(B.ticker)} <span class="sec" style="font-weight:400">— ${tfLabel()} pair view</span> ${close}</div>
+    <div class="cp-head">${esc(A.ticker)} ÷ ${esc(B.ticker)} <span class="sec" style="font-weight:400">— ${tfLabel()} pair view</span> ${close}${featureOn('baskets')?`<button class="btn xtiny" id="pairratio" data-tip="open these two legs as ratio candles — the same ${esc(A.ticker)} ÷ ${esc(B.ticker)} series as TF candlesticks with an honest EMA200" style="float:right;margin-right:8px">candles</button>`:''}</div>
     <div class="pairstats">
       <span>r<b class="${cNow>=0?'pos':'neg'}">${cNow==null?'—':(cNow>=0?'+':'')+cNow.toFixed(2)}</b></span>
       <span>${esc(A.ticker)}<b>${sret(ra)}</b></span>
@@ -1239,6 +1240,258 @@ function renderPairPanel(){
         <div class="sec spk-cap">${rollStability(roll)}</div></div>
     </div>`;
   el('pairclose').onclick=()=>{ state.corr.pair=null; p.hidden=true; };
+  const prb=el('pairratio'); if(prb) prb.onclick=()=>openRatio(A.ticker,B.ticker);
+}
+
+// ===== Custom baskets (build 2026.07.28-06) ==============================================
+// Synthetic EW instruments for the VISUAL layer. Definitions + server-synthesized daily series
+// arrive via /api/baskets — the client never invents membership, and the equity COMP/G leg
+// consumes the SERVER's daily synthesis verbatim. Crypto COMP/G (intraday) synthesizes over the
+// matrix's own bars with basketClosesClient below, which the suite DUELS against compute.js
+// basketCloses on one fixture — one math, two runtimes, outputs pinned bit-identical.
+// Tier boundary, load-bearing: baskets and ratios exist in COMP/G, the ratio panel, the manager
+// and the picker ONLY. They never touch signal math, alerts, or the ladder — there is no ledger
+// to unwind when one is dropped.
+let BASKETS={ts:0, floor:0.6, maxMembers:20, maxCustom:12, rev:-1, list:[]};
+let _basketsInflight=false;
+async function loadBaskets(force){
+  if(!featureOn('baskets')) return;
+  if(_basketsInflight) return;
+  if(!force && Date.now()-BASKETS.ts<60000 && BASKETS.list.length){ renderBasketPanel(); return; }
+  _basketsInflight=true;
+  try{ const d=await fetchJSON('/api/baskets');
+    if(d&&Array.isArray(d.baskets)) BASKETS={ts:Date.now(), floor:d.floor||0.6, maxMembers:d.maxMembers||20, maxCustom:d.maxCustom||12, rev:d.rev, list:d.baskets};
+  }catch(_){}
+  _basketsInflight=false;
+  renderBasketPanel();
+  const cg=el('compg'); if(cg&&!cg.hidden&&COMPG.sel.some(t=>isBasketName(t))) renderCompg();
+}
+function basketByName(t){ t=String(t||'').toUpperCase(); for(const b of BASKETS.list){ if(b.name===t) return b; } return null; }
+function isBasketName(t){ return !!basketByName(t); }
+function basketScopeList(){ const cr=state.scope==='crypto'; return BASKETS.list.filter(b=>(b.scope==='crypto')===cr); }
+function basketTip(b){
+  return `\u2b12 ${b.name} \u2014 ${b.builtin?'built-in sector basket (derived from the sector table \u00b7 follows the live roster)':'custom basket'} \u00b7 ${b.members.length} members \u00b7 EW \u00b7 daily-rebalanced (the only honest default without market-cap data) \u00b7 coverage ${b.cov?b.cov.n+'/'+b.cov.N:'\u2014'} \u00b7 a day under ${Math.round((BASKETS.floor||0.6)*100)}% membership renders as a GAP, never a renormalized guess \u00b7 visual layer only \u2014 baskets never enter signal math \u00b7 members: ${b.members.join(' ')}`;
+}
+// MIRROR of compute.js basketCloses — same algorithm, same floor semantics, verbatim. The suite
+// executes both against one ragged fixture and asserts deepEqual, so this copy cannot drift from
+// the server's without failing the build. Do not "improve" one side alone.
+function basketClosesClient(seriesArr, floor){
+  const N = Array.isArray(seriesArr) ? seriesArr.length : 0;
+  const L = N ? Math.max(...seriesArr.map(s=>Array.isArray(s)?s.length:0)) : 0;
+  const closes = new Array(L).fill(null), cov = new Array(L).fill(0);
+  if (!N || !L) return { closes, cov, n: N };
+  const need = Math.ceil((floor == null ? 0.6 : floor) * N);
+  const last = new Array(N).fill(null);
+  let idx = null;
+  for (let i = 0; i < L; i++) {
+    if (idx === null) {
+      let cnt = 0;
+      for (let m = 0; m < N; m++) { const v = seriesArr[m][i]; if (v != null && isFinite(v) && v > 0) cnt++; }
+      cov[i] = cnt;
+      if (cnt < need) continue;
+      idx = 100; closes[i] = 100;
+      for (let m = 0; m < N; m++) { const v = seriesArr[m][i]; if (v != null && isFinite(v) && v > 0) last[m] = v; }
+      continue;
+    }
+    let sum = 0, cnt = 0;
+    for (let m = 0; m < N; m++) {
+      const v = seriesArr[m][i];
+      if (v != null && isFinite(v) && v > 0 && last[m] != null) { sum += Math.log(v / last[m]); cnt++; }
+    }
+    cov[i] = cnt;
+    if (cnt < need) continue;
+    idx *= Math.exp(sum / cnt);
+    closes[i] = idx;
+    for (let m = 0; m < N; m++) { const v = seriesArr[m][i]; if (v != null && isFinite(v) && v > 0) last[m] = v; }
+  }
+  return { closes, cov, n: N };
+}
+// Crypto COMP/G leg: synthesize the basket over the matrix's OWN intraday bars (CORR._bars on
+// CORR._times) so the overlay and the matrix agree to the number — the same seam the plain
+// tickers already ride. Members absent from the matrix set are all-null series, handled by the
+// same floor as everywhere else. Memoized per (registry rev, window, bar set).
+function compgBasketBars(b){
+  if(!b||!(CORR._intraday&&CORR._bars&&CORR._times)) return null;
+  const key=BASKETS.rev+'|'+(CORR._win||'')+'|'+CORR._times.length;
+  if(b._barsKey===key) return b._bars;
+  const nul=CORR._times.map(()=>null);
+  const series=b.members.map(m=>CORR._bars.get(m)||nul);
+  const bc=basketClosesClient(series, BASKETS.floor);
+  b._barsKey=key;
+  b._bars=bc.closes.some(v=>v!=null)?bc.closes:null;
+  return b._bars;
+}
+function compgBasketNames(){
+  if(!featureOn('baskets')) return [];
+  const cr=state.scope==='crypto';
+  return basketScopeList().filter(b=>!cr||compgBasketBars(b)).map(b=>b.name);
+}
+
+// ===== Basket manager panel ==============================================================
+// Lives on the Corr tab under COMP/G. Built-ins render as derived (no drop button); customs
+// carry create/drop wired to POST /api/baskets. Every constraint the server enforces is stated
+// in the form line — the error path is for races, not for discovery.
+function renderBasketPanel(){
+  const p=el('basketpanel'); if(!p) return;
+  if(!featureOn('baskets')||state.view!=='corr'){ p.hidden=true; return; }
+  const list=basketScopeList();
+  const rowsH=list.map(b=>`<tr>
+      <td style="white-space:nowrap"><span class="bkg">\u2b12</span> <b>${esc(b.name)}</b>${b.builtin?' <span class="bk-builtin">BUILT-IN</span>':''}</td>
+      <td class="sec">${esc(b.members.join(' '))} <span class="sec">\u00b7 ${b.members.length}</span></td>
+      <td class="sec" style="white-space:nowrap" data-tip="equal weight, daily-rebalanced \u2014 the only honest default without market-cap data \u00b7 coverage = members contributing on the latest valid day \u00b7 a day under ${Math.round((BASKETS.floor||0.6)*100)}% membership renders as a gap, never a renormalized guess">EW \u00b7 ${b.cov?b.cov.n+'/'+b.cov.N:'\u2014'}</td>
+      <td>${b.builtin?'<span class="sec" style="font-size:10px">derived \u2014 follows the roster</span>':`<button class="btn xtiny" data-bkdrop="${esc(b.name)}">drop</button>`}</td>
+    </tr>`).join('');
+  const customN=BASKETS.list.filter(b=>!b.builtin).length;
+  p.hidden=false;
+  p.innerHTML=`<div class="cp-head">Baskets <span class="sec" style="font-weight:400">\u2014 synthetic EW instruments \u00b7 visual layer only, never signal math</span></div>
+    <table class="bk-mgr"><tbody>${rowsH||'<tr><td class="sec">no baskets in this universe yet \u2014 create one below, or in the terminal: <span class="amber">basket create MAG7 AAPL MSFT GOOGL AMZN NVDA META TSLA</span></td></tr>'}</tbody></table>
+    <div class="bk-new">
+      <input id="bk-name" placeholder="name \u2014 e.g. MAG7" maxlength="12" autocomplete="off"/>
+      <input id="bk-members" placeholder="members \u2014 e.g. AAPL MSFT GOOGL AMZN NVDA META TSLA" autocomplete="off"/>
+      <button class="btn xtiny" id="bk-create">create</button>
+      <span id="bk-err" class="tp-err"></span></div>
+    <div class="sec" style="font-size:10.5px;margin-top:5px">2\u2013${BASKETS.maxMembers} members \u00b7 one universe (baskets never cross the stocks/crypto separation) \u00b7 ${customN}/${BASKETS.maxCustom} custom \u00b7 name must not collide with a listed ticker or a benchmark alias</div>`;
+  p.querySelectorAll('[data-bkdrop]').forEach(x=>x.onclick=async()=>{
+    try{ const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name:x.dataset.bkdrop, drop:true})});
+      const d=await r.json().catch(()=>({}));
+      if(d&&d.ok) loadBaskets(true); else { const e=el('bk-err'); if(e) e.textContent=(d&&d.error)||'drop failed'; }
+    }catch(e){ const eo=el('bk-err'); if(eo) eo.textContent='drop failed \u2014 '+(e.message||'network'); } });
+  const cb=el('bk-create'); if(cb) cb.onclick=async()=>{
+    const nm=(el('bk-name')||{}).value||'', mem=((el('bk-members')||{}).value||'').split(/[\s,]+/).filter(Boolean);
+    const eo=el('bk-err'); if(eo) eo.textContent='';
+    try{ const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name:nm, members:mem})});
+      const d=await r.json().catch(()=>({}));
+      if(d&&d.ok) loadBaskets(true); else if(eo) eo.textContent=(d&&d.error)||'create failed';
+    }catch(e){ if(eo) eo.textContent='create failed \u2014 '+(e.message||'network'); } };
+}
+
+// ===== RATIO — synthetic pair candles ====================================================
+// Server-computed (one code path): hourly ratio closes bucketed into TF candles, EMA200 over the
+// full series before the wire trim. The client renders and rebases — a display transform only
+// (rebase is a scalar multiply, so the shipped EMA scales by the same factor and stays exact).
+const RATIO={num:null, den:null, tf:'4h', scale:'reb', ema:true, data:null, inflight:false, closed:false};
+function openRatio(num,den,tf){
+  RATIO.num=String(num||'').toUpperCase(); RATIO.den=String(den||'').toUpperCase();
+  if(tf) RATIO.tf=String(tf).toLowerCase();
+  RATIO.closed=false;
+  loadRatio();
+}
+async function loadRatio(){
+  const p=el('ratiopanel'); if(!p||!featureOn('baskets')||RATIO.closed) return;
+  if(!RATIO.num||!RATIO.den){ p.hidden=true; return; }
+  p.hidden=false;
+  p.innerHTML=`<div class="cp-head">RATIO <span class="sec" style="font-weight:400">\u2014 building ${esc(RATIO.num)} \u00f7 ${esc(RATIO.den)} \u00b7 ${esc(RATIO.tf.toUpperCase())}\u2026</span></div>`;
+  RATIO.inflight=true;
+  try{ RATIO.data=await fetchJSON('/api/ratio?num='+encodeURIComponent(RATIO.num)+'&den='+encodeURIComponent(RATIO.den)+'&tf='+encodeURIComponent(RATIO.tf)); }
+  catch(e){ RATIO.data={ok:false,error:e.message||'network error'}; }
+  RATIO.inflight=false;
+  renderRatio();
+  p.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+// Pure SVG builder — no DOM, no globals beyond esc — so the suite can EXECUTE it against a fixture
+// payload and assert real candle markup emerges (the -84 lesson: existence pins don't prove wiring).
+// Returns {svg, pts} where pts[i] = {x, yo, yh, yl, yc, k} for the hover wiring.
+function ratioSvg(d, opt){
+  const W=940, H=300, PL=52, PR=14, PT=10, PB=24;
+  const ks=d.candles||[]; if(!ks.length) return {svg:'<div class="sec">no candles</div>', pts:[]};
+  const f = opt.scale==='reb' ? 100/ks[0].o : 1;
+  const ema = (opt.ema&&d.ema200) ? d.ema200.map(v=>v==null?null:v*f) : null;
+  let lo=Infinity, hi=-Infinity;
+  for(const k of ks){ if(k.l*f<lo) lo=k.l*f; if(k.h*f>hi) hi=k.h*f; }
+  if(ema) for(const v of ema){ if(v!=null){ if(v<lo)lo=v; if(v>hi)hi=v; } }
+  const pad=(hi-lo)*0.06||1e-9; lo-=pad; hi+=pad;
+  const X=i=>PL+(i+0.5)*(W-PL-PR)/ks.length, Y=v=>PT+(hi-v)*(H-PT-PB)/(hi-lo);
+  const bw=Math.max(1.5, Math.min(9, (W-PL-PR)/ks.length*0.62));
+  let g='';
+  const dp=(hi-lo)<0.5?4:(hi-lo)<5?3:2;
+  for(let i=0;i<5;i++){ const v=lo+pad+(hi-lo-2*pad)*i/4, y=Y(v).toFixed(1);
+    g+=`<line x1="${PL}" x2="${W-PR}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`
+      +`<text x="${PL-6}" y="${(+y+3).toFixed(1)}" fill="var(--faint)" font-size="10" text-anchor="end">${v.toFixed(dp)}</text>`; }
+  const pts=[];
+  let body='';
+  for(let i=0;i<ks.length;i++){ const k=ks[i], x=X(i), up=k.c>=k.o, col=up?'var(--up)':'var(--down)';
+    const yo=Y(k.o*f), yc=Y(k.c*f), yh=Y(k.h*f), yl=Y(k.l*f);
+    const top=Math.min(yo,yc), hh=Math.max(0.8, Math.abs(yo-yc));
+    body+=`<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${yh.toFixed(1)}" y2="${yl.toFixed(1)}" stroke="${col}" stroke-width="1"/>`
+      +`<rect class="rt-k" x="${(x-bw/2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"/>`;
+    pts.push({x, yo, yh, yl, yc, k}); }
+  let emaPath='';
+  if(ema){ let dstr='', pen=false;
+    for(let i=0;i<ks.length;i++){ const v=ema[i];
+      if(v==null){ pen=false; continue; }
+      dstr+=(pen?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' '; pen=true; }
+    if(dstr) emaPath=`<path class="rt-ema" d="${dstr.trim()}" fill="none" stroke="var(--blue)" stroke-width="1.6" opacity="0.95"/>`; }
+  const svg=`<svg id="rt-chart" viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="none" style="display:block">`
+    +g+body+emaPath
+    +`<line id="rt-cx" x1="0" x2="0" y1="${PT}" y2="${H-PB}" stroke="var(--faint)" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>`
+    +`<rect id="rt-hl" x="0" y="${PT}" width="0" height="${H-PT-PB}" fill="var(--text)" opacity="0"/>`
+    +`</svg>`;
+  return {svg, pts, W, H, PT, PB};
+}
+function renderRatio(){
+  const p=el('ratiopanel'); if(!p) return;
+  if(!featureOn('baskets')||state.view!=='corr'||RATIO.closed||!RATIO.num){ p.hidden=true; return; }
+  const d=RATIO.data;
+  const close=`<button class="btn xtiny" id="rt-close" title="close" style="float:right">\u2715</button>`;
+  const head=(extra)=>`<div class="cp-head">RATIO <span class="sec" style="font-weight:400">\u2014 ${esc(RATIO.num)} \u00f7 ${esc(RATIO.den)}</span> ${close}${extra||''}</div>`;
+  if(!d){ p.hidden=false; p.innerHTML=head(); wireRatioCommon(); return; }
+  if(!d.ok){ p.hidden=false;
+    p.innerHTML=head()+`<div class="sec" style="margin-top:8px">${esc(d.error||'ratio unavailable')}</div>`;
+    wireRatioCommon(); return; }
+  const tfBtns=['1h','4h','12h','1d'].map(t=>`<button class="cg-pill${RATIO.tf===t?' on':''}" data-rtf="${t}">${t.toUpperCase()}</button>`).join('');
+  const scBtns=[['reb','rebased 100'],['raw','raw ratio']].map(([k,l])=>`<button class="cg-pill${RATIO.scale===k?' on':''}" data-rsc="${k}" data-tip="${k==='reb'?'both the candles and the EMA multiplied by 100 \u00f7 first shown open \u2014 a scalar display transform, the geometry is untouched':'the ratio as computed \u2014 numerator close \u00f7 denominator close on the hourly spine'}">${l}</button>`).join('');
+  const emaOk=!!d.ema200;
+  const emaBtn=emaOk
+    ? `<button class="cg-pill${RATIO.ema?' on':''}" id="rt-ema" data-tip="EMA ${d.emaSpan} computed server-side over the FULL ${d.bars}-bar series (SMA-seeded, the ladder's own construction), then trimmed with the window \u2014 the plotted line is exact, not window-seeded">EMA ${d.emaSpan}</button>`
+    : `<button class="cg-pill" id="rt-ema" disabled data-tip="EMA ${d.emaSpan} needs ${d.emaMin} closed ${esc(RATIO.tf.toUpperCase())} bars \u2014 this pair has ${d.bars} on a ${d.spineDays}d spine; the toggle enables itself as history deepens. No shorter EMA ever wears the 200 name.">EMA ${d.emaSpan} \u2014 n/a</button>`;
+  const S=ratioSvg(d,{scale:RATIO.scale, ema:RATIO.ema&&emaOk});
+  const covBit=(lbl,isB,cov)=>isB?`${lbl} synthesized hourly (EW, coverage ${cov?cov.n+'/'+cov.N:'\u2014'}, floor ${Math.round((d.floor||0.6)*100)}%)`:null;
+  const legBits=[
+    `${d.numBasket?'\u2b12':''}${esc(d.num)} \u00f7 ${d.denBasket?'\u2b12':''}${esc(d.den)}`,
+    `${esc(RATIO.tf.toUpperCase())} candles bucketed from hourly ratio closes`,
+    RATIO.scale==='reb'?'rebased 100 at window start':'raw ratio',
+    covBit('numerator',d.numBasket,d.numCov), covBit('denominator',d.denBasket,d.denCov),
+    'intrabar extremes finer than 1H not captured',
+    `showing last ${d.shown}/${d.bars} bars`,
+  ].filter(Boolean);
+  p.hidden=false;
+  p.innerHTML=head()
+    +`<div class="rt-ctrls"><span class="seg">${tfBtns}</span><button class="cg-pill" id="rt-swap" data-tip="flip numerator and denominator">\u21c4 swap</button><span class="seg">${scBtns}</span>${emaBtn}</div>`
+    +`<div class="cg-chartwrap">${S.svg}<div class="rt-read" id="rt-read"></div></div>`
+    +`<div class="rt-leg">${legBits.join(' \u00b7 ')}</div>`;
+  wireRatioCommon();
+  p.querySelectorAll('[data-rtf]').forEach(b=>b.onclick=()=>{ RATIO.tf=b.dataset.rtf; loadRatio(); });
+  p.querySelectorAll('[data-rsc]').forEach(b=>b.onclick=()=>{ RATIO.scale=b.dataset.rsc; renderRatio(); });
+  const eb=el('rt-ema'); if(eb&&emaOk) eb.onclick=()=>{ RATIO.ema=!RATIO.ema; renderRatio(); };
+  const sw=el('rt-swap'); if(sw) sw.onclick=()=>{ const n=RATIO.num; RATIO.num=RATIO.den; RATIO.den=n; loadRatio(); };
+  wireRatioHover(S,d);
+}
+function wireRatioCommon(){ const c=el('rt-close'); if(c) c.onclick=()=>{ RATIO.closed=true; const p=el('ratiopanel'); if(p) p.hidden=true; }; }
+// Crosshair + candle highlight + OHLC readout — the standing rule: every chart hovers.
+function wireRatioHover(S,d){
+  const svg=el('rt-chart'), read=el('rt-read'), cx=el('rt-cx'), hl=el('rt-hl');
+  if(!svg||!S.pts.length) return;
+  const f=RATIO.scale==='reb'?100/d.candles[0].o:1;
+  const dp=(v)=>{ const a=Math.abs(v); return a>=100?2:a>=1?4:6; };
+  const fmt=(v)=>v.toFixed(dp(v));
+  const move=(ev)=>{
+    const r=svg.getBoundingClientRect();
+    const mx=(ev.clientX-r.left)*S.W/r.width;
+    let bi=0, bd=Infinity;
+    for(let i=0;i<S.pts.length;i++){ const dd=Math.abs(S.pts[i].x-mx); if(dd<bd){bd=dd;bi=i;} }
+    const P=S.pts[bi], k=P.k;
+    cx.setAttribute('x1',P.x); cx.setAttribute('x2',P.x); cx.setAttribute('opacity','1');
+    const bw=Math.max(3,(S.W-66)/S.pts.length);
+    hl.setAttribute('x',P.x-bw/2); hl.setAttribute('width',bw); hl.setAttribute('opacity','0.06');
+    const chg=(k.c/k.o-1)*100;
+    const emaV=(RATIO.ema&&d.ema200&&d.ema200[bi]!=null)?d.ema200[bi]*f:null;
+    read.innerHTML=`<span class="sec">${new Date(k.t).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>`
+      +`<span>O <b>${fmt(k.o*f)}</b></span><span>H <b>${fmt(k.h*f)}</b></span><span>L <b>${fmt(k.l*f)}</b></span><span>C <b>${fmt(k.c*f)}</b></span>`
+      +`<span class="${chg>=0?'pos':'neg'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`
+      +(emaV!=null?`<span style="color:var(--blue)">EMA${d.emaSpan} <b>${fmt(emaV)}</b></span>`:'');
+  };
+  svg.addEventListener('mousemove',move);
+  svg.addEventListener('mouseleave',()=>{ cx.setAttribute('opacity','0'); hl.setAttribute('opacity','0'); read.innerHTML=''; });
 }
 
 // ===== COMP/G — N-name normalized comparison =============================================
@@ -1251,7 +1504,10 @@ function renderPairPanel(){
 const COMPG_PAL=['var(--accent)','var(--blue)','var(--up)','var(--down)','#b98cd6','#d6c25a','#5ac8d6','#d68f5a'];
 const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorTs:null, win:null, _intraday:false, _span:0, closed:false };
 function compgColor(i){ return COMPG_PAL[i%COMPG_PAL.length]; }
-function compgRowFor(tk){ tk=String(tk||'').toUpperCase(); for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; } return null; }
+function compgRowFor(tk){ tk=String(tk||'').toUpperCase();
+  const b=basketByName(tk);   // virtual row: the SERVER's daily synthesis verbatim — the client never re-derives it
+  if(b) return { ticker:b.name, _basket:b, daily:(b.daily||[]).map(p=>({t:p[0], c:p[1]})) };
+  for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; } return null; }
 // union-day alignment across N names; a name missing a day carries null (gaps stay visible)
 function alignedDailyN(rows, Ldays){
   const cutoff=Math.floor(Date.now()/DAY)-Ldays;
@@ -1269,8 +1525,8 @@ function alignedDailyN(rows, Ldays){
 function compgAligned(){
   if(state.scope==='crypto' && CORR._intraday && CORR._bars && CORR._times){
     const axis=CORR._times.slice();
-    const selP=COMPG.sel.filter(t=>CORR._bars.has(t));
-    return { axis, series:selP.map(t=>CORR._bars.get(t)), selPresent:selP, intraday:true };
+    const selP=COMPG.sel.filter(t=>CORR._bars.has(t)||(isBasketName(t)&&compgBasketBars(basketByName(t))));
+    return { axis, series:selP.map(t=>CORR._bars.has(t)?CORR._bars.get(t):compgBasketBars(basketByName(t))), selPresent:selP, intraday:true };
   }
   const L=COMPG.win||+state.corr.tf, rows=COMPG.sel.map(compgRowFor);
   const idx=COMPG.sel.map((_,i)=>i).filter(i=>rows[i]);
@@ -1340,14 +1596,16 @@ function compgLegend(S){
     const v=r.last==null?'<span class="na">·</span>':(COMPG.mode==='index'
       ? `${r.last.toFixed(1)} <span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}%</span>`
       : `<span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}pp</span>`);
-    return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${esc(r.tk)}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
+    const b=basketByName(r.tk);
+    return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"${b?` data-tip="${esc(basketTip(b))}"`:''}><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${b?'<span class="bkg">\u2b12</span>':''}${esc(r.tk)}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
 }
 // ===== COMP/G picker: universe-validated typeahead + fill shortcuts =====
 // The panel auto-opens on the Corr tab (no launcher button) and re-renders live on every
 // add/remove — selection is chips + typeahead, matrix clicks still work as before.
-function compgUniverse(){ return state.scope==='crypto'
+function compgUniverse(){ const base = state.scope==='crypto'
   ? (CORR._bars ? [...CORR._bars.keys()].map(t=>String(t).toUpperCase()) : [])
-  : activeRows().map(r=>(r.ticker||'').toUpperCase()).filter(Boolean); }
+  : activeRows().map(r=>(r.ticker||'').toUpperCase()).filter(Boolean);
+  return base.concat(compgBasketNames()); }
 function compgDefaultSel(){ const cr=state.scope==='crypto';
   const rows=(CORR._rows&&CORR._rows.length?CORR._rows:corrScope());
   return [...new Set(rows.map(r=>({t:(r.ticker||'').toUpperCase(),m:Math.abs((cr?corrRet(r):windowRetPct(r,+state.corr.tf))||0)}))
@@ -1367,10 +1625,14 @@ function compgWirePicker(p){
   const inp=el('cg-add'), sg=el('cg-sugg'); if(!inp) return;
   const show=()=>{ const q=inp.value.trim().toUpperCase();
     if(!q){ sg.hidden=true; return; }
-    const uni=compgUniverse().filter(t=>!COMPG.sel.includes(t));
-    const m=[...uni.filter(t=>t.startsWith(q)),...uni.filter(t=>!t.startsWith(q)&&t.includes(q))].slice(0,6);
-    if(!m.length){ sg.innerHTML='<div class="cg-sg-none">no match in the live universe</div>'; sg.hidden=false; return; }
-    sg.innerHTML=m.map(t=>`<div class="cg-sg" data-t="${esc(t)}">${esc(t)}</div>`).join(''); sg.hidden=false;
+    // Baskets group first (⬒-flagged), then plain tickers — a synthetic series is labelled as one
+    // even inside the dropdown.
+    const bks=compgBasketNames().filter(t=>!COMPG.sel.includes(t)&&(t.startsWith(q)||t.includes(q))).slice(0,4);
+    const uni=compgUniverse().filter(t=>!COMPG.sel.includes(t)&&!isBasketName(t));
+    const m=[...uni.filter(t=>t.startsWith(q)),...uni.filter(t=>!t.startsWith(q)&&t.includes(q))].slice(0,6-Math.min(2,bks.length));
+    if(!m.length&&!bks.length){ sg.innerHTML='<div class="cg-sg-none">no match in the live universe</div>'; sg.hidden=false; return; }
+    sg.innerHTML=bks.map(t=>`<div class="cg-sg bk" data-t="${esc(t)}"><span class="bkg">\u2b12</span> ${esc(t)} <span class="cg-sg-r">basket</span></div>`).join('')
+      + m.map(t=>`<div class="cg-sg" data-t="${esc(t)}">${esc(t)}</div>`).join(''); sg.hidden=false;
     sg.querySelectorAll('.cg-sg').forEach(x=>x.onclick=()=>{ if(compgAddName(x.dataset.t)){ const ni=el('cg-add'); if(ni){ ni.focus(); } } }); };
   inp.oninput=show;
   inp.onkeydown=e=>{
@@ -1407,8 +1669,8 @@ function openCompg(tickers){
     const p0=el('compg'); if(p0){ p0.hidden=false; p0.innerHTML='<div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— building '+esc(want)+' intraday series…</span></div>'; }
     setTimeout(wait,120); return;
   }
-  const uni = cr ? new Set([...CORR._bars.keys()].map(t=>String(t).toUpperCase()))
-                 : new Set(activeRows().map(r=>(r.ticker||'').toUpperCase()));
+  const uni = new Set((cr ? [...CORR._bars.keys()].map(t=>String(t).toUpperCase())
+                          : activeRows().map(r=>(r.ticker||'').toUpperCase())).concat(compgBasketNames()));
   let sel=(tickers&&tickers.length?tickers.map(t=>String(t).toUpperCase()):[]).filter(t=>uni.has(t));
   if(!sel.length) sel=compgDefaultSel();   // default: the current matrix set, top 8 by |window return|
   sel=[...new Set(sel)].slice(0,8);
@@ -1419,10 +1681,14 @@ function openCompg(tickers){
                       : (Math.floor(Date.now()/DAY)-(+state.corr.tf))*DAY;   // rebase from the window start
   const p=el('compg'); if(p){ p.hidden=false; renderCompg(); p.scrollIntoView({behavior:'smooth',block:'nearest'}); }
 }
+// One chip template for both COMP/G branches. Basket anatomy — dashed border + ⬒ glyph + the
+// disclosure tooltip — exists so a synthetic series can never be mistaken for a listed name.
+function compgChipHtml(t,i){ const b=basketByName(t);
+  return `<span class="cg-chip${COMPG.off.has(t)?' off':''}${b?' bk':''}" data-tk="${esc(t)}"${b?` data-tip="${esc(basketTip(b))}"`:''}><span class="cg-sw" style="background:${compgColor(i)}"></span>${b?'<span class="bkg">\u2b12</span>':''}${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`; }
 function renderCompg(){
   const p=el('compg'); if(!p) return;
   if(COMPG.sel.length<2){ p.hidden=false;
-    const chips=COMPG.sel.map((t,i)=>`<span class="cg-chip" data-tk="${esc(t)}"><span class="cg-sw" style="background:${compgColor(i)}"></span>${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`).join('');
+    const chips=COMPG.sel.map(compgChipHtml).join('');
     p.innerHTML=`<div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— normalized comparison</span> <button class="btn xtiny" id="cg-close" title="close for this session" style="float:right">✕</button></div>
       <div class="cg-ctrls"><div class="cg-chips">${chips}</div>${compgPickerHtml()}</div>
       <div class="sec" style="margin-top:6px">Add at least two names — type above, use the fill buttons, or click tickers in the matrix. Terminal: <span class="amber">comp NVDA AAPL MSFT</span>.</div>`;
@@ -1431,7 +1697,7 @@ function renderCompg(){
     compgWirePicker(p); return; }
   const S=compgSeries();
   const {svg,X,Y}=compgSvg(S);
-  const chips=COMPG.sel.map((t,i)=>`<span class="cg-chip${COMPG.off.has(t)?' off':''}" data-tk="${esc(t)}"><span class="cg-sw" style="background:${compgColor(i)}"></span>${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`).join('');
+  const chips=COMPG.sel.map(compgChipHtml).join('');
   const cr=COMPG._intraday, ax=S.axis;
   let anchorCtl;
   if(cr){
@@ -7072,8 +7338,10 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
     ||head==='breadth'||head==='sectors'||head==='news'||head==='reports') return true;
   if(head==='earnings'||head==='earn') return p.length===1||!!termFind(p[1])||['today','tomorrow','week','recent'].includes((p[1]||'').toLowerCase());
   if(head==='vs'||head==='compare') return !!(termFind(p[1])&&termFind(p[2]));
-  if(head==='comp') return p.slice(1).filter(x=>termFind(x)).length>=2;
+  if(head==='comp') return p.slice(1).filter(x=>termFind(x)||isBasketName(x)).length>=2;
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
+  if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
+  if(head==='ratio') return p.length>=2;
   return false; }
 function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCase(), T=p[0].toUpperCase();
   if(h==='stocks'||h==='crypto'){ const b=document.querySelector('.scope[data-scope="'+h+'"]'); if(b) b.click(); termOut(`<span class="sec">scope →</span> <span class="amber">${h}</span>`); return; }
@@ -7087,7 +7355,12 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='news'){ const rr=termFind(p[1]); const nn=p.slice(1).map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); return termNewsCmd(rr?rr.ticker.toUpperCase():null,nn); }
   if(h==='reports') return termReports();
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
-  if(h==='comp'){ const tks=[...new Set(p.slice(1).map(x=>termFind(x)).filter(Boolean).map(r=>(r.ticker||'').toUpperCase()))]; return tks.length>=2?termComp(tks):termErr('usage: comp <ticker> <ticker> [more…] — needs at least two'); }
+  if(h==='comp'){ const cr=state.scope==='crypto';
+    const tks=[...new Set(p.slice(1).map(x=>{ const r=termFind(x); if(r) return (r.ticker||'').toUpperCase();
+      const b=basketByName(x); return (b&&(b.scope==='crypto')===cr)?b.name:null; }).filter(Boolean))];
+    return tks.length>=2?termComp(tks):termErr('usage: comp <ticker|basket> <ticker|basket> [more…] — needs at least two'); }
+  if(h==='basket') return termBasket(p.slice(1));
+  if(h==='ratio') return termRatio(p.slice(1));
   if(h==='report'||h==='ai'){ const rr=termFind(p[1])||termFind(p[0]); return rr?termReport(rr):termErr('usage: report <ticker>'); }
   if(h==='earnings'||h==='earn'){ const a1=(p[1]||'').toLowerCase();
     if(!p[1]||['today','tomorrow','week','recent'].includes(a1)) return termEarnCal(a1||'today');
@@ -7096,6 +7369,47 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='diverge'){ const r=termFind(p[1]); return r?termDiverge(r):termErr('usage: diverge <ticker>'); }
   const r=termFind(T); if(r){ if(p[1]) return termFieldCmd(r,p[1]); return termCard(r); }
   termErr(`unknown "${tesc(h)}" — type help`); }
+// ---- basket / ratio verbs (build 2026.07.28-06) ----
+async function termBasket(args){
+  const sub=(args[0]||'').toLowerCase();
+  if(!featureOn('baskets')) return termErr('baskets are not enabled for this view');
+  if(sub==='list'){
+    if(!BASKETS.list.length) await loadBaskets(true);
+    if(!BASKETS.list.length) return termOut('no baskets yet — <span class="ex" data-tcmd="basket create MAG7 AAPL MSFT GOOGL AMZN NVDA META TSLA">basket create MAG7 AAPL MSFT …</span>');
+    const rows=BASKETS.list.map(b=>`<span class="amber">\u2b12 ${tesc(b.name)}</span> <span class="sec">${b.scope} · ${b.members.length} members${b.builtin?' · built-in':''} · EW · ${b.cov?b.cov.n+'/'+b.cov.N:'—'} · ${tesc(b.members.slice(0,10).join(' '))}${b.members.length>10?' …':''}</span>`);
+    return termOut(rows.join('<br>')); }
+  if(sub==='create'){
+    const name=args[1], members=args.slice(2);
+    if(!name||members.length<2) return termErr('usage: basket create <NAME> <ticker> <ticker> …');
+    try{
+      const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name, members})});
+      const d=await r.json().catch(()=>({}));
+      if(d&&d.ok){ await loadBaskets(true);
+        return termOut(`✓ basket <b class="amber">\u2b12 ${tesc(d.basket.name)}</b> created · ${d.basket.scope} · ${d.basket.members.length} members · EW daily-rebalanced · available in COMP/G, RATIO and the picker`); }
+      return termErr((d&&d.error)||'create failed');
+    }catch(e){ return termErr('create failed — '+tesc(e.message||'network')); } }
+  if(sub==='drop'){
+    const name=args[1]; if(!name) return termErr('usage: basket drop <NAME>');
+    try{
+      const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name, drop:true})});
+      const d=await r.json().catch(()=>({}));
+      if(d&&d.ok){ await loadBaskets(true);
+        return termOut(`✓ <b>${tesc(d.name)}</b> removed — charts fall back gracefully; baskets never enter signal math, so there is no ledger to unwind`); }
+      return termErr((d&&d.error)||'drop failed');
+    }catch(e){ return termErr('drop failed — '+tesc(e.message||'network')); } }
+  return termErr('usage: basket create <NAME> <members…> · basket list · basket drop <NAME>');
+}
+function termRatio(args){
+  let a=args[0]||'', b=args[1]||'', tf=args[2];
+  if(a.includes('/')){ const s=a.split('/'); a=s[0]; b=s[1]; tf=args[1]; }
+  if(!a||!b) return termErr('usage: ratio <A>/<B> [1h|4h|12h|1d] — legs are listed names or baskets');
+  tf=(tf||RATIO.tf||'4h').toLowerCase();
+  if(!['1h','4h','12h','1d'].includes(tf)) return termErr('tf must be 1h · 4h · 12h · 1d');
+  if(!featureOn('baskets')) return termErr('the ratio chart is not enabled for this view');
+  showView('corr');
+  openRatio(a,b,tf);
+  return termOut(`✓ RATIO — <b>${tesc(a.toUpperCase())} ÷ ${tesc(b.toUpperCase())}</b> · ${tf.toUpperCase()} candles bucketed from hourly ratio closes · on the Correlation tab`);
+}
 // Tier 3 — AI fallback. The local layers couldn't resolve it, so escalate to /api/ask. Planner
 // (which/what) returns a grammar query the CLIENT runs → numbers stay the board's; analyst
 // (why/what-if) returns grounded prose over the compact bundle we send. Auto-routed by shape.
@@ -7211,7 +7525,9 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('earnings [t|when]',20)}</span><span class="sec">a ticker, or today·tomorrow·week·recent</span>
 <span class="amber">${tpad('news [ticker]',20)}</span><span class="sec">verified headlines · 72h window</span>
 <span class="amber">${tpad('vs <a> <b>',20)}</span><span class="sec">side-by-side field compare · corr <a> <b> for correlation</span>
-<span class="amber">${tpad('comp <a> <b> …',20)}</span><span class="sec">overlay N names rebased to 100 (COMP/G) · index or spread mode</span>
+<span class="amber">${tpad('comp <a> <b> …',20)}</span><span class="sec">overlay N names rebased to 100 (COMP/G) · baskets welcome · index or spread mode</span>
+<span class="amber">${tpad('basket create|list|drop',20)}</span><span class="sec">custom EW baskets — "basket create MAG7 AAPL MSFT …" · visual layer only</span>
+<span class="amber">${tpad('ratio <a>/<b> [tf]',20)}</span><span class="sec">synthetic pair candles (1h·4h·12h·1d) with an honest EMA200 — "ratio MAG7/EWZ 4h"</span>
 <span class="amber">${tpad('signals · reports',20)}</span><span class="sec">active signals · recent AI reports</span>
 <span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
 <span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
@@ -7225,7 +7541,7 @@ function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) 
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
 // ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
-const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','help','clear','stocks','crypto'];
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','help','clear','stocks','crypto'];
 const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
