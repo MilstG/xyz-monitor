@@ -2883,6 +2883,98 @@ function ribbonWidth(s) {
 // One bar of each ladder timeframe, in ms — the window for the retest-volume read (rrv).
 const TREND_TF_MS = { D1: 24 * 3600e3, H12: 12 * 3600e3, H4: 4 * 3600e3, H1: 3600e3 };
 
+// ---- closed-bar trend evaluation (build 2026.07.27-25) ----------------------------------------
+// The board deliberately rides the live mark — it must move with price. The trend ALERT lane must
+// not: a D1 ribbon that flips bullish at 14:35 and flips back by 19:00 is intrabar whipsaw, and
+// announcing it is announcing something the daily close never ratified. These two functions define
+// the alert lane's truth: the state of the last CLOSED bar of each rung, no live-mark
+// substitution, no forming bar. A transition in this state can only ever come into existence at a
+// candle close — false positives are impossible by construction, not filtered after the fact.
+
+// Trim TRAILING bars whose period has not ended (a bar at t covers [t, t+width)). Historical bars
+// are closed by construction, so only the tail is inspected.
+function closedBars(bars, widthMs, now) {
+  if (!Array.isArray(bars) || !bars.length) return [];
+  let end = bars.length;
+  while (end > 0) {
+    const t = +bars[end - 1].t;
+    if (isFinite(t) && t + widthMs > now) end--; else break;
+  }
+  return end === bars.length ? bars : bars.slice(0, end);
+}
+
+// The four-rung ladder over CLOSED series only. Same primitives as trendLadder (emaLast,
+// trendState, the TREND_RETEST_BARS zone probe) so the math cannot drift — the difference is the
+// reference price: each rung is judged against its OWN last closed close, never the live mark,
+// and the zone probe never widens to include it. Returns null when any rung lacks history (same
+// exclusion rule as the board). `sign` is the closed D1 ribbon direction (0 = unknown, not flat).
+// `closeAt[tf]` is when that rung's last closed bar ENDED — the confirming-close timestamp an
+// alert carries.
+function closedLadder(tfCandles, fast, slow) {
+  fast = fast || 13; slow = slow || 21;
+  const out = { tf: {}, avail: 0, sign: 0, closeAt: {},
+    long: { score: 0, retest: null }, short: { score: 0, retest: null } };
+  for (const tf of TREND_TFS) {
+    const c = tfCandles[tf];
+    if (!Array.isArray(c) || c.length < TREND_MIN_BARS) return null;
+    const closes = c.map((k) => +k.c);
+    const px = closes[closes.length - 1];               // the rung's own last CLOSED close
+    const eF = emaLast(closes, fast), eS = emaLast(closes, slow);
+    const lastT = +c[c.length - 1].t;
+    out.closeAt[tf] = isFinite(lastT) ? lastT + (TREND_TF_MS[tf] || 0) : null;
+    if (eF == null || eS == null || eS === 0 || !isFinite(px)) {
+      out.tf[tf] = { st: "nodata" };
+      continue;
+    }
+    out.avail++;
+    const st = trendState(px, eF, eS);
+    out.tf[tf] = { st };
+    if (tf === "D1") out.sign = eF > eS ? 1 : (eF < eS ? -1 : 0);
+    const lastK = c.slice(-TREND_RETEST_BARS);
+    let lowK = Infinity, highK = -Infinity;
+    for (const k of lastK) {
+      const lo = k.l != null && isFinite(+k.l) ? +k.l : +k.c;
+      const hi = k.h != null && isFinite(+k.h) ? +k.h : +k.c;
+      if (lo < lowK) lowK = lo;
+      if (hi > highK) highK = hi;
+    }
+    if (st === "up") {
+      out.long.score++;
+      if (!out.long.retest && lowK <= eF && px > eS) out.long.retest = tf;
+    } else if (st === "down") {
+      out.short.score++;
+      if (!out.short.retest && highK >= eF && px < eS) out.short.retest = tf;
+    }
+  }
+  return out;
+}
+
+// The confirmation line every trend alert carries: WHICH close made the event true and when, all
+// UTC (Hyperliquid buckets are UTC on both universes; no per-recipient timezone state exists and
+// none is invented). `seenAt` — the first intrabar sighting of the condition before the close
+// ratified it — is disclosed only when it genuinely preceded the confirming close: it is the
+// honest statement of what the confirmation cost on this specific alert. Telegram's own delivery
+// stamp says when the message reached a phone; this line is why delivery time can never again be
+// mistaken for signal time.
+const UTC_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function utcHM(ts) {
+  const d = new Date(+ts);
+  return String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
+}
+function utcMonDay(ts) {
+  const d = new Date(+ts);
+  return UTC_MON[d.getUTCMonth()] + " " + d.getUTCDate();
+}
+function trendWhen(ev) {
+  if (!ev || ev.confAt == null || !isFinite(+ev.confAt)) return null;
+  let s = "confirmed " + (ev.confTf || ev.tf || "") + " close " + utcHM(ev.confAt) + " UTC";
+  if (ev.seenAt != null && isFinite(+ev.seenAt) && +ev.seenAt < +ev.confAt) {
+    const sameDay = utcMonDay(ev.seenAt) === utcMonDay(ev.confAt);
+    s += " \u00b7 first seen " + (sameDay ? "" : utcMonDay(ev.seenAt) + " ") + utcHM(ev.seenAt);
+  }
+  return s;
+}
+
 // Tape-wide positioning regime (pure). From an array of per-name [ts, oi, funding] spines
 // (ascending), reconstruct the daily aggregate the whole book traded: total notional OI and the
 // OI-weighted mean funding as an APR %. Each name is forward-filled across days from its first
@@ -3059,6 +3151,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDelta
   EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, detectSwingPull, detectBaseBreak, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
+  closedBars, closedLadder, trendWhen,
   priceAsOf, fundingOver, holdReturn, runHolds, summarize, poolSummary, sessionComposite, activityClock, dowClock, pca2, hourReturnMeans, hourReturnStats,
   // structural-level outcome study (build 2026.07.24-10): does detectLevels output actually hold?
   normCdf, touchBaseline, studyBars, levelOutcomes, levelStudy, LVL_EDGES, PLACEBO_K,
@@ -3937,7 +4030,10 @@ function pushFmt(ev, opts) {
       + " \u00b7 " + tgEsc(ev.title || "");
     const body = preRows([["score", ev.score != null ? ev.score + "/4" : null],
       ["tf", ev.tf || null], ["mark", pxs(ev.px)], ["EMA21", pxs(ev.e21)]]);
-    return out([head, body, tgEsc(ev.text || ""), link("open " + (ev.t || ev.coin))]);
+    // The confirmation line rides every close-confirmed event: which close made this true, when
+    // (UTC), and — when the live board saw it coming — how far ahead of the close it ran.
+    const when = trendWhen(ev);
+    return out([head, body, tgEsc(ev.text || ""), when ? "\u23f1 " + tgEsc(when) : "", link("open " + (ev.t || ev.coin))]);
   }
 
   if (kind === "rule") {

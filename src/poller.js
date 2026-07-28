@@ -16,6 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
+const { closedBars, closedLadder } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
@@ -7564,22 +7565,41 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // Both are persistent-state transitions, so both carry the same re-arm discipline as regime and
   // coverage: state in force at first sight is seeded, never announced.
   //
-  // Boundary flap is the failure mode of both (build -16, the COPPER double): a 4/4 hugging the H1
-  // alignment edge drops to 3/4 for one scan and returns, and every return is technically a fresh
-  // arrival. Two gates, both episode-shaped, kill it:
+  // CLOSE-CONFIRMED (build -25). The board rides the live mark on purpose; the alert lane must
+  // not. A ribbon that flips bullish at 14:35 and flips back by 19:00 was, under the old scan-
+  // count debounce, still capable of reaching a phone — a 15-minute hold is not a daily close.
+  // Every transition below is now judged on the CLOSED ladder (compute.closedLadder: last closed
+  // bar of each rung, no live-mark substitution, no forming bar), so an event can only come into
+  // existence when a candle closes — the close IS the confirmation, and the old scan-count
+  // cross-confirm counter is gone because closed state cannot revert between closes. Each event carries
+  // `confTf`/`confAt` (which close made it true, when) and, when the live board ran ahead of the
+  // close, `seenAt` — the first intrabar sighting, the honest disclosure of what confirmation cost.
+  // The live board read (tb) still supplies the sighting stamps and message dressing; it never
+  // decides a transition.
   //
-  //   stack — the drop must HOLD: score < 4 for TREND_REARM_SCANS consecutive scans before the
-  //           event re-arms, so a one-scan dip is the same episode still standing. Belt-and-
-  //           suspenders under that, TREND_STACK_CD floors the gap between fires per name, so even
-  //           a legitimately re-crossing boundary-hugger cannot become a feed.
-  //   cross — announced only after the flipped sign has HELD for TREND_CROSS_CONFIRM consecutive
-  //           scans. A flip that reverts inside the window fires nothing at all — deliberately no
-  //           cooldown here, because suppressing a genuine second flip would leave the last
-  //           announcement pointing the wrong way (the ops-lane lesson: both directions or neither).
-  const TREND_REARM_SCANS = 3;          // scans score must hold below 4 before the stack re-arms (~15 min)
+  // Boundary flap ACROSS closes is still possible (H1 closes hourly), so the episode gates stay:
+  //
+  //   stack — the drop must HOLD: closed score < 4 for TREND_REARM_SCANS consecutive scans before
+  //           the event re-arms, and TREND_STACK_CD floors the gap between fires per name.
+  const TREND_REARM_SCANS = 3;          // scans closed score must hold below 4 before the stack re-arms (~15 min)
   const TREND_STACK_CD = 12 * 3600e3;   // per-name floor between stack fires
-  const TREND_CROSS_CONFIRM = 3;        // consecutive scans a flipped D1 sign must hold to be announced
-  const trendState = new Map();   // coin -> { score, sign, retest, below, stackAt, pendSign, pendRun }
+  // The closed ladder for one board name: candles trimmed to completed periods only, fed through
+  // the SAME rung sourcing buildTrend uses (daily series, UTC-aligned buckets, hourly spine). A
+  // harness-seeded board read may carry `closed` directly — data, not a second code path.
+  function trendClosed(coin, tb, now) {
+    if (tb && tb.closed) return tb.closed;
+    const r = rows.get(coin);
+    if (!r || !Array.isArray(r.dailyRaw) || !Array.isArray(r.hourlyRaw)) return null;
+    try {
+      return closedLadder({
+        D1: closedBars(r.dailyRaw, DAY, now),
+        H12: closedBars(bucketsFor(r, 12), 12 * HOUR, now),
+        H4: closedBars(bucketsFor(r, 4), 4 * HOUR, now),
+        H1: closedBars(hoursToObj(r.hourlyRaw.slice(-96)), HOUR, now),
+      });
+    } catch (_) { return null; }
+  }
+  const trendState = new Map();   // coin -> { score, sign, retest, below, stackAt, tfSt, seenStack, seenCross, seenCrossSign, seenRetest }
   let trendPrimed = false;
   function trendScan(tNow) {
     const now = Number.isFinite(tNow) ? tNow : Date.now();
@@ -7589,68 +7609,95 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     for (const [coin, tb] of trendByCoin) {
       const r = rows.get(coin);
       if (!r || r.delisted) continue;
-      const sign = (tb.e13 > 0 && tb.e21 > 0) ? (tb.e13 > tb.e21 ? 1 : -1) : 0;
+      const cl = trendClosed(coin, tb, now);
+      if (!cl) continue;   // no closed read, no judgement — silence over guessing at a confirmation
+      const sSide = tb.side === "short" ? "short" : "long";
+      const want = sSide === "long" ? "up" : "down";
+      const score = cl[sSide].score, sign = cl.sign, retest = cl[sSide].retest || null;
+      const tfSt = {}; for (const t of TREND_TFS) tfSt[t] = cl.tf[t] ? cl.tf[t].st : "nodata";
       const prev = trendState.get(coin);
-      if (!trendPrimed || !prev) {   // first pass seeds the whole board silently
+      // First pass seeds the whole board silently. A prev restored from a pre-close-confirm build
+      // (no tfSt — its score/sign were LIVE values) is reseeded the same way: one silent scan,
+      // never a fire judged against a truth measured with a different ruler.
+      if (!trendPrimed || !prev || !prev.tfSt) {
         // A name seeded below 4 counts as fully armed: the hold exists to kill re-fires of a KNOWN
         // stack, not to make a genuinely new name's first arrival late.
-        trendState.set(coin, { score: tb.score, sign, retest: tb.retest || null,
-          below: tb.score < 4 ? TREND_REARM_SCANS : 0, stackAt: 0, pendSign: 0, pendRun: 0 });
+        trendState.set(coin, { score, sign, retest, tfSt,
+          below: score < 4 ? TREND_REARM_SCANS : 0, stackAt: (prev && prev.stackAt) || 0 });
         continue;
       }
-      // `sign` here is the CONFIRMED ribbon direction; the observed one lives in the pend fields
-      // until it earns confirmation. `below` counts consecutive completed scans under 4/4.
-      const next = { score: tb.score, sign: prev.sign, retest: tb.retest || null,
-        below: tb.score < 4 ? Math.min((prev.below || 0) + 1, 999) : 0,
-        stackAt: prev.stackAt || 0, pendSign: prev.pendSign || 0, pendRun: prev.pendRun || 0 };
-      // 1. Full stack reached. Only the ARRIVAL fires; sitting at 4/4 for a week says nothing new —
-      //    and a one-scan wobble through 3/4 is sitting, not arriving (the hold), and a re-arrival
-      //    inside the cooldown is a boundary being hugged, not news. A rise that either gate
-      //    suppresses is consumed: `below` resets at 4/4, so the drop-and-hold must happen again.
-      if (tb.score >= 4 && prev.score < 4 && (prev.below || 0) >= TREND_REARM_SCANS
+      // Live sightings: when the live board runs ahead of the closes, stamp WHEN it first did —
+      // cleared the moment the live condition lapses, so a flickering sighting reports the onset
+      // of the run that actually got confirmed, not a stale first flicker.
+      const liveSign = (tb.e13 > 0 && tb.e21 > 0) ? (tb.e13 > tb.e21 ? 1 : -1) : 0;
+      const next = { score, sign: prev.sign, retest, tfSt,
+        below: score < 4 ? Math.min((prev.below || 0) + 1, 999) : 0,
+        stackAt: prev.stackAt || 0 };
+      next.seenStack = (tb.score >= 4 && score < 4) ? (prev.seenStack || now) : 0;
+      next.seenCross = (liveSign !== 0 && prev.sign !== 0 && liveSign !== prev.sign)
+        ? ((prev.seenCrossSign || 0) === liveSign ? (prev.seenCross || now) : now) : 0;
+      next.seenCrossSign = next.seenCross ? liveSign : 0;
+      next.seenRetest = (tb.retest && !retest) ? (prev.seenRetest || now) : 0;
+      const seen = (at, confAt) => (at && isFinite(+confAt) && at < +confAt ? at : undefined);
+      // 1. Full stack reached — on CLOSED rungs. Only the ARRIVAL fires; sitting at 4/4 for a week
+      //    says nothing new — and a one-scan wobble through 3/4 is sitting, not arriving (the
+      //    hold), and a re-arrival inside the cooldown is a boundary being hugged, not news. A
+      //    rise that either gate suppresses is consumed: `below` resets at 4/4, so the drop-and-
+      //    hold must happen again. The confirming close is the rung whose CLOSED state newly
+      //    aligned — the candle that completed the stack.
+      if (score >= 4 && prev.score < 4 && (prev.below || 0) >= TREND_REARM_SCANS
           && now - (prev.stackAt || 0) >= TREND_STACK_CD) {
         next.stackAt = now;
-        next.sign = sign; next.pendSign = 0; next.pendRun = 0;   // the cross is the stack — adopt, don't re-announce
+        next.sign = sign; next.seenStack = 0;   // the cross is the stack — adopt, don't re-announce
+        let confTf = null, confAt = 0;
+        for (const t of TREND_TFS) {
+          if (tfSt[t] === want && prev.tfSt[t] !== want) {
+            const at = cl.closeAt && isFinite(+cl.closeAt[t]) ? +cl.closeAt[t] : 0;
+            if (at >= confAt) { confAt = at; confTf = t; }
+          }
+        }
+        if (!confTf) { confTf = "H1"; confAt = (cl.closeAt && isFinite(+cl.closeAt.H1)) ? +cl.closeAt.H1 : now; }
         trendState.set(coin, next);
-        emitTrig("trend", { coin, t: r.ticker || coin, side: tb.side, sub: "stack", score: tb.score,
-          tf: "D1", px: r.px, e21: tb.e21, title: "full 4/4 stack",
-          text: `every rung aligned ${tb.side === "long" ? "up" : "down"}${tb.age != null ? ` \u00b7 trend age ${tb.age}d` : ""}` }, now);
+        emitTrig("trend", { coin, t: r.ticker || coin, side: sSide, sub: "stack", score,
+          tf: "D1", px: r.px, e21: tb.e21, confTf, confAt, seenAt: seen(prev.seenStack, confAt),
+          title: "full 4/4 stack",
+          text: `every rung aligned ${sSide === "long" ? "up" : "down"}${tb.age != null ? ` \u00b7 trend age ${tb.age}d` : ""}` }, now);
         fired++;
         continue;   // one event per name per scan: a cross that arrives with the stack is the stack
       }
-      // 2. RETEST badge arrival — the board's own read of a pullback into the 13/21 zone with the
-      //    close holding EMA21, on whichever rung it flagged. This is the SAME condition the ledger
-      //    enrolls as a claim; the difference is the alert fires on the badge APPEARING, while the
-      //    ledger's setup alert waits for the event family to prove a record (n >= 8 resolved). Until
-      //    that record exists this is the only way a retest reaches you at all — which, with a young
-      //    tretest ledger, is precisely why trend retests looked nonexistent.
-      if (tb.retest && !prev.retest) {
+      // 2. RETEST arrival — the pullback into the 13/21 zone with the CLOSE holding EMA21, judged
+      //    on closed bars of whichever rung shows it. This is the SAME condition the ledger
+      //    enrolls as a claim; the difference is the alert fires on the closed badge APPEARING,
+      //    while the ledger's setup alert waits for the event family to prove a record (n >= 8
+      //    resolved). Until that record exists this is the only way a retest reaches you at all —
+      //    which, with a young tretest ledger, is precisely why trend retests looked nonexistent.
+      //    Confirming close: the retesting rung's own last close (\u22644h/\u226412h/\u226424h behind the tape).
+      if (retest && !prev.retest) {
+        next.seenRetest = 0;
+        const confAt = (cl.closeAt && isFinite(+cl.closeAt[retest])) ? +cl.closeAt[retest] : now;
         trendState.set(coin, next);
-        emitTrig("trend", { coin, t: r.ticker || coin, side: tb.side, sub: "retest", score: tb.score,
-          tf: tb.retest, px: r.px, e21: tb.e21, title: tb.retest + " retest of the 13/21 zone",
-          text: `pullback into the ribbon of a ${tb.score}/4 stacked ${tb.side === "long" ? "uptrend" : "downtrend"}, close holding EMA21` }, now);
+        emitTrig("trend", { coin, t: r.ticker || coin, side: sSide, sub: "retest", score,
+          tf: retest, px: r.px, e21: tb.e21, confTf: retest, confAt, seenAt: seen(prev.seenRetest, confAt),
+          title: retest + " retest of the 13/21 zone",
+          text: `pullback into the ribbon of a ${score}/4 stacked ${sSide === "long" ? "uptrend" : "downtrend"}, close holding EMA21` }, now);
         fired++;
-        continue;   // a pending cross survives the retest scan and confirms on its own clock
+        continue;   // a live-pending cross survives the retest scan and confirms at its own close
       }
-      // 3. D1 ribbon cross, debounced. Sign 0 (a rung without both EMAs) is unknown, not a flip —
-      //    treating it as one would fire on every gap in the ladder, and it resets the pending
-      //    count rather than feeding it (silence over noise). A flip out of 0 is adoption, not a
-      //    flip: it confirms silently, exactly as the old direct comparison behaved.
-      if (sign === 0 || sign === prev.sign) { next.pendSign = 0; next.pendRun = 0; }
-      else {
-        next.pendRun = (prev.pendSign === sign ? (prev.pendRun || 0) : 0) + 1;
-        next.pendSign = sign;
-        if (next.pendRun >= TREND_CROSS_CONFIRM) {
-          next.sign = sign; next.pendSign = 0; next.pendRun = 0;
-          if (prev.sign !== 0) {
-            emitTrig("trend", { coin, t: r.ticker || coin, side: sign > 0 ? "long" : "short", sub: "cross",
-              score: tb.score, tf: "D1", px: r.px, e21: tb.e21,
-              title: "D1 13/21 cross " + (sign > 0 ? "up" : "down"),
-              text: "the daily ribbon flipped " + (sign > 0 ? "bullish" : "bearish") }, now);
-            fired++;
-          }
-        }
-      }
+      // 3. D1 ribbon cross — the CLOSED daily sign changed, which can only happen at a D1 close:
+      //    the close IS the confirmation, so it announces immediately and cannot revert before the
+      //    next close. Sign 0 (a rung without both EMAs) is unknown, not a flip — treating it as
+      //    one would fire on every gap in the ladder. A flip out of 0 is adoption, not a flip: it
+      //    confirms silently, exactly as the pre-debounce comparison behaved.
+      if (sign !== 0 && prev.sign !== 0 && sign !== prev.sign) {
+        next.sign = sign; next.seenCross = 0; next.seenCrossSign = 0;
+        const confAt = (cl.closeAt && isFinite(+cl.closeAt.D1)) ? +cl.closeAt.D1 : now;
+        emitTrig("trend", { coin, t: r.ticker || coin, side: sign > 0 ? "long" : "short", sub: "cross",
+          score, tf: "D1", px: r.px, e21: tb.e21, confTf: "D1", confAt,
+          seenAt: (prev.seenCrossSign || 0) === sign ? seen(prev.seenCross, confAt) : undefined,
+          title: "D1 13/21 cross " + (sign > 0 ? "up" : "down"),
+          text: "the daily ribbon flipped " + (sign > 0 ? "bullish" : "bearish") }, now);
+        fired++;
+      } else if (sign !== 0) next.sign = sign;
       trendState.set(coin, next);
     }
     // Names that left the board entirely lose their state, so a return is a genuinely new episode.
