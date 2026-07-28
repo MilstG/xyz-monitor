@@ -16,7 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
-const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy } = require("./compute");
+const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
@@ -4610,6 +4610,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // One full pass seeds every name's state before anything may fire — otherwise the first scan
     // after a deploy announces every 4/4 stack on the board as if it had just arrived.
     setTimeout(() => { try { trendScan(); } catch (_) {} trendPrimed = true; log("trend alerts primed"); }, 6 * 60 * 1000);
+    setInterval(safeTick(ma200Scan, "ma200Scan"), 5 * 60 * 1000);
+    // Same silent first look for the 200 lane: any event bar already standing at boot is seeded.
+    setTimeout(() => { try { ma200Scan(); } catch (_) {} maPrimed = true; log("ma200 alerts primed"); }, 6 * 60 * 1000);
     setInterval(safeTick(coverageScan, "coverageScan"), 10 * 60 * 1000);
     setInterval(safeTick(digestTick, "digestTick"), 5 * 60 * 1000);
     // The EDGAR rotation covers 2 names a minute, so a full roster pass takes ~40 minutes. Priming
@@ -6731,11 +6734,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         classFires.set(kv[0], kv[1].filter((t) => Number.isFinite(t)));
     const ep = d.episodes || {};
     const loadMap = (arr, map) => { if (Array.isArray(arr)) for (const kv of arr) if (Array.isArray(kv)) map.set(kv[0], kv[1]); };
-    loadMap(ep.trend, trendState); loadMap(ep.regime, regimeArmed); loadMap(ep.coverage, coverageArmed); loadMap(ep.earn, earnAlerted);
+    loadMap(ep.trend, trendState); loadMap(ep.ma200, maState); loadMap(ep.regime, regimeArmed); loadMap(ep.coverage, coverageArmed); loadMap(ep.earn, earnAlerted);
     if (Array.isArray(ep.filings)) for (const id of ep.filings) if (typeof id === "string") filingSeen.add(id);
     // Restored state IS the seed, so the priming delay would only eat real transitions. A genuinely
     // fresh boot (nothing restored) still gets the full silent seeding pass.
     if (trendState.size) trendPrimed = true;
+    if (maState.size) maPrimed = true;
     if (filingSeen.size) filingPrimed = true;
     return true;
   }
@@ -6751,6 +6755,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // the result. Persisting the seeds is what turns these classes from theoretical into real.
       episodes: {
         trend: [...trendState.entries()].slice(-500),
+        ma200: [...maState.entries()].slice(-500),
         regime: [...regimeArmed.entries()],
         coverage: [...coverageArmed.entries()].slice(-200),
         filings: [...filingSeen].slice(-FILING_SEEN_MAX),
@@ -7856,6 +7861,101 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return fired;
   }
 
+  // ---- ma200 class: reclaim / breakdown / bullish + bearish retest, H4 + D1 (build -32) --------
+  // The notification lane for the 200-EMA — the -26 study measures these events, the -28 shadows
+  // earn a record on two of them, and this scan is how ANY of the four reach a phone TODAY (the
+  // same role the trend retest-badge arrival plays for the 13/21 family). Full roster, BOTH
+  // universes, deliberately not scoped to the trend board's top-10s: a 200 breakdown matters most
+  // on a name that is NOT currently trending. Every judgement is compute.emaAlertState over
+  // CLOSED bars — the study's own buffered-cross / clear-air-retest vocabulary, so the alert and
+  // the study can never disagree about what an EMA200 event is — and can therefore only come
+  // into existence at that rung's close: the close IS the confirmation (-25). D1 rides
+  // mergedDailyBars (370d — names younger than ~7 months are honest-nodata and silent); H4 rides
+  // the spine buckets. Dedup is the firing bar's OWN timestamp, persisted: the same closed bar
+  // can never announce twice, across as many scans and redeploys as it spans. The live-mark
+  // sighting (the -25 seenAt disclosure) runs the SAME detector over closed bars plus the
+  // forming bar carrying the mark — one definition, two clocks.
+  const MA200_TFS = { D1: DAY, H4: 4 * HOUR };
+  const maState = new Map();   // coin -> { D1: { fired: {sub|side: barT}, seen: {sub|side: ts} }, H4: {...} }
+  let maPrimed = false;
+  function maSeries(r, tf, now) {
+    const src = tf === "D1" ? mergedDailyBars(r) : bucketsFor(r, 4);
+    return closedBars(src, MA200_TFS[tf], now);
+  }
+  // The forming bar for the live sighting: the untrimmed tail bucket when it exists (true
+  // intrabar h/l from the hours so far), the mark alone when it doesn't — with the close always
+  // replaced by the live mark, exactly the substitution trendLadder makes.
+  function maLiveBars(r, tf, closed, now) {
+    const w = MA200_TFS[tf], t0 = Math.floor(now / w) * w, px = +r.px;
+    if (!(px > 0)) return null;
+    const src = tf === "D1" ? mergedDailyBars(r) : bucketsFor(r, 4);
+    const tail = src.length ? src[src.length - 1] : null;
+    const f = tail && +tail.t === t0
+      ? { t: t0, c: px, h: Math.max(+tail.h, px), l: Math.min(+tail.l, px) }
+      : { t: t0, c: px, h: px, l: px };
+    return closed.concat([f]);
+  }
+  function ma200Scan(tNow) {
+    const now = Number.isFinite(tNow) ? tNow : Date.now();
+    let fired = 0;
+    for (const r of rows.values()) {
+      if (r.delisted || !(r.px > 0) || !Array.isArray(r.hourlyRaw)) continue;
+      let st = maState.get(r.coin);
+      for (const tf of ["D1", "H4"]) {
+        const bars = maSeries(r, tf, now);
+        if (!Array.isArray(bars) || bars.length < 216) continue;   // EMA200 cannot seed — honest silence, fills in as history deepens
+        // Sigma in the rung's OWN bar units — the study's exact construction, so the buffer means
+        // the same thing an /api/analytics reader sees adjudicated.
+        const sdTf = retStd(dailyRets(bars.map((k) => [k.t, k.c])).slice(-90), 15);
+        if (!(sdTf > 0)) continue;
+        let ev = null;
+        try { ev = emaAlertState(bars, sdTf); } catch (_) { continue; }
+        if (!st) { st = {}; maState.set(r.coin, st); }
+        const S = st[tf] || (st[tf] = { fired: {}, seen: {}, s: 0 });
+        const key = ev ? ev.sub + "|" + ev.side : null;
+        // Seeding: state in force at first sight — an event bar already standing when the scan
+        // first looks (boot, new name, history just deepened past the seed) — is recorded, never
+        // announced. Same discipline as every episode class. `s` marks a rung-state that has had
+        // its silent first look, so a name ARRIVING after priming still seeds instead of firing.
+        if (!maPrimed || !S.s) { S.s = 1; if (key) S.fired[key] = ev.barT; continue; }
+        // The fire is handled BEFORE the live-sighting upkeep: once the event bar has closed, the
+        // mark-extended series no longer matches the shape, so upkeep run first would wipe the
+        // very stamp the fire is about to disclose.
+        if (ev && S.fired[key] !== ev.barT) {
+          S.fired[key] = ev.barT;
+          const confAt = ev.barT + MA200_TFS[tf];
+          const seenAt = S.seen[key] != null && S.seen[key] < confAt ? S.seen[key] : undefined;
+          delete S.seen[key];
+          const rts = ev.sub === "retest";
+        emitTrig("ma200", { coin: r.coin, t: r.ticker || r.coin, side: ev.side, sub: ev.sub, tf,
+          px: r.px, ema: ev.ema, dist: ev.dist, held: ev.held, probe: rts ? ev.probe : undefined,
+          confTf: tf, confAt, seenAt,
+          title: tf + " " + (rts ? (ev.side === "long" ? "bullish" : "bearish") + " retest of EMA200"
+            : "EMA200 " + ev.sub),
+          text: rts
+            ? (ev.side === "long"
+              ? `pullback probed the 200 from above, close held it \u2014 continuation zone`
+              : `rally probed the 200 from below, close rejected it`)
+            : (ev.sub === "reclaim"
+              ? `closed back above the 200 after ${ev.held} ${tf} bar${ev.held === 1 ? "" : "s"} below it`
+              : `closed below the 200 for the first time in ${ev.held} ${tf} bar${ev.held === 1 ? "" : "s"}`) }, now);
+          fired++;
+        }
+        // Live sighting on the mark-extended series: stamped at the first scan the live shape
+        // appears, cleared the moment it lapses — the onset of the run that got confirmed.
+        let lv = null;
+        try { const lb = maLiveBars(r, tf, bars, now); lv = lb ? emaAlertState(lb, sdTf) : null; } catch (_) { lv = null; }
+        const lkey = lv ? lv.sub + "|" + lv.side : null;
+        for (const k of Object.keys(S.seen)) if (k !== lkey) delete S.seen[k];
+        if (lkey && S.seen[lkey] == null) S.seen[lkey] = now;
+      }
+    }
+    for (const c of [...maState.keys()]) if (!rows.has(c) || rows.get(c).delisted) maState.delete(c);
+    persistTriggers();
+    if (fired) log(`ma200 alerts: ${fired} event(s)`);
+    return fired;
+  }
+
   function pushTest(chat, owner, isAdmin) {
     if (!pushOn()) return { ok: false, error: "disabled" };
     const now = Date.now();
@@ -8004,6 +8104,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     regimeScanNow: regimeScan,
     trendScanNow: trendScan,
     trendPrimeNow: () => { trendPrimed = true; },
+    ma200ScanNow: ma200Scan,
+    ma200PrimeNow: () => { maPrimed = true; },
+    ma200StateNow: () => maState,
     trendIndexNow: () => trendByCoin,
     coverageScanNow: coverageScan,
     digestTickNow: digestTick,

@@ -1453,13 +1453,71 @@ function detectEmaRetest(bars, px, sd30, lvlBars) {
   return { ema: +ema[L].toPrecision(9), stop: +stop.toPrecision(9), target };
 }
 
-// ---- EMA200 trend events (build 2026.07.27-26) ------------------------------------------------
-// Close-confirmed crosses of the 200-EMA — the most common trend line in retail and fund PM
-// playbooks alike — scored walk-forward against a deterministic permutation placebo. Three
-// definitions duel per side (raw close-cross, close >=bufSd*sigma beyond the line, two
-// consecutive closes) because "the" EMA200 break has no canonical definition: the data picks,
-// we do not. Events fire on CLOSED candles only — an intrabar poke that closes back never
-// counts, which is the entire false-trigger defense. Re-arm: after a stream fires, it stays
+// ---- EMA200 alert-lane detector (build 2026.07.27-32) -----------------------------------------
+// The notification counterpart of the machinery above: the -26 study measures the events, the
+// -28 shadows enroll two of them as silent record-earning claims — this function is how ANY of
+// the four reach a phone TODAY, before a record exists (the same role the trend retest-badge
+// arrival plays for the 13/21 family). One stateless read of the LAST closed bar, all four
+// shapes, both sides, in the study's own vocabulary — buffer, arm width and clear-air rule are
+// the -26/-28 definitions verbatim, because an alert firing on a shape the study never measured
+// would be a second source of truth about what an "EMA200 event" is:
+//
+//   reclaim    — the buffered close-cross UP: close clears the line by >=bufSd*sigma after
+//                arm+1 consecutive closes below (detectEmaBreak's shape, side-agnostic and
+//                stripped of claim geometry — this is a notification, not a trade).
+//   breakdown  — the exact mirror down.
+//   retest     — the touch-and-hold with the clear-air arm: the bar's range brackets the line,
+//                the close holds the trend side, the PRIOR close sat >=bufSd*sigma clear on that
+//                side and did not itself touch (detectEmaRetest's shape, both sides). side long
+//                = bullish support retest, side short = bearish resistance rejection.
+//
+// At most one shape can match a given closed bar (the arm conditions are mutually exclusive), so
+// the return is a single event or null. `held` = consecutive prior closes on the departing side
+// (cross) / holding side (retest) — the message's own quality signal: a breakdown after 212 bars
+// above is a regime event, after 5 it's chop the arm mostly ate anyway. Closes-only bars (warm-
+// cache dailies) degrade honestly: h/l fall back to the close, so a retest touch cannot be
+// fabricated from a bar that never recorded its extremes.
+function emaAlertState(bars, sdTf, opts) {
+  const o = opts || {};
+  const N = Number.isFinite(o.N) && o.N >= 2 ? Math.round(o.N) : 200;
+  const bufSd = Number.isFinite(o.bufSd) && o.bufSd > 0 ? o.bufSd : 0.25;
+  const arm = Number.isFinite(o.arm) && o.arm >= 1 ? Math.round(o.arm) : 3;
+  const b = studyBars(bars);
+  const n = b.length;
+  if (n < N + 16 || !(sdTf > 0)) return null;
+  const k2 = 2 / (N + 1);
+  const ema = new Array(n).fill(null);
+  let e = 0;
+  for (let i = 0; i < n; i++) { const v = b[i].c;
+    if (i < N) { e += v; if (i === N - 1) { e /= N; ema[i] = e; } } else { e = v * k2 + e * (1 - k2); ema[i] = e; } }
+  const L = n - 1;
+  if (ema[L] == null || ema[L - arm - 1] == null) return null;
+  const above = (i) => b[i].c >= ema[i];
+  const held = (side) => {   // consecutive closes strictly before L on `side`
+    let h = 0; for (let i = L - 1; i >= 0 && ema[i] != null; i--) { if (above(i) === (side === "above")) h++; else break; }
+    return h;
+  };
+  const B = b[L], P = b[L - 1];
+  const distPct = (B.c / ema[L] - 1) * 100;
+  const out = (sub, side, extra) => Object.assign({ sub, side, barT: B.t,
+    ema: +ema[L].toPrecision(9), dist: +distPct.toFixed(2) }, extra);
+  // Crosses first — armed: every one of the arm+1 closes before the event sat on the far side.
+  let farBelow = true, farAbove = true;
+  for (let i = 1; i <= arm + 1; i++) { if (above(L - i)) farBelow = false; else farAbove = false; }
+  if (above(L) && farBelow && distPct >= bufSd * sdTf) return out("reclaim", "long", { held: held("below") });
+  if (!above(L) && farAbove && -distPct >= bufSd * sdTf) return out("breakdown", "short", { held: held("above") });
+  // Retests — the touch, the hold, and the clear-air prior (first touch of the episode).
+  const touch = B.l <= ema[L] && ema[L] <= B.h;
+  if (touch && B.c > ema[L]
+      && (P.c / ema[L - 1] - 1) * 100 >= bufSd * sdTf && P.l > ema[L - 1])
+    return out("retest", "long", { held: held("above"), probe: +B.l.toPrecision(9) });
+  if (touch && B.c < ema[L]
+      && (P.c / ema[L - 1] - 1) * 100 <= -bufSd * sdTf && P.h < ema[L - 1])
+    return out("retest", "short", { held: held("below"), probe: +B.h.toPrecision(9) });
+  return null;
+}
+
+
 // blocked until `rearm` consecutive closes on the FAR side reset the episode — chop around the
 // line is one fight, not five signals; blocked fires are counted and disclosed, never silently
 // eaten. Outcomes: signed with the event's direction (a breakdown that falls scores POSITIVE),
@@ -4051,7 +4109,7 @@ function trigEligible(row, cfg) {
 // `ledger` is the DEATH side of a claim the `setup` class already announced: its void level taken,
 // its target reached, or its horizon resolved. Deliberately one class rather than three — nobody
 // wants to subscribe to target-hits but not stop-hits, and the message says which it is.
-const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "filing", "earnings", "ai", "regime", "coverage", "ops"];
+const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "ma200", "filing", "earnings", "ai", "regime", "coverage", "ops"];
 // Classes only an operator should receive. Ops is server health — a stalled poller is actionable if
 // you can redeploy and noise if you cannot, and the group should not be woken by the plumbing.
 // Enforced in delivery AND in the in-app feed, not just hidden in the panel: a class the public
@@ -4113,7 +4171,7 @@ function pushEligible(ev, sub) {
   // wrote. Layering the setup thresholds on top would silently veto somebody's own alert.
   if (kind === "rule") return true;
   if (kind === "filing" || kind === "earnings" || kind === "ai") return true;
-  if (kind === "regime" || kind === "coverage" || kind === "trend") return true;
+  if (kind === "regime" || kind === "coverage" || kind === "trend" || kind === "ma200") return true;
   return trigEligible(ev, s.trig || {});           // setup: the SHARED gate, never a private copy
 }
 
@@ -4125,7 +4183,7 @@ function pushEligible(ev, sub) {
 // DOES have: a monospace <pre> block, and glyphs. The geometry goes in <pre> so the numbers column-
 // align exactly as they do on the board; everything else stays prose. One leading glyph per message
 // and a side dot — enough to sort a class at a glance on a lock screen, not enough to become soup.
-const PUSH_GLYPH = { setup: "\u26a1", ledger: "\u23f1", rule: "\u{1f4d0}", trend: "\u{1f4c8}",
+const PUSH_GLYPH = { setup: "\u26a1", ledger: "\u23f1", rule: "\u{1f4d0}", trend: "\u{1f4c8}", ma200: "\u{1f4cf}",
   filing: "\u{1f4c4}", earnings: "\u{1f4c5}", ai: "\u{1f9e0}", regime: "\u{1f30a}",
   coverage: "\u26a0\ufe0f", ops: "\u{1f527}" };
 const sideDot = (s) => (s === "long" ? "\u{1f7e2}" : s === "short" ? "\u{1f534}" : "");
@@ -4205,6 +4263,22 @@ function pushFmt(ev, opts) {
       ["tf", ev.tf || null], ["mark", pxs(ev.px)], ["EMA21", pxs(ev.e21)]]);
     // The confirmation line rides every close-confirmed event: which close made this true, when
     // (UTC), and — when the live board saw it coming — how far ahead of the close it ran.
+    const when = trendWhen(ev);
+    return out([head, body, tgEsc(ev.text || ""), when ? "\u23f1 " + tgEsc(when) : "", link("open " + (ev.t || ev.coin))]);
+  }
+
+  if (kind === "ma200") {
+    // Same grammar as the trend class — glyph flips with the side, geometry in <pre>, one prose
+    // line, the -25 confirmation stamp. `held` is the message's own quality signal (how long the
+    // prior side held, in the rung's bars); `probe` ships on retests only — the extreme that
+    // touched the line while the close held it.
+    const up = ev.side === "long";
+    const head = (up ? "\u{1f4c8}" : "\u{1f4c9}") + " <b>" + name + "</b> " + sideDot(ev.side)
+      + " \u00b7 " + tgEsc(ev.title || "");
+    const body = preRows([["mark", pxs(ev.px)], ["EMA200", pxs(ev.ema)],
+      ["dist", ev.dist != null && isFinite(ev.dist) ? nums(ev.dist, 2, true) + "%" : null],
+      ["probe", pxs(ev.probe)],
+      ["held", ev.held != null ? ev.held + " " + tgEsc(ev.tf || "") + " bars" : null]]);
     const when = trendWhen(ev);
     return out([head, body, tgEsc(ev.text || ""), when ? "\u23f1 " + tgEsc(when) : "", link("open " + (ev.t || ev.coin))]);
   }
@@ -4465,6 +4539,7 @@ module.exports.pushCodeOk = pushCodeOk;
 module.exports.pushCodeNorm = pushCodeNorm;
 module.exports.pushEligible = pushEligible;
 module.exports.pushFmt = pushFmt;
+module.exports.emaAlertState = emaAlertState;
 module.exports.levelHit = levelHit;
 module.exports.pushBatch = pushBatch;
 
