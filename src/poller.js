@@ -1068,6 +1068,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         ref: trimRef(r.ref), feat: trimFeat(r.feat),
         doi: trimWin(computeDoi(r)), fundByWin: trimWin(computeFundWin(r), 6),
         sector: cl.sector, assetClass: cl.assetClass,
+        // Industry group (build -04): shipped ONLY when it differs from the sector — the client's
+        // contract is `r.ind || r.sector`, so an absent field IS the fallback, not a gap. Keeps
+        // the payload thin for the majority of instruments where the two coincide.
+        ind: cl.ind !== cl.sector ? cl.ind : undefined,
         // Display name + macro news lane, both from the static sectors table. `nm` is a label
         // only; `mlane` declares whether this instrument HAS a topical news lane and what it is
         // scoped to, so the drawer never re-derives either. Both are undefined when unseeded —

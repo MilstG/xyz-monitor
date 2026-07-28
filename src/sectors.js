@@ -6,8 +6,8 @@
 // bare FX codes, the XYZ100 dex index, and commodity CME codes like CL=WTI).
 
 const SECTOR_TICKERS = {
-  "Information Technology": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ADBE","AMD","INTC","CSCO","ACN","TXN","QCOM","IBM","NOW","INTU","AMAT","MU","ADI","LRCX","KLAC","SNPS","CDNS","PANW","ANET","MRVL","FTNT","ON","DELL","HPQ","HPE","NXPI","MCHP","ROP","TEL","GLW","SMCI","WDC","STX","ZS","CRWD","DDOG","SNOW","NET","PLTR","TEAM","WDAY","ADSK","APH","MPWR","FSLR","KEYS","CTSH","IT","GRMN","TER","ZBRA","TYL","PTC","ANSS","EPAM","TSM","ASML","ARM","MSTR","BB","NBIS","CRWV","CBRS","LITE","SNDK","SKHX","SMSN","KIOXIA","IBIDEN","ZHIPU","MINIMAX"],
-  "Communication Services": ["GOOGL","GOOG","META","NFLX","DIS","CMCSA","T","VZ","TMUS","CHTR","EA","TTWO","WBD","OMC","LYV","MTCH","PINS","SNAP","RBLX","SPOT","ROKU","ZM","IPG","NWSA","FOXA","PARA","WMG","SOFTBANK"],
+  "Information Technology": ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ADBE","AMD","INTC","CSCO","ACN","TXN","QCOM","IBM","NOW","INTU","AMAT","MU","ADI","LRCX","KLAC","SNPS","CDNS","PANW","ANET","MRVL","FTNT","ON","DELL","HPQ","HPE","NXPI","MCHP","ROP","TEL","GLW","SMCI","WDC","STX","ZS","CRWD","DDOG","SNOW","NET","PLTR","TEAM","WDAY","ADSK","APH","MPWR","FSLR","KEYS","CTSH","IT","GRMN","TER","ZBRA","TYL","PTC","ANSS","EPAM","ZM","TSM","ASML","ARM","MSTR","BB","NBIS","CRWV","CBRS","LITE","SNDK","SKHX","SMSN","KIOXIA","IBIDEN","ZHIPU","MINIMAX"],
+  "Communication Services": ["GOOGL","GOOG","META","NFLX","DIS","CMCSA","T","VZ","TMUS","CHTR","EA","TTWO","WBD","OMC","LYV","MTCH","PINS","SNAP","RBLX","SPOT","ROKU","IPG","NWSA","FOXA","PARA","WMG","SOFTBANK"],
   "Consumer Discretionary": ["AMZN","TSLA","HD","MCD","NKE","LOW","SBUX","BKNG","TJX","ORLY","CMG","MAR","GM","F","HLT","ROST","AZO","YUM","LULU","DHI","LEN","EBAY","ETSY","ABNB","DRI","RCL","CCL","NCLH","EXPE","APTV","RIVN","LCID","DKNG","PHM","BBY","DPZ","TSCO","ULTA","LVS","WYNN","MGM","GPC","KMX","POOL","NVR","BABA","GME","HYUNDAI","BIRD"],
   "Consumer Staples": ["PG","KO","PEP","COST","WMT","PM","MO","MDLZ","TGT","KMB","GIS","KHC","SYY","STZ","KDP","MNST","HSY","KR","ADM","DG","DLTR","CLX","CHD","MKC","K","HRL","TSN","CAG","CPB","EL","KVUE","BG","TAP"],
   "Health Care": ["UNH","JNJ","LLY","ABBV","MRK","PFE","TMO","ABT","DHR","AMGN","BMY","GILD","CVS","MDT","ISRG","ELV","VRTX","REGN","CI","ZTS","BSX","HCA","SYK","BDX","HUM","MRNA","BIIB","IDXX","DXCM","IQV","MCK","CNC","GEHC","EW","A","RMD","WST","BAX","ZBH","MTD","COR","ALGN","HOLX","STE","HIMS"],
@@ -37,6 +37,87 @@ for (const [sector, arr] of Object.entries(SECTOR_TICKERS)) for (const t of arr)
 
 function norm(t) { return String(t || "").toUpperCase().replace(/[^A-Z0-9.]/g, ""); }
 
+// ---- industry groups (build 2026.07.28-04) ----------------------------------------------------
+// A finer, trader-oriented grouping LAYERED ON TOP of the GICS sector — never replacing it.
+// Rationale: Info Tech is a ~70-ticker mega-bucket where AAPL/MSFT volume-weighting drowns a
+// 6-name memory complex; the industry lens makes memory-vs-semis-vs-software rotation legible.
+// Rules of this table:
+//   · Curated static edit, reviewed like the GICS map — never AI-learned, never auto-promoted.
+//   · Groups are DELIBERATELY allowed to cross GICS sectors when that is how the tape trades
+//     (Crypto-Fi holds COIN/HOOD from Financials next to MSTR from Info Tech; Mega Platforms
+//     spans three sectors; the DRAM/HBM/NAND thematic indices sit inside Memory/Storage).
+//   · A ticker with no entry here inherits its GICS sector as its industry — the client renders
+//     that fallback VISIBLY (italic, "= sector" chip), it is never hidden or guessed.
+//   · Group names must never collide with a GICS sector name or "Unclassified": the client
+//     detects fallback groups by name-vs-entry, and a collision would silently merge a curated
+//     group with fallback members. Guarded by test.
+//   · Scope: display grouping in the Sectors tab ONLY. Signal-engine pooling, news badges and
+//     asset-class scoping stay on the untouched 11-sector GICS map.
+const IND_TICKERS = {
+  // -- Info Tech splits (plus the deliberate cross-sector groups) --
+  "Mega Platforms": ["AAPL","MSFT","GOOGL","GOOG","META","AMZN"],
+  "Semiconductors": ["NVDA","AMD","AVGO","INTC","TXN","QCOM","ADI","NXPI","MCHP","ON","MRVL","MPWR","TSM","ARM","CBRS","SMH","SOXX"],
+  "Semi Equipment": ["AMAT","LRCX","KLAC","ASML","TER","KEYS","IBIDEN","WAFER"],
+  "Memory/Storage": ["MU","WDC","STX","SNDK","SKHX","KIOXIA","SMSN","DRAM","HBM","NAND","MEMORY"],
+  "AI Infra":       ["NBIS","CRWV","SMCI","SOFTBANK","GPU","H100","COMPUTE"],
+  "AI Software":    ["PLTR","ZHIPU","MINIMAX","OPENAI","ANTHROPIC","XAI","CURSOR","DATABRICKS"],
+  "Software":       ["ORCL","CRM","ADBE","NOW","INTU","SNPS","CDNS","TEAM","WDAY","ADSK","TYL","PTC","ANSS","ZM","IBM","DDOG","SNOW","CANVA"],
+  "Cybersecurity":  ["PANW","CRWD","ZS","FTNT","NET"],
+  "IT Services":    ["ACN","CTSH","IT","EPAM"],
+  "Hardware":       ["DELL","HPQ","HPE","APH","TEL","GLW","ZBRA","GRMN","LITE","BB","CSCO","ANET"],
+  "Clean Energy":   ["FSLR","BE"],
+  // -- Communication Services splits --
+  "Media/Streaming": ["NFLX","DIS","CMCSA","CHTR","WBD","PARA","FOXA","NWSA","WMG","LYV","SPOT","ROKU","OMC","IPG"],
+  "Telecom":         ["T","VZ","TMUS"],
+  "Social/Gaming":   ["PINS","SNAP","MTCH","RBLX","EA","TTWO","DISCORD"],
+  // -- Consumer Discretionary splits --
+  "Autos/EV":        ["TSLA","GM","F","RIVN","LCID","APTV","HYUNDAI"],
+  "E-Commerce":      ["BABA","EBAY","ETSY"],
+  "Retail":          ["HD","LOW","TJX","ROST","AZO","ORLY","BBY","GPC","KMX","TSCO","ULTA","GME"],
+  "Restaurants":     ["MCD","SBUX","CMG","YUM","DPZ","DRI"],
+  "Travel/Leisure":  ["BKNG","MAR","HLT","ABNB","EXPE","RCL","CCL","NCLH"],
+  "Casinos/Betting": ["LVS","WYNN","MGM","DKNG"],
+  "Home/Building":   ["DHI","LEN","PHM","NVR","BLDR","POOL"],
+  "Apparel":         ["NKE","LULU","BIRD"],
+  // -- Consumer Staples splits --
+  "Staples Retail":  ["WMT","COST","TGT","KR","DG","DLTR"],
+  "Bev/Tobacco":     ["KO","PEP","PM","MO","STZ","KDP","MNST","TAP"],
+  "Food":            ["MDLZ","GIS","KHC","SYY","HSY","ADM","K","HRL","TSN","CAG","CPB","BG","MKC"],
+  "Household":       ["PG","KMB","CLX","CHD","EL","KVUE"],
+  // -- Health Care splits --
+  "Pharma":          ["JNJ","LLY","ABBV","MRK","PFE","AMGN","BMY","GILD","ZTS"],
+  "Biotech":         ["VRTX","REGN","MRNA","BIIB"],
+  "MedTech":         ["MDT","ISRG","BSX","SYK","BDX","EW","ZBH","ALGN","HOLX","STE","DXCM","IDXX","RMD","WST","BAX","A","MTD","TMO","DHR","GEHC"],
+  "Health Services": ["UNH","ELV","CI","HUM","CNC","CVS","MCK","COR","HCA","IQV","HIMS"],
+  // -- Financials splits --
+  "Banks":           ["JPM","BAC","WFC","C","USB","PNC","TFC","FITB","HBAN","RF","CFG","KEY"],
+  "Capital Markets": ["GS","MS","SCHW","BLK","BX","TROW","AMP","STT","BK"],
+  "Exchanges/Data":  ["ICE","CME","NDAQ","SPGI","MCO","MSCI"],
+  "Payments/Credit": ["V","MA","AXP","PYPL","SQ","FIS","FI","GPN","DFS","SYF","COF","STRIPE","RAMP","REVOLUT"],
+  "Crypto-Fi":       ["COIN","HOOD","MSTR","CRCL","STRC"],
+  "Insurance":       ["BRK.B","BRKB","CB","PGR","MMC","AON","MET","AIG","PRU","TRV","ALL","AFL","AJG"],
+  // -- Industrials splits (rest of the sector falls back visibly) --
+  "Aero/Defense":    ["BA","GE","RTX","LMT","GD","NOC","LHX","TDG","HWM","RKLB","ANDURIL","SPCX"],
+  "Transport":       ["UNP","CSX","NSC","UPS","FDX","ODFL","LUV","DAL","UAL","AAL","PCAR","WAB"],
+  "Power/Grid":      ["GEV","VST","NRG","PWR"],
+  "Robotics":        ["FIGURE","BOT"],
+  // -- Energy splits --
+  "E&P/Majors":      ["XOM","CVX","COP","EOG","OXY","DVN","FANG","CTRA","MRO","APA","EQT","OVV","MTDR","HES"],
+  "Refiners":        ["MPC","PSX","VLO","DINO"],
+  "Oil Services":    ["SLB","HAL","BKR"],
+  "Midstream/LNG":   ["WMB","OKE","KMI","LNG","TRGP"],
+  // -- Materials splits --
+  "Metals/Mining":   ["FCX","NEM","NUE","STLD","USAR","ALB","URNM","URA"],
+  "Chemicals":       ["LIN","APD","SHW","ECL","DOW","DD","PPG","LYB","CF","MOS","CE","EMN","IFF","CTVA","FMC"],
+  // -- Real Estate split --
+  "Digital REITs":   ["EQIX","DLR","AMT","CCI","SBAC","IRM"],
+};
+const IND = {};
+for (const [ind, arr] of Object.entries(IND_TICKERS)) for (const t of arr) IND[t] = ind;
+// The industry for a classified instrument: its curated group, else its own sector (the visible
+// fallback). One helper so every classify() branch attaches `ind` by the exact same rule.
+function indOf(T, Td, sector) { return IND[T] || IND[Td] || sector; }
+
 // Crypto taxonomy for the Hyperliquid main dex (Build B): curated, same shape as the GICS
 // map. Unknowns fall to "Other" — still classed Crypto, so scope filtering stays airtight.
 const CRYPTO_SECTORS = {
@@ -54,25 +135,29 @@ const CRYPTO_SECTORS = {
   FIL: "Infra", AR: "Infra", GRT: "Infra", PYTH: "Infra", W: "Infra", JTO: "Infra", ICP: "Infra",
   STX: "Infra", IMX: "Infra", GALA: "Gaming", SAND: "Gaming", AXS: "Gaming", APE: "Gaming",
 };
+// Every branch now also carries `ind`, the industry group. For anything without a curated
+// industry (crypto sub-sectors, indices, FX, commodities, unsplit equities) ind === sector —
+// the fallback is part of the contract, so a consumer can always group on `ind` safely.
 function classify(ticker, uni) {
   if (uni === "main") {
     const T = String(ticker || "").toUpperCase();
-    return { assetClass: "Crypto", sector: CRYPTO_SECTORS[T] || "Other" };
+    const sec = CRYPTO_SECTORS[T] || "Other";
+    return { assetClass: "Crypto", sector: sec, ind: sec };   // crypto sectors ARE the fine grouping
   }
   const T = norm(ticker), Td = T.replace(/\./g, "");
-  if (EQ[T]) return { assetClass: "Equity", sector: EQ[T] };
-  if (EQ[Td]) return { assetClass: "Equity", sector: EQ[Td] };
-  if (PREIPO[T]) return { assetClass: "Pre-IPO", sector: PREIPO[T] };
-  if (THEMATIC.has(T)) return { assetClass: "Thematic", sector: "Thematic" };
-  if (SECTOR_ETF[T]) return { assetClass: "ETF", sector: SECTOR_ETF[T] };
-  if (REGION_ETF.has(T)) return { assetClass: "ETF", sector: "Index" };
-  if (INDEX.has(T) || INDEX.has(Td)) return { assetClass: "Index", sector: "Index" };
-  if (CRYPTO.has(T) || CRYPTO.has(Td)) return { assetClass: "Crypto", sector: "Crypto" };
-  if (COMMOD.has(T) || COMMOD.has(Td)) return { assetClass: "Commodity", sector: "Commodity" };
-  if (FX.has(T) || FX.has(Td)) return { assetClass: "FX", sector: "FX" };
-  if (/^[A-Z]{6}$/.test(Td)) { const a = Td.slice(0, 3), b = Td.slice(3); if (CCY.has(a) && CCY.has(b)) return { assetClass: "FX", sector: "FX" }; }
-  if (CCY.has(Td)) return { assetClass: "FX", sector: "FX" };
-  return { assetClass: "Unclassified", sector: "Unclassified" };
+  if (EQ[T]) return { assetClass: "Equity", sector: EQ[T], ind: indOf(T, Td, EQ[T]) };
+  if (EQ[Td]) return { assetClass: "Equity", sector: EQ[Td], ind: indOf(T, Td, EQ[Td]) };
+  if (PREIPO[T]) return { assetClass: "Pre-IPO", sector: PREIPO[T], ind: indOf(T, Td, PREIPO[T]) };
+  if (THEMATIC.has(T)) return { assetClass: "Thematic", sector: "Thematic", ind: indOf(T, Td, "Thematic") };
+  if (SECTOR_ETF[T]) return { assetClass: "ETF", sector: SECTOR_ETF[T], ind: indOf(T, Td, SECTOR_ETF[T]) };
+  if (REGION_ETF.has(T)) return { assetClass: "ETF", sector: "Index", ind: "Index" };
+  if (INDEX.has(T) || INDEX.has(Td)) return { assetClass: "Index", sector: "Index", ind: "Index" };
+  if (CRYPTO.has(T) || CRYPTO.has(Td)) return { assetClass: "Crypto", sector: "Crypto", ind: "Crypto" };
+  if (COMMOD.has(T) || COMMOD.has(Td)) return { assetClass: "Commodity", sector: "Commodity", ind: "Commodity" };
+  if (FX.has(T) || FX.has(Td)) return { assetClass: "FX", sector: "FX", ind: "FX" };
+  if (/^[A-Z]{6}$/.test(Td)) { const a = Td.slice(0, 3), b = Td.slice(3); if (CCY.has(a) && CCY.has(b)) return { assetClass: "FX", sector: "FX", ind: "FX" }; }
+  if (CCY.has(Td)) return { assetClass: "FX", sector: "FX", ind: "FX" };
+  return { assetClass: "Unclassified", sector: "Unclassified", ind: "Unclassified" };
 }
 
 // Company-name aliases for news relevance gating: a headline fetched under ticker T is only
@@ -387,5 +472,5 @@ function macroLane(t, uni) {
   return L || null;
 }
 
-module.exports = { classify, nameAliases, companyName, displayName, macroLane, MACRO_LANES, DISPLAY_NAMES, CRYPTO_NAMES };
+module.exports = { classify, nameAliases, companyName, displayName, macroLane, MACRO_LANES, DISPLAY_NAMES, CRYPTO_NAMES, IND_TICKERS, SECTOR_TICKERS };
 
