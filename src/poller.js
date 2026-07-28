@@ -2771,6 +2771,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const claimAge = now - e.t0, span = Math.max(1, e.resolveAt - e.t0);
         if (claimAge > 2 * span) continue;
         if (claimAge > span) { g.score = Math.round(g.score * 0.6); g.decayed = true; g.prime = false; }   // client shows the amber decaying state
+      } else if (rearm.has(key)) {
+        // Post-resolution episode (build -31): the claim behind this signal already resolved into
+        // the record and the condition never lapsed, so the re-arm gate refuses a serial re-claim
+        // (one episode, one claim). The card used to render a bare "now —" here — technically
+        // honest, practically a hole: the ledger HOLDS the answer, sitting in ledgerClosed. Ship
+        // the resolution stub so the client can say "already scored +1.3R" instead of "nothing to
+        // measure". Newest settled entry for this exact key wins (episodes reuse the key; the
+        // backwards scan finds the resolution that parked it). A never-scored expiry ships as
+        // voided — an honest "settled without an outcome", never a fabricated number.
+        let done = null;
+        for (const c0 of ledgerClosed)
+          if (c0 && c0.key === key && c0.vi == null
+            && (!done || (c0.tR || c0.t0 || 0) > (done.tR || done.t0 || 0))) done = c0;
+        if (done) g.scored = { t0: done.t0 || null, tR: done.tR || null,
+          realized: Number.isFinite(done.realized) ? +(+done.realized).toFixed(2) : null,
+          unit: unitOf(g.ev), stopped: done.stopped === true, voided: done.status === "void" };
+        else g.scored = { t0: null, tR: null, realized: null, unit: unitOf(g.ev), stopped: false, voided: true };
+        g.postres = true;
+        // A ★ prime badge on a corpse invites entry into a setup whose claim is already banked
+        // and whose lateness is uncomputable — the emphasis and its score bonus are withdrawn,
+        // same philosophy as the decay gate. Condition intensity stands on its own.
+        if (g.prime) { g.prime = false; g.score = Math.max(0, g.score - 6); }
       }
       kept.push(g);
     }
@@ -2814,7 +2836,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const top = crypto ? capPerUniverse(kept, 40, 40) : kept.slice(0, 40);
     const shadows = shadowRecord();
     const shSig = (a) => (a || []).map((g) => g.rows.map((r) => r.n + ":" + r.open).join(".")).join(",");
-    const sig = kept.length + "|" + top.map((g) => g.coin + g.ev + g.score).join(",")
+    const sig = kept.length + "|" + top.map((g) => g.coin + g.ev + g.score + (g.claim0 ? "c" + g.claim0.t : g.postres ? "p" : "")).join(",")   // -31: claim↔scored transitions change the payload even at an unchanged score — the ETag must move with them
       + "|" + shSig(shadows.xyz) + "|" + shSig(shadows.main);   // shadow record changes must bust the ETag too, both panels
     if (sig !== signalsSig) { signalsSig = sig; signalsVer = Date.now(); }
     for (const k of rearm) if (!firedNow.has(k)) rearm.delete(k);   // condition lapsed -> episode over, key re-armed
@@ -5470,6 +5492,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           if (g.unproven) it.unproven = true;
           if (g.claim0) it.claim = { t0: g.claim0.t, mark0: g.claim0.px, side: g.claim0.side,
             stop: g.claim0.stop, target: g.claim0.tgt, resolveAt: g.claim0.resolveAt };
+          // -31: no open claim because the episode already scored — say so, with the outcome.
+          // Without this the model reads a live condition with no geometry and can't tell "not
+          // yet claimed" from "already resolved"; the two demand opposite prose.
+          if (g.postres && g.scored) it.episodeScored = { realized: g.scored.realized,
+            unit: g.scored.unit, stopped: g.scored.stopped, voided: g.scored.voided, tR: g.scored.tR };
           live.push(it);
         }
       ctx.liveSignals = live;
