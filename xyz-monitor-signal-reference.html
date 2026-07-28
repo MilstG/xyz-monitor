@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xyz-monitor — Signal, Study &amp; Shadow Reference</title>
+<style>
+  :root{
+    --bg:#0a0e13; --panel:#0f151c; --panel2:#131b24; --line:#1e2a36;
+    --text:#c9d4dd; --dim:#7a8a98; --faint:#4a5a68;
+    --amber:#ffb000; --up:#2ecc71; --down:#ff5252; --cyan:#39c2d7; --violet:#b48cf2;
+    --mono:ui-monospace,'SF Mono','Cascadia Mono','JetBrains Mono',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);font:13px/1.6 var(--mono)}
+  a{color:var(--cyan);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{display:grid;grid-template-columns:250px 1fr;max-width:1400px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;padding:18px 12px;border-right:1px solid var(--line);font-size:11.5px}
+  nav .nh{color:var(--amber);text-transform:uppercase;letter-spacing:.12em;font-size:10px;margin:14px 0 4px}
+  nav a{display:block;color:var(--dim);padding:2px 6px;border-left:2px solid transparent}
+  nav a:hover{color:var(--text);border-left-color:var(--amber);text-decoration:none}
+  main{padding:26px 34px 120px;min-width:0}
+  header.doc{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:26px}
+  h1{font-size:19px;margin:0 0 4px;color:#fff;letter-spacing:.02em}
+  h1 .tag{color:var(--amber)}
+  .sub{color:var(--dim);font-size:12px}
+  h2{font-size:15px;color:var(--amber);margin:44px 0 10px;padding-top:10px;border-top:1px solid var(--line);letter-spacing:.04em;text-transform:uppercase}
+  h3{font-size:13px;color:#fff;margin:26px 0 8px}
+  p{margin:8px 0;max-width:110ch}
+  code,.k{font-family:var(--mono);background:var(--panel2);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:#e8eef3;font-size:12px}
+  table{border-collapse:collapse;width:100%;margin:10px 0 18px;font-size:12px}
+  th{color:var(--dim);text-transform:uppercase;font-size:10px;letter-spacing:.08em;text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+  td{padding:6px 8px;border-bottom:1px solid #16202b;vertical-align:top}
+  tr:hover td{background:#111a24}
+  .sig-card{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:12px 14px;margin:14px 0}
+  .sig-card h4{margin:0 0 6px;font-size:13px;color:#fff}
+  .sig-card h4 .id{color:var(--faint);font-weight:normal}
+  .grid{display:grid;grid-template-columns:96px 1fr;gap:2px 12px;font-size:12px}
+  .grid .lb{color:var(--dim);text-transform:uppercase;font-size:10px;letter-spacing:.06em;padding-top:2px}
+  .pill{display:inline-block;border:1px solid var(--line);border-radius:3px;padding:0 6px;font-size:10px;letter-spacing:.05em;margin-right:5px;vertical-align:1px}
+  .pill.long{color:var(--up);border-color:var(--up)}
+  .pill.short{color:var(--down);border-color:var(--down)}
+  .pill.both{color:var(--cyan);border-color:var(--cyan)}
+  .pill.watch{color:var(--dim)}
+  .pill.eq{color:var(--amber);border-color:var(--amber)}
+  .pill.cx{color:var(--violet);border-color:var(--violet)}
+  .pill.sh{color:var(--faint);border-color:var(--faint)}
+  .pos{color:var(--up)} .neg{color:var(--down)} .warn{color:var(--amber)} .dim{color:var(--dim)}
+  .note{border-left:3px solid var(--amber);background:var(--panel);padding:8px 12px;margin:12px 0;color:var(--dim);font-size:12px;max-width:110ch}
+  .note b{color:var(--text)}
+  .flow{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:12px 16px;font-size:12px;color:var(--dim);overflow-x:auto;white-space:pre;line-height:1.8}
+  .flow b{color:var(--amber)}
+  .mini{font-size:11px;color:var(--faint)}
+  td .mini{display:block;margin-top:2px}
+  .toc-top{position:fixed;bottom:14px;right:16px;background:var(--panel2);border:1px solid var(--line);border-radius:3px;padding:4px 10px;font-size:11px}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}nav{display:none}main{padding:18px 16px 80px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <div class="nh">Model</div>
+  <a href="#pipeline">Pipeline in one pass</a>
+  <a href="#scoring">Scoring model</a>
+  <a href="#ledger">Ledger mechanics</a>
+  <div class="nh">Equity roster (xyz)</div>
+  <a href="#bigmove">bigmove</a><a href="#breakout">breakout</a><a href="#breakdown">breakdown</a>
+  <a href="#gap">gap</a><a href="#fundflip">fundflip</a><a href="#squeeze">squeeze</a>
+  <a href="#unwind">unwind</a><a href="#oiflush">oiflush</a><a href="#fpdiv">fpdiv</a>
+  <a href="#prem">prem</a><a href="#ondrift">ondrift</a><a href="#tretest">tretest / tretestdn</a>
+  <div class="nh">Context flags</div>
+  <a href="#volshift">volshift</a><a href="#coil">coil</a><a href="#volume">volume</a>
+  <div class="nh">Crypto-native</div>
+  <a href="#crypto-uni">Universe rules</a>
+  <a href="#casc">casc</a><a href="#fundext">fundext</a>
+  <div class="nh">Shadows</div>
+  <a href="#variants">Threshold variants</a>
+  <a href="#strat-shadows">Strategy shadows</a>
+  <a href="#gapfade">gapfade</a><a href="#reclaim">reclaim</a><a href="#failbrk">failbrk</a>
+  <a href="#mapull">mapull</a><a href="#pead">pead</a><a href="#sweep">sweep</a>
+  <a href="#wickfill">wickfill</a><a href="#roundfr">roundfr</a><a href="#airead">airead</a>
+  <div class="nh">Surfaces</div>
+  <a href="#record">Record &amp; audit panels</a>
+  <a href="#actionable">Actionable board</a>
+  <div class="nh">Alerting</div>
+  <a href="#stream">Trigger stream</a>
+  <a href="#classes">Alert classes</a>
+  <a href="#levelscan">Level scan</a>
+  <a href="#rules">Metric rules</a>
+  <a href="#telegram">Telegram delivery</a>
+  <a href="#browser">Browser transport</a>
+  <div class="nh">Reference</div>
+  <a href="#glossary">Claim-field glossary</a>
+  <a href="#tuning">Tuning index</a>
+</nav>
+<main>
+
+<header class="doc">
+  <h1>xyz-monitor <span class="tag">// signal · study · shadow reference</h1>
+  <div class="sub">Every event the engine can fire, how it triggers, how it's measured, what renders, and what reaches a phone. Written against the codebase as of 2026.07.27. File anchors: detection math in <code>src/compute.js</code>, assembly &amp; fire sites in <code>src/poller.js</code>, rendering in <code>public/app.js</code>, routes in <code>server.js</code>, pins in <code>test/test.js</code>.</div>
+</header>
+
+<p>Every entry below is described on the same four axes, because those are the four things you'd tune independently:</p>
+<table>
+<tr><th style="width:110px">Axis</th><th>Meaning</th><th>Where it lives</th></tr>
+<tr><td class="warn">Trigger</td><td>The mechanical condition that fires it, with exact thresholds.</td><td><code>compute.js</code> detectors / <code>poller.js</code> fire sites</td></tr>
+<tr><td class="warn">Measurement</td><td>Horizon, sign convention, unit, how the claim resolves, what the study measured.</td><td><code>EV_META</code> / <code>EV_META_MAIN</code>, resolver in <code>poller.js</code></td></tr>
+<tr><td class="warn">Display</td><td>What the card / board / drawer renders, and from which payload field.</td><td><code>app.js</code> (never re-derived client-side)</td></tr>
+<tr><td class="warn">Alert</td><td>Which alert class it can emit and under what gate.</td><td>trigger stream + transports in <code>poller.js</code>/<code>compute.js</code></td></tr>
+</table>
+
+<h2 id="pipeline">Pipeline in one pass</h2>
+<div class="flow"><b>data</b> (hourly spine · daily · funding · OI · Coinalyze deriv · Finnhub earnings · EDGAR)
+   ↓ studies (in-sample base rates, per market per event, memoized to data version)
+   ↓ <b>buildSignals</b> — live surveillance: condition fires → mkSignal(intensity 0–50 + evidence 0–50)
+   ↓ <b>openLedger</b> — claim frozen at fire: mark0 · psd · stp · mv · tgt · sd0 · context stamp
+   ↓ episode gate (rearm) · universe gate (evAllowed) · geometry gate (stop/claimGeometryOk)
+   ↓ <b>resolveLedger</b> — at horizon: realized (play-signed, event unit) + realizedS (stop-aware)
+   ↓ record sets → Bayesian blend back into evidence · no-edge cap · confluence lift · variant promotion
+   ↓ <b>surfaces</b>: Signals cards · Actionable board · drawer record · ticker history · AI report
+   ↓ <b>trigger stream</b> (one canonical sequenced log) → transports: browser toast/bell · Telegram push</div>
+
+<div class="note"><b>One-code-path contract.</b> Every level on every surface (entry, void, target, R/R, lateness) ships on the server payload, frozen by the ledger at fire time. The client sorts and formats; it never recomputes a level. The moment two surfaces derive the same number separately they can disagree — that rule is pinned all over the test suite.</div>
+
+<h2 id="scoring">Scoring model</h2>
+<p>Score = <b>intensity</b> (0–50, per-event formula: how unusual the condition is right now) + <b>evidence</b> (0–50, expectancy-centered). Displayed on every card; drives ranking and the calibration audit.</p>
+
+<h3>Evidence (evPts / evidence in poller.js)</h3>
+<table>
+<tr><th>Rule</th><th>Detail</th></tr>
+<tr><td>Expectancy-centered</td><td><code>avg ≤ 0 → 0 points</code> + <span class="neg">neg exp</span> flag, regardless of how loud the condition is. Else <code>min(1, avg/scale)·30 + max(0, hit−0.5)·2·20</code>. Scale: <code>0.5R</code> for R-united events, <code>0.8%</code> for %-united.</td></tr>
+<tr><td>Evidence source</td><td>Own study if <code>n ≥ 8</code> (full weight) → asset-class pooled if <code>n ≥ 12</code> (0.7 discount, <span class="dim">unproven</span> flag) → token 6–8 pts (<span class="dim">unproven</span>). Crypto pools in its own bucket, never mixed with equity classes.</td></tr>
+<tr><td>Live blend</td><td>Once an event type has <code>≥ 5</code> live resolutions, stats become a blend of study and live record: <code>w = resolved/(resolved+25)</code> (0.17 at n=5, 0.67 at n=50). Shown as <code>liveW</code> %. Trust migrates both directions.</td></tr>
+<tr><td>No-live-edge cap</td><td><code>liveNoEdge</code>: ≥10 resolved, hit &lt; 50%, med ≤ 0 → evidence hard-capped at <b>8</b>, <span class="neg">no live edge</span> badge. Sits on top of the blend.</td></tr>
+<tr><td>Earnings guard</td><td>Report today/tomorrow (ET) inside the horizon → evidence capped at the same <b>8</b>, prime disabled, <span class="warn">earnings</span> flag. Intensity untouched — the condition is real, only borrowed confidence is trimmed.</td></tr>
+</table>
+
+<h3>Modifiers</h3>
+<table>
+<tr><th>Modifier</th><th>Gate</th><th>Effect</th></tr>
+<tr><td>★ prime</td><td>hit ≥ 60% · avg &gt; 0 · not noedge/negexp/earnings · R/R ≥ 1.2 where levels exist</td><td>+6 score, emphasis styling; <code>pr</code> stamped once on the claim at fire</td></tr>
+<tr><td>Decay</td><td>claim age &gt; horizon</td><td>score × 0.6, amber state, prime off; age &gt; 2× horizon → dropped</td></tr>
+<tr><td>Confluence</td><td>multiple <i>same-side</i> conditions on one name</td><td>default +8/condition; once ≥15 resolutions on each side (with-company vs solo), bonus scales to the <b>measured</b> lift — and goes to 0 if agreement doesn't prove out</td></tr>
+<tr><td>⇄ Conflict</td><td>long and short events both live on one name</td><td>flagged, no bonus for anyone; each claim resolves on its own record</td></tr>
+<tr><td>Universe lanes</td><td><code>capPerUniverse(kept, 40, 40)</code></td><td>40 signals per universe — crypto σ is 5–20× equity σ, so a single global sort would evict the equity board on any volatile day</td></tr>
+</table>
+
+<h2 id="ledger">Ledger mechanics</h2>
+<table>
+<tr><th style="width:170px">Mechanism</th><th>How it works</th></tr>
+<tr><td>Frozen geometry</td><td>At fire: <code>mark0</code> (entry mark), <code>psd</code> (play side), <code>stp</code> (void level), <code>mv</code> (target distance %, rounded), <code>tgt</code> (absolute target price — stamped because <code>mv</code> cannot be turned back into a price), <code>sd0</code> (30d daily σ for R normalization), <code>score0</code>, <code>pr</code>. Never re-derived, never moved — a bias flip later leaves the frozen claim to resolve untouched.</td></tr>
+<tr><td>Episode re-arm</td><td>If a claim resolves while its condition still fires, the key parks in <code>rearm</code> and cannot re-open until the condition lapses for ≥1 full build. One episode = one claim; kills serial pseudo-replication on persistent conditions (weekend premium, all-day big move). Applies to shadows too.</td></tr>
+<tr><td>Resolution</td><td><code>resolveLedger</code> revisits each claim at <code>resolveAt</code>: <code>realized</code> = at-horizon outcome, signed by the play side, in the event's unit. <code>realizedS</code> = stop-aware parallel track (outcome capped as if the void had been a hard stop; <code>stopped</code> flags a touched void). Session-calendar events (gap, gapfade) resolve at the next cash close instead of a wall-clock horizon.</td></tr>
+<tr><td>Units</td><td><code>prem → bp</code>; R-united set (<code>bigmove breakout breakdown fundflip volshift oiflush fpdiv reclaim mapull failbrk pead sweep airead casc fundext</code>) → R via <code>sd0</code>; everything else %.</td></tr>
+<tr><td>Geometry gates</td><td><code>stopGeometryOk</code> / <code>claimGeometryOk</code> refuse inverted or degenerate levels at fire. Crypto levels are built in log space (<code>logGeo</code>) so σ constructions can't produce negative prices; equity keeps the exact additive arithmetic so its record stays byte-comparable.</td></tr>
+<tr><td>Context stamp</td><td>Every claim (shadows included) carries fire-time features for slicing: <code>fnd/fndP</code> (funding + 31d percentile), <code>oi5</code>, <code>rngP</code> (position in 30d range), <code>mktR</code> (benchmark 24h move — BTC for crypto, SPX proxy for xyz), <code>ses</code> (xyz: rth/on/wknd) or <code>hod</code> (crypto: asia/eu/us/late), <code>dow</code>. Absent means honestly unknown, never null-padded.</td></tr>
+<tr><td>Chain dedup</td><td>Resolved re-fires ≤2d apart chain into one displayed episode on charts — recorded, but not re-marked.</td></tr>
+<tr><td>Persistence</td><td><code>/data/ledger.json</code> + append-only <code>ledger-archive.jsonl</code> on trim; optional off-site GitHub backup behind <code>LEDGER_BACKUP_REPO</code> + <code>LEDGER_BACKUP_TOKEN</code> (blob-sha skip, bytes verbatim). Crypto claims from before <code>CRYPTO_EPOCH</code> (2026-07-26 UTC) stay purged — old additive geometry produced fabricated targets.</td></tr>
+</table>
+
+<!-- ============================ EQUITY ROSTER ============================ -->
+<h2 id="eq-roster">Equity ledger roster — 13 events (xyz universe)</h2>
+<p class="dim">The scoped roster the record strip renders (pinned client &amp; server against each other): <code>bigmove · breakout · breakdown · gap · fundflip · squeeze · unwind · oiflush · fpdiv · prem · ondrift · tretest · tretestdn</code>. Zero-claim roster members render as explicit "awaiting first claim" rows — never fired ≠ not wired.</p>
+
+<div class="sig-card" id="bigmove"><h4>Big move <span class="id">bigmove</span> <span class="pill both">DIRECTIONAL</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Today's move ≥ <b>incumbent σ</b> of the market's own trailing 30d daily returns. Variant thresholds <code>σ≥ 1.5 / 2 / 2.5</code>, incumbent <b>2σ</b>.</span>
+<span class="lb">Measure</span><span>Study <code>d1</code>: did past moves continue (+) or fade (−) the next day, signed with the move. Horizon <b>1d</b> (crypto: <b>12h</b>). Unit R.</span>
+<span class="lb">Playbook</span><span>Continuation side; target = ±|study med|% from px; stop = 1σ against the move. Watch: volume staying elevated — thrust on fading volume is the fade setup instead.</span>
+<span class="lb">Display</span><span>Card with reading like "+3.1σ daily move", study line, playbook row with live level distances.</span>
+<span class="lb">Alert</span><span>setup class if it clears the Actionable CONFIRMED gate; ledger class on void/target/horizon.</span>
+</div></div>
+
+<div class="sig-card" id="breakout"><h4>30d-high breakout <span class="id">breakout</span> <span class="pill long">LONG</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>First close/mark above the prior 30-day high.</span>
+<span class="lb">Measure</span><span>Study <code>d5</code>: forward 5d return after past first-crosses. Horizon <b>5d</b> (crypto <b>2d</b>). Unit R.</span>
+<span class="lb">Playbook</span><span>Long; target = +|med|% from px; <b>stop = the breakout level itself</b> — a close back below the prior 30d high voids it.</span>
+<span class="lb">Notes</span><span>Live record finding F2: breakout continuation ran ~−0.73R / 39% hit on this tape — the <a href="#failbrk">failbrk</a> shadow was built to test the fade directly.</span>
+</div></div>
+
+<div class="sig-card" id="breakdown"><h4>30d-low breakdown <span class="id">breakdown</span> <span class="pill short">SHORT</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Close crossed below the prior 30d low. Bearish mirror of the breakout.</span>
+<span class="lb">Measure</span><span>Forward 5d, signed with the breakdown. Horizon <b>5d</b> (crypto <b>2d</b>). Unit R.</span>
+</div></div>
+
+<div class="sig-card" id="gap"><h4>Outsized gap <span class="id">gap</span> <span class="pill both">ADAPTIVE</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Live move since the last cash close is outsized vs this market's own gap distribution. Gate variants <code>σ≥ 0.5 / 0.75 / 1</code>, incumbent <b>0.75σ</b>. Fires only while the cash market is closed / pre-session (session calendar aware).</span>
+<span class="lb">Measure</span><span>Study <code>session</code>: did the next cash session continue (+) or fade (−) the gap. <b>Resolves at the next session close</b> (<code>horizonMs: null</code> — calendar walk, not wall clock). Unit %.</span>
+<span class="lb">Fade flip</span><span>If the name's own record is proven (<code>n ≥ 8</code>) and <code>med &lt; 0</code>, the market historically FADES its gaps: the card, the study numbers and the <b>ledgered claim</b> are flipped into fade-play units (positive = the fade paid), and the playbook shorts an up-gap with target = prior close. Unproven names never pick a side (<span class="pill watch">WATCH</span>).</span>
+<span class="lb">Display</span><span>Card states the flip explicitly; drawer gap chip; liveClose shipped in dailyCache for the in-progress gap.</span>
+</div></div>
+
+<div class="sig-card" id="fundflip"><h4>Funding flip <span class="id">fundflip</span> <span class="pill both">DIRECTIONAL</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Day-summed funding changed sign after ≥ <b>incumbent run</b> days pinned the other way. Variants <code>run≥ 2 / 3 / 5</code>, incumbent <b>3</b>.</span>
+<span class="lb">Measure</span><span>3d move toward the new crowd (crypto <b>2d</b>). Unit R.</span>
+<span class="lb">Playbook</span><span>Side of the new crowd; no target; <b>stop = 1σ against the flip</b> (added in the ops-findings pass — before it, fundflip had no stop-aware track). Watch: funding flipping straight back voids it; staying flipped 2+ days confirms.</span>
+</div></div>
+
+<div class="sig-card" id="squeeze"><h4>Squeeze setup <span class="id">squeeze</span> <span class="pill long">LONG</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Composite: crowded shorts (negative 7d funding) × OI building × price pressing the range highs. Fires at composite <code>score ≥</code> incumbent. Variants <code>50 / 60 / 70</code>, incumbent <b>60</b>.</span>
+<span class="lb">Measure</span><span>Horizon <b>3d</b>. No in-sample study (needs longer OI history) — record earned live. Unit %.</span>
+<span class="lb">Playbook</span><span>Long; target = <b>hi30 + 0.382 × range</b> (measured-move extension — squeezes resolve <i>through</i> the range, not to it; targeting hi30 itself produced inverted R/R exactly when the signal fired); stop = lo30 + 0.25 × range. Watch: ΔOI(7d) turning negative = shorts covering, spring released.</span>
+<span class="lb">Caveat</span><span>Excluded from crypto: the composite routinely fires with price far from the range edge its levels assume — an inverted-at-fire level is still inverted even in log space. It stays xyz-only until the equity record proves the trigger.</span>
+</div></div>
+
+<div class="sig-card" id="unwind"><h4>Long unwind <span class="id">unwind</span> <span class="pill short">SHORT</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Mirror composite: crowded longs paying funding × OI building × price near range lows. Same score variants <code>50 / 60 / 70</code>, incumbent <b>60</b>.</span>
+<span class="lb">Measure</span><span>Horizon <b>3d</b>, no in-sample study, unit %.</span>
+<span class="lb">Caveat</span><span>Source of the degenerate-void guard: its fixed-fraction-of-range void once landed 0.035% from entry (gross R/R 390+). The claim still ledgers; the Actionable board refuses it under <code>degenerate</code> (void ≥ 5bp absolute + σ-relative floor).</span>
+</div></div>
+
+<div class="sig-card" id="oiflush"><h4>OI flush <span class="id">oiflush</span> <span class="pill long">LONG</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>7d ΔOI collapsed below <b>−incumbent σ</b> of the market's own distribution while price fell — forced deleveraging exhausting itself. Variants <code>σ≤− 1.5 / 2 / 2.5</code>, incumbent <b>2</b>.</span>
+<span class="lb">Measure</span><span>5d bottoming thesis (crypto <b>2d</b>), study <code>d5</code>. Unit R. Flushes measure positions destroyed, not price traveled.</span>
+<span class="lb">Playbook</span><span>Long; target = +|med|%; stop = 1σ below. Watch: ΔOI stabilizing/turning up = flush complete; continued bleed = knife still falling.</span>
+</div></div>
+
+<div class="sig-card" id="fpdiv"><h4>Funding–price divergence <span class="id">fpdiv</span> <span class="pill both">DIRECTIONAL</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>7d price z-score diverging from funding trajectory, gate <code>|z7| ≥ ~0.8σ</code> (intensity formula <code>(|z7|−0.8)·20+16</code>). Strength while funding falls = shorts pressing (long, squeeze-adjacent); weakness while funding rises = longs averaging down (short, fragile).</span>
+<span class="lb">Measure</span><span>3d with the divergence (crypto <b>2d</b>), study <code>d3</code>, unit R.</span>
+<span class="lb">Playbook</span><span>Divergence side; target = ±|med|; stop 1σ against. Watch: funding re-converging with price = setup spent.</span>
+</div></div>
+
+<div class="sig-card" id="prem"><h4>Premium dislocation <span class="id">prem</span> <span class="pill both">MEAN-REVERT</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Perp price dislocated from oracle, <code>|z| ≥ 2σ</code> of its own 7d premium baseline (intensity <code>(|z|−2)·12+18</code>). During closed cash sessions this IS live price discovery for the synthetic — the card says so.</span>
+<span class="lb">Measure</span><span>Horizon <b>12h</b>, reversion toward oracle. Unit <b>bp</b> (the one non-R/non-% event).</span>
+<span class="lb">Playbook</span><span>Perp rich → short the perp / cheap → long; <b>target = the oracle itself</b>; no stop. Watch: closed-session — does the cash open confirm the level or snap it back; open — persistence (a dislocation that survives arb for hours is information).</span>
+<span class="lb">Caveat</span><span>No crypto analogue — main-dex oracle premium is arbitraged tight and carries nothing.</span>
+</div></div>
+
+<div class="sig-card" id="ondrift"><h4>Overnight drift <span class="id">ondrift</span> <span class="pill both">DIRECTIONAL</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Each market's summed off-hours drift over its last ~21 closed windows, z-scored <b>across the universe</b> (needs ≥25 markets with the stat). Fires at <code>|z| ≥ 2</code> AND <code>|drift| ≥ 1%</code> absolute.</span>
+<span class="lb">Measure</span><span>Claim covers ONLY the <b>next 5 overnight windows, held close→open</b> — a sum of windows, resolved by its own dedicated branch, not one span. Cash-session performance is irrelevant to the claim. Unit %. Ships with no backtest study by design; record earned purely out of sample.</span>
+<span class="lb">Playbook</span><span>Drift side; no target, no stop. Watch: the drift sign flipping in the live windows = regime gone.</span>
+</div></div>
+
+<div class="sig-card" id="tretest"><h4>Trend retest <span class="id">tretest / tretestdn</span> <span class="pill long">LONG</span><span class="pill short">SHORT</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>The Trend board's RETEST badge, promoted verbatim: a board-visible row (trend score ≥ 3/4 by <code>trendRead</code>'s own gate, top-10 by rank) whose retesting rung <b>probed the 13/21 EMA zone while the close held EMA21</b> (tretestdn: rallied into the zone, close held below EMA21). Read from the SAME <code>buildTrend</code> output the tab renders — signal and board cannot disagree.</span>
+<span class="lb">Measure</span><span>Horizon <b>5d</b> (crypto <b>3d</b>). Frozen at fire: entry = mark, <b>void = the rung's own EMA21</b> (ladder value), <b>target = that rung's prior swing</b> (null-tolerant: no valid swing → no target, claim still ledgers on its stop-aware leg). Unit %. No in-sample study — record earned out of sample.</span>
+<span class="lb">Features</span><span>Board score / rung tf / rrv / age recorded on the claim (<code>tsc tf rrv tage</code>) — recorded, NOT gated; the ledger decides which slices earn trust.</span>
+<span class="lb">Notes</span><span>Cleanest crypto transfer in the roster — geometry was never a σ construction, so enrollment needed nothing but the whitelist entry.</span>
+</div></div>
+
+<h2 id="ctx">Context flags — render, never ledger</h2>
+
+<div class="sig-card" id="volshift"><h4>Vol expansion <span class="id">volshift</span> <span class="pill watch">SIGNAL, NO ROSTER ROW</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>10d realized vol crossed above the <b>90th percentile</b> of its own trailing ~6 months.</span>
+<span class="lb">Measure</span><span>Study <code>d5</code>, 5d horizon (crypto 2d), unit R — it carries full study evidence and EV_META, but is not in the scoped ledger roster strips (no "awaiting" row in either universe).</span>
+</div></div>
+
+<div class="sig-card" id="coil"><h4>Range compression <span class="id">coil</span> <span class="pill watch">CONTEXT ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>10d realized vol in the <b>bottom decile</b> of its own trailing 120 observations — the spring is loaded, direction unknown.</span>
+<span class="lb">Measure</span><span>No ledger claim, no direction, unproven by construction. Exists to feed direction-aware confluence: a breakout/breakdown firing OUT of compression earns extra score.</span>
+</div></div>
+
+<div class="sig-card" id="volume"><h4>Volume surge <span class="id">volume</span> <span class="pill watch">CONTEXT ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>24h volume ≥ <b>2.5×</b> the market's own 30d norm.</span>
+<span class="lb">Measure</span><span>No claim; amplifies whatever else is firing. Intensity <code>(ratio−2.5)·10+12</code>, token 6 pts, unproven.</span>
+</div></div>
+
+<!-- ============================ CRYPTO ============================ -->
+<h2 id="crypto-uni">Crypto universe rules</h2>
+<p>Crypto roster (record strip): <code>bigmove · breakout · breakdown · fundflip · oiflush · fpdiv · tretest · tretestdn · casc · fundext</code>. Enrollment is a <b>whitelist</b> (<code>MAIN_EVS</code>), consulted by one gate — <code>evAllowed(uni, ev)</code> — at every fire site AND in <code>openLedger</code>, so a card can never render a play whose claim the gate refused.</p>
+<table>
+<tr><th>Excluded on crypto</th><th>Reason</th></tr>
+<tr><td>gap · gapfade · ondrift · pead · sweep</td><td>Structurally impossible on a 24/7 tape — no session boundary, no earnings, no "prior session" object.</td></tr>
+<tr><td>prem</td><td>No analogue — main-dex oracle premium is arbitraged tight.</td></tr>
+<tr><td>squeeze · unwind</td><td>Geometry not yet trustworthy: composite fires away from the range edge its levels assume. Stays out until the equity record validates the trigger.</td></tr>
+</table>
+<table>
+<tr><th>Crypto overrides</th><th>Detail</th></tr>
+<tr><td>Compressed horizons</td><td><code>EV_META_MAIN</code>: bigmove 12h · breakout/breakdown/volshift/fundflip/oiflush/fpdiv/reclaim/failbrk 2d · tretest(dn) 3d · mapull 4d · wickfill 1d. A 5d horizon on a name printing 12%/day resolves on tape noise, not the setup. Records never pool across universes.</td></tr>
+<tr><td>Log-space geometry</td><td>All σ / range constructions via <code>logLevel / logExtend</code> (<code>logGeo</code>) — no negative prices. Equity keeps additive math byte-for-byte.</td></tr>
+<tr><td>Epoch purge</td><td>Stored crypto claims older than <code>CRYPTO_EPOCH</code> (2026-07-26T00:00Z) purged on hydrate — pre-rewrite additive geometry fabricated targets; they feed no aggregate, in any record set.</td></tr>
+<tr><td>Pooling</td><td>Crypto has its own asset-class bucket ("Crypto") for the small-n rescue — never pooled with equities.</td></tr>
+</table>
+
+<div class="sig-card" id="casc"><h4>Cascade exhaustion <span class="id">casc</span> <span class="pill both">DIRECTIONAL</span><span class="pill cx">CRYPTO ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Two-stage. (1) <code>cascadeFlags</code>: a 15-minute bucket where one side's forced-liquidation notional spiked <b>≥3σ</b> above its own trailing 24h WHILE open interest fell in the same bucket — flow that actually cleared positioning. Data: aggregated CEX liqs via Coinalyze. (2) <code>detectCascExhaust</code>: cascade age between <b>1h and 24h</b>; flush window = the cascade hour + the 2 following; void = the flush extreme (low for a long-side cascade, high for short-side), target = the pre-cascade close; mark must sit <b>strictly between</b> flush extreme and pre-cascade level (beyond the extreme = thesis dead, past the level = move made).</span>
+<span class="lb">Measure</span><span>Horizon <b>12h</b>. Unit R. Longs carried out → long the exhaustion; shorts → short it. Geometry is entirely observed prices — nothing for <code>claimGeometryOk</code> to clamp — which is why it's the flagship crypto event.</span>
+<span class="lb">Display</span><span>Card: "long-side cascade 4h ago — 12.3M force-liquidated in one 15m bucket, OI −2.1% with it; the flush low has held since". Intensity decays with age: <code>max(10, 34 − ageH)</code>. Venue mismatch (CEX trigger, Hyperliquid resolution) disclosed on the card (<code>cexsrc</code>).</span>
+<span class="lb">Stamps</span><span><code>cliq</code> (liq notional), <code>cdoi</code> (bucket ΔOI%), <code>cage</code> (hours).</span>
+<span class="lb">Isolation</span><span>Fire site wrapped in its own try — the deriv lane is an optional external feed and must never take the board down.</span>
+</div></div>
+
+<div class="sig-card" id="fundext"><h4>Funding extreme <span class="id">fundext</span> <span class="pill both">FADE</span><span class="pill cx">CRYPTO ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Funding at <b>≥90th or ≤10th percentile</b> (<code>FUNDEXT_HI / FUNDEXT_LO</code>) of the name's own 31-day hourly distribution (≥96 samples via <code>fundPctileNow</code> — the same helper the AI crypto read uses). <b>Persistence floor</b>: the same sign must hold across the trailing <code>FUNDEXT_HOURS = 24</code> with ≥ <code>FUNDEXT_MIN_SAMPLES</code> — the episode definition the retired version lacked (without it one extreme reported n=40 for a single observation).</span>
+<span class="lb">Measure</span><span>Horizon <b>2d</b>, unit R. Fade the crowd: crowded longs → short, crowded shorts → long.</span>
+<span class="lb">Playbook</span><span>Target = <b>geometric mid of the 30d range</b> (√(hi·lo) — scale-free, an observed structure; only shipped if it's actually on the fade side of px); void = 1.5σ beyond the extreme the crowd is defending. Watch: funding decaying back to median = crowd unwinding on its own; a percentile extreme that persists for days is the setup, one print is not.</span>
+<span class="lb">Display</span><span>Card: "funding +212% APR — 97th percentile of its own 31d, crowded long".</span>
+</div></div>
+
+<!-- ============================ SHADOWS ============================ -->
+<h2 id="variants">Shadow layer 1 — threshold variants (self-tuning)</h2>
+<p>Each gated event runs 2–3 candidate thresholds. Only the <b>incumbent</b> emits visible signals; <b>every</b> variant (incumbent included) silently ledgers shadow claims (<code>vi</code>-stamped) on identical bookkeeping, so incumbent-vs-challenger is apples-to-apples out-of-sample.</p>
+<table>
+<tr><th>Event</th><th>Param</th><th>Values</th><th>Incumbent (index 1 at boot)</th></tr>
+<tr><td>bigmove</td><td>σ≥</td><td>1.5 · 2 · 2.5</td><td>2</td></tr>
+<tr><td>gap</td><td>gate σ≥</td><td>0.5 · 0.75 · 1</td><td>0.75</td></tr>
+<tr><td>squeeze</td><td>score≥</td><td>50 · 60 · 70</td><td>60</td></tr>
+<tr><td>fundflip</td><td>run≥</td><td>2 · 3 · 5</td><td>3</td></tr>
+<tr><td>unwind</td><td>score≥</td><td>50 · 60 · 70</td><td>60</td></tr>
+<tr><td>oiflush</td><td>σ≤−</td><td>1.5 · 2 · 2.5</td><td>2</td></tr>
+</table>
+<p><b>Promotion</b> (<code>shouldPromote</code>, checked every build before signals): challenger promotes only on <b>≥30 out-of-sample resolutions on both sides</b> with a real expectancy beat. Logged, reversible, persisted with the ledger; the Signals tab's tuning panel shows every variant's n / hit / avg and the last promotion. Bounded self-improvement — never free re-fitting.</p>
+
+<h2 id="strat-shadows">Shadow layer 2 — whole-strategy shadows</h2>
+<p>Whole candidate strategies (vs. threshold tweaks) earning a record before any promotion. All open as <code>vi=0</code> shadow claims: invisible to the visible record sets, drawer payloads and confluence; resolved on identical bookkeeping including the stop-aware track. Isolated per-row try/catch (the −79 outage: one market's string-typed closes threw inside shadow bookkeeping and blanked the whole board — three catch blocks now count into <code>swingFails</code>, logged once per build, never fatal). Detectors coerce string closes and fail <b>closed</b> on garbage. The ones in <code>STRAT_DEFS</code> render in the "strategy shadows (earning their record)" panel; <b>wickfill and roundfr have no client surface at all</b> until a deliberate promotion build adds one.</p>
+
+<div class="sig-card" id="gapfade"><h4>Universal gap fade <span class="id">gapfade</span> <span class="pill sh">SHADOW</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Every <b>≥1σ</b> gap, faded toward the prior close <b>regardless</b> of the per-name fade/continue record — the roster-wide test of gap mean reversion.</span>
+<span class="lb">Measure</span><span>Resolves at the next session close, same calendar as gap. Unit %. Two void widths run side by side on identical entries: <b>1.0σ and 1.5σ</b> of the market's own gap σ (both ledger via <code>[1, 1.5].forEach</code>; <code>gw</code> stamp records which).</span>
+<span class="lb">Display</span><span>Shadows panel, split rows "void 1.0σ" / "void 1.5σ".</span>
+</div></div>
+
+<div class="sig-card" id="reclaim"><h4>Breakdown reclaim <span class="id">reclaim</span> <span class="pill long">LONG</span><span class="pill sh">SHADOW</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Prior 30d closing low (window excludes the last 3 sessions) broken by at least one of the last 3 closes; the break is <b>fresh</b> (one of the last two closes still below); the mark has <b>reclaimed</b> above the level.</span>
+<span class="lb">Measure</span><span>Horizon <b>5d</b> (crypto 2d), unit R, stop-aware. Long the sprung trap: stop = the flush low; target = level + (level − flush), the measured move above.</span>
+</div></div>
+
+<div class="sig-card" id="failbrk"><h4>Failed-breakout fade <span class="id">failbrk</span> <span class="pill short">SHORT</span><span class="pill sh">SHADOW</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Exact mirror: prior 30d closing high broken by one of the last 3 closes, fresh, and the mark is back <b>below</b> the level.</span>
+<span class="lb">Measure</span><span>5d (crypto 2d), R. Stop = the flush high; target = level − (flush − level). Built to directly test finding F2 (breakout continuation ran negative expectancy on this tape).</span>
+</div></div>
+
+<div class="sig-card" id="mapull"><h4>MA50 pullback <span class="id">mapull</span> <span class="pill long">LONG</span><span class="pill sh">SHADOW</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Rising 50d MA; price pulled back from <b>≥4% above</b> it to a touch.</span>
+<span class="lb">Measure</span><span>Horizon <b>10d</b> (crypto 4d), R. Long at the MA; stop 1σ below it; target = the prior 30d closing high.</span>
+</div></div>
+
+<div class="sig-card" id="pead"><h4>Post-earnings drift <span class="id">pead</span> <span class="pill both">DIRECTIONAL</span><span class="pill sh">SHADOW</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>An earnings reaction <b>≥1.5σ</b> of the name's own daily vol; entered only <b>after the reaction session completes</b> (≥1 bar past the reaction index), within <b>3 sessions</b> of it, drifting WITH the move. AMC prints book the next bar as the reaction — same convention as <code>earnReactionsFor</code>.</span>
+<span class="lb">Measure</span><span>Horizon <b>10d</b>, R. Stop = 1σ back through the reaction close against the drift; target = <b>half the reaction magnitude</b> further from the mark — drift scales with the surprise, mechanically. <code>emv</code> stamps the frozen reaction move %. Accrues at earnings-season pace.</span>
+</div></div>
+
+<div class="sig-card" id="sweep"><h4>Liquidity sweep (5m) <span class="id">sweep</span> <span class="pill both">DIRECTIONAL</span><span class="pill sh">SHADOW</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>The failed-break reclaim one timeframe down: a <b>5m wick pierces the prior COMPLETED session's high or low</b> (<code>dailyRaw[-2]</code>, never the in-progress bar), is rejected inside the bar, the reclaim holds, and the mark is back on the origin side — a stop-run that trapped the break and reversed. Reads the tail of the optional 5m sqlite archive (<code>node:sqlite</code>, range-queried, never resident); gated behind <code>store.candlesEnabled</code>.</span>
+<span class="lb">Measure</span><span>Horizon <b>1d</b>, R, stop-aware. Void = the sweep extreme; target = level + 1× the trap depth. Builds forward only — no lookback backfill.</span>
+</div></div>
+
+<div class="sig-card" id="wickfill"><h4>Outsized-wick fill <span class="id">wickfill</span> <span class="pill both">DIRECTIONAL</span><span class="pill sh">SHADOW · NO UI</span><span class="pill eq">XYZ</span><span class="pill cx">CRYPTO</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Closed daily spine bar (via <code>bucketCandles</code>, never the forming day) with a <b>dominant wick ≥55%</b> of range (<code>WICK_FRAC</code>) on a bar <b>≥1.1×</b> normal size (<code>WICK_SIZE_MULT</code>). Refuses two-sided bars (no dominant wick = no unambiguous direction), short history, mark already past target or through void.</span>
+<span class="lb">Measure</span><span>Horizon <b>3d</b> (crypto 1d), R. Target = the wick midpoint <code>(bodyHi + high)/2</code> (mirrored short); void = the bar's opposite extreme. <code>wickPct</code> measured.</span>
+</div></div>
+
+<div class="sig-card" id="roundfr"><h4>Round-figure front-run <span class="id">roundfr</span> <span class="pill both">FADE</span><span class="pill sh">SHADOW · NO UI</span><span class="pill eq">XYZ ONLY</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span><code>roundStep</code> picks the dominant round-figure grid deterministically (step never &gt;12% of price: 87→10, 432→50, 6.4→0.5 …). Fires when price has been <b>advancing into</b> a figure and sits inside the approach band <b>0.05–0.6σ</b> from it (<code>RNDF_LO_BAND / RNDF_HI_BAND</code>), and the level is <b>fresh</b> — no close beyond the figure in the last 20 bars. Both sides (advance into 90 from below → short; decline into 80 from above → long). Declining toward a round above = no advance = no claim.</span>
+<span class="lb">Measure</span><span>Horizon <b>2d</b>, R. Fade into the figure: void = figure × (1 ± 0.25σ) — just <i>through</i> the round; target = 0.75σ retrace of the approach.</span>
+</div></div>
+
+<div class="sig-card" id="airead"><h4>Analyst read <span class="id">airead</span> <span class="pill both">DIRECTIONAL</span><span class="pill sh">ACCOUNTABILITY BUCKET</span></h4>
+<div class="grid">
+<span class="lb">Trigger</span><span>Every validated <b>directional</b> AI report (bias long/short) freezes a claim at generation: entry = mark at generation, void = the report's validator-corrected <code>voidLevel</code>, target from the report's target level, <code>rm</code> = the model that authored it. Neutral reads never ledger — "stand aside" contains nothing falsifiable. Gated by <code>stopGeometryOk</code>.</span>
+<span class="lb">Measure</span><span>Horizon <b>5d</b>, R, stop-aware. <b>One open read per name</b> (<code>|airead#0</code>): a same-bias regen never pseudo-replicates; a bias flip leaves the frozen claim to resolve untouched — moving a claim because the analyst changed its mind is what frozen geometry forbids.</span>
+<span class="lb">Display</span><span><code>vi=0</code> keeps it out of the visible record sets and drawer; absent from <code>STRAT_DEFS</code> keeps it off the shadows panel. Surfaces only inside the Report tab itself: "analyst reads: X% across n" strip + this-name record. Report footer states "synthesis layer — not a ledger signal".</span>
+<span class="lb">Alert</span><span><code>ai</code> class — fires only when a regenerated report's <b>action stance flips</b> vs the previously cached one (<code>aiFlipCheck</code>). Structurally rare by design.</span>
+</div></div>
+
+<!-- ============================ SURFACES ============================ -->
+<h2 id="record">Record &amp; audit displays (Signals tab)</h2>
+<table>
+<tr><th style="width:180px">Panel</th><th>What it shows</th></tr>
+<tr><td>Record strip</td><td>Per-event chips, record-first ordering (resolved desc → open → awaiting). <code>cl</code> = distinct tape-day count behind n, shown only when it diverges (claims clustered). Record sets keyed by move-threshold × prime × universe suffix (<code>0x</code> stocks, <code>0m</code> crypto); the evidence blend and no-edge cap always read the FULL <code>"0"</code> set.</td></tr>
+<tr><td>By event (honesty gap)</td><td>Claimed-vs-live per event type: live hit / med vs the study's claim, <b>pf</b> profit factor (catches the 55%-hit event that still loses money), stop-aware parallel column, <span class="pos">confirmed</span> / <span class="neg">no live edge</span> verdicts.</td></tr>
+<tr><td>Calibration buckets</td><td>Resolved claims bucketed by fire-time score — if 55+ scores don't hit more than &lt;35, the <i>scorer</i> is broken, not the events.</td></tr>
+<tr><td>Slices</td><td>By side (longs vs shorts hit), form (last-N vs all-time), confluence (with-company vs solo hit + the earned bonus value).</td></tr>
+<tr><td>Equity curve</td><td>Cumulative R, equal-weight, fired order; solid = at-horizon, dashed = stop-aware; hover shows the claim behind each step.</td></tr>
+<tr><td>Tuning</td><td>Variant chips per event: ★ incumbent, each challenger's n/hit/avg, last promotion line.</td></tr>
+<tr><td>Strategy shadows</td><td><code>STRAT_DEFS</code> panel per universe (uni field decides listing — gapfade/pead/sweep never appear under crypto). n / hit / avg / avgS / open per strategy (and per void-width split for gapfade).</td></tr>
+<tr><td>Ticker history</td><td>Universe-validated search → full claim-by-claim audit: what fired, at what score and mark, what it claimed, what happened, open claims counting down. Drawer "Signal record" is the compact version.</td></tr>
+</table>
+
+<h2 id="actionable">Actionable board</h2>
+<p>One cross-scope list of names currently AT a swing trigger. The candidate set is the <b>open ledger itself</b> — the board re-derives no geometry; it reads, carry-nets, and merges.</p>
+<table>
+<tr><th>Gate</th><th>Value</th><th>Why</th></tr>
+<tr><td>Horizon floor</td><td><code>ACT_MIN_HZ</code> = 3d equity · <code>ACT_MIN_HZ_MAIN</code> = 2d crypto</td><td>Swing board — 1d scalps belong to the Signals tab. Gate reads <code>EV_META</code> horizons, so future events enroll automatically.</td></tr>
+<tr><td>Freshness</td><td><code>ACT_MAX_BARS</code> = 10 bars in trigger</td><td>Then the setup is gone stale.</td></tr>
+<tr><td>Record (CONFIRMED)</td><td><code>n ≥ 8</code> AND <code>avg &gt; 0</code> AND <code>evR &gt; 0</code> AND <code>!noedge</code></td><td>avg is retrospective (did the family pay); evR is this entry, now, net of carry and lateness — both required, not the same test. Failures are DROPPED, not demoted: no list of things-not-to-do presented as things-to-do.</td></tr>
+<tr><td>Geometry</td><td>net R/R ≥ <code>ACT_MIN_RR</code> = 2.0 · ≤ <code>ACT_MAX_RR</code> = 20 · void ≥ <code>ACT_MIN_VOID_PCT</code> = 0.05% (plus σ-relative check when <code>sd0</code> exists)</td><td>R/R is repriced from the <b>live</b> mark every build — this floor doubles as the board's kill switch: a chased setup dies here on its own, no second lateness rule. &gt;20 means the void is a rounding error; degenerate voids counted under <code>coverage.degenerate</code>.</td></tr>
+</table>
+<p>Columns render from payload only: <b>Fired</b> (mark frozen at claim open — what the record was scored on) · <b>Now</b> (live) · <b>Late</b> (gap in the setup's own risk unit) · void/target frozen · R/R net of expected funding over the horizon · rec (n, hit, avgR) · Ago. Coverage block explains every rejection reason so an empty board can always say why. <code>trigScan</code> runs at the end of every board build — detection on the poller's clock, whether or not a tab is open.</p>
+
+<!-- ============================ ALERTING ============================ -->
+<h2 id="stream">Trigger stream — the canonical event log</h2>
+<p>The poller owns <b>one</b> sequenced, persisted event stream (<code>emitTrig</code> → <code>trigSeq</code>, <code>trigSeen</code>, ring). Every transport (browser toast, bell panel, Telegram) is a thin consumer with its <b>own</b> eligibility filter — eligibility never gates the stream itself, so a channel's thresholds can't censor the record of what fired.</p>
+<table>
+<tr><th>Property</th><th>Mechanism</th></tr>
+<tr><td>Cursor semantics</td><td><code>GET /api/triggers?since=seq</code> → <code>events</code> = everything above your cursor (what to interrupt for); <code>recent</code> = cursor-independent display list (the bell panel is a window onto the server ring, not a second copy). <code>no-store</code>.</td></tr>
+<tr><td>Announce once</td><td>Keys are per-claim AND per-fire (<code>coin|side|ev|t0</code>) with the frozen t0 — rebuilds never re-announce, and a restart with the persisted announced-set + ledger re-fires nothing. This property is what lets a push channel survive a deploy.</td></tr>
+<tr><td>Boot grace</td><td>5-min startup grace (<code>PUSH_GRACE_MS</code>) — the ring may hold events nobody was listening for; the first post-boot build's board is seeded, not blasted.</td></tr>
+<tr><td>First-run device</td><td>Badge starts clean at the current seq — forty retained events are history, not forty unread items. Read state is a persisted watermark, never a hand count.</td></tr>
+<tr><td>Ownership</td><td><code>rule</code> events are owner-scoped — your rules never appear in someone else's bell log. Market/server events are shared.</td></tr>
+</table>
+
+<h2 id="classes">Alert classes</h2>
+<table>
+<tr><th>Class</th><th>Fires when</th><th>Scan / cadence</th><th>Anti-noise discipline</th></tr>
+<tr><td><b>setup</b></td><td>A claim newly reaches the Actionable CONFIRMED board.</td><td><code>trigScan</code> on every board build</td><td>Per-channel eligibility via <code>trigEligible</code>: minEV · minRR (reads <b>gross</b>) · maxLate (unknown lateness ≠ late) · R/R-class filter (<code>rr</code> level-triggered vs <code>ev</code> σ-built — different trades, not different quality) · per-name mute · sides · noEarnings. Event carries both marks + geometry so a transport composes without re-reading the board.</td></tr>
+<tr><td><b>ledger</b></td><td>An announced claim's void taken, target reached, or horizon resolved.</td><td><code>levelScan</code> on <code>LVL_SCAN_MS</code> off the live mark</td><td>One class, not three — the message says which. Stop retires target in the same breath (<code>als=1 → alt=1</code>): a stopped claim can never later announce "target reached".</td></tr>
+<tr><td><b>rule</b></td><td>A user-authored metric rule crosses its threshold.</td><td><code>ruleScan</code> every 15s vs the snapshot payload</td><td>Edge-triggered with an arm band + per-rule cooldown (default 30m). Evaluated against the exact bytes the client renders — an alert can never disagree with the number on the board. Owner-scoped.</td></tr>
+<tr><td><b>trend</b></td><td>Trend-board state changes (new stacks / retests).</td><td><code>trendScan</code> every 5m; primed at 6m post-boot</td><td>One full pass seeds state before anything fires — no announcing every 4/4 stack on deploy.</td></tr>
+<tr><td><b>filing</b></td><td>Material EDGAR filing on a roster name.</td><td>rides the EDGAR rotation (~2 names/min, full pass ~40m)</td><td>Push forms only: <code>8-K · 8-K/A · 10-K · 10-Q · SC 13D(/A) · 6-K · 425</code> (DEF 14A / S-3 stay in the news tab; ownership forms 3/4/5/144/13G never alert). Must be ≤6h fresh; 45-min priming seeds the 7-day backlog silently; seen-set capped at 600, persisted.</td></tr>
+<tr><td><b>earnings</b></td><td>A name with an OPEN, ANNOUNCED claim reports today or tomorrow.</td><td><code>earnScan</code> hourly</td><td>Scoped HARD — 84 names in season is a calendar, not an alert. One per ticker per report date.</td></tr>
+<tr><td><b>ai</b></td><td>A regenerated report's action stance flips vs the cached one.</td><td>emitted from the generation path</td><td>Structurally rare: reports regenerate on cooldown, usually by hand, and only a changed mind is worth an interruption.</td></tr>
+<tr><td><b>regime</b></td><td>Net crowding |≥35| across percentile-carrying names, or aggregate OI stretch ≥2σ of its own 60d.</td><td><code>regimeScan</code> every 15m</td><td>Persistent-condition trap: ledger-style re-arm — one episode, one alert, re-arms only when the condition genuinely lapses.</td></tr>
+<tr><td><b>coverage</b></td><td>A data source goes stale / degraded.</td><td><code>coverageScan</code> every 10m</td><td>Same re-arm discipline.</td></tr>
+<tr><td><b>ops</b></td><td>Server telling on itself: deploys, poller stall, degraded feeds.</td><td><code>pushHealthTick</code> every 60s + emit sites</td><td><b>Admin-only</b>, enforced in delivery AND the in-app feed. Deploy notice is quiet by construction (enters the ring, never reaches a phone — Railway redeploys per pushed file); the wire proves itself via the stall watchdog + test-fire instead.</td></tr>
+</table>
+<p class="dim">Defaults: recipients with no selection get a frozen set of the four classes whose rates are known; every class added later is opt-in, shown in the panel with its measured fires/day. Clearing a selection resets to defaults — never to "everything", never to silence.</p>
+
+<h2 id="levelscan">Level scan — claim life-cycle alerts</h2>
+<p>Runs unconditionally (armed <b>outside</b> the Telegram token gate — detection is never a transport's hostage). Walks open, announced claims against the live mark + latest bar:</p>
+<table>
+<tr><th>Event</th><th>Condition</th><th>Stamps</th></tr>
+<tr><td>Void taken</td><td><code>levelHit(side, "stop", e.stp, px, bar)</code> and not already announced</td><td><code>als=1</code> AND <code>alt=1</code> — target retired with the stop, so a later run to the (now dead) target can never announce the most misleading message this class could send</td></tr>
+<tr><td>Target reached</td><td><code>levelHit(side, "target", e.tgt, …)</code>, claim not stopped</td><td><code>alt=1</code>; target is the frozen <code>tgt</code>, never reconstructed from <code>mv</code></td></tr>
+<tr><td>Horizon resolved</td><td>resolver</td><td>log entry; only the void hit gets a browser toast — target/horizon are for the log</td></tr>
+</table>
+
+<h2 id="rules">User metric rules</h2>
+<table>
+<tr><th>Constant</th><th>Value</th><th>Meaning</th></tr>
+<tr><td><code>RULE_MAX</code></td><td>60</td><td>Bounded shared list — past this it's a screener, not an alert</td></tr>
+<tr><td><code>RULE_DEFAULT_COOLDOWN</code></td><td>30 min</td><td>Per rule×coin</td></tr>
+<tr><td><code>RULE_STATE_MAX</code></td><td>4000</td><td>Bounded edge state (armed / lastFire / prev-value maps)</td></tr>
+<tr><td>Cadence</td><td>15s</td><td>Chained to the snapshot cadence — rules judge the number the board is showing, latency traded for consistency (level alerts run off the live mark instead)</td></tr>
+</table>
+<p class="dim">Edge state persists — a redeploy re-announces nothing already in breach. Ownerless legacy rules are admin-managed, never silently adopted.</p>
+
+<h2 id="telegram">Telegram delivery (push transport)</h2>
+<p>Second consumer of the same stream. Everything deciding what a message says lives as pure functions in <code>compute.js</code> (<code>pushEligible</code>/<code>pushFmt</code>, delegating to <code>trigEligible</code> — Telegram and the browser can never announce different things); <code>poller.js</code> holds only the wire. <b>Fully dormant without <code>TG_BOT_TOKEN</code></b>: no timers, no writes, no noise — unset the var and the transport doesn't exist.</p>
+<table>
+<tr><th>Mechanism</th><th>Detail</th></tr>
+<tr><td>Linking</td><td>Panel mints a single-use code (<code>PUSH_LINK_TTL</code> 10 min) carrying the minting browser's owner handle → human sends <code>/start CODE</code> to the bot → chat bound to that browser in one unforgeable step. <code>/stop</code> always works (control of the Telegram account outranks any cookie); <code>/status</code>/<code>/help</code> report state. Inbound via <code>getUpdates</code> poll every 20s — no webhook, no public URL needed.</td></tr>
+<tr><td>Outbox</td><td>Bounded (<code>PUSH_QUEUE_MAX</code> 50 — overflow drops oldest, counts, and the next delivered message <b>discloses</b> it), drained every 1s, paced 1 msg / 3s (<code>PUSH_SEND_GAP</code>). First <i>eligible</i> item, not first item — a digest scheduled for the end of a quiet window can't head-of-line-block an urgent alert. 15s abort on every request (one hung connection would otherwise stall the whole sequential lane).</td></tr>
+<tr><td>Per-recipient cap</td><td><code>PUSH_CAP_HOUR</code> 20/h — held, not dropped; disclosure protects you from believing silence means nothing fired. <code>force</code> bypasses for command replies (a /stop confirmation is not an alert).</td></tr>
+<tr><td>Failure handling</td><td>429 → backoff for <b>their</b> retry_after; 403 (blocked/deactivated) handled; up to <code>PUSH_MAX_TRIES</code> 5; last 40 outcomes in the panel log (<code>PUSH_LOG_RING</code>); Telegram's error <code>description</code> surfaced verbatim — the difference between "alerts don't work" and "the token is wrong".</td></tr>
+<tr><td>Per-recipient prefs</td><td>Class selection (empty = default set), per-name/side/threshold trig filters, mute, quiet hours (from/to + tz — scheduling, not subscription), daily digest hour (<code>digestTick</code> every 5m). Chat ids masked in the panel (<code>…1234</code>). Bell panel shows YOUR recipients only; admin manages everyone in the Admin tab.</td></tr>
+</table>
+
+<h2 id="browser">Browser transport</h2>
+<table>
+<tr><th>Piece</th><th>Behavior</th></tr>
+<tr><td>Pull</td><td>Chained to the snapshot cadence + a 5-min safety net (the standalone 60s timer is gone). The <code>trig.on</code> toggle gates <b>firing</b>, never the feed pull — history keeps flowing for people who turned toasts off.</td></tr>
+<tr><td>Toasts</td><td>Bottom-left (terminal owns bottom-right, drawer owns the right edge). Setup toast carries fire mark, geometry, per-name mute and a Report deep-link. Ledger class: only the <b>void hit</b> toasts (+ desktop Notification if granted); targets/horizons go to the log.</td></tr>
+<tr><td>Bell panel</td><td>A window onto the server's persisted ring — survives refreshes and closed laptops. One shared formatter for toast + panel; unread = persisted watermark.</td></tr>
+<tr><td>Config</td><td>Defaults OFF. Free numeric inputs for minEV / minRR / maxLate (the fixed three-option selects are gone); no "proven-only" toggle — the stream is confirmed-only upstream.</td></tr>
+</table>
+
+<!-- ============================ REFERENCE ============================ -->
+<h2 id="glossary">Claim-field glossary (ledger export)</h2>
+<table>
+<tr><th style="width:90px">Field</th><th>Meaning</th></tr>
+<tr><td>ev</td><td>event type</td></tr>
+<tr><td>vi</td><td>shadow-variant index (absent = the real, visible claim; 0 = strategy shadow / airead)</td></tr>
+<tr><td>t0 / tR</td><td>fire time / resolve time (ms)</td></tr>
+<tr><td>mark0</td><td>mark at fire</td></tr>
+<tr><td>dir</td><td>EVENT direction sign (a gap-fader's dir is the gap, not the trade)</td></tr>
+<tr><td>psd</td><td>published play side — outcome sign follows this when present</td></tr>
+<tr><td>sd0</td><td>30d daily σ at fire (R normalization); an R-united event without sd0 is a legacy %-outcome entry</td></tr>
+<tr><td>stp / mv / tgt</td><td>void level frozen at fire · playbook-target distance % · absolute target level frozen at fire</td></tr>
+<tr><td>alo / als / alt</td><td>opening announced · void announced as taken · target announced as reached</td></tr>
+<tr><td>score0 / pr / conf</td><td>score at fire · prime flag at fire · confluence flag at fire</td></tr>
+<tr><td>bt / eg / tal</td><td>opened on first post-boot build · episode-gap flag · daily ribbon aligned with the side at fire</td></tr>
+<tr><td>realized / realizedS / stopped</td><td>at-horizon outcome (play-signed, event unit) · stop-aware outcome · void touched before horizon</td></tr>
+<tr><td>fnd / fndP</td><td>funding rate at fire · percentile vs own 31d hourly (≥96 samples)</td></tr>
+<tr><td>oi5 / rngP / mktR</td><td>5d OI change % · position in 30d range (0=low, 1=high) · benchmark 24h move % (BTC / SPX proxy)</td></tr>
+<tr><td>ses / hod / dow</td><td>session bucket (xyz: rth/on/wknd) · UTC hour-of-day bucket (crypto: asia/eu/us/late) · UTC day-of-week (0=Sun)</td></tr>
+<tr><td>gw / emv / rm</td><td>gapfade void width (1.0/1.5σ) · pead frozen reaction move % · airead authoring model</td></tr>
+</table>
+
+<h2 id="tuning">Tuning index — every knob in one table</h2>
+<table>
+<tr><th>Knob</th><th>Value</th><th>File</th><th>What moving it does</th></tr>
+<tr><td>Variant thresholds</td><td>see <a href="#variants">table</a></td><td>poller.js <code>VARIANTS</code></td><td>Fire rates of the 6 tuned events. Prefer letting promotion move the incumbent — edits reset the apples-to-apples record.</td></tr>
+<tr><td>fpdiv gate</td><td>~0.8σ z7</td><td>poller.js fire site</td><td>Divergence sensitivity (embedded in the intensity formula)</td></tr>
+<tr><td>prem gate</td><td>2σ of 7d baseline</td><td>poller.js fire site</td><td>Dislocation sensitivity</td></tr>
+<tr><td>volume gate</td><td>2.5× 30d norm</td><td>poller.js fire site</td><td>Context-flag frequency</td></tr>
+<tr><td>coil gate</td><td>bottom decile of 120</td><td>compute.js</td><td>Compression flag frequency</td></tr>
+<tr><td>ondrift gates</td><td>|z|≥2 vs universe, |drift|≥1%, ≥25 mkts</td><td>poller.js</td><td>Drift-claim frequency</td></tr>
+<tr><td>fundext</td><td>pctile 90/10 · 24h persistence · min samples</td><td>poller.js <code>FUNDEXT_*</code></td><td>Crowding fade frequency + episode definition</td></tr>
+<tr><td>casc</td><td>3σ liq spike · age 1–24h · flush window 3h</td><td>compute.js <code>detectCascExhaust</code> / cascadeFlags</td><td>Cascade claim frequency + staleness window</td></tr>
+<tr><td>Shadow detectors</td><td><code>WICK_FRAC</code> .55 · <code>WICK_SIZE_MULT</code> 1.1 · <code>RNDF_LO/HI_BAND</code> .05/.6 · pead 1.5σ/3 sessions · mapull 4% · reclaim/failbrk 30d-window-minus-3, fresh-within-2</td><td>compute.js</td><td>Shadow fire rates — cheap to tune since nothing visible changes</td></tr>
+<tr><td>Evidence</td><td>own n≥8 · pooled n≥12 @0.7 · blend prior 25 · blend floor 5 resolved · no-edge (10, 50%, 0) cap 8 · scales 0.5R / 0.8%</td><td>poller.js <code>evPts / evidence</code></td><td>How fast trust migrates study→live and how hard losers sink</td></tr>
+<tr><td>Prime</td><td>hit≥60% · avg&gt;0 · R/R≥1.2 · +6</td><td>poller.js</td><td>★ frequency</td></tr>
+<tr><td>Confluence</td><td>default +8 · earned at 15/15 per side</td><td>poller.js</td><td>Stacking bonus</td></tr>
+<tr><td>Decay</td><td>×0.6 past horizon · drop at 2×</td><td>poller.js</td><td>Card staleness</td></tr>
+<tr><td>Universe lanes</td><td>40 / 40</td><td>compute.js <code>capPerUniverse</code></td><td>Payload split</td></tr>
+<tr><td>Promotion</td><td>n≥30 both sides + expectancy beat</td><td>compute.js <code>shouldPromote</code></td><td>Self-tuning strictness</td></tr>
+<tr><td>Actionable</td><td>hz 3d/2d · bars 10 · RR 2.0–20 · void .05% · rec n 8</td><td>poller.js <code>ACT_*</code></td><td>Board strictness / kill switch</td></tr>
+<tr><td>Rules</td><td>60 max · 30m cooldown · 4000 state · 15s</td><td>poller.js <code>RULE_*</code></td><td>Rule lane bounds</td></tr>
+<tr><td>Push wire</td><td>link 10m · gap 3s · cap 20/h · queue 50 · grace 5m · poll 20s · drain 1s · tries 5 · log 40 · abort 15s</td><td>poller.js <code>PUSH_*</code></td><td>Delivery pacing / bounds</td></tr>
+<tr><td>Scan cadences</td><td>health 60s · levels <code>LVL_SCAN_MS</code> · rules 15s · earnings 1h · regime 15m · trend 5m (prime 6m) · coverage 10m · digest 5m · filings prime 45m, ≤6h fresh, seen 600</td><td>poller.js boot block</td><td>Alert latency per class</td></tr>
+<tr><td>Regime gates</td><td>crowd ±35 · OI z 2</td><td>poller.js <code>REGIME_*</code></td><td>Regime-alert rarity</td></tr>
+<tr><td>Ledger epochs</td><td><code>CRYPTO_EPOCH</code> 2026-07-26Z · chain gap ≤2d</td><td>poller.js</td><td>Which history counts</td></tr>
+</table>
+
+<p class="mini" style="margin-top:34px;border-top:1px solid var(--line);padding-top:12px">Reference document only — describes the shipped behavior; the code and its test pins remain the source of truth. Change a threshold → the manifest tests in <code>test/test.js</code> that pin it must move with it, or the suite fails by design.</p>
+
+</main>
+</div>
+<a class="toc-top" href="#">↑ top</a>
+</body>
+</html>
