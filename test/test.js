@@ -6049,12 +6049,16 @@ test("-17 crypto analytics build: every applicable study lives on a 90d crypto u
     const legs = Object.keys(sec.sessionDecomp.sessions);
     assert.deepEqual(legs.sort(), ["utcday", "weekend"].sort(), "crypto decomposition: UTC-day + weekend, no cash leg");
     assert.equal(sec.sessionDecomp.isCrypto, true);
-    // -19: crypto publishes Positioning + Holds only. The Clocks/Week/Structure studies are not
-    // computed at all (they compare nothing on a one-class 24/7 book) and ship as {disabled:true}
-    // so the payload shape stays uniform and the client renders no panel and no "computing" row.
-    assert.deepEqual(cr.groups, ["positioning", "holds"], "crypto publishes exactly positioning + holds");
-    for (const k of ["hourClock", "dow", "clusters", "seasonality", "levels"])
+    // -19 dropped Clocks/Week/Structure from crypto; -27 restored STRUCTURE (the level + EMA200
+    // studies are price-structure claims — a 200-EMA pullback/breakdown/reclaim is as native to a
+    // perp as to any equity; stocks-only was a wiring accident). Still not computed on crypto:
+    // hour/day grids, seasonality, and clusters — clusters consume the hour clocks crypto does
+    // not publish, and must ship {disabled:true}, never an eternal pending row.
+    assert.deepEqual(cr.groups, ["positioning", "holds", "structure"], "crypto publishes positioning + holds + structure");
+    for (const k of ["hourClock", "dow", "clusters", "seasonality"])
       assert.equal(sec[k] && sec[k].disabled, true, `crypto ${k} must be disabled, not built`);
+    assert.ok(sec.levels && !sec.levels.disabled, "crypto structural levels study must BUILD since -27");
+    assert.ok(sec.ema200 && !sec.ema200.disabled, "crypto ema200 study must BUILD since -27");
     // and the ones it DOES publish are real (no disabled leaking into the Holds group)
     for (const k of ["sessionDecomp", "anatomy"])
       assert.ok(sec[k] && !sec[k].disabled, `crypto ${k} must still be built`);
@@ -6271,11 +6275,12 @@ test("-20: crypto renders only Positioning + Holds; stocks keeps all five groups
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   // server declares the set once, per universe, and skips building the disabled studies
-  assert.ok(pol.includes('groups: ["positioning", "holds"],'), "crypto descriptor publishes two groups");
+  assert.ok(pol.includes('groups: ["positioning", "holds", "structure"],'), "crypto descriptor publishes three groups since -27");
+  assert.ok(pol.includes('on("structure") && on("clocks") ? buildClusters(hourClock)'), "clusters gate on clocks too — no eternal pending on a clock-less universe");
   assert.ok(pol.includes('groups: ["positioning", "holds", "clocks", "week", "structure"],'), "stocks keeps five");
   assert.ok(pol.includes("groups: U.groups.slice(),"), "the group set ships in the payload");
   for (const gated of ['on("clocks") ? buildActivityClocks(U) : DISABLED',
-    'on("week") ? buildDowHeatmap(U) : DISABLED', 'on("structure") ? buildClusters(hourClock) : DISABLED',
+    'on("week") ? buildDowHeatmap(U) : DISABLED', 'on("structure") && on("clocks") ? buildClusters(hourClock)',
     'on("clocks") ? buildSeasonality(U) : DISABLED', 'on("structure") ? buildLevelsStudy(U) : DISABLED'])
     assert.ok(pol.includes(gated), `study must be group-gated, not built and hidden: ${gated}`);
   // client renders exactly the published set — no hard-coded five-group chain
@@ -10235,7 +10240,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.27-26"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.27-27"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
