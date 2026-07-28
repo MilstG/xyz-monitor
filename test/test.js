@@ -10457,7 +10457,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11939,4 +11939,56 @@ test("-04 wiring manifest: server ships ind thin, client groups on ONE key, cont
   // The founding fix stays fixed: ZM must not drift back into the Comm Services roster.
   const sj = fs.readFileSync(path.join(__dirname, "..", "src", "sectors.js"), "utf8");
   assert.ok(!/"SPOT","ROKU","ZM"/.test(sj), "ZM must stay out of Communication Services");
+});
+
+// ===== industry-grouping ingest (build 2026.07.28-05) ==========================================
+// The -04 field-name-mismatch bug, made unrepeatable. applySnapshot's merge is an EXPLICIT
+// field-by-field copy — the wire carried `ind`, the merge dropped it, and every industry group
+// rendered as an "= sector" fallback. String pins on the wire and the grouping key could not
+// catch it: only pushing a payload through the REAL ingestion path can. This test evaluates the
+// real client (the -17 harness pattern), feeds applySnapshot a snapshot whose rows carry `ind`
+// exactly as the poller ships it, and asserts the field survives into state.rows AND that
+// computeSectors then actually splits on it.
+test("-05 regression: applySnapshot carries `ind` into state.rows and the industry grouping splits", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const { els, mk } = _sessDomStub();
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/" }, matchMedia: () => ({ matches: false, addEventListener() {} }) };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  try {
+    const S = require("../src/sectors");
+    let H = null;
+    eval(app + "\n; H={state, applySnapshot, computeSectors, sectGrpActive};");
+    // Rows exactly as the poller ships them: `ind` present only when it differs from sector.
+    const wire = (t) => { const c = S.classify(t); return { coin: "xyz:" + t, ticker: t, uni: "xyz",
+      sector: c.sector, assetClass: c.assetClass, ind: c.ind !== c.sector ? c.ind : undefined,
+      px: 100, prevDay: 99, vol: 1e8, oi: 5e7, feat: { volBase: 9e7 } }; };
+    const mkts = ["SNDK", "SKHX", "MU", "NVDA", "MSFT", "CAT"].map(wire);
+    H.applySnapshot({ markets: mkts, mainMarkets: [], dataTs: 7 });
+    // 1) the field SURVIVES ingestion — this is the exact line that was missing in -04
+    assert.equal(H.state.rows.get("xyz:SNDK").ind, "Memory/Storage", "ind must survive the explicit merge");
+    assert.equal(H.state.rows.get("xyz:NVDA").ind, "Semiconductors");
+    assert.equal(H.state.rows.get("xyz:CAT").ind, undefined, "absent-on-the-wire stays absent — absence IS the fallback");
+    // 2) lockstep self-heal: a later payload with sector but no ind must CLEAR a stale group
+    H.applySnapshot({ markets: mkts.map(m => m.ticker === "SNDK" ? Object.assign({}, m, { ind: undefined }) : m),
+      mainMarkets: [], dataTs: 8 });
+    assert.equal(H.state.rows.get("xyz:SNDK").ind, undefined, "ind rides sector in lockstep — stale groups self-heal");
+    // 3) end to end: re-ingest the true payload and the grouping actually splits on it
+    H.applySnapshot({ markets: mkts, mainMarkets: [], dataTs: 9 });
+    H.state.scope = "stocks"; H.state.tf = "1d"; H.state.sect.grp = "ind";
+    const names = H.computeSectors().map(g => g.name);
+    assert.ok(names.includes("Memory/Storage") && names.includes("Semiconductors") && names.includes("Industrials"),
+      "industry grouping splits the ingested rows: " + names.join(", "));
+    H.state.sect.grp = "sector";
+    assert.ok(!H.computeSectors().map(g => g.name).includes("Memory/Storage"), "sector grouping stays GICS-only");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
 });
