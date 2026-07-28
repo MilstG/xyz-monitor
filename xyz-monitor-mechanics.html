@@ -1,0 +1,1088 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>xyz-monitor · mechanics</title>
+<style>
+:root{
+  --bg:#070b0f;--panel:#0d141b;--panel2:#111a23;--panel3:#161f29;--border:#1e2b38;--border2:#2b3d4f;
+  --text:#c8d4e0;--dim:#647689;--faint:#3d4c5c;
+  --amber:#f0a832;--green:#35c98a;--red:#e05656;--blue:#4aa3ff;--purple:#a184ff;--cyan:#3ec6c6;--clay:#c98a3c;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;height:100%}
+body{display:flex;flex-direction:column;overflow:hidden}
+header{display:flex;align-items:baseline;gap:14px;padding:11px 18px 9px;border-bottom:1px solid var(--border);flex-shrink:0}
+.brand{font-size:15px;letter-spacing:.14em;color:var(--amber);font-weight:700;text-transform:uppercase}
+.brand b{color:var(--text)}
+.sub{color:var(--dim);font-size:11px}
+.hcount{margin-left:auto;color:var(--faint);font-size:10.5px;letter-spacing:.05em}
+
+main{flex:1;min-height:0;display:grid;grid-template-columns:262px 1fr}
+#toc{border-right:1px solid var(--border);background:var(--panel);overflow-y:auto;padding:10px 0 30px}
+#toc .tg{font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--faint);padding:12px 14px 5px}
+#toc a{display:flex;gap:8px;align-items:baseline;padding:6px 14px;color:var(--dim);text-decoration:none;
+  font-size:11.5px;border-left:2px solid transparent;cursor:pointer;line-height:1.35}
+#toc a:hover{background:var(--panel2);color:var(--text)}
+#toc a.on{background:var(--panel3);color:var(--text);border-left-color:var(--amber)}
+#toc a .no{color:var(--faint);font-size:10px;min-width:16px}
+#toc a.on .no{color:var(--amber)}
+
+#doc{overflow-y:auto;padding:22px 30px 70px;max-width:1000px}
+.sec{display:none}.sec.on{display:block}
+.eyebrow{font-size:9.5px;letter-spacing:.22em;text-transform:uppercase;color:var(--faint);margin-bottom:5px}
+h1{font-size:21px;letter-spacing:-.01em;font-weight:700;margin-bottom:7px}
+.thesis{color:var(--amber);font-size:13px;line-height:1.6;border-left:2px solid var(--amber);padding-left:11px;margin-bottom:20px}
+h2{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin:26px 0 9px;
+  border-top:1px solid var(--border);padding-top:11px}
+p{color:var(--dim);font-size:12.5px;line-height:1.65;margin-bottom:9px;max-width:78ch}
+p b,li b{color:#e6edf4;font-weight:700}
+p code,li code,td code{background:var(--panel2);border:1px solid var(--border);border-radius:3px;padding:1px 4px;color:var(--cyan);font-size:11.5px}
+ul{list-style:none;margin-bottom:6px}
+li{color:var(--dim);font-size:12.5px;line-height:1.6;padding:3px 0 3px 15px;position:relative;max-width:78ch}
+li::before{content:"·";position:absolute;left:3px;color:var(--amber)}
+
+.formula{background:var(--panel);border:1px solid var(--border2);border-radius:5px;padding:13px 15px;margin:10px 0 14px;overflow-x:auto}
+.formula .fl{color:var(--text);font-size:12.5px;line-height:1.9;white-space:pre}
+.formula .fl .op{color:var(--amber)}
+.formula .fl .cm{color:var(--faint)}
+.formula .cap{color:var(--faint);font-size:10.5px;margin-top:8px;letter-spacing:.03em;white-space:normal}
+
+table{width:100%;border-collapse:collapse;margin:8px 0 14px}
+th{font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--faint);text-align:left;padding:5px 8px;border-bottom:1px solid var(--border2)}
+td{padding:5px 8px;border-bottom:1px solid var(--border);font-size:11.5px;line-height:1.45;color:var(--dim);vertical-align:top}
+tbody tr:hover td{background:var(--panel2)}
+td b,td strong{color:var(--text)}
+.pos{color:var(--green)}.neg{color:var(--red)}.mut{color:var(--faint)}.amb{color:var(--amber)}
+
+.note{border-left:2px solid var(--red);padding:9px 0 9px 12px;margin:14px 0;max-width:78ch}
+.note .nh{color:var(--red);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:4px}
+.note p{margin:0;color:var(--dim);font-size:12px}
+.note.good{border-left-color:var(--green)}.note.good .nh{color:var(--green)}
+.note.blue{border-left-color:var(--blue)}.note.blue .nh{color:var(--blue)}
+
+svg{display:block;max-width:100%;height:auto;margin:6px 0 4px}
+svg text{font-family:var(--mono)}
+.dlab{fill:var(--dim);font-size:10px}
+.dlabs{fill:var(--faint);font-size:9px}
+.dnm{fill:var(--text);font-size:11px;font-weight:700}
+.dbox{fill:var(--panel);stroke:var(--border2);stroke-width:1}
+.dbox2{fill:var(--panel2);stroke:var(--border2);stroke-width:1}
+.dln{stroke:var(--border2);stroke-width:1.2;fill:none}
+.dln.a{stroke:var(--amber)}
+.dln.g{stroke:var(--green)}
+.dln.r{stroke:var(--red)}
+.hv{cursor:help}
+.hv:hover .dbox,.hv:hover .dbox2{stroke:var(--amber)}
+.figcap{color:var(--faint);font-size:10.5px;margin:2px 0 16px;letter-spacing:.03em;max-width:78ch}
+
+/* live calculator */
+.calc{background:var(--panel);border:1px solid var(--border2);border-radius:6px;padding:15px 16px;margin:12px 0 16px}
+.calc .ch{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--amber);margin-bottom:12px}
+.crow{display:grid;grid-template-columns:150px 1fr 88px;gap:11px;align-items:center;margin-bottom:9px}
+.crow label{color:var(--dim);font-size:11.5px}
+.crow input[type=range]{-webkit-appearance:none;appearance:none;height:3px;background:var(--border2);border-radius:2px;outline:none}
+.crow input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--amber);cursor:pointer}
+.crow input[type=range]::-moz-range-thumb{width:12px;height:12px;border:none;border-radius:50%;background:var(--amber);cursor:pointer}
+.crow .cv{color:var(--text);font-size:11.5px;text-align:right}
+.cout{border-top:1px solid var(--border);margin-top:13px;padding-top:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:11px}
+.cout div{background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:8px 10px}
+.cout .cl{color:var(--faint);font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;margin-bottom:3px}
+.cout .cn{font-size:17px;font-weight:700;color:var(--text)}
+.cout .cn.big{color:var(--amber)}
+.cout .cs{color:var(--dim);font-size:10px;margin-top:2px}
+.cbar{height:5px;background:var(--panel3);border-radius:3px;overflow:hidden;margin-top:11px;display:flex}
+.cbar i{display:block;height:100%}
+.cbar i.a{background:var(--blue)}.cbar i.b{background:var(--green)}.cbar i.c{background:var(--purple)}
+.ckey{display:flex;gap:14px;margin-top:7px;color:var(--faint);font-size:10px;flex-wrap:wrap}
+.ckey span::before{content:"■ ";}
+.ckey .ka::before{color:var(--blue)}.ckey .kb::before{color:var(--green)}.ckey .kc::before{color:var(--purple)}
+.cflag{margin-top:10px;font-size:11px;color:var(--red);min-height:16px}
+.cflag.ok{color:var(--green)}
+
+#tip{position:fixed;z-index:99;display:none;max-width:320px;background:#0a1016;border:1px solid var(--border2);
+  border-radius:4px;padding:9px 11px;color:var(--dim);font-size:11px;line-height:1.55;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
+#tip b{color:var(--text)}
+footer{border-top:1px solid var(--border);color:var(--faint);font-size:10.5px;padding:7px 18px;flex-shrink:0;display:flex;gap:16px}
+footer b{color:var(--dim);font-weight:400}
+.pgnav{display:flex;gap:10px;margin-top:34px;border-top:1px solid var(--border);padding-top:14px}
+.pgnav button{all:unset;color:var(--dim);font-size:11.5px;cursor:pointer;padding:5px 9px;border:1px solid var(--border);border-radius:4px}
+.pgnav button:hover{color:var(--amber);border-color:var(--amber)}
+.pgnav .sp{margin-left:auto}
+@media (max-width:900px){main{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
+ #toc{max-height:150px;border-right:none;border-bottom:1px solid var(--border)}#doc{padding:16px}
+ .crow{grid-template-columns:112px 1fr 62px}}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">xyz-<b>monitor</b></span>
+  <span class="sub">mechanics — how each thing actually computes</span>
+  <span class="hcount" id="hcount"></span>
+</header>
+
+<main>
+  <nav id="toc"></nav>
+  <article id="doc"></article>
+</main>
+
+<footer>
+  <span><b>worked examples</b> use the real formulas from compute.js and poller.js — the numbers are illustrative, the math is not</span>
+  <span style="margin-left:auto">standalone · not part of the repo</span>
+</footer>
+<div id="tip"></div>
+
+<script>
+/* ---------- tooltip ---------- */
+const tip=document.getElementById("tip");
+document.addEventListener("mouseover",e=>{const t=e.target.closest("[data-tip]");if(!t)return;
+  tip.innerHTML=t.dataset.tip;tip.style.display="block";mv(e);});
+document.addEventListener("mousemove",e=>{if(tip.style.display==="block")mv(e);});
+document.addEventListener("mouseout",e=>{if(e.target.closest("[data-tip]"))tip.style.display="none";});
+function mv(e){const w=tip.offsetWidth,h=tip.offsetHeight;let x=e.clientX+14,y=e.clientY+16;
+  if(x+w>innerWidth-8)x=e.clientX-w-14;if(y+h>innerHeight-8)y=e.clientY-h-16;
+  tip.style.left=Math.max(4,x)+"px";tip.style.top=Math.max(4,y)+"px";}
+
+/* ================================================================= sections ============== */
+const S=[];
+const G=(g,t,thesis,html)=>S.push({g,t,thesis,html});
+
+/* ---------- 1. signal score ---------- */
+G("Signals","Signal score anatomy",
+"A score is two independent things added together: how weird the condition is right now, and how much money that condition has historically made. Weirdness is capped at 50 so it can never carry a signal on its own.",
+`<h2>The formula</h2>
+<div class="formula"><div class="fl">score <span class="op">=</span> round( clamp(intensity, 0, 50) <span class="op">+</span> evidencePts )   <span class="cm">// then +confluence, capped at 100</span></div>
+<div class="cap">Two halves that cannot substitute for each other. A condition at maximum weirdness with zero historical edge tops out at 50 — visible, ranked low, and pill-flagged. A modest condition with a strong record can beat it.</div></div>
+
+<h2>Where intensity comes from — it is per-event, not generic</h2>
+<p>Every event type computes its own intensity from the quantity that <i>defines</i> it. There is no shared "unusualness" score, because unusualness means different things for a gap than for a funding flip.</p>
+<table><thead><tr><th>event</th><th>intensity expression</th><th>reads as</th></tr></thead><tbody>
+<tr><td class="amb">prem</td><td><code>(|z| − 2) × 12 + 18</code></td><td>18 pts at the 2σ trigger, ~30 at 3σ, ~42 at 4σ</td></tr>
+<tr><td class="amb">volume</td><td><code>(vol/vol30 − 2.5) × 10 + 12</code></td><td>12 pts at the 2.5× gate, 22 at 3.5×, 37 at 5×</td></tr>
+<tr><td class="amb">coil</td><td><code>(10 − pctile) × 1.5 + 10</code></td><td>25 pts at the 0th percentile, 10 at the 10th — tighter coil, higher score</td></tr>
+<tr><td class="amb">gap</td><td><code>(|g|/gapSd) × 14 + min(16, |excess|/gapSd × 12)</code></td><td>own-sigma term plus a bounded benchmark-excess term</td></tr>
+<tr><td class="amb">squeeze</td><td><code>100 × crowd × (0.45 + 0.30·fuel + 0.25·trig)</code></td><td>a composite — see the squeeze section</td></tr>
+<tr><td class="amb">fundflip</td><td><code>22</code> (fixed)</td><td>a flip is a flip; its run length is in the reading, not the score</td></tr>
+</tbody></table>
+<div class="note blue"><div class="nh">why fundflip is flat</div><p>Some conditions are binary. Manufacturing a continuous intensity for them would be fabricating precision — a 5-day pinned run isn't 1.7× more "flipped" than a 3-day one. The run length appears in the reading text where a reader can weigh it, not in a number that pretends to have weighed it for them.</p></div>
+
+<h2>Live calculator</h2>
+<p>Drive the real formula. <b>Evidence</b> below is <code>evPts</code> with the Bayesian live blend applied — the next section unpacks it.</p>
+<div class="calc" id="calc"></div>
+
+<h2>What the pills mean</h2>
+<table><thead><tr><th>pill</th><th>trigger</th><th>effect on score</th></tr></thead><tbody>
+<tr><td><i class="neg">unproven</i></td><td>&lt;8 own occurrences and no usable pooled sample</td><td>evidence = token 6–8 pts</td></tr>
+<tr><td><i class="neg">neg exp</i></td><td>the base rate's mean signed outcome ≤ 0</td><td>evidence <b>zeroed</b> — intensity only</td></tr>
+<tr><td><i class="neg">no live edge</i></td><td>≥10 resolved live, hit &lt;50%, median ≤ 0</td><td>evidence <b>capped at 8</b></td></tr>
+<tr><td><i class="amb">earnings ≤1d</i></td><td>scheduled print inside the claim horizon</td><td>evidence capped at 8, ★ prime disabled, intensity untouched</td></tr>
+<tr><td><span class="pos">★ prime</span></td><td>≥60% hit, positive expectancy, R/R ≥1.2 where levels exist, not unproven/decayed/no-edge</td><td>emphasis only, no score change</td></tr>
+</tbody></table>
+<div class="note"><div class="nh">the expectancy gate is the main noise filter</div><p>Before it existed, "weird but historically unprofitable" rode its intensity score straight to the top of the board. Now a negative-expectancy base rate earns exactly zero evidence points no matter how extreme the live condition looks. Hit rate only ever <i>adds on top of</i> positive expectancy — it can never rescue a losing event.</p></div>`);
+
+/* ---------- 2. evidence blend ---------- */
+G("Signals","Evidence &amp; the Bayesian blend",
+"The claimed base rate and the live out-of-sample record are blended with a weight that grows as resolutions accumulate. Trust migrates from backtest to reality continuously, and in both directions.",
+`<h2>The scope ladder</h2>
+<div class="formula"><div class="fl">own base rate      n ≥ 8    <span class="op">→</span> discount 1.0
+class-pooled       n ≥ 12   <span class="op">→</span> discount 0.7   <span class="cm">// broader sample, 30% haircut</span>
+neither                     <span class="op">→</span> token 8 pts (some history) / 6 pts (none)</div>
+<div class="cap">Checked in order. A market with 8 of its own occurrences never falls back to the pooled rate, because its own behaviour is the better estimator even at a thin n.</div></div>
+
+<h2>evPts — 0 to 50, expectancy-centered</h2>
+<div class="formula"><div class="fl">scale <span class="op">=</span> unit === "R" ? 0.5 : 0.8      <span class="cm">// +0.5R/event is strong edge</span>
+
+if (avg <span class="op">==</span> null)  <span class="op">→</span> min(1, |med|/(R?1:1.5))·30 <span class="op">+</span> |hit − 0.5|·2·20
+if (avg <span class="op">&lt;=</span> 0)     <span class="op">→</span> <span class="neg">0</span>
+else            <span class="op">→</span> min(1, avg/scale)·30 <span class="op">+</span> max(0, hit − 0.5)·2·20</div>
+<div class="cap">30 points available from expectancy, 20 from hit rate above coin-flip. The <code>avg == null</code> branch is a legacy path for studies that only ever recorded medians; it uses |hit − 0.5| symmetrically because without a mean it cannot tell which direction the edge ran.</div></div>
+
+<h2>The live blend</h2>
+<div class="formula"><div class="fl">if (resolved ≥ 5):
+    w <span class="op">=</span> resolved / (resolved <span class="op">+</span> 25)
+    avg' <span class="op">=</span> (1−w)·study.avg <span class="op">+</span> w·live.avg
+    hit' <span class="op">=</span> (1−w)·study.hit <span class="op">+</span> w·live.hit</div>
+<div class="cap">The card shows w as <code>liveW</code>%, so a reader can see how much of the number in front of them is backtest and how much is reality.</div></div>
+<table><thead><tr><th>resolved claims</th><th>w</th><th>the score is mostly…</th></tr></thead><tbody>
+<tr><td>&lt;5</td><td class="mut">—</td><td>study only; no blend at all</td></tr>
+<tr><td>5</td><td>0.17</td><td>the backtest (83%)</td></tr>
+<tr><td>25</td><td>0.50</td><td>an even split</td></tr>
+<tr><td>50</td><td>0.67</td><td>the live record</td></tr>
+<tr><td>100</td><td>0.80</td><td>the live record, overwhelmingly</td></tr>
+</tbody></table>
+${blendSvg()}
+<p class="figcap">Hover the curve. The knee sits around 25 resolutions — chosen so an event needs roughly a quarter's worth of firings before it can talk over its own backtest.</p>
+<div class="note good"><div class="nh">it cuts both ways</div><p>A live record <i>better</i> than claimed earns more score, not just less. The blend is not a penalty box — it's the mechanism by which an event that ships without any in-sample study at all (ondrift, the trend retests) can accumulate a real score purely from out-of-sample behaviour.</p></div>
+<div class="note"><div class="nh">the hard guard sits on top</div><p><code>liveNoEdge</code> is checked <i>after</i> the blend and caps evidence at 8 outright: ≥10 resolved, hit &lt;50%, median ≤0. The blend would eventually drag such an event down on its own, but slowly — and slowly is not good enough for something the board is actively recommending.</p></div>`);
+
+/* ---------- 3. frozen geometry ---------- */
+G("Signals","Frozen geometry &amp; R:R",
+"At the instant a signal fires, four numbers are stamped and can never move: side, entry, void, target. Everything the app later says about that claim is measured against those four.",
+`<h2>What gets frozen</h2>
+${geoSvg()}
+<p class="figcap">Hover each level. <b>Entry</b> = the mark at fire. <b>Void</b> = the mechanical level that invalidates the thesis. <b>Target</b> = the historical median outcome projected from entry. <b>R</b> = |entry − void|, the risk unit everything is denominated in.</p>
+<div class="formula"><div class="fl">R      <span class="op">=</span> |entry − void|
+R:R    <span class="op">=</span> |target − entry| / R
+realized  <span class="op">=</span> (exit − entry) / R  × side      <span class="cm">// signed with the claim</span>
+realizedS <span class="op">=</span> same, but capped at −1R if void was touched first</div></div>
+
+<h2>Where each void comes from — per event, never generic</h2>
+<table><thead><tr><th>event</th><th>void level</th><th>why that level</th></tr></thead><tbody>
+<tr><td class="amb">tretest / tretestdn</td><td>the retesting rung's own EMA21</td><td>a value the ladder already computed and the board already rendered — no new math, so no way to disagree</td></tr>
+<tr><td class="amb">breakout / breakdown</td><td>the broken 30d level</td><td>the level whose break <i>was</i> the event; back below it and the event didn't happen</td></tr>
+<tr><td class="amb">bigmove / fundflip / fpdiv</td><td>entry ∓ 1σ (sd30)</td><td>sigma-built: there is no structural level, so the risk unit is the market's own daily volatility</td></tr>
+<tr><td class="amb">gap</td><td>the prior cash close</td><td>the gap closing is the gap not continuing</td></tr>
+<tr><td class="amb">prem</td><td>oracle-relative band</td><td>the dislocation is defined against oracle, so the invalidation must be too</td></tr>
+</tbody></table>
+
+<h2>Sigma-built vs level-triggered — the rr/ev split</h2>
+<p>These two families produce structurally different R:R, which is why the Actionable board splits on it rather than scoring it:</p>
+<table><thead><tr><th>class</th><th>geometry source</th><th>shape of the payoff</th></tr></thead><tbody>
+<tr><td><b>rr</b></td><td>a structural level — the void is somewhere real</td><td>frozen ratio clears 2:1. Win big, less often. Breakouts, retests.</td></tr>
+<tr><td><b>ev</b></td><td>±1σ around entry — the void is a statistic</td><td>below 2:1 but positive expectancy anyway. Win small, more often. Big moves, funding divergences.</td></tr>
+</tbody></table>
+<div class="note blue"><div class="nh">a filter, not a score</div><p>Both classes clear the same record and EV gates. They are different <i>trades</i>, not different quality — so ranking one above the other would be a category error. The board lets you filter to the shape you want to take today.</p></div>
+
+<h2>Null-tolerance</h2>
+<p>A target can legitimately be absent: for a trend retest with no valid prior swing on that rung, there is nothing honest to project to. The claim still ledgers, <code>mv</code> stays null, R:R is undefined, and the claim resolves on its stop-aware leg alone. The alternative — inventing a target from a nearby round number — would put a fabricated number into a permanent record.</p>
+<div class="note"><div class="nh">the rule that keeps the ledger clean</div><p>Math that cannot produce this geometry does not go into the ledger at all. It becomes a <b>screener column</b>. That is why <code>coil</code> and <code>volume</code> are context flags with no side and no claim: they are real information, and they have no honest void.</p></div>`);
+
+/* ---------- 4. claim lifecycle ---------- */
+G("Signals","Claim lifecycle",
+"Fire, freeze, count down, resolve, fold into the record. Every stage has a failure mode that got a specific guard.",
+`${lifeSvg()}
+<p class="figcap">Hover each stage.</p>
+<h2>Stage by stage</h2>
+<table><thead><tr><th>stage</th><th>what happens</th><th>the guard</th></tr></thead><tbody>
+<tr><td><b>1 · detect</b></td><td>condition evaluated on the poll cycle against the market's own history</td><td>the <b>re-arm gate</b> — a condition already in force cannot re-fire</td></tr>
+<tr><td><b>2 · freeze</b></td><td>side, entry, void, target, R:R, score, sd0 stamped; key = <code>coin|event</code></td><td>no geometry ⇒ no ledger entry; it becomes a screener column instead</td></tr>
+<tr><td><b>3 · announce</b></td><td>enters the trigger ring as a <code>setup</code> event; browser and Telegram both consume it</td><td><b>boot grace</b>: on the first build after a restart, only claims that fired within the grace window announce. Everything older is seeded silently.</td></tr>
+<tr><td><b>4 · count down</b></td><td>open claim, visible with time-to-resolution; the drawer and history show it as open</td><td><b>coverage alerts</b> fire if the spine feeding an open announced claim goes stale</td></tr>
+<tr><td><b>5 · resolve</b></td><td>scored at horizon in the study's own units and sign convention; <code>realized</code> and <code>realizedS</code> both recorded</td><td>a <code>ledger</code>-class alert announces the death — void taken, target reached, or horizon reached</td></tr>
+<tr><td><b>6 · fold in</b></td><td>joins the record; recomputes hit, median, avg, pf, calibration buckets, and the blend weight <code>w</code></td><td>unit check: R-events with no <code>sd0</code> are excluded from R aggregates rather than silently mixed with %</td></tr>
+</tbody></table>
+
+<h2>The boot-stamp honesty problem</h2>
+<p>When the server restarts, a condition that was already in force gets a fresh <code>t0</code> — the moment the new process noticed it, not the moment it became true. Every claim opened on a first-build-after-boot is flagged <b>⟲</b>, and the tooltip says exactly what is and isn't trustworthy: the mark and the outcome are honest because they are measured from that stamp forward; only the <i>onset time</i> is a floor rather than the true trigger.</p>
+<div class="note blue"><div class="nh">why identical timestamps appear in clusters</div><p>Several events sharing one timestamp is that boot, not shared bookkeeping. Without the flag it looks like a bug in the ledger — with it, it reads as what it is.</p></div>
+
+<h2>Retention</h2>
+<ul><li>Open claims: all of them, persisted with their frozen geometry</li>
+<li>Resolved: the last <b>4,000</b>, persisted</li>
+<li>Per-ticker history view: the most recent <b>150</b> matching, and it says so rather than implying it showed you everything</li>
+<li>Presence timelines persist across restarts — <b>a deploy is not a lapse</b></li></ul>`);
+
+/* ---------- 5. confluence ---------- */
+G("Signals","Confluence &amp; conflict",
+"Multiple same-side conditions on one name compound — but the bonus has to earn itself out of sample, and it drops to zero if agreement doesn't actually pay.",
+`<h2>The mechanic</h2>
+<div class="formula"><div class="fl">k <span class="op">=</span> count of company signals on this name   <span class="cm">// same-side + context-only</span>
+if (k > 1)  score <span class="op">=</span> min(100, score <span class="op">+</span> min(16, confUnit·(k−1)))
+
+confUnit <span class="op">=</span> measured lift once ≥15 resolutions exist per side, else 8</div>
+<div class="cap">Two caps, deliberately. <code>min(16, …)</code> stops a name with six firing conditions from being scored on quantity; <code>min(100, …)</code> keeps the scale honest.</div></div>
+
+<h2>Direction-awareness</h2>
+${confSvg()}
+<p class="figcap">Hover each case. Context-only signals (coil, volume) count as company for <i>either</i> side — that is their whole purpose. A coil is corroboration for whichever direction eventually expands out of it.</p>
+
+<h2>⇄ conflict</h2>
+<p>When a long-side and a short-side event are both live on one name:</p>
+<ul><li>Both are flagged <b>⇄</b>. Neither gets a confluence bonus — no bonus is granted amid contradiction.</li>
+<li>The chip <b>names its counterparts</b> with their sides and scores. The opposing signal may rank below the visible 40 or be filtered out client-side, and an unnamed conflict reads as a phantom.</li>
+<li>Each claim resolves independently on its own record. The ledger, not the dashboard, decides which side was right.</li></ul>
+
+<div class="note"><div class="nh">the bonus is not a belief</div><p>A confluence bonus asserts that agreement predicts better outcomes. That is a testable claim, so it gets tested: once 15+ resolutions exist on each side, <code>confUnit</code> becomes the <i>measured</i> lift of with-company firings over solo ones. If agreement doesn't prove out, it scales to zero and the mechanic quietly stops applying. Nothing about the UI changes — the number just stops being added.</p></div>`);
+
+/* ---------- 6. shadow variants ---------- */
+G("Signals","Shadow variants &amp; promotion",
+"Every gated event runs 2–3 candidate thresholds simultaneously. Only the incumbent is visible; all of them ledger. A challenger is promoted only on a real out-of-sample beat.",
+`${shadowSvg()}
+<p class="figcap">Hover each lane. The incumbent's claims are visible and scored; challenger claims (<code>vi</code>-stamped) are recorded on identical bookkeeping and never surface to a reader.</p>
+
+<h2>Promotion gate</h2>
+<div class="formula"><div class="fl">promote challenger  <span class="op">if</span>  resolutions ≥ 30 <span class="op">per side</span>
+                    <span class="op">and</span>  expectancy beat is real (not a rounding win)</div>
+<div class="cap">Per side, because a threshold can easily improve longs while wrecking shorts. 30 is the floor at which a difference in mean R is distinguishable from noise on this universe's correlation structure.</div></div>
+
+<h2>Worked example — fundflip run-length threshold</h2>
+<table><thead><tr><th>lane</th><th>threshold</th><th>resolved L / S</th><th>avg R</th><th>status</th></tr></thead><tbody>
+<tr><td><b>incumbent</b></td><td>run ≥ 3 days</td><td>41 / 38</td><td class="pos">+0.22</td><td>visible, scored</td></tr>
+<tr><td>challenger A</td><td>run ≥ 4 days</td><td>34 / 31</td><td class="pos">+0.31</td><td class="amb">gate met on longs, 31 shorts — <b>eligible</b></td></tr>
+<tr><td>challenger B</td><td>run ≥ 5 days</td><td>19 / 16</td><td class="pos">+0.44</td><td class="mut">looks best, <b>blocked</b> — n too thin both sides</td></tr>
+</tbody></table>
+<div class="note"><div class="nh">B is the trap</div><p>The tightest threshold almost always shows the best average, because it selects the most extreme cases and the sample gets small enough for a handful of winners to dominate. Without the per-side resolution floor, this mechanic becomes an automated overfitting machine that ratchets thresholds tighter forever and reports an ever-improving record.</p></div>
+<div class="note good"><div class="nh">why shadows never surface</div><p>A reader seeing three variants of the same event would reasonably read it as three signals, or as the engine hedging. Shadow claims are bookkeeping, not a second opinion — so <code>vi</code>-stamped entries are filtered out of every visible surface: cards, per-ticker history, the record strip.</p></div>`);
+
+/* ---------- 7. re-arm gate ---------- */
+G("Signals","Episode re-arm gate",
+"A condition that stays true for six days is one event, not six. The re-arm gate is what stops persistent states from manufacturing a fake track record.",
+`${rearmSvg()}
+<p class="figcap">Hover each state. The gate is a two-state machine per (name, event) pair, persisted across restarts.</p>
+
+<h2>Without it</h2>
+<table><thead><tr><th>day</th><th>condition</th><th>naive engine</th><th>with the gate</th></tr></thead><tbody>
+<tr><td>Mon</td><td>4/4 stack arrives</td><td class="pos">FIRE</td><td class="pos">FIRE → disarm</td></tr>
+<tr><td>Tue</td><td>still 4/4</td><td class="neg">FIRE</td><td class="mut">held</td></tr>
+<tr><td>Wed</td><td>still 4/4</td><td class="neg">FIRE</td><td class="mut">held</td></tr>
+<tr><td>Thu</td><td>drops to 3/4</td><td class="mut">—</td><td class="mut">re-arm</td></tr>
+<tr><td>Fri</td><td>back to 4/4</td><td class="pos">FIRE</td><td class="pos">FIRE — genuinely new episode</td></tr>
+</tbody></table>
+<p>The naive column records <b>4 claims on one move</b>, all opening within a few points of each other, all resolving together. Every aggregate downstream — hit rate, average R, sample size, the blend weight <code>w</code> — is then computed on four copies of one observation.</p>
+
+<h2>Three things had to persist</h2>
+<ul><li><b>Armed state</b> per (name, event). Without it every deploy re-seeds every scan.</li>
+<li><b>Seen keys</b> with a TTL, so a claim announced before a restart isn't announced again after it.</li>
+<li><b>Presence timelines</b> — when each condition first became true — so "how long has this been in force" survives a restart.</li></ul>
+<div class="note"><div class="nh">the bug this actually fixed</div><p>This app redeploys on every pushed file. Before episode state was persisted, the seed pass ran on every deploy — which meant a trend cross had to complete <i>entirely between two deploys</i> to ever fire. "The trend alerts don't exist" was an accurate description of the result, and nothing in the code looked wrong.</p></div>
+<div class="note blue"><div class="nh">in force at boot ⇒ seeded, not announced</div><p>Three distinct states, not two: never seen (arm it), armed (fire), and disarmed (hold). A condition already true when the process starts lands in <i>seeded</i> — recorded so the next transition is real, deliberately silent so a restart is never an alert storm.</p></div>`);
+
+/* ---------- 8. proven edge gate ---------- */
+G("Signals","Proven-edge gate for chart markers",
+"Signal markers on the report chart are a stronger claim than a signal card — a card says 'this fired', a marker says 'this mattered here'. So markers need a record first.",
+`<h2>The gate</h2>
+<div class="formula"><div class="fl">draw markers for event E on name N  <span class="op">if</span>
+
+    roster-wide:   resolved ≥ 8  <span class="op">and</span>  avg R > 0
+  <span class="op">or</span> name-specific: resolved ≥ 5  <span class="op">and</span>  hit ≥ 60%   <span class="cm">// on N itself</span></div>
+<div class="cap">Two paths because they answer different questions. The roster path asks "does this event work at all"; the name path asks "does this event work <i>here</i>", and accepts a thinner sample for a much stronger local claim.</div></div>
+
+<h2>Suppression is disclosed, not silent</h2>
+<p>When an event fails the gate its markers are withheld — and the legend states the count. A chart that quietly drew nothing would be indistinguishable from a chart where nothing fired, and the reader would draw exactly the wrong conclusion about a clean-looking chart.</p>
+<table><thead><tr><th>event</th><th>resolved (roster)</th><th>avg R</th><th>on this name</th><th>markers</th></tr></thead><tbody>
+<tr><td>breakout</td><td>34</td><td class="pos">+0.41</td><td>3 resolved</td><td class="pos">drawn — roster path</td></tr>
+<tr><td>tretest</td><td>6</td><td class="pos">+0.60</td><td>5 resolved, 80% hit</td><td class="pos">drawn — name path</td></tr>
+<tr><td>fpdiv</td><td>11</td><td class="neg">−0.08</td><td>2 resolved</td><td class="neg">suppressed, disclosed in legend</td></tr>
+<tr><td>casc</td><td>3</td><td class="mut">n/a</td><td>0 resolved</td><td class="neg">suppressed, disclosed in legend</td></tr>
+</tbody></table>
+<div class="note blue"><div class="nh">the escalation principle</div><p>Every surface in the app makes a claim of a different strength, and each has a bar proportional to it. A screener column asserts almost nothing. A signal card asserts "unusual, here's the record". A ledger claim asserts a frozen thesis. A chart marker asserts causation-adjacent relevance at a specific point in history. The bars rise accordingly.</p></div>`);
+
+/* ---------- 9. trend ladder ---------- */
+G("Boards","Trend ladder &amp; retest",
+"Four timeframes, one EMA 13/21 ribbon each, scored by agreement. The retest badge is the only part that becomes a tradeable claim — and the claim reads the board's own output rather than recomputing it.",
+`${ladderSvg()}
+<p class="figcap">Hover each rung. Score = the number of rungs whose ribbon agrees with the read. The visible board gates at ≥3 and ranks top-10 per side.</p>
+
+<h2>The retest condition</h2>
+<div class="formula"><div class="fl">RETEST  <span class="op">if</span>  board-visible (score ≥ 3, top-10 by rank)
+        <span class="op">and</span>  a rung's price probed the 13/21 zone
+        <span class="op">and</span>  that rung's close held EMA21
+
+freeze:  entry <span class="op">=</span> mark
+         void  <span class="op">=</span> that rung's EMA21        <span class="cm">// the ladder value, already computed</span>
+         target<span class="op">=</span> that rung's prior swing   <span class="cm">// null-tolerant</span></div>
+<div class="cap">Board score, rung, R:R and age ride along as <b>recorded features</b> — recorded, not gated. The ledger decides which slices earn trust; the trigger does not pre-judge.</div></div>
+
+<div class="note good"><div class="nh">the cleanest crypto transfer in the roster</div><p>Most events needed a log-space rewrite to enroll crypto, because their geometry was a sigma construction and crypto's return distribution breaks the assumption. tretest needed none: its void is the retesting rung's own EMA21 and its target is that rung's prior swing — both values the ladder already computed and the board already rendered, in price space. Enrollment was one key widening in a loop.</p></div>
+
+<h2>Alert narrowness, on purpose</h2>
+<ul><li>Only the <b>arrival</b> at a full 4/4 fires. Every subsequent tick spent at 4/4 is held by the re-arm gate.</li>
+<li>A ribbon flip requires <b>both sides known</b>. A rung missing an EMA has sign 0 — treating that as a flip fires on every ladder gap, which is a data condition, not a market condition.</li>
+<li><b>D1 only.</b> H12/H4 crossings across ~144 names would be a feed, not an alert. Stated in a comment at the line where it's decided, so the next person to consider widening it sees the reasoning first.</li>
+<li>One event per name per scan; a name leaving the board drops its state, so a return is a genuinely new episode.</li></ul>
+
+<div class="note"><div class="nh">one code path, enforced</div><p>The tretest signal reads the <b>same buildTrend output</b> the tab renders. It does not re-derive the ladder, the zone, or the swing. If it did, the board could show RETEST while the signal disagreed, or vice versa — and every reader would trust whichever they happened to look at. This is the modal lesson applied to the ledger.</p></div>`);
+
+/* ---------- 10. levels ---------- */
+G("Boards","Level detection &amp; the void snap",
+"Levels are pivot clusters, not round numbers. And because an AI-proposed void is allowed to snap to one, the levels themselves get measured against a random-walk null.",
+`<h2>Clustering</h2>
+<div class="formula"><div class="fl">tau <span class="op">=</span> max(tauMult · sd30, 0.5) / 100        <span class="cm">// tolerance, volatility-scaled</span>
+sort pivots by price
+for each pivot:
+    if |p / cluster.<span class="op">runningMean</span> − 1| ≤ tau  <span class="op">→</span> join, recompute mean
+    else                                     <span class="op">→</span> start new cluster
+keep clusters with ≥ minN touches
+side <span class="op">=</span> all highs ? "res" : all lows ? "sup" : "flip"</div>
+<div class="cap">Chained against the <b>running mean</b>, not the seed pivot. Comparing to the seed lets a long chain drift arbitrarily far past tau — twenty pivots each within tolerance of the previous one can span several percent, and the "level" ends up being a region with a price attached.</div></div>
+<p>Levels are then sorted by <b>absolute distance from spot</b> and the nearest <code>maxOut</code> kept — those are the levels a void could plausibly sit on — then re-sorted high→low for presentation.</p>
+
+<h2>Do the levels do anything? — the outcome study</h2>
+<p>detectLevels already decides which levels the app draws and which levels an AI-proposed void may snap to. Nothing measured whether they hold. The study walks the daily tape, re-detects levels <b>from the prefix only</b> at a fixed stride, and watches each forward over a fixed horizon — so every observation is out of sample with respect to the bars that produced it.</p>
+<div class="formula"><div class="fl">null baseline:  P(touch) <span class="op">=</span> 2·(1 − Φ(d / √h))
+                <span class="cm">// driftless walk, per-bar sd 1, level d sd away, h bars</span></div>
+<div class="cap">Φ implemented as Abramowitz &amp; Stegun 7.1.26 — hand-rolled, because the zero-dependency rule applies here as everywhere else.</div></div>
+${touchSvg()}
+<p class="figcap">Hover the curve. A level 0.2σ away gets touched almost every time — that is <b>geometry, not structure</b>, and it is exactly why a raw touch rate is a meaningless statistic without this null to measure against.</p>
+<h2>Two questions, one of which matters more</h2>
+<ul><li><b>Touch:</b> is a detected level reached more often than distance alone implies? Interesting.</li>
+<li><b>Hold:</b> once touched, is the close rejected back to the origin side, or does it break through? <b>This is the one that matters for a void.</b></li></ul>
+<div class="note"><div class="nh">the sentence that motivated the study</div><p>A void on a level that breaks 70% of the time is not an invalidation point. It is a stop-loss donation. The snap rule was silently betting on an unmeasured property of these levels, and it should not have shipped without something checking that bet.</p></div>`);
+
+/* ---------- 11. squeeze ---------- */
+G("Boards","Squeeze composite",
+"Three ingredients — crowding, fuel, trigger — multiplied by a crowding gate so that no amount of fuel or position matters if the shorts aren't actually paying.",
+`<div class="formula"><div class="fl">fAPR  <span class="op">=</span> funding7d · 24 · 365 · 100
+crowd <span class="op">=</span> fAPR &lt; 0 ? tanh(−fAPR / 35) : <span class="neg">0</span>      <span class="cm">// gate: no crowding, no setup</span>
+fuel  <span class="op">=</span> tanh(max(0, ΔOI7d) / 8)
+trig  <span class="op">=</span> clamp((px − lo30) / (hi30 − lo30), 0, 1)
+
+sqz   <span class="op">=</span> round(100 · crowd · (0.45 <span class="op">+</span> 0.30·fuel <span class="op">+</span> 0.25·trig))</div>
+<div class="cap">The weights sum to 1.00, so <code>crowd</code> sets the ceiling and the other two decide where in that ceiling you land. A fully crowded name with no OI build and price at the range low still scores 45% of its crowding.</div></div>
+<h2>Worked examples</h2>
+<table><thead><tr><th>case</th><th>fAPR</th><th>crowd</th><th>ΔOI7d</th><th>fuel</th><th>range pos</th><th>trig</th><th>sqz</th></tr></thead><tbody>
+<tr><td>textbook</td><td class="neg">−48%</td><td>0.88</td><td>+14%</td><td>0.94</td><td>0.91</td><td>0.91</td><td class="pos"><b>85</b></td></tr>
+<tr><td>crowded, no fuel</td><td class="neg">−48%</td><td>0.88</td><td>−3%</td><td>0.00</td><td>0.40</td><td>0.40</td><td class="amb"><b>48</b></td></tr>
+<tr><td>loaded, not crowded</td><td class="pos">+12%</td><td class="neg">0.00</td><td>+18%</td><td>0.99</td><td>0.95</td><td>0.95</td><td class="neg"><b>0</b></td></tr>
+<tr><td>mild everything</td><td class="neg">−9%</td><td>0.25</td><td>+4%</td><td>0.46</td><td>0.60</td><td>0.60</td><td class="mut"><b>18</b></td></tr>
+</tbody></table>
+<div class="note blue"><div class="nh">why crowding is multiplicative and the rest additive</div><p>A squeeze <i>is</i> crowded shorts being forced out. Without the crowding there is no fuel to burn, so it must gate the whole thing to zero rather than contribute a share. Fuel and trigger are corroborating conditions — each makes the setup better, neither is load-bearing. Row three is the case that makes this concrete: perfect position, perfect OI build, and nothing to squeeze.</p></div>
+<div class="note"><div class="nh">no study yet, and it says so</div><p>squeeze and unwind carry no historical base rate: they need longer OI history than exists. They score on intensity alone, flagged <i>unproven</i>, and their evidence contribution is the 6–8 point token. That's a deliberate placeholder state, not an oversight — and it will resolve itself as the append-only OI log accrues.</p></div>`);
+
+/* ---------- 12. sessions ---------- */
+G("Studies","Session decomposition",
+"Rebuild what an overnight, weekend, or cash hold actually paid — one equal-weight bet per calendar boundary, compounded, gross and net of funding.",
+`${sessSvg()}
+<p class="figcap">Hover each stage of the pipeline.</p>
+<h2>Anchors, per universe</h2>
+<table><thead><tr><th>universe</th><th>legs</th><th>why</th></tr></thead><tbody>
+<tr><td><b>xyz equities</b></td><td>overnight (close→open) · weekend (Fri→Mon) · cash (open→close)</td><td>a cash session exists, so the three holds partition the week</td></tr>
+<tr><td><b>crypto perps</b></td><td>UTC day (00:00→24:00) · weekend (Fri→Mon)</td><td>no cash leg exists on a continuous book. The UTC day is the holding-period analogue.</td></tr>
+</tbody></table>
+<h2>Pooling</h2>
+<div class="formula"><div class="fl">for each boundary b:
+    ret(b) <span class="op">=</span> mean over every eligible ticker that traded b   <span class="cm">// equal weight</span>
+curve  <span class="op">=</span> compound(ret(b) for b in order)
+net(b) <span class="op">=</span> ret(b) − funding paid over the hold</div>
+<div class="cap">One equal-weight <b>bet</b> per boundary, not per ticker-boundary. Otherwise a day where 80 names traded outweighs a day where 20 did, and the curve becomes a coverage chart wearing a returns chart's clothes.</div></div>
+<h2>Gates before it publishes at all</h2>
+<ul><li><code>SESSION_MIN_SPINE = 72h</code> — a ticker needs ≥3 days of hourly candles to contribute a boundary</li>
+<li><code>SESSION_MIN_EQUITIES = 5</code> — the class must be broad enough or the study doesn't publish; the panel says "computing — needs 5, have 3"</li></ul>
+<h2>The funding-known fraction</h2>
+<p>Net is only as deep as the funding spine, which is shallower than the price spine. Each curve therefore carries a <b>per-boundary funding-known fraction</b> and a horizon timestamp, and the client renders net as <i>approximate</i> before that horizon rather than drawing a confident line through a period where the funding cost was partly unknown.</p>
+<div class="note"><div class="nh">the shaded band is the whole point</div><p>The gap between gross and net is the running funding drag. An edge that dies net-of-funding is not an edge — it's a donation to the venue. A rising overnight curve while the cash curve is flat is the classic overnight effect; the drawer's per-name "where the 30d return happened" split asks the same question one ticker at a time.</p></div>`);
+
+/* ---------- 13. seasonality ---------- */
+G("Studies","Seasonality significance test",
+"The most quarantined study in the app, because it is the single easiest place to hallucinate a pattern. It ships significance-flagged so the client cannot present a coin flip as a finding.",
+`<h2>Cross-sectional by default</h2>
+<div class="formula"><div class="fl">for each ET hour h:
+    a <span class="op">=</span> [ per-ticker mean return at h ]     <span class="cm">// one TICKER = one observation</span>
+    if a.length &lt; 3  <span class="op">→</span> null, not 0
+    mean <span class="op">=</span> Σa / n
+    sd   <span class="op">=</span> sqrt(Σ(x−mean)² / (n−1))
+    se   <span class="op">=</span> sd / √n
+    t    <span class="op">=</span> mean / se
+flag hour if |t| ≥ 2</div>
+<div class="cap">One ticker = one observation. Using every candle instead would inflate n by a factor of the sample length and manufacture significance out of pseudo-replication — 84 names × 180 days of a 24-hour grid is a very large number of very non-independent observations.</div></div>
+${tSvg()}
+<p class="figcap">Hover each hour. Only bars past |t| ≥ 2 are highlighted; everything else stays visibly present but unflagged, because hiding the null result would misrepresent how much of the grid is noise.</p>
+<h2>Three drill-down scopes, decreasing trust</h2>
+<table><thead><tr><th>scope</th><th>observation unit</th><th>caveat shown</th></tr></thead><tbody>
+<tr><td><b>universe</b> (default)</td><td>one ticker</td><td>the standard significance flag</td></tr>
+<tr><td><b>sector</b></td><td>one member ticker</td><td>same test, smaller n — flags get rarer honestly</td></tr>
+<tr><td><b>ticker</b></td><td>one day (within-name time series)</td><td>noisier, labeled with <b>extra</b> caution</td></tr>
+</tbody></table>
+<div class="note"><div class="nh">not applicable to crypto, and it says so</div><p>This is a by-sector cross-sectional test and the crypto book is one class — there is nothing to run it across. The panel states that in words rather than showing an empty chart, because an empty chart reads as a bug or as "no seasonality found", and neither is true.</p></div>
+<div class="note blue"><div class="nh">never a standalone signal</div><p>The payload itself carries the significance flags, so a client cannot accidentally render a t = 0.4 hour with the same weight as a t = 2.8 one. Quarantine enforced at the data layer, not by UI discipline.</p></div>`);
+
+/* ---------- 14. mom duel ---------- */
+G("Studies","MOM vs MOM+ duel",
+"A candidate momentum score runs alongside the incumbent every day. The verdict is a paired t-test on the daily difference — the anti-eyeball number.",
+`<h2>The variant multipliers</h2>
+<div class="formula"><div class="fl"><span class="cm">V2 — OI corroboration</span>
+if ΔOI7d > 0:  c <span class="op">=</span> funding agrees ? 1 : (against ? 0 : 0.5)
+               mult <span class="op">=</span> 1 <span class="op">+</span> 0.4·tanh(ΔOI/8)·(0.5 <span class="op">+</span> 0.5·c)
+if ΔOI7d &lt; 0:  mult <span class="op">=</span> 1 − 0.2·tanh(−ΔOI/8)
+               clamp to [0.6, 1.4]
+
+<span class="cm">V3 — funding-crowding haircut</span>
+if score > 0 <span class="op">and</span> fAPR > 0 <span class="op">and</span> fundPct ≥ 90  <span class="op">→</span> ×0.8
+if score &lt; 0 <span class="op">and</span> fAPR &lt; 0 <span class="op">and</span> fundPct ≤ 10  <span class="op">→</span> ×0.8
+
+<span class="cm">V4 — volume participation</span>
+mult <span class="op">=</span> clamp(1 <span class="op">+</span> 0.15·tanh(ln(vol5 / vol30) / 0.4), 0.85, 1.15)
+
+<span class="cm">squash, both scores</span>
+out <span class="op">=</span> 100 · tanh(core / 1.5)</div>
+<div class="cap">Every multiplier is bounded and every bound is deliberate. Participation caps at ±15% because a move on volume should <i>outrank</i> the same move on air, not dominate it. The crowding haircut is a flat ×0.8 rather than a curve because the claim is categorical: the crowd is at a monthly extreme on your side, take a fifth off.</div></div>
+<div class="note"><div class="nh">the flat-distribution trap in V3</div><p>The percentile rank uses <code>≤</code>, so on a market whose funding has been perfectly flat for 31 days every value ranks 1.0 — and the haircut would tax <i>every</i> flat-funding name in the universe. The guard is explicit: only compute a rank when <code>max &gt; min</code> over the window. This is the kind of bug that produces a plausible-looking board and no error anywhere.</p></div>
+
+<h2>The verdict</h2>
+<div class="formula"><div class="fl">daily:  IC <span class="op">=</span> spearman(scores, forward returns)   <span class="cm">// pearson of average ranks</span>
+        null when either side is degenerate — an honest dash, not a fabricated 0
+
+verdict:  d <span class="op">=</span> IC_B − IC_A per day
+          t <span class="op">=</span> mean(d) / (sd(d)/√n)      <span class="cm">// PAIRED</span>
+          unlocks at n ≥ minN days <span class="op">or</span> |t| ≥ 2, whichever comes first
+          until then the panel refuses to call a winner</div></div>
+<table><thead><tr><th>day</th><th>IC · MOM</th><th>IC · MOM+</th><th>d</th></tr></thead><tbody>
+<tr><td>1</td><td>0.09</td><td>0.14</td><td class="pos">+0.05</td></tr>
+<tr><td>2</td><td class="neg">−0.04</td><td class="neg">−0.01</td><td class="pos">+0.03</td></tr>
+<tr><td>3</td><td>0.21</td><td>0.18</td><td class="neg">−0.03</td></tr>
+<tr><td>4</td><td>0.02</td><td>0.11</td><td class="pos">+0.09</td></tr>
+<tr><td colspan="3"><b>mean d = +0.035 · sd = 0.051 · t = 1.37</b></td><td class="mut">no verdict</td></tr>
+</tbody></table>
+<div class="note good"><div class="nh">why paired, and why on the difference</div><p>Both scores see the identical universe on the identical day, so market-wide IC swings are shared noise. Testing the <b>difference</b> cancels them and asks only "did B beat A", which is the actual question. Comparing two mean ICs independently would be dominated by whether the tape happened to trend during the sample.</p></div>
+<div class="note blue"><div class="nh">it persists</div><p>The IC record is written to the volume, so it carries across deploys. Given that this app redeploys on every pushed file, a duel record living in memory would reset to n = 1 several times a day and never reach any verdict at all.</p></div>`);
+
+/* ---------- 15. regime ---------- */
+G("Studies","Regime aggregate",
+"Two questions about the whole book — how crowded, how leveraged — reconstructed entirely from spines that have been accruing since day one.",
+`<h2>The two axes</h2>
+<table><thead><tr><th>axis</th><th>built from</th><th>extreme means</th></tr></thead><tbody>
+<tr><td><b>crowding</b></td><td>OI-weighted funding across names, plus the breadth of percentile-extreme funding readings</td><td>positive: longs crowded · negative: shorts crowded</td></tr>
+<tr><td><b>leverage</b></td><td>aggregate OI and its stretch z-score vs its own 60-day history</td><td>positive: leverage stretched · negative: leverage flushed</td></tr>
+</tbody></table>
+<p>Both are computed per scope — crypto, stocks, and both combined. The two universes live in separate rosters by design, so the combined view explicitly unions them here rather than filtering one list by a universe field; that canonical split is what makes the crypto side populate at all.</p>
+<h2>Why it needed no new persistence</h2>
+<p>The <code>[ts, oi, funding]</code> spines have been written to the volume since the first build, for entirely different reasons. The regime aggregate is a pure reconstruction from them over a 60-day window — no new writes, no new schema, and a full 60 days of history available the moment the feature shipped rather than starting from empty.</p>
+<h2>Firing an extreme</h2>
+${regimeSvg()}
+<p class="figcap">Hover each state. One re-arm gate per (scope, metric) pair — so crowding and leverage extremes are independent episodes, and an extreme in crypto doesn't consume the equity side's arm.</p>
+<div class="note blue"><div class="nh">context, not a ledger signal</div><p>Regime is deliberately not a per-name ledgered claim. It has no side, no void, no target for any individual market — it describes the tape. Giving it ledger machinery would have meant inventing geometry it doesn't have, which is exactly the line the frozen-geometry rule draws.</p></div>`);
+
+/* ---------- 16. push pipeline ---------- */
+G("Plumbing","Push pipeline",
+"One sequenced stream, two consumers, five gates in a fixed order. Every gate exists because something got through the version without it.",
+`${pushSvg()}
+<p class="figcap">Hover each gate.</p>
+<h2>The gates, in order</h2>
+<table><thead><tr><th>#</th><th>gate</th><th>rejects</th><th>the incident behind it</th></tr></thead><tbody>
+<tr><td>1</td><td><code>ev.quiet</code></td><td>events worth logging, worthless as interruptions</td><td>deploy notices — the app redeploys per pushed file, so one build fired five identical DMs</td></tr>
+<tr><td>2</td><td><code>sub.muted</code></td><td>everything, for that recipient</td><td>muting had to be its own control, separate from class selection</td></tr>
+<tr><td>3</td><td>class known + admin check</td><td>unknown classes; ops to non-operators</td><td>ops is operator-only in delivery <b>and</b> in the feed — nobody can opt in by naming the class</td></tr>
+<tr><td>4</td><td>class subscription</td><td>classes this person didn't choose</td><td>an <b>absent</b> list falls back to the frozen default four, not to everything — so adding a class can never retroactively subscribe anyone</td></tr>
+<tr><td>5</td><td><code>trigEligible</code> (setups only)</td><td>setups below this person's EV / R:R / lateness bars</td><td><b>delegated</b>, not reimplemented — this is what stops the browser and the bot announcing different things</td></tr>
+</tbody></table>
+<div class="note good"><div class="nh">gate 5 is the important one architecturally</div><p>The setup class calls the same <code>trigEligible</code> the browser calls. A re-implementation would have been simpler to write and would have drifted within weeks — which is the specific failure this whole stream was built to prevent. There is exactly one definition of "worth surfacing".</p></div>
+
+<h2>The outbox</h2>
+<ul><li><b>Bounded batches</b> with disclosed overflow: "+4 more held" appears in the message. Events past the cap are counted, never vanished.</li>
+<li><b>Body-limit splitting</b>: a batch that would exceed Telegram's limit splits into two messages rather than being rejected wholesale.</li>
+<li><b>HTML escaping</b> before <code>parse_mode=HTML</code>, ampersand first — escaping it after the angle brackets would double-escape the entities just introduced. Telegram understands exactly five entities; anything else 400s and the alert is lost.</li>
+<li><b>15s abort</b> on every call. The outbox drains sequentially, so one hung request would stall the entire alert lane.</li></ul>
+
+<h2>The drain picks eligible, not first</h2>
+<div class="formula"><div class="fl">idx <span class="op">=</span> queue.findIndex(q <span class="op">=&gt;</span> !q.after <span class="op">||</span> q.after <span class="op">&lt;=</span> now)
+<span class="cm">// every removal — success, 4xx drop, give-up — targets idx, never shift()</span></div>
+<div class="cap">A message deferred to 07:00 by quiet hours sitting at the head of the queue would block every urgent message behind it for hours. All three removal paths splice by index; a single <code>shift()</code> anywhere in the drain reintroduces the bug.</div></div>
+
+<h2>Message grammar</h2>
+<div class="formula"><div class="fl">⚡ <b>HOOD</b> 🟢 LONG
+&lt;pre&gt;entry   42.1
+void    40.5
+target  46.0
+R:R     2.4&lt;/pre&gt;
+n=12 · 58% hit · 5d horizon
+https://…/#t=HOOD</div>
+<div class="cap">The <code>&lt;pre&gt;</code> is load-bearing. Telegram has no colour, so column-aligned numbers in a monospace block are the only thing carrying the terminal feel — and the eye still lands on the void in the same place every time. No PUBLIC_URL means no link, not a broken one. An unformattable event yields null rather than a half-message.</div></div>`);
+
+/* ---------- 17. flags ---------- */
+G("Plumbing","Flag resolution",
+"Three states per feature, resolved server-side per request, injected pre-paint. Keys fail closed; routes fail open. That asymmetry is the interesting part.",
+`${flagSvg()}
+<p class="figcap">Hover each decision point.</p>
+<h2>The asymmetry</h2>
+<table><thead><tr><th></th><th>unlisted key</th><th>unclaimed route</th></tr></thead><tbody>
+<tr><td><b>resolves to</b></td><td>admin — <b>fail closed</b></td><td>ungated — <b>fail open</b></td></tr>
+<tr><td><b>consequence of being wrong</b></td><td>a new feature is invisible to the group until someone notices</td><td>a route is reachable that was meant to be gated</td></tr>
+<tr><td><b>consequence of the opposite default</b></td><td>a feature shipped without a manifest entry is silently public</td><td><b>every</b> unlisted route 403s and the whole app goes dark on the first deploy</td></tr>
+<tr><td><b>closed by</b></td><td>mechanically — the manifest test fails on any tab without an entry</td><td>review</td></tr>
+</tbody></table>
+<div class="note"><div class="nh">do not "fix" this</div><p>The asymmetry looks like an oversight and reads like one in a code review. It is documented at the definition with an instruction to read the test comment first, because defaulting routes closed is a one-line change that darks the entire app on the next deploy — and the failure presents as "the app is broken", not as "a flag default changed".</p></div>
+
+<h2>pin and lock — the two states that must not be reachable</h2>
+<table><thead><tr><th>feature</th><th>modifier</th><th>if it could be changed</th></tr></thead><tbody>
+<tr><td><b>markets</b></td><td><code>pin</code> — always public</td><td>every gated view falls through to Markets. Hide it and a public visitor lands on a blank app with no way out.</td></tr>
+<tr><td><b>admin</b></td><td><code>lock</code> — always admin, never off</td><td>public would hand the whole switchboard to the group. Off would lock the operator out with no way back but a redeploy.</td></tr>
+</tbody></table>
+<p>Both are enforced in three places, because one is not enough: <code>featureState</code> honours them ahead of any stored value, <code>setFlag</code> refuses a write, and the sanitizer drops them at load so a hand-edited <code>flags.json</code> cannot smuggle one in either.</p>
+
+<h2>FEATURE_NEVER_GATE</h2>
+<div class="formula"><div class="fl">/api/health · /login · /logout · /api/ai-unlock · /api/ai-lock · /api/ai-status · /api/features</div>
+<div class="cap">Consulted <b>first</b>, before any flag. Gating the unlock route is a one-way door: no admin cookie, no way to mint one, no way back in without a redeploy. Gating /api/health makes Railway's healthcheck 401 and the deploy restart-loops — the same reason the site gate exempts it.</div></div>
+
+<h2>Pre-paint injection</h2>
+<ul><li>The shell is split <b>once at boot</b> around a fixed placeholder; a request is a two-part concat, not a 23 KB string scan per hit</li>
+<li>The resolved set is computed for <b>this caller</b> and injected into <code>&lt;head&gt;</code>, before the app.js tag — so a gated tab is never in the markup, not even for one frame</li>
+<li>The shell is <code>no-store</code>. That is what makes a per-audience body safe: no shared cache can hand a public visitor the admin shell.</li>
+<li>A missing placeholder logs a WARN and degrades to serving the shell unmodified. The client then fails <b>open</b> and shows everything — but the routes still 403, so a failed injection costs a cosmetic leak, never actual access.</li>
+<li><code>tabVisible()</code> is the single client composition point: scope AND flags. Nothing anywhere recomputes a visibility from a raw flag.</li></ul>
+<div class="note blue"><div class="nh">the Admin tab bypasses its own flag</div><p>Deliberately circular otherwise: "view as public" swaps in the public set, which hides the Admin panel, which removes the toggle that turns view-as-public back off. The tab keys off <code>IS_ADMIN</code> directly. Its manifest entry still exists with <code>lock:true</code> so the markup→manifest join holds and no write can ever open it.</p></div>`);
+
+/* ---------- 18. etag ---------- */
+G("Plumbing","ETag lifecycle",
+"Two caching helpers that look interchangeable and are not. Using the wrong one on candles is a correctness bug, not a performance miss.",
+`${etagSvg()}
+<p class="figcap">Hover each path.</p>
+<h2>serveCached — content-signature ETag</h2>
+<div class="formula"><div class="fl">etag <span class="op">=</span> W/"&lt;dataTs&gt;"        <span class="cm">// the payload's own version stamp</span>
+if (req.if-none-match === etag)  <span class="op">→</span> 304, empty body
+else                             <span class="op">→</span> 200 <span class="op">+</span> body <span class="op">+</span> etag</div>
+<div class="cap">Works because these payloads are <b>singletons</b>: there is exactly one current snapshot, one current daily, one current signals payload. One resource, one version, one tag.</div></div>
+<h2>serveKeyed — per-resource ETag + gzip memo</h2>
+<div class="formula"><div class="fl">etag <span class="op">=</span> W/"candles|&lt;coin&gt;|&lt;tf&gt;|&lt;version&gt;"
+memo: pre-serialized <span class="op">+</span> pre-gzipped body, keyed the same way</div>
+<div class="cap">Candles and series are <b>families</b>: ~144 coins × 4 timeframes. They carry no <code>dataTs</code>, so under serveCached every one of them would compute the same <code>W/"0"</code>.</div></div>
+<div class="note"><div class="nh">the actual failure, spelled out</div><p>Client requests HOOD's D1 chart, receives <code>W/"0"</code>. Client then requests NVDA's D1 chart and sends <code>If-None-Match: W/"0"</code>. Server computes <code>W/"0"</code> for NVDA, they match, and it returns <b>304 Not Modified</b> — so the browser renders its cached HOOD candles under NVDA's header. Nothing errors. Nothing logs. The chart is simply the wrong company's price history, and it looks completely normal.</p></div>
+<p>The test suite pins all four halves of this: <code>serveKeyed</code> and <code>sendCachedBody</code> must exist, candles and series must route through <code>serveKeyed</code>, candles must <b>not</b> be <code>no-store</code>, and the key format must contain the coin.</p>
+<h2>The one no-store exception</h2>
+<p>The HTML shell. Its body is audience-specific by construction, so it must never be cached anywhere — and because it is uncacheable, injecting a per-request feature set into it is safe. The two properties depend on each other.</p>`);
+
+/* ---------- 19. spine ---------- */
+G("Plumbing","Data spine &amp; WS arbitration",
+"The socket accelerates; REST stays the source of truth about membership. Neither is trusted to notice its own death.",
+`${spineSvg()}
+<p class="figcap">Hover each component.</p>
+<h2>Arbitration</h2>
+<div class="formula"><div class="fl">every UNIVERSE_MS tick:
+    universeTick++
+    if (socket healthy <span class="op">and</span> universeTick % 5 !== 0)  <span class="op">→</span> skip the REST poll
+    else                                          <span class="op">→</span> full REST poll</div>
+<div class="cap">While the socket is healthy REST drops to every 5th tick (~150s). It never stops entirely, because the socket carries <b>contexts</b>, not <b>membership</b> — a new HIP-3 listing or a delisting is only visible through the REST universe call.</div></div>
+<h2>The watchdog</h2>
+<div class="formula"><div class="fl">WS_STALE_MS <span class="op">=</span> 120_000        <span class="cm">// two missed ping cycles of total silence</span>
+
+on ping tick:
+    if (now − lastMsg > WS_STALE_MS)  <span class="op">→</span> ws.close(); return   <span class="cm">// check BEFORE pinging</span>
+    else ping()
+
+on open:   lastMsg <span class="op">=</span> now      <span class="cm">// armed at open</span>
+on close:  clearInterval(ping); retry() <span class="cm">// backoff → reconnect</span></div>
+<div class="cap">Two ordering details carry the whole guard. Checking staleness <b>before</b> pinging means a mute socket is force-closed rather than pinged forever into the void. Arming <code>lastMsg</code> at open means a socket that never delivers even one message is caught too — the case a "time since last message" check initialized to zero would miss forever.</div></div>
+<div class="note blue"><div class="nh">close() is the recovery path, not a giveup</div><p>The watchdog doesn't reconnect. It calls <code>close()</code>, which routes into the existing <code>onclose</code> → backoff → reconnect chain that already handles every other disconnection. One recovery path, entered from two places.</p></div>
+
+<h2>Backfill</h2>
+<ul><li>Two hourly workers and two daily workers, running concurrently against the weight-based rate limiter</li>
+<li>Per-market backoff windows (<code>hFailUntil</code>, <code>dFailUntil</code>, <code>fFailUntil</code>) so a persistently failing name doesn't consume the whole budget</li>
+<li>New listings <b>jump the queue</b> — a market detected this cycle gets its history immediately, logged as <code>NEW market detected</code></li>
+<li>A daily audit line logs the active count and anything still awaiting backfill</li>
+<li>Queue depth, fail counts and limiter utilization all surface in <code>/api/health</code></li></ul>
+
+<h2>Persistence rules</h2>
+<table><thead><tr><th>data</th><th>strategy</th><th>why</th></tr></thead><tbody>
+<tr><td>OI samples</td><td>append-only log, pruned to 31d</td><td>open interest <b>cannot be re-fetched</b>. A missed sample is gone forever.</td></tr>
+<tr><td>hourly spine</td><td>NDJSON, async write, awaited on shutdown, <b>skipped on crash</b></td><td>it self-heals from REST on boot, so a crash-time write is risk without benefit</td></tr>
+<tr><td>computed features</td><td>cached to volume</td><td>a redeploy serves a warm table instantly instead of a spinner</td></tr>
+<tr><td>daily OHLC</td><td>rebuilt from the hourly spine via <code>bucketCandles</code></td><td>one source of truth. This fixed warm-cache closes-only bars being treated as fresh.</td></tr>
+</tbody></table>
+<div class="note"><div class="nh">per-universe transport lanes</div><p><code>capPerUniverse</code> exists because a shared rate-limit budget is not neutral: on a volatile crypto day the crypto lane consumes it and the equity board's backfill silently starves. Each universe gets its own budget and neither can evict the other.</p></div>`);
+
+/* ---------- 20. ai pipeline ---------- */
+G("Plumbing","AI report pipeline",
+"A synthesis layer with a hard boundary: the model writes prose, the server computes every number, and the validator enforces the difference.",
+`${aiSvg()}
+<p class="figcap">Hover each stage.</p>
+<h2>The boundary</h2>
+<table><thead><tr><th>the model produces</th><th>the server produces</th></tr></thead><tbody>
+<tr><td>the plain-language read, the narrative, the scenario descriptions</td><td>every level, every R:R, every expected value, every probability anchor</td></tr>
+<tr><td>which levels to <i>reference</i> (snapped to detected levels within tolerance)</td><td>the level list it may choose from</td></tr>
+<tr><td>the shape of the action block</td><td>the EV-at-entry, and the downgrade to "wait" when it's negative</td></tr>
+</tbody></table>
+<div class="note good"><div class="nh">the risk unit is not negotiable</div><p>The risk unit is the distance from generation price to the void. When a live claim exists on that name, <b>the void IS that claim's frozen stop</b> — the model cannot move it, cannot argue with it, cannot propose a tighter one. Without this the report becomes a second opinion competing with the ledger, and a reader has two numbers and no way to choose.</p></div>
+
+<h2>Validator rules</h2>
+<table><thead><tr><th>rule</th><th>rejects</th><th>reasoning</th></tr></thead><tbody>
+<tr><td>EMA annotations banned as levels</td><td>"support at the 21 EMA"</td><td>an EMA moves. A level that moves is not a level, and a void on one is not an invalidation point.</td></tr>
+<tr><td>directional read requires a correctly-<b>sided</b> void</td><td>a short read whose void sits below entry</td><td>an unsided void makes the R:R arithmetically meaningless</td></tr>
+<tr><td>opposing-bias anchors never override the void</td><td>a bullish level cited as a short's invalidation</td><td>the void must be where the thesis <i>dies</i>, not where a counter-thesis lives</td></tr>
+<tr><td>action block mandatory</td><td>a report that ends in "watch for confirmation"</td><td>if the data doesn't support an action, the honest output is <b>"wait"</b> — which is an action</td></tr>
+<tr><td>negative-EV entries downgraded server-side</td><td>an entry the server's own arithmetic says loses money</td><td>the model doesn't get to overrule the EV computation with confidence</td></tr>
+</tbody></table>
+
+<h2>Caching &amp; the group rate limit</h2>
+<div class="formula"><div class="fl">cache key: coin <span class="op">+</span> AI_SCHEMA_V
+regenerate unlocks on:  TTL expiry
+                        <span class="op">or</span> material change — new claim opened
+                                            <span class="op">|</span> claim resolved
+                                            <span class="op">|</span> earnings print landed
+cooldown: server-enforced (429). The disabled button is convenience.</div>
+<div class="cap">One generation serves the whole group, so the cache <b>is</b> the rate limit by construction rather than by policy. <code>AI_SCHEMA_V</code> invalidates every cached report on deploy — serving a report shaped for an older contract is worse than regenerating.</div></div>
+<div class="note"><div class="nh">it reads the ledger and cannot write to it</div><p>The report has no frozen geometry of its own and never enters the track record. It is not a signal, it does not resolve, and it accrues no record. Letting it ledger would mean a prose synthesis competing on the same scoreboard as mechanical claims with frozen stops — and the whole value of that scoreboard is that everything on it was frozen before the outcome was known.</p></div>`);
+
+/* ================================================================= diagrams ============== */
+function blendSvg(){
+  let pts="",dots="";
+  for(let n=0;n<=120;n++){const w=n/(n+25);const x=60+(n/120)*600,y=200-w*160;
+    pts+=(n?"L":"M")+x.toFixed(1)+","+y.toFixed(1);}
+  [5,25,50,100].forEach(n=>{const w=n/(n+25),x=60+(n/120)*600,y=200-w*160;
+    dots+=`<g class="hv" data-tip="<b>${n} resolved</b><br>w = ${n}/(${n}+25) = <b>${w.toFixed(2)}</b><br>${Math.round(w*100)}% live record, ${Math.round((1-w)*100)}% backtest">
+    <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="11" fill="transparent"/>
+    <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5" fill="var(--amber)"/>
+    <text x="${x.toFixed(1)}" y="${(y-11).toFixed(1)}" text-anchor="middle" class="dlabs">${w.toFixed(2)}</text></g>`;});
+  return `<svg viewBox="0 0 700 230">
+  <line x1="60" y1="200" x2="660" y2="200" class="dln"/><line x1="60" y1="30" x2="60" y2="200" class="dln"/>
+  <line x1="60" y1="120" x2="660" y2="120" stroke="var(--border)" stroke-dasharray="3 4"/>
+  <text x="64" y="116" class="dlabs">w = 0.5 · even split</text>
+  <path d="${pts}" class="dln a" stroke-width="1.8"/>${dots}
+  <text x="60" y="220" class="dlabs">0</text><text x="360" y="220" text-anchor="middle" class="dlabs">resolved claims</text>
+  <text x="660" y="220" text-anchor="end" class="dlabs">120</text>
+  <text x="52" y="34" text-anchor="end" class="dlabs">1.0</text><text x="52" y="204" text-anchor="end" class="dlabs">0</text>
+  <text x="18" y="115" class="dlabs" transform="rotate(-90 18 115)">live weight w</text></svg>`;
+}
+function geoSvg(){
+  const L=[["target",56,"var(--green)","projected from the historical median forward outcome. Null-tolerant: no valid swing means no target, and the claim still ledgers on its stop-aware leg."],
+  ["entry",122,"var(--amber)","the mark at the instant the condition fired. Every outcome is measured from here — including on claims opened at a boot, where only the timestamp is a floor."],
+  ["void",178,"var(--red)","the mechanical level that invalidates the thesis. Per-event, never generic. When an AI report runs on this name, this is the stop it is forbidden from moving."]];
+  return `<svg viewBox="0 0 700 250">
+  <rect x="40" y="30" width="400" height="180" class="dbox"/>
+  ${L.map(([n,y,c,t])=>`<g class="hv" data-tip="<b>${n}</b><br>${t}">
+    <rect x="40" y="${y-13}" width="400" height="26" fill="transparent"/>
+    <line x1="40" y1="${y}" x2="440" y2="${y}" stroke="${c}" stroke-width="1.6" stroke-dasharray="${n==="entry"?"":"5 4"}"/>
+    <text x="46" y="${y-5}" style="fill:${c};font-size:10.5px;letter-spacing:.12em">${n.toUpperCase()}</text></g>`).join("")}
+  <g class="hv" data-tip="<b>R</b> = |entry − void|<br>The risk unit. Every outcome in the ledger is denominated in multiples of this distance, which is what makes a $400 stock and a $3 perp comparable in one aggregate.">
+  <rect x="452" y="115" width="90" height="70" fill="transparent"/>
+  <line x1="466" y1="122" x2="466" y2="178" stroke="var(--purple)" stroke-width="1.4"/>
+  <line x1="462" y1="122" x2="470" y2="122" stroke="var(--purple)"/><line x1="462" y1="178" x2="470" y2="178" stroke="var(--purple)"/>
+  <text x="476" y="154" style="fill:var(--purple);font-size:11px">1 R</text></g>
+  <g class="hv" data-tip="<b>R:R</b> = |target − entry| / R<br>Scored, not just reported: poor structure is penalized in the signal score rather than quietly passed through to the reader.">
+  <rect x="556" y="50" width="120" height="80" fill="transparent"/>
+  <line x1="570" y1="56" x2="570" y2="122" stroke="var(--green)" stroke-width="1.4"/>
+  <line x1="566" y1="56" x2="574" y2="56" stroke="var(--green)"/><line x1="566" y1="122" x2="574" y2="122" stroke="var(--green)"/>
+  <text x="580" y="93" style="fill:var(--green);font-size:11px">R:R × R</text></g>
+  <text x="40" y="232" class="dlabs">frozen at fire · immutable for the life of the claim</text></svg>`;
+}
+function lifeSvg(){
+  const st=[["detect","condition evaluated on the poll cycle, against this market's own history"],
+  ["freeze","side · entry · void · target · R:R · score · sd0 stamped. Key = coin|event."],
+  ["announce","enters the trigger ring as a setup event; browser and Telegram both consume it"],
+  ["count down","open claim with time-to-resolution; coverage alerts guard its data spine"],
+  ["resolve","scored at horizon in the study's own units. realized and realizedS both recorded."],
+  ["fold in","recomputes hit, median, avg, pf, calibration buckets, and the blend weight w"]];
+  const w=104,g=10;
+  return `<svg viewBox="0 0 700 120">
+  ${st.map(([n,t],i)=>{const x=6+i*(w+g);return `<g class="hv" data-tip="<b>${i+1} · ${n}</b><br>${t}">
+    <rect x="${x}" y="34" width="${w}" height="46" class="dbox2" rx="4"/>
+    <text x="${x+w/2}" y="53" text-anchor="middle" class="dlabs">${String(i+1).padStart(2,"0")}</text>
+    <text x="${x+w/2}" y="68" text-anchor="middle" class="dnm" style="font-size:10.5px">${n}</text></g>
+    ${i<st.length-1?`<path d="M${x+w+1},57 L${x+w+g-2},57" class="dln a"/><path d="M${x+w+g-5},54 L${x+w+g-2},57 L${x+w+g-5},60" class="dln a"/>`:""}`;}).join("")}
+  <text x="6" y="99" class="dlabs">grace window guards stage 3 · re-arm gate guards stage 1 · unit check guards stage 6</text></svg>`;
+}
+function confSvg(){
+  const C=[["k = 3 same side","breakout + coil + volume, all long-compatible","+min(16, 8×2) = +16","var(--green)",
+  "Two company signals beyond the first. Context-only flags (coil, volume) count as company for either side — corroborating whichever direction expands."],
+  ["k = 1","one condition, no company","+0","var(--dim)","No bonus. Most signals live here."],
+  ["conflict ⇄","breakout (long) + unwind (short)","+0, both flagged","var(--red)",
+  "No bonus for anyone. Each claim resolves independently — the ledger, not the dashboard, decides which side was right. The chip names its counterparts so the conflict doesn't read as a phantom."]];
+  return `<svg viewBox="0 0 700 190">
+  ${C.map(([n,d,b,c,t],i)=>{const y=18+i*56;return `<g class="hv" data-tip="<b>${n}</b><br>${t}">
+    <rect x="6" y="${y}" width="688" height="46" class="dbox" rx="4"/>
+    <rect x="6" y="${y}" width="3" height="46" fill="${c}"/>
+    <text x="20" y="${y+20}" class="dnm" style="fill:${c}">${n}</text>
+    <text x="20" y="${y+35}" class="dlabs">${d}</text>
+    <text x="686" y="${y+29}" text-anchor="end" class="dlab" style="fill:${c};font-size:11px">${b}</text></g>`;}).join("")}</svg>`;
+}
+function shadowSvg(){
+  const L=[["incumbent","run ≥ 3","visible + ledgered","var(--amber)","Emits signal cards. Its claims are the record the app shows and scores against."],
+  ["challenger A","run ≥ 4","ledgered only (vi-stamped)","var(--purple)","Silent. Opens claims on identical bookkeeping — same mark, same horizon, same resolver."],
+  ["challenger B","run ≥ 5","ledgered only (vi-stamped)","var(--purple)","Silent. Almost always shows the best average, and almost always on too few resolutions to mean anything."]];
+  return `<svg viewBox="0 0 700 200">
+  <text x="6" y="16" class="dlabs">one condition · three thresholds · one visible</text>
+  ${L.map(([n,th,st,c,t],i)=>{const y=28+i*50;return `<g class="hv" data-tip="<b>${n}</b><br>${t}">
+    <rect x="6" y="${y}" width="688" height="42" class="dbox" rx="4"/>
+    <rect x="6" y="${y}" width="3" height="42" fill="${c}"/>
+    <text x="20" y="${y+18}" class="dnm" style="fill:${c};font-size:10.5px">${n}</text>
+    <text x="20" y="${y+33}" class="dlabs">threshold: ${th}</text>
+    <text x="686" y="${y+25}" text-anchor="end" class="dlab">${st}</text></g>`;}).join("")}
+  <text x="6" y="192" class="dlabs">promotion: ≥30 resolutions PER SIDE + a real expectancy beat — n floors are what stop the ratchet</text></svg>`;
+}
+function rearmSvg(){
+  return `<svg viewBox="0 0 700 200">
+  <g class="hv" data-tip="<b>never seen</b><br>No stored state for this (name, event) pair. The first observation arms it rather than firing — so a condition already true at boot is seeded, not announced.">
+  <rect x="20" y="70" width="140" height="52" class="dbox2" rx="4"/><text x="90" y="94" text-anchor="middle" class="dnm">never seen</text>
+  <text x="90" y="109" text-anchor="middle" class="dlabs">→ arm, silent</text></g>
+  <g class="hv" data-tip="<b>armed</b><br>Ready. The next time the condition is true, it fires and immediately disarms.">
+  <rect x="270" y="70" width="140" height="52" class="dbox2" rx="4" stroke="var(--green)"/>
+  <text x="340" y="94" text-anchor="middle" class="dnm" style="fill:var(--green)">armed</text>
+  <text x="340" y="109" text-anchor="middle" class="dlabs">will fire</text></g>
+  <g class="hv" data-tip="<b>disarmed</b><br>The condition is in force and has already been announced. Every subsequent tick is held. Only the condition going FALSE re-arms it.">
+  <rect x="520" y="70" width="150" height="52" class="dbox2" rx="4" stroke="var(--red)"/>
+  <text x="595" y="94" text-anchor="middle" class="dnm" style="fill:var(--red)">disarmed</text>
+  <text x="595" y="109" text-anchor="middle" class="dlabs">held</text></g>
+  <path d="M162,96 L266,96" class="dln"/><path d="M262,93 L266,96 L262,99" class="dln"/>
+  <g class="hv" data-tip="The fire transition. One event per (name, event) episode, whatever its duration."><rect x="410" y="80" width="112" height="32" fill="transparent"/>
+  <path d="M412,96 L516,96" class="dln g"/><path d="M512,93 L516,96 L512,99" class="dln g"/>
+  <text x="464" y="90" text-anchor="middle" class="dlabs" style="fill:var(--green)">FIRE</text></g>
+  <g class="hv" data-tip="Re-arm. The condition went false, so the next occurrence is a genuinely new episode rather than a continuation of the same move.">
+  <rect x="330" y="128" width="280" height="46" fill="transparent"/>
+  <path d="M595,124 L595,158 L340,158 L340,124" class="dln"/><path d="M337,128 L340,124 L343,128" class="dln"/>
+  <text x="468" y="172" text-anchor="middle" class="dlabs">condition went FALSE → re-arm</text></g>
+  <text x="20" y="42" class="dlabs">per (name, event) · persisted across restarts — a deploy is not a re-seed</text></svg>`;
+}
+function ladderSvg(){
+  const R=[["D1","4h",1,"the only rung that fires alerts. H12/H4 crossings across ~144 names would be a feed, not an alert."],
+  ["H12","",1,"contributes to the score; can carry the retest."],
+  ["H4","",1,"contributes to the score; can carry the retest. The chart modal opens on whichever rung is retesting."],
+  ["H1","",0,"contributes to the score. A rung missing an EMA has sign 0 — unknown, deliberately NOT counted as a flip."]];
+  return `<svg viewBox="0 0 700 200">
+  <text x="6" y="16" class="dlabs">EMA 13/21 ribbon per rung · score = rungs in agreement · board gates at ≥3</text>
+  ${R.map(([n,x,ok,t],i)=>{const y=28+i*40;return `<g class="hv" data-tip="<b>${n}</b><br>${t}">
+    <rect x="6" y="${y}" width="688" height="34" class="dbox" rx="3"/>
+    <text x="22" y="${y+22}" class="dnm">${n}</text>
+    <rect x="70" y="${y+11}" width="${ok?380:250}" height="11" fill="${ok?"var(--green)":"var(--faint)"}" opacity="${ok?.28:.18}"/>
+    <line x1="70" y1="${y+13}" x2="${70+(ok?380:250)}" y2="${y+13}" stroke="${ok?"var(--green)":"var(--faint)"}" stroke-width="1.2"/>
+    <line x1="70" y1="${y+20}" x2="${70+(ok?380:250)}" y2="${y+20}" stroke="${ok?"var(--blue)":"var(--faint)"}" stroke-width="1.2"/>
+    <text x="686" y="${y+22}" text-anchor="end" class="dlab" style="fill:${ok?"var(--green)":"var(--faint)"};font-size:10.5px">${ok?"stacked":"unknown — sign 0"}</text></g>`;}).join("")}
+  <text x="6" y="194" class="dlabs">score 3/4 · board-visible · retest on H4 → void = H4's EMA21, target = H4's prior swing</text></svg>`;
+}
+function touchSvg(){
+  const phi=z=>{const s=z<0?-1:1,x=Math.abs(z)/Math.SQRT2,t=1/(1+.3275911*x);
+    const erf=1-((((1.061405429*t-1.453152027)*t+1.421413741)*t-.284496736)*t+.254829592)*t*Math.exp(-x*x);
+    return .5*(1+s*erf);};
+  const h=20;let p="",dots="";
+  for(let i=0;i<=100;i++){const d=i/100*3;const P=2*(1-phi(d/Math.sqrt(h)));
+    p+=(i?"L":"M")+(60+i/100*600).toFixed(1)+","+(190-P*150).toFixed(1);}
+  [0.2,0.5,1,2].forEach(d=>{const P=2*(1-phi(d/Math.sqrt(h)));const x=60+d/3*600,y=190-P*150;
+    dots+=`<g class="hv" data-tip="A level <b>${d}σ</b> away over 20 bars<br>null touch probability = <b>${(P*100).toFixed(0)}%</b><br>${d<=0.5?"This is geometry, not structure — a raw touch rate here says nothing.":"Here a touch rate above the null starts to be informative."}">
+    <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="11" fill="transparent"/>
+    <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5" fill="var(--amber)"/>
+    <text x="${x.toFixed(1)}" y="${(y-10).toFixed(1)}" text-anchor="middle" class="dlabs">${(P*100).toFixed(0)}%</text></g>`;});
+  return `<svg viewBox="0 0 700 220">
+  <line x1="60" y1="190" x2="660" y2="190" class="dln"/><line x1="60" y1="30" x2="60" y2="190" class="dln"/>
+  <path d="${p}" class="dln a" stroke-width="1.8"/>${dots}
+  <text x="360" y="210" text-anchor="middle" class="dlabs">distance to level (σ) · horizon 20 bars</text>
+  <text x="52" y="44" text-anchor="end" class="dlabs">100%</text><text x="52" y="194" text-anchor="end" class="dlabs">0</text>
+  <text x="18" y="120" class="dlabs" transform="rotate(-90 18 120)">P(touch) under a driftless walk</text></svg>`;
+}
+function sessSvg(){
+  const S=[["anchors","boundary timestamps generated per leg — overnight, weekend, cash (or UTC-day for crypto)"],
+  ["runHolds","each ticker's hourly spine walked between anchor pairs, with a 3h tolerance for a missing candle"],
+  ["composite","one equal-weight bet per boundary across every eligible ticker — not per ticker-boundary"],
+  ["compound","per-boundary means chained into gross and net-of-funding equity curves"],
+  ["breadth","how many names stood behind each point, shipped alongside — thin breadth deserves less trust"]];
+  const w=128,g=9;
+  return `<svg viewBox="0 0 700 120">
+  ${S.map(([n,t],i)=>{const x=6+i*(w+g);return `<g class="hv" data-tip="<b>${n}</b><br>${t}">
+    <rect x="${x}" y="34" width="${w}" height="46" class="dbox2" rx="4"/>
+    <text x="${x+w/2}" y="61" text-anchor="middle" class="dnm" style="font-size:10.5px">${n}</text></g>
+    ${i<S.length-1?`<path d="M${x+w+1},57 L${x+w+g-2},57" class="dln a"/>`:""}`;}).join("")}
+  <text x="6" y="99" class="dlabs">gates before publication: ≥72h spine per ticker · ≥5 eligible equities in the class</text></svg>`;
+}
+function tSvg(){
+  const H=[[9,2.8],[10,1.1],[11,-0.4],[12,0.9],[13,-2.3],[14,0.6],[15,1.7],[16,-0.9]];
+  return `<svg viewBox="0 0 700 210">
+  <line x1="60" y1="110" x2="660" y2="110" class="dln"/>
+  ${[2,-2].map(v=>`<line x1="60" y1="${110-v*28}" x2="660" y2="${110-v*28}" stroke="var(--amber)" stroke-dasharray="3 4" opacity=".5"/>
+  <text x="664" y="${114-v*28}" class="dlabs" style="fill:var(--amber)">t=${v>0?"+":""}${v}</text>`).join("")}
+  ${H.map(([h,t],i)=>{const x=80+i*72,sig=Math.abs(t)>=2,bh=t*28;
+    return `<g class="hv" data-tip="<b>${h}:00 ET</b><br>t = <b>${t}</b> · n = 41 tickers<br>${sig?"clears |t| ≥ 2 — <b>flagged</b>":"below the threshold — shown, not flagged. Hiding it would hide how much of this grid is noise."}">
+    <rect x="${x-26}" y="20" width="52" height="170" fill="transparent"/>
+    <rect x="${x-18}" y="${t>0?110-bh:110}" width="36" height="${Math.abs(bh).toFixed(1)}"
+      fill="${sig?(t>0?"var(--green)":"var(--red)"):"var(--faint)"}" opacity="${sig?.75:.3}"/>
+    <text x="${x}" y="205" text-anchor="middle" class="dlabs">${h}:00</text></g>`;}).join("")}
+  <text x="60" y="16" class="dlabs">cross-sectional t per ET hour · one ticker = one observation</text></svg>`;
+}
+function regimeSvg(){
+  const S=[["|v| &lt; ext","not hot","re-arm if disarmed; otherwise nothing. The quiet state.","var(--dim)"],
+  ["|v| ≥ ext, unseen","seed","in force at boot — recorded so the NEXT transition is real, deliberately silent.","var(--blue)"],
+  ["|v| ≥ ext, armed","FIRE","emits a regime event with the direction named in words, then disarms.","var(--green)"],
+  ["|v| ≥ ext, disarmed","hold","still the same episode. No second event.","var(--red)"]];
+  return `<svg viewBox="0 0 700 190">
+  ${S.map(([c,a,t,col],i)=>{const y=12+i*44;return `<g class="hv" data-tip="<b>${a}</b><br>${t}">
+    <rect x="6" y="${y}" width="688" height="38" class="dbox" rx="3"/>
+    <rect x="6" y="${y}" width="3" height="38" fill="${col}"/>
+    <text x="20" y="${y+24}" class="dlab" style="font-size:11px">${c}</text>
+    <text x="686" y="${y+24}" text-anchor="end" class="dnm" style="fill:${col};font-size:10.5px">${a}</text></g>`;}).join("")}
+  <text x="6" y="186" class="dlabs">one gate per (scope, metric) — crowding and leverage are independent episodes, per universe</text></svg>`;
+}
+function pushSvg(){
+  const G=[["quiet","recorded, not delivered — the deploy-notice lesson"],
+  ["muted","this recipient receives nothing, whatever they subscribed to"],
+  ["class known + admin","unknown classes never deliver; ops never leaves the operator"],
+  ["subscription","absent list ⇒ the frozen default four, NOT everything"],
+  ["trigEligible","setups only — delegated to the same function the browser calls"]];
+  const w=126,g=10;
+  return `<svg viewBox="0 0 700 130">
+  <text x="6" y="16" class="dlabs">one event · five gates in a fixed order · any rejection ends it</text>
+  ${G.map(([n,t],i)=>{const x=6+i*(w+g);return `<g class="hv" data-tip="<b>gate ${i+1} · ${n}</b><br>${t}">
+    <rect x="${x}" y="34" width="${w}" height="50" class="dbox2" rx="4"/>
+    <text x="${x+w/2}" y="52" text-anchor="middle" class="dlabs">gate ${i+1}</text>
+    <text x="${x+w/2}" y="70" text-anchor="middle" class="dnm" style="font-size:10px">${n}</text></g>
+    ${i<G.length-1?`<path d="M${x+w+1},59 L${x+w+g-2},59" class="dln a"/>`:""}`;}).join("")}
+  <path d="M669,59 L692,59" class="dln g"/><text x="6" y="108" class="dlabs">passing all five → outbox → batch → drain (first ELIGIBLE, spliced by index)</text></svg>`;
+}
+function flagSvg(){
+  const N=[["NEVER_GATE?",60,"var(--red)","/api/health, /login, /logout and the unlock routes are checked FIRST, before any flag. Gating them is a one-way door."],
+  ["pin / lock?",112,"var(--purple)","markets is always public; admin is always admin. Honoured ahead of any stored value, refused on write, dropped by the sanitizer."],
+  ["stored flag?",164,"var(--amber)","public / admin / off from flags.json on the volume, sanitized at load."],
+  ["unlisted",216,"var(--dim)","Falls to admin — fail closed. A feature shipped without a manifest entry is invisible, not accidentally public."]];
+  return `<svg viewBox="0 0 700 260">
+  ${N.map(([n,y,c,t],i)=>`<g class="hv" data-tip="<b>${n}</b><br>${t}">
+    <rect x="6" y="${y-18}" width="440" height="36" class="dbox" rx="3"/>
+    <rect x="6" y="${y-18}" width="3" height="36" fill="${c}"/>
+    <text x="20" y="${y+4}" class="dnm" style="fill:${c};font-size:11px">${i+1}. ${n}</text>
+    ${i<3?`<path d="M226,${y+19} L226,${y+33}" class="dln"/><path d="M223,${y+30} L226,${y+33} L229,${y+30}" class="dln"/>`:""}</g>`).join("")}
+  <g class="hv" data-tip="<b>routes fail OPEN</b><br>A route no manifest entry claims stays ungated — because the alternative is every unlisted route 403ing and the whole app going dark on the first deploy.">
+  <rect x="466" y="120" width="228" height="80" class="dbox" rx="4" stroke="var(--green)"/>
+  <text x="580" y="148" text-anchor="middle" class="dnm" style="fill:var(--green);font-size:11px">routes: fail OPEN</text>
+  <text x="580" y="166" text-anchor="middle" class="dlabs">unclaimed route stays reachable</text>
+  <text x="580" y="182" text-anchor="middle" class="dlabs">closed by review, not by default</text></g>
+  <text x="6" y="248" class="dlabs">keys fail closed · routes fail open · the tab half is closed mechanically by the manifest test</text></svg>`;
+}
+function etagSvg(){
+  return `<svg viewBox="0 0 700 210">
+  <g class="hv" data-tip="<b>serveCached</b><br>Singleton payloads: one current snapshot, one current daily. ETag is the payload's own dataTs — one resource, one version, one tag.">
+  <rect x="6" y="20" width="336" height="76" class="dbox" rx="4" stroke="var(--green)"/>
+  <text x="22" y="42" class="dnm" style="fill:var(--green)">serveCached</text>
+  <text x="22" y="60" class="dlabs">snapshot · daily · signals · trend · analytics …</text>
+  <text x="22" y="78" class="dlab" style="font-size:10.5px">etag = W/"&lt;dataTs&gt;"</text></g>
+  <g class="hv" data-tip="<b>serveKeyed</b><br>Family payloads: ~144 coins × 4 timeframes, none carrying a dataTs. The key must contain the coin or every member collides on one tag.">
+  <rect x="358" y="20" width="336" height="76" class="dbox" rx="4" stroke="var(--blue)"/>
+  <text x="374" y="42" class="dnm" style="fill:var(--blue)">serveKeyed</text>
+  <text x="374" y="60" class="dlabs">candles · series &nbsp;+ pre-gzipped memo</text>
+  <text x="374" y="78" class="dlab" style="font-size:10.5px">etag = W/"candles|&lt;coin&gt;|&lt;tf&gt;|&lt;ver&gt;"</text></g>
+  <g class="hv" data-tip="<b>The bug</b><br>Request HOOD D1 → receive W/&quot;0&quot;. Request NVDA D1 sending If-None-Match: W/&quot;0&quot; → server computes W/&quot;0&quot; → they match → <b>304</b>. The browser renders cached HOOD candles under NVDA's header. Nothing errors, nothing logs.">
+  <rect x="6" y="112" width="688" height="60" class="dbox" rx="4" stroke="var(--red)"/>
+  <rect x="6" y="112" width="3" height="60" fill="var(--red)"/>
+  <text x="22" y="134" class="dnm" style="fill:var(--red);font-size:11px">what serveCached on candles actually does</text>
+  <text x="22" y="152" class="dlabs">every coin computes W/"0" → a 304 hands the client the WRONG coin's chart</text>
+  <text x="22" y="166" class="dlabs">no error · no log · the chart just belongs to a different company</text></g>
+  <text x="6" y="196" class="dlabs">pinned four ways in the suite: helpers exist · both routes use serveKeyed · candles is not no-store · the key contains the coin</text></svg>`;
+}
+function spineSvg(){
+  return `<svg viewBox="0 0 700 230">
+  <g class="hv" data-tip="<b>WebSocket · allDexsAssetCtxs</b><br>Realtime price / funding / OI at zero rate-limit weight. Carries CONTEXTS only — it knows nothing about membership.">
+  <rect x="6" y="24" width="180" height="52" class="dbox" rx="4" stroke="var(--blue)"/>
+  <text x="20" y="46" class="dnm" style="fill:var(--blue);font-size:11px">WS ctxs</text>
+  <text x="20" y="63" class="dlabs">realtime · zero weight</text></g>
+  <g class="hv" data-tip="<b>REST universe poll</b><br>Owns MEMBERSHIP: names, new HIP-3 listings, delistings. Drops to every 5th tick while the socket is healthy, never to zero.">
+  <rect x="6" y="94" width="180" height="52" class="dbox" rx="4" stroke="var(--amber)"/>
+  <text x="20" y="116" class="dnm" style="fill:var(--amber);font-size:11px">REST poll</text>
+  <text x="20" y="133" class="dlabs">membership · ~150s when healthy</text></g>
+  <g class="hv" data-tip="<b>Watchdog</b><br>WS_STALE_MS = 120s of total silence → force close → onclose → backoff → reconnect. Checked BEFORE pinging; armed at open so a never-delivering socket is caught too.">
+  <rect x="6" y="164" width="180" height="52" class="dbox" rx="4" stroke="var(--red)"/>
+  <text x="20" y="186" class="dnm" style="fill:var(--red);font-size:11px">watchdog 120s</text>
+  <text x="20" y="203" class="dlabs">force-close → reconnect</text></g>
+  <g class="hv" data-tip="<b>Backfill workers</b><br>2 hourly + 2 daily, concurrent against the weight-based limiter. Per-market backoff windows; new listings jump the queue.">
+  <rect x="240" y="59" width="180" height="52" class="dbox2" rx="4"/>
+  <text x="254" y="81" class="dnm" style="font-size:11px">backfill workers</text>
+  <text x="254" y="98" class="dlabs">2 hourly · 2 daily · per-lane backoff</text></g>
+  <g class="hv" data-tip="<b>/data volume</b><br>Append-only OI log (pruned 31d) · hourly NDJSON spine · funding · computed feature cache · ledger · triggers · push · flags.">
+  <rect x="240" y="129" width="180" height="52" class="dbox2" rx="4"/>
+  <text x="254" y="151" class="dnm" style="font-size:11px">/data volume</text>
+  <text x="254" y="168" class="dlabs">append-only where unrepeatable</text></g>
+  <g class="hv" data-tip="<b>bucketCandles</b><br>Daily OHLC rebuilt from the hourly spine rather than fetched separately. One source of truth — and the fix for warm-cache closes-only bars being treated as fresh.">
+  <rect x="474" y="59" width="220" height="52" class="dbox" rx="4" stroke="var(--green)"/>
+  <text x="488" y="81" class="dnm" style="fill:var(--green);font-size:11px">bucketCandles → D1 / H12 / H4</text>
+  <text x="488" y="98" class="dlabs">derived, never separately fetched</text></g>
+  <g class="hv" data-tip="<b>Snapshot build</b><br>Assembled in the poller, stamped with the build version and last-poll time. The amber staleness dot reads that stamp.">
+  <rect x="474" y="129" width="220" height="52" class="dbox" rx="4" stroke="var(--amber)"/>
+  <text x="488" y="151" class="dnm" style="fill:var(--amber);font-size:11px">snapshot / daily / analytics</text>
+  <text x="488" y="168" class="dlabs">version + last-poll stamped</text></g>
+  <path d="M188,50 L238,72" class="dln"/><path d="M188,120 L238,90" class="dln"/><path d="M188,190 L238,155" class="dln"/>
+  <path d="M422,85 L472,85" class="dln a"/><path d="M422,155 L472,155" class="dln a"/>
+  <path d="M330,113 L330,127" class="dln"/></svg>`;
+}
+function aiSvg(){
+  const S=[["gate","admin + signed AI-unlock cookie. Secret derived from ADMIN_PASSWORD — rotating it revokes every outstanding unlock."],
+  ["compile","every server-held fact on this ticker: ladder, live claims with frozen geometry, its own record, positioning, benchmark decomposition, vol regime, divergences, coverage gaps, earnings, sector."],
+  ["provider","primary model with an automatic same-family fallback. A separate cheaper model handles classification."],
+  ["validate","levels sided and non-EMA · action block mandatory · EV computed server-side · negative-EV entries downgraded to wait."],
+  ["cache","keyed by coin + AI_SCHEMA_V. One generation serves the group — the cache IS the rate limit."]];
+  const w=128,g=9;
+  return `<svg viewBox="0 0 700 125">
+  ${S.map(([n,t],i)=>{const x=6+i*(w+g);return `<g class="hv" data-tip="<b>${n}</b><br>${t}">
+    <rect x="${x}" y="30" width="${w}" height="48" class="dbox2" rx="4"/>
+    <text x="${x+w/2}" y="59" text-anchor="middle" class="dnm" style="font-size:10.5px">${n}</text></g>
+    ${i<S.length-1?`<path d="M${x+w+1},54 L${x+w+g-2},54" class="dln a"/>`:""}`;}).join("")}
+  <text x="6" y="100" class="dlabs">the model writes prose · the server computes every number · the validator enforces the line</text>
+  <text x="6" y="116" class="dlabs">it reads the ledger and cannot write to it — no geometry of its own, no record, never a signal</text></svg>`;
+}
+
+/* ================================================================= render =============== */
+const toc=document.getElementById("toc"),doc=document.getElementById("doc");
+let last=null,html="";
+S.forEach((s,i)=>{
+  if(s.g!==last){html+=`<div class="tg">${s.g}</div>`;last=s.g;}
+  html+=`<a data-i="${i}" class="${i===0?"on":""}"><span class="no">${String(i+1).padStart(2,"0")}</span><span>${s.t}</span></a>`;
+});
+toc.innerHTML=html;
+doc.innerHTML=S.map((s,i)=>`<section class="sec${i===0?" on":""}" data-i="${i}">
+  <div class="eyebrow">${s.g} · mechanic ${String(i+1).padStart(2,"0")} of ${S.length}</div>
+  <h1>${s.t}</h1><div class="thesis">${s.thesis}</div>${s.html}
+  <div class="pgnav">${i>0?`<button data-go="${i-1}">← ${S[i-1].t}</button>`:""}
+  ${i<S.length-1?`<button class="sp" data-go="${i+1}">${S[i+1].t} →</button>`:""}</div></section>`).join("");
+document.getElementById("hcount").textContent=S.length+" mechanics";
+
+function go(i){
+  document.querySelectorAll("#toc a").forEach(a=>a.classList.toggle("on",+a.dataset.i===i));
+  document.querySelectorAll(".sec").forEach(s=>s.classList.toggle("on",+s.dataset.i===i));
+  doc.scrollTop=0;
+  const a=toc.querySelector('a[data-i="'+i+'"]');if(a)a.scrollIntoView({block:"nearest"});
+  if(i===0)wireCalc();
+}
+toc.addEventListener("click",e=>{const a=e.target.closest("a");if(a)go(+a.dataset.i);});
+doc.addEventListener("click",e=>{const b=e.target.closest("button[data-go]");if(b)go(+b.dataset.go);});
+document.addEventListener("keydown",e=>{
+  if(e.target.tagName==="INPUT")return;
+  const cur=+document.querySelector("#toc a.on").dataset.i;
+  if(e.key==="ArrowRight"||e.key==="j"){if(cur<S.length-1)go(cur+1);}
+  if(e.key==="ArrowLeft"||e.key==="k"){if(cur>0)go(cur-1);}});
+
+/* ---------- live score calculator (the real formulas) ---------- */
+const CF=[["intensity","int",0,60,28,1,"per-event condition strength, before the clamp at 50"],
+["study avg (R)","savg",-0.4,1.2,0.34,0.02,"mean signed outcome per occurrence in the in-sample study"],
+["study hit","shit",0.2,0.9,0.58,0.01,"share of in-sample occurrences that went the way the event implied"],
+["study n","sn",0,60,14,1,"own occurrences. ≥8 uses the own base rate; below that it falls to pooled."],
+["live avg (R)","lavg",-0.4,1.2,0.22,0.02,"mean signed outcome across resolved live claims"],
+["live hit","lhit",0.2,0.9,0.54,0.01,"share of resolved live claims that went the way the event implied"],
+["resolved","res",0,120,22,1,"resolved live claims. ≥5 starts the blend; ≥10 with hit<50% and med≤0 triggers the hard cap."],
+["confluence k","k",1,5,1,1,"same-side + context company on this name"]];
+function wireCalc(){
+  const c=document.getElementById("calc");if(!c||c.dataset.w)return;c.dataset.w="1";
+  c.innerHTML=`<div class="ch">score = clamp(intensity,0,50) + evidence + confluence</div>`
+   +CF.map(f=>`<div class="crow"><label data-tip="${f[6]}">${f[0]}</label>
+     <input type="range" id="c_${f[1]}" min="${f[2]}" max="${f[3]}" step="${f[5]}" value="${f[4]}">
+     <span class="cv" id="v_${f[1]}">${f[4]}</span></div>`).join("")
+   +`<div class="cout">
+     <div data-tip="clamp(intensity, 0, 50) — weirdness alone can never exceed 50"><div class="cl">intensity</div><div class="cn" id="o_int">—</div><div class="cs" id="s_int"></div></div>
+     <div data-tip="evPts on the blended stats, times the scope discount, then any hard cap"><div class="cl">evidence</div><div class="cn" id="o_ev">—</div><div class="cs" id="s_ev"></div></div>
+     <div data-tip="min(16, confUnit×(k−1)) with confUnit = 8 until it is measured"><div class="cl">confluence</div><div class="cn" id="o_cf">—</div><div class="cs" id="s_cf"></div></div>
+     <div data-tip="the number on the card, capped at 100"><div class="cl">score</div><div class="cn big" id="o_sc">—</div><div class="cs" id="s_sc"></div></div></div>
+   <div class="cbar" id="o_bar"></div>
+   <div class="ckey"><span class="ka">intensity</span><span class="kb">evidence</span><span class="kc">confluence</span></div>
+   <div class="cflag" id="o_flag"></div>`;
+  CF.forEach(f=>document.getElementById("c_"+f[1]).addEventListener("input",calc));
+  calc();
+}
+function evPts(avg,hit,unit){
+  const scale=unit==="R"?0.5:0.8;
+  if(avg<=0)return 0;
+  return Math.min(1,avg/scale)*30+Math.max(0,hit-0.5)*2*20;
+}
+function calc(){
+  const g=k=>+document.getElementById("c_"+k).value;
+  const V={};CF.forEach(f=>{V[f[1]]=g(f[1]);
+    document.getElementById("v_"+f[1]).textContent=f[5]<1?V[f[1]].toFixed(2):V[f[1]];});
+  const inten=Math.min(50,Math.max(0,V.int));
+  // scope
+  let discount,scope;
+  if(V.sn>=8){discount=1;scope="own base rate";}
+  else if(V.sn>0){discount=0.7;scope="class-pooled (30% haircut)";}
+  else{discount=0;scope="token";}
+  let avg=V.savg,hit=V.shit,w=null;
+  if(V.res>=5){w=V.res/(V.res+25);avg=(1-w)*V.savg+w*V.lavg;hit=(1-w)*V.shit+w*V.lhit;}
+  let ev,flags=[];
+  if(discount===0){ev=6;flags.push("unproven — token evidence only");}
+  else{
+    ev=evPts(avg,hit,"R")*discount;
+    if(avg<=0)flags.push("neg exp — blended expectancy ≤ 0, evidence zeroed");
+    if(V.sn<8)flags.push("unproven — fewer than 8 own occurrences, pooled at a 30% discount");
+  }
+  const noEdge=V.res>=10&&V.lhit<0.5&&V.lavg<=0;
+  if(noEdge&&ev>8){ev=8;flags.push("no live edge — hard cap at 8 applied on top of the blend");}
+  const cf=V.k>1?Math.min(16,8*(V.k-1)):0;
+  const sc=Math.min(100,Math.round(inten+ev+cf));
+  const prime=hit>=0.6&&avg>0&&!noEdge&&V.sn>=8;
+  const set=(id,v,s)=>{document.getElementById("o_"+id).textContent=v;
+    document.getElementById("s_"+id).textContent=s||"";};
+  set("int",inten.toFixed(0),V.int>50?"clamped from "+V.int:"of 50 max");
+  set("ev",ev.toFixed(1),scope);
+  set("cf",cf?"+"+cf:"0",V.k>1?"k = "+V.k:"solo");
+  set("sc",sc,w!=null?"live weight "+Math.round(w*100)+"%":"no blend (res < 5)");
+  const tot=Math.max(1,inten+ev+cf);
+  document.getElementById("o_bar").innerHTML=
+    `<i class="a" style="width:${(inten/tot*100).toFixed(1)}%"></i><i class="b" style="width:${(ev/tot*100).toFixed(1)}%"></i><i class="c" style="width:${(cf/tot*100).toFixed(1)}%"></i>`;
+  const fl=document.getElementById("o_flag");
+  if(flags.length){fl.className="cflag";fl.textContent=flags.join(" · ");}
+  else if(prime){fl.className="cflag ok";fl.textContent="★ prime eligible — ≥60% blended hit, positive expectancy, own base rate (R/R gate applies separately)";}
+  else{fl.className="cflag";fl.textContent="";}
+}
+wireCalc();
+</script>
+</body>
+</html>

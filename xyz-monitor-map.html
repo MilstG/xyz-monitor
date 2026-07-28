@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>xyz-monitor · system map</title>
+<style>
+:root{
+  --bg:#070b0f; --panel:#0d141b; --panel2:#111a23; --border:#1e2b38; --border2:#2b3d4f;
+  --text:#c8d4e0; --dim:#647689; --faint:#3d4c5c;
+  --amber:#f0a832; --green:#35c98a; --red:#e05656; --blue:#4aa3ff; --purple:#a184ff; --cyan:#3ec6c6;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;height:100%}
+body{display:flex;flex-direction:column}
+
+header{display:flex;align-items:baseline;gap:14px;padding:12px 18px 10px;border-bottom:1px solid var(--border)}
+header .brand{font-size:15px;letter-spacing:.14em;color:var(--amber);font-weight:700;text-transform:uppercase}
+header .brand b{color:var(--text);font-weight:700}
+header .sub{color:var(--dim);font-size:11px;letter-spacing:.05em}
+header .live{margin-left:auto;color:var(--dim);font-size:11px;display:flex;align-items:center;gap:6px}
+header .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green)}
+
+nav{display:flex;gap:2px;padding:0 18px;border-bottom:1px solid var(--border);background:var(--panel)}
+nav button{appearance:none;background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
+  font:inherit;font-size:11px;letter-spacing:.16em;text-transform:uppercase;padding:10px 14px;cursor:pointer}
+nav button:hover{color:var(--text)}
+nav button.on{color:var(--amber);border-bottom-color:var(--amber)}
+nav button:focus-visible{outline:1px solid var(--amber);outline-offset:-1px}
+
+main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 372px;overflow:hidden}
+#stage{position:relative;overflow:auto;padding:10px}
+#stage svg{display:block;min-width:980px;width:100%;height:auto}
+
+/* ---------- inspector ---------- */
+#inspect{border-left:1px solid var(--border);background:var(--panel);overflow-y:auto;padding:16px 16px 26px}
+#inspect .kicker{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-bottom:4px}
+#inspect h2{font-size:15px;letter-spacing:.03em;margin-bottom:2px}
+#inspect .role{color:var(--dim);font-size:11.5px;margin-bottom:12px}
+#inspect h3{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin:16px 0 6px;border-top:1px solid var(--border);padding-top:10px}
+#inspect ul{list-style:none}
+#inspect li{padding:4px 0 4px 14px;position:relative;color:var(--text);font-size:12px;line-height:1.5}
+#inspect li::before{content:"·";position:absolute;left:2px;color:var(--accent,var(--amber))}
+#inspect .routes span{display:inline-block;background:var(--panel2);border:1px solid var(--border);border-radius:3px;
+  padding:2px 6px;margin:2px 3px 2px 0;font-size:10.5px;color:var(--cyan)}
+#inspect .hint{color:var(--faint);font-size:10.5px;margin-top:18px;letter-spacing:.04em}
+
+/* ---------- svg map ---------- */
+.colhead{fill:var(--faint);font-size:10px;letter-spacing:.22em;font-family:var(--mono)}
+.node rect{fill:var(--panel);stroke:var(--border2);stroke-width:1;rx:4}
+.node:hover rect,.node.sel rect{stroke:var(--nc);filter:drop-shadow(0 0 5px color-mix(in srgb,var(--nc) 45%,transparent))}
+.node{cursor:pointer}
+.node text{font-family:var(--mono);pointer-events:none}
+.node .nm{fill:var(--text);font-size:12px;font-weight:700}
+.node .ds{fill:var(--dim);font-size:9.5px}
+.node .tag{fill:var(--nc);font-size:8.5px;letter-spacing:.14em}
+.edge{stroke:var(--faint);stroke-width:1.2;fill:none;opacity:.55}
+.edge.hot{stroke:var(--amber);opacity:1;stroke-width:1.6}
+.edge.dimmed{opacity:.12}
+.node.dimmed{opacity:.25}
+.pulse{stroke-dasharray:3 9;animation:dash 1.6s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-12}}
+@media (prefers-reduced-motion:reduce){.pulse{animation:none}}
+
+/* ---------- flows ---------- */
+.pane{display:none;padding:16px 20px 30px;overflow-y:auto}
+.pane.on{display:block}
+.flow{border:1px solid var(--border);background:var(--panel);border-radius:5px;margin-bottom:12px}
+.flow>button{all:unset;display:flex;width:100%;align-items:baseline;gap:10px;padding:11px 14px;cursor:pointer}
+.flow>button:hover{background:var(--panel2)}
+.flow .fno{color:var(--amber);font-size:11px;min-width:26px}
+.flow .fname{font-weight:700;font-size:13px}
+.flow .fsub{color:var(--dim);font-size:11px;margin-left:auto;text-align:right}
+.flow .steps{display:none;padding:4px 14px 14px;border-top:1px solid var(--border)}
+.flow.open .steps{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.step{background:var(--panel2);border:1px solid var(--border2);border-radius:3px;padding:5px 9px;font-size:11px;position:relative;cursor:default}
+.step:hover{border-color:var(--amber)}
+.step .tip{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:5;width:270px;background:#0a1016;
+  border:1px solid var(--border2);border-radius:4px;padding:8px 10px;color:var(--dim);font-size:11px;line-height:1.5;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+.step:hover .tip{display:block}
+.arrow{color:var(--faint);font-size:11px}
+.flow .fnote{color:var(--dim);font-size:11px;line-height:1.5;padding:0 14px 12px;display:none}
+.flow.open .fnote{display:block}
+
+/* ---------- features table ---------- */
+table{width:100%;border-collapse:collapse}
+th{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);text-align:left;padding:6px 10px;border-bottom:1px solid var(--border2)}
+td{padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:top}
+tr:hover td{background:var(--panel2)}
+.aud{font-size:10px;letter-spacing:.1em;padding:1px 7px;border-radius:3px;border:1px solid}
+.aud.public{color:var(--green);border-color:var(--green)}
+.aud.admin{color:var(--red);border-color:var(--red)}
+.kbadge{color:var(--purple);font-size:10px;letter-spacing:.1em}
+.rt{color:var(--cyan);font-size:10.5px}
+.note{color:var(--dim);font-size:11px}
+
+/* ---------- integrity cards ---------- */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.card{border:1px solid var(--border);background:var(--panel);border-radius:5px;padding:13px 14px}
+.card:hover{border-color:var(--amber)}
+.card h4{font-size:12px;letter-spacing:.04em;margin-bottom:6px}
+.card h4 .cno{color:var(--amber);margin-right:8px;font-size:11px}
+.card p{color:var(--dim);font-size:11.5px;line-height:1.55}
+.card p b{color:var(--text);font-weight:400}
+
+footer{border-top:1px solid var(--border);color:var(--faint);font-size:10.5px;letter-spacing:.06em;padding:8px 18px;display:flex;gap:18px}
+footer span b{color:var(--dim);font-weight:400}
+
+@media (max-width:900px){
+  main{grid-template-columns:1fr;grid-template-rows:minmax(0,1.2fr) minmax(0,1fr)}
+  #inspect{border-left:none;border-top:1px solid var(--border)}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">xyz-<b>monitor</b></span>
+  <span class="sub">system map · architecture / flows / features / integrity</span>
+  <span class="live"><span class="dot"></span>reflects builds through 2026.07.27-14</span>
+</header>
+
+<nav id="nav">
+  <button data-p="sys" class="on">System</button>
+  <button data-p="flows">Data flows</button>
+  <button data-p="feat">Features</button>
+  <button data-p="integ">Integrity</button>
+</nav>
+
+<main>
+  <div id="left">
+    <div id="stage" class="pane on" data-p="sys"></div>
+    <div id="flows" class="pane" data-p="flows"></div>
+    <div id="feat" class="pane" data-p="feat"></div>
+    <div id="integ" class="pane" data-p="integ"></div>
+  </div>
+  <aside id="inspect"></aside>
+</main>
+
+<footer>
+  <span><b>legend</b> — hover a node to trace its wiring · click to inspect</span>
+  <span><b>colors</b> — <span style="color:var(--dim)">external</span> · <span style="color:var(--green)">src/ modules</span> · <span style="color:var(--amber)">server</span> · <span style="color:var(--blue)">client</span></span>
+  <span style="margin-left:auto">standalone visualization — not part of the repo</span>
+</footer>
+
+<script>
+/* ============================================================ data ============ */
+const C={ext:"#647689",src:"#35c98a",srv:"#f0a832",cli:"#4aa3ff",data:"#3ec6c6",ai:"#a184ff"};
+
+const NODES=[
+/* external */
+{id:"rest",g:"ext",x:20,y:60,w:180,h:52,nm:"Hyperliquid REST",ds:"universe · candles · funding",
+ role:"Primary market-data source for both universes (main-dex perps + xyz HIP-3 builder dex).",
+ pts:["Universe membership re-polled every 30s — new HIP-3 listings detected, logged, and backfill jumps the queue",
+ "Hourly + daily candle backfill and funding history, driven through the weight-based rate limiter",
+ "Failing markets get per-lane backoff windows (hFailUntil / dFailUntil / fFailUntil) surfaced in /api/health"]},
+{id:"ws",g:"ext",x:20,y:126,w:180,h:52,nm:"Hyperliquid WS",ds:"allDexsAssetCtxs · realtime",
+ role:"Zero-rate-cost accelerator: realtime price / funding / OI pushes for the whole universe.",
+ pts:["While healthy, REST universe poll drops to every 5th tick (~150s); REST still owns membership",
+ "Watchdog: 120s of total silence force-closes the socket into onclose → backoff → reconnect",
+ "Armed at open — a socket that never delivers a single message is also caught"]},
+{id:"finn",g:"ext",x:20,y:192,w:180,h:44,nm:"Finnhub",ds:"earnings calendar",
+ role:"Earnings calendar feed (FINNHUB_TOKEN).",
+ pts:["API serves long windows far-end-first and caps the response — so fetches run in small disjoint chunks: 3-day live, 7-day historical",
+ "Feeds earnCache, realized prints, and the out-of-sample earnings study (E-tagged ledger claims)"]},
+{id:"edgar",g:"ext",x:20,y:250,w:180,h:44,nm:"SEC EDGAR",ds:"regulatory filings",
+ role:"Filing feed for the equities universe.",
+ pts:["Drives filing alerts on the push lane","45-minute boot grace period seeds the backlog silently — no alert storm on deploy"]},
+{id:"aiapi",g:"ext",x:20,y:308,w:180,h:52,nm:"OpenAI / Anthropic",ds:"gpt-5.6-sol → terra fallback",
+ role:"LLM behind the AI analyst report, behind a provider abstraction layer.",
+ pts:["Auto-detects ANTHROPIC_API_KEY or OPENAI_API_KEY; AI_PROVIDER overrides explicitly",
+ "Primary model with a pinned fallback chain, plus a separate cheaper classifier model",
+ "Fully dormant with no key — boot line says so out loud"]},
+{id:"tg",g:"ext",x:20,y:374,w:180,h:52,nm:"Telegram Bot API",ds:"push alerts",
+ role:"Outbound alert transport + inbound /start binding via getUpdates long-poll.",
+ pts:["Every call carries a real 15s AbortSignal — the outbox drains sequentially, so one hang would stall the whole lane",
+ "Unset TG_BOT_TOKEN = transport simply not there; detection still runs into the in-app bell"]},
+
+/* src modules */
+{id:"hl",g:"src",x:268,y:96,w:184,h:56,nm:"src/hyperliquid.js",ds:"transport · rate limiter · socket",
+ role:"The only code that talks to Hyperliquid: REST client, weight-based rate limiter, WS socket with ping + staleness watchdog.",
+ pts:["Per-universe transport lanes (capPerUniverse) — a volatile crypto day cannot evict the equity board",
+ "Rate-limiter utilization exported into health stats","onclose clears the ping timer and retries with backoff"]},
+{id:"poller",g:"src",x:268,y:176,w:184,h:110,nm:"src/poller.js",ds:"orchestrator · thin assembly",
+ role:"The hub. Owns every worker loop and every piece of served state; routes only ever read its getters.",
+ pts:["Universe poll, hourly/daily/funding workers, backfill queues, 5m archive lane",
+ "buildSnapshot / buildDaily / per-universe analytics (isolated: one bad build can't kill the other tab's rebuild loop)",
+ "Signals + ledger engine, triggers stream, Telegram push queue + drain, AI report engine",
+ "Rich health stats: fail counts, backoff, queue depth, limiter utilization, WS status — 'looks stale' is diagnosable from /api/health"]},
+{id:"compute",g:"src",x:268,y:302,w:184,h:56,nm:"src/compute.js",ds:"pure functions only",
+ role:"All math lives here as pure functions — no I/O, no clocks it doesn't receive.",
+ pts:["Stats + feature extraction; bucketCandles rebuilds D1 from the hourly spine",
+ "FEATURES manifest + flag resolution (keys fail closed to admin)","sig(): 9-significant-figure quantization used everywhere for signature stability"]},
+{id:"store",g:"src",x:268,y:374,w:184,h:64,nm:"src/store.js",ds:"/data volume · append-only",
+ role:"Persistence on the Railway volume. Append-only where the data can't be re-fetched.",
+ pts:["oi.log: OI can never be re-fetched, so every sample is appended; pruned to 31 days",
+ "Hourly spine as NDJSON — async persist, awaited on shutdown, skipped on crash (self-heals from REST on boot)",
+ "Ledger, triggers, push recipients, regime, news warm cache, computed-feature cache for instant warm boots"]},
+
+/* server */
+{id:"srv",g:"srv",x:522,y:150,w:186,h:170,nm:"server.js",ds:"fastify · gates · caching · routes",
+ role:"Serves /public and the JSON API; owns the poller. Every response is a cached read of poller state.",
+ pts:["Site gate + admin gate + signed AI-unlock cookie (secret derived from ADMIN_PASSWORD — rotate it and every unlock is revoked)",
+ "Audience-specific shell: resolved feature flags injected pre-paint via split-once concat; no-store so no cache can serve the wrong audience",
+ "serveCached: content-signature ETags on every read route; serveKeyed adds per-coin/tf ETags + gzip memo for candles/series (a shared ETag would 304 the wrong coin's chart)",
+ "~25 GET routes + admin POSTs; FEATURE_NEVER_GATE keeps /api/health and the unlock routes permanently open (gating them is a one-way door)"],
+ routes:["/api/snapshot","/api/daily","/api/candles","/api/series","/api/signals","/api/ledger","/api/triggers","/api/trend","/api/analytics","/api/corr-crypto","/api/earnings","/api/news","/api/ai-report","/api/alerts","/api/health","/api/export/ledger","sw.js · manifest"]},
+
+/* client */
+{id:"shell",g:"cli",x:778,y:88,w:186,h:56,nm:"index.html",ds:"stamped shell · PWA",
+ role:"Version-stamped shell with the flag slot in <head> — a gated tab never even paints.",
+ pts:["Assets tagged ?v=BUILD for cache-busting; drift is warned at boot, not silently degraded",
+ "PWA surface: manifest.webmanifest, sw.js, icon.svg"]},
+{id:"app",g:"cli",x:778,y:160,w:186,h:128,nm:"public/app.js",ds:"zero-dependency renderer",
+ role:"Renders the cached snapshot. Never re-derives server truth — one code path.",
+ pts:["13 tabs across two hard-separated scopes (stocks / crypto); Treemap self-installs at runtime",
+ "Ticker drawer with deep links (#t=coin), shareable tab hashes, saved layouts in localStorage",
+ "Alerts bell + per-person Telegram subscriptions (signed per-browser ownership handles)",
+ "tabVisible() is the single visibility composition point — scope AND server-resolved flags, nothing recomputed",
+ "Live distances recomputed client-side against the streaming mark; everything else ships from the server"]},
+{id:"css",g:"cli",x:778,y:304,w:186,h:44,nm:"styles.css",ds:"bloomberg-dark theme",
+ role:"The terminal look. Every class is pinned in the client integrity manifest.",
+ pts:["File-size bounds, no duplicate declarations, class inventory — silent deletions fail the suite"]},
+{id:"views",g:"cli",x:778,y:362,w:186,h:96,nm:"Views",ds:"the 13 tabs",
+ role:"What the group actually sees.",
+ pts:["Public: Markets · Trend · Sectors · Correlation · Sessions · Signals · Earnings · News · AI Report · Treemap",
+ "Admin: Actionable · Backtest · Admin panel (locked — it is the switchboard for everything else)",
+ "Markets is pinned always-public: it's the fallback every gated view lands on"]},
+];
+
+const EDGES=[
+["rest","hl",1],["ws","hl",1],["hl","poller",1],
+["finn","poller",0],["edgar","poller",0],
+["aiapi","poller",0],["tg","poller",0],
+["poller","compute",0],["poller","store",0],
+["poller","srv",1],["srv","shell",0],["srv","app",1],
+["shell","app",0],["css","app",0],["app","views",1],
+];
+
+/* ============================================================ system map ===== */
+const stage=document.getElementById("stage");
+const NS="http://www.w3.org/2000/svg";
+const svg=document.createElementNS(NS,"svg");
+svg.setAttribute("viewBox","0 0 984 480");
+stage.appendChild(svg);
+
+const heads=[["EXTERNAL",20],["SRC / SERVER CORE",268],["API SURFACE",522],["CLIENT",778]];
+for(const[t,x]of heads){const e=document.createElementNS(NS,"text");
+  e.setAttribute("x",x);e.setAttribute("y",34);e.setAttribute("class","colhead");e.textContent=t;svg.appendChild(e);}
+
+const byId={};NODES.forEach(n=>byId[n.id]=n);
+function cx(n){return n.x+n.w/2}function cy(n){return n.y+n.h/2}
+
+const edgeEls=[];
+for(const[a,b,hot]of EDGES){
+  const A=byId[a],B=byId[b];
+  const x1=A.x+A.w,y1=cy(A),x2=B.x,y2=cy(B);
+  const p=document.createElementNS(NS,"path");
+  const mx=(x1+x2)/2;
+  p.setAttribute("d",`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`);
+  p.setAttribute("class","edge"+(hot?" pulse":""));
+  p.dataset.a=a;p.dataset.b=b;
+  svg.appendChild(p);edgeEls.push(p);
+}
+
+const nodeEls={};
+for(const n of NODES){
+  const g=document.createElementNS(NS,"g");
+  g.setAttribute("class","node");g.style.setProperty("--nc",C[n.g]);
+  g.setAttribute("tabindex","0");g.setAttribute("role","button");
+  const r=document.createElementNS(NS,"rect");
+  r.setAttribute("x",n.x);r.setAttribute("y",n.y);r.setAttribute("width",n.w);r.setAttribute("height",n.h);r.setAttribute("rx",4);
+  g.appendChild(r);
+  const t1=document.createElementNS(NS,"text");t1.setAttribute("x",n.x+10);t1.setAttribute("y",n.y+19);t1.setAttribute("class","nm");t1.textContent=n.nm;g.appendChild(t1);
+  const t2=document.createElementNS(NS,"text");t2.setAttribute("x",n.x+10);t2.setAttribute("y",n.y+33);t2.setAttribute("class","ds");t2.textContent=n.ds;g.appendChild(t2);
+  const t3=document.createElementNS(NS,"text");t3.setAttribute("x",n.x+n.w-8);t3.setAttribute("y",n.y+13);t3.setAttribute("text-anchor","end");t3.setAttribute("class","tag");
+  t3.textContent={ext:"EXT",src:"SRC",srv:"SRV",cli:"CLI"}[n.g];g.appendChild(t3);
+  svg.appendChild(g);nodeEls[n.id]=g;
+  g.addEventListener("mouseenter",()=>focusNode(n.id));
+  g.addEventListener("mouseleave",clearFocus);
+  g.addEventListener("click",()=>select(n.id));
+  g.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();select(n.id);}});
+}
+
+function connected(id){const s=new Set([id]);
+  for(const e of EDGES){if(e[0]===id)s.add(e[1]);if(e[1]===id)s.add(e[0]);}return s;}
+function focusNode(id){const keep=connected(id);
+  for(const p of edgeEls){const on=p.dataset.a===id||p.dataset.b===id;
+    p.classList.toggle("hot",on);p.classList.toggle("dimmed",!on);}
+  for(const n of NODES)nodeEls[n.id].classList.toggle("dimmed",!keep.has(n.id));}
+function clearFocus(){for(const p of edgeEls)p.classList.remove("hot","dimmed");
+  for(const n of NODES)nodeEls[n.id].classList.remove("dimmed");}
+
+/* ============================================================ inspector ====== */
+const insp=document.getElementById("inspect");
+let selId=null;
+function select(id){selId=id;
+  for(const n of NODES)nodeEls[n.id].classList.toggle("sel",n.id===id);
+  const n=byId[id];
+  insp.style.setProperty("--accent",C[n.g]);
+  let h=`<div class="kicker" style="color:${C[n.g]}">${{ext:"external dependency",src:"server module",srv:"api surface",cli:"client"}[n.g]}</div>
+  <h2>${n.nm}</h2><div class="role">${n.role}</div>
+  <h3>What it does</h3><ul>${n.pts.map(p=>`<li>${p}</li>`).join("")}</ul>`;
+  if(n.routes)h+=`<h3>Route surface</h3><div class="routes">${n.routes.map(r=>`<span>${r}</span>`).join("")}</div>`;
+  h+=`<div class="hint">hover other nodes to trace their wiring</div>`;
+  insp.innerHTML=h;
+}
+function overview(){insp.style.setProperty("--accent","var(--amber)");
+  insp.innerHTML=`<div class="kicker">overview</div><h2>How the whole thing hangs together</h2>
+  <div class="role">Self-hosted Bloomberg-dark dashboard on Railway. Two hard-separated universes: Hyperliquid main-dex perps (top-60 by volume) and the xyz HIP-3 equities dex (~84 tickers).</div>
+  <h3>The shape</h3><ul>
+  <li><b>One direction of truth:</b> external feeds → hyperliquid.js → poller.js builds everything → server.js serves cached reads → app.js renders. Nothing downstream re-derives what an upstream layer already decided.</li>
+  <li><b>poller.js is the hub</b> — every worker loop, every cache, every getter. server.js is deliberately thin; compute.js is deliberately pure; store.js is deliberately dumb.</li>
+  <li><b>The client is a renderer,</b> not a second brain. Chart and board can never disagree because they read the same payload.</li></ul>
+  <h3>Start here</h3><ul>
+  <li>Click <b>poller.js</b> — it's the center of gravity</li>
+  <li>Then <b>Data flows</b> for the seven end-to-end pipelines</li>
+  <li><b>Integrity</b> explains why the test suite is shaped the way it is</li></ul>
+  <div class="hint">hover a node to trace its wiring · click to inspect</div>`;}
+overview();
+
+/* ============================================================ flows ========== */
+const FLOWS=[
+{n:"01",nm:"Market board",sub:"WS + REST → snapshot → table",
+ steps:[["WS ctxs / REST poll","Realtime pushes while the socket is healthy; REST reconciles every ~150s and owns membership (new listings, delistings)."],
+ ["rows","Per-market state in the poller — prices, funding, OI, fail/backoff windows."],
+ ["compute features","Pure functions in compute.js; the computed feature cache is persisted so redeploys serve a warm table instantly."],
+ ["buildSnapshot / buildDaily","Assembled in the poller, stamped with the build version and last-poll time (the amber staleness dot reads this)."],
+ ["serveCached · ETag","Content-signature ETags — an unchanged payload is a 304, not a re-send."],
+ ["Markets table + drawer","Live distances recomputed client-side against the streaming mark; every annotation ships from the server."]],
+ note:"The two universes travel the same pipeline but never mix — separate analytics slots, separate transport lanes, separate scope in the UI."},
+{n:"02",nm:"Candle spine",sub:"hourly workers → /data → charts",
+ steps:[["hourly workers ×2","Backfill queue with new listings jumping the line; per-market backoff on failures."],
+ ["NDJSON spine on /data","persistHourly is async, awaited on shutdown, skipped on crash — the spine self-heals from REST on boot."],
+ ["bucketCandles","D1 rebuilt from the hourly spine (the fix for warm-cache closes-only bars being treated as fresh); H12/H4 derived the same way."],
+ ["/api/candles · serveKeyed","Per-coin/tf/version ETags + gzip memo. A plain content ETag here would be a correctness bug — every coin would share one tag and a client could 304 into the wrong chart."],
+ ["charts","Report-tab candles, EMA 13/21 ribbon, level labels, signal markers."]]},
+{n:"03",nm:"Signals → ledger",sub:"detection → frozen geometry → proven edge",
+ steps:[["detection at poll","Signal conditions evaluated server-side each cycle."],
+ ["frozen geometry","Side / void / target / R:R frozen at fire time. Math that can't produce this geometry lives in screener columns, not the ledger."],
+ ["episode re-arm gate","A persistent condition must re-arm before it can fire again — no serial pseudo-replication inflating the record."],
+ ["out-of-sample resolution","Every signal earns its record live. No in-sample study is claimed at launch, ever."],
+ ["proven-edge gate","Chart markers only after ≥8 resolved roster-wide with positive avg R, or ≥5 resolved at ≥60% hit for a name-specific edge. Suppressed counts are disclosed in the legend."]]},
+{n:"04",nm:"AI analyst report",sub:"compiler → provider → validator → cache",
+ steps:[["POST /api/ai-report","Admin + signed AI-unlock cookie (HttpOnly, session-lived, derived from ADMIN_PASSWORD — no header bypass exists)."],
+ ["compiler","Gathers everything the server holds on the ticker — spine, levels, ledger record, earnings context."],
+ ["provider abstraction","gpt-5.6-sol primary → terra fallback; Anthropic slot ready if the key changes."],
+ ["validator","EMA annotations banned as levels; a directional read requires a correctly-sided void; EV computed server-side; negative-EV entries downgraded to 'wait'."],
+ ["schema-v4 cache + TTL","AI_SCHEMA_V invalidates stale reports on deploy; the regeneration cooldown is server-enforced and shared across the group."],
+ ["GET /api/ai-report","Everyone reads the same cached report — one code path, one bill."]]},
+{n:"05",nm:"Telegram push",sub:"trigger stream → outbox → drain",
+ steps:[["trigger stream","Edge-triggered events with a persisted seq cursor — a redeploy doesn't replay or drop the stream."],
+ ["filters","Per-person class subscriptions, quiet hours, once-per-local-day digest (scheduled summaries can't be eaten by the hourly cap)."],
+ ["outbox","Bounded batches with disclosed overflow ('+4 more held', never silently vanished); HTML-escaped before parse_mode=HTML."],
+ ["pushDrain","Picks the first ELIGIBLE item — a message held until 07:00 can't head-of-line block urgent ones. Every removal targets the chosen index."],
+ ["Telegram","15s abort on every call; 4xx drops by index; ops faults get their own event lane."]],
+ note:"Ownership without accounts: a signed, unguessable per-browser handle scopes each person's subscriptions; admin overrides are a server capability, not a UI trick. Startup: 45-min grace before filing alerts fire."},
+{n:"06",nm:"Earnings & filings",sub:"Finnhub / EDGAR → study",
+ steps:[["Finnhub chunks","3-day live / 7-day historical disjoint windows — the API caps long windows far-end-first."],
+ ["earnCache + prints","Voidable rows (admin POST); realized prints accrue into the study."],
+ ["out-of-sample study","Ledger claims in force within 1 day of a print are E-tagged so the earnings-conditioned base-rate split accrues honestly."],
+ ["EDGAR filings","Filing alerts through the push lane after the boot grace period."]]},
+{n:"07",nm:"Auth & gating",sub:"password → flags → tabVisible()",
+ steps:[["site password","Shared cookie gate; /api/health exempt so Railway's healthcheck can't 401 the deploy into a restart loop."],
+ ["flag resolution","public / admin / off per feature. Keys fail CLOSED (unlisted → admin-only); routes fail OPEN — deliberate asymmetry, because default-closed routes would dark the whole app on the first missed manifest entry."],
+ ["shell injection","Server-resolved flags concatenated into the shell pre-paint; a gated tab is never in the markup. no-store, so no cache can hand a public visitor the admin shell."],
+ ["tabVisible()","The single client composition point: scope AND flags. 'View as public' swaps the whole resolved set in one assignment."],
+ ["route 403s","The server gate is authoritative — a failed shell injection costs a cosmetic leak, never actual access."]]},
+];
+document.getElementById("flows").innerHTML=FLOWS.map(f=>`
+<div class="flow"><button aria-expanded="false"><span class="fno">${f.n}</span><span class="fname">${f.nm}</span><span class="fsub">${f.sub}</span></button>
+<div class="steps">${f.steps.map((s,i)=>`${i?'<span class="arrow">→</span>':''}<span class="step">${s[0]}<span class="tip">${s[1]}</span></span>`).join("")}</div>
+${f.note?`<div class="fnote">${f.note}</div>`:""}</div>`).join("");
+document.getElementById("flows").addEventListener("click",e=>{
+  const b=e.target.closest(".flow>button");if(!b)return;
+  const f=b.parentElement;f.classList.toggle("open");
+  b.setAttribute("aria-expanded",f.classList.contains("open"));});
+
+/* ============================================================ features ======= */
+const FEAT=[
+["markets","tab","public","/api/snapshot · /api/daily · /api/series · /api/candles","pin — always public; the fallback every gated view lands on"],
+["trend","tab","public","/api/trend",""],
+["sectors","tab","public","—","rotation flow map · RRG · sector detail · sector×sector correlation"],
+["corr","tab","public","/api/corr-crypto",""],
+["sessions","tab","public","/api/analytics","per-universe analytics slots"],
+["signals","tab","public","/api/signals · /api/ledger · /api/triggers",""],
+["earnings","tab","public","/api/earnings",""],
+["news","tab","public","/api/news · /api/news/channels","warm-cache persisted"],
+["report","tab","public","/api/ai-report · /api/ai-reports","reads are public; generation is a gated act"],
+["treemap","tab","public","—","runtime — injected by JS at load, no static markup"],
+["actionable","tab","admin","/api/actionable",""],
+["backtest","tab","admin","/api/duel","MOM vs MOM+ score duel persists across deploys"],
+["admin","tab","admin","—","lock — never openable to public, never off; it is the switchboard"],
+["ai.generate","act","admin","POST /api/ai-report",""],
+["ai.ask","act","admin","POST /api/ask","terminal Tier-3 fallback"],
+["ai.reset","act","admin","POST /api/ai-reset","budget reset"],
+["export.ledger","act","public","/api/export/ledger","CSV"],
+["news.write","act","admin","POST /api/news/channels",""],
+["earnings.void","act","admin","POST /api/earnings/void",""],
+["derivs.refresh","act","admin","POST /api/derivs/refresh",""],
+];
+document.getElementById("feat").innerHTML=`
+<p class="note" style="margin-bottom:12px;max-width:760px">The FEATURES manifest in compute.js is the single source of truth for what exists and who sees it.
+States are <b style="color:var(--green)">public</b> / <b style="color:var(--red)">admin</b> / off. Unlisted keys resolve to admin (fail closed);
+FEATURE_NEVER_GATE keeps /api/health, login and the AI-unlock routes permanently open.</p>
+<table><thead><tr><th>key</th><th>kind</th><th>default</th><th>routes</th><th>notes</th></tr></thead><tbody>
+${FEAT.map(f=>`<tr><td><b>${f[0]}</b></td><td><span class="kbadge">${f[1]}</span></td>
+<td><span class="aud ${f[2]}">${f[2]}</span></td><td class="rt">${f[3]}</td><td class="note">${f[4]}</td></tr>`).join("")}
+</tbody></table>`;
+
+/* ============================================================ integrity ====== */
+const INTEG=[
+["One code path","Chart and board must <b>never disagree</b>. Every annotation — state badge, retest flag, zone levels — ships in the server payload. The client renders; it never re-derives."],
+["Frozen geometry","Every ledger event freezes side / void / target / R:R at fire time. If the math can't produce that geometry, it belongs in a screener column, not the ledger."],
+["Route manifest test","Every API route pinned as registered <b>exactly once</b>, and every poller getter a route references must actually exist. Kills phantom routes and silent deletions that pass node --check — the class of bug that once shipped for six builds unnoticed."],
+["View wiring invariant","Tab buttons, view sections, the setHidden visibility list, and showView dispatch must all describe the same set. The -84 News tab existed in three of the four and still rendered nothing — this test closes that class in every direction."],
+["Fail-closed keys, fail-open routes","A feature shipped without a manifest entry is invisible, not accidentally public. But an unclaimed <b>route</b> stays open — default-closed routes would 403 the whole app on the first deploy. The asymmetry is deliberate and documented at the definition."],
+["Honest nulls","Suppressed marker counts disclosed in the legend. Coverage gaps stated in the UI. Overflow batched as '+N more held', never vanished. Degradations announced at boot as WARN lines, never swallowed."],
+["Episode deduplication","Persistent conditions must re-arm before re-firing. Without the gate, one lasting state would serially pseudo-replicate into a fake track record."],
+["Out-of-sample only","Every new ledger signal earns its record live. No in-sample backtest is ever claimed as the launch record."],
+["ETag discipline","serveCached keys on content signature; candles/series use serveKeyed with per-coin/tf ETags — a shared tag would let a client 304 into the <b>wrong coin's chart</b>. Correctness, not just bandwidth."],
+["Audience-specific shell","Feature flags resolved server-side per request and injected pre-paint. no-store, so a shared cache can never hand a public visitor the admin shell. A failed injection degrades to a cosmetic leak; routes still 403."],
+["Isolated failure lanes","One universe's bad analytics build can't kill the other's rebuild loop. A stalled Telegram call aborts in 15s. A zombie WebSocket is force-closed into reconnect. Every lane fails alone and announces it."],
+["Parallel-session protocol","Two sessions building from different bases once silently overwrote each other. The rule since: clone HEAD, state the base commit hash, scan <b>full</b> git history for the highest build stamp, and diff a surprising tree before calling it a regression."],
+];
+document.getElementById("integ").innerHTML=`
+<p class="note" style="margin-bottom:14px;max-width:760px">These aren't style preferences — each one is a scar. The test suite pins all of them mechanically wherever it can.</p>
+<div class="grid">${INTEG.map((c,i)=>`<div class="card"><h4><span class="cno">${String(i+1).padStart(2,"0")}</span>${c[0]}</h4><p>${c[1]}</p></div>`).join("")}</div>`;
+
+/* ============================================================ nav ============ */
+document.getElementById("nav").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on",x===b));
+  document.querySelectorAll(".pane").forEach(p=>p.classList.toggle("on",p.dataset.p===b.dataset.p));
+  document.getElementById("inspect").style.display=b.dataset.p==="sys"?"":"none";
+  if(b.dataset.p==="sys"&&!selId)overview();
+});
+</script>
+</body>
+</html>

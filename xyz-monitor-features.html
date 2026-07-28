@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>xyz-monitor · feature map</title>
+<style>
+:root{
+  --bg:#070b0f;--panel:#0d141b;--panel2:#111a23;--panel3:#161f29;--border:#1e2b38;--border2:#2b3d4f;
+  --text:#c8d4e0;--dim:#647689;--faint:#3d4c5c;
+  --amber:#f0a832;--green:#35c98a;--red:#e05656;--blue:#4aa3ff;--purple:#a184ff;--cyan:#3ec6c6;--clay:#c98a3c;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;height:100%}
+body{display:flex;flex-direction:column;overflow:hidden}
+
+header{display:flex;align-items:baseline;gap:14px;padding:11px 18px 9px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.brand{font-size:15px;letter-spacing:.14em;color:var(--amber);font-weight:700;text-transform:uppercase}
+.brand b{color:var(--text)}
+.sub{color:var(--dim);font-size:11px}
+.hsearch{margin-left:auto;display:flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--border2);border-radius:4px;padding:5px 9px}
+.hsearch input{all:unset;font:inherit;font-size:12px;color:var(--text);width:190px}
+.hsearch input::placeholder{color:var(--faint)}
+.hsearch span{color:var(--faint);font-size:11px}
+.scopekey{display:flex;gap:9px;font-size:10px;color:var(--dim);align-items:center}
+.sc{display:inline-block;padding:1px 5px;border-radius:3px;border:1px solid;font-size:9.5px;letter-spacing:.08em}
+.sc.both{color:var(--green);border-color:var(--green)}
+.sc.stk{color:var(--blue);border-color:var(--blue)}
+.sc.cry{color:var(--clay);border-color:var(--clay)}
+.sc.adm{color:var(--red);border-color:var(--red)}
+
+nav{display:flex;gap:2px;padding:0 18px;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;overflow-x:auto}
+nav button{all:unset;border-bottom:2px solid transparent;color:var(--dim);font-size:11px;letter-spacing:.16em;
+  text-transform:uppercase;padding:10px 14px;cursor:pointer;white-space:nowrap}
+nav button:hover{color:var(--text)}
+nav button.on{color:var(--amber);border-bottom-color:var(--amber)}
+nav button:focus-visible{outline:1px solid var(--amber);outline-offset:-2px}
+
+main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 400px}
+#body{overflow-y:auto;padding:0}
+#det{border-left:1px solid var(--border);background:var(--panel);overflow-y:auto;padding:16px 16px 30px}
+.pane{display:none}.pane.on{display:block}
+
+/* ---------- tree ---------- */
+.grp{border-bottom:1px solid var(--border)}
+.grp>.gh{display:flex;align-items:center;gap:9px;padding:9px 16px;cursor:pointer;background:var(--panel)}
+.grp>.gh:hover{background:var(--panel2)}
+.gh .car{color:var(--faint);width:9px;font-size:10px}
+.gh .gt{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
+.gh .gn{margin-left:auto;color:var(--faint);font-size:10px}
+.grp.open>.gh .car{color:var(--amber)}
+.gb{display:none;padding:2px 0 8px}
+.grp.open>.gb{display:block}
+
+.feat{display:flex;align-items:baseline;gap:9px;padding:6px 16px 6px 30px;cursor:pointer;border-left:2px solid transparent}
+.feat:hover{background:var(--panel2)}
+.feat.sel{background:var(--panel3);border-left-color:var(--amber)}
+.feat .fn{font-weight:700;font-size:12.5px;min-width:auto}
+.feat .fd{color:var(--dim);font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.feat .fm{display:flex;gap:5px;flex-shrink:0;align-items:center}
+.feat .cnt{color:var(--faint);font-size:10px}
+.feat.hide{display:none}
+.grp.hide{display:none}
+
+/* ---------- detail ---------- */
+#det .kick{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
+#det h2{font-size:15px;margin-bottom:3px;letter-spacing:.02em}
+#det .lead{color:var(--dim);font-size:11.5px;line-height:1.55;margin:6px 0 4px}
+#det h3{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin:15px 0 6px;border-top:1px solid var(--border);padding-top:9px}
+#det ul{list-style:none}
+#det li{padding:4px 0 4px 14px;position:relative;font-size:12px;line-height:1.55}
+#det li::before{content:"·";position:absolute;left:2px;color:var(--amber)}
+#det li b{color:#e8eef4;font-weight:700}
+#det .chips span{display:inline-block;background:var(--panel2);border:1px solid var(--border);border-radius:3px;
+  padding:2px 6px;margin:2px 3px 2px 0;font-size:10.5px;color:var(--cyan)}
+#det .why{border-left:2px solid var(--red);padding:7px 0 7px 10px;color:var(--dim);font-size:11.5px;line-height:1.55;margin-top:10px}
+#det .why b{color:var(--red);font-weight:700;letter-spacing:.1em;font-size:10px;display:block;margin-bottom:3px}
+#det .hint{color:var(--faint);font-size:10.5px;margin-top:20px}
+
+/* ---------- tables ---------- */
+.tw{padding:14px 18px 34px}
+.tw>p.intro{color:var(--dim);font-size:11.5px;line-height:1.6;max-width:820px;margin-bottom:12px}
+table{width:100%;border-collapse:collapse}
+th{font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);text-align:left;
+  padding:6px 8px;border-bottom:1px solid var(--border2);position:sticky;top:0;background:var(--bg);z-index:2}
+td{padding:6px 8px;border-bottom:1px solid var(--border);font-size:11.5px;vertical-align:top;line-height:1.45}
+tbody tr{cursor:default}
+tbody tr:hover td{background:var(--panel2)}
+td.k{color:var(--amber);white-space:nowrap}
+td.n{color:var(--dim)}
+.pos{color:var(--green)}.neg{color:var(--red)}.mut{color:var(--faint)}
+.tag{font-size:9.5px;letter-spacing:.08em;padding:1px 5px;border-radius:3px;border:1px solid;white-space:nowrap}
+.tag.long{color:var(--green);border-color:var(--green)}
+.tag.short{color:var(--red);border-color:var(--red)}
+.tag.ctx{color:var(--faint);border-color:var(--faint)}
+.tag.dual{color:var(--amber);border-color:var(--amber)}
+.tag.shad{color:var(--purple);border-color:var(--purple)}
+.tag.on{color:var(--green);border-color:var(--green)}
+.tag.off{color:var(--faint);border-color:var(--faint)}
+.tag.adm{color:var(--red);border-color:var(--red)}
+td .hint2{color:var(--faint);font-size:10.5px}
+
+/* hover tooltip engine */
+#tip{position:fixed;z-index:99;display:none;max-width:330px;background:#0a1016;border:1px solid var(--border2);
+  border-radius:4px;padding:9px 11px;color:var(--dim);font-size:11px;line-height:1.55;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
+#tip b{color:var(--text)}
+[data-tip]{cursor:help}
+
+/* matrix */
+.mx td:first-child,.mx th:first-child{position:sticky;left:0;background:var(--bg)}
+.mx tbody tr:hover td:first-child{background:var(--panel2)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:2px}
+.dot.y{background:var(--green)}.dot.n{background:#20303d}.dot.p{background:var(--clay)}
+
+footer{border-top:1px solid var(--border);color:var(--faint);font-size:10.5px;padding:7px 18px;display:flex;gap:16px;flex-shrink:0}
+footer b{color:var(--dim);font-weight:400}
+
+@media (max-width:920px){main{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,.85fr)}
+  #det{border-left:none;border-top:1px solid var(--border)}.hsearch input{width:120px}}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">xyz-<b>monitor</b></span>
+  <span class="sub">feature map</span>
+  <span class="scopekey">
+    <span class="sc both">both</span><span class="sc stk">xyz only</span><span class="sc cry">crypto only</span><span class="sc adm">admin</span>
+  </span>
+  <label class="hsearch"><span>/</span><input id="q" type="text" placeholder="filter features…" autocomplete="off" spellcheck="false"></label>
+</header>
+
+<nav id="nav">
+  <button data-p="tree" class="on">Feature tree</button>
+  <button data-p="sig">Signal roster</button>
+  <button data-p="alerts">Alert classes</button>
+  <button data-p="cols">Table columns</button>
+  <button data-p="matrix">Scope matrix</button>
+</nav>
+
+<main>
+  <div id="body">
+    <div class="pane on" data-p="tree" id="tree"></div>
+    <div class="pane" data-p="sig" id="sig"></div>
+    <div class="pane" data-p="alerts" id="alerts"></div>
+    <div class="pane" data-p="cols" id="cols"></div>
+    <div class="pane" data-p="matrix" id="matrix"></div>
+  </div>
+  <aside id="det"></aside>
+</main>
+
+<footer>
+  <span><b>tree</b> — click a feature for the full detail · hover any cell for its explanation</span>
+  <span style="margin-left:auto">standalone visualization — not part of the repo</span>
+</footer>
+
+<div id="tip"></div>
+
+<script>
+/* ================= tooltip engine (hover on every table cell / tagged element) ============= */
+const tip=document.getElementById("tip");
+document.addEventListener("mouseover",e=>{
+  const t=e.target.closest("[data-tip]");if(!t)return;
+  tip.innerHTML=t.dataset.tip;tip.style.display="block";move(e);});
+document.addEventListener("mousemove",e=>{if(tip.style.display==="block")move(e);});
+document.addEventListener("mouseout",e=>{if(e.target.closest("[data-tip]"))tip.style.display="none";});
+function move(e){const w=tip.offsetWidth,h=tip.offsetHeight;
+  let x=e.clientX+14,y=e.clientY+16;
+  if(x+w>innerWidth-8)x=e.clientX-w-14; if(y+h>innerHeight-8)y=e.clientY-h-16;
+  tip.style.left=Math.max(4,x)+"px";tip.style.top=Math.max(4,y)+"px";}
+
+/* ================= feature tree data ===================================================== */
+/* sc: both | stk | cry | adm   */
+const TREE=[
+{g:"Markets",n:"the default board — both universes",items:[
+ {nm:"Markets table",sc:"both",fd:"~40 sortable columns, scope-switched between xyz equities and crypto perps",
+  lead:"The home surface. One row per market, sorted and filtered client-side against a server-built snapshot.",
+  pts:["Analysis window segment (1h / 4h / 1d / 7d / 30d) drives every window-relative column at once",
+  "Refresh cadence selectable 30s / 1m / 5m / 15m; the status dot goes amber when the <b>server's</b> data goes stale, not the browser's",
+  "Column show/hide/reorder via ⚙, with a curated <b>Mobile</b> preset that auto-applies once on a first phone-width visit",
+  "Volume and OI threshold filters (M by default, k/b suffixes override), ★-watchlist-only toggle, ticker text filter",
+  "Keyboard: <b>j/k</b> to move the row cursor, <b>Enter</b> to open the drawer, <b>/</b> to jump to the tab's search, <b>Esc</b> to clear",
+  "CSV export of the current view — exactly the columns and rows on screen"],
+  why:"Live distances are recomputed client-side against the streaming mark; everything else ships from the server. That split is the rule — the client may re-time a number, never re-derive it."},
+ {nm:"Ticker drawer",sc:"both",fd:"per-name deep dive: candles, positioning, signal record, news, earnings",
+  lead:"Opens on row click or Enter, and via the #t=COIN deep link. The per-name view of every server surface at once.",
+  pts:["Candle chart with hover crosshair; 'where the 30d return happened' session split",
+  "Positioning: OI history, funding history with percentile flags, liquidation context",
+  "Signal record — compact per-event hit fractions and open-claim count, with <b>full history →</b> deep-linking into the Signals tab",
+  "Per-name news slice (the same /api/news payload, filtered client-side — one fetch, one truth) and the earnings row when one exists",
+  "<b>AI report →</b> state-aware jump into the report tab for this ticker"]},
+ {nm:"Saved layouts",sc:"both",fd:"named views: columns, sort, window, filters, ★-only",
+  lead:"Per-browser named table views, so the phone can hold a different set than the desktop.",
+  pts:["Captures column order + visibility, sort key/dir, analysis window, vol/OI filter strings (round-tripped exactly), ★-only",
+  "Deliberately <b>not</b> captured: ticker search text (ephemeral), scope (a layout applies to whichever you're in), refresh rate",
+  "The active layout shows a • when the live view has unsaved drift; LAYOUT_V bumps force a one-time migration to a new default",
+  "Built-in rows: Default (factory) and Mobile (phone columns)"],
+  why:"Columns added after a layout was saved get appended rather than dropped — hidden if they're hidden in the factory default. A saved view must never silently lose a new feature."},
+ {nm:"Regime strip",sc:"both",fd:"tape-wide crowding + leverage banner",
+  lead:"How crowded and how leveraged the whole book is right now, reconstructed from the persisted OI/funding spines.",
+  pts:["Crowding: OI-weighted funding plus percentile-extreme breadth across names",
+  "Leverage: aggregate OI and its stretch z-score vs its own 60d history",
+  "Split crypto / stocks / both — computed from spines that have been populating since day one, so no new persistence was needed",
+  "Extremes emit <b>regime</b> alert-class events through the shared trigger stream, with a re-arm gate so one episode fires once"]},
+ {nm:"Theme · density · help",sc:"both",fd:"terminal/amber themes, compact rows, per-tab help modal",
+  pts:["Two themes: the default terminal green-on-black and a Bloomberg amber; saved per browser",
+  "Compact density tightens every table for more rows per screen",
+  "<b>?</b> opens a per-tab 'how to read this' modal — what every column, chart and score means, and how to interpret it. Every number in the app also explains itself on hover; the modal is the map."]},
+]},
+
+{g:"Trend",n:"stacked EMA ladder board",items:[
+ {nm:"Trend board",sc:"both",fd:"D1/H12/H4/H1 ladder, score 0–4, long and short sides",
+  lead:"A rung-by-rung EMA 13/21 ladder per name, scored by how many timeframes agree.",
+  pts:["Side segment switches the whole board between longs and shorts",
+  "Score = number of stacked rungs; the visible board gates at ≥3 and ranks top-10",
+  "<b>RETEST</b> badge when a rung probes the 13/21 zone while the close holds EMA21 — this badge is the condition that becomes a ledger signal",
+  "Click a row for a candle modal opening on the retesting rung's timeframe, with a switchable EMA pair"],
+  why:"The tretest / tretestdn ledger signals read the <b>same</b> buildTrend output the board renders — never re-derived. Board and signal cannot disagree; that's the modal lesson applied to the ledger."},
+ {nm:"Trend alerts",sc:"both",fd:"D1-only: arrival at 4/4, and ribbon flips",
+  lead:"The trend alert class, deliberately narrow.",
+  pts:["Only the <b>arrival</b> at a full 4/4 stack fires — not every tick spent there",
+  "A ribbon flip requires both sides known: an unknown ribbon (a rung missing an EMA) is not a flip",
+  "H12/H4 crossings across ~144 names would be a feed, not an alert — D1 only, stated where it's decided",
+  "One event per name per scan; a name leaving the board drops its state, so a return is a genuinely new episode"]},
+]},
+
+{g:"Sectors",n:"classification + rotation",items:[
+ {nm:"Rotation flow map",sc:"stk",fd:"capital direction × activity heat, bubble = 24h volume",
+  lead:"Horizontal axis = capital direction (price plus OI conviction), vertical = activity heat (volume plus volatility).",
+  pts:["Top-right = money flowing in with conviction (accumulation); top-left = flowing out with activity (distribution)",
+  "Weighting toggle: by volume or equal-weight — a mega-cap shouldn't be the whole sector's story unless you asked for that",
+  "Leaders mode swaps the map for a ranked table","CSV export of the sector board"]},
+ {nm:"Relative Rotation Graph",sc:"stk",fd:"RS-Ratio vs RS-Momentum against the S&P",
+  lead:"The classic four-quadrant RRG: leading, weakening, lagging, improving.",
+  pts:["Benchmark is resolved from the S&P aliases present in the universe (SPX / SPX500 / US500 …)","Per-sector tails show the rotation path, not just the current point"]},
+ {nm:"Sector detail + correlation",sc:"stk",fd:"per-sector members, sector×sector matrix",
+  pts:["Drill into one sector's members with their own contribution to the composite","Sector×sector correlation matrix at a selectable window"]},
+]},
+
+{g:"Correlation",n:"pairwise structure",items:[
+ {nm:"Correlation matrix",sc:"both",fd:"top-N by volume, selectable window and candle timeframe",
+  pts:["Window (30d default) and candle timeframe both selectable; top-N sized to stay readable",
+  "Search to pin one name and read its whole row","Hover any cell for the exact ρ, n, and the window it was measured over"]},
+ {nm:"Top pairs + pair detail",sc:"both",fd:"most/least correlated pairs, overlaid price paths",
+  pts:["Ranked pair list with a selectable count",
+  "Pair view overlays both normalized paths",
+  "A name listed after the anchor rebases to its <b>own</b> first close, dated in the legend — no fake shared origin"]},
+]},
+
+{g:"Sessions",n:"time-of-day analytics · 5 groups, 8 studies",items:[
+ {nm:"Session decomposition",sc:"both",fd:"the flagship: what an overnight / weekend / cash hold actually pays",
+  lead:"Holds run on each name's hourly spine, pooled one equal-weight bet per calendar boundary, compounded into equity curves.",
+  pts:["Equities: overnight (close→open), weekend (Fri→Mon), cash (open→close)",
+  "Crypto: the two holds that survive a continuous book — the full UTC day and the Fri→Mon weekend. No cash leg exists.",
+  "<b>Gross vs net of funding</b>: the shaded band is the running funding drag. An edge that dies net-of-funding is not an edge.",
+  "Net is only as deep as the funding spine, so each curve carries a per-boundary funding-known fraction and a horizon timestamp — the client renders net as approximate before it",
+  "Needs ≥3 days hourly spine per ticker and ≥5 eligible equities before it publishes at all"]},
+ {nm:"Hour-of-day clocks",sc:"stk",fd:"range/volume activity clock + funding clock",
+  pts:["Left clock: spoke length = that hour's range or volume vs the day's average; rings mark 1×, 2×; the blue arc is the US cash session",
+  "Right clock: color = carry direction, brightness = size — when the payment concentrates",
+  "Labels follow the payload's declared timezone (ET for equities, UTC for crypto), so nothing is mislabeled by a hardcoded zone"]},
+ {nm:"Day-of-week heatmap",sc:"stk",fd:"7×24 grid",pts:["Weekend-gap and Friday→Monday risk, laid out as a grid","Needs ≥3 markets with ≥5d of hourly spine"]},
+ {nm:"Return seasonality",sc:"stk",fd:"exploratory · significance-flagged",
+  lead:"Quarantined by design — the easiest pattern in the world to hallucinate.",
+  pts:["Default is a <b>cross-sectional</b> t-test per hour (one ticker = one observation), avoiding candle pseudo-replication; only |t| ≥ 2 hours are highlighted",
+  "Drill into one sector (cross-sectional over members) or one ticker (within-name time series, noisier, labeled with extra caution)",
+  "Not applicable to crypto at all: this is a by-sector test and the crypto book is one class — the panel says exactly that instead of showing an empty chart"],
+  why:"Never a standalone trade signal. The payload itself is significance-flagged so the client cannot present a coin-flip as a finding."},
+ {nm:"Cross-ticker clustering",sc:"stk",fd:"group markets by the shape of their trading day",
+  pts:["Clusters by hour-of-day profile; flags <b>oddballs</b> — names correlating better with a class other than their own",
+  "Asset-class composite overlays compare the pooled day of Equity vs FX vs Commodity vs Index","Needs ≥8 markets with an hourly profile"]},
+ {nm:"Levels + candle anatomy",sc:"both",fd:"structural level validation, pivot behaviour",
+  pts:["Whether structural levels actually hold, measured rather than asserted",
+  "Pivot-timing histogram: an extreme that prints early and holds is the trend-day signature — read against the ~50% coin-flip base"]},
+ {nm:"Group layout + verdicts",sc:"both",fd:"5 collapsible groups, sticky jump bar, live one-line verdicts",
+  lead:"The tab used to be one blind scroll of eleven expanded studies.",
+  pts:["Groups: Positioning · Holds · Clocks · Week · Structure. Crypto publishes only the first two — declared in the payload, so the client renders exactly that set",
+  "Each group header carries a one-line verdict computed from the <b>same</b> section payload its panels render — the verdict can never disagree with the chart",
+  "Open/collapsed state persists per browser; pending studies stay visible as dimmed rows with 'computing — needs X', never hidden",
+  "Coverage bookkeeping collapses once readiness hits 100%; full numbers stay on hover"],
+  why:"A cold cache and a build that throws every cycle look identical from the client. The server ships the build error when it has one, so the tab says which it is rather than implying progress forever."},
+]},
+
+{g:"Signals",n:"the ledger engine — 18 live events + 5 shadow strategies",items:[
+ {nm:"Live signal cards",sc:"both",fd:"ranked conditions in a fixed four-line grammar",
+  lead:"An unusual condition, ranked. Never a prediction.",
+  pts:["Score = unusualness now (0–50) + historical edge: the market's <b>own</b> base rate at ≥8 occurrences, else the asset-class pooled rate at a 30% discount, else a token score",
+  "<b>Line 1</b> event chip, plain-language reading, when it appeared, the claim it's scored against · <b>Line 2</b> evidence in one fixed format (scope · n · median · hit · expectancy · horizon) plus qualifier pills · <b>Line 3</b> the mechanical play (side, target, void, R/R) · <b>Line 4</b> the one corroborating thing to watch",
+  "Qualifier pills: <i>unproven</i> (flag without history), <i>neg exp</i> (past occurrences lost money — shown for awareness, ranked as noise), <i>no live edge</i>, earnings proximity",
+  "★ <b>prime</b> = ≥60% hit, positive expectancy, sound structure at fire time. Signals decay past their claimed horizon (amber) and drop at 2×"],
+  why:"The payload is capped at 40 per universe; the <b>count</b> is the true number of live conditions. Serving the capped length as the count once pinned the tab badge at 40 forever."},
+ {nm:"Per-universe lanes",sc:"both",fd:"crypto cannot crowd out the equity board",
+  lead:"Each universe gets its own budget in the capped payload.",
+  pts:["Crypto's sigma makes its intensity terms structurally larger, so a plain top-40 is not a neutral cap",
+  "Without lanes, any volatile crypto day fills the list with perps and the equity board — the one with the long record — silently vanishes from its own tab"],
+  why:"These lanes were retired as dead weight when only one universe was enrolled, then had to come back with the crypto engine. The cap is a transport decision; the badge must track reality."},
+ {nm:"Frozen claim geometry",sc:"both",fd:"side · void · target · R:R, stamped at fire time",
+  lead:"Every ledgered event freezes its geometry the moment it fires and can never move it.",
+  pts:["Entry = the mark at fire; void = the mechanical level that invalidates it; target from the historical median (null-tolerant — no valid swing means no target, and the claim still ledgers with its stop-aware leg)",
+  "R:R is scored: poor structure is penalized rather than ignored",
+  "Math that cannot produce this geometry goes into <b>screener columns</b>, not the ledger"]},
+ {nm:"Out-of-sample record",sc:"both",fd:"hit · median · expectancy · profit factor · calibration",
+  lead:"Every fired signal is ledgered at its mark and resolved at its horizon, live.",
+  pts:["The record blends back into scoring — weight grows with resolved count, so trust migrates from backtest to reality; event types whose live record shows no edge get <b>capped automatically</b>",
+  "<b>pf</b> (profit factor) catches the 55%-hit event that still loses money",
+  "<b>Calibration buckets</b> audit the scorer itself: if 55+ scores don't hit more than sub-35 scores, the ranking is broken",
+  "<b>⛔ stop-aware</b> re-scores every claim as if the void had been a hard stop",
+  "<b>vs BTC</b> column: the same claims net of the benchmark's move over each claim's own window — raw tells you what the trade returned, this tells you whether the event added anything beyond being long crypto",
+  "Claim-day disclosure: n resolved claims that fired across only k distinct UTC days are <b>not</b> n independent observations, and the tooltip says so"]},
+ {nm:"Confluence",sc:"both",fd:"direction-aware · earned bonus · ⇄ conflict flag",
+  pts:["Multiple <b>same-side</b> conditions on one name compound; context-only signals count as company",
+  "The bonus is earned: once 15+ resolutions exist per side it scales to the measured lift of with-company firings, and drops to <b>zero</b> if agreement doesn't prove out",
+  "<b>⇄</b> = long and short both fired on one name: flagged, no bonus for anyone, each claim resolves on its own, and the chip names its counterpart(s) so it doesn't read as a phantom"]},
+ {nm:"Shadow variants",sc:"both",fd:"self-tuning thresholds, bounded",
+  lead:"Each gated event runs 2–3 candidate thresholds in parallel.",
+  pts:["Only the incumbent emits visible signals; <b>all</b> variants silently ledger shadow claims on identical bookkeeping",
+  "A challenger is promoted only on ≥30 out-of-sample resolutions per side with a real expectancy beat",
+  "Shadow claims never surface in per-ticker history — they are internal bookkeeping, not a second opinion for the reader"],
+  why:"Bounded self-improvement, not free re-fitting. Without the resolution floor and the expectancy gate this becomes an automated overfitting machine."},
+ {nm:"Ticker claim history",sc:"stk",fd:"claim-by-claim audit trail behind the search bar",
+  pts:["Filter by coin, by event type, or both — an unfiltered dump has no consumer and would only invite misuse",
+  "Every row: event, side, fired-at (local), the mark it triggered at, resolution or countdown, score, at-horizon outcome, stop-aware outcome",
+  "Flags per row: ★ prime · <b>E</b> earnings-window · ⧉ fired with same-side company · <i>legacy %</i> for pre-normalization entries",
+  "⟲ marks claims opened on the first build after a restart — the mark and outcome are honest, only the onset time is a floor",
+  "Ledger keeps the last 4,000 resolved claims; the view shows the most recent 150 matching and says so"]},
+ {nm:"Earnings-conditioned split",sc:"stk",fd:"E-tagged claims vs everything else",
+  pts:["Claims in force within 1 ET day of a scheduled print are E-tagged and accrue their own base rate",
+  "Shown only past n ≥ 5 resolved earnings-window claims per event — below that it's accounting, not evidence",
+  "Both halves always shown so the comparison is honest; an earnings gap is a different animal than an overnight-drift gap"]},
+]},
+
+{g:"Earnings",n:"calendar, prints, study",items:[
+ {nm:"Earnings calendar",sc:"stk",fd:"Finnhub, chunked; upcoming + realized prints",
+  pts:["Fetched in small <b>disjoint</b> date chunks — 3-day live, 7-day historical",
+  "Ticker badges on the markets table flag proximity to a scheduled print",
+  "Admin can <b>void</b> a bad row rather than living with a wrong date poisoning the study"],
+  why:"Finnhub serves long windows far-end-first and caps the response. Asking for one wide window silently returns the wrong end of it — the chunking exists because that failure is invisible."},
+ {nm:"Filings link",sc:"stk",fd:"SEC EDGAR releases joined to calendar rows",
+  pts:["Material forms only, and only the ones that actually move a mark",
+  "DEF 14A and S-3 shelves are real but rarely urgent — they stay in the News tape",
+  "Coverage is honest about its edges: foreign listings and non-reporting instruments (indices, ETFs, FX, synthetics) simply don't file, so their absence is real, not a gap"]},
+ {nm:"PEAD study",sc:"stk",fd:"post-earnings drift, shadow strategy",
+  pts:["10-day horizon, drifting with the earnings reaction","Runs as a shadow strategy — ledgered on identical bookkeeping, no visible signal until it earns one"]},
+]},
+
+{g:"News",n:"merged tape, 72h retention",items:[
+ {nm:"Company + macro tape",sc:"stk",fd:"one feed, sliced client-side",
+  pts:["Company headlines tied to followed names plus the macro tape that moves everything",
+  "Served whole and sliced in the browser — the drawer's per-name news is the same payload filtered. One fetch, one source of truth.",
+  "72h retention: older items age off rather than accumulating into noise",
+  "Warm cache serves the last good pull across redeploys, so the tab comes back populated instead of blank"],
+  why:"A tape, not a verdict. It surfaces what was said and filed, not whether it matters — a headline's presence is never a signal. The ledger is where a story becomes a measurable condition."},
+ {nm:"Telegram channels",sc:"adm",fd:"group config on its own volume file",
+  pts:["The channel list is <b>configuration, not cache</b> — its own file on the volume, so a trimmed news cache can never lose it",
+  "Edits apply within seconds for everyone; each channel shows live status, and one erroring out says so rather than silently contributing nothing",
+  "Attribution is best-effort: a headline is tied to a ticker only when the match verifies, and unverified items stay in the tape without a false company tag"]},
+ {nm:"Filings overlay",sc:"stk",fd:"FL badge, material flag",
+  pts:["EDGAR filings ride the same feed, flagged <b>FL</b>, with material ones marked","Here they read as the raw regulatory tape; the Earnings tab is where they join a release"]},
+]},
+
+{g:"AI Report",n:"one ticker, everything the server holds",items:[
+ {nm:"Report card",sc:"both",fd:"synthesis layer that reads the ledger and cannot write to it",
+  lead:"Trend ladder, live claims with frozen geometry, the name's own record, positioning, benchmark decomposition, vol regime, divergences, coverage gaps, plus (equities) earnings risk and sector context — compiled and synthesized into plain language.",
+  pts:["The card footer names the <b>model that actually produced this report</b>, not the configured default",
+  "Reads are public; generation is an admin-gated act behind a signed unlock cookie",
+  "Universe-validated typeahead search, and a state-aware <b>AI report →</b> jump from the ticker drawer"],
+  why:"Not a ledger signal. The report has no frozen geometry of its own and never enters the track record — it reads the ledger, it cannot write to it."},
+ {nm:"Annotated chart",sc:"both",fd:"D1/H12/H4, EMA ribbon, levels, signal markers",
+  pts:["Drawn client-side from /api/candles plus the server's validated level list, so it cannot disagree with the data",
+  "EMA 13/21 ribbon with band fill; collision-staggered level labels so nothing overlaps into illegibility",
+  "Signal markers with side-typed color-coded glyphs and a decoded legend",
+  "<b>Proven-edge gate</b> on markers: ≥8 resolved roster-wide with positive avg R, or ≥5 resolved at ≥60% hit for name-specific edge. Suppressed counts are disclosed in the legend."]},
+ {nm:"Scenarios + EV",sc:"both",fd:"server-computed R/R and expected value",
+  pts:["The <b>risk unit</b> is the distance from generation price to the void — and when a live claim exists, the void IS that claim's frozen stop. The model cannot move it.",
+  "Per-scenario R/R and expected value are computed server-side from validated levels and probabilities, <b>never</b> taken from the model's prose",
+  "Scenario odds anchor on the name's own base rates; where n is thin the card says so",
+  "Negative-EV entries are server-downgraded to 'wait' — the action block is mandatory and cannot be a vague gesture"]},
+ {nm:"Validator",sc:"both",fd:"the rules the model cannot break",
+  pts:["EMA annotations are banned as chart levels — they move, so they cannot be a level",
+  "A directional read requires a correctly-<b>sided</b> void level and scenario; an opposing-bias anchor never overrides a short read's void",
+  "Action blocks mandatory, with EV-at-entry computed server-side",
+  "Schema versioning (AI_SCHEMA_V) invalidates every stale cached report on deploy rather than serving one shaped for an older contract"]},
+ {nm:"Cache + cooldown",sc:"both",fd:"one generation serves the whole group",
+  pts:["Reports are cached for everyone; the cache <b>is</b> the group's rate limit by construction",
+  "Regenerate unlocks on TTL expiry or material change — a new claim opened, a claim resolved, an earnings print landed — and the reason shows on the card",
+  "Cooldown is enforced server-side: the disabled button is convenience, the 429 is the gate",
+  "Live cooldown readout counts down in M:SS"]},
+ {nm:"Provider abstraction",sc:"both",fd:"auto-detect, same-family fallback",
+  pts:["Auto-detects ANTHROPIC_API_KEY or OPENAI_API_KEY; AI_PROVIDER is an explicit override",
+  "Primary model with an automatic same-family fallback, plus a separate cheaper classifier model",
+  "Fully dormant without a key, and the boot line says so out loud",
+  "Admin budget reset (POST /api/ai-reset) and the terminal Tier-3 ask fallback (POST /api/ask) are separate gated acts"]},
+]},
+
+{g:"Treemap",n:"runtime-injected tab",items:[
+ {nm:"Sector treemap",sc:"stk",fd:"squarified, size by volume or OI, three area scales",
+  lead:"Self-installs at load — injected by JS rather than living in index.html.",
+  pts:["Size by 24h volume or by OI; color = window return, capped at the 95th percentile of absolute moves so one outlier can't wash out the whole map",
+  "Three area scales: <b>honest</b> (true proportion), <b>balanced</b>, <b>flat</b> — because a truthful treemap of a power-law universe is mostly one tile",
+  "Labels only render what actually fits the tile; nothing overflows",
+  "Click a tile to open that ticker's drawer; hover for ticker, return, and size"],
+  why:"Because the tab is injected at runtime it has to join every system that wired the static tabs — saved tab order, drag-to-reorder, scope gating, flag visibility — explicitly. Its manifest entry is marked runtime:true so the markup-scanning test doesn't demand a data-view that will never exist."},
+]},
+
+{g:"Actionable",n:"admin — swing triggers right now",items:[
+ {nm:"Actionable board",sc:"adm",fd:"one row per name per side, at a swing trigger now",
+  lead:"Every name currently sitting at a swing trigger, with the entry, invalidation and target you would actually use.",
+  pts:["<b>rr</b> class = frozen ratio clears the 2:1 line — level-triggered setups (breakouts, retests): win big, less often",
+  "<b>ev</b> class = below 2:1 but positive expectancy anyway — sigma-built setups (big moves, funding divergences): win small, more often",
+  "Both clear the same record and EV gates. They are different <b>trades</b>, not different quality — which is why class is a filter, not a score.",
+  "Filters: class, muted names, exclude-near-earnings"]},
+]},
+
+{g:"Backtest",n:"admin — score duel",items:[
+ {nm:"Signal backtest",sc:"adm",fd:"signal · lookback · cadence · quantile · cost · split",
+  pts:["Configurable: signal, lookback, rebalance cadence, quantile, cost in bps, universe, in/out-of-sample split",
+  "Direction (high/low), structure (long-short or long-only), weighting (equal or otherwise), require-sign gate, hold window",
+  "Scores are computed with data through day <b>i</b> only — no lookahead, enforced in the scorer itself"]},
+ {nm:"MOM vs MOM+ duel",sc:"adm",fd:"persisted IC record across deploys",
+  pts:["The incumbent momentum score against the variant family, tracked as a daily information-coefficient record",
+  "Persisted on the volume, so the record carries across deploys rather than restarting at zero every push",
+  "Variant multipliers: OI corroboration (funding agreement scales the flow story), funding-crowding haircut at 31d extremes, volume participation — each bounded, so participation only nudges"]},
+ {nm:"D1 retest study",sc:"adm",fd:"designed, not yet built",
+  pts:["Mockup delivered; open decisions are cooldown length and the exact event definition"]},
+]},
+
+{g:"Alerts",n:"one stream, two consumers",items:[
+ {nm:"Bell panel + toasts",sc:"both",fd:"the in-app consumer of the trigger ring",
+  lead:"The panel is a window onto the server's persisted event ring, not a log this tab keeps.",
+  pts:["The display list is adopted wholesale from the server on every pull, so the panel shows what fired overnight, after a refresh, after a closed laptop",
+  "First run on a device adopts the server's high-water mark <b>without</b> firing, and starts the badge clean — forty retained events are history, not forty unread things",
+  "Toast interruption is gated on your thresholds; the <b>pull</b> is not — turning setup toasts off must not silently cost you the bell log too",
+  "Client eligibility mirrors compute.trigEligible exactly, in one place, so the board and the alert can't disagree about which setups are worth surfacing"]},
+ {nm:"Telegram delivery",sc:"both",fd:"the same stream, a different cursor",
+  pts:["Link by minting a 6-char code from an unambiguous alphabet (no O/0, I/1 — these get read off a screen and typed into a phone)",
+  "Per-person class subscriptions, quiet hours, once-per-local-day digest",
+  "Message grammar: header (class glyph, name, side dot, side), a monospace geometry block, the evidence line, the deep link. Telegram has no colour, so column-aligned numbers are what carries the terminal feel.",
+  "Bounded batches with <b>disclosed</b> overflow ('+N more held'), body-limit splitting, HTML-escaped text before parse_mode=HTML",
+  "The drain picks the first <b>eligible</b> item — a message held until 07:00 cannot head-of-line block urgent ones behind it"],
+  why:"The setup class delegates to the shared trigEligible rather than re-implementing it. A rule change can never make the browser and the bot announce different things — the exact drift this stream was built to prevent."},
+ {nm:"Ownership without accounts",sc:"both",fd:"signed per-browser handle",
+  lead:"Alerts were designed per-person, but the app has one shared password and no user accounts.",
+  pts:["Ownership is a signed, unguessable per-browser handle — that's the 'person' subscriptions scope to",
+  "Before this, the first Telegram linked became a global row every visitor could see, and rules were one shared list",
+  "Admin override is a <b>server</b> capability, not a UI trick: a non-admin cannot write someone else's subscriptions even by crafting the request",
+  "Rule cap is per person, so one prolific author cannot exhaust the list for everyone"]},
+ {nm:"Metric rules",sc:"both",fd:"user-authored threshold rules",
+  pts:["Per-metric comparison rules with a default cooldown, evaluated server-side",
+  "Others' rules are <b>counted, not listed</b> — you can tell the engine is working for other people without being shown what they're watching",
+  "Deleting a rule clears its armed / last-fire / previous-value state so a re-created rule is a genuinely new episode"]},
+ {nm:"Ops lane",sc:"adm",fd:"the server telling on itself",
+  pts:["Edge-triggered by construction: every caller holds its own 'already reported' flag and clears it on recovery",
+  "Operator-only in <b>delivery and in the feed</b> — a class the public cannot act on should not be readable either, and nobody can opt in by naming the class",
+  "Deploy notices are recorded but flagged <b>quiet</b>: the app redeploys on every pushed file, so a single build once fired five identical DMs"],
+  why:"An ops alert that repeats every tick is worse than none — you learn to ignore the channel, and then you miss the real one."},
+ {nm:"Measured class rates",sc:"both",fd:"fires-per-day next to every class",
+  pts:["Rolling 24h and 1h fire counts per class, shown in the subscription panel so a subscription is an informed choice rather than a bet",
+  "A very noisy class reports '400+' rather than a number that quietly understates it",
+  "Default set is frozen to the four whose rates are known (setup · ledger · rule · ops); every class added since is <b>opt-in</b>",
+  "Two candidate classes were deliberately never built: news headlines (tens per day — that's a tab, not an interruption) and ownership filings (Forms 3/4/5/144/13G — routine insider flow)"],
+  why:"Guessing a class's frequency from roster size is not good enough; measuring it is cheap. 'All classes by default' would mean every new class silently starts spamming everyone already linked."},
+]},
+
+{g:"Admin",n:"the switchboard",items:[
+ {nm:"Feature flag panel",sc:"adm",fd:"public / admin / off per feature, server-enforced",
+  lead:"The control surface for every other flag — which is why it can never be opened or turned off.",
+  pts:["Three states per feature: <b>public</b>, <b>admin</b>, <b>off</b>. 'Off' means nobody, including admin — it parks something broken without implying it's secret.",
+  "Unlisted keys resolve to admin (fail closed), so a feature shipped without a manifest entry is invisible to the group rather than silently exposed",
+  "<b>pin</b> (Markets) = always public: it's the fallback every gated view lands on, so hiding it would leave a public user on a blank app with no way out",
+  "<b>lock</b> (Admin) = always admin, never openable: a write making it public would hand the whole switchboard to the group, and one turning it off would lock the operator out with no way back but a redeploy",
+  "<b>View as public</b> swaps the entire resolved set in one assignment — and deliberately bypasses the flag check for its own tab, or the toggle that turns it back off would disappear with it"],
+  why:"Route gating fails OPEN while keys fail closed. That asymmetry is deliberate: default-closed routes would 403 the whole app dark on the first missed manifest entry. The tab half is closed mechanically by the manifest test; the route half is closed by review."},
+ {nm:"AI unlock",sc:"adm",fd:"signed, HttpOnly, session-lived",
+  pts:["Secret derived from ADMIN_PASSWORD — rotating the password revokes every outstanding unlock",
+  "Fails closed: no ADMIN_PASSWORD means no valid unlock, ever",
+  "The only affordance is the password route. There is no header or Basic bypass, and the test asserts none exists.",
+  "Emits a distinct <b>ai-locked</b> 401 so the client can prompt for the AI password rather than a login"],
+  why:"FEATURE_NEVER_GATE keeps /api/health, /login, /logout and the unlock routes permanently open. Gating the unlock route is a one-way door: no cookie, no way to mint one, no way back in without a redeploy."},
+ {nm:"Health + ops surface",sc:"adm",fd:"/api/health as the diagnosis tool",
+  pts:["Per-lane fail counts and backoff windows, backfill queue depth (hourly / daily pending), rate-limiter utilization, WS status",
+  "Hourly and funding coverage, last poll time, signal count, open/resolved ledger sizes, earnings entry counts and build errors",
+  "Build version stamp shipped in health, the snapshot payload and the UI status line — a stale deploy is visible at a glance",
+  "Force-refresh derivs, void an earnings row, reset the AI day budget"],
+  why:"'It looks stale' should be diagnosable from one endpoint instead of Railway logs."},
+]},
+
+{g:"Cross-cutting",n:"everything that isn't one tab",items:[
+ {nm:"Scope separation",sc:"both",fd:"two universes that never mix",
+  pts:["xyz HIP-3 equities dex (~84 tickers) and Hyperliquid main-dex perps (top-60 by volume), hard-separated end to end",
+  "Separate rosters, transport lanes, analytics slots, signal budgets, record sets, benchmark coins",
+  "Analytics keeps per-universe slots so a scope flip mid-flight can never render crypto data into a stocks view",
+  "Crypto declares its own study groups and its own ledger roster — 'awaiting first claim' for an event the universe never runs would be a lie"]},
+ {nm:"Deep links + tab order",sc:"both",fd:"every view routable",
+  pts:["#t=COIN opens a ticker drawer; #sectors, #signals, #news etc. open a tab. Shareable.",
+  "<b>Every</b> view name is routable, not a hand-kept subset — the old whitelist silently omitted actionable, signals and news, which made those hashes no-ops",
+  "A gated hash stops at the check rather than clearing the active view",
+  "Tabs are drag-reorderable and the order persists per browser"]},
+ {nm:"Version-stamped shell",sc:"both",fd:"cache-busting with a boot-time drift warning",
+  pts:["Assets served as /app.js?v=BUILD and /styles.css?v=BUILD, stamped once at boot",
+  "If the tags in the source markup ever drift from the stamper's expected form, boot logs a WARN — cache-busting degrades loudly, and the app still serves",
+  "The shell is split once at boot around the flag slot, so a request is a two-part concat rather than a 23 KB string scan per hit"]},
+ {nm:"PWA shell",sc:"both",fd:"installable · deliberately cache-free",
+  pts:["manifest.webmanifest, theme-color, icon.svg, and a registered service worker — all inline in the server",
+  "The service worker is a <b>no-op passthrough</b>: it exists for install-prompt eligibility and intercepts nothing",
+  "A test asserts no caches.open / caches.match ever appears in it"],
+  why:"Any future edit that adds caching to the SW is reintroducing the stale-client bug class that the version-stamped shell exists to kill — so it has to fail the suite first."},
+ {nm:"Touch parity",sc:"both",fd:"hover interactions on a phone",
+  pts:["Long-press drives the tooltip engine so every hover explanation is reachable by touch",
+  "Line charts scrub on horizontal intent (dx > dy + 4), so a scrub gesture doesn't fight the page scroll",
+  "Mobile column preset auto-applies once on a first phone-width visit with no stored prefs — one-shot, so widening the set later is never overridden"]},
+ {nm:"ETag caching",sc:"both",fd:"serveCached and serveKeyed",
+  pts:["Every read route serves through <b>serveCached</b> with a content-signature ETag; an unchanged payload is a 304",
+  "Candles and series use <b>serveKeyed</b> instead: per-coin / per-timeframe / per-version ETags plus a gzip memo",
+  "The shell is the exception — no-store, because its body is audience-specific"],
+  why:"A plain content ETag on candles would be a correctness bug, not just a perf miss: those payloads have no dataTs, so every coin would share one tag and a client could receive a 304 for the wrong coin's chart."},
+ {nm:"Persistence",sc:"both",fd:"the /data volume",
+  pts:["Append-only OI log — open interest accrues over time and cannot be re-fetched, so every sample is written and reloaded on boot. Pruned to 31 days.",
+  "Funding history, hourly spine (NDJSON), computed feature cache (so a redeploy serves a warm table instantly)",
+  "Ledger (last 4,000 resolved + all open), trigger ring with its seq cursor and <b>episode state</b>, push recipients, alert rules, news warm cache, duel record, feature flags",
+  "Presence timelines survive restarts — a deploy is not a lapse"],
+  why:"Persisting episode seeds is what turned the trend and regime alert classes from theoretical into real. This app redeploys once per pushed file, so before that a trend cross had to complete entirely between two deploys to ever fire."},
+ {nm:"CSV export",sc:"both",fd:"markets, sectors, ledger",
+  pts:["Markets table exports exactly the columns and rows on screen","Sector board export","Ledger export as a public route — the record should be auditable outside the app"]},
+]},
+];
+
+/* ================= tree render ============================================================ */
+const SCL={both:["both","both universes"],stk:["stk","xyz equities only"],cry:["cry","crypto only"],adm:["adm","admin-gated"]};
+const treeEl=document.getElementById("tree");
+let idx=[];
+treeEl.innerHTML=TREE.map((g,gi)=>{
+  const items=g.items.map((f,fi)=>{
+    idx.push({gi,fi,txt:(g.g+" "+f.nm+" "+f.fd+" "+(f.lead||"")+" "+(f.pts||[]).join(" ")+" "+(f.why||"")).toLowerCase()});
+    const s=SCL[f.sc];
+    return `<div class="feat" data-g="${gi}" data-f="${fi}">
+      <span class="fn">${f.nm}</span><span class="fd">${f.fd}</span>
+      <span class="fm"><span class="sc ${s[0]}" data-tip="${s[1]}">${s[0]}</span><span class="cnt">${(f.pts||[]).length}</span></span></div>`;
+  }).join("");
+  return `<section class="grp${gi<2?" open":""}" id="g${gi}">
+    <div class="gh" data-g="${gi}"><span class="car">${gi<2?"▾":"▸"}</span><span class="gt">${g.g}</span>
+    <span class="fd" style="color:var(--faint);font-size:11px">${g.n}</span><span class="gn">${g.items.length}</span></div>
+    <div class="gb">${items}</div></section>`;
+}).join("");
+
+treeEl.addEventListener("click",e=>{
+  const gh=e.target.closest(".gh");
+  if(gh){const s=gh.parentElement;s.classList.toggle("grp");const o=s.classList.toggle("open");
+    s.classList.add("grp");gh.querySelector(".car").textContent=o?"▾":"▸";return;}
+  const f=e.target.closest(".feat");if(!f)return;
+  document.querySelectorAll(".feat.sel").forEach(x=>x.classList.remove("sel"));
+  f.classList.add("sel");showFeat(+f.dataset.g,+f.dataset.f);
+});
+
+const det=document.getElementById("det");
+function showFeat(gi,fi){
+  const g=TREE[gi],f=g.items[fi],s=SCL[f.sc];
+  det.innerHTML=`<div class="kick">${g.g} · <span class="sc ${s[0]}">${s[1]}</span></div>
+  <h2>${f.nm}</h2><div class="lead">${f.lead||f.fd}</div>
+  ${(f.pts||[]).length?`<h3>Detail</h3><ul>${f.pts.map(p=>`<li>${p}</li>`).join("")}</ul>`:""}
+  ${f.why?`<div class="why"><b>why it works this way</b>${f.why}</div>`:""}
+  <div class="hint">${g.items.length} feature${g.items.length===1?"":"s"} in ${g.g}</div>`;
+  det.scrollTop=0;
+}
+function detHome(){
+  const n=idx.length,gn=TREE.length;
+  det.innerHTML=`<div class="kick">overview</div><h2>${n} features across ${gn} areas</h2>
+  <div class="lead">Every surface the app exposes, grouped by where it lives, with the reasoning behind the ones that look arbitrary.</div>
+  <h3>How to read this</h3><ul>
+  <li>Click any row for its full detail and, where one exists, the <b>why it works this way</b> note — usually a bug that shaped the design</li>
+  <li>The <b>scope chip</b> says which universe a feature runs in. Several studies genuinely have no crypto analogue and say so in the UI rather than showing an empty panel.</li>
+  <li>The count on the right is how many detail points that feature carries — a rough proxy for how much machinery sits behind it</li>
+  <li>Type in the filter box to search across names, descriptions and every detail point at once</li></ul>
+  <h3>The other tabs</h3><ul>
+  <li><b>Signal roster</b> — all 18 live events and 5 shadow strategies with horizons, sides and universes</li>
+  <li><b>Alert classes</b> — the ten push classes, which are on by default, and which two were deliberately never built</li>
+  <li><b>Table columns</b> — the full markets column inventory and which presets show what</li>
+  <li><b>Scope matrix</b> — the stocks/crypto grid at a glance</li></ul>
+  <div class="hint">hover anything with a dotted feel — most cells carry their own explanation</div>`;
+}
+detHome();
+
+/* ================= signal roster ========================================================= */
+const SIGS=[
+["bigmove","Big move","long/short","next 1d, signed with the move","d1","both","Today's move is ≥2σ of this market's own trailing 30d daily returns. History measures whether such moves continued or faded the next day."],
+["breakout","30d-high breakout","long","next 5d","d5","both","First close/mark above the prior 30-day high. Forward 5d study on this market's own past first-crosses."],
+["breakdown","30d-low breakdown","short","next 5d, signed with the breakdown","d5","both","Close crossed below the prior 30d low — the bearish mirror of the breakout."],
+["volshift","Vol expansion","long/short","next 5d","d5","both","10d realized vol crossed above the 90th percentile of its own trailing ~6 months."],
+["gap","Outsized gap","long/short","next cash session, signed with the gap","session","stk","The live move since the last cash close is outsized vs this market's own gap distribution. For markets whose own record says gaps FADE, the study numbers and the ledgered claim are flipped into the units of the fade play — positive means the fade paid."],
+["fundflip","Funding flip","long/short","next 3d, toward the new crowd","d3","both","Day-summed funding changed sign after ≥3 days pinned the other way — the crowd switched sides."],
+["squeeze","Squeeze setup","long","next 3d","—","stk","Crowded shorts (negative 7d funding) × OI building × price pressing the range. No historical study yet: needs longer OI history."],
+["unwind","Long unwind","short","next 3d","—","stk","Crowded longs paying funding while OI builds and price sits near range lows — the bearish mirror of the squeeze. Their liquidation is the seller of last resort."],
+["oiflush","OI flush","long","next 5d (bottoming thesis)","d5","both","7d ΔOI collapsed below −2σ of this market's own distribution while price fell — forced deleveraging exhausting itself. Flushes measure positions destroyed, not price traveled."],
+["fpdiv","Funding–price divergence","long/short","next 3d, with the divergence","d3","both","Strength while funding falls = shorts pressing into a rising market (squeeze-adjacent, long). Weakness while funding rises = longs averaging down into a falling one (fragile, short)."],
+["prem","Premium dislocation","long/short","reversion toward oracle (12h)","—","stk","Perp dislocated from oracle vs its own 7-day premium baseline. During closed cash sessions this IS the live price discovery for the synthetic."],
+["ondrift","Overnight drift","long","next 5 overnight windows, held close→open","—","stk","Summed off-hours drift over ~21 closed windows sits ≥2σ from the universe — the structural edge of a venue where cash-hours assets trade 24/7. Ships without a backtest study by design: it earns trust purely out of sample."],
+["tretest","Trend retest (long)","long","next 5d, with the stacked trend","—","both","The Trend board's RETEST badge promoted to a ledgered claim: a ≥3/4 stacked uptrend whose retesting rung probed the 13/21 EMA zone while the close held EMA21. Void = that rung's own EMA21; target = that rung's prior swing."],
+["tretestdn","Trend retest (short)","short","next 5d, with the stacked downtrend","—","both","The short mirror. Cleanest transfer in the roster — its geometry was never a sigma construction, so crypto enrollment needed no log-space rewrite, only the enrollment."],
+["casc","Cascade exhaustion","long/short","—","—","cry","Liquidation cascade exhausting itself, read off the forced-liquidation tape against aggregate OI."],
+["fundext","Funding extreme","long/short","—","—","cry","Funding at a percentile extreme of its own distribution — crypto-native, where the carry is large enough to be the story."],
+["coil","Range compression","context","context flag — expansion pending, direction unknown","—","both","10d realized vol in the bottom decile of its own trailing 120. Never claims a side: it exists to corroborate a breakout or breakdown firing OUT of the compression."],
+["volume","Volume surge","context","context flag","—","both","24h volume is a multiple of this market's own 30d norm — amplifies whatever else is firing."],
+];
+const SHADOWS=[
+["gapfade","Gap fade","next cash session, faded","the fade side of the gap event, on the same session calendar"],
+["reclaim","Breakdown reclaim","next 5d, off the failed breakdown","a breakdown that gets taken back — the failure of the failure"],
+["mapull","MA50 pullback","next 10d, off the rising MA50","pullback into a rising MA50 in an intact uptrend"],
+["failbrk","Failed breakout","next 5d, fading the failed breakout","a 30d-high break that doesn't hold, traded the other way"],
+["pead","Post-earnings drift","next 10d, drifting with the reaction","the classic PEAD, ledgered out of sample before it is ever shown"],
+];
+document.getElementById("sig").innerHTML=`<div class="tw">
+<p class="intro">Eighteen live event types plus five shadow strategies. <b>Study</b> names the backtest key each event's claimed base rate comes from — a dash means it ships with <i>no</i> in-sample study and earns its record purely out of sample. Sigma-united events resolve in <b>R</b>; the rest in % or bp. Hover any row for the full condition.</p>
+<table><thead><tr><th>key</th><th>label</th><th>side</th><th>horizon &amp; sign convention</th><th data-tip="which in-sample study supplies the claimed base rate — a dash means none exists and the event earns its record live">study</th><th>universe</th></tr></thead><tbody>
+${SIGS.map(s=>`<tr data-tip="<b>${s[1]}</b><br>${s[6]}">
+<td class="k">${s[0]}</td><td>${s[1]}</td>
+<td><span class="tag ${s[2]==="context"?"ctx":(s[2].indexOf("/")>0?"dual":s[2])}">${s[2]}</span></td>
+<td class="n">${s[3]}</td><td class="${s[4]==="—"?"mut":"n"}">${s[4]}</td>
+<td><span class="sc ${s[5]==="both"?"both":(s[5]==="stk"?"stk":"cry")}">${s[5]}</span></td></tr>`).join("")}
+</tbody></table>
+<h3 style="font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin:22px 0 8px">Shadow strategies</h3>
+<p class="intro">Ledgered on identical bookkeeping, never surfaced as visible signals until the record earns it. A challenger threshold is promoted only on ≥30 out-of-sample resolutions per side with a real expectancy beat.</p>
+<table><thead><tr><th>key</th><th>label</th><th>horizon</th><th>what it tests</th></tr></thead><tbody>
+${SHADOWS.map(s=>`<tr><td class="k">${s[0]}</td><td><span class="tag shad">${s[1]}</span></td><td class="n">${s[2]}</td><td class="n">${s[3]}</td></tr>`).join("")}
+</tbody></table>
+<p class="intro" style="margin-top:20px"><b>Crypto roster is a whitelist, not a blanket re-admission.</b> It carries casc, fundext, bigmove, breakout, breakdown, volshift, fundflip, oiflush, fpdiv, tretest, tretestdn, coil and volume — and deliberately excludes gap, prem, ondrift, squeeze and unwind. Rendering "awaiting first claim" for an event a universe never runs would be a lie, so the client roster and the server whitelist are joined by a test.</p>
+</div>`;
+
+/* ================= alert classes ========================================================= */
+const CLS=[
+["setup","the existing trigger stream — a new ranked condition worth interrupting for","yes","no","Delegates to the shared trigEligible gate, so the browser and the bot can never announce different things. Your EV / R:R / lateness thresholds apply here."],
+["ledger","the DEATH side of a claim setup already announced: void taken, target reached, or horizon resolved","yes","no","Deliberately one class rather than three — nobody wants target-hits but not stop-hits, and the message says which it is."],
+["rule","a user-authored metric threshold rule fired","yes","no","Per-person rules with their own cooldowns; deleting a rule clears its armed state."],
+["ops","the server telling on itself: stalls, degraded feeds, deploys","yes","ADMIN","Operator-only in delivery AND in the feed. Nobody can opt in by naming the class. Deploy notices are recorded but flagged quiet."],
+["trend","arrival at a full 4/4 D1 stack, or a D1 ribbon flip","opt-in","no","D1 only — H12/H4 crossings across ~144 names would be a feed, not an alert."],
+["filing","a material SEC filing on a covered name","opt-in","no","Material forms only. 45-minute boot grace period seeds the EDGAR backlog silently. Ownership filings (3/4/5/144/13G) were deliberately excluded as routine insider flow."],
+["earnings","proximity to a scheduled print, and analyst flips","opt-in","no","Ships opt-in: it enters the ring and the in-app log immediately, and reaches a phone only once someone has seen its measured rate."],
+["ai","an AI report became regeneratable on material change","opt-in","no","Material change means a new claim opened, a claim resolved, or an earnings print landed."],
+["regime","tape-wide crowding or leverage hit an extreme","opt-in","no","Re-arm gate per scope and sub-metric, so one episode fires once. In force at boot = seeded, not announced."],
+["coverage","a data gap on a name carrying an OPEN, announced claim","opt-in","no","Scoped deliberately: a gap on a name nobody is watching is a maintenance item for the coverage panel. A gap under a live claim means every number you were given about it is now computed from a stale spine — and you should know before you act."],
+];
+document.getElementById("alerts").innerHTML=`<div class="tw">
+<p class="intro">Ten classes on one sequenced trigger stream with two consumers: the in-app bell and the Telegram bot. Both read the same ring with their own cursor. Every class enters through a single emitter and is stamped with its <b>kind</b>, so a consumer filters on a field that always exists rather than inferring class from which fields happen to be present.</p>
+<table><thead><tr><th>class</th><th>what it announces</th><th data-tip="whether a freshly linked recipient receives this class before choosing anything. The default set is frozen to the four whose rates are known — every class added since is opt-in, so adding one can never retroactively subscribe anyone.">default</th><th>audience</th><th>notes</th></tr></thead><tbody>
+${CLS.map(c=>`<tr><td class="k">${c[0]}</td><td>${c[1]}</td>
+<td><span class="tag ${c[2]==="yes"?"on":"off"}">${c[2]}</span></td>
+<td>${c[3]==="ADMIN"?'<span class="tag adm">admin</span>':'<span class="n">all</span>'}</td>
+<td class="n">${c[4]}</td></tr>`).join("")}
+</tbody></table>
+<p class="intro" style="margin-top:18px"><b>Two classes were deliberately not built.</b> News headlines: the wire runs a per-name rotation across the whole roster, so attributed headlines land at tens per day — that's a tab to read, not an interruption. Ownership filings: several per day per active name of routine insider flow. Both would have been noise wearing an alert's clothes.</p>
+<p class="intro"><b>Rate measurement.</b> Rolling 24h and 1h fire counts per class are shown next to each subscription checkbox, capped at 400 per class and reported as "400+" rather than a number that quietly understates. This exists because a deploy notice once fired five times per build and it only surfaced when it got annoying.</p>
+</div>`;
+
+/* ================= columns =============================================================== */
+const COLS=[
+["ticker","Ticker","★ watchlist toggle, ticker, earnings badge","default","never hideable"],
+["px","Price","live mark, flashes on change","default","mobile"],
+["funding","Funding (APR)","annualized funding, with a ▴/▾ flag at the 90th/10th percentile of its own 31d hourly distribution","default","mobile"],
+["prem","Prem","(mark − oracle) / oracle in bp — during a closed cash session this IS the live price discovery","default",""],
+["h1","1h %","window return","default",""],
+["h4","4h %","window return","default",""],
+["d1","1d %","window return","default","mobile"],
+["d7","7d %","window return","default","mobile"],
+["d30","30d %","window return","default",""],
+["gap","Gap","live move since the last cash close","default",""],
+["trend","Trend","stacked EMA ladder score","default",""],
+["rs","RS","relative strength vs the benchmark","default",""],
+["mom","MOM","incumbent momentum score","default",""],
+["momp","MOM+","the variant candidate, pinned adjacent to the incumbent","default",""],
+["dd","DD","drawdown from high","default",""],
+["ddy","DD (y)","drawdown from the yearly high","default",""],
+["yopen","vs Y open","versus the year's open","default",""],
+["mopen","vs M open","versus the month's open","default",""],
+["vol","24h Vol","dollar volume","default","mobile"],
+["adr","ADR","average daily range","default",""],
+["cascT","Casc","cascade exhaustion column","default",""],
+["liq24","Liq 24h","forced liquidations, long/short split — aggregated CEX, USD source-converted. Context, not HL-native.","default",""],
+["turn","Turn","turnover","default",""],
+["doi","ΔOI","open interest change","hidden","mobile"],
+["oi","OI","open interest","hidden",""],
+["sqz","Squeeze","squeeze screen","hidden",""],
+["carry","Carry","carry screen","hidden",""],
+["beta","Beta","vs benchmark","hidden",""],
+["vol30","Vol (ann)","30d annualized volatility","hidden",""],
+["rvol","RVOL","relative volume","hidden",""],
+["vstape","vs tape","versus the tape","hidden",""],
+["dcap","D-cap","","hidden",""],
+["hitr","Hit rate","","hidden",""],
+["ma20","MA20","distance to the 20d MA","hidden",""],
+["ma50","MA50","distance to the 50d MA","hidden",""],
+["ma100","MA100","distance to the 100d MA","hidden",""],
+["ma200","MA200","distance to the 200d MA","hidden",""],
+["vwap","VWAP","","hidden",""],
+["vsvwap","vs VWAP","","hidden",""],
+];
+document.getElementById("cols").innerHTML=`<div class="tw">
+<p class="intro">The markets table column inventory. <b>Default</b> columns show on a fresh install; <b>hidden</b> ones are one ⚙ toggle away — nothing is removed, only hidden. The <b>mobile</b> flag marks the seven columns in the built-in phone preset: the set that survives a ~390px viewport with the ticker pinned.</p>
+<table><thead><tr><th>key</th><th>label</th><th>what it shows</th><th>on fresh install</th><th data-tip="the curated phone-width preset, auto-applied once on a first mobile visit with no stored prefs">mobile preset</th></tr></thead><tbody>
+${COLS.map(c=>`<tr${c[2]?` data-tip="<b>${c[1]}</b><br>${c[2]}"`:""}>
+<td class="k">${c[0]}</td><td>${c[1]}</td><td class="n">${c[2]||'<span class="mut">—</span>'}</td>
+<td><span class="tag ${c[3]==="default"?"on":"off"}">${c[3]}</span></td>
+<td>${c[4]?'<span class="tag dual">mobile</span>':'<span class="mut">—</span>'}</td></tr>`).join("")}
+</tbody></table>
+<p class="intro" style="margin-top:18px"><b>MOM+ adjacency.</b> When a saved layout or a stored pref predates a new column, the column is appended rather than dropped — except MOM+, which migrates in <i>next to</i> its incumbent rather than at the far right. A candidate you're evaluating is useless twenty columns away from the thing it's competing with.</p>
+</div>`;
+
+/* ================= scope matrix ========================================================== */
+const MX=[
+["Markets table","y","y"],["Ticker drawer","y","y"],["Saved layouts","y","y"],["Regime strip","y","y"],
+["Trend board + alerts","y","y"],
+["Sectors: flow map / RRG / detail","y","n"],
+["Correlation matrix + pairs","y","y"],
+["Sessions · Positioning","y","y"],["Sessions · Holds","y","y"],
+["Sessions · Clocks","y","n"],["Sessions · Week","y","n"],["Sessions · Structure","y","n"],
+["Return seasonality","y","n"],
+["Signals + ledger","y","p"],["Per-universe signal lanes","y","y"],
+["Ticker claim history","y","n"],["Earnings-conditioned split","y","n"],
+["Earnings calendar + PEAD","y","n"],["News tape + filings","y","n"],
+["AI report","y","y"],["Treemap","y","n"],
+["Actionable board","y","n"],["Backtest + duel","y","n"],
+["Alerts: setup / ledger / rule / ops","y","y"],["Alerts: trend / regime / coverage","y","y"],
+["Alerts: filing / earnings","y","n"],
+["PWA + touch parity","y","y"],["CSV export","y","y"],
+];
+document.getElementById("matrix").innerHTML=`<div class="tw">
+<p class="intro">Which universe each feature runs in. <span class="dot y"></span> runs · <span class="dot p"></span> partial (whitelisted subset) · <span class="dot n"></span> not applicable. Most gaps are deliberate rather than unbuilt: a by-sector cross-sectional test has no analogue in a one-class book, hour/day grids on a 24/7 venue restate the clock with no cash session to contrast against, and events like gap or premium dislocation simply don't exist without a closing bell.</p>
+<table class="mx"><thead><tr><th style="min-width:280px">feature</th><th data-tip="xyz HIP-3 builder dex — roughly 84 equity tickers">xyz equities</th><th data-tip="Hyperliquid main-dex perpetuals — top 60 by volume">crypto perps</th><th>note</th></tr></thead><tbody>
+${MX.map(r=>{
+  const note=r[2]==="n"?"no analogue in a continuous one-class book":(r[2]==="p"?"whitelisted event subset, not a blanket enrollment":"");
+  return `<tr><td>${r[0]}</td>
+  <td><span class="dot ${r[1]}"></span></td><td><span class="dot ${r[2]}"></span></td>
+  <td class="n" style="font-size:10.5px">${note}</td></tr>`;}).join("")}
+</tbody></table></div>`;
+
+/* ================= search + nav ========================================================== */
+const q=document.getElementById("q");
+q.addEventListener("input",()=>{
+  const v=q.value.trim().toLowerCase();
+  const feats=treeEl.querySelectorAll(".feat");
+  if(!v){feats.forEach(f=>f.classList.remove("hide"));
+    treeEl.querySelectorAll(".grp").forEach(g=>g.classList.remove("hide"));return;}
+  treeEl.querySelectorAll(".grp").forEach(g=>{g.classList.add("open");g.querySelector(".car").textContent="▾";});
+  let n=0;
+  feats.forEach(f=>{
+    const r=idx.find(i=>i.gi===+f.dataset.g&&i.fi===+f.dataset.f);
+    const hit=r&&r.txt.includes(v);f.classList.toggle("hide",!hit);if(hit)n++;});
+  treeEl.querySelectorAll(".grp").forEach(g=>{
+    g.classList.toggle("hide",!g.querySelectorAll(".feat:not(.hide)").length);});
+});
+document.addEventListener("keydown",e=>{
+  if(e.key==="/"&&document.activeElement!==q){e.preventDefault();q.focus();q.select();}
+  if(e.key==="Escape"&&document.activeElement===q){q.value="";q.dispatchEvent(new Event("input"));q.blur();}});
+
+document.getElementById("nav").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on",x===b));
+  document.querySelectorAll(".pane").forEach(p=>p.classList.toggle("on",p.dataset.p===b.dataset.p));
+  document.getElementById("body").scrollTop=0;
+  document.getElementById("det").style.display=b.dataset.p==="tree"?"":"none";
+});
+</script>
+</body>
+</html>
