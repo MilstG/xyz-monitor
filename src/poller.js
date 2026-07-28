@@ -2877,14 +2877,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function analyticsUniverse(scope) {
     if (scope === "crypto") return {
       scope: "crypto", isCrypto: true, tz: "UTC",
-      // Which session-study GROUPS this universe publishes (-19). Crypto keeps Positioning (the
-      // regime aggregate) and Holds (session decomposition, anatomy, candle behaviour, pivots) and
-      // drops the rest: the asset-class overlay and clustering both collapse to a single "Crypto"
-      // class so they compare nothing, seasonality is a by-sector test with no crypto analogue, and
-      // the hour/day grids on a 24/7 book restate the clock without a cash session to contrast it
-      // against. One declaration, shipped in the payload — the client renders exactly these, and the
-      // builders below skip the disabled studies entirely rather than burning CPU on hidden panels.
-      groups: ["positioning", "holds"],
+      // Which session-study GROUPS this universe publishes (-19, structure added -27). Crypto keeps
+      // Positioning (the regime aggregate), Holds (session decomposition, anatomy, candle
+      // behaviour, pivots) and — since -27 — Structure: the level and EMA200 studies are
+      // price-structure claims, and a 200-EMA pullback/breakdown/reclaim is as native to a perp
+      // as to any equity; keeping them stocks-only was a wiring accident, not a decision. Still
+      // dropped: the asset-class overlay and clustering (both collapse to a single "Crypto" class
+      // so they compare nothing — clusters additionally ride the hour clocks, which crypto does
+      // not publish), seasonality (a by-sector test with no crypto analogue), and the hour/day
+      // grids (a 24/7 book restates the clock without a cash session to contrast it against).
+      // One declaration, shipped in the payload — the client renders exactly these groups.
+      groups: ["positioning", "holds", "structure"],
       roster: () => mainMarkets().filter((r) => r && !r.delisted),
       classOf: () => "Crypto",
       // On a 24/7 book "equity" gating is meaningless — the study-eligible set is the whole roster
@@ -2963,7 +2966,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           sessionDecomp: buildSessionDecomp(U),
           hourClock,
           dow: on("week") ? buildDowHeatmap(U) : DISABLED,
-          clusters: on("structure") ? buildClusters(hourClock) : DISABLED,
+          clusters: on("structure") && on("clocks") ? buildClusters(hourClock) : DISABLED,   // clusters consume the hour clocks — a universe without clocks (crypto) gets an honest disabled, never an eternal pending
           seasonality: on("clocks") ? buildSeasonality(U) : DISABLED,
           levels: lvSt,
           ema200: emSt,
