@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.28-05";
+const VERSION = "2026.07.28-06";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -713,6 +713,27 @@ async function main() {
     return serveKeyed(req, reply, "corr-crypto|" + win + "|" + poller.getCryptoCorrStamp(win),
       () => poller.getCryptoCorr(win),
       { win, enabled: false, bar: null, times: [], coins: [], C: [], N: [], minOv: 0, reason: "not built yet" });
+  });
+  // Custom baskets (build 2026.07.28-06): registry + server-synthesized EW daily series, one
+  // payload. Both routes are gated by the "baskets" manifest key (admin while it soaks). Visual
+  // layer only — nothing served here ever feeds signal math or the alert emitters.
+  fastify.get("/api/baskets", (req, reply) =>
+    serveKeyed(req, reply, "baskets|" + poller.getBasketsStamp(), () => poller.getBasketsPayload(), { baskets: [], floor: 0.6 }));
+  // One route, two verbs in the body: {name, members[]} creates, {name, drop:true} drops. The
+  // gate matches the method-less manifest route string, so both verbs open and close together.
+  fastify.post("/api/baskets", { bodyLimit: 8 * 1024 }, (req, reply) => {
+    const b = req.body || {};
+    const res = b.drop ? poller.dropBasket(b.name) : poller.createBasket(b.name, b.members);
+    reply.header("cache-control", "no-store").send(res);
+  });
+  // Ratio pair candles: server-computed from hourly ratio closes (basket legs synthesized hourly),
+  // bucketed with the ladder's own bucketer, EMA200 over the full series before the wire trim —
+  // the client only renders. Key folds the baskets stamp + a 5-minute clock bucket: edits and new
+  // dailies mint fresh keys, tf-toggle spam inside a bucket 304s.
+  fastify.get("/api/ratio", (req, reply) => {
+    const q = req.query || {};
+    const key = "ratio|" + (q.num || "") + "|" + (q.den || "") + "|" + (q.tf || "") + "|" + poller.getBasketsStamp() + "|" + Math.floor(Date.now() / 300000);
+    return serveKeyed(req, reply, key, () => poller.getRatio(q.num, q.den, q.tf), { ok: false, error: "poller not ready" });
   });
   // Claim-history browser: filter by ticker (coin=), by event type (ev=), or both. Powers the
   // drawer signal record and the Signals-tab full history search.
