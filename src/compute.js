@@ -2571,6 +2571,27 @@ function newsRelevant(headline, summary, ticker, aliases) {
   return aliasHit(txt.toLowerCase(), aliases);
 }
 
+// ---- macro-lane topic gate (pure) — build 2026.07.28-03 ------------------------------------
+// Third lane, alongside CONFIRMATION (newsRelevant) and DISCOVERY (newsAttributes). A macro
+// instrument has no company feed, so its news is topical: does this tape headline name Brazil,
+// the yen, crude? Word-boundary matched, NOT substring — aliasHit's substring rule is right for
+// company names ("Apple" must cover "Apple's") and wrong for short topic words, where "oil"
+// inside "toil" and "yen" inside "cayenne" would silently seed a drawer with garbage. Phrases
+// match as phrases ("Bank of Japan"), so internal spaces are preserved and only the outer edges
+// are boundary-checked. Case-insensitive. An empty or absent topic list matches NOTHING — a name
+// with no declared lane gets no tape, which is the whole point of the gate.
+function topicHit(text, topics) {
+  if (!Array.isArray(topics) || !topics.length) return false;
+  const t = String(text || "");
+  if (!t) return false;
+  for (const k of topics) {
+    const s = String(k || "").trim();
+    if (!s) continue;
+    if (new RegExp("(^|[^A-Za-z0-9])" + symEsc(s) + "($|[^A-Za-z0-9])", "i").test(t)) return true;
+  }
+  return false;
+}
+
 // ---- news attribution gate (pure) — DISCOVERY lane ----------------------------------------
 // Inverted from newsRelevant: T is NOT known — arbitrary text is scanned against the whole roster
 // to find the name it's about. A bare word-boundaried symbol is too weak to attribute on here,
@@ -3881,6 +3902,7 @@ module.exports.etDayStr = etDayStr;
 module.exports.mergeNews = mergeNews;
 module.exports.newsRelevant = newsRelevant;
 module.exports.newsAttributes = newsAttributes;
+module.exports.topicHit = topicHit;
 module.exports.COMMON_WORD = COMMON_WORD;
 module.exports.parseTgPreview = parseTgPreview;
 module.exports.attributeTg = attributeTg;

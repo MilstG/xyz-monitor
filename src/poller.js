@@ -14,13 +14,13 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
-const { classify, nameAliases, companyName } = require("./sectors");
+const { classify, nameAliases, companyName, displayName, macroLane } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 const TF = { h1: HOUR, h4: 4 * HOUR, d1: DAY, d7: 7 * DAY, d30: 30 * DAY };
@@ -1068,6 +1068,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         ref: trimRef(r.ref), feat: trimFeat(r.feat),
         doi: trimWin(computeDoi(r)), fundByWin: trimWin(computeFundWin(r), 6),
         sector: cl.sector, assetClass: cl.assetClass,
+        // Display name + macro news lane, both from the static sectors table. `nm` is a label
+        // only; `mlane` declares whether this instrument HAS a topical news lane and what it is
+        // scoped to, so the drawer never re-derives either. Both are undefined when unseeded —
+        // the client renders the bare ticker and shows no tape, never a guess.
+        nm: displayName(r.ticker, r.uni) || undefined,
+        mlane: macroLane(r.ticker, r.uni) || undefined,
       };
     };
     const markets = activeMarkets().map(mapMarket);
@@ -3715,10 +3721,46 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (a.tk && a.rel === 0 && newsRelevant(a.h, null, a.tk, aliasesFor(String(a.tk).toUpperCase()))) { a.rel = 1; promoted++; }
     return promoted;
   }
+  // Macro-lane roster (build 2026.07.28-03): every LIVE non-equity xyz name that declares a news
+  // lane, as [TICKER, lane] pairs. Rebuilt each payload from `rows`, so a name that is not in the
+  // universe can never be stamped onto a headline. Broad-lane names (the S&P, the VIX, the dollar
+  // index) take the whole tape by definition and are stamped onto every non-off-topic tape item;
+  // scoped names are stamped only when the headline actually names one of their topics.
+  function macroLaneRoster() {
+    const out = [];
+    for (const r of rows.values()) {
+      if (r.delisted || r.uni !== "xyz" || !r.ticker) continue;
+      const L = macroLane(r.ticker, r.uni);
+      if (L) out.push([String(r.ticker).toUpperCase(), L]);
+    }
+    return out;
+  }
+  // Write-once per article id: headlines are immutable once stored, so the match set is computed
+  // exactly once and reused for the life of the item. Keyed by id + roster signature so a roster
+  // change (a new listing, a delisting) recomputes rather than serving a stale set.
+  const mtkCache = new Map();
+  function macroTagsFor(a, roster, rosterSig) {
+    const key = String(a.id);
+    const hit = mtkCache.get(key);
+    if (hit && hit.sig === rosterSig) return hit.tk;
+    const tk = [];
+    for (const [T, L] of roster) {
+      if (L.broad) { tk.push(T); continue; }
+      if (topicHit(a.h, L.topics)) tk.push(T);
+    }
+    const v = tk.length ? tk : null;
+    mtkCache.set(key, { sig: rosterSig, tk: v });
+    return v;
+  }
+  function pruneMtkCache() { const live = new Set(newsItems.map((a) => String(a.id))); for (const k of mtkCache.keys()) if (!live.has(k)) mtkCache.delete(k); }
+
   function buildNewsPayload() {
     // per-item context stamps, all server-side so the tab stays dumb: coin (drawer deep-link),
     // ed (days to earnings when <=7 — the amber badge), sig (a live kept signal is firing —
     // the red badge, refreshed each signals build so it can lag a build; the tooltip says so)
+    const mtRoster = macroLaneRoster();
+    const mtSig = mtRoster.map((x) => x[0]).join(",");
+    pruneMtkCache();
     const byTk = new Map();
     for (const r of rows.values()) if (!r.delisted && r.ticker && r.uni === "xyz") byTk.set(String(r.ticker).toUpperCase(), r);   // xyz only — telegram attribution is equities-only by policy
     const edByTk = new Map();
@@ -3757,10 +3799,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (cs && cs !== "Unclassified") o.sec = cs;
         else { const L = secLearned[String(a.tk).toUpperCase()]; if (L) { o.sec = L; o.secAi = 1; } }
       } else if (secTape[String(a.id)] != null) { o.sec = secTape[String(a.id)]; o.secAi = 1; }
+      // Macro lane: which macro instruments this UNATTRIBUTED tape headline is news FOR. Only the
+      // plain tape earns tags — a verified company item already has its own name, and a pending
+      // item has not cleared relevance yet, so neither may leak into a macro drawer. Off-topic
+      // items are excluded here rather than client-side, so every consumer agrees.
+      if (!verified && !o.pend && o.sec !== "off-topic") {
+        const mt = macroTagsFor(a, mtRoster, mtSig);
+        if (mt) o.mtk = mt;
+      }
       return o;
     });
     const sig = items.length + "|" + (items[0] ? items[0].id : "") + "|" + items.filter((x) => x.sig).length + "|" + items.filter((x) => x.ed != null).length + "|" + items.filter((x) => x.sec).length
-      + "|" + items.filter((x) => x.tk).length + "|" + items.filter((x) => x.pend).length + "|" + items.filter((x) => x.fl).length + "|" + (newsErr || "");
+      + "|" + items.filter((x) => x.tk).length + "|" + items.filter((x) => x.pend).length + "|" + items.filter((x) => x.fl).length + "|" + items.filter((x) => x.mtk).length + "|" + (newsErr || "");
     if (sig !== newsSig) { newsSig = sig; newsVer = Date.now(); }
     newsCache = { ts: Date.now(), dataTs: newsVer, items, fetchedAt: newsFetchedAt || null,
       ttlHours: 72, error: newsErr, count: items.length,
