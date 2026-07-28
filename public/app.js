@@ -38,6 +38,9 @@ const COLS=[
     td:r=>`<td${shade(r.rs,8)}>${rsCell(r)}</td>`},
   {key:'vstape', label:'vs tape', type:'num', def:'desc', tip:'This market\u2019s window return minus the UNIVERSE MEDIAN return \u2014 relative strength against the whole tape, not a benchmark. On a red tape, sort descending: the names above zero are holding stronger than the rest. Same reference as DownCap/Hit%, so today\u2019s read and the 31d character read line up one-to-one.',
     td:r=>`<td${shade(r.vstape,8)}>${vsTapeCell(r)}</td>`},
+  {key:'dvb', label:'\u0394 vs \u2b12', type:'num', def:'desc',
+    tip:'This market\u2019s window return minus the EW MEAN of the picked basket\u2019s members over the SAME window \u2014 a screener lens computed from the board\u2019s own h1/h4/1d/7d/30d fields, following the timeframe selector. Coverage floor 60%: when fewer members carry the field, the basket mean is a dash \u2014 never a thinner average. Pick the basket in the column header (\u25be). Tier note, load-bearing: this is a LENS, not the benchmark \u2014 the RS column and every beta stay on SP500/BTC; an editable basket is never the benchmark under signal math.',
+    td:r=>dvbCell(r)},
   {key:'dcap', label:'DownCap 31d', type:'num', def:'asc', tip:'Down-capture vs the tape: over the last 31 days, on 4h bars where the whole scope was red (\u226570% of names down, negative median), how much of the tape\u2019s move this name ate. <100 = dumps less than the typical name, negative = net GREEN on red bars, >100 amplifies red tape. Sum-ratio vs the universe median, cascade bars winsorized. Fixed 31d/4h \u2014 does not follow the window selector. Dash below 20 matched bars.',
     td:r=>dcapCell(r)},
   {key:'hitr', label:'Hit%', type:'num', def:'desc', tip:'On those same red-tape 4h bars: the share where this name beat the universe median. The consistency check on DownCap \u2014 a good DownCap with a low Hit% means the average is carried by a couple of lucky bars; both strong means the resilience is character, not one print. Dash below 20 matched bars.',
@@ -110,16 +113,16 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dcap','hitr','mom','momp','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','liq24','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
-const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dcap','hitr','rvol','vwap','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dvb','dcap','hitr','mom','momp','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','liq24','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
+const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dvb','dcap','hitr','rvol','vwap','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
-const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null,
-  filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null},
+const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:null,
+  filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
-    direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc' },
+    direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'' },
   duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
   watch:new Set(), watchOnly:false, detail:null,
   report:{ coin:null, data:null, list:null, gen:false, tick:null, tf:'1d' },   // AI analyst report tab
@@ -661,7 +664,7 @@ const MAIN_ONLY_COLS=new Set(['cascT','liq24']);   // aggregated-CEX derivs cont
 // (momp beside mom), move it there instead of leaving it appended at the table's far edge.
 function colAdjacent(v,key,anchor){ const i=v.indexOf(key),a=v.indexOf(anchor);
   if(i>=0&&a>=0&&i!==a+1){ v.splice(i,1); v.splice(v.indexOf(anchor)+1,0,key); } }
-function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key) && !(state.scope==='crypto'&&XYZ_ONLY_COLS.has(c.key)) && !(state.scope!=='crypto'&&MAIN_ONLY_COLS.has(c.key))); }
+function visibleCols(){ return state.colOrder.map(k=>COL_BY_KEY[k]).filter(c=>c && !state.colHidden.has(c.key) && !(c.key==='dvb'&&!featureOn('baskets')) && !(state.scope==='crypto'&&XYZ_ONLY_COLS.has(c.key)) && !(state.scope!=='crypto'&&MAIN_ONLY_COLS.has(c.key))); }
 let dragKey=null;
 function clearDropMarks(){ document.querySelectorAll('#head th').forEach(t=>t.classList.remove('drop-before','drop-after')); }
 function moveColumn(src, dst, after){
@@ -676,10 +679,15 @@ function buildHead(){ const tr=el('head'); tr.innerHTML='';
     let label=c.label; if(c.key==='rs')label=`vs ${state.scope==='crypto'?'BTC':'S&amp;P'} (${state.tf})`; if(c.key==='doi')label=`ΔOI (${state.tf})`;
     if(c.key==='vstape')label=`vs tape (${state.tf})`; if(c.key==='rvol')label=`RVOL (${['1h','4h','1d'].includes(state.tf)?state.tf:'—'})`;
     if(c.key==='adr')label=`Avg Range (${state.tf==='30d'?'30d':'7d'})`;
+    if(c.key==='dvb'){ const b=dvbBasketDef(); if(featureOn('baskets')&&!BASKETS.list.length) loadBaskets();
+      label=`\u0394 vs <span class="bkg">\u2b12</span>${b?esc(b.name):'\u2014'} (${state.tf}) <select id="dvb-pick" class="dvb-pick" title="pick the basket this column measures against \u2014 the window follows the board's timeframe selector">${dvbPickOpts()}</select>`; }
     const active=state.sortKey===c.key; th.setAttribute('aria-sort', active?(state.sortDir==='asc'?'ascending':'descending'):'none');
     if(c.tip) th.title=c.tip;
     th.innerHTML=`<span class="grip" aria-hidden="true">⠿</span>${label}`+(active?`<span class="arw">${state.sortDir==='asc'?'▲':'▼'}</span>`:'');
     th.addEventListener('click',()=>sortBy(c.key));
+    if(c.key==='dvb'){ const dp=th.querySelector&&th.querySelector('#dvb-pick'); if(dp){
+      dp.addEventListener('click',e=>e.stopPropagation());
+      dp.addEventListener('change',e=>{ e.stopPropagation(); state.dvbBasket=dp.value||null; savePrefs(); buildHead(); render(); }); } }
     th.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();sortBy(c.key);}});
     th.addEventListener('dragstart',e=>{ dragKey=c.key; th.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; try{e.dataTransfer.setData('text/plain',c.key);}catch(_){} });
     th.addEventListener('dragend',()=>{ th.classList.remove('dragging'); dragKey=null; clearDropMarks(); });
@@ -692,6 +700,7 @@ function buildHead(){ const tr=el('head'); tr.innerHTML='';
 function sortBy(key){ if(state.sortKey===key) state.sortDir=state.sortDir==='asc'?'desc':'asc';
   else { state.sortKey=key; state.sortDir=(COLS.find(c=>c.key===key).def)||'desc'; } buildHead(); render(); savePrefs(); }
 function sortedRows(){ let rows=activeRows(); const f=state.filter.trim().toUpperCase();
+  if(featureOn('baskets') && (!state.colHidden.has('dvb')||state.sortKey==='dvb')) computeDvb(rows);
   if(f) rows=rows.filter(r=>r.ticker.toUpperCase().includes(f)||r.coin.toUpperCase().includes(f));
   if(state.watchOnly) rows=rows.filter(r=>state.watch.has(r.coin));
   const fl=state.filters;
@@ -1045,7 +1054,7 @@ function syncCorrLookback(){ const seg=el('corrtf'); if(!seg) return;
 }
 function openCorr(){
   syncCorrLookback();
-  loadBaskets(); renderBasketPanel(); renderRatio();   // baskets ride the Corr tab — gated inside each
+  loadBaskets(); renderBasketPanel(); renderRatio(); syncCorrBk();   // baskets ride the Corr tab — gated inside each
   if(!state.rows.size){ el('corrwrap').innerHTML='<div class="msg">Markets still loading — switch back in a moment.</div>'; return; }
   if(state.scope==='crypto'){ renderCorr(); return; }
   const rows=corrScope(), have=rows.filter(r=>r.daily).length;
@@ -1059,7 +1068,7 @@ function readoutHtml(rt,ct,v,n){
 }
 function renderCorr(){
   if(state.scope==='crypto') return renderCorrCrypto();
-  const rows=corrScope();
+  const rows=corrScope().concat(corrBasketRows());   // -09: baskets ride the same daily-return pearson path as every ticker
   if(rows.length<2){ el('corrwrap').innerHTML='<div class="msg"><span class="big">Not enough markets</span>Widen the focus search or pick a larger set.</div>'; el('corrpairs').innerHTML=''; el('corrpanel').hidden=true; return; }
   const L=+state.corr.tf, res=buildCorr(rows,L);
   paintCorr(rows, res.C, res.N, {});
@@ -1092,9 +1101,11 @@ function paintCorr(rows, C, OV, opts){
   const ord=clusterOrder(D);
   const cell=rows.length<=20?30:rows.length<=40?20:15, showVal=rows.length<=20;
   let h=`<table class="cmx" style="--cell:${cell}px"><thead><tr><th class="corner"></th>`;
-  ord.forEach(i=>{ h+=`<th class="cl" data-i="${i}" title="${esc(rows[i].ticker)}"><span>${esc(rows[i].ticker)}</span></th>`; });
+  ord.forEach(i=>{ const r0=rows[i];
+    h+=`<th class="cl${r0._basket?' bk':''}" data-i="${i}" ${r0._basket?`data-tip="${esc(basketTip(r0._basket))}"`:`title="${esc(r0.ticker)}"`}><span>${r0._basket?'<span class="bkg">\u2b12</span>':''}${esc(r0.ticker)}</span></th>`; });
   h+='</tr></thead><tbody>';
-  ord.forEach((ri,dr)=>{ h+=`<tr data-dr="${dr}"><th class="rl" data-i="${ri}" title="${esc(rows[ri].coin)}">${esc(rows[ri].ticker)}</th>`;
+  ord.forEach((ri,dr)=>{ const rr=rows[ri];
+    h+=`<tr data-dr="${dr}"><th class="rl${rr._basket?' bk':''}" data-i="${ri}" ${rr._basket?`data-tip="${esc(basketTip(rr._basket))}"`:`title="${esc(rr.coin)}"`}>${rr._basket?'<span class="bkg">\u2b12</span>':''}${esc(rr.ticker)}</th>`;
     ord.forEach((ci,dc)=>{ const v=C[ri][ci], self=ri===ci;
       const cls=self?'diag':(v==null?'nodata':'');
       const vs=(v==null)?'na':String(v);
@@ -1211,7 +1222,7 @@ function renderPairPanel(){
   const minPts = cr ? Math.max(12, CORR._minOv||20) : 8;
   const close='<button class="btn xtiny" id="pairclose" title="close" style="float:right">✕</button>';
   if(!al||al.days.length<minPts){ p.hidden=false;
-    p.innerHTML=`<div class="cp-head">${esc(A.ticker)} ÷ ${esc(B.ticker)} ${close}</div><div class="sec" style="margin-top:6px">Not enough overlapping ${cr?'intraday':'daily'} history yet — still loading in the background, or one of these listed recently.</div>`;
+    p.innerHTML=`<div class="cp-head">${A._basket?'<span class="bkg">\u2b12</span>':''}${esc(A.ticker)} ÷ ${B._basket?'<span class="bkg">\u2b12</span>':''}${esc(B.ticker)} ${close}</div><div class="sec" style="margin-top:6px">Not enough overlapping ${cr?'intraday':'daily'} history yet — still loading in the background, or one of these listed recently.</div>`;
     el('pairclose').onclick=()=>{ state.corr.pair=null; p.hidden=true; }; return; }
   const retA=[],retB=[]; for(let k=1;k<al.pa.length;k++){ retA.push(Math.log(al.pa[k]/al.pa[k-1])); retB.push(Math.log(al.pb[k]/al.pb[k-1])); }
   let saA=0,saB=0; const nR=retA.length; for(let k=0;k<nR;k++){saA+=retA[k];saB+=retB[k];}
@@ -1226,7 +1237,7 @@ function renderPairPanel(){
   const rcap=z>1.5?`spread stretched high — ${esc(A.ticker)} rich vs ${esc(B.ticker)}`:(z<-1.5?`spread stretched low — ${esc(A.ticker)} cheap vs ${esc(B.ticker)}`:'spread near its mean (fair value)');
   p.hidden=false;
   p.innerHTML=`
-    <div class="cp-head">${esc(A.ticker)} ÷ ${esc(B.ticker)} <span class="sec" style="font-weight:400">— ${tfLabel()} pair view</span> ${close}${featureOn('baskets')?`<button class="btn xtiny" id="pairratio" data-tip="open these two legs as ratio candles — the same ${esc(A.ticker)} ÷ ${esc(B.ticker)} series as TF candlesticks with an honest EMA200" style="float:right;margin-right:8px">candles</button>`:''}</div>
+    <div class="cp-head">${A._basket?'<span class="bkg">\u2b12</span>':''}${esc(A.ticker)} ÷ ${B._basket?'<span class="bkg">\u2b12</span>':''}${esc(B.ticker)} <span class="sec" style="font-weight:400">— ${tfLabel()} pair view</span> ${close}${featureOn('baskets')?`<button class="btn xtiny" id="pairratio" data-tip="open these two legs as ratio candles — the same ${esc(A.ticker)} ÷ ${esc(B.ticker)} series as TF candlesticks with an honest EMA200" style="float:right;margin-right:8px">candles</button>`:''}</div>
     <div class="pairstats">
       <span>r<b class="${cNow>=0?'pos':'neg'}">${cNow==null?'—':(cNow>=0?'+':'')+cNow.toFixed(2)}</b></span>
       <span>${esc(A.ticker)}<b>${sret(ra)}</b></span>
@@ -1267,8 +1278,13 @@ async function loadBaskets(force){
     if(d&&Array.isArray(d.baskets)) BASKETS={ts:Date.now(), floor:d.floor||0.6, maxMembers:d.maxMembers||20, maxCustom:d.maxCustom||12, rev:d.rev, list:d.baskets};
   }catch(_){}
   _basketsInflight=false;
-  renderBasketPanel();
+  renderBasketPanel(); syncCorrBk();
   const cg=el('compg'); if(cg&&!cg.hidden&&COMPG.sel.some(t=>isBasketName(t))) renderCompg();
+  // -09: baskets now surface on three more tabs — repaint whichever is live so the registry
+  // landing is visible without a manual poke. Each call is cheap and view-gated internally.
+  if(state.view==='markets'){ buildHead(); render(); }
+  if(state.view==='backtest') drawBacktest();
+  if(state.view==='corr'&&state.scope!=='crypto') renderCorr();
 }
 function basketByName(t){ t=String(t||'').toUpperCase(); for(const b of BASKETS.list){ if(b.name===t) return b; } return null; }
 function isBasketName(t){ return !!basketByName(t); }
@@ -1330,6 +1346,78 @@ function compgBasketNames(){
   const cr=state.scope==='crypto';
   return basketScopeList().filter(b=>!cr||compgBasketBars(b)).map(b=>b.name);
 }
+// One virtual row per basket, shared by COMP/G, the correlation matrix, the pair view and the
+// backtest yardstick — {ticker, coin, daily} is the whole contract those consumers read, and the
+// daily is the SERVER's synthesis verbatim. Memoized per registry revision so dailyReturns'
+// per-row cache survives repeated renders instead of recomputing on every paint.
+function basketVirtualRow(b){
+  if(!b) return null;
+  if(b._vrow && b._vrowRev===BASKETS.rev) return b._vrow;
+  b._vrowRev=BASKETS.rev;
+  b._vrow={ ticker:b.name, coin:b.name, uni:'xyz', _basket:b, daily:(b.daily||[]).map(p=>({t:p[0], c:p[1]})) };
+  return b._vrow;
+}
+
+// ===== Δ vs ⬒ — the markets-tab screener column (build 2026.07.28-09) =====================
+// One header-picked basket; each row shows its own window return MINUS the EW mean of the
+// basket members' returns over the SAME window — computed entirely from the h1/h4/d1/d7/d30
+// fields already on the rows, following the board's timeframe selector. One code path with the
+// board's own numbers: no fetch, no series, no re-derivation. Coverage floor 60% — a thinner
+// mean is a dash, never a quieter lie. Tier boundary: a LENS, not the benchmark; RS and every
+// beta stay on SP500/BTC, and r.dvb feeds no rule engine, no alert, no signal.
+function dvbBasketDef(){
+  if(!featureOn('baskets')) return null;
+  const list=basketScopeList();
+  if(!list.length) return null;
+  return list.find(b=>b.name===state.dvbBasket)||list[0];
+}
+function dvbPickOpts(){
+  const cur=dvbBasketDef();
+  return basketScopeList().map(b=>`<option value="${esc(b.name)}"${cur&&cur.name===b.name?' selected':''}>\u2b12 ${esc(b.name)}</option>`).join('')||'<option value="">\u2014</option>';
+}
+function computeDvb(rows){
+  const f=TF_MAP[state.tf], b=dvbBasketDef();
+  if(!b||!f){ for(const r of rows) r.dvb=undefined; state._dvbMean=null; return; }
+  const byTk=new Map(); for(const r of rows) byTk.set((r.ticker||'').toUpperCase(), r);
+  let s=0,n=0;
+  for(const m of b.members){ const mr=byTk.get(m); const v=mr?mr[f]:null; if(v!=null&&isFinite(v)){ s+=v; n++; } }
+  const mean=n>=Math.ceil(0.6*b.members.length)?s/n:null;
+  state._dvbMean=mean; state._dvbCov={n, N:b.members.length};
+  for(const r of rows){ const v=r[f];
+    r.dvb=(v===undefined)?undefined:((mean!=null&&v!=null&&isFinite(v))?v-mean:null); }
+}
+function dvbCell(r){
+  if(r.dvb===undefined) return '<td><span class="ph">\u00b7</span></td>';
+  if(r.dvb===null){ const c=state._dvbCov;
+    return `<td class="sec" title="basket mean unavailable \u2014 ${c?c.n+'/'+c.N+' members carry this field, under the 60% floor':'no basket picked'}; a thinner average would be a quieter lie">\u2014</td>`; }
+  const b=dvbBasketDef(), c=state._dvbCov;
+  return `<td${shade(r.dvb,8)} title="${esc('vs \u2b12'+(b?b.name:'')+' \u00b7 EW mean of '+(c?c.n+'/'+c.N:'')+' members over '+state.tf+' \u00b7 screener lens, not the benchmark under RS/beta')}">${pctInner(r.dvb)}</td>`;
+}
+
+// ===== Basket rows in the stocks correlation matrix (build 2026.07.28-09) =================
+// Custom baskets always join (when the feature is on); the 11 derived sector built-ins sit
+// behind a toggle so they don't crowd an 84-name matrix. Virtual rows ride the exact same
+// dailyReturns → pearson path as every ticker — no special math, so the matrix cannot disagree
+// with COMP/G about what a basket did. Crypto matrix is server-built from the 5m archive, so
+// basket rows there are DEFERRED and the toggle's tooltip says so — stated, not half-implemented.
+function corrBasketRows(){
+  if(!featureOn('baskets')||state.scope==='crypto') return [];
+  return BASKETS.list
+    .filter(b=>b.scope==='stocks'&&(state.corr.showBuiltins||!b.builtin))
+    .map(basketVirtualRow)
+    .filter(r=>r&&r.daily.length>=5);
+}
+function syncCorrBk(){
+  const seg=el('corrbk'); if(!seg) return;
+  const on=featureOn('baskets')&&state.scope!=='crypto';
+  seg.hidden=!on; if(!on) return;
+  const nCust=BASKETS.list.filter(b=>b.scope==='stocks'&&!b.builtin).length;
+  seg.innerHTML=`<span class="seglbl" title="custom baskets (${nCust}) always join the stocks matrix as dashed \u2b12 rows \u2014 synthetic EW series, visual layer only, same daily-return math as every ticker">\u2b12 rows \u00b7 custom ${nCust}</span>`
+    +`<button type="button" data-bk="blt"${state.corr.showBuiltins?' class="active"':''} title="add the derived sector baskets (TECH, HEALTH, \u2026) as matrix rows \u2014 off by default so 11 extra rows don't crowd the matrix. Crypto matrix is server-built from the 5m archive, so basket rows there are deferred.">+ built-ins</button>`;
+  const b=seg.querySelector&&seg.querySelector('[data-bk="blt"]');
+  if(b) b.onclick=()=>{ state.corr.showBuiltins=!state.corr.showBuiltins; syncCorrBk(); renderCorr(); };
+}
+
 
 // ===== Basket manager panel ==============================================================
 // Lives on the Corr tab under COMP/G. Built-ins render as derived (no drop button); customs
@@ -1510,7 +1598,7 @@ const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorTs:nul
 function compgColor(i){ return COMPG_PAL[i%COMPG_PAL.length]; }
 function compgRowFor(tk){ tk=String(tk||'').toUpperCase();
   const b=basketByName(tk);   // virtual row: the SERVER's daily synthesis verbatim — the client never re-derives it
-  if(b) return { ticker:b.name, _basket:b, daily:(b.daily||[]).map(p=>({t:p[0], c:p[1]})) };
+  if(b) return basketVirtualRow(b);
   for(const r of activeRows()){ if((r.ticker||'').toUpperCase()===tk||(r.coin||'').toUpperCase()===tk) return r; } return null; }
 // union-day alignment across N names; a name missing a day carries null (gaps stay visible)
 function alignedDailyN(rows, Ldays){
@@ -2177,7 +2265,7 @@ function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); 
 let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
   colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
-  sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly,
+  sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, dvbBasket:state.dvbBasket||null,
   sectGrp:state.sect.grp,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
   updateLayoutBtn(); }, 250); }
@@ -2192,6 +2280,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(p.tf&&TF_MAP[p.tf]) state.tf=p.tf;
   if(typeof p.refreshMs==='number'&&p.refreshMs>0){ state.refreshMs=p.refreshMs; state.pollMs=p.refreshMs; }
   if(p.sortKey&&COL_BY_KEY[p.sortKey]){ state.sortKey=p.sortKey; state.sortDir=p.sortDir==='asc'?'asc':'desc'; }
+  if(typeof p.dvbBasket==='string'&&/^[A-Z][A-Z0-9]{1,11}$/.test(p.dvbBasket)) state.dvbBasket=p.dvbBasket;
   if(typeof p.filterText==='string') state.filter=p.filterText;
   if(Array.isArray(p.watch)) state.watch=new Set(p.watch);
   if(p.sectGrp==='ind'||p.sectGrp==='sector') state.sect.grp=p.sectGrp;
@@ -4013,7 +4102,8 @@ function btCurveSvg(res, splitIdx){
   const W=680,H=210, pl=48,pr=54,pt=14,pb=26, days=res.days, m=days.length;
   const pct=arr=>arr.map(e=>(e/arr[0]-1)*100);
   const net=pct(res.eq), gross=pct(res.eqg), bench=pct(res.eqb), ew=pct(res.eqew);
-  let lo=Infinity,hi=-Infinity; for(const arr of [net,gross,bench,ew]) for(const y of arr){ if(y<lo)lo=y; if(y>hi)hi=y; }
+  const vb=res.eqvb?pct(res.eqvb):null;
+  let lo=Infinity,hi=-Infinity; for(const arr of (vb?[net,gross,bench,ew,vb]:[net,gross,bench,ew])) for(const y of arr){ if(y<lo)lo=y; if(y>hi)hi=y; }
   if(!(hi>lo)){ hi=1; lo=-1; } const padv=(hi-lo)*0.08||1; lo-=padv; hi+=padv;
   const X=i=>pl+(m<2?0:i/(m-1))*(W-pl-pr), Y=y=>pt+(1-(y-lo)/(hi-lo))*(H-pt-pb);
   const path=arr=>arr.map((y,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(y).toFixed(1)).join(' ');
@@ -4027,6 +4117,7 @@ function btCurveSvg(res, splitIdx){
   s+=lcGrid(pl,W-pr,ticks,Y,v=>(v>0?'+':'')+v.toFixed(1)+'%');
   s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`;
   s+=`<path d="${path(ew)}" fill="none" stroke="var(--faint)" stroke-width="1"/>`;
+  if(vb) s+=`<path class="bt-vb" d="${path(vb)}" fill="none" stroke="var(--accent-dim)" stroke-width="1.2" stroke-dasharray="4 3"/>`;
   s+=`<path d="${path(bench)}" fill="none" stroke="var(--muted)" stroke-width="1.2"/>`;
   s+=`<path d="${path(gross)}" fill="none" stroke="var(--blue)" stroke-width="1.2" opacity="0.85"/>`;
   s+=`<path d="${path(net)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
@@ -4042,7 +4133,8 @@ function btCurveSvg(res, splitIdx){
       `<span style="color:var(--accent)">net ${(net[i]>0?'+':'')+net[i].toFixed(2)}%</span> · `+
       `<span style="color:var(--blue)">gross ${(gross[i]>0?'+':'')+gross[i].toFixed(2)}%</span><br>`+
       `<span style="color:var(--muted)">bench ${(bench[i]>0?'+':'')+bench[i].toFixed(2)}%</span> · `+
-      `<span style="color:var(--faint)">EW ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`;
+      `<span style="color:var(--faint)">EW ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`+
+      (vb?`<br><span style="color:var(--accent-dim)">\u2b12${esc(res.vbName||'')} ${(vb[i]>0?'+':'')+vb[i].toFixed(2)}%</span>`:'');
   });
   return hoverChart(s, { w:W, h:H, pt, pb, xs, rows });
 }
@@ -4072,6 +4164,7 @@ function btBookPanel(book){
 }
 function renderBacktest(){
   const p=state.backtest;
+  if(featureOn('baskets')&&!BASKETS.list.length) loadBaskets();   // -09: the vs-⬒ select must populate even when Backtest is the first tab visited; loadBaskets redraws this view when the registry lands
   const res=btRun();
   const head=sHead('Strategy backtest','define a cross-sectional rule and test it net of costs — in-sample vs out-of-sample');
   // controls
@@ -4083,9 +4176,15 @@ function renderBacktest(){
   if(!cr) uniSel+=opt('eq','Equities only',p.universe);
   if(sectors.length) uniSel+=`<optgroup label="By sector">`+sectors.map(sc=>opt('sec:'+sc, sc, p.universe)).join('')+`</optgroup>`;
   uniSel+=`</select>`;
+  // -09: optional price-only basket yardstick on the curve. A comparison line, never a component:
+  // it enters no stat box, no Sharpe, no verdict — the strategy's numbers are untouched by it.
+  const vbSel=featureOn('baskets')
+    ? `<span class="lbl">vs <span class="bkg">\u2b12</span></span><select id="btVsB" class="clocksel" title="overlay a basket's price-only EW daily index on the curve \u2014 a yardstick, not a strategy: no costs, no funding, and it never enters the stats">`
+      +opt('','off',p.vsBasket)+basketScopeList().map(b=>opt(b.name,'\u2b12 '+b.name,p.vsBasket)).join('')+`</select>`
+    : '';
   let sigSel=`<select id="btSig" class="clocksel">`+Object.keys(BT_SIGNALS).map(k=>opt(k,BT_SIGNALS[k],p.signal)).join('')+`</select>`;
   const controls=
-    `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}`+
+    `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}${vbSel}`+
     (cr?'':`<span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}`)+`</div>`+   // crypto is 24/7 — no overnight boundary to hold across
     `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d'],[60,'60d'],[120,'120d']])}`+
     (BT_MVAR[p.signal]?`<span class="sec" style="align-self:center">n/a — this rule runs fixed 1/7/30d horizons</span>`:'')+
@@ -4103,6 +4202,16 @@ function renderBacktest(){
       : `Not enough daily history yet — ${res.have||0} names, need 8 with ≥${BT_MIN_DAYS}d (and more days than the lookback). Fills in as /api/daily loads, or pick a shorter lookback.`;
     return head+controls+sCard(`<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center;text-align:center;padding:0 30px">${msg}</div>`)+renderDuelSection();
   }
+  // -09 basket yardstick: the picked basket's EW daily index compounded over the SAME curve days,
+  // rebased with the strategy. dailyReturns on the shared virtual row — the exact series COMP/G
+  // and the matrix consume, so all four surfaces agree about what the basket did. Days the basket
+  // gapped (sub-floor coverage) compound flat, same convention as the benchmark's missing days.
+  if(featureOn('baskets')&&p.vsBasket){
+    const vbDef=basketScopeList().find(x=>x.name===p.vsBasket);
+    const vbRow=vbDef?basketVirtualRow(vbDef):null, vbm=vbRow?dailyReturns(vbRow):null;
+    if(vbm){ const eqvb=[1];
+      for(let i=1;i<res.days.length;i++){ const v=vbm.get(res.days[i]); eqvb.push(eqvb[eqvb.length-1]*((v!=null&&isFinite(v))?Math.exp(v):1)); }
+      res.eqvb=eqvb; res.vbName=vbRow.ticker; } }
   const m=res.days.length, splitIdx=Math.max(1,Math.min(m-2,Math.floor(m*p.split)));
   const isR=res.portR.slice(0,splitIdx), oosR=res.portR.slice(splitIdx);
   const isE=res.eq.slice(0,splitIdx+1), oosE=res.eq.slice(splitIdx);
@@ -4115,7 +4224,9 @@ function renderBacktest(){
       `<div class="s-row"><span>turnover</span><b>${(res.turnover*100).toFixed(0)}%</b></div>`+
       `<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`+
       `<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div></div></div>`;
-  const leg=sLeg([{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'},{color:'var(--faint)',label:'equal-weight'}]);
+  const legItems=[{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'},{color:'var(--faint)',label:'equal-weight'}];
+  if(res.eqvb) legItems.push({color:'var(--accent-dim)',label:'\u2b12 '+res.vbName+' (price-only EW)'});
+  const leg=sLeg(legItems);
   const pctq=(p.quantile*100).toFixed(0), dirTop=p.direction==='high'?'top':'bottom';
   const structTxt = p.structure==='long' ? `<b>long-only</b>, holding the ${dirTop} ${pctq}%`
     : p.structure==='short' ? `<b>short-only</b>, shorting the ${p.direction==='high'?'bottom':'top'} ${pctq}%`
@@ -4128,7 +4239,8 @@ function renderBacktest(){
   const cap = res.on
     ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
     : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
-  return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap)+renderDuelSection();
+  const vbCap=res.eqvb?` The dashed <b>\u2b12 ${esc(res.vbName)}</b> line is that basket's price-only EW daily index over the same days \u2014 no costs, no funding, a comparison yardstick that never enters the stats; basket gap days (sub-floor coverage) compound flat.`:'';
+  return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection();
 }
 // ===== Score duel — MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) =====
 // The adjudicator for the candidate column. Server-computed record (/api/duel): once per UTC
@@ -4207,6 +4319,7 @@ function renderDuelSection(){
 function attachBtControls(){
   const sig=el('btSig'); if(sig) sig.addEventListener('change',()=>{ state.backtest.signal=sig.value; drawBacktest(); });
   const uni=el('btUni'); if(uni) uni.addEventListener('change',()=>{ state.backtest.universe=uni.value; drawBacktest(); });
+  const vbs=el('btVsB'); if(vbs) vbs.addEventListener('change',()=>{ state.backtest.vsBasket=vbs.value; drawBacktest(); });
   const segWire=(id,key,num)=>{ const g=el(id); if(!g) return; g.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest[key]=num?parseFloat(b.dataset.v):b.dataset.v; drawBacktest(); })); };
   segWire('btLb','lookback',true); segWire('btCad','cadence',true); segWire('btQ','quantile',true); segWire('btCost','cost',true); segWire('btSplit','split',true);
   segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false); segWire('btHold','holdWindow',false);
