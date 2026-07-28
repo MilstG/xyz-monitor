@@ -431,7 +431,11 @@ function applyDaily(d){ if(!d||!d.daily) return;
     }
     r._dret=null; r._wrL=null; r._dlvl=null; }
   scheduleRender();
-  if(!el('view-corr').hidden) openCorr();           // wrapper, so the "loading X/Y" sync counter advances with the data
+  if(!el('view-corr').hidden){ openCorr();           // wrapper, so the "loading X/Y" sync counter advances with the data
+    // -07 self-heal: a COMP/G panel painted before this data landed rendered its honest loading
+    // state (COMPG._empty). Repaint it now — this hook was already the matrix's refresh, but the
+    // panel had no path back from empty and stayed broken-looking for the life of the page.
+    if(COMPG._empty && el('compg') && !el('compg').hidden) renderCompg(); }
   if(!el('view-sectors').hidden) renderSectors();   // leaders map + sector corr fill in live as daily coverage grows
 }
 function updateAggregates(){ const rows=activeRows(); let v=0,o=0;
@@ -1502,7 +1506,7 @@ function wireRatioHover(S,d){
 // histories are honest: a name listed after the anchor rebases to its own first close and the
 // legend states the date, never a silent 100 at a different origin.
 const COMPG_PAL=['var(--accent)','var(--blue)','var(--up)','var(--down)','#b98cd6','#d6c25a','#5ac8d6','#d68f5a'];
-const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorTs:null, win:null, _intraday:false, _span:0, closed:false };
+const COMPG={ sel:[], off:new Set(), mode:'index', base:'__basket', anchorTs:null, win:null, _intraday:false, _span:0, closed:false, _empty:false };
 function compgColor(i){ return COMPG_PAL[i%COMPG_PAL.length]; }
 function compgRowFor(tk){ tk=String(tk||'').toUpperCase();
   const b=basketByName(tk);   // virtual row: the SERVER's daily synthesis verbatim — the client never re-derives it
@@ -1696,6 +1700,21 @@ function renderCompg(){
     p.querySelectorAll('.cg-chip .cg-x').forEach(x=>x.onclick=()=>{ COMPG.sel=COMPG.sel.filter(t=>t!==x.dataset.x); renderCompg(); });
     compgWirePicker(p); return; }
   const S=compgSeries();
+  // -07: an empty axis means the selection has NO loaded history yet (a corr-tab visit racing
+  // /api/daily). The old path painted a lineless chart with a NaN anchor label — a broken-looking
+  // panel that never healed and read as "comparison removed". Say what's happening instead; the
+  // daily-arrival hook repaints this panel out of the empty state the moment data lands.
+  COMPG._empty=!S.axis.length;
+  if(COMPG._empty){ p.hidden=false;
+    const chipsE=COMPG.sel.map(compgChipHtml).join('');
+    const rowsE=COMPG.sel.map(compgRowFor), haveE=rowsE.filter(r=>r&&Array.isArray(r.daily)&&r.daily.length).length;
+    p.innerHTML=`<div class="cp-head">COMP/G <span class="sec" style="font-weight:400">— ${COMPG.sel.length} names · waiting for history</span>
+        <button class="btn xtiny" id="cg-close" title="close for this session" style="float:right">✕</button></div>
+      <div class="cg-ctrls"><div class="cg-chips">${chipsE}</div>${compgPickerHtml()}</div>
+      <div class="sec" style="margin-top:6px">Loading ${COMPG._intraday?'intraday':'daily'} history — ${haveE}/${COMPG.sel.length} selected names have series so far. The chart draws itself the moment the data lands; nothing to click. If this line never advances, the ${COMPG._intraday?'archive':'/api/daily feed'} isn't reaching this page.</div>`;
+    const c0=el('cg-close'); if(c0) c0.onclick=()=>{ p.hidden=true; COMPG.closed=true; };
+    p.querySelectorAll('.cg-chip .cg-x').forEach(x=>x.onclick=()=>{ COMPG.sel=COMPG.sel.filter(t=>t!==x.dataset.x); renderCompg(); });
+    compgWirePicker(p); return; }
   const {svg,X,Y}=compgSvg(S);
   const chips=COMPG.sel.map(compgChipHtml).join('');
   const cr=COMPG._intraday, ax=S.axis;
