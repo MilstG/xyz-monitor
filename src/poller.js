@@ -7,7 +7,7 @@ const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust,
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, FOMC_DECISIONS,
-  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, briefVisibleLen, BRIEF_GROUP_MIN } = require("./compute");
+  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -7387,7 +7387,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         quiet: (r.quiet && Number.isFinite(r.quiet.from) && Number.isFinite(r.quiet.to))
           ? { from: +r.quiet.from, to: +r.quiet.to, tz: +r.quiet.tz || 0 } : null,
         digestHour: Number.isFinite(r.digestHour) ? +r.digestHour : null,
-        dgSet: r.dgSet ? 1 : 0, tz: Number.isFinite(r.tz) ? +r.tz : null });
+        dgSet: r.dgSet ? 1 : 0, tz: Number.isFinite(r.tz) ? +r.tz : null,
+        // Migration, not a rewrite: the legacy pair stays on the record (older code paths and the
+        // panel's own back-compat read it) and `sched` is derived from it exactly once, when the
+        // recipient has no sched yet. Deriving it on EVERY hydrate would silently undo an edit
+        // made through the new surface the moment the process restarted.
+        sched: (r.sched && typeof r.sched === "object") ? r.sched
+          : { brief: { h: Number.isFinite(r.digestHour) ? +r.digestHour : null, set: r.dgSet ? 1 : 0, days: null } } });
     }
     if (Number.isFinite(d.offset)) pushOffset = d.offset;
     return pushRecipients.size;
@@ -8201,6 +8207,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const BRIEF_MAX_TOKENS = Math.max(AI_MAX_TOKENS, Number(process.env.BRIEF_MAX_TOKENS) || 12000);
   const BRIEF_CACHE_MS = 55 * 60 * 1000;
   const BRIEF_MOVERS_N = 3, BRIEF_NEWS_CLUSTERS = 3, BRIEF_NEWS_PER = 3, BRIEF_IDX_MAX = 5;
+  const BRIEF_EARN_N = 4;   // per group; four rows x three groups is already most of a screen
   let briefCache = null;              // { key, at, messages, dropped, model, degraded }
   let briefDay = { d: "", n: 0 };
   let briefLastErr = null;
@@ -8383,18 +8390,34 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     };
     ctx.positioning = { crypto: posFor(main), stocks: posFor(xyz) };
 
-    // -- earnings: printed in the window, plus today and tomorrow
+    // -- earnings: what printed (with the numbers that make a print worth reading), plus what is
+    //    still ahead today and tomorrow. Routing is by earnEntryState, not by date alone: a BMO
+    //    name reporting THIS MORNING is a printed row by lunchtime, and filing it under "Today"
+    //    as though it were still pending was the reason same-day beats never showed a verdict.
     try {
+      const byT = new Map();
+      for (const r of rows.values()) if (r.ticker && !r.delisted) byT.set(String(r.ticker).toUpperCase(), r);
+      const dailyFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Array.isArray(r.dailyRaw) ? r.dailyRaw : null; };
       const e = { printed: [], today: [], tomorrow: [] };
+      const seen = new Set();
+      // Today's already-reported rows first — they are the freshest thing on the page.
+      for (const en of (earnCache && earnCache.entries) || []) {
+        const d = earnDayDiff(en.d, t);
+        if (d !== 0 || earnEntryState(en, t) !== "reported") continue;
+        if (e.printed.length >= BRIEF_EARN_N) break;
+        seen.add(en.t + "|" + en.d);
+        e.printed.push(earnPrintRow(en, dailyFor(en.t)));
+      }
       for (const p of (earnCache && earnCache.recent) || []) {
-        if (e.printed.length >= 4) break;
-        const beat = p.eps != null && p.epsA != null ? (p.epsA > p.eps ? "beat" : "miss") : null;
-        e.printed.push({ t: String(p.t).toUpperCase(), res: beat });
+        if (e.printed.length >= BRIEF_EARN_N) break;
+        if (seen.has(p.t + "|" + p.d)) continue;
+        e.printed.push(earnPrintRow(p, dailyFor(p.t)));
       }
       for (const en of (earnCache && earnCache.entries) || []) {
         const d = earnDayDiff(en.d, t);
-        if (d === 0 && e.today.length < 4) e.today.push({ t: String(en.t).toUpperCase() });
-        else if (d === 1 && e.tomorrow.length < 4) e.tomorrow.push({ t: String(en.t).toUpperCase() });
+        const row = { t: String(en.t).toUpperCase(), s: en.s || "TBD", eps: en.eps != null ? en.eps : null };
+        if (d === 0 && earnEntryState(en, t) === "upcoming" && e.today.length < BRIEF_EARN_N) e.today.push(row);
+        else if (d === 1 && e.tomorrow.length < BRIEF_EARN_N) e.tomorrow.push(row);
       }
       ctx.earnings = e;
     } catch (_) { ctx.earnings = { printed: [], today: [], tomorrow: [] }; }
@@ -8425,7 +8448,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         const c = classifyCached(String(a.tk).toUpperCase(), "xyz");
         const key = (c && c.ind && c.ind !== "Unclassified") ? c.ind : (a.sec || "Market");
         let g = bySec.get(key); if (!g) { g = []; bySec.set(key, g); }
-        if (g.length < BRIEF_NEWS_PER) g.push({ t: String(a.tk).toUpperCase(), h: String(a.h || "").slice(0, 90) });
+        if (g.length < BRIEF_NEWS_PER) g.push({ t: String(a.tk).toUpperCase(), h: String(a.h || "").slice(0, 90), u: a.url || null });
       }
       ctx.news = [...bySec.entries()].sort((a, b) => b[1].length - a[1].length)
         .slice(0, BRIEF_NEWS_CLUSTERS).map(([sector, items]) => ({ sector, items }));
@@ -8523,26 +8546,38 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // Is this recipient still on the default? An explicitly chosen hour — including one set before
   // this build — is LOCAL to them. The default is deliberately not: with no offset on file "10:00
   // local" is unknowable, so the default is a fixed wall-clock moment in UTC instead of a guess.
-  function briefIsDefault(rec) { return !(rec && Number.isFinite(rec.digestHour)); }
-  function briefHourFor(rec) {
-    if (!rec) return null;
-    if (rec.dgSet) return Number.isFinite(rec.digestHour) ? rec.digestHour : null;
-    return Number.isFinite(rec.digestHour) ? rec.digestHour : BRIEF_DEFAULT_HOUR;
+  // One resolution point for "when does this recipient get this send", so the panel and the
+  // scheduler can never disagree about it. `sched` is authoritative; the legacy digestHour is only
+  // consulted for a record that predates the migration.
+  function schedEntry(rec, kind) {
+    const sc = rec && rec.sched && typeof rec.sched === "object" ? rec.sched[kind] : null;
+    if (sc) return sc;
+    if (kind === "brief") return { h: Number.isFinite(rec && rec.digestHour) ? +rec.digestHour : null, set: rec && rec.dgSet ? 1 : 0, days: null };
+    return null;
   }
+  // The registry carries a static default; the env var wins where one exists, so BRIEF_DEFAULT_HOUR
+  // keeps working exactly as it did before the schedule layer existed.
+  const SCHED_ENV_HOUR = { brief: BRIEF_DEFAULT_HOUR };
+  function schedDefFor(kind) {
+    const d = SCHED_KINDS.find((x) => x.k === kind) || {};
+    return Number.isFinite(SCHED_ENV_HOUR[kind]) ? Object.assign({}, d, { defaultHour: SCHED_ENV_HOUR[kind] }) : d;
+  }
+  function schedFor(rec, kind) { return schedResolve(schedEntry(rec, kind), schedDefFor(kind)); }
+  function briefIsDefault(rec) { return schedFor(rec, "brief").isDefault; }
+  function briefHourFor(rec) { return schedFor(rec, "brief").hour; }
   async function briefTick() {
     if (!pushOn() || !pushRecipients.size) return 0;
     const now = Date.now();
     let sent = 0;
     for (const rec of pushRecipients.values()) {
       if (rec.muted) continue;
-      const hour = briefHourFor(rec);
-      if (!Number.isFinite(hour)) continue;
+      const res = schedFor(rec, "brief");
+      if (!Number.isFinite(res.hour)) continue;
       // Default riders are scheduled in UTC; anyone who picked an hour gets it in their own time.
-      const tz = briefIsDefault(rec) ? 0 : briefTzFor(rec);
-      const local = new Date(now + tz * 60000);
-      const day = local.toISOString().slice(0, 10);
+      const tz = res.isDefault ? 0 : briefTzFor(rec);
+      const day = schedDueAt(res, now, tz);
+      if (!day) continue;
       if (briefSent.get(rec.chat) === day) continue;
-      if (local.getUTCHours() !== hour) continue;
       briefSent.set(rec.chat, day);
       let b = null;
       try { b = await generateBrief(now, tz); } catch (e) { log("brief generate failed (isolated): " + (e && e.message)); continue; }
@@ -8620,9 +8655,46 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       // The brief is default-ON, so "off" has to be storable as a DECISION rather than as an absent
       // value — otherwise the next deploy reads null as "never configured" and switches it back on.
       r.dgSet = 1;
+      if (!r.sched || typeof r.sched !== "object") r.sched = {};
+      r.sched.brief = { h: r.digestHour, set: 1, days: (r.sched.brief && schedNormDays(r.sched.brief.days)) || null };
+    }
+    // The general surface. Per kind: an hour (null = off, a stored DECISION) and an optional
+    // day-of-week set (null/absent = every day). Validated against the registry so an unknown kind
+    // cannot be written and then silently never delivered.
+    if ("sched" in p) {
+      const sc = p.sched;
+      if (!sc || typeof sc !== "object" || Array.isArray(sc)) return { ok: false, error: "bad-sched" };
+      const next = (r.sched && typeof r.sched === "object") ? Object.assign({}, r.sched) : {};
+      for (const k of Object.keys(sc)) {
+        if (!SCHED_KINDS.some((x) => x.k === k)) return { ok: false, error: "bad-kind" };
+        const v = sc[k] || {};
+        const h = v.h;
+        let hour;
+        if (h == null || h === "") hour = null;
+        else if (!Number.isFinite(+h) || +h < 0 || +h > 23) return { ok: false, error: "bad-hour" };
+        else hour = +h;
+        // An hour-only write must not silently reset a chosen day set to daily: absence of the
+        // `days` key means "unchanged", null means "every day", and only an explicit value edits
+        // it. The wipe was unreachable from the current panel (both prompts always send days) but
+        // API-reachable, and a schedule that quietly forgets its days is the worst kind of wrong.
+        let days;
+        if (!("days" in v)) days = (next[k] && schedNormDays(next[k].days)) || null;
+        else if (v.days == null) days = null;
+        else {
+          days = schedNormDays(v.days);
+          if (days === undefined) return { ok: false, error: "bad-days" };
+        }
+        next[k] = { h: hour, set: 1, days };
+      }
+      // Nothing is mutated until every kind in the write validated — the legacy sync used to run
+      // inside the loop, so {brief: ok, junk: bad} refused the write yet left digestHour already
+      // moved, to be swept out by the NEXT persist. Refusals must leave no fingerprints.
+      r.sched = next;
+      if (next.brief && next.brief.set) { r.digestHour = next.brief.h; r.dgSet = 1; }
     }
     persistPush();
-    return { ok: true, quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {} };
+    return { ok: true, quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null,
+      sched: r.sched || null, trig: r.trig || {} };
   }
 
 
@@ -8917,6 +8989,15 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         // The hour the brief will ACTUALLY fire at, defaults folded in — a panel showing "off"
         // for a recipient who is about to receive one is a lie the operator would act on.
         briefHour: briefHourFor(r), briefSet: r.dgSet ? 1 : 0,
+        // One entry per registered send, already resolved: hour, days and whether this recipient
+        // is still riding the default. The panel renders these directly rather than re-deriving —
+        // a second copy of the resolution rule is a second thing that can disagree with delivery.
+        sched: SCHED_KINDS.reduce((acc, kind) => {
+          const res = schedFor(r, kind.k);
+          acc[kind.k] = { hour: res.hour, days: res.days, dflt: res.isDefault ? 1 : 0,
+            daysLabel: schedDaysLabel(res.days), utc: res.isDefault ? 1 : 0 };
+          return acc;
+        }, {}),
         briefTz: briefIsDefault(r) ? 0 : briefTzFor(r), briefTzKnown: briefTzKnown(r) ? 1 : 0,
         briefUtc: briefIsDefault(r) ? 1 : 0,   // on the default = a fixed UTC moment, and the panel must say UTC rather than imply local
         quietNow: !!(r.quiet && inQuietWindow(now, r.quiet)),
@@ -8926,6 +9007,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       // remaining budget, so it rides behind the same isAdmin gate the rest of that panel uses.
       brief: isAdmin ? { enabled: BRIEF_ON, defaultHour: BRIEF_DEFAULT_HOUR, perDay: BRIEF_PER_DAY,
         dayLeft: briefDayLeft(), model: BRIEF_MODEL, lastErr: briefLastErr } : null,
+      schedKinds: SCHED_KINDS.map((k) => ({ k: k.k, label: k.label, defaultHour: schedDefFor(k.k).defaultHour, tip: k.tip || null })),
       queue: pushQueue.length, dropped: pushDropped, capHour: PUSH_CAP_HOUR,
       holdMs: Math.max(0, pushHoldUntil - now), lastErr: pushLastErr,
       log: pushLog.slice(0, 12),
@@ -9039,6 +9121,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     trendIndexNow: () => trendByCoin,
     coverageScanNow: coverageScan,
     briefTickNow: briefTick,                     // harness: run delivery without waiting out the clock
+    briefCtxNow: buildBriefCtx,                  // harness: execute the real context assembly — string pins can't prove routing (the -84 lesson)
     buildBriefCtxNow: buildBriefCtx,             // harness: assemble the context off live state
     generateBriefNow: generateBrief,
     briefTest: briefTestNow,
@@ -9088,7 +9171,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     seedHistNow: (coin, arr) => { hist.set(coin, arr); },   // harness: seed the sampled OI/funding history ([t, oi, funding] rows) so oiDailySeries is testable without network
     hydrateFeaturesNow: hydrateFeatures,   // harness: run the warm-cache hydrate against an injected store.loadFeatures — persisted-shape compat is testable without a boot
     seedEarnNow: (entries, study, prints) => {   // harness: inject calendar rows / study / print history so the earnings-context split is testable without network
-      earnCache = { ts: Date.now(), dataTs: 1, asOf: Date.now(), windowDays: EARN_WINDOW_DAYS, source: "finnhub", error: null, entries: entries || [], recent: [], eligible: 1 };
+      // `recent` is derived from the injected prints exactly as fetchEarnings derives it — a seeded
+      // cache with an always-empty recent list made the brief's Printed path untestable and
+      // therefore untested, which is how the padR slicing survived to an audit.
+      earnCache = { ts: Date.now(), dataTs: 1, asOf: Date.now(), windowDays: EARN_WINDOW_DAYS, source: "finnhub", error: null, entries: entries || [], recent: recentEarnPrints(prints || [], Date.now()), eligible: 1 };
       if (study) earnStudy = study;
       if (prints) earnPrints = prints;
       return earnCache;

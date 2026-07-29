@@ -3820,6 +3820,44 @@ function parseEarningsCalendar(json, symMap) {
 // order within a day, ticker as tiebreak. Pure — the poller derives this from the persisted
 // print history at cache-build time, so a report keeps its beat/miss on the tab for two full
 // days after the print instead of vanishing at the ET midnight rollover.
+// Reaction to a single print, using the SAME definition the reaction study uses: close-to-close on
+// the first session the print could actually be traded — the print day itself for BMO/DMH, the next
+// session for AMC. Extracted so the brief and the study can never disagree about what "the market
+// reaction" means. Null when the spine does not reach the print or the reaction day has not closed
+// yet — an AMC print from this afternoon HAS no reaction, and saying so is the honest answer.
+function earnPrintReaction(print, daily) {
+  if (!print || typeof print.d !== "string" || !Array.isArray(daily) || daily.length < 2) return null;
+  const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
+  let pi = null;
+  for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c) && dayOf(daily[i].t) === print.d) { pi = i; break; }
+  if (pi == null) return null;
+  const ri = print.s === "AMC" ? pi + 1 : pi;
+  if (ri <= 0 || ri >= daily.length) return null;
+  const c1 = daily[ri].c, c0 = daily[ri - 1].c;
+  if (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0) return null;
+  return +(((c1 - c0) / c0) * 100).toFixed(1);
+}
+// One print, fully dressed: what was expected, what printed, whether that beat, by how much, and
+// what the tape did about it. Every field independently nullable — a feed that shipped the date but
+// not the estimate yields a row that says so rather than a row that guesses.
+function earnPrintRow(print, daily) {
+  if (!print) return null;
+  // `+null` is 0 and `+""` is 0, so a bare Number.isFinite(+x) turns a MISSING estimate into a
+  // zero one — and a zero estimate makes every actual a "beat" with an undefined surprise. That is
+  // the exact false-confidence failure this row exists to avoid, so absence is checked first.
+  const num = (v) => (v == null || v === "" ? null : (Number.isFinite(+v) ? +v : null));
+  const eps = num(print.eps), epsA = num(print.epsA);
+  const verdict = (eps != null && epsA != null) ? (epsA > eps ? "beat" : epsA < eps ? "miss" : "in line") : null;
+  // Surprise is undefined against a zero estimate, not infinite. Break-even quarters are common
+  // enough in this roster that the guard is load-bearing.
+  const surprisePct = (eps != null && epsA != null && eps !== 0)
+    ? +(((epsA - eps) / Math.abs(eps)) * 100).toFixed(1) : null;
+  return { t: String(print.t || "").toUpperCase(), s: print.s || "TBD", d: print.d || null,
+    eps, epsA, verdict, surprisePct, reactionPct: earnPrintReaction(print, daily) };
+}
+module.exports.earnPrintReaction = earnPrintReaction;
+module.exports.earnPrintRow = earnPrintRow;
+
 function recentEarnPrints(prints, nowMs, backDays) {
   const bd = backDays != null ? backDays : 2;
   const out = [];
@@ -5735,8 +5773,147 @@ module.exports.validateBriefProse = validateBriefProse;
 const BRIEF_COLS = 32;
 const BRIEF_DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const BRIEF_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function briefStamp(atMs, tzMin) {
-  const d = new Date(atMs + (tzMin || 0) * 60000);
+// Earnings block layout, pure so the column arithmetic is testable without a Telegram client.
+// 32 columns is the whole budget, which is why surprise% lives in the context but not on screen:
+// print-vs-estimate already carries it, and a fourth column would push the reaction off the edge
+// on a narrow phone. Sessions are spelled out — "AMC" is feed jargon, "post-close" is English.
+const EARN_SESS_TXT = { BMO: "pre-mkt", AMC: "post-close", DMH: "in hours" };
+function briefEarnNum(v) { return v == null || !isFinite(v) ? "\u2014" : (+v).toFixed(2); }
+// A pad that NEVER slices. padR truncates to width, which for a numeric field silently cuts
+// digits — the audit caught "-12.34" rendering as "-12.3" and "9999.99" as "999": a wrong number
+// displayed as truth, the exact failure the NFLX 2dp lesson in parseEarningsCalendar exists to
+// prevent. Numeric columns therefore size to their content and overflow is handled by dropping a
+// whole COLUMN, never a digit.
+function padSafe(s, n) { s = String(s == null ? "" : s); return s.length >= n ? s : s + " ".repeat(n - s.length); }
+// Left-aligned sibling: padL also slices, and the reaction field is a number too. Reactions past
+// +999.9% cannot come from an equity close-to-close, but "cannot happen" is not a rendering
+// contract — an oversized value simply widens the row, and the existing overflow check then drops
+// the whole reaction column rather than any digit.
+function padSafeL(s, n) { s = String(s == null ? "" : s); return s.length >= n ? s : " ".repeat(n - s.length) + s; }
+function briefEarnRows(e) {
+  const rows = [];
+  const printed = (e && e.printed) || [], today = (e && e.today) || [], tomorrow = (e && e.tomorrow) || [];
+  if (printed.length) {
+    rows.push("Printed");
+    const pairs = printed.map((p) => briefEarnNum(p.epsA) + "/" + briefEarnNum(p.eps));
+    const pairW = Math.max(11, ...pairs.map((x) => x.length)) + 1;
+    const line = (p, i, withReact) => {
+      const verdict = p.verdict === "in line" ? "line" : (p.verdict || "\u2014");
+      const react = p.reactionPct == null || !isFinite(p.reactionPct)
+        ? "\u2014" : (p.reactionPct >= 0 ? "+" : "") + (+p.reactionPct).toFixed(1) + "%";
+      return " " + padSafe(briefClip(p.t, 5), 6) + padSafe(pairs[i], pairW)
+        + (withReact ? padSafe(verdict, 5) + padSafeL(react, 7) : verdict);
+    };
+    // Reaction rides only while every row fits the column budget. When an extreme pair (deep
+    // losses, three-digit EPS) pushes a row over, the whole block drops the reaction column —
+    // uniformly, so the table stays a table — rather than any number losing a digit.
+    let withReact = true;
+    let body = printed.map((p, i) => line(p, i, true));
+    if (body.some((r) => r.length > BRIEF_COLS)) { withReact = false; body = printed.map((p, i) => line(p, i, false)); }
+    for (const r of body) rows.push(r);
+  }
+  const upcoming = (lab, arr) => {
+    if (!arr || !arr.length) return;
+    rows.push(lab);
+    const ests = arr.map((x) => x.eps == null || !isFinite(x.eps) ? "est \u2014" : "est " + (+x.eps).toFixed(2));
+    const estW = Math.max(9, ...ests.map((x) => x.length)) + 1;
+    for (let i = 0; i < arr.length; i++)
+      rows.push(" " + padSafe(briefClip(arr[i].t, 5), 6) + padSafe(ests[i], estW) + (EARN_SESS_TXT[arr[i].s] || "time TBD"));
+  };
+  upcoming("Today", today); upcoming("Tomorrow", tomorrow);
+  return rows;
+}
+module.exports.briefEarnRows = briefEarnRows;
+
+// ---- scheduled sends ---------------------------------------------------------------------------
+// The registry of things this server delivers on a clock, as opposed to on an event. Kept as a
+// LIST rather than a single hardcoded brief because "who gets what, and when" is a per-recipient
+// question with more than one answer, and the day-of-week axis exists so a send can run Mon/Wed/Fri
+// without the scheduler needing to learn a new concept later.
+// 0 = Sunday, matching Date#getUTCDay so no translation layer can drift.
+const SCHED_KINDS = [
+  { k: "brief", label: "Morning brief", defaultHour: 10,
+    tip: "indices, movers, sectors, regime, positioning, earnings, macro and the day's headlines, with two written sections" },
+];
+const SCHED_DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+// null means EVERY day. Normalising all-seven back to null matters: the panel should say "daily",
+// not "sun·mon·tue·wed·thu·fri·sat", and two recipients who mean the same thing must store the same
+// thing or the display will disagree with itself.
+function schedNormDays(days) {
+  if (days == null) return null;
+  if (!Array.isArray(days)) return undefined;
+  const out = [];
+  for (const d of days) {
+    const n = +d;
+    if (!Number.isInteger(n) || n < 0 || n > 6) return undefined;
+    if (out.indexOf(n) === -1) out.push(n);
+  }
+  if (!out.length) return undefined;              // an empty selection is a malformed request, not "never" — use a null hour for off
+  out.sort((a, b) => a - b);
+  return out.length === 7 ? null : out;
+}
+// Accepts "all"/"daily", "mon,wed,fri", "MWF", or "1,3,5". Returns null for every day, undefined
+// for something it could not read — the caller must tell those apart rather than defaulting.
+function schedParseDays(str) {
+  const s = String(str == null ? "" : str).trim().toLowerCase();
+  if (!s || s === "all" || s === "daily" || s === "everyday" || s === "every day") return null;
+  if (s === "weekdays" || s === "wd") return [1, 2, 3, 4, 5];
+  const out = [];
+  const push = (n) => { if (out.indexOf(n) === -1) out.push(n); };
+  const parts = s.split(/[\s,;/|]+/).filter(Boolean);
+  if (parts.length === 1 && /^[mtwrfsu]+$/.test(parts[0]) && !/^\d/.test(parts[0])) {
+    // Compact form. r = Thursday, u = Sunday — the unambiguous single letters, since t and s each
+    // serve two days and guessing which is meant is exactly the wrong thing to do with a schedule.
+    const map = { m: 1, t: 2, w: 3, r: 4, f: 5, s: 6, u: 0 };
+    for (const ch of parts[0]) push(map[ch]);
+    return schedNormDays(out);
+  }
+  for (const p of parts) {
+    if (/^\d$/.test(p)) { push(+p); continue; }
+    const ix = SCHED_DAY_NAMES.indexOf(p.slice(0, 3));
+    if (ix === -1) return undefined;
+    push(ix);
+  }
+  return schedNormDays(out);
+}
+function schedDaysLabel(days) {
+  if (days == null) return "daily";
+  if (days.length === 5 && days.join() === "1,2,3,4,5") return "weekdays";
+  return days.map((d) => SCHED_DAY_NAMES[d]).join("\u00b7");
+}
+// Resolve one recipient's setting for one kind. Default-ON, with the tri-state that makes that
+// safe: `set` distinguishes "never configured" (takes the default) from "deliberately off" (a null
+// hour that survives every deploy).
+function schedResolve(entry, def) {
+  const d = def || {};
+  if (!entry || !entry.set) {
+    const h = entry && Number.isFinite(entry.h) ? entry.h : (Number.isFinite(d.defaultHour) ? d.defaultHour : null);
+    const days = entry ? schedNormDays(entry.days) : null;
+    return { hour: h, days: days === undefined ? null : days, isDefault: !(entry && Number.isFinite(entry.h)) };
+  }
+  const days = schedNormDays(entry.days);
+  return { hour: Number.isFinite(entry.h) ? entry.h : null,
+    days: days === undefined ? null : days, isDefault: false };
+}
+// Due right now? Returns the day key to dedupe on, or null. The day key is computed in the
+// recipient's own frame, so someone on a negative offset does not get two sends across a UTC
+// midnight — the bug this function exists to make unrepresentable.
+function schedDueAt(resolved, nowMs, tzMin) {
+  if (!resolved || !Number.isFinite(resolved.hour)) return null;
+  const local = new Date(nowMs + (tzMin || 0) * 60000);
+  if (local.getUTCHours() !== resolved.hour) return null;
+  if (resolved.days && resolved.days.indexOf(local.getUTCDay()) === -1) return null;
+  return local.toISOString().slice(0, 10);
+}
+module.exports.SCHED_KINDS = SCHED_KINDS;
+module.exports.SCHED_DAY_NAMES = SCHED_DAY_NAMES;
+module.exports.schedNormDays = schedNormDays;
+module.exports.schedParseDays = schedParseDays;
+module.exports.schedDaysLabel = schedDaysLabel;
+module.exports.schedResolve = schedResolve;
+module.exports.schedDueAt = schedDueAt;
+
+function briefStamp(atMs, tzMin) {  const d = new Date(atMs + (tzMin || 0) * 60000);
   const hh = String(d.getUTCHours()).padStart(2, "0"), mm = String(d.getUTCMinutes()).padStart(2, "0");
   return `${BRIEF_DOW[d.getUTCDay()]} ${d.getUTCDate()} ${BRIEF_MON[d.getUTCMonth()]} \u00b7 ${hh}:${mm}`
     + (tzMin ? "" : " UTC");
@@ -5883,27 +6060,15 @@ function renderBrief(ctx, prose) {
     push("positioning", "\u2696\ufe0f <b>POSITIONING</b>", lines);
   }
 
-  // -- earnings
+  // -- earnings. The first version printed a ticker and, at best, the word "beat" — which told the
+  //    reader a print happened and nothing about it. What a print is FOR is the three facts below:
+  //    what was expected, what arrived, and what the tape did. All three are independently
+  //    nullable and each renders its own dash, so a feed that shipped a date without an estimate
+  //    produces a visibly incomplete row rather than a confident wrong one.
   {
-    const e = c.earnings || {}, rows = [];
-    const W = 10, avail = BRIEF_COLS - W;
-    const line = (lab, arr) => {
-      if (!arr || !arr.length) return;
-      const names = arr.map((x) => x.t + (x.res ? " " + x.res : ""));
-      const wrapped = [];
-      let cur = "";
-      for (const n of names) {
-        const add = (cur ? " \u00b7 " : "") + n;
-        if (cur && cur.length + add.length > avail) { wrapped.push(cur); cur = n; }
-        else cur += add;
-      }
-      if (cur) wrapped.push(cur);
-      // The label belongs to the first line of its own group. Deriving it from what is already in
-      // `rows` put "Tomorrow" against a continuation line of "Today".
-      wrapped.forEach((l, i) => rows.push(padR(i === 0 ? lab : "", W) + l));
-    };
-    line("Printed", e.printed); line("Today", e.today); line("Tomorrow", e.tomorrow);
-    push("earnings", "\ud83d\udcc5 <b>EARNINGS</b>", [{ item: 1, text: briefPre(rows) }]);
+    const e = c.earnings || {};
+    const rows = briefEarnRows(e);
+    if (rows.length) push("earnings", "\ud83d\udcc5 <b>EARNINGS</b>", [{ item: 1, text: briefPre(rows) }]);
   }
 
   // -- macro
@@ -5931,7 +6096,16 @@ function renderBrief(ctx, prose) {
     for (const cl of c.news || []) {
       if (!cl.items || !cl.items.length) continue;
       lines.push({ item: 1, text: `<b>${tgEscape(cl.sector)}</b>` });
-      for (const h of cl.items.slice(0, 2)) lines.push({ item: 1, text: "  \u00b7 " + tgEscape(briefClip(h.h, 58)) });
+      for (const h of cl.items.slice(0, 2)) {
+        // Linked when the source URL survived the cluster builder AND looks like a URL. The guard
+        // matters more than it looks: tgEscape does not escape quotes, so a junk-feed URL carrying
+        // one would break out of the href attribute, Telegram would reject the parse, and the
+        // failure mode of one bad headline would be the ENTIRE brief not arriving. An unlinkable
+        // headline degrades to plain text; the message always ships.
+        const txt = tgEscape(briefClip(h.h, 58));
+        const linkable = typeof h.u === "string" && /^https?:\/\/[^\s"'<>]+$/.test(h.u);
+        lines.push({ item: 1, text: "  \u00b7 " + (linkable ? `<a href="${tgEscape(h.u)}">${txt}</a>` : txt) });
+      }
     }
     push("news", "\ud83d\udcf0 <b>WHAT MATTERED</b>", lines);
   }
