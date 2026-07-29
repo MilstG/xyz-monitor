@@ -26,6 +26,10 @@ const COLS=[
       return `<td class="${f.c}" title="${t2}">${f.t}${flag}</td>`; }},
   {key:'prem', label:'Prem', type:'num', tip:'Perp vs oracle dislocation in basis points: (mark \u2212 oracle) / oracle. When the cash market is closed the oracle sits near the last print, so a persistent premium (perp rich) or discount (perp cheap) IS the live off-hours price discovery \u2014 the tradeable dislocation. Hover a cell for the exact mark vs oracle prices.',
     td:r=>premCell(r)},
+  {key:'m5', label:'5m', type:'num', tip:'5-minute price change: live mark vs the mark ~5 minutes ago, sampled server-side every 15s from the SAME streaming mark the Price column shows \u2014 one code path, accurate to within one tick of the true lookback. The sample ring is memory-only: for the first ~5 minutes after a deploy, or across a feed gap wider than 90s at the lookback point, this is an honest dash \u2014 never a longer move wearing a 5m label. Hidden by default \u2014 enable it here in the column menu.',
+    td:r=>`<td class="${scCls(r)}"${shade(r.m5,1)}>${pctInner(r.m5)}</td>`},
+  {key:'m15', label:'15m', type:'num', tip:'15-minute price change: live mark vs the mark ~15 minutes ago, sampled server-side every 15s from the same streaming mark the Price column shows. Memory-only ring: dashes for the first ~15 minutes after a deploy or across a feed gap wider than 90s \u2014 the label is exact or the cell is blank. Hidden by default \u2014 enable it here in the column menu.',
+    td:r=>`<td class="${scCls(r)}"${shade(r.m15,1.8)}>${pctInner(r.m15)}</td>`},
   {key:'h1', label:'1h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h1,2.5)}>${pctInner(r.h1)}</td>`},
   {key:'h4', label:'4h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h4,4)}>${pctInner(r.h4)}</td>`},
   {key:'d1', label:'1d', type:'num', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
@@ -113,8 +117,8 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','h1','h4','d1','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
-const DEFAULT_HIDDEN=['prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','m5','m15','h1','h4','d1','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_HIDDEN=['m5','m15','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
@@ -258,7 +262,11 @@ function nowChip(coin,c,opts){
 }
 
 // ===== row helpers =====
-function recomputeChanges(r){ const cur=r.px, ref=r.ref; if(cur==null||!ref)return;
+function recomputeChanges(r){ const cur=r.px; if(cur==null)return;
+  // 5m/15m read the server's ring references (p5m/p15m on the row), not the hourly-spine ref —
+  // they exist before the spine warms and null out independently (deploy warm-up / feed gap).
+  r.m5=r.p5m>0?(cur-r.p5m)/r.p5m*100:null; r.m15=r.p15m>0?(cur-r.p15m)/r.p15m*100:null;
+  const ref=r.ref; if(!ref)return;
   r.h1=ref.p1h?(cur-ref.p1h)/ref.p1h*100:null; r.h4=ref.p4h?(cur-ref.p4h)/ref.p4h*100:null;
   r.d7=ref.p7d?(cur-ref.p7d)/ref.p7d*100:null;  r.d30=ref.p30d?(cur-ref.p30d)/ref.p30d*100:null; }
 function setPrice(r,px){ if(px==null)return; if(r.px!=null&&px!==r.px) r.flash=px>r.px?'up':'down'; r.px=px; }
@@ -390,6 +398,10 @@ function applySnapshot(s){
       // would wear a stale group on any long-lived page until reload. (Build -05: this line is the
       // fix for -04's field-name-mismatch bug — the wire carried ind, this explicit merge dropped it.)
       r.ind=(m.ind!==undefined)?m.ind:undefined; }
+    // 5m/15m ring references: absence on the wire MEANS no honest reference right now (server
+    // warm-up or a feed gap at the lookback point) — clear rather than keep, or a long-lived page
+    // would compute a "5m" change against a reference minutes older than its label.
+    r.p5m=(m.p5m!=null)?m.p5m:null; r.p15m=(m.p15m!=null)?m.p15m:null;
     r.fundPct=(m.fundPct!=null)?m.fundPct:r.fundPct;
     if(m.red!==undefined) r.red=m.red;             // {dcap,hit,n} or null — fixed 31d/4h red-tape resilience, server-computed
     if(m.rvol!==undefined) r.rvolByWin=m.rvol;     // {h1,h4,d1} clock-hour-matched relative volume, server-computed
@@ -2397,6 +2409,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
     if(Array.isArray(p.colOrder)){ const v=p.colOrder.filter(k=>COL_BY_KEY[k]);
       for(const c of COLS) if(!v.includes(c.key)){ v.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) state.colHidden.add(c.key); }
       colAdjacent(v,'momp','mom');   // the candidate migrates in NEXT TO the incumbent, not appended at the far right
+      colAdjacent(v,'m5','px'); colAdjacent(v,'m15','m5');   // the intraday pair migrates in next to Price, ahead of 1h
       state.colOrder=v; }
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
@@ -2441,6 +2454,7 @@ function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
   const hid=new Set((Array.isArray(src.colHidden)?src.colHidden:[]).filter(k=>COL_BY_KEY[k]));
   for(const c of COLS) if(!ord.includes(c.key)){ ord.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) hid.add(c.key); }
   colAdjacent(ord,'momp','mom');   // same adjacency rule for saved layouts
+  colAdjacent(ord,'m5','px'); colAdjacent(ord,'m15','m5');
   state.colOrder=ord; state.colHidden=hid;
   if(src.sortKey&&COL_BY_KEY[src.sortKey]){ state.sortKey=src.sortKey; state.sortDir=src.sortDir==='asc'?'asc':'desc'; }
   state.watchOnly=!!src.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly);
