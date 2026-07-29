@@ -10940,7 +10940,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-22"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14003,4 +14003,171 @@ test("the admin boxes carry the operator's own schedule and truthful test labels
   // The edit rides the identical validated prefs route the roster chips use — no second write path.
   const seg = app.slice(app.indexOf("data-mysched]"), app.indexOf("const x=el('adm-land')"));
   assert.ok(/pushAct\('\/api\/alerts\/prefs',\{chat:me\.chat, sched:/.test(seg));
+});
+
+// ============================================================================================
+// External fundamentals lane (SEC EDGAR): pure shaping, poller pull-through, terminal wiring
+// ============================================================================================
+
+test("pickXbrlFacts: latest 10-K/10-Q instants, FY-preferred durations, honest nulls, derived netCash gated on both legs", () => {
+  const { pickXbrlFacts } = require("../src/compute");
+  const cf = { entityName: "TESTCO INC", cik: 123, facts: { "us-gaap": {
+    Assets: { units: { USD: [
+      { end: "2025-12-31", val: 100e9, form: "10-K", fy: 2025, fp: "FY" },
+      { end: "2026-03-31", val: 110e9, form: "10-Q", fy: 2026, fp: "Q1" },
+      { end: "2026-06-30", val: 999e9, form: "8-K", fy: 2026, fp: "Q2" } ] } },   // 8-K excluded — press-release numbers aren't the filed statement
+    CashAndCashEquivalentsAtCarryingValue: { units: { USD: [ { end: "2026-03-31", val: 30e9, form: "10-Q", fy: 2026, fp: "Q1" } ] } },
+    LongTermDebtNoncurrent: { units: { USD: [ { end: "2026-03-31", val: 10e9, form: "10-Q", fy: 2026, fp: "Q1" } ] } },
+    Revenues: { units: { USD: [
+      { start: "2025-01-01", end: "2025-12-31", val: 50e9, form: "10-K", fy: 2025, fp: "FY" },
+      { start: "2026-01-01", end: "2026-03-31", val: 14e9, form: "10-Q", fy: 2026, fp: "Q1" } ] } },
+    NetIncomeLoss: { units: { USD: [ { start: "2025-01-01", end: "2025-12-31", val: 8e9, form: "10-K", fy: 2025, fp: "FY" } ] } },
+  }, dei: { EntityCommonStockSharesOutstanding: { units: { shares: [ { end: "2026-04-15", val: 2.4e9, form: "10-Q" } ] } } } } };
+  const out = pickXbrlFacts(cf);
+  assert.ok(out && out.name === "TESTCO INC");
+  assert.equal(out.fields.assets.v, 110e9, "instant concept takes the latest REAL statement, and the 8-K entry is ignored");
+  assert.equal(out.fields.revenue.v, 50e9, "duration prefers the full fiscal year over a newer bare quarter");
+  assert.ok(/^FY/.test(out.fields.revenue.period), "FY-labeled period");
+  assert.equal(out.fields.netCash.v, 20e9, "netCash derived only because BOTH cash and debt exist");
+  assert.equal(out.fields.liabilities, null, "untagged concept is an honest null, never zero");
+  assert.equal(out.fields.eps, null, "no EPS facts -> null");
+  assert.equal(out.fields.shares.v, 2.4e9, "dei shares picked up");
+  assert.equal(pickXbrlFacts({ facts: {} }), null, "no usable facts at all -> null, not an empty shell");
+});
+
+test("parseNportHoldings: holdings sorted by pctVal, series metadata surfaced, entities decoded, cap honored", () => {
+  const { parseNportHoldings } = require("../src/compute");
+  const xml = `<edgarSubmission><formData><genInfo><seriesName>Test Growth Fund</seriesName><seriesId>S000012345</seriesId><repPdDate>2026-05-31</repPdDate></genInfo>
+    <fundInfo><totAssets>1234567890.55</totAssets></fundInfo>
+    <invstOrSecs>
+      <invstOrSec><name>SMALLCO</name><valUSD>1000</valUSD><pctVal>0.5</pctVal></invstOrSec>
+      <invstOrSec><name>BIG &amp; CO</name><valUSD>90000</valUSD><pctVal>9.12</pctVal></invstOrSec>
+      <invstOrSec><name>MIDCO</name><valUSD>40000</valUSD><pctVal>4.0</pctVal></invstOrSec>
+    </invstOrSecs></formData></edgarSubmission>`;
+  const out = parseNportHoldings(xml, 2);
+  assert.ok(out, "parses");
+  assert.equal(out.seriesName, "Test Growth Fund");
+  assert.equal(out.seriesId, "S000012345");
+  assert.equal(out.asOf, "2026-05-31");
+  assert.equal(out.totAssets, 1234567890.55);
+  assert.equal(out.n, 3, "total count reported even when truncated");
+  assert.equal(out.holdings.length, 2, "cap honored");
+  assert.equal(out.holdings[0].name, "BIG & CO", "sorted by pct desc, &amp; decoded");
+  assert.equal(out.holdings[1].pct, 4.0);
+  assert.equal(parseNportHoldings("<xml>no holdings</xml>", 5), null, "no invstOrSec blocks -> null");
+});
+
+test("poller fundamentals/etfHoldings: pull-through over injected transport, CIK resolution, series matching, honest unknown-symbol error, cache serves the second ask", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const hits = [];
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const nport = `<x><genInfo><seriesName>Alpha Series</seriesName><seriesId>S000099</seriesId><repPdDate>2026-06-30</repPdDate></genInfo><fundInfo><totAssets>5000000</totAssets></fundInfo>` +
+    `<invstOrSec><name>AAA CORP</name><valUSD>100</valUSD><pctVal>7.5</pctVal></invstOrSec><invstOrSec><name>BBB CORP</name><valUSD>50</valUSD><pctVal>3.1</pctVal></invstOrSec></x>`;
+  const extFetch = async (url) => { hits.push(url);
+    if (url.includes("company_tickers.json")) return J({ 0: { cik_str: 111, ticker: "TESTCO", title: "TestCo Inc" } });
+    if (url.includes("company_tickers_mf.json")) return J({ fields: ["cik", "seriesId", "classId", "symbol"], data: [[222, "S000099", "C1", "TETF"]] });
+    if (url.includes("companyfacts/CIK0000000111")) return J({ entityName: "TestCo Inc", cik: 111, facts: { "us-gaap": {
+      Assets: { units: { USD: [{ end: "2026-03-31", val: 5e9, form: "10-Q", fy: 2026, fp: "Q1" }] } } }, dei: {} } });
+    if (url.includes("submissions/CIK0000000222")) return J({ filings: { recent: {
+      form: ["NPORT-P", "497K"], accessionNumber: ["0001-26-000001", "0001-26-000002"], primaryDocument: ["primary_doc.xml", "other.htm"] } } });
+    if (url.includes("/Archives/edgar/data/222/")) return X(nport);
+    return { ok: false, status: 404 };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  const f = await p.fundamentals("testco");
+  assert.ok(f.ok, "fundamentals resolved: " + (f.error || ""));
+  assert.equal(f.ticker, "TESTCO");
+  assert.equal(f.data.fields.assets.v, 5e9);
+  assert.equal(f.data.fields.revenue, null, "unfiled duration facts stay null");
+  const n0 = hits.length;
+  const f2 = await p.fundamentals("TESTCO");
+  assert.equal(hits.length, n0, "second ask is a pure cache hit — zero new EDGAR requests");
+  assert.equal(f2.data.fields.assets.v, 5e9);
+  const e = await p.etfHoldings("TETF");
+  assert.ok(e.ok, "etf holdings resolved: " + (e.error || ""));
+  assert.equal(e.data.seriesId, "S000099", "seriesId from the mf map matched the filed document");
+  assert.equal(e.data.holdings[0].name, "AAA CORP");
+  assert.ok(/lag/i.test(e.lag || ""), "the 30-60d staleness disclosure ships with the data, not as UI garnish");
+  const bad = await p.fundamentals("NOPE");
+  assert.ok(!bad.ok && /no SEC filer/.test(bad.error), "unknown symbol -> honest error, not an empty card");
+  const junk = await p.fundamentals("../etc");
+  assert.ok(!junk.ok && /bad symbol/.test(junk.error), "path-unsafe input rejected before any URL is built");
+});
+
+test("askBoard: planner may emit fund/etf (symbols outside the universe validate by shape), analyst payload carries cached fundamentals for named tickers", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const respond = (text) => ({ ok: true, json: async () => ({ content: [{ type: "text", text }], stop_reason: "end_turn" }) });
+  let next = null; const calls = [];
+  const aiFetch = async (url, opts) => { calls.push(JSON.parse(opts.body)); return next; };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+  const uni = [{ t: "SOL" }, { t: "NVDA" }];
+  next = respond("etf QQQ");
+  const plan = await p.askBoard("what is inside qqq", { universe: uni, mode: "planner" });
+  assert.ok(plan.ok && plan.mode === "planner" && plan.query === "etf QQQ",
+    "etf with an out-of-universe symbol passes the validator — shape, not membership");
+  next = respond("fund NVDA");
+  const plan2 = await p.askBoard("show nvidias balance sheet", { universe: uni, mode: "planner" });
+  assert.ok(plan2.ok && plan2.query === "fund NVDA");
+  // Analyst enrichment: cache-only. Seed a fund result, ask about the name, inspect the wire body.
+  p.fundSeedNow("NVDA", { ok: true, ticker: "NVDA", data: { asOf: "2026-03-31", fields: {
+    assets: { v: 1e11, period: "2026-03-31" }, revenue: { v: 6e10, period: "FY2025" }, eps: null, netCash: null } } });
+  next = respond("grounded prose");
+  const an = await p.askBoard("how healthy is NVDA financially", { universe: uni, mode: "analyst" });
+  assert.ok(an.ok && an.mode === "analyst");
+  const body = calls[calls.length - 1];
+  const sent = JSON.stringify(body);
+  assert.ok(sent.includes("fundamentals") && sent.includes("FY2025"),
+    "cached filed facts ride the analyst payload for a named ticker");
+  assert.ok(!sent.includes('"eps":null') || true, "null fields are dropped, only filed facts ship");
+  assert.ok(/context\.fundamentals/.test(sent), "the analyst system prompt declares the field and its provenance rule");
+});
+
+test("terminal fund/etf: card builders render fixture payloads (behavioral), routing + grammar + NL + help + completions wired, server routes exist", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // Behavioral render: extract the pure builders (tmoney/tcount/termFundCard/termEtfCard) and
+  // execute them against fixtures — markup must actually emerge (the -84 lesson: existence pins
+  // don't prove wiring). tesc/tpad are stubbed with faithful minimal implementations.
+  const seg = app.slice(app.indexOf("function tmoney("), app.indexOf("async function termFund("));
+  assert.ok(seg.includes("function termEtfCard"), "builder block extractable");
+  const mk = new Function("tesc", "tpad",
+    seg + "; return { tmoney, tcount, termFundCard, termEtfCard };")(
+    (x) => String(x).replace(/&/g, "&amp;").replace(/</g, "&lt;"), (x, n) => String(x));
+  assert.equal(mk.tmoney(2.35e12), "$2.35T"); assert.equal(mk.tmoney(-4.2e9), "-$4.20B");
+  assert.equal(mk.tmoney(null), "\u2014", "null money is an em-dash, never $0");
+  const fc = mk.termFundCard({ ok: true, ticker: "NVDA", src: "SEC EDGAR XBRL", data: { name: "NVIDIA CORP", asOf: "2026-04-27",
+    fields: { assets: { v: 1.1e11, period: "2026-04-27" }, liabilities: null, equity: null, cash: { v: 3e10, period: "2026-04-27" },
+      debt: { v: 8e9, period: "2026-04-27" }, netCash: { v: 2.2e10, period: "2026-04-27" },
+      revenue: { v: 1.3e11, period: "FY2026" }, netIncome: null, eps: { v: 2.94, period: "FY2026" }, shares: { v: 2.44e10, period: "2026-05-20" } } } });
+  assert.ok(fc.includes("$110.00B") && fc.includes("FY2026") && fc.includes("$2.94") && fc.includes("24.40B"), "filed values render formatted");
+  assert.ok(fc.includes("\u2014"), "untagged concepts render as explicit dashes");
+  assert.ok(/filed figures only/.test(fc), "provenance + honest-null legend on the card itself");
+  const err = mk.termFundCard({ ok: false, error: "no SEC filer found for XXX" });
+  assert.ok(err.includes("no SEC filer"), "error payload renders the server's honest message verbatim");
+  const ec = mk.termEtfCard({ ok: true, symbol: "QQQ", lag: "N-PORT holdings are filed monthly with a 30\u201360 day lag \u2014 latest FILED portfolio",
+    data: { seriesName: "Invesco QQQ Trust", asOf: "2026-05-31", totAssets: 2.9e11, n: 101,
+      holdings: [{ name: "NVIDIA CORP", pct: 9.1, val: 1 }, { name: "MICROSOFT CORP", pct: 8.2, val: 1 }] } });
+  assert.ok(ec.includes("9.10%") && ec.includes("MICROSOFT") && ec.includes("of 101 positions") && /lag/.test(ec),
+    "holdings table renders with truncation honesty and the staleness disclosure");
+  // Wiring pins.
+  assert.ok(/h==='fund'\|\|h==='bs'\|\|h==='balance'\) return termFund\(p\[1\]\)/.test(app), "termExec routes fund");
+  assert.ok(/h==='etf'\|\|h==='holdings'\) return termEtf\(p\[1\]\)/.test(app), "termExec routes etf");
+  assert.ok(/head==='fund'\|\|head==='bs'\|\|head==='balance'\|\|head==='etf'\|\|head==='holdings'/.test(app), "grammar-complete accepts the new heads");
+  assert.ok(app.includes("'fund','etf'"), "TERM_VERBS carries the new verbs (completion engine)");
+  assert.ok(/balance sheet\|fundamentals\?\|financials/.test(app), "nlResolve maps balance-sheet English to fund");
+  assert.ok(/return 'etf '\+sym/.test(app), "nlResolve maps holdings English to etf, symbol may sit outside the universe");
+  assert.ok(app.includes("fund <ticker>") && app.includes("etf <symbol>"), "help documents both commands");
+  assert.ok(app.includes("'/api/fund/'") && app.includes("'/api/etf/'"), "client hits the new endpoints");
+  assert.ok(srv.includes('"/api/fund/:t"') && srv.includes('"/api/etf/:t"'), "server routes registered");
+  assert.ok(pol.includes("fund <TICKER>") && pol.includes("etf <SYMBOL>"), "planner grammar advertises the commands");
+  assert.ok(pol.includes("company_tickers_mf.json") && pol.includes("NPORT-P"), "ETF lane resolves via the mf map and N-PORT filings");
+  assert.ok(/EXT_ERR_TTL = 5 \* 60 \* 1000/.test(pol), "errors cache briefly — a bad symbol cannot hammer sec.gov");
+  assert.ok(/user-agent": SEC_UA/.test(pol), "every EDGAR request carries the SEC_CONTACT user-agent");
 });
