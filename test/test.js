@@ -9014,8 +9014,60 @@ test("brief: VIX renders as a level, everything else as a signed percentage", ()
   const C = require("../src/compute");
   const ctx = Object.assign(BRIEF_CTX(), { indices: [{ t: "SPX", d1: 0.4 }, { t: "VIX", px: 14.23, d1: -0.8, level: 1 }] });
   const m = C.renderBrief(ctx, null).messages[0];
-  assert.ok(/VIX<\/b>  14\.2/.test(m), "a volatility index is a level; printing it as a % move reads as a price change");
-  assert.ok(/SPX<\/b>  \+0\.4/.test(m));
+  assert.ok(/VIX\s+14\.2/.test(m), "a volatility index is a level; printing it as a % move reads as a price change");
+  assert.ok(/SPX\s+\+0\.4/.test(m));
+  // Tables must live in <pre>: Telegram body text is proportional and space-built columns only
+  // align inside a pre block. This is the bug that made the first shipped brief unreadable.
+  assert.ok(m.includes("<pre>"), "tabular blocks must be monospace");
+  const preLines = (m.match(/<pre>[\s\S]*?<\/pre>/g) || []).join("\n").replace(/<\/?pre>/g, "").split("\n");
+  for (const l of preLines) assert.ok(l.length <= C.BRIEF_COLS, `pre line over ${C.BRIEF_COLS} cols will wrap on a phone: "${l}"`);
+  assert.ok(!/[\u2591\u2592\u2593]/.test(m), "shade glyphs are not in every device font \u2014 they arrived as tofu boxes");
+});
+
+test("brief format: every table is <pre>, every pre line fits the column budget, no tofu glyphs", () => {
+  const C = require("../src/compute");
+  // The shipped-and-rejected version of this feature laid out columns with spaces in PROPORTIONAL
+  // body text. It aligned perfectly in a monospace editor and arrived on the phone as ragged noise:
+  // two unlabelled numbers per mover row, and breadth "bars" drawn in a glyph the device font did
+  // not carry. This test is the guard for all three failures at once.
+  const r = C.renderBrief(BRIEF_CTX(), { story: "Semis carried it.", closing: "Nothing is resolved." });
+  const all = r.messages.join("\n");
+  const pres = all.match(/<pre>[\s\S]*?<\/pre>/g) || [];
+  assert.ok(pres.length >= 4, "indices, sectors, movers and regime are all tabular and all belong in <pre>");
+  for (const block of pres) {
+    const body = block.replace(/<\/?pre>/g, "");
+    assert.ok(!/<[a-z]/i.test(body), "Telegram does not support nested markup inside <pre>");
+    for (const line of body.split("\n"))
+      assert.ok(line.length <= C.BRIEF_COLS, `pre line is ${line.length} cols and will wrap: "${line}"`);
+  }
+  // No decorative glyphs anywhere: shade blocks, and the box-drawing characters that fail the same way.
+  assert.ok(!/[\u2591\u2592\u2593\u2580-\u258f]/.test(all), "device-font-dependent glyphs must not ship");
+  // Mover columns must be LABELLED in place. The unreadable version put the legend in the section
+  // header, forty characters from the two bare numbers it described.
+  const mv = pres.find((b) => /STOCKS/.test(b));
+  assert.ok(/STOCKS\s+24h\s+vs /.test(mv), "each mover table names its own columns");
+  // Empty tables must not ship a heading with the string "null" under it.
+  const bare = Object.assign(BRIEF_CTX(), { indices: [], commodities: [], fx: [], baskets: [] });
+  const rb = C.renderBrief(bare, null).messages.join("\n");
+  assert.ok(!/null/.test(rb), "an empty table renders nothing, not the word null");
+  assert.ok(!rb.includes("INDICES"), "…and drops its heading with it");
+});
+
+test("brief validator: cites from the material we handed it, still refuses invention", () => {
+  const C = require("../src/compute");
+  const ctx = Object.assign(BRIEF_CTX(), {
+    news: [{ sector: "Semiconductors", items: [{ t: "SKHY", h: "SK hynix posts 1,200% net profit boost on AI chip boom" }] }],
+    macro: { next: [{ when: "Wed 14:00", label: "FOMC rate decision", prior: null }], rates: [], data: [] } });
+  const ok = (o) => C.validateBriefProse(Object.assign({ story: "Breadth closed at 48%.", closing: "Nothing is resolved." }, o), ctx);
+  // These are the rejections that silently cost the brief its prose on the first live send: a
+  // two-letter word from a headline we supplied, and a thousands separator.
+  assert.ok(ok({ story: "SK Hynix drove the tape." }).ok, "a name from a headline we handed the model is not an invention");
+  assert.ok(ok({ story: "SK hynix posted a 1,200% profit boost." }).ok, "a comma is not a fabricated number");
+  assert.ok(ok({ closing: "The FOMC rate decision lands Wednesday." }).ok, "calendar labels we supplied are citable");
+  // …and the gate still does its actual job.
+  assert.match(ok({ story: "The 10-year sits at 7.77%." }).error, /number not in context/);
+  assert.match(ok({ closing: "PLTR is the tell." }).error, /name not in context/);
+  assert.match(ok({ closing: "You should buy semis here." }).error, /directional instruction/);
 });
 
 test("brief: the budget ladder keeps a pathological day inside Telegram's ceiling", () => {
@@ -10881,7 +10933,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-14"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-15"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
