@@ -2740,16 +2740,45 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     // The browser knows the reader's offset; asking them for it would be a worse question than one
     // they can already answer wrongly.
     pushAct('/api/alerts/prefs',{chat:rec.chat, quiet:{from:+m[1], to:+m[2], tz:-new Date().getTimezoneOffset()}}); }));
-  pop.querySelectorAll('[data-pdig]').forEach(x=>x.addEventListener('click',()=>{
-    const rec=((pushState&&pushState.recipients)||[]).find(r=>r.chat===x.dataset.pdig); if(!rec) return;
-    const cur=(rec.briefHour!=null?rec.briefHour:rec.digestHour);
-    const v=(prompt('Morning brief at which local hour? (0-23, blank to turn it off)',cur!=null?String(cur):'7')||'').trim();
-    // Blank is a DECISION to switch it off, and the server records it as one — otherwise the
-    // default would quietly switch the brief back on at the next deploy. The offset rides along
-    // because the browser is the only party here that knows it.
-    pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour: v===''?null:+v, tz:-new Date().getTimezoneOffset()}); }));
+  pop.querySelectorAll('[data-psched]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=((pushState&&pushState.recipients)||[]).find(r=>r.chat===x.dataset.pchat2); if(!rec) return;
+    const k=x.dataset.psched, kind=((pushState&&pushState.schedKinds)||[]).find(z=>z.k===k)||{};
+    const sc=(rec.sched&&rec.sched[k])||null;
+    const cur=sc&&sc.hour!=null?String(sc.hour):String(kind.defaultHour!=null?kind.defaultHour:10);
+    const v=(prompt(kind.label+' at which local hour? (0-23, blank to turn it off)',cur)||'').trim();
+    if(v===''){ pushAct('/api/alerts/prefs',{chat:rec.chat, sched:{[k]:{h:null}}, tz:-new Date().getTimezoneOffset()}); return; }
+    const dCur=sc&&sc.days?sc.days.join(','):'all';
+    const d=(prompt('Which days? ("all", "weekdays", "mon,wed,fri" or "MWF")',dCur)||'').trim();
+    // Days are parsed SERVER-side; sending the raw string would put a second parser in the browser
+    // and give the two somewhere to disagree. The client only ever sends numbers or nothing.
+    const days=schedDaysClient(d);
+    if(days===undefined){ alert('Could not read those days. Try "all", "weekdays", "mon,wed,fri" or "MWF".'); return; }
+    pushAct('/api/alerts/prefs',{chat:rec.chat, sched:{[k]:{h:+v, days}}, tz:-new Date().getTimezoneOffset()}); }));
   pop.querySelectorAll('[data-punlink]').forEach(x=>x.addEventListener('click',()=>{
     if(confirm('Unlink this recipient? They stop receiving alerts immediately.')) pushAct('/api/alerts/unlink',{chat:x.dataset.punlink}); })); }
+// Mirrors the server's schedParseDays for the ONE job the browser has: turning what someone typed
+// into day numbers, or refusing. Deliberately not a second source of truth about schedules — it
+// returns numbers and the server re-validates them.
+function schedDaysClient(str){
+  const s=String(str==null?'':str).trim().toLowerCase();
+  if(!s||s==='all'||s==='daily'||s==='everyday'||s==='every day') return null;
+  if(s==='weekdays'||s==='wd') return [1,2,3,4,5];
+  const NM=['sun','mon','tue','wed','thu','fri','sat'], out=[];
+  const add=n=>{ if(out.indexOf(n)===-1) out.push(n); };
+  const parts=s.split(/[\s,;/|]+/).filter(Boolean);
+  if(parts.length===1&&/^[mtwrfsu]+$/.test(parts[0])){
+    const M={m:1,t:2,w:3,r:4,f:5,s:6,u:0};
+    for(const ch of parts[0]) add(M[ch]);
+    return out.sort((a,b)=>a-b);
+  }
+  for(const p of parts){
+    if(/^\d$/.test(p)){ add(+p); continue; }
+    const ix=NM.indexOf(p.slice(0,3));
+    if(ix===-1) return undefined;
+    add(ix);
+  }
+  return out.length?out.sort((a,b)=>a-b):undefined;
+}
 function addAlertRule(){ const A=state.alerts, tIn=el('ar-ticker').value.trim().toUpperCase(); let coin='';
   if(tIn){ for(const r of state.rows.values()){ if(r.ticker.toUpperCase()===tIn||r.coin.toUpperCase()===tIn){ coin=r.coin; break; } }
     if(!coin){ el('ar-ticker').classList.add('bad'); return; } }
@@ -2826,10 +2855,15 @@ function renderAdmRecips(){
     const bH=(r.briefHour!=null?r.briefHour:null);
     const bLbl=bH!=null?`${String(bH).padStart(2,'0')}:00${r.briefUtc?' UTC':''}`:'off';
     const briefChip=openR?`<button type="button" class="cdtf${bH!=null?' on':''}" data-apbrief="${esc(r.chat)}" data-tip="the morning brief for THIS recipient \u2014 click to set the hour or turn it off. Setting it from here records the hour only, never your timezone: stamping your offset onto somebody else's account would move their delivery without them asking.">brief ${esc(bLbl)}</button>`:'';
+    const schedChips=openR?((P.schedKinds||[]).map(k=>{
+      const sc=(r.sched&&r.sched[k.k])||null, h=sc?sc.hour:null;
+      const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''}${sc&&sc.days?' \u00b7 '+sc.daysLabel:''}`:'off';
+      return `<button type="button" class="cdtf${h!=null?' on':''}" data-asched="${esc(k.k)}" data-aschat="${esc(r.chat)}" data-tip="${esc(k.label+' for THIS recipient \u2014 hour and days. Records the schedule only, never your timezone: stamping your offset onto somebody else\u2019s account would move their delivery without them asking.')}">${esc(k.label.toLowerCase())} ${esc(lbl)}</button>`;
+    }).join('')):'';
     return `<div class="arule" style="flex-wrap:wrap"><span class="arec-h" data-admexp="${esc(r.chat)}"><span class="asec-c">${openR?'\u25be':'\u25b8'}</span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${nOn} class(es) \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':(r.owned?' \u00b7 another browser':' \u00b7 unclaimed')}</span></span>`
       +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
       +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span>`
-      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${briefChip}</span>`:'')+`</div>`; }).join('')
+      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${schedChips}</span>`:'')+`</div>`; }).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>');
   b.querySelectorAll('[data-admexp]').forEach(x=>x.addEventListener('click',()=>{
     admRecOpen[x.dataset.admexp]=!admRecOpen[x.dataset.admexp]; renderAdmRecips(); }));
@@ -2847,6 +2881,19 @@ function renderAdmRecips(){
     // No tz in this write. An admin setting somebody else's hour from their own browser would
     // otherwise stamp the operator's offset onto that person's record and silently move them.
     pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour: v===''?null:+v}).then(()=>renderAdmRecips()); }));
+  b.querySelectorAll('[data-asched]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=rows.find(r=>r.chat===x.dataset.aschat); if(!rec) return;
+    const k=x.dataset.asched, kind=((P.schedKinds)||[]).find(z=>z.k===k)||{};
+    const sc=(rec.sched&&rec.sched[k])||null;
+    const cur=sc&&sc.hour!=null?String(sc.hour):String(kind.defaultHour!=null?kind.defaultHour:10);
+    const v=(prompt(kind.label+' for '+rec.name+' at which hour? (0-23, blank to turn it off)',cur)||'').trim();
+    if(v===''){ pushAct('/api/alerts/prefs',{chat:rec.chat, sched:{[k]:{h:null}}}).then(()=>renderAdmRecips()); return; }
+    const d=(prompt('Which days? ("all", "weekdays", "mon,wed,fri" or "MWF")',sc&&sc.days?sc.days.join(','):'all')||'').trim();
+    const days=schedDaysClient(d);
+    if(days===undefined){ alert('Could not read those days.'); return; }
+    // No tz in this write, same reason the brief hour never carried one: setting somebody else's
+    // schedule from the operator's browser must not stamp the operator's offset onto their record.
+    pushAct('/api/alerts/prefs',{chat:rec.chat, sched:{[k]:{h:+v, days}}}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-admclaim]').forEach(x=>x.addEventListener('click',()=>{
     pushAct('/api/alerts/claim',{chat:x.dataset.admclaim}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-admunlink]').forEach(x=>x.addEventListener('click',()=>{
@@ -4774,7 +4821,14 @@ function buildPushSection(){
       +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`
       +`<span style="display:flex;gap:6px;width:100%;margin-top:4px;align-items:center">`
       +`<button type="button" class="cdtf${q?' on':''}" data-pquiet="${esc(r.chat)}" data-tip="quiet hours delay non-urgent alerts until the window ends \u2014 they are never dropped. A void being taken and a poller stall always pierce.">quiet ${esc(qLbl)}</button>`
-      +`<button type="button" class="cdtf${bH!=null?' on':''}" data-pdig="${esc(r.chat)}" data-tip="the morning brief: indices, movers, sectors, regime, positioning, earnings, macro and the day's headlines, with two written sections \u2014 delivered as two messages at your local hour. On by default; click to change the hour or turn it off.">brief ${esc(dLbl)}</button>`
+      +((P.schedKinds||[]).map(k=>{
+          const sc=(r.sched&&r.sched[k.k])||null, h=sc?sc.hour:null;
+          // The label states the hour, the days AND whether it is UTC. A chip reading "10:00" that
+          // actually fires at 07:00 local is the kind of quiet wrongness you only find out about
+          // by being woken, and "daily" vs "mon\u00b7wed\u00b7fri" is the whole point of the control.
+          const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''}${sc&&sc.days?' \u00b7 '+sc.daysLabel:''}`:'off';
+          return `<button type="button" class="cdtf${h!=null?' on':''}" data-psched="${esc(k.k)}" data-pchat2="${esc(r.chat)}" data-tip="${esc(k.label+(k.tip?' \u2014 '+k.tip:'')+' \u00b7 on by default; click to set the hour and which days you want it')}">${esc(k.label.toLowerCase())} ${esc(lbl)}</button>`;
+        }).join(''))
       +`</span>`:'')+`</div>`;
   }).join('') : '<div class="sec" style="font-size:12px;padding:4px">You haven\u2019t linked a telegram account yet.</div>';
   void othersNote;
