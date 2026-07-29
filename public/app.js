@@ -2742,10 +2742,12 @@ function buildAlertsPanel(){ const pop=el('alertpop'), A=state.alerts;
     pushAct('/api/alerts/prefs',{chat:rec.chat, quiet:{from:+m[1], to:+m[2], tz:-new Date().getTimezoneOffset()}}); }));
   pop.querySelectorAll('[data-pdig]').forEach(x=>x.addEventListener('click',()=>{
     const rec=((pushState&&pushState.recipients)||[]).find(r=>r.chat===x.dataset.pdig); if(!rec) return;
-    if(rec.digestHour!=null){ pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour:null}); return; }
-    const v=(prompt('Send the daily digest at which local hour? (0-23)','8')||'').trim();
-    if(v==='') return;
-    pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour:+v}); }));
+    const cur=(rec.briefHour!=null?rec.briefHour:rec.digestHour);
+    const v=(prompt('Morning brief at which local hour? (0-23, blank to turn it off)',cur!=null?String(cur):'7')||'').trim();
+    // Blank is a DECISION to switch it off, and the server records it as one — otherwise the
+    // default would quietly switch the brief back on at the next deploy. The offset rides along
+    // because the browser is the only party here that knows it.
+    pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour: v===''?null:+v, tz:-new Date().getTimezoneOffset()}); }));
   pop.querySelectorAll('[data-punlink]').forEach(x=>x.addEventListener('click',()=>{
     if(confirm('Unlink this recipient? They stop receiving alerts immediately.')) pushAct('/api/alerts/unlink',{chat:x.dataset.punlink}); })); }
 function addAlertRule(){ const A=state.alerts, tIn=el('ar-ticker').value.trim().toUpperCase(); let coin='';
@@ -2809,7 +2811,19 @@ function renderAdmRecips(){
   // admin override the server already honoured; the person's own panel shows the change on next open.
   const dflt=P.defaultClasses||[];
   const adminCls=P.adminClasses||['ops'];
-  b.innerHTML=rows.length? rows.map(r=>{
+  // Brief test-fire. The formatting of a Telegram message cannot be checked from the browser —
+  // proportional font, entity parsing and the 4096 ceiling only bite on the real transport — so
+  // this sends the actual thing, by the actual path, to the operator's own linked accounts.
+  // Recipients still on UTC because nobody has told us their offset. Default-on means this is the
+  // difference between a 07:00 brief and a 04:00 one, so it is surfaced rather than left to chance.
+  const utcN=rows.filter(r=>r.briefHour!=null&&r.briefUtc).length;
+  const utcWarn=utcN?`<div class="sec warn" style="font-size:11px;padding:2px 4px" data-tip="These accounts are on the default schedule, which is a fixed UTC moment rather than a guess at their local time. Picking an hour from the alerts bell on their own browser switches them to their own timezone.">${utcN} recipient(s) on the default \u2014 delivered in UTC until they pick an hour.</div>`:'';
+  const briefBar=`<div class="arule" style="flex-wrap:wrap;gap:6px;align-items:center">`
+    +`<span class="sec" style="font-size:11.5px;flex:1;min-width:150px" data-tip="Sends the morning brief exactly as the 07:00 scheduler would \u2014 same context, same renderer, same two-message split \u2014 to every telegram account linked from THIS browser. Cached: re-serves this hour's brief without a model call. Fresh: regenerates and spends one of the day's brief budget.">Morning brief \u2014 send a test to your linked account(s)</span>`
+    +`<button type="button" class="cdtf" id="adm-brief" data-tip="re-serves this hour's brief \u2014 no model call, no budget spent">send cached</button>`
+    +`<button type="button" class="cdtf" id="adm-brief-f" data-tip="regenerate from live state and spend one of today's brief budget">send fresh</button>`
+    +`<span class="sec" id="adm-brief-r" style="font-size:11px;width:100%"></span></div>`;
+  b.innerHTML=utcWarn+briefBar+(rows.length? rows.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const openR=!!admRecOpen[r.chat];
     const on=(c)=>(r.classes&&r.classes.length)?r.classes.includes(c):dflt.includes(c);
@@ -2820,7 +2834,28 @@ function renderAdmRecips(){
       +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
       +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span>`
       +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`:'')+`</div>`; }).join('')
-    : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>';
+    : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>');
+  // Report back what actually happened: parts, entity-parsed length of each, whether the prose
+  // layer degraded, and which budget-ladder steps fired. A silent success tells the operator
+  // nothing about whether the message that landed is the message they designed.
+  const briefRun=(fresh)=>{
+    const out=el('adm-brief-r'); if(out) out.textContent='sending\u2026';
+    ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh})})
+      .then(r=>r.json().catch(()=>null)).then(d=>{
+        if(!out) return;
+        if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
+        const parts=[`sent to ${d.sent} account(s) \u00b7 ${d.parts} message(s) \u00b7 ${(d.chars||[]).join(' + ')} chars`];
+        if(d.model) parts.push('model '+d.model);
+        if(d.degraded) parts.push('<span class="warn">prose degraded: '+esc(d.degraded)+'</span>');
+        if(d.dropped&&d.dropped.length) parts.push('<span class="warn">ladder: '+esc(d.dropped.join(', '))+'</span>');
+        if(d.dayLeft!=null) parts.push(d.dayLeft+' left today');
+        out.innerHTML=parts.join(' \u00b7 ');
+      }).catch(()=>{ if(out) out.innerHTML='<span class="neg">request failed</span>'; })
+      .finally(()=>{ ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=false; }); });
+  };
+  { const x=el('adm-brief'); if(x) x.addEventListener('click',()=>briefRun(false)); }
+  { const x=el('adm-brief-f'); if(x) x.addEventListener('click',()=>briefRun(true)); }
   b.querySelectorAll('[data-admexp]').forEach(x=>x.addEventListener('click',()=>{
     admRecOpen[x.dataset.admexp]=!admRecOpen[x.dataset.admexp]; renderAdmRecips(); }));
   b.querySelectorAll('[data-apcls]').forEach(x=>x.addEventListener('click',()=>{
@@ -4699,7 +4734,12 @@ function buildPushSection(){
       const optIn=rt.dflt===false;
       return `<button type="button" class="cdtf${on(c)?' on':''}" data-pcls="${esc(c)}" data-pchat="${esc(r.chat)}" data-tip="${esc((CTIP[c]||c)+(optIn?' \u00b7 opt-in: not delivered unless you select it':''))}">${esc(c)}${per?` <i style="font-style:normal;opacity:.6">${esc(per)}</i>`:''}</button>`; }).join('');
     const q=r.quiet, qLbl=q?`${String(q.from).padStart(2,'0')}:00\u2013${String(q.to).padStart(2,'0')}:00`:'off';
-    const dLbl=r.digestHour!=null?`${String(r.digestHour).padStart(2,'0')}:00`:'off';
+    // briefHour is the EFFECTIVE hour with the default folded in — a chip reading "off" for
+    // someone who is about to receive a brief would be a lie the reader acts on.
+    const bH=(r.briefHour!=null?r.briefHour:r.digestHour);
+    // An hour with no known offset is UTC, and must SAY so: a chip reading "07:00" that actually
+    // fires at 04:00 local is the kind of quiet wrongness the reader only discovers by being woken.
+    const dLbl=bH!=null?`${String(bH).padStart(2,'0')}:00${r.briefUtc?' UTC':''}`:'off';
     const openR=!!A.openRec[r.chat];
     const nOn=(P.classes||[]).filter(c=>on(c)&&(!adminCls.includes(c)||r.admin)).length;
     return `<div class="arule" style="flex-wrap:wrap">`
@@ -4708,7 +4748,7 @@ function buildPushSection(){
       +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`
       +`<span style="display:flex;gap:6px;width:100%;margin-top:4px;align-items:center">`
       +`<button type="button" class="cdtf${q?' on':''}" data-pquiet="${esc(r.chat)}" data-tip="quiet hours delay non-urgent alerts until the window ends \u2014 they are never dropped. A void being taken and a poller stall always pierce.">quiet ${esc(qLbl)}</button>`
-      +`<button type="button" class="cdtf${r.digestHour!=null?' on':''}" data-pdig="${esc(r.chat)}" data-tip="one daily summary: what fired by class, open claims, and the attributed headlines that are too frequent to push individually">digest ${esc(dLbl)}</button>`
+      +`<button type="button" class="cdtf${bH!=null?' on':''}" data-pdig="${esc(r.chat)}" data-tip="the morning brief: indices, movers, sectors, regime, positioning, earnings, macro and the day's headlines, with two written sections \u2014 delivered as two messages at your local hour. On by default; click to change the hour or turn it off.">brief ${esc(dLbl)}</button>`
       +`</span>`:'')+`</div>`;
   }).join('') : '<div class="sec" style="font-size:12px;padding:4px">You haven\u2019t linked a telegram account yet.</div>';
   void othersNote;
