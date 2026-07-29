@@ -11071,7 +11071,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14632,4 +14632,50 @@ test("loop instrumentation 2026.07.29-05: renderAdmLoop EXECUTES against a full 
     global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
   }
+});
+
+
+// ===== precompressed immutable assets (build 2026.07.29-06, Phase 1 of the perf batch) ==========
+test("brotli precompression 2026.07.29-06: boot compress, explicit routes, negotiation order, caching contract untouched", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // Boot-time q11 brotli + level-9 gzip fallback, size-hinted, over BOTH stamped assets.
+  assert.ok(srv.includes("[zlib.constants.BROTLI_PARAM_QUALITY]: 11"), "brotli must run at maximum quality — the whole point is once-at-boot, best-possible bytes");
+  assert.ok(srv.includes("[zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length"), "size hint set");
+  assert.ok(srv.includes('gz = zlib.gzipSync(raw, { level: 9 })'), "gzip fallback at max level");
+  assert.ok(srv.includes('["/app.js", "app.js", "text/javascript; charset=utf-8"]') && srv.includes('["/styles.css", "styles.css", "text/css; charset=utf-8"]'),
+    "both stamped assets precompress");
+  // Explicit routes over the static wildcard; failure degrades to static, never to a missing asset.
+  assert.ok(srv.includes("for (const route of Object.keys(PRECOMP))"), "routes registered only for assets that actually compressed — boot failure falls back to @fastify/static");
+  // Negotiation: br before gzip before raw, encoding set on the reply (which makes @fastify/compress skip it).
+  const h = srv.slice(srv.indexOf("for (const route of Object.keys(PRECOMP))"), srv.indexOf("// Version-stamped shell"));
+  assert.ok(h.indexOf('content-encoding", "br"') > -1 && h.indexOf('content-encoding", "gzip"') > -1, "both encodings served");
+  assert.ok(h.indexOf('content-encoding", "br"') < h.indexOf('content-encoding", "gzip"'), "br preferred over gzip");
+  assert.ok(h.includes('reply.header("vary", "accept-encoding")'), "vary header — an intermediate cache must never hand a br body to a gzip-only client");
+  // ETag is a strong content identity (sha1 of the raw bytes), honored with a real 304.
+  assert.ok(srv.includes('crypto.createHash("sha1").update(raw).digest("base64url")'), "ETag keys on content, not on VERSION");
+  assert.ok(h.includes('req.headers["if-none-match"] === a.tag') && h.includes("code(304)"), "if-none-match answers 304");
+  // The caching CONTRACT is unchanged: route starts at no-cache, the onSend stamped-upgrade pins survive.
+  assert.ok(h.includes('header("cache-control", "no-cache")'), "route default stays no-cache — only the onSend hook may upgrade");
+  assert.ok(srv.includes('req.url.slice(q + 1) === "v=" + VERSION && reply.statusCode === 200 && !req.url.startsWith("/api/")'),
+    "stamped-immutable upgrade untouched");
+  assert.ok(srv.includes('"public, max-age=31536000, immutable"'), "immutable tier untouched");
+  assert.ok(srv.includes('setHeaders(res) { res.setHeader("cache-control", "no-cache"); }'), "static fallback default untouched");
+});
+
+test("brotli precompression 2026.07.29-06: round trip with the SOURCE'S OWN params is byte-identical and actually smaller (behavioral)", () => {
+  // Executes the real compression against the real shipped asset using the quality parsed FROM
+  // server.js — if someone silently lowers the quality or swaps the algorithm, this test compresses
+  // with whatever they shipped and the equivalence/size assertions judge the real thing.
+  const fs = require("fs"), path = require("path"), zlib = require("zlib");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const qm = srv.match(/BROTLI_PARAM_QUALITY\]: (\d+)/);
+  assert.ok(qm, "quality param must be parseable from source");
+  const raw = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"));
+  const br = zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: Number(qm[1]), [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length } });
+  const gz = zlib.gzipSync(raw, { level: 9 });
+  assert.ok(Buffer.compare(zlib.brotliDecompressSync(br), raw) === 0, "brotli round trip must be byte-identical");
+  assert.ok(Buffer.compare(zlib.gunzipSync(gz), raw) === 0, "gzip round trip must be byte-identical");
+  assert.ok(br.length < gz.length && gz.length < raw.length, `size ordering must hold: br ${br.length} < gz ${gz.length} < raw ${raw.length}`);
+  assert.ok(br.length < gz.length * 0.9, "q11 brotli must beat max gzip by a real margin (>10%) on app.js — if it doesn't, the boot cost buys nothing and this phase should be reverted");
 });
