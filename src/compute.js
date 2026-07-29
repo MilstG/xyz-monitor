@@ -6229,3 +6229,89 @@ module.exports.renderBrief = renderBrief;
 module.exports.briefStamp = briefStamp;
 module.exports.briefClip = briefClip;
 module.exports.BRIEF_COLS = BRIEF_COLS;
+
+// ===== External fundamentals — SEC EDGAR XBRL companyfacts ==================================
+// Pure shaping only: the poller fetches, this file decides what "the latest balance sheet"
+// means. Every field is honest-null when the filer never tagged the concept — no zero-filling,
+// no cross-concept guessing. Instant (point-in-time) concepts take the latest `end` date from
+// a 10-K/10-Q; duration concepts (revenue, net income, eps) prefer the latest FULL fiscal year
+// and fall back to the latest quarter, labeled so the card can say which one it is showing.
+const XBRL_TAGS = {
+  assets:      { tags: ["Assets"], unit: "USD" },
+  liabilities: { tags: ["Liabilities"], unit: "USD" },
+  equity:      { tags: ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"], unit: "USD" },
+  cash:        { tags: ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"], unit: "USD" },
+  debt:        { tags: ["LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations"], unit: "USD" },
+  revenue:     { tags: ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"], unit: "USD", duration: true },
+  netIncome:   { tags: ["NetIncomeLoss"], unit: "USD", duration: true },
+  eps:         { tags: ["EarningsPerShareDiluted", "EarningsPerShareBasic"], unit: "USD/shares", duration: true },
+};
+const XBRL_FORMS = new Set(["10-K", "10-Q", "10-K/A", "10-Q/A", "20-F", "20-F/A", "6-K"]);
+function xbrlBest(node, unit, duration) {
+  // node: companyfacts concept object { units: { USD: [ {end, val, form, fy, fp, start?}, ... ] } }
+  const arr = node && node.units && node.units[unit];
+  if (!Array.isArray(arr) || !arr.length) return null;
+  const usable = arr.filter((e) => e && Number.isFinite(+e.val) && e.end && XBRL_FORMS.has(String(e.form || "")));
+  if (!usable.length) return null;
+  const latest = (list) => list.reduce((a, b) => (String(a.end) >= String(b.end) ? a : b));
+  if (!duration) return latest(usable);
+  // Duration: an FY entry spans ~a year; a quarterly entry ~90 days. Companyfacts marks fiscal
+  // period in `fp` ("FY" | "Q1".."Q4"). Prefer the latest FY; if the filer's latest data is a
+  // newer quarter than the last FY, still show FY (comparable, un-annualized) — the quarter
+  // fallback exists only for filers with no FY row at all (fresh listings).
+  const fy = usable.filter((e) => e.fp === "FY" && e.start && dayDiffISO(e.start, e.end) > 300);
+  if (fy.length) return latest(fy);
+  const q = usable.filter((e) => e.start && dayDiffISO(e.start, e.end) < 120);
+  return q.length ? latest(q) : latest(usable);
+}
+function dayDiffISO(a, b) { const ms = Date.parse(b) - Date.parse(a); return Number.isFinite(ms) ? ms / 864e5 : 0; }
+function pickXbrlFacts(cf) {
+  if (!cf || typeof cf !== "object") return null;
+  const gaap = (cf.facts && (cf.facts["us-gaap"] || cf.facts["ifrs-full"])) || {};
+  const dei = (cf.facts && cf.facts.dei) || {};
+  const out = { name: cf.entityName || null, cik: cf.cik != null ? +cf.cik : null, fields: {}, asOf: null };
+  for (const key of Object.keys(XBRL_TAGS)) {
+    const spec = XBRL_TAGS[key]; let best = null;
+    for (const tag of spec.tags) { best = xbrlBest(gaap[tag], spec.unit, !!spec.duration); if (best) break; }
+    out.fields[key] = best ? { v: +best.val, end: best.end, form: best.form || null,
+      period: spec.duration ? (best.fp === "FY" ? "FY" + (best.fy || String(best.end).slice(0, 4)) : (best.fp || "period") + " " + String(best.end).slice(0, 4)) : best.end } : null;
+    if (best && (!out.asOf || String(best.end) > out.asOf)) out.asOf = best.end;
+  }
+  { const sh = xbrlBest(dei.EntityCommonStockSharesOutstanding, "shares", false);
+    out.fields.shares = sh ? { v: +sh.val, end: sh.end, form: sh.form || null, period: sh.end } : null; }
+  // Derived only when both legs exist AND share a currency — never synthesized from one side.
+  const f = out.fields;
+  out.fields.netCash = f.cash && f.debt ? { v: f.cash.v - f.debt.v, end: f.cash.end, form: null, period: f.cash.end } : null;
+  const some = Object.keys(out.fields).some((k) => out.fields[k] != null);
+  return some ? out : null;
+}
+
+// ===== ETF composition — SEC EDGAR N-PORT primary_doc.xml ==================================
+// N-PORT is the only free, primary-source holdings disclosure: monthly portfolio filed with a
+// 30–60 day lag. The parser is regex-over-XML on a document whose schema the SEC controls —
+// each holding lives in an <invstOrSec> block with flat scalar children, so a full XML parser
+// buys nothing here. Percent of value (`pctVal`) is the filing's own number, never recomputed.
+function xmlEnt(s) { return String(s || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d)); }
+function xmlTag(block, tag) { const m = block.match(new RegExp("<" + tag + "(?:\\s[^>]*)?>([\\s\\S]*?)</" + tag + ">")); return m ? xmlEnt(m[1].trim()) : null; }
+function parseNportHoldings(xml, maxN) {
+  const s = String(xml || ""); const cap = Math.max(1, maxN || 15);
+  const gen = s.match(/<genInfo>[\s\S]*?<\/genInfo>/); const g = gen ? gen[0] : "";
+  const out = { seriesName: xmlTag(g, "seriesName"), seriesId: xmlTag(g, "seriesId"),
+    asOf: xmlTag(g, "repPdDate"), totAssets: null, holdings: [], n: 0 };
+  { const fi = s.match(/<fundInfo>[\s\S]*?<\/fundInfo>/); const ta = fi ? xmlTag(fi[0], "totAssets") : null;
+    if (ta != null && Number.isFinite(+ta)) out.totAssets = +ta; }
+  const blocks = s.match(/<invstOrSec>[\s\S]*?<\/invstOrSec>/g) || [];
+  const all = [];
+  for (const b of blocks) {
+    const name = xmlTag(b, "name") || xmlTag(b, "title"); if (!name) continue;
+    const pct = +(xmlTag(b, "pctVal") || NaN), val = +(xmlTag(b, "valUSD") || NaN);
+    all.push({ name: name.slice(0, 80), pct: Number.isFinite(pct) ? pct : null, val: Number.isFinite(val) ? val : null });
+  }
+  out.n = all.length;
+  all.sort((a, b) => (b.pct != null ? b.pct : -1) - (a.pct != null ? a.pct : -1));
+  out.holdings = all.slice(0, cap);
+  return out.n ? out : null;
+}
+module.exports.pickXbrlFacts = pickXbrlFacts;
+module.exports.parseNportHoldings = parseNportHoldings;

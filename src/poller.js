@@ -16,7 +16,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
@@ -140,7 +140,7 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -3982,6 +3982,112 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       store.saveNews({ ts: now, items: newsItems, secTape, secLearned, nameLearned });
     }
   }
+
+  // ---- SEC EDGAR fundamentals + ETF holdings (on-demand, terminal-driven) --------------------
+  // Two pull lanes for the ask terminal: `fund <T>` (latest filed balance sheet + income facts
+  // via XBRL companyfacts) and `etf <SYM>` (latest N-PORT portfolio). On-demand only — nothing
+  // polls; a name nobody asks about costs zero requests. All numbers come straight from filings
+  // and are shaped by pure compute functions; the model never touches them. Caches are in-memory
+  // with a 24h TTL (fundamentals change quarterly, N-PORT monthly — a redeploy refetching a few
+  // asked-about names is cheaper than another persistence surface). Errors cache for 5 minutes so
+  // a bad symbol can't hammer sec.gov, and an in-flight map dedupes concurrent asks for one name.
+  // extFetch is the injected-transport test hook, same pattern as aiFetch.
+  const extFetch = extFetchOpt || ((...a) => fetch(...a));
+  const FUND_TTL = 24 * HOUR, EXT_ERR_TTL = 5 * 60 * 1000, EXT_TIMEOUT_MS = 25 * 1000;
+  const fundCache = new Map();     // TICKER -> { at, res }
+  const etfCache = new Map();      // SYMBOL -> { at, res }
+  const extInflight = new Map();   // "fund:T" | "etf:S" -> Promise
+  let cikMaps = null, cikMapsAt = 0;   // { co: SYM->{cik,name}, mf: SYM->{cik,seriesId,name} }
+  async function extGet(url, kind) {
+    const ac = new AbortController(); const t = setTimeout(() => ac.abort(), EXT_TIMEOUT_MS);
+    try {
+      const res = await extFetch(url, { headers: { "user-agent": SEC_UA, accept: kind === "xml" ? "application/xml" : "application/json" }, signal: ac.signal });
+      if (!res.ok) return { ok: false, error: "HTTP " + res.status };
+      return { ok: true, body: kind === "xml" ? await res.text() : await res.json() };
+    } catch (e) { return { ok: false, error: "fetch failed: " + (e && e.message) }; } finally { clearTimeout(t); }
+  }
+  async function ensureCikMaps() {
+    const now = Date.now();
+    if (cikMaps && now - cikMapsAt < FUND_TTL) return cikMaps;
+    const co = new Map(), mf = new Map();
+    const a = await extGet("https://www.sec.gov/files/company_tickers.json", "json");
+    if (a.ok && a.body && typeof a.body === "object")
+      for (const k of Object.keys(a.body)) { const e = a.body[k];
+        if (e && e.ticker && e.cik_str != null) co.set(String(e.ticker).toUpperCase(), { cik: +e.cik_str, name: e.title || null }); }
+    // The mutual-fund/ETF map ships column-oriented: { fields:[...], data:[[...],...] }. Many
+    // symbols repeat across share classes of one series — first hit wins, it carries the seriesId
+    // the N-PORT match needs. This file failing is non-fatal: most large ETFs also appear in the
+    // company map, they just lose series-level disambiguation.
+    const b = await extGet("https://www.sec.gov/files/company_tickers_mf.json", "json");
+    if (b.ok && b.body && Array.isArray(b.body.data) && Array.isArray(b.body.fields)) {
+      const fi = {}; b.body.fields.forEach((f, i) => { fi[String(f).toLowerCase()] = i; });
+      for (const row of b.body.data) { const sym = String(row[fi.symbol] || "").toUpperCase();
+        if (sym && !mf.has(sym) && row[fi.cik] != null) mf.set(sym, { cik: +row[fi.cik], seriesId: row[fi.seriesid] || null, name: null }); }
+    }
+    if (!co.size && !mf.size) return null;   // both maps down -> caller reports honestly, cache stays empty
+    cikMaps = { co, mf }; cikMapsAt = now; return cikMaps;
+  }
+  const cikPad = (cik) => String(cik).padStart(10, "0");
+  function extCached(cache, key) { const c = cache.get(key);
+    if (c && Date.now() - c.at < (c.res && c.res.ok ? FUND_TTL : EXT_ERR_TTL)) return c.res; return null; }
+  function extRun(cache, key, flightKey, work) {
+    const hit = extCached(cache, key); if (hit) return Promise.resolve(hit);
+    if (extInflight.has(flightKey)) return extInflight.get(flightKey);
+    const p = work().then((res) => { cache.set(key, { at: Date.now(), res });
+      if (cache.size > 200) cache.clear(); return res; })
+      .finally(() => extInflight.delete(flightKey));
+    extInflight.set(flightKey, p); return p;
+  }
+  function fundamentals(tickerRaw) {
+    const T = String(tickerRaw || "").toUpperCase().trim();
+    if (!T || !/^[A-Z0-9.\-]{1,10}$/.test(T)) return Promise.resolve({ ok: false, error: "bad symbol" });
+    return extRun(fundCache, T, "fund:" + T, async () => {
+      const maps = await ensureCikMaps();
+      if (!maps) return { ok: false, error: "SEC ticker map unavailable" };
+      const hit = maps.co.get(T);
+      if (!hit) return { ok: false, error: "no SEC filer found for " + T + " — fundamentals cover US-filed equities only" };
+      const cf = await extGet("https://data.sec.gov/api/xbrl/companyfacts/CIK" + cikPad(hit.cik) + ".json", "json");
+      if (!cf.ok) return { ok: false, error: "EDGAR companyfacts: " + cf.error };
+      const shaped = pickXbrlFacts(cf.body);
+      if (!shaped) return { ok: false, error: "filer has no usable XBRL facts (foreign or exempt filer)" };
+      return { ok: true, ticker: T, src: "SEC EDGAR XBRL", data: shaped, at: Date.now() };
+    });
+  }
+  function etfHoldings(symRaw) {
+    const S = String(symRaw || "").toUpperCase().trim();
+    if (!S || !/^[A-Z0-9.\-]{1,10}$/.test(S)) return Promise.resolve({ ok: false, error: "bad symbol" });
+    return extRun(etfCache, S, "etf:" + S, async () => {
+      const maps = await ensureCikMaps();
+      if (!maps) return { ok: false, error: "SEC ticker map unavailable" };
+      const mf = maps.mf.get(S), co = maps.co.get(S);
+      const cik = (mf && mf.cik) || (co && co.cik);
+      if (!cik) return { ok: false, error: "no SEC filer found for " + S };
+      const sub = await extGet("https://data.sec.gov/submissions/CIK" + cikPad(cik) + ".json", "json");
+      if (!sub.ok) return { ok: false, error: "EDGAR submissions: " + sub.error };
+      const rec = sub.body && sub.body.filings && sub.body.filings.recent;
+      if (!rec || !Array.isArray(rec.form)) return { ok: false, error: "no filing index for " + S };
+      const cand = [];
+      for (let i = 0; i < rec.form.length && cand.length < 5; i++)
+        if (/^NPORT-P/.test(String(rec.form[i]))) cand.push({ acc: rec.accessionNumber[i], doc: rec.primaryDocument[i] || "primary_doc.xml" });
+      if (!cand.length) return { ok: false, error: S + " has no N-PORT filings — not a registered fund (holdings cover ETFs/mutual funds only)" };
+      // Multi-series trusts file one NPORT-P per series under the same CIK. When the mf map gave
+      // us a seriesId we walk the recent filings until the XML's own seriesId matches; without
+      // one, the newest filing is the honest best guess and the card shows the series name so a
+      // mismatch is visible, never silent.
+      let first = null;
+      for (const c of cand) {
+        const url = "https://www.sec.gov/Archives/edgar/data/" + cik + "/" + String(c.acc).replace(/-/g, "") + "/" + c.doc;
+        const x = await extGet(url, "xml"); if (!x.ok) continue;
+        const parsed = parseNportHoldings(x.body, 15); if (!parsed) continue;
+        if (!first) first = parsed;
+        if (!(mf && mf.seriesId) || parsed.seriesId === mf.seriesId) { first = parsed; break; }
+      }
+      if (!first) return { ok: false, error: "could not read an N-PORT document for " + S };
+      return { ok: true, symbol: S, src: "SEC EDGAR N-PORT", data: first, at: Date.now(),
+        lag: "N-PORT holdings are filed monthly with a 30\u201360 day lag \u2014 this is the latest FILED portfolio, not today's" };
+    });
+  }
+
   function getTgChannels() {
     return { ts: Date.now(), max: TG_MAX, channels: tgChannels.map((c) => Object.assign({ c }, tgStatus.get(c) || { lastOk: null, error: null, posts: 0 })) };
   }
@@ -6340,10 +6446,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const ASK_GRAMMAR = "top <field> [n] ; bottom <field> [n] (any field below, plus: gainers losers); "
     + "screen <field><op><value> [& <field><op><value> ...] (fields: funding fundpct squeeze momentum oi vol vstape doi beta dd ddy carry turn d1 d7 d30 h1 h4 gap prem rvol adr vol30 rs dcap hitr vsvwap vsma20 vsma50 vsma100 vsma200 vsyopen vsmopen; ops: > < >= <= =); "
     + "<TICKER> ; <TICKER> <field> ; signals [TICKER] ; corr <A> <B> ; diverge <TICKER> ; vs <A> <B> ; "
-    + "earnings [TICKER|today|tomorrow|week|recent] ; news [TICKER] ; breadth [d1|d7|d30] ; sectors [d1|d7|d30] ; reports";
+    + "earnings [TICKER|today|tomorrow|week|recent] ; news [TICKER] ; breadth [d1|d7|d30] ; sectors [d1|d7|d30] ; reports ; "
+    + "fund <TICKER> (latest SEC-filed balance sheet + income facts) ; etf <SYMBOL> (latest SEC N-PORT holdings of an ETF/fund)";
   const ASK_PLANNER_SYS = "You translate a trader's natural-language question about a markets dashboard into EXACTLY ONE query in this grammar, and output ONLY that query — no prose, no backticks, no explanation.\nGrammar: " + ASK_GRAMMAR
-    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>. context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current question may be a follow-up — resolve it against that context, and a complaint about a prior answer means the ORIGINAL question was answered wrongly, so re-map the original intent. If the question cannot be expressed in this grammar, output exactly: NONE";
-  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Every entry in context.markets is one market's live fields (absent keys mean that value is genuinely unavailable for that name): name = the company's common name, px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. NUMBERS RULE: every price, %, level or figure you cite must come from these fields or simple arithmetic on them (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma) — never invent or estimate a figure that is not in or derivable from the data. IDENTITY RULE: for what a company IS or what it makes — its products, business lines, sub-industry, competitors — you MAY use well-known general knowledge, but ONLY about tickers present in context.markets, and NEVER name a company that is not in that list. When an answer leans on general knowledge rather than the live fields, note that briefly. context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current message may be a follow-up — resolve pronouns and complaints against it, and a message like 'not what I asked' means a prior answer missed the ORIGINAL question, so answer that original question properly now. context.news, when present, holds the ONLY headlines you may reference ({h} = headline, {tk} = verified ticker or null for macro tape, {ageH} = hours old): for 'why is X moving' questions, cite a matching headline when one plausibly explains the move, and say plainly when none does — then read the tape (sector.rel via sector peers in context.markets, beta, funding, volume) instead of inventing a catalyst. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
+    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>; a question about a company's balance sheet, fundamentals, financials, debt, cash position, filed revenue or net income maps to fund <TICKER>; a question about an ETF's or fund's holdings, composition, constituents or what it contains maps to etf <SYMBOL> (for fund and etf the symbol MAY be outside context.tickers when the user names it explicitly). context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current question may be a follow-up — resolve it against that context, and a complaint about a prior answer means the ORIGINAL question was answered wrongly, so re-map the original intent. If the question cannot be expressed in this grammar, output exactly: NONE";
+  const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Every entry in context.markets is one market's live fields (absent keys mean that value is genuinely unavailable for that name): name = the company's common name, px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. NUMBERS RULE: every price, %, level or figure you cite must come from these fields or simple arithmetic on them (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma) — never invent or estimate a figure that is not in or derivable from the data. IDENTITY RULE: for what a company IS or what it makes — its products, business lines, sub-industry, competitors — you MAY use well-known general knowledge, but ONLY about tickers present in context.markets, and NEVER name a company that is not in that list. When an answer leans on general knowledge rather than the live fields, note that briefly. context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current message may be a follow-up — resolve pronouns and complaints against it, and a message like 'not what I asked' means a prior answer missed the ORIGINAL question, so answer that original question properly now. context.fundamentals, when present, holds SEC-filed facts for named tickers ({t}, {asOf}, facts keyed assets/liabilities/equity/cash/debt/netCash/revenue/netIncome/eps/shares, each {v} in USD or shares with its filing {period}): these are filed figures, cite them with their period and treat an absent key as genuinely unfiled. context.news, when present, holds the ONLY headlines you may reference ({h} = headline, {tk} = verified ticker or null for macro tape, {ageH} = hours old): for 'why is X moving' questions, cite a matching headline when one plausibly explains the move, and say plainly when none does — then read the tape (sector.rel via sector peers in context.markets, beta, funding, volume) instead of inventing a catalyst. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
   // Causal/explanatory intent routes to the analyst wherever it sits in the sentence — the
   // anchored-only version classified "what could be causing DRAM dump today" as planner, which
   // mapped it to a bare ticker card: a "why" answered with a number. The anchored set stays for
@@ -6359,6 +6466,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (h === "screen") return /[<>=]/.test(s);
     if (h === "signals" || h === "corr" || h === "diverge" || h === "vs" || h === "earnings"
       || h === "news" || h === "breadth" || h === "sectors" || h === "reports") return true;
+    // fund/etf take symbols that may live OUTSIDE the trading universe (an ETF is not a perp
+    // listing) — validate shape, not membership; the fetch path reports honestly on unknowns.
+    if (h === "fund" || h === "etf") return p[1] != null && /^[A-Za-z0-9.\-]{1,10}$/.test(p[1]);
     return !!(tickerSet && tickerSet.has(H));   // <TICKER> or <TICKER> <field>
   }
   async function askBoard(q, ctx) {
@@ -6421,10 +6531,27 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       for (const a of sorted) { if (macro >= 4) break; if (!a.tk && !a.fl) { push(a); macro++; } }
       return out.length ? out : null;
     })();
+    // Filed fundamentals for the analyst: cache-only, never a fetch — an ask must not block on
+    // sec.gov. A name gets its fundamentals attached once someone has pulled its `fund` card
+    // this day; until then the analyst honestly has no filing data for it. Max 2 names keeps
+    // the payload lean; the prompt's numbers rule already covers provenance.
+    const askFunds = (() => {
+      const txt = (q + " " + hist.map((h) => h.q).join(" ")).toUpperCase();
+      const words = new Set(txt.split(/[^A-Z0-9.\-]+/).filter(Boolean));
+      const out = [];
+      for (const [T, c] of fundCache) { if (out.length >= 2) break;
+        if (words.has(T) && c.res && c.res.ok && Date.now() - c.at < FUND_TTL) {
+          const f = c.res.data.fields, pick = {};
+          for (const k of Object.keys(f)) if (f[k]) pick[k] = { v: f[k].v, period: f[k].period };
+          out.push({ t: T, asOf: c.res.data.asOf, src: "SEC filings", facts: pick });
+        } }
+      return out.length ? out : null;
+    })();
     const analyst = async () => {
       const payload = { question: q, scope: ctx.scope || null, markets };
       if (hist.length) payload.history = hist;
       if (askNews) payload.news = askNews;
+      if (askFunds) payload.fundamentals = askFunds;
       const c = await callBoth(ASK_ANALYST_SYS, payload, 2600);
       return c.ok ? { ok: true, mode: "analyst", answer: c.text.trim(), marketsN: markets.length }
                   : { ok: false, error: c.error || "model call failed" };
@@ -9379,6 +9506,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       lastErr: briefLastErr, enabled: BRIEF_ON, model: BRIEF_MODEL }),
     briefTzForNow: briefTzFor,   // harness: the offset resolution both delivery and the panel read
     briefIsDefaultNow: briefIsDefault,
+    fundamentals,                                // on-demand SEC XBRL pull for the terminal's `fund` card
+    etfHoldings,                                 // on-demand SEC N-PORT pull for the terminal's `etf` card
+    fundSeedNow: (t, res) => { fundCache.set(String(t).toUpperCase(), { at: Date.now(), res }); },   // harness: stage filed facts without an EDGAR round trip
     filingScanNow: filingScan,                   // harness: feed parsed EDGAR items without a fetch
     earnScanNow: earnScan,                       // harness: run the proximity check on demand
     earnRebuildNow: rebuildEarnMap,              // harness: stage a calendar without a Finnhub round trip
