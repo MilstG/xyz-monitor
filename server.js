@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.28-20";
+const VERSION = "2026.07.28-21";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -668,7 +668,7 @@ async function main() {
     if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "admin only" });
     const b = req.body || {};
     const fn = b.kind === "landscape" ? poller.landTest : poller.briefTest;
-    const r = await fn(b.chat || null, ensureOwner(req, reply), true, !!b.fresh);
+    const r = await fn(b.chat || null, ensureOwner(req, reply), true, !!b.fresh, !!b.mine);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
 
