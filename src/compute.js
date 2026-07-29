@@ -5645,27 +5645,23 @@ function briefContextNumbers(ctx) {
   return set;
 }
 function briefContextNames(ctx) {
+  // Walk the ENTIRE context. The first version whitelisted name-bearing fields one by one and paid
+  // for it three times: headline words ("SK"), macro labels ("FOMC"), then the basket names
+  // themselves ("MAG7") — each a thing we explicitly handed the model, each rejected as an
+  // "invention" because its field was not on the list. The contract is simpler than a field list:
+  // anything present anywhere in the context is citable, and only genuinely absent names fail.
   const set = new Set();
-  const add = (t) => { if (t) set.add(String(t).toUpperCase()); };
-  for (const k of ["indices", "commodities", "fx"]) for (const r of (ctx && ctx[k]) || []) add(r.t);
-  for (const side of ["up", "down"]) {
-    for (const r of ((ctx && ctx.movers && ctx.movers.stocks) || {})[side] || []) add(r.t);
-    for (const r of ((ctx && ctx.movers && ctx.movers.crypto) || {})[side] || []) add(r.t);
-  }
-  for (const g of (ctx && ctx.sectors) || []) { add(g.name); add(g.label); }
-  for (const e of ((ctx && ctx.earnings) || {}).items || []) add(e.t);
-  // Headline TEXT counts, not just the ticker it was attributed to. The feed is full of "SK Hynix",
-  // "HIMS", "Q2" — the model citing a headline we handed it is the correct behaviour, and rejecting
-  // the whole brief because "SK" is not a listed symbol is the gate eating the thing it protects.
-  for (const c of (ctx && ctx.news) || []) {
-    add(c.sector);
-    for (const h of c.items || []) {
-      add(h.t);
-      for (const w of String(h.h || "").match(/\b[A-Za-z][A-Za-z0-9.&]{0,11}\b/g) || []) add(w);
+  const walk = (v) => {
+    if (v == null) return;
+    if (typeof v === "string") {
+      set.add(v.toUpperCase());
+      for (const w of v.match(/[A-Za-z][A-Za-z0-9.&/-]{0,15}/g) || []) set.add(w.toUpperCase());
+      return;
     }
-  }
-  for (const g of (ctx && ctx.macro && ctx.macro.next) || []) for (const w of String(g.label || "").split(/\s+/)) add(w);
-  if (ctx && ctx.bench) { add(ctx.bench.stocks && ctx.bench.stocks.t); add(ctx.bench.crypto && ctx.bench.crypto.t); }
+    if (Array.isArray(v)) { for (const x of v) walk(x); return; }
+    if (typeof v === "object") { for (const k of Object.keys(v)) walk(v[k]); }
+  };
+  walk(ctx);
   return set;
 }
 // Ticker-shaped tokens the model may use freely: prose words that happen to be capitalised, and
@@ -5750,11 +5746,17 @@ const padL = (s, n) => { s = String(s == null ? "" : s); return s.length >= n ? 
 const briefClip = (s, n) => { s = String(s == null ? "" : s).replace(/\s+/g, " ").trim(); return s.length <= n ? s : s.slice(0, n - 1).replace(/[\s,;:.-]+$/, "") + "\u2026"; };
 // A <pre> block, escaped, with any line that would wrap on a phone hard-clipped rather than left to
 // fold. An empty block is dropped so a heading never sits above nothing.
+// Monospace WITHOUT the code-block chrome. <pre> is the obvious choice and it is wrong: Telegram
+// renders it as a code widget with a grey "copy" header bar, so a market brief arrived looking like
+// a terminal dump. Per-line <code> gives the same fixed-width alignment as an inline entity, with no
+// header, no border and no copy button.
 function briefPre(lines) {
-  const body = (lines || []).filter((l) => l != null).map((l) => tgEscape(String(l).replace(/\s+$/, "")).slice(0, 200));
+  const body = (lines || []).filter((l) => l != null).map((l) => String(l).replace(/\s+$/, "").slice(0, 200));
   while (body.length && body[body.length - 1] === "") body.pop();
   if (!body.length) return null;
-  return "<pre>" + body.join("\n") + "</pre>";
+  // Leading spaces collapse in HTML, so indentation rides on a figure space (U+2007), which is
+  // fixed-width in a monospace face and survives the parser.
+  return body.map((l) => (l === "" ? "" : "<code>" + tgEscape(l.replace(/ /g, "\u2007")) + "</code>")).join("\n");
 }
 function renderBrief(ctx, prose) {
   const c = ctx || {};
@@ -5771,6 +5773,8 @@ function renderBrief(ctx, prose) {
     { text: "\ud83c\udf05 <b>MORNING BRIEF</b>" },
     { text: `<i>${briefStamp(c.at || Date.now(), c.tz || 0)} \u00b7 last 24h</i>` }] });
 
+  if (!(prose && prose.story) && c.proseErr)
+    S.push({ key: "prosewarn", head: null, lines: [{ text: `<i>\u26a0 commentary unavailable \u2014 ${tgEscape(briefClip(c.proseErr, 90))}</i>` }] });
   if (prose && prose.story)
     S.push({ key: "story", head: "\ud83d\udcac <b>THE STORY</b>",
       lines: prose.story.split(/\n{2,}/).map((p) => ({ para: 1, text: tgEscape(p.trim()) })).filter((x) => x.text) });
@@ -5838,6 +5842,7 @@ function renderBrief(ctx, prose) {
           + (anyNote ? padL(r.note ? briefClip(String(r.note).replace(/[^0-9+\-\u2212]/g, "").replace(/-/g, "\u2212"), 5) : "", 6) : ""));
       if (bench && bench.t && Number.isFinite(+bench.d1))
         rows.push(padR(briefClip(bench.t, 9), 10) + padL(pct(bench.d1), 7));
+      if (blocks.length) blocks.push({ text: "" });   // the two books ran together without a spacer
       blocks.push({ item: 1, text: briefPre(rows) });
     }
     push("movers", "\ud83d\udcca <b>MOVERS</b>", blocks);
@@ -5856,7 +5861,7 @@ function renderBrief(ctx, prose) {
         row("breadth 1d", (g) => num(g.breadth, "%")),
         row("        7d", (g) => num(g.d7, "%")),
         row("       30d", (g) => num(g.d30, "%")),
-        row(">200DMA", (g) => num(g.ma200, "%")),
+        row("above 200D", (g) => num(g.ma200, "%")),
         row("corr", (g) => (g.corr == null ? "\u2014" : g.corr.toFixed(2))),
         row("dispersion", (g) => (g.disp == null ? "\u2014" : g.disp.toFixed(1) + "%"))];
       push("regime", "\ud83c\udf21 <b>REGIME</b>", [{ item: 1, text: briefPre(rows) }]);

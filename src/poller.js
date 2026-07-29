@@ -8193,6 +8193,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const BRIEF_PER_DAY = Math.max(1, Number(process.env.BRIEF_PER_DAY) || 6);
   const BRIEF_EFFORT = process.env.BRIEF_EFFORT || "medium";
   const BRIEF_MODEL = process.env.BRIEF_MODEL || AI_MODEL;
+  const BRIEF_MODEL_FALLBACK = process.env.BRIEF_MODEL_FALLBACK || AI_MODEL_FALLBACK;
+  // NEVER below the provider's own budget. GPT-5.x bills reasoning tokens against
+  // max_completion_tokens, so an output-sized budget returns finish_reason=length with an EMPTY
+  // message: the first build set this to 4000 and every live brief lost its prose to a silent
+  // empty response. AI_DEF.maxTokens is the floor the report path and the suite already agree on.
+  const BRIEF_MAX_TOKENS = Math.max(AI_MAX_TOKENS, Number(process.env.BRIEF_MAX_TOKENS) || 12000);
   const BRIEF_CACHE_MS = 55 * 60 * 1000;
   const BRIEF_MOVERS_N = 3, BRIEF_NEWS_CLUSTERS = 3, BRIEF_NEWS_PER = 3, BRIEF_IDX_MAX = 5;
   let briefCache = null;              // { key, at, messages, dropped, model, degraded }
@@ -8450,7 +8456,16 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   async function briefProse(ctx) {
     if (!AI_KEY() && !aiFetch) return { ok: false, error: "no key" };
     if (!briefDayLeft()) return { ok: false, error: "brief-daily-cap" };
-    const call = await callModel(BRIEF_MODEL, ctx, { system: BRIEF_SYSTEM, maxTokens: 4000, effort: BRIEF_EFFORT });
+    // Same fallback discipline as the report path: a refusal or a budget blow-out on the primary
+    // retries once on the fallback model before the brief gives up its prose.
+    const opts = { system: BRIEF_SYSTEM, maxTokens: BRIEF_MAX_TOKENS, effort: BRIEF_EFFORT };
+    let used = BRIEF_MODEL;
+    let call = await callModel(BRIEF_MODEL, ctx, opts);
+    if (!call.ok && BRIEF_MODEL_FALLBACK && BRIEF_MODEL_FALLBACK !== BRIEF_MODEL) {
+      log("brief: primary failed (" + call.error + "), retrying on " + BRIEF_MODEL_FALLBACK);
+      used = BRIEF_MODEL_FALLBACK;
+      call = await callModel(BRIEF_MODEL_FALLBACK, ctx, opts);
+    }
     if (!call.ok) return { ok: false, error: call.error };
     let obj = null;
     try { obj = JSON.parse(String(call.text).replace(/^```(?:json)?|```$/gm, "").trim()); } catch (_) {
@@ -8461,7 +8476,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const d = briefDayKey(Date.now());
     if (briefDay.d !== d) briefDay = { d, n: 0 };
     briefDay.n++;
-    return { ok: true, story: v.story, closing: v.closing, model: BRIEF_MODEL };
+    return { ok: true, story: v.story, closing: v.closing, model: used };
   }
 
   // One generation per hour-bucket, shared by everyone waking in it. A recipient at 07:00 and one at
@@ -8479,6 +8494,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         else { degraded = p.error; briefLastErr = p.error; }
       } catch (e) { degraded = (e && e.message) || String(e); briefLastErr = degraded; }
     } else degraded = "disabled";
+    if (degraded) ctx.proseErr = degraded;
     const r = renderBrief(ctx, prose);
     briefCache = { key, at: t, messages: r.messages, dropped: r.dropped, model, degraded, ctx };
     if (degraded) log("brief: prose degraded (" + degraded + ") — shipping mechanical brief");
