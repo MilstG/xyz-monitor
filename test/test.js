@@ -4855,7 +4855,13 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
   // store: atomic blob pair
   assert.ok(stf.includes("saveDuel(data)") && stf.includes("loadDuel()") && stf.includes('duel.json'), "store duel blob missing");
   // client: column adjacent to the incumbent in the default order, migration helper applied twice
-  assert.ok(/'mom','momp'/.test(app), "momp must sit beside mom in DEFAULT_ORDER");
+  // -10: MOM+ is the default-visible momentum column; plain MOM moved to the hidden tail. They are
+  // no longer adjacent in DEFAULT_ORDER — pin the product decision instead of the old layout.
+  { const ord = app.match(/const DEFAULT_ORDER=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim());
+    const hid = new Set(app.match(/const DEFAULT_HIDDEN=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim()));
+    assert.ok(ord.includes("mom") && ord.includes("momp"), "both momentum columns exist in DEFAULT_ORDER");
+    assert.ok(!hid.has("momp"), "MOM+ visible by default");
+    assert.ok(hid.has("mom"), "plain MOM hidden by default (the -10 default set)"); }
   assert.equal(app.split("colAdjacent(").length - 1, 3, "adjacency migration: one definition + prefs path + layout path");
   assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
   // -08: the hot dot rides BOTH momentum cells — it flags the name, not the incumbent score,
@@ -10457,7 +10463,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-09"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-10"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -12642,8 +12648,10 @@ test("-09 wiring pins: column registered + gated, prefs survive, toggle seg exis
     "an editable basket is never the benchmark under signal math",   // tier copy, verbatim
     "res.eqvb", "price-only EW",                         // backtest yardstick + honest label
     "id=\"btVsB\""]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
-  assert.ok(app.includes("'vstape','dvb','dcap'"), "dvb sits in DEFAULT_ORDER");
-  assert.ok(app.includes("'vstape','dvb','dcap','hitr'"), "…and defaults hidden (opt-in lens)");
+  { const ord = app.match(/const DEFAULT_ORDER=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim());
+    const hid = new Set(app.match(/const DEFAULT_HIDDEN=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim()));
+    assert.ok(ord.includes("dvb"), "dvb registered in DEFAULT_ORDER");
+    assert.ok(hid.has("dvb"), "dvb hidden by default (opt-in lens)"); }
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(ht.includes('<div class="seg" id="corrbk" role="group" aria-label="Basket rows" hidden></div>'), "built-ins toggle seg, born hidden (.seg[hidden] guard already pinned)");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
@@ -12651,4 +12659,61 @@ test("-09 wiring pins: column registered + gated, prefs survive, toggle seg exis
   // tier boundary holds server-side too: nothing in phase 2 touched the poller's alert machinery
   const pj = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(!/dvb/.test(pj), "the Δ column is client-lens only — the server never learns it exists");
+});
+
+// ===== curated built-in baskets + markets defaults (build 2026.07.28-10) ========================
+// MAG7 ships as a default on every deployment: a fixed membership list intersected with the live
+// roster (no phantom members on a delisting), overridable by a same-named custom (custom wins),
+// while benchmark aliases and derived sector names stay reserved. Plus the markets default view is
+// pinned to the shipped set with Δ vs ⬒ hidden and defaulting to MAG7.
+
+test("-10 curated baskets: MAG7 ships built-in, roster-intersected, overridable; benchmarks/sectors stay reserved", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger() {}, insert() {}, saveRegime() {}, saveNews() {}, loadNews: () => null,
+    saveBaskets: () => true, loadBaskets: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const HOUR = 3600e3, DAY = 86400e3, now = Math.floor(Date.now() / HOUR) * HOUR;
+  // seed 5 of 7 MAG7 names -> the built-in exists with exactly those 5 (intersection, no phantoms)
+  ["AAPL", "MSFT", "GOOGL", "NVDA", "META"].forEach((tk, i) => p.seedRowNow("xyz:" + tk, {
+    px: 100, dailyRaw: Array.from({ length: 20 }, (_, k) => ({ t: now - (19 - k) * DAY, c: 100 * (i + 1) })),
+    hourlyRaw: Array.from({ length: 30 }, (_, k) => ({ t: now - (29 - k) * HOUR, c: 100 })) }));
+  let mag = p.getBasketsPayload().baskets.find((b) => b.name === "MAG7");
+  assert.ok(mag && mag.builtin, "MAG7 ships as a built-in default");
+  assert.deepEqual(mag.members, ["AAPL", "MSFT", "GOOGL", "NVDA", "META"], "intersected with the roster in the CURATED order — 5 of 7 present, no phantom AMZN/TSLA");
+  // reservation: a benchmark alias and a derived sector name can't be created; MAG7 CAN be overridden
+  assert.equal(p.createBasket("SPX", ["AAPL", "MSFT"]).ok, false, "benchmark alias stays reserved");
+  const c = p.createBasket("MAG7", ["AAPL", "MSFT", "NVDA"]);
+  assert.ok(c.ok, "curated name is overridable — custom wins is the whole point");
+  const named = p.getBasketsPayload().baskets.filter((b) => b.name === "MAG7");
+  assert.equal(named.length, 1, "no duplicate name in the payload");
+  assert.equal(named[0].builtin, false, "the custom definition wins over the shipped one");
+  assert.deepEqual(named[0].members, ["AAPL", "MSFT", "NVDA"], "operator's membership, not the curated list");
+});
+
+test("-10 curated baskets: under 2 listed members the built-in honestly does not exist", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger() {}, insert() {}, saveRegime() {}, saveNews() {}, loadNews: () => null,
+    saveBaskets: () => true, loadBaskets: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const DAY = 86400e3, now = Math.floor(Date.now() / (3600e3)) * 3600e3;
+  p.seedRowNow("xyz:AAPL", { px: 100, dailyRaw: Array.from({ length: 20 }, (_, k) => ({ t: now - (19 - k) * DAY, c: 100 })) });
+  assert.ok(!p.getBasketsPayload().baskets.some((b) => b.name === "MAG7"), "1 of 7 present -> no one-name MAG7 shipped");
+});
+
+test("-10 markets defaults: the shipped visible set matches the intended columns, Δ vs ⬒ hidden + defaulting to MAG7", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const ord = app.match(/const DEFAULT_ORDER=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim());
+  const hid = new Set(app.match(/const DEFAULT_HIDDEN=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim()));
+  const visible = ord.filter(k => !hid.has(k));
+  assert.deepEqual(visible, ["ticker", "px", "h1", "h4", "d1", "d7", "d30", "gap", "rs", "vstape", "momp", "vol", "funding", "rvol", "adr", "turn", "vwap"],
+    "default visible columns match the requested set, in order");
+  assert.ok(hid.has("dvb"), "Δ vs ⬒ hidden by default");
+  assert.ok(app.includes("dvbBasket:'MAG7'"), "the Δ column defaults to MAG7");
+  // picker is a visible control, not bare text (the -09 report)
+  assert.ok(app.includes('class="dvb-ctl"') && app.includes('data-name='), "the header picker renders as a caret pill showing the current basket");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".dvb-ctl{") && css.includes(".dvb-ctl::after{content:attr(data-name)"), "pill styled with the name visible and the select overlaid transparent");
 });
