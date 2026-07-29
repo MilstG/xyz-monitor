@@ -5631,7 +5631,13 @@ function briefContextNumbers(ctx) {
       if (a >= 1000) set.add(String(Math.round(a / 1000)));
       return;
     }
-    if (typeof v === "string") { const m = v.match(/\d+(?:\.\d+)?/g); if (m) for (const x of m) set.add(x.replace(/\.?0+$/, "")); return; }
+    if (typeof v === "string") {
+      // Thousands separators: a headline saying "1,200% profit" put "1" and "200" in the set while
+      // the model quite reasonably wrote "1,200" — and the brief lost its prose over a comma.
+      const m = v.match(/\d[\d,]*(?:\.\d+)?/g);
+      if (m) for (const x of m) { const t = x.replace(/,/g, ""); set.add(t.replace(/\.?0+$/, "")); set.add(t); }
+      return;
+    }
     if (Array.isArray(v)) { for (const x of v) walk(x); return; }
     if (typeof v === "object") { for (const k of Object.keys(v)) walk(v[k]); }
   };
@@ -5648,7 +5654,17 @@ function briefContextNames(ctx) {
   }
   for (const g of (ctx && ctx.sectors) || []) { add(g.name); add(g.label); }
   for (const e of ((ctx && ctx.earnings) || {}).items || []) add(e.t);
-  for (const c of (ctx && ctx.news) || []) { add(c.sector); for (const h of c.items || []) add(h.t); }
+  // Headline TEXT counts, not just the ticker it was attributed to. The feed is full of "SK Hynix",
+  // "HIMS", "Q2" — the model citing a headline we handed it is the correct behaviour, and rejecting
+  // the whole brief because "SK" is not a listed symbol is the gate eating the thing it protects.
+  for (const c of (ctx && ctx.news) || []) {
+    add(c.sector);
+    for (const h of c.items || []) {
+      add(h.t);
+      for (const w of String(h.h || "").match(/\b[A-Za-z][A-Za-z0-9.&]{0,11}\b/g) || []) add(w);
+    }
+  }
+  for (const g of (ctx && ctx.macro && ctx.macro.next) || []) for (const w of String(g.label || "").split(/\s+/)) add(w);
   if (ctx && ctx.bench) { add(ctx.bench.stocks && ctx.bench.stocks.t); add(ctx.bench.crypto && ctx.bench.crypto.t); }
   return set;
 }
@@ -5710,173 +5726,218 @@ module.exports.briefContextNames = briefContextNames;
 module.exports.validateBriefProse = validateBriefProse;
 
 // ---- the renderer -----------------------------------------------------------------------------
-// ctx -> sections -> briefFit -> messages. Every block is conditional on its data existing: a
-// server with no FRED key ships no rates lines, a dex with no listed index ships no INDICES block,
-// and neither case leaves a heading with nothing under it.
-const BRIEF_DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const BRIEF_MON = ["January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December"];
+// HARD-WON: Telegram renders body text in a PROPORTIONAL font. Columns built out of spaces only
+// line up inside <pre>. The first version of this laid out inline rows that aligned perfectly in a
+// monospace editor and arrived on the phone as ragged, wrapping noise — two unlabelled numbers per
+// mover row that nobody could read. Every tabular block below is therefore <pre>, and every line is
+// built to BRIEF_COLS so it cannot wrap on a narrow phone.
+//
+// Also: <pre> content is PLAIN TEXT. No nested <b>/<i> (Telegram does not support it there), so
+// emphasis lives in the section headings outside the block. And no decorative glyphs — the shade
+// characters the first version drew breadth bars with (U+2591) are not in every device font and
+// rendered as tofu boxes.
+const BRIEF_COLS = 32;
+const BRIEF_DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const BRIEF_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function briefStamp(atMs, tzMin) {
   const d = new Date(atMs + (tzMin || 0) * 60000);
   const hh = String(d.getUTCHours()).padStart(2, "0"), mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${BRIEF_DOW[d.getUTCDay()]} ${d.getUTCDate()} ${BRIEF_MON[d.getUTCMonth()]} \u00b7 ${hh}:${mm}`;
+  return `${BRIEF_DOW[d.getUTCDay()]} ${d.getUTCDate()} ${BRIEF_MON[d.getUTCMonth()]} \u00b7 ${hh}:${mm}`
+    + (tzMin ? "" : " UTC");
 }
-function briefMoverLine(r, dp) {
-  const raw = briefPct(r.d1, dp), rel = r.rel == null ? null : briefPct(r.rel, dp);
-  return { item: 1,
-    text: `${r.d1 >= 0 ? "\ud83d\udfe2" : "\ud83d\udd34"}  <b>${tgEscape(r.t)}</b>  ${raw}` + (rel ? `  <i>${rel}</i>` : ""),
-    note: r.note ? tgEscape(r.note) : null };
+const padR = (s, n) => { s = String(s == null ? "" : s); return s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length); };
+const padL = (s, n) => { s = String(s == null ? "" : s); return s.length >= n ? s.slice(0, n) : " ".repeat(n - s.length) + s; };
+const briefClip = (s, n) => { s = String(s == null ? "" : s).replace(/\s+/g, " ").trim(); return s.length <= n ? s : s.slice(0, n - 1).replace(/[\s,;:.-]+$/, "") + "\u2026"; };
+// A <pre> block, escaped, with any line that would wrap on a phone hard-clipped rather than left to
+// fold. An empty block is dropped so a heading never sits above nothing.
+function briefPre(lines) {
+  const body = (lines || []).filter((l) => l != null).map((l) => tgEscape(String(l).replace(/\s+$/, "")).slice(0, 200));
+  while (body.length && body[body.length - 1] === "") body.pop();
+  if (!body.length) return null;
+  return "<pre>" + body.join("\n") + "</pre>";
 }
 function renderBrief(ctx, prose) {
   const c = ctx || {};
   const S = [];
-  const push = (key, head, lines) => { const L = (lines || []).filter(Boolean); if (L.length) S.push({ key, head, lines: L }); };
+  // A line object whose text is null is NOT content: briefPre returns null for an empty table, and
+  // filtering on the wrapper alone shipped the string "null" under a live heading.
+  const push = (key, head, lines) => {
+    const L = (lines || []).filter((x) => x && (typeof x === "string" ? x.trim() : (x.text != null && String(x.text).trim())));
+    if (L.length) S.push({ key, head, lines: L });
+  };
+  const pct = (v, dp) => briefPct(v, dp) || "\u2014";
 
   S.push({ key: "head", head: null, lines: [
-    { text: "\ud83c\udf05  <b>MORNING BRIEF</b>" },
-    { text: `     <i>${briefStamp(c.at || Date.now(), c.tz || 0)} \u00b7 last 24 hours</i>` }] });
+    { text: "\ud83c\udf05 <b>MORNING BRIEF</b>" },
+    { text: `<i>${briefStamp(c.at || Date.now(), c.tz || 0)} \u00b7 last 24h</i>` }] });
 
-  // -- the model's opening. Absent when the model is disabled, failed or was rejected: the brief
-  //    still ships, just without narration. Nothing is faked in its place.
   if (prose && prose.story)
-    S.push({ key: "story", head: "\ud83d\udcac  <b>THE STORY</b>",
+    S.push({ key: "story", head: "\ud83d\udcac <b>THE STORY</b>",
       lines: prose.story.split(/\n{2,}/).map((p) => ({ para: 1, text: tgEscape(p.trim()) })).filter((x) => x.text) });
 
-  // -- indices, commodities, FX. Roster-driven: whatever the dex lists and sectors.js classifies as
-  //    Index / Commodity / FX, ranked by move. VIX rides its own branch — it is a level, not a
-  //    percentage, and printing "+2.1" against a volatility index reads as a price move.
+  // -- indices / commodities / FX / baskets. One instrument per line, value right-aligned: two
+  //    columns saved space and cost legibility, which is the wrong trade on the block that exists
+  //    to be glanced at.
   {
-    const lines = [];
-    const idx = (c.indices || []).filter((r) => !r.level);
-    if (idx.length) lines.push({ item: 1, text: idx.map((r) =>
-      `<b>${tgEscape(r.t)}</b>  ${briefPct(r.d1)}`).join("   ") });
-    const vix = (c.indices || []).filter((r) => r.level);
-    for (const v of vix) lines.push({ item: 1,
-      text: `<b>${tgEscape(v.t)}</b>  ${briefLevel(v.px, 1)}` + (v.d1 != null ? `  <i>${briefPct(v.d1)}</i>` : "") });
-    if ((c.commodities || []).length) lines.push({ item: 1,
-      text: "<i>Commodities</i>   " + c.commodities.map((r) => `<b>${tgEscape(r.t)}</b> ${briefPct(r.d1)}`).join("  \u00b7  ") });
-    if ((c.fx || []).length) lines.push({ item: 1,
-      text: "<i>FX</i>   " + c.fx.map((r) => `<b>${tgEscape(r.t)}</b> ${briefPct(r.d1, 2)}`).join("  \u00b7  ") });
-    for (const b of c.baskets || []) lines.push({ item: 1,
-      text: `<b>${tgEscape(b.name)}</b>  ${briefPct(b.med)}`,
-      note: b.up != null ? `${b.up}% of members green` : null });
-    push("indices", "\ud83d\udcd0  <b>INDICES</b>", lines);
+    const rows = [], W = 14, V = 8;
+    const grp = (label, list, dp) => {
+      if (!list || !list.length) return;
+      if (rows.length && label) rows.push("");
+      if (label) rows.push(label);
+      for (const r of list) {
+        if (r.level) rows.push("  " + padR(r.t, W - 2) + padL(briefLevel(r.px, 1) || "\u2014", V) + (r.d1 != null ? padL(pct(r.d1), 7) : ""));
+        else rows.push("  " + padR(r.t, W - 2) + padL(pct(r.d1, dp), V));
+      }
+    };
+    grp("INDEX", (c.indices || []).filter((r) => !r.level));
+    grp("", (c.indices || []).filter((r) => r.level));
+    grp("COMMODITY", c.commodities);
+    grp("FX", c.fx, 2);
+    if ((c.baskets || []).length) {
+      if (rows.length) rows.push("");
+      rows.push("BASKET");
+      for (const b of c.baskets)
+        rows.push("  " + padR(b.name, W - 2) + padL(pct(b.med), V) + (b.up != null ? padL(b.up + "%", 6) : ""));
+    }
+    // The whole block is one item so the ladder drops it whole rather than orphaning a header.
+    push("indices", "\ud83d\udcd0 <b>INDICES</b>", [{ item: 1, text: briefPre(rows) }]);
   }
 
-  // -- sectors, then the finer industry groups. Both come from the basket layer, which derives them
-  //    from the live roster on every read, so a listing or delisting moves them without a deploy.
+  // -- sectors, then the finer industry groups
   {
-    const lines = [];
+    const rows = [], W = 15, V = 7;
     const sec = (c.sectors || []).filter((g) => g.kind !== "industry");
     const ind = (c.sectors || []).filter((g) => g.kind === "industry");
     if (sec.length) {
-      const up = sec.filter((g) => g.med > 0).slice(0, 3), dn = sec.filter((g) => g.med < 0).slice(-3).reverse();
-      if (up.length) lines.push({ item: 1, text: "\u2197\ufe0e  " + up.map((g) => `<b>${tgEscape(g.name)} ${briefPct(g.med)}</b>`).join("  \u00b7  ") });
-      if (dn.length) lines.push({ item: 1, text: "\u2198\ufe0e  " + dn.map((g) => `<b>${tgEscape(g.name)} ${briefPct(g.med)}</b>`).join("  \u00b7  ") });
+      rows.push("SECTOR");
+      for (const g of sec.slice(0, 6)) rows.push("  " + padR(g.name, W - 2) + padL(pct(g.med), V));
       const red = sec.filter((g) => g.med < 0).length;
-      if (sec.length >= 4) lines.push({ item: 1, text: `<i>${red} of ${sec.length} sectors closed red</i>` });
+      if (sec.length >= 4) rows.push("  " + padR(`${red}/${sec.length} red`, W - 2 + V));
     }
     if (ind.length) {
-      const top = ind.slice(0, 2), bot = ind.slice(-2).reverse().filter((g) => !top.includes(g));
-      lines.push({ item: 1, text: "<i>Industry</i>   " + top.concat(bot).map((g) =>
-        `${tgEscape(g.label)} ${briefPct(g.med)}`).join("  \u00b7  ") });
+      if (rows.length) rows.push("");
+      rows.push("INDUSTRY");
+      const IW = 17;   // sector tokens are short; industry names are words and deserve the room
+      for (const g of ind.slice(0, 4)) rows.push("  " + padR(briefClip(g.label, IW - 2), IW - 2) + padL(pct(g.med), V));
     }
-    push("sectors", "\ud83c\udfe2  <b>SECTORS</b>  \u00b7  24h", lines);
+    push("sectors", "\ud83c\udfe2 <b>SECTORS</b>", [{ item: 1, text: briefPre(rows) }]);
   }
 
-  // -- movers, both books, each against its own benchmark
+  // -- movers. The failure the header fixes: two bare numbers per row with the legend forty
+  //    characters away, which read as a single garbled figure. Columns are labelled in place.
   {
-    const lines = [];
-    for (const [key, label, bench] of [["stocks", "Stocks", (c.bench || {}).stocks], ["crypto", "Crypto", (c.bench || {}).crypto]]) {
+    const blocks = [];
+    for (const [key, label, bench] of [["stocks", "STOCKS", (c.bench || {}).stocks], ["crypto", "CRYPTO", (c.bench || {}).crypto]]) {
       const m = (c.movers || {})[key];
       if (!m || (!m.up.length && !m.down.length)) continue;
-      lines.push({ text: `<b>${label}</b>  \u00b7  <i>24h${bench && bench.t ? `, vs ${tgEscape(bench.t)} in italics` : ""}</i>` });
-      for (const r of m.up) lines.push(briefMoverLine(r));
-      for (const r of m.down) lines.push(briefMoverLine(r));
+      const bt = bench && bench.t ? briefClip(bench.t, 5) : null;
+      const anyNote = m.up.concat(m.down).some((r) => r.note);
+      const rows = [padR(label, 10) + padL("24h", 7) + padL(bt ? "vs " + bt : "", 9) + (anyNote ? padL("fund", 6) : "")];
+      for (const r of m.up.concat(m.down))
+        rows.push(padR(briefClip(r.t, 9), 10) + padL(pct(r.d1), 7) + padL(r.rel == null ? "" : pct(r.rel), 9)
+          + (anyNote ? padL(r.note ? briefClip(String(r.note).replace(/[^0-9+\-\u2212]/g, "").replace(/-/g, "\u2212"), 5) : "", 6) : ""));
       if (bench && bench.t && Number.isFinite(+bench.d1))
-        lines.push({ text: `        <i>${tgEscape(bench.t)} ${briefPct(bench.d1)}</i>` });
-      lines.push({ text: "" });
+        rows.push(padR(briefClip(bench.t, 9), 10) + padL(pct(bench.d1), 7));
+      blocks.push({ item: 1, text: briefPre(rows) });
     }
-    while (lines.length && lines[lines.length - 1].text === "") lines.pop();
-    push("movers", "\ud83d\udcca  <b>MOVERS</b>", lines);
+    push("movers", "\ud83d\udcca <b>MOVERS</b>", blocks);
   }
 
-  // -- regime. The bar is the only visual that survives Telegram's proportional body font: block
-  //    characters hold their width where digit columns do not.
+  // -- regime: one table, both books side by side. No bars — the glyphs the first version used are
+  //    not in every device font and arrived as hollow boxes.
   {
-    const lines = [];
-    for (const [key, label] of [["stocks", "Stocks"], ["crypto", "Crypto"]]) {
-      const g = (c.regime || {})[key];
-      if (!g || g.breadth == null) continue;
-      const filled = Math.max(0, Math.min(10, Math.round(g.breadth / 10)));
-      lines.push({ item: 1, text: `<b>${label}</b>   breadth ${"\u2593".repeat(filled)}${"\u2591".repeat(10 - filled)} ${g.breadth}%` });
-      const hist = [g.d7 != null ? `${g.d7}% on 7d` : null, g.d30 != null ? `${g.d30}% on 30d` : null].filter(Boolean);
-      if (hist.length) lines.push({ item: 1, text: `          <i>${hist.join(" \u00b7 ")}${g.decaying ? " \u2014 decaying" : ""}</i>` });
-      const bits = [g.ma200 != null ? `200DMA ${g.ma200}%` : null,
-        g.corr != null ? `corr ${g.corr.toFixed(2)}${g.corrUp ? " \u2191" : ""}` : null,
-        g.disp != null ? `disp ${g.disp.toFixed(1)}%` : null].filter(Boolean);
-      if (bits.length) lines.push({ item: 1, text: "          " + bits.join("  \u00b7  ") });
+    const s = (c.regime || {}).stocks, k = (c.regime || {}).crypto;
+    if (s || k) {
+      const L = 11, V = 9;
+      const col = (g, f) => padL(g ? f(g) : "\u2014", V);
+      const row = (lab, f) => padR(lab, L) + col(s, f) + col(k, f);
+      const num = (v, suf) => (v == null ? "\u2014" : v + (suf || ""));
+      const rows = [padR("", L) + padL("STOCKS", V) + padL("CRYPTO", V),
+        row("breadth 1d", (g) => num(g.breadth, "%")),
+        row("        7d", (g) => num(g.d7, "%")),
+        row("       30d", (g) => num(g.d30, "%")),
+        row(">200DMA", (g) => num(g.ma200, "%")),
+        row("corr", (g) => (g.corr == null ? "\u2014" : g.corr.toFixed(2))),
+        row("dispersion", (g) => (g.disp == null ? "\u2014" : g.disp.toFixed(1) + "%"))];
+      push("regime", "\ud83c\udf21 <b>REGIME</b>", [{ item: 1, text: briefPre(rows) }]);
     }
-    push("regime", "\ud83c\udf21  <b>REGIME</b>", lines);
   }
 
-  // -- positioning. Book-level by the operator's call: per-sector crypto positioning would need a
-  //    hand-maintained L1/L2/meme taxonomy that goes stale as the top-60 rotates.
+  // -- positioning: a sentence, not a table. Prose belongs in prose type.
   {
     const lines = [];
     const p = c.positioning || {};
     if (p.crypto && p.crypto.netFundApr != null) {
-      const bits = [`net funding <b>${briefPct(p.crypto.netFundApr)}% APR</b>`];
+      const bits = [`net funding <b>${pct(p.crypto.netFundApr)}% APR</b>`];
       if (p.crypto.negN != null) bits.push(`negative on ${p.crypto.negN} name${p.crypto.negN === 1 ? "" : "s"}`);
-      if (p.crypto.oiChg != null) bits.push(`aggregate OI ${briefPct(p.crypto.oiChg)}%`);
-      lines.push({ item: 1, text: "<b>Crypto, whole book</b> \u2014 " + bits.join(", ") + "." });
+      if (p.crypto.oiChg != null) bits.push(`aggregate OI ${pct(p.crypto.oiChg)}%`);
+      lines.push({ item: 1, text: "<b>Crypto book</b> \u2014 " + bits.join(", ") + "." });
     }
     if (p.stocks && p.stocks.oiChg != null)
-      lines.push({ item: 1, text: `<b>Equity perps</b> \u2014 aggregate OI ${briefPct(p.stocks.oiChg)}%.` });
-    push("positioning", "\u2696\ufe0f  <b>POSITIONING</b>", lines);
+      lines.push({ item: 1, text: `<b>Equity perps</b> \u2014 aggregate OI ${pct(p.stocks.oiChg)}%.` });
+    push("positioning", "\u2696\ufe0f <b>POSITIONING</b>", lines);
   }
 
   // -- earnings
   {
-    const e = c.earnings || {};
-    const lines = [];
-    const fmt = (arr) => arr.map((x) => `<b>${tgEscape(x.t)}</b>` + (x.res ? ` ${tgEscape(x.res)}` : "")).join("  \u00b7  ");
-    if ((e.printed || []).length) lines.push({ item: 1, text: "Printed    " + fmt(e.printed) });
-    if ((e.today || []).length) lines.push({ item: 1, text: "Today      " + fmt(e.today) });
-    if ((e.tomorrow || []).length) lines.push({ item: 1, text: "Tomorrow   " + fmt(e.tomorrow) });
-    push("earnings", "\ud83d\udcc5  <b>EARNINGS</b>", lines);
+    const e = c.earnings || {}, rows = [];
+    const W = 10, avail = BRIEF_COLS - W;
+    const line = (lab, arr) => {
+      if (!arr || !arr.length) return;
+      const names = arr.map((x) => x.t + (x.res ? " " + x.res : ""));
+      const wrapped = [];
+      let cur = "";
+      for (const n of names) {
+        const add = (cur ? " \u00b7 " : "") + n;
+        if (cur && cur.length + add.length > avail) { wrapped.push(cur); cur = n; }
+        else cur += add;
+      }
+      if (cur) wrapped.push(cur);
+      // The label belongs to the first line of its own group. Deriving it from what is already in
+      // `rows` put "Tomorrow" against a continuation line of "Today".
+      wrapped.forEach((l, i) => rows.push(padR(i === 0 ? lab : "", W) + l));
+    };
+    line("Printed", e.printed); line("Today", e.today); line("Tomorrow", e.tomorrow);
+    push("earnings", "\ud83d\udcc5 <b>EARNINGS</b>", [{ item: 1, text: briefPre(rows) }]);
   }
 
-  // -- macro: the scheduled calendar, then whatever level series the server actually holds
+  // -- macro
   {
-    const lines = [];
-    for (const ev of (c.macro || {}).next || [])
-      lines.push({ item: 1, text: `${tgEscape(ev.when)}   ${tgEscape(ev.label)}` + (ev.prior ? `  <i>prior ${tgEscape(ev.prior)}</i>` : "") });
+    const rows = [];
+    for (const ev of (c.macro || {}).next || []) {
+      rows.push(padR(briefClip(ev.when, 10), 11) + briefClip(ev.label, BRIEF_COLS - 11));
+      if (ev.prior) rows.push(padR("", 11) + briefClip("prior " + ev.prior, BRIEF_COLS - 11));
+    }
     const r = (c.macro || {}).rates;
-    if (r && r.length) { lines.push({ text: "" }); lines.push({ item: 1, text: r.map((x) =>
-      `${tgEscape(x.k)} <b>${tgEscape(x.v)}</b>` + (x.chg ? ` <i>${tgEscape(x.chg)}</i>` : "")).join("  \u00b7  ") }); }
+    if (r && r.length) {
+      if (rows.length) rows.push("");
+      for (const x of r) rows.push(padR(x.k, 9) + padL(x.v, 8) + (x.chg ? padL(briefClip(x.chg, 11), 12) : ""));
+    }
     const d = (c.macro || {}).data;
-    if (d && d.length) lines.push({ item: 1, text: d.map((x) => `${tgEscape(x.k)} ${tgEscape(x.v)}`).join("  \u00b7  ") });
-    push("macro", "\ud83c\udfdb  <b>MACRO</b>", lines);
+    if (d && d.length) { if (rows.length) rows.push(""); for (const x of d) rows.push(padR(briefClip(x.k, 12), 13) + padL(x.v, 8)); }
+    push("macro", "\ud83c\udfdb <b>MACRO</b>", [{ item: 1, text: briefPre(rows) }]);
   }
 
-  // -- news, clustered by sector. Filings are deliberately not here: the operator reads the
-  //    filings lane in the app and does not want it duplicated in the brief.
+  // -- headlines. Proportional type is CORRECT here (it is prose), but they must be short: the
+  //    first version shipped three full-length headlines joined by dots and produced a five-line
+  //    wall per cluster that nobody would read.
   {
     const lines = [];
     for (const cl of c.news || []) {
       if (!cl.items || !cl.items.length) continue;
-      lines.push({ item: 1, text: `<b>${tgEscape(cl.sector)}</b>  ` + cl.items.map((h) =>
-        tgEscape(h.h)).join("  \u00b7  ") });
+      lines.push({ item: 1, text: `<b>${tgEscape(cl.sector)}</b>` });
+      for (const h of cl.items.slice(0, 2)) lines.push({ item: 1, text: "  \u00b7 " + tgEscape(briefClip(h.h, 58)) });
     }
-    push("news", "\ud83d\udcf0  <b>WHAT MATTERED</b>", lines);
+    push("news", "\ud83d\udcf0 <b>WHAT MATTERED</b>", lines);
   }
 
   if (prose && prose.closing)
-    S.push({ key: "closing", head: "\ud83c\udfaf  <b>FINAL THOUGHTS</b>",
+    S.push({ key: "closing", head: "\ud83c\udfaf <b>FINAL THOUGHTS</b>",
       lines: prose.closing.split(/\n{2,}/).map((p) => ({ para: 1, text: tgEscape(p.trim()) })).filter((x) => x.text) });
 
   return briefFit(S, BRIEF_TG_LIMIT);
 }
 module.exports.renderBrief = renderBrief;
 module.exports.briefStamp = briefStamp;
+module.exports.briefClip = briefClip;
+module.exports.BRIEF_COLS = BRIEF_COLS;
