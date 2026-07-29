@@ -8417,10 +8417,10 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     }
     return sent;
   }
-  async function landTestNow(chat, owner, isAdmin, fresh, mineOnly) {
+  async function landTestNow(chat, owner, isAdmin, fresh, operatorOnly) {
     if (!pushOn()) return { ok: false, error: "disabled" };
-    const targets = testTargets(chat, owner, isAdmin, mineOnly);
-    if (!targets.length) return { ok: false, error: chat ? "forbidden" : (mineOnly ? "no-own-recipient" : "no-recipients") };
+    const targets = testTargets(chat, owner, isAdmin, operatorOnly);
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : (operatorOnly ? "no-operator-designated" : "no-recipients") };
     if (fresh) landCache = null;
     let b;
     try { b = await generateLandscape(Date.now()); }
@@ -8813,19 +8813,21 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // caller's own recipients, and takes the same path a real brief takes so what lands on the phone
   // is byte-identical to the 07:00 send. `fresh` forces a regeneration (and burns budget) rather
   // than re-serving the hour's cache.
-  // mineOnly: target strictly the caller's OWN linked telegram(s) — rec.owner === owner, with
-  // isAdmin deliberately NOT expanding the set. The admin test buttons were firing with no chat,
-  // and for an admin pushOwns says yes to everybody, so "send test" was a six-person broadcast
-  // standing next to a label claiming it only went to this browser. A test fire is a test fire.
-  function testTargets(chat, owner, isAdmin, mineOnly) {
+  // operatorOnly: target the recipients DESIGNATED operator (rec.admin), not the owner cookie.
+  // The cookie version missed the operator whenever their telegram was linked from a different
+  // browser — which is the normal case for someone who administers from more than one machine. The
+  // designation is explicit, visible on the roster, and toggleable there; it is the same flag that
+  // already gates ops-class delivery, so "operator" means one thing: server-health alerts and test
+  // fires go to this person.
+  function testTargets(chat, owner, isAdmin, operatorOnly) {
     if (chat) return [String(chat)].filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
-    if (mineOnly) return [...pushRecipients.entries()].filter(([, r]) => r.owner && owner && r.owner === owner).map(([c]) => c);
+    if (operatorOnly) return [...pushRecipients.entries()].filter(([, r]) => r.admin === true && !r.muted).map(([c]) => c);
     return [...pushRecipients.keys()].filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
   }
-  async function briefTestNow(chat, owner, isAdmin, fresh, mineOnly) {
+  async function briefTestNow(chat, owner, isAdmin, fresh, operatorOnly) {
     if (!pushOn()) return { ok: false, error: "disabled" };
-    const targets = testTargets(chat, owner, isAdmin, mineOnly);
-    if (!targets.length) return { ok: false, error: chat ? "forbidden" : (mineOnly ? "no-own-recipient" : "no-recipients") };
+    const targets = testTargets(chat, owner, isAdmin, operatorOnly);
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : (operatorOnly ? "no-operator-designated" : "no-recipients") };
     if (fresh) briefCache = null;
     let b;
     try { b = await generateBrief(Date.now(), 0); }
@@ -8890,6 +8892,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // The general surface. Per kind: an hour (null = off, a stored DECISION) and an optional
     // day-of-week set (null/absent = every day). Validated against the registry so an unknown kind
     // cannot be written and then silently never delivered.
+    // The operator designation. Admin-gated: this flag routes server-health alerts and test fires,
+    // and a public user must not be able to promote themselves into either. Setting it does not
+    // touch classes or schedules — it is one bit with two disclosed consequences.
+    if ("operator" in p) {
+      if (!isAdmin) return { ok: false, error: "admin-only" };
+      r.admin = p.operator === true;
+    }
     if ("sched" in p) {
       const sc = p.sched;
       if (!sc || typeof sc !== "object" || Array.isArray(sc)) return { ok: false, error: "bad-sched" };
