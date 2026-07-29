@@ -9272,11 +9272,95 @@ test("brief: the admin test-fire is admin-only, takes the real path, and reports
   assert.ok(/generateBrief\(/.test(fn) && /pushEnqueue\(c, m, true\)/.test(fn));
   assert.ok(/if \(fresh\) briefCache = null;/.test(fn), "cached vs fresh must be a real distinction, not a label");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  for (const pin of ["id=\"adm-brief\"", "id=\"adm-brief-f\"", "/api/alerts/brief-test", "prose degraded"])
-    assert.ok(app.includes(pin), `admin panel pin missing: ${pin}`);
-  // The panel must report the real numbers: a silent success says nothing about what landed.
-  for (const pin of ["d.parts", "d.chars", "d.dropped", "d.dayLeft"])
-    assert.ok(app.includes(pin), `test-fire result pin missing: ${pin}`);
+  assert.ok(app.includes("/api/alerts/brief-test"), "client never calls the route");
+});
+
+// Behavioral render, not existence pins. The first version of these controls lived inside the
+// recipients accordion, which ships collapsed — the markup was correct and the operator could not
+// see any of it. String pins like app.includes('id="adm-brief"') passed the whole time, because a
+// pin proves a string is in the file, not that it ever reaches the screen. These execute the real
+// functions against a real payload and assert the markup emerges.
+function ADM_DOM() {
+  const mk = (id) => ({ id, hidden: false, innerHTML: "", textContent: "", disabled: false,
+    querySelector: () => ({ textContent: "" }), querySelectorAll: () => [], addEventListener() {} });
+  const nodes = { admBriefBox: mk("admBriefBox"), admRecB: mk("admRecB"), admRecH: mk("admRecH"),
+    admRecN: mk("admRecN"), "adm-brief": mk("adm-brief"), "adm-brief-f": mk("adm-brief-f"), "adm-brief-r": mk("adm-brief-r") };
+  return nodes;
+}
+function ADM_PUSH(over) {
+  return Object.assign({ admin: true, capHour: 6, classes: ["setup", "ops"], defaultClasses: ["setup"], adminClasses: ["ops"],
+    brief: { enabled: true, defaultHour: 10, perDay: 6, dayLeft: 5, model: "gpt-5.6-terra", lastErr: null },
+    recipients: [{ chat: "111", mask: "1**1", name: "Milst", admin: true, mine: true, owned: true, muted: false,
+      lastErr: null, classes: null, sentHour: 0, briefHour: 10, briefUtc: 1, briefTz: 0, briefTzKnown: 0, quiet: null, trig: {} }] }, over || {});
+}
+function runAdmFn(name, nodes, pushState, openRec) {
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (fn, until) => src.slice(src.indexOf(fn), src.indexOf(until));
+  const body = name === "renderAdmBrief"
+    ? grab("function renderAdmBrief()", "function renderAdmin()")
+    : grab("function renderAdmRecips()", "function renderAdmBrief()");
+  const f = new Function("el", "esc", "pushState", "pushAct", "admRecOpen", "IS_ADMIN", "fetch", "nodes",
+    body + `; ${name}(); return nodes;`);
+  return f((id) => nodes[id] || null, (x) => String(x == null ? "" : x), pushState,
+    async () => ({}), openRec || {}, true, () => ({ then: () => ({ then: () => ({ catch: () => ({ finally: () => {} }) }) }) }), nodes);
+}
+
+test("brief admin block renders OUTSIDE the collapsed accordion, and survives an empty roster", () => {
+  const fs = require("fs"), path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(/<div class="adm-brief" id="admBriefBox"><\/div>/.test(html), "the brief block needs its own host element");
+  // …and that host must NOT sit inside the accordion body that ships hidden.
+  const accordion = html.slice(html.indexOf('<div class="adm-recip">'), html.indexOf('<div class="adm-head">'));
+  assert.ok(!accordion.includes("admBriefBox"), "controls inside a collapsed section are indistinguishable from controls that do not exist");
+  assert.ok(/<div id="admRecB" hidden>/.test(html), "the recipients body is still collapsed by default \u2014 that is what makes the above matter");
+
+  const nodes = ADM_DOM();
+  runAdmFn("renderAdmBrief", nodes, ADM_PUSH());
+  const out = nodes.admBriefBox.innerHTML;
+  assert.equal(nodes.admBriefBox.hidden, false, "an admin must see the block without expanding anything");
+  assert.ok(out.includes("adm-brief") && out.includes("adm-brief-f"), "both test-fire buttons must actually render");
+  assert.ok(/default 10:00 UTC/.test(out), "the block states the real schedule");
+  assert.ok(/5\/6 generations left/.test(out), "…and the remaining budget");
+  assert.ok(/1 of 1 linked recipient/.test(out) && /1 on the UTC default/.test(out));
+
+  // Nobody linked yet: the block must still render rather than vanishing with the roster.
+  const empty = ADM_DOM();
+  runAdmFn("renderAdmBrief", empty, ADM_PUSH({ recipients: [] }));
+  assert.ok(empty.admBriefBox.innerHTML.includes("adm-brief"), "the controls do not depend on a populated roster");
+  assert.ok(/0 of 0 linked/.test(empty.admBriefBox.innerHTML));
+
+  // Disabled globally, and a prose failure, both have to be visible rather than silent.
+  const off = ADM_DOM();
+  runAdmFn("renderAdmBrief", off, ADM_PUSH({ brief: { enabled: false, defaultHour: 10, perDay: 6, dayLeft: 6, model: "m", lastErr: "model refused" } }));
+  assert.ok(/disabled/.test(off.admBriefBox.innerHTML) && /BRIEF_ENABLED=0/.test(off.admBriefBox.innerHTML));
+  assert.ok(/last prose failure: model refused/.test(off.admBriefBox.innerHTML));
+});
+
+test("brief chip renders on an expanded admin roster row, and reports UTC honestly", () => {
+  const nodes = ADM_DOM();
+  runAdmFn("renderAdmRecips", nodes, ADM_PUSH(), { 111: true });
+  const out = nodes.admRecB.innerHTML;
+  assert.ok(out.includes('data-apbrief="111"'), "the brief needs its own chip \u2014 it is not one of the push classes");
+  assert.ok(/brief 10:00 UTC/.test(out), "a default rider is on a UTC schedule and the chip must say so, not imply local");
+  // Collapsed row: the chip is inside the expander like the class chips, which is fine because the
+  // always-visible block above carries the state. Rows only expand on click.
+  const shut = ADM_DOM();
+  runAdmFn("renderAdmRecips", shut, ADM_PUSH(), {});
+  assert.ok(!shut.admRecB.innerHTML.includes("data-apbrief"), "chips belong to the expanded row");
+  // A recipient who turned it off reads off, not a fabricated hour.
+  const offRec = ADM_DOM();
+  const st = ADM_PUSH();
+  st.recipients[0].briefHour = null; st.recipients[0].briefUtc = 0;
+  runAdmFn("renderAdmRecips", offRec, st, { 111: true });
+  assert.ok(/brief off/.test(offRec.admRecB.innerHTML));
+  // The admin write must carry the hour and NOT a timezone: stamping the operator's offset onto
+  // somebody else's account would silently move their delivery time.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const h = app.slice(app.indexOf("data-apbrief]"), app.indexOf("data-apbrief]") + 900);
+  assert.ok(/digestHour: v===''\?null:\+v/.test(h), "admin chip must write the hour");
+  assert.ok(!/tz:/.test(h), "…and must never write a timezone on somebody else's behalf");
 });
 
 test("brief: prose failure degrades to the mechanical brief, never to silence", async () => {
@@ -10797,7 +10881,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-13"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-14"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
