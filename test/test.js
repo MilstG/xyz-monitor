@@ -10463,7 +10463,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-10"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-11"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -12212,15 +12212,15 @@ test("-06 end to end: create/list/drop against a live roster, ratio candles + EM
   ["AAA", "BBB", "CCC", "DDD"].forEach((t, i) => seedEq(t, 100 * (i + 1)));
   p.seedRowNow("SOL", { px: 150, hourlyRaw: Array.from({ length: 60 }, (_, i) => ({ t: now - (59 - i) * HOUR, c: 150 + i })) });
   // create: happy path infers the stocks scope and persists
-  const c = p.createBasket("mine", ["aaa", "bbb", "ccc"]);
+  const c = p.createBasket("mine", ["aaa", "bbb", "ccc"], true);
   assert.ok(c.ok, "create: " + (c.error || "ok"));
   assert.equal(c.basket.scope, "stocks", "scope inferred from members");
   assert.ok(saved && saved.list.length === 1 && saved.list[0].name === "MINE", "registry persisted through the store");
   // refusals, each with a stated reason
-  assert.ok(!p.createBasket("SPX", ["AAA", "BBB"]).ok, "benchmark alias refused");
-  assert.ok(!p.createBasket("AAA", ["BBB", "CCC"]).ok, "listed name refused");
-  assert.ok(!p.createBasket("MIXED", ["AAA", "SOL"]).ok, "cross-universe membership refused — the wall holds at create");
-  assert.ok(!p.createBasket("MINE2", ["AAA", "NOPE"]).ok, "unknown member refused, not silently dropped");
+  assert.ok(!p.createBasket("SPX", ["AAA", "BBB"], true).ok, "benchmark alias refused");
+  assert.ok(!p.createBasket("AAA", ["BBB", "CCC"], true).ok, "listed name refused");
+  assert.ok(!p.createBasket("MIXED", ["AAA", "SOL"], true).ok, "cross-universe membership refused — the wall holds at create");
+  assert.ok(!p.createBasket("MINE2", ["AAA", "NOPE"], true).ok, "unknown member refused, not silently dropped");
   // payload: the basket rides with a server-synthesized daily series
   const pay = p.getBasketsPayload();
   const mine = pay.baskets.find((b) => b.name === "MINE");
@@ -12246,8 +12246,8 @@ test("-06 end to end: create/list/drop against a live roster, ratio candles + EM
   assert.ok(!p.getRatio("AAA", "BBB", "7h").ok, "unknown tf refused");
   // drop: custom goes, built-ins (none seeded here) can't, and the stamp moves for the ETag
   const st0 = p.getBasketsStamp();
-  assert.ok(p.dropBasket("MINE").ok, "drop custom");
-  assert.ok(!p.dropBasket("MINE").ok, "double-drop refused");
+  assert.ok(p.dropBasket("MINE", true).ok, "drop custom");
+  assert.ok(!p.dropBasket("MINE", true).ok, "double-drop refused");
   assert.notEqual(p.getBasketsStamp(), st0, "registry stamp moved — cached /api/baskets keys die with it");
   assert.equal(saved.list.length, 0, "persisted registry reflects the drop");
 });
@@ -12682,8 +12682,8 @@ test("-10 curated baskets: MAG7 ships built-in, roster-intersected, overridable;
   assert.ok(mag && mag.builtin, "MAG7 ships as a built-in default");
   assert.deepEqual(mag.members, ["AAPL", "MSFT", "GOOGL", "NVDA", "META"], "intersected with the roster in the CURATED order — 5 of 7 present, no phantom AMZN/TSLA");
   // reservation: a benchmark alias and a derived sector name can't be created; MAG7 CAN be overridden
-  assert.equal(p.createBasket("SPX", ["AAPL", "MSFT"]).ok, false, "benchmark alias stays reserved");
-  const c = p.createBasket("MAG7", ["AAPL", "MSFT", "NVDA"]);
+  assert.equal(p.createBasket("SPX", ["AAPL", "MSFT"], true).ok, false, "benchmark alias stays reserved");
+  const c = p.createBasket("MAG7", ["AAPL", "MSFT", "NVDA"], true);
   assert.ok(c.ok, "curated name is overridable — custom wins is the whole point");
   const named = p.getBasketsPayload().baskets.filter((b) => b.name === "MAG7");
   assert.equal(named.length, 1, "no duplicate name in the payload");
@@ -12716,4 +12716,187 @@ test("-10 markets defaults: the shipped visible set matches the intended columns
   assert.ok(app.includes('class="dvb-ctl"') && app.includes('data-name='), "the header picker renders as a caret pill showing the current basket");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".dvb-ctl{") && css.includes(".dvb-ctl::after{content:attr(data-name)"), "pill styled with the name visible and the select overlaid transparent");
+});
+
+// ===== owner-scoped baskets: admin persists server-side, guests browser-local (build 2026.07.28-11)
+// The model: the SERVER registry is the admin's alone (owner:"admin", persisted, refuses non-admin
+// writes); a guest's customs live ONLY in their browser (localStorage), invisible to the admin and
+// to other guests; built-ins stay global. These tests pin the server gate directly and EXECUTE the
+// guest client path (create -> localStorage -> merge -> visible) in the DOM harness.
+
+test("-11 server: create/drop refuse a non-admin, stamp owner:admin, and never leak a guest write into the file", () => {
+  const { createPoller } = require("../src/poller");
+  let saved = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger() {}, insert() {}, saveRegime() {}, saveNews() {}, loadNews: () => null,
+    saveBaskets: (d) => { saved = d; return true; }, loadBaskets: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const DAY = 86400e3, now = Math.floor(Date.now() / 3600e3) * 3600e3;
+  ["AAPL", "MSFT", "NVDA"].forEach((tk) => p.seedRowNow("xyz:" + tk, { px: 100, dailyRaw: Array.from({ length: 20 }, (_, k) => ({ t: now - (19 - k) * DAY, c: 100 })) }));
+  assert.equal(p.createBasket("GX", ["AAPL", "MSFT"], false).error, "not-admin", "guest create refused server-side (defense in depth)");
+  assert.equal(saved, null, "nothing written for a refused guest create");
+  assert.ok(p.createBasket("GX", ["AAPL", "MSFT"], true).ok, "admin create lands");
+  assert.equal(saved.list[0].owner, "admin", "persisted basket is owner-stamped");
+  assert.equal(p.dropBasket("GX", false).error, "not-admin", "guest drop refused server-side");
+  assert.ok(p.dropBasket("GX", true).ok, "admin drop lands");
+});
+
+test("-11 guest client: customs live in localStorage, merge into the picker, and never call the server", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {}, removeChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 300 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch, ct: global.clearTimeout, ci: global.clearInterval };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  // NON-admin session
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: { baskets: true }, __ADMIN: false };
+  const lsStore = {};
+  global.localStorage = { getItem(k) { return lsStore[k] ?? null; }, setItem(k, v) { lsStore[k] = String(v); }, removeItem(k) { delete lsStore[k]; } };
+  let serverCalls = 0;
+  // Never-settling fetch, same as the other client-execution tests: it keeps the boot poll chain
+  // inert so no promise resolves into torn-down globals after the test. We assert the guest path
+  // makes no server call by counting invocations, not by letting them complete.
+  global.fetch = (url) => { serverCalls++; return new Promise(() => {}); };
+  try {
+    const api = new Function(app + "\n;return {state, BASKETS, IS_ADMIN, guestCreateBasket, guestDropBasket, guestBasketsLoad, guestMerge, basketMutate, activeRows};")();
+    assert.equal(api.IS_ADMIN, false, "harness is a guest session");
+    const DAY = 86400e3, today = Math.floor(Date.now() / DAY) * DAY;
+    api.state.scope = "stocks";
+    ["AAPL", "MSFT", "NVDA"].forEach((tk) => api.state.rows.set("xyz:" + tk, { coin: "xyz:" + tk, ticker: tk, uni: "xyz", px: 100,
+      daily: Array.from({ length: 30 }, (_, i) => ({ t: today - (29 - i) * DAY, c: 100 })), delisted: false }));
+    // create as guest -> lands in localStorage, no server hit. Reset the counter first: constructing
+    // the client kicks off its boot polls (which we stalled), and those are not what we're measuring.
+    serverCalls = 0;
+    const c = api.guestCreateBasket("MYSHORTS", ["AAPL", "MSFT"]);
+    assert.ok(c.ok, "guest create ok: " + (c.error || ""));
+    assert.ok(lsStore["xyz-guest-baskets"], "written to localStorage, not the server");
+    assert.equal(serverCalls, 0, "guest create made ZERO server calls");
+    // reserved names refused client-side too
+    assert.ok(!api.guestCreateBasket("SPX", ["AAPL", "MSFT"]).ok, "benchmark alias refused for guests");
+    assert.ok(!api.guestCreateBasket("MAG7", ["AAPL", "MSFT"]).ok, "built-in name refused for guests");
+    // merge surfaces the guest basket with a synthesized daily series + the guest flag
+    const merged = api.guestMerge([{ name: "MAG7", scope: "stocks", members: ["AAPL"], builtin: true, daily: [] }]);
+    const mine = merged.find((b) => b.name === "MYSHORTS");
+    assert.ok(mine && mine.guest === true, "guest basket carries the guest flag");
+    assert.ok(Array.isArray(mine.daily) && mine.daily.length >= 25, "daily synthesized client-side, charts like any basket");
+    assert.equal(serverCalls, 0, "the whole guest create+merge cycle made ZERO server calls");
+    // guest drop removes from localStorage
+    const drop = api.guestDropBasket("MYSHORTS");
+    assert.ok(drop.ok && !api.guestBasketsLoad().some((b) => b.name === "MYSHORTS"), "guest drop removes from localStorage");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
+});
+
+test("-11 wiring: mutations route through basketMutate, guest scope is disclosed, owner seam carried server-side", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // no direct /api/baskets POST survives outside basketMutate (the single gate)
+  const posts = (app.match(/fetch\('\/api\/baskets'/g) || []).length;
+  assert.equal(posts, 1, "exactly one /api/baskets POST in the codebase — inside basketMutate");
+  assert.ok(app.includes("function basketMutate("), "single mutation entry point exists");
+  assert.ok(app.includes("this browser only") || app.includes("THIS BROWSER"), "guest scope disclosed in the UI");
+  assert.ok(app.includes("guestBasketDaily") && app.includes("basketClosesClient"), "guest daily synthesized with the duel-tested mirror");
+  const pj = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pj.includes('owner: "admin"'), "server stamps owner:admin — the seam that becomes owner:<userId> at real-users time");
+  assert.ok(/createBasket\(name, members, isAdmin\)/.test(pj) && /dropBasket\(name, isAdmin\)/.test(pj), "mutators take the admin flag");
+});
+
+// ===== shadow baskets + corr reorder + 7d overlap floor (folded into build 2026.07.28-11) =======
+// Sector AND industry groups become pickable comparison instruments (COMP/G, ratio, matrix) but are
+// SHADOW: hidden from the editable Baskets manager. The corr tab reorders to matrix -> strongest
+// pairs -> COMP/G -> baskets. And the 7d correlation lookback no longer greys out (the overlap
+// floor scales with the window instead of a flat 15-day minimum that a 7d window can't clear).
+
+test("-11 shadow baskets: sectors + industries derive as usable instruments, flagged shadow, curated MAG7 stays shown", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger() {}, insert() {}, saveRegime() {}, saveNews() {}, loadNews: () => null,
+    saveBaskets: () => true, loadBaskets: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const DAY = 86400e3, HOUR = 3600e3, now = Math.floor(Date.now() / HOUR) * HOUR;
+  // a memory-complex (industry) inside Info Tech (sector) + MAG7 names
+  ["SNDK", "MU", "WDC", "STX", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"].forEach((tk) =>
+    p.seedRowNow("xyz:" + tk, { px: 100, dailyRaw: Array.from({ length: 20 }, (_, k) => ({ t: now - (19 - k) * DAY, c: 100 + k })),
+      hourlyRaw: Array.from({ length: 60 }, (_, k) => ({ t: now - (59 - k) * HOUR, c: 100 })) }));
+  const bb = p.getBasketsPayload().baskets.filter((b) => b.builtin);
+  const tech = bb.find((b) => b.name === "TECH");
+  assert.ok(tech && tech.shadow === true && tech.kind === "sector", "sector basket is shadow");
+  const mem = bb.find((b) => b.kind === "industry" && /Memory/.test(b.label || ""));
+  assert.ok(mem && mem.shadow === true, "the memory-complex industry derives as a shadow basket");
+  assert.ok(/^[A-Z][A-Z0-9]{1,11}$/.test(mem.name), "industry name tokenized to a valid basket name: " + mem.name);
+  assert.deepEqual(mem.members, ["MU", "SNDK", "STX", "WDC"], "industry members are the roster intersection");
+  const mag = bb.find((b) => b.name === "MAG7");
+  assert.ok(mag && !mag.shadow, "curated MAG7 is NOT shadow — it shows in the manager");
+  // usable as a ratio instrument, either leg, either order
+  assert.ok(p.getRatio(mem.name, "TECH", "1h").ok, "industry ÷ sector ratio resolves");
+  assert.ok(p.getRatio("MAG7", mem.name, "1h").ok, "curated ÷ industry ratio resolves");
+});
+
+test("-11 client: shadows are pickable everywhere but excluded from the manager list", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 300 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch, ct: global.clearTimeout, ci: global.clearInterval };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0; global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null, createElement: mk, addEventListener() {}, body: mk("b"), documentElement: mk("h"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: { baskets: true }, __ADMIN: true };
+  global.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  global.fetch = () => new Promise(() => {});
+  try {
+    const api = new Function(app + "\n;return {state, BASKETS, basketScopeList, basketManagerList, compgBasketNames, dvbBasketDef};")();
+    api.state.scope = "stocks";
+    // Mutate BASKETS.list in place — the client closure reads the module-scoped BASKETS, so a
+    // reassignment of the whole object would be invisible to basketScopeList/compgBasketNames.
+    api.BASKETS.list.length = 0;
+    api.BASKETS.list.push(
+      { name: "MINE", scope: "stocks", members: ["AAPL", "MSFT"], builtin: false },
+      { name: "MAG7", scope: "stocks", members: ["AAPL", "MSFT", "NVDA"], builtin: true, cur: true },
+      { name: "TECH", scope: "stocks", members: ["AAPL", "MSFT"], builtin: true, shadow: true, kind: "sector", daily: [{ t: Date.now(), c: 100 }] },
+      { name: "MEMORYSTORAG", scope: "stocks", members: ["MU", "SNDK"], builtin: true, shadow: true, kind: "industry", label: "Memory/Storage", daily: [{ t: Date.now(), c: 100 }] });
+    api.BASKETS.rev = 1;
+    const mgr = api.basketManagerList().map((b) => b.name);
+    assert.deepEqual(mgr.sort(), ["MAG7", "MINE"], "manager shows the operator's own + curated MAG7, NEVER the shadows");
+    const picks = api.compgBasketNames();
+    assert.ok(picks.includes("TECH") && picks.includes("MEMORYSTORAG"), "shadows ARE pickable in COMP/G");
+    assert.ok(picks.includes("MINE") && picks.includes("MAG7"), "…alongside the shown baskets");
+    // Δ column picker can select a shadow too
+    api.state.dvbBasket = "MEMORYSTORAG";
+    assert.equal(api.dvbBasketDef().name, "MEMORYSTORAG", "the Δ column can measure against a shadow industry");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
+});
+
+test("-11 corr reorder + 7d floor: pairs sit above COMP/G, and the overlap floor never exceeds the window", () => {
+  const fs = require("fs"), path = require("path");
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  // order within the corr section: corrpairs BEFORE compg BEFORE ratiopanel BEFORE basketpanel
+  const iPairs = ht.indexOf('id="corrpairs"'), iCompg = ht.indexOf('id="compg"'),
+    iRatio = ht.indexOf('id="ratiopanel"'), iBasket = ht.indexOf('id="basketpanel"');
+  assert.ok(iPairs > -1 && iCompg > iPairs, "strongest pairs sit above COMP/G");
+  assert.ok(iRatio > iCompg && iBasket > iRatio, "COMP/G -> ratio -> baskets follow, in that order");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const m = app.match(/minOv=Math\.max\((\d+),\s*Math\.floor\(Math\.min\(Ldays,\s*90\)\s*\*\s*([\d.]+)\)\)/);
+  assert.ok(m, "the overlap floor scales with the window (not a flat 15)");
+  // simulate: for every offered window, the floor must be achievable (< the window's day count)
+  const floor = (L) => Math.max(+m[1], Math.floor(Math.min(L, 90) * (+m[2])));
+  for (const L of [7, 30, 90, 180, 365]) assert.ok(floor(L) < L, L + "d window: floor " + floor(L) + " is achievable (was the 7d grey-out bug)");
+  assert.ok(!/minOv=Math\.max\(15,/.test(app), "the flat-15 floor that greyed the 7d matrix is gone");
 });
