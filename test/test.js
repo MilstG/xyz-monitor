@@ -599,7 +599,7 @@ test("swing shadow setups: detectors, geometry, fundflip stop, gapfade wiring, E
     "fundflip call site feeds the stop context AND the universe's geometry mode");
 });
 
-test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisible to getLedgerFor", () => {
+test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisible to getLedgerFor", async () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now();
   const mk = (coin, stp) => ({ key: coin + "|reclaim#0", coin, ticker: coin, ev: "reclaim", t0: now - 6 * DAY,
@@ -618,7 +618,7 @@ test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisi
     hs.push({ t, o: px, h: px + 0.2, l: px - 0.2, c: px, v: 1 }); } return hs; };
   p.seedRowNow("xyz:CLEAN", { px: 104, hourlyRaw: spine(false), hourlyTs: now });
   p.seedRowNow("xyz:STOPPED", { px: 104, hourlyRaw: spine(true), hourlyTs: now });
-  p.buildSignalsNow();   // runs resolveLedger
+  await p.buildSignalsNow();   // runs resolveLedger
   const x = p.getLedgerExport();
   const done = Object.fromEntries(x.closed.filter((e) => e.ev === "reclaim").map((e) => [e.coin, e]));
   assert.ok(done["xyz:CLEAN"] && done["xyz:CLEAN"].status === "resolved", "clean claim resolved");
@@ -809,7 +809,7 @@ test("-80 regression: string-typed closes can't kill the board — detectors coe
   assert.equal((cmp.match(/closes\.map\(\(k\) => \+k\[1\]\)/g) || []).length, 8, "every daily-close detector coerces (reclaim, failbrk, mapull, roundfr, swpull/basebrk/regime200 + emabrk since -28)");
 });
 
-test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the ledger, post-epoch claims survive", () => {
+test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the ledger, post-epoch claims survive", async () => {
   // The -101 purge, bounded to the era it was actually about. Every crypto claim opened before
   // the geometry fix was stamped by additive range arithmetic that produced negative targets and
   // voids multiples of price away — seeding a supposedly out-of-sample record with those would be
@@ -853,7 +853,7 @@ test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the le
     saveLedger: (d) => { saved = d; }, insert: () => {}, saveRegime: () => {} };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const d = p.getSignals();
   // the purge itself: every non-airead crypto entry is gone, open and closed alike
   const x = p.getLedgerExport();
@@ -1279,7 +1279,7 @@ test("news discovery gate 2026.07.21-12: common-word tickers don't wear bare-wor
   assert.ok(C.newsRelevant("$COST beats", null, "COST", null), "confirmation lane honours cashtags");
 });
 
-test("crypto enrollment, proven by behavior: both universes fire, on their own horizons, whitelist holding both ways", () => {
+test("crypto enrollment, proven by behavior: both universes fire, on their own horizons, whitelist holding both ways", async () => {
   // The same two seeded rows and the same real unpatched iteration this test has always used —
   // now asserting the enrollment rather than the removal. Behavior, not string pins.
   const { createPoller } = require("../src/poller");
@@ -1292,7 +1292,7 @@ test("crypto enrollment, proven by behavior: both universes fire, on their own h
   p.seedRowNow("ETH", { px: 112, ticker: "ETH", uni: "main", vol: 5e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p.buildDailyNow();
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const d = p.getSignals();
   assert.ok(d.signals.length > 0, "the engine fires");
   assert.ok(d.signals.some((s0) => s0.uni === "xyz"), "the xyz side still fires");
@@ -1533,7 +1533,7 @@ test("analyst-read ledger: directional reports freeze claims, episodes hold, buc
   assert.equal(p.aireadClaimsNow().open.filter((e) => e.coin === "xyz:NVDA").length, 1,
     "still exactly ONE open analyst claim on the name");
   // bucket isolation: the analyst record never leaks into the engine's record sets or shadows
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const d = p.getSignals();
   for (const key of ["0", "0x", "0m"])
     assert.ok(!d.records[key] || !d.records[key].record.airead, `airead absent from record set ${key}`);
@@ -1903,7 +1903,7 @@ test("earnings: chunked calendar windows are disjoint, covering, near-first — 
   assert.deepEqual(earnChunks(now, now, 3), [[etDayStr(now), etDayStr(now)]], "single-day window is one single-day chunk");
 });
 
-test("earnings: stale-schedule purge drops placeholder-date phantoms, never deletes on absence", () => {
+test("earnings: stale-schedule purge drops placeholder-date phantoms, never deletes on absence", async () => {
   const { purgeStalePrints } = require("../src/compute");
   const now = Date.UTC(2026, 6, 16, 16, 0);   // Thu Jul 16 noon ET
   const prints = [
@@ -2877,7 +2877,7 @@ test("daily refetch predicate: closes-only warm restores refetch regardless of d
     "warm-restore bars ride through with null o/h/l");
 });
 
-test("trend retest -> ledger signal: the board's badge fires a claim with frozen ladder geometry", () => {
+test("trend retest -> ledger signal: the board's badge fires a claim with frozen ladder geometry", async () => {
   // The RETEST badge promoted to the ledger. Contract under test, end to end: the condition IS
   // the board (score >= 3, board-visible, retest set by trendRead's own gate); the claim's void
   // is the retesting rung's OWN EMA21 as shipped on the trend payload; the target is the
@@ -2910,7 +2910,7 @@ test("trend retest -> ledger signal: the board's badge fires a claim with frozen
   assert.ok(row.swing != null && row.swing > px, "prior swing ships on the payload and sits on the profit side of the mark");
   const zone = row.tf[row.retest];
   assert.ok(zone && zone.e21 > 0 && zone.e21 < px, "retesting rung's EMA21 shipped, below the mark for a long");
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const sigs = p.getSignals();
   const s = sigs && sigs.signals ? sigs.signals.find((g) => g.coin === "TRSIG" && g.ev === "tretest") : null;
   assert.ok(s, "tretest signal is visible in the signals payload");
@@ -2926,7 +2926,7 @@ test("trend retest -> ledger signal: the board's badge fires a claim with frozen
   assert.ok(Math.abs(e.resolveAt - e.t0 - 5 * DAY) < 1000, "5d horizon");
   assert.ok(e.mv != null && e.mv > 0, "mv (target distance) stamped for the move-filtered record");
   // second build inside the same episode: no serial re-open (the pseudo-replication guard)
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   assert.equal(p.getLedgerFor("TRSIG", "tretest").open.length, 1, "same episode never opens a second claim");
   // and the short mirror stays silent on a long-side retest
   assert.equal(p.getLedgerFor("TRSIG", "tretestdn").open.length, 0, "no phantom short claim");
@@ -3781,7 +3781,7 @@ test("perf: store source pins the async streamed NDJSON path (no whole-file stri
   assert.ok(!/saveHourly\(data\) \{\s*try \{\s*const tmp = hourlyFile/.test(st), "the old synchronous saveHourly must not survive");
 });
 
-test("perf: getHourly is a by-reference passthrough over the packed spine (no normalization copy)", () => {
+test("perf: getHourly is a by-reference passthrough over the packed spine (no normalization copy)", async () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   // Since 2026.07.21-09 the spine IS the packed [t,o,h,l,c,v] array (packHours at every write), so
@@ -3946,7 +3946,7 @@ test("perf batch 2026.07.21-08: getFunding memo, bucketsFor memo, gzip+dataTs wi
 
   // #5 gzip cache in serveCached
   assert.ok(srv.includes("const gzipCache = new WeakMap();"), "gzip WeakMap missing");
-  assert.ok(srv.includes("gz = zlib.gzipSync(s)") && srv.includes('reply.header("content-encoding", "gzip")'), "pre-gzip serve path missing");
+  assert.ok(srv.includes("gz = gzipAsync(s)") && srv.includes('reply.header("content-encoding", "gzip")'), "pre-gzip serve path missing — -08 moved the compress onto the libuv threadpool (gzipAsync), memoized as a promise then a Buffer");
   assert.ok(srv.includes('const zlib = require("zlib");'), "zlib import missing");
 
   // #2 client dataTs short-circuit + factored sidecar pulls
@@ -5345,7 +5345,7 @@ test("levels study -10: end-to-end through the poller — seeded equities produc
     // AAPL/MSFT/NVDA-class tickers classify as Equity through the real classifier.
     const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
     names.forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(97 + i * 13), hourlyTs: now }));
-    p.buildAnalyticsNow();
+    await p.buildAnalyticsNow();
     const a = p.getAnalytics();
     assert.ok(a && a.sections && a.sections.levels, "sections.levels served");
     const lv = a.sections.levels;
@@ -5359,13 +5359,13 @@ test("levels study -10: end-to-end through the poller — seeded equities produc
     const v1 = a.dataTs;
     assert.ok(v1 > 0, "analytics ETag version stamped");
     // memo: a second build with an unchanged spine must NOT recompute (events array identity survives)
-    p.buildAnalyticsNow();
+    await p.buildAnalyticsNow();
     const b = p.getAnalytics();
     assert.equal(b.dataTs, v1, "unchanged content -> unchanged ETag version (levels sig is stable)");
     // pending path: a fresh poller with too few equities reports the honest gate
     const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
     p2.seedRowNow("xyz:AAPL", { px: 100, ticker: "AAPL", hourlyRaw: spine(5), hourlyTs: now });
-    p2.buildAnalyticsNow();
+    await p2.buildAnalyticsNow();
     const lv2 = p2.getAnalytics().sections.levels;
     assert.ok(lv2.pending, "one equity -> pending, never a study on a two-name class");
     assert.equal(lv2.need, 5);
@@ -5566,7 +5566,7 @@ test("anatomy -11: end-to-end through the poller — served study, stable ETag, 
     };
     const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
     names.forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(41 + i * 17), hourlyTs: now }));
-    p.buildAnalyticsNow();
+    await p.buildAnalyticsNow();
     const a = p.getAnalytics();
     const an = a.sections && a.sections.anatomy;
     assert.ok(an && !an.pending, `anatomy live, got ${JSON.stringify(an && { pending: an.pending, count: an.count })}`);
@@ -5576,11 +5576,11 @@ test("anatomy -11: end-to-end through the poller — served study, stable ETag, 
     assert.ok(an.monday.weeks >= 15, `pooled weeks served (${an.monday.weeks})`);
     assert.ok(an.naked.revisit.every((x) => x == null || (x >= 0 && x <= 1)), "revisit rates are probabilities");
     const v1 = a.dataTs;
-    p.buildAnalyticsNow();
+    await p.buildAnalyticsNow();
     assert.equal(p.getAnalytics().dataTs, v1, "unchanged spine -> memo holds, ETag stable");
     const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
     p2.seedRowNow("xyz:AAPL", { px: 100, ticker: "AAPL", hourlyRaw: spine(5), hourlyTs: now });
-    p2.buildAnalyticsNow();
+    await p2.buildAnalyticsNow();
     const an2 = p2.getAnalytics().sections.anatomy;
     assert.ok(an2.pending && an2.need === 5, "thin book reports the honest gate");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -5793,7 +5793,7 @@ test("-13 end-to-end: byTicker scopes, candles and pivots ride the served anatom
     };
     const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
     names.forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(61 + i * 19), hourlyTs: now }));
-    p.buildAnalyticsNow();
+    await p.buildAnalyticsNow();
     const secs = p.getAnalytics().sections;
     const an = secs.anatomy, lv = secs.levels;
     assert.ok(an && !an.pending && lv && !lv.pending);
@@ -6021,7 +6021,7 @@ test("-17 compute: crypto 24/7 anchor generators (utcDay + Fri->Mon weekend)", (
   assert.ok(wk.length >= 2, "at least two Fri->Mon weekends in a 20-day span");
 });
 
-test("-17 crypto analytics build: every applicable study lives on a 90d crypto universe, independent of the xyz build", () => {
+test("-17 crypto analytics build: every applicable study lives on a 90d crypto universe, independent of the xyz build", async () => {
   const { openStore } = require("../src/store");
   const { createPoller } = require("../src/poller");
   const fs = require("fs"), path = require("path"), os = require("os");
@@ -6046,8 +6046,8 @@ test("-17 crypto analytics build: every applicable study lives on a 90d crypto u
     // one xyz equity, so the stocks build is independently exercised and must stay pending (n=1)
     p.seedRowNow("xyz:NVDA", { px: 120, ticker: "NVDA", hourlyRaw: spine(999), hourlyTs: now });
 
-    p.buildAnalyticsNow("crypto");
-    p.buildAnalyticsNow("stocks");
+    await p.buildAnalyticsNow("crypto");
+    await p.buildAnalyticsNow("stocks");
     const cr = p.getAnalytics("crypto"), st = p.getAnalytics("stocks");
 
     // the two payloads are distinct objects with the right universe tags and window depths
@@ -6157,7 +6157,7 @@ test("-17 hotfix: the analytics rebuild loop is armed before any throwable boot 
   assert.equal((pol.match(/const safeTick = /g) || []).length, 1, "one safeTick definition");
 });
 
-test("-17 hotfix: getAnalytics self-heals a cold cache and the failure reason reaches the client", () => {
+test("-17 hotfix: getAnalytics self-heals a cold cache and the failure reason reaches the client", async () => {
   const { openStore } = require("../src/store");
   const { createPoller } = require("../src/poller");
   const fs = require("fs"), path = require("path"), os = require("os");
@@ -6172,10 +6172,16 @@ test("-17 hotfix: getAnalytics self-heals a cold cache and the failure reason re
     ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL"].forEach((t, i) => p.seedRowNow("xyz:" + t, { px: 100, ticker: t, hourlyRaw: spine(3 + i), hourlyTs: now }));
     ["BTC", "ETH", "SOL", "AVAX", "LINK"].forEach((t, i) => p.seedRowNow(t, { px: 100, hourlyRaw: spine(20 + i), hourlyTs: now }));
     // start() is NEVER called — the worst case, a boot path that died before any build ran. Pre-fix
-    // this served the empty fallback forever; now the first request repairs the cache itself.
+    // this served the empty fallback forever. Since -08 the self-heal is ASYNC: the cold first
+    // request FIRES the chained build and serves the fallback exactly once; the repair is complete
+    // by the client's next poll. The test observes that same production sequence — request, settle
+    // the chain, request again — rather than patching a synchronous path back in.
+    const cold1 = p.getAnalytics("stocks"), cold2 = p.getAnalytics("crypto");
+    assert.ok(cold1 == null && cold2 == null, "the cold request itself serves the fallback (route substitutes it) — the build is queued, not inlined");
+    await p.settleBuildsNow();
     const st = p.getAnalytics("stocks"), cr = p.getAnalytics("crypto");
-    assert.ok(st && st.coverage && st.coverage.hourly, "stocks analytics self-heals on first request");
-    assert.ok(cr && cr.coverage && cr.coverage.hourly, "crypto analytics self-heals on first request");
+    assert.ok(st && st.coverage && st.coverage.hourly, "stocks analytics self-heals by the next request");
+    assert.ok(cr && cr.coverage && cr.coverage.hourly, "crypto analytics self-heals by the next request");
     assert.equal(st.scope, "stocks"); assert.equal(cr.scope, "crypto");
     // a healthy build records no error
     assert.equal(p.getAnalyticsErr("stocks"), "", "no error recorded on a healthy build");
@@ -6598,7 +6604,7 @@ test("actionable -06: the CONFIRMED gate drops negative-expectancy setups instea
   assert.equal(rr.gross, 3, "...while the geometry check stays independent of the record");
 }, );
 
-test("actionable -07: the board reads the ledger's frozen geometry and never re-derives a level", () => {
+test("actionable -07: the board reads the ledger's frozen geometry and never re-derives a level", async () => {
   const { createPoller } = require("../src/poller");
   const HOUR = 3600e3, DAY = 86400e3;
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
@@ -6611,7 +6617,7 @@ test("actionable -07: the board reads the ledger's frozen geometry and never re-
   for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
     daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
   p.seedRowNow("TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
-  p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+  p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow();
   const a = p.getActionable();
   // A brand-new event has no record, so it is NOT suggested — the whole point of the gate. It is
   // dropped with a named reason rather than shown with a blank expectancy.
@@ -6632,7 +6638,7 @@ test("actionable -07: the board reads the ledger's frozen geometry and never re-
     assert.ok(EV_META[r.ev].horizonMs >= 3 * DAY, `sub-3d event on the swing board: ${r.ev}`);
 });
 
-test("actionable -08: geometry that is no longer tradeable is counted, and the claim survives it", () => {
+test("actionable -08: geometry that is no longer tradeable is counted, and the claim survives it", async () => {
   const { createPoller } = require("../src/poller");
   const HOUR = 3600e3, DAY = 86400e3;
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
@@ -6645,7 +6651,7 @@ test("actionable -08: geometry that is no longer tradeable is counted, and the c
   for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
     daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
   p.seedRowNow("xyz:TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
-  p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+  p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow();
   const a1 = p.getActionable();
   assert.equal(a1.coverage.norecord, 1, "the claim is scanned and rejected on record, with geometry still intact");
   // Walk the mark down through the frozen void. netRR now returns null, so the rejection reason
@@ -6653,7 +6659,7 @@ test("actionable -08: geometry that is no longer tradeable is counted, and the c
   // and which reason it was stays visible.
   const led = [...(p.trigStateNow() ? [1] : [])];
   p.seedRowNow("xyz:TRSIG", { px: px * 0.5 });
-  p.buildActionableNow();
+  await p.buildActionableNow();
   const a2 = p.getActionable();
   assert.equal(a2.count, 0, "still nothing suggested");
   assert.ok(a2.coverage.untakeable >= 1,
@@ -6784,7 +6790,7 @@ function actClosedRecord(coin, n, realized) {
     t0: Date.now() - (60 + i) * 86400e3, tR: Date.now() - (55 + i) * 86400e3, psd: "long", pn: 1 });
   return out;
 }
-test("triggers -03: announce once, never twice, and never re-blast the board on a redeploy", () => {
+test("triggers -03: announce once, never twice, and never re-blast the board on a redeploy", async () => {
   const { createPoller } = require("../src/poller");
   const HOUR = 3600e3, DAY = 86400e3;
   let savedTrig = null, savedLed = null;
@@ -6804,10 +6810,10 @@ test("triggers -03: announce once, never twice, and never re-blast the board on 
       daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
     p.seedRowNow(COIN, { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
   };
-  const build = (p) => { p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow(); };
+  const build = async (p) => { p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow(); };
 
   const p1 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
-  seed(p1); p1.hydrateLedgerNow(); build(p1);   // hydrate first: the record is what makes the claim confirmed
+  seed(p1); p1.hydrateLedgerNow(); await build(p1);   // hydrate first: the record is what makes the claim confirmed
   assert.equal(p1.getActionable().count, 1, "with a real record behind it, the setup IS suggested");
   const t1 = p1.getTriggers();
   assert.equal(t1.seq, 1, "a fresh in-grace fire emits exactly one event");
@@ -6815,13 +6821,13 @@ test("triggers -03: announce once, never twice, and never re-blast the board on 
   assert.ok(t1.events[0].fired > 0 && t1.events[0].late != null, "the event carries both marks so a transport can compose a message without re-reading the board");
   assert.equal(t1.events[0].also, undefined, "corroboration is a board concern, not part of the claim event");
   // Idempotence within a process: rebuilding must not re-announce a claim already seen.
-  build(p1);
+  await build(p1);
   assert.equal(p1.getTriggers().seq, 1, "rebuilding the board does not re-announce");
   // Restart with the persisted announced-set AND the persisted ledger: the frozen t0 keeps the
   // key stable, so nothing re-fires. This is the property that decides whether a push channel
   // survives contact with a deploy.
   const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
-  seed(p2); p2.hydrateTriggersNow(); p2.hydrateLedgerNow(); build(p2);
+  seed(p2); p2.hydrateTriggersNow(); p2.hydrateLedgerNow(); await build(p2);
   assert.equal(p2.getActionable().count, 1, "the setup is still suggested after the restart");
   assert.equal(p2.getTriggers().seq, 1, "a redeploy re-announces nothing");
   assert.equal(p2.trigStateNow().seen, 1, "and restores the announced set rather than starting blank");
@@ -6831,7 +6837,7 @@ test("triggers -03: announce once, never twice, and never re-blast the board on 
   assert.equal(p2.getTriggers(99).count, 0, "a cursor beyond the stream is empty, not negative");
 });
 
-test("triggers -04: a cold start with a stale board seeds silently instead of detonating", () => {
+test("triggers -04: a cold start with a stale board seeds silently instead of detonating", async () => {
   const { createPoller } = require("../src/poller");
   const HOUR = 3600e3, DAY = 86400e3;
   let savedLed = null;
@@ -6851,7 +6857,7 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
   };
   // Pass 1: open a claim normally and capture the persisted ledger.
   const p1 = createPoller({ dex: "xyz", store: mkStore(() => ({ ts: Date.now(), open: [], closed: REC })), log: () => {}, version: "test", crypto: false });
-  seed(p1); p1.hydrateLedgerNow(); p1.buildTrendNow(); p1.buildSignalsNow();
+  seed(p1); p1.hydrateLedgerNow(); p1.buildTrendNow(); await p1.buildSignalsNow();
   assert.ok(savedLed && savedLed.open && savedLed.open.length >= 1, "a claim was opened and persisted");
   // Backdate it by three days — the restart-after-downtime case: the board is full of claims that
   // fired while nobody was listening, and none of them are news.
@@ -6860,7 +6866,7 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
   stale.closed = REC;   // the record travels with it, so the stale claim is confirmed, not merely old
   // Pass 2: a genuinely cold process (no persisted trigger state) meets that stale board.
   const p2 = createPoller({ dex: "xyz", store: mkStore(() => stale), log: () => {}, version: "test", crypto: false });
-  seed(p2); p2.hydrateLedgerNow(); p2.buildActionableNow();
+  seed(p2); p2.hydrateLedgerNow(); await p2.buildActionableNow();
   const t = p2.getTriggers();
   assert.ok(p2.getActionable().count >= 1, "the stale claim is still ON the board — it is tradeable, just not news");
   assert.ok(t.known >= 1, "and it IS recorded as known, so it can never announce later");
@@ -6878,7 +6884,7 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
   for (let i = 0; i < 60; i++) { const c = px2 * Math.pow(1.002, i - 59);
     d2.push({ t: (Math.floor(now2 / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
   p2.seedRowNow("xyz:FRESH", { px: px2, ticker: "FRESH", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: h2, dailyRaw: d2 });
-  p2.buildTrendNow(); p2.buildSignalsNow(); p2.buildActionableNow();
+  p2.buildTrendNow(); await p2.buildSignalsNow(); await p2.buildActionableNow();
   const t2 = p2.getTriggers();
   assert.ok(t2.seq >= 1, "a claim opened after the cold start DOES announce");
   assert.ok(t2.events.some((e) => e.t === "FRESH"), "and it is the new name, not the seeded stale one");
@@ -7016,11 +7022,11 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   assert.ok(hv > 0 && hv < ah, "HASH_VIEWS must be declared before applyHash");
 });
 
-test("actionable -10: the gate rejects each way independently, and never silently empties the board", () => {
+test("actionable -10: the gate rejects each way independently, and never silently empties the board", async () => {
   const HOUR = 3600e3, DAY = 86400e3;
   const { createPoller } = require("../src/poller");
   const COIN = "xyz:GATE";
-  const mk = (closed) => {
+  const mk = async (closed) => {
     const store = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
       saveLedger: () => {}, loadLedger: () => ({ ts: Date.now(), open: [], closed }),
       saveTriggers: () => {}, loadTriggers: () => null };
@@ -7032,7 +7038,7 @@ test("actionable -10: the gate rejects each way independently, and never silentl
     for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
       daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
     p.seedRowNow(COIN, { px, ticker: "GATE", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
-    p.hydrateLedgerNow(); p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+    p.hydrateLedgerNow(); p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow();
     return p.getActionable();
   };
   const rec = (n, realized) => { const o = []; for (let i = 0; i < n; i++)
@@ -7040,26 +7046,26 @@ test("actionable -10: the gate rejects each way independently, and never silentl
       realized, t0: Date.now() - (60 + i) * DAY, tR: Date.now() - (55 + i) * DAY, psd: "long", pn: 1 }); return o; };
 
   // Winning record, enough of it: suggested.
-  const good = mk(rec(10, 1.4));
+  const good = await mk(rec(10, 1.4));
   assert.equal(good.count, 1, "a family with 10 resolved winners IS suggested");
   assert.equal(good.rows[0].rec.n, 10);
   assert.ok(good.rows[0].evR > 0, "and carries a positive expectancy");
   assert.ok(good.rows[0].rr.gross >= 2.0, "and clears the R:R floor");
 
   // Same edge, too few fires: the record cannot speak yet.
-  assert.equal(mk(rec(7, 1.4)).coverage.norecord, 1, "7 resolved fires is below the floor");
-  assert.equal(mk(rec(7, 1.4)).count, 0, "and it is dropped, not shown with a blank EV");
+  assert.equal((await mk(rec(7, 1.4))).coverage.norecord, 1, "7 resolved fires is below the floor");
+  assert.equal((await mk(rec(7, 1.4))).count, 0, "and it is dropped, not shown with a blank EV");
 
   // Enough fires, but the family LOST money: this is the case the first cut got wrong.
-  const losing = mk(rec(12, -0.6));
+  const losing = await mk(rec(12, -0.6));
   assert.equal(losing.count, 0, "a negative-expectancy family is never suggested");
   assert.equal(losing.coverage.negexp, 1, "and the reason is named");
 
   // Break-even is not positive: the boundary is > 0, not >= 0.
-  assert.equal(mk(rec(12, 0)).coverage.negexp, 1, "a flat record is not an edge");
+  assert.equal((await mk(rec(12, 0))).coverage.negexp, 1, "a flat record is not an edge");
 
   // Coverage always accounts for every scanned claim, so an empty board can always be explained.
-  for (const a of [good, mk(rec(7, 1.4)), losing]) {
+  for (const a of [good, await mk(rec(7, 1.4)), losing]) {
     const c = a.coverage, dropped = c.expired + c.noGeometry + (c.degenerate || 0) + (c.untakeable || 0) + c.norecord + c.negexp + c.negev + c.noedge;
     assert.equal(c.confirmed + dropped, 1, "every scanned claim is either confirmed or counted against a reason");
     assert.ok(c.openClaims >= 1, "and the open-claim count is always disclosed");
@@ -7630,7 +7636,7 @@ test("BTC-excess leg + tape-day clustering: the two disclosures a correlated uni
   assert.ok(cl2 && cl2.rx === undefined, "no excess leg on an equity claim — absent, never a zero (they mean opposite things)");
 });
 
-test("buildActionable: the noGeom crash cannot return, and horizons follow the universe", () => {
+test("buildActionable: the noGeom crash cannot return, and horizons follow the universe", async () => {
   // Regression guard for a live bug this build fixed: the reject counter was an undeclared
   // `noGeom`, so under "use strict" any open claim lacking a stamped stop or target distance threw
   // a ReferenceError straight out of the build. getActionable swallows and logs it, so the only
@@ -7643,7 +7649,7 @@ test("buildActionable: the noGeom crash cannot return, and horizons follow the u
   const p = createPoller({ dex: "xyz", store, log: (m) => logs.push(m), version: "test", crypto: true });
   p.seedRowNow("xyz:ZZZ", { px: 100, ticker: "ZZZ", uni: "xyz" });
   p.openLedgerNow("xyz:ZZZ", "fundflip", { score: 1, reading: "", play: { side: "long", target: null, stop: 99 } }, 1, { sd0: 1 });
-  p.buildActionableNow();
+  await p.buildActionableNow();
   const a = p.getActionable();
   assert.equal(logs.filter((m) => /buildActionable error/.test(m)).length, 0,
     "a geometry-less claim must be COUNTED, not thrown on: " + logs.filter((m) => /buildActionable error/.test(m)).join(" | "));
@@ -7759,7 +7765,7 @@ test("scope isolation: neither board ever shows the other universe's rows, execu
     "Signals and Actionable are in scope for crypto");
 });
 
-test("scoped badge and header count read the universe on screen, from kept totals", () => {
+test("scoped badge and header count read the universe on screen, from kept totals", async () => {
   // The badge is the one number visible without opening the tab, so a whole-engine count under a
   // crypto board would advertise equity conditions the board does not contain. It reads countU,
   // which the server computes over KEPT conditions — the transport cap must never move it.
@@ -7773,7 +7779,7 @@ test("scoped badge and header count read the universe on screen, from kept total
   p.seedRowNow("ETH", { px: 112, ticker: "ETH", uni: "main", vol: 5e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p.buildDailyNow();
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const d = p.getSignals();
   assert.ok(d.countU && Number.isInteger(d.countU.x) && Number.isInteger(d.countU.m), "countU ships both universes as integers");
   assert.equal(d.countU.x + d.countU.m, d.count, "the split sums to the whole-engine total — no condition uncounted or double-counted");
@@ -7787,11 +7793,11 @@ test("scoped badge and header count read the universe on screen, from kept total
   const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p2.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p2.buildDailyNow();
-  p2.buildSignalsNow();
+  await p2.buildSignalsNow();
   assert.equal(p2.getSignals().countU.m, null, "crypto disabled: m is null, never 0");
 });
 
-test("degenerate void: a stop that lands on the entry cannot reach the board, however good the ratio looks", () => {
+test("degenerate void: a stop that lands on the entry cannot reach the board, however good the ratio looks", async () => {
   // Real board row, 2026-07-27. PALLADIUM short, unwind on D1: fired 1287.40, void 1287.85,
   // target 1109.61. The void is 45 cents on a 1287 instrument — 0.035% — while the target is
   // 13.81% away, so the ratio comes out at 395:1 and setupEV turns a 60% hit rate into an
@@ -7816,7 +7822,7 @@ test("degenerate void: a stop that lands on the entry cannot reach the board, ho
   const e = p2.openLedgerNow("xyz:PALLADIUM", "unwind",
     { score: 9, reading: "", play: { side: "short", stop: 1287.85, target: 1109.61 } }, -1, { sd0: 1.2 });
   assert.ok(e && e.stp === 1287.85, "the claim itself still opens and still records — this guard is the BOARD's, not the ledger's");
-  p2.buildActionableNow();
+  await p2.buildActionableNow();
   const a = p2.getActionable();
   assert.equal(a.rows.length, 0, "and it never reaches the board");
   assert.equal(a.coverage.degenerate, 1, "counted under its own reason, so an empty board can always say why");
@@ -7826,14 +7832,14 @@ test("degenerate void: a stop that lands on the entry cannot reach the board, ho
   p3.seedRowNow("xyz:AAA", { px: 100, ticker: "AAA", uni: "xyz" });
   // no sd0 stamped: the absolute 5bp floor has to carry it alone
   p3.openLedgerNow("xyz:AAA", "unwind", { score: 9, reading: "", play: { side: "short", stop: 100.02, target: 90 } }, -1, {});
-  p3.buildActionableNow();
+  await p3.buildActionableNow();
   assert.equal(p3.getActionable().coverage.degenerate, 1, "a 2bp void is refused with no volatility stamp to judge it by");
 
   // a legitimately tight-but-real setup survives: 0.9% void on a 1.2% sigma name, ratio 3.3
   const p4 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p4.seedRowNow("xyz:BBB", { px: 100, ticker: "BBB", uni: "xyz" });
   p4.openLedgerNow("xyz:BBB", "breakout", { score: 9, reading: "", play: { side: "long", stop: 99.1, target: 103 } }, 1, { sd0: 1.2 });
-  p4.buildActionableNow();
+  await p4.buildActionableNow();
   assert.equal(p4.getActionable().coverage.degenerate, 0,
     "a real void at 0.75 sigma is NOT degenerate — this guard must not become a filter on tight setups");
 });
@@ -10499,7 +10505,7 @@ test("telegram lane fails fast: tgApi carries a real 15s abort signal to every c
   delete process.env.TG_BOT_TOKEN;
 });
 
-test("crash containment + fuller shutdown: every timer-cadence persist gets a final flush", () => {
+test("crash containment + fuller shutdown: every timer-cadence persist gets a final flush", async () => {
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
@@ -10601,10 +10607,10 @@ test("askBoard -15: causal routes analyst anywhere in the sentence; history + sc
   assert.equal(r1.mode, "analyst", "mid-sentence causal intent must route to the analyst, never the planner/card path");
   // The user payload is a JSON string inside the transport body — parse it rather than string-
   // matching escaped quotes, so the assertions read what the MODEL reads.
-  const userPayload = (call) => { const m = (call.messages || []).find((x) => x.role === "user");
+  const userPayload = async (call) => { const m = (call.messages || []).find((x) => x.role === "user");
     const c = typeof m.content === "string" ? m.content : m.content.map((x) => x.text || "").join("");
     return JSON.parse(c.slice(c.indexOf("{"))); };
-  const pay1 = userPayload(calls[calls.length - 1]);
+  const pay1 = await userPayload(calls[calls.length - 1]);
   assert.ok((pay1.news || []).some((n) => n.h === "DRAM guides down on pricing"), "the ticker's verified headline must ride the analyst payload");
   assert.ok((pay1.news || []).some((n) => n.h === "Fed holds rates"), "macro tape headlines ride too");
   assert.ok(!pay1.history, "no transcript sent -> no history key fabricated");
@@ -10613,7 +10619,7 @@ test("askBoard -15: causal routes analyst anywhere in the sentence; history + sc
   const h = [{ q: "why is DRAM dumping so much today", a: "DRAM d1 -6.7%" }];
   const r2 = await p.askBoard("not what I asked", { scope: "stocks", universe: uni, mode: "analyst", hist: h });
   assert.ok(r2.ok, r2.error || "");
-  const pay2 = userPayload(calls[calls.length - 1]);
+  const pay2 = await userPayload(calls[calls.length - 1]);
   assert.ok(Array.isArray(pay2.history) && pay2.history[0].q === "why is DRAM dumping so much today",
     "the session transcript must ride the analyst payload — statelessness was the original failure");
   assert.ok((pay2.news || []).some((n) => n.h === "DRAM guides down on pricing"), "history mentions the ticker -> its headlines still attach to the follow-up");
@@ -10635,7 +10641,7 @@ test("askBoard -15: causal routes analyst anywhere in the sentence; history + sc
 // One poller, one confirmed board row, full episode lifecycle. Mirrors the actionable -10 seed
 // (10 resolved winners -> the tretest claim confirms) so the settled record is exercised against
 // the same machinery the live board runs, not a synthetic shortcut.
-function settledPoller() {
+async function settledPoller() {
   const { createPoller } = require("../src/poller");
   const COIN = "xyz:SETL";
   const saved = [];
@@ -10655,12 +10661,12 @@ function settledPoller() {
   for (let i = 0; i < 60; i++) { const c = px * Math.pow(1.002, i - 59);
     daily.push({ t: (Math.floor(now / DAY_) - 60 + i) * DAY_, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
   p.seedRowNow(COIN, { px, ticker: "SETL", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
-  p.hydrateLedgerNow(); p.buildTrendNow(); p.buildSignalsNow(); p.buildActionableNow();
+  p.hydrateLedgerNow(); p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow();
   return { p, COIN, px, hourly, saved, HOUR_, DAY_, endH };
 }
 
-test("settled -15: an episode opens at first appearance, flicker folds instead of duplicating, and the payload ships the record", () => {
-  const { p, COIN, px } = settledPoller();
+test("settled -15: an episode opens at first appearance, flicker folds instead of duplicating, and the payload ships the record", async () => {
+  const { p, COIN, px } = await settledPoller();
   const a = p.getActionable();
   assert.equal(a.count, 1, "precondition: the seeded setup confirms onto the board");
   assert.ok(a.rows[0].k && a.rows[0].k.startsWith(COIN + "|"), "board rows must carry their claim key");
@@ -10676,11 +10682,11 @@ test("settled -15: an episode opens at first appearance, flicker folds instead o
   assert.equal(a.settled.perUni.stocks.open, 1);
   assert.equal(a.settled.perUni.stocks.all.n, 0, "nothing resolved yet — the record starts at zero, no backfill");
   // Flicker: walk the mark through the void (untakeable), rebuild, restore, rebuild — SAME episode.
-  p.seedRowNow(COIN, { px: px * 0.5 }); p.buildActionableNow();
+  p.seedRowNow(COIN, { px: px * 0.5 }); await p.buildActionableNow();
   st = p.boardEpStateNow();
   assert.equal(st.open.length, 1, "a dropped row does not resolve or delete its episode");
   assert.ok(st.open[0].off > 0, "the drop is marked");
-  p.seedRowNow(COIN, { px }); p.buildActionableNow();
+  p.seedRowNow(COIN, { px }); await p.buildActionableNow();
   st = p.boardEpStateNow();
   assert.equal(st.open.length, 1, "reappearance is the SAME episode — oscillation never manufactures sample size");
   assert.equal(st.open[0].flick, 1, "…and the fold is counted");
@@ -10689,7 +10695,7 @@ test("settled -15: an episode opens at first appearance, flicker folds instead o
   assert.equal(a2.settled.perUni.stocks.flick, 1, "the fold is disclosed on the payload");
 });
 
-test("settled -15: resolution is inherited from the claim — target touch, both-touch pessimism, and the spine-gap approx label", () => {
+test("settled -15: resolution is inherited from the claim — target touch, both-touch pessimism, and the spine-gap approx label", async () => {
   const C = require("../src/compute");
   // epResolve unit truths first: the walk, the pessimism, the honesty flag.
   const H = 3600e3, t0 = 1000 * H;
@@ -10713,13 +10719,13 @@ test("settled -15: resolution is inherited from the claim — target touch, both
   assert.equal(C.epScore("long", 100, 95, 110, "expired", null), null, "no exit price at expiry -> unscoreable, never guessed");
   // Now the machinery end-to-end: extend the spine past the show stamp with a target-touch candle,
   // close the claim, and sweep.
-  const { p, COIN, px, hourly, HOUR_, endH } = settledPoller();
+  const { p, COIN, px, hourly, HOUR_, endH } = await settledPoller();
   const ep = p.boardEpStateNow().open[0];
   const tgt = ep.target;
   const later = hourly.concat([{ t: (endH + 2) * HOUR_, o: px, h: tgt * 1.01, l: px * 0.999, c: tgt, v: 1 }]);
   p.seedRowNow(COIN, { px, hourlyRaw: later });
   assert.ok(p.ledgerCloseNow(ep.k, { realized: 2.1, tR: (endH + 4) * HOUR_ }), "harness close must find the open claim");
-  p.buildActionableNow();
+  await p.buildActionableNow();
   const st = p.boardEpStateNow();
   assert.equal(st.open.length, 0, "the resolved claim's episode leaves the open set");
   assert.equal(st.closed.length, 1, "…and enters the settled record — ON or OFF the board, once shown always scored");
@@ -10738,14 +10744,14 @@ test("settled -15: resolution is inherited from the claim — target touch, both
   assert.ok(u.lat != null, "lateness (avg@fire - avg@shown) ships computed server-side");
 });
 
-test("settled -15: the record persists inside the ledger blob and survives a restart; the ETag moves on a resolution", () => {
-  const { p, COIN, px, hourly, saved, HOUR_, endH } = settledPoller();
+test("settled -15: the record persists inside the ledger blob and survives a restart; the ETag moves on a resolution", async () => {
+  const { p, COIN, px, hourly, saved, HOUR_, endH } = await settledPoller();
   const sig0 = p.getActionable().dataTs;
   const ep = p.boardEpStateNow().open[0];
   const later = hourly.concat([{ t: (endH + 2) * HOUR_, o: px, h: px * 1.001, l: ep.void * 0.99, c: ep.void, v: 1 }]);
   p.seedRowNow(COIN, { px, hourlyRaw: later });
   p.ledgerCloseNow(ep.k, { realized: -1.2, tR: (endH + 4) * HOUR_ });
-  p.buildActionableNow();
+  await p.buildActionableNow();
   assert.equal(p.boardEpStateNow().closed[0].kind, "void");
   assert.equal(p.boardEpStateNow().closed[0].rE, -1, "a void exit is exactly -1R");
   assert.ok(p.getActionable().dataTs !== sig0, "a resolution with an unchanged live board must still bust the ETag");
@@ -10778,14 +10784,14 @@ test("settled -15: the record persists inside the ledger blob and survives a res
 // SHOWN basis and carry their exit price, lateness is a red-when-positive cost computed only
 // over trustworthy stamps, and correlated same-build clusters are tagged so n cannot inflate.
 
-test("settled -02: an expiry records its exit price, splits by sign at shown, and NEVER counts as a hit", () => {
-  const { p, COIN, px, hourly, HOUR_, endH } = settledPoller();
+test("settled -02: an expiry records its exit price, splits by sign at shown, and NEVER counts as a hit", async () => {
+  const { p, COIN, px, hourly, HOUR_, endH } = await settledPoller();
   const ep = p.boardEpStateNow().open[0];
   // Extend the spine past the show stamp with candles that touch NEITHER frozen level.
   const flat = hourly.concat([1, 2, 3].map((i) => ({ t: (endH + i) * HOUR_, o: px, h: px * 1.0005, l: px * 0.9995, c: px, v: 1 })));
   p.seedRowNow(COIN, { px, hourlyRaw: flat });
   assert.ok(p.ledgerCloseNow(ep.k, { realized: 0.1, tR: (endH + 3) * HOUR_ }), "harness close must find the open claim");
-  p.buildActionableNow();
+  await p.buildActionableNow();
   const done = p.boardEpStateNow().closed[0];
   assert.equal(done.kind, "expired");
   assert.ok(Number.isFinite(done.exitPx) && done.exitPx > 0, "the price the expiry was scored at is part of the score — recorded, not implied");
@@ -10798,7 +10804,7 @@ test("settled -02: an expiry records its exit price, splits by sign at shown, an
   assert.ok(Number.isFinite(shipped.exitPx), "exitPx ships on the payload — the client renders it, never re-derives it");
 });
 
-test("settled -02: boot-stamped episodes are excluded from lateness, first-cohort blobs are repaired, clusters are tagged", () => {
+test("settled -02: boot-stamped episodes are excluded from lateness, first-cohort blobs are repaired, clusters are tagged", async () => {
   const { createPoller } = require("../src/poller");
   const S = Date.now() - 3 * 86400e3, H_ = 3600e3;
   const mkEp = (i, o) => Object.assign({ k: "xyz:B" + i + "|fundext", coin: "xyz:B" + i, t: "B" + i, uni: "stocks",
@@ -10821,7 +10827,7 @@ test("settled -02: boot-stamped episodes are excluded from lateness, first-cohor
   const st = p.boardEpStateNow();
   assert.equal(st.closed.find((e) => e.k.includes("B1")).bt, 1, "first-cohort repair: tShow === epoch with a long-fired claim is retro-stamped bt");
   assert.ok(!st.closed.find((e) => e.k.includes("B2")).bt, "an episode stamped after the epoch keeps its trustworthy stamp");
-  p.buildActionableNow();
+  await p.buildActionableNow();
   const s = p.getActionable().settled, u = s.perUni.stocks;
   assert.equal(u.btN, 1, "the excluded boot-stamped count is disclosed");
   assert.equal(u.latN, 3, "lateness runs over the trustworthy stamps only");
@@ -11071,7 +11077,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-07"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-08"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11233,7 +11239,7 @@ test("swing -20: poller wiring manifest — fire sites, resolver, rosters, gloss
     assert.ok(app.includes(pin), `app.js missing -20 pin: ${pin}`);
 });
 
-test("swing -20: resolver end-to-end — early target touch, stop-out, still-live, timeout MTM", () => {
+test("swing -20: resolver end-to-end — early target touch, stop-out, still-live, timeout MTM", async () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now(), H = 3600e3, DAY_ = 86400e3;
   const mk = (coin, extra) => Object.assign({ key: coin + "|swpull#0", coin, ticker: coin, ev: "swpull",
@@ -11253,7 +11259,7 @@ test("swing -20: resolver end-to-end — early target touch, stop-out, still-liv
   p.seedRowNow("xyz:STP",  { px: 100, hourlyTs: now, hourlyRaw: spine((i) => i === 70 ? [97.5, 100.1, 96.8] : [100, 100.3, 99.7]) });
   p.seedRowNow("xyz:LIVE", { px: 101, hourlyTs: now, hourlyRaw: spine(flat) });
   p.seedRowNow("xyz:MTM",  { px: 101, hourlyTs: now, hourlyRaw: spine(flat) });
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const x = p.getLedgerExport();
   const done = Object.fromEntries(x.closed.filter((e) => e.ev === "swpull").map((e) => [e.coin, e]));
   const open = Object.fromEntries(x.open.filter((e) => e.ev === "swpull").map((e) => [e.coin, e]));
@@ -11273,7 +11279,7 @@ test("swing -20: resolver end-to-end — early target touch, stop-out, still-liv
   assert.ok(Math.abs(done["xyz:MTM"].realized) < 0.2, `flat tape MTM outcome ~0R, got ${done["xyz:MTM"].realized}`);
 });
 
-test("swing -20: the symmetric bracket track exposes the old one-sided bias on fixed-horizon claims", () => {
+test("swing -20: the symmetric bracket track exposes the old one-sided bias on fixed-horizon claims", async () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now(), H = 3600e3, DAY_ = 86400e3;
   // a NON-touch claim (reclaim, 5d convention) carrying both frozen levels: price rides through
@@ -11294,7 +11300,7 @@ test("swing -20: the symmetric bracket track exposes the old one-sided bias on f
     hs.push({ t: now - i * H, o: px, h: hi, l: lo, c: px, v: 1 });
   }
   p.seedRowNow("xyz:BIAS", { px: 100.5, hourlyTs: now, hourlyRaw: hs });
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const e = p.getLedgerExport().closed.find((k) => k.coin === "xyz:BIAS");
   assert.ok(e && e.status === "resolved", "claim resolved at its fixed horizon as always");
   assert.equal(e.rb, "t", "bracket walk saw the target touched first");
@@ -11562,7 +11568,7 @@ test("ema200 -26: poller + client wiring manifest — section, memo, retest ride
     assert.equal((cmp.match(new RegExp("^function " + f + "\\(", "mg")) || []).length, 1, `exactly one ${f} definition`);
 });
 
-test("ema200 -26: end-to-end through the analytics build — the section publishes off seeded rows", () => {
+test("ema200 -26: end-to-end through the analytics build — the section publishes off seeded rows", async () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
@@ -11582,7 +11588,7 @@ test("ema200 -26: end-to-end through the analytics build — the section publish
     for (let i = 200; i >= 0; i--) { const c = 110 + (i % 3); hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.4, l: c - 0.4, c, v: 5 }); }
     p.seedRowNow(coin, { ticker: TKS[m], px: 112, dailyRaw, hourlyRaw, hourlyTs: now });
   }
-  const a = p.buildAnalyticsNow();
+  const a = await p.buildAnalyticsNow();
   const em = a && a.sections && a.sections.ema200;
   assert.ok(em && !em.pending, `section published (got ${JSON.stringify(em && em.pending)})`);
   const d1 = em.tf["1d"];
@@ -11680,7 +11686,7 @@ test("ema200 shadows -28: EV_META convention, wiring manifest, panel rows, close
   ]) assert.ok(pol.includes(pin), `poller.js missing -28 pin: ${pin}`);
 });
 
-test("ema200 shadows -28: end-to-end — the breakout fires as an invisible touch-mode claim with frozen geometry", () => {
+test("ema200 shadows -28: end-to-end — the breakout fires as an invisible touch-mode claim with frozen geometry", async () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
@@ -11702,7 +11708,7 @@ test("ema200 shadows -28: end-to-end — the breakout fires as an invisible touc
   for (let i = 200; i >= 0; i--) { const c = 104 + (i % 3) * 0.1; hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.3, l: c - 0.3, c, v: 5 }); }
   p.seedRowNow("xyz:EMB", { ticker: "EMB", px: 104.5, dailyRaw, hourlyRaw, hourlyTs: now });
   p.buildDailyNow();
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const x = p.getLedgerExport();
   const e = x.open.find((k) => k.coin === "xyz:EMB" && k.ev === "emabrk");
   assert.ok(e, "the breakout shadow opened");
@@ -11713,7 +11719,7 @@ test("ema200 shadows -28: end-to-end — the breakout fires as an invisible touc
   assert.equal(e.psd, "long", "long side only at stage two");
 });
 
-test("ema200 shadows -28: crypto depth regression — a main-universe row's detectors see all 370d, not the wire's 94", () => {
+test("ema200 shadows -28: crypto depth regression — a main-universe row's detectors see all 370d, not the wire's 94", async () => {
   // The bug this pins: dc.daily (the /api/daily payload) was also the signal loop's input, and
   // the -20 wire cap silently starved every crypto detector needing >92 closes. This builds a
   // crypto poller, seeds a 300d spine-backed daily series with an armed EMA200 cross, and
@@ -11736,7 +11742,7 @@ test("ema200 shadows -28: crypto depth regression — a main-universe row's dete
   for (let i = 220; i >= 0; i--) { const c = 104 + (i % 3) * 0.1; hourlyRaw.push({ t: now - i * H, o: c, h: c + 0.3, l: c - 0.3, c, v: 5 }); }
   p.seedRowNow("MAINEMA", { uni: "main", ticker: "MAINEMA", px: 104.5, dailyRaw, hourlyRaw, hourlyTs: now });
   p.buildDailyNow();
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const x = p.getLedgerExport();
   const e = x.open.find((k) => k.coin === "MAINEMA" && k.ev === "emabrk");
   assert.ok(e, "the crypto breakout shadow opened — the loop read full depth past the wire cap");
@@ -11872,7 +11878,7 @@ test("every function reading the `A.` alerts alias declares it (no borrowed call
 // of nothing, and the ★ prime emphasis is withdrawn from what is, trade-wise, a corpse.
 // ================================================================================================
 
-test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime, and re-claims only after a genuine lapse", () => {
+test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime, and re-claims only after a genuine lapse", async () => {
   const { createPoller } = require("../src/poller");
   const DAY_ = 86400e3, HOUR_ = 3600e3, now = Date.now();
   // The resolved claim that parked the key, exactly as the resolver would have left it.
@@ -11893,10 +11899,10 @@ test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime
   p.hydrateLedgerNow();
   const mkD = () => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100 * Math.pow(1.0005, 61 - i), o: 100, h: 103, l: 98, v: 1e6 }); return d; };
   const mkH = () => { const h = []; for (let i = 400; i >= 0; i--) { const c = 100 + Math.sin(i / 9); h.push({ t: now - i * HOUR_, o: c, h: c + 0.7, l: c - 0.7, c, v: 1e5 }); } return h; };
-  const fire = () => { p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7,
+  const fire = async () => { p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7,
     dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
-    p.buildDailyNow(); p.buildSignalsNow(); };
-  fire();
+    p.buildDailyNow(); await p.buildSignalsNow(); };
+  await fire();
   const g1 = (p.getSignals().signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
   assert.ok(g1, "the bigmove condition fires on the seeded tape");
   assert.ok(!g1.claim0, "the re-arm gate refuses a serial re-claim, so no open claim ships");
@@ -11922,11 +11928,11 @@ test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime
   p.seedRowNow("xyz:NVDA", { px: 100, ticker: "NVDA", uni: "xyz", vol: 1e7,
     dailyRaw: (() => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100, o: 100, h: 100.5, l: 99.5, v: 1e6 }); return d; })(),
     hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 0 });
-  p.buildDailyNow(); p.buildSignalsNow();
+  p.buildDailyNow(); await p.buildSignalsNow();
   assert.ok(!(p.getSignals().signals || []).some((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove"),
     "flat tape: the condition genuinely lapses");
   // refire: a genuinely new episode opens a FRESH claim and the stub is gone
-  fire();
+  await fire();
   const g2 = (p.getSignals().signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
   assert.ok(g2, "the new episode fires");
   assert.ok(g2.claim0, "…and opens a fresh claim — the gate parks episodes, it does not retire the event");
@@ -12092,7 +12098,7 @@ test("structural void -01: EV_META convention, wiring manifest, panel rows, duel
   assert.ok(uq > 0 && u2 > uq, "the twin opens after — and only alongside — the visible unwind fire");
 });
 
-test("structural void -01: end-to-end — the held support probe fires as an invisible touch-mode claim with tight frozen geometry", () => {
+test("structural void -01: end-to-end — the held support probe fires as an invisible touch-mode claim with tight frozen geometry", async () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now(), DAY_ = 86400e3, H = 3600e3;
   const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
@@ -12121,7 +12127,7 @@ test("structural void -01: end-to-end — the held support probe fires as an inv
   for (let t = dayStart; t <= now - H; t += H) hourlyRaw.push({ t, o: 103.5, h: 103.8, l: 103.2, c: 103.5, v: 5 });
   p.seedRowNow("xyz:LVT", { ticker: "LVT", px: 103.5, dailyRaw, hourlyRaw, hourlyTs: now });
   p.buildDailyNow();
-  p.buildSignalsNow();
+  await p.buildSignalsNow();
   const x = p.getLedgerExport();
   const e = x.open.find((k) => k.coin === "xyz:LVT" && k.ev === "lvlhold");
   assert.ok(e, "the level-hold shadow opened");
@@ -12207,7 +12213,7 @@ test("vp families -02: EV_META convention + wiring manifest", () => {
   ]) assert.ok(pol.includes(pin), `poller.js missing -02 pin: ${pin}`);
 });
 
-test("board promotion path -02: a matured shadow record carries its family onto the actionable board — tight void, correct label, no new machinery", () => {
+test("board promotion path -02: a matured shadow record carries its family onto the actionable board — tight void, correct label, no new machinery", async () => {
   // Phase 4, proven end-to-end: the board's confirmed gate IS the promotion. Eight resolved
   // out-of-sample lvlhold fires with positive expectancy hydrate from the persisted ledger, a
   // fresh live fire opens from the tape, and the row surfaces through the same
@@ -12246,8 +12252,8 @@ test("board promotion path -02: a matured shadow record carries its family onto 
   for (let t = dayStart; t <= now - H; t += H) hourlyRaw.push({ t, o: 103.5, h: 103.8, l: 103.2, c: 103.5, v: 5 });
   p.seedRowNow("xyz:LVT", { ticker: "LVT", px: 103.5, dailyRaw, hourlyRaw, hourlyTs: now });
   p.buildDailyNow();
-  p.buildSignalsNow();
-  p.buildActionableNow();
+  await p.buildSignalsNow();
+  await p.buildActionableNow();
   const a = p.getActionable();
   const row = a.rows.find((x) => x.coin === "xyz:LVT" && x.ev === "lvlhold");
   assert.ok(row, "the confirmed structural family reaches the board: " + JSON.stringify(a.coverage));
@@ -14718,4 +14724,65 @@ test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on 
   assert.ok(app.includes("startEvents();   // push channel first"), "stream armed at boot");
   // startCycle must derive its interval through _cycleMs so a stretch/snap re-arm actually re-times.
   assert.ok(app.includes("const ms=_cycleMs(); cycleTimer=setInterval("), "cycle interval derives from _cycleMs");
+});
+
+// ===== perf phase 3 (build 2026.07.29-08): named ticks, yielding builds, the serialized chain ===
+// Phase 0 measured the event loop; phase 3 makes the measurement ACTIONABLE and the offenders
+// cooperative. Three commitments pinned here: every scheduled tick reports a named duration
+// (/api/health carries the worst offenders), the heavy builds yield the loop instead of holding it
+// for seconds, and every yielding build runs on ONE serialized chain — because yields introduce
+// interleaving that synchronous execution used to forbid for free, and buildActionable reading a
+// ledger mid-mutation by buildSignals is exactly the corruption the chain exists to prevent.
+test("perf -08: tick instrumentation, cooperative yields and the serialized build chain are wired", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The instrumentation choke point and its honesty split: sync duration IS loop hold (250ms
+  // floor), async duration is wall time across yields (higher floor, labeled async).
+  for (const pin of ["function timedTick", "function tickRecord", "SLOW_TICK_SYNC_MS = 250", "SLOW_TICK_ASYNC_MS",
+    "const isAsyncFn", "function chainBuild", "const buildYield", "BUILD_YIELD_EVERY"])
+    assert.ok(pol.includes(pin), `-08 instrumentation pin missing: ${pin}`);
+  // safeTick routes async builds onto the chain WITHOUT changing any pinned call-site string.
+  assert.ok(/const safeTick = \(fn, name\) => \(\) => \{\s*\n\s*try \{\s*\n\s*const r = isAsyncFn\(fn\) \? chainBuild\(name, fn\) : timedTick\(name, fn\);/.test(pol),
+    "safeTick must be the instrumentation choke point: async -> chain, sync -> timedTick");
+  // The three heavy builds are async and actually yield.
+  for (const pin of ["async function buildSignals()", "async function buildActionable()", "async function buildAnalytics(scope)"])
+    assert.ok(pol.includes(pin), `heavy build must be async: ${pin}`);
+  assert.ok((pol.match(/await buildYield\(\);/g) || []).length >= 8, "the builds must yield between markets/sections, not just declare async");
+  assert.ok(/if \(\+\+yN % BUILD_YIELD_EVERY === 0\) await buildYield\(\);/.test(pol), "per-market yield cadence in the passes");
+  // Lazy self-heals fire the CHAIN, never a bare async call that could interleave.
+  assert.ok(pol.includes('chainBuild("buildActionable", buildActionable)'), "getActionable's self-heal must go through the chain");
+  assert.ok(pol.includes('chainBuild("buildAnalytics:" + (cr ? "crypto" : "stocks")'), "buildAnalyticsSafe must go through the chain");
+  assert.ok(pol.includes("buildAnalyticsSafe(scope).catch(() => {});"), "getAnalytics fires the async self-heal and serves the fallback this once");
+  // The previously bare intervals are timed + isolated now.
+  assert.ok(pol.includes('setInterval(safeTick(buildSnapshot, "buildSnapshot"), 15 * 1000);'), "buildSnapshot runs through safeTick");
+  assert.ok(pol.includes('setInterval(safeTick(buildDaily, "buildDaily"), 60 * 1000);'), "buildDaily runs through safeTick");
+  // The names reach the wire, and the harness can settle the chain.
+  assert.ok(pol.includes("ticks: [...tickStats]"), "stats() must ship the named tick durations");
+  assert.ok(pol.includes("settleBuildsNow: () => buildChain"), "harness chain-settle export missing");
+  // Server: the cached-serve gzip runs on the libuv threadpool, memoized promise-then-Buffer.
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(srv.includes('const gzipAsync = require("util").promisify(zlib.gzip);'), "threadpool gzip helper missing");
+  assert.ok(srv.includes("gz = gzipAsync(s).then((buf) => { gzipCache.set(body, buf); return buf; });"),
+    "the promise must be memoized immediately so concurrent first requests share one compression");
+  assert.ok(srv.includes("return Buffer.isBuffer(gz) ? reply.send(gz) : gz.then((buf) => reply.send(buf));"),
+    "resolved Buffer takes the synchronous fast path; the in-flight promise is awaited, never re-compressed");
+  // Client: the Loop dot names the culprit, and says when a duration is wall time, not loop hold.
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("worst tick: ${w.name}") && app.includes("(yielding build, wall time)"),
+    "the Loop tooltip must attribute the worst tick by name and label async durations honestly");
+});
+
+test("perf -08 behavior: the chain serializes — actionable's self-heal settles via settleBuildsNow and never interleaves", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, saveTriggers: () => {}, loadTriggers: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  // Cold cache: the getter fires the chained build and serves the fallback THIS call…
+  const cold = p.getActionable();
+  assert.equal(cold.count, 0, "the cold request serves the fallback shape, never blocks on the build");
+  await p.settleBuildsNow();
+  // …and by the time the chain settles, the cache is real (empty roster -> empty board, but BUILT:
+  // params carry the gate disclosure only a completed build stamps).
+  const warm = p.getActionable();
+  assert.equal(warm.params.gate, "confirmed", "the chained self-heal completed and stamped a real payload");
 });
