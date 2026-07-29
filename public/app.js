@@ -2908,6 +2908,17 @@ function renderAdmBrief(){
   box.hidden=false;
   const P=pushState;
   const rows=(P&&P.recipients)||[];
+  // The operator's own schedule, stated inside each box rather than only on a roster chip you have
+  // to know to expand. One resolved line, click to edit, same validated route as everything else.
+  const mySchedRow=(k)=>{
+    const kind=((P&&P.schedKinds)||[]).find(z=>z.k===k)||{};
+    const me=rows.find(r=>r.mine);
+    if(!me) return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <span class="warn">link a telegram above to schedule yourself</span></div>`;
+    const sc=(me.sched&&me.sched[k])||null, h=sc?sc.hour:null;
+    const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''} \u00b7 ${esc(sc&&sc.daysLabel||'daily')}`:'off';
+    return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <button type="button" class="cdtf${h!=null?' on':''}" data-mysched="${esc(k)}" data-tip="when YOUR copy of ${esc(kind.label||k)} arrives \u2014 hour and days. Everyone else\u2019s is on their roster row.">${esc(lbl)}</button></div>`;
+  };
+
   const utcN=rows.filter(r=>r.briefHour!=null&&r.briefUtc).length;
   const onN=rows.filter(r=>r.briefHour!=null).length;
   const st=(P&&P.brief)||null;
@@ -2920,15 +2931,30 @@ function renderAdmBrief(){
     +`<div class="abr-row">`
       +`<button type="button" class="cdtf" id="adm-brief" data-tip="re-serves this hour\u2019s brief \u2014 no model call, no budget spent">send test (cached)</button>`
       +`<button type="button" class="cdtf" id="adm-brief-f" data-tip="regenerate from live state and spend one of today\u2019s brief budget">send test (fresh)</button>`
-      +`<span class="sec" style="font-size:11px">\u2192 telegram account(s) linked from this browser</span>`
-    +`</div><div class="abr-r" id="adm-brief-r"></div>`;
+      +`<span class="sec" style="font-size:11px" data-tip="test fires go ONLY to the telegram account(s) YOU linked from this browser \u2014 never to other recipients. To send someone else a copy, use their roster row below.">\u2192 just you, never other recipients</span>`
+    +`</div><div class="abr-r" id="adm-brief-r"></div>`
+    +mySchedRow('brief');
+  // Separate state line and test pair, not a shared row with the brief: separate schedules,
+  // separate budgets, separate failure modes — one averaged row would hide exactly the case worth
+  // seeing, the brief fine and the commentary dead.
+  const L=(P&&P.landscape)||null;
+  const lState=L?(L.enabled?`<span class="pos">on</span> \u00b7 default ${String(L.defaultHour).padStart(2,'0')}:00 UTC \u00b7 ${esc(L.defaultDays||'daily')} \u00b7 ${L.dayLeft}/${L.perDay} generations left today \u00b7 ${L.windowH}h corpus`
+    :'<span class="neg">disabled</span> (LANDSCAPE_ENABLED=0)'):'\u2026';
+  box.innerHTML+=`<div class="abr-t" style="margin-top:10px" data-tip="One written commentary message per scheduled day, an hour after the brief. Built from the headline corpus and it must cite the headlines it rests on \u2014 those citations render as the sources footer. Interpretation, not measurement: unlike the brief, its claims are not checked against server-computed figures. Per-recipient hour and days are on each roster row below.">THE LANDSCAPE</div>`
+    +`<div class="sec" style="font-size:11.5px">${lState}${L&&L.model?` \u00b7 ${esc(L.model)}`:''}</div>`
+    +(L&&L.lastErr?`<div class="sec neg" style="font-size:11px;margin-top:3px" data-tip="the last time commentary generation failed \u2014 the message still ships, saying so">last failure: ${esc(L.lastErr)}</div>`:'')
+    +`<div class="abr-row">`
+      +`<button type="button" class="cdtf" id="adm-land" data-tip="re-serves this hour\u2019s commentary \u2014 no model call, no budget spent">send test (cached)</button>`
+      +`<button type="button" class="cdtf" id="adm-land-f" data-tip="regenerate from the live headline corpus and spend one of today\u2019s landscape budget">send test (fresh)</button>`
+    +`</div><div class="abr-r" id="adm-land-r"></div>`
+    +mySchedRow('landscape');
   // Report what actually shipped: parts, entity-parsed length of each, whether the prose layer
   // degraded, and which budget-ladder steps fired. A silent success tells the operator nothing
   // about whether the message that landed is the message they designed.
   const briefRun=(fresh)=>{
     const out=el('adm-brief-r'); if(out) out.textContent='sending\u2026';
     ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
-    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh})})
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh, mine:true})})
       .then(r=>r.json().catch(()=>null)).then(d=>{
         if(!out) return;
         if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
@@ -2941,6 +2967,36 @@ function renderAdmBrief(){
       }).catch(()=>{ if(out) out.innerHTML='<span class="neg">request failed</span>'; })
       .finally(()=>{ ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=false; }); });
   };
+  const landRun=(fresh)=>{
+    const out=el('adm-land-r'); if(out) out.textContent='sending\u2026';
+    ['adm-land','adm-land-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'landscape',fresh:!!fresh, mine:true})})
+      .then(r=>r.json().catch(()=>null)).then(d=>{
+        if(!out) return;
+        if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
+        const p=[`sent to ${d.sent} account(s) \u00b7 ${(d.chars||[]).join('')} chars`];
+        if(d.sources!=null) p.push(d.sources+' source(s) cited');
+        if(d.model) p.push('model '+esc(d.model));
+        if(d.degraded) p.push('<span class="warn">degraded: '+esc(d.degraded)+'</span>');
+        if(d.dropped&&d.dropped.length) p.push('<span class="warn">shed: '+esc(d.dropped.join(', '))+'</span>');
+        if(d.dayLeft!=null) p.push(d.dayLeft+' left today');
+        out.innerHTML=p.join(' \u00b7 ');
+      }).catch(()=>{ if(out) out.innerHTML='<span class="neg">request failed</span>'; })
+      .finally(()=>{ ['adm-land','adm-land-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=false; }); });
+  };
+  box.querySelectorAll('[data-mysched]').forEach(x=>x.addEventListener('click',()=>{
+    const k=x.dataset.mysched, kind=((P&&P.schedKinds)||[]).find(z=>z.k===k)||{};
+    const me=rows.find(r=>r.mine); if(!me) return;
+    const sc=(me.sched&&me.sched[k])||null;
+    const cur=sc&&sc.hour!=null?String(sc.hour):String(kind.defaultHour!=null?kind.defaultHour:10);
+    const v=(prompt((kind.label||k)+' at which local hour for YOU? (0-23, blank to turn it off)',cur)||'').trim();
+    if(v===''){ pushAct('/api/alerts/prefs',{chat:me.chat, sched:{[k]:{h:null}}, tz:-new Date().getTimezoneOffset()}).then(()=>renderAdmBrief()); return; }
+    const d=(prompt('Which days? ("all", "weekdays", "mon,wed,fri" or "MWF")',sc&&sc.days?sc.days.join(','):(kind.defaultDays?kind.defaultDays.join(','):'all'))||'').trim();
+    const days=schedDaysClient(d);
+    if(days===undefined){ alert('Could not read those days. Try "all", "weekdays", "mon,wed,fri" or "MWF".'); return; }
+    pushAct('/api/alerts/prefs',{chat:me.chat, sched:{[k]:{h:+v, days}}, tz:-new Date().getTimezoneOffset()}).then(()=>renderAdmBrief()); }));
+  { const x=el('adm-land'); if(x) x.addEventListener('click',()=>landRun(false)); }
+  { const x=el('adm-land-f'); if(x) x.addEventListener('click',()=>landRun(true)); }
   { const x=el('adm-brief'); if(x) x.addEventListener('click',()=>briefRun(false)); }
   { const x=el('adm-brief-f'); if(x) x.addEventListener('click',()=>briefRun(true)); }
 }
