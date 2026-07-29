@@ -8933,14 +8933,24 @@ test("regime + coverage are episode-gated: one alert per episode, seeded at boot
   p.coverageScanNow();
   assert.equal(covs().length, 0, "…and it does not accumulate on repeat scans — this is a persistent condition, not an event");
 
-  // It re-arms only once the condition genuinely lapses, then fires on the next occurrence.
-  p.seedRowNow("AAA", { hourlyTs: Date.now() });
-  p.coverageScanNow();
-  p.seedRowNow("AAA", { hourlyTs: Date.now() - 4 * 3600e3 });
-  p.coverageScanNow();
-  assert.equal(covs().length, 1, "a genuinely new episode fires exactly once");
-  p.coverageScanNow(); p.coverageScanNow();
+  // It re-arms only once the condition genuinely lapses — and (2026.07.29-03) only after the
+  // spine has been continuously fresh for a full COVERAGE_REARM_FRESH_MS window. A flap around
+  // the stale line is one episode, not one alert per crossing.
+  const t0 = Date.now();
+  p.seedRowNow("AAA", { hourlyTs: t0 });
+  p.coverageScanNow(t0);                       // fresh observed: the re-arm clock starts here…
+  p.seedRowNow("AAA", { hourlyTs: t0 - 4 * 3600e3 });
+  p.coverageScanNow(t0 + 60e3);
+  assert.equal(covs().length, 0, "a flap (fresh for one scan, stale a minute later) does NOT re-arm — this was the many-messages failure mode");
+  p.seedRowNow("AAA", { hourlyTs: t0 + 60e3 });
+  p.coverageScanNow(t0 + 2 * 60e3);            // fresh again: a NEW fresh stretch, its own clock
+  p.coverageScanNow(t0 + 35 * 60e3);           // …sustained past the window: re-armed
+  p.seedRowNow("AAA", { hourlyTs: t0 - 4 * 3600e3 });
+  p.coverageScanNow(t0 + 36 * 60e3);
+  assert.equal(covs().length, 1, "a genuinely new episode (sustained-fresh, then stale) fires exactly once");
+  p.coverageScanNow(t0 + 37 * 60e3); p.coverageScanNow(t0 + 38 * 60e3);
   assert.equal(covs().length, 1, "and stays quiet while it persists");
+  assert.ok(/no fetch failures recorded/.test(covs()[0].text), "the alert text discloses the WHY: hFail=0 here, so it names queue/budget contention");
 
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
@@ -10387,9 +10397,12 @@ test("episode state survives a restart — the fix that makes trend/regime/cover
   const covs = p2.getTriggers(0, null, true).events.filter((e) => e.kind === "coverage");
   assert.equal(covs.length, 0, "a restored seed is a seed — the restart is not a new episode");
 
-  // …but a transition that spans the restart DOES fire: recovery in p2, then stale again.
-  p2.seedRowNow("AAA", { hourlyTs: Date.now() }); p2.coverageScanNow();
-  p2.seedRowNow("AAA", { hourlyTs: Date.now() - 4 * 3600e3 }); p2.coverageScanNow();
+  // …but a transition that spans the restart DOES fire: recovery in p2 — sustained past the
+  // 2026.07.29-03 re-arm window, a flap is deliberately not a recovery — then stale again.
+  const tR = Date.now();
+  p2.seedRowNow("AAA", { hourlyTs: tR }); p2.coverageScanNow(tR);
+  p2.coverageScanNow(tR + 31 * 60e3);
+  p2.seedRowNow("AAA", { hourlyTs: tR - 4 * 3600e3 }); p2.coverageScanNow(tR + 32 * 60e3);
   assert.equal(p2.getTriggers(0, null, true).events.filter((e) => e.kind === "coverage").length, 1,
     "the transition fires exactly once, across as many deploys as it spans");
 
@@ -11057,7 +11070,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -13094,7 +13107,9 @@ test("the widened earnings class did not weaken the claim-scoped leg", () => {
   // season becomes a dozen interruptions a day and the class gets muted — which is the failure
   // the batched preview exists to avoid having to risk.
   const scan = pol.slice(pol.indexOf("function earnScan()"), pol.indexOf("function earnPreviewScan()"));
-  assert.ok(/if \(e\.vi != null \|\| e\.alo !== 1\) continue;/.test(scan), "shadows and unannounced claims stay excluded");
+  // 2026.07.29-03 folded every copy of this gate into the shared isOpenAnnounced predicate; the
+  // exclusion is unchanged, and now cannot drift per consumer.
+  assert.ok(/if \(!isOpenAnnounced\(e\)\) continue;/.test(scan), "shadows and unannounced claims stay excluded");
   assert.ok(/prox\.diff > 1/.test(scan), "today or tomorrow only");
   const C = require("../src/compute");
   assert.ok(/open <b>breakout<\/b> claim/.test(C.pushFmt({ kind: "earnings", coin: "X", t: "X", when: "tomorrow", session: "amc", claim: "breakout" }, {})),
@@ -14287,4 +14302,80 @@ test("terminal fund/etf: card builders render fixture payloads (behavioral), rou
   assert.ok(pol.includes("company_tickers_mf.json") && pol.includes("NPORT-P"), "ETF lane resolves via the mf map and N-PORT filings");
   assert.ok(/EXT_ERR_TTL = 5 \* 60 \* 1000/.test(pol), "errors cache briefly — a bad symbol cannot hammer sec.gov");
   assert.ok(/user-agent": SEC_UA/.test(pol), "every EDGAR request carries the SEC_CONTACT user-agent");
+});
+
+// ===== spine staleness hardening (build 2026.07.29-03) ==========================================
+// The many-messages coverage episode had three root causes and one delivery flaw; every one is
+// pinned or exercised here. (1) The vol-ordered fetch queue could starve a low-vol name carrying
+// an open claim — the exact set coverageScan alerts on. (2) The silent hourlyWorker catch let a
+// coin back itself off to a 90-min-stale spine with no log trace. (3) Nothing surfaced per-coin
+// spine age + fail state, so episodes were undiagnosable after the fact. (4) coverageArmed
+// re-armed on a single fresh scan, so a flap around the stale line fired per crossing.
+
+test("spine hardening 2026.07.29-03: pure pick comparator — claim priority + age escalation, tier-0 byte-identical", () => {
+  const { hourlyPickTier, hourlyPickBetter } = require("../src/compute");
+  const ESC = 30 * 60 * 1000;
+  // Tier assignment: fresh-ish is tier 0 whatever it holds; past escalation, claim beats no-claim.
+  assert.equal(hourlyPickTier(5 * 60000, true, ESC), 0, "a fresh-ish claim coin is NOT escalated — under a healthy budget the ordering is the historical one");
+  assert.equal(hourlyPickTier(31 * 60000, false, ESC), 1);
+  assert.equal(hourlyPickTier(31 * 60000, true, ESC), 2);
+  // The load-bearing case: a tiny stale claim coin beats the biggest fresh name on the board.
+  const claimStale = { tier: 2, age: 95 * 60000, isNew: false, vol: 1 };
+  const bigFresh = { tier: 0, age: 2 * 60000, isNew: true, vol: 1e9 };
+  assert.ok(hourlyPickBetter(claimStale, bigFresh), "an escalated claim coin outranks volume AND isNew entirely");
+  assert.ok(!hourlyPickBetter(bigFresh, claimStale), "…and the comparison is antisymmetric");
+  // Within an escalated tier: stalest first, volume ignored.
+  const older = { tier: 1, age: 200 * 60000, vol: 1 }, newer = { tier: 1, age: 95 * 60000, vol: 1e9 };
+  assert.ok(hourlyPickBetter(older, newer) && !hourlyPickBetter(newer, older), "inside a tier, staleness decides — volume is out of the picture");
+  // Tier 2 beats tier 1 regardless of age: the claim set is protected first.
+  assert.ok(hourlyPickBetter({ tier: 2, age: 31 * 60000 }, { tier: 1, age: 500 * 60000 }), "claim tier outranks age across tiers");
+  // Tier 0 preserves the historical ordering byte for byte: isNew beats vol, then vol descending.
+  assert.ok(hourlyPickBetter({ tier: 0, isNew: true, vol: 1 }, { tier: 0, isNew: false, vol: 1e9 }), "tier 0: isNew first");
+  assert.ok(hourlyPickBetter({ tier: 0, isNew: false, vol: 5 }, { tier: 0, isNew: false, vol: 3 }), "tier 0: then volume");
+  assert.ok(!hourlyPickBetter({ tier: 0, isNew: false, vol: 3 }, { tier: 0, isNew: false, vol: 5 }), "tier 0: ties never churn best");
+  assert.ok(hourlyPickBetter({ tier: 0, vol: 1 }, null), "null best always loses");
+});
+
+test("spine hardening 2026.07.29-03: poller wiring — shared claim predicate, comparator in pick, flat claim backoff, logged failures, health spines", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+
+  // One predicate defines the protected set, and BOTH consumers (fetch priority + coverage alert)
+  // read it — this is the one-code-path claim between "what we warn about" and "what we refresh first".
+  assert.ok(pol.includes("const isOpenAnnounced = (e) => e.vi == null && e.alo === 1;"), "shared open-claim predicate missing");
+  assert.ok((pol.match(/isOpenAnnounced\(e\)/g) || []).length >= 2, "both openClaimCoins and coverageScan must consume the shared predicate");
+  assert.ok(!pol.includes("e.vi != null || e.alo !== 1"), "coverageScan's inlined copy of the predicate must be gone — two copies is how they drift");
+
+  // pick() escalation: constant derived from HOURLY_STALE (not a magic number), comparator imported
+  // from compute (pure, tested above), claim set computed only on the hourly lane.
+  assert.ok(pol.includes("const CLAIM_PRIORITY_AGE = 3 * HOURLY_STALE;"), "escalation age must derive from HOURLY_STALE");
+  assert.ok(pol.includes('const { hourlyPickTier, hourlyPickBetter } = require("./compute");'), "comparator must live in compute (pure), not inline in the scheduler");
+  assert.ok(pol.includes('const claims = prefix === "h:" ? openClaimCoins() : null;'), "claim escalation is hourly-lane only — daily/5m/funding orderings untouched");
+  assert.ok(pol.includes("hourlyPickTier(age, claims.has(r.coin), CLAIM_PRIORITY_AGE)") && pol.includes("if (hourlyPickBetter(key, bestKey)) { best = r; bestKey = key; }"), "pick must route through the pure comparator");
+  assert.ok(pol.includes("if (r.coin === benchCoin) return r.coin;"), "benchmark-first is untouched — it still preempts every tier");
+
+  // Flat backoff for claim coins + the catch is no longer silent.
+  assert.ok(pol.includes("r.hFailUntil = Date.now() + (claim ? FAIL_BACKOFF : Math.min(FAIL_BACKOFF * r.hFail, 15 * 60 * 1000));"), "claim coins must ride a flat FAIL_BACKOFF, never the 15-min ceiling");
+  assert.ok(pol.includes("log(`hourly refresh failed for ${coin}:"), "the hourly fetch failure must reach the log — the silent catch was the observability gap");
+  assert.ok(!/catch \(_\) \{\s*\n\s*const r = rows\.get\(coin\);\s*\n\s*if \(r\) \{ r\.hFail =/.test(pol), "the old silent one-line hourly catch must be gone");
+
+  // Coverage hysteresis: fresh-stretch clock starts on observation, dies on any stale scan, and
+  // re-arm requires the full window. Ordering pins: the delete must precede the armed checks.
+  assert.ok(pol.includes("const COVERAGE_REARM_FRESH_MS = 30 * 60 * 1000;"), "re-arm window constant missing");
+  assert.ok(pol.includes("if (!coverageFreshAt.has(key)) coverageFreshAt.set(key, now);"), "fresh stretch must be clocked from first observation");
+  assert.ok(pol.includes("now - coverageFreshAt.get(key) >= COVERAGE_REARM_FRESH_MS"), "re-arm must require the sustained window");
+  const scan = pol.slice(pol.indexOf("function coverageScan(atNow)"));
+  const delAt = scan.indexOf("coverageFreshAt.delete(key);"), armChk = scan.indexOf('if (coverageArmed.get(key) === false) continue;');
+  assert.ok(delAt > 0 && armChk > 0 && delAt < armChk, "a stale scan must kill the fresh clock BEFORE the armed checks, or a flap keeps an old clock alive");
+  assert.ok(pol.includes("function coverageScan(atNow)"), "coverageScan must accept a fake clock — the hysteresis is untestable on wall time");
+  assert.ok(scan.includes("coverageArmed.delete(k); coverageFreshAt.delete(k);"), "dead claims must drop BOTH maps, or freshAt leaks");
+
+  // The alert says WHY: fail state when there is one, honest budget attribution when there isn't.
+  assert.ok(pol.includes("fetch failing (${r.hFail} consecutive") && pol.includes("no fetch failures recorded \\u2014 queue/budget contention"), "coverage text must disclose the cause split");
+
+  // Health spines block: stale list rides the SAME threshold the alert uses (one constant), sorted
+  // worst-first, capped, carrying the fail state that makes the episode diagnosable from one curl.
+  assert.ok(pol.includes("spines: { staleMs: COVERAGE_STALE_MS, stale: staleSp.length,"), "health must expose the spines block on the alert's own threshold");
+  assert.ok(pol.includes("staleSp.sort((a, b) => b.ageMin - a.ageMin);") && pol.includes("coins: staleSp.slice(0, 20)"), "worst-first, capped");
+  assert.ok(pol.includes("hFail: r.hFail || 0,") && pol.includes("backoffS:"), "per-coin fail state must ride the health entry");
 });
