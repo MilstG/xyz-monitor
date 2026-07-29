@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.28-22";
+const VERSION = "2026.07.29-01";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -902,6 +902,18 @@ async function main() {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
     return poller.askBoard(b.q || "", b.ctx || {});
+  });
+  // On-demand external fundamentals for the ask terminal. Both endpoints are pull-through
+  // caches over SEC EDGAR (24h TTL, 5-min error TTL) — the first ask for a name does the
+  // round trip, everyone after reads the cache. Symbols are validated in the poller; an
+  // unknown or non-fund symbol returns an honest { ok:false, error } the card renders as-is.
+  fastify.get("/api/fund/:t", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    return poller.fundamentals(req.params.t || "");
+  });
+  fastify.get("/api/etf/:t", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    return poller.etfHoldings(req.params.t || "");
   });
   fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR }, ...poller.stats(), ts: Date.now() }));
 
