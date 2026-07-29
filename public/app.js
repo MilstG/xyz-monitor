@@ -682,7 +682,7 @@ function buildHead(){ const tr=el('head'); tr.innerHTML='';
     if(c.key==='dvb'){ const b=dvbBasketDef(); if(featureOn('baskets')&&!BASKETS.list.length) loadBaskets();
       // The basket name IS the control — a bordered caret pill wrapping a real (visible) select, so
       // the "which basket" affordance can't be mistaken for static header text (the -09 bug).
-      label=`\u0394 vs <span class="dvb-ctl" data-name="${b?esc(b.name):'\u2014'}"><span class="bkg">\u2b12</span><select id="dvb-pick" class="dvb-pick" title="pick the basket this \u0394 column measures against \u2014 window follows the board timeframe">${dvbPickOpts()}</select><span class="dvb-car">\u25be</span></span> <span class="sec" style="font-weight:400">(${state.tf})</span>`; }
+      label=`\u0394 vs <span class="dvb-ctl" data-name="${b?esc(b.label||b.name):'\u2014'}"><span class="bkg">\u2b12</span><select id="dvb-pick" class="dvb-pick" title="pick the basket this \u0394 column measures against \u2014 window follows the board timeframe">${dvbPickOpts()}</select><span class="dvb-car">\u25be</span></span> <span class="sec" style="font-weight:400">(${state.tf})</span>`; }
     const active=state.sortKey===c.key; th.setAttribute('aria-sort', active?(state.sortDir==='asc'?'ascending':'descending'):'none');
     if(c.tip) th.title=c.tip;
     th.innerHTML=`<span class="grip" aria-hidden="true">⠿</span>${label}`+(active?`<span class="arw">${state.sortDir==='asc'?'▲':'▼'}</span>`:'');
@@ -1220,6 +1220,9 @@ function rollStability(roll){ const v=roll.filter(x=>x!=null&&isFinite(x)); if(v
 function openPair(i,j){ const rows=CORR._rows; if(!rows||i==null||j==null||i===j||i>=rows.length||j>=rows.length) return;
   state.corr.pair=[i,j]; state.corr.selected=null; renderCorrPanel(); renderPairPanel();
   el('pairpanel').scrollIntoView({behavior:'smooth',block:'nearest'}); }
+// A pair-view leg's display name: a basket leg shows its clean label (industry) or token; a ticker
+// shows its symbol. The ratio/candles handoff still uses .ticker (the key) — display only.
+function pairLegName(R){ return R._basket ? (R._basket.label||R._basket.name) : String(R.ticker||'').toUpperCase(); }
 function renderPairPanel(){
   const p=el('pairpanel'), rows=CORR._rows, pr=state.corr.pair;
   if(!rows||!pr){ p.hidden=true; return; }
@@ -1228,7 +1231,7 @@ function renderPairPanel(){
   const minPts = cr ? Math.max(12, CORR._minOv||20) : 8;
   const close='<button class="btn xtiny" id="pairclose" title="close" style="float:right">✕</button>';
   if(!al||al.days.length<minPts){ p.hidden=false;
-    p.innerHTML=`<div class="cp-head">${A._basket?'<span class="bkg">\u2b12</span>':''}${esc(A.ticker)} ÷ ${B._basket?'<span class="bkg">\u2b12</span>':''}${esc(B.ticker)} ${close}</div><div class="sec" style="margin-top:6px">Not enough overlapping ${cr?'intraday':'daily'} history yet — still loading in the background, or one of these listed recently.</div>`;
+    p.innerHTML=`<div class="cp-head">${A._basket?'<span class="bkg">\u2b12</span>':''}${esc(pairLegName(A))} ÷ ${B._basket?'<span class="bkg">\u2b12</span>':''}${esc(pairLegName(B))} ${close}</div><div class="sec" style="margin-top:6px">Not enough overlapping ${cr?'intraday':'daily'} history yet — still loading in the background, or one of these listed recently.</div>`;
     el('pairclose').onclick=()=>{ state.corr.pair=null; p.hidden=true; }; return; }
   const retA=[],retB=[]; for(let k=1;k<al.pa.length;k++){ retA.push(Math.log(al.pa[k]/al.pa[k-1])); retB.push(Math.log(al.pb[k]/al.pb[k-1])); }
   let saA=0,saB=0; const nR=retA.length; for(let k=0;k<nR;k++){saA+=retA[k];saB+=retB[k];}
@@ -1243,7 +1246,7 @@ function renderPairPanel(){
   const rcap=z>1.5?`spread stretched high — ${esc(A.ticker)} rich vs ${esc(B.ticker)}`:(z<-1.5?`spread stretched low — ${esc(A.ticker)} cheap vs ${esc(B.ticker)}`:'spread near its mean (fair value)');
   p.hidden=false;
   p.innerHTML=`
-    <div class="cp-head">${A._basket?'<span class="bkg">\u2b12</span>':''}${esc(A.ticker)} ÷ ${B._basket?'<span class="bkg">\u2b12</span>':''}${esc(B.ticker)} <span class="sec" style="font-weight:400">— ${tfLabel()} pair view</span> ${close}${featureOn('baskets')?`<button class="btn xtiny" id="pairratio" data-tip="open these two legs as ratio candles — the same ${esc(A.ticker)} ÷ ${esc(B.ticker)} series as TF candlesticks with an honest EMA200" style="float:right;margin-right:8px">candles</button>`:''}</div>
+    <div class="cp-head">${A._basket?'<span class="bkg">\u2b12</span>':''}${esc(pairLegName(A))} ÷ ${B._basket?'<span class="bkg">\u2b12</span>':''}${esc(pairLegName(B))} <span class="sec" style="font-weight:400">— ${tfLabel()} pair view</span> ${close}${featureOn('baskets')?`<button class="btn xtiny" id="pairratio" data-tip="open these two legs as ratio candles — the same ${esc(A.ticker)} ÷ ${esc(B.ticker)} series as TF candlesticks with an honest EMA200" style="float:right;margin-right:8px">candles</button>`:''}</div>
     <div class="pairstats">
       <span>r<b class="${cNow>=0?'pos':'neg'}">${cNow==null?'—':(cNow>=0?'+':'')+cNow.toFixed(2)}</b></span>
       <span>${esc(A.ticker)}<b>${sret(ra)}</b></span>
@@ -1381,6 +1384,11 @@ async function basketMutate(body){
   return body.drop ? guestDropBasket(body.name) : guestCreateBasket(body.name, body.members);
 }
 function basketByName(t){ t=String(t||'').toUpperCase(); for(const b of BASKETS.list){ if(b.name===t) return b; } return null; }
+// Display name for a basket key: an industry shadow carries a clean human label ("Semiconductors"),
+// which is what the user should SEE — the 12-char token (SEMICONDUCTO) stays the internal key for
+// selection, ratio legs, colour order, everything. One helper so chips, legend, picker, RATIO and
+// the matrix all show the same friendly name and nothing re-derives it.
+function basketDisplayName(t){ const b=basketByName(t); return (b&&b.label)?b.label:String(t||'').toUpperCase(); }
 function isBasketName(t){ return !!basketByName(t); }
 function basketScopeList(){ const cr=state.scope==='crypto'; return BASKETS.list.filter(b=>(b.scope==='crypto')===cr); }
 // Manager list: the operator's own baskets + curated defaults (MAG7), NEVER the derived shadow
@@ -1473,7 +1481,7 @@ function dvbBasketDef(){
 }
 function dvbPickOpts(){
   const cur=dvbBasketDef();
-  return basketScopeList().map(b=>`<option value="${esc(b.name)}"${cur&&cur.name===b.name?' selected':''}>\u2b12 ${esc(b.name)}</option>`).join('')||'<option value="">\u2014</option>';
+  return basketScopeList().map(b=>`<option value="${esc(b.name)}"${cur&&cur.name===b.name?' selected':''}>\u2b12 ${esc(b.label||b.name)}</option>`).join('')||'<option value="">\u2014</option>';
 }
 function computeDvb(rows){
   const f=TF_MAP[state.tf], b=dvbBasketDef();
@@ -1629,11 +1637,15 @@ function renderRatio(){
   if(!featureOn('baskets')||state.view!=='corr'||RATIO.closed||!RATIO.num){ p.hidden=true; return; }
   const d=RATIO.data;
   const close=`<button class="btn xtiny" id="rt-close" title="close" style="float:right">\u2715</button>`;
-  const head=(extra)=>`<div class="cp-head">RATIO <span class="sec" style="font-weight:400">\u2014 ${esc(RATIO.num)} \u00f7 ${esc(RATIO.den)}</span> ${close}${extra||''}</div>`;
+  const head=(extra)=>`<div class="cp-head">RATIO <span class="sec" style="font-weight:400">\u2014 ${esc(basketDisplayName(RATIO.num))} \u00f7 ${esc(basketDisplayName(RATIO.den))}</span> ${close}${extra||''}</div>`;
   if(!d){ p.hidden=false; p.innerHTML=head(); wireRatioCommon(); return; }
   if(!d.ok){ p.hidden=false;
     p.innerHTML=head()+`<div class="sec" style="margin-top:8px">${esc(d.error||'ratio unavailable')}</div>`;
     wireRatioCommon(); return; }
+  // Adopt the server's canonical leg names: if you typed a natural label ("semiconductor"), the
+  // server resolved it to the real basket token, and the panel should show that, not the raw input.
+  if(d.num) RATIO.num=String(d.num).toUpperCase();
+  if(d.den) RATIO.den=String(d.den).toUpperCase();
   const tfBtns=['1h','4h','12h','1d'].map(t=>`<button class="cg-pill${RATIO.tf===t?' on':''}" data-rtf="${t}">${t.toUpperCase()}</button>`).join('');
   const scBtns=[['reb','rebased 100'],['raw','raw ratio']].map(([k,l])=>`<button class="cg-pill${RATIO.scale===k?' on':''}" data-rsc="${k}" data-tip="${k==='reb'?'both the candles and the EMA multiplied by 100 \u00f7 first shown open \u2014 a scalar display transform, the geometry is untouched':'the ratio as computed \u2014 numerator close \u00f7 denominator close on the hourly spine'}">${l}</button>`).join('');
   const emaOk=!!d.ema200;
@@ -1793,7 +1805,7 @@ function compgLegend(S){
       ? `${r.last.toFixed(1)} <span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}%</span>`
       : `<span class="${r.chg>=0?'pos':'neg'}">${r.chg>=0?'+':''}${r.chg.toFixed(1)}pp</span>`);
     const b=basketByName(r.tk);
-    return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"${b?` data-tip="${esc(basketTip(b))}"`:''}><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${b?'<span class="bkg">\u2b12</span>':''}${esc(r.tk)}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
+    return `<div class="cg-lg${off}" data-tk="${esc(r.tk)}"${b?` data-tip="${esc(basketTip(b))}"`:''}><span class="cg-sw" style="background:${r.color}"></span><span class="cg-tk">${b?'<span class="bkg">\u2b12</span>':''}${esc(basketDisplayName(r.tk))}</span>${late}<span class="cg-v">${v}</span></div>`; }).join('');
 }
 // ===== COMP/G picker: universe-validated typeahead + fill shortcuts =====
 // The panel auto-opens on the Corr tab (no launcher button) and re-renders live on every
@@ -1828,7 +1840,7 @@ function compgWirePicker(p){
     const m=[...uni.filter(t=>t.startsWith(q)),...uni.filter(t=>!t.startsWith(q)&&t.includes(q))].slice(0,6-Math.min(2,bks.length));
     if(!m.length&&!bks.length){ sg.innerHTML='<div class="cg-sg-none">no match in the live universe</div>'; sg.hidden=false; return; }
     sg.innerHTML=bks.map(t=>{ const b=basketByName(t); const tag=b&&b.shadow?(b.kind==='industry'?'industry':'sector'):(b&&b.builtin?'built-in':'basket');
-        const nm=b&&b.label?`${esc(t)} <span class="sec" style="font-size:9px">${esc(b.label)}</span>`:esc(t);
+        const nm=b&&b.label?`${esc(b.label)} <span class="sec" style="font-size:9px">${esc(t)}</span>`:esc(t);
         return `<div class="cg-sg bk" data-t="${esc(t)}"><span class="bkg">\u2b12</span> ${nm} <span class="cg-sg-r">${tag}</span></div>`; }).join('')
       + m.map(t=>`<div class="cg-sg" data-t="${esc(t)}">${esc(t)}</div>`).join(''); sg.hidden=false;
     sg.querySelectorAll('.cg-sg').forEach(x=>x.onclick=()=>{ if(compgAddName(x.dataset.t)){ const ni=el('cg-add'); if(ni){ ni.focus(); } } }); };
@@ -1838,7 +1850,12 @@ function compgWirePicker(p){
     if(e.key!=='Enter') return;
     const q=inp.value.trim().toUpperCase(); if(!q) return;
     const uni=compgUniverse().filter(t=>!COMPG.sel.includes(t));
-    const m=uni.find(t=>t===q)||uni.find(t=>t.startsWith(q));
+    // Resolve a typed basket LABEL to its token too, so "semiconductor" adds the SEMICONDUCTO
+    // shadow even though the visible universe key is the truncated token.
+    const nq=q.replace(/[^A-Z0-9]/g,''), strip=s=>s.replace(/S$/,'');
+    const byLabel=()=>{ for(const b of basketScopeList()){ if(!b.label) continue; const nl=b.label.toUpperCase().replace(/[^A-Z0-9]/g,'');
+      if(nl===nq||strip(nl)===strip(nq)||((nl.startsWith(nq)||nq.startsWith(nl))&&Math.min(nl.length,nq.length)>=5)) return b.name; } return null; };
+    const m=uni.find(t=>t===q)||uni.find(t=>t.startsWith(q))||byLabel();
     if(m&&compgAddName(m)){ const ni=el('cg-add'); if(ni) ni.focus(); } };
   const t8=el('cg-top8'); if(t8) t8.onclick=()=>{ COMPG.sel=compgDefaultSel(); COMPG.off=new Set(); COMPG.base='__basket'; renderCompg(); };
   const w=el('cg-watch'); if(w) w.onclick=()=>{ const uni=new Set(compgUniverse());
@@ -1882,7 +1899,7 @@ function openCompg(tickers){
 // One chip template for both COMP/G branches. Basket anatomy — dashed border + ⬒ glyph + the
 // disclosure tooltip — exists so a synthetic series can never be mistaken for a listed name.
 function compgChipHtml(t,i){ const b=basketByName(t);
-  return `<span class="cg-chip${COMPG.off.has(t)?' off':''}${b?' bk':''}" data-tk="${esc(t)}"${b?` data-tip="${esc(basketTip(b))}"`:''}><span class="cg-sw" style="background:${compgColor(i)}"></span>${b?'<span class="bkg">\u2b12</span>':''}${esc(t)}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`; }
+  return `<span class="cg-chip${COMPG.off.has(t)?' off':''}${b?' bk':''}" data-tk="${esc(t)}"${b?` data-tip="${esc(basketTip(b))}"`:''}><span class="cg-sw" style="background:${compgColor(i)}"></span>${b?'<span class="bkg">\u2b12</span>':''}${esc(basketDisplayName(t))}<span class="cg-x" data-x="${esc(t)}">✕</span></span>`; }
 function renderCompg(){
   const p=el('compg'); if(!p) return;
   if(COMPG.sel.length<2){ p.hidden=false;
