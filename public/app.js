@@ -2855,6 +2855,7 @@ function renderAdmRecips(){
     const bH=(r.briefHour!=null?r.briefHour:null);
     const bLbl=bH!=null?`${String(bH).padStart(2,'0')}:00${r.briefUtc?' UTC':''}`:'off';
     const briefChip=openR?`<button type="button" class="cdtf${bH!=null?' on':''}" data-apbrief="${esc(r.chat)}" data-tip="the morning brief for THIS recipient \u2014 click to set the hour or turn it off. Setting it from here records the hour only, never your timezone: stamping your offset onto somebody else's account would move their delivery without them asking.">brief ${esc(bLbl)}</button>`:'';
+    const opChip=openR?`<button type="button" class="cdtf${r.admin?' on':''}" data-aop="${esc(r.chat)}" data-tip="operator designation. The operator receives server-health (ops) alerts and the \u2018send test\u2019 fires from the boxes above. Any number of recipients can hold it; zero means test buttons refuse rather than guess. Click to toggle.">\u265b operator${r.admin?'':' \u00b7 off'}</button>`:'';
     const schedChips=openR?((P.schedKinds||[]).map(k=>{
       const sc=(r.sched&&r.sched[k.k])||null, h=sc?sc.hour:null;
       const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''}${sc&&sc.days?' \u00b7 '+sc.daysLabel:''}`:'off';
@@ -2863,7 +2864,7 @@ function renderAdmRecips(){
     return `<div class="arule" style="flex-wrap:wrap"><span class="arec-h" data-admexp="${esc(r.chat)}"><span class="asec-c">${openR?'\u25be':'\u25b8'}</span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${nOn} class(es) \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':(r.owned?' \u00b7 another browser':' \u00b7 unclaimed')}</span></span>`
       +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
       +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span>`
-      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${schedChips}</span>`:'')+`</div>`; }).join('')
+      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${opChip}${schedChips}</span>`:'')+`</div>`; }).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>');
   b.querySelectorAll('[data-admexp]').forEach(x=>x.addEventListener('click',()=>{
     admRecOpen[x.dataset.admexp]=!admRecOpen[x.dataset.admexp]; renderAdmRecips(); }));
@@ -2881,6 +2882,11 @@ function renderAdmRecips(){
     // No tz in this write. An admin setting somebody else's hour from their own browser would
     // otherwise stamp the operator's offset onto that person's record and silently move them.
     pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour: v===''?null:+v}).then(()=>renderAdmRecips()); }));
+  b.querySelectorAll('[data-aop]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=rows.find(r=>r.chat===x.dataset.aop); if(!rec) return;
+    const to=!rec.admin;
+    if(!confirm((to?'Make ':'Remove ')+rec.name+(to?' the operator? They will receive server-health (ops) alerts and the test fires from the admin boxes.':' as operator? They will stop receiving ops alerts and test fires.'))) return;
+    pushAct('/api/alerts/prefs',{chat:rec.chat, operator:to}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-asched]').forEach(x=>x.addEventListener('click',()=>{
     const rec=rows.find(r=>r.chat===x.dataset.aschat); if(!rec) return;
     const k=x.dataset.asched, kind=((P.schedKinds)||[]).find(z=>z.k===k)||{};
@@ -2912,8 +2918,11 @@ function renderAdmBrief(){
   // to know to expand. One resolved line, click to edit, same validated route as everything else.
   const mySchedRow=(k)=>{
     const kind=((P&&P.schedKinds)||[]).find(z=>z.k===k)||{};
-    const me=rows.find(r=>r.mine);
-    if(!me) return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <span class="warn">link a telegram above to schedule yourself</span></div>`;
+    // Prefer the row this browser linked; fall back to the designated operator, since that is who
+    // the admin boxes serve — an operator administering from a second machine still sees and edits
+    // their own schedule here instead of a dead "link a telegram" line.
+    const me=rows.find(r=>r.mine)||rows.find(r=>r.admin);
+    if(!me) return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <span class="warn">link a telegram or mark an operator below</span></div>`;
     const sc=(me.sched&&me.sched[k])||null, h=sc?sc.hour:null;
     const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''} \u00b7 ${esc(sc&&sc.daysLabel||'daily')}`:'off';
     return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <button type="button" class="cdtf${h!=null?' on':''}" data-mysched="${esc(k)}" data-tip="when YOUR copy of ${esc(kind.label||k)} arrives \u2014 hour and days. Everyone else\u2019s is on their roster row.">${esc(lbl)}</button></div>`;
@@ -2931,7 +2940,7 @@ function renderAdmBrief(){
     +`<div class="abr-row">`
       +`<button type="button" class="cdtf" id="adm-brief" data-tip="re-serves this hour\u2019s brief \u2014 no model call, no budget spent">send test (cached)</button>`
       +`<button type="button" class="cdtf" id="adm-brief-f" data-tip="regenerate from live state and spend one of today\u2019s brief budget">send test (fresh)</button>`
-      +`<span class="sec" style="font-size:11px" data-tip="test fires go ONLY to the telegram account(s) YOU linked from this browser \u2014 never to other recipients. To send someone else a copy, use their roster row below.">\u2192 just you, never other recipients</span>`
+      +`<span class="sec" style="font-size:11px" data-tip="test fires go ONLY to the recipient(s) marked operator on the roster below \u2014 never to anyone else. Toggle who is operator with the crown chip on their row.">\u2192 operator only</span>`
     +`</div><div class="abr-r" id="adm-brief-r"></div>`
     +mySchedRow('brief');
   // Separate state line and test pair, not a shared row with the brief: separate schedules,
@@ -2954,7 +2963,7 @@ function renderAdmBrief(){
   const briefRun=(fresh)=>{
     const out=el('adm-brief-r'); if(out) out.textContent='sending\u2026';
     ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
-    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh, mine:true})})
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh, operator:true})})
       .then(r=>r.json().catch(()=>null)).then(d=>{
         if(!out) return;
         if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
@@ -2970,7 +2979,7 @@ function renderAdmBrief(){
   const landRun=(fresh)=>{
     const out=el('adm-land-r'); if(out) out.textContent='sending\u2026';
     ['adm-land','adm-land-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
-    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'landscape',fresh:!!fresh, mine:true})})
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'landscape',fresh:!!fresh, operator:true})})
       .then(r=>r.json().catch(()=>null)).then(d=>{
         if(!out) return;
         if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
