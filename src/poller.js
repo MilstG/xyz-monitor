@@ -8906,6 +8906,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         quietNow: !!(r.quiet && inQuietWindow(now, r.quiet)),
         sentHour: (r.sent || []).filter((t) => now - t < 3600e3).length })),
       code: codes.length ? codes[codes.length - 1] : null,
+      // Brief state for the admin block. Operator-facing only — it names the model and the
+      // remaining budget, so it rides behind the same isAdmin gate the rest of that panel uses.
+      brief: isAdmin ? { enabled: BRIEF_ON, defaultHour: BRIEF_DEFAULT_HOUR, perDay: BRIEF_PER_DAY,
+        dayLeft: briefDayLeft(), model: BRIEF_MODEL, lastErr: briefLastErr } : null,
       queue: pushQueue.length, dropped: pushDropped, capHour: PUSH_CAP_HOUR,
       holdMs: Math.max(0, pushHoldUntil - now), lastErr: pushLastErr,
       log: pushLog.slice(0, 12),
