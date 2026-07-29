@@ -6,7 +6,8 @@ const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require(".
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
-const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, FOMC_DECISIONS } = require("./compute");
+const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, FOMC_DECISIONS,
+  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, briefVisibleLen, BRIEF_GROUP_MIN } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -4361,6 +4362,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             macroStats.FOMC = { cur: { lo: lo.v, hi: hi.v, d: hi.d }, prev: loP != null && hiP != null ? { lo: loP, hi: hiP } : null };
           }
         }
+        // Level series (rates + claims) for the morning brief. Isolated on purpose: these are
+        // additive to the brief and must never be able to cost the calendar its entries.
+        try { await sleep(150); await fetchMacroLevels(fget); }
+        catch (e2) { log("macro: level series unavailable (brief rate lines absent): " + (e2 && e2.message)); }
       } else err = "FRED_KEY not set";
     } catch (e) { err = (e && e.message) || "fetch failed"; }
     // The FOMC table serves regardless — a dead FRED (or no key) still puts rate decisions on
@@ -4768,7 +4773,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Same silent first look for the 200 lane: any event bar already standing at boot is seeded.
     setTimeout(() => { try { ma200Scan(); } catch (_) {} maPrimed = true; log("ma200 alerts primed"); }, 6 * 60 * 1000);
     setInterval(safeTick(coverageScan, "coverageScan"), 10 * 60 * 1000);
-    setInterval(safeTick(digestTick, "digestTick"), 5 * 60 * 1000);
+    // Brief delivery runs on a 5-minute cadence: the hour match is exact, so a coarser tick would
+    // miss a recipient whose hour opened and closed between polls.
+    setInterval(() => { briefTick().catch((e) => log("briefTick failed (isolated, server stays up): " + (e && e.message))); }, 5 * 60 * 1000);
     // The EDGAR rotation covers 2 names a minute, so a full roster pass takes ~40 minutes. Priming
     // only after that means the 7-day backlog every name carries is seeded silently instead of
     // arriving as a wall of notifications on the first deploy of the day.
@@ -7379,7 +7386,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         muted: !!r.muted, lastOk: +r.lastOk || null, lastErr: r.lastErr || null,
         quiet: (r.quiet && Number.isFinite(r.quiet.from) && Number.isFinite(r.quiet.to))
           ? { from: +r.quiet.from, to: +r.quiet.to, tz: +r.quiet.tz || 0 } : null,
-        digestHour: Number.isFinite(r.digestHour) ? +r.digestHour : null });
+        digestHour: Number.isFinite(r.digestHour) ? +r.digestHour : null,
+        dgSet: r.dgSet ? 1 : 0, tz: Number.isFinite(r.tz) ? +r.tz : null });
     }
     if (Number.isFinite(d.offset)) pushOffset = d.offset;
     return pushRecipients.size;
@@ -7463,6 +7471,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // and nobody wants their first message from this bot to be two hundred stale setups.
       cur: trigSeq, classes: prev ? prev.classes : null, trig: prev ? prev.trig : {},
       quiet: prev ? prev.quiet : null, digestHour: prev ? prev.digestHour : null,
+      // A fresh link inherits the default brief hour by leaving dgSet clear.
+      dgSet: prev ? (prev.dgSet ? 1 : 0) : 0, tz: prev && Number.isFinite(prev.tz) ? prev.tz : null,
       muted: false, lastOk: null, lastErr: null });
     persistPush();
     log(`push: linked recipient ${name || key} (${pushMask(key)})`);
@@ -8165,64 +8175,387 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return fired;
   }
 
-  // ---- daily digest ------------------------------------------------------------------------------
-  // This is where the classes that failed the frequency test in slice E finally get a home. News
-  // headlines land at tens per day, which is unusable as interruptions and perfectly fine as a
-  // once-a-day list. The digest is also the honest counterweight to quiet hours and the hourly cap:
-  // it states what the day actually contained, including what was suppressed.
-  const DIGEST_MAX_HEADLINES = 8;
-  function buildDigest(now) {
+
+  // ===== morning brief (build 2026.07.28-13) ======================================================
+  // Replaces the ops digest. See the contract notes above renderBrief in compute.js: synthesis only,
+  // every number mechanical, honest absence, and it must fit inside Telegram's hard 4096 ceiling.
+  //
+  // Cost shape: ONE model call per hour-bucket, shared by every recipient who wakes at that hour,
+  // on its own daily budget so a brief can never eat the report allowance. A failure at any point —
+  // no key, budget spent, refusal, validator reject, timeout — drops the two prose sections and
+  // ships the mechanical brief. A recipient never gets silence because the model had a bad morning.
+  const BRIEF_ON = String(process.env.BRIEF_ENABLED || "1") !== "0";
+  // 10:00 UTC. Parsed explicitly rather than with `|| 10`, so that BRIEF_DEFAULT_HOUR=0 means
+  // midnight UTC instead of silently falling through to the default — an env var that ignores one
+  // of its own legal values is a trap.
+  const _briefHourEnv = Number(process.env.BRIEF_DEFAULT_HOUR);
+  const BRIEF_DEFAULT_HOUR = Number.isFinite(_briefHourEnv) ? Math.min(23, Math.max(0, Math.trunc(_briefHourEnv))) : 10;
+  const BRIEF_PER_DAY = Math.max(1, Number(process.env.BRIEF_PER_DAY) || 6);
+  const BRIEF_EFFORT = process.env.BRIEF_EFFORT || "medium";
+  const BRIEF_MODEL = process.env.BRIEF_MODEL || AI_MODEL;
+  const BRIEF_CACHE_MS = 55 * 60 * 1000;
+  const BRIEF_MOVERS_N = 3, BRIEF_NEWS_CLUSTERS = 3, BRIEF_NEWS_PER = 3, BRIEF_IDX_MAX = 5;
+  let briefCache = null;              // { key, at, messages, dropped, model, degraded }
+  let briefDay = { d: "", n: 0 };
+  let briefLastErr = null;
+  const briefSent = new Map();        // chat -> YYYY-MM-DD already sent
+
+  function briefDayKey(now) { return new Date(now).toISOString().slice(0, 10); }
+  function briefDayLeft() {
+    const d = briefDayKey(Date.now());
+    if (briefDay.d !== d) return BRIEF_PER_DAY;
+    return Math.max(0, BRIEF_PER_DAY - briefDay.n);
+  }
+
+  // ---- FRED level series: rates + claims ---------------------------------------------------------
+  // The release calendar (MACRO_RELEASES) answers "what prints and when". It carries no LEVELS, so
+  // the brief had nothing true to say about the curve. These four series are daily/weekly, cheap,
+  // and are the ones actually asked for. Same degradation contract as everything else on this tick:
+  // no key or a dead endpoint means the rates lines are ABSENT from the brief, never stale or faked.
+  const MACRO_LEVELS = [
+    { k: "10y", sid: "DGS10", dp: 2, unit: "" },
+    { k: "2y", sid: "DGS2", dp: 2, unit: "" },
+    { k: "30y", sid: "DGS30", dp: 2, unit: "" },
+    { k: "claims", sid: "ICSA", dp: 0, unit: "k", scale: 0.001 },
+  ];
+  let macroLevels = null;   // { at, series: { k: { v, prev, wowBp, obsD } } }
+  async function fetchMacroLevels(fget) {
+    const out = {};
+    for (const def of MACRO_LEVELS) {
+      try {
+        const j = await fget("series/observations", { series_id: def.sid, sort_order: "desc", limit: 30 });
+        const obs = fredObsSeries(j);
+        if (!obs.length) continue;
+        const asc = obs.slice();
+        const last = asc[asc.length - 1];
+        // Week-over-week off the observation dates, not "five rows back": treasury series skip
+        // holidays, and counting rows would silently compare across a long weekend as if it were a week.
+        const wk = Date.parse(last[0]) - 7 * 24 * 3600e3;
+        let prev = null;
+        for (let i = asc.length - 2; i >= 0; i--) { if (Date.parse(asc[i][0]) <= wk) { prev = asc[i]; break; } }
+        out[def.k] = { v: last[1], obsD: last[0], prev: prev ? prev[1] : null,
+          chg: prev ? +(last[1] - prev[1]).toFixed(3) : null };
+      } catch (_) { /* one dead series must not cost the others */ }
+    }
+    if (Object.keys(out).length) macroLevels = { at: Date.now(), series: out };
+    return macroLevels;
+  }
+  // Rate lines for the brief, built ONLY from series that actually came back. 2s10s is derived and
+  // therefore requires both legs — a spread computed from one leg would be a fabrication.
+  function briefRates() {
+    const s = macroLevels && macroLevels.series;
+    if (!s) return { rates: [], data: [] };
+    const rates = [], data = [];
+    const bp = (c) => (c == null ? null : (c > 0 ? "+" : "\u2212") + Math.abs(Math.round(c * 100)) + "bp w/w");
+    for (const k of ["10y", "2y", "30y"]) if (s[k]) rates.push({ k, v: s[k].v.toFixed(2), chg: bp(s[k].chg) });
+    if (s["10y"] && s["2y"]) {
+      const sp = Math.round((s["10y"].v - s["2y"].v) * 100);
+      rates.push({ k: "2s10s", v: (sp >= 0 ? "+" : "\u2212") + Math.abs(sp) + "bp", chg: null });
+    }
+    if (s.claims) data.push({ k: "Claims", v: Math.round(s.claims.v / 1000) + "k" });
+    return { rates, data };
+  }
+
+  // ---- context assembly --------------------------------------------------------------------------
+  // Thin: every number here is read off state the poller already maintains. Nothing is computed for
+  // the brief that the board does not already compute for itself — that is what keeps the brief and
+  // the board from ever disagreeing.
+  function briefRowsFor(uni) {
+    const list = uni === "crypto" ? (crypto ? mainMarkets() : []) : activeMarkets().filter((r) => r.uni === "xyz");
+    return list.filter((r) => r && !r.delisted);
+  }
+  function briefD1(r) { return (r && r.d1 != null && isFinite(r.d1)) ? +(+r.d1).toFixed(2) : null; }
+  function buildBriefCtx(now, tzMin) {
     const t = now || Date.now();
-    const cut = t - 24 * 3600e3;
-    const rates = getClassRates();
-    const lines = [];
-    for (const k of PUSH_CLASSES) {
-      const n = rates[k] ? rates[k].d1 : 0;
-      if (n > 0) lines.push(k + " " + (rates[k].capped ? "400+" : n));
+    const ctx = { at: t, tz: tzMin || 0, build: version || "dev" };
+    const xyz = briefRowsFor("stocks"), main = briefRowsFor("crypto");
+
+    // -- benchmarks: the SPX proxy the whole app already resolves, and BTC for the perp book
+    const bStock = benchCoin ? rows.get(benchCoin) : null;
+    const bCrypto = crypto ? rows.get(MAIN_BENCH) : null;
+    ctx.bench = {
+      stocks: bStock ? { t: String(bStock.ticker || "").toUpperCase(), d1: briefD1(bStock) } : null,
+      crypto: bCrypto ? { t: MAIN_BENCH, d1: briefD1(bCrypto) } : null,
+    };
+
+    // -- indices / commodities / FX, straight off the roster's own classification
+    const byClass = { Index: [], Commodity: [], FX: [] };
+    for (const r of xyz) {
+      const c = classifyCached(r.ticker, r.uni);
+      if (!byClass[c.assetClass]) continue;
+      const T = String(r.ticker || "").toUpperCase();
+      if (bStock && r.coin === bStock.coin) { /* benchmark still belongs in the index line */ }
+      const d1 = briefD1(r);
+      if (d1 == null && !(r.px > 0)) continue;
+      byClass[c.assetClass].push({ t: T, d1, px: r.px > 0 ? r.px : null,
+        level: /^(VIX|VOL)$/.test(T) ? 1 : 0 });
     }
-    const open = [...ledgerOpen.values()].filter((e) => e.vi == null && e.alo === 1).length;
-    const heads = [];
+    const rank = (a) => a.sort((x, y) => (y.d1 == null ? -1e9 : y.d1) - (x.d1 == null ? -1e9 : x.d1));
+    ctx.indices = rank(byClass.Index).slice(0, BRIEF_IDX_MAX);
+    ctx.commodities = rank(byClass.Commodity).slice(0, 4);
+    ctx.fx = rank(byClass.FX).slice(0, 3);
+
+    // -- sector + industry groups, and the curated baskets, from the basket layer. It derives both
+    //    from the LIVE roster on every read, so listings and delistings move them with no deploy.
     try {
-      const news = newsCache && Array.isArray(newsCache.items) ? newsCache.items : [];
-      for (const a of news) {
-        if (heads.length >= DIGEST_MAX_HEADLINES) break;
-        if (!a || !a.tk || !(a.pub >= cut) || a.tg || a.form) continue;   // attributed wire headlines only
-        heads.push(a.tk + " \u2014 " + String(a.h || "").slice(0, 110));
+      const d1By = new Map();
+      for (const r of xyz.concat(main)) { const d = briefD1(r); if (d != null) d1By.set(String(r.ticker || "").toUpperCase(), d); }
+      const groups = [], picks = [];
+      for (const b of builtinBaskets()) {
+        const vals = (b.members || []).map((m) => d1By.get(m)).filter((v) => v != null);
+        const entry = { name: b.name, label: b.label || b.name, kind: b.kind || null, vals };
+        if (b.kind === "sector" || b.kind === "industry") groups.push(entry);
+        else if (b.cur) picks.push(entry);   // curated (MAG7 today) — an instrument, not a sector
       }
+      ctx.sectors = briefRankGroups(groups, BRIEF_GROUP_MIN);
+      ctx.baskets = briefRankGroups(picks, 2);
+    } catch (_) { ctx.sectors = []; ctx.baskets = []; }
+
+    // -- movers, each book against its own benchmark. Index/commodity/FX instruments are excluded:
+    //    they have their own block, and a currency pair in a "top movers" list is noise.
+    const noteFor = (r) => {
+      const bits = [];
+      if (r.uni === "main") {
+        const f = r.funding != null && isFinite(r.funding) ? r.funding * 24 * 365 * 100 : null;
+        if (f != null && Math.abs(f) >= 15) bits.push("funding " + (f > 0 ? "+" : "\u2212") + Math.abs(f).toFixed(0) + "%");
+      }
+      return bits.length ? bits.join(", ") : null;
+    };
+    // EXCLUSION, not inclusion. Requiring assetClass === "Equity" silently dropped any name the
+    // static map has not been taught yet — a fresh listing would go missing from its own movers
+    // list while every other panel showed it. What actually needs excluding is the handful of
+    // classes that already have their own block above.
+    const MOVER_SKIP = new Set(["Index", "Commodity", "FX"]);
+    const benchTk = { xyz: ctx.bench.stocks && ctx.bench.stocks.t, main: ctx.bench.crypto && ctx.bench.crypto.t };
+    const moverList = (list) => list.filter((r) => {
+      const T = String(r.ticker || "").toUpperCase();
+      // The benchmark is the reference line under the list; ranking it against itself prints a
+      // relative move of zero and costs a real mover its slot.
+      if (T === String(benchTk[r.uni === "main" ? "main" : "xyz"] || "").toUpperCase()) return false;
+      return !MOVER_SKIP.has(classifyCached(r.ticker, r.uni).assetClass);
+    }).map((r) => ({ t: String(r.ticker || "").toUpperCase(), d1: briefD1(r), note: noteFor(r) }));
+    ctx.movers = {
+      stocks: briefMovers(moverList(xyz), ctx.bench.stocks && ctx.bench.stocks.d1, BRIEF_MOVERS_N),
+      crypto: briefMovers(moverList(main), ctx.bench.crypto && ctx.bench.crypto.d1, BRIEF_MOVERS_N),
+    };
+
+    // -- regime, per book. Breadth on three horizons off the same reference prices the board uses.
+    const regimeFor = (list) => {
+      const d1 = [], d7 = [], d30 = [], ma = [];
+      for (const r of list) {
+        const a = briefD1(r); if (a != null) d1.push(a);
+        const b = pctOf(r.px, r.ref && r.ref.p7d); if (b != null) d7.push(b);
+        const c2 = pctOf(r.px, r.ref && r.ref.p30d); if (c2 != null) d30.push(c2);
+        const tb = trendByCoin.get(r.coin);
+        if (tb && tb.e200 > 0 && r.px > 0) ma.push(r.px > tb.e200 ? 1 : 0);
+      }
+      if (!d1.length) return null;
+      const bd1 = briefBreadth(d1), bd7 = briefBreadth(d7), bd30 = briefBreadth(d30);
+      return { breadth: bd1, d7: bd7, d30: bd30,
+        decaying: bd1 != null && bd7 != null && bd30 != null && bd1 < bd7 && bd7 < bd30,
+        ma200: ma.length ? Math.round((100 * ma.filter(Boolean).length) / ma.length) : null,
+        disp: d1.length > 2 ? +retStd(d1, 3) : null };
+    };
+    ctx.regime = { stocks: regimeFor(xyz), crypto: regimeFor(main) };
+    try {
+      const cr = computeCorrNow();
+      if (cr && cr.corr != null && ctx.regime.crypto) ctx.regime.crypto.corr = +cr.corr.toFixed(2);
     } catch (_) {}
-    return { at: t, counts: lines, openClaims: open, headlines: heads };
+
+    // -- positioning, book-level. Per-sector crypto positioning would need a hand-kept L1/L2/meme
+    //    taxonomy that rots as the top-60 rotates; the aggregate is already computed and honest.
+    const posFor = (list) => {
+      let fSum = 0, fN = 0, neg = 0, oiSum = 0, oiN = 0;
+      for (const r of list) {
+        if (r.funding != null && isFinite(r.funding)) { const apr = r.funding * 24 * 365 * 100; fSum += apr; fN++; if (apr < 0) neg++; }
+        const dw = r.doi != null && isFinite(r.doi) ? r.doi : null;
+        if (dw != null) { oiSum += dw; oiN++; }
+      }
+      if (!fN && !oiN) return null;
+      return { netFundApr: fN ? +(fSum / fN).toFixed(1) : null, negN: fN ? neg : null,
+        oiChg: oiN ? +(oiSum / oiN).toFixed(1) : null };
+    };
+    ctx.positioning = { crypto: posFor(main), stocks: posFor(xyz) };
+
+    // -- earnings: printed in the window, plus today and tomorrow
+    try {
+      const e = { printed: [], today: [], tomorrow: [] };
+      for (const p of (earnCache && earnCache.recent) || []) {
+        if (e.printed.length >= 4) break;
+        const beat = p.eps != null && p.epsA != null ? (p.epsA > p.eps ? "beat" : "miss") : null;
+        e.printed.push({ t: String(p.t).toUpperCase(), res: beat });
+      }
+      for (const en of (earnCache && earnCache.entries) || []) {
+        const d = earnDayDiff(en.d, t);
+        if (d === 0 && e.today.length < 4) e.today.push({ t: String(en.t).toUpperCase() });
+        else if (d === 1 && e.tomorrow.length < 4) e.tomorrow.push({ t: String(en.t).toUpperCase() });
+      }
+      ctx.earnings = e;
+    } catch (_) { ctx.earnings = { printed: [], today: [], tomorrow: [] }; }
+
+    // -- macro: the scheduled calendar (upcoming only), then whatever levels came back
+    try {
+      const next = [];
+      for (const en of (macroCache && macroCache.entries) || []) {
+        if (next.length >= 4) break;
+        if (macroEntryState(en, t) !== "upcoming") continue;
+        const dt = new Date(en.d + "T00:00:00Z");
+        const when = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dt.getUTCDay()] + " " + (en.tEt || "");
+        let prior = null;
+        try { prior = macroStatText(en.k, macroStats && macroStats[en.k]) || null; } catch (_) {}
+        next.push({ when: when.trim(), label: en.label || en.k, prior });
+      }
+      const lv = briefRates();
+      ctx.macro = { next, rates: lv.rates, data: lv.data };
+    } catch (_) { ctx.macro = { next: [], rates: [], data: [] }; }
+
+    // -- news, clustered by sector. Verified attributions only, and filings are excluded outright:
+    //    the operator reads the filings lane in the app and does not want it repeated here.
+    try {
+      const cut = t - 24 * 3600e3, bySec = new Map();
+      for (const a of newsItems || []) {
+        if (!a || a.fl || a.tg || !(a.pub >= cut)) continue;
+        if (!a.tk || a.rel !== 1) continue;
+        const c = classifyCached(String(a.tk).toUpperCase(), "xyz");
+        const key = (c && c.ind && c.ind !== "Unclassified") ? c.ind : (a.sec || "Market");
+        let g = bySec.get(key); if (!g) { g = []; bySec.set(key, g); }
+        if (g.length < BRIEF_NEWS_PER) g.push({ t: String(a.tk).toUpperCase(), h: String(a.h || "").slice(0, 90) });
+      }
+      ctx.news = [...bySec.entries()].sort((a, b) => b[1].length - a[1].length)
+        .slice(0, BRIEF_NEWS_CLUSTERS).map(([sector, items]) => ({ sector, items }));
+    } catch (_) { ctx.news = []; }
+
+    return ctx;
   }
-  function digestText(d) {
-    const parts = ["<b>Daily digest</b>"];
-    parts.push(d.counts.length ? d.counts.join(" \u00b7 ") : "nothing fired in the last 24h");
-    parts.push(d.openClaims + " open announced claim(s)");
-    if (d.headlines.length) {
-      parts.push("");
-      parts.push("<b>Headlines</b> <i>(not pushed individually \u2014 too frequent)</i>");
-      for (const h of d.headlines) parts.push("\u00b7 " + tgEsc(h));
+
+  // ---- the prose layer ---------------------------------------------------------------------------
+  const BRIEF_SYSTEM = `You write the two prose sections of a daily markets brief for ONE experienced trader who runs the dashboard this data comes from. You receive a JSON context holding everything the brief will show: indices, commodities and FX listed on the venue; GICS sector and finer industry groups (median 24h move per group, member counts, share green); movers for both books with their move against that book's own benchmark (an equity index proxy for stocks, BTC for crypto); regime (breadth on 1/7/30-day horizons, share above the 200-day, mean pairwise correlation, dispersion); book-level positioning (net funding APR, how many names are negative, aggregate open-interest change); earnings printed and scheduled; the macro calendar with prior values, plus rate levels and initial claims where the server holds them; and the day's verified headlines clustered by industry.
+
+Both books trade 24/7 on perpetual futures. The equity perps keep trading when the cash market is shut, so an overnight move is a real, tradeable fact the cash tape will not show — say so when the data supports it.
+
+Return ONLY a JSON object, no markdown fences and no preamble:
+{"story": string, "closing": string}
+
+"story" — 2 to 4 paragraphs, separated by blank lines, under 1400 characters total. What happened in the last 24 hours and what it means. Lead with the thing that actually matters rather than walking the sections in order. Write like a person talking to a colleague: "half the board fell on a green day" beats "breadth registered 48%". Prefer the number that reframes ("ten of the fourteen names up more than a percent were semis") over the number that merely reports.
+
+"closing" — 2 to 3 paragraphs, under 1000 characters. The synthesis: where conviction is concentrated, where the risk actually sits, what would change the picture. This is the section the reader opens the brief for. It is commentary, not a recommendation — never tell the reader what to do, and say plainly when the honest answer is that nothing is resolved.
+
+HARD RULES, all enforced server-side; a violation discards BOTH sections and the brief ships with no prose at all:
+- Every number you write must appear in the context. Do not compute new ones, do not round to a "cleaner" figure, do not recall figures from outside the context. Spelled-out small counts ("four sessions", "eight of eleven") are fine.
+- Every ticker, sector, industry or basket name you write must appear in the context. Never mention an instrument the venue does not list.
+- No trading instructions. No "you should", no "buy", no "take profit". Describe where risk sits and let the reader decide.
+- No markup, no HTML, no markdown. Plain text only; separate paragraphs with a blank line.
+- Where the data is thin or a block is absent, say so plainly rather than smoothing over it. An honest "there is nothing to read in crypto today" is a better brief than an invented narrative.`;
+
+  async function briefProse(ctx) {
+    if (!AI_KEY() && !aiFetch) return { ok: false, error: "no key" };
+    if (!briefDayLeft()) return { ok: false, error: "brief-daily-cap" };
+    const call = await callModel(BRIEF_MODEL, ctx, { system: BRIEF_SYSTEM, maxTokens: 4000, effort: BRIEF_EFFORT });
+    if (!call.ok) return { ok: false, error: call.error };
+    let obj = null;
+    try { obj = JSON.parse(String(call.text).replace(/^```(?:json)?|```$/gm, "").trim()); } catch (_) {
+      return { ok: false, error: "unparseable model output" };
     }
-    return parts.join("\n");
+    const v = validateBriefProse(obj, ctx);
+    if (!v.ok) return { ok: false, error: v.error };
+    const d = briefDayKey(Date.now());
+    if (briefDay.d !== d) briefDay = { d, n: 0 };
+    briefDay.n++;
+    return { ok: true, story: v.story, closing: v.closing, model: BRIEF_MODEL };
   }
-  const digestSent = new Map();   // chat -> YYYY-MM-DD already sent
-  function digestTick() {
+
+  // One generation per hour-bucket, shared by everyone waking in it. A recipient at 07:00 and one at
+  // 22:00 legitimately get different briefs; two at 07:00 get the same one and cost one call.
+  async function generateBrief(now, tzMin) {
+    const t = now || Date.now();
+    const key = briefDayKey(t) + "|" + new Date(t).getUTCHours() + "|" + (tzMin || 0);
+    if (briefCache && briefCache.key === key && t - briefCache.at < BRIEF_CACHE_MS) return briefCache;
+    const ctx = buildBriefCtx(t, tzMin);
+    let prose = null, degraded = null, model = null;
+    if (BRIEF_ON) {
+      try {
+        const p = await briefProse(ctx);
+        if (p.ok) { prose = { story: p.story, closing: p.closing }; model = p.model; }
+        else { degraded = p.error; briefLastErr = p.error; }
+      } catch (e) { degraded = (e && e.message) || String(e); briefLastErr = degraded; }
+    } else degraded = "disabled";
+    const r = renderBrief(ctx, prose);
+    briefCache = { key, at: t, messages: r.messages, dropped: r.dropped, model, degraded, ctx };
+    if (degraded) log("brief: prose degraded (" + degraded + ") — shipping mechanical brief");
+    if (r.dropped.length) log("brief: budget ladder fired [" + r.dropped.join(", ") + "]");
+    return briefCache;
+  }
+
+  // ---- delivery ----------------------------------------------------------------------------------
+  // Default ON. `dgSet` is the tri-state that makes that migration honest: a recipient who has never
+  // touched the setting has no dgSet and gets the default hour; one who explicitly turned it off
+  // carries dgSet with a null hour and stays off. Without the flag there is no way to tell "never
+  // configured" from "deliberately silenced", and turning someone's alerts back on by deploy is not
+  // a thing this system should do.
+  // Offset resolution, in one place so the panel and the scheduler can never disagree about when a
+  // brief will land: an explicitly stored tz wins, quiet hours are the legacy fallback, UTC is the
+  // honest last resort (and the panel says so rather than implying local time).
+  function briefTzFor(rec) {
+    if (!rec) return 0;
+    if (Number.isFinite(rec.tz)) return rec.tz;
+    if (rec.quiet && Number.isFinite(rec.quiet.tz)) return rec.quiet.tz;
+    return 0;
+  }
+  function briefTzKnown(rec) {
+    return !!(rec && (Number.isFinite(rec.tz) || (rec.quiet && Number.isFinite(rec.quiet.tz))));
+  }
+  // Is this recipient still on the default? An explicitly chosen hour — including one set before
+  // this build — is LOCAL to them. The default is deliberately not: with no offset on file "10:00
+  // local" is unknowable, so the default is a fixed wall-clock moment in UTC instead of a guess.
+  function briefIsDefault(rec) { return !(rec && Number.isFinite(rec.digestHour)); }
+  function briefHourFor(rec) {
+    if (!rec) return null;
+    if (rec.dgSet) return Number.isFinite(rec.digestHour) ? rec.digestHour : null;
+    return Number.isFinite(rec.digestHour) ? rec.digestHour : BRIEF_DEFAULT_HOUR;
+  }
+  async function briefTick() {
     if (!pushOn() || !pushRecipients.size) return 0;
     const now = Date.now();
     let sent = 0;
     for (const rec of pushRecipients.values()) {
-      if (rec.muted || !Number.isFinite(rec.digestHour)) continue;
-      const tz = (rec.quiet && Number.isFinite(rec.quiet.tz)) ? rec.quiet.tz : 0;
+      if (rec.muted) continue;
+      const hour = briefHourFor(rec);
+      if (!Number.isFinite(hour)) continue;
+      // Default riders are scheduled in UTC; anyone who picked an hour gets it in their own time.
+      const tz = briefIsDefault(rec) ? 0 : briefTzFor(rec);
       const local = new Date(now + tz * 60000);
       const day = local.toISOString().slice(0, 10);
-      if (digestSent.get(rec.chat) === day) continue;
-      if (local.getUTCHours() !== rec.digestHour) continue;
-      digestSent.set(rec.chat, day);
-      // force: a digest is a scheduled summary, not one of the day's alerts, so it should not be
-      // the message the hourly cap happens to eat.
-      pushEnqueue(rec.chat, digestText(buildDigest(now)), true);
-      sent++;
+      if (briefSent.get(rec.chat) === day) continue;
+      if (local.getUTCHours() !== hour) continue;
+      briefSent.set(rec.chat, day);
+      let b = null;
+      try { b = await generateBrief(now, tz); } catch (e) { log("brief generate failed (isolated): " + (e && e.message)); continue; }
+      // force: a scheduled brief is not one of the day's alerts and must not be the message the
+      // hourly cap happens to eat. Both parts ride force for the same reason — half a brief is worse
+      // than none, and the cap must not be able to swallow the conclusions while delivering the data.
+      for (const m of b.messages) { pushEnqueue(rec.chat, m, true); sent++; }
     }
     return sent;
   }
+  // Admin-only formatting check. Bypasses the schedule and the once-a-day guard, hits ONLY the
+  // caller's own recipients, and takes the same path a real brief takes so what lands on the phone
+  // is byte-identical to the 07:00 send. `fresh` forces a regeneration (and burns budget) rather
+  // than re-serving the hour's cache.
+  async function briefTestNow(chat, owner, isAdmin, fresh) {
+    if (!pushOn()) return { ok: false, error: "disabled" };
+    const targets = (chat ? [String(chat)] : [...pushRecipients.keys()])
+      .filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : "no-recipients" };
+    if (fresh) briefCache = null;
+    let b;
+    try { b = await generateBrief(Date.now(), 0); }
+    catch (e) { return { ok: false, error: (e && e.message) || "generate failed" }; }
+    for (const c of targets) for (const m of b.messages) pushEnqueue(c, m, true);
+    return { ok: true, sent: targets.length, parts: b.messages.length,
+      chars: b.messages.map((m) => briefVisibleLen(m)), degraded: b.degraded || null,
+      dropped: b.dropped, model: b.model || null, dayLeft: briefDayLeft() };
+  }
+
   function pushSetPrefs(chat, prefs, owner, isAdmin) {
     const r = pushRecipients.get(String(chat));
     if (!r) return { ok: false, error: "unknown" };
@@ -8255,11 +8588,22 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       if (maxLate != null) r.trig.maxLate = maxLate;
       if (cls && cls.length === 1) r.trig.cls = cls;   // both selected == no filter; storing it would just be noise
     }
+    // Timezone rides with any prefs write. Without it a default-on brief fires at 07:00 UTC for
+    // anyone who never set quiet hours, which is the middle of the night across the Americas.
+    if ("tz" in p) {
+      const z = p.tz;
+      if (z == null || z === "") r.tz = null;
+      else if (!Number.isFinite(+z) || Math.abs(+z) > 900) return { ok: false, error: "bad-tz" };
+      else r.tz = +z;
+    }
     if ("digestHour" in p) {
       const h = p.digestHour;
       if (h == null || h === "") r.digestHour = null;
       else if (!Number.isFinite(+h) || +h < 0 || +h > 23) return { ok: false, error: "bad-hour" };
       else r.digestHour = +h;
+      // The brief is default-ON, so "off" has to be storable as a DECISION rather than as an absent
+      // value — otherwise the next deploy reads null as "never configured" and switches it back on.
+      r.dgSet = 1;
     }
     persistPush();
     return { ok: true, quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {} };
@@ -8554,6 +8898,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         chat: r.chat, mask: pushMask(r.chat), name: r.name, since: r.since,
         classes: r.classes, muted: !!r.muted, admin: !!r.admin, owned: !!r.owner, lastOk: r.lastOk || null, lastErr: r.lastErr || null,
         quiet: r.quiet || null, digestHour: Number.isFinite(r.digestHour) ? r.digestHour : null, trig: r.trig || {},
+        // The hour the brief will ACTUALLY fire at, defaults folded in — a panel showing "off"
+        // for a recipient who is about to receive one is a lie the operator would act on.
+        briefHour: briefHourFor(r), briefSet: r.dgSet ? 1 : 0,
+        briefTz: briefIsDefault(r) ? 0 : briefTzFor(r), briefTzKnown: briefTzKnown(r) ? 1 : 0,
+        briefUtc: briefIsDefault(r) ? 1 : 0,   // on the default = a fixed UTC moment, and the panel must say UTC rather than imply local
         quietNow: !!(r.quiet && inQuietWindow(now, r.quiet)),
         sentHour: (r.sent || []).filter((t) => now - t < 3600e3).length })),
       code: codes.length ? codes[codes.length - 1] : null,
@@ -8669,8 +9018,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     ma200StateNow: () => maState,
     trendIndexNow: () => trendByCoin,
     coverageScanNow: coverageScan,
-    digestTickNow: digestTick,
-    buildDigestNow: buildDigest,
+    briefTickNow: briefTick,                     // harness: run delivery without waiting out the clock
+    buildBriefCtxNow: buildBriefCtx,             // harness: assemble the context off live state
+    generateBriefNow: generateBrief,
+    briefTest: briefTestNow,
+    briefRatesNow: briefRates,
+    briefCacheReset: () => { briefCache = null; briefSent.clear(); },
+    briefStateNow: () => ({ defaultHour: BRIEF_DEFAULT_HOUR, perDay: BRIEF_PER_DAY, dayLeft: briefDayLeft(),
+      lastErr: briefLastErr, enabled: BRIEF_ON, model: BRIEF_MODEL }),
+    briefTzForNow: briefTzFor,   // harness: the offset resolution both delivery and the panel read
+    briefIsDefaultNow: briefIsDefault,
     filingScanNow: filingScan,                   // harness: feed parsed EDGAR items without a fetch
     earnScanNow: earnScan,                       // harness: run the proximity check on demand
     earnRebuildNow: rebuildEarnMap,              // harness: stage a calendar without a Finnhub round trip
@@ -8707,6 +9064,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       else if (!order.includes(coin)) order.push(coin);   // xyz seeds join the xyz roster exactly as the universe refresh would place them
       return r;
     },
+    detectBenchNow: () => { benchCoin = detectBenchmark(); return benchCoin; },   // harness: resolve the SPX proxy without a universe refresh (the brief must never resolve its own)
     seedHistNow: (coin, arr) => { hist.set(coin, arr); },   // harness: seed the sampled OI/funding history ([t, oi, funding] rows) so oiDailySeries is testable without network
     hydrateFeaturesNow: hydrateFeatures,   // harness: run the warm-cache hydrate against an injected store.loadFeatures — persisted-shape compat is testable without a boot
     seedEarnNow: (entries, study, prints) => {   // harness: inject calendar rows / study / print history so the earnings-context split is testable without network
