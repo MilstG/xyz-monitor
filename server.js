@@ -11,7 +11,23 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.29-04";
+const VERSION = "2026.07.29-05";
+
+// ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
+// The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
+// store opens and before createPoller, so the histogram observes every build tick from the first
+// one — arming it after poller start would blind it to exactly the boot-build stalls we care about.
+// resolution 20ms: coarse enough to be ~free, fine enough that a 50ms+ stall (the gate threshold)
+// is never missed. Nanosecond readings are converted to ms at the read site, 1 decimal.
+const { monitorEventLoopDelay } = require("perf_hooks");
+const loopHist = monitorEventLoopDelay({ resolution: 20 });
+loopHist.enable();
+const LOOP_WINDOW = 6 * 3600e3;   // histogram reset cadence; one ring point per window
+const LOOP_RING_MAX = 28;         // 7 days at 6h — the full decision-gate observation period
+const loopMs = (ns) => Math.round(ns / 1e5) / 10;
+function loopSample() {
+  return { p50: loopMs(loopHist.percentile(50)), p99: loopMs(loopHist.percentile(99)), max: loopMs(loopHist.max) };
+}
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -92,6 +108,38 @@ const store = openStore(DATA_DIR);
 const HEARTBEAT = store.heartbeat();
 log(`Volume heartbeat: boot #${HEARTBEAT.boots} on this data dir (first boot ${new Date(HEARTBEAT.firstBoot).toISOString()}) — ` +
   (HEARTBEAT.boots > 1 ? "volume IS persisting" : "if this says boot #1 again next deploy, the volume is NOT persisting (check DATA_DIR vs the mount path)"));
+// Loop-delay ring: [t, p50, p99, max] per closed 6h window, plus the worst stall ever seen with its
+// timestamp (a boot spike must stay attributable, not pollute the rolling read forever — which is
+// also why the histogram resets each window instead of accumulating since boot). Persisted to the
+// volume with the same atomic tmp+rename discipline as every other /data write, because the whole
+// point is a WEEK of evidence for the worker-thread decision gate — a redeploy must not wipe it.
+const LOOP_FILE = path.join(DATA_DIR, "loop-history.json");
+let loopRing = [], loopMaxEver = null, loopResetAt = Date.now();
+try {
+  const j = JSON.parse(fs.readFileSync(LOOP_FILE, "utf8"));
+  if (Array.isArray(j.ring)) loopRing = j.ring.slice(-LOOP_RING_MAX);
+  if (j.maxEver && j.maxEver.v > 0) loopMaxEver = j.maxEver;
+} catch (_) {}
+function persistLoopSync() {
+  try {
+    const tmp = LOOP_FILE + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify({ ring: loopRing, maxEver: loopMaxEver }));
+    fs.renameSync(tmp, LOOP_FILE);
+  } catch (_) {}
+}
+function rollLoopWindow() {
+  // Always record: a window of near-zeros is honest data (an idle loop), and the unconditional
+  // sample-then-reset ordering can never record an empty window in place of a real one.
+  const s = loopSample();
+  loopRing.push([Date.now(), s.p50, s.p99, s.max]);
+  if (loopRing.length > LOOP_RING_MAX) loopRing = loopRing.slice(-LOOP_RING_MAX);
+  if (!loopMaxEver || s.max > loopMaxEver.v) loopMaxEver = { v: s.max, t: Date.now() };
+  loopHist.reset(); loopResetAt = Date.now();
+  persistLoopSync();
+  log(`event loop window closed: p50 ${s.p50}ms p99 ${s.p99}ms max ${s.max}ms (${loopRing.length}/${LOOP_RING_MAX} ring points)`);
+}
+setInterval(rollLoopWindow, LOOP_WINDOW).unref();
+
 // Kill-switch: CRYPTO=0 disables main-dex polling entirely — one-variable rollback on Railway.
 const CRYPTO = process.env.CRYPTO !== "0";
 const poller = createPoller({ dex: DEX, store, log, version: VERSION, crypto: CRYPTO });
@@ -915,7 +963,12 @@ async function main() {
     reply.header("cache-control", "no-store");
     return poller.etfHoldings(req.params.t || "");
   });
-  fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR }, ...poller.stats(), ts: Date.now() }));
+  fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
+    // Live histogram read (current, still-open window) + the closed-window ring + worst-ever. The
+    // live sample makes a stall visible within seconds of happening; the ring is the 7d evidence
+    // trail the worker-thread decision gate reads. ~30 small numbers — negligible on the wire.
+    loop: { ...loopSample(), sinceMs: Date.now() - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing },
+    ...poller.stats(), ts: Date.now() }));
 
   await fastify.listen({ port: PORT, host: HOST });
   log(`Listening on ${HOST}:${PORT} (dex=${DEX}, data=${DATA_DIR}, build=${VERSION})`);
@@ -937,6 +990,9 @@ async function shutdown() {
   try { poller.persistTriggers(); } catch (_) {}
   try { poller.persistPush(); } catch (_) {}
   try { await poller.persistHourly(); } catch (_) {}
+  // Fold the still-open loop window into the ring before persisting: Railway redeploys arrive on
+  // push cadence, often < 6h apart, and without this the ring would never accumulate a point.
+  try { rollLoopWindow(); } catch (_) {}
   try { store.close(); } catch (_) {}
   process.exit(0);
 }
@@ -957,6 +1013,7 @@ function crashFlush(kind, err) {
   try { poller.persistLedger(); } catch (_) {}
   try { poller.persistTriggers(); } catch (_) {}
   try { poller.persistPush(); } catch (_) {}
+  try { persistLoopSync(); } catch (_) {}
   try { store.close(); } catch (_) {}
   process.exit(1);
 }
