@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.28-12";
+const VERSION = "2026.07.28-13";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -655,6 +655,16 @@ async function main() {
   fastify.post("/api/alerts/test", { bodyLimit: 4 * 1024 }, (req, reply) => {
     const r = poller.pushTest((req.body && req.body.chat) || null, ensureOwner(req, reply), isAdmin(req));
     if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
+  // Morning-brief test fire. ADMIN ONLY, unlike the plain test above: a brief costs a model call
+  // and lands as two messages, so it is an operator tool for checking formatting, not something a
+  // visitor should be able to trigger. `fresh` regenerates instead of re-serving the hour's cache —
+  // that is the one that actually burns budget, so it is opt-in rather than the default.
+  fastify.post("/api/alerts/brief-test", { bodyLimit: 4 * 1024 }, async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "admin only" });
+    const b = req.body || {};
+    const r = await poller.briefTest(b.chat || null, ensureOwner(req, reply), true, !!b.fresh);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
 
