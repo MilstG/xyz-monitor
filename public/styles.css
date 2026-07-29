@@ -350,7 +350,11 @@ svg.spark{width:100%;height:46px;display:block;margin:5px 0 2px}
 .cg-sg.bk .bkg{margin-right:2px}
 .cg-sg-r{float:right;color:var(--faint);font-size:9.5px;letter-spacing:.05em}
 /* -09: Δ vs ⬒ header picker + matrix basket-row anatomy */
-.dvb-pick{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:3px;font:inherit;font-size:10px;padding:0 2px;margin-left:4px;max-width:92px}
+.dvb-ctl{display:inline-flex;align-items:center;gap:2px;position:relative;border:1px solid var(--accent-dim);border-radius:3px;padding:0 3px;background:var(--panel2);cursor:pointer;vertical-align:baseline}
+.dvb-ctl .bkg{margin:0}
+.dvb-ctl .dvb-car{color:var(--accent);font-size:9px}
+.dvb-pick{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font:inherit}
+.dvb-ctl::after{content:attr(data-name);color:var(--accent);font-size:11px;letter-spacing:.02em}
 .cmx th.bk span{border-bottom:1px dashed var(--accent-dim)}
 .cmx th.bk .bkg{margin-right:2px;border-bottom:none}
 .bt-vb{pointer-events:none}

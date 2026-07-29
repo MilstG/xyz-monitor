@@ -113,11 +113,11 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','funding','prem','h1','h4','d1','d7','d30','gap','trend','rs','vstape','dvb','dcap','hitr','mom','momp','dd','ddy','yopen','mopen','vol','rvol','adr','beta','vol30','doi','sqz','cascT','liq24','carry','oi','turn','ma20','ma50','ma100','ma200','vwap','vsvwap'];
-const DEFAULT_HIDDEN=['beta','vol30','doi','sqz','carry','oi','ma20','ma50','ma100','ma200','vstape','dvb','dcap','hitr','rvol','vwap','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','h1','h4','d1','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_HIDDEN=['prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
-const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:null,
+const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
@@ -680,7 +680,9 @@ function buildHead(){ const tr=el('head'); tr.innerHTML='';
     if(c.key==='vstape')label=`vs tape (${state.tf})`; if(c.key==='rvol')label=`RVOL (${['1h','4h','1d'].includes(state.tf)?state.tf:'—'})`;
     if(c.key==='adr')label=`Avg Range (${state.tf==='30d'?'30d':'7d'})`;
     if(c.key==='dvb'){ const b=dvbBasketDef(); if(featureOn('baskets')&&!BASKETS.list.length) loadBaskets();
-      label=`\u0394 vs <span class="bkg">\u2b12</span>${b?esc(b.name):'\u2014'} (${state.tf}) <select id="dvb-pick" class="dvb-pick" title="pick the basket this column measures against \u2014 the window follows the board's timeframe selector">${dvbPickOpts()}</select>`; }
+      // The basket name IS the control — a bordered caret pill wrapping a real (visible) select, so
+      // the "which basket" affordance can't be mistaken for static header text (the -09 bug).
+      label=`\u0394 vs <span class="dvb-ctl" data-name="${b?esc(b.name):'\u2014'}"><span class="bkg">\u2b12</span><select id="dvb-pick" class="dvb-pick" title="pick the basket this \u0394 column measures against \u2014 window follows the board timeframe">${dvbPickOpts()}</select><span class="dvb-car">\u25be</span></span> <span class="sec" style="font-weight:400">(${state.tf})</span>`; }
     const active=state.sortKey===c.key; th.setAttribute('aria-sort', active?(state.sortDir==='asc'?'ascending':'descending'):'none');
     if(c.tip) th.title=c.tip;
     th.innerHTML=`<span class="grip" aria-hidden="true">⠿</span>${label}`+(active?`<span class="arw">${state.sortDir==='asc'?'▲':'▼'}</span>`:'');
