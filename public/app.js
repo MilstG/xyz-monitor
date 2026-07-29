@@ -4969,6 +4969,9 @@ function actSortSave(){ try{ store.set(ASKEY,JSON.stringify(_actSort)); }catch(_
 let _actEpOpen={}, _actSetOpen=(store.get('actSettled')==='1');
 function actSetPct(x){ return x==null?'\u2014':Math.round(x*100)+'%'; }
 function actSetR(x){ return x==null?'\u2014':`<span class="${x>0?'pos':x<0?'neg':'sec'}">${x>0?'+':''}${x.toFixed(2)}R</span>`; }
+// Lateness is a COST: positive means the board's surfacing lost you R, so positive reads red.
+// The generic R formatter painted +0.73R of lateness green — the exact opposite of its meaning.
+function actSetCost(x){ return x==null?'\u2014':`<span class="${x>0.005?'neg':x<-0.005?'pos':'sec'}">${x>0?'+':''}${x.toFixed(2)}R</span>`; }
 function actSetDays(ms){ return ms==null?'\u2014':(ms/86400000).toFixed(1)+'d'; }
 function actSettled(d,wantU){
   const st=d&&d.settled, u=st&&st.perUni&&st.perUni[wantU];
@@ -4982,7 +4985,8 @@ function actSettled(d,wantU){
     +`<span data-tip="every distinct suggestion that ever appeared in this scope \u2014 one episode per underlying claim, flicker reappearances folded into the original">shown <b>${a.n+u.open}</b></span>`
     +`<span data-tip="episodes whose claim is still inside its horizon \u2014 they score when it resolves, whether or not the row is still on the board">open <b>${u.open}</b></span>`
     +`<span data-tip="episodes whose claim resolved \u2014 scored from the geometry frozen at first appearance">resolved <b>${a.n}</b></span>`
-    +(u.lat!=null?`<span data-tip="avg R at the fire mark minus avg R from the first-shown mark \u2014 the measured cost of the board surfacing late (confirmation, record and EV gates all delay a row)">lateness ${actSetR(-Math.abs(u.lat)===u.lat?u.lat:u.lat)}</span>`:'')
+    +(u.lat!=null?`<span data-tip="avg R at the fire mark minus avg R from the first-shown mark, over the ${u.latN||0} episode(s) with a trustworthy first-shown stamp \u2014 the measured cost of the board surfacing late (confirmation, record and EV gates all delay a row). Positive is a COST and reads red.${u.btN?` ${u.btN} boot-stamped episode(s) (\u27f2) are excluded \u2014 their stamp is a lower bound on visibility, not a surfacing.`:''}">lateness ${actSetCost(u.lat)}</span>`:(u.btN&&u.all.n?`<span class="sec" data-tip="every resolved episode here is boot-stamped (\u27f2): the first-shown stamps are the feature's own birth, not surfacings, so a lateness number would be manufactured. It starts measuring with the first episode shown by a running process.">lateness \u2014 (${u.btN} boot-stamped)</span>`:''))
+    +(u.clus?`<span class="neg" data-tip="resolved episodes of the same family and side first shown on the SAME build \u2014 one correlated market condition observed several times, not independent samples. Read n accordingly: a cluster of four is closer to one observation than to four.">${u.clus} correlated cluster${u.clus===1?'':'s'}</span>`:'')
     +(u.flick?`<span data-tip="rows that dropped off (the mark wobbled through a gate) and reappeared \u2014 folded into their original episode so oscillation never manufactures sample size">${u.flick} flicker${u.flick===1?'':'s'} folded</span>`:'')
     +(st.dropped?`<span data-tip="episodes shown but unscoreable \u2014 the claim was voided or purged, or no exit price survived. Counted, never silently gone.">${st.dropped} unscoreable</span>`:'')
     +(a.approx?`<span data-tip="episodes scored with a gap in the hourly spine (a restart trimmed it): level touches were unknowable, so they scored at their endpoints \u2014 labeled, not hidden">${a.approx} approx</span>`:'')
@@ -4991,17 +4995,19 @@ function actSettled(d,wantU){
   const row=(lbl,tip,b,mut)=>`<tr${mut?' class="act-set-mut"':''}><td><span data-tip="${esc(tip)}">${lbl}</span></td>`
     +`<td style="text-align:right">${b.n}</td>`
     +`<td style="text-align:right" class="sec">${b.n?`${b.t}t / ${b.v}v / ${b.x}x`:'\u2014'}</td>`
-    +`<td style="text-align:right">${b.n?`<span class="${b.hit>=0.5?'pos':'neg'}">${actSetPct(b.hit)}</span>`:'\u2014'}</td>`
-    +`<td style="text-align:right">${actSetR(b.avgE)}</td>`
+    +`<td style="text-align:right">${b.x?`<span class="pos">${b.xp||0}+</span><span class="sec"> / </span><span class="neg">${b.xn||0}\u2212</span>`:'\u2014'}</td>`
+    +`<td style="text-align:right">${b.hit!=null?`<span class="${b.hit>=0.5?'pos':'neg'}">${actSetPct(b.hit)}</span>`:'\u2014'}</td>`
     +`<td style="text-align:right">${actSetR(b.avgM)}</td>`
+    +`<td style="text-align:right" class="sec">${actSetR(b.avgE)}</td>`
     +`<td style="text-align:right">${b.pf!=null?b.pf.toFixed(2):'\u2014'}</td></tr>`;
   h+=`<table class="act-set-t"><thead><tr><th></th>`
-    +`<th data-tip="resolved episodes in this bucket" style="text-align:right">n</th>`
-    +`<th data-tip="how those resolutions split: t = target touched, v = void touched, x = expired between the levels" style="text-align:right">t/v/x</th>`
-    +`<th data-tip="share of resolved episodes positive at the fire mark" style="text-align:right">hit</th>`
-    +`<th data-tip="avg realized R at the fire mark \u2014 the basis the family record was scored on: were the plans good" style="text-align:right">avg @fire</th>`
-    +`<th data-tip="avg realized R from the live mark at FIRST appearance \u2014 what acting on the board actually got" style="text-align:right">avg @shown</th>`
-    +`<th data-tip="gross win R \u00f7 gross loss R, at the fire mark" style="text-align:right">pf</th></tr></thead><tbody>`
+    +`<th data-tip="resolved episodes in this bucket. Correlated same-build clusters are tagged on their rows below \u2014 a cluster counts here as its full size but is closer to ONE observation." style="text-align:right">n</th>`
+    +`<th data-tip="how those resolutions split: t = target touched, v = void touched, x = expired between the levels \u2014 partial outcomes, never hits" style="text-align:right">t/v/x</th>`
+    +`<th data-tip="expiries split by the sign of R@shown \u2014 the basis a reader could actually have had. Disclosed separately precisely so a favorable drift can never pad the hit rate." style="text-align:right">exp \u00b1</th>`
+    +`<th data-tip="targets over level-touched resolutions ONLY (t \u00f7 (t+v)). Expiries are excluded \u2014 a dash means nothing has touched a level yet, and no rate is claimed." style="text-align:right">hit</th>`
+    +`<th data-tip="avg realized R from the live mark at FIRST appearance \u2014 what acting on the board actually got. The economically meaningful number: the first price anyone watching could have had." style="text-align:right">avg @shown</th>`
+    +`<th data-tip="avg realized R at the fire mark \u2014 a diagnostic counterfactual: the basis the family record was scored on, at a price nobody watching the board could trade. The gap to @shown is the lateness cost." style="text-align:right">avg @fire</th>`
+    +`<th data-tip="gross win R \u00f7 gross loss R at the SHOWN mark \u2014 priced on the basis a reader could actually trade" style="text-align:right">pf</th></tr></thead><tbody>`
     +row('2+1 \u2014 \u22652:1 at fire','the level-triggered family: frozen R:R cleared 2:1 at fire. All of its outcomes \u2014 targets, voids, expiries \u2014 are in this row.',u.cls.rr)
     +row('grinders \u2014 sub-2:1, +EV','the statistical family: below 2:1 at fire, positive expectancy anyway. All of its outcomes are here too \u2014 a grinder that tagged its modest target counts exactly like a 2+1 that tagged its big one.',u.cls.ev)
     +row('all resolved','both families combined \u2014 the whole record',a,true)
@@ -5009,21 +5015,22 @@ function actSettled(d,wantU){
   const eps=(st.episodes||[]).filter(e=>e.uni===wantU).slice().reverse();
   if(eps.length){
     h+=`<table class="trend-t act-set-eps"><thead><tr><th>name</th><th>event</th><th>class</th><th>side</th>`
-      +`<th data-tip="when the row first appeared on the board" style="text-align:right">shown</th>`
-      +`<th data-tip="how the claim resolved: target / void touched first, or expired between them (a candle spanning both scores pessimistically as the void)">outcome</th>`
-      +`<th data-tip="realized R at the fire mark" style="text-align:right">R@fire</th>`
-      +`<th data-tip="realized R from the mark at first appearance" style="text-align:right">R@shown</th>`
-      +`<th data-tip="first appearance to resolution (or to the level touch that decided it)" style="text-align:right">held</th><th></th></tr></thead><tbody>`;
+      +`<th data-tip="when the row first appeared on the board \u00b7 \u27f2 marks a boot-stamped episode: the stamp is the record's own first scan, a LOWER BOUND on when the row was visible \u2014 excluded from the headline lateness" style="text-align:right">shown</th>`
+      +`<th data-tip="how the claim resolved \u2014 target / void touched first, or expired between them (a candle spanning both scores pessimistically as the void) \u2014 with the price it was scored at: the frozen level for touches, the mark at horizon for expiries">outcome</th>`
+      +`<th data-tip="realized R from the mark at first appearance \u2014 what acting on this row when it appeared actually got" style="text-align:right">R@shown</th>`
+      +`<th data-tip="realized R at the fire mark \u2014 diagnostic counterfactual: nobody watching the board could have had this price" style="text-align:right">R@fire</th>`
+      +`<th data-tip="first appearance to resolution (or to the level touch that decided it) \u2014 NOT the claim's full life: a claim surfaced near its horizon shows a short hold by construction" style="text-align:right">held</th><th></th></tr></thead><tbody>`;
     for(const e of eps){ const op=!!_actEpOpen[e.k];
       const oc=e.kind==='target'?'pos':e.kind==='void'?'neg':'sec';
+      const opx=e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx;
       h+=`<tr class="act-set-ep" data-epk="${esc(e.k)}"><td class="${e.side==='long'?'pos':'neg'}"><span class="tk">${esc(e.t)}</span></td>`
-        +`<td class="sec">${esc(e.label||e.ev)}</td>`
+        +`<td class="sec">${esc(e.label||e.ev)}${e.cor?` <span class="act-tf neg" data-tip="one of ${e.cor} resolved episodes of this family and side first shown on the SAME build \u2014 one correlated market condition, not ${e.cor} independent observations">corr \u00d7${e.cor}</span>`:''}</td>`
         +`<td class="sec">${e.cls==='ev'?'grinder':'2+1'}</td>`
         +`<td class="${e.side==='long'?'pos':'neg'}">${e.side}</td>`
-        +`<td class="sec" style="text-align:right">${actAgo(Date.now()-e.tShow)}</td>`
-        +`<td class="${oc}">${e.kind}${e.approx?' \u2248':''}</td>`
-        +`<td style="text-align:right">${actSetR(e.rE)}</td>`
+        +`<td class="sec" style="text-align:right">${actAgo(Date.now()-e.tShow)}${e.bt?` <span data-tip="boot-stamped: opened on the record's first scan for a claim fired ${e.tFire?actAgo(e.tShow-e.tFire)+' earlier':'well before'} \u2014 the row may have been visible before the stamp; excluded from the headline lateness">\u27f2</span>`:''}</td>`
+        +`<td class="${oc}">${e.kind}${e.approx?' \u2248':''}${opx!=null?` <span class="sec">@ ${fmtPrice(opx)}</span>`:''}</td>`
         +`<td style="text-align:right">${actSetR(e.rM)}</td>`
+        +`<td style="text-align:right" class="sec">${actSetR(e.rE)}</td>`
         +`<td class="sec" style="text-align:right">${actSetDays(e.held)}</td>`
         +`<td>${op?'\u25be':'\u25b8'}</td></tr>`;
       if(op) h+=`<tr class="act-detrow"><td colspan="10">${actEpDetail(e)}</td></tr>`;
@@ -5035,11 +5042,14 @@ function actSettled(d,wantU){
 }
 function actEpDetail(e){
   const risk=Math.abs(e.fired-e.void), riskPct=e.fired?(risk/e.fired*100):null;
+  const opx=e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx;
   return `<div class="act-set-det">`
     +`<span>first shown <b>${new Date(e.tShow).toISOString().slice(0,16).replace('T',' ')}</b> at mark <b>${fmtPrice(e.markShow)}</b>${e.tFire?` \u00b7 claim fired <b>${actAgo(e.tShow-e.tFire)}</b> earlier`:''}</span>`
+    +(e.bt?`<span class="sec">\u27f2 boot-stamped \u2014 the first-shown stamp is the record's own first scan; the row may have been visible earlier, so this episode's lateness is a lower bound and it is excluded from the headline lateness number</span>`:'')
+    +(e.cor?`<span class="sec">corr \u00d7${e.cor} \u2014 one of ${e.cor} same-family, same-side episodes first shown on the same build: one correlated market condition, not ${e.cor} independent observations</span>`:'')
     +`<span>frozen: fired <b>${fmtPrice(e.fired)}</b> \u00b7 void <b>${fmtPrice(e.void)}</b> \u00b7 target <b>${fmtPrice(e.target)}</b>${riskPct!=null?` \u00b7 risk <b>${riskPct.toFixed(2)}%</b>`:''}</span>`
     +`<span>displayed at show: r:r <b>${e.rr!=null?e.rr.toFixed(2):'\u2014'}</b> \u00b7 ev <b>${e.evR!=null?(e.evR>0?'+':'')+e.evR.toFixed(2)+'R':'\u2014'}</b>${e.rec&&e.rec.n?` \u00b7 rec <b>${Math.round(e.rec.hit*100)}%\u00b7${e.rec.n}</b>`:''}</span>`
-    +`<span>resolved <b>${e.tRes?new Date(e.tRes).toISOString().slice(0,16).replace('T',' '):'\u2014'}</b> \u2014 <b>${e.kind}</b>${e.approx?' <span class="sec" data-tip="hourly-spine gap over this window: level touches were unknowable, scored at the endpoints">(approx \u2014 spine gap)</span>':''}${e.flick?` \u00b7 ${e.flick} flicker${e.flick===1?'':'s'} folded`:''}</span>`
+    +`<span>resolved <b>${e.tRes?new Date(e.tRes).toISOString().slice(0,16).replace('T',' '):'\u2014'}</b> \u2014 <b>${e.kind}</b>${opx!=null?` at <b>${fmtPrice(opx)}</b>`:e.kind==='expired'?' <span class="sec">(exit price not recorded \u2014 pre-fix episode)</span>':''}${e.approx?' <span class="sec" data-tip="hourly-spine gap over this window: level touches were unknowable, scored at the endpoints">(approx \u2014 spine gap)</span>':''}${e.flick?` \u00b7 ${e.flick} flicker${e.flick===1?'':'s'} folded`:''}</span>`
     +`</div>`;
 }
 function actSettledWire(box){
