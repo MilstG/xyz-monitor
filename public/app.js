@@ -488,7 +488,13 @@ function renderFreshTray(h){ const box=el('freshtray'); if(!box||!h) return;
   // still-open window so a stall shows within one 45s tray poll, not at the next 6h window close.
   let loopDot='';
   if(h.loop&&h.loop.p99!=null){ const p=h.loop.p99, cls=p>=50?'stale':(p>=20?'warn':'ok');
-    loopDot=`<span class="fdot ${cls}" title="event loop delay (live window) — p50 ${h.loop.p50}ms · p99 ${p}ms · max ${h.loop.max}ms — green <20 · amber <50 · red \u226550 (the worker-thread gate)"><i></i>Loop</span>`; }
+    // -08: the histogram's worst number now carries a NAME. h.ticks is worst-first from the server;
+    // the top entry is the answer to "what was that max". Async ticks are yielding builds — their
+    // duration is wall time across yields, not loop hold, and the label says so honestly.
+    let culprit='';
+    if(Array.isArray(h.ticks)&&h.ticks.length){ const w=h.ticks[0];
+      culprit=` — worst tick: ${w.name} ${w.worst>=1000?(w.worst/1000).toFixed(1)+'s':w.worst+'ms'}${w.async?' (yielding build, wall time)':''} ${aiFmtAgo(Date.now()-w.worstAt)} ago`; }
+    loopDot=`<span class="fdot ${cls}" title="event loop delay (live window) — p50 ${h.loop.p50}ms · p99 ${p}ms · max ${h.loop.max}ms — green <20 · amber <50 · red \u226550 (the worker-thread gate)${culprit}"><i></i>Loop</span>`; }
   box.innerHTML=dots+loopDot; box.hidden=false; }
 async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); _lastHealth=h; renderFreshTray(h); if(h&&h.ai) renderAskBudget(h.ai.askDayLeft, h.ai.askPerDay); renderAdmLoop(h); }catch(_){ } }
 // Last /api/health payload, shared with the admin loop row so opening the panel between tray polls
