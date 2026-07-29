@@ -7064,7 +7064,26 @@ function warmCount(){
   if(!w||!(w.d>0)) return '';
   return ` <span class="sec">(server backfill in progress — <b>${w.d}</b> market${w.d===1?'':'s'} remaining, refreshing every 20s)</span>`;
 }
-function startCycle(){ clearInterval(cycleTimer); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }, state.refreshMs); nextCycle=Date.now()+state.refreshMs; }
+// ===== SSE version push (build 2026.07.29-07) ==================================================
+// The server pushes {dataTs, alertVer, v} the second the content clock or alert seq moves; the
+// reaction is the SAME loadSnapshot the poll runs — the stream changes WHEN we pull, never WHAT.
+// While the stream is healthy the poll survives as a stretched 120s fallback (belt and braces: a
+// proxy can wedge a stream half-open without erroring); any stream error snaps the cadence back
+// instantly and EventSource handles its own reconnect. No EventSource support = the poll exactly
+// as it always was.
+let _sseOk=false, _sseSrc=null;
+function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
+  try{ _sseSrc=new EventSource('/api/events'); }catch(_){ return; }
+  _sseSrc.onopen=()=>{ _sseOk=true; startCycle(); };
+  _sseSrc.onerror=()=>{ if(_sseOk){ _sseOk=false; startCycle(); } };   // reconnects itself; we just restore the fast poll
+  _sseSrc.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch(_){ return; }
+    // A pushed dataTs we already hold is a no-op (the initial sync frame, typically). A new one —
+    // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
+    // applySnapshot's own short-circuit and alertVer handling then do exactly what they do on a poll.
+    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); } };
+}
+function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
+function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
 function setRefresh(ms){ state.refreshMs=ms; state.pollMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
 setInterval(()=>{ const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left/60000), s=Math.floor((left%60000)/1000);
@@ -8168,6 +8187,7 @@ function termAutoGrow(el){ if(!el) return; el.style.height='auto'; el.style.heig
   termHint(); } }
 
 (async ()=>{
+  startEvents();   // push channel first: a change during boot loads lands as an instant re-pull
   await Promise.all([loadSnapshot(), loadDaily()]);
   applyHash();
   startCycle();
