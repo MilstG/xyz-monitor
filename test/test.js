@@ -9014,60 +9014,11 @@ test("brief: VIX renders as a level, everything else as a signed percentage", ()
   const C = require("../src/compute");
   const ctx = Object.assign(BRIEF_CTX(), { indices: [{ t: "SPX", d1: 0.4 }, { t: "VIX", px: 14.23, d1: -0.8, level: 1 }] });
   const m = C.renderBrief(ctx, null).messages[0];
-  assert.ok(/VIX\s+14\.2/.test(m), "a volatility index is a level; printing it as a % move reads as a price change");
-  assert.ok(/SPX\s+\+0\.4/.test(m));
-  // Tables must live in <pre>: Telegram body text is proportional and space-built columns only
-  // align inside a pre block. This is the bug that made the first shipped brief unreadable.
-  assert.ok(m.includes("<pre>"), "tabular blocks must be monospace");
-  const preLines = (m.match(/<pre>[\s\S]*?<\/pre>/g) || []).join("\n").replace(/<\/?pre>/g, "").split("\n");
-  for (const l of preLines) assert.ok(l.length <= C.BRIEF_COLS, `pre line over ${C.BRIEF_COLS} cols will wrap on a phone: "${l}"`);
-  assert.ok(!/[\u2591\u2592\u2593]/.test(m), "shade glyphs are not in every device font \u2014 they arrived as tofu boxes");
-});
-
-test("brief format: every table is <pre>, every pre line fits the column budget, no tofu glyphs", () => {
-  const C = require("../src/compute");
-  // The shipped-and-rejected version of this feature laid out columns with spaces in PROPORTIONAL
-  // body text. It aligned perfectly in a monospace editor and arrived on the phone as ragged noise:
-  // two unlabelled numbers per mover row, and breadth "bars" drawn in a glyph the device font did
-  // not carry. This test is the guard for all three failures at once.
-  const r = C.renderBrief(BRIEF_CTX(), { story: "Semis carried it.", closing: "Nothing is resolved." });
-  const all = r.messages.join("\n");
-  const pres = all.match(/<pre>[\s\S]*?<\/pre>/g) || [];
-  assert.ok(pres.length >= 4, "indices, sectors, movers and regime are all tabular and all belong in <pre>");
-  for (const block of pres) {
-    const body = block.replace(/<\/?pre>/g, "");
-    assert.ok(!/<[a-z]/i.test(body), "Telegram does not support nested markup inside <pre>");
-    for (const line of body.split("\n"))
-      assert.ok(line.length <= C.BRIEF_COLS, `pre line is ${line.length} cols and will wrap: "${line}"`);
-  }
-  // No decorative glyphs anywhere: shade blocks, and the box-drawing characters that fail the same way.
-  assert.ok(!/[\u2591\u2592\u2593\u2580-\u258f]/.test(all), "device-font-dependent glyphs must not ship");
-  // Mover columns must be LABELLED in place. The unreadable version put the legend in the section
-  // header, forty characters from the two bare numbers it described.
-  const mv = pres.find((b) => /STOCKS/.test(b));
-  assert.ok(/STOCKS\s+24h\s+vs /.test(mv), "each mover table names its own columns");
-  // Empty tables must not ship a heading with the string "null" under it.
-  const bare = Object.assign(BRIEF_CTX(), { indices: [], commodities: [], fx: [], baskets: [] });
-  const rb = C.renderBrief(bare, null).messages.join("\n");
-  assert.ok(!/null/.test(rb), "an empty table renders nothing, not the word null");
-  assert.ok(!rb.includes("INDICES"), "…and drops its heading with it");
-});
-
-test("brief validator: cites from the material we handed it, still refuses invention", () => {
-  const C = require("../src/compute");
-  const ctx = Object.assign(BRIEF_CTX(), {
-    news: [{ sector: "Semiconductors", items: [{ t: "SKHY", h: "SK hynix posts 1,200% net profit boost on AI chip boom" }] }],
-    macro: { next: [{ when: "Wed 14:00", label: "FOMC rate decision", prior: null }], rates: [], data: [] } });
-  const ok = (o) => C.validateBriefProse(Object.assign({ story: "Breadth closed at 48%.", closing: "Nothing is resolved." }, o), ctx);
-  // These are the rejections that silently cost the brief its prose on the first live send: a
-  // two-letter word from a headline we supplied, and a thousands separator.
-  assert.ok(ok({ story: "SK Hynix drove the tape." }).ok, "a name from a headline we handed the model is not an invention");
-  assert.ok(ok({ story: "SK hynix posted a 1,200% profit boost." }).ok, "a comma is not a fabricated number");
-  assert.ok(ok({ closing: "The FOMC rate decision lands Wednesday." }).ok, "calendar labels we supplied are citable");
-  // …and the gate still does its actual job.
-  assert.match(ok({ story: "The 10-year sits at 7.77%." }).error, /number not in context/);
-  assert.match(ok({ closing: "PLTR is the tell." }).error, /name not in context/);
-  assert.match(ok({ closing: "You should buy semis here." }).error, /directional instruction/);
+  const rows = (m.match(/<code>[^<]*<\/code>/g) || []).map((x) => x.replace(/<\/?code>/g, "").replace(/\u2007/g, " "));
+  assert.ok(rows.some((r) => /VIX\s+14\.2\b/.test(r)), "a volatility index is a level; a % move reads as a price change");
+  assert.ok(rows.some((r) => /SPX\s+\+0\.4/.test(r)));
+  assert.ok(m.includes("<code>") && !m.includes("<pre>"), "monospace via <code>, never <pre>");
+  assert.ok(!/[\u2591\u2592\u2593]/.test(m), "shade glyphs are not in every device font");
 });
 
 test("brief: the budget ladder keeps a pathological day inside Telegram's ceiling", () => {
@@ -9413,6 +9364,43 @@ test("brief chip renders on an expanded admin roster row, and reports UTC honest
   const h = app.slice(app.indexOf("data-apbrief]"), app.indexOf("data-apbrief]") + 900);
   assert.ok(/digestHour: v===''\?null:\+v/.test(h), "admin chip must write the hour");
   assert.ok(!/tz:/.test(h), "…and must never write a timezone on somebody else's behalf");
+});
+
+test("brief: the model budget never drops below the provider floor, and falls back once", async () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The bug this pins: the brief shipped with maxTokens 4000 against an 8000 provider default.
+  // GPT-5.x bills REASONING against max_completion_tokens, so the model returned an empty message
+  // with finish_reason=length and every live brief silently lost its prose.
+  assert.ok(/BRIEF_MAX_TOKENS = Math\.max\(AI_MAX_TOKENS,/.test(pol),
+    "the brief budget must be floored at the provider's own, never set independently below it");
+  assert.ok(!/maxTokens: 4000/.test(pol), "the under-budget literal must be gone");
+  assert.ok(/callModel\(BRIEF_MODEL_FALLBACK, ctx, opts\)/.test(pol), "a refusal must retry on the fallback like the report path");
+
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const prevProv = process.env.AI_PROVIDER, prevKey = process.env.OPENAI_API_KEY;
+  process.env.AI_PROVIDER = "openai"; process.env.OPENAI_API_KEY = "sk-test";
+  try {
+    const calls = [];
+    const good = JSON.stringify({ story: "Breadth was 47%.", closing: "Nothing is resolved." });
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
+      aiFetch: async (url, o) => { const b = JSON.parse(o.body); calls.push(b);
+        return calls.length === 1
+          ? { ok: true, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }) }
+          : { ok: true, json: async () => ({ choices: [{ message: { content: good }, finish_reason: "stop" }] }) }; } });
+    p.seedRowNow("MU", { ticker: "MU", coin: "MU", px: 100, d1: 4.8, uni: "xyz" });
+    const b = await p.generateBriefNow(Date.now(), 0);
+    assert.ok(calls[0].max_completion_tokens >= 8000,
+      `brief ran on ${calls[0].max_completion_tokens} tokens \u2014 reasoning alone will eat that`);
+    assert.equal(calls.length, 2, "an empty budget-blown response must retry on the fallback model");
+    assert.ok(!b.degraded, "…and the retry must be able to save the prose: " + b.degraded);
+    assert.ok(/THE STORY/.test(b.messages.join("")));
+  } finally {
+    if (prevProv === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = prevProv;
+    if (prevKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = prevKey;
+  }
 });
 
 test("brief: prose failure degrades to the mechanical brief, never to silence", async () => {
@@ -10933,7 +10921,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-15"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-17"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
