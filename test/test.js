@@ -4862,7 +4862,8 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
     assert.ok(ord.includes("mom") && ord.includes("momp"), "both momentum columns exist in DEFAULT_ORDER");
     assert.ok(!hid.has("momp"), "MOM+ visible by default");
     assert.ok(hid.has("mom"), "plain MOM hidden by default (the -10 default set)"); }
-  assert.equal(app.split("colAdjacent(").length - 1, 3, "adjacency migration: one definition + prefs path + layout path");
+  // -04: the 5m/15m pair added two adjacency calls per merge site (m5 beside px, m15 beside m5)
+  assert.equal(app.split("colAdjacent(").length - 1, 7, "adjacency migration: one definition + (momp, m5, m15) on the prefs path + the same three on the layout path");
   assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
   // -08: the hot dot rides BOTH momentum cells — it flags the name, not the incumbent score,
   // and must survive when only one of the two columns is visible.
@@ -11070,7 +11071,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14378,4 +14379,122 @@ test("spine hardening 2026.07.29-03: poller wiring — shared claim predicate, c
   assert.ok(pol.includes("spines: { staleMs: COVERAGE_STALE_MS, stale: staleSp.length,"), "health must expose the spines block on the alert's own threshold");
   assert.ok(pol.includes("staleSp.sort((a, b) => b.ageMin - a.ageMin);") && pol.includes("coins: staleSp.slice(0, 20)"), "worst-first, capped");
   assert.ok(pol.includes("hFail: r.hFail || 0,") && pol.includes("backoffS:"), "per-coin fail state must ride the health entry");
+});
+
+// ===== 5m/15m screener columns — in-memory mark-price ring (build 2026.07.29-04) ================
+// A memory-only [t, px] ring per market, sampled on buildSnapshot's 15s cadence, ships p5m/p15m
+// reference prices so the board can show intraday changes accurate to one tick. The 5m ARCHIVE was
+// deliberately NOT the source: closed-bars-only + ~once-per-bar capture makes its freshest
+// reference 5-12 min stale, and a "5m" column built on it would sometimes measure a 12-minute move
+// under a 5-minute label. Behavioral tests on the pure math + manifest pins on every wiring choice.
+
+test("px ring: pxRingPush keeps a strictly-increasing, depth-trimmed ring and rejects junk", () => {
+  const { pxRingPush } = require("../src/compute");
+  const M = 60 * 1000, ring = [];
+  pxRingPush(ring, 1000 * M, 100, 20 * M);
+  pxRingPush(ring, 1001 * M, 101, 20 * M);
+  assert.equal(ring.length, 2, "two valid samples land");
+  pxRingPush(ring, 1001 * M, 999, 20 * M);          // duplicate ts
+  pxRingPush(ring, 1000 * M + 1, 999, 20 * M);      // out-of-order ts
+  assert.equal(ring.length, 2, "duplicate / out-of-order timestamps are rejected — the ring stays strictly increasing");
+  pxRingPush(ring, 1002 * M, NaN, 20 * M);
+  pxRingPush(ring, 1002 * M, null, 20 * M);
+  pxRingPush(ring, 1002 * M, -5, 20 * M);
+  pxRingPush(ring, 1002 * M, 0, 20 * M);
+  assert.equal(ring.length, 2, "non-finite / non-positive prices never enter the ring");
+  pxRingPush(ring, 1030 * M, 103, 20 * M);          // 30 min later — everything older than 20m drops
+  assert.equal(ring.length, 1, "depth trim drops samples older than depthMs");
+  assert.equal(ring[0][1], 103, "the freshest sample survives the trim");
+});
+
+test("px ring: pxRingRef is tolerance-gated — the label is exact or the answer is null", () => {
+  const { pxRingPush, pxRingRef } = require("../src/compute");
+  const M = 60 * 1000, S = 1000, ring = [];
+  // 15s cadence, 20 min of samples, price = minutes-since-epoch for easy assertions
+  for (let t = 1000 * M; t <= 1020 * M; t += 15 * S) pxRingPush(ring, t, t / M, 20 * M);
+  const now = 1020 * M;
+  assert.equal(pxRingRef(ring, now, 5 * M, 90 * S), 1015, "5m lookback returns the sample at exactly now-5m");
+  assert.equal(pxRingRef(ring, now, 15 * M, 90 * S), 1005, "15m lookback returns the sample at exactly now-15m");
+  // off-grid target: nearest at-or-before within tolerance
+  assert.equal(pxRingRef(ring, now + 7 * S, 5 * M, 90 * S), 1015, "an off-grid target takes the newest sample at-or-before it");
+  // gap wider than tolerance at the lookback point -> null, never a longer window under the label
+  const gappy = [];
+  pxRingPush(gappy, 1000 * M, 1000, 60 * M);
+  pxRingPush(gappy, 1010 * M, 1010, 60 * M);
+  assert.equal(pxRingRef(gappy, 1017 * M, 5 * M, 90 * S), null, "a 2-min hole at the lookback point dashes rather than silently measuring a 7-min move");
+  assert.equal(pxRingRef([], 1000 * M, 5 * M, 90 * S), null, "empty ring -> null (deploy warm-up)");
+  assert.equal(pxRingRef(gappy, 1005 * M, 15 * M, 90 * S), null, "a lookback older than the ring's first sample -> null");
+});
+
+test("5m/15m columns: server wiring — ring sampled in buildSnapshot, refs shipped, ETag-honest", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  // pure math lives in compute and is exported — the poller only assembles
+  assert.ok(cmp.includes("function pxRingPush(") && cmp.includes("function pxRingRef("), "ring math lives in compute.js");
+  assert.ok(cmp.includes("pxRingPush, pxRingRef,"), "ring helpers exported from compute");
+  assert.ok(pol.includes('const { pxRingPush, pxRingRef } = require("./compute");'), "poller imports the ring helpers");
+  // tunables pinned: 20 min depth, 90s tolerance
+  assert.ok(pol.includes("PX_RING_DEPTH_MS = 20 * 60 * 1000"), "ring depth pinned at 20 min");
+  assert.ok(pol.includes("PX_RING_TOL_MS = 90 * 1000"), "lookback tolerance pinned at 90s");
+  // sampling rides buildSnapshot, before anything downstream can short-circuit, both universes
+  assert.ok(/function buildSnapshot\(\) \{\s*\n\s*sampleRegime\(\);[\s\S]{0,700}pxRingPush\(r\.pxRing/.test(pol),
+    "ring sampling sits at the TOP of buildSnapshot (15s cadence, ahead of any early-out)");
+  assert.ok(pol.includes("pxRing: [],"), "pxRing initialized on row creation");
+  // references shipped on the mapped row via the tolerance-gated lookup, quantized like every ref
+  assert.ok(pol.includes("p5m: sig(pxRingRef(r.pxRing, nowMs, 5 * 60 * 1000, PX_RING_TOL_MS), 9)"), "p5m shipped through pxRingRef + sig");
+  assert.ok(pol.includes("p15m: sig(pxRingRef(r.pxRing, nowMs, 15 * 60 * 1000, PX_RING_TOL_MS), 9)"), "p15m shipped through pxRingRef + sig");
+  // the refs ride markSig — a moving p5m/p15m must bust the snapshot ETag even when px is flat
+  assert.ok(pol.includes('(m.p5m == null ? "" : m.p5m) + "," + (m.p15m == null ? "" : m.p15m)'), "p5m/p15m ride markSig");
+});
+
+test("5m/15m columns: ring lookups against a real mapped-row-shaped flow (execution, not pins)", () => {
+  // Execute the exact server-side composition: 15s sampling into the row's ring, then the two
+  // mapMarket lookups — asserting real numbers emerge, and that warm-up yields honest nulls.
+  const { pxRingPush, pxRingRef } = require("../src/compute");
+  const DEPTH = 20 * 60 * 1000, TOL = 90 * 1000, S = 1000;
+  const r = { pxRing: [] };
+  let now = 5_000_000 * S;
+  // cold boot: 2 minutes of samples — 5m and 15m must both be null (dash), never a shorter-window guess
+  for (let i = 0; i < 8; i++) pxRingPush(r.pxRing, now + i * 15 * S, 100 + i, DEPTH);
+  now += 7 * 15 * S;
+  assert.equal(pxRingRef(r.pxRing, now, 5 * 60 * 1000, TOL), null, "2 min after boot the 5m ref is an honest null");
+  assert.equal(pxRingRef(r.pxRing, now, 15 * 60 * 1000, TOL), null, "…and so is the 15m ref");
+  // steady state: 20 minutes of 15s samples — both refs resolve to the sample at the exact lookback
+  const t0 = now;
+  for (let i = 1; i <= 80; i++) pxRingPush(r.pxRing, t0 + i * 15 * S, 200 + i, DEPTH);
+  now = t0 + 80 * 15 * S;
+  const p5 = pxRingRef(r.pxRing, now, 5 * 60 * 1000, TOL);
+  const p15 = pxRingRef(r.pxRing, now, 15 * 60 * 1000, TOL);
+  assert.equal(p5, 200 + 60, "5m ref = the sample exactly 20 ticks back");
+  assert.equal(p15, 200 + 20, "15m ref = the sample exactly 60 ticks back");
+  // and the % the client derives from them is finite and correctly signed
+  const px = 200 + 80;
+  const m5 = (px - p5) / p5 * 100, m15 = (px - p15) / p15 * 100;
+  assert.ok(isFinite(m5) && m5 > 0 && isFinite(m15) && m15 > m5, "derived changes are finite, positive, and 15m > 5m on a monotone tape");
+});
+
+test("5m/15m columns: client wiring — hidden by default, adjacent to Price, honest null fold", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // both columns registered with header tooltips
+  assert.ok(/key:'m5', label:'5m', type:'num', tip:/.test(app), "m5 column registered with a tooltip");
+  assert.ok(/key:'m15', label:'15m', type:'num', tip:/.test(app), "m15 column registered with a tooltip");
+  // default layout: present in order (next to px), HIDDEN by default — the product decision
+  { const ord = app.match(/const DEFAULT_ORDER=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim());
+    const hid = new Set(app.match(/const DEFAULT_HIDDEN=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim()));
+    assert.ok(ord.indexOf("m5") === ord.indexOf("px") + 1 && ord.indexOf("m15") === ord.indexOf("m5") + 1, "m5/m15 sit immediately after px in DEFAULT_ORDER");
+    assert.ok(hid.has("m5") && hid.has("m15"), "m5 and m15 are HIDDEN by default");
+  }
+  // saved layouts and prefs migrate the pair in next to Price, not appended at the far right
+  assert.equal(app.split("colAdjacent(v,'m5','px')").length - 1, 1, "prefs merge migrates m5 next to px");
+  assert.equal(app.split("colAdjacent(ord,'m5','px')").length - 1, 1, "saved-layout merge migrates m5 next to px");
+  assert.ok(app.includes("colAdjacent(v,'m15','m5')") && app.includes("colAdjacent(ord,'m15','m5')"), "m15 rides next to m5 at both merge sites");
+  // snapshot fold: absence on the wire CLEARS the refs (the ind-lockstep lesson — no stale reference under a fresh label)
+  assert.ok(app.includes("r.p5m=(m.p5m!=null)?m.p5m:null; r.p15m=(m.p15m!=null)?m.p15m:null;"), "absent wire refs clear to null, never persist stale");
+  // recomputeChanges derives m5/m15 from the ring refs BEFORE the hourly-spine ref guard
+  assert.ok(/function recomputeChanges\(r\)\{ const cur=r\.px; if\(cur==null\)return;[\s\S]{0,400}r\.m5=r\.p5m>0[\s\S]{0,200}const ref=r\.ref; if\(!ref\)return;/.test(app),
+    "m5/m15 compute ahead of the ref guard — the ring warms before the spine and must not wait on it");
+  // mobile preset excludes them (curated set unchanged) — they stay opt-in there too
+  assert.ok(!app.match(/const MOBILE_COLS=\[[^\]]*\]/)[0].includes("'m5'"), "mobile preset stays curated — m5 not in it");
 });
