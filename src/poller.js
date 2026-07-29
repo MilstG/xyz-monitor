@@ -12,6 +12,7 @@ const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
+const { pxRingPush, pxRingRef } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
@@ -92,6 +93,12 @@ const HOURLY_PASS_THRESHOLD = 0.9;    // start daily backfill once this fraction
 const ANALYTICS_MS = 3 * 60 * 1000;   // recompute the session / time-of-day analytics payload every 3 min
 const HOURLY_PERSIST_MS = 10 * 60 * 1000;   // save the raw hourly spine to /data so it survives redeploys
                                       // (so a few permanently-unfetchable markets can't block all daily data)
+// ---- short-horizon mark-price ring (5m / 15m screener columns, build 2026.07.29-04) -----------
+// Memory-only [t, px] ring per market, sampled on buildSnapshot's 15s cadence from the SAME live
+// mark the row ships — one code path, zero new fetch lanes, zero disk. See compute.pxRingPush /
+// pxRingRef for the honesty contract (strictly-increasing ring, tolerance-gated lookback).
+const PX_RING_DEPTH_MS = 20 * 60 * 1000;   // 15m lookback + tolerance + slack; ~80 samples/market
+const PX_RING_TOL_MS = 90 * 1000;          // max gap between the lookback target and its nearest sample — wider dashes
 // ---- 5-minute OHLCV archive (build-forward, on-disk via node:sqlite) --------------------------
 const FIVE_MIN = 5 * 60 * 1000;
 const M5_RETENTION_DAYS = 370;        // rolling 5m archive; 370 (not 365) buys a few days of slack so a "1y" chart is never short
@@ -194,6 +201,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         ref: null, feat: null, dailyRaw: null, hourlyRaw: null, fundH: new Map(), fundBackfilled: false,
         hourlyTs: 0, dailyTs: 0, isNew: true, delisted: false,
         m5Ts: 0, m5LastTs: 0, m5Fail: 0, m5FailUntil: 0, m5SeededCursor: false,   // 5m archive capture cursor (see capture5m)
+        pxRing: [],   // short-horizon mark samples ([t, px], memory-only) — the 5m/15m column source
       };
       rows.set(coin, r);
     }
@@ -948,6 +956,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return m.coin + "|" + m.px + "," + m.prevDay + "," + m.funding + "," + m.vol + "," + m.oi + ","
       + m.oiBase + "," + m.oracle + "," + m.d1 + "," + m.fundPct + "," + (m.delisted ? 1 : 0) + "," + (m.cascT || 0) + "," + (m.liq24 || 0)
       + "," + (m.tscore == null ? "" : m.tscore) + "," + (m.e21d == null ? "" : m.e21d)
+      + "," + (m.p5m == null ? "" : m.p5m) + "," + (m.p15m == null ? "" : m.p15m)
       + "|" + (m.ref ? JSON.stringify(m.ref) : "") + (m.feat ? JSON.stringify(m.feat) : "")
       + (m.red ? JSON.stringify(m.red) : "") + (m.rvol ? JSON.stringify(m.rvol) : "")
       + (m.doi ? JSON.stringify(m.doi) : "") + (m.fundByWin ? JSON.stringify(m.fundByWin) : "") + ";";
@@ -1009,6 +1018,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   }
   function buildSnapshot() {
     sampleRegime();
+    // 5m/15m reference sampling rides the snapshot's own 15s cadence — one push per non-delisted
+    // market in BOTH universes, taken before anything downstream can short-circuit, from the same
+    // live mark mapMarket ships. Memory-only by design (see PX_RING_DEPTH_MS above).
+    { const tR = Date.now();
+      for (const r of rows.values()) if (!r.delisted && r.px != null) pxRingPush(r.pxRing || (r.pxRing = []), tR, r.px, PX_RING_DEPTH_MS); }
     const tapeXyz = tapeStatsFor("xyz", activeMarkets());
     const tapeMain = crypto ? tapeStatsFor("main", mainMarkets()) : tapeCache.main;
     const RVOL_WINS = { h1: HOUR, h4: 4 * HOUR, d1: DAY };
@@ -1092,6 +1106,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         // Signed so ONE metric expresses both sides: +4 fully stacked up, -4 fully stacked down.
         tscore: tb ? (tb.side === "long" ? tb.score : -tb.score) : undefined,
         e21d: (tb && tb.e21 > 0 && r.px > 0) ? rnd((r.px / tb.e21 - 1) * 100, 2) : undefined,
+        // 5m/15m mark references from the in-memory ring — shipped as reference PRICES like
+        // ref.p1h/p4h so the client derives the % the same way it does every other window (one
+        // convention, one code path). Absent (undefined) during warm-up or across a feed gap
+        // wider than PX_RING_TOL_MS at the lookback point: the client dashes, never guesses.
+        p5m: sig(pxRingRef(r.pxRing, nowMs, 5 * 60 * 1000, PX_RING_TOL_MS), 9) ?? undefined,
+        p15m: sig(pxRingRef(r.pxRing, nowMs, 15 * 60 * 1000, PX_RING_TOL_MS), 9) ?? undefined,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
         oracle: sig(r.oracle, 9), d1: rnd(r.d1, 4),

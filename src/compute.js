@@ -99,6 +99,41 @@ function featuresFromHourly(c, now, HOUR, DAY) {
   return { ref, feat };
 }
 
+// ---- short-horizon mark-price ring (5m / 15m screener columns, build 2026.07.29-04) ----------
+// The board's window deltas read hourly-spine references (featuresFromHourly.ref); a 5- or
+// 15-minute change has no honest source there. The 5m ARCHIVE won't do either: it holds only
+// CLOSED bars pulled ~once per bar, so its freshest reference is 5-12 minutes stale and a "5m"
+// column built on it would sometimes measure a 12-minute move under a 5-minute label. Instead:
+// an in-memory ring of the SAME live mark the snapshot ships, sampled on the snapshot's own 15s
+// cadence — the reference lands within one tick of the true lookback. Deliberately not persisted:
+// a redeploy restarts it cold and the columns dash for their first 5/15 minutes, the same honest
+// warm-up contract as every spine-fed field.
+// pxRingPush: append one [t, px] sample IN PLACE and drop everything older than depthMs. Skips
+// non-finite / non-positive prices and out-of-order timestamps, so the ring is strictly
+// increasing in t by construction — pxRingRef's reverse scan depends on that.
+function pxRingPush(ring, t, px, depthMs) {
+  if (!Array.isArray(ring) || !isFinite(t) || px == null || !isFinite(px) || px <= 0) return ring;
+  if (ring.length && t <= ring[ring.length - 1][0]) return ring;
+  ring.push([t, px]);
+  const cut = t - depthMs;
+  let i = 0;
+  while (i < ring.length && ring[i][0] < cut) i++;
+  if (i) ring.splice(0, i);
+  return ring;
+}
+// pxRingRef: the reference price for "backMs ago" — the NEWEST sample at or before (now − backMs),
+// accepted only when it sits within tolMs of that target. A wider gap (deploy warm-up, a stalled
+// feed) returns null: the column dashes rather than silently measuring a longer window than its
+// label claims — the label is exact or the cell is blank.
+function pxRingRef(ring, now, backMs, tolMs) {
+  if (!Array.isArray(ring) || !ring.length || !isFinite(now)) return null;
+  const target = now - backMs;
+  for (let i = ring.length - 1; i >= 0; i--) {
+    if (ring[i][0] <= target) return target - ring[i][0] <= tolMs ? ring[i][1] : null;
+  }
+  return null;
+}
+
 // Open-interest change over a window from a [[ts, oi], ...] history buffer.
 // Anchors by linear interpolation between the two samples that straddle `now - window`,
 // so the reference lands on the exact window boundary rather than on whichever stored
@@ -3590,7 +3625,7 @@ function duelStats(rows, minN) {
   return { n, meanA, meanB, winB, t, verdict };
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
