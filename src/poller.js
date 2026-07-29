@@ -172,6 +172,56 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let analyticsErrMsg = "", analyticsCryptoErrMsg = "";
   let analyticsLazyTs = 0, analyticsCryptoLazyTs = 0;
   const ANALYTICS_LAZY_CD = 20 * 1000;   // at most one on-demand build attempt per universe per 20s
+  // ---- tick instrumentation + the serialized build chain (build 2026.07.29-08, perf phase 3) ----
+  // Phase 0 gave the event loop a histogram; this gives the histogram NAMES. Every scheduled tick
+  // runs through timedTick, which records how long it ran and logs offenders — so "max 2573ms" on
+  // the Loop dot stops being a mystery and becomes "buildAnalytics:crypto 2541ms". The worst
+  // offenders ship on /api/health (stats().ticks) and surface in the tray tooltip.
+  // Two honesty notes baked into the numbers: a SYNC tick's duration IS event-loop hold, so it
+  // slow-logs at 250ms; an ASYNC (yielding) build's duration is wall time across its yields — it
+  // holds the loop only in slices, so its floor is higher (a runaway build, not a stall).
+  const SLOW_TICK_SYNC_MS = 250, SLOW_TICK_ASYNC_MS = 8000, TICK_TOP = 8;
+  const tickStats = new Map();   // name -> { n, last, lastAt, worst, worstAt, slow, async }
+  function tickRecord(name, ms, isAsync) {
+    let s = tickStats.get(name);
+    if (!s) { s = { n: 0, last: 0, lastAt: 0, worst: 0, worstAt: 0, slow: 0, async: !!isAsync }; tickStats.set(name, s); }
+    s.n++; s.last = ms; s.lastAt = Date.now(); s.async = !!isAsync;
+    if (ms > s.worst) { s.worst = ms; s.worstAt = s.lastAt; }
+    if (ms >= (isAsync ? SLOW_TICK_ASYNC_MS : SLOW_TICK_SYNC_MS)) { s.slow++; log(`slow tick: ${name} ${isAsync ? "ran" : "held the loop"} ${ms}ms`); }
+  }
+  function timedTick(name, fn) {
+    const t0 = Date.now();
+    try {
+      const r = fn();
+      if (r && typeof r.then === "function")
+        return r.then((v) => { tickRecord(name, Date.now() - t0, true); return v; },
+          (e) => { tickRecord(name, Date.now() - t0, true); throw e; });
+      tickRecord(name, Date.now() - t0, false);
+      return r;
+    } catch (e) { tickRecord(name, Date.now() - t0, false); throw e; }
+  }
+  const isAsyncFn = (fn) => fn && fn.constructor && fn.constructor.name === "AsyncFunction";
+  // Cooperative yield for the heavy builds: hand the event loop back every few markets/sections so
+  // HTTP responses, WS frames and timers interleave with a build instead of queueing behind it for
+  // seconds. The math is untouched — only the pacing changes. But builds that yield can INTERLEAVE,
+  // which synchronous execution used to forbid for free: buildSignals mutates the ledger mid-pass
+  // and buildActionable reads it, so an interleaving would read a half-updated ledger. Every
+  // yielding build therefore runs on ONE serialized promise chain — chainBuild — which restores
+  // exactly the old mutual exclusion and doubles as the in-flight guard (a tick firing while its
+  // own previous build still runs queues behind it rather than overlapping it). Prices sampled by a
+  // yielding build can now move a second or two between the first market and the last; detectors
+  // read the candle spines (append-only on the hour), so this widens nothing that matters.
+  const buildYield = () => new Promise((r) => setImmediate(r));
+  const BUILD_YIELD_EVERY = 12;   // markets between yields — a few ms of held loop per slice at current roster sizes
+  let buildChain = Promise.resolve();
+  function chainBuild(name, fn) {
+    const run = () => timedTick(name, fn);
+    const p = buildChain.then(run, run);
+    // The chain itself must never carry a rejection forward (one failed build would poison every
+    // later one), but the CALLER's handle keeps the rejection so safeTick can log it.
+    buildChain = p.catch(() => {});
+    return p;
+  }
   let signalsCache = null, signalsVer = 0, signalsSig = "";         // ETag version for /api/signals
   let earnCache = null, earnVer = 0, earnSig = "", lastEarnOk = 0, earnErr = null;   // /api/earnings payload + freshness
   let trendCache = null, trendVer = 0, trendSig = "", trendBuilt = 0, trendByCoin = new Map();   // /api/trend — lazy, memoized, ETag rides content
@@ -2256,7 +2306,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return { xyz: panel("xyz"), main: crypto ? panel("main") : null };
   }
   let signalsBuildCount = 0;   // builds since process start — build #1 is the post-boot catch-up where in-force conditions all open at once
-  function buildSignals() {
+  async function buildSignals() {
+    let yN = 0;   // yield counter — one buildYield() per BUILD_YIELD_EVERY markets, both passes
     firedNow.clear();
     signalsBuildCount++;
     resolveLedger();
@@ -2292,6 +2343,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const prepped = [];
     for (const r of activeMarkets().concat(crypto ? mainMarkets() : [])) {
       if (r.delisted || r.px == null) continue;
+      if (++yN % BUILD_YIELD_EVERY === 0) await buildYield();
       const closes = deepDaily.get(r.coin) || dc.daily[r.coin] || null, dayFunding = dc.funding[r.coin] || null;   // -28: detectors read full depth; the wire's cap is the wire's business
       const st = studiesFor(r, closes, dayFunding);
       const ac = acOf(r);
@@ -2311,6 +2363,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (dc.offHours && dc.offHours.closed && b && b.px != null && pc > 0) gBench = (b.px / pc - 1) * 100; }
     // pass 2: live detection
     for (const { r, closes, dayFunding, st, ac } of prepped) {
+      if (++yN % BUILD_YIELD_EVERY === 0) await buildYield();
       const rets = closes ? dailyRets(closes) : [];
       const sd30 = retStd(rets.slice(-30), 15);
 
@@ -3123,10 +3176,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
 
   // Error-recording wrapper. Every scheduled and on-demand build goes through this so a persistent
   // failure surfaces in the UI (and the logs) instead of masquerading as "still warming up".
-  function buildAnalyticsSafe(scope) {
+  async function buildAnalyticsSafe(scope) {
     const cr = scope === "crypto";
     try {
-      const p = buildAnalytics(scope);
+      // Serialized with every other yielding build: buildAnalytics is async since -08 (it hands the
+      // loop back between study sections), and the chain is what keeps two analytics scopes — or an
+      // analytics build and a signals build — from interleaving at those yield points.
+      const p = await chainBuild("buildAnalytics:" + (cr ? "crypto" : "stocks"), () => buildAnalytics(scope));
       if (cr) analyticsCryptoErrMsg = ""; else analyticsErrMsg = "";
       return p;
     } catch (e) {
@@ -3137,7 +3193,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
 
-  function buildAnalytics(scope) {
+  async function buildAnalytics(scope) {
     const U = analyticsUniverse(scope || "stocks");
     const READY_HOURS = 20 * 24;   // "ready" = >= ~20 trading days of hourly candles for the session studies
     const universe = U.roster()
@@ -3152,14 +3208,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const hc = hourlyCoverage(U), fc = fundingCoverage(U);
     const equityMarkets = U.isCrypto ? universe.length : universe.filter((u) => u.assetClass === "Equity").length;
     const ready = universe.filter((u) => u.hours >= READY_HOURS).length;
+    await buildYield();
     const regime = buildRegime();   // regime is inherently both-universe; the client reads regime[scope]
     const rgSig = ["all", "crypto", "stocks"].map((k) => { const d = regime[k]; return d && !d.pending ? `${Math.round(d.lev.totalOi || 0)}|${d.crowd.netFundApr || 0}|${d.crowd.netCrowd || 0}|${(d.series || []).length}` : "0"; }).join(";");
     // Groups this universe publishes; a study whose group is off is never built (-19).
     const on = (g) => U.groups.indexOf(g) > -1;
     const DISABLED = { disabled: true };
+    await buildYield();
     const lvSt = on("structure") ? buildLevelsStudy(U) : DISABLED;   // computed once; reused in sections below so sig and payload can never disagree
+    await buildYield();
     const emSt = on("structure") ? buildEma200Study(U) : DISABLED;   // same gate, same cadence, same memo contract as the levels study
     const lvSig = lvSt.disabled ? "off" : (lvSt.pending ? `p${lvSt.count}` : `${lvSt.n}:${lvSt.overall.nTouched}:${lvSt.overall.touchRate}:${lvSt.overall.holdRate}:${lvSt.coverage.tickers}`);
+    await buildYield();
     const anSt = buildAnatomy(U);       // same one-computation contract as the levels study
     const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday ? anSt.monday.weeks : 0}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
     const sig = `${U.scope}:${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
@@ -3177,15 +3237,26 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       },
       universe,
       groups: U.groups.slice(),
-      sections: (() => {
+      sections: await (async () => {
+        // One yield between every study builder: each one loops the full roster, so this is where
+        // the loop-hold used to accumulate into a single multi-second block. Section granularity
+        // first; if the tick stats show one section still spiking alone, it yields internally next.
         const hourClock = on("clocks") ? buildActivityClocks(U) : DISABLED;
+        await buildYield();
+        const sessionDecomp = buildSessionDecomp(U);
+        await buildYield();
+        const dow = on("week") ? buildDowHeatmap(U) : DISABLED;
+        await buildYield();
+        const clusters = on("structure") && on("clocks") ? buildClusters(hourClock) : DISABLED;   // clusters consume the hour clocks — a universe without clocks (crypto) gets an honest disabled, never an eternal pending
+        await buildYield();
+        const seasonality = on("clocks") ? buildSeasonality(U) : DISABLED;
         return {
           regime,
-          sessionDecomp: buildSessionDecomp(U),
+          sessionDecomp,
           hourClock,
-          dow: on("week") ? buildDowHeatmap(U) : DISABLED,
-          clusters: on("structure") && on("clocks") ? buildClusters(hourClock) : DISABLED,   // clusters consume the hour clocks — a universe without clocks (crypto) gets an honest disabled, never an eternal pending
-          seasonality: on("clocks") ? buildSeasonality(U) : DISABLED,
+          dow,
+          clusters,
+          seasonality,
           levels: lvSt,
           ema200: emSt,
           anatomy: anSt,
@@ -4880,8 +4951,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
 
   async function start() {
     // Isolation helper, hoisted to the top of start() so the critical rebuild loops can be armed
-    // before anything that might throw.
-    const safeTick = (fn, name) => () => { try { fn(); } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); } };
+    // before anything that might throw. Since 2026.07.29-08 it is also the instrumentation choke
+    // point: every scheduled tick runs through timedTick (durations named on /api/health — the
+    // "which build was the 2.5s stall" question answered from the tray), and any ASYNC build is
+    // routed onto the serialized build chain instead of being invoked bare, so yielding builds can
+    // never interleave with each other. Detection by constructor keeps every pinned call-site
+    // string byte-identical while changing what happens underneath.
+    const safeTick = (fn, name) => () => {
+      try {
+        const r = isAsyncFn(fn) ? chainBuild(name, fn) : timedTick(name, fn);
+        if (r && typeof r.catch === "function") r.catch((e) => log(name + " failed (isolated, server stays up): " + (e && e.message)));
+      } catch (e) { log(name + " failed (isolated, server stays up): " + (e && e.message)); }
+    };
     // ---- ARM THE ANALYTICS REBUILD LOOP FIRST -------------------------------------------------
     // This used to be registered ~90 lines down, after the universe poll, the WebSocket, the
     // workers and the sqlite probe. start() is invoked as poller.start().catch(log), so ANY throw
@@ -4997,8 +5078,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     } else {
       log("5m archive: disabled (node:sqlite unavailable — needs Node >= 22.5 with --experimental-sqlite)");
     }
-    setInterval(buildSnapshot, 15 * 1000);
-    setInterval(buildDaily, 60 * 1000);
+    // Timed + isolated since -08: these two were the only scheduled ticks outside safeTick, which
+    // meant (a) a throw in either would take the process down and (b) they were invisible to the
+    // tick stats. Same cadence, same functions — they just report in now like everything else.
+    setInterval(safeTick(buildSnapshot, "buildSnapshot"), 15 * 1000);
+    setInterval(safeTick(buildDaily, "buildDaily"), 60 * 1000);
     setInterval(safeTick(buildSignals, "buildSignals"), 10 * 60 * 1000);
     // Trigger detection follows the signals build on the same cadence, offset so it reads a
     // settled ledger. Isolated: a board error must never take the signal engine down with it.
@@ -7238,7 +7322,8 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { n, hit: +(w / n).toFixed(3), avgR: +(sum / n).toFixed(2) };
   }
 
-  function buildActionable() {
+  async function buildActionable() {
+    let yN = 0;   // yield counter — the actRecord scans per claim are the weight here
     const now = Date.now();
     const recMemo = new Map();
     const recOf = (ev, shadow) => {
@@ -7250,6 +7335,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const rej = { expired: 0, noGeometry: 0, degenerate: 0, untakeable: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
     for (const e of ledgerOpen.values()) {
       if (e.ev === "airead") continue;                          // the analyst's own claim, not a setup
+      if (++yN % BUILD_YIELD_EVERY === 0) await buildYield();
       const r = rows.get(e.coin);
       if (!r || r.delisted || !(r.px > 0)) continue;
       if (r.uni === "main" && !crypto) continue;
@@ -9505,7 +9591,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   function getActionable() {
     const now = Date.now();
     if (!actCache || now - actBuilt > ACT_MS) {
-      try { buildActionable(); } catch (err) { log("buildActionable error: " + (err && err.message)); }
+      // The build is async (it yields) and MUST run on the serialized chain — a bare call here
+      // could interleave with a signals build mid-ledger-mutation. Fire it and serve what exists
+      // now; the cold-cache case serves the fallback exactly once, and the next poll reads warm.
+      chainBuild("buildActionable", buildActionable).catch((err) => log("buildActionable error: " + (err && err.message)));
     }
     return actCache || { ts: Date.now(), dataTs: 0, params: {}, coverage: {}, rows: [], count: 0 };
   }
@@ -9524,7 +9613,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         const now = Date.now(), last = cr ? analyticsCryptoLazyTs : analyticsLazyTs;
         if (now - last >= ANALYTICS_LAZY_CD) {
           if (cr) analyticsCryptoLazyTs = now; else analyticsLazyTs = now;
-          c = buildAnalyticsSafe(scope);
+          // Async since -08: fire the chained build and serve the fallback THIS request — the cold
+          // cache is repaired by the time the client's next poll lands, same self-heal, new tense.
+          buildAnalyticsSafe(scope).catch(() => {});
         }
       }
       return c;
@@ -9739,6 +9830,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     hydrateLedgerNow: hydrateLedger,   // harness: run hydration + unit repair without start()
     pollNow: pollUniverse,   // diagnostics + harness: force one universe reconciliation
     buildSignalsNow: buildSignals,   // harness: run a full signals build synchronously
+    settleBuildsNow: () => buildChain,   // harness: await every build currently queued on the serialized chain — how a test observes an async self-heal without patching around the production path
     resolveLedgerNow: resolveLedger,   // harness: resolve due claims against the seeded spines without waiting out a build cycle
     buildDailyNow: buildDaily,       // harness: populate daily closes so the signals loop has inputs
     buildSnapshotNow: buildSnapshot, // harness: run one snapshot build synchronously (content-sig identity test)
@@ -9783,6 +9875,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         // means the fetch never failed — the coin simply never got queue time (budget contention).
         spines: { staleMs: COVERAGE_STALE_MS, stale: staleSp.length,
           worstAgeMin: staleSp.length ? staleSp[0].ageMin : 0, coins: staleSp.slice(0, 20) },
+        // Named tick durations (worst-first): the "which build was the stall" answer, served where
+        // the Loop dot already looks. worstAt makes a boot spike attributable instead of eternal.
+        ticks: [...tickStats].map(([name, v]) => ({ name, n: v.n, last: v.last, worst: v.worst, worstAt: v.worstAt, slow: v.slow, async: v.async }))
+          .sort((a, b) => b.worst - a.worst).slice(0, TICK_TOP),
         signals: signalsCache ? signalsCache.count : 0,
         ledger: { open: ledgerOpen.size, resolved: ledgerClosed.length },
         earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null,
