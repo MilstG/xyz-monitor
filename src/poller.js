@@ -1370,6 +1370,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (ep && typeof ep.k === "string" && ep.tShow > 0 && ep.void > 0) boardEp.set(ep.k, ep);
       if (Array.isArray(d.board.closed))
         boardEpClosed = d.board.closed.filter((e) => e && typeof e.k === "string" && e.kind && Number.isFinite(e.rE)).slice(-BOARD_EP_KEEP);
+      // First-cohort repair, idempotent: episodes stamped on the record's very first scan
+      // (tShow === the epoch itself) whose claims fired well before it were opened against rows
+      // that may have been visible before the feature existed. Their shown stamp is the
+      // feature's boot, not a surfacing — retro-marked bt so the headline lateness never blames
+      // the board's gates for the record's own birth.
+      { let fx = 0;
+        const firstCohort = (e) => !e.bt && boardEpSince > 0 && e.tShow === boardEpSince
+          && Number.isFinite(e.tFire) && e.tShow - e.tFire > BOARD_EP_BT_MS;
+        for (const e of boardEpClosed) if (firstCohort(e)) { e.bt = 1; fx++; }
+        for (const e of boardEp.values()) if (firstCohort(e)) { e.bt = 1; fx++; }
+        if (fx) { ledgerDirty = true; log(`Settled-record repair: ${fx} first-cohort episode(s) retro-stamped bt — excluded from headline lateness`); } }
     }
     // Pre-epoch crypto purge. The -101 removal un-enrolled the main universe and dropped its
     // stored claims wholesale. The engine is back (2026.07.26-08) with log-space geometry, so the
@@ -7047,6 +7058,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   let boardEpClosed = [];       // resolved episodes, oldest first
   let boardEpSince = 0;         // first scan ever — the record's own out-of-sample epoch
   let boardEpDropped = 0;       // shown but unscoreable (claim voided/purged, or no exit price) — disclosed, never silent
+  // First scan after process start. An episode opened on it, for a claim that fired well before
+  // this process existed, carries a first-shown stamp that is only a LOWER BOUND on visibility —
+  // the row may have been on the board while no process was watching (feature-first deploy, lost
+  // blob, or a mid-flight restart). Such episodes are stamped `bt`, disclosed in the UI, and
+  // EXCLUDED from the headline lateness: blaming the board's surfacing with a boot artifact would
+  // manufacture the very number the settled record exists to measure. A claim that fired within
+  // ~the current build window could not have been shown earlier, so it never earns the stamp.
+  let boardEpBoot = true;
+  const BOARD_EP_BT_MS = 30 * 60 * 1000;
 
   function boardEpScan(board, now) {
     if (!boardEpSince) { boardEpSince = now; ledgerDirty = true; }
@@ -7056,12 +7076,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       present.add(rw.k);
       const ep = boardEp.get(rw.k);
       if (ep) { if (ep.off) { ep.flick = (ep.flick || 0) + 1; ep.off = 0; ledgerDirty = true; } continue; }
-      boardEp.set(rw.k, { k: rw.k, coin: rw.coin, t: rw.t, uni: rw.uni, ev: rw.ev, label: rw.label,
+      const nu = { k: rw.k, coin: rw.coin, t: rw.t, uni: rw.uni, ev: rw.ev, label: rw.label,
         cls: rw.cls, side: rw.side, tShow: now, markShow: rw.entry, fired: rw.fired,
         void: rw.void, target: rw.target, rr: rw.rr ? rw.rr.gross : null, evR: rw.evR,
-        rec: rw.rec ? { n: rw.rec.n, hit: rw.rec.hit } : null, tFire: rw.t0, flick: 0, off: 0 });
+        rec: rw.rec ? { n: rw.rec.n, hit: rw.rec.hit } : null, tFire: rw.t0, flick: 0, off: 0 };
+      if (boardEpBoot && Number.isFinite(rw.t0) && now - rw.t0 > BOARD_EP_BT_MS) nu.bt = 1;
+      boardEp.set(rw.k, nu);
       ledgerDirty = true;
     }
+    boardEpBoot = false;
     // merge losers were never SHOWN — only the merged winner opened an episode; a row missing this
     // build marks off (the flicker gate), it does not resolve anything.
     for (const ep of boardEp.values()) if (!present.has(ep.k) && !ep.off) { ep.off = now; ledgerDirty = true; }
@@ -7086,6 +7109,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         void: ep.void, target: ep.target, rr: ep.rr, evR: ep.evR, rec: ep.rec, tFire: ep.tFire,
         flick: ep.flick || 0, tRes: tEnd, kind: res.kind, rE, rM,
         held: Math.max(0, (res.tHit || tEnd) - ep.tShow) };
+      // The price the score came from is part of the score. Target/void exits are their frozen
+      // levels (already on the episode); an expiry's exit mark existed only in this sweep — an
+      // "expired +0.05R" row with no visible price asks for trust the record never needs to ask.
+      if (res.kind === "expired" && Number.isFinite(exitPx) && exitPx > 0) done.exitPx = sig(exitPx, 9);
+      if (ep.bt) done.bt = 1;
       if (res.approx) done.approx = 1;   // spine gap: touch state unknowable, scored at endpoints — labeled
       boardEpClosed.push(done);
       if (boardEpClosed.length > BOARD_EP_KEEP) boardEpClosed = boardEpClosed.slice(-BOARD_EP_KEEP);
@@ -7093,24 +7121,51 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   }
 
   function boardSettled() {
-    const mk = () => ({ n: 0, t: 0, v: 0, x: 0, approx: 0, hit: null, avgE: null, avgM: null, pf: null, _w: 0, _sE: 0, _sM: 0, _gw: 0, _gl: 0 });
-    const uniObj = () => ({ cls: { rr: mk(), ev: mk() }, all: mk(), lat: null, open: 0, flick: 0 });
+    // Correlated same-build clusters. Resolved episodes of ONE family and side first shown on the
+    // SAME scan are one market condition observed several times, not independent samples —
+    // funding extremes are the canonical case: one funding episode fires half the alt roster at
+    // once and the gate surfaces them all on one build. An untagged n silently overstates the
+    // record, which is exactly the sin the fundext persistence floor exists to prevent upstream.
+    const corKey = (e) => e.ev + "|" + e.side + "|" + e.tShow;
+    const corMap = new Map();
+    for (const e of boardEpClosed) corMap.set(corKey(e), (corMap.get(corKey(e)) || 0) + 1);
+    const mk = () => ({ n: 0, t: 0, v: 0, x: 0, xp: 0, xn: 0, approx: 0, hit: null, avgE: null, avgM: null, pf: null, _sE: 0, _sM: 0, _gw: 0, _gl: 0 });
+    const uniObj = () => ({ cls: { rr: mk(), ev: mk() }, all: mk(), lat: null, latN: 0, btN: 0, clus: 0, open: 0, flick: 0, _lE: 0, _lM: 0 });
     const per = { stocks: uniObj(), crypto: crypto ? uniObj() : null };
     const add = (b, e) => { b.n++; b[e.kind === "target" ? "t" : e.kind === "void" ? "v" : "x"]++;
+      // Expiries are partial outcomes by construction — neither level was reached. They are
+      // split by the sign of R@SHOWN (the basis a reader could actually have had) and NEVER
+      // counted as hits, so a favorable drift can't pad the rate the geometry promised.
+      if (e.kind === "expired") { if (e.rM > 0) b.xp++; else b.xn++; }
       if (e.approx) b.approx++;
-      if (e.rE > 0) { b._w++; b._gw += e.rE; } else b._gl += -e.rE;
+      // Profit factor prices the SHOWN basis. The fire mark is a counterfactual nobody watching
+      // the board could trade; a pf built on it flatters the record with untradeable R.
+      if (e.rM > 0) b._gw += e.rM; else b._gl += -e.rM;
       b._sE += e.rE; b._sM += e.rM; };
-    const fin = (b) => { if (b.n) { b.hit = +(b._w / b.n).toFixed(3); b.avgE = +(b._sE / b.n).toFixed(2);
-      b.avgM = +(b._sM / b.n).toFixed(2); b.pf = b._gl > 0 ? +(b._gw / b._gl).toFixed(2) : null; }
-      delete b._w; delete b._sE; delete b._sM; delete b._gw; delete b._gl; return b; };
+    const fin = (b) => { if (b.n) {
+      // hit = targets over level-touched resolutions ONLY. Null when nothing touched a level —
+      // "100% hit" over pure expiries was a real bug this replaces, not a hypothetical.
+      b.hit = (b.t + b.v) ? +(b.t / (b.t + b.v)).toFixed(3) : null;
+      b.avgE = +(b._sE / b.n).toFixed(2); b.avgM = +(b._sM / b.n).toFixed(2);
+      b.pf = b._gl > 0 ? +(b._gw / b._gl).toFixed(2) : null; }
+      delete b._sE; delete b._sM; delete b._gw; delete b._gl; return b; };
+    const clusSeen = { stocks: new Set(), crypto: new Set() };
     for (const e of boardEpClosed) { const u = per[e.uni]; if (!u) continue;
-      add(u.cls[e.cls === "ev" ? "ev" : "rr"], e); add(u.all, e); u.flick += e.flick || 0; }
+      add(u.cls[e.cls === "ev" ? "ev" : "rr"], e); add(u.all, e); u.flick += e.flick || 0;
+      // Lateness only over episodes with a trustworthy first-shown stamp — bt stamps are lower
+      // bounds on visibility and would inflate the very cost this number measures.
+      if (e.bt) u.btN++; else { u._lE += e.rE; u._lM += e.rM; u.latN++; }
+      if ((corMap.get(corKey(e)) || 0) > 1 && clusSeen[e.uni]) clusSeen[e.uni].add(corKey(e)); }
     for (const ep of boardEp.values()) { const u = per[ep.uni]; if (u) { u.open++; u.flick += ep.flick || 0; } }
     for (const key of ["stocks", "crypto"]) { const u = per[key]; if (!u) continue;
       fin(u.cls.rr); fin(u.cls.ev); fin(u.all);
-      u.lat = u.all.n ? +(u.all.avgE - u.all.avgM).toFixed(2) : null; }
+      u.lat = u.latN ? +((u._lE - u._lM) / u.latN).toFixed(2) : null;
+      u.clus = clusSeen[key].size;
+      delete u._lE; delete u._lM; }
     return { since: boardEpSince || null, dropped: boardEpDropped, perUni: per,
-      episodes: boardEpClosed.slice(-BOARD_EP_SHIP) };
+      episodes: boardEpClosed.slice(-BOARD_EP_SHIP).map((e) => {
+        const c = corMap.get(corKey(e)) || 0;
+        return c > 1 ? Object.assign({}, e, { cor: c }) : e; }) };
   }
   // Labels come from the two places that already own them — the signals engine's EV_LABEL and the
   // strategy panel's STRAT_DEFS — so a renamed setup can't read one way here and another there.
