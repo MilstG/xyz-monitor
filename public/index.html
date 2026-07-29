@@ -308,6 +308,9 @@
 </section>
 
 <section id="view-admin" hidden>
+  <!-- Event-loop latency row (Phase 0 of the perf batch): live-window chips + the persisted 7d
+       p99 ring with the 50ms worker-thread decision gate drawn as a dashed line. -->
+  <div class="adm-loop" id="admLoop" hidden></div>
   <!-- Morning brief controls. Deliberately OUTSIDE the recipients accordion: the first version put
        them inside it and they were invisible until you happened to expand a collapsed section, which
        is indistinguishable from the feature not shipping. -->

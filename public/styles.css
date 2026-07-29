@@ -764,6 +764,25 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .freshtray .fdot.ok i{background:var(--up)}
 .freshtray .fdot.warn i{background:var(--accent)}
 .freshtray .fdot.stale i{background:var(--down)}
+/* ===== admin event-loop latency row (2026.07.29-04) ===== */
+.adm-loop{background:var(--panel2);border:1px solid var(--grid);border-radius:6px;padding:12px 14px;margin-bottom:12px;position:relative}
+.adm-loop .alp-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:8px}
+.adm-loop .alp-t{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.adm-loop .alp-chips{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px}
+.adm-loop .alp-chip{font-family:var(--mono);font-size:12px;padding:3px 9px;border-radius:3px;border:1px solid var(--grid);color:var(--muted)}
+.adm-loop .alp-chip.ok{border-color:rgba(70,185,126,.45);color:var(--up)}
+.adm-loop .alp-chip.warn{border-color:rgba(232,180,75,.45);color:var(--accent)}
+.adm-loop .alp-chip.bad{border-color:rgba(229,96,77,.5);color:var(--down)}
+.adm-loop .alp-chip.dim{color:var(--faint)}
+.adm-loop .alp-spark{width:100%;display:block;cursor:crosshair}
+.adm-loop .alp-base{stroke:var(--grid);stroke-width:1}
+.adm-loop .alp-gate{stroke:rgba(232,180,75,.55);stroke-width:1;stroke-dasharray:3 4}
+.adm-loop .alp-gtxt{fill:rgba(232,180,75,.7);font-size:10px;font-family:var(--mono)}
+.adm-loop .alp-line{fill:none;stroke:var(--accent);stroke-width:1.5}
+.adm-loop .alp-dotp,.adm-loop .alp-cd{fill:var(--accent)}
+.adm-loop .alp-cx{stroke:var(--muted);stroke-width:.8}
+.adm-loop .alp-ro{position:absolute;bottom:64px;background:var(--panel2);border:1px solid var(--grid);border-radius:3px;padding:3px 8px;font-family:var(--mono);font-size:11px;color:var(--text);pointer-events:none;white-space:nowrap}
+.adm-loop .alp-none{font-size:11.5px;color:var(--faint);padding:6px 0}
 /* ===== ask-the-board terminal ===== */
 .term-fab{position:fixed;bottom:18px;right:18px;z-index:118;display:flex;align-items:center;gap:7px;
   background:var(--panel2);border:1px solid var(--accent);color:var(--accent);font-family:var(--mono);

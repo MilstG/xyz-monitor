@@ -483,8 +483,61 @@ function renderFreshTray(h){ const box=el('freshtray'); if(!box||!h) return;
     else { age=now-ts; cls=age>s.stale?'stale':(age>s.warn?'warn':'ok'); }
     const ageTxt=age!=null?aiFmtAgo(age)+' ago':(failing?'fetch failing':'no data yet');
     return `<span class="fdot ${cls}" title="${esc(s.tip)} — ${ageTxt}"><i></i>${esc(label)}</span>`; }).join('');
-  box.innerHTML=dots; box.hidden=false; }
-async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); renderFreshTray(h); if(h&&h.ai) renderAskBudget(h.ai.askDayLeft, h.ai.askPerDay); }catch(_){ } }
+  // Event-loop dot: value-graded (p99 ms), not age-graded like the feed dots — the thresholds are
+  // the worker-thread decision gate itself: green <20ms, amber <50ms, red ≥50ms. Reads the LIVE
+  // still-open window so a stall shows within one 45s tray poll, not at the next 6h window close.
+  let loopDot='';
+  if(h.loop&&h.loop.p99!=null){ const p=h.loop.p99, cls=p>=50?'stale':(p>=20?'warn':'ok');
+    loopDot=`<span class="fdot ${cls}" title="event loop delay (live window) — p50 ${h.loop.p50}ms · p99 ${p}ms · max ${h.loop.max}ms — green <20 · amber <50 · red \u226550 (the worker-thread gate)"><i></i>Loop</span>`; }
+  box.innerHTML=dots+loopDot; box.hidden=false; }
+async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); _lastHealth=h; renderFreshTray(h); if(h&&h.ai) renderAskBudget(h.ai.askDayLeft, h.ai.askPerDay); renderAdmLoop(h); }catch(_){ } }
+// Last /api/health payload, shared with the admin loop row so opening the panel between tray polls
+// renders instantly from the 45s-old read instead of a blank box.
+let _lastHealth=null;
+// ===== admin panel: event-loop latency row (build 2026.07.29-04) ===============================
+// Phase 0 of the perf batch: chips for the live window + a p99-per-window sparkline over the
+// persisted 7d ring, with the 50ms decision-gate line drawn as a dashed reference. Admin-only by
+// placement (it lives inside view-admin, whose route/tab gating is already server-enforced).
+function renderAdmLoop(h){ const box=el('admLoop'); if(!box) return;
+  if(!h||!h.loop){ return; }
+  const L=h.loop, ring=Array.isArray(L.hist)?L.hist:[];
+  const chip=(v,lab,tip)=>{ const cls=v>=50?'bad':(v>=20?'warn':'ok');
+    return `<span class="alp-chip ${cls}" data-tip="${esc(tip)}">${esc(lab)} ${v}ms</span>`; };
+  const me=L.maxEver?`<span class="alp-chip dim" data-tip="worst single stall ever observed on this data dir — kept separately so one boot spike stays attributable without polluting the rolling read">maxEver ${L.maxEver.v}ms · ${new Date(L.maxEver.t).toISOString().slice(5,16).replace('T',' ')}</span>`:'';
+  const winH=Math.round((L.windowMs||0)/3600e3), liveMin=Math.round((L.sinceMs||0)/60e3);
+  let spark='<div class="alp-none">no closed windows yet — first ring point lands at the '+winH+'h mark (or on the next deploy, which folds the open window in)</div>';
+  if(ring.length){
+    const W=600,H=72,top=6,bot=58,vmax=Math.max(60,...ring.map(r=>r[2]));
+    const xs=ring.length>1?(i)=>i*(W/(ring.length-1)):()=>W/2;
+    const y=(v)=>bot-Math.min(v,vmax)/vmax*(bot-top);
+    const pts=ring.map((r,i)=>xs(i).toFixed(1)+','+y(r[2]).toFixed(1)).join(' ');
+    const gate=y(50);
+    spark=`<svg class="alp-spark" viewBox="0 0 ${W} ${H}" data-n="${ring.length}">`
+      +`<line x1="0" y1="${bot}" x2="${W}" y2="${bot}" class="alp-base"/>`
+      +`<line x1="0" y1="${gate.toFixed(1)}" x2="${W}" y2="${gate.toFixed(1)}" class="alp-gate"/>`
+      +`<text x="${W-4}" y="${(gate-4).toFixed(1)}" text-anchor="end" class="alp-gtxt">50ms</text>`
+      +(ring.length>1?`<polyline class="alp-line" points="${pts}"/>`:`<circle class="alp-dotp" cx="${xs(0).toFixed(1)}" cy="${y(ring[0][2]).toFixed(1)}" r="2.5"/>`)
+      +`<line class="alp-cx" x1="0" y1="0" x2="0" y2="${H}" visibility="hidden"/>`
+      +`<circle class="alp-cd" r="3" visibility="hidden"/></svg>`
+      +`<div class="alp-ro" hidden></div>`;
+  }
+  box.innerHTML=`<div class="alp-head"><span class="alp-t">Event loop</span><span class="sec">live window ${liveMin}m of ${winH}h · ring ${ring.length}/28 · p99 per closed window</span></div>`
+    +`<div class="alp-chips">${chip(L.p50,'p50','median tick delay, live window')}${chip(L.p99,'p99','99th-percentile tick delay, live window — the decision-gate number: sustained \u226550ms for a week justifies moving builds to worker threads; sustained <50ms kills that work item')}${chip(L.max,'max','worst stall in the live window')}${me}</div>${spark}`;
+  box.hidden=false;
+  const svg=box.querySelector('.alp-spark');
+  if(svg&&ring.length){
+    const cx=svg.querySelector('.alp-cx'), cd=svg.querySelector('.alp-cd'), ro=box.querySelector('.alp-ro');
+    const W=600,top=6,bot=58,vmax=Math.max(60,...ring.map(r=>r[2]));
+    svg.addEventListener('mousemove',(e)=>{ const r=svg.getBoundingClientRect();
+      const x=(e.clientX-r.left)/r.width*W;
+      const i=ring.length>1?Math.max(0,Math.min(ring.length-1,Math.round(x/(W/(ring.length-1))))):0;
+      const px=ring.length>1?i*(W/(ring.length-1)):W/2, py=bot-Math.min(ring[i][2],vmax)/vmax*(bot-top);
+      cx.setAttribute('x1',px); cx.setAttribute('x2',px); cx.setAttribute('visibility','visible');
+      cd.setAttribute('cx',px); cd.setAttribute('cy',py); cd.setAttribute('visibility','visible');
+      ro.textContent=new Date(ring[i][0]).toISOString().slice(5,16).replace('T',' ')+'  p50 '+ring[i][1]+'  p99 '+ring[i][2]+'  max '+ring[i][3]+'ms';
+      ro.style.left=Math.min(px/W*r.width+10, r.width-190)+'px'; ro.hidden=false; });
+    svg.addEventListener('mouseleave',()=>{ cx.setAttribute('visibility','hidden'); cd.setAttribute('visibility','hidden'); ro.hidden=true; });
+  } }
 // Ambient ask-AI budget chip in the terminal bar. Shared group pool, resets midnight UTC; green
 // with headroom, amber when low (<=25%), red at zero. Fed by the 45s health poll AND by each ask
 // response (askDayLeft/askPerDay ride on every /api/ask reply) so it updates the instant you spend.
@@ -2828,7 +2881,7 @@ const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
-async function openAdmin(){ if(!IS_ADMIN) return; renderAdmin(); await loadAdmin(); }
+async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); await loadAdmin(); }
 async function loadAdmin(){
   try{ _adm=await fetchJSON('/api/features'); }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
