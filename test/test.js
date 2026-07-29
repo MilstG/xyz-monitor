@@ -10940,7 +10940,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-21"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-22"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -13938,44 +13938,68 @@ test("the landscape's budget targets the telegram ceiling, and the contract matc
 // went to this browser. And the -18-era app.js that reached origin was missing the landscape admin
 // box entirely (the partial-deploy lesson, now inside one upload batch).
 
-test("mine-only test fires target strictly the operator's own telegram — admin does not expand it", async () => {
+test("test fires target the DESIGNATED operator, from any browser, and the designation is toggleable", async () => {
   process.env.TG_BOT_TOKEN = "test-token";
   const p = twoUserHarness();
-  const ca = p.pushMintCode("own-admin", true); p.pushBindNow(ca.code, 7000000001, "milst");
+  // The operator's telegram was linked from browser A; today they administer from browser B. The
+  // owner-cookie version of this feature returned no-own-recipient in exactly that case — which is
+  // the normal case for anyone with two machines — so targeting keys on the roster's operator flag.
+  const ca = p.pushMintCode("browser-A", true); p.pushBindNow(ca.code, 7000000001, "milst");
   const cb = p.pushMintCode("own-b", false); p.pushBindNow(cb.code, 7000000002, "friend");
 
-  // The old path, retained: no chat, no mine, admin -> everyone. The buttons no longer use it.
-  const all = await p.briefTest(null, "own-admin", true, false);
-  assert.equal(all.sent, 2, "the broadcast path still exists for anything that explicitly wants it");
+  const fromB = await p.briefTest(null, "browser-B", true, false, true);
+  assert.equal(fromB.sent, 1, "the operator gets the test even though this browser never linked them");
+  assert.equal((await p.landTest(null, "browser-B", true, false, true)).sent, 1, "landscape identical");
 
-  // The buttons' path: mine=true targets rec.owner === owner, and isAdmin buys NOTHING extra.
-  const mine = await p.briefTest(null, "own-admin", true, false, true);
-  assert.equal(mine.sent, 1, "an admin's test fire reaches exactly their own linked telegram");
-  const mineL = await p.landTest(null, "own-admin", true, false, true);
-  assert.equal(mineL.sent, 1, "…and the landscape pair behaves identically");
-  // An operator with nothing linked gets told, not silently zero-sent.
-  const none = await p.briefTest(null, "own-nobody", true, false, true);
-  assert.equal(none.error, "no-own-recipient");
+  // The toggle: admin-gated, both directions, and refusal is explicit when nobody holds the flag.
+  assert.equal(p.pushSetPrefs("7000000002", { operator: true }, "own-b", false).error, "admin-only",
+    "a public user cannot promote themselves into ops alerts and test fires");
+  assert.ok(p.pushSetPrefs("7000000002", { operator: true }, "browser-B", true).ok);
+  assert.equal((await p.briefTest(null, "browser-B", true, false, true)).sent, 2, "two operators, two copies");
+  p.pushSetPrefs("7000000002", { operator: false }, "browser-B", true);
+  p.pushSetPrefs("7000000001", { operator: false }, "browser-B", true);
+  assert.equal((await p.briefTest(null, "browser-B", true, false, true)).error, "no-operator-designated",
+    "zero operators refuses rather than guessing a recipient");
+
+  // The designation survives a restart — it rides the same persist the rest of the record does.
+  p.pushSetPrefs("7000000002", { operator: true }, "browser-B", true);
+  p.hydratePushNow();
+  assert.equal((await p.briefTest(null, "browser-B", true, false, true)).sent, 1);
 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(/!!b\.fresh, !!b\.mine/.test(srv), "the route passes mine through to both kinds");
+  assert.ok(/!!b\.operator \|\| !!b\.mine/.test(srv), "the route passes the flag (old clients' mine still lands operator-only, never broadcast)");
+});
+
+test("the roster carries the operator toggle and the boxes say where tests go", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/data-aop=/.test(app), "the toggle chip exists on the roster row");
+  assert.ok(/operator:to/.test(app) && /confirm\(/.test(app),
+    "toggling is confirm-guarded and states both consequences (ops alerts + test fires)");
+  assert.ok(/body:JSON\.stringify\(\{fresh:!!fresh, operator:true\}\)/.test(app));
+  assert.ok(/body:JSON\.stringify\(\{kind:'landscape',fresh:!!fresh, operator:true\}\)/.test(app));
+  assert.ok(/\u2192 operator only/.test(app) || /operator only<\/span>/.test(app), "the label states the new truth");
+  assert.ok(/rows\.find\(r=>r\.mine\)\|\|rows\.find\(r=>r\.admin\)/.test(app),
+    "the in-box schedule row serves the operator from ANY browser, not only the linking one");
 });
 
 test("the admin boxes carry the operator's own schedule and truthful test labels", () => {
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  // Both test pairs send mine:true — the button IS the operator-only fire.
-  assert.ok(/body:JSON\.stringify\(\{fresh:!!fresh, mine:true\}\)/.test(app));
-  assert.ok(/body:JSON\.stringify\(\{kind:'landscape',fresh:!!fresh, mine:true\}\)/.test(app));
-  assert.ok(/just you, never other recipients/.test(app),
+  // Both test pairs send operator:true — the button fires at the designated operator, which is
+  // this test's -21 ancestor corrected: the owner-cookie version missed an operator on a second
+  // browser, so the flag replaced the cookie and these pins moved with it.
+  assert.ok(/body:JSON\.stringify\(\{fresh:!!fresh, operator:true\}\)/.test(app));
+  assert.ok(/body:JSON\.stringify\(\{kind:'landscape',fresh:!!fresh, operator:true\}\)/.test(app));
+  assert.ok(/operator only/.test(app),
     "the label next to the buttons states what they now actually do");
   // Each box states the operator's own resolved schedule with click-to-edit — the direct answer to
   // "which time does MY brief/landscape land", without hunting for a roster chip to expand.
   assert.ok(/data-mysched=/.test(app));
   assert.ok(/mySchedRow\('brief'\)/.test(app) && /mySchedRow\('landscape'\)/.test(app));
-  assert.ok(/link a telegram above to schedule yourself/.test(app),
-    "an operator with nothing linked is told why the control is absent");
+  assert.ok(/link a telegram or mark an operator below/.test(app),
+    "with neither a linked telegram nor a designated operator, the row says why it is empty");
   // The edit rides the identical validated prefs route the roster chips use — no second write path.
   const seg = app.slice(app.indexOf("data-mysched]"), app.indexOf("const x=el('adm-land')"));
   assert.ok(/pushAct\('\/api\/alerts\/prefs',\{chat:me\.chat, sched:/.test(seg));
