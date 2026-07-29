@@ -1227,3 +1227,9 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .nowbrk i.tgt{background:var(--up);opacity:.85}
 .nowbrk i.stp{background:var(--down);opacity:.85}
 .nowbrk .z{position:absolute;top:-1px;bottom:-1px;left:50%;width:1px;background:var(--faint)}
+
+/* ---- admin: morning brief block (build 2026.07.28-14) ------------------------------------- */
+.adm-brief{border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:0 0 10px}
+.adm-brief .abr-t{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:6px}
+.adm-brief .abr-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px}
+.adm-brief .abr-r{font-size:11px;width:100%;color:var(--dim);margin-top:4px}

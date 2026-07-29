@@ -2814,48 +2814,23 @@ function renderAdmRecips(){
   // Brief test-fire. The formatting of a Telegram message cannot be checked from the browser —
   // proportional font, entity parsing and the 4096 ceiling only bite on the real transport — so
   // this sends the actual thing, by the actual path, to the operator's own linked accounts.
-  // Recipients still on UTC because nobody has told us their offset. Default-on means this is the
-  // difference between a 07:00 brief and a 04:00 one, so it is surfaced rather than left to chance.
-  const utcN=rows.filter(r=>r.briefHour!=null&&r.briefUtc).length;
-  const utcWarn=utcN?`<div class="sec warn" style="font-size:11px;padding:2px 4px" data-tip="These accounts are on the default schedule, which is a fixed UTC moment rather than a guess at their local time. Picking an hour from the alerts bell on their own browser switches them to their own timezone.">${utcN} recipient(s) on the default \u2014 delivered in UTC until they pick an hour.</div>`:'';
-  const briefBar=`<div class="arule" style="flex-wrap:wrap;gap:6px;align-items:center">`
-    +`<span class="sec" style="font-size:11.5px;flex:1;min-width:150px" data-tip="Sends the morning brief exactly as the 07:00 scheduler would \u2014 same context, same renderer, same two-message split \u2014 to every telegram account linked from THIS browser. Cached: re-serves this hour's brief without a model call. Fresh: regenerates and spends one of the day's brief budget.">Morning brief \u2014 send a test to your linked account(s)</span>`
-    +`<button type="button" class="cdtf" id="adm-brief" data-tip="re-serves this hour's brief \u2014 no model call, no budget spent">send cached</button>`
-    +`<button type="button" class="cdtf" id="adm-brief-f" data-tip="regenerate from live state and spend one of today's brief budget">send fresh</button>`
-    +`<span class="sec" id="adm-brief-r" style="font-size:11px;width:100%"></span></div>`;
-  b.innerHTML=utcWarn+briefBar+(rows.length? rows.map(r=>{
+  b.innerHTML=(rows.length? rows.map(r=>{
     const dot=r.muted?'neg':(r.lastErr?'warn':'pos');
     const openR=!!admRecOpen[r.chat];
     const on=(c)=>(r.classes&&r.classes.length)?r.classes.includes(c):dflt.includes(c);
     const nOn=(P.classes||[]).filter(c=>on(c)&&(!adminCls.includes(c)||r.admin)).length;
     const chips=openR?(P.classes||[]).filter(c=>!adminCls.includes(c)||r.admin).map(c=>
       `<button type="button" class="cdtf${on(c)?' on':''}" data-apcls="${esc(c)}" data-apchat="${esc(r.chat)}">${esc(c)}</button>`).join(''):'';
+    // The brief is a scheduled summary, not an event class, so it has no chip among the classes —
+    // it needs its own. Admin-scoped: the operator fields the "why am I getting this" messages.
+    const bH=(r.briefHour!=null?r.briefHour:null);
+    const bLbl=bH!=null?`${String(bH).padStart(2,'0')}:00${r.briefUtc?' UTC':''}`:'off';
+    const briefChip=openR?`<button type="button" class="cdtf${bH!=null?' on':''}" data-apbrief="${esc(r.chat)}" data-tip="the morning brief for THIS recipient \u2014 click to set the hour or turn it off. Setting it from here records the hour only, never your timezone: stamping your offset onto somebody else's account would move their delivery without them asking.">brief ${esc(bLbl)}</button>`:'';
     return `<div class="arule" style="flex-wrap:wrap"><span class="arec-h" data-admexp="${esc(r.chat)}"><span class="asec-c">${openR?'\u25be':'\u25b8'}</span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${nOn} class(es) \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':(r.owned?' \u00b7 another browser':' \u00b7 unclaimed')}</span></span>`
       +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
       +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span>`
-      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}</span>`:'')+`</div>`; }).join('')
+      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${briefChip}</span>`:'')+`</div>`; }).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>');
-  // Report back what actually happened: parts, entity-parsed length of each, whether the prose
-  // layer degraded, and which budget-ladder steps fired. A silent success tells the operator
-  // nothing about whether the message that landed is the message they designed.
-  const briefRun=(fresh)=>{
-    const out=el('adm-brief-r'); if(out) out.textContent='sending\u2026';
-    ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
-    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh})})
-      .then(r=>r.json().catch(()=>null)).then(d=>{
-        if(!out) return;
-        if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
-        const parts=[`sent to ${d.sent} account(s) \u00b7 ${d.parts} message(s) \u00b7 ${(d.chars||[]).join(' + ')} chars`];
-        if(d.model) parts.push('model '+d.model);
-        if(d.degraded) parts.push('<span class="warn">prose degraded: '+esc(d.degraded)+'</span>');
-        if(d.dropped&&d.dropped.length) parts.push('<span class="warn">ladder: '+esc(d.dropped.join(', '))+'</span>');
-        if(d.dayLeft!=null) parts.push(d.dayLeft+' left today');
-        out.innerHTML=parts.join(' \u00b7 ');
-      }).catch(()=>{ if(out) out.innerHTML='<span class="neg">request failed</span>'; })
-      .finally(()=>{ ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=false; }); });
-  };
-  { const x=el('adm-brief'); if(x) x.addEventListener('click',()=>briefRun(false)); }
-  { const x=el('adm-brief-f'); if(x) x.addEventListener('click',()=>briefRun(true)); }
   b.querySelectorAll('[data-admexp]').forEach(x=>x.addEventListener('click',()=>{
     admRecOpen[x.dataset.admexp]=!admRecOpen[x.dataset.admexp]; renderAdmRecips(); }));
   b.querySelectorAll('[data-apcls]').forEach(x=>x.addEventListener('click',()=>{
@@ -2865,16 +2840,67 @@ function renderAdmRecips(){
     const c=x.dataset.apcls;
     cur = cur.includes(c) ? cur.filter(v=>v!==c) : cur.concat([c]);
     pushAct('/api/alerts/classes',{chat:rec.chat, classes:cur}).then(()=>renderAdmRecips()); }));
+  b.querySelectorAll('[data-apbrief]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=rows.find(r=>r.chat===x.dataset.apbrief); if(!rec) return;
+    const cur=rec.briefHour;
+    const v=(prompt('Morning brief for '+rec.name+' at which hour? (0-23, blank to turn it off)',cur!=null?String(cur):'10')||'').trim();
+    // No tz in this write. An admin setting somebody else's hour from their own browser would
+    // otherwise stamp the operator's offset onto that person's record and silently move them.
+    pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour: v===''?null:+v}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-admclaim]').forEach(x=>x.addEventListener('click',()=>{
     pushAct('/api/alerts/claim',{chat:x.dataset.admclaim}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-admunlink]').forEach(x=>x.addEventListener('click',()=>{
     if(!confirm('Revoke this recipient? They stop receiving alerts immediately and must re-link.')) return;
     pushAct('/api/alerts/unlink',{chat:x.dataset.admunlink}).then(()=>renderAdmRecips()); }));
 }
+// Morning brief: an always-visible admin block, not a row inside a collapsed accordion. Renders
+// whether or not the recipients section is expanded, and whether or not anyone is linked.
+function renderAdmBrief(){
+  const box=el('admBriefBox'); if(!box) return;
+  if(!IS_ADMIN){ box.hidden=true; return; }
+  box.hidden=false;
+  const P=pushState;
+  const rows=(P&&P.recipients)||[];
+  const utcN=rows.filter(r=>r.briefHour!=null&&r.briefUtc).length;
+  const onN=rows.filter(r=>r.briefHour!=null).length;
+  const st=(P&&P.brief)||null;
+  const state=st?(st.enabled?`<span class="pos">on</span> \u00b7 default ${String(st.defaultHour).padStart(2,'0')}:00 UTC \u00b7 ${st.dayLeft}/${st.perDay} generations left today`
+    :'<span class="neg">disabled</span> (BRIEF_ENABLED=0)'):'\u2026';
+  box.innerHTML=`<div class="abr-t" data-tip="One market brief a day per recipient, delivered as two telegram messages: indices, movers, sectors, regime, positioning, earnings, macro and the day\u2019s headlines, with two model-written sections. On by default for everyone who links telegram.">Morning brief</div>`
+    +`<div class="sec" style="font-size:11.5px">${state}${st&&st.model?` \u00b7 ${esc(st.model)}`:''}</div>`
+    +`<div class="sec" style="font-size:11.5px;margin-top:3px">${onN} of ${rows.length} linked recipient(s) receiving it${utcN?` \u00b7 <span class="warn">${utcN} on the UTC default</span>`:''}</div>`
+    +(st&&st.lastErr?`<div class="sec neg" style="font-size:11px;margin-top:3px" data-tip="the last time the prose layer failed \u2014 the mechanical brief still shipped">last prose failure: ${esc(st.lastErr)}</div>`:'')
+    +`<div class="abr-row">`
+      +`<button type="button" class="cdtf" id="adm-brief" data-tip="re-serves this hour\u2019s brief \u2014 no model call, no budget spent">send test (cached)</button>`
+      +`<button type="button" class="cdtf" id="adm-brief-f" data-tip="regenerate from live state and spend one of today\u2019s brief budget">send test (fresh)</button>`
+      +`<span class="sec" style="font-size:11px">\u2192 telegram account(s) linked from this browser</span>`
+    +`</div><div class="abr-r" id="adm-brief-r"></div>`;
+  // Report what actually shipped: parts, entity-parsed length of each, whether the prose layer
+  // degraded, and which budget-ladder steps fired. A silent success tells the operator nothing
+  // about whether the message that landed is the message they designed.
+  const briefRun=(fresh)=>{
+    const out=el('adm-brief-r'); if(out) out.textContent='sending\u2026';
+    ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh})})
+      .then(r=>r.json().catch(()=>null)).then(d=>{
+        if(!out) return;
+        if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
+        const p=[`sent to ${d.sent} account(s) \u00b7 ${d.parts} message(s) \u00b7 ${(d.chars||[]).join(' + ')} chars`];
+        if(d.model) p.push('model '+esc(d.model));
+        if(d.degraded) p.push('<span class="warn">prose degraded: '+esc(d.degraded)+'</span>');
+        if(d.dropped&&d.dropped.length) p.push('<span class="warn">ladder: '+esc(d.dropped.join(', '))+'</span>');
+        if(d.dayLeft!=null) p.push(d.dayLeft+' left today');
+        out.innerHTML=p.join(' \u00b7 ');
+      }).catch(()=>{ if(out) out.innerHTML='<span class="neg">request failed</span>'; })
+      .finally(()=>{ ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=false; }); });
+  };
+  { const x=el('adm-brief'); if(x) x.addEventListener('click',()=>briefRun(false)); }
+  { const x=el('adm-brief-f'); if(x) x.addEventListener('click',()=>briefRun(true)); }
+}
 function renderAdmin(){
   { const h=el('admRecH'), b=el('admRecB');
     if(h&&!h._wired){ h._wired=1; h.addEventListener('click',()=>{ b.hidden=!b.hidden; renderAdmRecips(); }); }
-    if(!pushState) loadPush().then(()=>renderAdmRecips()); else renderAdmRecips(); }
+    if(!pushState) loadPush().then(()=>{ renderAdmRecips(); renderAdmBrief(); }); else { renderAdmRecips(); renderAdmBrief(); } }
   const host=el('adm-rows'); if(!host) return;
   if(!_adm){ host.innerHTML='<div class="msg">Loading…</div>'; return; }
   if(_adm.error){ host.innerHTML='<div class="msg">Could not load feature state — '+esc(_adm.error)+'</div>'; return; }
