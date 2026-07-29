@@ -10940,7 +10940,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-20"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-21"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -13930,4 +13930,53 @@ test("the landscape's budget targets the telegram ceiling, and the contract matc
   const yCtx = { at: Date.now(), news: [{ sector: "X", items: [{ id: "h1", t: "A", h: "x" }, { id: "h2", t: "B", h: "y" }] }] };
   assert.ok(/number not in context: 2021/.test(
     C.validateLandProse({ story: "Like it is 2021 again.\n\nSecond.", refs: ["h1", "h2"] }, yCtx).error));
+});
+
+// ===== operator-only test fires + in-box schedules (build 2026.07.28-21) =======================
+// Found live: the admin test buttons fired with no chat, and for an admin pushOwns says yes to
+// everybody — so "send test" was a six-person broadcast standing next to a label claiming it only
+// went to this browser. And the -18-era app.js that reached origin was missing the landscape admin
+// box entirely (the partial-deploy lesson, now inside one upload batch).
+
+test("mine-only test fires target strictly the operator's own telegram — admin does not expand it", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const p = twoUserHarness();
+  const ca = p.pushMintCode("own-admin", true); p.pushBindNow(ca.code, 7000000001, "milst");
+  const cb = p.pushMintCode("own-b", false); p.pushBindNow(cb.code, 7000000002, "friend");
+
+  // The old path, retained: no chat, no mine, admin -> everyone. The buttons no longer use it.
+  const all = await p.briefTest(null, "own-admin", true, false);
+  assert.equal(all.sent, 2, "the broadcast path still exists for anything that explicitly wants it");
+
+  // The buttons' path: mine=true targets rec.owner === owner, and isAdmin buys NOTHING extra.
+  const mine = await p.briefTest(null, "own-admin", true, false, true);
+  assert.equal(mine.sent, 1, "an admin's test fire reaches exactly their own linked telegram");
+  const mineL = await p.landTest(null, "own-admin", true, false, true);
+  assert.equal(mineL.sent, 1, "…and the landscape pair behaves identically");
+  // An operator with nothing linked gets told, not silently zero-sent.
+  const none = await p.briefTest(null, "own-nobody", true, false, true);
+  assert.equal(none.error, "no-own-recipient");
+
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/!!b\.fresh, !!b\.mine/.test(srv), "the route passes mine through to both kinds");
+});
+
+test("the admin boxes carry the operator's own schedule and truthful test labels", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // Both test pairs send mine:true — the button IS the operator-only fire.
+  assert.ok(/body:JSON\.stringify\(\{fresh:!!fresh, mine:true\}\)/.test(app));
+  assert.ok(/body:JSON\.stringify\(\{kind:'landscape',fresh:!!fresh, mine:true\}\)/.test(app));
+  assert.ok(/just you, never other recipients/.test(app),
+    "the label next to the buttons states what they now actually do");
+  // Each box states the operator's own resolved schedule with click-to-edit — the direct answer to
+  // "which time does MY brief/landscape land", without hunting for a roster chip to expand.
+  assert.ok(/data-mysched=/.test(app));
+  assert.ok(/mySchedRow\('brief'\)/.test(app) && /mySchedRow\('landscape'\)/.test(app));
+  assert.ok(/link a telegram above to schedule yourself/.test(app),
+    "an operator with nothing linked is told why the control is absent");
+  // The edit rides the identical validated prefs route the roster chips use — no second write path.
+  const seg = app.slice(app.indexOf("data-mysched]"), app.indexOf("const x=el('adm-land')"));
+  assert.ok(/pushAct\('\/api\/alerts\/prefs',\{chat:me\.chat, sched:/.test(seg));
 });
