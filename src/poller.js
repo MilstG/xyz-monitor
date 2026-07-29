@@ -6531,6 +6531,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     "Consumer Discretionary": "DISC", "Consumer Staples": "STAPLES", "Health Care": "HEALTH",
     "Financials": "FINS", "Industrials": "INDUS", "Energy": "ENERGY", "Materials": "MATS",
     "Real Estate": "REALEST", "Utilities": "UTES" };
+  // Curated built-ins (build 2026.07.28-10): fixed membership lists that ship as defaults on every
+  // deployment — MAG7 the founding member. Derived at read time like the sector baskets: the list
+  // is INTERSECTED with the live roster (an unlisted member simply doesn't contribute; ≥2 present
+  // or the basket doesn't exist), so a delisting can never leave a phantom member. A custom basket
+  // wearing the same name WINS — the operator's own definition beats the shipped one, and the
+  // curated entry steps aside rather than duplicating the name in the registry.
+  const BASKET_CURATED = [
+    { name: "MAG7", scope: "stocks", members: ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"] },
+  ];
   const RATIO_TFS = { "1h": 1, "4h": 4, "12h": 12, "1d": 24 };
   const RATIO_EMA_SPAN = 200, RATIO_EMA_MIN = RATIO_EMA_SPAN + 5;   // emaSeries' own floor — the line exists honestly or not at all
   const RATIO_SHOW_MAX = 400;   // candles ON THE WIRE; the EMA is computed over the FULL series first, then both are trimmed together
@@ -6592,6 +6601,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     }
     const out = [];
     for (const [name, members] of groups) if (members.length >= 3) out.push({ name, scope: "stocks", members: members.sort(), builtin: true });
+    // Curated defaults join AFTER the sector groups: fixed lists intersected with the live roster.
+    // A same-named custom wins (the operator's definition beats the shipped one); under 2 listed
+    // members the curated basket honestly does not exist rather than shipping a one-name "basket".
+    for (const cdef of BASKET_CURATED) {
+      if (baskets.some((b) => b.name === cdef.name)) continue;
+      const tks = basketScopeTickers(cdef.scope);
+      const present = cdef.members.filter((m) => tks.has(m));
+      if (present.length < BASKET_MIN_MEMBERS) continue;
+      out.push({ name: cdef.name, scope: cdef.scope, members: present, builtin: true, cur: true });
+    }
     out.sort((a, b) => (a.name < b.name ? -1 : 1));
     return out;
   }
@@ -6662,8 +6681,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       return { ok: false, error: `members must live in ONE universe \u2014 not in the ${closer.scope} universe: ${closer.miss.join(" ")}` };
     }
     const scope = allS ? "stocks" : "crypto";
+    // Sector built-ins are reserved (purely derived, no membership to override); curated built-ins
+    // are NOT — the whole point of "custom wins" is that an operator can redefine MAG7. So reserve
+    // the derived sector names but let a curated name through to be overridden.
+    const curatedNames = new Set(BASKET_CURATED.map((c) => c.name));
     const reserved = new Set([...SP_ALIASES.map((a) => a.toUpperCase()), "BTC",
-      ...baskets.map((b) => b.name), ...builtinBaskets().map((b) => b.name)]);
+      ...baskets.map((b) => b.name), ...builtinBaskets().map((b) => b.name).filter((n) => !curatedNames.has(n))]);
     const v = validateBasket(name, ms, scope, { tickers: scope === "stocks" ? sT : cT, reserved });
     if (!v.ok) return v;
     const def = { name: v.name, scope, members: v.members, at: Date.now() };
