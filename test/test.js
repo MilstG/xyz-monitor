@@ -10463,7 +10463,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-11"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-12"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -12899,4 +12899,83 @@ test("-11 corr reorder + 7d floor: pairs sit above COMP/G, and the overlap floor
   const floor = (L) => Math.max(+m[1], Math.floor(Math.min(L, 90) * (+m[2])));
   for (const L of [7, 30, 90, 180, 365]) assert.ok(floor(L) < L, L + "d window: floor " + floor(L) + " is achievable (was the 7d grey-out bug)");
   assert.ok(!/minOv=Math\.max\(15,/.test(app), "the flat-15 floor that greyed the 7d matrix is gone");
+});
+
+// ===== shadow baskets resolve by typed label, not just the truncated token (build 2026.07.28-11) ==
+// The bug: industry names tokenize to <=12 chars, so "Semiconductors" -> SEMICONDUCTO (no trailing
+// R). Clicking the COMP/G chip worked (real token), but typing the natural word in `ratio` failed.
+// Fix: basketDefByName resolves by token first, then by normalized human LABEL (singular/plural
+// tolerant), so `ratio mag7/semiconductor` and `.../semiconductors` both hit the basket.
+
+test("-11 shadow baskets resolve by natural label: ratio accepts the typed industry name, not just the token", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger() {}, insert() {}, saveRegime() {}, saveNews() {}, loadNews: () => null,
+    saveBaskets: () => true, loadBaskets: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const DAY = 86400e3, HOUR = 3600e3, now = Math.floor(Date.now() / HOUR) * HOUR;
+  ["NVDA", "AMD", "AVGO", "MRVL", "QCOM", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA"].forEach((tk) =>
+    p.seedRowNow("xyz:" + tk, { px: 100, dailyRaw: Array.from({ length: 20 }, (_, k) => ({ t: now - (19 - k) * DAY, c: 100 + k })),
+      hourlyRaw: Array.from({ length: 60 }, (_, k) => ({ t: now - (59 - k) * HOUR, c: 100 })) }));
+  // the industry exists and its token is the truncated form
+  const semi = p.getBasketsPayload().baskets.find((b) => b.label === "Semiconductors");
+  assert.ok(semi, "the Semiconductors industry basket exists");
+  assert.equal(semi.name.length, 12, "its token is truncated to 12 chars (the source of the typo trap)");
+  // all natural forms resolve to the SAME basket, and the ratio echoes the canonical token
+  for (const typed of ["SEMICONDUCTOR", "SEMICONDUCTORS", "semiconductor", semi.name]) {
+    const r = p.getRatio("MAG7", typed, "1h");
+    assert.ok(r.ok, "ratio resolves '" + typed + "': " + (r.error || ""));
+    assert.equal(r.den, semi.name, "echoes the canonical basket token for '" + typed + "'");
+  }
+  // a genuine non-match still fails cleanly (no over-eager fuzzy hit)
+  assert.ok(!p.getRatio("MAG7", "ZZZQQ", "1h").ok, "garbage still refused");
+});
+
+// ===== shadow baskets display their clean label, token stays the key (build 2026.07.28-12) =======
+// The truncated tokens (SEMICONDUCTO) are ugly and unguessable. Everywhere a shadow basket is SHOWN
+// — chip, legend, picker, RATIO header, Δ picker — the human label ("Semiconductors") renders, while
+// the token remains the selection key, colour anchor, and ratio leg. Typing the label resolves it.
+
+test("-12 clean labels: display shows the label, selection keeps the token", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 300 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch, ct: global.clearTimeout, ci: global.clearInterval };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0; global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null, createElement: mk, addEventListener() {}, body: mk("b"), documentElement: mk("h"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: { baskets: true }, __ADMIN: true };
+  global.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  global.fetch = () => new Promise(() => {});
+  try {
+    const api = new Function(app + "\n;return {state, BASKETS, basketDisplayName, basketByName, compgChipHtml, dvbPickOpts, dvbBasketDef};")();
+    api.state.scope = "stocks";
+    api.BASKETS.list.length = 0;
+    api.BASKETS.list.push(
+      { name: "SEMICONDUCTO", scope: "stocks", members: ["NVDA", "AMD"], builtin: true, shadow: true, kind: "industry", label: "Semiconductors" },
+      { name: "TECH", scope: "stocks", members: ["AAPL", "MSFT"], builtin: true, shadow: true, kind: "sector" },
+      { name: "MINE", scope: "stocks", members: ["AAPL", "MSFT"], builtin: false });
+    api.BASKETS.rev = 1;
+    // display helper: label for the industry, token for the sector (no label), token for a custom
+    assert.equal(api.basketDisplayName("SEMICONDUCTO"), "Semiconductors", "industry shows its clean label");
+    assert.equal(api.basketDisplayName("TECH"), "TECH", "a sector with no label shows its token");
+    assert.equal(api.basketDisplayName("MINE"), "MINE", "a custom shows its name");
+    // chip: visible text is the label, but the data-tk KEY is the token (selection/colour/ratio)
+    const chip = api.compgChipHtml("SEMICONDUCTO", 0);
+    assert.ok(/data-tk="SEMICONDUCTO"/.test(chip), "chip key is the token");
+    assert.ok(/Semiconductors/.test(chip) && !/>SEMICONDUCTO</.test(chip.replace(/data-tk="[^"]*"/g, "")), "chip shows the label, not the token");
+    // Δ picker: option value is the token, visible text the label
+    api.state.dvbBasket = "SEMICONDUCTO";
+    const opts = api.dvbPickOpts();
+    assert.ok(/value="SEMICONDUCTO"/.test(opts) && /Semiconductors/.test(opts), "Δ picker option: token value, label text");
+    assert.equal(api.dvbBasketDef().name, "SEMICONDUCTO", "the Δ selection resolves by token");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
 });
