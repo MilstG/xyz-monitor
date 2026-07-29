@@ -359,6 +359,8 @@ svg.spark{width:100%;height:46px;display:block;margin:5px 0 2px}
 .cmx th.bk .bkg{margin-right:2px;border-bottom:none}
 .bt-vb{pointer-events:none}
 .bk-builtin{color:var(--faint);font-size:9px;letter-spacing:.1em}
+.bk-guest{color:var(--blue);font-size:8.5px;letter-spacing:.08em;border:1px solid var(--blue);border-radius:2px;padding:0 3px;opacity:.85}
+.bk-guestbanner{border-left:2px solid var(--blue);padding-left:6px}
 .bk-mgr{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
 .bk-mgr td{padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top}
 .bk-new{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}

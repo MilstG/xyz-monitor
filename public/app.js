@@ -982,7 +982,11 @@ function pearson(a,b){ const n=a.length; if(n<3) return null; let sa=0,sb=0; for
   const ma=sa/n, mb=sb/n; let cov=0,va=0,vb=0; for(let i=0;i<n;i++){ const da=a[i]-ma, db=b[i]-mb; cov+=da*db; va+=da*da; vb+=db*db; }
   if(va<=0||vb<=0) return null; return cov/Math.sqrt(va*vb); }
 function buildCorr(rows, Ldays){
-  const cutoff=Math.floor(Date.now()/DAY)-Ldays, minOv=Math.max(15, Math.floor(Ldays*0.5));
+  // Overlap floor scales with the window: a 7d lookback only has ~5 trading days of returns, so a
+  // flat 15-day minimum greyed the entire 7d matrix (every cell fell under the floor). Require
+  // roughly half the window's expected return-days, hard-floored at 4 so a correlation still rests
+  // on enough points to mean something. (Was max(15, Ldays*0.5) — the 15 was the bug.)
+  const cutoff=Math.floor(Date.now()/DAY)-Ldays, minOv=Math.max(4, Math.floor(Math.min(Ldays,90)*0.4));
   const series=rows.map(r=>{ const m=dailyReturns(r); if(!m) return null; const f=new Map(); for(const [d,v] of m) if(d>=cutoff) f.set(d,v); return f; });
   const N=rows.length, C=Array.from({length:N},()=>new Array(N).fill(null)), OV=Array.from({length:N},()=>new Array(N).fill(0));
   for(let i=0;i<N;i++){ C[i][i]=1; const si=series[i]; if(!si) continue;
@@ -1271,13 +1275,63 @@ function renderPairPanel(){
 // to unwind when one is dropped.
 let BASKETS={ts:0, floor:0.6, maxMembers:20, maxCustom:12, rev:-1, list:[]};
 let _basketsInflight=false;
+// ===== Guest baskets (build 2026.07.28-11) ===============================================
+// Ownership model: the SERVER registry belongs to the admin alone (persisted, roster-synthesized).
+// A non-admin's custom baskets live ONLY in this browser (localStorage) — non-persistent across
+// cleared storage or another device, invisible to the admin and to every other guest, and never
+// sent to the server (which refuses a non-admin write anyway). Built-ins (MAG7, sector baskets)
+// stay global and read-only for everyone. When real users land later, this whole guest path is
+// deleted and `owner` keys to a user id instead — the server seam already carries the field.
+const GUEST_BK_KEY='xyz-guest-baskets';
+let _guestRev=0;
+function guestBasketsLoad(){
+  if(IS_ADMIN) return [];
+  try{ const raw=localStorage.getItem(GUEST_BK_KEY); if(!raw) return [];
+    const arr=JSON.parse(raw); if(!Array.isArray(arr)) return [];
+    return arr.filter(b=>b&&/^[A-Z][A-Z0-9]{1,11}$/.test(b.name)&&Array.isArray(b.members)&&b.members.length>=2)
+      .slice(0,12).map(b=>({name:b.name, scope:b.scope==='crypto'?'crypto':'stocks',
+        members:[...new Set(b.members.map(m=>String(m||'').toUpperCase()).filter(Boolean))].slice(0,20),
+        builtin:false, guest:true}));
+  }catch(_){ return []; }
+}
+function guestBasketsSave(list){ try{ localStorage.setItem(GUEST_BK_KEY, JSON.stringify(
+  list.map(b=>({name:b.name, scope:b.scope, members:b.members})))); }catch(_){}
+  _guestRev++; }
+// Synthesize the daily series for a guest basket the same way the server does for admin baskets —
+// the client already carries every member's r.daily, and basketClosesClient is the duel-tested
+// mirror of the server's basketCloses. So a guest basket charts identically to an admin one; only
+// where it's STORED differs.
+function guestBasketDaily(b){
+  const rowsByTk=new Map(); for(const r of activeRows()) rowsByTk.set((r.ticker||'').toUpperCase(), r);
+  const maps=b.members.map(m=>{ const r=rowsByTk.get(m), mm=new Map();
+    if(r&&Array.isArray(r.daily)) for(const k of r.daily){ const c=parseFloat(k.c), d=Math.floor(k.t/DAY); if(isFinite(c)&&c>0) mm.set(d,c); }
+    return mm; });
+  const axset=new Set(); maps.forEach(m=>m.forEach((_,d)=>axset.add(d)));
+  const axis=[...axset].sort((a,b)=>a-b);
+  const series=maps.map(m=>axis.map(d=>{ const v=m.get(d); return v===undefined?null:v; }));
+  const bc=basketClosesClient(series, BASKETS.floor);
+  let covN=0; for(let i=axis.length-1;i>=0;i--){ if(bc.closes[i]!=null){ covN=bc.cov[i]; break; } }
+  const daily=[]; for(let i=0;i<axis.length;i++) if(bc.closes[i]!=null) daily.push([axis[i]*DAY, +bc.closes[i].toFixed(4)]);
+  return { daily:daily.map(p=>({t:p[0], c:p[1]})), cov:{n:covN, N:b.members.length} };
+}
+function guestMerge(serverList){
+  if(IS_ADMIN) return serverList;
+  const guests=guestBasketsLoad().map(b=>{ const s=guestBasketDaily(b);
+    return { name:b.name, scope:b.scope, members:b.members, builtin:false, guest:true, daily:s.daily, cov:s.cov }; });
+  // a guest name never collides with a built-in (validated on create); append after the server's
+  // built-ins so the picker groups them naturally.
+  return serverList.concat(guests);
+}
 async function loadBaskets(force){
   if(!featureOn('baskets')) return;
   if(_basketsInflight) return;
   if(!force && Date.now()-BASKETS.ts<60000 && BASKETS.list.length){ renderBasketPanel(); return; }
   _basketsInflight=true;
+  let serverList=[];
   try{ const d=await fetchJSON('/api/baskets');
-    if(d&&Array.isArray(d.baskets)) BASKETS={ts:Date.now(), floor:d.floor||0.6, maxMembers:d.maxMembers||20, maxCustom:d.maxCustom||12, rev:d.rev, list:d.baskets};
+    if(d&&Array.isArray(d.baskets)){ serverList=d.baskets;
+      BASKETS={ts:Date.now(), floor:d.floor||0.6, maxMembers:d.maxMembers||20, maxCustom:d.maxCustom||12, rev:(d.rev||0)+'|'+_guestRev, list:guestMerge(d.baskets)};
+    }
   }catch(_){}
   _basketsInflight=false;
   renderBasketPanel(); syncCorrBk();
@@ -1288,11 +1342,55 @@ async function loadBaskets(force){
   if(state.view==='backtest') drawBacktest();
   if(state.view==='corr'&&state.scope!=='crypto') renderCorr();
 }
+// Guest-side create/drop: pure localStorage, never touches the server. Returns the same {ok,error}
+// shape the server does so the callers (manager form + terminal) are identical for both audiences.
+function guestCreateBasket(name, members){
+  const nm=String(name||'').toUpperCase().trim();
+  if(!/^[A-Z][A-Z0-9]{1,11}$/.test(nm)) return {ok:false, error:'name must be 2–12 chars, A–Z / 0–9, starting with a letter'};
+  const existing=guestBasketsLoad();
+  if(existing.length>=(BASKETS.maxCustom||12)) return {ok:false, error:`basket cap reached (${BASKETS.maxCustom||12}) — drop one first`};
+  const ms=[...new Set((members||[]).map(m=>String(m||'').toUpperCase().trim()).filter(Boolean))];
+  if(ms.length<2||ms.length>(BASKETS.maxMembers||20)) return {ok:false, error:`needs 2–${BASKETS.maxMembers||20} members (got ${ms.length})`};
+  // reserved: benchmark aliases, BTC, curated + loaded built-ins, and this browser's own. The
+  // curated names are pinned unconditionally so a guest can't shadow MAG7 before the registry loads.
+  const reserved=new Set(['SPX','SPX500','SP500','US500','BTC','MAG7',...BASKETS.list.filter(b=>b.builtin).map(b=>b.name),...existing.map(b=>b.name)]);
+  if(reserved.has(nm)) return {ok:false, error:`“${nm}” collides with a built-in or benchmark alias, or you already have a basket by that name`};
+  // scope inference from the live universe (guests only ever see one scope's rows at a time, but
+  // validate against both so a wrong-scope member is caught, same as the server)
+  const uni=new Set(activeRows().map(r=>(r.ticker||'').toUpperCase()));
+  const miss=ms.filter(m=>!uni.has(m));
+  if(miss.length) return {ok:false, error:`not in the ${state.scope} universe: ${miss.join(' ')}`};
+  existing.push({name:nm, scope:state.scope==='crypto'?'crypto':'stocks', members:ms});
+  guestBasketsSave(existing);
+  return {ok:true, basket:{name:nm, scope:state.scope, members:ms, builtin:false, guest:true}};
+}
+function guestDropBasket(name){
+  const nm=String(name||'').toUpperCase().trim();
+  const existing=guestBasketsLoad(), i=existing.findIndex(b=>b.name===nm);
+  if(i<0) return {ok:false, error:`no basket “${nm}” in this browser`};
+  existing.splice(i,1); guestBasketsSave(existing);
+  return {ok:true, name:nm};
+}
+// One entry point both audiences call — admin hits the server, guest hits localStorage. Async so
+// the two paths share a signature.
+async function basketMutate(body){
+  if(IS_ADMIN){
+    const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify(body)});
+    return await r.json().catch(()=>({ok:false, error:'network'}));
+  }
+  return body.drop ? guestDropBasket(body.name) : guestCreateBasket(body.name, body.members);
+}
 function basketByName(t){ t=String(t||'').toUpperCase(); for(const b of BASKETS.list){ if(b.name===t) return b; } return null; }
 function isBasketName(t){ return !!basketByName(t); }
 function basketScopeList(){ const cr=state.scope==='crypto'; return BASKETS.list.filter(b=>(b.scope==='crypto')===cr); }
+// Manager list: the operator's own baskets + curated defaults (MAG7), NEVER the derived shadow
+// baskets (sectors + industries). Shadows are pickable everywhere as instruments but would drown
+// the editable list and can't be dropped anyway.
+function basketManagerList(){ return basketScopeList().filter(b=>!b.shadow); }
 function basketTip(b){
-  return `\u2b12 ${b.name} \u2014 ${b.builtin?'built-in sector basket (derived from the sector table \u00b7 follows the live roster)':'custom basket'} \u00b7 ${b.members.length} members \u00b7 EW \u00b7 daily-rebalanced (the only honest default without market-cap data) \u00b7 coverage ${b.cov?b.cov.n+'/'+b.cov.N:'\u2014'} \u00b7 a day under ${Math.round((BASKETS.floor||0.6)*100)}% membership renders as a GAP, never a renormalized guess \u00b7 visual layer only \u2014 baskets never enter signal math \u00b7 members: ${b.members.join(' ')}`;
+  const kind=b.shadow?(b.kind==='industry'?'industry basket':'sector basket'):(b.builtin?'built-in basket':'custom basket');
+  const nm=b.label?`${b.name} (${b.label})`:b.name;
+  return `\u2b12 ${nm} \u2014 ${kind}${b.builtin?' (derived from the classification table \u00b7 follows the live roster)':''} \u00b7 ${b.members.length} members \u00b7 EW \u00b7 daily-rebalanced (the only honest default without market-cap data) \u00b7 coverage ${b.cov?b.cov.n+'/'+b.cov.N:'\u2014'} \u00b7 a day under ${Math.round((BASKETS.floor||0.6)*100)}% membership renders as a GAP, never a renormalized guess \u00b7 visual layer only \u2014 baskets never enter signal math \u00b7 members: ${b.members.join(' ')}`;
 }
 // MIRROR of compute.js basketCloses — same algorithm, same floor semantics, verbatim. The suite
 // executes both against one ragged fixture and asserts deepEqual, so this copy cannot drift from
@@ -1404,8 +1502,11 @@ function dvbCell(r){
 // basket rows there are DEFERRED and the toggle's tooltip says so — stated, not half-implemented.
 function corrBasketRows(){
   if(!featureOn('baskets')||state.scope==='crypto') return [];
+  // The toggle adds customs + curated + SECTOR shadows. Industry shadows are excluded here on
+  // purpose: there are many, and 20+ extra rows would drown an 84-name matrix — they stay
+  // comparison-only instruments (COMP/G, ratio, the Δ column) rather than matrix rows.
   return BASKETS.list
-    .filter(b=>b.scope==='stocks'&&(state.corr.showBuiltins||!b.builtin))
+    .filter(b=>b.scope==='stocks' && b.kind!=='industry' && (state.corr.showBuiltins||!b.builtin))
     .map(basketVirtualRow)
     .filter(r=>r&&r.daily.length>=5);
 }
@@ -1428,16 +1529,21 @@ function syncCorrBk(){
 function renderBasketPanel(){
   const p=el('basketpanel'); if(!p) return;
   if(!featureOn('baskets')||state.view!=='corr'){ p.hidden=true; return; }
-  const list=basketScopeList();
+  const list=basketManagerList();
   const rowsH=list.map(b=>`<tr>
-      <td style="white-space:nowrap"><span class="bkg">\u2b12</span> <b>${esc(b.name)}</b>${b.builtin?' <span class="bk-builtin">BUILT-IN</span>':''}</td>
+      <td style="white-space:nowrap"><span class="bkg">\u2b12</span> <b>${esc(b.name)}</b>${b.builtin?' <span class="bk-builtin">BUILT-IN</span>':(b.guest?' <span class="bk-guest" data-tip="stored in THIS browser only \u2014 not saved on the server, invisible to the admin and to other visitors, and gone if you clear site data">THIS BROWSER</span>':'')}</td>
       <td class="sec">${esc(b.members.join(' '))} <span class="sec">\u00b7 ${b.members.length}</span></td>
       <td class="sec" style="white-space:nowrap" data-tip="equal weight, daily-rebalanced \u2014 the only honest default without market-cap data \u00b7 coverage = members contributing on the latest valid day \u00b7 a day under ${Math.round((BASKETS.floor||0.6)*100)}% membership renders as a gap, never a renormalized guess">EW \u00b7 ${b.cov?b.cov.n+'/'+b.cov.N:'\u2014'}</td>
       <td>${b.builtin?'<span class="sec" style="font-size:10px">derived \u2014 follows the roster</span>':`<button class="btn xtiny" data-bkdrop="${esc(b.name)}">drop</button>`}</td>
     </tr>`).join('');
   const customN=BASKETS.list.filter(b=>!b.builtin).length;
+  // Ownership banner: the admin's customs persist server-side; a guest's live only in this browser.
+  const scopeBanner=IS_ADMIN
+    ? `<div class="sec" style="font-size:10.5px;margin-top:2px">Your custom baskets are saved on the server and available on every admin browser. Visitors don't see them \u2014 they only get the built-ins.</div>`
+    : `<div class="sec bk-guestbanner" style="font-size:10.5px;margin-top:2px" data-tip="no accounts yet \u2014 without an admin session your baskets can only live in this browser">Your custom baskets are stored in <b>this browser only</b> \u2014 not saved on the server, and gone if you clear site data. The built-ins (MAG7, sectors) are shared and always here.</div>`;
   p.hidden=false;
   p.innerHTML=`<div class="cp-head">Baskets <span class="sec" style="font-weight:400">\u2014 synthetic EW instruments \u00b7 visual layer only, never signal math</span></div>
+    ${scopeBanner}
     <table class="bk-mgr"><tbody>${rowsH||'<tr><td class="sec">no baskets in this universe yet \u2014 create one below, or in the terminal: <span class="amber">basket create MAG7 AAPL MSFT GOOGL AMZN NVDA META TSLA</span></td></tr>'}</tbody></table>
     <div class="bk-new">
       <input id="bk-name" placeholder="name \u2014 e.g. MAG7" maxlength="12" autocomplete="off"/>
@@ -1446,17 +1552,13 @@ function renderBasketPanel(){
       <span id="bk-err" class="tp-err"></span></div>
     <div class="sec" style="font-size:10.5px;margin-top:5px">2\u2013${BASKETS.maxMembers} members \u00b7 one universe (baskets never cross the stocks/crypto separation) \u00b7 ${customN}/${BASKETS.maxCustom} custom \u00b7 name must not collide with a listed ticker or a benchmark alias</div>`;
   p.querySelectorAll('[data-bkdrop]').forEach(x=>x.onclick=async()=>{
-    try{ const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name:x.dataset.bkdrop, drop:true})});
-      const d=await r.json().catch(()=>({}));
-      if(d&&d.ok) loadBaskets(true); else { const e=el('bk-err'); if(e) e.textContent=(d&&d.error)||'drop failed'; }
-    }catch(e){ const eo=el('bk-err'); if(eo) eo.textContent='drop failed \u2014 '+(e.message||'network'); } });
+    const d=await basketMutate({name:x.dataset.bkdrop, drop:true});
+    if(d&&d.ok) loadBaskets(true); else { const e=el('bk-err'); if(e) e.textContent=(d&&d.error)||'drop failed'; } });
   const cb=el('bk-create'); if(cb) cb.onclick=async()=>{
     const nm=(el('bk-name')||{}).value||'', mem=((el('bk-members')||{}).value||'').split(/[\s,]+/).filter(Boolean);
     const eo=el('bk-err'); if(eo) eo.textContent='';
-    try{ const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name:nm, members:mem})});
-      const d=await r.json().catch(()=>({}));
-      if(d&&d.ok) loadBaskets(true); else if(eo) eo.textContent=(d&&d.error)||'create failed';
-    }catch(e){ if(eo) eo.textContent='create failed \u2014 '+(e.message||'network'); } };
+    const d=await basketMutate({name:nm, members:mem});
+    if(d&&d.ok) loadBaskets(true); else if(eo) eo.textContent=(d&&d.error)||'create failed'; };
 }
 
 // ===== RATIO — synthetic pair candles ====================================================
@@ -1725,7 +1827,9 @@ function compgWirePicker(p){
     const uni=compgUniverse().filter(t=>!COMPG.sel.includes(t)&&!isBasketName(t));
     const m=[...uni.filter(t=>t.startsWith(q)),...uni.filter(t=>!t.startsWith(q)&&t.includes(q))].slice(0,6-Math.min(2,bks.length));
     if(!m.length&&!bks.length){ sg.innerHTML='<div class="cg-sg-none">no match in the live universe</div>'; sg.hidden=false; return; }
-    sg.innerHTML=bks.map(t=>`<div class="cg-sg bk" data-t="${esc(t)}"><span class="bkg">\u2b12</span> ${esc(t)} <span class="cg-sg-r">basket</span></div>`).join('')
+    sg.innerHTML=bks.map(t=>{ const b=basketByName(t); const tag=b&&b.shadow?(b.kind==='industry'?'industry':'sector'):(b&&b.builtin?'built-in':'basket');
+        const nm=b&&b.label?`${esc(t)} <span class="sec" style="font-size:9px">${esc(b.label)}</span>`:esc(t);
+        return `<div class="cg-sg bk" data-t="${esc(t)}"><span class="bkg">\u2b12</span> ${nm} <span class="cg-sg-r">${tag}</span></div>`; }).join('')
       + m.map(t=>`<div class="cg-sg" data-t="${esc(t)}">${esc(t)}</div>`).join(''); sg.hidden=false;
     sg.querySelectorAll('.cg-sg').forEach(x=>x.onclick=()=>{ if(compgAddName(x.dataset.t)){ const ni=el('cg-add'); if(ni){ ni.focus(); } } }); };
   inp.oninput=show;
@@ -7527,27 +7631,29 @@ async function termBasket(args){
   if(sub==='list'){
     if(!BASKETS.list.length) await loadBaskets(true);
     if(!BASKETS.list.length) return termOut('no baskets yet — <span class="ex" data-tcmd="basket create MAG7 AAPL MSFT GOOGL AMZN NVDA META TSLA">basket create MAG7 AAPL MSFT …</span>');
-    const rows=BASKETS.list.map(b=>`<span class="amber">\u2b12 ${tesc(b.name)}</span> <span class="sec">${b.scope} · ${b.members.length} members${b.builtin?' · built-in':''} · EW · ${b.cov?b.cov.n+'/'+b.cov.N:'—'} · ${tesc(b.members.slice(0,10).join(' '))}${b.members.length>10?' …':''}</span>`);
-    return termOut(rows.join('<br>')); }
+    const cr=state.scope==='crypto';
+    const scoped=BASKETS.list.filter(b=>(b.scope==='crypto')===cr);
+    const line=b=>`<span class="amber">\u2b12 ${tesc(b.name)}</span> <span class="sec">${b.label?tesc(b.label)+' · ':''}${b.members.length} members · EW · ${b.cov?b.cov.n+'/'+b.cov.N:'—'} · ${tesc(b.members.slice(0,8).join(' '))}${b.members.length>8?' …':''}</span>`;
+    const own=scoped.filter(b=>!b.shadow), sect=scoped.filter(b=>b.shadow&&b.kind==='sector'), ind=scoped.filter(b=>b.shadow&&b.kind==='industry');
+    const blk=[];
+    if(own.length) blk.push('<span class="sec">— yours + built-in —</span><br>'+own.map(line).join('<br>'));
+    if(sect.length) blk.push('<span class="sec">— sectors (shadow · usable in comp / ratio) —</span><br>'+sect.map(line).join('<br>'));
+    if(ind.length) blk.push('<span class="sec">— industries (shadow · usable in comp / ratio) —</span><br>'+ind.map(line).join('<br>'));
+    return termOut(blk.join('<br><br>')); }
   if(sub==='create'){
     const name=args[1], members=args.slice(2);
     if(!name||members.length<2) return termErr('usage: basket create <NAME> <ticker> <ticker> …');
-    try{
-      const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name, members})});
-      const d=await r.json().catch(()=>({}));
-      if(d&&d.ok){ await loadBaskets(true);
-        return termOut(`✓ basket <b class="amber">\u2b12 ${tesc(d.basket.name)}</b> created · ${d.basket.scope} · ${d.basket.members.length} members · EW daily-rebalanced · available in COMP/G, RATIO and the picker`); }
-      return termErr((d&&d.error)||'create failed');
-    }catch(e){ return termErr('create failed — '+tesc(e.message||'network')); } }
+    const d=await basketMutate({name, members});
+    if(d&&d.ok){ await loadBaskets(true);
+      const where=IS_ADMIN?'saved on the server':'stored in <b>this browser only</b>';
+      return termOut(`✓ basket <b class="amber">\u2b12 ${tesc(d.basket.name)}</b> created · ${d.basket.scope} · ${d.basket.members.length} members · EW daily-rebalanced · ${where} · available in COMP/G, RATIO and the picker`); }
+    return termErr((d&&d.error)||'create failed'); }
   if(sub==='drop'){
     const name=args[1]; if(!name) return termErr('usage: basket drop <NAME>');
-    try{
-      const r=await fetch('/api/baskets',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({name, drop:true})});
-      const d=await r.json().catch(()=>({}));
-      if(d&&d.ok){ await loadBaskets(true);
-        return termOut(`✓ <b>${tesc(d.name)}</b> removed — charts fall back gracefully; baskets never enter signal math, so there is no ledger to unwind`); }
-      return termErr((d&&d.error)||'drop failed');
-    }catch(e){ return termErr('drop failed — '+tesc(e.message||'network')); } }
+    const d=await basketMutate({name, drop:true});
+    if(d&&d.ok){ await loadBaskets(true);
+      return termOut(`✓ <b>${tesc(d.name)}</b> removed — charts fall back gracefully; baskets never enter signal math, so there is no ledger to unwind`); }
+    return termErr((d&&d.error)||'drop failed'); }
   return termErr('usage: basket create <NAME> <members…> · basket list · basket drop <NAME>');
 }
 function termRatio(args){
