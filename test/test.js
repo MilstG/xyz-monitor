@@ -10940,7 +10940,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-18"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-20"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -13674,8 +13674,10 @@ test("schedule prefs round-trip: writes validate, resolve, survive a restart, an
 
   // Bad writes are refused with the reason, and refuse ATOMICALLY — nothing half-applies.
   assert.equal(p.pushSetPrefs(chat, { sched: { brief: { h: 99 } } }, "own-a", false).error, "bad-hour");
-  assert.equal(p.pushSetPrefs(chat, { sched: { landscape: { h: 11 } } }, "own-a", false).error, "bad-kind",
+  assert.equal(p.pushSetPrefs(chat, { sched: { nonsense: { h: 11 } } }, "own-a", false).error, "bad-kind",
     "a kind not in the registry is refused rather than stored and never delivered");
+  assert.ok(p.pushSetPrefs(chat, { sched: { landscape: { h: 9, days: [2, 4] } } }, "own-a", false).ok,
+    "landscape is now a registered kind — the same prefs surface schedules it");
   assert.equal(p.pushSetPrefs(chat, { sched: { brief: { h: 10, days: [9] } } }, "own-a", false).error, "bad-days");
 
   // A good write resolves exactly as delivery will read it.
@@ -13773,4 +13775,159 @@ test("a refused schedule write leaves no fingerprints, and an hour-only write ke
   // Explicit null is still "every day" — the distinction is absent-vs-null, not lost.
   p.pushSetPrefs(chat, { sched: { brief: { h: 9, days: null } } }, "own-a", false);
   assert.equal(p.getPush("own-a", false).recipients[0].sched.brief.days, null);
+});
+
+// ===== THE LANDSCAPE as a registered scheduled send (build 2026.07.28-19) ======================
+// The point of the sched registry, cashed in: the landscape arrives as a second registered kind
+// and every recipient row grows a second hour+days chip with zero new panel machinery. Mon/Wed/Fri
+// 11:00 UTC by default, per-recipient overridable through the identical validated route.
+
+test("the landscape registers Mon/Wed/Fri 11:00 UTC, and default days yield to any explicit choice", () => {
+  const C = require("../src/compute");
+  const k = C.SCHED_KINDS.find((x) => x.k === "landscape");
+  assert.ok(k, "it is in the registry — that is what makes it schedulable at all");
+  assert.equal(k.defaultHour, 11, "an hour after the brief");
+  assert.deepEqual(k.defaultDays, [1, 3, 5]);
+
+  const res = C.schedResolve(undefined, k);
+  assert.deepEqual(res, { hour: 11, days: [1, 3, 5], isDefault: true },
+    "a never-configured recipient rides M/W/F at 11:00 UTC");
+  const mon = Date.parse("2026-07-27T11:00:00Z"), tue = Date.parse("2026-07-28T11:00:00Z");
+  assert.equal(C.schedDueAt(res, mon, 0), "2026-07-27", "due Monday");
+  assert.equal(C.schedDueAt(res, tue, 0), null, "silent Tuesday — the day set gates the default too");
+
+  // An explicit choice replaces the default days entirely, including choosing daily.
+  assert.deepEqual(C.schedResolve({ set: 1, h: 9, days: [2, 4] }, k).days, [2, 4]);
+  assert.equal(C.schedResolve({ set: 1, h: 9 }, k).days, null,
+    "a configured recipient with no day set is DAILY — registry defaults never leak into an explicit schedule");
+  assert.equal(C.schedResolve({ set: 1, h: null }, k).hour, null, "and off is off");
+  // The brief keeps no default days: registering one kind's days must not change another's.
+  assert.equal(C.schedResolve(undefined, C.SCHED_KINDS.find((x) => x.k === "brief")).days, null);
+});
+
+test("landscape prose: refs are the grounding contract and every gate the brief has still applies", () => {
+  const C = require("../src/compute");
+  const ctx = { at: Date.now(), news: [{ sector: "Semi Equipment", items: [
+    { id: "h1", t: "ASML", h: "China DUV push", u: "https://ex.com/1" },
+    { id: "h2", t: "MU", h: "Memory pricing", u: "https://ex.com/2" }] }] };
+  const two = "First paragraph about the pattern.\n\nSecond paragraph about what it implies.";
+  assert.equal(C.validateLandProse({ story: two, refs: ["h1", "h2"] }, ctx).ok, true);
+  assert.equal(C.validateLandProse({ story: two }, ctx).error, "refs missing",
+    "prose that cannot say what it rests on does not ship");
+  assert.ok(/ref not in context/.test(C.validateLandProse({ story: two, refs: ["h1", "h99"] }, ctx).error),
+    "a citation to a headline never in the corpus is the exact failure this gate exists for");
+  assert.equal(C.validateLandProse({ story: two + "\n\nYou should buy the dip.", refs: ["h1", "h2"] }, ctx).error,
+    "directional instruction");
+  assert.ok(/number not in context/.test(
+    C.validateLandProse({ story: two + "\n\nInflation ran 7.77 percent.", refs: ["h1", "h2"] }, ctx).error),
+    "relational claims are allowed; invented figures are not");
+  assert.ok(/name not in context/.test(
+    C.validateLandProse({ story: two + "\n\nNVDA led the move.", refs: ["h1", "h2"] }, ctx).error));
+  assert.ok(/paragraphs/.test(C.validateLandProse({ story: "one blob", refs: ["h1", "h2"] }, ctx).error));
+});
+
+test("landscape render: sources footer, URL guard, honest degradation, shed order", () => {
+  const C = require("../src/compute");
+  const ctx = { at: Date.parse("2026-07-29T11:00:00Z"), tz: 0, news: [{ sector: "X", items: [
+    { id: "h1", t: "ASML", h: "China DUV push", u: "https://ex.com/1" },
+    { id: "h2", t: "MU", h: "quote bomb", u: 'https://ex.com/x"onclick' }] }] };
+  const r = C.renderLandscape(ctx, { story: "Para one.\n\nPara two.", refs: ["h1", "h2"] });
+  assert.ok(/THE LANDSCAPE/.test(r.message) && /Para one\./.test(r.message));
+  assert.ok(/<a href="https:\/\/ex\.com\/1">/.test(r.message), "a cited headline with a sane URL links");
+  assert.ok(/quote bomb/.test(r.message) && !/onclick/.test(r.message),
+    "the brief's URL guard applies here too — one junk URL must not cost the whole message");
+  assert.equal(r.sources, 2);
+
+  const d = C.renderLandscape({ at: Date.now(), tz: 0, proseErr: "landscape-daily-cap" }, null);
+  assert.ok(/commentary unavailable/.test(d.message) && /landscape-daily-cap/.test(d.message),
+    "no mechanical fallback exists, so a failed generation says so instead of going silent");
+
+  const many = { sector: "X", items: [] };
+  for (let i = 0; i < 12; i++) many.items.push({ id: "h" + i, t: "T" + i, h: "H".repeat(300) + i, u: "https://ex.com/" + i });
+  const big = C.renderLandscape({ at: Date.now(), tz: 0, news: [many] },
+    { story: "A".repeat(1900) + ".\n\n" + "B".repeat(1900) + ".", refs: many.items.map((x) => x.id) });
+  assert.ok(C.briefVisibleLen(big.message) <= C.BRIEF_TG_LIMIT, "the message fits Telegram's limit");
+  assert.ok(big.dropped.includes("source"), "citations shed before prose");
+});
+
+test("landscape delivery walks the registry: due only on scheduled days, once per recipient-day", async () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const p = twoUserHarness();
+  const c = p.pushMintCode("own-a", true); p.pushBindNow(c.code, 5555555555, "milst");
+  // Default rider on a non-scheduled day: the tick walks and sends nothing. This asserts through
+  // the REAL landTick rather than a string pin — the -84 lesson — using whatever today is: if today
+  // is M/W/F the send fires (degraded: no key -> the honest unavailable line), otherwise silence.
+  const sentToday = await p.landTickNow();
+  const isMWF = [1, 3, 5].includes(new Date().getUTCDay());
+  const dueNow = new Date().getUTCHours() === 11;
+  assert.equal(sentToday, isMWF && dueNow ? 1 : 0,
+    "delivery agrees exactly with the registry's M/W/F 11:00 UTC resolution for a default rider");
+  // An explicit daily schedule at the current hour delivers now, and only once.
+  const hr = new Date().getUTCHours();
+  p.pushSetPrefs("5555555555", { sched: { landscape: { h: hr, days: null } }, tz: 0 }, "own-a", false);
+  if (!(isMWF && dueNow)) {
+    assert.equal(await p.landTickNow(), 1, "an explicit schedule at the current hour delivers");
+  }
+  assert.equal(await p.landTickNow(), 0, "…exactly once per recipient-day");
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/setInterval\(\(\) => \{ landTick\(\)\.catch/.test(pol),
+    "separate timer, separate catch — a dead commentary layer cannot take the brief down");
+  assert.ok(/pushEnqueue\(rec\.chat, b\.message, true\)/.test(pol), "scheduled sends ride force past the hourly cap");
+});
+
+test("admin panel: landscape state block, test pair, and the route that serves them", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/THE LANDSCAPE<\/div>/.test(app), "the admin box states the layer's own health");
+  assert.ok(/id="adm-land"/.test(app) && /id="adm-land-f"/.test(app), "cached and fresh test fires, like the brief");
+  assert.ok(/kind:'landscape'/.test(app), "routed through the one endpoint rather than a near-clone");
+  assert.ok(/Interpretation, not measurement/.test(app),
+    "the honesty line sits where the operator reads it");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/b\.kind === "landscape" \? poller\.landTest : poller\.briefTest/.test(srv));
+  // The recipient chips need no new machinery — they render from schedKinds, which now carries two
+  // kinds. The behavioral admin-row test above (fixture schedKinds) already proves the chip path;
+  // here we pin only that the registry actually ships both.
+  const C = require("../src/compute");
+  assert.deepEqual(C.SCHED_KINDS.map((x) => x.k), ["brief", "landscape"]);
+});
+
+// ===== landscape length + voice (build 2026.07.28-20) ==========================================
+test("the landscape's budget targets the telegram ceiling, and the contract matches the prompt", () => {
+  const C = require("../src/compute");
+  // Prose 3400 + ~550 footer + header lands the full message just under 4096. The ladder is the
+  // backstop, not the plan: a max-length story with a normal footer must fit WITHOUT shedding.
+  assert.equal(C.LAND_PROSE_MAX, 3400);
+  const items = [];
+  for (let i = 0; i < 7; i++) items.push({ id: "h" + i, t: "TCK" + i, h: "A believable headline about something, sized like the real feed's rows number " + i, u: "https://ex.com/" + i });
+  const story = ("P".repeat(560) + ".\n\n").repeat(5) + "Q".repeat(540) + ".";   // ~3350 chars, 6 paragraphs
+  const ctx = { at: Date.now(), tz: 0, news: [{ sector: "X", items }] };
+  const v = C.validateLandProse({ story, refs: items.map((x) => x.id) }, ctx);
+  assert.ok(v.ok, "six paragraphs at full budget validate: " + (v.error || ""));
+  const r = C.renderLandscape(ctx, v);
+  assert.ok(C.briefVisibleLen(r.message) <= C.BRIEF_TG_LIMIT);
+  assert.equal(r.dropped.length, 0, "a full-length story with a normal footer ships whole — nothing shed");
+  assert.ok(C.briefVisibleLen(r.message) > 3700, "…and it actually uses the room it asked for");
+  // Over-budget and over-paragraph still refuse.
+  assert.ok(/over budget/.test(C.validateLandProse({ story: "x".repeat(3401) + "\n\ny", refs: ["h0", "h1"] }, ctx).error));
+  assert.ok(/paragraphs/.test(C.validateLandProse({ story: Array(8).fill("p").join("\n\n"), refs: ["h0", "h1"] }, ctx).error));
+
+  const p = ctxHarness();
+  const sys = p.landStateNow().system;
+  // The contract the validator enforces must be the contract the prompt states — a model doing its
+  // best against instructions it was never given is a validator rejecting good-faith output.
+  assert.ok(/2,800\u20133,300 characters/.test(sys) && /3 to 6 paragraphs/.test(sys),
+    "the prompt asks for the length the validator accepts");
+  assert.ok(/VOICE/.test(sys) && /never catch you performing/.test(sys), "the voice section exists");
+  assert.ok(/clich/.test(sys), "…and bans the filler that passes for wit");
+  assert.ok(/write less rather than padding/.test(sys),
+    "the length target must never outrank the thin-day honesty rule");
+  // Found by the sample run: the number gate refuses years ("like it is 2021 again" -> refused),
+  // which is correct — an invented year is an invented reference — but only survivable if the
+  // prompt says so. A gate the model cannot see is a recurring degraded send.
+  assert.ok(/includes YEARS/.test(sys), "the year rule is stated where the model can obey it");
+  const yCtx = { at: Date.now(), news: [{ sector: "X", items: [{ id: "h1", t: "A", h: "x" }, { id: "h2", t: "B", h: "y" }] }] };
+  assert.ok(/number not in context: 2021/.test(
+    C.validateLandProse({ story: "Like it is 2021 again.\n\nSecond.", refs: ["h1", "h2"] }, yCtx).error));
 });
