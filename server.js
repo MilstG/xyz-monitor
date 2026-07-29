@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.28-10";
+const VERSION = "2026.07.28-11";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -723,7 +723,8 @@ async function main() {
   // gate matches the method-less manifest route string, so both verbs open and close together.
   fastify.post("/api/baskets", { bodyLimit: 8 * 1024 }, (req, reply) => {
     const b = req.body || {};
-    const res = b.drop ? poller.dropBasket(b.name) : poller.createBasket(b.name, b.members);
+    const admin = isAdmin(req);
+    const res = b.drop ? poller.dropBasket(b.name, admin) : poller.createBasket(b.name, b.members, admin);
     reply.header("cache-control", "no-store").send(res);
   });
   // Ratio pair candles: server-computed from hourly ratio closes (basket legs synthesized hourly),
