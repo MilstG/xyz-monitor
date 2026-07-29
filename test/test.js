@@ -11071,7 +11071,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-07"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14678,4 +14678,44 @@ test("brotli precompression 2026.07.29-06: round trip with the SOURCE'S OWN para
   assert.ok(Buffer.compare(zlib.gunzipSync(gz), raw) === 0, "gzip round trip must be byte-identical");
   assert.ok(br.length < gz.length && gz.length < raw.length, `size ordering must hold: br ${br.length} < gz ${gz.length} < raw ${raw.length}`);
   assert.ok(br.length < gz.length * 0.9, "q11 brotli must beat max gzip by a real margin (>10%) on app.js — if it doesn't, the boot cost buys nothing and this phase should be reverted");
+});
+
+// ===== SSE version push (build 2026.07.29-07, Phase 2 of the perf batch) =======================
+test("sse push 2026.07.29-07: server — route once, versions-only frames, 1s watcher, heartbeat, cap, shutdown close", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.equal(srv.split('fastify.get("/api/events"').length - 1, 1, "/api/events registered exactly once");
+  // Versions only, read from the SAME snapshotCache clients fetch — one code path, never a payload.
+  assert.ok(srv.includes('JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0, v: VERSION })'),
+    "frames carry {dataTs, alertVer, v} and nothing else");
+  assert.ok(/function sseFrame\(\) \{\s*\n\s*const s = poller\.getSnapshot\(\);/.test(srv), "frame reads poller.getSnapshot() — the same object /api/snapshot serves");
+  // Watcher + heartbeat both unref'd — push infrastructure must never keep a dying process alive.
+  assert.ok(srv.includes("}, 1000).unref()"), "1s change watcher, unref'd");
+  assert.ok(srv.includes("}, 25000).unref()"), "25s heartbeat, unref'd");
+  assert.ok(srv.includes('res.write(": hb\\n\\n")'), "heartbeat is a comment frame — proxies stay open, clients parse nothing");
+  assert.ok(srv.includes("if (ts === sseLastTs && av === sseLastAlert) return;"), "broadcast only on a real change of either clock");
+  // Hijacked stream = Fastify pipeline (compress, onSend) never touches it, so headers are manual.
+  assert.ok(srv.includes("reply.hijack()"), "stream must be hijacked out of the send pipeline");
+  for (const hdr of ['"content-type": "text/event-stream"', '"x-accel-buffering": "no"', '"x-content-type-options": "nosniff"', '"x-frame-options": "DENY"'])
+    assert.ok(srv.includes(hdr), `manual SSE header missing: ${hdr}`);
+  assert.ok(srv.includes("const SSE_MAX = 200") && srv.includes('reply.code(503).send({ error: "sse-full" })'),
+    "connection cap with an explicit 503 — the poll fallback fully serves an overflowing client");
+  assert.ok(srv.includes("try { res.write(sseFrame()); } catch (_) {}"), "initial sync frame on connect");
+  assert.ok(/req\.raw\.on\("close", drop\);\s*\n\s*req\.raw\.on\("error", drop\)/.test(srv), "client set cleaned on close AND error");
+  const shut = srv.slice(srv.indexOf("async function shutdown()"), srv.indexOf('process.on("SIGTERM"'));
+  assert.ok(shut.includes("sseClients.clear()"), "shutdown ends every stream — the reconnect's first frame is the deploy notice");
+});
+
+test("sse push 2026.07.29-07: client — poll survives stretched, snaps back on error, push reuses loadSnapshot", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("typeof EventSource==='undefined'||_sseSrc"), "no-EventSource browsers keep the poll untouched; double-start guarded");
+  assert.ok(app.includes("function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }"),
+    "healthy stream stretches the poll to a 120s fallback — never kills it (half-open streams are real)");
+  assert.ok(app.includes("_sseSrc.onerror=()=>{ if(_sseOk){ _sseOk=false; startCycle(); } }"), "stream error snaps cadence back instantly");
+  assert.ok(app.includes("if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot();"),
+    "a pushed version triggers the EXISTING loadSnapshot — the stream changes when we pull, never what");
+  assert.ok(app.includes("startEvents();   // push channel first"), "stream armed at boot");
+  // startCycle must derive its interval through _cycleMs so a stretch/snap re-arm actually re-times.
+  assert.ok(app.includes("const ms=_cycleMs(); cycleTimer=setInterval("), "cycle interval derives from _cycleMs");
 });
