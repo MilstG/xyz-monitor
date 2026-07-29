@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.29-06";
+const VERSION = "2026.07.29-07";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1009,6 +1009,63 @@ async function main() {
     reply.header("cache-control", "no-store");
     return poller.etfHoldings(req.params.t || "");
   });
+  // ===== SSE version push (build 2026.07.29-07, Phase 2 of the perf batch) =====================
+  // Pushes VERSIONS, never payloads: `{dataTs, alertVer, v}` on content-clock or alert-seq change.
+  // The client reacts by running the exact snapshot fetch it already runs — which lands on the warm
+  // serialize/gzip memos — so this changes WHEN clients pull, never WHAT they pull, and the one-
+  // code-path contract is untouched. Alert latency drops from poll-cadence to ~1s; idle clients
+  // during off-hours (frozen content clock) cost heartbeats only.
+  //
+  // The change detector is a 1s unref'd watcher over the SAME snapshotCache object clients fetch,
+  // deliberately NOT an emitter threaded through poller.js: buildSnapshot has many call sites, a
+  // missed one would be a silent latency regression, and a property read per second is free. The
+  // worst-case extra second is invisible next to the poll interval it replaces.
+  // Streams are hijacked from Fastify's pipeline (compress/onSend never touch them), so the
+  // baseline security headers are written by hand here. Connection cap prevents fd exhaustion —
+  // client #201 gets a 503 and its EventSource retry keeps it on the poll fallback, fully served.
+  const sseClients = new Set();
+  const SSE_MAX = 200;
+  function sseFrame() {
+    const s = poller.getSnapshot();
+    return "data: " + JSON.stringify({ dataTs: s ? s.dataTs : 0, alertVer: s ? s.alertVer : 0, v: VERSION }) + "\n\n";
+  }
+  let sseLastTs = -1, sseLastAlert = -1;
+  setInterval(() => {
+    if (!sseClients.size) return;
+    const s = poller.getSnapshot();
+    const ts = s ? s.dataTs : 0, av = s ? (s.alertVer || 0) : 0;
+    if (ts === sseLastTs && av === sseLastAlert) return;
+    sseLastTs = ts; sseLastAlert = av;
+    const frame = sseFrame();
+    for (const res of sseClients) { try { res.write(frame); } catch (_) {} }
+  }, 1000).unref();
+  // One shared heartbeat, comment frames only: keeps proxies (Railway's edge included) from
+  // reaping quiet streams, which off-hours streams otherwise always are.
+  setInterval(() => {
+    for (const res of sseClients) { try { res.write(": hb\n\n"); } catch (_) {} }
+  }, 25000).unref();
+  fastify.get("/api/events", (req, reply) => {
+    if (sseClients.size >= SSE_MAX) { reply.code(503).send({ error: "sse-full" }); return; }
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      "connection": "keep-alive",
+      "x-accel-buffering": "no",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "referrer-policy": "same-origin",
+    });
+    // Initial frame on connect: the client syncs immediately instead of waiting for the first
+    // change — and a reconnect after a missed deploy sees the new `v` on its first byte.
+    try { res.write(sseFrame()); } catch (_) {}
+    sseClients.add(res);
+    const drop = () => { sseClients.delete(res); try { res.end(); } catch (_) {} };
+    req.raw.on("close", drop);
+    req.raw.on("error", drop);
+  });
+
   fastify.get("/api/health", () => ({ ok: true, version: VERSION, volume: { boots: HEARTBEAT.boots, firstBoot: HEARTBEAT.firstBoot, dataDir: DATA_DIR },
     // Live histogram read (current, still-open window) + the closed-window ring + worst-ever. The
     // live sample makes a stall visible within seconds of happening; the ring is the 7d evidence
@@ -1039,6 +1096,9 @@ async function shutdown() {
   // Fold the still-open loop window into the ring before persisting: Railway redeploys arrive on
   // push cadence, often < 6h apart, and without this the ring would never accumulate a point.
   try { rollLoopWindow(); } catch (_) {}
+  // Close every SSE stream: their EventSource auto-reconnects to the NEW build and receives the
+  // fresh `v` in the initial frame — the push channel doubles as the fastest deploy notice.
+  try { for (const res of sseClients) { try { res.end(); } catch (_) {} } sseClients.clear(); } catch (_) {}
   try { store.close(); } catch (_) {}
   process.exit(0);
 }
