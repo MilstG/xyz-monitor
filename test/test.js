@@ -10757,6 +10757,123 @@ test("settled -15: the record persists inside the ledger blob and survives a res
   assert.equal(p3.boardEpStateNow().since, 0);
 });
 
+// ===== settled honesty fixes (build 2026.07.29-02) ============================================
+// Born from the record's own first cohort: four correlated fundext expiries read as "100% hit"
+// with no visible exit price, green lateness, and a shown stamp that was the feature's boot.
+// These tests pin the corrections — hit is level-touched only, expiries split by sign at the
+// SHOWN basis and carry their exit price, lateness is a red-when-positive cost computed only
+// over trustworthy stamps, and correlated same-build clusters are tagged so n cannot inflate.
+
+test("settled -02: an expiry records its exit price, splits by sign at shown, and NEVER counts as a hit", () => {
+  const { p, COIN, px, hourly, HOUR_, endH } = settledPoller();
+  const ep = p.boardEpStateNow().open[0];
+  // Extend the spine past the show stamp with candles that touch NEITHER frozen level.
+  const flat = hourly.concat([1, 2, 3].map((i) => ({ t: (endH + i) * HOUR_, o: px, h: px * 1.0005, l: px * 0.9995, c: px, v: 1 })));
+  p.seedRowNow(COIN, { px, hourlyRaw: flat });
+  assert.ok(p.ledgerCloseNow(ep.k, { realized: 0.1, tR: (endH + 3) * HOUR_ }), "harness close must find the open claim");
+  p.buildActionableNow();
+  const done = p.boardEpStateNow().closed[0];
+  assert.equal(done.kind, "expired");
+  assert.ok(Number.isFinite(done.exitPx) && done.exitPx > 0, "the price the expiry was scored at is part of the score — recorded, not implied");
+  assert.ok(Math.abs(done.exitPx - px) / px < 0.01, "exit price is the mark at horizon from the spine");
+  const u = p.getActionable().settled.perUni.stocks;
+  assert.equal(u.all.n, 1); assert.equal(u.all.x, 1);
+  assert.equal(u.all.hit, null, "hit is level-touched ONLY — a record of pure expiries claims NO hit rate, never 100%");
+  assert.equal((u.all.xp || 0) + (u.all.xn || 0), 1, "the expiry lands in the signed split at the SHOWN basis");
+  const shipped = p.getActionable().settled.episodes[0];
+  assert.ok(Number.isFinite(shipped.exitPx), "exitPx ships on the payload — the client renders it, never re-derives it");
+});
+
+test("settled -02: boot-stamped episodes are excluded from lateness, first-cohort blobs are repaired, clusters are tagged", () => {
+  const { createPoller } = require("../src/poller");
+  const S = Date.now() - 3 * 86400e3, H_ = 3600e3;
+  const mkEp = (i, o) => Object.assign({ k: "xyz:B" + i + "|fundext", coin: "xyz:B" + i, t: "B" + i, uni: "stocks",
+    ev: "fundext", label: "funding extreme", cls: "rr", side: "short", tShow: S + 6 * H_, markShow: 10,
+    fired: 10.5, void: 11, target: 9, rr: 3, evR: 0.4, rec: { n: 9, hit: 0.6 }, tFire: S + 5 * H_,
+    flick: 0, tRes: S + 20 * H_, kind: "expired", exitPx: 9.9, rE: 1.2, rM: 0.1, held: 14 * H_ }, o || {});
+  const closed = [
+    // first-cohort shape: stamped ON the epoch, claim fired 12h earlier — must be retro-marked bt
+    mkEp(1, { tShow: S, tFire: S - 12 * H_ }),
+    // trustworthy stamp — the ONLY episode the lateness number may use
+    mkEp(2, {}),
+    // correlated pair: same family, same side, same tShow — one condition, tagged, still counted
+    mkEp(3, { tShow: S + 9 * H_ }), mkEp(4, { tShow: S + 9 * H_ }),
+  ];
+  const blob = { ts: Date.now(), open: [], closed: [], board: { since: S, dropped: 0, open: [], closed } };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], insert: () => {}, saveRegime: () => {},
+    saveLedger: () => {}, loadLedger: () => blob, saveTriggers: () => {}, loadTriggers: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow();
+  const st = p.boardEpStateNow();
+  assert.equal(st.closed.find((e) => e.k.includes("B1")).bt, 1, "first-cohort repair: tShow === epoch with a long-fired claim is retro-stamped bt");
+  assert.ok(!st.closed.find((e) => e.k.includes("B2")).bt, "an episode stamped after the epoch keeps its trustworthy stamp");
+  p.buildActionableNow();
+  const s = p.getActionable().settled, u = s.perUni.stocks;
+  assert.equal(u.btN, 1, "the excluded boot-stamped count is disclosed");
+  assert.equal(u.latN, 3, "lateness runs over the trustworthy stamps only");
+  assert.ok(Math.abs(u.lat - 1.1) < 0.01, "lat = avg(rE - rM) over non-bt episodes — the bt artifact never inflates the cost");
+  assert.equal(u.clus, 1, "the same-build same-family pair is one correlated cluster");
+  const cors = s.episodes.filter((e) => e.cor === 2).map((e) => e.k).sort();
+  assert.deepEqual(cors, ["xyz:B3|fundext", "xyz:B4|fundext"], "each clustered episode ships its cluster size; the others ship untagged");
+  // Aggregate honesty on this fixture: four expiries, zero level touches.
+  assert.equal(u.all.hit, null); assert.equal(u.all.x, 4); assert.equal(u.all.xp, 4);
+});
+
+test("settled -02: the client renders the honest surfaces — cost-colored lateness, exp \u00b1 split, shown-first ordering, exit price, bt and corr tags", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(s.includes("function actSetCost"), "lateness needs its own formatter — it is a cost, not a return");
+  assert.ok(s.includes("lateness ${actSetCost(u.lat)}"), "the strip must render lateness through the cost formatter (positive = red), not the generic R formatter that painted it green");
+  assert.ok(s.includes("exp \\u00b1"), "the stats table must carry the signed expiry split column");
+  assert.ok(s.includes("targets over level-touched resolutions ONLY"), "the hit tooltip must state expiries are excluded");
+  assert.ok(s.includes("b.hit!=null?"), "a null hit renders a dash — no rate is claimed over pure expiries");
+  // @shown leads @fire everywhere: the economically meaningful basis first, the counterfactual demoted.
+  const th = s.indexOf("R@shown"), tf = s.indexOf("R@fire");
+  assert.ok(th >= 0 && tf >= 0 && th < tf, "the episode table must lead with R@shown");
+  const ah = s.indexOf("avg @shown"), af = s.indexOf("avg @fire");
+  assert.ok(ah >= 0 && af >= 0 && ah < af, "the stats table must lead with avg @shown");
+  assert.ok(s.includes("actSetR(b.avgM)") && s.indexOf("actSetR(b.avgM)") < s.indexOf("actSetR(b.avgE)"), "cells must follow the header order");
+  // Outcome carries the price it was scored at — frozen level for touches, recorded mark for expiries.
+  assert.ok(s.includes("e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx"), "outcome price resolves from the episode's own frozen data");
+  assert.ok(s.includes("fmtPrice(opx)"), "…and renders it");
+  assert.ok(!/epScore|epResolve/.test(s), "still no client-side scoring");
+  assert.ok(s.includes("excluded from the headline lateness"), "bt episodes must be disclosed as excluded, glyph and words");
+  assert.ok(s.includes("corr \\u00d7"), "correlated same-build episodes must wear the tag");
+  assert.ok(s.includes("correlated cluster"), "the strip must disclose cluster count");
+});
+
+test("settled -02: the cost formatter executes with cost semantics and the episode table's colspan matches its columns", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // Execute the formatter, don't just pin it: positive lateness is a COST and must class red.
+  const m = s.match(/function actSetCost\(x\)\{[^\n]*\}/);
+  assert.ok(m, "actSetCost must be a one-line pure function");
+  const actSetCost = new Function("return " + m[0].replace("function actSetCost", "function"))();
+  assert.ok(actSetCost(0.73).includes('class="neg"'), "+0.73R of lateness renders RED — the screenshot bug");
+  assert.ok(actSetCost(-0.2).includes('class="pos"'), "negative lateness (the board surfaced EARLY) renders green");
+  assert.ok(actSetCost(null) === "\u2014", "null renders a dash");
+  // The detail row spans whatever the header declares — a column added on one side only renders a broken table.
+  const hdr = s.match(/<table class="trend-t act-set-eps"><thead><tr>(.*?)<\/tr><\/thead>/s);
+  assert.ok(hdr, "episode table header missing");
+  const thN = (hdr[1].match(/<th/g) || []).length;
+  const cs = s.match(/act-detrow"><td colspan="(\d+)">\$\{actEpDetail/);
+  assert.ok(cs, "episode detail colspan missing");
+  assert.equal(+cs[1], thN, `detail colspan (${cs && cs[1]}) must equal the header's column count (${thN})`);
+});
+
+test("settled -02: server invariants — bt stamping window, shown-basis pf, and the exit price on the sweep", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/BOARD_EP_BT_MS = 30 \* 60 \* 1000/.test(pol), "the bt window is one pinned constant");
+  assert.ok(pol.includes("if (boardEpBoot && Number.isFinite(rw.t0) && now - rw.t0 > BOARD_EP_BT_MS) nu.bt = 1;"),
+    "bt stamps only on the first scan, only for claims fired before the window — a fresh fire on the boot build stays trustworthy");
+  assert.ok(pol.includes("boardEpBoot = false;"), "the boot flag clears after one scan");
+  assert.ok(pol.includes("b.hit = (b.t + b.v) ? +(b.t / (b.t + b.v)).toFixed(3) : null;"), "hit is level-touched only, server-side");
+  assert.ok(pol.includes("if (e.rM > 0) b._gw += e.rM; else b._gl += -e.rM;"), "profit factor prices the SHOWN basis");
+  assert.ok(pol.includes('done.exitPx = sig(exitPx, 9)'), "the sweep records the expiry's exit mark on the episode");
+  assert.ok(pol.includes("first-cohort episode(s) retro-stamped bt"), "hydrate repairs the first cohort, logged");
+});
+
 test("settled -15: the client renders the server's record and never re-scores an episode", () => {
   const fs = require("fs"), path = require("path");
   const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
@@ -10940,7 +11057,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
