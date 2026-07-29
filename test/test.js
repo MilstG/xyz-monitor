@@ -8949,23 +8949,357 @@ test("regime + coverage are episode-gated: one alert per episode, seeded at boot
   assert.ok(regs().length >= 0);
 });
 
-test("digest: counts what fired, states what it will not push individually", () => {
-  const p = ctxHarness();
-  for (let i = 0; i < 3; i++) p.pushOpsNow("x" + i, "y");
-  const d = p.buildDigestNow(Date.now());
-  assert.ok(d.counts.some((c) => c.startsWith("ops 3")), "the digest counts by class off the same meter the panel shows");
-  assert.equal(typeof d.openClaims, "number");
-  assert.ok(Array.isArray(d.headlines));
+// A full, realistic brief context. Every test below starts from this and removes what it wants to
+// prove is optional — the shape here IS the contract between poller assembly and the renderer.
+function BRIEF_CTX() {
+  return {
+    at: Date.UTC(2026, 6, 28, 10, 0), tz: -180, build: "test",
+    bench: { stocks: { t: "SPX", d1: 0.4 }, crypto: { t: "BTC", d1: -0.4 } },
+    indices: [{ t: "NDX", d1: 0.9 }, { t: "SPX", d1: 0.4 }, { t: "RUT", d1: -0.6 }, { t: "VIX", px: 14.2, d1: -0.8, level: 1 }],
+    commodities: [{ t: "GOLD", d1: 0.3 }, { t: "WTI", d1: -2.4 }],
+    fx: [{ t: "DXY", d1: 0.12 }],
+    baskets: [{ name: "MAG7", med: 1.4, up: 43, n: 7 }],
+    sectors: [{ name: "TECH", label: "TECH", med: 1.8, n: 12, up: 66 },
+      { name: "ENERGY", label: "ENERGY", med: -1.6, n: 5, up: 20 },
+      { name: "SEMICONDUCTO", label: "Semiconductors", kind: "industry", med: 2.1, n: 9, up: 77 }],
+    movers: { stocks: { up: [{ t: "MU", d1: 4.8, rel: 4.4, note: "HBM sold out" }], down: [{ t: "ENPH", d1: -5.2, rel: -5.6, note: null }] },
+      crypto: { up: [{ t: "HYPE", d1: 6.1, rel: 6.5, note: null }], down: [{ t: "ARB", d1: -8.4, rel: -8, note: null }] } },
+    regime: { stocks: { breadth: 48, d7: 56, d30: 63, decaying: true, ma200: 74, corr: 0.34, disp: 1.8 },
+      crypto: { breadth: 29, d7: 34, d30: 41, decaying: true, ma200: 38, corr: 0.74, corrUp: true, disp: 4.1 } },
+    positioning: { crypto: { netFundApr: -9, negN: 9, oiChg: 6 }, stocks: { oiChg: 7 } },
+    earnings: { printed: [{ t: "ENPH", res: "miss" }], today: [{ t: "MSFT" }], tomorrow: [{ t: "AMD" }] },
+    macro: { next: [{ when: "Wed 14:00", label: "FOMC minutes", prior: null }],
+      rates: [{ k: "10y", v: "4.18", chg: "+6bp w/w" }], data: [{ k: "Claims", v: "231k" }] },
+    news: [{ sector: "Semis", items: [{ t: "MU", h: "HBM sold out through 2027" }] }],
+  };
+}
 
+// ===== Morning brief (build 2026.07.28-13) =====================================================
+// Replaces the ops digest wholesale. The old digest counted what fired and listed headlines; the
+// operator does not read the board that way. What ships now is a market brief, and the tests below
+// guard the three things that can silently ruin one: a number the model invented, a message
+// Telegram refuses because it is one byte over, and a default that quietly un-mutes somebody.
+
+test("brief: the ops digest is retired, and nothing still schedules it", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  // The digest is where the classes that failed the frequency test get a home, and it says so to
-  // the reader rather than presenting them as if they had simply been forgotten.
-  assert.ok(/not pushed individually.*too frequent|too frequent/.test(pol));
-  assert.ok(/attributed wire headlines only/.test(pol));
-  assert.ok(/pushEnqueue\(rec\.chat, digestText\(buildDigest\(now\)\), true\)/.test(pol),
-    "a scheduled summary must not be the message the hourly cap happens to eat");
-  assert.ok(/digestSent\.get\(rec\.chat\) === day/.test(pol), "once per local day, not once per tick");
+  for (const gone of ["function buildDigest(", "function digestText(", "function digestTick(", "DIGEST_MAX_HEADLINES"])
+    assert.ok(!pol.includes(gone), `retired digest symbol still present: ${gone}`);
+  assert.ok(/briefTick\(\)\.catch\(/.test(pol), "the brief must be the thing on the schedule");
+  assert.ok(/briefSent\.get\(rec\.chat\) === day/.test(pol), "once per local day, not once per tick");
+  assert.ok(/pushEnqueue\(rec\.chat, m, true\)/.test(pol),
+    "both parts ride force \u2014 the hourly cap must not be able to eat the conclusions while delivering the data");
+});
+
+test("brief: renderer ships two messages, omits every block whose data is absent, never fakes one", () => {
+  const C = require("../src/compute");
+  const full = BRIEF_CTX();
+  const r = C.renderBrief(full, { story: "Semis carried it.", closing: "Nothing is resolved." });
+  assert.equal(r.messages.length, 2, "market first, calendar and conclusions second");
+  assert.ok(/MORNING BRIEF/.test(r.messages[0]) && /THE STORY/.test(r.messages[0]));
+  for (const h of ["INDICES", "SECTORS", "MOVERS", "REGIME"]) assert.ok(r.messages[0].includes(h), `missing block: ${h}`);
+  for (const h of ["POSITIONING", "EARNINGS", "MACRO", "WHAT MATTERED", "FINAL THOUGHTS"]) assert.ok(r.messages[1].includes(h), `missing block: ${h}`);
+  assert.ok(!/FILINGS/i.test(r.messages.join("")), "filings are deliberately not in the brief");
+  // A server with no FRED key, no listed index and no news must not emit empty headings.
+  const bare = Object.assign(BRIEF_CTX(), { indices: [], commodities: [], fx: [], baskets: [], news: [],
+    macro: { next: [], rates: [], data: [] }, earnings: { printed: [], today: [], tomorrow: [] } });
+  const rb = C.renderBrief(bare, null);
+  const txt = rb.messages.join("\n");
+  for (const h of ["INDICES", "MACRO", "WHAT MATTERED", "EARNINGS"]) assert.ok(!txt.includes(h), `absent data must drop its heading, not print it empty: ${h}`);
+  assert.ok(!/THE STORY|FINAL THOUGHTS/.test(txt), "no prose sections when the model produced none");
+  assert.ok(/MOVERS/.test(txt), "the mechanical brief still ships without the model");
+});
+
+test("brief: VIX renders as a level, everything else as a signed percentage", () => {
+  const C = require("../src/compute");
+  const ctx = Object.assign(BRIEF_CTX(), { indices: [{ t: "SPX", d1: 0.4 }, { t: "VIX", px: 14.23, d1: -0.8, level: 1 }] });
+  const m = C.renderBrief(ctx, null).messages[0];
+  assert.ok(/VIX<\/b>  14\.2/.test(m), "a volatility index is a level; printing it as a % move reads as a price change");
+  assert.ok(/SPX<\/b>  \+0\.4/.test(m));
+});
+
+test("brief: the budget ladder keeps a pathological day inside Telegram's ceiling", () => {
+  const C = require("../src/compute");
+  const big = BRIEF_CTX();
+  // A heavy day: every block at maximum, prose at its full allowance.
+  big.news = ["Semis", "Energy", "Financials", "Health"].map((sector) => ({ sector,
+    items: [0, 1, 2].map((i) => ({ t: "AAA", h: "A materially long headline about something that happened " + i + " " + "x".repeat(50) })) }));
+  big.sectors = big.sectors.concat([...Array(8)].map((_, i) => ({ name: "SEC" + i, label: "Sector " + i, med: -i, n: 5, up: 20 })));
+  const prose = { story: ("A ".repeat(1600)).trim(), closing: ("B ".repeat(1400)).trim() };
+  const r = C.renderBrief(big, prose);
+  for (const m of r.messages) assert.ok(C.briefVisibleLen(m) <= C.BRIEF_TG_LIMIT,
+    `over the ceiling at ${C.briefVisibleLen(m)} \u2014 Telegram hard-fails the send, it does not truncate`);
+  assert.ok(r.dropped.length, "a day this heavy must record which ladder steps fired");
+  // Prose is the least compressible thing in the message: the ladder must exhaust every mechanical
+  // block before it touches either written section.
+  const mech = C.BRIEF_LADDER.findIndex((x) => x.sec === "story" || x.sec === "closing");
+  for (let i = 0; i < mech; i++) assert.ok(!["story", "closing"].includes(C.BRIEF_LADDER[i].sec), "prose must sacrifice last");
+});
+
+test("brief: the ladder is measured on ENTITY-PARSED length, so markup is free", () => {
+  const C = require("../src/compute");
+  assert.equal(C.briefVisibleLen("<b>abc</b>"), 3, "tags do not count against Telegram's limit");
+  assert.equal(C.briefVisibleLen("plain"), 5);
+  // Guard the real failure this prevents: a brief that fits, refused because we measured the markup.
+  const heavy = "<b>x</b>".repeat(400);
+  assert.ok(C.briefVisibleLen(heavy) < heavy.length / 2);
+});
+
+test("brief validator: rejects invented numbers, unlisted names, advice and markup; passes grounded prose", () => {
+  const C = require("../src/compute");
+  const ctx = BRIEF_CTX();
+  const good = { story: "Breadth closed at 48% while the index added 0.4%, and ten of the fourteen movers were semis.",
+    closing: "TECH is carrying it. Nothing is resolved until the print." };
+  assert.ok(C.validateBriefProse(good, ctx).ok, "grounded prose must pass: " + JSON.stringify(C.validateBriefProse(good, ctx)));
+  const bad = (o) => C.validateBriefProse(Object.assign({ story: "Breadth closed at 48%.", closing: "Nothing is resolved." }, o), ctx);
+  assert.match(bad({ story: "The 10-year sits at 7.77% this morning." }).error, /number not in context/);
+  assert.match(bad({ closing: "PLTR is the tell here." }).error, /name not in context/);
+  assert.match(bad({ closing: "You should buy the dip in semis." }).error, /directional instruction/);
+  assert.match(bad({ story: "Breadth <b>48%</b>." }).error, /markup/);
+  assert.match(bad({ closing: "" }).error, /closing missing/);
+  assert.match(bad({ story: "x".repeat(C.BRIEF_PROSE_MAX.story + 1) }).error, /over budget/);
+  // Small counts are prose, not claims — a model writing "four sessions running" is doing its job.
+  assert.ok(C.validateBriefProse({ story: "Four sessions running, eight of eleven sectors closed red.",
+    closing: "Nothing is resolved." }, ctx).ok, "spelled-out and small counts must not trip the numeric gate");
+});
+
+test("brief: movers carry both legs, and the relative leg is absent rather than wrong without a benchmark", () => {
+  const C = require("../src/compute");
+  const rows = [{ t: "MU", d1: 4.8 }, { t: "AVGO", d1: 3.1 }, { t: "NVDA", d1: 2.4 }, { t: "PFE", d1: -2.1 }, { t: "XOM", d1: -2.9 }, { t: "ENPH", d1: -5.2 }];
+  const m = C.briefMovers(rows, 0.4, 3);
+  assert.deepEqual(m.up.map((r) => r.t), ["MU", "AVGO", "NVDA"]);
+  assert.deepEqual(m.down.map((r) => r.t), ["ENPH", "XOM", "PFE"], "losers lead with the worst");
+  assert.equal(m.up[0].rel, 4.4, "the relative leg is the move against the book's own benchmark");
+  const noBench = C.briefMovers(rows, null, 3);
+  assert.equal(noBench.up[0].rel, null, "a relative column computed against a missing benchmark would be a fabrication");
+  // Fewer names than the cap must not put the same row in both lists.
+  const thin = C.briefMovers([{ t: "A", d1: 1 }, { t: "B", d1: -1 }], 0, 3);
+  assert.equal(thin.up.filter((r) => thin.down.includes(r)).length, 0);
+  // Partition on sign, not head-and-tail of one list. With fewer names than twice the cap the
+  // old slice put losers inside the winners column, where they rendered red under a green heading.
+  const few = C.briefMovers([{ t: "A", d1: 6.1 }, { t: "B", d1: 1.9 }, { t: "C", d1: -6.9 },
+    { t: "D", d1: -7.6 }, { t: "E", d1: -8.4 }], 0, 3);
+  assert.deepEqual(few.up.map((r) => r.t), ["A", "B"], "winners are names that went up, or there are none");
+  assert.deepEqual(few.down.map((r) => r.t), ["E", "D", "C"], "losers lead with the worst");
+  assert.ok(few.up.every((r) => r.d1 > 0) && few.down.every((r) => r.d1 < 0));
+  const allGreen = C.briefMovers([{ t: "A", d1: 1 }, { t: "B", d1: 2 }], 0, 3);
+  assert.equal(allGreen.down.length, 0, "a day with no losers has an empty losers list, not a fabricated one");
+});
+
+test("brief: sector groups use the median and drop thin ones rather than ranking on two names", () => {
+  const C = require("../src/compute");
+  const g = C.briefRankGroups([
+    { name: "TECH", vals: [1, 2, 30] },              // median 2, not the 11 a mean would claim
+    { name: "THIN", vals: [9, 9] },                  // under the floor
+    { name: "ENERGY", vals: [-1, -2, -3] }], 3);
+  assert.deepEqual(g.map((x) => x.name), ["TECH", "ENERGY"], "thin groups are dropped, not shipped on two names");
+  assert.equal(g[0].med, 2, "one earnings gap must not decide what a sector did");
+  assert.equal(g[0].up, 100);
+});
+
+test("brief delivery: default ON for a fresh link, and an explicit OFF survives a redeploy", () => {
+  const p = ctxHarness();
+  const st = p.briefStateNow();
+  assert.equal(st.defaultHour, 10, "the default brief is 10:00 UTC");
+  // A fresh link has never touched the setting, so it inherits the default rather than sitting off.
+  const code = p.pushMintCode("owner-a", true);
+  p.pushBindNow(code.code, "chat-1", "Milst");
+  const seen = p.getPush("owner-a", true).recipients.find((r) => r.chat === "chat-1");
+  assert.equal(seen.briefHour, st.defaultHour, "linking telegram must opt you in \u2014 that is the whole point of the default");
+  assert.equal(seen.briefSet, 0, "an untouched setting must be distinguishable from a chosen one");
+
+  // Turning it off is a DECISION, and has to be stored as one.
+  assert.ok(p.pushSetPrefs("chat-1", { digestHour: null }, "owner-a", true).ok);
+  const off = p.getPush("owner-a", true).recipients.find((r) => r.chat === "chat-1");
+  assert.equal(off.briefHour, null, "off means off");
+  assert.equal(off.briefSet, 1, "without this flag the next deploy reads null as \u2018never configured\u2019 and switches it back on");
+
+  // …and a chosen hour is honoured over the default.
+  assert.ok(p.pushSetPrefs("chat-1", { digestHour: 19 }, "owner-a", true).ok);
+  assert.equal(p.getPush("owner-a", true).recipients.find((r) => r.chat === "chat-1").briefHour, 19);
+  assert.ok(!p.pushSetPrefs("chat-1", { digestHour: 24 }, "owner-a", true).ok, "24 is not an hour");
+});
+
+test("brief: the delivery hour resolves against a stored offset, and UTC is disclosed not implied", () => {
+  const p = ctxHarness();
+  const code = p.pushMintCode("owner-z", true);
+  p.pushBindNow(code.code, "chat-z", "Milst");
+  const get = () => p.getPush("owner-z", true).recipients.find((r) => r.chat === "chat-z");
+
+  // Nobody has told us an offset yet. The brief still fires — it is default-on — but at UTC, and
+  // the panel has to say so: a chip reading 07:00 that lands at 04:00 local is the kind of quiet
+  // wrongness the reader only finds out about by being woken up.
+  assert.equal(get().briefTz, 0);
+  assert.equal(get().briefUtc, 1, "a default rider is scheduled in UTC, and the panel must say so");
+  assert.equal(get().briefTzKnown, 0, "an unknown offset must be distinguishable from a deliberate UTC");
+
+  // Recording a timezone for an UNRELATED feature must not silently move the brief. Before the
+  // default was UTC-anchored, setting quiet hours re-anchored it by the reader's whole offset.
+  assert.ok(p.pushSetPrefs("chat-z", { quiet: { from: 23, to: 7, tz: -180 } }, "owner-z", true).ok);
+  assert.equal(get().briefUtc, 1, "still on the default, so still UTC");
+  assert.equal(get().briefHour, 10);
+
+  // Picking an hour switches them to their own time.
+  assert.ok(p.pushSetPrefs("chat-z", { digestHour: 7, tz: -180 }, "owner-z", true).ok);
+  assert.equal(get().briefTz, -180);
+  assert.equal(get().briefUtc, 0, "an explicitly chosen hour is local, not UTC");
+  assert.equal(get().briefTzKnown, 1);
+  assert.equal(get().briefHour, 7);
+
+  // Quiet hours remain the legacy fallback for recipients who set them before tz existed.
+  const p2 = ctxHarness();
+  const c2 = p2.pushMintCode("owner-y", true);
+  p2.pushBindNow(c2.code, "chat-y", "Other");
+  assert.ok(p2.pushSetPrefs("chat-y", { quiet: { from: 23, to: 7, tz: -300 } }, "owner-y", true).ok);
+  assert.equal(p2.briefTzForNow({ quiet: { from: 23, to: 7, tz: -300 } }), -300, "quiet-hours tz is the legacy fallback");
+  assert.equal(p2.briefTzForNow({ tz: -120, quiet: { from: 23, to: 7, tz: -300 } }), -120, "an explicit tz wins over the fallback");
+  // …but a quiet-hours offset alone does NOT re-anchor the brief: this recipient never chose an
+  // hour, so they stay a default rider on the UTC schedule. Recording a timezone for one feature
+  // must not silently move the delivery time of another.
+  const y = () => p2.getPush("owner-y", true).recipients.find((r) => r.chat === "chat-y");
+  assert.equal(y().briefUtc, 1);
+  assert.equal(y().briefTz, 0, "default riders are scheduled in UTC regardless of what quiet hours know");
+  assert.equal(y().briefTzKnown, 1, "the offset is on file, it is simply not what schedules the default");
+  // Choosing an hour promotes them to their own time, and the legacy quiet-hours tz is the fallback.
+  assert.ok(p2.pushSetPrefs("chat-y", { digestHour: 8 }, "owner-y", true).ok);
+  assert.equal(y().briefUtc, 0);
+  assert.equal(y().briefTz, -300, "quiet-hours tz remains the fallback for recipients who predate the tz field");
+  assert.ok(!p2.pushSetPrefs("chat-y", { tz: 99999 }, "owner-y", true).ok, "an absurd offset is refused, not stored");
+
+  // The scheduler and the panel must agree on whether a recipient is a default rider, or the chip
+  // shows one delivery time and the tick uses another.
+  const p3 = ctxHarness();
+  assert.equal(p3.briefIsDefaultNow({ tz: -180 }), true, "no chosen hour = default rider = UTC");
+  assert.equal(p3.briefIsDefaultNow({ digestHour: 7, tz: -180 }), false);
+  const polD = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/const tz = briefIsDefault\(rec\) \? 0 : briefTzFor\(rec\);/.test(polD),
+    "delivery must anchor default riders in UTC rather than in a timezone nobody has supplied");
+
+  // The scheduler and the panel must read the SAME resolver, or they disagree about when it lands.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.equal((pol.match(/briefTzFor\(rec\)/g) || []).length + (pol.match(/briefTzFor\(r\)/g) || []).length >= 2, true,
+    "delivery and the payload must both go through briefTzFor");
+  assert.ok(!/rec\.quiet && Number\.isFinite\(rec\.quiet\.tz\) \? rec\.quiet\.tz : 0;\s*\n\s*const local = new Date\(now/.test(pol),
+    "the old inline quiet-hours offset must be gone from the brief tick");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("tz:-new Date().getTimezoneOffset()"),
+    "the browser is the only party that knows the offset \u2014 it must send it with the hour");
+  assert.ok(app.includes("r.briefUtc?' UTC':''"), "the chip must mark a default rider as UTC, never imply local time");
+});
+
+test("brief: context assembles off live state \u2014 indices split by class, movers exclude non-equities, both books separate", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  const eq = (t, d1) => p.seedRowNow(t, { ticker: t, coin: t, px: 100 * (1 + d1 / 100), d1, uni: "xyz" });
+  eq("NVDA", 2.4); eq("MU", 4.8); eq("ENPH", -5.2); eq("XOM", -2.9); eq("PFE", -2.1);
+  eq("ZZZQ", 1.1);   // deliberately not in the static sector map: a fresh listing
+  p.seedRowNow("SPX", { ticker: "SPX", coin: "SPX", px: 5000, d1: 0.4, uni: "xyz" });      // Index
+  p.seedRowNow("NDX", { ticker: "NDX", coin: "NDX", px: 18000, d1: 0.9, uni: "xyz" });     // Index
+  p.seedRowNow("VIX", { ticker: "VIX", coin: "VIX", px: 14.2, d1: -0.8, uni: "xyz" });     // Index, level
+  p.seedRowNow("WTI", { ticker: "WTI", coin: "WTI", px: 71, d1: -2.4, uni: "xyz" });       // Commodity
+  p.seedRowNow("DXY", { ticker: "DXY", coin: "DXY", px: 99, d1: 0.12, uni: "xyz" });       // FX
+  p.seedRowNow("BTC", { ticker: "BTC", coin: "BTC", px: 60000, d1: -0.4, uni: "main", funding: 0.00001 });
+  p.seedRowNow("ARB", { ticker: "ARB", coin: "ARB", px: 0.4, d1: -8.4, uni: "main", funding: -0.00003 });
+  p.seedRowNow("SOL", { ticker: "SOL", coin: "SOL", px: 180, d1: 1.9, uni: "main", funding: 0.000005 });
+
+  p.detectBenchNow();   // the universe refresh that normally resolves the SPX proxy never runs in a harness
+  const ctx = p.buildBriefCtxNow(Date.now(), 0);
+  const tks = (a) => (a || []).map((x) => x.t);
+  assert.deepEqual(tks(ctx.indices), ["NDX", "SPX", "VIX"], "indices come off the roster's own classification, ranked");
+  assert.ok(ctx.indices.find((x) => x.t === "VIX").level, "VIX must be flagged as a level, not a percentage");
+  assert.deepEqual(tks(ctx.commodities), ["WTI"]);
+  assert.deepEqual(tks(ctx.fx), ["DXY"]);
+  // An index or a currency pair in a "top movers" list is noise — those have their own block.
+  const moverTks = tks(ctx.movers.stocks.up).concat(tks(ctx.movers.stocks.down));
+  for (const bad of ["SPX", "NDX", "VIX", "WTI", "DXY"]) assert.ok(!moverTks.includes(bad), `${bad} must not appear in equity movers`);
+  assert.equal(ctx.movers.stocks.up[0].t, "MU");
+  // An unclassified name must still rank. Requiring assetClass === "Equity" silently dropped any
+  // listing the static map had not been taught, so a new ticker went missing from its own movers
+  // list while every other panel showed it.
+  assert.ok(moverTks.includes("ENPH"), "the biggest loser must be in the losers list, classified or not");
+  assert.equal(ctx.movers.stocks.down[0].t, "ENPH", "losers lead with the worst");
+  // The benchmark is the reference line under the list; ranking it against itself prints a
+  // relative move of zero and costs a real mover its slot.
+  const cryTks = tks(ctx.movers.crypto.up).concat(tks(ctx.movers.crypto.down));
+  assert.ok(!cryTks.includes("BTC"), "BTC must not appear in the crypto movers it is the benchmark for");
+  assert.ok(!moverTks.includes("SPX"));
+  assert.equal(ctx.bench.stocks && ctx.bench.stocks.t, "SPX", "the SPX proxy the rest of the app resolves is the equity benchmark");
+  assert.equal(ctx.bench.crypto && ctx.bench.crypto.t, "BTC");
+  assert.equal(ctx.movers.stocks.up[0].rel, +(4.8 - 0.4).toFixed(2), "the relative leg rides the book's own benchmark");
+  // Hard separation survives into the brief: no crypto name in the equity book and vice versa.
+  assert.ok(!tks(ctx.movers.crypto.up).concat(tks(ctx.movers.crypto.down)).some((t) => ["MU", "NVDA", "SPX"].includes(t)));
+  assert.ok(ctx.regime.stocks && ctx.regime.stocks.breadth != null, "breadth must be computed per book");
+  assert.notEqual(ctx.regime.stocks.breadth, ctx.regime.crypto && ctx.regime.crypto.breadth);
+  // The renderer must survive whatever the assembler produces — the contract between the two halves.
+  const C = require("../src/compute");
+  const r = C.renderBrief(ctx, null);
+  for (const m of r.messages) assert.ok(C.briefVisibleLen(m) <= C.BRIEF_TG_LIMIT);
+  assert.ok(/NDX/.test(r.messages[0]) && /MU/.test(r.messages[0]));
+});
+
+test("brief: rate lines are absent without the FRED level pull, and 2s10s needs both legs", () => {
+  const p = ctxHarness();
+  const r = p.briefRatesNow();
+  // No key in the harness, so no levels: the brief must simply not have a rates block. The old
+  // failure mode this guards is a curve figure printed from a spread the server never fetched.
+  assert.deepEqual(r.rates, [], "no pull means no rate lines, never stale or invented ones");
+  assert.deepEqual(r.data, []);
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/MACRO_LEVELS = \[/.test(pol) && /DGS10/.test(pol) && /ICSA/.test(pol),
+    "the release calendar carries no levels \u2014 rates and claims need their own series");
+  assert.ok(/if \(s\["10y"\] && s\["2y"\]\)/.test(pol), "a spread computed from one leg would be a fabrication");
+  assert.ok(/level series unavailable \(brief rate lines absent\)/.test(pol),
+    "a dead level series must never be able to cost the calendar its entries");
+});
+
+test("brief: the admin test-fire is admin-only, takes the real path, and reports what actually shipped", () => {
+  const fs = require("fs"), path = require("path");
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(sv.includes('fastify.post("/api/alerts/brief-test"'), "route missing");
+  const route = sv.slice(sv.indexOf('/api/alerts/brief-test'), sv.indexOf('/api/alerts/brief-test') + 700);
+  assert.ok(/if \(!isAdmin\(req\)\) return reply\.code\(403\)/.test(route),
+    "a brief costs a model call and lands as two messages \u2014 not a visitor's button");
+  assert.ok(/bodyLimit/.test(route), "every POST carries a body cap");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/briefTest: briefTestNow,/.test(pol), "poller.briefTest must be exported or the route is bound to a phantom");
+  // It must go through generateBrief, not a bespoke preview path — a test fire that renders
+  // differently from the 07:00 send is worse than no test fire at all.
+  const fn = pol.slice(pol.indexOf("async function briefTestNow("), pol.indexOf("async function briefTestNow(") + 1200);
+  assert.ok(/generateBrief\(/.test(fn) && /pushEnqueue\(c, m, true\)/.test(fn));
+  assert.ok(/if \(fresh\) briefCache = null;/.test(fn), "cached vs fresh must be a real distinction, not a label");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of ["id=\"adm-brief\"", "id=\"adm-brief-f\"", "/api/alerts/brief-test", "prose degraded"])
+    assert.ok(app.includes(pin), `admin panel pin missing: ${pin}`);
+  // The panel must report the real numbers: a silent success says nothing about what landed.
+  for (const pin of ["d.parts", "d.chars", "d.dropped", "d.dayLeft"])
+    assert.ok(app.includes(pin), `test-fire result pin missing: ${pin}`);
+});
+
+test("brief: prose failure degrades to the mechanical brief, never to silence", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  // A model that returns garbage is the common case (refusal, truncation, a stray fence).
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
+    aiFetch: async () => ({ ok: true, json: async () => ({ content: [{ type: "text", text: "not json at all" }], stop_reason: "end_turn" }) }) });
+  p.seedRowNow("NVDA", { ticker: "NVDA", coin: "NVDA", px: 100, d1: 2.4, uni: "xyz" });
+  p.seedRowNow("MU", { ticker: "MU", coin: "MU", px: 100, d1: 4.8, uni: "xyz" });
+  const b = await p.generateBriefNow(Date.now(), 0);
+  assert.ok(b.messages.length >= 1, "a failed model call must still put a brief on the phone");
+  assert.ok(b.degraded, "and must say why, in the logs and on the test-fire result");
+  assert.ok(!/THE STORY|FINAL THOUGHTS/.test(b.messages.join("")), "no prose headings with no prose under them");
+  assert.ok(/MOVERS/.test(b.messages.join("")), "the mechanical half is the fallback, and it is complete");
+});
+
+test("brief: breadth is share-green, deliberately not benchmark-relative", () => {
+  const C = require("../src/compute");
+  assert.equal(C.briefBreadth([1, 1, -1, -1]), 50);
+  assert.equal(C.briefBreadth([-1, -1, -1, 1]), 25);
+  assert.equal(C.briefBreadth([]), null, "no data is null, never zero");
 });
 
 test("the drain picks the first ELIGIBLE item, so a deferred message cannot head-of-line block", () => {
@@ -10463,7 +10797,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-12"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-13"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
