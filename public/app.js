@@ -7656,6 +7656,36 @@ async function termReports(){ let d=state.report.list;
   if(!list.length) return termOut('<span class="sec">no AI reports generated yet</span> <span class="tp-trans">— try <span class="ex" data-tcmd="report NVDA">report NVDA</span></span>');
   const lines=list.slice(0,8).map(x=>`<span class="tp-trans">${termAgo(x.ts)}</span> <span class="tp-deep" data-tcmd="report ${tesc(x.ticker)}">${tpad(tesc(x.ticker),7)}</span> <span class="tp-chip ${x.bias==='long'?'l':x.bias==='short'?'s':''}">${tesc(x.bias||'—')}</span> ${tesc((x.headline||'').slice(0,64))}`).join('\n');
   termOut(`<span class="tp-hd">recent AI reports</span> <span class="tp-trans">· shared across the group</span>\n${lines}`); }
+// ---- external fundamentals cards (SEC EDGAR) ----
+// Card builders are PURE string functions (fetch-free) so the test suite can execute them
+// against fixture payloads and assert real markup — the behavioral-render doctrine. Every
+// number on these cards is a filed figure shaped server-side; a missing field renders as an
+// explicit em-dash because the filer never tagged it, not because we dropped it.
+function tmoney(v){ if(v==null||!isFinite(v)) return '\u2014'; const a=Math.abs(v), sg=v<0?'-':'';
+  if(a>=1e12) return sg+'$'+(a/1e12).toFixed(2)+'T'; if(a>=1e9) return sg+'$'+(a/1e9).toFixed(2)+'B';
+  if(a>=1e6) return sg+'$'+(a/1e6).toFixed(1)+'M'; if(a>=1e3) return sg+'$'+(a/1e3).toFixed(1)+'K'; return sg+'$'+a.toFixed(2); }
+function tcount(v){ if(v==null||!isFinite(v)) return '\u2014'; const a=Math.abs(v);
+  if(a>=1e9) return (v/1e9).toFixed(2)+'B'; if(a>=1e6) return (v/1e6).toFixed(1)+'M'; if(a>=1e3) return (v/1e3).toFixed(1)+'K'; return String(v); }
+function termFundCard(d){
+  if(!d||!d.ok) return `<span class="sec">${tesc((d&&d.error)||'fundamentals unavailable')}</span>`;
+  const x=d.data||{}, f=x.fields||{};
+  const row=(lbl,fd,fmt)=>`<span class="tp-k">${tpad(lbl,14)}</span> <b>${fd?fmt(fd.v):'\u2014'}</b>${fd&&fd.period?` <span class="tp-trans">${tesc(String(fd.period))}</span>`:''}`;
+  const lines=[ row('assets',f.assets,tmoney), row('liabilities',f.liabilities,tmoney), row('equity',f.equity,tmoney),
+    row('cash',f.cash,tmoney), row('lt debt',f.debt,tmoney), row('net cash',f.netCash,tmoney),
+    row('revenue',f.revenue,tmoney), row('net income',f.netIncome,tmoney),
+    row('diluted eps',f.eps,(v)=>'$'+(+v).toFixed(2)), row('shares out',f.shares,tcount) ];
+  return `<span class="tp-hd">${tesc(d.ticker)} fundamentals</span>${x.name?` <span class="tp-trans">\u00b7 ${tesc(x.name)}</span>`:''}\n${lines.join('\n')}\n<span class="tp-trans">source: ${tesc(d.src||'SEC EDGAR')}${x.asOf?` \u00b7 latest filing data through ${tesc(String(x.asOf))}`:''} \u00b7 filed figures only \u2014 an em-dash means the filer never tagged that concept</span>`; }
+function termEtfCard(d){
+  if(!d||!d.ok) return `<span class="sec">${tesc((d&&d.error)||'holdings unavailable')}</span>`;
+  const x=d.data||{}, hs=Array.isArray(x.holdings)?x.holdings:[];
+  const rows=hs.map((h,i)=>`<span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(h.pct!=null?h.pct.toFixed(2)+'%':'\u2014',8,true)}  ${tesc(h.name||'\u2014')}`).join('\n');
+  return `<span class="tp-hd">${tesc(d.symbol)} holdings</span>${x.seriesName?` <span class="tp-trans">\u00b7 ${tesc(x.seriesName)}</span>`:''}\n<span class="tp-th">${tpad('#',3)} ${tpad('% NAV',8,true)}  NAME</span>\n${rows||'<span class="sec">no holdings parsed</span>'}\n<span class="tp-trans">${x.n?`top ${Math.min(hs.length,x.n)} of ${x.n} positions`:''}${x.totAssets?` \u00b7 total assets ${tmoney(x.totAssets)}`:''}${x.asOf?` \u00b7 as of ${tesc(String(x.asOf))}`:''} \u00b7 ${tesc(d.lag||'source: SEC EDGAR N-PORT')}</span>`; }
+async function termFund(t){ const T=String(t||'').toUpperCase(); if(!T) return termErr('usage: fund <ticker>');
+  const think=termThinking(); try{ const d=await fetchJSON('/api/fund/'+encodeURIComponent(T)); think.remove(); termOut(termFundCard(d)); }
+  catch(_){ think.remove(); termErr('fundamentals fetch failed \u2014 try again in a moment'); } }
+async function termEtf(t){ const T=String(t||'').toUpperCase(); if(!T) return termErr('usage: etf <symbol>');
+  const think=termThinking(); try{ const d=await fetchJSON('/api/etf/'+encodeURIComponent(T)); think.remove(); termOut(termEtfCard(d)); }
+  catch(_){ think.remove(); termErr('holdings fetch failed \u2014 try again in a moment'); } }
 function termCompare(a,b){ termHi(a.coin);
   const F=['price','d1','d7','funding','fundpct','squeeze','momentum','vstape','oi','vol','beta','dd'];
   const cell=(r,k)=>{ const f=TFIELD[k], v=f.g(r); return v==null||!isFinite(v)?'—':f.f(v); };
@@ -7718,6 +7748,13 @@ function nlResolve(text){ const rawWords=text.split(/\s+/); const s=' '+text.toL
   // failure the escalation contract forbids. A ticker inside a causal question is context for the
   // AI, never the answer. Runs before every local mapping; mirrored server-side in classifyAsk.
   if(/\bwhy\b|\bhow come\b|\bcaus(e|es|ed|ing)\b|\bexplain\b|\breasons?\b|\bdriving\b|\bwhat happened\b|\bgoing on\b|\bbehind (the|this|its)\b/.test(s)) return null;
+  // ---- external filed data (SEC) ----
+  // "balance sheet of X" / "what's inside QQQ" are pull-through commands, not board lenses —
+  // they map locally so a plain-English ask never burns AI budget on something the grammar owns.
+  if(/\b(balance sheet|fundamentals?|financials|income statement|debt load|cash position|net income|shares outstanding)\b/.test(s)&&tk) return 'fund '+tk;
+  if(/\b(holdings?|composition|constituents|top holdings|made up of|what'?s inside|whats inside)\b/.test(s)){
+    const sym=tk||rawWords.map(x=>x.replace(/[?!.,]/g,'')).find(x=>/^[A-Z]{2,6}$/.test(x)&&x===x.toUpperCase());
+    if(sym) return 'etf '+sym; }
   // ---- whole-board questions (no ticker needed) ----
   if(/\bbreadth\b/.test(s)||/\b(hows?|how is|how are|how does|whats) the (market|tape|board)\b/.test(s)
     ||/\b(market|tape) (doing|look|looking|today)\b/.test(s)||/\bhow many (names? )?(are )?(up|down|green|red)\b/.test(s)
@@ -7797,6 +7834,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='vs'||head==='compare') return !!(termFind(p[1])&&termFind(p[2]));
   if(head==='comp') return p.slice(1).filter(x=>termFind(x)||isBasketName(x)).length>=2;
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
+  if(head==='fund'||head==='bs'||head==='balance'||head==='etf'||head==='holdings') return !!p[1];   // symbols may live outside the universe (ETFs)
   if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
   if(head==='ratio') return p.length>=2;
   return false; }
@@ -7811,6 +7849,8 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='sectors') return termSectors(tfield(p[1])||'d1');
   if(h==='news'){ const rr=termFind(p[1]); const nn=p.slice(1).map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); return termNewsCmd(rr?rr.ticker.toUpperCase():null,nn); }
   if(h==='reports') return termReports();
+  if(h==='fund'||h==='bs'||h==='balance') return termFund(p[1]);
+  if(h==='etf'||h==='holdings') return termEtf(p[1]);
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
   if(h==='comp'){ const cr=state.scope==='crypto';
     const tks=[...new Set(p.slice(1).map(x=>{ const r=termFind(x); if(r) return (r.ticker||'').toUpperCase();
@@ -7989,6 +8029,8 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('ratio <a>/<b> [tf]',20)}</span><span class="sec">synthetic pair candles (1h·4h·12h·1d) with an honest EMA200 — "ratio MAG7/EWZ 4h"</span>
 <span class="amber">${tpad('signals · reports',20)}</span><span class="sec">active signals · recent AI reports</span>
 <span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
+<span class="amber">${tpad('fund <ticker>',20)}</span><span class="sec">latest SEC-filed balance sheet + income facts \u00b7 XBRL, on demand</span>
+<span class="amber">${tpad('etf <symbol>',20)}</span><span class="sec">ETF/fund composition from the latest N-PORT filing (30\u201360d lag)</span>
 <span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
 <span class="amber">${tpad('admin unlock',20)}</span><span class="sec">+ password — unlock AI generation for this session (echo redacted)</span>
 <span class="amber">${tpad('admin lock',20)}</span><span class="sec">re-lock AI generation now</span>
@@ -8000,7 +8042,7 @@ function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) 
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
 // ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
-const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','help','clear','stocks','crypto'];
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','help','clear','stocks','crypto'];
 const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
@@ -8008,6 +8050,7 @@ function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toL
   if(termFind(p[0])) return TERM_FIELDS.filter(f=>f.startsWith(cur)).map(f=>p.slice(0,-1).join(' ')+' '+f);
   if(h==='top'||h==='bottom') return ['vol','funding','squeeze','momentum','oi','carry','gainers','losers','d7','d30','rvol','vsvwap','gap','adr','vol30'].filter(x=>x.startsWith(cur)).map(x=>h+' '+x);
   if(h==='earnings') return ['today','tomorrow','week','recent'].concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur)).map(x=>'earnings '+x);
+  if(h==='fund') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>'fund '+x);
   if(h==='report'||h==='signals'||h==='corr'||h==='comp'||h==='diverge'||h==='news'||h==='vs'||h==='compare') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>p.slice(0,-1).join(' ')+' '+x);
   return []; }
 let termHist=[], termHi_=-1;
