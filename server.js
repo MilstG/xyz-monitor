@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.29-05";
+const VERSION = "2026.07.29-06";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -578,6 +578,52 @@ async function main() {
     // the query string needed to verify the stamp is not reliably reachable from it.
     setHeaders(res) { res.setHeader("cache-control", "no-cache"); },
   });
+
+  // ===== precompressed immutable assets (build 2026.07.29-06, Phase 1 of the perf batch) =========
+  // The two stamped assets are immutable BY CONSTRUCTION (the ?v=VERSION URL is the cache-buster),
+  // which makes maximum-effort compression free when amortized: brotli q11 runs ONCE at boot
+  // (~1-2s, logged) instead of gzip running per cache miss, and brotli beats gzip by ~15-20% on JS
+  // — a real first-load win on mobile, where app.js dominates the wire. Explicit routes win over
+  // @fastify/static's wildcard by radix-tree specificity, so these take the hit path and static
+  // remains the fallback for everything else. Degradation is deliberate and loud: if a read or
+  // compress throws at boot, the route is simply not registered and @fastify/static serves the
+  // file exactly as before — a failed optimization must never become a missing asset.
+  // Negotiation order br → gzip → raw; content-encoding is set BEFORE @fastify/compress sees the
+  // reply, which makes it skip these bodies (it never double-compresses an encoded payload).
+  // cache-control starts at no-cache to match the static default; the onSend hook above runs at
+  // send time and upgrades CURRENT-stamp requests to immutable, same as it always has — this
+  // route changes the bytes on the wire, never the caching contract.
+  const PRECOMP = (() => {
+    const out = {};
+    for (const [route, file, type] of [["/app.js", "app.js", "text/javascript; charset=utf-8"],
+                                       ["/styles.css", "styles.css", "text/css; charset=utf-8"]]) {
+      try {
+        const raw = fs.readFileSync(path.join(__dirname, "public", file));
+        const br = zlib.brotliCompressSync(raw, { params: {
+          [zlib.constants.BROTLI_PARAM_QUALITY]: 11,
+          [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length } });
+        const gz = zlib.gzipSync(raw, { level: 9 });
+        // Strong content identity for the ETag: two builds shipping identical bytes revalidate
+        // across the deploy, and any byte change is a new tag — never keyed on VERSION alone.
+        const tag = 'W/"' + crypto.createHash("sha1").update(raw).digest("base64url") + '"';
+        out[route] = { raw, br, gz, type, tag };
+        log(`precompressed ${file}: raw ${(raw.length / 1024).toFixed(0)} KB \u2192 br ${(br.length / 1024).toFixed(0)} KB \u00b7 gz ${(gz.length / 1024).toFixed(0)} KB`);
+      } catch (e) { log(`WARN: precompress ${file} failed (${e.message}) \u2014 @fastify/static serves it per-request instead`); }
+    }
+    return out;
+  })();
+  for (const route of Object.keys(PRECOMP)) {
+    fastify.get(route, async (req, reply) => {
+      const a = PRECOMP[route];
+      reply.header("vary", "accept-encoding").header("cache-control", "no-cache").type(a.type);
+      if (req.headers["if-none-match"] === a.tag) return reply.header("etag", a.tag).code(304).send();
+      reply.header("etag", a.tag);
+      const ae = String(req.headers["accept-encoding"] || "");
+      if (/\bbr\b/.test(ae)) return reply.header("content-encoding", "br").send(a.br);
+      if (/\bgzip\b/.test(ae)) return reply.header("content-encoding", "gzip").send(a.gz);
+      return reply.send(a.raw);
+    });
+  }
 
   // Version-stamped shell: index.html is read once at boot with ?v=BUILD stamped onto the two
   // asset tags, so every deploy changes the asset URLs themselves — a browser can no longer
