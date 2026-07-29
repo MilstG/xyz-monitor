@@ -6315,3 +6315,26 @@ function parseNportHoldings(xml, maxN) {
 }
 module.exports.pickXbrlFacts = pickXbrlFacts;
 module.exports.parseNportHoldings = parseNportHoldings;
+
+// ===== hourly fetch scheduling (pure) ==========================================================
+// The comparator behind the hourly worker's pick(). Volume ordering is the right default — the
+// most-watched names refresh first — but it is also exactly how a low-volume name carrying an
+// open, announced claim starves to a 90-min-stale spine whenever the rate budget is tight: the
+// coverage alert's watch set and the fetch queue's priority set didn't know about each other.
+// Past an escalation age, staleness outranks volume, and a claim-carrying name outranks
+// everything but the benchmark — one code path between "what we warn about" and "what we
+// refresh first". Tiers: 0 = within the escalation age (isNew, then volume — the historical
+// ordering, byte for byte); 1 = past it (stalest first); 2 = past it with an open claim
+// (stalest first). Non-hourly lanes pass tier 0 always and are untouched.
+function hourlyPickTier(ageMs, hasClaim, escalateMs) {
+  return ageMs > escalateMs ? (hasClaim ? 2 : 1) : 0;
+}
+function hourlyPickBetter(cand, best) {
+  if (!best) return true;
+  if (cand.tier !== best.tier) return cand.tier > best.tier;
+  if (cand.tier > 0) return (cand.age || 0) > (best.age || 0);
+  if (!!cand.isNew !== !!best.isNew) return !!cand.isNew;
+  return (cand.vol || 0) > (best.vol || 0);
+}
+module.exports.hourlyPickTier = hourlyPickTier;
+module.exports.hourlyPickBetter = hourlyPickBetter;

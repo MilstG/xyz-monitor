@@ -20,6 +20,7 @@ const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnP
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
+const { hourlyPickTier, hourlyPickBetter } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName, displayName, macroLane } = require("./sectors");
@@ -664,14 +665,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // fetched (identified by `prefix`) so a second worker claims the next candidate instead of
   // spinning on the one the first worker already holds — this is what makes the doubled
   // hourly/daily workers actually run in parallel.
+  // Hourly lane only: past CLAIM_PRIORITY_AGE the ordering escalates — a coin holding an open,
+  // announced claim outranks the volume order entirely (the fetch queue protects the same set
+  // coverageScan alerts on: one predicate, one code path), and everything past the age outranks
+  // fresh-ish names stalest-first, so no market can starve indefinitely just for being small.
+  // Under a healthy budget nothing ever reaches the escalation age and the ordering is
+  // byte-for-byte the historical one. Non-hourly lanes stay tier 0 always, untouched.
+  const CLAIM_PRIORITY_AGE = 3 * HOURLY_STALE;   // past this spine age, staleness outranks volume
+  const isOpenAnnounced = (e) => e.vi == null && e.alo === 1;   // shared with coverageScan — same set, one predicate
+  function openClaimCoins() {
+    const s = new Set();
+    for (const e of ledgerOpen.values()) if (isOpenAnnounced(e)) s.add(e.coin);
+    return s;
+  }
   function pick(needsFetch, prefix) {
-    let best = null;
+    const now = Date.now();
+    const claims = prefix === "h:" ? openClaimCoins() : null;
+    let best = null, bestKey = null;
     for (const r of rows.values()) {
       if (r.delisted || !needsFetch(r)) continue;
       if (prefix && inflight.has(prefix + r.coin)) continue;
       if (r.coin === benchCoin) return r.coin;   // benchmark first, always: RS, β, leaders and every correlation panel gate on its history
-      if (!best || (r.isNew && !best.isNew) ||
-          (r.isNew === best.isNew && (r.vol || 0) > (best.vol || 0))) best = r;
+      const age = claims ? now - (r.hourlyTs || 0) : 0;
+      const key = { tier: claims ? hourlyPickTier(age, claims.has(r.coin), CLAIM_PRIORITY_AGE) : 0,
+        age, isNew: r.isNew, vol: r.vol };
+      if (hourlyPickBetter(key, bestKey)) { best = r; bestKey = key; }
     }
     return best ? best.coin : null;
   }
@@ -693,9 +711,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (inflight.has("h:" + coin)) { await sleep(500); continue; }
       inflight.add("h:" + coin);
       try { await refreshHourly(coin); const r = rows.get(coin); if (r) r.hFail = 0; }
-      catch (_) {
+      catch (e) {
         const r = rows.get(coin);
-        if (r) { r.hFail = (r.hFail || 0) + 1; r.hFailUntil = Date.now() + Math.min(FAIL_BACKOFF * r.hFail, 15 * 60 * 1000); }
+        if (r) {
+          r.hFail = (r.hFail || 0) + 1;
+          // A coin carrying an open, announced claim never rides the escalating ceiling: its live
+          // claim numbers are computed from this spine, so a persistently failing fetch retries
+          // every FAIL_BACKOFF instead of every quarter hour. Everyone else keeps the escalation.
+          const claim = openClaimCoins().has(coin);
+          r.hFailUntil = Date.now() + (claim ? FAIL_BACKOFF : Math.min(FAIL_BACKOFF * r.hFail, 15 * 60 * 1000));
+          // This catch used to be silent — a coin could back itself off to a 90-min-stale spine
+          // with no trace in the log. One line per failed attempt, rate-ceilinged by the backoff.
+          log(`hourly refresh failed for ${coin}: ${(e && e.message) || e} — fail #${r.hFail}, retry in ${Math.round((r.hFailUntil - Date.now()) / 1000)}s${claim ? " (open-claim: flat backoff)" : ""}`);
+        }
       } finally { inflight.delete("h:" + coin); }
     }
   }
@@ -7920,7 +7948,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // Group by coin so the 5m range query runs once per NAME, not once per claim.
     const byCoin = new Map();
     for (const e of ledgerOpen.values()) {
-      if (e.vi != null || e.alo !== 1) continue;
+      if (!isOpenAnnounced(e)) continue;
       const wantStop = e.stp != null && e.als !== 1, wantTgt = e.tgt != null && e.alt !== 1;
       if (!wantStop && !wantTgt) continue;
       if (!byCoin.has(e.coin)) byCoin.set(e.coin, []);
@@ -8153,7 +8181,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     let fired = 0;
     const seen = new Set();
     for (const e of ledgerOpen.values()) {
-      if (e.vi != null || e.alo !== 1) continue;
+      if (!isOpenAnnounced(e)) continue;
       const tk = e.ticker;
       if (!tk || seen.has(tk)) continue;
       seen.add(tk);
@@ -8190,7 +8218,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // on inline, so the scoped leg above stays the interruption and this stays the reference.
     const claims = new Map();
     for (const e of ledgerOpen.values()) {
-      if (e.vi != null || e.alo !== 1 || !e.ticker) continue;
+      if (!isOpenAnnounced(e) || !e.ticker) continue;
       if (!claims.has(e.ticker)) claims.set(e.ticker, EV_LABEL[e.ev] || e.ev);
     }
     const dayMove = new Map();
@@ -8340,28 +8368,44 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // OPEN, ANNOUNCED claim is different — every number you were given about that claim is now being
   // computed from a stale spine, and you should know before you act on it.
   const COVERAGE_STALE_MS = 90 * 60 * 1000;
+  // Re-arm hysteresis: a spine flapping around the stale line (refresh, drift stale, refresh)
+  // used to fire once per crossing — the many-messages failure mode. Re-arming now requires the
+  // spine to have been continuously fresh for a full window, so a flap is one episode, one alert.
+  // coverageFreshAt is deliberately NOT persisted: a restart merely delays the next re-arm by
+  // one window, which is the safe direction.
+  const COVERAGE_REARM_FRESH_MS = 30 * 60 * 1000;
   const coverageArmed = new Map();
-  function coverageScan() {
-    const now = Date.now();
+  const coverageFreshAt = new Map();   // first observation of the current fresh stretch
+  function coverageScan(atNow) {
+    const now = atNow || Date.now();
     let fired = 0;
     const live = new Set();
     for (const e of ledgerOpen.values()) {
-      if (e.vi != null || e.alo !== 1) continue;
+      if (!isOpenAnnounced(e)) continue;
       const r = rows.get(e.coin);
       if (!r || r.delisted) continue;
       live.add(e.coin);
       const age = now - (r.hourlyTs || 0);
       const stale = r.hourlyTs > 0 && age > COVERAGE_STALE_MS;
       const key = e.coin;
-      if (!stale) { if (coverageArmed.get(key) === false) coverageArmed.set(key, true); continue; }
+      if (!stale) {
+        if (!coverageFreshAt.has(key)) coverageFreshAt.set(key, now);
+        if (coverageArmed.get(key) === false && now - coverageFreshAt.get(key) >= COVERAGE_REARM_FRESH_MS) coverageArmed.set(key, true);
+        continue; }
+      coverageFreshAt.delete(key);   // the fresh stretch is over; the next one starts its own clock
       if (coverageArmed.get(key) === false) continue;
       if (!coverageArmed.has(key)) { coverageArmed.set(key, false); continue; }
       coverageArmed.set(key, false);
+      // Say WHY when we can: a failing fetch (with its retry clock) reads very differently from a
+      // healthy fetch that never got queue time — one is an API problem, the other is budget.
+      const why = (r.hFail || 0) > 0
+        ? ` \u00b7 fetch failing (${r.hFail} consecutive${(r.hFailUntil || 0) > now ? `, retry in ${Math.max(1, Math.ceil((r.hFailUntil - now) / 60000))}m` : ""})`
+        : " \u00b7 no fetch failures recorded \u2014 queue/budget contention";
       emitTrig("coverage", { coin: e.coin, t: e.ticker || e.coin,
-        text: `hourly spine last refreshed ${Math.round(age / 60000)} min ago \u2014 the open ${EV_LABEL[e.ev] || e.ev} claim's live numbers are running on stale data` }, now);
+        text: `hourly spine last refreshed ${Math.round(age / 60000)} min ago \u2014 the open ${EV_LABEL[e.ev] || e.ev} claim's live numbers are running on stale data${why}` }, now);
       fired++;
     }
-    for (const k of [...coverageArmed.keys()]) if (!live.has(k)) coverageArmed.delete(k);
+    for (const k of [...coverageArmed.keys()]) if (!live.has(k)) { coverageArmed.delete(k); coverageFreshAt.delete(k); }
     persistTriggers();   // seeds and re-arms matter to the NEXT process as much as fires do
     return fired;
   }
@@ -9693,6 +9737,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     stats: () => {
       const now = Date.now();
       let active = 0, hFailing = 0, dFailing = 0, fFailing = 0, pendH = 0, pendD = 0;
+      const staleSp = [];   // spines past the coverage-alert threshold, with the per-coin fail state that explains WHY
       for (const r of rows.values()) {
         if (r.delisted) continue;
         active++;
@@ -9701,7 +9746,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         if ((r.fFailUntil || 0) > now) fFailing++;
         if (!r.feat) pendH++;
         if (!r.dailyRaw) pendD++;
+        if (r.hourlyTs > 0 && now - r.hourlyTs > COVERAGE_STALE_MS)
+          staleSp.push({ coin: r.coin, ageMin: Math.round((now - r.hourlyTs) / 60000), hFail: r.hFail || 0,
+            backoffS: (r.hFailUntil || 0) > now ? Math.round((r.hFailUntil - now) / 1000) : 0 });
       }
+      staleSp.sort((a, b) => b.ageMin - a.ageMin);
       return {
         version: version || null,
         markets: rows.size, active, bench: benchCoin, oiCoins: hist.size,
@@ -9709,6 +9758,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         hourly: hourlyCoverage(), funding: fundingCoverage(), lastPoll,
         backfill: { hourlyPending: pendH, dailyPending: pendD },
         failing: { hourly: hFailing, daily: dFailing, funding: fFailing },
+        // Stale spines with fail state: the next coverage episode is diagnosable from one curl of
+        // /api/health instead of correlating Railway logs after the fact. hFail=0 on a stale spine
+        // means the fetch never failed — the coin simply never got queue time (budget contention).
+        spines: { staleMs: COVERAGE_STALE_MS, stale: staleSp.length,
+          worstAgeMin: staleSp.length ? staleSp[0].ageMin : 0, coins: staleSp.slice(0, 20) },
         signals: signalsCache ? signalsCache.count : 0,
         ledger: { open: ledgerOpen.size, resolved: ledgerClosed.length },
         earnings: { entries: earnCache ? earnCache.entries.length : 0, asOf: earnCache ? earnCache.asOf : null,
