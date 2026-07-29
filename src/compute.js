@@ -5834,6 +5834,11 @@ module.exports.briefEarnRows = briefEarnRows;
 const SCHED_KINDS = [
   { k: "brief", label: "Morning brief", defaultHour: 10,
     tip: "indices, movers, sectors, regime, positioning, earnings, macro and the day's headlines, with two written sections" },
+  // Default days [1,3,5]: THE LANDSCAPE runs Mon/Wed/Fri unless a recipient chooses otherwise —
+  // the day-of-week axis exists in the registry precisely so a send like this needs no scheduler
+  // work of its own. An hour after the brief on the days it runs.
+  { k: "landscape", label: "The Landscape", defaultHour: 11, defaultDays: [1, 3, 5],
+    tip: "written market commentary built from the headline corpus \u2014 which stories are the same story, and what hasn\u2019t been repriced. Interpretation, not measurement: unlike the brief its claims are not validated against the server\u2019s numbers, and it cites the headlines it rests on" },
 ];
 const SCHED_DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 // null means EVERY day. Normalising all-seven back to null matters: the panel should say "daily",
@@ -5886,10 +5891,15 @@ function schedDaysLabel(days) {
 // hour that survives every deploy).
 function schedResolve(entry, def) {
   const d = def || {};
+  // A kind may register default DAYS as well as a default hour (the landscape's M/W/F). They apply
+  // exactly as far as the default hour does: to a recipient who never configured this send. The
+  // moment someone sets anything, their day set — including "daily" as null — is their own.
+  const defDays = (() => { const n = schedNormDays(d.defaultDays); return n === undefined ? null : n; })();
   if (!entry || !entry.set) {
     const h = entry && Number.isFinite(entry.h) ? entry.h : (Number.isFinite(d.defaultHour) ? d.defaultHour : null);
-    const days = entry ? schedNormDays(entry.days) : null;
-    return { hour: h, days: days === undefined ? null : days, isDefault: !(entry && Number.isFinite(entry.h)) };
+    const isDefault = !(entry && Number.isFinite(entry.h));
+    const days = entry && entry.days != null ? schedNormDays(entry.days) : (isDefault ? defDays : null);
+    return { hour: h, days: days === undefined ? null : days, isDefault };
   }
   const days = schedNormDays(entry.days);
   return { hour: Number.isFinite(entry.h) ? entry.h : null,
@@ -5905,13 +5915,112 @@ function schedDueAt(resolved, nowMs, tzMin) {
   if (resolved.days && resolved.days.indexOf(local.getUTCDay()) === -1) return null;
   return local.toISOString().slice(0, 10);
 }
-module.exports.SCHED_KINDS = SCHED_KINDS;
-module.exports.SCHED_DAY_NAMES = SCHED_DAY_NAMES;
+module.exports.SCHED_KINDS = SCHED_KINDS;module.exports.SCHED_DAY_NAMES = SCHED_DAY_NAMES;
 module.exports.schedNormDays = schedNormDays;
 module.exports.schedParseDays = schedParseDays;
 module.exports.schedDaysLabel = schedDaysLabel;
 module.exports.schedResolve = schedResolve;
 module.exports.schedDueAt = schedDueAt;
+
+// ---- THE LANDSCAPE -----------------------------------------------------------------------------
+// The commentary send. Deliberately NOT a section of the brief: the brief is measurement — every
+// figure validated against server-computed numbers — and this is interpretation built from the
+// headline corpus. Mixing them in one message would let the credibility of the first launder the
+// second, so it is a separate message on its own schedule with its own opt-out.
+//
+// Its grounding contract differs in kind from the brief's. Commentary claims are RELATIONAL ("the
+// same story in different clothes", "nobody has repriced that yet") and a number-and-name checker
+// has nothing to grab there. So the model must return the ids of the headlines each response rests
+// on; every ref must exist in the context, and the refs render as a sources footer — the guard is
+// visible to the reader, not buried in a validator. It cannot catch a bad INFERENCE from real
+// headlines (nothing can); it kills fluent commentary about events never in the context at all.
+// Prose budget sized back from Telegram's 4096: a ~550-char sources footer plus header leaves
+// ~3400 for the story, so a full-length generation lands the whole message just under the
+// ceiling. The renderer's shed ladder (sources first, then paragraphs) remains the backstop for
+// the day the model spends every character AND cites twelve long headlines.
+const LAND_PROSE_MAX = 3400;
+const LAND_REFS_MIN = 2, LAND_REFS_MAX = 12;
+const LAND_PARA_MIN = 2, LAND_PARA_MAX = 6;
+function validateLandProse(prose, ctx) {
+  const p = prose && typeof prose === "object" ? prose : null;
+  if (!p) return { ok: false, error: "not an object" };
+  const v = p.story;
+  if (typeof v !== "string" || !v.trim()) return { ok: false, error: "story missing" };
+  if (v.length > LAND_PROSE_MAX) return { ok: false, error: `story over budget (${v.length})` };
+  if (/<[a-z/]/i.test(v)) return { ok: false, error: "story contains markup" };
+  const paras = v.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
+  if (paras.length < LAND_PARA_MIN || paras.length > LAND_PARA_MAX)
+    return { ok: false, error: `story must be ${LAND_PARA_MIN}-${LAND_PARA_MAX} paragraphs (${paras.length})` };
+  // Same no-advice rule as the brief: this describes where risk sits, it never says what to do.
+  if (/\b(?:you should|i'd (?:buy|sell|short|long)|we recommend|recommend (?:buying|selling)|take profit|add here|buy the|sell the)\b/i.test(v))
+    return { ok: false, error: "directional instruction" };
+  const ids = new Set();
+  for (const cl of (ctx && ctx.news) || []) for (const h of cl.items || []) if (h && h.id) ids.add(String(h.id));
+  const refs = Array.isArray(p.refs) ? [...new Set(p.refs.map((x) => String(x)))] : null;
+  if (!refs) return { ok: false, error: "refs missing" };
+  if (refs.length < LAND_REFS_MIN) return { ok: false, error: `refs too few (${refs.length})` };
+  if (refs.length > LAND_REFS_MAX) return { ok: false, error: `refs too many (${refs.length})` };
+  for (const r of refs) if (!ids.has(r)) return { ok: false, error: `ref not in context: ${r}` };
+  // Numbers and names ride the same gates the brief uses — commentary is allowed to be relational,
+  // not to be numerically inventive.
+  const nums = briefContextNumbers(ctx);
+  for (const raw of v.match(/\d+(?:[.,]\d+)?/g) || []) {
+    const t = raw.replace(/,/g, "");
+    if (!/\./.test(t) && +t <= 99) continue;
+    const norm = t.replace(/\.?0+$/, "");
+    if (nums.has(norm) || nums.has(t)) continue;
+    return { ok: false, error: `number not in context: ${raw}` };
+  }
+  const names = briefContextNames(ctx);
+  for (const tok of v.match(/\b[A-Z][A-Z0-9.&]{1,9}\b/g) || []) {
+    if (BRIEF_NAME_OK.has(tok) || names.has(tok)) continue;
+    return { ok: false, error: `name not in context: ${tok}` };
+  }
+  return { ok: true, story: v.trim(), refs };
+}
+
+// One message, always. Heading, the paragraphs, then the cited headlines as links — the sources
+// footer IS the refs contract made visible. Over budget, sources shed before prose (a paragraph
+// without its citation is still worth reading; a citation without its paragraph is not), and a
+// failed generation ships an explicit "commentary unavailable" line: this section has no
+// mechanical fallback, and silence would read as a quiet news day while hiding a dead layer.
+function renderLandscape(ctx, prose) {
+  const c = ctx || {};
+  const head = "\ud83e\udded <b>THE LANDSCAPE</b>";
+  const stamp = `<i>${tgEscape(briefStamp(c.at || Date.now(), c.tz || 0))}</i>`;
+  if (!prose || !prose.story) {
+    const why = c.proseErr ? tgEscape(briefClip(c.proseErr, 120)) : "no commentary generated";
+    return { message: [head, stamp, "", `<i>\u26a0 commentary unavailable \u2014 ${why}</i>`].join("\n"), sources: 0, dropped: ["all"] };
+  }
+  const byId = new Map();
+  for (const cl of c.news || []) for (const h of cl.items || []) if (h && h.id) byId.set(String(h.id), h);
+  const paras = prose.story.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean).map((x) => tgEscape(x));
+  const srcLine = (h) => {
+    const txt = tgEscape((h.t ? h.t + " \u2014 " : "") + briefClip(h.h, 62));
+    const linkable = typeof h.u === "string" && /^https?:\/\/[^\s"'<>]+$/.test(h.u);   // same guard as the brief: one junk URL must not cost the message
+    return "\u00b7 " + (linkable ? `<a href="${tgEscape(h.u)}">${txt}</a>` : txt);
+  };
+  const cited = (prose.refs || []).map((r) => byId.get(String(r))).filter(Boolean);
+  const build = (nSrc) => {
+    const out = [head, stamp, "", paras.join("\n\n")];
+    if (nSrc > 0) {
+      out.push("");
+      out.push("\ud83d\udcce <b>Sources</b>");
+      for (const h of cited.slice(0, nSrc)) out.push(srcLine(h));
+      if (cited.length > nSrc) out.push(`<i>+${cited.length - nSrc} more cited</i>`);
+    }
+    return out.join("\n");
+  };
+  let n = cited.length, msg = build(n);
+  const dropped = [];
+  while (briefVisibleLen(msg) > BRIEF_TG_LIMIT && n > 0) { n--; msg = build(n); dropped.push("source"); }
+  while (briefVisibleLen(msg) > BRIEF_TG_LIMIT && paras.length > 1) { paras.pop(); dropped.push("para"); msg = build(0); }
+  return { message: msg, sources: n, dropped };
+}
+module.exports.LAND_PROSE_MAX = LAND_PROSE_MAX;
+module.exports.LAND_REFS_MIN = LAND_REFS_MIN;
+module.exports.validateLandProse = validateLandProse;
+module.exports.renderLandscape = renderLandscape;
 
 function briefStamp(atMs, tzMin) {  const d = new Date(atMs + (tzMin || 0) * 60000);
   const hh = String(d.getUTCHours()).padStart(2, "0"), mm = String(d.getUTCMinutes()).padStart(2, "0");

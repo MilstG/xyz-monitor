@@ -6,8 +6,8 @@ const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require(".
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
-const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, FOMC_DECISIONS,
-  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel } = require("./compute");
+const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, macroStatText, FOMC_DECISIONS,
+  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -4776,6 +4776,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Brief delivery runs on a 5-minute cadence: the hour match is exact, so a coarser tick would
     // miss a recipient whose hour opened and closed between polls.
     setInterval(() => { briefTick().catch((e) => log("briefTick failed (isolated, server stays up): " + (e && e.message))); }, 5 * 60 * 1000);
+    // Sibling schedule, sibling isolation: a failing commentary generation must never take the
+    // brief down with it, so the two ticks are separate timers with separate catches.
+    setInterval(() => { landTick().catch((e) => log("landTick failed (isolated, server stays up): " + (e && e.message))); }, 5 * 60 * 1000);
     // The EDGAR rotation covers 2 names a minute, so a full roster pass takes ~40 minutes. Priming
     // only after that means the 7-day backlog every name carries is seeded silently instead of
     // arriving as a wall of notifications on the first deploy of the day.
@@ -8213,6 +8216,223 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   let briefLastErr = null;
   const briefSent = new Map();        // chat -> YYYY-MM-DD already sent
 
+  // ---- THE LANDSCAPE -----------------------------------------------------------------------------
+  // The second registered scheduled send. All schedule mechanics (who, which hour, which days) live
+  // in the sched registry — this block is only the generation engine and the tick that walks it.
+  // Mon/Wed/Fri 11:00 UTC by default, from the registry's defaultDays, an hour after the brief.
+  const LAND_ON = String(process.env.LANDSCAPE_ENABLED || "1") !== "0";
+  const LAND_PER_DAY = Math.max(1, Number(process.env.LANDSCAPE_PER_DAY) || 4);
+  // Commentary is where reasoning depth actually shows: the difference between "three headlines
+  // about chips" and "the second time the tape repriced terminal value" is inference over a
+  // corpus, not summarisation of it.
+  const LAND_EFFORT = process.env.LANDSCAPE_EFFORT || "high";
+  const LAND_MODEL = process.env.LANDSCAPE_MODEL || BRIEF_MODEL;
+  const LAND_MODEL_FALLBACK = process.env.LANDSCAPE_MODEL_FALLBACK || BRIEF_MODEL_FALLBACK;
+  const LAND_MAX_TOKENS = Math.max(AI_MAX_TOKENS, Number(process.env.LANDSCAPE_MAX_TOKENS) || 12000);
+  const LAND_CACHE_MS = 55 * 60 * 1000;
+  // A WIDER corpus than WHAT MATTERED's 24h x 3 x 2: commentary needs enough material to find a
+  // pattern ACROSS clusters, so it reads 72h, more groups, full headlines, source and age attached.
+  const LAND_WINDOW_H = 72, LAND_CLUSTERS = 8, LAND_PER_CLUSTER = 5, LAND_HEADLINES_MAX = 30;
+  let landCache = null;               // { key, at, message, sources, dropped, model, degraded }
+  let landDay = { d: "", n: 0 };
+  let landLastErr = null;
+  const landSent = new Map();         // chat -> YYYY-MM-DD already sent
+  function landDayLeft() {
+    const d = briefDayKey(Date.now());
+    if (landDay.d !== d) return LAND_PER_DAY;
+    return Math.max(0, LAND_PER_DAY - landDay.n);
+  }
+
+  // A headline-centric context, not a numeric one. The brief's ctx is the dashboard; this one is
+  // the news corpus, because the question is different — not "what did the book do" but "what is
+  // going on, and which parts of it are the same story".
+  function buildLandCtx(now) {
+    const t = now || Date.now();
+    const ctx = { at: t, tz: 0, build: version || "dev", windowH: LAND_WINDOW_H };
+    const cut = t - LAND_WINDOW_H * 3600e3;
+    const bySec = new Map();
+    let n = 0;
+    try {
+      const sorted = (newsItems || []).filter((a) => a && !a.fl && !a.tg && (a.pub >= cut))
+        .sort((a, b) => (b.pub || 0) - (a.pub || 0));
+      for (const a of sorted) {
+        if (n >= LAND_HEADLINES_MAX) break;
+        // Unattributed macro tape is INCLUDED here, unlike the brief's per-industry clusters — the
+        // economic landscape is mostly not a company story.
+        let key;
+        if (a.tk && a.rel === 1) {
+          const c = classifyCached(String(a.tk).toUpperCase(), "xyz");
+          key = (c && c.ind && c.ind !== "Unclassified") ? c.ind : (a.sec || "Market");
+        } else if (!a.tk) key = "Macro tape";
+        else continue;
+        let g = bySec.get(key); if (!g) { g = []; bySec.set(key, g); }
+        if (g.length >= LAND_PER_CLUSTER) continue;
+        g.push({ id: "h" + (++n), t: a.tk ? String(a.tk).toUpperCase() : null,
+          h: String(a.h || "").slice(0, 180), src: a.src || null, u: a.url || null,
+          ageH: Math.max(0, Math.round((t - (a.pub || t)) / 3600e3)) });
+      }
+    } catch (_) {}
+    ctx.news = [...bySec.entries()].sort((a, b) => b[1].length - a[1].length)
+      .slice(0, LAND_CLUSTERS).map(([sector, items]) => ({ sector, items }));
+
+    // Did the tape care? Handed over as WORDS, never percentages — a column of decimals is how
+    // commentary becomes a number recital. Direction only, from the same d1 the board renders.
+    const byTicker = new Map();
+    for (const r of rows.values()) if (r.ticker && !r.delisted) byTicker.set(String(r.ticker).toUpperCase(), r);
+    const toneOf = (tickers) => {
+      let up = 0, dn = 0;
+      for (const tk of tickers) {
+        const r = byTicker.get(tk);
+        const d = r && r.d1 != null && isFinite(r.d1) ? r.d1 : null;
+        if (d == null) continue;
+        if (d > 0) up++; else if (d < 0) dn++;
+      }
+      if (!up && !dn) return null;
+      if (up && !dn) return "higher";
+      if (dn && !up) return "lower";
+      return up > dn * 2 ? "mostly higher" : dn > up * 2 ? "mostly lower" : "mixed";
+    };
+    for (const cl of ctx.news) {
+      const tks = [...new Set(cl.items.map((x) => x.t).filter(Boolean))];
+      if (tks.length) { const tone = toneOf(tks); if (tone) cl.tape = tone; }
+    }
+
+    // Macro trajectory: what just landed (with the actual) and what is inside three days, priors
+    // labeled as priors — this feed carries no street consensus and the prompt repeats that.
+    try {
+      const ent = macroCache && Array.isArray(macroCache.entries) ? macroCache.entries : [];
+      const released = [], upcoming = [];
+      for (const e of ent) {
+        const df = earnDayDiff(e.d, t);
+        if (df == null) continue;
+        if (e.actual != null && df <= 0) {
+          released.push({ k: e.k, label: e.label, d: e.d,
+            actual: macroStatText(e.k, e.actual), prior: macroStatText(e.k, e.prior) });
+        } else if (macroEntryState(e, t) === "upcoming" && df >= 0 && df <= 3) {
+          upcoming.push({ k: e.k, label: e.label, d: e.d, inDays: df, prior: macroStatText(e.k, e.prior) });
+        }
+      }
+      ctx.macro = (released.length || upcoming.length) ? { released, upcoming } : null;
+    } catch (_) { ctx.macro = null; }
+    return ctx;
+  }
+
+  const LAND_SYSTEM = `You write ONE commentary section, titled THE LANDSCAPE, for a markets message read by a single experienced trader who already received a full quantitative brief an hour earlier. That brief gave them every number: index moves, movers, sector medians, breadth, positioning, earnings, the macro calendar. Your section exists BECAUSE the numbers were already covered. Do not recite them again.
+
+You receive a JSON context holding the last ${LAND_WINDOW_H} hours of headlines grouped by industry (each with an id, ticker where one applies, source and age in hours), an optional one-word read of how each group's names traded, and the macro prints that just landed or are about to.
+
+WHAT TO WRITE
+Write about what is actually happening in the world and why it matters to someone with money at risk. Aim for 2,800–3,300 characters across 3 to 6 paragraphs — a proper read, not a caption. If the corpus genuinely cannot support that length, write less rather than padding; a stretched thin day is worse than a short honest one. The value you add is connective, not descriptive:
+- Say when several headlines are the same story wearing different clothes, and name the story.
+- Say when something is the second or third instance of a pattern rather than a new event.
+- Say when a development has NOT yet been repriced, or when the reaction looks like positioning rather than conviction.
+- Say when a cluster connects to nothing else on the board — an isolated loud story is worth flagging as isolated.
+- Prefer the second-order point over the first-order one.
+
+VOICE
+Write like the sharpest analyst at the desk after the second coffee: dry, vivid, occasionally funny, never sloppy. Wit is welcome when it carries the point — a good metaphor that makes the mechanism obvious, a deadpan aside about a narrative the market is telling itself. Wit is not welcome as decoration: no puns for their own sake, no exclamation marks, no finance clichés ("cautiously optimistic", "wait and see", "time will tell"), and never a joke at the expense of precision. When something is genuinely dull, saying so plainly IS the entertainment. The reader should finish knowing more and having enjoyed the trip; they should never catch you performing.
+
+HARD RULES
+- 3 to 6 paragraphs. No headings, no bullets, no markup of any kind. Plain sentences.
+- Every claim must rest on a headline or macro print in the context. You may reason across them, draw analogies, and note what is absent — you may not introduce events, companies, people or dates that are not in the context.
+- Do NOT restate numbers from the brief. Figures should be rare; when you use one it must appear in the context verbatim. That includes YEARS — "like it is 2019 again" fails the gate unless 2019 is in the context. Reach for "the last cycle" or "two squeezes ago" instead.
+- Only use ticker symbols and proper names that appear in the context.
+- Never give instructions or advice. Describe where risk sits; do not say what to do about it. No "should", no buy/sell language, no price targets.
+- If the context is thin, say so plainly in one short paragraph rather than inflating it. A thin day honestly described is worth more than a manufactured narrative.
+
+OUTPUT
+Respond with ONLY a JSON object, no prose outside it and no markdown fences:
+{"story": "<paragraphs separated by blank lines>", "refs": ["<headline id>", ...]}
+"refs" lists the ids of every headline your paragraphs actually rest on, between 2 and 12 of them. They are rendered to the reader as the sources footer, so a ref you did not use is a broken citation.`;
+
+  async function landProse(ctx) {
+    if (!AI_KEY() && !aiFetch) return { ok: false, error: "no key" };
+    if (!landDayLeft()) return { ok: false, error: "landscape-daily-cap" };
+    if (!ctx || !Array.isArray(ctx.news) || !ctx.news.length) return { ok: false, error: "no headlines in the window" };
+    const opts = { system: LAND_SYSTEM, maxTokens: LAND_MAX_TOKENS, effort: LAND_EFFORT };
+    let used = LAND_MODEL;
+    let call = await callModel(LAND_MODEL, ctx, opts);
+    if (!call.ok && LAND_MODEL_FALLBACK && LAND_MODEL_FALLBACK !== LAND_MODEL) {
+      log("landscape: primary failed (" + call.error + "), retrying on " + LAND_MODEL_FALLBACK);
+      used = LAND_MODEL_FALLBACK;
+      call = await callModel(LAND_MODEL_FALLBACK, ctx, opts);
+    }
+    if (!call.ok) return { ok: false, error: call.error };
+    let obj = null;
+    try { obj = JSON.parse(String(call.text).replace(/^```(?:json)?|```$/gm, "").trim()); }
+    catch (_) { return { ok: false, error: "unparseable model output" }; }
+    const v = validateLandProse(obj, ctx);
+    if (!v.ok) return { ok: false, error: v.error };
+    const d = briefDayKey(Date.now());
+    if (landDay.d !== d) landDay = { d, n: 0 };
+    landDay.n++;
+    return { ok: true, story: v.story, refs: v.refs, model: used };
+  }
+
+  // One generation per hour-bucket, shared by everyone waking in it — same economics as the brief.
+  // No mechanical fallback exists here (the prose IS the message), so a failed generation ships the
+  // explicit "commentary unavailable" line: silence would read as a quiet news day and hide a dead
+  // layer from the one person who could fix it.
+  async function generateLandscape(now) {
+    const t = now || Date.now();
+    const key = briefDayKey(t) + "|" + new Date(t).getUTCHours();
+    if (landCache && landCache.key === key && t - landCache.at < LAND_CACHE_MS) return landCache;
+    const ctx = buildLandCtx(t);
+    let prose = null, degraded = null, model = null;
+    if (LAND_ON) {
+      try {
+        const p = await landProse(ctx);
+        if (p.ok) { prose = { story: p.story, refs: p.refs }; model = p.model; }
+        else { degraded = p.error; landLastErr = p.error; }
+      } catch (e) { degraded = (e && e.message) || String(e); landLastErr = degraded; }
+    } else degraded = "disabled";
+    if (degraded) ctx.proseErr = degraded;
+    const r = renderLandscape(ctx, prose);
+    landCache = { key, at: t, message: r.message, sources: r.sources, dropped: r.dropped, model, degraded };
+    if (degraded) log("landscape: degraded (" + degraded + ")");
+    if (r.dropped && r.dropped.length) log("landscape: budget shed [" + r.dropped.join(", ") + "]");
+    return landCache;
+  }
+
+  async function landTick() {
+    if (!pushOn() || !pushRecipients.size) return 0;
+    const now = Date.now();
+    let sent = 0;
+    for (const rec of pushRecipients.values()) {
+      if (rec.muted) continue;
+      const res = schedFor(rec, "landscape");
+      if (!Number.isFinite(res.hour)) continue;
+      const tz = res.isDefault ? 0 : briefTzFor(rec);
+      const day = schedDueAt(res, now, tz);
+      if (!day) continue;
+      if (landSent.get(rec.chat) === day) continue;
+      landSent.set(rec.chat, day);
+      let b = null;
+      try { b = await generateLandscape(now); }
+      catch (e) { log("landscape generate failed (isolated): " + (e && e.message)); continue; }
+      // force, like the brief: a scheduled send is not one of the day's alerts and must not be the
+      // message the hourly cap happens to eat.
+      pushEnqueue(rec.chat, b.message, true);
+      sent++;
+    }
+    return sent;
+  }
+  async function landTestNow(chat, owner, isAdmin, fresh) {
+    if (!pushOn()) return { ok: false, error: "disabled" };
+    const targets = (chat ? [String(chat)] : [...pushRecipients.keys()])
+      .filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : "no-recipients" };
+    if (fresh) landCache = null;
+    let b;
+    try { b = await generateLandscape(Date.now()); }
+    catch (e) { return { ok: false, error: (e && e.message) || "generate failed" }; }
+    for (const c of targets) pushEnqueue(c, b.message, true);
+    return { ok: true, sent: targets.length, parts: 1, chars: [briefVisibleLen(b.message)],
+      degraded: b.degraded || null, dropped: b.dropped || [], sources: b.sources,
+      model: b.model || null, dayLeft: landDayLeft() };
+  }
+
+
   function briefDayKey(now) { return new Date(now).toISOString().slice(0, 10); }
   function briefDayLeft() {
     const d = briefDayKey(Date.now());
@@ -8557,7 +8777,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   }
   // The registry carries a static default; the env var wins where one exists, so BRIEF_DEFAULT_HOUR
   // keeps working exactly as it did before the schedule layer existed.
-  const SCHED_ENV_HOUR = { brief: BRIEF_DEFAULT_HOUR };
+  const _landHourEnv = Number(process.env.LANDSCAPE_DEFAULT_HOUR);
+  const SCHED_ENV_HOUR = { brief: BRIEF_DEFAULT_HOUR,
+    landscape: Number.isFinite(_landHourEnv) ? Math.min(23, Math.max(0, Math.trunc(_landHourEnv))) : undefined };
   function schedDefFor(kind) {
     const d = SCHED_KINDS.find((x) => x.k === kind) || {};
     return Number.isFinite(SCHED_ENV_HOUR[kind]) ? Object.assign({}, d, { defaultHour: SCHED_ENV_HOUR[kind] }) : d;
@@ -9007,6 +9229,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       // remaining budget, so it rides behind the same isAdmin gate the rest of that panel uses.
       brief: isAdmin ? { enabled: BRIEF_ON, defaultHour: BRIEF_DEFAULT_HOUR, perDay: BRIEF_PER_DAY,
         dayLeft: briefDayLeft(), model: BRIEF_MODEL, lastErr: briefLastErr } : null,
+      landscape: isAdmin ? { enabled: LAND_ON, defaultHour: schedDefFor("landscape").defaultHour,
+        defaultDays: schedDaysLabel(schedResolve(null, schedDefFor("landscape")).days),
+        perDay: LAND_PER_DAY, dayLeft: landDayLeft(), model: LAND_MODEL, lastErr: landLastErr,
+        windowH: LAND_WINDOW_H } : null,
       schedKinds: SCHED_KINDS.map((k) => ({ k: k.k, label: k.label, defaultHour: schedDefFor(k.k).defaultHour, tip: k.tip || null })),
       queue: pushQueue.length, dropped: pushDropped, capHour: PUSH_CAP_HOUR,
       holdMs: Math.max(0, pushHoldUntil - now), lastErr: pushLastErr,
@@ -9125,6 +9351,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     buildBriefCtxNow: buildBriefCtx,             // harness: assemble the context off live state
     generateBriefNow: generateBrief,
     briefTest: briefTestNow,
+    landTest: landTestNow,
+    landTickNow: landTick,                       // harness: run delivery without waiting out the clock
+    landCtxNow: buildLandCtx,                    // harness: inspect the corpus the model is handed
+    landCacheReset: () => { landCache = null; landSent.clear(); },
+    landStateNow: () => ({ defaultHour: schedDefFor("landscape").defaultHour, perDay: LAND_PER_DAY,
+      dayLeft: landDayLeft(), enabled: LAND_ON, windowH: LAND_WINDOW_H, system: LAND_SYSTEM }),
     briefRatesNow: briefRates,
     briefCacheReset: () => { briefCache = null; briefSent.clear(); },
     briefStateNow: () => ({ defaultHour: BRIEF_DEFAULT_HOUR, perDay: BRIEF_PER_DAY, dayLeft: briefDayLeft(),
