@@ -11,7 +11,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.28-18";
+const VERSION = "2026.07.28-20";
 
 const DEX = process.env.DEX || "xyz";
 const PORT = Number(process.env.PORT || 3000);
@@ -661,10 +661,14 @@ async function main() {
   // and lands as two messages, so it is an operator tool for checking formatting, not something a
   // visitor should be able to trigger. `fresh` regenerates instead of re-serving the hour's cache —
   // that is the one that actually burns budget, so it is opt-in rather than the default.
+  // `kind` selects which scheduled send is being tested. Folded into one route: the auth, the body
+  // limit and the ownership check are identical, and a second near-clone endpoint is a second place
+  // for that gate to drift.
   fastify.post("/api/alerts/brief-test", { bodyLimit: 4 * 1024 }, async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "admin only" });
     const b = req.body || {};
-    const r = await poller.briefTest(b.chat || null, ensureOwner(req, reply), true, !!b.fresh);
+    const fn = b.kind === "landscape" ? poller.landTest : poller.briefTest;
+    const r = await fn(b.chat || null, ensureOwner(req, reply), true, !!b.fresh);
     return reply.code(r.ok ? 200 : 400).send(r);
   });
 
