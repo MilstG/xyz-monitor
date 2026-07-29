@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const zlib = require("zlib");
+const gzipAsync = require("util").promisify(zlib.gzip);   // -08: threadpool gzip for the cached-serve path
 const Fastify = require("fastify");
 const { openStore } = require("./src/store");
 const { createPoller } = require("./src/poller");
@@ -11,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.29-07";
+const VERSION = "2026.07.29-08";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -188,10 +189,18 @@ function sendCachedBody(req, reply, body, tag) {
   reply.header("content-type", "application/json; charset=utf-8");
   if (s.length >= 1024 && /\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
     let gz = gzipCache.get(body);
-    if (gz === undefined) { gz = zlib.gzipSync(s); gzipCache.set(body, gz); }
+    if (gz === undefined) {
+      // Threadpool offload (build 2026.07.29-08): zlib.gzip runs on libuv's worker threads, so the
+      // ~0.5 MB compress no longer holds the event loop even the one time per content change it
+      // runs. The PROMISE is memoized immediately, so concurrent first requests share one
+      // compression instead of racing; the resolved Buffer then replaces it in the cache and every
+      // later request takes the synchronous fast path exactly as before.
+      gz = gzipAsync(s).then((buf) => { gzipCache.set(body, buf); return buf; });
+      gzipCache.set(body, gz);
+    }
     reply.header("content-encoding", "gzip");
     reply.header("vary", "accept-encoding");
-    return reply.send(gz);
+    return Buffer.isBuffer(gz) ? reply.send(gz) : gz.then((buf) => reply.send(buf));
   }
   return reply.send(s);   // under threshold or client can't gzip — @fastify/compress handles the rest
 }
