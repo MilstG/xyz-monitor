@@ -8417,11 +8417,10 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     }
     return sent;
   }
-  async function landTestNow(chat, owner, isAdmin, fresh) {
+  async function landTestNow(chat, owner, isAdmin, fresh, mineOnly) {
     if (!pushOn()) return { ok: false, error: "disabled" };
-    const targets = (chat ? [String(chat)] : [...pushRecipients.keys()])
-      .filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
-    if (!targets.length) return { ok: false, error: chat ? "forbidden" : "no-recipients" };
+    const targets = testTargets(chat, owner, isAdmin, mineOnly);
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : (mineOnly ? "no-own-recipient" : "no-recipients") };
     if (fresh) landCache = null;
     let b;
     try { b = await generateLandscape(Date.now()); }
@@ -8814,11 +8813,19 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // caller's own recipients, and takes the same path a real brief takes so what lands on the phone
   // is byte-identical to the 07:00 send. `fresh` forces a regeneration (and burns budget) rather
   // than re-serving the hour's cache.
-  async function briefTestNow(chat, owner, isAdmin, fresh) {
+  // mineOnly: target strictly the caller's OWN linked telegram(s) — rec.owner === owner, with
+  // isAdmin deliberately NOT expanding the set. The admin test buttons were firing with no chat,
+  // and for an admin pushOwns says yes to everybody, so "send test" was a six-person broadcast
+  // standing next to a label claiming it only went to this browser. A test fire is a test fire.
+  function testTargets(chat, owner, isAdmin, mineOnly) {
+    if (chat) return [String(chat)].filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
+    if (mineOnly) return [...pushRecipients.entries()].filter(([, r]) => r.owner && owner && r.owner === owner).map(([c]) => c);
+    return [...pushRecipients.keys()].filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
+  }
+  async function briefTestNow(chat, owner, isAdmin, fresh, mineOnly) {
     if (!pushOn()) return { ok: false, error: "disabled" };
-    const targets = (chat ? [String(chat)] : [...pushRecipients.keys()])
-      .filter((c) => pushOwns(pushRecipients.get(c), owner, isAdmin));
-    if (!targets.length) return { ok: false, error: chat ? "forbidden" : "no-recipients" };
+    const targets = testTargets(chat, owner, isAdmin, mineOnly);
+    if (!targets.length) return { ok: false, error: chat ? "forbidden" : (mineOnly ? "no-own-recipient" : "no-recipients") };
     if (fresh) briefCache = null;
     let b;
     try { b = await generateBrief(Date.now(), 0); }
