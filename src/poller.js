@@ -6555,7 +6555,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const members = [...new Set(b.members.map((m) => String(m || "").toUpperCase()).filter(Boolean))].slice(0, BASKET_MAX_MEMBERS);
       if (members.length < BASKET_MIN_MEMBERS) continue;
       if (out.some((x) => x.name === name)) continue;
-      out.push({ name, scope, members, at: +b.at || Date.now() });
+      // Owner scoping (build 2026.07.28-11): the server registry is the ADMIN's alone — guests keep
+      // their customs in their own browser and never write here. So every persisted basket is
+      // owner:"admin" by construction; the field is carried (not hard-coded at read) so the later
+      // real-users migration is "owner = admin" -> "owner = <userId>" and nothing else moves.
+      out.push({ name, scope, members, at: +b.at || Date.now(), owner: "admin" });
       if (out.length >= BASKET_MAX_CUSTOM) break;
     }
     return out;
@@ -6587,20 +6591,43 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // Built-in sector baskets, DERIVED from the live roster's classification on every read — they
   // follow listings and delistings on their own and are never persisted. Uncapped membership by
   // design: the member cap protects hand-typed registries, not the sector table.
+  // Turn a free-text industry name ("Memory/Storage", "Mega Platforms") into a safe basket token:
+  // uppercased, non-alnum stripped, capped to 12 chars, guaranteed to start with a letter. Two
+  // industries that collide after tokenizing get a numeric suffix so the picker never shows dups.
+  function industryToken(name, taken) {
+    let t = String(name || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+    if (!/^[A-Z]/.test(t)) t = "I" + t.slice(0, 11);
+    if (t.length < 2) t = (t + "IND").slice(0, 12);
+    let base = t, n = 2;
+    while (taken.has(t)) { t = (base.slice(0, 10) + n).slice(0, 12); n++; }
+    taken.add(t);
+    return t;
+  }
   function builtinBaskets() {
-    const groups = new Map();
+    const groups = new Map();       // sector short -> members
+    const inds = new Map();         // industry NAME -> members
     for (const r of rows.values()) {
       if (r.delisted || r.uni === "main") continue;
       const c = classifyCached(r.ticker);
       if (c.assetClass !== "Equity") continue;
+      const tk = (r.ticker || "").toUpperCase();
       const short = BASKET_SECTOR_SHORT[c.sector];
-      if (!short) continue;
-      let g = groups.get(short);
-      if (!g) { g = []; groups.set(short, g); }
-      g.push((r.ticker || "").toUpperCase());
+      if (short) { let g = groups.get(short); if (!g) { g = []; groups.set(short, g); } g.push(tk); }
+      // Industry groups: only where the curated industry DIFFERS from the sector (an unsplit
+      // equity's ind === sector would just duplicate the sector basket). Keyed by the human name
+      // for the tooltip; tokenized to a basket name below.
+      if (c.ind && c.ind !== c.sector) { let g = inds.get(c.ind); if (!g) { g = []; inds.set(c.ind, g); } g.push(tk); }
     }
     const out = [];
-    for (const [name, members] of groups) if (members.length >= 3) out.push({ name, scope: "stocks", members: members.sort(), builtin: true });
+    // Sector + industry baskets are SHADOW: derived, roster-following, usable as instruments in the
+    // picker / COMP/G / ratio / matrix, but hidden from the Baskets manager (they're not editable and
+    // would drown the operator's own list). MAG7 (curated) is NOT shadow — it shows in the manager.
+    for (const [name, members] of groups) if (members.length >= 3) out.push({ name, scope: "stocks", members: members.sort(), builtin: true, shadow: true, kind: "sector" });
+    const taken = new Set(out.map((b) => b.name));
+    for (const [indName, members] of inds) if (members.length >= 3) {
+      const nm = industryToken(indName, taken);
+      out.push({ name: nm, scope: "stocks", members: members.sort(), builtin: true, shadow: true, kind: "industry", label: indName });
+    }
     // Curated defaults join AFTER the sector groups: fixed lists intersected with the live roster.
     // A same-named custom wins (the operator's definition beats the shipped one); under 2 listed
     // members the curated basket honestly does not exist rather than shipping a one-name "basket".
@@ -6656,7 +6683,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
 
   function getBasketsPayload() {
     const list = [];
-    for (const b of builtinBaskets()) { const s = basketDailySeries(b); list.push({ name: b.name, scope: b.scope, members: b.members, builtin: true, daily: s.daily, cov: s.cov }); }
+    for (const b of builtinBaskets()) { const s = basketDailySeries(b); list.push({ name: b.name, scope: b.scope, members: b.members, builtin: true, shadow: !!b.shadow, kind: b.kind || null, label: b.label || null, daily: s.daily, cov: s.cov }); }
     for (const b of baskets) { const s = basketDailySeries(b); list.push({ name: b.name, scope: b.scope, members: b.members, builtin: false, daily: s.daily, cov: s.cov }); }
     return { ts: Date.now(), floor: BASKET_FLOOR, maxMembers: BASKET_MAX_MEMBERS, maxCustom: BASKET_MAX_CUSTOM, rev: basketsRev, baskets: list };
   }
@@ -6664,7 +6691,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // mints a fresh key, everything else 304s the (largest-in-this-family) payload away.
   function getBasketsStamp() { return basketsRev + "|" + dailyVer; }
 
-  function createBasket(name, members) {
+  function createBasket(name, members, isAdmin) {
+    // The server registry belongs to the admin alone (guests store customs in their own browser and
+    // never reach this path). Refuse a non-admin write outright — defense in depth: even if the
+    // client guard is bypassed, a guest can never write into the admin's file.
+    if (!isAdmin) return { ok: false, error: "not-admin" };
     if (baskets.length >= BASKET_MAX_CUSTOM)
       return { ok: false, error: `basket cap reached (${BASKET_MAX_CUSTOM}) \u2014 drop one first` };
     const ms = [...new Set((members || []).map((m) => String(m || "").toUpperCase().trim()).filter(Boolean))];
@@ -6689,14 +6720,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       ...baskets.map((b) => b.name), ...builtinBaskets().map((b) => b.name).filter((n) => !curatedNames.has(n))]);
     const v = validateBasket(name, ms, scope, { tickers: scope === "stocks" ? sT : cT, reserved });
     if (!v.ok) return v;
-    const def = { name: v.name, scope, members: v.members, at: Date.now() };
+    const def = { name: v.name, scope, members: v.members, at: Date.now(), owner: "admin" };
     baskets.push(def);
     persistBaskets();
     log(`basket ${def.name} created (${scope}, ${def.members.length} members)`);
     const s = basketDailySeries(def);
     return { ok: true, basket: { name: def.name, scope, members: def.members, builtin: false, cov: s.cov } };
   }
-  function dropBasket(name) {
+  function dropBasket(name, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "not-admin" };
     const nm = String(name || "").toUpperCase().trim();
     const i = baskets.findIndex((b) => b.name === nm);
     if (i < 0) return { ok: false, error: builtinBaskets().some((b) => b.name === nm) ? "built-in baskets are derived from the sector table \u2014 they cannot be dropped" : `no custom basket \u201c${nm}\u201d` };
