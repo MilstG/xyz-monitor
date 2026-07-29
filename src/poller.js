@@ -6642,7 +6642,24 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return out;
   }
   function basketDefByName(nameU) {
-    return baskets.find((b) => b.name === nameU) || builtinBaskets().find((b) => b.name === nameU) || null;
+    const q = String(nameU || "").toUpperCase();
+    // Exact token match first (MAG7, TECH, SEMICONDUCTO, a custom).
+    const exact = baskets.find((b) => b.name === q) || builtinBaskets().find((b) => b.name === q);
+    if (exact) return exact;
+    // Then match on the human industry LABEL, normalized to letters/digits so a typed natural name
+    // resolves even though the token was truncated to 12 chars: "semiconductor(s)" -> Semiconductors,
+    // "memory storage" / "memorystorage" -> Memory/Storage. The token is unguessable; the label is
+    // what a person actually types.
+    const norm = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const nq = norm(q);
+    if (!nq) return null;
+    const bl = builtinBaskets();
+    // exact normalized label, then a singular/plural-tolerant prefix (drop a trailing S on either side)
+    const strip = (s) => s.replace(/S$/, "");
+    return bl.find((b) => b.label && norm(b.label) === nq)
+      || bl.find((b) => b.label && strip(norm(b.label)) === strip(nq))
+      || bl.find((b) => b.label && (norm(b.label).startsWith(nq) || nq.startsWith(norm(b.label))) && Math.min(norm(b.label).length, nq.length) >= 5)
+      || null;
   }
 
   // Align member close series on a shared axis and synthesize the EW index (compute.basketCloses).
