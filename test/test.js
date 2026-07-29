@@ -9175,8 +9175,12 @@ test("brief: the delivery hour resolves against a stored offset, and UTC is disc
   assert.equal(p3.briefIsDefaultNow({ tz: -180 }), true, "no chosen hour = default rider = UTC");
   assert.equal(p3.briefIsDefaultNow({ digestHour: 7, tz: -180 }), false);
   const polD = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(/const tz = briefIsDefault\(rec\) \? 0 : briefTzFor\(rec\);/.test(polD),
+  // Same invariant, now expressed through the schedule resolver: a recipient still riding the
+  // default is anchored in UTC, and only an explicitly chosen hour is treated as local.
+  assert.ok(/const tz = res\.isDefault \? 0 : briefTzFor\(rec\);/.test(polD),
     "delivery must anchor default riders in UTC rather than in a timezone nobody has supplied");
+  assert.ok(/const day = schedDueAt\(res, now, tz\);/.test(polD),
+    "…and the due check is the shared predicate, so day-of-week applies to every registered send at once");
 
   // The scheduler and the panel must read the SAME resolver, or they disagree about when it lands.
   const fs = require("fs"), path = require("path");
@@ -9293,8 +9297,12 @@ function ADM_DOM() {
 function ADM_PUSH(over) {
   return Object.assign({ admin: true, capHour: 6, classes: ["setup", "ops"], defaultClasses: ["setup"], adminClasses: ["ops"],
     brief: { enabled: true, defaultHour: 10, perDay: 6, dayLeft: 5, model: "gpt-5.6-terra", lastErr: null },
+    // The registry the panel renders from. Shipped by getPush; the chips are derived from it, so a
+    // fixture without it renders no chips at all — which is exactly what this fixture caught.
+    schedKinds: [{ k: "brief", label: "Morning brief", defaultHour: 10, tip: "the daily brief" }],
     recipients: [{ chat: "111", mask: "1**1", name: "Milst", admin: true, mine: true, owned: true, muted: false,
-      lastErr: null, classes: null, sentHour: 0, briefHour: 10, briefUtc: 1, briefTz: 0, briefTzKnown: 0, quiet: null, trig: {} }] }, over || {});
+      lastErr: null, classes: null, sentHour: 0, briefHour: 10, briefUtc: 1, briefTz: 0, briefTzKnown: 0, quiet: null, trig: {},
+      sched: { brief: { hour: 10, days: null, dflt: 1, daysLabel: "daily", utc: 1 } } }] }, over || {});
 }
 function runAdmFn(name, nodes, pushState, openRec) {
   const fs = require("fs"), path = require("path");
@@ -9344,19 +9352,30 @@ test("brief chip renders on an expanded admin roster row, and reports UTC honest
   const nodes = ADM_DOM();
   runAdmFn("renderAdmRecips", nodes, ADM_PUSH(), { 111: true });
   const out = nodes.admRecB.innerHTML;
-  assert.ok(out.includes('data-apbrief="111"'), "the brief needs its own chip \u2014 it is not one of the push classes");
+  assert.ok(out.includes('data-asched="brief"') && out.includes('data-aschat="111"'),
+    "the brief needs its own chip \u2014 it is not one of the push classes, and it is now one chip per registered scheduled send");
   assert.ok(/brief 10:00 UTC/.test(out), "a default rider is on a UTC schedule and the chip must say so, not imply local");
   // Collapsed row: the chip is inside the expander like the class chips, which is fine because the
   // always-visible block above carries the state. Rows only expand on click.
   const shut = ADM_DOM();
   runAdmFn("renderAdmRecips", shut, ADM_PUSH(), {});
-  assert.ok(!shut.admRecB.innerHTML.includes("data-apbrief"), "chips belong to the expanded row");
+  assert.ok(!shut.admRecB.innerHTML.includes("data-asched"), "chips belong to the expanded row");
   // A recipient who turned it off reads off, not a fabricated hour.
   const offRec = ADM_DOM();
   const st = ADM_PUSH();
   st.recipients[0].briefHour = null; st.recipients[0].briefUtc = 0;
+  st.recipients[0].sched = { brief: { hour: null, days: null, dflt: 0, daysLabel: "daily", utc: 0 } };
   runAdmFn("renderAdmRecips", offRec, st, { 111: true });
   assert.ok(/brief off/.test(offRec.admRecB.innerHTML));
+
+  // Day-of-week is part of the label, not a hidden setting: a send that only runs Mon/Wed/Fri must
+  // say so on the chip, or the reader believes it is daily and wonders why Tuesday was quiet.
+  const mwf = ADM_DOM();
+  const st2 = ADM_PUSH();
+  st2.recipients[0].sched = { brief: { hour: 11, days: [1, 3, 5], dflt: 0, daysLabel: "mon\u00b7wed\u00b7fri", utc: 0 } };
+  runAdmFn("renderAdmRecips", mwf, st2, { 111: true });
+  assert.ok(/11:00/.test(mwf.admRecB.innerHTML) && /mon\u00b7wed\u00b7fri/.test(mwf.admRecB.innerHTML));
+  assert.ok(!/UTC/.test(mwf.admRecB.innerHTML), "an explicitly chosen hour is local, and must not be labelled UTC");
   // The admin write must carry the hour and NOT a timezone: stamping the operator's offset onto
   // somebody else's account would silently move their delivery time.
   const fs = require("fs"), path = require("path");
@@ -10421,8 +10440,8 @@ test("admin edits any recipient's classes from the roster; a person's own contro
     "admin writes ride the normal classes route");
   assert.ok(/data-admexp=/.test(app), "rows expand on demand — three recipients of chips is the wall the bell panel just escaped");
   // Public users' own controls: still built for every recipient the bell panel shows.
-  assert.ok(/data-pcls=/.test(app) && /data-pquiet=/.test(app) && /data-pdig=/.test(app),
-    "self-service class/quiet/digest controls remain in the bell panel");
+  assert.ok(/data-pcls=/.test(app) && /data-pquiet=/.test(app) && /data-psched=/.test(app),
+    "self-service class/quiet/schedule controls remain in the bell panel");
   // And the server still enforces that a NON-admin cannot write someone else's subscriptions.
   const p = twoUserHarness();
   const cb = p.pushMintCode("own-b", false); p.pushBindNow(cb.code, 2222222222, "friend");
@@ -10921,7 +10940,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.28-17"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.28-18"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -13436,4 +13455,322 @@ test("-12 clean labels: display shows the label, selection keeps the token", () 
     global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
   }
+});
+
+// ===== linked headlines, granular schedules, earnings detail (build 2026.07.28-18) =============
+
+test("WHAT MATTERED headlines link when a URL survives, and stay plain when one doesn't", () => {
+  const C = require("../src/compute");
+  const ctx = { at: Date.parse("2026-07-29T10:00:00Z"), tz: 0, news: [
+    { sector: "Semi Equipment", items: [
+      { t: "ASML", h: "Why China's DUV push hit ASML and Micron", u: "https://ex.com/a" },
+      { t: "MU", h: "Memory pricing bites consumer hardware", u: null }] }] };
+  const txt = C.renderBrief(ctx, null).messages.join("\n");
+  assert.ok(/<a href="https:\/\/ex\.com\/a">/.test(txt), "a headline with a source URL is a link");
+  assert.ok(/Memory pricing bites/.test(txt) && !/href="null"/.test(txt),
+    "…and one without stays plain rather than becoming a broken anchor");
+  assert.equal(C.briefVisibleLen('<a href="https://x.dev/verylongurl">abc</a>'), 3,
+    "anchor markup is invisible to the length accounting the fit ladder runs on");
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/h: String\(a\.h \|\| ""\)\.slice\(0, 90\), u: a\.url \|\| null/.test(pol),
+    "the URL was always on the news item — dropping it at the cluster builder is what made the block dead text");
+  assert.ok(/disable_web_page_preview: true/.test(pol), "linked headlines must not become preview cards");
+});
+
+test("schedule days: one parser, and unreadable input is refused rather than guessed", () => {
+  const C = require("../src/compute");
+  assert.equal(C.schedParseDays("all"), null, "null means every day");
+  assert.equal(C.schedParseDays(""), null);
+  assert.deepEqual(C.schedParseDays("MWF"), [1, 3, 5]);
+  assert.deepEqual(C.schedParseDays("mon,wed,fri"), [1, 3, 5]);
+  assert.deepEqual(C.schedParseDays("1,3,5"), [1, 3, 5]);
+  assert.deepEqual(C.schedParseDays("weekdays"), [1, 2, 3, 4, 5]);
+  assert.deepEqual(C.schedParseDays("tue thu"), [2, 4]);
+  assert.equal(C.schedParseDays("garbage"), undefined, "unreadable is undefined, NOT an empty set");
+  // t and s each serve two days, so the compact form uses r for Thursday and u for Sunday. Guessing
+  // which was meant is the one thing a schedule parser must never do.
+  assert.deepEqual(C.schedParseDays("MTWRF"), [1, 2, 3, 4, 5]);
+  assert.equal(C.schedNormDays([0, 1, 2, 3, 4, 5, 6]), null, "all seven normalises back to 'every day'");
+  assert.equal(C.schedNormDays([]), undefined, "an empty selection is malformed — 'off' is a null hour, not an empty week");
+  assert.equal(C.schedNormDays([9]), undefined);
+  assert.equal(C.schedDaysLabel(null), "daily");
+  assert.equal(C.schedDaysLabel([1, 3, 5]), "mon\u00b7wed\u00b7fri");
+  assert.equal(C.schedDaysLabel([1, 2, 3, 4, 5]), "weekdays");
+});
+
+test("schedule resolution: default-on, off is a stored decision, days gate delivery", () => {
+  const C = require("../src/compute");
+  const def = { defaultHour: 10 };
+  assert.deepEqual(C.schedResolve(undefined, def), { hour: 10, days: null, isDefault: true },
+    "never configured takes the default and is flagged as a default rider");
+  assert.deepEqual(C.schedResolve({ set: 1, h: null }, def), { hour: null, days: null, isDefault: false },
+    "an explicit off stays off — the tri-state is what makes default-on safe to deploy");
+  const mwf = C.schedResolve({ set: 1, h: 11, days: [1, 3, 5] }, def);
+  assert.deepEqual(mwf, { hour: 11, days: [1, 3, 5], isDefault: false });
+
+  const wed = Date.parse("2026-07-29T11:00:00Z"), thu = Date.parse("2026-07-30T11:00:00Z");
+  assert.equal(C.schedDueAt(mwf, wed, 0), "2026-07-29", "due on a selected day");
+  assert.equal(C.schedDueAt(mwf, thu, 0), null, "silent on one that isn't");
+  assert.equal(C.schedDueAt(mwf, Date.parse("2026-07-29T12:00:00Z"), 0), null, "and only in its own hour");
+  assert.equal(C.schedDueAt({ hour: null, days: null }, wed, 0), null, "off is off");
+  // The day key is computed in the RECIPIENT's frame. Computing it in UTC would hand someone on a
+  // negative offset two sends across a UTC midnight.
+  const late = Date.parse("2026-07-30T01:00:00Z");   // 2026-07-29 21:00 at -240
+  const daily = C.schedResolve({ set: 1, h: 21 }, def);
+  assert.equal(C.schedDueAt(daily, late, -240), "2026-07-29");
+});
+
+test("brief delivery reads the schedule registry, and legacy hours migrate once", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/function schedFor\(rec, kind\) \{ return schedResolve\(schedEntry\(rec, kind\), schedDefFor\(kind\)\); \}/.test(pol),
+    "one resolution point, so the panel and the scheduler cannot disagree about when a send lands");
+  assert.ok(/sched: \(r\.sched && typeof r\.sched === "object"\) \? r\.sched/.test(pol),
+    "migration is once-only — deriving sched on every hydrate would undo an edit at the next restart");
+  // The sync moved OUT of the validation loop (the atomicity bug pinned below): the legacy pair
+  // now tracks only a write that fully validated.
+  assert.ok(/if \(next\.brief && next\.brief\.set\) \{ r\.digestHour = next\.brief\.h; r\.dgSet = 1; \}/.test(pol),
+    "the legacy pair is kept in step for anything still reading it — after validation, never during");
+  assert.ok(/if \(!SCHED_KINDS\.some\(\(x\) => x\.k === k\)\) return \{ ok: false, error: "bad-kind" \}/.test(pol),
+    "an unknown kind is refused rather than stored and then never delivered");
+  assert.ok(/Number\.isFinite\(SCHED_ENV_HOUR\[kind\]\)/.test(pol),
+    "BRIEF_DEFAULT_HOUR still wins over the registry's static default");
+});
+
+test("earnings: what was expected, what printed, and what the tape did", () => {
+  const C = require("../src/compute");
+  const D = 24 * 3600e3, d0 = Date.parse("2026-07-27T00:00:00Z");
+  const daily = [{ t: d0, c: 100 }, { t: d0 + D, c: 100 }, { t: d0 + 2 * D, c: 102.4 }];
+
+  // AMC prints are traded the NEXT session — the same definition the reaction study uses, so the
+  // brief and the study can never disagree about what "the reaction" means.
+  const amc = C.earnPrintRow({ t: "msft", s: "AMC", d: "2026-07-28", eps: 3.12, epsA: 3.31 }, daily);
+  assert.equal(amc.verdict, "beat");
+  assert.equal(amc.surprisePct, 6.1);
+  assert.equal(amc.reactionPct, 2.4, "close-to-close on the first session that could trade it");
+
+  const bmo = C.earnPrintRow({ t: "x", s: "BMO", d: "2026-07-29", eps: 1, epsA: 0.9 }, daily);
+  assert.equal(bmo.verdict, "miss");
+  assert.equal(bmo.reactionPct, 2.4, "a BMO print trades on its own day");
+  assert.equal(C.earnPrintRow({ t: "y", s: "AMC", d: "2026-07-29", eps: 1, epsA: 1.2 }, daily).reactionPct, null,
+    "an AMC print from this afternoon HAS no reaction yet, and says so");
+
+  // Every field independently nullable — a feed that shipped a date without an estimate produces a
+  // visibly incomplete row, never a confident wrong one.
+  const noEst = C.earnPrintRow({ t: "z", s: "BMO", d: "2026-07-29", eps: null, epsA: 2.2 }, daily);
+  assert.equal(noEst.verdict, null);
+  assert.equal(noEst.surprisePct, null);
+  assert.equal(C.earnPrintRow({ t: "w", s: "BMO", d: "2026-07-29", eps: 0, epsA: 0.1 }, daily).surprisePct, null,
+    "surprise against a zero estimate is undefined, not infinite");
+  // Regression: `+null` is 0, so a bare Number.isFinite(+x) coerced a MISSING estimate into a zero
+  // one — and against zero every actual is a "beat" with an undefined surprise. Absence and zero
+  // are different facts and the row has to keep them apart.
+  assert.equal(C.earnPrintRow({ t: "n", s: "BMO", d: "2026-07-29", eps: null, epsA: 2.2 }, daily).eps, null);
+  assert.equal(C.earnPrintRow({ t: "n", s: "BMO", d: "2026-07-29", eps: "", epsA: 2.2 }, daily).eps, null);
+  assert.equal(C.earnPrintRow({ t: "n", s: "BMO", d: "2026-07-29", eps: 0, epsA: 2.2 }, daily).eps, 0,
+    "…while a genuine zero estimate is still a zero");
+  assert.equal(C.earnPrintRow({ t: "q", s: "BMO", d: "2026-07-29", eps: 2, epsA: 2 }, daily).verdict, "in line");
+});
+
+test("the earnings block prints the numbers, and fits the column budget", () => {
+  const C = require("../src/compute");
+  const rows = C.briefEarnRows({
+    printed: [{ t: "MSFT", s: "AMC", eps: 3.12, epsA: 3.31, verdict: "beat", surprisePct: 6.1, reactionPct: 2.4 },
+      { t: "V", s: "AMC", eps: 2.95, epsA: 2.9, verdict: "miss", surprisePct: -1.7, reactionPct: -0.8 },
+      { t: "XOM", s: "BMO", eps: 1.2, epsA: null, verdict: null, surprisePct: null, reactionPct: null }],
+    today: [{ t: "AAPL", s: "AMC", eps: 1.42 }],
+    tomorrow: [{ t: "BA", s: "BMO", eps: 0.31 }, { t: "NVDA", s: "TBD", eps: null }] });
+  const txt = rows.join("\n");
+  assert.ok(/3\.31\/3\.12/.test(txt), "print vs expected — the thing the old block never showed");
+  assert.ok(/beat/.test(txt) && /miss/.test(txt));
+  assert.ok(/\+2\.4%/.test(txt) && /-0\.8%/.test(txt), "and the market reaction");
+  assert.ok(/est 1\.42/.test(txt), "upcoming rows carry the estimate");
+  assert.ok(/est \u2014/.test(txt), "…and say so when the feed has none");
+  // Audit regression: padR SLICES to width, and a numeric field must never be sliced — the first
+  // cut rendered "-12.34" as "-12.3" and "9999.99" as "999", a wrong number displayed as truth
+  // (the NFLX 2dp lesson, one layer up). Extreme pairs now size their column and the block drops
+  // the reaction COLUMN, uniformly, rather than any number losing a digit.
+  const hostile = C.briefEarnRows({ printed: [
+    { t: "GOOGL", s: "AMC", eps: -12.34, epsA: -10.05, verdict: "beat", reactionPct: -12.4 },
+    { t: "BRKB", s: "BMO", eps: 9999.99, epsA: 10000.01, verdict: "beat", reactionPct: 100 }],
+    today: [{ t: "GOOGL", s: "DMH", eps: -1234.56 }], tomorrow: [] });
+  const htxt = hostile.join("\n");
+  assert.ok(/-10\.05\/-12\.34/.test(htxt) && /10000\.01\/9999\.99/.test(htxt) && /est -1234\.56/.test(htxt),
+    "every digit survives, whatever the value");
+  assert.ok(!/12\.4%/.test(htxt), "the reaction column gave way for the whole block");
+  for (const r of hostile) assert.ok(r.length <= C.BRIEF_COLS, "and every row still fits: " + r.length);
+  assert.ok(/post-close/.test(txt) && /pre-mkt/.test(txt) && /time TBD/.test(txt),
+    "sessions in English — AMC is feed jargon");
+  for (const r of rows) assert.ok(r.length <= C.BRIEF_COLS,
+    `every row must fit ${C.BRIEF_COLS} columns or it wraps into noise on a phone: ${r.length} "${r}"`);
+  assert.equal(C.briefEarnRows({}).length, 0, "an empty calendar renders nothing, and the block drops");
+});
+
+test("today's already-reported names are routed as printed, not as pending", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // A BMO name that reported at 08:30 is a printed row by lunchtime. Filing it under "Today" as
+  // though it were still ahead is why same-day beats never showed a verdict.
+  assert.ok(/if \(d !== 0 \|\| earnEntryState\(en, t\) !== "reported"\) continue;/.test(pol));
+  assert.ok(/if \(d === 0 && earnEntryState\(en, t\) === "upcoming" && e\.today\.length < BRIEF_EARN_N\)/.test(pol));
+  assert.ok(/seen\.has\(p\.t \+ "\|" \+ p\.d\)/.test(pol),
+    "and a row cannot appear twice by arriving from both the entries list and the recent-prints list");
+});
+
+test("client: one schedule chip per registered send, parsed to numbers before it leaves", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/data-psched=/.test(app) && /data-asched=/.test(app),
+    "both the reader's own panel and the operator roster drive off the registry");
+  assert.ok(/\(P\.schedKinds\|\|\[\]\)\.map/.test(app), "chips are derived from the server's registry, not hardcoded");
+  assert.ok(/function schedDaysClient\(str\)/.test(app));
+  assert.ok(/sched:\{\[k\]:\{h:\+v, days\}\}/.test(app), "the client sends numbers; the server re-validates them");
+  assert.ok(/Could not read those days/.test(app), "unreadable input is refused in the UI too, not silently sent");
+  // The operator writing somebody else's schedule must not stamp their own offset onto it.
+  const admWrite = app.slice(app.indexOf("data-asched]"), app.indexOf("data-admclaim]"));
+  assert.ok(!/tz:-new Date/.test(admWrite), "no timezone rides an admin-side schedule write");
+});
+
+test("brief ctx routing, executed: reported names land in Printed with their reaction, pending stay in Today", () => {
+  const { etDayStr } = require("../src/compute");
+  const p = ctxHarness();
+  const D = 24 * 3600e3, now = Date.now();
+  const today = etDayStr(now), yesterday = etDayStr(now - D), tomorrow = etDayStr(now + D);
+  // A spine for the reaction: yesterday closed 100, today closed 102.4 — a BMO print yesterday...
+  // Actually anchor the print to `yesterday` (BMO) so the reaction day (its own day) has a close.
+  const d0 = now - 2 * D;
+  p.seedRowNow("xyz:MSFT", { ticker: "MSFT", px: 102.4, uni: "xyz",
+    dailyRaw: [{ t: d0, c: 100 }, { t: now - D, c: 100 }, { t: now, c: 102.4 }] });
+  p.seedEarnNow(
+    [ // calendar rows: one same-day row ALREADY carrying its actual, one pending today, one tomorrow
+      { coin: "xyz:AAPL", t: "AAPL", d: today, s: "AMC", eps: 1.42, epsA: null },
+      { coin: "xyz:BA", t: "BA", d: tomorrow, s: "BMO", eps: 0.31, epsA: null },
+      { coin: "xyz:XOM", t: "XOM", d: today, s: "BMO", eps: 1.2, epsA: 1.33 }],
+    null,
+    [ // print history feeding `recent`
+      { coin: "xyz:MSFT", t: "MSFT", d: etDayStr(now - D), s: "BMO", eps: 3.12, epsA: 3.31 }]);
+  const ctx = p.briefCtxNow(now, 0);
+  const e = ctx.earnings;
+  // The same-day row with an actual is a PRINT, not a pending binary — routing by earnEntryState.
+  assert.ok(e.printed.some((x) => x.t === "XOM" && x.verdict === "beat"),
+    "a same-day reported row routes to Printed with its verdict");
+  assert.ok(!e.today.some((x) => x.t === "XOM"), "…and does not ALSO sit in Today as pending");
+  // AAPL is AMC and unreported: genuinely still ahead, with its estimate on the row.
+  const aapl = e.today.find((x) => x.t === "AAPL");
+  assert.ok(aapl && aapl.eps === 1.42 && aapl.s === "AMC");
+  assert.ok(e.tomorrow.some((x) => x.t === "BA" && x.eps === 0.31));
+  // The historical print carries the reaction computed off the seeded spine (BMO: its own day).
+  const msft = e.printed.find((x) => x.t === "MSFT");
+  assert.ok(msft && msft.verdict === "beat", "recent prints flow through earnPrintRow");
+  assert.equal(msft.reactionPct, 0, "BMO yesterday: close-to-close on its own day (100 -> 100)");
+});
+
+test("schedule prefs round-trip: writes validate, resolve, survive a restart, and keep legacy in step", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const p = twoUserHarness();
+  const c = p.pushMintCode("own-a", true); p.pushBindNow(c.code, 3333333333, "milst");
+  const chat = "3333333333";
+
+  // Bad writes are refused with the reason, and refuse ATOMICALLY — nothing half-applies.
+  assert.equal(p.pushSetPrefs(chat, { sched: { brief: { h: 99 } } }, "own-a", false).error, "bad-hour");
+  assert.equal(p.pushSetPrefs(chat, { sched: { landscape: { h: 11 } } }, "own-a", false).error, "bad-kind",
+    "a kind not in the registry is refused rather than stored and never delivered");
+  assert.equal(p.pushSetPrefs(chat, { sched: { brief: { h: 10, days: [9] } } }, "own-a", false).error, "bad-days");
+
+  // A good write resolves exactly as delivery will read it.
+  const ok = p.pushSetPrefs(chat, { sched: { brief: { h: 7, days: [1, 3, 5] } }, tz: -240 }, "own-a", false);
+  assert.ok(ok.ok);
+  let rec = p.getPush("own-a", false).recipients[0];
+  assert.equal(rec.sched.brief.hour, 7);
+  assert.deepEqual(rec.sched.brief.days, [1, 3, 5]);
+  assert.equal(rec.sched.brief.utc, 0, "an explicitly chosen hour is local, not UTC");
+  assert.equal(rec.sched.brief.daysLabel, "mon\u00b7wed\u00b7fri");
+  assert.equal(rec.digestHour, 7, "the legacy field is kept in step for anything still reading it");
+
+  // Survives the restart: persistPush wrote it, hydratePush must read it back — this is the
+  // partial-persist bug class (deepDaily, trend seeds) applied to schedules.
+  p.hydratePushNow();
+  rec = p.getPush("own-a", false).recipients[0];
+  assert.equal(rec.sched.brief.hour, 7);
+  assert.deepEqual(rec.sched.brief.days, [1, 3, 5]);
+
+  // Off is a decision that also survives.
+  p.pushSetPrefs(chat, { sched: { brief: { h: null } } }, "own-a", false);
+  p.hydratePushNow();
+  rec = p.getPush("own-a", false).recipients[0];
+  assert.equal(rec.sched.brief.hour, null, "an explicit off is not resurrected by the default at hydrate");
+
+  // All-seven normalises to daily on the way in.
+  p.pushSetPrefs(chat, { sched: { brief: { h: 9, days: [0, 1, 2, 3, 4, 5, 6] } } }, "own-a", false);
+  rec = p.getPush("own-a", false).recipients[0];
+  assert.equal(rec.sched.brief.days, null);
+  assert.equal(rec.sched.brief.daysLabel, "daily");
+});
+
+// ===== bug-review pins (post-audit review of build 2026.07.28-18) ==============================
+// Four bugs found by hostile review after the first audit. Each pin states the failure it locks out.
+
+test("a malformed source URL degrades one headline to plain text — never the whole brief", () => {
+  const C = require("../src/compute");
+  // Two clusters of two: the block renders only the first TWO items per cluster, so a one-cluster
+  // fixture would leave half these cases untested (the review's own first draft made that mistake).
+  const ctx = { at: Date.parse("2026-07-29T10:00:00Z"), tz: 0, news: [
+    { sector: "X", items: [
+      { t: "A", h: "good link", u: "https://ex.com/ok?a=1&b=2" },
+      { t: "B", h: "quote bomb", u: 'https://ex.com/x"onclick' }] },
+    { sector: "Y", items: [
+      { t: "C", h: "spacey", u: "https://ex.com/a b" },
+      { t: "D", h: "not a url", u: "javascript:alert(1)" }] }] };
+  const txt = C.renderBrief(ctx, null).messages.join("\n");
+  // tgEscape does not escape quotes; a raw quote inside href breaks the attribute, Telegram
+  // rejects the parse, and one junk headline would have cost the ENTIRE message.
+  assert.ok(/<a href="https:\/\/ex\.com\/ok\?a=1&amp;b=2">/.test(txt), "a sane URL links, ampersand escaped");
+  assert.ok(/quote bomb/.test(txt) && !/onclick/.test(txt), "a quoted URL is not linked at all");
+  assert.ok(/spacey/.test(txt) && !/href="https:\/\/ex\.com\/a b"/.test(txt));
+  assert.ok(/not a url/.test(txt) && !/javascript:/.test(txt), "non-http schemes never reach an href");
+});
+
+test("an absurd reaction value widens its row and sheds the column — digits never slice (padL edition)", () => {
+  const C = require("../src/compute");
+  // padL slices exactly like padR did; the reaction is a number too. +1234.5% cannot come from an
+  // equity close-to-close, but "cannot happen" is not a rendering contract.
+  const rows = C.briefEarnRows({ printed: [
+    { t: "AAA", s: "BMO", eps: 1, epsA: 2, verdict: "beat", reactionPct: 1234.5 },
+    { t: "BBB", s: "BMO", eps: 1, epsA: 0.5, verdict: "miss", reactionPct: -2.1 }], today: [], tomorrow: [] });
+  const txt = rows.join("\n");
+  assert.ok(!/234\.5%/.test(txt) || /\+1234\.5%/.test(txt), "no truncated tail of the number may appear alone");
+  assert.ok(/beat/.test(txt) && /miss/.test(txt), "verdicts survive the shed");
+  for (const r of rows) assert.ok(r.length <= C.BRIEF_COLS, "rows still fit after the column gives way");
+});
+
+test("a refused schedule write leaves no fingerprints, and an hour-only write keeps the days", () => {
+  process.env.TG_BOT_TOKEN = "test-token";
+  const p = twoUserHarness();
+  const c = p.pushMintCode("own-a", true); p.pushBindNow(c.code, 4444444444, "milst");
+  const chat = "4444444444";
+
+  p.pushSetPrefs(chat, { sched: { brief: { h: 7, days: [1, 3, 5] } }, tz: -240 }, "own-a", false);
+
+  // ATOMICITY. The legacy sync used to run INSIDE the validation loop, so a write refusing on a
+  // later key had already moved digestHour — a refused request mutating state, swept into the next
+  // persist. Any refusal must leave the record byte-identical.
+  const before = JSON.stringify(p.getPush("own-a", false).recipients[0]);
+  assert.equal(p.pushSetPrefs(chat, { sched: { brief: { h: 9 }, nonsense: { h: 9 } } }, "own-a", false).error, "bad-kind");
+  assert.equal(JSON.stringify(p.getPush("own-a", false).recipients[0]), before,
+    "a refused write changed nothing — not the schedule, not the legacy digestHour");
+
+  // DAYS PRESERVATION. An hour-only write edits the hour; absence of the days key means
+  // "unchanged", not "reset to daily". Unreachable from the panel (both prompts send days), but
+  // API-reachable, and a schedule that quietly forgets its days is the worst kind of wrong.
+  const ok = p.pushSetPrefs(chat, { sched: { brief: { h: 9 } } }, "own-a", false);
+  assert.ok(ok.ok);
+  const rec = p.getPush("own-a", false).recipients[0];
+  assert.equal(rec.sched.brief.hour, 9);
+  assert.deepEqual(rec.sched.brief.days, [1, 3, 5], "the M/W/F selection survived the hour edit");
+  assert.equal(rec.digestHour, 9, "…and the legacy pair still tracks a SUCCESSFUL write");
+
+  // Explicit null is still "every day" — the distinction is absent-vs-null, not lost.
+  p.pushSetPrefs(chat, { sched: { brief: { h: 9, days: null } } }, "own-a", false);
+  assert.equal(p.getPush("own-a", false).recipients[0].sched.brief.days, null);
 });
