@@ -11071,7 +11071,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14497,4 +14497,139 @@ test("5m/15m columns: client wiring — hidden by default, adjacent to Price, ho
     "m5/m15 compute ahead of the ref guard — the ring warms before the spine and must not wait on it");
   // mobile preset excludes them (curated set unchanged) — they stay opt-in there too
   assert.ok(!app.match(/const MOBILE_COLS=\[[^\]]*\]/)[0].includes("'m5'"), "mobile preset stays curated — m5 not in it");
+});
+
+// ===== event-loop instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) ==============
+// The measurement that gates every future worker-thread decision. Manifest pins because server.js
+// is not importable (it starts the server), plus a real-histogram behavioral check so the ms
+// conversion and window-roll math are executed, not merely grepped for.
+test("loop instrumentation 2026.07.29-05: histogram armed before the store/poller, 6h roll persists atomically, health ships it", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // Armed BEFORE openStore and createPoller — arming later blinds it to boot-build stalls, which
+  // are exactly the stalls the worker-thread gate needs to see.
+  const arm = srv.indexOf("loopHist.enable()");
+  assert.ok(arm > -1, "monitorEventLoopDelay histogram must be enabled");
+  assert.ok(srv.includes("monitorEloopDelay") === false, "sanity");
+  assert.ok(arm < srv.indexOf("const store = openStore("), "histogram armed before the store opens");
+  assert.ok(arm < srv.indexOf("createPoller({"), "histogram armed before the poller is created");
+  // Window mechanics: 6h reset cadence, 28-point (7d) ring, reset AFTER sampling, unref'd timer.
+  assert.ok(srv.includes("const LOOP_WINDOW = 6 * 3600e3"), "6h window constant");
+  assert.ok(srv.includes("const LOOP_RING_MAX = 28"), "7d ring cap");
+  assert.ok(srv.includes("setInterval(rollLoopWindow, LOOP_WINDOW).unref()"), "roll timer armed and unref'd — instrumentation must never keep a dying process alive");
+  const roll = srv.slice(srv.indexOf("function rollLoopWindow()"), srv.indexOf("setInterval(rollLoopWindow"));
+  assert.ok(roll.indexOf("loopRing.push") < roll.indexOf("loopHist.reset()"), "sample is pushed to the ring BEFORE the histogram resets — reversed order records an empty window");
+  assert.ok(roll.includes("s.max > loopMaxEver.v"), "maxEver tracks the worst stall with its own timestamp");
+  // Persistence: atomic tmp+rename to the volume, same discipline as every other /data write, and
+  // wired into BOTH exit paths — shutdown folds the open window in (redeploys < 6h apart must
+  // still accumulate ring points), the crash path does the cheap sync persist only.
+  assert.ok(srv.includes('const LOOP_FILE = path.join(DATA_DIR, "loop-history.json")'), "ring persists to the data volume");
+  assert.ok(/const tmp = LOOP_FILE \+ "\.tmp";\s*\n\s*fs\.writeFileSync\(tmp,[\s\S]{0,120}fs\.renameSync\(tmp, LOOP_FILE\)/.test(srv), "atomic tmp+rename write");
+  const shut = srv.slice(srv.indexOf("async function shutdown()"), srv.indexOf('process.on("SIGTERM"'));
+  assert.ok(shut.includes("rollLoopWindow()"), "shutdown folds the still-open window into the ring");
+  const crash = srv.slice(srv.indexOf("function crashFlush("), srv.indexOf('process.on("unhandledRejection"'));
+  assert.ok(crash.includes("persistLoopSync()"), "crash path persists the ring synchronously");
+  // Boot restore trims to the cap so a hand-edited or legacy-format file can't grow unbounded.
+  assert.ok(srv.includes("loopRing = j.ring.slice(-LOOP_RING_MAX)"), "boot restore trims to the ring cap");
+  // Health surface: live sample + ring + maxEver, on the existing route (no new endpoint).
+  assert.ok(/\/api\/health"[\s\S]{0,600}loop: \{ \.\.\.loopSample\(\), sinceMs: Date\.now\(\) - loopResetAt, windowMs: LOOP_WINDOW, maxEver: loopMaxEver, hist: loopRing \}/.test(srv),
+    "/api/health must ship the live sample, window age, maxEver and the ring");
+});
+
+test("loop instrumentation 2026.07.29-05: ms conversion against a real histogram (behavioral, not a grep)", () => {
+  // Execute the same conversion server.js uses against a genuinely-enabled histogram: nanosecond
+  // readings, /1e5 then /10 = milliseconds at one decimal. A histogram that has observed any event
+  // loop time reports percentiles >= the 20ms resolution floor's granularity and max >= p99 >= p50.
+  const { monitorEventLoopDelay } = require("perf_hooks");
+  const h = monitorEventLoopDelay({ resolution: 20 });
+  h.enable();
+  // The histogram samples the delay of its OWN repeating timer, so it must be running before the
+  // stall: a sync block placed immediately after enable() lands before the first sample and is
+  // invisible (empirically verified — max reads 0). Warm up 50ms, THEN stall inside a timer.
+  return new Promise((res) => setTimeout(() => {
+    const t0 = Date.now(); while (Date.now() - t0 < 60) {}   // one deliberate ~60ms stall to observe
+    setTimeout(() => {
+    h.disable();
+    const ms = (ns) => Math.round(ns / 1e5) / 10;
+    const p50 = ms(h.percentile(50)), p99 = ms(h.percentile(99)), max = ms(h.max);
+    assert.ok(Number.isFinite(p50) && Number.isFinite(p99) && Number.isFinite(max), "all three read as finite ms");
+    assert.ok(p50 <= p99 && p99 <= max, `ordering must hold: p50 ${p50} <= p99 ${p99} <= max ${max}`);
+    assert.ok(max >= 40, `the deliberate ~60ms stall must be visible in max (got ${max}ms)`);
+    assert.ok(max < 60000, "readings are in ms, not ns — a raw-nanosecond leak reads as tens of millions");
+    res();
+    }, 80);
+  }, 50));
+});
+
+test("loop instrumentation 2026.07.29-05: client surfaces — tray dot, admin row, crosshair hover, markup and css", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Tray dot: value-graded on the LIVE p99 at the decision-gate thresholds, reusing the fdot classes.
+  assert.ok(app.includes("cls=p>=50?'stale':(p>=20?'warn':'ok')"), "tray loop dot must grade on the 20/50ms gate thresholds");
+  assert.ok(app.includes("box.innerHTML=dots+loopDot"), "loop dot must actually be appended to the tray");
+  // Admin row: renderer exists, fed by BOTH the 45s health poll and admin-open (stash + fresh pull).
+  assert.ok(app.includes("function renderAdmLoop(h)"), "renderAdmLoop missing");
+  assert.ok(app.includes("_lastHealth=h; renderFreshTray(h)"), "health poll must stash the payload for the admin row");
+  assert.ok(app.includes("renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin();"), "openAdmin must render instantly from the stash then refresh");
+  // Standing rule: every chart gets hover. Crosshair + readout, and a leave handler that hides them.
+  assert.ok(app.includes("svg.addEventListener('mousemove'") && app.includes("svg.addEventListener('mouseleave'"),
+    "sparkline crosshair hover is a standing delivery rule, not an option");
+  assert.ok(app.includes("p50 '+ring[i][1]+'") && app.includes("max '+ring[i][3]+'"), "readout must carry the full [p50,p99,max] of the hovered window");
+  // The 50ms gate line is drawn on the sparkline itself.
+  assert.ok(app.includes('class="alp-gate"') && app.includes(">50ms</text>"), "decision-gate reference line + label");
+  // Empty-ring state is honest, not blank.
+  assert.ok(app.includes("no closed windows yet"), "empty ring renders an explanation, not nothing");
+  assert.ok(html.includes('id="admLoop"'), "admin loop host div missing from markup");
+  assert.ok(css.includes(".adm-loop .alp-spark{width:100%;display:block;cursor:crosshair}"), "sparkline css missing");
+  // The [hidden] lesson: .adm-loop sets no display rule that could beat UA [hidden]{display:none},
+  // and the row is revealed by clearing the attribute, never by a display override.
+  assert.ok(!/\.adm-loop\{[^}]*display:/.test(css), ".adm-loop must not set display — [hidden] must keep working");
+});
+
+test("loop instrumentation 2026.07.29-05: renderAdmLoop EXECUTES against a full health payload and real markup emerges", () => {
+  // Execution smoke per the -17 doctrine: string pins cannot catch an undeclared variable, so the
+  // renderer runs for real. Reuses the drawSessions DOM stub; querySelector returns null in the
+  // stub, so hover wiring is skipped (guarded in the renderer) — this validates markup emission.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const { els, mk } = _sessDomStub();
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/" }, matchMedia: () => ({ matches: false, addEventListener() {} }) };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  try {
+    const api = new Function(app + "\n;return { renderAdmLoop: typeof renderAdmLoop!=='undefined'?renderAdmLoop:null, renderFreshTray: typeof renderFreshTray!=='undefined'?renderFreshTray:null };")();
+    assert.ok(api.renderAdmLoop && api.renderFreshTray, "client exposes renderAdmLoop + renderFreshTray");
+    const now = Date.now();
+    const hist = []; for (let i = 0; i < 12; i++) hist.push([now - (12 - i) * 6 * 3600e3, 2 + i * 0.1, 18 + i * 3, 30 + i * 4]);
+    const h = { lastPoll: now, loop: { p50: 2.3, p99: 41.2, max: 78, sinceMs: 90 * 60e3, windowMs: 6 * 3600e3,
+      maxEver: { v: 112, t: now - 2 * 86400e3 }, hist } };
+    const box = global.document.getElementById("admLoop");
+    box.innerHTML = ""; box.hidden = true;
+    api.renderAdmLoop(h);   // must not throw
+    const out = box.innerHTML;
+    assert.ok(out.length > 500, `renderAdmLoop must emit real markup (got ${out.length} chars)`);
+    for (const frag of ["p50 2.3ms", "p99 41.2ms", "max 78ms", "maxEver 112ms", 'class="alp-line"', 'class="alp-gate"', "ring 12/28"])
+      assert.ok(out.includes(frag), `admin loop markup missing: ${frag}`);
+    assert.equal(box.hidden, false, "the row reveals itself by clearing [hidden]");
+    // p99 41.2 is in the amber band — the chip must carry the warn class, and NOT the bad class.
+    assert.ok(/alp-chip warn[^>]*>p99 41\.2ms/.test(out), "p99 chip grades amber in the 20-50ms band");
+    // Empty ring renders the honest placeholder, never a bare blank.
+    api.renderAdmLoop({ loop: { p50: 0, p99: 0, max: 0, sinceMs: 0, windowMs: 6 * 3600e3, maxEver: null, hist: [] } });
+    assert.ok(box.innerHTML.includes("no closed windows yet"), "empty ring must render the explanation");
+    // Tray: the loop dot renders alongside the feed dots and grades red at the gate.
+    const tray = global.document.getElementById("freshtray");
+    tray.innerHTML = "";
+    api.renderFreshTray({ lastPoll: now, loop: { p50: 3, p99: 61, max: 90 } });
+    assert.ok(/fdot stale[^>]*>[\s\S]{0,40}Loop/.test(tray.innerHTML), "tray loop dot must render and grade red at p99 >= 50ms");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
 });
