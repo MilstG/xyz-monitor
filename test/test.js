@@ -11077,7 +11077,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-09"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.30-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14869,4 +14869,144 @@ test("row patching 2026.07.29-09: patched output is byte-identical to a rebuild 
   assert.ok(!children[0].outerHTML.includes('class="fl"'), "flash class actually cleared");
   const writes3 = api.patchRowsInto(children, settled, settled.slice());
   assert.equal(writes3, 0, "an identical board costs zero writes");
+});
+
+// ---- brief robustness audit: the three bugs that reached a phone, each pinned behaviourally ----
+// All three were the same failure — a read against a field nobody proved existed, or a value nobody
+// proved was in range. Existence pins would not have caught any of them, so these execute.
+function briefAuditHarness() {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  const DAY = 86400000, now = Date.now();
+  // 220 daily candles so the EMA200 is genuinely computable, and deliberately irrational prices so
+  // any unrounded derived value shows its full precision rather than hiding behind a round number.
+  const mk = (i, uni) => {
+    const px = 100 + i * 7.3333333, daily = [];
+    for (let k = 220; k >= 0; k--) daily.push({ t: now - k * DAY, c: px * (1 + Math.sin(k + i) / 30), o: px * 0.999 });
+    return { ticker: (uni === "xyz" ? "EQ" : "C") + i, uni, px,
+      d1: (i % 7) - 3 + 0.3333333, ref: { p7d: px / 1.0333333, p30d: px / 1.0777777, p1d: px / 1.0166666 },
+      funding: 0.0000123456, doi: 3.3333333 + i, dailyRaw: daily };
+  };
+  for (let i = 0; i < 14; i++) p.seedRowNow("EQ" + i, mk(i, "xyz"));
+  for (let i = 0; i < 14; i++) p.seedRowNow("C" + i, mk(i + 2, "main"));
+  return { p, now, DAY };
+}
+
+test("brief ctx: the model is never handed more precision than the brief prints", () => {
+  const { p, now } = briefAuditHarness();
+  const ctx = p.buildBriefCtxNow(now);
+  // GUARD FIRST. An earlier version of this scan reported zero offenders against a ctx whose
+  // regime was null — it proved nothing at all. If the section under test is empty, the test is
+  // lying, so assert it is populated before believing any count.
+  assert.ok(ctx.regime && ctx.regime.stocks, "regime must be populated or this test proves nothing");
+  assert.ok(Number.isFinite(ctx.regime.stocks.disp), "dispersion must be present — it is the field that broke");
+  const bad = [];
+  const walk = (v, path) => {
+    if (v == null) return;
+    if (typeof v === "number") {
+      const str = String(v);
+      if (Number.isFinite(v) && str.includes(".") && str.split(".")[1].length > 2) bad.push(path + "=" + str);
+      return;
+    }
+    if (Array.isArray(v)) { v.forEach((x, i) => walk(x, path + "[" + i + "]")); return; }
+    if (typeof v === "object") { for (const k of Object.keys(v)) walk(v[k], path + "." + k); }
+  };
+  walk(ctx, "ctx");
+  // 4.587792771657628 reached the model, was quoted back verbatim, and cost a live brief its
+  // entire prose layer because the validator only allowed the rounded forms.
+  assert.deepEqual(bad, [], "unrounded floats in the ctx are prose landmines: " + bad.join(", "));
+});
+
+test("brief regime: above-200D is computed from real candles, with coverage disclosed", () => {
+  const { p, now } = briefAuditHarness();
+  const ctx = p.buildBriefCtxNow(now);
+  const s = ctx.regime.stocks;
+  // The old code read `tb.e200` off the trend index, which has never carried an e200 field in any
+  // build in git history — `undefined > 0` is false for every name, so this row was a dash for
+  // both books from the day it shipped. A non-null assertion is the whole point.
+  assert.ok(s.ma200 != null, "above-200D must be computed, not read off a field that does not exist");
+  assert.ok(s.ma200 >= 0 && s.ma200 <= 100, "it is a percentage share");
+  assert.equal(s.ma200N, 14, "every seeded name has 220 candles, so all 14 are covered");
+  assert.equal(s.ma200Of, 14);
+  const C = require("../src/compute");
+  const all = C.renderBrief(ctx, null).messages.join("\n").replace(/\u2007/g, " ");
+  assert.ok(/above 200D\s+\d+%/.test(all), "the row renders a number, not a dash");
+  // Partial coverage must disclose n rather than presenting a third of the book as the book.
+  const partial = JSON.parse(JSON.stringify(ctx));
+  partial.regime.stocks.ma200N = 30; partial.regime.stocks.ma200Of = 84;
+  assert.ok(C.renderBrief(partial, null).messages.join("\n").includes("30/84"),
+    "partial coverage is disclosed inline");
+});
+
+test("earnings reaction: an AMC print whose candle has not closed still yields a number", () => {
+  const C = require("../src/compute");
+  const DAY = 86400000, now = Date.now();
+  const dstr = (t) => new Date(t).toISOString().slice(0, 10);
+  // Daily series ending YESTERDAY — exactly the live shape when the brief runs in the morning.
+  const daily = [];
+  for (let k = 5; k >= 1; k--) daily.push({ t: now - k * DAY, c: 100 });
+  // The AMC print is dated yesterday, so its reaction leg is TODAY, which has no candle yet. The
+  // previous implementation asked for daily[pi+1], fell off the end and returned null — which is
+  // why ARM, HOOD, META and MSFT all showed a dash on one morning's brief.
+  const rx = C.earnPrintReaction({ t: "ARM", d: dstr(now - DAY), s: "AMC" }, daily, 106);
+  assert.ok(rx, "an AMC print from yesterday must not be unmeasurable");
+  assert.equal(rx.state, "forming");
+  assert.equal(rx.pct, 6, "the live mark against the last close before the print");
+  // Once a candle closes on the reaction leg, closed-bar arithmetic takes over and the live mark
+  // is ignored — the number must not keep drifting after it is final.
+  const closed = daily.concat([{ t: now, c: 104 }]);
+  const fin = C.earnPrintReaction({ t: "ARM", d: dstr(now - DAY), s: "AMC" }, closed, 999);
+  assert.equal(fin.state, "final");
+  assert.equal(fin.pct, 4, "a settled reaction ignores the live mark entirely");
+  // BMO scores its own candle, unchanged convention.
+  assert.equal(C.earnPrintReaction({ t: "X", d: dstr(now - 2 * DAY), s: "BMO" }, closed, 999).state, "final");
+  // A print older than the retained window stays absent rather than being invented.
+  assert.equal(C.earnPrintReaction({ t: "X", d: "2019-01-01", s: "BMO" }, closed, 100), null);
+  // And the row carries the tier so the renderer can label it.
+  const row = C.earnPrintRow({ t: "ARM", d: dstr(now - DAY), s: "AMC", eps: 0.41, epsA: 0.45 }, daily, 106);
+  assert.equal(row.verdict, "beat");
+  assert.equal(row.reactionState, "forming");
+  const rendered = C.renderBrief({ at: now, earnings: { printed: [row], today: [], tomorrow: [] } }, null)
+    .messages.join("\n").replace(/\u2007/g, " ");
+  assert.ok(rendered.includes("+6.0%~"), "a forming reaction is marked, not passed off as settled");
+  assert.ok(rendered.includes("move so far, candle open"), "and the mark is explained");
+});
+
+test("prose gate: context values are citable at their own precision, and one bad half keeps the other", () => {
+  const C = require("../src/compute");
+  const ctx = { regime: { stocks: { disp: 4.587792771657628 } } };
+  // The exact live failure: the model quoted its context verbatim and was rejected for inventing
+  // a number that was sitting in the context it was handed.
+  assert.ok(C.briefContextNumbers(ctx).has("4.587792771657628"),
+    "a value present in the context must be citable at the precision it was presented at");
+  const ok = C.validateBriefProse({ story: "Dispersion sat at 4.587792771657628 across the book.",
+    closing: "Breadth stays thin." }, ctx);
+  assert.ok(ok.ok, "faithful quotation must not be treated as fabrication: " + ok.error);
+  // Fabrication is still caught — the gate must not have been loosened into uselessness.
+  const bad = C.validateBriefProse({ story: "Dispersion sat at 7.77 across the book.", closing: "Fine." }, ctx);
+  assert.ok(!bad.ok && /7\.77/.test(bad.error), "an invented figure is still rejected");
+  // Per-section: a fabricated closing must not cost a clean story.
+  const per = C.validateBriefSections({ story: "Dispersion sat at 4.59 across the book.",
+    closing: "Nonsense at 9.99 per cent." }, ctx);
+  assert.ok(per.story.ok, "the clean section survives its sibling's failure");
+  assert.ok(!per.closing.ok, "the dirty one does not");
+  assert.ok(/9\.99/.test(per.closing.error));
+  // A missing section reports as its own, never as the other one's failure.
+  const half = C.validateBriefSections({ story: "Breadth thin.", closing: "" }, ctx);
+  assert.ok(half.story.ok);
+  assert.ok(!half.closing.ok && /closing/.test(half.closing.error));
+});
+
+test("brief: a partial prose pass ships the clean half and discloses the withheld one", () => {
+  const C = require("../src/compute");
+  const msgs = C.renderBrief({ at: Date.now(), proseErr: "closing withheld \u2014 number not in context: 7.77" },
+    { story: "Breadth is thin and narrowing.", closing: null }).messages.join("\n");
+  assert.ok(msgs.includes("THE STORY"), "the clean section ships");
+  assert.ok(msgs.includes("Breadth is thin and narrowing."));
+  assert.ok(!msgs.includes("FINAL THOUGHTS"), "the withheld one does not");
+  // Silence about the withholding would read as a model that had nothing to add.
+  assert.ok(msgs.includes("commentary unavailable"), "and the reader is told why");
+  assert.ok(msgs.includes("closing withheld"));
 });
