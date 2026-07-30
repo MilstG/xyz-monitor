@@ -253,14 +253,83 @@ test("EV_META horizons align with the studies' sign conventions", () => {
   assert.equal(C.EV_META.gap.horizonMs, null);      // gap resolves at the next session close, calendar-aware
 });
 
-test("shadow-variant promotion: strict out-of-sample gates", () => {
-  const inc = { n: 40, hit: 0.55, avg: 0.20 };
-  assert.ok(C.shouldPromote(inc, { n: 34, hit: 0.58, avg: 0.31 }), "clear beat promotes");
-  assert.ok(!C.shouldPromote(inc, { n: 22, hit: 0.60, avg: 0.40 }), "n<30 never promotes");
-  assert.ok(!C.shouldPromote({ n: 12, hit: 0.5, avg: 0.1 }, { n: 40, hit: 0.6, avg: 0.4 }), "incumbent must also have 30");
-  assert.ok(!C.shouldPromote(inc, { n: 40, hit: 0.57, avg: 0.25 }), "margin below 0.08 does not promote");
-  assert.ok(!C.shouldPromote(inc, { n: 40, hit: 0.40, avg: 0.35 }), "hit collapse blocks tail-riders");
-  assert.ok(!C.shouldPromote({ n: 40, hit: 0.45, avg: -0.10 }, { n: 40, hit: 0.46, avg: -0.01 }), "challenger expectancy must be positive");
+test("promotion F4: daily clock and min-dwell bound the re-testing channel", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  // bigmove: incumbent index 1. Inject a clear SE-clearing beat at index 2 (tight dispersion,
+  // large edge). Index 0 is unremarkable.
+  const winner = { n: 40, hit: 0.60, avg: 0.60, sd: 0.4 };   // vs inc avg 0.20, SE~0.089, edge 0.40 >> margin
+  p.setVariantStatsNow({ bigmove: [
+    { n: 40, hit: 0.50, avg: 0.05, sd: 0.4 },   // vi 0
+    { n: 40, hit: 0.55, avg: 0.20, sd: 0.4 },   // vi 1 (incumbent)
+    winner,                                      // vi 2
+  ] });
+  const vs = p.variantStateNow();
+  assert.equal(vs.bigmove.inc, 1, "incumbent starts at index 1");
+  // First FORCED sweep promotes to the winner.
+  p.checkPromotionsNow(true);
+  assert.equal(p.variantStateNow().bigmove.inc, 2, "a clear beat promotes on a forced sweep");
+  assert.equal(p.variantStateNow().bigmove.hist.length, 1, "promotion recorded in hist with a timestamp");
+  // Now inject an even-better index 0 and sweep AGAIN, forced. Min-dwell must refuse: the
+  // incumbent was just installed, so no move regardless of how good a challenger looks.
+  p.setVariantStatsNow({ bigmove: [
+    { n: 40, hit: 0.70, avg: 1.50, sd: 0.4 },   // vi 0 — spectacular
+    { n: 40, hit: 0.55, avg: 0.20, sd: 0.4 },   // vi 1
+    { n: 40, hit: 0.60, avg: 0.60, sd: 0.4 },   // vi 2 (fresh incumbent)
+  ] });
+  p.checkPromotionsNow(true);
+  assert.equal(p.variantStateNow().bigmove.inc, 2, "min-dwell blocks a move right after a promotion, even forced");
+  // Backdate the last promotion beyond the dwell window; now the sweep may act again.
+  p.variantStateNow().bigmove.hist[0].t = Date.now() - 11 * 86400e3;
+  p.checkPromotionsNow(true);
+  assert.equal(p.variantStateNow().bigmove.inc, 0, "past the dwell window the better challenger promotes");
+});
+
+test("promotion F4: the daily clock skips sweeps inside the window (unforced)", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const winner = { n: 40, hit: 0.60, avg: 0.60, sd: 0.4 };
+  const inject = () => p.setVariantStatsNow({ bigmove: [
+    { n: 40, hit: 0.50, avg: 0.05, sd: 0.4 }, { n: 40, hit: 0.55, avg: 0.20, sd: 0.4 }, winner ] });
+  inject();
+  // First UNFORCED sweep runs (lastPromoCheck starts at 0) and promotes.
+  p.checkPromotionsNow(false);
+  assert.equal(p.variantStateNow().bigmove.inc, 2, "first unforced sweep runs and promotes");
+  // Reset the incumbent and re-inject a live challenger; a second UNFORCED sweep inside the ~20h
+  // window must be skipped entirely — the incumbent index is unchanged because the sweep never ran.
+  p.variantStateNow().bigmove.inc = 1;
+  p.variantStateNow().bigmove.hist.length = 0;   // clear dwell so ONLY the daily clock can block
+  inject();
+  p.checkPromotionsNow(false);
+  assert.equal(p.variantStateNow().bigmove.inc, 1, "a second unforced sweep inside the daily window is skipped");
+});
+
+
+test("shadow-variant promotion: strict out-of-sample gates + SE-scaled margin (F4)", () => {
+  // With dispersion supplied, the margin is max(0.08, 1 pooled SE). A tight-dispersion challenger
+  // that clears its own SE promotes; the SAME avg edge under wide dispersion does not.
+  const incT = { n: 40, hit: 0.55, avg: 0.20, sd: 0.4 };   // tight
+  assert.ok(C.shouldPromote(incT, { n: 40, hit: 0.58, avg: 0.45, sd: 0.4 }),
+    "a genuine beat that clears the pooled SE promotes");   // SE~0.089, margin~0.089, edge 0.25 >> margin
+  assert.ok(!C.shouldPromote(incT, { n: 40, hit: 0.58, avg: 0.31, sd: 1.3 }),
+    "the same nominal edge under WIDE dispersion is inside the noise and does not promote");   // SE~0.29 > 0.11 edge
+  // Structural gates unchanged.
+  assert.ok(!C.shouldPromote(incT, { n: 22, hit: 0.60, avg: 0.90, sd: 0.4 }), "n<30 never promotes");
+  assert.ok(!C.shouldPromote({ n: 12, hit: 0.5, avg: 0.1, sd: 0.4 }, { n: 40, hit: 0.6, avg: 0.9, sd: 0.4 }), "incumbent must also have 30");
+  assert.ok(!C.shouldPromote(incT, { n: 40, hit: 0.40, avg: 0.90, sd: 0.4 }), "hit collapse blocks tail-riders");
+  assert.ok(!C.shouldPromote({ n: 40, hit: 0.45, avg: -0.10, sd: 0.4 }, { n: 40, hit: 0.46, avg: -0.01, sd: 0.4 }), "challenger expectancy must be positive");
+  // Missing sd -> conservative 1.0R proxy, so the bar is WIDER than the old fixed 0.08 (never
+  // looser). The old "clear beat" fixture (0.11R edge, n~37) no longer clears under that proxy —
+  // which is the whole point of F4: that edge was inside the sampling error.
+  const incNoSd = { n: 40, hit: 0.55, avg: 0.20 };
+  assert.ok(!C.shouldPromote(incNoSd, { n: 34, hit: 0.58, avg: 0.31 }),
+    "without dispersion the 1.0R proxy makes a 0.11R edge fail — the fixed-0.08 promotion is gone");
+  assert.ok(C.shouldPromote(incNoSd, { n: 40, hit: 0.58, avg: 0.90 }),
+    "a large edge still clears even the conservative proxy");
 });
 
 test("stop-touch: conservative hourly walk with direction semantics", () => {
@@ -11189,7 +11258,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.30-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.30-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
