@@ -7,7 +7,7 @@ const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust,
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, macroStatText, FOMC_DECISIONS,
-  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape } = require("./compute");
+  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, validateBriefSections, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -8910,15 +8910,36 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
         const a = briefD1(r); if (a != null) d1.push(a);
         const b = pctOf(r.px, r.ref && r.ref.p7d); if (b != null) d7.push(b);
         const c2 = pctOf(r.px, r.ref && r.ref.p30d); if (c2 != null) d30.push(c2);
-        const tb = trendByCoin.get(r.coin);
-        if (tb && tb.e200 > 0 && r.px > 0) ma.push(r.px > tb.e200 ? 1 : 0);
+        // EMA200 from the row's OWN daily closes. The previous version read `tb.e200` off the
+        // trend index, which has never carried an e200 field in any build — `undefined > 0` is
+        // false for every name, so this row was null for both books from the day it shipped.
+        // trendByCoin holds e13/e21 only; the 200 lives in the daily series, so take it there.
+        if (Array.isArray(r.dailyRaw) && r.px > 0) {
+          const cl = [];
+          for (const b of r.dailyRaw) if (b && Number.isFinite(b.c)) cl.push(b.c);
+          if (cl.length >= 200) {
+            const kk = 2 / 201;
+            let e = cl.slice(0, 200).reduce((a, b) => a + b, 0) / 200;
+            for (let i = 200; i < cl.length; i++) e = cl[i] * kk + e * (1 - kk);
+            if (e > 0) ma.push(r.px > e ? 1 : 0);
+          }
+        }
       }
       if (!d1.length) return null;
       const bd1 = briefBreadth(d1), bd7 = briefBreadth(d7), bd30 = briefBreadth(d30);
       return { breadth: bd1, d7: bd7, d30: bd30,
         decaying: bd1 != null && bd7 != null && bd30 != null && bd1 < bd7 && bd7 < bd30,
+        // Coverage rides with the number. A 200-day EMA needs 200 candles, which a recently
+        // listed name does not have, so this is a share of the COVERED names — and the renderer
+        // discloses n when coverage is partial rather than implying the whole book.
         ma200: ma.length ? Math.round((100 * ma.filter(Boolean).length) / ma.length) : null,
-        disp: d1.length > 2 ? +retStd(d1, 3) : null };
+        ma200N: ma.length || null, ma200Of: list.length || null,
+        // Rounded HERE, at the source. retStd is the only raw-float source that reaches this
+        // context, and an unrounded 4.587792771657628 handed to the model — which quoted it back
+        // faithfully and had the whole prose layer rejected for it — is the entire reason this
+        // .toFixed exists. Every other numeric field in this context is already quantized by
+        // pctOf, briefD1, briefBreadth or a toFixed at its own assignment.
+        disp: d1.length > 2 ? +retStd(d1, 3).toFixed(2) : null };
     };
     ctx.regime = { stocks: regimeFor(xyz), crypto: regimeFor(main) };
     try {
@@ -8949,6 +8970,9 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
       const byT = new Map();
       for (const r of rows.values()) if (r.ticker && !r.delisted) byT.set(String(r.ticker).toUpperCase(), r);
       const dailyFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Array.isArray(r.dailyRaw) ? r.dailyRaw : null; };
+      // The live mark, so a print whose reaction candle has not closed still yields a number
+      // instead of a dash. This is the whole fix for "every AMC print dashes every morning".
+      const pxFor = (tk) => { const r = byT.get(String(tk).toUpperCase()); return r && Number.isFinite(r.px) ? r.px : null; };
       const e = { printed: [], today: [], tomorrow: [] };
       const seen = new Set();
       // Today's already-reported rows first — they are the freshest thing on the page.
@@ -8957,12 +8981,12 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
         if (d !== 0 || earnEntryState(en, t) !== "reported") continue;
         if (e.printed.length >= BRIEF_EARN_N) break;
         seen.add(en.t + "|" + en.d);
-        e.printed.push(earnPrintRow(en, dailyFor(en.t)));
+        e.printed.push(earnPrintRow(en, dailyFor(en.t), pxFor(en.t)));
       }
       for (const p of (earnCache && earnCache.recent) || []) {
         if (e.printed.length >= BRIEF_EARN_N) break;
         if (seen.has(p.t + "|" + p.d)) continue;
-        e.printed.push(earnPrintRow(p, dailyFor(p.t)));
+        e.printed.push(earnPrintRow(p, dailyFor(p.t), pxFor(p.t)));
       }
       for (const en of (earnCache && earnCache.entries) || []) {
         const d = earnDayDiff(en.d, t);
@@ -9046,11 +9070,27 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       return { ok: false, error: "unparseable model output" };
     }
     const v = validateBriefProse(obj, ctx);
-    if (!v.ok) return { ok: false, error: v.error };
     const d = briefDayKey(Date.now());
     if (briefDay.d !== d) briefDay = { d, n: 0 };
     briefDay.n++;
-    return { ok: true, story: v.story, closing: v.closing, model: used };
+    if (v.ok) return { ok: true, story: v.story, closing: v.closing, model: used };
+    // Whole-object validation failed. Before giving up the entire prose layer, ask which SECTION
+    // failed: one bad figure in the closing used to cost the story as well, and the reader paid
+    // twice for one mistake. A section that passes on its own is clean by the same gate that
+    // rejected its sibling, so shipping it fabricates nothing.
+    const per = validateBriefSections(obj, ctx);
+    const keep = {};
+    if (per.story && per.story.ok) keep.story = per.story.story;
+    if (per.closing && per.closing.ok) keep.closing = per.closing.closing;
+    if (keep.story || keep.closing) {
+      const dropped = ["story", "closing"].filter((k) => !keep[k]);
+      // Logged with the value AND the failing section, so the next occurrence is diagnosable from
+      // the server log instead of a bare float on a phone.
+      log("brief prose: kept " + Object.keys(keep).join("+") + ", dropped " + dropped.join("+") + " (" + v.error + ")");
+      return { ok: true, story: keep.story || null, closing: keep.closing || null,
+        model: used, partial: dropped.join("+"), partialWhy: v.error };
+    }
+    return { ok: false, error: v.error };
   }
 
   // One generation per hour-bucket, shared by everyone waking in it. A recipient at 07:00 and one at
@@ -9064,8 +9104,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (BRIEF_ON) {
       try {
         const p = await briefProse(ctx);
-        if (p.ok) { prose = { story: p.story, closing: p.closing }; model = p.model; }
-        else { degraded = p.error; briefLastErr = p.error; }
+        if (p.ok) {
+          prose = { story: p.story, closing: p.closing }; model = p.model;
+          // A partial pass ships the clean section AND says which half was withheld and why. The
+          // reader must never be left guessing whether a missing FINAL THOUGHTS means the model
+          // had nothing to add or the gate ate it.
+          if (p.partial) { degraded = p.partial + " withheld \u2014 " + p.partialWhy; briefLastErr = degraded; }
+        } else { degraded = p.error; briefLastErr = p.error; }
       } catch (e) { degraded = (e && e.message) || String(e); briefLastErr = degraded; }
     } else degraded = "disabled";
     if (degraded) ctx.proseErr = degraded;

@@ -3860,22 +3860,42 @@ function parseEarningsCalendar(json, symMap) {
 // session for AMC. Extracted so the brief and the study can never disagree about what "the market
 // reaction" means. Null when the spine does not reach the print or the reaction day has not closed
 // yet — an AMC print from this afternoon HAS no reaction, and saying so is the honest answer.
-function earnPrintReaction(print, daily) {
+function earnPrintReaction(print, daily, px) {
+  // Two tiers, in this order, because the previous single-tier version asked for the candle AFTER
+  // the print and returned null when it did not exist yet — which is every AMC print on the
+  // morning you actually read the brief. ARM, HOOD, META and MSFT all dashed on one brief for
+  // exactly this reason. The reference close always exists for a print inside the retained
+  // window; the compare does not have to be a closed candle.
+  //
+  //   final   — a candle has closed past the print. Closed-bar arithmetic, the number is done.
+  //   forming — no closed candle yet, so the live mark carries it. Honest and non-null, and the
+  //             renderer says "so far" rather than presenting it as settled.
+  //
+  // Returns { pct, state } or null only when the print predates the retained candles entirely.
   if (!print || typeof print.d !== "string" || !Array.isArray(daily) || daily.length < 2) return null;
   const dayOf = (t) => { const x = new Date(t); return x.getUTCFullYear() + "-" + String(x.getUTCMonth() + 1).padStart(2, "0") + "-" + String(x.getUTCDate()).padStart(2, "0"); };
   let pi = null;
   for (let i = 0; i < daily.length; i++) if (daily[i] && Number.isFinite(daily[i].c) && dayOf(daily[i].t) === print.d) { pi = i; break; }
   if (pi == null) return null;
+  // Reaction leg per the EMA200/earnings study convention: BMO/DMH/TBD score the print's own UTC
+  // candle, AMC the next one (the perp trades weekends, so a Friday AMC print books Saturday).
   const ri = print.s === "AMC" ? pi + 1 : pi;
-  if (ri <= 0 || ri >= daily.length) return null;
-  const c1 = daily[ri].c, c0 = daily[ri - 1].c;
-  if (!Number.isFinite(c1) || !Number.isFinite(c0) || c0 <= 0) return null;
-  return +(((c1 - c0) / c0) * 100).toFixed(1);
+  if (ri <= 0) return null;
+  const c0 = daily[ri - 1].c;                       // last close BEFORE the print's reaction leg
+  if (!Number.isFinite(c0) || c0 <= 0) return null;
+  if (ri < daily.length) {
+    const c1 = daily[ri].c;
+    if (Number.isFinite(c1)) return { pct: +(((c1 - c0) / c0) * 100).toFixed(1), state: "final" };
+  }
+  // No candle on the reaction leg yet. The live mark is the honest compare — the alternative was
+  // a dash on the one row the reader opened the brief for.
+  if (Number.isFinite(px) && px > 0) return { pct: +(((px - c0) / c0) * 100).toFixed(1), state: "forming" };
+  return null;
 }
 // One print, fully dressed: what was expected, what printed, whether that beat, by how much, and
 // what the tape did about it. Every field independently nullable — a feed that shipped the date but
 // not the estimate yields a row that says so rather than a row that guesses.
-function earnPrintRow(print, daily) {
+function earnPrintRow(print, daily, px) {
   if (!print) return null;
   // `+null` is 0 and `+""` is 0, so a bare Number.isFinite(+x) turns a MISSING estimate into a
   // zero one — and a zero estimate makes every actual a "beat" with an undefined surprise. That is
@@ -3887,8 +3907,12 @@ function earnPrintRow(print, daily) {
   // enough in this roster that the guard is load-bearing.
   const surprisePct = (eps != null && epsA != null && eps !== 0)
     ? +(((epsA - eps) / Math.abs(eps)) * 100).toFixed(1) : null;
+  // The reaction is a {pct,state} pair, flattened onto the row so the renderer can label a
+  // still-developing move instead of showing it as settled.
+  const rx = earnPrintReaction(print, daily, px);
   return { t: String(print.t || "").toUpperCase(), s: print.s || "TBD", d: print.d || null,
-    eps, epsA, verdict, surprisePct, reactionPct: earnPrintReaction(print, daily) };
+    eps, epsA, verdict, surprisePct,
+    reactionPct: rx ? rx.pct : null, reactionState: rx ? rx.state : null };
 }
 module.exports.earnPrintReaction = earnPrintReaction;
 module.exports.earnPrintRow = earnPrintRow;
@@ -5697,6 +5721,13 @@ function briefContextNumbers(ctx) {
     if (typeof v === "number") {
       if (!Number.isFinite(v)) return;
       const a = Math.abs(v);
+      // The value's OWN string form, first. A dispersion of 4.587792771657628 was handed to the
+      // model verbatim in the context JSON, quoted back verbatim, and rejected as an invention
+      // because only "4.59" and "4.6" were in the set — the gate punished the model for citing
+      // its context accurately and cost a whole brief its prose. Anything actually present is
+      // citable at the precision it was presented at; that is not a loosening of the rule, it IS
+      // the rule.
+      set.add(String(a));
       set.add(a.toFixed(2).replace(/\.?0+$/, ""));
       set.add(a.toFixed(1).replace(/\.0$/, ""));
       if (Number.isInteger(a)) set.add(String(a));
@@ -5742,16 +5773,35 @@ function briefContextNames(ctx) {
 const BRIEF_NAME_OK = new Set(["A", "I", "AI", "US", "IT", "EU", "UK", "GDP", "CPI", "PCE", "PPI", "FOMC",
   "ET", "UTC", "AM", "PM", "OI", "APR", "EMA", "DMA", "RS", "R", "THE", "AND", "BUT", "FED", "NFP",
   "Q1", "Q2", "Q3", "Q4", "H1", "H2", "S&P", "SP", "TV", "CEO", "CFO", "USD", "OK", "NASDAQ", "DOW"]);
-function validateBriefProse(prose, ctx) {
+// Per-section verdict. validateBriefProse below keeps its all-or-nothing contract because callers
+// and tests depend on it; this reports which sections individually pass, so the caller can ship a
+// clean story when only the closing is bad. Losing both halves to one number in one paragraph was
+// a disproportion the reader paid for: the anti-fabrication rule is per SENTENCE in spirit, and
+// per section is the closest honest approximation that keeps whole-paragraph coherence.
+function validateBriefSections(prose, ctx) {
+  const p = prose && typeof prose === "object" ? prose : null;
+  if (!p) return { story: { ok: false, error: "not an object" }, closing: { ok: false, error: "not an object" } };
+  const out = {};
+  for (const k of ["story", "closing"]) {
+    const one = { story: "", closing: "" };
+    one[k] = typeof p[k] === "string" ? p[k] : "";
+    // The other section is blanked, so `${k} missing` can only ever refer to THIS one.
+    out[k] = one[k].trim() ? validateBriefProse({ story: one.story || " ", closing: one.closing || " ", _only: k }, ctx, k)
+      : { ok: false, error: k + " missing" };
+  }
+  return out;
+}
+function validateBriefProse(prose, ctx, only) {
   const p = prose && typeof prose === "object" ? prose : null;
   if (!p) return { ok: false, error: "not an object" };
-  for (const k of ["story", "closing"]) {
+  const keys = only ? [only] : ["story", "closing"];
+  for (const k of keys) {
     const v = p[k];
     if (typeof v !== "string" || !v.trim()) return { ok: false, error: `${k} missing` };
     if (v.length > BRIEF_PROSE_MAX[k]) return { ok: false, error: `${k} over budget (${v.length})` };
     if (/<[a-z/]/i.test(v)) return { ok: false, error: `${k} contains markup` };
   }
-  const text = p.story + "\n" + p.closing;
+  const text = only ? String(p[only]) : p.story + "\n" + p.closing;
   // No advice. The brief describes where risk sits; it does not tell anyone what to do.
   if (/\b(?:you should|i'd (?:buy|sell|short|long)|we recommend|recommend (?:buying|selling)|take profit|add here|buy the|sell the)\b/i.test(text))
     return { ok: false, error: "directional instruction" };
@@ -5793,6 +5843,7 @@ module.exports.briefSectionText = briefSectionText;
 module.exports.briefContextNumbers = briefContextNumbers;
 module.exports.briefContextNames = briefContextNames;
 module.exports.validateBriefProse = validateBriefProse;
+module.exports.validateBriefSections = validateBriefSections;
 
 // ---- the renderer -----------------------------------------------------------------------------
 // HARD-WON: Telegram renders body text in a PROPORTIONAL font. Columns built out of spaces only
@@ -5834,8 +5885,11 @@ function briefEarnRows(e) {
     const pairW = Math.max(11, ...pairs.map((x) => x.length)) + 1;
     const line = (p, i, withReact) => {
       const verdict = p.verdict === "in line" ? "line" : (p.verdict || "\u2014");
+      // A forming reaction carries a trailing ~ rather than a bare number: the move is real but
+      // the candle has not closed, and the legend under the block spells that out.
       const react = p.reactionPct == null || !isFinite(p.reactionPct)
-        ? "\u2014" : (p.reactionPct >= 0 ? "+" : "") + (+p.reactionPct).toFixed(1) + "%";
+        ? "\u2014" : (p.reactionPct >= 0 ? "+" : "") + (+p.reactionPct).toFixed(1) + "%"
+          + (p.reactionState === "forming" ? "~" : "");
       return " " + padSafe(briefClip(p.t, 5), 6) + padSafe(pairs[i], pairW)
         + (withReact ? padSafe(verdict, 5) + padSafeL(react, 7) : verdict);
     };
@@ -5846,6 +5900,8 @@ function briefEarnRows(e) {
     let body = printed.map((p, i) => line(p, i, true));
     if (body.some((r) => r.length > BRIEF_COLS)) { withReact = false; body = printed.map((p, i) => line(p, i, false)); }
     for (const r of body) rows.push(r);
+    if (withReact && printed.some((p) => p.reactionState === "forming" && p.reactionPct != null))
+      rows.push(" ~ move so far, candle open");
   }
   const upcoming = (lab, arr) => {
     if (!arr || !arr.length) return;
@@ -6094,7 +6150,9 @@ function renderBrief(ctx, prose) {
     { text: "\ud83c\udf05 <b>MORNING BRIEF</b>" },
     { text: `<i>${briefStamp(c.at || Date.now(), c.tz || 0)} \u00b7 last 24h</i>` }] });
 
-  if (!(prose && prose.story) && c.proseErr)
+  // Shown whenever anything was withheld — not only when the story is missing. A brief that
+  // silently drops FINAL THOUGHTS looks like a model that had nothing to say.
+  if (c.proseErr)
     S.push({ key: "prosewarn", head: null, lines: [{ text: `<i>\u26a0 commentary unavailable \u2014 ${tgEscape(briefClip(c.proseErr, 90))}</i>` }] });
   if (prose && prose.story)
     S.push({ key: "story", head: "\ud83d\udcac <b>THE STORY</b>",
@@ -6182,7 +6240,11 @@ function renderBrief(ctx, prose) {
         row("breadth 1d", (g) => num(g.breadth, "%")),
         row("        7d", (g) => num(g.d7, "%")),
         row("       30d", (g) => num(g.d30, "%")),
-        row("above 200D", (g) => num(g.ma200, "%")),
+        // Coverage disclosed inline when it is partial: "27% 30/84" reads as a share of the names
+        // that HAVE 200 candles, which is the honest claim. Suppressing n would present a third
+        // of the book as the book.
+        row("above 200D", (g) => (g.ma200 == null ? "\u2014"
+          : g.ma200 + "%" + (g.ma200N && g.ma200Of && g.ma200N < g.ma200Of ? " " + g.ma200N + "/" + g.ma200Of : ""))),
         row("corr", (g) => (g.corr == null ? "\u2014" : g.corr.toFixed(2))),
         row("dispersion", (g) => (g.disp == null ? "\u2014" : g.disp.toFixed(1) + "%"))];
       push("regime", "\ud83c\udf21 <b>REGIME</b>", [{ item: 1, text: briefPre(rows) }]);
