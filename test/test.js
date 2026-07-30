@@ -427,6 +427,118 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(p.getLedgerFor("xyz:AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
 });
 
+// ---- Slice A (2026.07.30-02): the study<->live blend honours the universe wall, migrates trust
+// at tape-day speed, and its fallback branch stays expectancy-centered ---------------------------
+// Helper: N resolved entries for one (coin, ev). Crypto ids (no ":") MUST sit after CRYPTO_EPOCH
+// (2026-07-26) or the hydrate-time pre-epoch purge drops them; equity ids ("xyz:...") have no such
+// floor. `dayBase` picks the first UTC day; spreadDays walks forward one day per entry (cl=n) vs
+// stacking on dayBase (cl=1). Distinct ms keeps entries unique within a shared UTC day.
+function blendClosed(coin, ev, n, realized, opts) {
+  opts = opts || {};
+  const EPOCH_DAY = Math.floor(Date.UTC(2026, 6, 26) / 86400000);
+  const today = Math.floor(Date.now() / 86400000);
+  // Anchor so the LAST entry lands on/just after the epoch for crypto, and comfortably in-window
+  // for equities. For spread runs we still need n distinct days; equities can reach back freely,
+  // crypto is clamped to >= epoch (callers keep crypto spreads small or use equities for wide cl).
+  const isCrypto = !String(coin).includes(":");
+  const floorDay = isCrypto ? EPOCH_DAY + 1 : today - (n + 5);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const dayIdx = opts.spreadDays ? floorDay + i : floorDay;   // spread -> cl=n ; stacked -> cl=1
+    const t0 = dayIdx * 86400000 + i * 1000;                    // distinct ms, same UTC day when stacked
+    out.push({ key: coin + "|" + ev + "#h" + i, coin, ticker: coin.split(":").pop() || coin, ev,
+      t0, mark0: 100, dir: 1, sd0: 2, status: "resolved", tR: t0 + 5 * 86400000,
+      realized, realizedS: realized, win: realized > 0, winS: realized > 0, psd: "long", pn: 1 });
+  }
+  return out;
+}
+
+test("blend F1: evidence reads the firing claim's OWN universe record, never the mixed pot", () => {
+  const { createPoller } = require("../src/poller");
+  // Equity breakout record is COLD (avg -1R); crypto breakout record is HOT (avg +1R). A study
+  // that itself reads +0.5R should be pulled DOWN for an equity fire and UP for a crypto fire —
+  // if the blend were still cross-universe, both would see the same (near-zero) mixed record.
+  // Real universe convention: equities are "xyz:TICK" (has ":", universe x), crypto is a bare perp
+  // id WITHOUT ":" (universe m). uniOf keys on the colon.
+  const fixture = { ts: Date.now(), rearm: [], variants: null, open: [], closed: [
+    ...blendClosed("xyz:AAA", "breakout", 40, -1),          // equity: cold (universe x)
+    ...blendClosed("BTCP", "breakout", 40, 1),              // crypto: hot (universe m)
+  ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  p.hydrateLedgerNow();
+  p.recomputeRecordNow();
+  const xRec = p.recForNow("xyz"), mRec = p.recForNow("main");
+  assert.ok(xRec.breakout && xRec.breakout.avg < 0, "equity scoped record is the cold one");
+  assert.ok(mRec.breakout && mRec.breakout.avg > 0, "crypto scoped record is the hot one");
+  const study = { n: 12, hit: 0.55, med: 0.5, avg: 0.5 };
+  const eqEv = p.evidenceNow(study, "breakout", null, "R", "xyz");
+  const cxEv = p.evidenceNow(study, "breakout", null, "R", "main");
+  // Same study, opposite universes -> the cold record must drag the equity score strictly below
+  // the crypto score. A cross-universe blend would make these equal.
+  assert.ok(cxEv.pts > eqEv.pts + 1, "hot-universe fire outscores cold-universe fire on the SAME study");
+  assert.ok(eqEv.liveW > 0 && cxEv.liveW > 0, "both blended against a live record (>=5 resolutions)");
+});
+
+test("blend F1: no-edge guard is scoped — a cold record in one universe can't cap the other", () => {
+  const { createPoller } = require("../src/poller");
+  // Equity breakdown is a clear no-edge record (n>=10, hit<0.5, med<=0). Crypto breakdown is clean.
+  const fixture = { ts: Date.now(), rearm: [], variants: null, open: [], closed: [
+    ...blendClosed("xyz:BBB", "breakdown", 14, -1),   // universe x: no-edge
+    ...blendClosed("ETHP", "breakdown", 14, 1),       // universe m: fine
+  ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  const study = { n: 12, hit: 0.6, med: 0.6, avg: 0.6 };
+  const eqEv = p.evidenceNow(study, "breakdown", null, "R", "xyz");
+  const cxEv = p.evidenceNow(study, "breakdown", null, "R", "main");
+  assert.equal(eqEv.noedge, true, "equity fire is capped by its own no-edge record");
+  assert.ok(eqEv.pts <= 8, "no-edge cap applied to the equity score");
+  assert.ok(!cxEv.noedge, "crypto fire is NOT capped by the equity universe's no-edge record");
+  assert.ok(cxEv.pts > 8, "crypto score rides its own clean record past the cap");
+});
+
+test("blend F2: trust migrates at tape-DAY speed (cl), not raw claim count", () => {
+  const { createPoller } = require("../src/poller");
+  // Two universes, identical n and identical live avg, but one record fired all on ONE day
+  // (cl=1) and the other across distinct days (cl=n). The clustered record must earn far less
+  // blend weight — forty longs into one green day are one draw, not forty.
+  // Clustered record = crypto, all n on ONE post-epoch day (cl=1). Spread record = equity, n across
+  // n distinct days (cl=n). Same n, same +1R avg -> only cl differs, so only liveW should differ.
+  const fixture = { ts: Date.now(), rearm: [], variants: null, open: [], closed: [
+    ...blendClosed("SOLP", "bigmove", 40, 1, { spreadDays: false }),      // crypto, cl=1
+    ...blendClosed("xyz:CCC", "bigmove", 40, 1, { spreadDays: true }),    // equity, cl=40
+  ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  assert.equal(p.recForNow("main").bigmove.cl, 1, "same-day crypto record collapses to cl=1");
+  assert.equal(p.recForNow("xyz").bigmove.cl, 40, "spread equity record keeps cl=n");
+  const study = { n: 12, hit: 0.5, med: 0, avg: 0 };   // neutral study so liveW drives the gap
+  const clustered = p.evidenceNow(study, "bigmove", null, "R", "main");
+  const spread = p.evidenceNow(study, "bigmove", null, "R", "xyz");
+  assert.ok(spread.liveW > clustered.liveW + 20,
+    "the independent-day record earns much more live weight than the one-day cluster");
+});
+
+test("blend F7: the no-avg fallback stays expectancy-centered (a losing base rate scores 0)", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.recomputeRecordNow();   // empty record -> evidence falls through to the study/pooled path (no blend)
+  // A study with NO avg (the fallback branch): a negative median + sub-even hit must NOT score the
+  // same as a positive median + strong hit. Pre-F7 both earned |med|/|hit-0.5| symmetrically.
+  const losing = p.evidenceNow({ n: 12, hit: 0.2, med: -1, avg: null }, "breakout", null, "R", "xyz");
+  const winning = p.evidenceNow({ n: 12, hit: 0.8, med: 1, avg: null }, "breakout", null, "R", "xyz");
+  assert.equal(losing.pts, 0, "a losing no-avg base rate earns zero, not intensity-mirrored points");
+  assert.ok(winning.pts > 20, "a winning no-avg base rate still earns real points");
+});
+
 test("ledger export: raw completeness, shadow/legacy accounting, self-describing meta, route wiring", () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now();
@@ -11077,7 +11189,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.30-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.30-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
