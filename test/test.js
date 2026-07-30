@@ -608,6 +608,125 @@ test("blend F7: the no-avg fallback stays expectancy-centered (a losing base rat
   assert.ok(winning.pts > 20, "a winning no-avg base rate still earns real points");
 });
 
+// ---- Slice C (2026.07.30-04): prime v2 admits the asymmetric swing profile; confluence pays on
+// R lift, not hit lift alone -------------------------------------------------------------------
+test("prime F6: the asymmetric-profile path is certified by the live scoped record", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now(), EPOCH_DAY = Math.floor(Date.UTC(2026, 6, 26) / 86400000);
+  // Build a live record for an R-united event whose HIT is well under 0.6 (v1 impossible) but whose
+  // expectancy is asymmetric: avg ~0.5R, pf >= 1.5. reclaim is R-united. Wins are big, losses small
+  // -> low hit, high avg, high pf. Crypto ids (no ":") must sit post-epoch to survive the purge.
+  function ent(coin, ev, i, realized) {
+    const t0 = (EPOCH_DAY + 1) * 86400000 + i * 1000;
+    return { key: coin + "|" + ev + "#h" + i, coin, ticker: coin, ev, t0, mark0: 100, dir: 1, sd0: 2,
+      status: "resolved", tR: t0 + 5 * 86400000, realized, realizedS: realized, win: realized > 0, winS: realized > 0, psd: "long", pn: 1 };
+  }
+  // 14 crypto reclaim resolutions: 6 wins at +2R, 8 losses at -0.4R -> hit 0.43, avg ~0.63R,
+  // pf = (6*2)/(8*0.4) = 12/3.2 = 3.75.
+  const closed = [];
+  for (let i = 0; i < 6; i++) closed.push(ent("SOLP", "reclaim", i, 2));
+  for (let i = 6; i < 14; i++) closed.push(ent("SOLP", "reclaim", i, -0.4));
+  const fixture = { ts: now, rearm: [], variants: null, open: [], closed };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => fixture,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  const rec = p.recForNow("main").reclaim;
+  assert.ok(rec && rec.hit < 0.6, "the live record's hit rate is below the v1 gate");
+  assert.ok(rec.avg >= 0.35, "but expectancy clears the v2 avg threshold");
+  assert.ok(rec.pf >= 1.5, "and profit factor clears the v2 pf threshold");
+  assert.equal(p.primeV2LiveNow("main", "reclaim"), true, "v2 admits this asymmetric profile as prime");
+  // Wiring pin (the -84 lesson: a correct predicate that the build never consults is dead). The
+  // prime decision must OR primeV2 into the gate — pin the call site structurally so deleting the
+  // OR-branch is a suite failure, not a silent revert to hit>=0.6-only.
+  const polSrc = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/primeV2\s*=\s*primeV2Live\(g\.uni,\s*g\.ev\)/.test(polSrc), "prime v2 is computed from the live-record predicate at fire");
+  assert.ok(/\(primeV1\s*\|\|\s*primeV2\)/.test(polSrc), "the prime gate ORs the asymmetric v2 path in — not hit>=0.6 alone");
+  // Guards: a % event never qualifies (0.35 isn't an R threshold there); a thin record doesn't;
+  // and the wrong universe (no crypto claims on the equity side) doesn't.
+  assert.equal(p.primeV2LiveNow("main", "squeeze"), false, "a %-unit event is never v2-prime");
+  assert.equal(p.primeV2LiveNow("xyz", "reclaim"), false, "the equity universe has no such record -> not prime");
+});
+
+test("prime F6: a thin or low-pf live record does NOT earn v2 prime", () => {
+  const { createPoller } = require("../src/poller");
+  const EPOCH_DAY = Math.floor(Date.UTC(2026, 6, 26) / 86400000);
+  function ent(coin, ev, i, realized) {
+    const t0 = (EPOCH_DAY + 1) * 86400000 + i * 1000;
+    return { key: coin + "|" + ev + "#h" + i, coin, ticker: coin, ev, t0, mark0: 100, dir: 1, sd0: 2,
+      status: "resolved", tR: t0 + 5 * 86400000, realized, realizedS: realized, win: realized > 0, winS: realized > 0, psd: "long", pn: 1 };
+  }
+  // 8 resolutions only (< 12): even with a great profile, too thin to certify.
+  const thin = []; for (let i = 0; i < 8; i++) thin.push(ent("SOLP", "reclaim", i, 1));
+  let store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => ({ ts: Date.now(), rearm: [], variants: null, open: [], closed: thin }),
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  let p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  assert.equal(p.primeV2LiveNow("main", "reclaim"), false, "n<12 is too thin for v2 prime");
+  // 14 resolutions but symmetric (pf ~1.0): expectancy ~0, fails both avg and pf.
+  const flat = [];
+  for (let i = 0; i < 7; i++) flat.push(ent("SOLP", "reclaim", i, 1));
+  for (let i = 7; i < 14; i++) flat.push(ent("SOLP", "reclaim", i, -1));
+  store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => ({ ts: Date.now(), rearm: [], variants: null, open: [], closed: flat }),
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: true });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  assert.equal(p.primeV2LiveNow("main", "reclaim"), false, "a break-even record (pf~1) is not v2-prime");
+});
+
+test("confluence F8: the earned bonus scales on R lift and requires both lifts non-negative", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  // Confluence entries need conf:true/false, win, realized, and an R-united ev. Build two regimes.
+  function set(coin, ev, i, conf, realized) {
+    return { key: coin + "|" + ev + "#" + (conf ? "c" : "s") + i, coin, ticker: coin.split(":").pop(), ev,
+      t0: now - (40 - (i % 40)) * 86400000 - i * 1000, mark0: 100, dir: 1, sd0: 2,
+      status: "resolved", tR: now - i * 1000, realized, realizedS: realized, win: realized > 0, winS: realized > 0,
+      psd: "long", pn: 1, conf };
+  }
+  // Regime 1: with-company firings genuinely better on BOTH hit and avg-R. 20 conf @ +1R (all win),
+  // 20 solo @ -0.5R half / +0.5R half (hit 0.5, avg 0). Both lifts positive -> bonus = round(avgLift*20).
+  const closed = [];
+  for (let i = 0; i < 20; i++) closed.push(set("xyz:AAA", "breakout", i, true, 1));       // conf: hit 1.0, avg +1R
+  for (let i = 0; i < 10; i++) closed.push(set("xyz:AAA", "breakout", 100 + i, false, 0.5));
+  for (let i = 0; i < 10; i++) closed.push(set("xyz:AAA", "breakout", 200 + i, false, -0.5)); // solo: hit 0.5, avg 0
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => ({ ts: now, rearm: [], variants: null, open: [], closed }),
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  const c = p.confCacheNow();
+  assert.ok(c.confAvg > c.soloAvg, "confluence raised avg R");
+  assert.ok(c.confHit >= c.soloHit, "confluence did not lower hit");
+  assert.equal(c.bonus, Math.max(0, Math.round((c.confAvg - c.soloAvg) * 20)), "bonus scales on the R lift");
+  assert.ok(c.bonus > 8, "a real R lift earns more than the flat default");
+});
+
+test("confluence F8: a hit gain bought with expectancy loss earns zero", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  function set(coin, ev, i, conf, realized) {
+    return { key: coin + "|" + ev + "#" + (conf ? "c" : "s") + i, coin, ticker: coin.split(":").pop(), ev,
+      t0: now - (40 - (i % 40)) * 86400000 - i * 1000, mark0: 100, dir: 1, sd0: 2,
+      status: "resolved", tR: now - i * 1000, realized, realizedS: realized, win: realized > 0, winS: realized > 0,
+      psd: "long", pn: 1, conf };
+  }
+  // Confluence wins MORE often but each win is tiny and its losses are brutal -> higher hit, lower
+  // avg R. F8 must refuse the bonus (avgLift < 0), where the old hit-only rule would have paid.
+  const closed = [];
+  for (let i = 0; i < 16; i++) closed.push(set("xyz:BBB", "breakout", i, true, 0.1));   // conf wins small
+  for (let i = 0; i < 4; i++) closed.push(set("xyz:BBB", "breakout", 50 + i, true, -3)); // conf losses huge -> hit 0.8, avg -0.52
+  for (let i = 0; i < 10; i++) closed.push(set("xyz:BBB", "breakout", 100 + i, false, 0.6));
+  for (let i = 0; i < 10; i++) closed.push(set("xyz:BBB", "breakout", 200 + i, false, -0.4)); // solo hit 0.5, avg +0.1
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => ({ ts: now, rearm: [], variants: null, open: [], closed }),
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  const c = p.confCacheNow();
+  assert.ok(c.confHit > c.soloHit, "confluence raised hit rate");
+  assert.ok(c.confAvg < c.soloAvg, "but confluence LOWERED avg R");
+  assert.equal(c.bonus, 0, "a hit gain bought with expectancy loss earns zero bonus (F8)");
+});
+
 test("ledger export: raw completeness, shadow/legacy accounting, self-describing meta, route wiring", () => {
   const { createPoller } = require("../src/poller");
   const now = Date.now();
@@ -11258,7 +11377,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.30-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.30-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
