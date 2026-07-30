@@ -9,7 +9,7 @@ const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASK
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, macroStatText, FOMC_DECISIONS,
   briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, validateBriefSections, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape } = require("./compute");
 const {
-  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, stdev, stopGeometryOk, fadeStats,
+  studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, intrabarCross, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef } = require("./compute");
@@ -1442,6 +1442,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let variantStats = {};   // ev -> [ {n,hit,avg} per variant index ]
   const incVal = (ev) => VARIANTS[ev].vals[variantState[ev].inc];
   const R_UNIT_EVS = new Set(["bigmove", "breakout", "breakdown", "fundflip", "volshift", "oiflush", "fpdiv", "reclaim", "mapull", "failbrk", "pead", "sweep", "airead", "casc", "fundext", "swpull", "basebrk", "basepj"]);
+  // F3 blend half-life: how fast the live-record blend forgets. A resolution 120d old carries half
+  // the weight of a fresh one in avgR/hitR. Deliberately generous — recency is a gentle tilt so a
+  // decayed edge fades from the SCORE over a quarter rather than whipsawing on a bad fortnight; the
+  // displayed all-time record is untouched. This is the one F3 tuning knob.
+  const BLEND_HALFLIFE_MS = 120 * 86400e3;
   const unitOf = (ev) => ev === "prem" ? "bp" : (R_UNIT_EVS.has(ev) ? "R" : "%");
   // coin|ev -> { t: ms, b: bool } — when THIS episode of the condition became continuously
   // present in the builds (b = stamped on the first build after a restart, where the condition
@@ -1664,8 +1669,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           realizedS: "stop-aware outcome (void-level-capped)", stopped: "void level touched before horizon",
           tm: "touch-mode claim: first touch of the frozen target or void resolves it (untouched -> at-horizon mark at the timeout)",
           rb: "bracket outcome: t = target touched first, s = void touched first, m = neither (at-horizon)",
+          amb: "bracket resolution was ambiguous: the resolving candle straddled BOTH frozen levels in one bar and was conservatively called a stop (F9 measurement — the outcome is unchanged, only flagged)",
           realizedB: "bracket-track outcome — capped at whichever frozen level was touched FIRST, at-horizon otherwise (symmetric fix to the stop-only cap; accrues from build -20)",
           r2: "MA200 regime at fire: +2 mark above MA200, +1 MA200 rising (3..0); absent = under 210 daily closes at fire",
+          vr: "vol-regime percentile at fire: current 10d realized vol's rank within its trailing-120 baseline (0..100; absent = under 140 daily closes at fire)",
+          ib: "breakout/breakdown only: the cross was intrabar at fire — only the live mark cleared the level, the last COMPLETED daily close had not (the study counts close-confirmed crosses; recorded, never gated)",
           fnd: "funding rate at fire", fndP: "funding percentile vs this market's own 31d hourly history (>=96 samples)",
           oi5: "5d open-interest change % at fire", rngP: "position in the 30d range at fire (0=low, 1=high)",
           mktR: "benchmark 24h move % at fire (BTC for the crypto universe, the SPX proxy for xyz)",
@@ -1875,6 +1883,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // read here so a per-fire MA walk never happens. The record SPLITS by this later; nothing
       // gates on it — whether below-200 pullbacks deserve exclusion is the ledger's question.
       if (r._r2 != null) e.r2 = r._r2;
+      if (r._vr != null) e.vr = r._vr;   // vol-regime percentile at fire (F-vr) — recorded for later conditioned splits
       ledgerOpen.set(key, e); ledgerDirty = true;
     }
     return e;
@@ -1921,7 +1930,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         let tEnd = e.resolveAt, pTouch = null;
         if (e.tm === 1 && e.stp != null && e.tgt != null) {
           const br = bracketTouch(hs, e.t0, Math.min(e.resolveAt, now), sideE, e.stp, e.tgt);
-          if (br) { pTouch = br.level; tEnd = br.t; e.rb = br.hit === "target" ? "t" : "s"; }
+          if (br) { pTouch = br.level; tEnd = br.t; e.rb = br.hit === "target" ? "t" : "s"; if (br.amb) e.amb = 1; }   // F9: same-bar both-touch flagged
           else if (now < e.resolveAt) continue;
           else e.rb = "m";
         }
@@ -1969,6 +1978,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           else if (e.stp != null && e.tgt != null && e.gv !== 1) {
             const br = bracketTouch(hs, e.t0, e.resolveAt, sideE, e.stp, e.tgt);
             e.rb = br ? (br.hit === "target" ? "t" : "s") : "m";
+            if (br && br.amb) e.amb = 1;   // F9: same-bar both-touch flagged on the bracket track
             e.realizedB = br ? +(sgn * (br.level / p0 - 1) * 100).toFixed(2) : realized;
           }
           // Sigma-normalize EVERY R-united claim: the studies claim in R, so the ledger must
@@ -2037,7 +2047,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function buildRecordSet(res, openEntries) {
     const per = {};
     for (const e of res) {
-      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [], retsS: [], winsS: 0, stopped: 0, nS: 0, ents: [], retsX: [], winsX: 0, retsB: [], winsB: 0, tchT: 0, tchS: 0, tchM: 0 });
+      const b = per[e.ev] || (per[e.ev] = { resolved: 0, wins: 0, rets: [], claims: [], retsS: [], winsS: 0, stopped: 0, nS: 0, ents: [], retsX: [], winsX: 0, retsB: [], winsB: 0, tchT: 0, tchS: 0, tchM: 0, amb: 0 });
       b.resolved++; if (e.win) b.wins++; b.rets.push(e.realized);
       b.ents.push(e);
       // BTC-excess leg, crypto only (rx is stamped only for main claims). Kept in its own bucket
@@ -2049,16 +2059,36 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (e.realizedB != null && Number.isFinite(e.realizedB)) {
         b.retsB.push(e.realizedB); if (e.realizedB > 0) b.winsB++;
         if (e.rb === "t") b.tchT++; else if (e.rb === "s") b.tchS++; else b.tchM++;
+        if (e.amb === 1) b.amb++;   // F9: same-bar both-touch ambiguities (resolved conservatively to stop)
       }
       if (e.claim && Number.isFinite(e.claim.med)) b.claims.push(e.claim.med);
     }
     const out = {};
+    // F3 (2026.07.30-05): the score's live-record blend should weight RECENT resolutions more —
+    // a signal whose edge decayed six months ago keeps earning glory-days points until enough
+    // losers dilute an all-time mean, which at n=200 takes a long time. avgR/hitR are the same
+    // outcomes weighted by exp(-age/halflife) on each resolution's resolve time (tR). ONLY the
+    // blend reads these; the displayed record (avg/hit) stays honest all-time, so the panel never
+    // silently redefines "the record" while the score quietly tracks the recent slice. A single
+    // conservative half-life (BLEND_HALFLIFE_MS) — long enough that recency is a gentle tilt, not
+    // a short-memory whipsaw; it is the one tuning knob and is documented as such.
+    const nowRW = Date.now();
     for (const ev in per) {
       const b = per[ev], sm = summarizeEvents(b.rets);
       const w = b.rets.filter((x) => x > 0), l = b.rets.filter((x) => x <= 0);
       const wSum = w.reduce((a, c) => a + c, 0), lSum = l.reduce((a, c) => a + c, 0);
+      // recency-weighted mean outcome + hit over this event's resolved entries
+      let rwW = 0, rwR = 0, rwWin = 0;
+      for (const e of b.ents) {
+        if (!Number.isFinite(e.realized)) continue;
+        const age = Math.max(0, nowRW - (+e.tR || +e.t0 || nowRW));
+        const wt = Math.exp(-age / BLEND_HALFLIFE_MS);
+        rwW += wt; rwR += wt * e.realized; if (e.realized > 0) rwWin += wt;
+      }
       out[ev] = { resolved: b.resolved, hit: b.resolved ? +(b.wins / b.resolved).toFixed(2) : null,
         med: sm.n ? sm.med : null, avg: sm.n ? sm.avg : null,
+        avgR: rwW > 0 ? +(rwR / rwW).toFixed(3) : null,   // F3: recency-weighted mean — blend-only
+        hitR: rwW > 0 ? +(rwWin / rwW).toFixed(3) : null, // F3: recency-weighted hit share — blend-only
         avgWin: w.length ? +(wSum / w.length).toFixed(2) : null,
         avgLoss: l.length ? +(lSum / l.length).toFixed(2) : null,
         pf: w.length && l.length && lSum !== 0 ? +(wSum / Math.abs(lSum)).toFixed(2) : null,   // profit factor: gross wins / gross losses
@@ -2089,7 +2119,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         Object.assign(out[ev], { nB: b.retsB.length, hitB: +(b.winsB / b.retsB.length).toFixed(2),
           medB: smB.n ? smB.med : null, avgB: smB.n ? smB.avg : null,
           pfB: wB.length && lB.length && lbSum !== 0 ? +(wbSum / Math.abs(lbSum)).toFixed(2) : null,
-          tchT: b.tchT, tchS: b.tchS, tchM: b.tchM });
+          tchT: b.tchT, tchS: b.tchS, tchM: b.tchM, amb: b.amb });
       }
     }
     for (const e of openEntries) (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++;
@@ -2252,7 +2282,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (rec && rec.resolved >= 5 && rec.hit != null && rec.avg != null && stats.avg != null) {
         const eff = rec.cl != null && rec.cl > 0 ? rec.cl : rec.resolved;   // independent tape-days, not claim count
         const w = eff / (eff + 25);
-        return { pts: evPts({ avg: (1 - w) * stats.avg + w * rec.avg, hit: (1 - w) * stats.hit + w * rec.hit }, unit) * discount,
+        // F3: blend toward the RECENCY-WEIGHTED live record (avgR/hitR). Fall back to the all-time
+        // avg/hit for pre-F3 cached records that never carried the weighted fields, so a stale blob
+        // degrades to the -02 behaviour rather than throwing.
+        const recAvg = rec.avgR != null ? rec.avgR : rec.avg;
+        const recHit = rec.hitR != null ? rec.hitR : rec.hit;
+        return { pts: evPts({ avg: (1 - w) * stats.avg + w * recAvg, hit: (1 - w) * stats.hit + w * recHit }, unit) * discount,
           liveW: Math.round(w * 100) };
       }
       return { pts: evPts(stats, unit) * discount, liveW: null };
@@ -2471,7 +2506,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             ((r.px / hi - 1) * 100) * 12 + 15, evd, { horizon: evMeta("breakout", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
             sig.play = playbook("breakout", { logGeo: r.uni === "main", px: r.px, level: hi, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
-          out.push(sig); if (sd30 > 0) openLedger(r, "breakout", sig, 1, { sd0: +sd30.toFixed(3) });
+          // F5 (2026.07.30-05): the study counts CLOSE-confirmed first crosses; this site fires on
+          // the live mark. ib=1 marks a claim where only the intrabar mark cleared the level — the
+          // last COMPLETED close is still at/under it — so the record can later split intrabar
+          // pokes from close-confirmed breakouts and a stricter variant earns its case with data,
+          // not argument. The last bar is "forming" when its UTC day hasn't ended; the completed
+          // reference is that bar otherwise. Recorded, never gated.
+          const ibBO = intrabarCross(closes, hi, 1, now) ? 1 : 0;
+          out.push(sig); if (sd30 > 0) openLedger(r, "breakout", sig, 1, { sd0: +sd30.toFixed(3), ib: ibBO });
         }
         let lo = Infinity;
         for (let j = closes.length - 31; j < closes.length - 1; j++) if (closes[j][1] < lo) lo = closes[j][1];
@@ -2481,7 +2523,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             ((1 - r.px / lo) * 100) * 12 + 15, evd, { horizon: evMeta("breakdown", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
             sig.play = playbook("breakdown", { logGeo: r.uni === "main", px: r.px, level: lo, med: mR != null && sd30 > 0 ? mR * sd30 : null }); }
-          out.push(sig); if (sd30 > 0) openLedger(r, "breakdown", sig, -1, { sd0: +sd30.toFixed(3) });
+          const ibBD = intrabarCross(closes, lo, -1, now) ? 1 : 0;   // F5: only the live mark broke down; last completed close still at/over the low
+          out.push(sig); if (sd30 > 0) openLedger(r, "breakdown", sig, -1, { sd0: +sd30.toFixed(3), ib: ibBD });
         }
         // ---- swing shadow setups (findings follow-on): higher-timeframe, human-tradeable
         // structures earning their record invisibly (vi=0 never surfaces anywhere) before any
@@ -2520,6 +2563,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // after boot simply leaves them unstamped (absent = honest unknown).
           { const r2v = regime200(closes, r.px);
             if (r2v != null) r._r2 = r2v; else delete r._r2; }
+          // Vol-regime percentile at fire (vr): current 10d realized vol's rank within its
+          // trailing-120 baseline — the same number the coil signal surfaces, so a claim's
+          // recorded regime agrees with what the board shows. Stamped on the row here and read by
+          // openLedger for every claim (like r._r2). The single most predictive conditioning
+          // variable not yet on the ledger: "does this signal only work in quiet tape" becomes a
+          // record query instead of a rebuild. Absent under 140 daily closes (coil's own floor) —
+          // an honest unknown, excluded from any future split. Recorded, never gated.
+          if (st.coil && Number.isFinite(st.coil.pct)) r._vr = st.coil.pct; else delete r._vr;
           const lvlBars = r.dailyRaw && r.dailyRaw.length >= 60
             ? r.dailyRaw.map((k) => { const c = +k.c, h = +k.h; return { c, h: Number.isFinite(h) && h > 0 ? h : c, l: c }; })
             : null;

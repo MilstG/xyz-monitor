@@ -486,6 +486,19 @@ function dailyRets(closes) {   // closes: [[t, c], ...] ascending
   }
   return out;
 }
+// True when a level cross is INTRABAR ONLY — the live mark has cleared `level` in direction `dir`
+// (+1 above, -1 below) but the last COMPLETED daily close has not. The last array bar is "forming"
+// when its UTC day has not ended (t + DAY > now); the completed reference is the prior bar then,
+// else the last bar. Used to stamp `ib` on breakout/breakdown claims so the record can split
+// intrabar pokes from the close-confirmed crosses the study actually measures. Recorded, not gated.
+function intrabarCross(closes, level, dir, now) {
+  if (!Array.isArray(closes) || closes.length < 1 || !(level > 0)) return false;
+  const last = closes[closes.length - 1];
+  const forming = +last[0] + DAY > now;
+  const ref = forming ? (closes.length >= 2 ? closes[closes.length - 2] : null) : last;
+  if (!ref || !(ref[1] > 0)) return false;
+  return dir > 0 ? ref[1] <= level : ref[1] >= level;   // completed close still on the pre-cross side -> intrabar only
+}
 // trailing-30 daily sigma ending just before index i (unit for R-normalized outcomes)
 function sdAt(rets, i) { return retStd(rets.slice(Math.max(0, i - 30), i), 15); }
 function fwdRet(closes, i, k) {
@@ -497,28 +510,33 @@ function fwdRet(closes, i, k) {
 // returns are SIGNED IN THE DIRECTION of the move: positive = continuation, negative = fade.
 function studyBigMove(closes) {
   const rets = dailyRets(closes), d1 = [], d3 = [];
+  let end1 = -1, end3 = -1;   // F10: per-horizon overlap guards, keyed on the forward-window start ci
   for (let i = 30; i < rets.length; i++) {
     const sd = sdAt(rets, i);
     if (sd == null || sd <= 0 || !Number.isFinite(rets[i]) || Math.abs(rets[i]) < 2 * sd) continue;
     const dir = rets[i] > 0 ? 1 : -1, ci = i + 1;   // rets[i] is the move into closes[ci]
-    const f1 = fwdRet(closes, ci, 1), f3 = fwdRet(closes, ci, 3);
-    if (f1 != null) d1.push(+(dir * f1 / sd).toFixed(3));   // R units: outcome / own sigma at event time
-    if (f3 != null) d3.push(+(dir * f3 / sd).toFixed(3));
+    if (ci >= end1) { const f1 = fwdRet(closes, ci, 1); if (f1 != null) { d1.push(+(dir * f1 / sd).toFixed(3)); end1 = ci + 1; } }
+    if (ci >= end3) { const f3 = fwdRet(closes, ci, 3); if (f3 != null) { d3.push(+(dir * f3 / sd).toFixed(3)); end3 = ci + 3; } }
   }
   return { d1: summarizeEvents(d1), d3: summarizeEvents(d3), raw: { d1, d3 }, unit: "R" };
 }
 // 30d-high breakout: close crosses above the max of the prior 30 closes. Forward 1d / 5d.
 function studyBreakout(closes) {
   const rets = dailyRets(closes), d1 = [], d5 = [];
+  // F10 (2026.07.30-05): two first-crosses four days apart share most of a 5d forward window;
+  // summarizeEvents then counts them as independent draws, inflating n exactly like the cluster-day
+  // problem does on the LIVE record. Per-horizon lastEnd guards drop an event whose forward window
+  // overlaps the previous ACCEPTED event's — d1 and d5 track separately because a pair can be
+  // independent at 1d and overlapping at 5d. n shrinks and finally means what the score assumes.
+  let end1 = -1, end5 = -1;
   for (let i = 31; i < closes.length; i++) {
     let hi = -Infinity;
     for (let j = i - 30; j < i; j++) if (closes[j][1] > hi) hi = closes[j][1];
     if (!(closes[i][1] > hi) || closes[i - 1][1] > hi) continue;   // first cross only
     const sd = sdAt(rets, i - 1);
     if (sd == null || sd <= 0) continue;
-    const f1 = fwdRet(closes, i, 1), f5 = fwdRet(closes, i, 5);
-    if (f1 != null) d1.push(+(f1 / sd).toFixed(3));
-    if (f5 != null) d5.push(+(f5 / sd).toFixed(3));
+    if (i >= end1) { const f1 = fwdRet(closes, i, 1); if (f1 != null) { d1.push(+(f1 / sd).toFixed(3)); end1 = i + 1; } }
+    if (i >= end5) { const f5 = fwdRet(closes, i, 5); if (f5 != null) { d5.push(+(f5 / sd).toFixed(3)); end5 = i + 5; } }
   }
   return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
 }
@@ -527,15 +545,15 @@ function studyBreakout(closes) {
 // matching the ledger's dir=-1 convention, so "hit" means the breakdown followed through.
 function studyBreakdown(closes) {
   const rets = dailyRets(closes), d1 = [], d5 = [];
+  let end1 = -1, end5 = -1;   // F10: per-horizon overlap guards (see studyBreakout)
   for (let i = 31; i < closes.length; i++) {
     let lo = Infinity;
     for (let j = i - 30; j < i; j++) if (closes[j][1] < lo) lo = closes[j][1];
     if (!(closes[i][1] < lo) || closes[i - 1][1] < lo) continue;   // first cross only
     const sd = sdAt(rets, i - 1);
     if (sd == null || sd <= 0) continue;
-    const f1 = fwdRet(closes, i, 1), f5 = fwdRet(closes, i, 5);
-    if (f1 != null) d1.push(+(-f1 / sd).toFixed(3));
-    if (f5 != null) d5.push(+(-f5 / sd).toFixed(3));
+    if (i >= end1) { const f1 = fwdRet(closes, i, 1); if (f1 != null) { d1.push(+(-f1 / sd).toFixed(3)); end1 = i + 1; } }
+    if (i >= end5) { const f5 = fwdRet(closes, i, 5); if (f5 != null) { d5.push(+(-f5 / sd).toFixed(3)); end5 = i + 5; } }
   }
   return { d1: summarizeEvents(d1), d5: summarizeEvents(d5), raw: { d1, d5 }, unit: "R" };
 }
@@ -545,16 +563,18 @@ function studyVolShift(closes) {
   const rets = dailyRets(closes), vols = [];
   for (let i = 10; i <= rets.length; i++) vols.push(retStd(rets.slice(i - 10, i), 8));
   const d5 = [];
+  let end5 = -1;   // F10: overlap guard
   for (let i = 120; i < vols.length; i++) {
     const hist = vols.slice(i - 120, i).filter((x) => x != null);
     if (hist.length < 60 || vols[i] == null || vols[i - 1] == null) continue;
     const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
     if (!(vols[i] > p90) || vols[i - 1] > p90) continue;           // first cross only
     const ci = i + 10;                                              // vols[i] ends at closes[ci]
+    if (ci < end5) continue;
     const sd = sdAt(rets, ci - 1);
     if (sd == null || sd <= 0) continue;
     const f5 = fwdRet(closes, ci, 5);
-    if (f5 != null) d5.push(+(f5 / sd).toFixed(3));
+    if (f5 != null) { d5.push(+(f5 / sd).toFixed(3)); end5 = ci + 5; }
   }
   return { d5: summarizeEvents(d5), raw: { d5 }, unit: "R" };
 }
@@ -573,7 +593,16 @@ function studyGapFade(hourly, windows, tol) {
   for (const gp of gaps) {
     if (Math.abs(gp.g) < 0.75 * sd) continue;
     const open = priceAsOf(hourly, gp.exit, tol);
-    const close = priceAsOf(hourly, gp.exit + 6.5 * HOUR, tol);
+    // The next cash session's TRUE close, not a fixed +6.5h — early-close days (half sessions end
+    // 13:00 ET) were being measured to a phantom 16:00, folding the missing 2.5h of drift into the
+    // gap record as noise. marketSessions carries the real close per calendar day (13:00 on a
+    // half-day, 16:00 otherwise). Pick the session whose open is at/just after this gap's exit;
+    // fall back to the old fixed offset only if no session is found in a tight window.
+    const sess = marketSessions(gp.exit - HOUR, gp.exit + 8 * HOUR);
+    let closeT = null;
+    for (const s of sess) { if (s.open >= gp.exit - HOUR) { closeT = s.close; break; } }
+    if (closeT == null) closeT = gp.exit + 6.5 * HOUR;   // no session matched -> conservative fallback
+    const close = priceAsOf(hourly, closeT, tol);
     if (!(open > 0) || !(close > 0)) continue;
     dirRets.push((gp.g > 0 ? 1 : -1) * (close / open - 1) * 100);
   }
@@ -1034,8 +1063,16 @@ function bracketTouch(candles, t0, tEnd, side, stp, tgt) {
     const t = k[0];
     if (t <= t0) continue;
     if (t > tEnd) break;
-    if (long ? k[3] <= stp : k[2] >= stp) return { hit: "stop", level: stp, t };
-    if (long ? k[2] >= tgt : k[3] <= tgt) return { hit: "target", level: tgt, t };
+    const hitStop = long ? k[3] <= stp : k[2] >= stp;
+    const hitTgt = long ? k[2] >= tgt : k[3] <= tgt;
+    // F9 (2026.07.30-05): a single candle straddling BOTH frozen levels is genuinely ambiguous —
+    // on this bar's resolution we can't know which came first, so we keep the conservative "stop"
+    // call BUT flag amb so the record can measure how often it happens. If the rate is small the
+    // conservative call is harmless; if it is large on the crypto clock, that is the evidence that
+    // justifies resolving those specific claims against the 5m archive (a separate program). The
+    // measurement comes first, deliberately — the flag never changes the outcome, only records it.
+    if (hitStop) return { hit: "stop", level: stp, t, amb: hitTgt };
+    if (hitTgt) return { hit: "target", level: tgt, t, amb: false };
   }
   return null;
 }
@@ -3645,7 +3682,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, pxRingP
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
-  summarizeEvents, retStd, dailyRets, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
+  summarizeEvents, retStd, dailyRets, intrabarCross, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
   EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
