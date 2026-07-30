@@ -2093,14 +2093,37 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       }
     }
     for (const e of openEntries) (out[e.ev] || (out[e.ev] = { resolved: 0, hit: null, med: null, avg: null, claimMed: null, open: 0, unit: unitOf(e.ev) })).open++;
-    const cf = { confN: 0, confW: 0, soloN: 0, soloW: 0 };
+    const cf = { confN: 0, confW: 0, soloN: 0, soloW: 0, confRn: 0, soloRn: 0, confR: 0, soloR: 0 };
     for (const e of res) {
       if (typeof e.conf !== "boolean") continue;
-      if (e.conf) { cf.confN++; if (e.win) cf.confW++; } else { cf.soloN++; if (e.win) cf.soloW++; }
+      // Hit counts span every ledgered event (hit rate is unit-agnostic). The avg-R lift, though,
+      // must NOT mix a +2% gap fade with a +1.5R breakout in one mean — it is accumulated over
+      // R-united events ONLY, with its own n (confRn/soloRn). A pure-% coin therefore contributes
+      // to the hit comparison but not the R comparison, which is the honest split.
+      const isR = R_UNIT_EVS.has(e.ev) && Number.isFinite(e.realized);
+      if (e.conf) { cf.confN++; if (e.win) cf.confW++; if (isR) { cf.confRn++; cf.confR += e.realized; } }
+      else { cf.soloN++; if (e.win) cf.soloW++; if (isR) { cf.soloRn++; cf.soloR += e.realized; } }
     }
     const conf = { confN: cf.confN, confHit: cf.confN ? +(cf.confW / cf.confN).toFixed(2) : null,
-      soloN: cf.soloN, soloHit: cf.soloN ? +(cf.soloW / cf.soloN).toFixed(2) : null };
-    conf.bonus = conf.confN >= 15 && conf.soloN >= 15 ? Math.max(0, Math.round((conf.confHit - conf.soloHit) * 40)) : 8;
+      soloN: cf.soloN, soloHit: cf.soloN ? +(cf.soloW / cf.soloN).toFixed(2) : null,
+      confAvg: cf.confRn ? +(cf.confR / cf.confRn).toFixed(3) : null,
+      soloAvg: cf.soloRn ? +(cf.soloR / cf.soloRn).toFixed(3) : null,
+      confRn: cf.confRn, soloRn: cf.soloRn };
+    // F8 (2026.07.30-04): the earned bonus is driven by the AVG-R lift of with-company firings
+    // over solo ones, not the hit-rate lift alone — confluence that raises hit while shrinking
+    // average R is not an edge worth a score bonus. BOTH lifts must be non-negative to pay at all
+    // (a hit gain bought with expectancy loss earns zero); the magnitude scales on the R lift.
+    // The R lift needs its own >=15/15 floor (confRn/soloRn) because a coin roster heavy in %
+    // events could clear the hit floor while the R comparison is still too thin to trust. When the
+    // R evidence is thin but the hit floor is met, fall back to a gated flat bonus on hit lift
+    // alone (never the old hit-magnitude scaling). Below the hit floor, the flat default (8) stands.
+    if (conf.confN >= 15 && conf.soloN >= 15) {
+      const hitLift = conf.confHit - conf.soloHit;
+      if (conf.confRn >= 15 && conf.soloRn >= 15) {
+        const avgLift = conf.confAvg - conf.soloAvg;
+        conf.bonus = hitLift >= 0 && avgLift >= 0 ? Math.max(0, Math.round(avgLift * 20)) : 0;
+      } else conf.bonus = hitLift > 0 ? 8 : 0;   // thin R evidence: proven-positive hit lift earns the flat unit, nothing speculative
+    } else conf.bonus = 8;
     const hitOf = (v) => (v.length ? +(v.filter((e) => e.win).length / v.length).toFixed(2) : null);
     const buckets = [{ k: "<35", lo: 0, hi: 35 }, { k: "35\u201354", lo: 35, hi: 55 }, { k: "55+", lo: 55, hi: 1e9 }]
       .map((b) => { const v = res.filter((e) => Number.isFinite(e.score0) && e.score0 >= b.lo && e.score0 < b.hi); return { k: b.k, n: v.length, hit: hitOf(v) }; });
@@ -2187,6 +2210,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   function liveNoEdge(ev, uni) {
     const src = recFor(uni), rec = src && src[ev];
     return !!(rec && rec.resolved >= 10 && rec.hit != null && rec.hit < 0.5 && rec.med != null && rec.med <= 0);
+  }
+  // Prime v2 predicate (F6): the asymmetric-profile path — an R-united event whose OWN-universe
+  // LIVE record shows avg>=0.35R over n>=12 with profit factor>=1.5. This is the read that lets a
+  // 45%-hit/+0.5R swing strategy be prime when the ledger proves it pays, which the hard hit>=0.6
+  // gate structurally forbade. Shared closure so the build and the harness exercise identical code.
+  function primeV2Live(uni, ev) {
+    if (unitOf(ev) !== "R") return false;
+    const src = recFor(uni), lr = src && src[ev];
+    return !!(lr && lr.resolved >= 12 && lr.avg != null && lr.avg >= 0.35 && lr.pf != null && lr.pf >= 1.5);
   }
   // 0..50 evidence, EXPECTANCY-centered: only base rates that actually paid (mean direction-
   // signed outcome > 0) earn points; a negative-expectancy base rate earns ZERO and flags the
@@ -3010,8 +3042,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           else if (g.rr >= 1.5) g.score += 4;
         }
       }
+      // Prime v1 kept: a proven-in-sample base rate with hit>=60%, positive expectancy, sound
+      // structure, not unproven/decayed/no-edge. But hit>=0.6 as a HARD gate structurally excludes
+      // the asymmetric swing profile the whole -20 program exists to observe — a 45%-hit/+0.5R
+      // strategy can never be prime under it, even with a live record proving it pays. F6
+      // (2026.07.30-04): OR a second path certified by the claim's OWN-universe LIVE record —
+      // avg>=0.35R AND n>=12 AND profit factor>=1.5. This path reads the resolved ledger (recFor,
+      // scoped post-F1), not the in-sample study, because "pays asymmetrically" is a claim only the
+      // record can make; and it applies only to R-united events, where 0.35 is a real R threshold
+      // (a % event's 0.35 would be meaningless). Same disqualifiers as v1: no-edge, neg-exp,
+      // earnings-in-horizon, poor structure.
       const bs = g.study && g.study.n >= 8 ? g.study : g.pooled;
-      if (bs && bs.hit >= 0.6 && bs.avg > 0 && !g.noedge && !g.negexp && !g.earn && (g.rr == null || g.rr >= 1.2)) { g.prime = true; g.score += 6; }
+      const primeV1 = bs && bs.hit >= 0.6 && bs.avg > 0;
+      const primeV2 = primeV2Live(g.uni, g.ev);   // asymmetric swing profile, certified by the live scoped record
+      if ((primeV1 || primeV2) && !g.noedge && !g.negexp && !g.earn && (g.rr == null || g.rr >= 1.2)) { g.prime = true; g.score += 6; }
       const key = g.coin + "|" + g.ev;
       { const e0 = ledgerOpen.get(key);   // fire-time prime quality on the claim, stamped once
         if (e0 && e0.pr == null) { e0.pr = !!g.prime; ledgerDirty = true; } }
@@ -9832,6 +9876,8 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     variantStateNow: () => variantState,         // harness: read/stage incumbent index + promotion history (dwell)
     variantStatsNow: () => variantStats,         // harness: read the per-variant {n,hit,avg,sd} the gate consumes
     setVariantStatsNow: (v) => { variantStats = v; },   // harness: inject variant aggregates without seeding a full ledger
+    confCacheNow: () => confCache,                       // harness: read the earned confluence bonus (F8)
+    primeV2LiveNow: (uni, ev) => primeV2Live(uni, ev),   // harness: the asymmetric-profile prime predicate against the live record (F6)
     evidenceNow: (st, ev, pooled, unit, uni) => evidence(st, ev, pooled, unit, uni),   // harness: run the REAL scoped blend (F1/F2), not a reimplementation
     recForNow: (uni) => recFor(uni),             // harness: which universe record the score reads
     resolveLedgerNow: resolveLedger,             // harness: force resolution without waiting out a horizon
