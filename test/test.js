@@ -247,6 +247,119 @@ test("playbook: explicit sides and mechanical levels", () => {
   assert.equal(C.playbook("volume", {}).side, "watch");
 });
 
+test("study overlap F10: the d5 window guard spaces accepted events ~5 apart on a daily-breakout run", () => {
+  // A monotonic staircase makes a NEW 30d high every single day for a stretch — a breakout fires
+  // daily. Without the guard, d5 counts nearly every day (heavily overlapping 5d windows); WITH the
+  // guard, accepted d5 events sit >=5 days apart, so d5.n collapses to roughly d1.n / 5. This is the
+  // pseudo-replication the guard exists to kill, made explicit.
+  const closes = [];
+  for (let i = 0; i < 80; i++) closes.push([Date.now() - (120 - i) * DAY, 100]);        // flat base -> 30d high = 100
+  for (let i = 0; i < 40; i++) closes.push([Date.now() - (40 - i) * DAY, 100 + i * 2]); // rising daily -> a new high every day
+  const bo = C.studyBreakout(closes);
+  assert.ok(bo.d1.n >= 25, "the staircase fires a breakout nearly every day (d1 counts them)");
+  assert.ok(bo.d5.n * 4 <= bo.d1.n, "d5 accepted events are spaced ~5 apart -> far fewer than d1 (the guard fired)");
+  assert.ok(bo.d5.n >= 5, "the guard thins, it does not empty");
+  assert.equal(bo.d5.n, bo.raw.d5.length, "raw d5 array and summarized n agree — no double counting");
+});
+
+test("bracketTouch F9: a same-bar both-touch is flagged amb and resolved conservatively to stop", () => {
+  const t0 = 0, H = 3600e3;
+  // long: stop below, target above. A candle whose low<=stop AND high>=target straddles both.
+  const straddle = [[t0 + H, 100, 100, 100, 100], [t0 + 2 * H, 100, 130, 80, 100]];   // [t,o,h,l,c]
+  const r = C.bracketTouch(straddle, t0, t0 + 10 * H, "long", 90, 120);   // stop 90, target 120
+  assert.equal(r.hit, "stop", "conservative: a straddling bar resolves to the stop");
+  assert.equal(r.amb, true, "the straddle is flagged ambiguous");
+  // a clean target touch (no stop breach on the bar) is NOT ambiguous
+  const clean = [[t0 + H, 100, 100, 100, 100], [t0 + 2 * H, 100, 130, 95, 100]];   // low 95 > stop 90
+  const r2 = C.bracketTouch(clean, t0, t0 + 10 * H, "long", 90, 120);
+  assert.equal(r2.hit, "target", "clean target touch");
+  assert.equal(r2.amb, false, "a clean target is not ambiguous");
+});
+
+test("intrabarCross F5: true only when the live mark crossed but the last COMPLETED close did not", () => {
+  const now = Date.UTC(2026, 6, 30, 18, 0, 0);   // mid-session ET
+  const dayStart = Date.UTC(2026, 6, 30);
+  // A series whose last bar is TODAY (forming) — its close is the live-ish value; the completed
+  // reference is the prior bar. level = 105.
+  const forming = [[dayStart - 2 * DAY, 100], [dayStart - DAY, 102], [dayStart, 108]];
+  // breakout (dir +1): completed close is 102 (<=105) while today's bar shows 108 -> intrabar only.
+  assert.equal(C.intrabarCross(forming, 105, 1, now), true, "forming last bar: completed close under the level -> intrabar");
+  // If the completed prior close were already above the level, it's a close-confirmed cross.
+  const confirmed = [[dayStart - 2 * DAY, 100], [dayStart - DAY, 106], [dayStart, 108]];
+  assert.equal(C.intrabarCross(confirmed, 105, 1, now), false, "completed close already above -> close-confirmed, not intrabar");
+  // When the last bar is a COMPLETED day (its UTC day already ended), it IS the reference.
+  const closed = [[dayStart - 2 * DAY, 100], [dayStart - DAY, 108]];   // last bar's day ended before `now`
+  assert.equal(C.intrabarCross(closed, 105, 1, now), false, "a completed last bar above the level is close-confirmed");
+  // breakdown (dir -1): mirror — completed close still at/over the low is intrabar.
+  const fd = [[dayStart - 2 * DAY, 100], [dayStart - DAY, 98], [dayStart, 92]];
+  assert.equal(C.intrabarCross(fd, 95, -1, now), true, "breakdown: completed close over the low -> intrabar");
+  assert.equal(C.intrabarCross([], 100, 1, now), false, "empty series is never a cross");
+  assert.equal(C.intrabarCross([[dayStart, 108]], 105, 1, now), false, "a lone forming bar has no completed reference");
+});
+
+test("fire-time stamps F5/vr: a breakout claim carries ib (intrabar) and vr (vol-regime) at fire", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  // 160 daily bars (>=140 so the coil/vr percentile computes; a gentle wave keeps a real 30d high).
+  const daily = [];
+  for (let i = 0; i < 160; i++) { const c = 100 + Math.sin(i / 5) * 1.5;
+    daily.push({ t: (Math.floor(Date.now() / DAY) - 160 + i) * DAY, c, l: c * 0.98, h: c * 1.02 }); }
+  const hi30 = Math.max(...daily.slice(-31, -1).map((d) => d.c));
+  const hourly = []; for (let i = 0; i < 48; i++) hourly.push({ t: (Math.floor(Date.now() / HOUR) - 48 + i) * HOUR, o: 100, h: 100, l: 100, c: 100, v: 1 });
+  // Build 1: mark just BELOW the prior-30d high — no breakout, but the pass-2 block stamps r._vr.
+  const r = p.seedRowNow("VRSIG", { px: hi30 * 0.99, ticker: "VRSIG", uni: "xyz", vol: 1e6, dailyRaw: daily, hourlyRaw: hourly });
+  p.buildDailyNow();
+  await p.buildSignalsNow();
+  assert.equal(p.ledgerOpenNow().size, 0, "no breakout yet — mark is under the high");
+  // Build 2: push the mark above the high. The last COMPLETED daily close is still ~100 (< the
+  // high), so the cross is intrabar (ib=1); r._vr is already present from build 1, so it stamps.
+  r.px = hi30 * 1.03;
+  await p.buildSignalsNow();
+  const e = p.ledgerOpenNow().get("VRSIG|breakout");
+  assert.ok(e, "breakout claim opened on the intrabar cross");
+  assert.equal(e.ib, 1, "ib=1: only the live mark cleared the high, the last completed close had not");
+  assert.ok(Number.isFinite(e.vr) && e.vr >= 0 && e.vr <= 100, "vr stamped as a 0..100 vol-regime percentile");
+});
+
+test("gap study F-gap: the forward session uses the TRUE close, honoring early-close half-days", () => {
+  // 2025-07-03 is a US early close (13:00 ET / 17:00 UTC) because Jul 4 2025 is a Friday. Its
+  // session opens 09:30 ET (13:30 UTC); a fixed open+6.5h lands at 20:00 UTC (16:00 ET) — 3h past
+  // the real close. We prove the study reads the TRUE 13:00 close by making the price at 13:00
+  // differ sharply from the 16:00 print, and by making 2025-07-03 the ONLY qualifying (>=0.75σ)
+  // gap so its outcome is the only session return in the record.
+  const HH = HOUR;
+  // A long, flat hourly spine covering late June -> July 3, close at index 4 (OHLCV). Small daily
+  // wiggles on the prior days give the gap-sigma sample nonzero variance without any of them
+  // reaching the 0.75σ threshold; the July-3 +10% gap is the lone qualifier.
+  const spine = [];
+  const start = Date.UTC(2025, 5, 20, 12, 0), end = Date.UTC(2025, 6, 3, 22, 0);
+  const open = Date.UTC(2025, 6, 3, 13, 30), trueClose = Date.UTC(2025, 6, 3, 17, 0), phantom = Date.UTC(2025, 6, 3, 20, 0);
+  for (let t = start; t <= end; t += HH) {
+    let c = 100 + 0.3 * Math.sin(t / (7 * HH));   // gentle sub-threshold wiggle
+    if (t >= open && t < trueClose) c = 110;
+    else if (t >= trueClose && t < phantom) c = 130;
+    else if (t >= phantom) c = 101;
+    spine.push([t, c, c, c, c]);
+  }
+  // Gap windows: 11 tiny filler gaps (sub-threshold, to build the sd sample) on prior days, plus
+  // the July-3 gap (prior close 100 -> open 110 = +10%, the outlier that clears 0.75σ).
+  const windows = [];
+  for (let i = 0; i < 11; i++) {
+    const day = Date.UTC(2025, 5, 21 + i, 20, 0);   // ~16:00 ET prior close
+    windows.push({ enter: day, exit: day + 17.5 * HH });   // tiny drift across the hold -> ~0 gap
+  }
+  windows.push({ enter: Date.UTC(2025, 6, 2, 20, 0), exit: open });   // the qualifying July-3 gap
+  const res = C.studyGapFade(spine, windows, 4 * HH);
+  assert.ok(res.sd > 0, "enough gaps to establish the gap-sigma baseline");
+  assert.ok(res.raw && res.raw.session.length >= 1, "the July-3 gap qualifies and is measured");
+  // Open 110 -> TRUE 13:00 close 130 = +18.2%, signed with the up gap = positive and large. The old
+  // fixed +6.5h would have read the 101 revert (~ -8%). A clearly-positive outcome proves the fix.
+  assert.ok(res.raw.session.some((x) => x > 10),
+    "measured to the 13:00 half-day close (+18%), not the phantom 16:00 revert (which would be negative)");
+});
+
 test("EV_META horizons align with the studies' sign conventions", () => {
   assert.equal(C.EV_META.bigmove.horizonMs, DAY);
   assert.equal(C.EV_META.breakout.horizonMs, 5 * DAY);
@@ -570,6 +683,42 @@ test("blend F1: no-edge guard is scoped — a cold record in one universe can't 
   assert.ok(cxEv.pts > 8, "crypto score rides its own clean record past the cap");
 });
 
+test("blend F3: the live record blends toward recency — recent winners outweigh old losers", () => {
+  const { createPoller } = require("../src/poller");
+  const now = Date.now();
+  // Two equity records for different events, identical claim COUNT and identical FLAT mean (0),
+  // but opposite time ordering: one has recent WINNERS + old losers, the other recent LOSERS +
+  // old winners. The recency-weighted avgR must diverge — positive for the first, negative for the
+  // second — even though the all-time avg is ~0 for both. That divergence is F3.
+  function entTimed(coin, ev, i, realized, ageDays) {
+    const t0 = now - ageDays * 86400000 - i * 1000;
+    return { key: coin + "|" + ev + "#" + i, coin, ticker: coin.split(":").pop(), ev, t0, mark0: 100,
+      dir: 1, sd0: 2, status: "resolved", tR: now - ageDays * 86400000, realized, realizedS: realized,
+      win: realized > 0, winS: realized > 0, psd: "long", pn: 1 };
+  }
+  const closed = [];
+  // recentWin event: +1R in the last ~10d, -1R ~300d ago -> flat all-time, positive recency
+  for (let i = 0; i < 12; i++) closed.push(entTimed("xyz:RW", "breakout", i, 1, 8));
+  for (let i = 0; i < 12; i++) closed.push(entTimed("xyz:RW", "breakout", 100 + i, -1, 300));
+  // recentLoss event: mirror -> flat all-time, negative recency
+  for (let i = 0; i < 12; i++) closed.push(entTimed("xyz:RL", "breakdown", i, -1, 8));
+  for (let i = 0; i < 12; i++) closed.push(entTimed("xyz:RL", "breakdown", 100 + i, 1, 300));
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => ({ ts: now, rearm: [], variants: null, open: [], closed }),
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, archiveClosed: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.hydrateLedgerNow(); p.recomputeRecordNow();
+  const rw = p.recForNow("xyz").breakout, rl = p.recForNow("xyz").breakdown;
+  assert.ok(Math.abs(rw.avg) < 0.2, "recentWin event is ~flat on the all-time mean");
+  assert.ok(rw.avgR > 0.3, "but its recency-weighted mean is clearly positive (recent winners dominate)");
+  assert.ok(rl.avgR < -0.3, "the mirror's recency-weighted mean is clearly negative");
+  // And the blend consumes avgR: a neutral study blended against each record scores higher for the
+  // recent-winner event than the recent-loser one, though their all-time means are identical.
+  const study = { n: 12, hit: 0.5, med: 0, avg: 0 };
+  const evRW = p.evidenceNow(study, "breakout", null, "R", "xyz");
+  const evRL = p.evidenceNow(study, "breakdown", null, "R", "xyz");
+  assert.ok(evRW.pts > evRL.pts, "the blend rewards the recently-working signal over the recently-failing one");
+});
+
 test("blend F2: trust migrates at tape-DAY speed (cl), not raw claim count", () => {
   const { createPoller } = require("../src/poller");
   // Two universes, identical n and identical live avg, but one record fired all on ONE day
@@ -762,7 +911,7 @@ test("ledger export: raw completeness, shadow/legacy accounting, self-describing
   assert.ok(x.closed.some(e => e.vi === 1), "shadow entry present in the dump");
   assert.ok(x.closed.every(e => typeof e.key === "string"), "raw internal shape — key survives (curated pub drops it)");
   assert.ok(x.variants && x.variants.state && typeof x.variants.stats === "object", "variant state + stats ship for the variant slices");
-  for (const k of ["ev", "vi", "sd0", "stp", "realizedS", "fndP", "rngP", "mktR", "ses", "tal"])
+  for (const k of ["ev", "vi", "sd0", "stp", "realizedS", "fndP", "rngP", "mktR", "ses", "tal", "vr", "ib", "amb"])
     assert.ok(typeof x.meta.glossary[k] === "string" && x.meta.glossary[k].length, `glossary documents ${k}`);
   // route wiring: download header + no-store are pinned in server source (the manifest test
   // already pins the registration itself and the getLedgerExport getter's existence)
@@ -11377,7 +11526,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.30-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.30-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11518,7 +11667,7 @@ test("swing -20: poller wiring manifest — fire sites, resolver, rosters, gloss
     "stp: bb.stop, tgt: bb.targetL, tm: 1",
     "stp: bb.stop, tgt: bb.targetP, tm: 1",
     "const br = bracketTouch(hs, e.t0, Math.min(e.resolveAt, now), sideE, e.stp, e.tgt);",   // early-touch scan
-    'if (br) { pTouch = br.level; tEnd = br.t; e.rb = br.hit === "target" ? "t" : "s"; }',
+    'if (br) { pTouch = br.level; tEnd = br.t; e.rb = br.hit === "target" ? "t" : "s"; if (br.amb) e.amb = 1; }',
     "else if (now < e.resolveAt) continue;",                     // untouched + not expired -> still live
     "if (e.tm === 1 && e.rb) e.realizedB = realized;",           // touch claims: tracks coincide
     "e.realizedB = br ? +(sgn * (br.level / p0 - 1) * 100).toFixed(2) : realized;",          // symmetric track
