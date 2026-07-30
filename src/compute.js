@@ -2792,11 +2792,25 @@ function linkEarningsFilings(entries, filings, nowMs) {
 // beats the incumbent's by a real margin (0.08 native units) AND is positive; and its hit rate
 // hasn't collapsed (>= incumbent - 0.02, i.e. it isn't a pure tail-rider). Strict on purpose:
 // with samples this small, promotion churn IS the failure mode. Reversible by the same rule.
+// Promotion gate for a challenger threshold over the incumbent. Both stats carry {n, hit, avg}
+// and now {sd} (stdev of the variant's resolved outcomes) so the margin can be scaled to noise.
+// The old fixed +0.08R margin sits INSIDE the sampling error at n=30 (SE of a mean at sd~1.3R,
+// n=30 is ~0.24R), so a coin-flip difference could promote — and checkPromotions re-tests every
+// build, a slow multiple-comparisons channel that eventually crosses any fixed line by chance.
+// F4 (2026.07.30-03): the challenger must beat the incumbent by at least max(0.08R, 1 pooled SE
+// of the difference in means). SE uses each side's own dispersion; when sd is missing (older
+// aggregates that never stamped it) it falls back to a conservative 1.0R proxy so the gate stays
+// STRICTER, never looser, than before. The daily clock and min-dwell that bound re-testing live
+// in the caller (checkPromotions).
 function shouldPromote(inc, ch) {
   if (!inc || !ch || !(inc.n >= 30) || !(ch.n >= 30)) return false;
   if (ch.avg == null || inc.avg == null || ch.hit == null || inc.hit == null) return false;
   if (!(ch.avg > 0)) return false;
-  if (!(ch.avg >= inc.avg + 0.08)) return false;
+  const sdC = Number.isFinite(ch.sd) && ch.sd > 0 ? ch.sd : 1.0;   // conservative proxy -> wider bar, never narrower
+  const sdI = Number.isFinite(inc.sd) && inc.sd > 0 ? inc.sd : 1.0;
+  const se = Math.sqrt((sdC * sdC) / ch.n + (sdI * sdI) / inc.n);   // SE of (chAvg - incAvg)
+  const margin = Math.max(0.08, se);                                // at least 1 SE, floor at the old 0.08R
+  if (!(ch.avg >= inc.avg + margin)) return false;
   if (!(ch.hit >= inc.hit - 0.02)) return false;
   return true;
 }

@@ -2168,9 +2168,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     variantStats = {};
     for (const ev in vagg) variantStats[ev] = vagg[ev].map((rets) => {
-      if (!rets || !rets.length) return { n: 0, hit: null, avg: null };
+      if (!rets || !rets.length) return { n: 0, hit: null, avg: null, sd: null };
       const sm = summarizeEvents(rets);
-      return { n: sm.n, hit: +(rets.filter((x) => x > 0).length / rets.length).toFixed(2), avg: sm.avg };
+      return { n: sm.n, hit: +(rets.filter((x) => x > 0).length / rets.length).toFixed(2), avg: sm.avg,
+        sd: rets.length >= 2 ? +stdev(rets.filter(Number.isFinite)).toFixed(3) : null };   // dispersion for the SE-scaled promotion margin (F4)
     });
   }
   // The live record the score should read for a claim in universe `uni`. Scoped to the firing
@@ -2244,10 +2245,29 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }, extra || {});
   }
 
-  function checkPromotions() {
+  // F4 (2026.07.30-03): re-testing every build against slowly-drifting cumulative stats is a
+  // multiple-comparisons channel — tens of thousands of evaluations will eventually cross any
+  // fixed line by chance. Two bounds close it: a DAILY clock (evaluate at most once per ~20h) and
+  // a MIN-DWELL (a threshold promoted within the last PROMO_DWELL_MS cannot be moved again).
+  // Neither is persisted: a restart merely delays the next evaluation by up to a day, which is
+  // harmless — the same posture the coverage re-arm clock takes. The dwell reads the last hist
+  // entry's timestamp, which IS persisted with the ledger, so a fresh promotion survives a reboot
+  // with its dwell intact.
+  const PROMO_CHECK_MS = 20 * 3600e3;   // at most one promotion sweep per ~20h
+  const PROMO_DWELL_MS = 10 * 86400e3;  // a just-promoted threshold holds for 10 days before it can move again
+  let lastPromoCheck = 0;
+  function checkPromotions(force) {
+    const now = Date.now();
+    if (!force && now - lastPromoCheck < PROMO_CHECK_MS) return;   // daily clock: skip until the window elapses
+    lastPromoCheck = now;
     for (const ev in VARIANTS) {
       const stats = variantStats[ev]; if (!stats) continue;
-      const inc = variantState[ev].inc, incStats = stats[inc];
+      const st = variantState[ev];
+      // Min-dwell: if the incumbent was set within the dwell window, leave it alone. The last
+      // hist entry is the most recent promotion; its `t` is the incumbent's install time.
+      const lastH = st.hist && st.hist.length ? st.hist[st.hist.length - 1] : null;
+      if (lastH && Number.isFinite(lastH.t) && now - lastH.t < PROMO_DWELL_MS) continue;
+      const inc = st.inc, incStats = stats[inc];
       let best = null;
       for (let vi = 0; vi < VARIANTS[ev].vals.length; vi++) {
         if (vi === inc || !stats[vi]) continue;
@@ -2256,8 +2276,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (best != null) {
         const h = { t: Date.now(), from: VARIANTS[ev].vals[inc], to: VARIANTS[ev].vals[best],
           incN: incStats.n, incAvg: incStats.avg, chN: stats[best].n, chAvg: stats[best].avg };
-        variantState[ev].inc = best;
-        variantState[ev].hist.push(h); if (variantState[ev].hist.length > 20) variantState[ev].hist.shift();
+        st.inc = best;
+        st.hist.push(h); if (st.hist.length > 20) st.hist.shift();
         ledgerDirty = true;
         log(`Variant promotion: ${ev} threshold ${h.from} -> ${h.to} (incumbent ${h.incAvg} on n=${h.incN} vs challenger ${h.chAvg} on n=${h.chN}, out-of-sample)`);
       }
@@ -9808,6 +9828,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     ledgerOpenNow: () => ledgerOpen,             // harness: reach the open claims to stage geometry
     ledgerClosedNow: () => ledgerClosed,         // harness: stage resolved entries so the scoped record builds off real claims
     recomputeRecordNow: recomputeRecord,         // harness: rebuild recordCache/recordCacheU from the staged ledger without a full build
+    checkPromotionsNow: (force) => checkPromotions(force),   // harness: run the promotion sweep; force=true bypasses the daily clock (F4)
+    variantStateNow: () => variantState,         // harness: read/stage incumbent index + promotion history (dwell)
+    variantStatsNow: () => variantStats,         // harness: read the per-variant {n,hit,avg,sd} the gate consumes
+    setVariantStatsNow: (v) => { variantStats = v; },   // harness: inject variant aggregates without seeding a full ledger
     evidenceNow: (st, ev, pooled, unit, uni) => evidence(st, ev, pooled, unit, uni),   // harness: run the REAL scoped blend (F1/F2), not a reimplementation
     recForNow: (uni) => recFor(uni),             // harness: which universe record the score reads
     resolveLedgerNow: resolveLedger,             // harness: force resolution without waiting out a horizon
