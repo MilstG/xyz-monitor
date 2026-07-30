@@ -906,17 +906,58 @@ function carryCell(r){ const v=r.carry;
   const c=v>0.05?'pos':(v<-0.05?'neg':'sec'), fAPR=(r._carryF!=null)?r._carryF:null;
   const t=`funding ${fAPR!=null?(fAPR>=0?'+':'')+fAPR.toFixed(0)+'% APR':'n/a'} \u00f7 vol ${r.vol30!=null?r.vol30.toFixed(0)+'%':'n/a'} \u2014 ${v>=0?'shorts are paid':'longs are paid'} ${Math.abs(v).toFixed(2)} vol-units/yr to hold`;
   return `<td${shade(v,1)} title="${esc(t)}"><span class="${c}">${v>=0?'+':''}${v.toFixed(2)}</span></td>`; }
+// ===== row-level table patching (build 2026.07.29-09) ==========================================
+// The content short-circuit skips UNCHANGED snapshots; this handles the other 99%: one tick moved,
+// and the old path re-parsed a 140-row table's innerHTML and re-laid-out everything. Now the row
+// STRINGS are still all built every render — string concat was never the cost; parse + layout was
+// — and the DOM is only touched where a row's string actually differs from what that row already
+// is. One code path is preserved at the level that matters: rowHtml() is the ONLY producer of row
+// markup, full rebuild and patch both consume its exact output, so the patched table is byte-
+// identical to a rebuild BY CONSTRUCTION (and the harness proves it, not just asserts it).
+//
+// The patch path only runs when the table SHAPE is provably unchanged: same coins in the same
+// order, same visible column set, same bench row, and the live DOM has exactly the row count we
+// think it has. Any mismatch — sort flips, filter edits, scope/column changes, or an external
+// write like errRow() replacing the tbody — fails the gate and takes the full rebuild, which also
+// re-primes the cache. Self-healing beats clever: the cache can never wedge the board, because
+// disagreement with reality always resolves to "rebuild everything", never to "trust the cache".
+let _rowCache=null, _rowStruct='';
+function rowHtml(r, vc, bScope){
+  const cls=(r.coin===bScope)?' class="benchrow"':'';
+  let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>';
+  r.flash=null;   // consumed into this string exactly as the rebuild path always did — the NEXT
+                  // render produces a flash-free string, so the patcher clears the class then
+  return row;
+}
+// Split out for the execution-smoke harness: given aligned old/new row strings and a children-like
+// list, rewrite ONLY the slots whose strings differ. Returns the write count — the perf claim is
+// "unchanged rows cost zero DOM writes", and the test asserts the number, not the vibe.
+function patchRowsInto(children, oldHtml, newHtml){
+  let writes=0;
+  for(let i=0;i<newHtml.length;i++){ if(oldHtml[i]!==newHtml[i]){ children[i].outerHTML=newHtml[i]; writes++; } }
+  return writes;
+}
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts();
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
-  if(!rows.length){ body.innerHTML=`<tr><td colspan="${vc.length}"><div class="msg"><span class="big">No matches</span>Clear the filters to see all markets.</div></td></tr>`; return; }
-  const out=[];
+  if(!rows.length){ body.innerHTML=`<tr><td colspan="${vc.length}"><div class="msg"><span class="big">No matches</span>Clear the filters to see all markets.</div></td></tr>`; _rowCache=null; return; }
   const bScope=scopeBench();
-  for(const r of rows){ const cls=(r.coin===bScope)?' class="benchrow"':'';
-    let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>'; r.flash=null; out.push(row); }
-  body.innerHTML=out.join('');
-  applyKsel();   // innerHTML rebuild wipes the j/k highlight — re-pin it to the selected coin
+  const out=[], coins=[];
+  for(const r of rows){ out.push(rowHtml(r, vc, bScope)); coins.push(r.coin); }
+  // Structural signature: row identity+order, visible columns, bench. \u0001/\u0002 separators can
+  // never appear in a coin or column key, so the signature is collision-free by construction.
+  const struct=coins.join('\u0001')+'\u0002'+vc.map(c=>c.key).join('\u0001')+'\u0002'+(bScope||'');
+  if(_rowCache && struct===_rowStruct && body.children.length===out.length){
+    const oldHtml=coins.map(c=>_rowCache.get(c));
+    patchRowsInto(body.children, oldHtml, out);
+    for(let i=0;i<coins.length;i++) if(oldHtml[i]!==out[i]) _rowCache.set(coins[i], out[i]);
+  } else {
+    body.innerHTML=out.join('');
+    _rowCache=new Map(); for(let i=0;i<coins.length;i++) _rowCache.set(coins[i], out[i]);
+    _rowStruct=struct;
+  }
+  applyKsel();   // rebuild wipes the j/k highlight; a patch may have replaced the selected row — re-pin either way
 }
 function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(r.d1));
   if(rows.length<3){ el('movers').hidden=true; return; } el('movers').hidden=false;
