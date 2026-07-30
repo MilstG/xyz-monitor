@@ -1418,7 +1418,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // and records the realized outcome UNDER THE SAME SIGN CONVENTION the study claims, so the
   // in-sample base rate and the live out-of-sample record are directly comparable. Event types
   // whose live record shows no edge get their evidence score capped automatically.
-  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, confCache = null, recordXCache = null, recordSets = null;
+  let ledgerOpen = new Map(), ledgerClosed = [], ledgerDirty = false, recordCache = null, recordCacheU = null, confCache = null, recordXCache = null, recordSets = null;
   // Episode re-arm gate: when a claim resolves while its condition is STILL firing, the key is
   // parked here and openLedger refuses to re-open it until the condition lapses for at least one
   // full build. Without this, one persistent episode (a premium dislocation across a closed
@@ -2147,7 +2147,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       for (const u of ["m", "x"])
         recordSets[key + u] = buildRecordSet(resolved.filter((e) => f(e) && uniOf(e) === u), openReal.filter((e) => f(e) && uniOf(e) === u));
     }
-    recordCache = recordSets["0"].record;       // evidence blend + no-edge cap always use the FULL record
+    recordCache = recordSets["0"].record;       // full record: confluence bonus + anything not universe-scoped
+    // F1 (2026.07.30-02): the study<->live Bayesian blend and the no-edge guard read the record of
+    // the FIRING claim's OWN universe, never the mixed pot. A crypto bigmove resolves on a 12h clock
+    // and an equity bigmove on a 1d clock (EV_META_MAIN) — blending an equity score toward crypto's
+    // record (or vice versa) is exactly the cross-universe contamination the tab split already
+    // refuses to render, leaking into the SCORE. recordCacheU carries the two scoped records so the
+    // score honours the same wall the panels do. Scoped-ONLY by decision: a thin universe record
+    // migrates trust slowly (the cl-weighted shrinkage below keeps a 2-day record near-weightless),
+    // which is the honest behaviour; the ONLY fallback to the full pot is a genuinely empty scoped
+    // set (crypto disabled -> no "x" claims ever), handled at the read site.
+    recordCacheU = { m: recordSets["0m"].record, x: recordSets["0x"].record };
     confCache = recordSets["0"].confluence;
     recordXCache = recordSets["0"].recordX;
     const vagg = {};
@@ -2163,8 +2173,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       return { n: sm.n, hit: +(rets.filter((x) => x > 0).length / rets.length).toFixed(2), avg: sm.avg };
     });
   }
-  function liveNoEdge(ev) {
-    const rec = recordCache && recordCache[ev];
+  // The live record the score should read for a claim in universe `uni`. Scoped to the firing
+  // claim's own universe (F1); falls back to the full record ONLY when the scoped set is genuinely
+  // absent — i.e. crypto disabled, so the "x" record was never built and no "x" claim can ever
+  // resolve. A merely THIN scoped record is used as-is: the cl-weighted shrinkage keeps it from
+  // moving the score much until real resolutions accrue, which is the honest slow migration.
+  function recFor(uni) {
+    if (!recordCacheU) return recordCache;
+    const scoped = uni === "main" ? recordCacheU.m : recordCacheU.x;
+    return scoped || recordCache;   // {} is a valid (empty) scoped record and is kept; only null/undefined falls back
+  }
+  function liveNoEdge(ev, uni) {
+    const src = recFor(uni), rec = src && src[ev];
     return !!(rec && rec.resolved >= 10 && rec.hit != null && rec.hit < 0.5 && rec.med != null && rec.med <= 0);
   }
   // 0..50 evidence, EXPECTANCY-centered: only base rates that actually paid (mean direction-
@@ -2174,21 +2194,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // now sinks instead of riding its intensity score.
   function evPts(st, unit) {
     const scale = unit === "R" ? 0.5 : 0.8;   // +0.5R/event is strong edge; +0.8%/event was the % calibration
-    if (st.avg == null) return Math.min(1, Math.abs(st.med) / (unit === "R" ? 1 : 1.5)) * 30 + Math.abs(st.hit - 0.5) * 2 * 20;
+    // Fallback branch (no avg — a claim/pool that never carried an expectancy): mirror the main
+    // branch's expectancy discipline rather than rewarding raw |med|/|hit-0.5|. A -1R median and
+    // a 0.20 hit rate must not score identically to +1R and 0.80 (F7). Only a positive median and
+    // above-even hit earn here, same posture as avg>0 below.
+    if (st.avg == null) {
+      if (st.med == null || st.med <= 0) return Math.max(0, (st.hit || 0) - 0.5) * 2 * 20;
+      return Math.min(1, st.med / (unit === "R" ? 1 : 1.5)) * 30 + Math.max(0, (st.hit || 0) - 0.5) * 2 * 20;
+    }
     if (st.avg <= 0) return 0;
     return Math.min(1, st.avg / scale) * 30 + Math.max(0, st.hit - 0.5) * 2 * 20;
   }
-  // Evidence with Bayesian shrinkage toward the LIVE out-of-sample record: once an event type
-  // has >=5 resolutions, the stats driving the score become a blend of the in-sample base rate
-  // and the live record, weighted w = resolved/(resolved+25) — at 5 resolutions the study still
-  // dominates (w=0.17), at 50 the live record does (w=0.67). Trust migrates continuously from
-  // backtest to reality, in both directions: a live record BETTER than claimed now earns more.
-  // Units align because the resolver scores ledgered events in the units the studies claim.
-  function evidence(st, ev, pooled, unit) {
-    const rec = recordCache && recordCache[ev];
+  // Evidence with Bayesian shrinkage toward the LIVE out-of-sample record (of the claim's OWN
+  // universe, F1). Once an event type has >=5 resolutions the stats driving the score blend the
+  // in-sample base rate with the live record, weighted w = cl/(cl+25) where cl is the count of
+  // distinct UTC tape-DAYS the resolutions fell on, NOT the raw claim count (F2). On a universe
+  // ~0.8-correlated to one benchmark, forty longs opened into one green day are one draw, not
+  // forty — weighting by cl makes the trust-migration speed match the independence the panel
+  // already discloses next to n. cl falls back to `resolved` for pre-cl cached records. Trust
+  // migrates continuously in both directions: a live record better than claimed earns more.
+  function evidence(st, ev, pooled, unit, uni) {
+    const src = recFor(uni), rec = src && src[ev];
     const scored = (stats, discount) => {
       if (rec && rec.resolved >= 5 && rec.hit != null && rec.avg != null && stats.avg != null) {
-        const w = rec.resolved / (rec.resolved + 25);
+        const eff = rec.cl != null && rec.cl > 0 ? rec.cl : rec.resolved;   // independent tape-days, not claim count
+        const w = eff / (eff + 25);
         return { pts: evPts({ avg: (1 - w) * stats.avg + w * rec.avg, hit: (1 - w) * stats.hit + w * rec.hit }, unit) * discount,
           liveW: Math.round(w * 100) };
       }
@@ -2199,7 +2229,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     else if (pooled && pooled.n >= 12) { const b = scored(pooled, 0.7); base = { pts: b.pts, liveW: b.liveW, unproven: true, st: st && st.n ? st : null, pooled, negexp: pooled.avg != null && pooled.avg <= 0 }; }
     else base = { pts: st && st.n ? 8 : 6, unproven: true, st: st && st.n ? st : null };
     base.unit = unit || "%";
-    if (ev && liveNoEdge(ev)) { base.pts = Math.min(base.pts, 8); base.noedge = true; }   // hard guard stays on top of the blend
+    if (ev && liveNoEdge(ev, uni)) { base.pts = Math.min(base.pts, 8); base.noedge = true; }   // hard guard stays on top of the blend
     return base;
   }
   function mkSignal(r, ev, valTxt, intensity, evd, extra) {
@@ -2372,7 +2402,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         // shadow-ledger every variant the measure clears (incumbent included — identical bookkeeping)
         VARIANTS.bigmove.vals.forEach((v, vi) => { if (zMove >= v) openLedger(r, "bigmove", { score: 0, reading: "" }, dir, { sd0: +sd30.toFixed(3) }, vi); });
         if (zMove >= vBM) {
-          const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"), "R");
+          const evd = evidence(st.bigmove && st.bigmove.d1, "bigmove", pooledFor(ac, "bigmove", "d1"), "R", r.uni);
           const sig = mkSignal(r, "bigmove", `${r.d1 >= 0 ? "+" : ""}${r.d1.toFixed(1)}% today (${zMove.toFixed(1)}\u03c3 ${dir > 0 ? "up" : "down"})`,
             (zMove - vBM) * 20 + 20, evd, { horizon: evMeta("bigmove", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);   // R -> % via this market's own sigma
@@ -2384,7 +2414,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         let hi = -Infinity;
         for (let j = closes.length - 31; j < closes.length - 1; j++) if (closes[j][1] > hi) hi = closes[j][1];
         if (hi > 0 && r.px > hi && closes[closes.length - 2][1] <= hi) {
-          const evd = evidence(st.breakout && st.breakout.d5, "breakout", pooledFor(ac, "breakout", "d5"), "R");
+          const evd = evidence(st.breakout && st.breakout.d5, "breakout", pooledFor(ac, "breakout", "d5"), "R", r.uni);
           const sig = mkSignal(r, "breakout", `mark ${((r.px / hi - 1) * 100).toFixed(1)}% above the prior 30d high`,
             ((r.px / hi - 1) * 100) * 12 + 15, evd, { horizon: evMeta("breakout", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
@@ -2394,7 +2424,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         let lo = Infinity;
         for (let j = closes.length - 31; j < closes.length - 1; j++) if (closes[j][1] < lo) lo = closes[j][1];
         if (isFinite(lo) && lo > 0 && r.px < lo && closes[closes.length - 2][1] >= lo) {
-          const evd = evidence(st.breakdown && st.breakdown.d5, "breakdown", pooledFor(ac, "breakdown", "d5"), "R");
+          const evd = evidence(st.breakdown && st.breakdown.d5, "breakdown", pooledFor(ac, "breakdown", "d5"), "R", r.uni);
           const sig = mkSignal(r, "breakdown", `mark ${((1 - r.px / lo) * 100).toFixed(1)}% below the prior 30d low`,
             ((1 - r.px / lo) * 100) * 12 + 15, evd, { horizon: evMeta("breakdown", r.uni).horizon });
           { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
@@ -2580,7 +2610,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             const zF = (doiNow.d7 - st.oiflush.cur.mu) / st.oiflush.cur.sd;
             VARIANTS.oiflush.vals.forEach((v, vi) => { if (zF <= -v && r.d7 < 0 && sd30 > 0) openLedger(r, "oiflush", { score: 0, reading: "" }, 1, { sd0: +sd30.toFixed(3) }, vi); });
             if (zF <= -incVal("oiflush") && r.d7 < 0) {
-              const evd = evidence(st.oiflush.d5, "oiflush", pooledFor(ac, "oiflush", "d5"), "R");
+              const evd = evidence(st.oiflush.d5, "oiflush", pooledFor(ac, "oiflush", "d5"), "R", r.uni);
               const sig = mkSignal(r, "oiflush", `\u0394OI7d ${doiNow.d7.toFixed(1)}% (${zF.toFixed(1)}\u03c3 flush) into a ${r.d7.toFixed(1)}% decline`,
                 (-zF - incVal("oiflush")) * 18 + 18, evd, { horizon: evMeta("oiflush", r.uni).horizon });
               { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
@@ -2598,7 +2628,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             if (z7 >= 0.8 && fwD.d1 < fwD.d7 - EPS_H) dDir = 1;
             else if (z7 <= -0.8 && fwD.d1 > fwD.d7 + EPS_H) dDir = -1;
             if (dDir) {
-              const evd = evidence(st.fpdiv.d3, "fpdiv", pooledFor(ac, "fpdiv", "d3"), "R");
+              const evd = evidence(st.fpdiv.d3, "fpdiv", pooledFor(ac, "fpdiv", "d3"), "R", r.uni);
               const sig = mkSignal(r, "fpdiv", `${dDir > 0 ? "strength" : "weakness"} (${z7.toFixed(1)}\u03c3 7d) while funding ${dDir > 0 ? "falls" : "rises"} \u2014 ${dDir > 0 ? "shorts pressing" : "longs averaging down"}`,
                 (Math.abs(z7) - 0.8) * 20 + 16, evd, { horizon: evMeta("fpdiv", r.uni).horizon });
               { const mR = sig.study ? sig.study.med : (sig.pooled ? sig.pooled.med : null);
@@ -2623,7 +2653,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             const cf = latestCascade(czCasc.get(r.coin), now, CASC_LOOK_MS);
             const ce = cf ? detectCascExhaust(cf, getHourly(r.coin), r.px, { now }) : null;
             if (ce) {
-              const evd = evidence(null, "casc", null, "R");
+              const evd = evidence(null, "casc", null, "R", r.uni);
               const ageH = Math.max(1, Math.round(ce.ageMs / HOUR));
               const sigC = mkSignal(r, "casc",
                 `${ce.side === "long" ? "long" : "short"}-side cascade ${ageH}h ago \u2014 ${ce.liq >= 1e9 ? (ce.liq/1e9).toFixed(1)+"B" : ce.liq >= 1e6 ? (ce.liq/1e6).toFixed(1)+"M" : Math.round(ce.liq/1e3)+"K"} force-liquidated in one 15m bucket, OI ${ce.doiPct != null ? (ce.doiPct > 0 ? "+" : "") + ce.doiPct.toFixed(1) + "%" : "down"} with it; the flush ${ce.side === "long" ? "low" : "high"} has held since`,
@@ -2659,7 +2689,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             }
             if (held >= FUNDEXT_MIN_SAMPLES) {
               const fAPR = r.funding * 24 * 365 * 100;
-              const evd = evidence(null, "fundext", null, "R");
+              const evd = evidence(null, "fundext", null, "R", r.uni);
               const sigF = mkSignal(r, "fundext",
                 `funding ${fAPR >= 0 ? "+" : ""}${fAPR.toFixed(0)}% APR \u2014 ${fp}th percentile of its own 31d, crowded ${crowdedLong ? "long" : "short"} for ${held}h+`,
                 Math.abs(fp - 50) * 0.5 + 12, evd, { horizon: evMeta("fundext", r.uni).horizon });
@@ -2678,7 +2708,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (cur != null && hist.length >= 60) {
           const p90 = [...hist].sort((a, b) => a - b)[Math.floor(hist.length * 0.9)];
           if (cur > p90) {
-            const evd = evidence(st.volshift && st.volshift.d5, "volshift", pooledFor(ac, "volshift", "d5"), "R");
+            const evd = evidence(st.volshift && st.volshift.d5, "volshift", pooledFor(ac, "volshift", "d5"), "R", r.uni);
             const sig = mkSignal(r, "volshift", `10d vol ${cur.toFixed(1)}%/d vs p90 ${p90.toFixed(1)}%/d`,
               (cur / p90 - 1) * 60 + 12, evd, { horizon: evMeta("volshift", r.uni).horizon });
             sig.play = playbook("volshift", {});
@@ -2716,7 +2746,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             // zeroed, never prime) while the card simultaneously told you to fade the gap.
             const gs0 = st.gap.session;
             const gs = gs0 && gs0.n >= 8 && gs0.med != null && gs0.med < 0 ? fadeStats(gs0) : gs0;
-            const evd = evidence(gs, "gap", pooledFor(ac, "gap", "session"), "%");
+            const evd = evidence(gs, "gap", pooledFor(ac, "gap", "session"), "%", r.uni);
             const reading = `${g >= 0 ? "+" : ""}${g.toFixed(2)}% since the last close (${(Math.abs(g) / st.gap.sd).toFixed(1)}\u03c3 of its gaps)`
               + (exc != null ? ` \u00b7 S&P ${gBench >= 0 ? "+" : ""}${gBench.toFixed(2)}%, excess ${exc >= 0 ? "+" : ""}${exc.toFixed(2)}%` : "");
             const sig = mkSignal(r, "gap", reading,
@@ -2734,7 +2764,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (s0 !== 0 && sd30 > 0)
           VARIANTS.fundflip.vals.forEach((v, vi) => { if (run >= v) openLedger(r, "fundflip", { score: 0, reading: "" }, s0, { sd0: +sd30.toFixed(3) }, vi); });
         if (s0 !== 0 && run >= incVal("fundflip")) {
-          const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"), "R");
+          const evd = evidence(st.fundflip && st.fundflip.d3, "fundflip", pooledFor(ac, "fundflip", "d3"), "R", r.uni);
           const sig = mkSignal(r, "fundflip", `day funding flipped ${s0 > 0 ? "positive (longs now pay)" : "negative (shorts now pay)"} after ${run}+ days the other way`,
             22, evd, { horizon: evMeta("fundflip", r.uni).horizon });
           sig.play = playbook("fundflip", { logGeo: r.uni === "main", dir: s0, px: r.px, sd30 });   // px + σ give the play its 1σ stop (findings ops item 3)
@@ -2752,7 +2782,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const sqz = Math.round(100 * crowd * (0.45 + 0.30 * fuel + 0.25 * trig));
           VARIANTS.squeeze.vals.forEach((v, vi) => { if (sqz >= v) openLedger(r, "squeeze", { score: 0, reading: "" }, 1, null, vi); });
           if (sqz >= incVal("squeeze")) {
-            const evd = evidence(null, "squeeze", null, "%");
+            const evd = evidence(null, "squeeze", null, "%", r.uni);
             const sig = mkSignal(r, "squeeze", `score ${sqz} \u2014 shorts paying ${Math.abs(fAPR).toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
               (sqz - incVal("squeeze")) * 1.1 + 15, evd, { horizon: evMeta("squeeze", r.uni).horizon });
             sig.play = playbook("squeeze", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
@@ -2785,7 +2815,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const unw = Math.round(100 * crowdL * (0.45 + 0.30 * fuel + 0.25 * trigL));
           VARIANTS.unwind.vals.forEach((v, vi) => { if (unw >= v) openLedger(r, "unwind", { score: 0, reading: "" }, -1, null, vi); });
           if (unw >= incVal("unwind")) {
-            const evd = evidence(null, "unwind", null, "%");
+            const evd = evidence(null, "unwind", null, "%", r.uni);
             const sig = mkSignal(r, "unwind", `score ${unw} \u2014 longs paying ${fAPR.toFixed(0)}% APR, \u0394OI7d ${doi && doi.d7 != null ? (doi.d7 >= 0 ? "+" : "") + doi.d7.toFixed(1) + "%" : "n/a"}`,
               (unw - incVal("unwind")) * 1.1 + 15, evd, { horizon: evMeta("unwind", r.uni).horizon });
             sig.play = playbook("unwind", { hi30: f ? f.hi30 : null, lo30: f ? f.lo30 : null });
@@ -2809,7 +2839,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (pb && r.oracle > 0) {
         const prem = (r.px / r.oracle - 1) * 1e4, z = (prem - pb.m) / pb.sd;
         if (Math.abs(z) >= 2 && Math.abs(prem) >= 5) {
-          const evd = evidence(null, "prem", null);
+          const evd = evidence(null, "prem", null, undefined, r.uni);
           const sig = mkSignal(r, "prem", `${prem >= 0 ? "+" : ""}${prem.toFixed(1)}bp vs oracle (${z >= 0 ? "+" : ""}${z.toFixed(1)}\u03c3 of its 7d baseline)`,
             (Math.abs(z) - 2) * 12 + 18, evd,
             { horizon: dc.offHours && dc.offHours.closed ? "cash market closed \u2014 live off-hours price discovery" : EV_META.prem.horizon });
@@ -2865,7 +2895,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             const cell = e.tf && e.tf[e.retest];
             if (!cell || !(cell.e21 > 0)) continue;
             const dir = side === "long" ? 1 : -1;
-            const evd = evidence(null, ev, null, "%");
+            const evd = evidence(null, ev, null, "%", r.uni);
             const reading = `${e.retest} retest \u2014 pullback into the 13/21 zone of a ${e.score}/4 stacked ${side === "long" ? "uptrend" : "downtrend"}, close holding EMA21`
               + (e.rrv != null ? ` \u00b7 zone volume ${e.rrv.toFixed(1)}\u00d7` : "")
               + (e.age != null ? ` \u00b7 trend age ${e.age}${e.ageCap ? "+" : ""}d` : "");
@@ -2899,7 +2929,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const z = (d30 - mu) / sdD;
           if (Math.abs(z) < 2 || Math.abs(d30) < 1) continue;
           const dir = d30 > 0 ? 1 : -1;
-          const evd = evidence(null, "ondrift", null, "%");
+          const evd = evidence(null, "ondrift", null, "%", r.uni);
           const sig = mkSignal(r, "ondrift", `${d30 >= 0 ? "+" : ""}${d30.toFixed(1)}% off-hours drift over ~21 windows (${z.toFixed(1)}\u03c3 vs universe)`,
             (Math.abs(z) - 2) * 16 + 18, evd, { horizon: evMeta("ondrift", r.uni).horizon });
           sig.play = playbook("ondrift", { dir });
@@ -9776,6 +9806,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     filingPrimeNow: () => { filingPrimed = true; },   // harness: skip the 45-minute seeding window
     hydrateRulesNow: hydrateRules,               // harness: restore rules + edge state without a boot
     ledgerOpenNow: () => ledgerOpen,             // harness: reach the open claims to stage geometry
+    ledgerClosedNow: () => ledgerClosed,         // harness: stage resolved entries so the scoped record builds off real claims
+    recomputeRecordNow: recomputeRecord,         // harness: rebuild recordCache/recordCacheU from the staged ledger without a full build
+    evidenceNow: (st, ev, pooled, unit, uni) => evidence(st, ev, pooled, unit, uni),   // harness: run the REAL scoped blend (F1/F2), not a reimplementation
+    recForNow: (uni) => recFor(uni),             // harness: which universe record the score reads
     resolveLedgerNow: resolveLedger,             // harness: force resolution without waiting out a horizon
     buildActionableNow: buildActionable,   // harness: force an actionable rebuild without waiting out the memo
     boardEpStateNow: () => ({ open: [...boardEp.values()], closed: boardEpClosed.slice(), since: boardEpSince, dropped: boardEpDropped }),   // harness: the settled record's raw state
