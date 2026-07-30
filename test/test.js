@@ -3519,7 +3519,7 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
   assert.ok(!app.includes("xyzmon.density") && !app.includes("densBtn"), "density toggle wiring must be gone");
   assert.ok(!html.includes('id="densBtn"'), "density button must be gone from the markup");
   // Keyboard nav: slash-search map, j/k movement, re-applied highlight after each render.
-  for (const pin of ["kmoveSel(1)", "kmoveSel(-1)", "CSS.escape(state.ksel)", "applyKsel();   // innerHTML rebuild"])
+  for (const pin of ["kmoveSel(1)", "kmoveSel(-1)", "CSS.escape(state.ksel)", "applyKsel();   // rebuild wipes the j/k highlight"])
     assert.ok(app.includes(pin), `keyboard nav pin missing: ${pin}`);
   assert.ok(css.includes(".wrap tbody tr.krow td"), "krow highlight CSS missing");
   // Focused ticker: set on drawer open, chip in the statusline, report-tab fallback.
@@ -11077,7 +11077,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.29-08"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.29-09"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -13774,7 +13774,17 @@ test("client: one schedule chip per registered send, parsed to numbers before it
 test("brief ctx routing, executed: reported names land in Printed with their reaction, pending stay in Today", () => {
   const { etDayStr } = require("../src/compute");
   const p = ctxHarness();
-  const D = 24 * 3600e3, now = Date.now();
+  // -09 determinism fix: this test shipped in -08 asserting an unreported same-day AMC row stays
+  // "pending" — true only before 16:00 ET, because earnEntryState (correctly) flips AMC to
+  // reported at the close. Run after 4pm ET and the suite went red with no code change. Freeze
+  // `now` at ET MIDDAY of the current ET day: inside market hours, past the BMO boundary (09:30,
+  // so XOM's epsA-carrying BMO row still exercises the reported path) and before the AMC one —
+  // every session-boundary assertion below is now true at any wall-clock time, per the fake-clock
+  // doctrine every episode-gate test already follows.
+  const D = 24 * 3600e3, _wall = Date.now();
+  const { etParts } = require("../src/compute");
+  const _ep = etParts(_wall);
+  const now = _wall + ((12 - _ep.h) * 3600e3) - (_ep.mi * 60e3) - ((_ep.s || 0) * 1000);
   const today = etDayStr(now), yesterday = etDayStr(now - D), tomorrow = etDayStr(now + D);
   // A spine for the reaction: yesterday closed 100, today closed 102.4 — a BMO print yesterday...
   // Actually anchor the print to `yesterday` (BMO) so the reaction day (its own day) has a close.
@@ -14785,4 +14795,78 @@ test("perf -08 behavior: the chain serializes — actionable's self-heal settles
   // params carry the gate disclosure only a completed build stamps).
   const warm = p.getActionable();
   assert.equal(warm.params.gate, "confirmed", "the chained self-heal completed and stamped a real payload");
+});
+
+// ===== row-level table patching (build 2026.07.29-09) ==========================================
+test("row patching 2026.07.29-09: one producer, gated patch path, self-healing rebuild, cache discipline", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // ONE producer of row markup: rowHtml() exists and the <tr data-coin= template appears exactly
+  // once in the whole client — a second producer is exactly the divergence this design forbids.
+  assert.ok(app.includes("function rowHtml(r, vc, bScope)"), "rowHtml producer missing");
+  // Other tables (EMA events, positioning) legitimately carry data-coin rows of their own shape;
+  // the one-producer invariant is about the MARKET row specifically: its template line and its
+  // column-walk exist exactly once, inside rowHtml.
+  assert.equal(app.split('let row=`<tr data-coin=').length - 1, 1, "the market row template must exist only inside rowHtml");
+  assert.equal(app.split('for(const c of vc) row+=c.td(r)').length - 1, 1, "the column walk must exist only inside rowHtml");
+  assert.ok(app.includes("out.push(rowHtml(r, vc, bScope))"), "render must consume rowHtml, not inline markup");
+  // Patch gate: identical structure AND the live DOM agreeing on row count — any disagreement,
+  // including an external tbody write like errRow, resolves to full rebuild, never to trusting the cache.
+  assert.ok(app.includes("if(_rowCache && struct===_rowStruct && body.children.length===out.length){"),
+    "patch path must be triple-gated: cache primed, structure unchanged, DOM row count agrees");
+  assert.ok(app.includes("coins.join('\\u0001')+'\\u0002'+vc.map(c=>c.key).join('\\u0001')+'\\u0002'+(bScope||'')"),
+    "structural signature covers row identity+order, visible columns, and bench");
+  // Cache discipline: primed only by a full rebuild, updated per-row on patch, dropped on empty.
+  assert.ok(app.includes("_rowCache=new Map(); for(let i=0;i<coins.length;i++) _rowCache.set(coins[i], out[i]);"), "full rebuild re-primes the whole cache");
+  assert.ok(app.includes("if(oldHtml[i]!==out[i]) _rowCache.set(coins[i], out[i]);"), "patch updates only the rows it wrote");
+  assert.ok(app.includes("Clear the filters to see all markets.</div></td></tr>`; _rowCache=null; return;"), "the no-matches path must drop the cache");
+  // Selection re-pin survives on BOTH paths (a patch may have replaced the selected row's node).
+  const rf = app.slice(app.indexOf("function render(){"), app.indexOf("function updateMovers("));
+  assert.ok(rf.includes("applyKsel();"), "applyKsel must still run after render");
+  assert.ok(app.includes("r.flash=null;   // consumed into this string"), "flash consumption moved with the producer, unchanged in behavior");
+});
+
+test("row patching 2026.07.29-09: patched output is byte-identical to a rebuild and unchanged rows cost ZERO writes (behavioral)", () => {
+  // Executes the REAL rowHtml + patchRowsInto extracted from app.js — not reimplementations — so
+  // the identity guarantee is proven against shipped code: patch a mutated board, then assert the
+  // assembled DOM equals what a full rebuild of the same state would produce, byte for byte, and
+  // that the write count equals exactly the number of rows whose data actually moved.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const escSrc = app.match(/function esc\([\s\S]*?\n(?=function|const|let)/)[0];
+  const rowSrc = app.match(/function rowHtml\(r, vc, bScope\)\{[\s\S]*?\n\}/)[0];
+  const patchSrc = app.match(/function patchRowsInto\(children, oldHtml, newHtml\)\{[\s\S]*?\n\}/)[0];
+  const api = new Function(escSrc + "\n" + rowSrc + "\n" + patchSrc + "\n;return { rowHtml, patchRowsInto };")();
+  const vc = [
+    { key: "ticker", td: (r) => `<th class="rl">${r.ticker}</th>` },
+    { key: "px",     td: (r) => `<td>${r.px}</td>` },
+    { key: "d1",     td: (r) => `<td class="${r.d1 >= 0 ? "up" : "down"}">${r.d1}%${r.flash ? ' <i class="fl"></i>' : ""}</td>` },
+  ];
+  const mkRows = () => [
+    { coin: "xyz:AAA", ticker: "AAA", px: 100.0, d1: 1.2, flash: null },
+    { coin: "xyz:BBB", ticker: "BBB", px: 55.5,  d1: -0.4, flash: null },
+    { coin: "xyz:CCC", ticker: "CCC", px: 9.87,  d1: 0.0, flash: null },
+  ];
+  const v1 = mkRows();
+  const old = v1.map((r) => api.rowHtml(r, vc, "xyz:BBB"));
+  assert.ok(old[1].includes('class="benchrow"'), "bench row must carry its class through the single producer");
+  const children = old.map((h) => ({ outerHTML: h }));
+  // Tick ONE row (and give it a flash), leave two untouched.
+  const v2 = mkRows(); v2[0].px = 100.5; v2[0].flash = true;
+  const fresh = v2.map((r) => api.rowHtml(r, vc, "xyz:BBB"));
+  assert.ok(fresh[0].includes('<i class="fl"></i>'), "flash renders into the changed row's string");
+  assert.equal(v2[0].flash, null, "rowHtml must consume flash exactly as the rebuild path always did");
+  const writes = api.patchRowsInto(children, old, fresh);
+  assert.equal(writes, 1, "exactly the one moved row may be written — unchanged rows cost zero DOM writes, which is the entire point");
+  assert.equal(children.map((c) => c.outerHTML).join(""), fresh.join(""),
+    "patched DOM must be BYTE-IDENTICAL to a full rebuild of the same state");
+  // Second render with nothing moved: flash was consumed, so the flash class clears via ONE more
+  // write on that row, and everything else stays at zero — the flash lifecycle survives patching.
+  const v3 = mkRows(); v3[0].px = 100.5;
+  const settled = v3.map((r) => api.rowHtml(r, vc, "xyz:BBB"));
+  const writes2 = api.patchRowsInto(children, fresh, settled);
+  assert.equal(writes2, 1, "flash clearance is one write on the flashed row, none elsewhere");
+  assert.ok(!children[0].outerHTML.includes('class="fl"'), "flash class actually cleared");
+  const writes3 = api.patchRowsInto(children, settled, settled.slice());
+  assert.equal(writes3, 0, "an identical board costs zero writes");
 });
