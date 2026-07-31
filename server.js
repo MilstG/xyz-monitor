@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.07.30-05";
+const VERSION = "2026.07.31-02";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -872,6 +872,15 @@ async function main() {
     if (!r.ok && r.error === "cooldown") return reply.code(429).send(r);
     if (!r.ok) return reply.code(400).send(r);
     return r;
+  });
+  // Fundamentals (equity drawer panel · Finnhub basic financials + profile2). Per-coin fresh
+  // payloads via serveKeyed for the same reason as derivs: the body carries a live-derived trio
+  // (market cap / P/E / P/S off the current mark), so poller.fundamentalsKey folds a coarse px
+  // bucket — collision-proof per (coin, content version, cache stamp, px bucket).
+  fastify.get("/api/fundamentals", (req, reply) => {
+    const coin = String((req.query && req.query.coin) || "");
+    return serveKeyed(req, reply, "fund|" + poller.fundamentalsKey(coin), () => poller.getFundamentals(coin),
+      { coin, enabled: false, error: "unavailable" });
   });
   fastify.get("/api/ledger", (req, reply) => {
     reply.header("cache-control", "no-store");
