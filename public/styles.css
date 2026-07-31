@@ -981,6 +981,33 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .dzchip{background:color-mix(in srgb,var(--text) 5%,transparent);border-radius:4px;padding:6px 8px}
 .dzchip .dzk{display:block;font-size:10px;color:var(--faint)}
 .dzchip .dzv{display:block;font-size:12.5px;margin-top:1px}
+
+/* ===== drawer: fundamentals panel (Finnhub basic financials · xyz equity universe) ===== */
+.fnsub{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin:-2px 0 10px}
+.fndot{width:7px;height:7px;border-radius:50%;background:var(--up);display:inline-block}
+.fnlbl{font-family:var(--mono);font-size:10px;color:var(--faint);margin:12px 0 5px;letter-spacing:.3px}
+/* 52-week range bar: red (low) -> neutral -> green (high), live mark marker, crosshair readout */
+.fnrange{position:relative;height:26px;border-radius:5px;border:1px solid var(--border);cursor:crosshair;
+  background:linear-gradient(90deg,color-mix(in srgb,var(--down) 30%,transparent),var(--grid) 46%,var(--grid) 54%,color-mix(in srgb,var(--up) 30%,transparent))}
+.fnrange .lo,.fnrange .hi{position:absolute;top:50%;transform:translateY(-50%);font-family:var(--mono);font-size:10px;color:var(--muted)}
+.fnrange .lo{left:7px} .fnrange .hi{right:7px}
+.fnrange .mk{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--accent);box-shadow:0 0 6px color-mix(in srgb,var(--accent) 70%,transparent)}
+.fnrange .mk::after{content:'';position:absolute;top:-4px;left:50%;transform:translateX(-50%);
+  border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--accent)}
+.fnread{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin:5px 0 2px;min-height:14px}
+.fnread b{color:var(--text);font-weight:500}
+.fnbars{display:flex;flex-direction:column;gap:5px;margin-bottom:4px}
+.fnbar{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:11.5px}
+.fnbar .bk{color:var(--muted);min-width:74px}
+.fnbar .track{flex:1;height:8px;background:var(--grid);border-radius:4px;overflow:hidden;position:relative}
+.fnbar .fill{height:100%;border-radius:4px;transition:filter .12s}
+.fnbar:hover .fill{filter:brightness(1.25)}
+.fnbar .bv{min-width:44px;text-align:right;color:var(--text);font-weight:500}
+.fnbar.neg .bv{color:var(--down)}
+.fnnone{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--muted);
+  background:color-mix(in srgb,var(--text) 3%,transparent);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:6px}
+.fnnone b{color:var(--text)}
+.fnnone .why{color:var(--faint);display:block;margin-top:5px;font-size:10.5px}
 .dzlbl{font-size:10px;color:var(--faint);margin:2px 0 3px}
 .dzwrap{position:relative;margin-bottom:6px}
 .dzwrap svg{width:100%;display:block;height:auto}

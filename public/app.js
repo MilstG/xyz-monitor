@@ -2179,6 +2179,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     ${splitHtml}
     <div id="dseries"></div>
     ${r.uni==='main'?'<div id="dderivs"></div>':''}
+    ${r.uni==='xyz'?'<div id="dfund"></div>':''}
     <div id="dledger"></div>
     <div id="dnews"></div>
     <div class="dsec">Metrics</div>
@@ -2208,6 +2209,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   loadDrawerCandles(coin);
   loadDrawerLedger(coin);
   if(r.uni==='main') loadDrawerDerivs(coin);
+  if(r.uni==='xyz') loadDrawerFund(coin);
   fillDrawerNews(); if(!state.news) loadNews();   // slice from the shared payload; first open triggers the fetch
   { const dai=el('dai'); if(dai){ dai.onclick=()=>{ closeDetail(); openAiReport(coin); };
     // state-aware label: annotate with the shared cache's age so the group knows a read exists
@@ -2294,6 +2296,74 @@ async function loadDrawerSeries(coin){
       html+=`<div class="dsec">Funding APR ${span(s.funding)} · now ${(last>=0?'+':'')+last.toFixed(1)}%</div>${sparkline(v,{zero:true,color:'var(--blue)'})}`; }
     box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:12px">collecting — the trend appears here as history accrues server-side</div>';
   }catch(_){}
+}
+// ===== drawer: fundamentals panel (xyz equity universe · Finnhub basic financials) =====
+// Equity-side counterpart to the derivs panel. Everything is the server payload; the three
+// price-sensitive figures (mkt cap / P/E / P/S) are derived server-side off the live mark, so this
+// panel can never disagree with the price in the drawer header. Client renders, never re-derives.
+let FUNDSEQ=0;
+function loadDrawerFund(coin){ const box=el('dfund'); if(!box) return; const seq=++FUNDSEQ;
+  fetchJSON('/api/fundamentals?coin='+encodeURIComponent(coin))
+    .then(d=>{ if(state.detail!==coin||seq!==FUNDSEQ||!box.isConnected) return; renderFund(box,coin,d); })
+    .catch(()=>{ if(state.detail===coin&&box.isConnected) box.innerHTML=''; }); }
+function renderFund(box,coin,d){
+  if(!d||d.enabled===false){ box.innerHTML=''; return; }   // no FINNHUB_TOKEN on the server — the panel simply doesn't exist
+  const head=`<div class="dsec" data-tip="company fundamentals for the underlying \u2014 Finnhub basic financials + profile \u00b7 point-in-time, quarterly-updated, refreshed daily server-side \u00b7 US listings only (free tier) \u00b7 market cap / P/E / P/S are derived live off this board\u2019s mark, everything else is the cached quarterly figure">Fundamentals <span class="dzsrc">finnhub \u00b7 basic financials \u2014 not live</span></div>`;
+  if(!d.covered){
+    const why=esc(d.reason||'not covered');
+    const tail=d.pending?'':`<span class="why">Absent, never guessed \u2014 same gate as the earnings tab: a name the US feed can\u2019t resolve gets no fabricated grid.</span>`;
+    box.innerHTML=head+`<div class="fnnone">${d.pending?'Collecting \u2014 not fetched yet. The panel fills once the slow rotation reaches this name.':`Not covered on this feed \u2014 <b>${why}</b>.`}${tail}</div>`;
+    return;
+  }
+  const num=(v,dg)=>(v==null||!isFinite(v))?null:(+v).toFixed(dg==null?2:dg);
+  const na='<span class="na">\u00b7</span>';
+  // trillion-aware compact formatter (fmtUsd caps at B) — local so no shared helper is touched
+  const nfc=(v,dg)=>{ const a=Math.abs(v); if(a>=1e12)return (v/1e12).toFixed(dg)+'T'; if(a>=1e9)return (v/1e9).toFixed(dg)+'B'; if(a>=1e6)return (v/1e6).toFixed(dg)+'M'; if(a>=1e3)return (v/1e3).toFixed(1)+'K'; return (+v).toFixed(0); };
+  const pct=(v,dg)=>num(v,dg)==null?na:num(v,dg)+'%';
+  const pe = d.peNm ? '<span class="na" data-tip="trailing EPS is negative or zero \u2014 P/E is not meaningful">n/m</span>' : (num(d.pe,1)!=null?num(d.pe,1):na);
+  const chip=(k,v,t)=>`<div class="dzchip" data-tip="${esc(t)}"><span class="dzk">${k}</span><span class="dzv">${v}</span></div>`;
+  let html=head;
+  html+=`<div class="fnsub"><span class="fndot"></span>${esc(d.name||coin)}${d.ind?' \u00b7 '+esc(d.ind):''}${d.asOf?' \u00b7 refreshed '+fmtAge(Date.now()-d.asOf)+' ago':''}</div>`;
+  html+=`<div class="dzchips">`
+    +chip('mkt cap', d.mcap!=null?'$'+nfc(d.mcap,2):na, 'market cap = live mark \u00d7 shares outstanding (Finnhub profile) \u2014 derived off the board price, so it tracks the header')
+    +chip('P/E (TTM)', pe, 'live mark \u00f7 trailing-12m EPS \u2014 derived here so it never disagrees with the price above')
+    +chip('P/S (TTM)', d.ps!=null?num(d.ps,1):na, 'live mark \u00f7 trailing-12m sales per share')
+    +chip('div yield', pct(d.divY,2), 'indicated annual dividend yield (TTM)')
+    +`</div>`;
+  // 52-week range bar with crosshair readout
+  if(d.wkHi!=null&&d.wkLo!=null&&d.px!=null&&d.wkHi>d.wkLo){
+    const posPct=Math.max(0,Math.min(1,d.rangePos!=null?d.rangePos:((d.px-d.wkLo)/(d.wkHi-d.wkLo))))*100;
+    const offHi=((d.px/d.wkHi)-1)*100;
+    html+=`<div class="fnlbl">52-week range \u00b7 hover to scan</div>`
+      +`<div class="fnrange" id="fnrng" data-lo="${d.wkLo}" data-hi="${d.wkHi}" data-px="${d.px}">`
+      +`<span class="lo">${num(d.wkLo,2)}</span><span class="hi">${num(d.wkHi,2)}</span>`
+      +`<span class="mk" style="left:${posPct.toFixed(2)}%"></span></div>`
+      +`<div class="fnread" id="fnread">now <b>${num(d.px,2)}</b> \u00b7 ${posPct.toFixed(0)}% of range \u00b7 <span class="${offHi>=-0.05?'pos':'neg'}">${offHi>=0?'+':''}${offHi.toFixed(1)}%</span> from 52w high${d.wkHiD?' ('+esc(d.wkHiD)+')':''}</div>`;
+  }
+  // margins (TTM), each bar hoverable
+  if(d.gm!=null||d.om!=null||d.nm!=null){
+    const bar=(k,v)=>{ if(v==null||!isFinite(v)) return `<div class="fnbar" data-tip="${k} margin (TTM): no data"><span class="bk">${k}</span><span class="track"></span><span class="bv na">\u00b7</span></div>`;
+      const neg=v<0, w=Math.max(2,Math.min(100,Math.abs(v))), col=neg?'var(--down)':(v>=45?'var(--up)':(v>=20?'var(--accent)':'var(--blue)'));
+      return `<div class="fnbar${neg?' neg':''}" data-tip="${k} margin (TTM): ${v.toFixed(1)}%"><span class="bk">${k}</span><span class="track"><span class="fill" style="width:${w}%;background:${col}"></span></span><span class="bv">${v.toFixed(1)}%</span></div>`; };
+    html+=`<div class="fnlbl">Margins (TTM)</div><div class="fnbars">`+bar('gross',d.gm)+bar('operating',d.om)+bar('net',d.nm)+`</div>`;
+  }
+  // detail grid
+  const st=(k,v)=>`<div class="dstat"><span class="dk">${k}</span><span class="dv">${v}</span></div>`;
+  const g=(v)=>num(v,1)==null?na:`<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${num(v,1)}%</span>`;
+  html+=`<div class="dgrid" style="margin-top:12px">`
+    +st('EPS TTM', d.epsTTM!=null?num(d.epsTTM,2):na)+st('rev/sh TTM', d.revPsTTM!=null?num(d.revPsTTM,2):na)
+    +st('rev growth', g(d.revG))+st('EPS growth', g(d.epsG))
+    +st('P/B', d.pb!=null?num(d.pb,1):na)+st('ROE', pct(d.roe,1))
+    +st('ROA', pct(d.roa,1))+st('shares out', d.shares!=null?nfc(d.shares*1e6,2):na)
+    +`</div>`;
+  box.innerHTML=html;
+  // crosshair readout on the 52w bar — local mousemove (no shared chart machinery needed for one bar)
+  const rng=el('fnrng'), read=el('fnread');
+  if(rng&&read){ const lo=+rng.dataset.lo, hi=+rng.dataset.hi, px=+rng.dataset.px, base=read.innerHTML;
+    rng.addEventListener('mousemove',e=>{ const rc=rng.getBoundingClientRect(); const fr=Math.max(0,Math.min(1,(e.clientX-rc.left)/rc.width)); const v=lo+(hi-lo)*fr; const dv=((v/px)-1)*100;
+      read.innerHTML=`at <b>${v.toFixed(2)}</b> \u00b7 ${(fr*100).toFixed(0)}% of range \u00b7 <span class="${v>=px?'pos':'neg'}">${dv>=0?'+':''}${dv.toFixed(1)}%</span> vs mark ${px.toFixed(2)}`; });
+    rng.addEventListener('mouseleave',()=>read.innerHTML=base);
+  }
 }
 // ===== drawer: deriv-context panel (crypto universe · aggregated CEX via Coinalyze) =====
 // Everything rendered here is the server payload — chips, buckets, cascade flags. Nothing is
