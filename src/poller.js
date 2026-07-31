@@ -129,6 +129,13 @@ const EARN_WINDOW_DAYS = 14;          // forward calendar window served to the t
 const EARN_STALE = 6 * 3600 * 1000;   // refetch when the last GOOD fetch is older than this
 const EARN_RETRY_MS = 30 * 60 * 1000; // staleness check cadence (doubles as failure retry)
 const EARN_ALIAS = { BRKB: "BRK.B" }; // xyz ticker -> US exchange symbol where they differ
+// Fundamentals (Finnhub basic financials + profile2) reuse the earnings gate AND its US-symbol
+// aliasing — same "which names are real US equities" question. Rotation is deliberately slow:
+// these numbers move quarterly, so each name re-fetches at most ~daily, a few per minute inside
+// the shared 60/min Finnhub budget (news + earnings + this).
+const FUND_ALIAS = EARN_ALIAS;
+const FUND_BATCH = 3;              // tickers per 60s tick (2 calls each: metric + profile2)
+const FUND_TTL = 22 * HOUR;        // a name is "due" only once its cache is this stale
 // Signals whose claim spans a session boundary (drift, gap, breakout follow-through): an earnings
 // print inside the horizon is a different return distribution than the study sample, so the
 // evidence contribution is capped — same mechanism and same cap as the no-live-edge guard.
@@ -4137,6 +4144,125 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       store.saveNews({ ts: Date.now(), items: newsItems, secTape, secLearned, nameLearned });
     } catch (e) { newsErr = "tape fetch failed: " + (e && e.message); buildNewsPayload(); }
   }
+  // ---- fundamentals (Finnhub basic financials + profile2 · xyz equity universe) -----------
+  // The equity-side counterpart to the Coinalyze derivs panel: per-ticker company fundamentals
+  // in the drawer. Same degradation contract as earnings/news — no token or a dead endpoint is an
+  // error string on the payload, never a broken panel; a name the free (US-only) tier can't resolve
+  // is honestly "not covered", never a fabricated grid (the earnings tab's "absent, never guessed").
+  //
+  // ONE-CODE-PATH NOTE. Everything genuinely quarterly (EPS TTM, rev/sh, margins, ROE/ROA, growth,
+  // P/B, div yield, 52w range, name, industry) is cached from Finnhub and refreshed daily. The three
+  // PRICE-sensitive figures — market cap, P/E, P/S — are NOT cached: getFundamentals derives them live
+  // off the board's own mark (r.px) at read time, so they can never disagree with the price the drawer
+  // header shows. Negative/zero trailing EPS => P/E is n/m, never a negative multiple.
+  let fundErr = null, fundVer = 0, fundLastOk = 0;
+  const fundData = new Map();   // US symbol -> cached quarterly record { at, name, ind, shares, epsTTM, revPsTTM, ... }
+  const fundAt = new Map();     // US symbol -> last fetch-attempt ms (rotation order + TTL + the "tried but empty = foreign" signal)
+  const fundSym = (ticker) => { const T = String(ticker).toUpperCase(); return FUND_ALIAS[T] || T; };
+  // Finnhub basic-financials margins/yields are ALREADY percentages (74.9 = 74.9%); passed through
+  // unscaled. profile2 shareOutstanding is in MILLIONS. Both documented and pinned, so a future scale
+  // surprise is a conscious change rather than a silent one.
+  function parseFundamentals(mj, pj, now) {
+    const M = (mj && mj.metric) || {};
+    const P = pj || {};
+    const num = (v) => (typeof v === "number" && isFinite(v)) ? v : null;
+    const rec = {
+      at: now,
+      name: (P.name && String(P.name).slice(0, 80)) || null,
+      ind: (P.finnhubIndustry && String(P.finnhubIndustry).slice(0, 60)) || null,
+      shares: num(P.shareOutstanding),                                  // MILLIONS
+      epsTTM: num(M.epsTTM),                                            // -> live P/E
+      revPsTTM: num(M.revenuePerShareTTM),                             // -> live P/S
+      pb: num(M.pbAnnual != null ? M.pbAnnual : M.pbQuarterly),
+      divY: num(M.currentDividendYieldTTM != null ? M.currentDividendYieldTTM : M.dividendYieldIndicatedAnnual),
+      gm: num(M.grossMarginTTM), om: num(M.operatingMarginTTM), nm: num(M.netProfitMarginTTM),
+      roe: num(M.roeTTM), roa: num(M.roaTTM),
+      revG: num(M.revenueGrowthTTMYoy), epsG: num(M.epsGrowthTTMYoy),
+      wkHi: num(M["52WeekHigh"]), wkLo: num(M["52WeekLow"]),
+      wkHiD: (M["52WeekHighDate"] && String(M["52WeekHighDate"]).slice(0, 10)) || null,
+      wkLoD: (M["52WeekLowDate"] && String(M["52WeekLowDate"]).slice(0, 10)) || null,
+    };
+    // A genuine hit needs at least a name or one financial; an all-null body is "not resolved"
+    // (foreign/uncovered) and is NOT cached, so the rotation retries it on a later pass.
+    if (!rec.name && rec.epsTTM == null && rec.gm == null && rec.pb == null && rec.wkHi == null) return null;
+    return rec;
+  }
+  async function fundTick() {
+    const token = process.env.FINNHUB_TOKEN || "";
+    if (!token) { fundErr = "FINNHUB_TOKEN not set"; return; }
+    const roster = [...earnEligible().values()];   // {coin, ticker} — the SAME eligibility gate as earnings
+    if (!roster.length) return;                     // universe not reconciled yet
+    const now = Date.now();
+    const due = roster
+      .map((m) => ({ sym: fundSym(m.ticker) }))
+      .filter((x) => now - (fundAt.get(x.sym) || 0) >= FUND_TTL)
+      .sort((a, b) => (fundAt.get(a.sym) || 0) - (fundAt.get(b.sym) || 0));
+    if (!due.length) return;
+    const batch = due.slice(0, FUND_BATCH);
+    let changed = false;
+    for (const { sym } of batch) {
+      fundAt.set(sym, now);   // stamped BEFORE the calls: a failing/empty name must not wedge the rotation, and "tried but empty" is exactly the foreign-listing signal getFundamentals reads
+      try {
+        const mres = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(sym)}&metric=all&token=${encodeURIComponent(token)}`,
+          { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        if (!mres.ok) { if (mres.status === 401 || mres.status === 403) fundErr = `Finnhub metric: HTTP ${mres.status} (entitlement)`; continue; }
+        const mj = await mres.json();
+        let pj = {};
+        const pres = await fetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(sym)}&token=${encodeURIComponent(token)}`,
+          { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        if (pres.ok) pj = await pres.json();
+        const rec = parseFundamentals(mj, pj, now);
+        if (rec) { fundData.set(sym, rec); changed = true; fundErr = null; }
+      } catch (e) { fundErr = "fundamentals fetch failed: " + (e && e.message); }
+    }
+    if (changed) {
+      fundVer = Date.now(); fundLastOk = Date.now();
+      if (store.saveFund) store.saveFund({ ts: fundLastOk, data: [...fundData.entries()] });
+    }
+  }
+  function hydrateFund() {
+    const d = store.loadFund && store.loadFund();
+    if (d && Array.isArray(d.data)) {
+      for (const [sym, rec] of d.data) { if (sym && rec) { fundData.set(sym, rec); fundAt.set(sym, rec.at || 0); } }
+      if (fundData.size) fundVer = Date.now();
+      fundLastOk = d.ts || 0;
+    }
+    return fundData.size;
+  }
+  // Cached read; the price-sensitive trio (mkt cap / P/E / P/S) is derived live HERE off the board
+  // mark so it tracks the header price. Non-equity and unresolved names get an honest not-covered
+  // payload, never a fabricated grid.
+  function getFundamentals(coin) {
+    const base = { coin: coin || "", ts: Date.now(), src: "finnhub", ver: fundVer };
+    const token = process.env.FINNHUB_TOKEN || "";
+    if (!token) return { ...base, enabled: false, error: "disabled (no FINNHUB_TOKEN on the server)" };
+    const r = coin ? rows.get(coin) : null;
+    if (!r || r.uni !== "xyz" || r.delisted) return { ...base, enabled: true, covered: false, reason: "not in the equity universe" };
+    const ac = classifyCached(r.ticker).assetClass || "instrument";
+    if (ac !== "Equity") return { ...base, enabled: true, covered: false, reason: "non-equity (" + ac + ") — no company fundamentals" };
+    const sym = fundSym(r.ticker);
+    const f = fundData.get(sym);
+    if (!f) {
+      const tried = fundAt.has(sym);
+      return { ...base, enabled: true, covered: false, pending: !tried,
+        reason: tried ? "foreign listing — not resolved by the US feed" : "collecting — not fetched yet",
+        asOf: fundLastOk || null };
+    }
+    const px = (r.px != null && isFinite(r.px)) ? r.px : null;
+    const epsNm = (f.epsTTM != null && f.epsTTM <= 0);   // negative/zero trailing EPS => P/E not meaningful
+    const mcap = (px != null && f.shares != null) ? px * f.shares * 1e6 : null;
+    const pe = (px != null && f.epsTTM != null && f.epsTTM > 0) ? px / f.epsTTM : null;
+    const ps = (px != null && f.revPsTTM != null && f.revPsTTM > 0) ? px / f.revPsTTM : null;
+    const rangePos = (px != null && f.wkHi != null && f.wkLo != null && f.wkHi > f.wkLo)
+      ? (px - f.wkLo) / (f.wkHi - f.wkLo) : null;
+    return { ...base, enabled: true, covered: true, sym, name: f.name, ind: f.ind,
+      asOf: f.at, dataAsOf: fundLastOk || null, px,
+      mcap, pe, peNm: epsNm, ps, pb: f.pb, divY: f.divY,
+      epsTTM: f.epsTTM, revPsTTM: f.revPsTTM, revG: f.revG, epsG: f.epsG,
+      roe: f.roe, roa: f.roa, shares: f.shares,
+      gm: f.gm, om: f.om, nm: f.nm,
+      wkHi: f.wkHi, wkLo: f.wkLo, wkHiD: f.wkHiD, wkLoD: f.wkLoD, rangePos };
+  }
   // ---- telegram channels (public t.me previews — no bot, no credentials) -------------------
   // Shared group config, persisted to its own volume file. Every channel fetches on a 10-min
   // cadence; per-channel status (green/red dot in the manager) rides the payload. Degradation
@@ -5124,6 +5250,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (restoredHourly) log(`Restored hourly spine for ${restoredHourly} market(s) — session analytics warm`);
     if (hydrateEarnings()) log(`Restored earnings calendar: ${earnCache.entries.length} report(s) — badges warm while Finnhub refreshes`);
     { const n = hydrateNews(); if (n) log(`Restored news feed: ${n} headline(s) — tab warm while the rotation catches up`); }
+    { const n = hydrateFund(); if (n) log(`Restored fundamentals: ${n} name(s) cached — drawer panel warm while the rotation refreshes`); }
     // Announced-trigger set: without this a redeploy re-announces the whole live board.
     if (hydrateTriggers()) log(`Restored trigger state: ${trigSeen.size} announced setup(s), seq ${trigSeq}`);
     // ---- alert detection + transports -----------------------------------------------------------
@@ -5254,6 +5381,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // dead surfaces on the payload, never breaks a tab.
     setInterval(() => { newsCompanyTick().catch((e) => log("news tick failed (isolated): " + (e && e.message))); }, 60 * 1000);
     setInterval(() => { newsTapeTick().catch((e) => log("news tape failed (isolated): " + (e && e.message))); }, 15 * 60 * 1000);
+    setInterval(() => { fundTick().catch((e) => log("fundamentals tick failed (isolated): " + (e && e.message))); }, 60 * 1000);
+    setTimeout(() => { fundTick().catch(() => {}); }, 50 * 1000);
     setTimeout(() => { newsTapeTick().catch(() => {}); }, 20 * 1000);
     setTimeout(() => { newsCompanyTick().catch(() => {}); }, 40 * 1000);
     // Sector classifier: batched, write-once, fallback-model, ~a cent a day at current volume.
@@ -10003,6 +10132,17 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getDerivs,
     refreshDerivs,
     derivsKey: (coin) => coin + "|" + czVer + "|" + (czRefreshAt.get(coin) || 0) + "|" + (czErr ? 1 : 0) + "|" + Math.floor((czLastOk || 0) / 60000),
+    // Fundamentals: cached read + collision-proof ETag key. mkt cap / P/E / P/S are derived live off
+    // the mark, so the key folds a COARSE px bucket (~0.25% via log) — the panel refreshes as price
+    // moves meaningfully without busting cache every snapshot tick.
+    getFundamentals,
+    fundamentalsKey: (coin) => {
+      const r = rows.get(coin);
+      const sym = r ? fundSym(r.ticker) : coin;
+      const f = fundData.get(sym);
+      const pxb = (r && r.px > 0) ? Math.round(Math.log(r.px) * 400) : 0;
+      return coin + "|" + fundVer + "|" + (f ? f.at : 0) + "|" + pxb + "|" + (fundErr ? 1 : 0);
+    },
     generateAiReport,
     listAiReports,
     aiCompileNow: compileAiContext,   // harness: build the context object without any network

@@ -21,6 +21,7 @@ function openStore(dataDir) {
   const earnFile = path.join(dataDir, "earnings.json");
   const macroFile = path.join(dataDir, "macro.json");
   const newsFile = path.join(dataDir, "news.json");
+  const fundFile = path.join(dataDir, "fundamentals.json");
   const tgFile = path.join(dataDir, "tgchannels.json");
   const trigFile = path.join(dataDir, "triggers.json");
   const pushFile = path.join(dataDir, "alertpush.json");   // telegram recipients + delivery cursor
@@ -330,6 +331,20 @@ function openStore(dataDir) {
     },
     loadNews() {
       try { return JSON.parse(fs.readFileSync(newsFile, "utf8")); } catch (_) { return null; }
+    },
+    // Fundamentals warm cache (Finnhub basic financials + profile2): a redeploy serves the last
+    // cached company numbers instead of a blank drawer panel while the slow rotation re-warms.
+    saveFund(data) {
+      try {
+        const tmp = fundFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, fundFile);
+      } catch (_) {}
+    },
+    loadFund() {
+      try { if (fs.existsSync(fundFile)) return JSON.parse(fs.readFileSync(fundFile, "utf8")); }
+      catch (_) {}
+      return null;
     },
     // Earnings calendar warm cache (small, atomic like the rest): a redeploy inside the 6h
     // refresh window serves the last good fetch instead of blanking badges until Finnhub answers.

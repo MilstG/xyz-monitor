@@ -6088,7 +6088,11 @@ function validateLandProse(prose, ctx) {
   if (!p) return { ok: false, error: "not an object" };
   const v = p.story;
   if (typeof v !== "string" || !v.trim()) return { ok: false, error: "story missing" };
-  if (v.length > LAND_PROSE_MAX) return { ok: false, error: `story over budget (${v.length})` };
+  // Length is NOT a validity failure. LAND_PROSE_MAX is the soft target the model aims for; the
+  // renderer's shed ladder (sources first, then paragraphs, then a final clip) is the single
+  // authority on fitting Telegram's ceiling. Hard-rejecting here discarded commentary the renderer
+  // could have shipped whole — a 3% overshoot (3508 vs 3400) became "commentary unavailable" and
+  // the trader got nothing. The validator owns correctness; the renderer owns length.
   if (/<[a-z/]/i.test(v)) return { ok: false, error: "story contains markup" };
   const paras = v.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
   if (paras.length < LAND_PARA_MIN || paras.length > LAND_PARA_MAX)
@@ -6136,7 +6140,8 @@ function renderLandscape(ctx, prose) {
   }
   const byId = new Map();
   for (const cl of c.news || []) for (const h of cl.items || []) if (h && h.id) byId.set(String(h.id), h);
-  const paras = prose.story.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean).map((x) => tgEscape(x));
+  const rawParas = prose.story.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);   // unescaped, for the final clip
+  const paras = rawParas.map((x) => tgEscape(x));                                       // what actually renders
   const srcLine = (h) => {
     const txt = tgEscape((h.t ? h.t + " \u2014 " : "") + briefClip(h.h, 62));
     const linkable = typeof h.u === "string" && /^https?:\/\/[^\s"'<>]+$/.test(h.u);   // same guard as the brief: one junk URL must not cost the message
@@ -6157,7 +6162,23 @@ function renderLandscape(ctx, prose) {
   const dropped = [];
   while (briefVisibleLen(msg) > BRIEF_TG_LIMIT && n > 0) { n--; msg = build(n); dropped.push("source"); }
   while (briefVisibleLen(msg) > BRIEF_TG_LIMIT && paras.length > 1) { paras.pop(); dropped.push("para"); msg = build(0); }
-  return { message: msg, sources: n, dropped };
+  // Final backstop: after every source and all but one paragraph are gone, a single over-long
+  // paragraph could still exceed the ceiling and get the SEND rejected. Clip the remaining prose to
+  // fit (word boundary, ellipsis) so the message ALWAYS ships — a trimmed read beats a bounced one.
+  // Reached only in the pathological case; the shed ladder above handles the ordinary overshoot
+  // that used to be discarded wholesale.
+  if (briefVisibleLen(msg) > BRIEF_TG_LIMIT && paras.length === 1) {
+    while (briefVisibleLen(msg) > BRIEF_TG_LIMIT && rawParas[0].length > 24) {
+      const over = briefVisibleLen(msg) - BRIEF_TG_LIMIT;
+      rawParas[0] = briefClip(rawParas[0], Math.max(24, rawParas[0].length - over - 4));
+      paras[0] = tgEscape(rawParas[0]); msg = build(0);
+    }
+    dropped.push("clip");
+  }
+  // Once any paragraph is shed or clipped the message was rebuilt with build(0), so it carries no
+  // sources — report that honestly rather than the pre-shed count.
+  const noSrc = dropped.includes("para") || dropped.includes("clip");
+  return { message: msg, sources: noSrc ? 0 : n, dropped };
 }
 module.exports.LAND_PROSE_MAX = LAND_PROSE_MAX;
 module.exports.LAND_REFS_MIN = LAND_REFS_MIN;
