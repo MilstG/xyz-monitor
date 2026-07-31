@@ -1225,6 +1225,14 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .act-set-det{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:2px 20px;
   padding:8px 12px;font-size:11.5px;line-height:1.7;color:var(--muted);border-left:2px solid var(--accent)}
 .act-set-det b{color:var(--text);font-weight:400}
+.act-ep-pager{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:4px 2px 7px;font-family:var(--mono);font-size:11px}
+.act-ep-show,.act-ep-nav{display:flex;align-items:center;gap:6px}
+.act-ep-nav .sec{margin-right:4px}
+.act-ep-sz,.act-ep-pg{font-family:var(--mono);font-size:11px;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:4px;padding:3px 9px;cursor:pointer}
+.act-ep-sz{padding:2px 8px}
+.act-ep-sz:hover:not(:disabled),.act-ep-pg:hover:not(:disabled){color:var(--text);border-color:var(--muted)}
+.act-ep-sz.on{color:var(--text);border-color:var(--accent);background:var(--panel)}
+.act-ep-pg:disabled{opacity:.4;cursor:default}
 
 /* ===== macro calendar ===== */
 /* Global strip: next universe-wide macro binary (today/tomorrow ET), every tab, both scopes.

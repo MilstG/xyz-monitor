@@ -5151,6 +5151,12 @@ function actSortSave(){ try{ store.set(ASKEY,JSON.stringify(_actSort)); }catch(_
 // sub-2:1 positive-EV family; each bucket includes every outcome its episodes reached (target,
 // void, expired) — a grinder that tagged its modest target belongs to the grinders row.
 let _actEpOpen={}, _actSetOpen=(store.get('actSettled')==='1');
+// Settled record only grows (out-of-sample rows are never pruned), so the episode list is paged.
+// Size is sticky across visits and shared by both universes; the batch index is kept PER universe
+// so switching scope holds each side's place instead of snapping the other back to the top.
+let _actEpPage={};
+let _actEpSize=(()=>{ const v=+store.get('actEpSize'); return (v===10||v===20||v===50)?v:20; })();
+function actEpSizeSet(n){ if(n!==10&&n!==20&&n!==50) return; _actEpSize=n; try{ store.set('actEpSize',String(n)); }catch(_){} }
 function actSetPct(x){ return x==null?'\u2014':Math.round(x*100)+'%'; }
 function actSetR(x){ return x==null?'\u2014':`<span class="${x>0?'pos':x<0?'neg':'sec'}">${x>0?'+':''}${x.toFixed(2)}R</span>`; }
 // Lateness is a COST: positive means the board's surfacing lost you R, so positive reads red.
@@ -5198,13 +5204,27 @@ function actSettled(d,wantU){
     +`</tbody></table>`;
   const eps=(st.episodes||[]).filter(e=>e.uni===wantU).slice().reverse();
   if(eps.length){
+    // Page the record. Only the current batch is ever in the DOM, so the settled list stays bounded
+    // no matter how large the out-of-sample record grows. Batch index is per universe and clamped
+    // here (a size change can drop the last page out from under the stored index).
+    const epsTotal=eps.length, epsSize=_actEpSize, epsPages=Math.max(1,Math.ceil(epsTotal/epsSize));
+    let epsPg=_actEpPage[wantU]||0; if(epsPg>epsPages-1) epsPg=epsPages-1; if(epsPg<0) epsPg=0; _actEpPage[wantU]=epsPg;
+    const epsStart=epsPg*epsSize, epsEnd=Math.min(epsStart+epsSize,epsTotal), epsPageRows=eps.slice(epsStart,epsStart+epsSize);
+    if(epsTotal>10){
+      const szBtn=n=>`<button type="button" class="act-ep-sz${n===epsSize?' on':''}" data-epsz="${n}">${n}</button>`;
+      h+=`<div class="act-ep-pager" data-tip="the settled record only grows \u2014 this pages it. Batch size is remembered; the batch you're on is kept per universe, so crypto and stocks hold their own place.">`
+        +`<span class="act-ep-show">show ${szBtn(10)}${szBtn(20)}${szBtn(50)}</span>`
+        +`<span class="act-ep-nav"><span class="sec">${epsStart+1}\u2013${epsEnd} of ${epsTotal} \u00b7 batch ${epsPg+1}/${epsPages}</span>`
+        +`<button type="button" class="act-ep-pg" data-eppg="-1"${epsPg<=0?' disabled':''}>\u2190 prev</button>`
+        +`<button type="button" class="act-ep-pg" data-eppg="1"${epsPg>=epsPages-1?' disabled':''}>next \u2192</button></span></div>`;
+    }
     h+=`<table class="trend-t act-set-eps"><thead><tr><th>name</th><th>event</th><th>class</th><th>side</th>`
       +`<th data-tip="when the row first appeared on the board \u00b7 \u27f2 marks a boot-stamped episode: the stamp is the record's own first scan, a LOWER BOUND on when the row was visible \u2014 excluded from the headline lateness" style="text-align:right">shown</th>`
       +`<th data-tip="how the claim resolved \u2014 target / void touched first, or expired between them (a candle spanning both scores pessimistically as the void) \u2014 with the price it was scored at: the frozen level for touches, the mark at horizon for expiries">outcome</th>`
       +`<th data-tip="realized R from the mark at first appearance \u2014 what acting on this row when it appeared actually got" style="text-align:right">R@shown</th>`
       +`<th data-tip="realized R at the fire mark \u2014 diagnostic counterfactual: nobody watching the board could have had this price" style="text-align:right">R@fire</th>`
       +`<th data-tip="first appearance to resolution (or to the level touch that decided it) \u2014 NOT the claim's full life: a claim surfaced near its horizon shows a short hold by construction" style="text-align:right">held</th><th></th></tr></thead><tbody>`;
-    for(const e of eps){ const op=!!_actEpOpen[e.k];
+    for(const e of epsPageRows){ const op=!!_actEpOpen[e.k];
       const oc=e.kind==='target'?'pos':e.kind==='void'?'neg':'sec';
       const opx=e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx;
       h+=`<tr class="act-set-ep" data-epk="${esc(e.k)}"><td class="${e.side==='long'?'pos':'neg'}"><span class="tk">${esc(e.t)}</span></td>`
@@ -5241,6 +5261,20 @@ function actSettledWire(box){
   if(tg) tg.addEventListener('click',()=>{ _actSetOpen=!_actSetOpen; try{ store.set('actSettled',_actSetOpen?'1':'0'); }catch(_){} renderActionable(); });
   box.querySelectorAll('tr.act-set-ep').forEach(tr=>tr.addEventListener('click',()=>{
     const k=tr.dataset.epk; _actEpOpen[k]=!_actEpOpen[k]; renderActionable(); }));
+  // Size change holds your place by row anchor: the first row of the current batch stays on screen
+  // rather than snapping to the top when the page grows or shrinks.
+  box.querySelectorAll('.act-ep-sz').forEach(b=>b.addEventListener('click',ev=>{
+    ev.stopPropagation();
+    const n=+b.dataset.epsz, u=state.scope==='crypto'?'crypto':'stocks';
+    const anchor=(_actEpPage[u]||0)*_actEpSize;
+    actEpSizeSet(n); _actEpPage[u]=Math.floor(anchor/n);
+    renderActionable(); }));
+  box.querySelectorAll('.act-ep-pg').forEach(b=>b.addEventListener('click',ev=>{
+    ev.stopPropagation();
+    if(b.disabled) return;
+    const u=state.scope==='crypto'?'crypto':'stocks';
+    _actEpPage[u]=(_actEpPage[u]||0)+(+b.dataset.eppg);
+    renderActionable(); }));
 }
 function actRR(x){ return x!=null&&isFinite(x)?(+x).toFixed(2):'\u2014'; }
 function actEV(x){ return x!=null&&isFinite(x)?((x>=0?'+':'')+(+x).toFixed(2)):'\u2014'; }
