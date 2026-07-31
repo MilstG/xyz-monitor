@@ -11396,6 +11396,51 @@ test("settled -15: the client renders the server's record and never re-scores an
     assert.ok(css.includes("." + cls), `missing CSS for settled class: ${cls}`);
 });
 
+test("settled -03: the episode record is paged — bounded DOM, per-universe batch, sticky anchor-preserving size", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Only the current batch is ever mounted — the loop must iterate the slice, not the full list.
+  // (The -84 lesson: an existence pin on the pager proves nothing if the render still walks every row.)
+  assert.ok(s.includes("epsPageRows=eps.slice(epsStart,epsStart+epsSize)"), "the batch must be a slice of the reversed episode list");
+  assert.ok(s.includes("for(const e of epsPageRows)"), "the render loop must walk the current batch");
+  assert.ok(!/for\(const e of eps\)\{ const op=/.test(s), "the render loop must NOT walk the full episode list — that defeats the bounded-DOM point");
+  // Batch index is kept PER universe and clamped at render (a size bump can orphan the stored page).
+  assert.ok(s.includes("_actEpPage[wantU]=epsPg") && /if\(epsPg>epsPages-1\) epsPg=epsPages-1/.test(s), "per-universe batch index, clamped to the page count");
+  assert.ok(s.includes("Math.max(1,Math.ceil(epsTotal/epsSize))"), "page count derives from total and size");
+  // The pager only appears once there's more than the smallest batch to page through.
+  assert.ok(s.includes("if(epsTotal>10)"), "pager is gated on there being more than one batch at the smallest size");
+  // Size is one of exactly three values, persisted, shared across universes.
+  assert.ok(s.includes("data-epsz=\"10\"") === false, "sizes are rendered via szBtn, not hard-inlined");
+  for (const n of [10, 20, 50]) assert.ok(s.includes("szBtn(" + n + ")"), "size option missing: " + n);
+  assert.ok(s.includes("store.get('actEpSize')") && s.includes("store.set('actEpSize'"), "size must persist under actEpSize");
+  // Anchor-preserving size change: first row of the current batch stays put across a resize.
+  assert.ok(s.includes("const anchor=(_actEpPage[u]||0)*_actEpSize;") && s.includes("_actEpPage[u]=Math.floor(anchor/n);"),
+    "size change must hold position by row anchor, not snap to top");
+  // Nav mutates the per-universe index and re-renders; disabled ends are inert.
+  assert.ok(s.includes("_actEpPage[u]=(_actEpPage[u]||0)+(+b.dataset.eppg)"), "prev/next steps the per-universe batch index");
+  assert.ok(/\.act-ep-pg.*if\(b\.disabled\) return/s.test(s.slice(s.indexOf("act-ep-pg"))), "a disabled nav button is inert");
+  for (const cls of ["act-ep-pager", "act-ep-sz", "act-ep-pg", "act-ep-show", "act-ep-nav"])
+    assert.ok(css.includes("." + cls), "missing pager CSS class: " + cls);
+});
+
+test("settled -03: actEpSizeSet executes with real validation — only 10/20/50, and it persists", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const m = s.match(/function actEpSizeSet\(n\)\{[\s\S]*?\}\n/);
+  assert.ok(m, "actEpSizeSet must be a single named function");
+  const rec = [];
+  const api = new Function("store",
+    `let _actEpSize=20; ${m[0]} return { set:(n)=>{ actEpSizeSet(n); return _actEpSize; } };`
+  )({ set: (k, v) => rec.push([k, v]) });
+  assert.equal(api.set(50), 50, "50 is accepted");
+  assert.equal(api.set(10), 10, "10 is accepted");
+  assert.equal(api.set(7), 10, "an off-menu size is rejected — the last valid size stands");
+  assert.equal(api.set(0), 10, "zero is rejected");
+  assert.deepEqual(rec[rec.length - 1], ["actEpSize", "10"], "only accepted sizes are persisted");
+  assert.equal(rec.filter((r) => r[1] === "7" || r[1] === "0").length, 0, "rejected sizes never reach the store");
+});
+
 // ===================== macro calendar (build -17) =====================
 test("macro: FOMC decision table pins the published Fed schedule through Jan 2028", () => {
   const { FOMC_DECISIONS } = require("../src/compute");
@@ -11560,7 +11605,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.31-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.31-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
