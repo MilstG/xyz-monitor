@@ -2502,6 +2502,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "renderCorrCrypto", "paintCorr", "alignedIntraday", "corrRet", "corrOvUnit", "syncCorrLookback",
     "compgAligned", "compgTickLabel", "compgHoverLabel",
     "cascCell", "liq24Cell", "loadDrawerDerivs", "renderDerivs", "dzWire",
+    "loadDrawerFund", "renderFund",
     "compgUniverse", "compgDefaultSel", "compgAddName", "compgPickerHtml", "compgWirePicker", "compgAuto",
     "dailyLevels", "dailyOI", "btMomVariant",
     "mompCell", "renderDuelSection", "duelSvg", "duelDivergence", "loadDuelData", "duelRoll", "colAdjacent",
@@ -2520,6 +2521,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "macrostrip", "MACRO \\u00b7 REPORTED", "act-mwarn", "mrow", "d.macroErr", "tabdot",
     "nxt.diff<=2", "mn.diff<=2", "FOMC meeting begins",
     "krow", "state.focus", "/api/derivs", "MAIN_ONLY_COLS", "dderivs",
+    "/api/fundamentals", "id=\"dfund\"", "fnrange", "fnread", "fnbar",
     "key:'momp'", "/api/duel", "momentum2:", "r.momWhy",
     "c.structLevels", "detected structural level(s) drawn faint"]) {
     const ok = frag.includes("|") ? frag.split("|").some((f) => s.includes(f)) : s.includes(frag);
@@ -2652,7 +2654,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const routes = ["/api/snapshot", "/api/daily", "/api/analytics", "/api/duel", "/api/trend", "/api/signals",
-    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/ai-report", "/api/ai-reports", "/api/health",
+    "/api/earnings", "/api/series", "/api/ledger", "/api/candles", "/api/corr-crypto", "/api/derivs", "/api/fundamentals", "/api/ai-report", "/api/ai-reports", "/api/health",
     "/api/actionable", "/api/triggers",
     "/api/export/ledger", "/api/news", "/api/news/channels", "/api/alerts", "/api/alerts/rules",
     "/manifest.webmanifest", "/icon.svg", "/sw.js"];
@@ -4905,6 +4907,38 @@ test("server: /api/derivs routes registered once, keyed ETag, cooldown maps to 4
   assert.ok(srv.includes('"derivs|" + poller.derivsKey(coin)'), "ETag key must come from poller.derivsKey");
   assert.ok(/fastify\.post\("\/api\/derivs\/refresh", \{ bodyLimit: 8 \* 1024 \}/.test(srv), "refresh POST must carry a body cap");
   assert.ok(/r\.error === "cooldown" \? reply\.code\(429\)|error === "cooldown"\) return reply\.code\(429\)/.test(srv), "cooldown must map to 429");
+});
+
+test("fundamentals: poller module wired, gated on the earnings roster, price-trio derived live", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const sto = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  // exports + ETag key
+  assert.ok(pol.includes("getFundamentals,") && pol.includes("fundamentalsKey:"), "getFundamentals + fundamentalsKey exported for serveKeyed");
+  // SAME eligibility gate as earnings — no separate roster to drift out of sync
+  assert.ok(/const roster = \[\.\.\.earnEligible\(\)\.values\(\)\];\s+\/\/ \{coin, ticker\} — the SAME eligibility gate as earnings/.test(pol),
+    "fundTick must gate on earnEligible() — the earnings roster, not a parallel one");
+  assert.ok(pol.includes("const FUND_ALIAS = EARN_ALIAS"), "fundamentals must reuse the earnings US-symbol aliasing");
+  // the price-sensitive trio is derived live off the mark, NOT cached — this is the one-code-path guarantee
+  assert.ok(pol.includes("const mcap = (px != null && f.shares != null) ? px * f.shares * 1e6 : null"), "market cap derived live off the board mark");
+  assert.ok(pol.includes("const pe = (px != null && f.epsTTM != null && f.epsTTM > 0) ? px / f.epsTTM : null"), "P/E derived live; guarded so EPS<=0 does not produce a number");
+  assert.ok(pol.includes("const ps = (px != null && f.revPsTTM != null && f.revPsTTM > 0) ? px / f.revPsTTM : null"), "P/S derived live off the mark");
+  assert.ok(/peNm: epsNm/.test(pol) && pol.includes("const epsNm = (f.epsTTM != null && f.epsTTM <= 0)"), "negative/zero trailing EPS must flag P/E as n/m, not a negative multiple");
+  // honest coverage: non-equity and unresolved names get a reason, never a fabricated grid
+  assert.ok(pol.includes('covered: false') && pol.includes('non-equity ('), "non-equity names get an honest not-covered reason");
+  assert.ok(pol.includes('foreign listing — not resolved by the US feed'), "a tried-but-empty name reads as foreign/uncovered, distinct from pending");
+  assert.ok(/pending: !tried/.test(pol), "un-fetched names are pending, not miscategorised as uncovered");
+  // the ETag key folds a coarse px bucket so the live trio isn't frozen behind a cached body
+  assert.ok(/Math\.round\(Math\.log\(r\.px\) \* 400\)/.test(pol), "fundamentalsKey must fold a coarse px bucket so the derived trio refreshes as the mark moves");
+  // slow rotation + warm cache persistence
+  assert.ok(pol.includes("const FUND_TTL = 22 * HOUR"), "each name re-fetches at most ~daily (fundamentals are quarterly)");
+  assert.ok(pol.includes("hydrateFund()") && pol.includes("store.saveFund(") , "cache is persisted and restored across redeploys");
+  assert.ok(sto.includes("saveFund(data)") && sto.includes("loadFund()"), "store must expose saveFund/loadFund");
+  // server route via serveKeyed, exactly once, keyed off the poller
+  assert.equal(srv.split('fastify.get("/api/fundamentals"').length - 1, 1, "GET /api/fundamentals registered exactly once");
+  assert.ok(/get\("\/api\/fundamentals"[\s\S]{0,500}serveKeyed\(/.test(srv), "/api/fundamentals must serve via serveKeyed (per-coin fresh payload)");
+  assert.ok(srv.includes('"fund|" + poller.fundamentalsKey(coin)'), "ETag key must come from poller.fundamentalsKey");
 });
 
 test("client: CASC column + drawer deriv panel wired, crypto-scoped, honestly labeled", () => {
@@ -11526,7 +11560,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.30-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.07.31-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14422,6 +14456,13 @@ test("landscape prose: refs are the grounding contract and every gate the brief 
   assert.ok(/name not in context/.test(
     C.validateLandProse({ story: two + "\n\nNVDA led the move.", refs: ["h1", "h2"] }, ctx).error));
   assert.ok(/paragraphs/.test(C.validateLandProse({ story: "one blob", refs: ["h1", "h2"] }, ctx).error));
+  // Regression: a story over the SOFT prose budget must NOT be rejected. The renderer owns length;
+  // rejecting here turned a 3% overshoot into "commentary unavailable" and the trader got nothing.
+  const longPara = ("clouds gather over the same names again and again ").repeat(40).trim();
+  const overBudget = longPara + "\n\n" + longPara;   // ~4000 chars, 2 paragraphs, no numbers/names/advice
+  assert.ok(overBudget.length > C.LAND_PROSE_MAX, "the guard's story must actually exceed the soft budget");
+  assert.equal(C.validateLandProse({ story: overBudget, refs: ["h1", "h2"] }, ctx).ok, true,
+    "over the soft budget is not a validity failure — the renderer's shed ladder fits it, never a wholesale discard");
 });
 
 test("landscape render: sources footer, URL guard, honest degradation, shed order", () => {
@@ -14446,6 +14487,16 @@ test("landscape render: sources footer, URL guard, honest degradation, shed orde
     { story: "A".repeat(1900) + ".\n\n" + "B".repeat(1900) + ".", refs: many.items.map((x) => x.id) });
   assert.ok(C.briefVisibleLen(big.message) <= C.BRIEF_TG_LIMIT, "the message fits Telegram's limit");
   assert.ok(big.dropped.includes("source"), "citations shed before prose");
+
+  // Pathological single over-long paragraph: sources+paragraph shedding can't help (one paragraph,
+  // no \n\n), so the final clip backstop trims it to fit. The commentary still ships — never the
+  // "unavailable" placeholder, and never an over-limit body the Telegram send would bounce.
+  const huge = C.renderLandscape({ at: Date.now(), tz: 0, news: [{ sector: "X", items: [{ id: "h1", t: "T", h: "h", u: "https://ex.com/1" }] }] },
+    { story: "z".repeat(9000), refs: ["h1"] });
+  assert.ok(C.briefVisibleLen(huge.message) <= C.BRIEF_TG_LIMIT, "a single over-long paragraph is clipped to fit the ceiling");
+  assert.ok(huge.dropped.includes("clip"), "the final backstop engages when shedding alone cannot fit");
+  assert.ok(!/commentary unavailable/.test(huge.message) && /THE LANDSCAPE/.test(huge.message),
+    "an over-long story still delivers the commentary, not the unavailable line");
 });
 
 test("landscape delivery walks the registry: due only on scheduled days, once per recipient-day", async () => {
@@ -14507,8 +14558,11 @@ test("the landscape's budget targets the telegram ceiling, and the contract matc
   assert.ok(C.briefVisibleLen(r.message) <= C.BRIEF_TG_LIMIT);
   assert.equal(r.dropped.length, 0, "a full-length story with a normal footer ships whole — nothing shed");
   assert.ok(C.briefVisibleLen(r.message) > 3700, "…and it actually uses the room it asked for");
-  // Over-budget and over-paragraph still refuse.
-  assert.ok(/over budget/.test(C.validateLandProse({ story: "x".repeat(3401) + "\n\ny", refs: ["h0", "h1"] }, ctx).error));
+  // Over-PARAGRAPH still refuses (a structural gate). Over-BUDGET no longer does: length is the
+  // renderer's concern now, so a story past the soft budget validates and gets shed/clipped to fit
+  // rather than discarded. This is the fix for "commentary unavailable — story over budget".
+  assert.equal(C.validateLandProse({ story: "x".repeat(3401) + "\n\ny", refs: ["h0", "h1"] }, ctx).ok, true,
+    "past the soft budget is not a validity failure — the renderer's shed ladder owns length");
   assert.ok(/paragraphs/.test(C.validateLandProse({ story: Array(8).fill("p").join("\n\n"), refs: ["h0", "h1"] }, ctx).error));
 
   const p = ctxHarness();
