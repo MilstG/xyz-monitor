@@ -9558,12 +9558,51 @@ test("brief validator: rejects invented numbers, unlisted names, advice and mark
   assert.match(bad({ story: "The 10-year sits at 7.77% this morning." }).error, /number not in context/);
   assert.match(bad({ closing: "PLTR is the tell here." }).error, /name not in context/);
   assert.match(bad({ closing: "You should buy the dip in semis." }).error, /directional instruction/);
+  // 2026.08.03-01: the U.S/EV screenshots — a dotted "U.S." tokenizes as "U.S" and must resolve
+  // through the dot-stripped whitelist form; "EV" is ordinary market prose. Either one previously
+  // discarded the ENTIRE commentary and the reader got a warning line instead of a brief.
+  assert.ok(C.validateBriefProse({ story: "The U.S. tape leaned risk-off while EV names lagged.",
+    closing: "Nothing is resolved." }, ctx).ok, "U.S. and EV are prose, not fabricated instruments");
+  assert.equal(typeof C.briefNameOk, "function", "normalized name check exported");
+  assert.ok(C.briefNameOk("U.S", new Set()) && C.briefNameOk("U.K", new Set()) && C.briefNameOk("EV", new Set()));
+  assert.ok(!C.briefNameOk("ZZZZ", new Set()), "a genuinely unknown name still rejects — the gate is normalized, not disarmed");
+  assert.match(C.validateBriefProse({ story: "Breadth closed at 48%.", closing: "QQQQ is the tell here." }, ctx).error,
+    /name not in context/, "fabricated tickers still die at the gate after the U.S/EV fix");
   assert.match(bad({ story: "Breadth <b>48%</b>." }).error, /markup/);
   assert.match(bad({ closing: "" }).error, /closing missing/);
   assert.match(bad({ story: "x".repeat(C.BRIEF_PROSE_MAX.story + 1) }).error, /over budget/);
   // Small counts are prose, not claims — a model writing "four sessions running" is doing its job.
   assert.ok(C.validateBriefProse({ story: "Four sessions running, eight of eleven sectors closed red.",
     closing: "Nothing is resolved." }, ctx).ok, "spelled-out and small counts must not trip the numeric gate");
+});
+
+test("prose salvage 2026.08.03-01: one bad token costs the sentence, never the commentary", () => {
+  const C = require("../src/compute");
+  const ctx = BRIEF_CTX();
+  // The proportionality complaint: three clean sentences must survive one fabricated name.
+  const s = C.briefSalvageProse(
+    "Breadth closed soft. QQQQ led the tape lower. Semis carried what strength there was.\n\nNothing else moved.", ctx);
+  assert.equal(s.cut, 1, "exactly the offending sentence is cut");
+  assert.ok(!/QQQQ/.test(s.text) && /Breadth closed soft/.test(s.text) && /Semis carried/.test(s.text)
+    && /Nothing else moved/.test(s.text), "every clean sentence survives, in place");
+  assert.match(s.why, /name not in context: QQQQ/, "the cut is attributable, not silent");
+  // Salvaged output must pass the SAME validator that rejected the original — one code path.
+  assert.ok(C.validateBriefProse({ story: s.text, closing: "Nothing is resolved." }, ctx).ok,
+    "salvage and validation judge by the identical gate");
+  // Invented figures ride the same rung.
+  const n = C.briefSalvageProse("The tape held. Inflation ran 7.77 percent. Risk stayed on.", ctx);
+  assert.equal(n.cut, 1); assert.match(n.why, /number not in context/);
+  // Advice is NOT salvageable — a misbehaving model still hard-fails, per-sentence mercy is for
+  // vocabulary misses only. briefTextViolation carries no advice gate; the validator's does.
+  assert.match(C.validateBriefProse({ story: "You should buy the dip.", closing: "x" }, ctx).error,
+    /directional instruction/);
+  assert.equal(typeof C.briefTextViolation, "function", "shared gate exported");
+  // Landscape renderer discloses a cut ALONGSIDE the prose (previously proseErr only rendered
+  // when prose was absent entirely).
+  const lctx = Object.assign({}, ctx, { proseErr: "1 sentence(s) withheld \u2014 name not in context: QQQQ" });
+  const r = C.renderLandscape(lctx, { story: "First paragraph here.\n\nSecond paragraph here.", refs: [] });
+  assert.ok(/withheld/.test(r.message) && /First paragraph here/.test(r.message),
+    "the reader gets the commentary AND the disclosure, not one or the other");
 });
 
 test("brief: movers carry both legs, and the relative leg is absent rather than wrong without a benchmark", () => {
@@ -11605,7 +11644,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.07.31-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.03-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14500,6 +14539,8 @@ test("landscape prose: refs are the grounding contract and every gate the brief 
     "relational claims are allowed; invented figures are not");
   assert.ok(/name not in context/.test(
     C.validateLandProse({ story: two + "\n\nNVDA led the move.", refs: ["h1", "h2"] }, ctx).error));
+  assert.equal(C.validateLandProse({ story: two + "\n\nThe U.S. session set the tone and EV names followed.",
+    refs: ["h1", "h2"] }, ctx).ok, true, "U.S./EV must not discard landscape commentary — the -01 screenshot bug");
   assert.ok(/paragraphs/.test(C.validateLandProse({ story: "one blob", refs: ["h1", "h2"] }, ctx).error));
   // Regression: a story over the SOFT prose budget must NOT be rejected. The renderer owns length;
   // rejecting here turned a 3% overshoot into "commentary unavailable" and the trader got nothing.
