@@ -5283,6 +5283,30 @@ function scopeFilterActionable(p, vis) {
 // (ops, rules, filings, earnings, trend, ma200, macro …) belongs to features with their own gates
 // and passes untouched. `setup` events are actionable-borne, `ledger` events signal-borne — each is
 // judged against its OWN parent's scope set so the wire and the tabs can never disagree.
+// ===== fire -> shown decomposition (build 2026.08.03-07) =======================================
+// Splits an episode's surfacing delay into its two actionable-side components:
+//   cad  = tBld - tFire   (cadence: the claim existed but no actionable build had evaluated it yet)
+//   gate = tShow - tBld   (gating: a build evaluated it and the EV/tradeable gates held it back)
+// The upstream cost (condition true -> claim fired) lives in the signal engine's own cadence and
+// confirmation walls and is NOT reconstructible for existing claims — no number is invented for it.
+// Lower-bound stamps (bt = boot-shown, be = boot-evaluated) are EXCLUDED and counted, same doctrine
+// as the headline lateness: a restart's stamp is the process's birth, not a measurement.
+function epLatParts(ep) {
+  if (!ep || ep.bt || ep.be) return null;
+  const f = +ep.tFire, b = +ep.tBld, s = +ep.tShow;
+  if (!isFinite(f) || !isFinite(b) || !isFinite(s)) return null;   // pre-stamp episode: dash, never guessed
+  if (b < f || s < b) return null;                                  // hydration damage / skew: refused, not clamped
+  return { cad: b - f, gate: s - b };
+}
+function epLatSplit(eps) {
+  const cad = [], gate = []; let excl = 0;
+  for (const e of eps || []) { const p = epLatParts(e); if (!p) { excl++; continue; } cad.push(p.cad); gate.push(p.gate); }
+  const med = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y), m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+  return { n: cad.length, excl, cadMed: med(cad), cadAvg: avg(cad), gateMed: med(gate), gateAvg: avg(gate) };
+}
+
 function scopeEventVisible(ev, sigVis, actVis) {
   if (!ev) return false;
   if (ev.kind === "ledger") return sigVis[coinScope(ev.coin)];
@@ -5417,6 +5441,8 @@ module.exports.coinScope = coinScope;
 module.exports.scopeFilterSignals = scopeFilterSignals;
 module.exports.scopeFilterActionable = scopeFilterActionable;
 module.exports.scopeEventVisible = scopeEventVisible;
+module.exports.epLatParts = epLatParts;
+module.exports.epLatSplit = epLatSplit;
 module.exports.featureSettable = featureSettable;
 
 // ===== settled-board episode scoring (build 2026.07.27-15) ======================================

@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
-const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible } = require("./compute");
+const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible, epLatSplit } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, macroStatText, FOMC_DECISIONS,
   briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, validateBriefSections, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape, briefSalvageProse } = require("./compute");
@@ -1480,6 +1480,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (ep && typeof ep.k === "string" && ep.tShow > 0 && ep.void > 0) boardEp.set(ep.k, ep);
       if (Array.isArray(d.board.closed))
         boardEpClosed = d.board.closed.filter((e) => e && typeof e.k === "string" && e.kind && Number.isFinite(e.rE)).slice(-BOARD_EP_KEEP);
+      // Evaluation stamps survive restarts — a deploy is not an evaluation, and rehydrated stamps
+      // keep actEvalBoot from lower-bounding claims a previous process already timed properly.
+      if (Array.isArray(d.board.evalT)) for (const t of d.board.evalT)
+        if (Array.isArray(t) && typeof t[0] === "string" && Number.isFinite(t[1])) actEval.set(t[0], { t: t[1], b: t[2] ? 1 : 0 });
       // First-cohort repair, idempotent: episodes stamped on the record's very first scan
       // (tShow === the epoch itself) whose claims fired well before it were opened against rows
       // that may have been visible before the feature existed. Their shown stamp is the
@@ -1595,7 +1599,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (!ledgerDirty) return;
     store.saveLedger({ ts: Date.now(), open: [...ledgerOpen.values()], closed: ledgerClosed.slice(-4000), variants: variantState, rearm: [...rearm],
       present: [...presentSince].map(([k, v]) => [k, v.t]),   // presence timelines survive restarts — a deploy is not a lapse
-      board: { since: boardEpSince, dropped: boardEpDropped, open: [...boardEp.values()], closed: boardEpClosed.slice(-BOARD_EP_KEEP) } });   // the board's own record rides the same blob — no new storage surface
+      board: { since: boardEpSince, dropped: boardEpDropped, open: [...boardEp.values()], closed: boardEpClosed.slice(-BOARD_EP_KEEP),
+        evalT: [...actEval].map(([k, v]) => [k, v.t, v.b ? 1 : 0]) } });   // the board's own record rides the same blob — no new storage surface
     ledgerDirty = false;
   }
   // Per-ticker signal history for the drawer: every VISIBLE claim the engine ever made on one
@@ -1797,6 +1802,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     } catch (_) {}
     return c;
   }
+  // Set when a REAL (vi==null) claim opens during a signals pass; consumed at the pass's end to
+  // chain an immediate actionable rebuild (2026.08.03-07). A flag, not a call: openLedger runs
+  // mid-pass with the ledger under mutation, and a bare buildActionable from here is exactly the
+  // interleave chainBuild exists to forbid.
+  let actKick = false;
   function openLedger(r, ev, sigEntry, dir, extra, vi) {
     // Universe enrollment, single-sourced through evAllowed: the crypto side runs the whitelisted
     // roster (MAIN_EVS) and nothing else, the equity side runs everything except the two
@@ -1907,6 +1917,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (r._r2 != null) e.r2 = r._r2;
       if (r._vr != null) e.vr = r._vr;   // vol-regime percentile at fire (F-vr) — recorded for later conditioned splits
       ledgerOpen.set(key, e); ledgerDirty = true;
+      if (vi == null) actKick = true;   // a real claim opened -> the board's inputs changed NOW, not at the next timer
     }
     return e;
   }
@@ -3257,6 +3268,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       record: recordCache || {}, confluence: confCache || null, recordX: recordXCache,
       records: recordSets, variants, shadows, recent: rs0 ? rs0.recent : [], earnSplit };
     persistLedger();
+    // Event-driven board rebuild (2026.08.03-07): claims opened THIS pass reach the board on the
+    // chained build that follows, not the next ACT_MS/poll tick — the pure-cadence half of the
+    // fire->shown cost, deleted. Debounced to one chained rebuild per signals pass, floor-limited
+    // so a cascade day cannot stampede the chain, serialized through chainBuild like every build
+    // that touches the ledger. Fire-and-forget on purpose: the signals pass must not await the
+    // board, and chainBuild's caller-side rejection is logged by its own handler.
+    if (actKick) {
+      actKick = false;
+      if (Date.now() - actBuilt > 5000)
+        chainBuild("buildActionable", buildActionable).catch((err) => log("chained buildActionable error: " + (err && err.message)));
+    }
   }
 
   // ---- session / time-of-day analytics (served at /api/analytics) ----
@@ -7503,6 +7525,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const BOARD_EP_SHIP = 120;    // shipped on the payload, newest last
   let boardEp = new Map();      // claim key -> open episode
   let boardEpClosed = [];       // resolved episodes, oldest first
+  // fire->shown decomposition (2026.08.03-07): claim key -> { t, b } — the first buildActionable
+  // pass that EVALUATED the claim (candidate loop entry, before any gate). b=1 marks a claim that
+  // FIRED before this process existed and carried no hydrated stamp: it may have been evaluable
+  // long before boot, so its stamp is a lower bound and its episode is excluded from the split
+  // aggregates (mirroring bt). Claims fired BY this process are properly timed from their first
+  // build regardless — the epoch test, not a first-build flag, draws the honest line. Persisted
+  // with the episodes: a deploy is not an evaluation.
+  let actEval = new Map();
+  const actEvalEpoch = Date.now();
   let boardEpSince = 0;         // first scan ever — the record's own out-of-sample epoch
   let boardEpDropped = 0;       // shown but unscoreable (claim voided/purged, or no exit price) — disclosed, never silent
   // First scan after process start. An episode opened on it, for a claim that fired well before
@@ -7523,10 +7554,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       present.add(rw.k);
       const ep = boardEp.get(rw.k);
       if (ep) { if (ep.off) { ep.flick = (ep.flick || 0) + 1; ep.off = 0; ledgerDirty = true; } continue; }
+      const ev0 = actEval.get(rw.k);
       const nu = { k: rw.k, coin: rw.coin, t: rw.t, uni: rw.uni, ev: rw.ev, label: rw.label,
         cls: rw.cls, side: rw.side, tShow: now, markShow: rw.entry, fired: rw.fired,
         void: rw.void, target: rw.target, rr: rw.rr ? rw.rr.gross : null, evR: rw.evR,
-        rec: rw.rec ? { n: rw.rec.n, hit: rw.rec.hit } : null, tFire: rw.t0, flick: 0, off: 0 };
+        rec: rw.rec ? { n: rw.rec.n, hit: rw.rec.hit } : null, tFire: rw.t0, flick: 0, off: 0,
+        // first-evaluated stamp, frozen at episode open. A row can only be ON the board because a
+        // build evaluated it, so a missing stamp here means hydration loss — left absent, and the
+        // split math refuses the episode rather than inventing a build time.
+        tBld: ev0 ? ev0.t : undefined, be: ev0 && ev0.b ? 1 : undefined };
       if (boardEpBoot && Number.isFinite(rw.t0) && now - rw.t0 > BOARD_EP_BT_MS) nu.bt = 1;
       boardEp.set(rw.k, nu);
       ledgerDirty = true;
@@ -7554,7 +7590,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const done = { k: ep.k, coin: ep.coin, t: ep.t, uni: ep.uni, ev: ep.ev, label: ep.label,
         cls: ep.cls, side: ep.side, tShow: ep.tShow, markShow: ep.markShow, fired: ep.fired,
         void: ep.void, target: ep.target, rr: ep.rr, evR: ep.evR, rec: ep.rec, tFire: ep.tFire,
-        flick: ep.flick || 0, tRes: tEnd, kind: res.kind, rE, rM,
+        tBld: ep.tBld, be: ep.be, flick: ep.flick || 0, tRes: tEnd, kind: res.kind, rE, rM,
         held: Math.max(0, (res.tHit || tEnd) - ep.tShow) };
       // The price the score came from is part of the score. Target/void exits are their frozen
       // levels (already on the episode); an expiry's exit mark existed only in this sweep — an
@@ -7608,6 +7644,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       fin(u.cls.rr); fin(u.cls.ev); fin(u.all);
       u.lat = u.latN ? +((u._lE - u._lM) / u.latN).toFixed(2) : null;
       u.clus = clusSeen[key].size;
+      // fire->shown split over this universe's resolved episodes: cadence (fire -> first
+      // evaluating build) vs gating (that build -> first shown). Pre-stamp / lower-bound
+      // episodes are excluded and the exclusion count ships — dashes over invented numbers.
+      u.split = epLatSplit(boardEpClosed.filter((e) => e.uni === key));
       delete u._lE; delete u._lM; }
     return { since: boardEpSince || null, dropped: boardEpDropped, perUni: per,
       episodes: boardEpClosed.slice(-BOARD_EP_SHIP).map((e) => {
@@ -7650,6 +7690,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const rej = { expired: 0, noGeometry: 0, degenerate: 0, untakeable: 0, norecord: 0, negexp: 0, negev: 0, noedge: 0 };
     for (const e of ledgerOpen.values()) {
       if (e.ev === "airead") continue;                          // the analyst's own claim, not a setup
+      // Evaluation stamp, BEFORE any gate: "a build looked at this claim" is true from here on,
+      // whether or not the row survives the gates below — that is exactly the boundary between
+      // the cadence component and the gate component of the fire->shown split.
+      if (e.vi == null && !actEval.has(e.key)) { actEval.set(e.key, { t: now, b: Number.isFinite(e.t0) && e.t0 < actEvalEpoch ? 1 : 0 }); ledgerDirty = true; }
       if (++yN % BUILD_YIELD_EVERY === 0) await buildYield();
       const r = rows.get(e.coin);
       if (!r || r.delisted || !(r.px > 0)) continue;
@@ -7768,6 +7812,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // its flicker fold recorded before the sweep closes it.
     boardEpScan(board, now);
     boardEpSweep(now);
+    // Stamp hygiene: a stamp whose claim closed AND whose episode is gone has no consumer left.
+    // Open episodes already copied their tBld at open, so this prune can never orphan one.
+    for (const k of [...actEval.keys()]) if (!ledgerOpen.has(k) && !boardEp.has(k)) actEval.delete(k);
     const settled = boardSettled();
     const sigA = JSON.stringify(board.map((x) => [x.coin, x.side, x.ev, x.bars, x.rr.gross, x.evR]))
       // the settled record must bust the ETag: a resolution or a new episode changes the tab's
