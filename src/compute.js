@@ -5065,7 +5065,28 @@ const FEATURES = [
   // The plain (method-less) route strings gate every verb on both endpoints, so creation is
   // exactly as open as the feature itself: no way to flag the panel off but leave the POST live.
   { key: "baskets", kind: "act", label: "Custom baskets + ratio", def: "admin", routes: ["/api/baskets", "/api/ratio"] },
+  // kind:"scope" — per-universe slices of a parent tab (build 2026.08.03-02). A scope owns NO route
+  // and NO tab: the parent's route gate stays the outer wall, and the scope is enforced INSIDE
+  // payload assembly — a non-admin caller's /api/signals, /api/ledger, /api/triggers, /api/actionable
+  // and ledger-export bodies simply do not contain rows from a hidden universe. The client renders
+  // what arrives (one-code-path: it never re-derives a slice from a raw flag), so chart, board, bell
+  // log, browser toasts and the Telegram wire all agree for free. "off" on a scope hides the slice
+  // from admin too, same semantics as every other key. Defaults encode the standing intent: crypto
+  // slice public, equity slice admin-only.
+  { key: "signals.cx",    kind: "scope", parent: "signals",    label: "Crypto universe", def: "public", routes: [] },
+  { key: "signals.eq",    kind: "scope", parent: "signals",    label: "Equity universe", def: "admin",  routes: [] },
+  { key: "actionable.cx", kind: "scope", parent: "actionable", label: "Crypto universe", def: "public", routes: [] },
+  { key: "actionable.eq", kind: "scope", parent: "actionable", label: "Equity universe", def: "admin",  routes: [] },
 ];
+
+// parent tab key -> its scope entries. Built once from the manifest so a scope can never point at
+// a key that isn't in it (the same closed-world rule the route index follows).
+const FEATURE_SCOPES_BY_PARENT = new Map();
+for (const f of FEATURES) {
+  if (f.kind !== "scope") continue;
+  if (!FEATURE_SCOPES_BY_PARENT.has(f.parent)) FEATURE_SCOPES_BY_PARENT.set(f.parent, []);
+  FEATURE_SCOPES_BY_PARENT.get(f.parent).push(f);
+}
 
 const FEATURE_BY_KEY = new Map(FEATURES.map((f) => [f.key, f]));
 
@@ -5104,8 +5125,35 @@ function featureState(flags, key) {
 function featureVisible(flags, key, isAdmin) {
   const s = featureState(flags, key);
   if (s === "off") return false;          // off means nobody — admin included
-  return s === "public" || !!isAdmin;
+  if (s !== "public" && !isAdmin) return false;
+  // Parent self-demotion: a public tab whose EVERY scope resolves non-public would render as an
+  // empty shell for a public user — the filtered payloads contain nothing. Hiding the tab is the
+  // honest presentation; the admin keeps it regardless (the scopes only slice the public wire).
+  if (!isAdmin && FEATURE_SCOPES_BY_PARENT.has(key)) {
+    const kids = FEATURE_SCOPES_BY_PARENT.get(key);
+    if (kids.length && !kids.some((k) => featureState(flags, k.key) === "public")) return false;
+  }
+  return true;
 }
+
+// The per-universe visibility a payload builder needs for one parent tab and one caller:
+// { cx, eq, all }. `all` short-circuits the filters to the identity path — the shared cached body
+// keeps its WeakMap serialize/gzip memoization and its ETag untouched for admin callers.
+function featureScopeVis(flags, parent, isAdmin) {
+  const kids = FEATURE_SCOPES_BY_PARENT.get(parent);
+  if (!kids || !kids.length) return { cx: true, eq: true, all: true };
+  const vis = { cx: true, eq: true };
+  for (const k of kids) {
+    const suf = k.key.slice(k.key.lastIndexOf(".") + 1);
+    if (suf === "cx" || suf === "eq") vis[suf] = featureVisible(flags, k.key, isAdmin);
+  }
+  vis.all = vis.cx && vis.eq;
+  return vis;
+}
+
+// Universe of one instrument, by the same colon convention the poller stamps rows with
+// (xyz builder-dex coins carry a ":" in the coin id; main-dex perps never do).
+function coinScope(coin) { return coin && String(coin).includes(":") ? "eq" : "cx"; }
 
 // The whole resolved set for one audience. This is what gets injected into the shell and what the
 // client reads; the client never re-derives a state from a raw flag, same one-code-path rule the
@@ -5152,12 +5200,84 @@ function featureSettable(key) {
   return !!f && !f.pin && !f.lock;
 }
 function featureCounts(flags) {
-  let pub = 0, adm = 0, off = 0;
+  let pub = 0, adm = 0, off = 0, scoped = 0;
   for (const f of FEATURES) {
     const s = featureState(flags, f.key);
     if (s === "public") pub++; else if (s === "off") off++; else adm++;
+    if (f.kind === "scope" && s !== "public") scoped++;
   }
-  return { total: FEATURES.length, public: pub, admin: adm, off: off };
+  return { total: FEATURES.length, public: pub, admin: adm, off: off, scoped };
+}
+
+// ===== per-universe payload slicing (build 2026.08.03-02) ======================================
+// Pure filters: given a FULL built payload and a { cx, eq, all } visibility set, return the body a
+// scoped caller may see. All identity-preserving on vis.all — the shared cached object (and its
+// WeakMap serialize/gzip memoization and dataTs ETag) passes through untouched for admin callers.
+// Never mutate the input: the full body is the admin's live cache.
+const _scopeOfUni = (uni) => (uni === "main" || uni === "crypto" ? "cx" : "eq");
+// `evUni` = { xyzOnly:Set, mainOnly:Set } — the poller's own single-answer universe rosters
+// (XYZ_ONLY_EVS / MAIN_ONLY_EVS), passed in so this stays pure and the classification cannot
+// drift from the fire-site gate. An event in neither set is shared and always survives.
+function scopeFilterSignals(p, vis, evUni) {
+  if (!p || vis.all) return p;
+  const keep = (uni) => vis[_scopeOfUni(uni)];
+  const xo = (evUni && evUni.xyzOnly) || new Set(), mo = (evUni && evUni.mainOnly) || new Set();
+  const rs = p.records || {};
+  // Single visible universe: the mixed-pot panels (record / recordX / confluence / recent) are
+  // replaced WHOLESALE by that universe's own scoped set — the mixed aggregates fold resolutions
+  // from the hidden universe, and serving a number a reader cannot audit against visible rows is
+  // exactly the false precision the ledger rules forbid. The scoped sets already exist per build.
+  const sfx = vis.cx ? "m" : "x";
+  const solo = rs["0" + sfx] || null;
+  const records = {};
+  // Scoped keys of the visible universe only. Mixed (suffix-less) keys are dropped for the same
+  // audit reason as the top-level trio; the client's record-key fallback then renders empty rather
+  // than contaminated, and the scoped keys it actually reads per tab survive intact.
+  for (const k in rs) if (k.endsWith(sfx)) records[k] = rs[k];
+  const countU = p.countU || {};
+  const sigs = (p.signals || []).filter((g) => keep(g.uni));
+  const evVisible = (ev) => !(xo.has(ev) && !vis.eq) && !(mo.has(ev) && !vis.cx);
+  return {
+    ts: p.ts, dataTs: p.dataTs,
+    // count is the tab badge's fallback on a payload predating countU — for a scoped caller it must
+    // total only what they can see, or the badge would disclose the hidden universe's activity.
+    count: (vis.cx && Number.isFinite(countU.m) ? countU.m : 0) + (vis.eq && Number.isFinite(countU.x) ? countU.x : 0),
+    countU: { x: vis.eq ? (countU.x != null ? countU.x : null) : null, m: vis.cx ? (countU.m != null ? countU.m : null) : null },
+    signals: sigs, shown: sigs.length,
+    record: solo ? solo.record : {}, confluence: solo ? solo.confluence : null,
+    recordX: solo ? solo.recordX : null, recent: solo ? solo.recent : [],
+    records,
+    // Variant rows for events that exist only in the hidden universe's engine carry that engine's
+    // live performance — dropped. Shared ("both") events stay; their stats fold both universes and
+    // that mixing is disclosed by the panel's own labeling, not hidden here.
+    variants: (p.variants || []).filter((v) => evVisible(v.ev)),
+    shadows: { xyz: vis.eq ? ((p.shadows || {}).xyz || null) : null, main: vis.cx ? ((p.shadows || {}).main || null) : null },
+    // The earnings-conditioned split partitions EQUITY resolutions by definition.
+    earnSplit: vis.eq ? (p.earnSplit || {}) : {},
+  };
+}
+function scopeFilterActionable(p, vis) {
+  if (!p || vis.all) return p;
+  const rows = (p.rows || []).filter((r) => vis[_scopeOfUni(r.uni)]);
+  const settled = p.settled || {};
+  return {
+    ts: p.ts, dataTs: p.dataTs, params: p.params || {},
+    // coverage.confirmed restated over the visible slice — the raw gate count would disclose how
+    // many hidden-universe setups exist. Rejection counters are engine-wide diagnostics and stay.
+    coverage: Object.assign({}, p.coverage || {}, { confirmed: rows.length }),
+    settled: { stocks: vis.eq ? (settled.stocks || null) : null, crypto: vis.cx ? (settled.crypto || null) : null },
+    rows, count: rows.length,
+  };
+}
+// Trigger-stream predicate: signal-borne kinds are universe-sliced by their coin; every other kind
+// (ops, rules, filings, earnings, trend, ma200, macro …) belongs to features with their own gates
+// and passes untouched. `setup` events are actionable-borne, `ledger` events signal-borne — each is
+// judged against its OWN parent's scope set so the wire and the tabs can never disagree.
+function scopeEventVisible(ev, sigVis, actVis) {
+  if (!ev) return false;
+  if (ev.kind === "ledger") return sigVis[coinScope(ev.coin)];
+  if (ev.kind === "setup") return actVis[coinScope(ev.coin)];
+  return true;
 }
 
 // ===== Custom baskets + ratio pairs — pure math (build 2026.07.28-06) ==========================
@@ -5281,6 +5401,12 @@ module.exports.featureVisible = featureVisible;
 module.exports.resolveFeatures = resolveFeatures;
 module.exports.featureGateFor = featureGateFor;
 module.exports.featureCounts = featureCounts;
+module.exports.FEATURE_SCOPES_BY_PARENT = FEATURE_SCOPES_BY_PARENT;
+module.exports.featureScopeVis = featureScopeVis;
+module.exports.coinScope = coinScope;
+module.exports.scopeFilterSignals = scopeFilterSignals;
+module.exports.scopeFilterActionable = scopeFilterActionable;
+module.exports.scopeEventVisible = scopeEventVisible;
 module.exports.featureSettable = featureSettable;
 
 // ===== settled-board episode scoring (build 2026.07.27-15) ======================================

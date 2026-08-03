@@ -4,7 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
-const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
+const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, macroStatText, FOMC_DECISIONS,
   briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, validateBriefSections, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape, briefSalvageProse } = require("./compute");
@@ -1607,8 +1607,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // type, or both — every VISIBLE claim matching (shadow variants never surface). At least one
   // filter is required; an unfiltered dump has no consumer and would only invite misuse.
   // Outcomes ship in the unit they actually resolved in; pre-epoch legacy entries are flagged.
-  function getLedgerFor(coin, ev) {
+  function getLedgerFor(coin, ev, isAdmin) {
     if (!coin && !ev) return { coin: "", ev: "", ticker: "", open: [], closed: [], ts: Date.now() };
+    // Universe slice (2026.08.03-02): a caller without a universe's signals scope gets NO claims
+    // from it — a coin-addressed query into the hidden universe returns the empty shape (same as a
+    // name with no history: the claims do not exist for this audience), and an event-only query is
+    // row-filtered so a "both"-universe event cannot smuggle hidden-universe rows out sideways.
+    const vis = featureScopeVis(featureFlags, "signals", !!isAdmin);
+    if (!vis.all && coin && !vis[coinScope(coin)])
+      return { coin, ev: ev || "", ticker: "", open: [], closed: [], ts: Date.now() };
     const pub = (e, status) => ({
       ev: e.ev, label: EV_LABEL[e.ev] || e.ev, tk: e.ticker || e.coin, coin: e.coin, t0: e.t0,
       tR: status === "resolved" ? (e.tR || null) : null, status,
@@ -1626,7 +1633,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       legacy: R_LEDGER_EVS.has(e.ev) && !(e.sd0 > 0),   // pre-sigma-epoch: excluded from aggregates, shown here labeled
       resolveAt: status === "open" ? e.resolveAt : undefined,
     });
-    const match = (e) => e.vi == null && (!coin || e.coin === coin) && (!ev || e.ev === ev);
+    const match = (e) => e.vi == null && (!coin || e.coin === coin) && (!ev || e.ev === ev)
+      && (vis.all || vis[coinScope(e.coin)]);
     let ticker = coin || "";
     const open = [], closed = [];
     for (const e of ledgerOpen.values())
@@ -1642,8 +1650,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // curated getLedgerFor shape: no 150-entry cap, no field pruning — shadow variants and
   // legacy pre-sigma entries ship as-is, distinguishable but present. The export's job is
   // completeness; exclusion is the analysis's call, made offline with the glossary in hand.
-  function getLedgerExport() {
-    const closed = ledgerClosed, open = [...ledgerOpen.values()];
+  function getLedgerExport(isAdmin) {
+    // Universe slice (2026.08.03-02): the export's job is completeness OF WHAT THIS AUDIENCE MAY
+    // SEE. A scoped caller's dump excludes hidden-universe entries entirely (shadow variants of
+    // those claims included — a vi row still names the coin), and the counts describe the shipped
+    // file, not the withheld one.
+    const vis = featureScopeVis(featureFlags, "signals", !!isAdmin);
+    const inScope = (e) => vis.all || vis[coinScope(e.coin)];
+    const closed = vis.all ? ledgerClosed : ledgerClosed.filter(inScope);
+    const open = [...ledgerOpen.values()].filter(inScope);
     let shadows = 0, legacy = 0, ctxFrom = null;
     for (const e of closed) {
       if (e.vi != null) shadows++;
@@ -7022,6 +7037,31 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   // callers (and every existing test stub) do not provide would take the whole poller down at
   // construction. Absent methods degrade to "no overrides, cannot persist" — manifest defaults only.
   let featureFlags = featureFlagsSanitize(store.loadFlags ? store.loadFlags() : null);
+  // Monotonic stamp for anything memoized against the CURRENT flag set (the scoped public bodies
+  // below): a flag flip must mint fresh filtered bodies AND fresh ETags immediately, not on the
+  // next signals/actionable build — an operator opening a universe expects it live on next poll.
+  let flagsVer = 1;
+  // ---- per-universe scoped bodies (build 2026.08.03-02) ---------------------------------------
+  // A non-admin caller whose signals/actionable scopes are not all public gets a FILTERED body:
+  // built once per (source cache object, flag set) pair by the pure compute filters, memoized so
+  // the per-request cost is one identity check, and stamped with its own dataTs so etagFor can
+  // never collide with the full body's tag (an admin unlock mid-session must not 304 a browser
+  // into keeping the filtered copy, and a flag flip must bust the public copy at once).
+  let sigScopedSrc = null, sigScopedStamp = "", sigScopedBody = null;
+  let actScopedSrc = null, actScopedStamp = "", actScopedBody = null;
+  function scopedBody(kind, src, vis) {
+    const stamp = String(src.dataTs || 0) + "|" + flagsVer + "|" + (vis.cx ? 1 : 0) + (vis.eq ? 1 : 0);
+    if (kind === "sig" && sigScopedSrc === src && sigScopedStamp === stamp) return sigScopedBody;
+    if (kind === "act" && actScopedSrc === src && actScopedStamp === stamp) return actScopedBody;
+    const body = kind === "sig" ? scopeFilterSignals(src, vis, { xyzOnly: XYZ_ONLY_EVS, mainOnly: MAIN_ONLY_EVS }) : scopeFilterActionable(src, vis);
+    // dataTs becomes a STRING here on purpose: etagFor interpolates it, so "…s3cx" can never equal
+    // any full body's numeric stamp, and folding flagsVer + the visible set means a flag flip or a
+    // scope change mints a fresh tag while an unchanged pair keeps revalidating to 304.
+    body.dataTs = String(src.dataTs || 0) + "s" + flagsVer + (vis.cx ? "c" : "") + (vis.eq ? "e" : "");
+    if (kind === "sig") { sigScopedSrc = src; sigScopedStamp = stamp; sigScopedBody = body; }
+    else { actScopedSrc = src; actScopedStamp = stamp; actScopedBody = body; }
+    return body;
+  }
   function getFlags() { return featureFlags; }
   // Everything the panel needs in one read: the manifest, the raw overrides, the resolved set for
   // THIS caller, and the public-facing counts. Resolved server-side on purpose — the client must
@@ -7038,7 +7078,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // rather than recomputing a public view from raw states in the browser — the client must never
       // re-derive a visibility, which is the same rule the chart annotations follow.
       resolvedPublic: resolveFeatures(featureFlags, false),
-      manifest: FEATURES.map((f) => ({ key: f.key, kind: f.kind, label: f.label,
+      manifest: FEATURES.map((f) => ({ key: f.key, kind: f.kind, label: f.label, parent: f.parent || null,
         state: featureState(featureFlags, f.key), pin: !!f.pin, lock: !!f.lock,
         settable: featureSettable(f.key), routes: f.routes || [] })),
     };
@@ -7061,6 +7101,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const clean = featureFlagsSanitize(next);
     if (!store.saveFlags || !store.saveFlags(clean)) return { ok: false, error: "write-failed" };
     featureFlags = clean;
+    flagsVer++;   // bust the memoized scoped public bodies (and their ETags) immediately
     log(`feature "${key}" set to ${state} (resolved ${featureState(clean, key)})`);
     return { ok: true, key, state: featureState(clean, key), features: getFeatures(true) };
   }
@@ -7918,7 +7959,14 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const evClassOk = (e, isAdmin) => !PUSH_ADMIN_CLASSES.includes(e.kind) || !!isAdmin;
   function getTriggers(sinceSeq, owner, isAdmin) {
     const since = Number.isFinite(+sinceSeq) ? +sinceSeq : null;
-    const vis = trigEvents.filter((e) => evClassOk(e, isAdmin) && evVisible(e, owner, isAdmin));
+    // Universe slice (2026.08.03-02): signal-borne kinds (ledger -> signals scopes, setup ->
+    // actionable scopes) are filtered by their coin's universe for scoped callers — the bell log
+    // and the toast transport read this stream, so hiding a universe from the tabs but announcing
+    // its fires here would be the exact one-code-path violation the manifest exists to prevent.
+    const sigVis = featureScopeVis(featureFlags, "signals", !!isAdmin);
+    const actVis = featureScopeVis(featureFlags, "actionable", !!isAdmin);
+    const vis = trigEvents.filter((e) => evClassOk(e, isAdmin) && evVisible(e, owner, isAdmin)
+      && scopeEventVisible(e, sigVis, actVis));
     const evs = since == null ? vis.slice(-40) : vis.filter((e) => e.seq > since);
     // `events` and `recent` answer two different questions and a consumer needs both in one round
     // trip: events = what has happened since MY cursor (what to interrupt for, exactly once), and
@@ -8245,12 +8293,19 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // deploy — and would still let a two-hour-old backlog through once the timer expired. Same
     // shape as trigScan's anti-blast rule: seeded, not announced.
     const floor = pushBootAt - PUSH_GRACE_MS;
+    // Universe slice (2026.08.03-02): a non-admin recipient's DM wire honours the same scope set
+    // as their /api/triggers pull — announcing a hidden universe's fires by Telegram while the
+    // tabs refuse to render them would put the two transports in disagreement about what exists.
+    // Resolved once per drain (the flag set is drain-invariant), applied per recipient by rank.
+    const pubSigVis = featureScopeVis(featureFlags, "signals", false);
+    const pubActVis = featureScopeVis(featureFlags, "actionable", false);
     for (const rec of pushRecipients.values()) {
       if (rec.muted) continue;
       const evs = trigEvents.filter((e) => e.seq > (rec.cur || 0));
       if (!evs.length) continue;
       rec.cur = trigSeq;
-      const keep = evs.filter((e) => (e.at || 0) >= floor && evVisible(e, rec.owner, false) && pushEligible(e, rec));
+      const keep = evs.filter((e) => (e.at || 0) >= floor && evVisible(e, rec.owner, false) && pushEligible(e, rec)
+        && (rec.admin || scopeEventVisible(e, pubSigVis, pubActVis)));
       // Split by whether the event pierces this recipient's quiet window. Held messages are
       // scheduled for the window's end rather than dropped, so nothing the log records is ever
       // missing from the phone — it just arrives at a civilised hour.
@@ -9936,7 +9991,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     };
   }
 
-  function getActionable() {
+  function getActionable(isAdmin) {
     const now = Date.now();
     if (!actCache || now - actBuilt > ACT_MS) {
       // The build is async (it yields) and MUST run on the serialized chain — a bare call here
@@ -9944,7 +9999,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       // now; the cold-cache case serves the fallback exactly once, and the next poll reads warm.
       chainBuild("buildActionable", buildActionable).catch((err) => log("buildActionable error: " + (err && err.message)));
     }
-    return actCache || { ts: Date.now(), dataTs: 0, params: {}, coverage: {}, rows: [], count: 0 };
+    const full = actCache || { ts: Date.now(), dataTs: 0, params: {}, coverage: {}, rows: [], count: 0 };
+    // Audience slice (2026.08.03-02): same contract as getSignals — identity for admin / all-public.
+    if (!actCache) return full;   // the cold fallback is a fresh empty literal; nothing to slice
+    const vis = featureScopeVis(featureFlags, "actionable", !!isAdmin);
+    return vis.all ? full : scopedBody("act", full, vis);
   }
 
   return {
@@ -9990,7 +10049,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getM5Stamp: (coin) => { const r = rows.get(coin); return r ? (r.m5LastTs || 0) : 0; },
     _m5FilterClosed: m5FilterClosed,   // harness: closed-bar guard, testable without network
     getTfCandles,
-    getSignals: () => signalsCache,
+    // Audience-aware since 2026.08.03-02: admin (or an all-public scope set) gets the shared cache
+    // object untouched — identity path, memoized serialize/gzip and the numeric ETag all intact.
+    getSignals: (isAdmin) => {
+      if (!signalsCache) return signalsCache;
+      const vis = featureScopeVis(featureFlags, "signals", !!isAdmin);
+      return vis.all ? signalsCache : scopedBody("sig", signalsCache, vis);
+    },
     askBoard,   // terminal Tier-3: NL question -> planner query or grounded analyst answer
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
