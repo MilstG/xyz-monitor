@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.03-01";
+const VERSION = "2026.08.03-02";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -705,7 +705,7 @@ async function main() {
   });
   // Ranked live signals + their per-market historical base rates (event studies).
   fastify.get("/api/signals", (req, reply) =>
-    serveCached(req, reply, poller.getSignals(), { ts: 0, dataTs: 0, count: 0, signals: [] }));
+    serveCached(req, reply, poller.getSignals(isAdmin(req)), { ts: 0, dataTs: 0, count: 0, signals: [] }));
 
   // Trigger stream: the sequenced log of newly-fired setups. Consumers pass the last seq they
   // handled and get everything above it — restart-safe and refresh-safe in a way a timestamp is
@@ -793,7 +793,7 @@ async function main() {
   // Content-signature ETag via serveCached — the payload only moves when a claim opens, closes,
   // ages a bar, or its geometry re-prices against the live mark.
   fastify.get("/api/actionable", (req, reply) =>
-    serveCached(req, reply, poller.getActionable(),
+    serveCached(req, reply, poller.getActionable(isAdmin(req)),
       { ts: 0, dataTs: 0, params: {}, coverage: {}, rows: [], count: 0 }));
   // Earnings calendar for the xyz equity universe (Finnhub-fed, 6h server refresh). ETag rides
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
@@ -886,7 +886,7 @@ async function main() {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
     const ev = (req.query && req.query.ev) || "";
-    return poller.getLedgerFor(coin, ev);
+    return poller.getLedgerFor(coin, ev, isAdmin(req));
   });
   // Telegram channel management: shared group config. GET = list + per-channel status,
   // POST = replace the list (validated server-side, persisted to the volume, applied within
@@ -909,7 +909,7 @@ async function main() {
   fastify.get("/api/export/ledger", (req, reply) => {
     reply.header("cache-control", "no-store");
     reply.header("content-disposition", `attachment; filename="xyz-ledger-${new Date().toISOString().slice(0, 10)}.json"`);
-    return poller.getLedgerExport();
+    return poller.getLedgerExport(isAdmin(req));
   });
   // Hourly OHLCV for the drawer candle chart. days: 1..60, default 14. With tf=1h|4h|12h|1d the
   // response is instead the EXACT per-rung series the trend ladder consumes (Trend-tab chart
