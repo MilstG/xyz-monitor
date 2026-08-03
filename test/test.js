@@ -3975,6 +3975,11 @@ test("UI batch -99: density toggle, keyboard nav and focused-ticker chip are ful
   assert.ok(css.includes(".wrap tbody tr.krow td"), "krow highlight CSS missing");
   // Focused ticker: set on drawer open, chip in the statusline, report-tab fallback.
   assert.ok(app.includes("state.focus=coin; updateFocusChip()"), "openDetail must set the focus");
+  // In-place drawer opens (build -08): trend rows, earnings rows and the actionable [data-dr]
+  // button open the drawer over the CURRENT tab â€” a click must never bounce the user to markets.
+  assert.ok(app.includes("if(state.rows.has(c)) openDetail(c); }));   // drawer opens in place"), "trend row click must open the drawer in place (no showView('markets') bounce)");
+  assert.ok(app.includes("if(state.rows.has(cn)) openDetail(cn); }));   // in-place drawer"), "actionable data-dr click must open the drawer in place");
+  assert.strictEqual((app.match(/if\(state\.rows\.has\(c\)\) openDetail\(c\); \}\)\);   \/\/ in-place drawer/g)||[]).length, 2, "both earnings row wirings must open the drawer in place");
   assert.ok(app.includes("state.focus && state.rows.has(state.focus)"), "report-tab focus fallback missing");
   for (const id of ["focusChipT", "focusChipX"]) assert.ok(html.includes(`id="${id}"`), `focus chip markup missing: ${id}`);
   assert.ok(css.includes(".fchip-t{"), "focus chip CSS missing");
@@ -11858,7 +11863,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.03-07"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.03-08"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
