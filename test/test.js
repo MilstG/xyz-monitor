@@ -581,7 +581,7 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   p.hydrateLedgerNow();   // idempotency: the rn stamp must make a second pass a no-op
-  const h = p.getLedgerFor("xyz:AAPL");
+  const h = p.getLedgerFor("xyz:AAPL", null, true);
   assert.equal(h.open.length, 1, "shadow-variant claims never surface");
   assert.equal(h.open[0].status, "open");
   assert.ok(h.open[0].resolveAt > now, "open claim carries its horizon");
@@ -599,14 +599,14 @@ test("ledger unit repair + getLedgerFor: R-normalization, idempotency, shadow ex
   assert.equal(by["breakdown:legacy"].realized, 3.1, "pre-sigma-epoch entry untouched");
   assert.equal(by["breakdown:legacy"].unit, "%", "legacy entry labeled in its true unit");
   assert.equal(by["breakdown:legacy"].legacy, true);
-  assert.equal(p.getLedgerFor("xyz:NVDA").closed.length, 1, "history is per-coin");
-  assert.equal(p.getLedgerFor("").open.length, 0, "no filter -> empty history");
-  const byEv = p.getLedgerFor("", "breakdown");
+  assert.equal(p.getLedgerFor("xyz:NVDA", null, true).closed.length, 1, "history is per-coin");
+  assert.equal(p.getLedgerFor("", null, true).open.length, 0, "no filter -> empty history");
+  const byEv = p.getLedgerFor("", "breakdown", true);
   assert.equal(byEv.closed.length, 3, "event filter crosses tickers (2 AAPL + 1 NVDA)");
   assert.ok(byEv.closed.every(e => e.ev === "breakdown"), "event filter is exact");
   assert.ok(byEv.closed.some(e => e.tk === "NVDA"), "cross-ticker rows carry their ticker");
-  assert.equal(p.getLedgerFor("xyz:AAPL", "breakdown").closed.length, 2, "coin+event filters combine");
-  assert.equal(p.getLedgerFor("xyz:AAPL", "breakdown").open.length, 0, "combined filter excludes other events\' open claims");
+  assert.equal(p.getLedgerFor("xyz:AAPL", "breakdown", true).closed.length, 2, "coin+event filters combine");
+  assert.equal(p.getLedgerFor("xyz:AAPL", "breakdown", true).open.length, 0, "combined filter excludes other events\' open claims");
 });
 
 // ---- Slice A (2026.07.30-02): the study<->live blend honours the universe wall, migrates trust
@@ -902,7 +902,7 @@ test("ledger export: raw completeness, shadow/legacy accounting, self-describing
     saveLedger: () => {}, insert: () => {}, saveRegime: () => {} };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   assert.equal(x.meta.counts.closed, 3, "every retained closed entry ships — no 150 cap, no shadow pruning");
   assert.equal(x.meta.counts.open, 1);
   assert.equal(x.meta.counts.shadowsClosed, 1, "shadow variants counted");
@@ -961,7 +961,7 @@ test("fire-time context stamp: computable fields frozen at openLedger, absent fi
   const e3 = p.openLedgerNow("ETH", "bigmove", { score: 0, reading: "" }, 1, { sd0: 2 }, 1);
   assert.ok(e3 && e3.vi === 1 && e3.fnd === 75 / 1e6 && Number.isInteger(e3.dow), "shadow claim carries the stamp too");
   // stamped claims surface in the export with a coverage epoch once closed
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   assert.equal(x.meta.counts.open, 3);
   assert.ok(x.open.every(o => Number.isInteger(o.dow)), "export ships the raw stamped fields");
 });
@@ -1068,7 +1068,7 @@ test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisi
   p.seedRowNow("xyz:CLEAN", { px: 104, hourlyRaw: spine(false), hourlyTs: now });
   p.seedRowNow("xyz:STOPPED", { px: 104, hourlyRaw: spine(true), hourlyTs: now });
   await p.buildSignalsNow();   // runs resolveLedger
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   const done = Object.fromEntries(x.closed.filter((e) => e.ev === "reclaim").map((e) => [e.coin, e]));
   assert.ok(done["xyz:CLEAN"] && done["xyz:CLEAN"].status === "resolved", "clean claim resolved");
   assert.ok(done["xyz:CLEAN"].rn === 1 && Math.abs(done["xyz:CLEAN"].realized - 1.5) < 0.3, `resolved in R (spine drifts ~3% over the hold / σ2 ≈ 1.5R), got ${done["xyz:CLEAN"].realized}`);
@@ -1077,7 +1077,7 @@ test("strategy shadows: stop-aware resolution in R for vi-stamped claims, invisi
   assert.ok(done["xyz:STOPPED"] && done["xyz:STOPPED"].stopped === true, "dip through the void marks the claim stopped");
   assert.ok(done["xyz:STOPPED"].realizedS < 0 && done["xyz:STOPPED"].realized > 0,
     "stop-aware leg caps at the void while at-horizon rides to the target — the exact honesty split");
-  assert.equal(p.getLedgerFor("xyz:CLEAN").closed.length, 0, "strategy shadows never surface in the claim browser");
+  assert.equal(p.getLedgerFor("xyz:CLEAN", null, true).closed.length, 0, "strategy shadows never surface in the claim browser");
 });
 
 test("ledger archive: overflow is appended to the volume before the retention trim", () => {
@@ -1303,16 +1303,16 @@ test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the le
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   await p.buildSignalsNow();
-  const d = p.getSignals();
+  const d = p.getSignals(true);
   // the purge itself: every non-airead crypto entry is gone, open and closed alike
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   const EPOCH = Date.UTC(2026, 6, 26);
   const preCrypto = (e) => !e.coin.includes(":") && e.ev !== "airead" && !(+e.t0 >= EPOCH);
   assert.ok(!x.open.some(preCrypto), "no PRE-EPOCH crypto claim survives among open entries");
   assert.ok(!x.closed.some(preCrypto), "no PRE-EPOCH crypto claim survives among closed entries");
   assert.ok(x.open.some((e) => e.coin === "SOL" && e.ev === "breakout"),
     "the post-epoch crypto claim SURVIVES — the purge is bounded to the broken-geometry era, not permanent");
-  assert.equal(p.getLedgerFor("ETH").closed.length, 0, "the claim browser has nothing on the purged crypto name");
+  assert.equal(p.getLedgerFor("ETH", null, true).closed.length, 0, "the claim browser has nothing on the purged crypto name");
   const ai = p.aireadClaimsNow();
   assert.ok(ai.open.some((e) => e.coin === "ETH") && ai.closed.some((e) => e.coin === "ETH"), "airead claims on crypto names survive the purge — open AND closed");
   assert.ok(saved && saved.open.length === 3 && saved.closed.length === 3,
@@ -1742,7 +1742,7 @@ test("crypto enrollment, proven by behavior: both universes fire, on their own h
   p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p.buildDailyNow();
   await p.buildSignalsNow();
-  const d = p.getSignals();
+  const d = p.getSignals(true);
   assert.ok(d.signals.length > 0, "the engine fires");
   assert.ok(d.signals.some((s0) => s0.uni === "xyz"), "the xyz side still fires");
   assert.ok(d.signals.some((s0) => s0.uni === "main"), "and the identically-seeded crypto row now fires too");
@@ -1754,9 +1754,9 @@ test("crypto enrollment, proven by behavior: both universes fire, on their own h
   for (const ev of ["casc", "fundext"])
     assert.ok(!d.signals.some((s0) => s0.uni === "xyz" && s0.ev === ev),
       `crypto-native event ${ev} must never surface on an equity card`);
-  const ledC = p.getLedgerFor("ETH");
+  const ledC = p.getLedgerFor("ETH", null, true);
   assert.ok((ledC.open || []).length > 0, "crypto claims ledger");
-  const ledX = p.getLedgerFor("xyz:NVDA");
+  const ledX = p.getLedgerFor("xyz:NVDA", null, true);
   assert.ok(ledX && ledX.open && ledX.open.length > 0, "the xyz row's claims ledger exactly as before");
   // horizons follow the universe: the same event resolves on a compressed clock for crypto. A 5d
   // horizon on a name printing 12%/day resolves on tape noise, not on the setup.
@@ -1965,7 +1965,7 @@ test("analyst-read ledger: directional reports freeze claims, episodes hold, buc
   // the drawer payload (getLedgerFor) correctly excludes vi-stamped claims, airead included:
   // the analyst bucket is invisible to the signal surfaces BY DESIGN, and this test proves
   // both the claim and the invisibility.
-  assert.ok(!(p.getLedgerFor("xyz:NVDA").open || []).some((e) => e.ev === "airead"),
+  assert.ok(!(p.getLedgerFor("xyz:NVDA", null, true).open || []).some((e) => e.ev === "airead"),
     "the drawer ledger slice never shows analyst claims — bucket isolation at the payload too");
   const cl = p.aireadClaimsNow().open.find((e) => e.coin === "xyz:NVDA");
   assert.ok(cl, "a validated long read opened an airead claim");
@@ -1983,7 +1983,7 @@ test("analyst-read ledger: directional reports freeze claims, episodes hold, buc
     "still exactly ONE open analyst claim on the name");
   // bucket isolation: the analyst record never leaks into the engine's record sets or shadows
   await p.buildSignalsNow();
-  const d = p.getSignals();
+  const d = p.getSignals(true);
   for (const key of ["0", "0x", "0m"])
     assert.ok(!d.records[key] || !d.records[key].record.airead, `airead absent from record set ${key}`);
   assert.ok(![...d.shadows.xyz].some((g) => g.ev === "airead"), "and absent from the shadows panel");
@@ -2762,13 +2762,13 @@ test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, op
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   p.hydrateLedgerNow();   // idempotent
-  const mm = p.getLedgerFor("xyz:MINIMAX").closed[0];
+  const mm = p.getLedgerFor("xyz:MINIMAX", null, true).closed[0];
   assert.equal(mm.realizedS, -20.79, "fabricated stop-aware outcome reverted to at-horizon truth");
   assert.equal(mm.stopped, false, "false stop cleared");
-  const ms = p.getLedgerFor("xyz:MSTR").closed[0];
+  const ms = p.getLedgerFor("xyz:MSTR", null, true).closed[0];
   assert.equal(ms.realizedS, -2.55, "valid stopped short untouched");
   assert.equal(ms.stopped, true, "valid stop kept");
-  const ng = p.getLedgerFor("xyz:NATGAS").open[0];
+  const ng = p.getLedgerFor("xyz:NATGAS", null, true).open[0];
   assert.equal(ng.status, "open", "open claim still resolving");
   assert.equal(ng.stopped, false);
 });
@@ -2804,14 +2804,14 @@ test("play-signed results: fadeStats, resolver sign, and hydrate repair of inver
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p.hydrateLedgerNow();
   p.hydrateLedgerNow();   // idempotent — pn guards the second pass
-  const mm = p.getLedgerFor("xyz:MSTR");
+  const mm = p.getLedgerFor("xyz:MSTR", null, true);
   const cl = mm.closed[0];
   assert.equal(cl.realized, -0.73, "failed fade now a LOSS in play units");
   assert.equal(cl.win, false, "win flag follows the play");
   assert.equal(cl.realizedS, -0.73, "stop-aware leg flipped too");
   assert.equal(cl.claimMed, 0.8, "claim median flipped into play units");
   assert.equal(mm.open[0].claimMed, 0.8, "open fader claim median flipped");
-  const co = p.getLedgerFor("xyz:COIN").closed[0];
+  const co = p.getLedgerFor("xyz:COIN", null, true).closed[0];
   assert.equal(co.realized, 1.4, "aligned claim untouched");
   assert.equal(co.win, true);
 });
@@ -3362,7 +3362,7 @@ test("trend retest -> ledger signal: the board's badge fires a claim with frozen
   const zone = row.tf[row.retest];
   assert.ok(zone && zone.e21 > 0 && zone.e21 < px, "retesting rung's EMA21 shipped, below the mark for a long");
   await p.buildSignalsNow();
-  const sigs = p.getSignals();
+  const sigs = p.getSignals(true);
   const s = sigs && sigs.signals ? sigs.signals.find((g) => g.coin === "TRSIG" && g.ev === "tretest") : null;
   assert.ok(s, "tretest signal is visible in the signals payload");
   assert.equal(s.play.side, "long", "play side follows the board side");
@@ -3370,7 +3370,7 @@ test("trend retest -> ledger signal: the board's badge fires a claim with frozen
   assert.ok(rel(s.play.stop, zone.e21) < 1e-5, "frozen void IS the ladder's own EMA21 for the retesting rung");
   assert.ok(rel(s.play.target, row.swing) < 1e-5, "frozen target IS the shipped prior-swing level");
   assert.ok(s.reading.includes(row.retest), "reading names the retesting rung");
-  const led = p.getLedgerFor("TRSIG", "tretest");
+  const led = p.getLedgerFor("TRSIG", "tretest", true);
   assert.equal(led.open.length, 1, "exactly one open claim — the episode gate holds");
   const e = led.open[0];
   assert.equal(e.side, "long", "claim side is play-signed");
@@ -3378,9 +3378,9 @@ test("trend retest -> ledger signal: the board's badge fires a claim with frozen
   assert.ok(e.mv != null && e.mv > 0, "mv (target distance) stamped for the move-filtered record");
   // second build inside the same episode: no serial re-open (the pseudo-replication guard)
   await p.buildSignalsNow();
-  assert.equal(p.getLedgerFor("TRSIG", "tretest").open.length, 1, "same episode never opens a second claim");
+  assert.equal(p.getLedgerFor("TRSIG", "tretest", true).open.length, 1, "same episode never opens a second claim");
   // and the short mirror stays silent on a long-side retest
-  assert.equal(p.getLedgerFor("TRSIG", "tretestdn").open.length, 0, "no phantom short claim");
+  assert.equal(p.getLedgerFor("TRSIG", "tretestdn", true).open.length, 0, "no phantom short claim");
 });
 
 test("withFormingDaily: stale daily series gets a synthetic forming bar, fresh series untouched", () => {
@@ -7101,7 +7101,7 @@ test("actionable -07: the board reads the ledger's frozen geometry and never re-
     daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
   p.seedRowNow("TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
   p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow();
-  const a = p.getActionable();
+  const a = p.getActionable(true);
   // A brand-new event has no record, so it is NOT suggested — the whole point of the gate. It is
   // dropped with a named reason rather than shown with a blank expectancy.
   assert.equal(a.count, 0, "an event with no resolved fires is not suggested");
@@ -7114,7 +7114,7 @@ test("actionable -07: the board reads the ledger's frozen geometry and never re-
   assert.deepEqual(a.params.requires, ["n>=8", "avgR>0", "EV>0", "R:R<=20", "!noedge"], "the gate's conditions ship with the payload — the 2:1 floor left them because it no longer rejects anything, while the R:R<=20 ceiling stays: an absurd ratio is still an artifact");
   assert.equal(a.params.rrFloor, 2, "the floor ships separately, as the family boundary");
   // Nothing confirmed means nothing announced — the stream inherits the gate by construction.
-  assert.equal(p.getTriggers().seq, 0, "an unconfirmed setup never reaches the trigger stream");
+  assert.equal(p.getTriggers(null, null, true).seq, 0, "an unconfirmed setup never reaches the trigger stream");
   // Swing gate is by horizon, so short-horizon events can never leak onto a swing board.
   const { EV_META } = require("../src/compute");
   for (const r of a.rows)
@@ -7135,7 +7135,7 @@ test("actionable -08: geometry that is no longer tradeable is counted, and the c
     daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
   p.seedRowNow("xyz:TRSIG", { px, ticker: "TRSIG", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
   p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow();
-  const a1 = p.getActionable();
+  const a1 = p.getActionable(true);
   assert.equal(a1.coverage.norecord, 1, "the claim is scanned and rejected on record, with geometry still intact");
   // Walk the mark down through the frozen void. netRR now returns null, so the rejection reason
   // changes from "no record" to "no tradeable geometry" — the row is gone for a different reason,
@@ -7143,7 +7143,7 @@ test("actionable -08: geometry that is no longer tradeable is counted, and the c
   const led = [...(p.trigStateNow() ? [1] : [])];
   p.seedRowNow("xyz:TRSIG", { px: px * 0.5 });
   await p.buildActionableNow();
-  const a2 = p.getActionable();
+  const a2 = p.getActionable(true);
   assert.equal(a2.count, 0, "still nothing suggested");
   assert.ok(a2.coverage.untakeable >= 1,
     "and the reason is its own counter now: a claim can be perfectly framed at fire and already dead at the live mark, which is a different fact from the frozen geometry never having made sense");
@@ -7297,27 +7297,27 @@ test("triggers -03: announce once, never twice, and never re-blast the board on 
 
   const p1 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   seed(p1); p1.hydrateLedgerNow(); await build(p1);   // hydrate first: the record is what makes the claim confirmed
-  assert.equal(p1.getActionable().count, 1, "with a real record behind it, the setup IS suggested");
-  const t1 = p1.getTriggers();
+  assert.equal(p1.getActionable(true).count, 1, "with a real record behind it, the setup IS suggested");
+  const t1 = p1.getTriggers(null, null, true);
   assert.equal(t1.seq, 1, "a fresh in-grace fire emits exactly one event");
   assert.equal(t1.events[0].t, "TRSIG");
   assert.ok(t1.events[0].fired > 0 && t1.events[0].late != null, "the event carries both marks so a transport can compose a message without re-reading the board");
   assert.equal(t1.events[0].also, undefined, "corroboration is a board concern, not part of the claim event");
   // Idempotence within a process: rebuilding must not re-announce a claim already seen.
   await build(p1);
-  assert.equal(p1.getTriggers().seq, 1, "rebuilding the board does not re-announce");
+  assert.equal(p1.getTriggers(null, null, true).seq, 1, "rebuilding the board does not re-announce");
   // Restart with the persisted announced-set AND the persisted ledger: the frozen t0 keeps the
   // key stable, so nothing re-fires. This is the property that decides whether a push channel
   // survives contact with a deploy.
   const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   seed(p2); p2.hydrateTriggersNow(); p2.hydrateLedgerNow(); await build(p2);
-  assert.equal(p2.getActionable().count, 1, "the setup is still suggested after the restart");
-  assert.equal(p2.getTriggers().seq, 1, "a redeploy re-announces nothing");
+  assert.equal(p2.getActionable(true).count, 1, "the setup is still suggested after the restart");
+  assert.equal(p2.getTriggers(null, null, true).seq, 1, "a redeploy re-announces nothing");
   assert.equal(p2.trigStateNow().seen, 1, "and restores the announced set rather than starting blank");
   // Cursor semantics: a consumer stores the last seq handled and takes everything above it.
-  assert.equal(p2.getTriggers(0).count, 1, "since=0 replays the retained window");
-  assert.equal(p2.getTriggers(1).count, 0, "since=high-water yields nothing");
-  assert.equal(p2.getTriggers(99).count, 0, "a cursor beyond the stream is empty, not negative");
+  assert.equal(p2.getTriggers(0, null, true).count, 1, "since=0 replays the retained window");
+  assert.equal(p2.getTriggers(1, null, true).count, 0, "since=high-water yields nothing");
+  assert.equal(p2.getTriggers(99, null, true).count, 0, "a cursor beyond the stream is empty, not negative");
 });
 
 test("triggers -04: a cold start with a stale board seeds silently instead of detonating", async () => {
@@ -7350,8 +7350,8 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
   // Pass 2: a genuinely cold process (no persisted trigger state) meets that stale board.
   const p2 = createPoller({ dex: "xyz", store: mkStore(() => stale), log: () => {}, version: "test", crypto: false });
   seed(p2); p2.hydrateLedgerNow(); await p2.buildActionableNow();
-  const t = p2.getTriggers();
-  assert.ok(p2.getActionable().count >= 1, "the stale claim is still ON the board — it is tradeable, just not news");
+  const t = p2.getTriggers(null, null, true);
+  assert.ok(p2.getActionable(true).count >= 1, "the stale claim is still ON the board — it is tradeable, just not news");
   assert.ok(t.known >= 1, "and it IS recorded as known, so it can never announce later");
   assert.equal(t.seq, 0, "but NOTHING is announced: opening the app after a weekend must not fire once per setup");
   assert.equal(t.count, 0, "the stream is empty");
@@ -7368,7 +7368,7 @@ test("triggers -04: a cold start with a stale board seeds silently instead of de
     d2.push({ t: (Math.floor(now2 / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
   p2.seedRowNow("xyz:FRESH", { px: px2, ticker: "FRESH", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: h2, dailyRaw: d2 });
   p2.buildTrendNow(); await p2.buildSignalsNow(); await p2.buildActionableNow();
-  const t2 = p2.getTriggers();
+  const t2 = p2.getTriggers(null, null, true);
   assert.ok(t2.seq >= 1, "a claim opened after the cold start DOES announce");
   assert.ok(t2.events.some((e) => e.t === "FRESH"), "and it is the new name, not the seeded stale one");
   assert.ok(!t2.events.some((e) => e.t === "OLD"), "the silently-seeded claim never announces retroactively");
@@ -7522,7 +7522,7 @@ test("actionable -10: the gate rejects each way independently, and never silentl
       daily.push({ t: (Math.floor(now / DAY) - 60 + i) * DAY, c, l: c * 0.97, h: c * (i === 50 ? 1.35 : 1.002) }); }
     p.seedRowNow(COIN, { px, ticker: "GATE", uni: "xyz", vol: 1e6, funding: 0.00005, hourlyRaw: hourly, dailyRaw: daily });
     p.hydrateLedgerNow(); p.buildTrendNow(); await p.buildSignalsNow(); await p.buildActionableNow();
-    return p.getActionable();
+    return p.getActionable(true);
   };
   const rec = (n, realized) => { const o = []; for (let i = 0; i < n; i++)
     o.push({ key: COIN + "|tretest#h" + i, coin: COIN, ticker: "GATE", ev: "tretest", status: "resolved",
@@ -7636,12 +7636,159 @@ test("features: manifest covers every tab in the markup, and every entry is real
   assert.ok(!/HIDDEN_TABS/.test(app), "a second tab-visibility list must not reappear beside the manifest");
 
   // kind and state vocabulary are closed sets; a typo'd def would resolve through to FEATURE_DEFAULT
-  // and quietly hide a feature that was meant to be public.
+  // and quietly hide a feature that was meant to be public. "scope" joined at 2026.08.03-02: a
+  // per-universe slice of a parent tab — no tab of its own, no route of its own.
   for (const f of C.FEATURES) {
-    assert.ok(f.kind === "tab" || f.kind === "act", `entry "${f.key}" has unknown kind "${f.kind}"`);
+    assert.ok(f.kind === "tab" || f.kind === "act" || f.kind === "scope", `entry "${f.key}" has unknown kind "${f.kind}"`);
     assert.ok(C.FEATURE_STATES.indexOf(f.def) >= 0, `entry "${f.key}" has invalid default "${f.def}"`);
     assert.ok(f.label && f.label.length <= 32, `entry "${f.key}" needs a short human label`);
+    if (f.kind === "scope") {
+      const p = C.FEATURES.find((x) => x.key === f.parent);
+      assert.ok(p && p.kind === "tab", `scope "${f.key}" must name an existing TAB parent (got "${f.parent}")`);
+      assert.equal((f.routes || []).length, 0, `scope "${f.key}" must own no route — the parent's gate is the outer wall, the scope filters payload rows`);
+      assert.ok(/\.(cx|eq)$/.test(f.key), `scope "${f.key}" must end in .cx or .eq — the filters key off that suffix`);
+      assert.ok(f.key.startsWith(f.parent + "."), `scope "${f.key}" must be namespaced under its parent`);
+    }
   }
+  // The scope roster itself is pinned: these four keys with these defaults ARE the standing intent
+  // (crypto slice public, equity slice admin). Adding a scope is fine; silently changing a default
+  // flips what the public sees on deploy and must show up here as a deliberate edit.
+  for (const [k, d] of [["signals.cx", "public"], ["signals.eq", "admin"], ["actionable.cx", "public"], ["actionable.eq", "admin"]]) {
+    const f = C.FEATURES.find((x) => x.key === k);
+    assert.ok(f && f.kind === "scope", `scope entry "${k}" missing from the manifest`);
+    assert.equal(f.def, d, `scope "${k}" default drifted from the standing intent`);
+  }
+});
+
+test("features: scope resolution — parent self-demotion, vis sets, and the coin convention", () => {
+  const C = require("../src/compute");
+  // Defaults: crypto slice public, equity slice admin — a public caller sees signals (cx open)…
+  assert.equal(C.featureVisible({}, "signals", false), true, "signals stays public while one scope is open");
+  let v = C.featureScopeVis({}, "signals", false);
+  assert.deepEqual(v, { cx: true, eq: false, all: false }, "public default vis must be crypto-only");
+  // …the admin always sees everything through the identity path.
+  v = C.featureScopeVis({}, "signals", true);
+  assert.deepEqual(v, { cx: true, eq: true, all: true }, "admin vis must be the identity set");
+  // Parent self-demotion: close BOTH scopes and the public tab hides itself — an empty shell is
+  // not a feature. The admin keeps the tab: scopes slice the public wire, not the operator's.
+  const shut = { "signals.cx": "admin", "signals.eq": "admin" };
+  assert.equal(C.featureVisible(shut, "signals", false), false, "a public tab with no public scope must self-demote");
+  assert.equal(C.featureVisible(shut, "signals", true), true, "self-demotion never touches the admin");
+  // off on a scope means nobody — admin included — for that SLICE, and only that slice.
+  v = C.featureScopeVis({ "signals.cx": "off" }, "signals", true);
+  assert.deepEqual(v, { cx: false, eq: true, all: false }, "an off scope hides its slice from admin too");
+  // A tab with no scope children resolves the identity set — nothing else in the manifest changes.
+  assert.deepEqual(C.featureScopeVis({}, "trend", false), { cx: true, eq: true, all: true });
+  // The coin convention the filters key off: xyz builder-dex ids carry a colon, main-dex never.
+  assert.equal(C.coinScope("xyz:AAPL"), "eq");
+  assert.equal(C.coinScope("BTC"), "cx");
+  // Counts disclose the split: with defaults, exactly the two equity scopes are non-public.
+  assert.equal(C.featureCounts({}).scoped, 2, "counts.scoped must report non-public scope entries");
+  // Sanitizer: scope keys are ordinary settable keys — stored states survive, garbage does not.
+  const out = C.featureFlagsSanitize({ "signals.eq": "public", "signals.cx": "OFF", "bogus.cx": "public" });
+  assert.deepEqual(out, { "signals.eq": "public" }, "scope flags sanitize like every other key");
+});
+
+test("features: scope filters — the payload a scoped caller receives (behavioral)", () => {
+  const C = require("../src/compute");
+  // A synthetic FULL signals payload with both universes present everywhere a row can hide. The
+  // filter is executed for real (string pins cannot prove a filter is wired AND applied) and the
+  // assertions read actual output — the -84 lesson.
+  // Universe rosters mirror the poller's XYZ_ONLY_EVS / MAIN_ONLY_EVS shape — the filter is pure
+  // and arg-driven; the wiring test below pins that the poller passes its REAL rosters in.
+  const evEq = "gapfade", evCx = "casc", evBoth = "bigmove";
+  const evUni = { xyzOnly: new Set([evEq]), mainOnly: new Set([evCx]) };
+  const full = {
+    ts: 1, dataTs: 111, count: 5, countU: { x: 3, m: 2 },
+    signals: [{ coin: "xyz:AAPL", uni: "xyz", ev: evEq }, { coin: "BTC", uni: "main", ev: evBoth }],
+    shown: 2,
+    record: { mixed: 1 }, confluence: { confN: 9 }, recordX: { buckets: "mixed" },
+    recent: [{ ticker: "AAPL", ev: evEq }],
+    records: {
+      "0": { record: { mixed: 1 } }, "0p": { record: { mixed: 2 } },
+      "0x": { record: { eq: 1 }, recent: [{ ticker: "AAPL" }] },
+      "0m": { record: { cx: 1 }, confluence: { confN: 1 }, recordX: { buckets: "m" }, recent: [{ ticker: "BTC" }] },
+    },
+    variants: [{ ev: evEq }, { ev: evCx }, { ev: evBoth }],
+    shadows: { xyz: [{ rows: [] }], main: [{ rows: [] }] },
+    earnSplit: { [evEq]: { eg: {} } },
+  };
+  const pub = C.scopeFilterSignals(full, { cx: true, eq: false, all: false }, evUni);
+  assert.ok(pub !== full, "a scoped body must be a NEW object — the full body is the admin's live cache");
+  assert.deepEqual(pub.signals.map((g) => g.coin), ["BTC"], "equity signal rows must be absent, crypto rows intact");
+  assert.equal(pub.shown, 1);
+  assert.equal(pub.count, 2, "the badge fallback must total only the visible universe (countU.m)");
+  assert.deepEqual(pub.countU, { x: null, m: 2 }, "the hidden countU lane must be nulled, not zeroed");
+  assert.equal(pub.shadows.xyz, null, "the equity shadow panel must be withheld");
+  assert.ok(Array.isArray(pub.shadows.main), "the crypto shadow panel must survive");
+  assert.deepEqual(Object.keys(pub.records), ["0m"], "records must keep ONLY the visible universe's scoped keys — mixed and hidden keys both go");
+  assert.deepEqual(pub.record, { cx: 1 }, "the mixed record panel must be replaced by the visible universe's own");
+  assert.deepEqual(pub.recent, [{ ticker: "BTC" }], "recent resolutions must come from the visible scoped set");
+  assert.equal(pub.recordX.buckets, "m");
+  assert.deepEqual(pub.variants.map((x) => x.ev).sort(), [evBoth, evCx].sort(), "hidden-universe-only variant rows must be dropped; shared rows stay");
+  assert.deepEqual(pub.earnSplit, {}, "the earnings split partitions equity resolutions and must vanish with them");
+  // Identity path: an all-visible caller gets the SAME object — the serialize/gzip memo and the
+  // numeric ETag depend on object identity surviving.
+  assert.equal(C.scopeFilterSignals(full, { cx: true, eq: true, all: true }, evUni), full, "vis.all must be the identity path");
+  // Input must not be mutated by the filtering pass.
+  assert.equal(full.signals.length, 2); assert.equal(full.countU.x, 3); assert.ok(full.records["0"]);
+
+  // Actionable: rows by uni, count restated, per-universe settled sliced, confirmed restated.
+  const act = { ts: 1, dataTs: 5, params: { p: 1 }, coverage: { confirmed: 4, untakeable: 7 },
+    settled: { stocks: { all: {} }, crypto: { all: {} } },
+    rows: [{ coin: "xyz:TSLA", uni: "stocks" }, { coin: "ETH", uni: "crypto" }], count: 2 };
+  const apub = C.scopeFilterActionable(act, { cx: true, eq: false, all: false });
+  assert.deepEqual(apub.rows.map((r) => r.coin), ["ETH"], "equity board rows must be absent for a crypto-only caller");
+  assert.equal(apub.count, 1);
+  assert.equal(apub.coverage.confirmed, 1, "coverage.confirmed must be restated over the visible slice");
+  assert.equal(apub.coverage.untakeable, 7, "engine-wide rejection diagnostics stay");
+  assert.equal(apub.settled.stocks, null, "the hidden universe's settled record must be withheld");
+  assert.ok(apub.settled.crypto, "the visible universe's settled record must survive");
+  assert.equal(C.scopeFilterActionable(act, { cx: true, eq: true, all: true }), act, "vis.all identity for the board too");
+
+  // Trigger predicate: signal-borne kinds sliced by coin against their OWN parent's set; every
+  // other kind passes untouched (it belongs to a feature with its own gate).
+  const sig = { cx: true, eq: false }, all = { cx: true, eq: true };
+  assert.equal(C.scopeEventVisible({ kind: "ledger", coin: "xyz:AAPL" }, sig, all), false, "an equity ledger fire must not reach a crypto-only caller");
+  assert.equal(C.scopeEventVisible({ kind: "ledger", coin: "BTC" }, sig, all), true);
+  assert.equal(C.scopeEventVisible({ kind: "setup", coin: "xyz:AAPL" }, all, sig), false, "setup events are judged against the ACTIONABLE scopes");
+  assert.equal(C.scopeEventVisible({ kind: "setup", coin: "ETH" }, all, sig), true);
+  assert.equal(C.scopeEventVisible({ kind: "ops" }, sig, sig), true, "non-signal kinds pass untouched");
+  assert.equal(C.scopeEventVisible({ kind: "rule", coin: "xyz:AAPL" }, sig, sig), true, "metric rules are Markets-land, never scope-sliced");
+});
+
+test("features: scope enforcement wiring — routes, memo, wire, panel (manifest pins)", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // Every scoped payload route must pass the caller's rank down — a getter called without it
+  // resolves as public-by-default in featureScopeVis only because !!undefined is false, which
+  // would silently scope ADMINS. These four call sites are the whole enforcement surface.
+  assert.ok(srv.includes("poller.getSignals(isAdmin(req))"), "/api/signals must be audience-aware");
+  assert.ok(srv.includes("poller.getActionable(isAdmin(req))"), "/api/actionable must be audience-aware");
+  assert.ok(srv.includes("poller.getLedgerFor(coin, ev, isAdmin(req))"), "/api/ledger must be audience-aware");
+  assert.ok(srv.includes("poller.getLedgerExport(isAdmin(req))"), "/api/export/ledger must be audience-aware");
+  // The scoped body carries a STRING dataTs folding the flags stamp — the collision guard between
+  // the filtered ETag and the full body's numeric one, and the immediacy guarantee on a flag flip.
+  assert.ok(pol.includes('body.dataTs = String(src.dataTs || 0) + "s" + flagsVer'), "scoped bodies must mint their own ETag stamp");
+  assert.ok(pol.includes("flagsVer++;"), "an accepted flag write must bust the scoped-body memo immediately");
+  // Identity path pin: vis.all must return the SHARED cache object (serialize/gzip memo + ETag).
+  assert.ok(pol.includes('vis.all ? signalsCache : scopedBody("sig", signalsCache, vis)'), "admin signals must take the identity path");
+  assert.ok(pol.includes("scopeFilterSignals(src, vis, { xyzOnly: XYZ_ONLY_EVS, mainOnly: MAIN_ONLY_EVS })"),
+    "the signals filter must be fed the poller's OWN universe rosters — a drifted copy would misclassify variant rows");
+  assert.ok(pol.includes('vis.all ? full : scopedBody("act", full, vis)'), "admin actionable must take the identity path");
+  // The two secondary transports honour the same predicate as the tabs — bell log and Telegram.
+  assert.ok(pol.includes("&& scopeEventVisible(e, sigVis, actVis)"), "the trigger stream must apply the scope predicate");
+  assert.ok(pol.includes("(rec.admin || scopeEventVisible(e, pubSigVis, pubActVis))"), "the Telegram wire must apply it for non-admin recipients");
+  // Client: the guard flips a scoped-out viewer to the visible universe instead of mounting an
+  // empty (or self-advertising) state, and the panel nests scope rows off the shipped parent link.
+  assert.ok(app.includes("function scopeGuard(parent)"), "the client scope guard is missing");
+  assert.ok(app.includes("scopeGuard('signals')") && app.includes("scopeGuard('actionable')"), "both scoped renderers must run the guard");
+  assert.ok(/x\.kind==='scope'&&x\.parent===m\.key/.test(app), "the admin panel must nest scope rows via the manifest's parent link, not a hardcoded list");
+  assert.ok(app.includes("' \u00b7 <b>'+c.scoped+'</b> scoped'") || app.includes("scoped':''"), "the counts line must disclose the scoped split");
+  assert.ok(css.includes(".adm-row.adm-scope"), "nested scope rows need their indent style");
 });
 
 test("features: every manifest route is registered in server.js exactly once", () => {
@@ -8104,7 +8251,7 @@ test("BTC-excess leg + tape-day clustering: the two disclosures a correlated uni
   assert.ok(e, "the crypto claim opened");
   e.t0 = now - 30 * HOUR; e.resolveAt = now - HOUR;   // force it due, against the seeded spines
   p.resolveLedgerNow();
-  const cl = p.getLedgerExport().closed.find((x) => x.coin === "ALT" && x.ev === "breakout");
+  const cl = p.getLedgerExport(true).closed.find((x) => x.coin === "ALT" && x.ev === "breakout");
   assert.ok(cl && cl.status === "resolved", "it resolved");
   assert.ok(cl.rx != null, "the excess leg is stamped for a crypto claim");
   assert.ok(cl.bmv > 9 && cl.bmv < 11, `the benchmark's own move is recorded for the autopsy, got ${cl.bmv}`);
@@ -8115,7 +8262,7 @@ test("BTC-excess leg + tape-day clustering: the two disclosures a correlated uni
   const e2 = p.openLedgerNow("xyz:ACME", "breakout", { score: 9, reading: "", play: { side: "long", stop: 97, target: 110 } }, 1, { sd0: 1.5 });
   e2.t0 = now - 30 * HOUR; e2.resolveAt = now - HOUR;
   p.resolveLedgerNow();
-  const cl2 = p.getLedgerExport().closed.find((x) => x.coin === "xyz:ACME");
+  const cl2 = p.getLedgerExport(true).closed.find((x) => x.coin === "xyz:ACME");
   assert.ok(cl2 && cl2.rx === undefined, "no excess leg on an equity claim — absent, never a zero (they mean opposite things)");
 });
 
@@ -8133,7 +8280,7 @@ test("buildActionable: the noGeom crash cannot return, and horizons follow the u
   p.seedRowNow("xyz:ZZZ", { px: 100, ticker: "ZZZ", uni: "xyz" });
   p.openLedgerNow("xyz:ZZZ", "fundflip", { score: 1, reading: "", play: { side: "long", target: null, stop: 99 } }, 1, { sd0: 1 });
   await p.buildActionableNow();
-  const a = p.getActionable();
+  const a = p.getActionable(true);
   assert.equal(logs.filter((m) => /buildActionable error/.test(m)).length, 0,
     "a geometry-less claim must be COUNTED, not thrown on: " + logs.filter((m) => /buildActionable error/.test(m)).join(" | "));
   assert.equal(a.coverage.noGeometry, 1, "and it lands in the reject tally where it can be seen");
@@ -8263,7 +8410,7 @@ test("scoped badge and header count read the universe on screen, from kept total
   p.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p.buildDailyNow();
   await p.buildSignalsNow();
-  const d = p.getSignals();
+  const d = p.getSignals(true);
   assert.ok(d.countU && Number.isInteger(d.countU.x) && Number.isInteger(d.countU.m), "countU ships both universes as integers");
   assert.equal(d.countU.x + d.countU.m, d.count, "the split sums to the whole-engine total — no condition uncounted or double-counted");
   const inPayload = (u) => d.signals.filter((g) => g.uni === u).length;
@@ -8277,7 +8424,7 @@ test("scoped badge and header count read the universe on screen, from kept total
   p2.seedRowNow("xyz:NVDA", { px: 112, ticker: "NVDA", uni: "xyz", vol: 1e7, dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
   p2.buildDailyNow();
   await p2.buildSignalsNow();
-  assert.equal(p2.getSignals().countU.m, null, "crypto disabled: m is null, never 0");
+  assert.equal(p2.getSignals(true).countU.m, null, "crypto disabled: m is null, never 0");
 });
 
 test("degenerate void: a stop that lands on the entry cannot reach the board, however good the ratio looks", async () => {
@@ -8306,7 +8453,7 @@ test("degenerate void: a stop that lands on the entry cannot reach the board, ho
     { score: 9, reading: "", play: { side: "short", stop: 1287.85, target: 1109.61 } }, -1, { sd0: 1.2 });
   assert.ok(e && e.stp === 1287.85, "the claim itself still opens and still records — this guard is the BOARD's, not the ledger's");
   await p2.buildActionableNow();
-  const a = p2.getActionable();
+  const a = p2.getActionable(true);
   assert.equal(a.rows.length, 0, "and it never reaches the board");
   assert.equal(a.coverage.degenerate, 1, "counted under its own reason, so an empty board can always say why");
 
@@ -8316,14 +8463,14 @@ test("degenerate void: a stop that lands on the entry cannot reach the board, ho
   // no sd0 stamped: the absolute 5bp floor has to carry it alone
   p3.openLedgerNow("xyz:AAA", "unwind", { score: 9, reading: "", play: { side: "short", stop: 100.02, target: 90 } }, -1, {});
   await p3.buildActionableNow();
-  assert.equal(p3.getActionable().coverage.degenerate, 1, "a 2bp void is refused with no volatility stamp to judge it by");
+  assert.equal(p3.getActionable(true).coverage.degenerate, 1, "a 2bp void is refused with no volatility stamp to judge it by");
 
   // a legitimately tight-but-real setup survives: 0.9% void on a 1.2% sigma name, ratio 3.3
   const p4 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   p4.seedRowNow("xyz:BBB", { px: 100, ticker: "BBB", uni: "xyz" });
   p4.openLedgerNow("xyz:BBB", "breakout", { score: 9, reading: "", play: { side: "long", stop: 99.1, target: 103 } }, 1, { sd0: 1.2 });
   await p4.buildActionableNow();
-  assert.equal(p4.getActionable().coverage.degenerate, 0,
+  assert.equal(p4.getActionable(true).coverage.degenerate, 0,
     "a real void at 0.75 sigma is NOT degenerate — this guard must not become a filter on tight setups");
 });
 
@@ -9286,7 +9433,7 @@ test("earnings alerts are scoped to open announced claims, once per report date"
   p.seedRowNow("BBB", { ticker: "BBB", px: 10, uni: "xyz" });
   const d = new Date(Date.now() + 20 * 3600e3).toISOString().slice(0, 10);
   p.earnIngestNow ? p.earnIngestNow() : null;
-  const earn = () => p.getTriggers(0).events.filter((e) => e.kind === "earnings");
+  const earn = () => p.getTriggers(0, null, true).events.filter((e) => e.kind === "earnings");
 
   // No claims -> nothing, however many names report. An 84-name roster in season is a calendar.
   p.earnScanNow();
@@ -11189,7 +11336,7 @@ async function settledPoller() {
 
 test("settled -15: an episode opens at first appearance, flicker folds instead of duplicating, and the payload ships the record", async () => {
   const { p, COIN, px } = await settledPoller();
-  const a = p.getActionable();
+  const a = p.getActionable(true);
   assert.equal(a.count, 1, "precondition: the seeded setup confirms onto the board");
   assert.ok(a.rows[0].k && a.rows[0].k.startsWith(COIN + "|"), "board rows must carry their claim key");
   let st = p.boardEpStateNow();
@@ -11213,7 +11360,7 @@ test("settled -15: an episode opens at first appearance, flicker folds instead o
   assert.equal(st.open.length, 1, "reappearance is the SAME episode — oscillation never manufactures sample size");
   assert.equal(st.open[0].flick, 1, "…and the fold is counted");
   assert.equal(st.open[0].tShow, ep.tShow, "the original show stamp stands");
-  const a2 = p.getActionable();
+  const a2 = p.getActionable(true);
   assert.equal(a2.settled.perUni.stocks.flick, 1, "the fold is disclosed on the payload");
 });
 
@@ -11257,7 +11404,7 @@ test("settled -15: resolution is inherited from the claim — target touch, both
   assert.ok(Math.abs(done.rE - (tgt - done.fired) / Math.abs(done.fired - done.void)) < 0.02, "R@fire is the frozen distance over the frozen risk");
   assert.ok(Math.abs(done.rM - (tgt - done.markShow) / Math.abs(done.markShow - done.void)) < 0.02, "R@shown prices the same exit against the first-shown basis");
   assert.ok(done.held > 0 && done.tRes > done.tShow, "held runs from first show to the deciding touch");
-  const a = p.getActionable();
+  const a = p.getActionable(true);
   const u = a.settled.perUni.stocks;
   assert.equal(u.all.n, 1); assert.equal(u.all.t, 1);
   const bucket = u.cls[done.cls === "ev" ? "ev" : "rr"];
@@ -11268,7 +11415,7 @@ test("settled -15: resolution is inherited from the claim — target touch, both
 
 test("settled -15: the record persists inside the ledger blob and survives a restart; the ETag moves on a resolution", async () => {
   const { p, COIN, px, hourly, saved, HOUR_, endH } = await settledPoller();
-  const sig0 = p.getActionable().dataTs;
+  const sig0 = p.getActionable(true).dataTs;
   const ep = p.boardEpStateNow().open[0];
   const later = hourly.concat([{ t: (endH + 2) * HOUR_, o: px, h: px * 1.001, l: ep.void * 0.99, c: ep.void, v: 1 }]);
   p.seedRowNow(COIN, { px, hourlyRaw: later });
@@ -11276,7 +11423,7 @@ test("settled -15: the record persists inside the ledger blob and survives a res
   await p.buildActionableNow();
   assert.equal(p.boardEpStateNow().closed[0].kind, "void");
   assert.equal(p.boardEpStateNow().closed[0].rE, -1, "a void exit is exactly -1R");
-  assert.ok(p.getActionable().dataTs !== sig0, "a resolution with an unchanged live board must still bust the ETag");
+  assert.ok(p.getActionable(true).dataTs !== sig0, "a resolution with an unchanged live board must still bust the ETag");
   p.persistLedger();
   const blob = saved[saved.length - 1];
   assert.ok(blob.board && Array.isArray(blob.board.closed) && blob.board.closed.length === 1 && blob.board.since > 0,
@@ -11318,11 +11465,11 @@ test("settled -02: an expiry records its exit price, splits by sign at shown, an
   assert.equal(done.kind, "expired");
   assert.ok(Number.isFinite(done.exitPx) && done.exitPx > 0, "the price the expiry was scored at is part of the score — recorded, not implied");
   assert.ok(Math.abs(done.exitPx - px) / px < 0.01, "exit price is the mark at horizon from the spine");
-  const u = p.getActionable().settled.perUni.stocks;
+  const u = p.getActionable(true).settled.perUni.stocks;
   assert.equal(u.all.n, 1); assert.equal(u.all.x, 1);
   assert.equal(u.all.hit, null, "hit is level-touched ONLY — a record of pure expiries claims NO hit rate, never 100%");
   assert.equal((u.all.xp || 0) + (u.all.xn || 0), 1, "the expiry lands in the signed split at the SHOWN basis");
-  const shipped = p.getActionable().settled.episodes[0];
+  const shipped = p.getActionable(true).settled.episodes[0];
   assert.ok(Number.isFinite(shipped.exitPx), "exitPx ships on the payload — the client renders it, never re-derives it");
 });
 
@@ -11350,7 +11497,7 @@ test("settled -02: boot-stamped episodes are excluded from lateness, first-cohor
   assert.equal(st.closed.find((e) => e.k.includes("B1")).bt, 1, "first-cohort repair: tShow === epoch with a long-fired claim is retro-stamped bt");
   assert.ok(!st.closed.find((e) => e.k.includes("B2")).bt, "an episode stamped after the epoch keeps its trustworthy stamp");
   await p.buildActionableNow();
-  const s = p.getActionable().settled, u = s.perUni.stocks;
+  const s = p.getActionable(true).settled, u = s.perUni.stocks;
   assert.equal(u.btN, 1, "the excluded boot-stamped count is disclosed");
   assert.equal(u.latN, 3, "lateness runs over the trustworthy stamps only");
   assert.ok(Math.abs(u.lat - 1.1) < 0.01, "lat = avg(rE - rM) over non-bt episodes — the bt artifact never inflates the cost");
@@ -11644,7 +11791,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.03-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.03-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -11827,7 +11974,7 @@ test("swing -20: resolver end-to-end — early target touch, stop-out, still-liv
   p.seedRowNow("xyz:LIVE", { px: 101, hourlyTs: now, hourlyRaw: spine(flat) });
   p.seedRowNow("xyz:MTM",  { px: 101, hourlyTs: now, hourlyRaw: spine(flat) });
   await p.buildSignalsNow();
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   const done = Object.fromEntries(x.closed.filter((e) => e.ev === "swpull").map((e) => [e.coin, e]));
   const open = Object.fromEntries(x.open.filter((e) => e.ev === "swpull").map((e) => [e.coin, e]));
   // TGT: resolved EARLY (resolveAt is 24d away), at the target, in R, tracks coinciding
@@ -11868,7 +12015,7 @@ test("swing -20: the symmetric bracket track exposes the old one-sided bias on f
   }
   p.seedRowNow("xyz:BIAS", { px: 100.5, hourlyTs: now, hourlyRaw: hs });
   await p.buildSignalsNow();
-  const e = p.getLedgerExport().closed.find((k) => k.coin === "xyz:BIAS");
+  const e = p.getLedgerExport(true).closed.find((k) => k.coin === "xyz:BIAS");
   assert.ok(e && e.status === "resolved", "claim resolved at its fixed horizon as always");
   assert.equal(e.rb, "t", "bracket walk saw the target touched first");
   assert.ok(Math.abs(e.realized - 0.25) < 0.15, `at-horizon leg books the fade (~0.25R), got ${e.realized}`);
@@ -12276,7 +12423,7 @@ test("ema200 shadows -28: end-to-end — the breakout fires as an invisible touc
   p.seedRowNow("xyz:EMB", { ticker: "EMB", px: 104.5, dailyRaw, hourlyRaw, hourlyTs: now });
   p.buildDailyNow();
   await p.buildSignalsNow();
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   const e = x.open.find((k) => k.coin === "xyz:EMB" && k.ev === "emabrk");
   assert.ok(e, "the breakout shadow opened");
   assert.equal(e.vi, 0, "invisible — a shadow earning its record, never a live signal");
@@ -12310,7 +12457,7 @@ test("ema200 shadows -28: crypto depth regression — a main-universe row's dete
   p.seedRowNow("MAINEMA", { uni: "main", ticker: "MAINEMA", px: 104.5, dailyRaw, hourlyRaw, hourlyTs: now });
   p.buildDailyNow();
   await p.buildSignalsNow();
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   const e = x.open.find((k) => k.coin === "MAINEMA" && k.ev === "emabrk");
   assert.ok(e, "the crypto breakout shadow opened — the loop read full depth past the wire cap");
   // and the wire itself must STILL be capped — the fix must not have bloated the payload
@@ -12470,10 +12617,10 @@ test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime
     dailyRaw: mkD(), hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 12 });
     p.buildDailyNow(); await p.buildSignalsNow(); };
   await fire();
-  const g1 = (p.getSignals().signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
+  const g1 = (p.getSignals(true).signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
   assert.ok(g1, "the bigmove condition fires on the seeded tape");
   assert.ok(!g1.claim0, "the re-arm gate refuses a serial re-claim, so no open claim ships");
-  assert.equal((p.getLedgerFor("xyz:NVDA").open || []).filter((e) => e.ev === "bigmove").length, 0,
+  assert.equal((p.getLedgerFor("xyz:NVDA", null, true).open || []).filter((e) => e.ev === "bigmove").length, 0,
     "…and the ledger really holds no open bigmove claim");
   assert.equal(g1.postres, true, "the signal is stamped post-resolution");
   assert.ok(g1.scored, "the resolution stub ships instead of nothing");
@@ -12496,11 +12643,11 @@ test("postres -31: a re-arm-parked signal ships its resolution stub, loses prime
     dailyRaw: (() => { const d = []; for (let i = 61; i >= 1; i--) d.push({ t: now - i * DAY_, c: 100, o: 100, h: 100.5, l: 99.5, v: 1e6 }); return d; })(),
     hourlyRaw: mkH(), dailyTs: now, hourlyTs: now, isNew: false, prevDay: 100, d1: 0 });
   p.buildDailyNow(); await p.buildSignalsNow();
-  assert.ok(!(p.getSignals().signals || []).some((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove"),
+  assert.ok(!(p.getSignals(true).signals || []).some((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove"),
     "flat tape: the condition genuinely lapses");
   // refire: a genuinely new episode opens a FRESH claim and the stub is gone
   await fire();
-  const g2 = (p.getSignals().signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
+  const g2 = (p.getSignals(true).signals || []).find((g) => g.coin === "xyz:NVDA" && g.ev === "bigmove");
   assert.ok(g2, "the new episode fires");
   assert.ok(g2.claim0, "…and opens a fresh claim — the gate parks episodes, it does not retire the event");
   assert.ok(!g2.scored && !g2.postres, "the resolution stub belongs to the parked episode only, never to a live claim");
@@ -12695,7 +12842,7 @@ test("structural void -01: end-to-end — the held support probe fires as an inv
   p.seedRowNow("xyz:LVT", { ticker: "LVT", px: 103.5, dailyRaw, hourlyRaw, hourlyTs: now });
   p.buildDailyNow();
   await p.buildSignalsNow();
-  const x = p.getLedgerExport();
+  const x = p.getLedgerExport(true);
   const e = x.open.find((k) => k.coin === "xyz:LVT" && k.ev === "lvlhold");
   assert.ok(e, "the level-hold shadow opened");
   assert.equal(e.vi, 0, "invisible — a shadow earning its record, never a live signal");
@@ -12821,7 +12968,7 @@ test("board promotion path -02: a matured shadow record carries its family onto 
   p.buildDailyNow();
   await p.buildSignalsNow();
   await p.buildActionableNow();
-  const a = p.getActionable();
+  const a = p.getActionable(true);
   const row = a.rows.find((x) => x.coin === "xyz:LVT" && x.ev === "lvlhold");
   assert.ok(row, "the confirmed structural family reaches the board: " + JSON.stringify(a.coverage));
   assert.equal(row.shadow, true, "honestly flagged as a shadow-record family");
@@ -15377,12 +15524,12 @@ test("perf -08 behavior: the chain serializes — actionable's self-heal settles
     insert: () => {}, saveRegime: () => {}, saveTriggers: () => {}, loadTriggers: () => null };
   const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
   // Cold cache: the getter fires the chained build and serves the fallback THIS call…
-  const cold = p.getActionable();
+  const cold = p.getActionable(true);
   assert.equal(cold.count, 0, "the cold request serves the fallback shape, never blocks on the build");
   await p.settleBuildsNow();
   // …and by the time the chain settles, the cache is real (empty roster -> empty board, but BUILT:
   // params carry the gate disclosure only a completed build stamps).
-  const warm = p.getActionable();
+  const warm = p.getActionable(true);
   assert.equal(warm.params.gate, "confirmed", "the chained self-heal completed and stamped a real payload");
 });
 
