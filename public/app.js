@@ -1940,6 +1940,7 @@ function compgPickerHtml(){ const n=COMPG.sel.length;
       <button class="cg-pill" id="cg-top8" title="the current matrix set, top 8 by |window return| — the auto-launch default">top 8 movers</button>
       <button class="cg-pill" id="cg-watch" title="your starred names present in this universe (up to 8)">\u2605 watchlist</button>
       <button class="cg-pill" id="cg-clear" title="empty the selection">clear</button>
+      <button class="cg-pill" id="cg-ai" title="AI group report on the selected names (2-12 live equities; synthetic baskets excluded) — prose-tier breadth/rotation read, no trade geometry">AI report</button>
       <span class="cg-cnt">${n}/8</span>${cap}</div>`; }
 function compgWirePicker(p){
   const inp=el('cg-add'), sg=el('cg-sugg'); if(!inp) return;
@@ -1975,6 +1976,13 @@ function compgWirePicker(p){
       if(uni.has(tk)&&!sel.includes(tk)) sel.push(tk); if(sel.length>=8) break; }
     COMPG.sel=sel; COMPG.off=new Set(); COMPG.base='__basket'; renderCompg(); };
   const cl=el('cg-clear'); if(cl) cl.onclick=()=>{ COMPG.sel=[]; COMPG.off=new Set(); COMPG.base='__basket'; renderCompg(); };
+  const ab=el('cg-ai'); if(ab) ab.onclick=()=>{
+    // Live single-name equities only: synthetic baskets have no server-side rows, crypto is out for v1.
+    const ts=COMPG.sel.filter(t=>!isBasketName(t)).map(t=>String(t).toUpperCase())
+      .filter(t=>{ for(const r of state.rows.values()) if((r.ticker||'').toUpperCase()===t&&r.uni!=='main') return true; return false; });
+    if(ts.length<2) return pushToast('Pick at least 2 live equities for a basket report (crypto and synthetic baskets are excluded for now)');
+    if(ts.length>12) return pushToast('Basket reports cap at 12 names — trim the selection');
+    openAiReport('grp:bkt:'+[...new Set(ts)].sort().join('+')); };
 }
 // Auto-launch: called whenever the Corr tab paints (view switch or scope flip). First visit
 // seeds the default set via openCompg (which self-defers on crypto until the matrix's intraday
@@ -8227,11 +8235,14 @@ async function termAsk(text){
     if(d&&d.askDayLeft!=null) renderAskBudget(d.askDayLeft, d.askPerDay);   // reflect the spend immediately
     if(d&&d.disabled) return termOutAI(`the AI fallback isn't enabled on the server yet <span class="tp-trans">(no API key set)</span>. The local engine handles most questions — try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="help">help</span>.`);
     if(!d||!d.ok){ if(d&&d.error==='rate') return termOutAI(`busy — the shared AI limit is maxed for a moment <span class="tp-trans">(retry in ${Math.ceil((d.retryMs||3000)/1000)}s)</span>.`);
-      if(d&&d.error==='ai-locked'){ termSetLock(true); return termOutAI(`AI is locked for this session. Run <b>admin unlock &lt;password&gt;</b> to enable AI answers <span class="tp-trans">(local commands like a ticker, <span class="ex" data-tcmd="top funding">top funding</span> or <span class="ex" data-tcmd="signals">signals</span> still work without it)</span>.`); }
-      if(d&&d.error==='ask-daily-cap') return termOutAI(`daily AI limit reached — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
+      if(d&&d.error==='ask-user-cap') return termOutAI(`your daily AI limit is reached — <span class="tp-err">${d.askUserPerDay||5}/${d.askUserPerDay||5}</span> of your ask calls used today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
+      if(d&&d.error==='ask-daily-cap') return termOutAI(`the shared daily AI pool is exhausted — <span class="tp-err">${d.askPerDay||0}/${d.askPerDay||0}</span> ask calls used across all users today, resets at midnight UTC. Local commands still work: try a ticker, <span class="ex" data-tcmd="top funding">top funding</span>, or <span class="ex" data-tcmd="screen">screen</span>.`);
       return termErr(`couldn't resolve that — ${tesc((d&&d.error)||'error')}`); }
     if(d.mode==='planner'&&d.query){ termHistPush(text,'→ '+d.query); termOutAI(`<span class="tp-trans">planned → ${tesc(d.query)}</span>`); return termExec(d.query); }   // AI planned, client computes
-    if(d.mode==='analyst'){ termHistPush(text,d.answer||''); const tail=d.askDayLeft!=null?` · <span style="color:${d.askDayLeft<=Math.max(1,(d.askPerDay||40)*0.25)?'var(--accent)':'var(--faint)'}">${d.askDayLeft} ask ${d.askDayLeft===1?'call':'calls'} left today</span>`:''; return termOutAI(`${tesc(d.answer||'').replace(/\n/g,'<br>')}\n<span class="tp-trans">— reasoned over ${d.marketsN||uni.length} live markets · ${tesc(d.model||'ai')}${d.cached?' · cached':''}${tail}</span>`); }
+    if(d.mode==='analyst'){ termHistPush(text,d.answer||'');
+      const tail=d.admin?' · <span class="tp-trans">admin — unlimited</span>'
+        :d.askUserDayLeft!=null?` · <span style="color:${d.askUserDayLeft<=1?'var(--accent)':'var(--faint)'}">${d.askUserDayLeft} of ${d.askUserPerDay} of your ask calls left today</span>`
+        :d.askDayLeft!=null?` · <span style="color:${d.askDayLeft<=Math.max(1,(d.askPerDay||50)*0.25)?'var(--accent)':'var(--faint)'}">${d.askDayLeft} ask ${d.askDayLeft===1?'call':'calls'} left today</span>`:''; return termOutAI(`${tesc(d.answer||'').replace(/\n/g,'<br>')}\n<span class="tp-trans">— reasoned over ${d.marketsN||uni.length} live markets · ${tesc(d.model||'ai')}${d.cached?' · cached':''}${tail}</span>`); }
     return termErr('empty response');
   }catch(e){ think.remove(); termErr('ask failed — '+tesc(e.message)); }
 }
@@ -8249,6 +8260,16 @@ function termRun(raw){ const line=raw.trim(); if(!line) return;
   if(adm){ termEcho('admin reset-reports'+(adm[1]?' ••••••':''));
     if(!adm[1]) return termErr('usage: admin reset-reports <password>');
     return termAdminReset(adm[1]); }
+  const grp=line.match(/^report\s+(sector|basket)\s+(.+)$/i);
+  if(grp){ termEcho(line);
+    if(/^sector$/i.test(grp[1])){ const name=grp[2].trim();
+      termOut(`opening sector report — <b>${tesc(name)}</b> <span class="tp-trans">(prose-tier group read; the server validates the sector name against the live universe)</span>`);
+      return openAiReport('grp:sec:'+name); }
+    const ts=[...new Set(grp[2].trim().toUpperCase().split(/[\s,+]+/).filter(Boolean))].sort();
+    if(ts.length<2) return termErr('a basket needs at least 2 tickers — report basket NVDA AMD AVGO');
+    if(ts.length>12) return termErr('basket reports cap at 12 names');
+    termOut(`opening basket report — <b>${tesc(ts.join(' '))}</b>`);
+    return openAiReport('grp:bkt:'+ts.join('+')); }
   termEcho(line);
   const p=line.split(/\s+/);
   if(termGrammarComplete(p)){ termHistPush(line, line); return termExec(line); }   // unambiguous, complete command — run it (no badge, you typed it)
@@ -8315,7 +8336,9 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('fund <ticker>',20)}</span><span class="sec">latest SEC-filed balance sheet + income facts \u00b7 XBRL, on demand</span>
 <span class="amber">${tpad('etf <symbol>',20)}</span><span class="sec">ETF/fund composition from the latest N-PORT filing (30\u201360d lag)</span>
 <span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
-<span class="amber">${tpad('admin unlock',20)}</span><span class="sec">+ password — unlock AI generation for this session (echo redacted)</span>
+<span class="amber">${tpad('report sector',20)}</span><span class="sec">+ name — AI group report on a GICS sector (e.g. report sector Energy)</span>
+<span class="amber">${tpad('report basket',20)}</span><span class="sec">+ tickers — AI group report on a custom basket (2-12 live equities)</span>
+<span class="amber">${tpad('admin unlock',20)}</span><span class="sec">+ password — admin: unlimited AI, no caps, burns no budget (echo redacted)</span>
 <span class="amber">${tpad('admin lock',20)}</span><span class="sec">re-lock AI generation now</span>
 <span class="tp-trans">Or just ask: "who reports tomorrow", "best sector this week", "whats above the 200dma", "nvda vs amd", "hows the tape". Tab completes · ↑↓ history · ~ opens.</span>`); }
 
@@ -8907,7 +8930,9 @@ function aiPick(coin){ const box=el('ai-sug'); if(box) box.hidden=true;
   const r=state.rows.get(coin); const q=el('ai-q'); if(q&&r) q.value=r.ticker||coin;
   state.report.coin=coin; loadAiReport(coin); }
 function openAiReport(coin){ state.report.coin=coin; showView('report');
-  const r=state.rows.get(coin), q=el('ai-q'); if(q&&r) q.value=r.ticker||coin;
+  const r=state.rows.get(coin), q=el('ai-q');
+  if(q){ if(r) q.value=r.ticker||coin; else if(String(coin).startsWith('grp:sec:')) q.value=coin.slice(8)+' (sector)';
+    else if(String(coin).startsWith('grp:bkt:')) q.value='basket: '+coin.slice(8).split('+').join(' '); }
   loadAiReport(coin); }
 function openReportView(){
   const q=el('ai-q');
@@ -8954,13 +8979,94 @@ async function aiRegenerate(coin){
   try{
     const r=await fetch('/api/ai-report',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({coin})});
     const d=await r.json().catch(()=>({}));
-    if(r.ok&&d.ok){ state.report.data=d.report; if(state.report.coin===coin) renderAiReport(d.report,coin); loadAiRecent(); pushToast('AI report generated — cached for everyone'+(d.dayLeft!=null?' · '+d.dayLeft+'/'+d.perDay+' left today':'')); }
-    else if(r.status===429&&d.error==='daily-cap'){ pushToast('Daily report budget exhausted ('+(d.perDay||5)+'/day) — resets at midnight UTC, or an admin can reset it in the terminal'); if(state.report.coin===coin) loadAiReport(coin,true); }
+    if(r.ok&&d.ok){ state.report.data=d.report; if(state.report.coin===coin) renderAiReport(d.report,coin); loadAiRecent();
+      pushToast('AI report generated — cached for everyone'+(d.admin?' · admin (unlimited)':(d.userDayLeft!=null?' · yours: '+d.userDayLeft+'/'+d.userPerDay+' today, '+d.userMonthLeft+'/'+d.userPerMonth+' this month':(d.dayLeft!=null?' · '+d.dayLeft+'/'+d.perDay+' left today':'')))); }
+    else if(r.status===429&&d.error==='user-day-cap'){ pushToast('Your daily report budget is spent ('+(d.userPerDay||3)+'/day) — resets at midnight UTC'); if(state.report.coin===coin) loadAiReport(coin,true); }
+    else if(r.status===429&&d.error==='user-month-cap'){ pushToast('Your monthly report budget is spent ('+(d.userPerMonth||20)+'/month) — resets on the 1st (UTC)'); if(state.report.coin===coin) loadAiReport(coin,true); }
+    else if(r.status===429&&d.error==='daily-cap'){ pushToast('The shared daily report pool is exhausted ('+(d.perDay||5)+'/day across all users) — resets at midnight UTC, or an admin can reset it in the terminal'); if(state.report.coin===coin) loadAiReport(coin,true); }
     else if(r.status===429){ pushToast('On cooldown — regenerate unlocks in '+aiFmtLeft(d.regenInMs)+' (or on material change)'); if(d.report&&state.report.coin===coin){ state.report.data=d.report; renderAiReport(d.report,coin); } }
     else if(r.status===401&&d.error==='ai-locked'){ pushToast('AI is locked — open the terminal (~) and run: admin unlock <password>'); }
     else pushToast('Generation failed — '+(d.error||('HTTP '+r.status)));
   }catch(e){ pushToast('Generation failed — '+e.message); }
   state.report.gen=false; if(state.report.coin===coin) renderAiGenState(coin,false);
+}
+// ---- group report card (grp:sec:* / grp:bkt:*) -------------------------------------------
+// Deliberately prose-tier: no geometry, no marks, no ledger claim — and the card SAYS so.
+// The EW-index chart carries a full crosshair readout; the breadth strip hovers per cell.
+function grpLabelOf(coin,d){ if(d&&d.label) return d.label;
+  if(String(coin).startsWith('grp:sec:')) return coin.slice(8)+' (sector)';
+  if(String(coin).startsWith('grp:bkt:')) return coin.slice(8).split('+').join(' · ');
+  return coin; }
+function grpIndexSvg(idx){
+  const W=640,H=170,PL=40,PR=14,PT=10,PB=22;
+  const pts=(idx||[]).filter(p=>p&&p.v!=null&&isFinite(p.v));
+  if(pts.length<2) return '<div class="sec" style="padding:14px 4px">not enough shared history to draw the equal-weight index yet</div>';
+  const vs=pts.map(p=>p.v); let lo=Math.min(...vs),hi=Math.max(...vs); if(hi-lo<1e-6){lo-=1;hi+=1;}
+  const X=i=>PL+(W-PL-PR)*i/(pts.length-1), Y=v=>PT+(H-PT-PB)*(1-(v-lo)/(hi-lo));
+  const path=pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p.v).toFixed(1)).join(' ');
+  const y100=(100>=lo&&100<=hi)?`<line x1="${PL}" x2="${W-PR}" y1="${Y(100).toFixed(1)}" y2="${Y(100).toFixed(1)}" stroke="var(--faint)" stroke-dasharray="3 3"/><text x="${W-PR+2}" y="${(Y(100)+3).toFixed(1)}" fill="var(--faint)" font-size="9">100</text>`:'';
+  const gl=[lo,hi].map(v=>`<text x="4" y="${(Y(v)+3).toFixed(1)}" fill="var(--faint)" font-size="9">${v.toFixed(0)}</text>`).join('');
+  return `<div class="cg-chartwrap" style="position:relative">
+    <svg id="grp-ix" viewBox="0 0 ${W} ${H}" style="width:100%;display:block" data-n="${pts.length}">
+      ${gl}${y100}
+      <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.6"/>
+      <line id="grp-cx" x1="0" x2="0" y1="${PT}" y2="${H-PB}" stroke="var(--faint)" visibility="hidden"/>
+      <circle id="grp-cd" r="3" fill="var(--accent)" visibility="hidden"/>
+      <rect x="${PL}" y="${PT}" width="${W-PL-PR}" height="${H-PT-PB}" fill="transparent" id="grp-hit"/>
+    </svg>
+    <div class="cg-read" id="grp-read"></div>
+    <div class="sec" style="font-size:10px;margin-top:2px">equal-weight index of member daily closes, rebased to 100 — a synthetic composite, drawn for context only; no levels are annotated on it by design (structure on a synthetic index would be false precision)</div>
+  </div>`;
+}
+function grpWireIndexHover(idx){
+  const svg=el('grp-ix'),hit=el('grp-hit'),cx=el('grp-cx'),cd=el('grp-cd'),rd=el('grp-read');
+  if(!svg||!hit) return;
+  const pts=(idx||[]).filter(p=>p&&p.v!=null&&isFinite(p.v)); if(pts.length<2) return;
+  const W=640,PL=40,PR=14,PT=10,PB=22,H=170;
+  const vs=pts.map(p=>p.v); let lo=Math.min(...vs),hi=Math.max(...vs); if(hi-lo<1e-6){lo-=1;hi+=1;}
+  const X=i=>PL+(W-PL-PR)*i/(pts.length-1), Y=v=>PT+(H-PT-PB)*(1-(v-lo)/(hi-lo));
+  const mv=e=>{ const r=svg.getBoundingClientRect(); const fx=(e.clientX-r.left)/r.width*W;
+    let i=Math.round((fx-PL)/(W-PL-PR)*(pts.length-1)); i=Math.max(0,Math.min(pts.length-1,i));
+    const p=pts[i];
+    cx.setAttribute('x1',X(i).toFixed(1)); cx.setAttribute('x2',X(i).toFixed(1)); cx.setAttribute('visibility','visible');
+    cd.setAttribute('cx',X(i).toFixed(1)); cd.setAttribute('cy',Y(p.v).toFixed(1)); cd.setAttribute('visibility','visible');
+    if(rd){ rd.textContent=p.d+' · '+p.v.toFixed(1)+' ('+(p.v>=100?'+':'')+(p.v-100).toFixed(1)+'% since rebase)'; rd.style.display='block'; } };
+  const out=()=>{ cx.setAttribute('visibility','hidden'); cd.setAttribute('visibility','hidden'); if(rd) rd.style.display='none'; };
+  hit.addEventListener('mousemove',mv); hit.addEventListener('mouseleave',out);
+}
+function renderAiGroupReport(d,coin,box){
+  const label=grpLabelOf(coin,d);
+  const budget=(d&&d.dayLeft!=null?`<div class="sec" style="font-size:11px;margin-top:6px">${d.admin?'admin — unlimited':(d.userDayLeft!=null?'yours: '+d.userDayLeft+'/'+d.userPerDay+' today · '+d.userMonthLeft+'/'+d.userPerMonth+' this month · ':'')+'shared pool '+d.dayLeft+'/'+d.perDay+' today'}</div>`:'');
+  if(!d||d.status==='none'||!d.ai){
+    box.innerHTML=`<div class="ai-head"><span class="tk">${esc(label)}</span><span class="sec">group report</span></div>`
+      +`<div class="msg" style="padding:22px 10px">No report for this ${String(coin).startsWith('grp:sec:')?'sector':'basket'} yet.${d&&d.error?'<br><span class="neg" style="font-size:12px">'+esc(d.error)+'</span>':''}<br><span class="sec" style="font-size:12px">Group reads are prose-tier: breadth, leadership and rotation over an equal-weight basket — no entry/stop/target, nothing enters the track record.</span></div>`
+      +(d&&d.enabled!==false&&!d.error?`<div style="text-align:center;padding-bottom:12px"><button class="btn" id="ai-regen" ${d&&d.dayLeft===0&&!d.admin?'disabled data-cap="1" title="shared daily pool exhausted — resets at midnight UTC"':''}>generate group report</button>${budget}</div>`:'');
+    const b=el('ai-regen'); if(b) b.onclick=()=>aiRegenerate(coin);
+    return;
+  }
+  const c=d.computed||{}, br=c.breadth||{};
+  const stateLine=(d.status==='fresh'?`<span class="pos">fresh</span> · regenerate in <b id="ai-cd" data-until="${Date.now()+(d.regenInMs||0)}">${aiFmtCountdown(d.regenInMs)}</b>`
+    :d.status==='invalidated'?`<span style="color:var(--accent)">invalidated — ${esc(d.invalidReason||'format updated')}</span>`
+    :'<span class="sec">stale</span> · <span class="pos">regenerate available</span>')
+    +(d.dayLeft!=null?` · <span class="sec">pool ${d.dayLeft}/${d.perDay}</span>`:'')
+    +(d.admin?' · <span class="sec">admin ∞</span>':d.userDayLeft!=null?` · <span class="${d.userDayLeft>0?'sec':'neg'}">yours ${d.userDayLeft}/${d.userPerDay}d · ${d.userMonthLeft}/${d.userPerMonth}m</span>`:'');
+  const chips=(d.members||[]).map(t=>`<span class="cg-chip" data-tip="member of this ${String(coin).startsWith('grp:sec:')?'sector':'basket'}">${esc(t)}</span>`).join(' ');
+  const brRow=(k,v,tip)=>v==null?'':`<span class="sec" style="margin-right:12px" data-tip="${esc(tip)}"><b>${esc(k)}</b> ${esc(String(v))}</span>`;
+  box.innerHTML=`<div class="ai-head"><span class="tk">${esc(label)}</span><span class="sec">group report · ${d.memberCount||''} members</span></div>
+    <div style="margin:6px 0 8px"><span class="ai-badge ${d.ai.bias==='short'?'short':d.ai.bias==='neutral'?'neutral':''}">${esc(d.ai.headline)}</span></div>
+    <div class="sec" style="font-size:11px;margin-bottom:6px">${stateLine} · <span id="ai-age" data-ts="${d.ts}">${aiFmtAgo(Date.now()-d.ts)}</span> old · ${esc(d.model||'')}</div>
+    ${grpIndexSvg(c.ewIndex)}
+    <div style="margin:8px 0 4px">${brRow('up today',br.pctUpD1!=null?br.pctUpD1+'%':null,'share of members positive on the day')}${brRow('above 200dma',br.pctAboveMa200!=null?br.pctAboveMa200+'%':null,'share of members above their 200-day SMA (of those with enough history)')}${brRow('avg pair corr',c.avgPairCorr,'average pairwise 30d correlation of member daily returns — high means one trade wearing many names')}${brRow('7d dispersion',c.dispersionD7!=null?c.dispersionD7+'pp':null,'cross-sectional stdev of member 7d returns — how differently the members are trading')}</div>
+    <div style="margin:4px 0 10px">${chips}</div>
+    ${(d.ai.read||[]).map(p=>`<p style="margin:6px 0">${esc(p)}</p>`).join('')}
+    <div class="hlp-h">Leaders</div><p style="margin:4px 0">${esc(d.ai.leaders||'')}</p>
+    <div class="hlp-h">Laggards</div><p style="margin:4px 0">${esc(d.ai.laggards||'')}</p>
+    ${(d.ai.risks&&d.ai.risks.length)?`<div class="hlp-h">Risks</div><p style="margin:4px 0">${d.ai.risks.map(esc).join(' · ')}</p>`:''}
+    ${(d.ai.watch&&d.ai.watch.length)?`<div class="hlp-h">What would change the read</div><p style="margin:4px 0">${d.ai.watch.map(esc).join(' · ')}</p>`:''}
+    <div class="sec" style="font-size:10px;margin-top:8px">Group reads are prose-tier by design: no frozen side/void/target, no ledger claim, no track record — a breadth-and-rotation synthesis over an equal-weight composite, cached for the whole group like any report.</div>
+    <div style="text-align:center;padding:10px 0"><button class="btn" id="ai-regen" ${(!d.canRegen)?'disabled title="on cooldown"':''} ${d.dayLeft===0&&!d.admin?'disabled data-cap="1" title="shared daily pool exhausted"':''}>regenerate</button>${budget}</div>`;
+  grpWireIndexHover(c.ewIndex);
+  const b=el('ai-regen'); if(b&&!b.disabled) b.onclick=()=>aiRegenerate(coin);
 }
 function renderAiGenState(coin,on){ const b=el('ai-regen'); if(!b) return;
   if(on){ b.disabled=true; b.innerHTML='<span class="ai-gen"><span class="sdot"></span>generating…</span>'; }
@@ -8970,6 +9076,7 @@ function aiBiasBadge(d){ const cls=d.ai.bias==='short'?'short':d.ai.bias==='neut
   return `<span class="ai-badge ${cls}${warn}">${esc(d.ai.headline)}</span>`; }
 function renderAiReport(d,coin){
   const box=el('ai-report'); if(!box) return; box.hidden=false;
+  if(String(coin).startsWith('grp:')||(d&&d.kind==='group')) return renderAiGroupReport(d,coin,box);
   const r=state.rows.get(coin);
   const tk=(d&&d.ticker)||(r&&r.ticker)||coin;
   const uni=(d&&d.uni)||(r&&r.uni==='main'?'crypto':'stocks');
@@ -8985,7 +9092,9 @@ function renderAiReport(d,coin){
   const stateLine=(d.status==='fresh'?`<span class="pos">fresh</span> · regenerate in <b id="ai-cd" data-until="${Date.now()+(d.regenInMs||0)}">${aiFmtCountdown(d.regenInMs)}</b>`
     :d.status==='invalidated'?`<span style="color:var(--accent)">invalidated — ${esc(d.invalidReason||'material change')}</span>`
     :'<span class="sec">stale</span> · <span class="pos">regenerate available</span>')
-    +(d.dayLeft!=null?` · <span class="${d.dayLeft>0?'sec':'neg'}" data-tip="daily generation budget, shared by the whole group — resets at midnight UTC; an admin can reset it early from the ask terminal (admin reset-reports)">${d.dayLeft}/${d.perDay} today</span>`:'');
+    +(d.dayLeft!=null?` · <span class="${d.dayLeft>0?'sec':'neg'}" data-tip="daily generation budget, shared by all non-admin users — resets at midnight UTC; an admin can reset it early from the ask terminal (admin reset-reports)">${d.dayLeft}/${d.perDay} today</span>`:'')
+    +(d.admin?' · <span class="sec" data-tip="admin — unlimited generations, burns no budget">admin ∞</span>'
+      :d.userDayLeft!=null?` · <span class="${d.userDayLeft>0?'sec':'neg'}" data-tip="your personal budget — ${d.userPerDay}/day and ${d.userPerMonth}/month, resets at midnight UTC / on the 1st">yours ${d.userDayLeft}/${d.userPerDay}d · ${d.userMonthLeft}/${d.userPerMonth}m</span>`:'');
   const capped=d.dayLeft===0;
   const ev=(d.ai.evidence||[]).map(e2=>`<tr><td class="k">${esc(e2.k)}</td><td>${esc(e2.v)}</td></tr>`).join('');
   const hasRisk=c.riskAbs!=null;
