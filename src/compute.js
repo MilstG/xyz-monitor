@@ -5259,13 +5259,23 @@ function scopeFilterSignals(p, vis, evUni) {
 function scopeFilterActionable(p, vis) {
   if (!p || vis.all) return p;
   const rows = (p.rows || []).filter((r) => vis[_scopeOfUni(r.uni)]);
-  const settled = p.settled || {};
+  // settled's REAL shape (boardSettled): { since, dropped, perUni: {stocks, crypto}, episodes }.
+  // 2026.08.03-03: the -02 filter rebuilt it as a flat {stocks, crypto} — the client's
+  // st.perUni[wantU] read found nothing and the settled record rendered empty for EVERYONE the
+  // filter touched. Slice INSIDE the shape: null the hidden universe's perUni panel and drop its
+  // episode rows (each carries uni and would otherwise enumerate the hidden board's history).
+  const st = p.settled || null;
   return {
     ts: p.ts, dataTs: p.dataTs, params: p.params || {},
     // coverage.confirmed restated over the visible slice — the raw gate count would disclose how
     // many hidden-universe setups exist. Rejection counters are engine-wide diagnostics and stay.
     coverage: Object.assign({}, p.coverage || {}, { confirmed: rows.length }),
-    settled: { stocks: vis.eq ? (settled.stocks || null) : null, crypto: vis.cx ? (settled.crypto || null) : null },
+    settled: !st ? st : {
+      since: st.since != null ? st.since : null, dropped: st.dropped,
+      perUni: { stocks: vis.eq ? ((st.perUni || {}).stocks || null) : null,
+                crypto: vis.cx ? ((st.perUni || {}).crypto || null) : null },
+      episodes: (st.episodes || []).filter((e) => vis[_scopeOfUni(e.uni)]),
+    },
     rows, count: rows.length,
   };
 }
