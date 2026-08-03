@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.03-07";
+const VERSION = "2026.08.03-09";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -424,13 +424,18 @@ async function main() {
     if (req.method === "POST" && AI_COST_PATHS.has(u)) {
       if (!reqAuthed(req))
         return reply.code(401).header("cache-control", "no-store").send({ error: "unauthorized", detail: "AI endpoints require authentication — set SITE_PASSWORD to enable them" });
-      // Second lock, layered over authentication: even a logged-in caller (browser OR script/Basic
-      // auth) must present a valid AI-unlock cookie. There is no header shortcut, so the only way to
-      // get one is `admin unlock <password>` in the terminal — AI stays browser+admin-password only.
-      if (!aiUnlockOk(getCookie(req, "xyzai")))
-        return reply.code(401).header("cache-control", "no-store").send({ error: "ai-locked", detail: "AI is locked — run 'admin unlock <password>' in the terminal to enable it for this session" });
+      // DELIBERATE REVERSAL of the locked-by-default posture: AI generation is now OPEN to every
+      // authenticated group member, capped per user (3 reports/day, 20/month, 5 asks/day) and by
+      // the shared non-admin pools — the caps are enforced in the poller, where the budget state
+      // lives. The xyzai unlock stopped being a gate and became an EXEMPTION: holding it (or the
+      // xyzadm view) marks the caller admin — unlimited, burns nothing. Still no header path to
+      // the exemption: `admin unlock <password>` in the terminal remains the only way in.
     }
   });
+  // One place computes "who is asking" for the AI-cost routes: the signed xyzown handle keys the
+  // per-user quota; admin = AI unlock OR admin view (both are ADMIN_PASSWORD-derived cookies).
+  const aiWho = (req, reply) => ({ owner: ensureOwner(req, reply),
+    admin: aiUnlockOk(getCookie(req, "xyzai")) || isAdmin(req) });
 
   // Optional shared-password gate. Disabled unless SITE_PASSWORD is set. Two ways in:
   //   1. Session cookie from the login page (30-day HMAC token) — the normal browser path.
@@ -956,13 +961,16 @@ async function main() {
   fastify.get("/api/ai-report", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
-    return poller.getAiReport(coin);
+    return poller.getAiReport(coin, aiWho(req, reply));
   });
   fastify.post("/api/ai-report", async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
-    const r = await poller.generateAiReport(String(b.coin || ""));
-    return reply.code(r.ok ? 200 : (r.error === "cooldown" || r.error === "daily-cap" ? 429 : 400)).send(r);
+    // b.coin may be a single name OR a group key (grp:sec:<sector> / grp:bkt:<T1+T2+...>) —
+    // the poller routes on the prefix; caps and cooldown apply identically.
+    const r = await poller.generateAiReport(String(b.coin || ""), aiWho(req, reply));
+    const capped = r.error === "cooldown" || r.error === "daily-cap" || r.error === "user-day-cap" || r.error === "user-month-cap";
+    return reply.code(r.ok ? 200 : (capped ? 429 : 400)).send(r);
   });
   // Admin reset of the AI report daily budget. Triggered from the ask terminal
   // (`admin reset-reports <password>`); the password is compared server-side against
@@ -997,7 +1005,17 @@ async function main() {
   // terminal show the right lock state on open without exposing the HttpOnly cookie to page JS.
   fastify.get("/api/ai-status", (req, reply) => {
     reply.header("cache-control", "no-store");
-    return { gated: !!ADMIN_PASSWORD, unlocked: aiUnlockOk(getCookie(req, "xyzai")), admin: isAdmin(req) };
+    // gated:false now means "open with caps", not "no lock exists" — the client stops
+    // prompting for a password on generation and shows the caller's own remaining budget.
+    const admin = aiUnlockOk(getCookie(req, "xyzai")) || isAdmin(req);
+    return Object.assign({ gated: false, unlocked: admin, admin: isAdmin(req) },
+      poller.getAiQuota(ensureOwner(req, reply), admin));
+  });
+  // Live GICS sectors with >=3 equity members — feeds the terminal's `report sector` command
+  // and any picker UI. Cheap (curated classification over in-memory rows), session-gated.
+  fastify.get("/api/ai-sectors", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    return { ts: Date.now(), sectors: poller.listSectors() };
   });
   // Recent AI reports across all tickers — the Report tab's shared feed.
   fastify.get("/api/ai-reports", (req, reply) => {
@@ -1013,7 +1031,7 @@ async function main() {
   fastify.post("/api/ask", { bodyLimit: 256 * 1024 }, async (req, reply) => {
     reply.header("cache-control", "no-store");
     const b = req.body || {};
-    return poller.askBoard(b.q || "", b.ctx || {});
+    return poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply));
   });
   // On-demand external fundamentals for the ask terminal. Both endpoints are pull-through
   // caches over SEC EDGAR (24h TTL, 5-min error TTL) — the first ask for a name does the
