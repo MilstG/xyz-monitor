@@ -5961,7 +5961,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // becomes decorative, at 3 more names fall to the honest-null path.
   const AI_LEVEL_K = 3, AI_LEVEL_TAU = 0.4, AI_LEVEL_MINN = 2, AI_LEVEL_MAX = 8;
   const AI_SNAP_TOL = 0.5;   // x tauPct — how close a proposed void must sit to a detected level
-  const AI_SCHEMA_V = 9;   // v9: target-price reconciliation — the target level is the single source of truth and a null scenario target is filled from it (the prompt offered "target": null while the validator rejected it, killing crypto reads where the detector confirms no cluster on the thesis side); v8: structural level detector — ctx.levels ships confirmed pivot clusters and a non-anchored directional void must snap to one (previously the void was bounded only by a +-40/60% sanity band); v7: earnings reported-vs-upcoming split — a printed event is a post-event object (context.earnings.reported), never served as a pending `next` binary; validator bans a stale `event` scenario; v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
+  const AI_SCHEMA_V = 10;   // v10: group reports — a second report kind (grp:sec:/grp:bkt: keys, prose-tier breadth/rotation read, no geometry, no ledger claim); v9: target-price reconciliation — the target level is the single source of truth and a null scenario target is filled from it (the prompt offered "target": null while the validator rejected it, killing crypto reads where the detector confirms no cluster on the thesis side); v8: structural level detector — ctx.levels ships confirmed pivot clusters and a non-anchored directional void must snap to one (previously the void was bounded only by a +-40/60% sanity band); v7: earnings reported-vs-upcoming split — a printed event is a post-event object (context.earnings.reported), never served as a pending `next` binary; validator bans a stale `event` scenario; v6: crypto signal-engine removal — crypto reports no longer carry engine-fed live signals, marks, or setups; v5: news grounding contract (news_read), crypto context, sector-relative
   const AI_MAX_TOKENS = AI_DEF.maxTokens;
   const AI_TIMEOUT_MS = 120 * 1000;
   // Per-surface reasoning effort (OpenAI GPT-5.x only — the Anthropic body stays minimal and
@@ -5979,14 +5979,50 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // — so a single busy day can't run up an unbounded bill. Only SUCCESSFUL, non-cached model calls
   // burn it (a cache hit or a failure costs nothing). Persisted with the report budget so a redeploy
   // can't refill it; resettable via the same admin path.
-  const ASK_REPORTS_PER_DAY = Math.max(1, Number(process.env.ASK_MAX_PER_DAY) || 40);
+  const ASK_REPORTS_PER_DAY = Math.max(1, Number(process.env.ASK_MAX_PER_DAY) || 50);
+  // Per-user caps, layered UNDER the shared pools above. AI is open to every authenticated
+  // group member now (the xyzai unlock stopped being a gate and became an exemption): a normal
+  // user gets 3 report generations a day and 20 a month, and 5 AI terminal questions a day;
+  // an admin (valid xyzai/xyzadm) is unlimited and burns NEITHER the per-user nor the shared
+  // pools. Identity is the xyzown owner cookie — the same signed handle the alert system uses.
+  // HONESTY NOTE: xyzown is a cookie, so a cleared browser mints a fresh identity and the
+  // per-user cap is soft by construction; the shared pools remain the hard cost wall. When
+  // multi-user accounts land, the quota key becomes the account id and this hardens for free.
+  const AI_USER_PER_DAY = Math.max(1, Number(process.env.AI_USER_PER_DAY) || 3);
+  const AI_USER_PER_MONTH = Math.max(1, Number(process.env.AI_USER_PER_MONTH) || 20);
+  const ASK_USER_PER_DAY = Math.max(1, Number(process.env.ASK_USER_PER_DAY) || 5);
   const utcDay = () => new Date().toISOString().slice(0, 10);
+  const utcMonth = () => new Date().toISOString().slice(0, 7);
   let aiDay = { day: utcDay(), count: 0 };
   let askDay = { day: utcDay(), count: 0 };
   function aiDayRoll() { const d = utcDay(); if (aiDay.day !== d) aiDay = { day: d, count: 0 }; }
   function aiDayLeft() { aiDayRoll(); return Math.max(0, AI_REPORTS_PER_DAY - aiDay.count); }
   function askDayRoll() { const d = utcDay(); if (askDay.day !== d) askDay = { day: d, count: 0 }; }
   function askDayLeft() { askDayRoll(); return Math.max(0, ASK_REPORTS_PER_DAY - askDay.count); }
+  // ownerId -> { d, dc, m, mc, ad, ac, ts }: report day+count, report month+count, ask day+count,
+  // last touch. Rolled lazily on read; persisted with the report cache so a redeploy can't refill
+  // anyone's day; pruned at persist time (45d untouched, 500-entry cap) so cookie churn can't
+  // grow the file unbounded.
+  let aiUsers = new Map();
+  function aiUserRow(owner) {
+    const id = String(owner || "anon");
+    let u = aiUsers.get(id);
+    if (!u) { u = { d: utcDay(), dc: 0, m: utcMonth(), mc: 0, ad: utcDay(), ac: 0, ts: Date.now() }; aiUsers.set(id, u); }
+    const d = utcDay(), m = utcMonth();
+    if (u.d !== d) { u.d = d; u.dc = 0; }
+    if (u.m !== m) { u.m = m; u.mc = 0; }
+    if (u.ad !== d) { u.ad = d; u.ac = 0; }
+    u.ts = Date.now();
+    return u;
+  }
+  function aiUserQuota(owner) {
+    const u = aiUserRow(owner);
+    return { userPerDay: AI_USER_PER_DAY, userDayLeft: Math.max(0, AI_USER_PER_DAY - u.dc),
+      userPerMonth: AI_USER_PER_MONTH, userMonthLeft: Math.max(0, AI_USER_PER_MONTH - u.mc),
+      askUserPerDay: ASK_USER_PER_DAY, askUserDayLeft: Math.max(0, ASK_USER_PER_DAY - u.ac) };
+  }
+  function aiUserBurnReport(owner) { const u = aiUserRow(owner); u.dc++; u.mc++; }
+  function aiUserBurnAsk(owner) { const u = aiUserRow(owner); u.ac++; }
   const AI_KINDS = new Set(["target", "flat", "void", "event"]);
   const AI_LEVEL_KINDS = new Set(["void", "target", "zone_low", "zone_high", "note"]);
   let aiReports = new Map();    // coin -> stored report (successes only; errors are returned, not cached)
@@ -6001,9 +6037,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       aiDay = { day: saved.day.day, count: Math.max(0, Number(saved.day.count) || 0) };
     if (saved && saved.askDay && saved.askDay.day === utcDay())
       askDay = { day: saved.askDay.day, count: Math.max(0, Number(saved.askDay.count) || 0) };
+    // Per-user counters ride the same file; stale day/month fields roll lazily in aiUserRow.
+    if (saved && Array.isArray(saved.users))
+      for (const u of saved.users) if (u && u.id) aiUsers.set(String(u.id),
+        { d: u.d || utcDay(), dc: Math.max(0, Number(u.dc) || 0), m: u.m || utcMonth(), mc: Math.max(0, Number(u.mc) || 0),
+          ad: u.ad || utcDay(), ac: Math.max(0, Number(u.ac) || 0), ts: Number(u.ts) || Date.now() });
   } catch (_) {}
   function persistAiReports() {
-    try { if (store.saveAiReports) store.saveAiReports({ ts: Date.now(), day: aiDay, askDay, reports: [...aiReports.values()] }); } catch (_) {}
+    try {
+      // Prune before write: 45d untouched or beyond the 500 freshest — cookie churn is bounded.
+      const cut = Date.now() - 45 * DAY;
+      const users = [...aiUsers.entries()].filter(([, u]) => u.ts >= cut)
+        .sort((a, b) => b[1].ts - a[1].ts).slice(0, 500).map(([id, u]) => Object.assign({ id }, u));
+      if (store.saveAiReports) store.saveAiReports({ ts: Date.now(), day: aiDay, askDay, users, reports: [...aiReports.values()] });
+    } catch (_) {}
   }
   const pctOf = (px, ref) => (px != null && ref != null && isFinite(px) && isFinite(ref) && ref > 0)
     ? +((px / ref - 1) * 100).toFixed(2) : null;
@@ -6027,6 +6074,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   }
   function aiInvalidReason(rep) {
     if ((rep.schemaV || 1) !== AI_SCHEMA_V) return "report format updated";
+    // Group reports have no per-name claim/earnings stamp — TTL + schema only.
+    if (rep.kind === "group") return null;
     const cur = aiStampFor(rep.coin, rep.ticker);
     const s = rep.ctxStamp || {};
     if (cur.openN > (s.openN || 0)) return "new signal claim opened";
@@ -6771,6 +6820,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       regenInMs: fresh ? Math.max(0, (rep.ttlMs || AI_TTL_MS) - age) : 0 });
   }
   function aiUniverseOk(coin) {
+    if (String(coin || "").startsWith("grp:")) { const s = groupParse(coin); return !!(s && !groupResolve(s).error); }
     const r = rows.get(coin);
     return !!(r && !r.delisted && (r.uni !== "main" || crypto));
   }
@@ -6787,17 +6837,20 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     return { overall: agg(rs), thisName: coin ? agg(mine) : undefined,
       open: openAll.length, openOnName: coin ? openAll.some((e) => e.coin === coin) : undefined };
   }
-  function getAiReport(coin) {
+  function getAiReport(coin, who) {
+    if (String(coin || "").startsWith("grp:")) { const s = groupParse(coin); if (s) coin = s.key; }   // canonical basket key
+    const quota = who && !who.admin ? aiUserQuota(who.owner) : (who && who.admin ? { admin: true } : null);
     if (!coin || !aiUniverseOk(coin)) {
       const rep = coin ? aiReports.get(coin) : null;
       if (!rep) return { coin: coin || "", status: "none", error: coin ? "not in the live universe" : "coin required", ts: Date.now() };
     }
     const rep = aiReports.get(coin);
-    if (!rep) return { coin, status: "none", canRegen: true, ts: Date.now(),
+    if (!rep) return Object.assign({ coin, status: "none", canRegen: true, ts: Date.now(),
       enabled: !!(AI_KEY() || aiFetch), provider: AI_PROVIDER, model: AI_MODEL,
-      perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
+      perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() }, quota || {});
     const pub = aiPublic(rep);
     pub.perDay = AI_REPORTS_PER_DAY; pub.dayLeft = aiDayLeft();   // live, never cached with the report
+    if (quota) Object.assign(pub, quota);
     const ar = analystRecordFor(coin);
     if (ar) pub.analystRecord = ar;   // live, not cached with the report: the record moves as claims resolve, and the ETag moves with it
     return pub;
@@ -6805,7 +6858,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   function listAiReports() {
     const out = [...aiReports.values()].map((rep) => {
       const p = aiPublic(rep);
-      return { coin: p.coin, ticker: p.ticker, uni: p.uni, ts: p.ts, model: p.model,
+      return { coin: p.coin, ticker: p.ticker, uni: p.uni, ts: p.ts, model: p.model, kind: p.kind || "name",
         headline: p.ai && p.ai.headline, bias: p.ai && p.ai.bias, status: p.status,
         invalidReason: p.invalidReason, regenInMs: p.regenInMs, evR: p.computed && p.computed.evR };
     });
@@ -6814,7 +6867,13 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       enabled: !!(AI_KEY() || aiFetch), perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft(),
       reports: out.slice(0, 30) };
   }
-  async function generateAiReport(coin) {
+  // who = { owner, admin }: threaded from the server (xyzown handle + xyzai/xyzadm state).
+  // Admin skips BOTH the per-user caps and the shared pools and burns neither — unlimited by
+  // request; the shared pools remain the hard wall for everyone else. The cooldown applies to
+  // all callers equally: the cache is shared, so regenerating early wastes everyone's report.
+  async function generateAiReport(coin, who) {
+    if (String(coin || "").startsWith("grp:")) return generateGroupReport(coin, who);
+    const admin = !!(who && who.admin), owner = (who && who.owner) || null;
     if (!coin || !aiUniverseOk(coin)) return { ok: false, error: "not in the live universe" };
     if (!AI_KEY() && !aiFetch) return { ok: false, error: "no AI API key set on the server (ANTHROPIC_API_KEY or OPENAI_API_KEY)" };
     const existing = aiReports.get(coin);
@@ -6824,9 +6883,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       // convenience, this check is the gate.
       if (!p.canRegen) return { ok: false, error: "cooldown", regenInMs: p.regenInMs, report: p };
     }
-    // The daily budget is the group's second gate after the TTL: 5 generations a day (env-
-    // tunable), enforced HERE — the client's disabled button is convenience, this check is real.
-    if (!aiDayLeft()) return { ok: false, error: "daily-cap", perDay: AI_REPORTS_PER_DAY, dayLeft: 0 };
+    if (!admin) {
+      // Per-user caps first (the specific complaint beats the general one), then the shared pool.
+      const uq = aiUserQuota(owner);
+      if (uq.userDayLeft <= 0) return Object.assign({ ok: false, error: "user-day-cap" }, uq);
+      if (uq.userMonthLeft <= 0) return Object.assign({ ok: false, error: "user-month-cap" }, uq);
+      // The daily budget is the group's second gate after the TTL: 5 generations a day (env-
+      // tunable), enforced HERE — the client's disabled button is convenience, this check is real.
+      if (!aiDayLeft()) return { ok: false, error: "daily-cap", perDay: AI_REPORTS_PER_DAY, dayLeft: 0 };
+    }
     if (aiGenerating.has(coin)) return { ok: false, error: "generation already running for this ticker" };
     aiGenerating.add(coin);
     try {
@@ -6848,7 +6913,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         log(`AI report ${coin}: fallback failed too (${val.error}) — ${aiRejectShape(call.ok ? call.text : null)}`);
         return { ok: false, error: val.error };
       }
-      aiDay.count++;   // only a SUCCESSFUL generation burns budget; aiAssemble persists the counter with the cache
+      if (!admin) { aiDay.count++; aiUserBurnReport(owner); }   // only a SUCCESSFUL generation burns budget (admin burns nothing); aiAssemble persists the counters with the cache
       const rep = aiAssemble(coin, ctx, val, used);
       // Analyst-read accountability: every validated DIRECTIONAL read becomes a frozen claim
       // in its own ledger bucket — side, the report's own void, its target, mark at generation
@@ -6882,8 +6947,192 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         }
       } catch (e) { log("airead claim open failed (isolated, report unaffected): " + (e && e.message)); }
       log(`AI report generated: ${coin} via ${used} (bias ${rep.ai.bias}, ev ${rep.computed.evR != null ? rep.computed.evR + "R" : "n/a"})`);
-      return { ok: true, report: aiPublic(rep), perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() };
+      return Object.assign({ ok: true, report: aiPublic(rep), perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() },
+        admin ? { admin: true } : aiUserQuota(owner));
     } finally { aiGenerating.delete(coin); }
+  }
+
+  // ===== Group reports — sectors and custom baskets ======================================
+  // A second report KIND alongside the single-name one. Deliberately prose-tier: no frozen
+  // side/void/target geometry, no ledger claim, no track record — a breadth-and-rotation read
+  // over an equal-weight basket, honestly framed as such. Equities only for now (crypto sectors
+  // deferred). Keys: `grp:sec:<GICS sector>` or `grp:bkt:<T1+T2+...>` (sorted, canonical — the
+  // key IS the cache identity, so the same basket in any order shares one cache and cooldown).
+  const GRP_MAX_MEMBERS = 12;      // ad-hoc basket ceiling: keeps the context bundle sane
+  const GRP_DETAIL_MAX = 20;       // sector reports list at most this many members in detail (by volume), totals stay honest
+  const GRP_SYS = "You are the analyst layer of a private trading dashboard, writing a GROUP report over a basket of equities (a GICS sector or a user-picked basket). You receive one JSON context object: context.members holds each member's live fields (t=ticker, name, px=price, d1/d7/d30=% change, dd=% below 30d high, vsma200=% vs 200-day SMA or null, rvol=relative volume, earnDate=next scheduled earnings date or null), context.group holds the aggregates (ewIndex = the equal-weight index of daily closes rebased to 100 with ISO dates, breadth = {pctUpD1, pctAboveMa200, n}, avgPairCorr = average pairwise 30d correlation of daily returns or null, dispersionD7 = cross-sectional stdev of 7d returns), context.ledger holds recent signal events that fired on members (read-only history), and context.macro any scheduled universe-wide binaries ahead. NUMBERS RULE: every figure you cite must come from these fields or simple arithmetic on them — never invent or estimate a number that is not in the data. This is a breadth-and-rotation read, NOT a trade call: there is no entry, stop or target, and you must not fabricate levels on the synthetic index. Respond with ONLY a JSON object, no backticks, no prose outside it: {\"bias\": \"long\"|\"short\"|\"neutral\", \"headline\": string (<=90 chars, the one-line read), \"read\": [2-4 paragraph strings — the group read: breadth, leadership, dispersion (high avgPairCorr means one trade wearing many names — say so), positioning of the move], \"leaders\": string (one paragraph on what leadership says), \"laggards\": string (one paragraph on the laggards and whether they are opportunity or warning), \"risks\": [1-4 short strings], \"watch\": [1-4 short strings — what would change the read]}.";
+  function groupParse(key) {
+    const s = String(key || "");
+    if (s.startsWith("grp:sec:")) { const name = s.slice(8); return name ? { kind: "sector", name, key: s } : null; }
+    if (s.startsWith("grp:bkt:")) {
+      const ts = s.slice(8).split("+").map((t) => t.trim().toUpperCase()).filter(Boolean);
+      if (ts.length < 2 || ts.length > GRP_MAX_MEMBERS) return null;
+      const uniq = [...new Set(ts)].sort();
+      return { kind: "basket", tickers: uniq, key: "grp:bkt:" + uniq.join("+") };
+    }
+    return null;
+  }
+  function groupKeyFor(spec) {
+    if (!spec) return null;
+    if (spec.kind === "sector") return "grp:sec:" + spec.name;
+    if (spec.kind === "basket") return groupParse("grp:bkt:" + (spec.tickers || []).join("+"))?.key || null;
+    return null;
+  }
+  // Resolve a group key to live equity members. Sector: every non-delisted xyz equity whose
+  // curated classification matches. Basket: the named tickers, validated against the live
+  // universe — unknown names are reported, never silently dropped into a wrong basket.
+  function groupResolve(spec) {
+    if (!spec) return { error: "bad group key" };
+    const eqRows = [...rows.values()].filter((r) => r && !r.delisted && r.uni !== "main");
+    if (spec.kind === "sector") {
+      const members = eqRows.filter((r) => classifyCached(r.ticker, r.uni).assetClass === "Equity"
+        && classifyCached(r.ticker, r.uni).sector === spec.name);
+      if (members.length < 3) return { error: "sector '" + spec.name + "' has fewer than 3 live equity members" };
+      return { label: spec.name + " (sector)", members };
+    }
+    const byT = new Map(eqRows.map((r) => [String(r.ticker).toUpperCase(), r]));
+    const members = [], missing = [];
+    for (const t of spec.tickers) { const r = byT.get(t); if (r) members.push(r); else missing.push(t); }
+    if (missing.length) return { error: "not in the live equity universe: " + missing.join(", ") };
+    if (members.length < 2) return { error: "a basket needs at least 2 live members" };
+    return { label: members.map((r) => r.ticker).join(" · "), members };
+  }
+  function compileGroupContext(spec) {
+    const res = groupResolve(spec);
+    if (res.error) return { error: res.error };
+    const now = Date.now();
+    // Detail rows: for sectors, cap by volume; the aggregates below still cover the whole set.
+    const byVol = res.members.slice().sort((a, b) => (b.vol || 0) - (a.vol || 0));
+    const detail = (spec.kind === "sector" ? byVol.slice(0, GRP_DETAIL_MAX) : byVol);
+    const smaOf = (r, n) => { const cl = (r.dailyRaw || []).map((k) => +k.c).filter(Number.isFinite);
+      if (cl.length < n) return null; let s = 0; for (let i = cl.length - n; i < cl.length; i++) s += cl[i]; return s / n; };
+    const members = detail.map((r) => {
+      const sma = smaOf(r, 200), px = r.px != null && isFinite(r.px) ? +r.px : null;
+      let earnDate = null;
+      try { if (earnCache && Array.isArray(earnCache.entries))
+        for (const x of earnCache.entries) if (x.t === r.ticker && earnEntryState(x, now) !== "reported" && (!earnDate || x.d < earnDate)) earnDate = x.d; } catch (_) {}
+      // Internal rows carry ref anchors + raw candles, not the wire row's derived fields —
+      // derive here from the same sources the snapshot builder uses (one code path in spirit:
+      // pctOf against the same ref anchors).
+      const dl = (r.dailyRaw || []).filter((k) => Number.isFinite(+k.c));
+      let dd = null; if (px && dl.length >= 5) { const hi = Math.max(...dl.slice(-30).map((k) => +(k.h != null ? k.h : k.c)));
+        if (isFinite(hi) && hi > 0) dd = +((px / hi - 1) * 100).toFixed(2); }
+      let rvol = null; if (dl.length >= 21) { const vs = dl.slice(-21).map((k) => +k.v).filter((v) => isFinite(v) && v > 0);
+        if (vs.length >= 10) { const last = vs[vs.length - 1], avg = vs.slice(0, -1).reduce((s, v) => s + v, 0) / (vs.length - 1);
+          if (avg > 0) rvol = +(last / avg).toFixed(2); } }
+      return { t: r.ticker, name: companyName(r.ticker) || undefined, px,
+        d1: r.d1 != null && isFinite(r.d1) ? +(+r.d1).toFixed(2) : null,
+        d7: pctOf(px, r.ref && r.ref.p7d), d30: pctOf(px, r.ref && r.ref.p30d),
+        dd, vsma200: sma && px ? +((px / sma - 1) * 100).toFixed(2) : null, rvol, earnDate };
+    });
+    // Aggregates over ALL members (not just the detail slice), from daily closes already in memory.
+    const all = res.members;
+    const retsOf = (r, n) => { const cl = (r.dailyRaw || []).map((k) => +k.c).filter(Number.isFinite).slice(-(n + 1));
+      const out = []; for (let i = 1; i < cl.length; i++) out.push(Math.log(cl[i] / cl[i - 1])); return out; };
+    // Equal-weight index: average log return per day over members that have that day, rebased to 100.
+    const dayMap = new Map();   // isoDay -> [logRets]
+    for (const r of all) { const dl = (r.dailyRaw || []).filter((k) => Number.isFinite(+k.t) && Number.isFinite(+k.c)).slice(-91);
+      for (let i = 1; i < dl.length; i++) { const d = new Date(+dl[i].t).toISOString().slice(0, 10);
+        if (!dayMap.has(d)) dayMap.set(d, []); dayMap.get(d).push(Math.log(+dl[i].c / +dl[i - 1].c)); } }
+    const days = [...dayMap.keys()].sort();
+    let lvl = 100; const ewIndex = [];
+    for (const d of days) { const a = dayMap.get(d); lvl *= Math.exp(a.reduce((s, x) => s + x, 0) / a.length);
+      ewIndex.push({ d, v: +lvl.toFixed(2) }); }
+    const upD1 = all.filter((r) => r.d1 != null && isFinite(r.d1) && r.d1 > 0).length;
+    const above = all.filter((r) => { const s = smaOf(r, 200); const px = r.px != null && isFinite(r.px) ? +r.px : null; return s && px && px > s; }).length;
+    const withMa = all.filter((r) => smaOf(r, 200) != null).length;
+    // Average pairwise 30d correlation over the detail slice (bounded pairs), honest null if thin.
+    let avgPairCorr = null;
+    try {
+      const series = detail.map((r) => retsOf(r, 30)).filter((s) => s.length >= 20);
+      if (series.length >= 3) {
+        const L = Math.min(...series.map((s) => s.length));
+        const cut = series.map((s) => s.slice(-L));
+        const corr = (a, b) => { const n = a.length; let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+          let sa = 0, sb = 0, sab = 0; for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sa += x * x; sb += y * y; sab += x * y; }
+          return sa > 0 && sb > 0 ? sab / Math.sqrt(sa * sb) : null; };
+        let s = 0, n = 0;
+        for (let i = 0; i < cut.length; i++) for (let j = i + 1; j < cut.length; j++) { const c = corr(cut[i], cut[j]); if (c != null) { s += c; n++; } }
+        if (n) avgPairCorr = +(s / n).toFixed(2);
+      }
+    } catch (_) {}
+    const d7s = all.map((r) => pctOf(r.px != null && isFinite(r.px) ? +r.px : null, r.ref && r.ref.p7d))
+      .filter((x) => x != null && isFinite(x));
+    const dispersionD7 = d7s.length >= 3 ? +retStd(d7s, d7s.length).toFixed(2) : null;
+    // Recent ledger history on members — read-only facts, exactly as they resolved.
+    const tset = new Set(all.map((r) => r.coin));
+    const ledger = [];
+    for (const e of ledgerClosed.slice(-400)) if (tset.has(e.coin) && e.vi == null && e.status === "resolved" && now - (e.tEnd || 0) < 14 * DAY)
+      ledger.push({ t: e.ticker, ev: e.ev, side: e.dir === 1 ? "long" : "short", realized: e.realized != null ? +(+e.realized).toFixed(2) : null });
+    const ctx = { kind: "group", label: res.label, memberCount: all.length,
+      members, group: { ewIndex: ewIndex.slice(-90), breadth: { pctUpD1: all.length ? +((upD1 / all.length) * 100).toFixed(0) : null,
+        pctAboveMa200: withMa ? +((above / withMa) * 100).toFixed(0) : null, n: all.length }, avgPairCorr, dispersionD7 },
+      ledger: ledger.slice(-20) };
+    try { const mac = macroWithin(macroCache && macroCache.entries || [], now, 10 * DAY).slice(0, 3);
+      if (mac.length) ctx.macro = mac.map((m) => ({ label: m.label, d: m.d, days: m.days })); } catch (_) {}
+    return ctx;
+  }
+  function validateAiGroupReport(rawText) {
+    let obj;
+    try { obj = JSON.parse(String(rawText || "").replace(/^```(?:json)?/m, "").replace(/```\s*$/m, "").trim()); }
+    catch (_) { return { ok: false, error: "model output is not valid JSON" }; }
+    if (!obj || typeof obj !== "object") return { ok: false, error: "model output is not an object" };
+    const bias = obj.bias;
+    if (bias !== "long" && bias !== "short" && bias !== "neutral") return { ok: false, error: "bias must be long/short/neutral" };
+    const headline = String(obj.headline || "").trim().slice(0, 90);
+    if (!headline) return { ok: false, error: "headline missing" };
+    const strArr = (a, min, max, cap) => Array.isArray(a) ? a.filter((x) => typeof x === "string" && x.trim())
+      .slice(0, max).map((x) => x.trim().slice(0, cap)) : [];
+    const read = strArr(obj.read, 2, 4, 900);
+    if (read.length < 2) return { ok: false, error: "read needs 2-4 paragraphs" };
+    const leaders = String(obj.leaders || "").trim().slice(0, 900);
+    const laggards = String(obj.laggards || "").trim().slice(0, 900);
+    if (!leaders || !laggards) return { ok: false, error: "leaders/laggards paragraphs missing" };
+    return { ok: true, ai: { bias, headline, read, leaders, laggards,
+      risks: strArr(obj.risks, 0, 4, 200), watch: strArr(obj.watch, 0, 4, 200) } };
+  }
+  async function generateGroupReport(key, who) {
+    const admin = !!(who && who.admin), owner = (who && who.owner) || null;
+    const spec = groupParse(key);
+    if (!spec) return { ok: false, error: "bad group key — grp:sec:<sector> or grp:bkt:<T1+T2+...> (2-" + GRP_MAX_MEMBERS + " tickers)" };
+    key = spec.key;   // canonicalized (basket tickers sorted/deduped)
+    if (!AI_KEY() && !aiFetch) return { ok: false, error: "no AI API key set on the server (ANTHROPIC_API_KEY or OPENAI_API_KEY)" };
+    const existing = aiReports.get(key);
+    if (existing) {
+      const p = aiPublic(existing);
+      if (!p.canRegen) return { ok: false, error: "cooldown", regenInMs: p.regenInMs, report: p };
+    }
+    if (!admin) {
+      const uq = aiUserQuota(owner);
+      if (uq.userDayLeft <= 0) return Object.assign({ ok: false, error: "user-day-cap" }, uq);
+      if (uq.userMonthLeft <= 0) return Object.assign({ ok: false, error: "user-month-cap" }, uq);
+      if (!aiDayLeft()) return { ok: false, error: "daily-cap", perDay: AI_REPORTS_PER_DAY, dayLeft: 0 };
+    }
+    if (aiGenerating.has(key)) return { ok: false, error: "generation already running for this group" };
+    aiGenerating.add(key);
+    try {
+      const ctx = compileGroupContext(spec);
+      if (!ctx || ctx.error) return { ok: false, error: (ctx && ctx.error) || "could not compile group context" };
+      let used = AI_MODEL, call = await callModel(AI_MODEL, ctx, { system: GRP_SYS, effort: AI_REPORT_EFFORT });
+      let val = call.ok ? validateAiGroupReport(call.text) : { ok: false, error: call.error };
+      if (!val.ok) {
+        log(`AI group report ${key}: ${AI_MODEL} failed (${val.error}) — falling back to ${AI_MODEL_FALLBACK}`);
+        used = AI_MODEL_FALLBACK; call = await callModel(AI_MODEL_FALLBACK, ctx, { system: GRP_SYS, effort: AI_REPORT_EFFORT });
+        val = call.ok ? validateAiGroupReport(call.text) : { ok: false, error: call.error };
+      }
+      if (!val.ok) return { ok: false, error: val.error };
+      if (!admin) { aiDay.count++; aiUserBurnReport(owner); }   // group generations spend the same pools
+      const rep = { coin: key, kind: "group", ticker: ctx.label, uni: "stocks", label: ctx.label,
+        memberCount: ctx.memberCount, members: ctx.members.map((m) => m.t), ts: Date.now(),
+        model: used, ttlMs: AI_TTL_MS, schemaV: AI_SCHEMA_V, ai: val.ai,
+        computed: { ewIndex: ctx.group.ewIndex, breadth: ctx.group.breadth,
+          avgPairCorr: ctx.group.avgPairCorr, dispersionD7: ctx.group.dispersionD7 } };
+      aiReports.set(key, rep);
+      persistAiReports();
+      log(`AI group report generated: ${key} via ${used} (bias ${rep.ai.bias}, ${ctx.memberCount} members)`);
+      return Object.assign({ ok: true, report: aiPublic(rep), perDay: AI_REPORTS_PER_DAY, dayLeft: aiDayLeft() },
+        admin ? { admin: true } : aiUserQuota(owner));
+    } finally { aiGenerating.delete(key); }
   }
 
   // ===== Ask-the-board terminal — Tier 3 AI fallback ====================================
@@ -6925,8 +7174,10 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (h === "fund" || h === "etf") return p[1] != null && /^[A-Za-z0-9.\-]{1,10}$/.test(p[1]);
     return !!(tickerSet && tickerSet.has(H));   // <TICKER> or <TICKER> <field>
   }
-  async function askBoard(q, ctx) {
-    const withBudget = (r) => Object.assign(r, { askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() });
+  async function askBoard(q, ctx, who) {
+    const admin = !!(who && who.admin), owner = (who && who.owner) || null;
+    const withBudget = (r) => Object.assign(r, { askPerDay: ASK_REPORTS_PER_DAY, askDayLeft: askDayLeft() },
+      admin ? { admin: true } : aiUserQuota(owner));
     q = String(q || "").trim();
     if (!q) return withBudget({ ok: false, error: "empty question" });
     if (!AI_KEY() && !aiFetch) return withBudget({ ok: false, disabled: true, error: "AI fallback needs an API key on the server (OPENAI_API_KEY / ANTHROPIC_API_KEY)" });
@@ -6947,9 +7198,15 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const now = Date.now();
     while (askHits.length && askHits[0] < now - ASK_WINDOW_MS) askHits.shift();
     if (askHits.length >= ASK_MAX_PER_WINDOW) return withBudget({ ok: false, error: "rate", retryMs: ASK_WINDOW_MS - (now - askHits[0]) });
-    // Daily budget, over the top of the per-minute window. Checked BEFORE any model call so an
-    // exhausted day costs nothing; the client's chip is convenience, this is the real gate.
-    if (!askDayLeft()) return withBudget({ ok: false, error: "ask-daily-cap" });
+    // Daily budgets, over the top of the per-minute window (which applies to EVERYONE — it
+    // protects the API, not the wallet). Checked BEFORE any model call so an exhausted day
+    // costs nothing; the client's chip is convenience, this is the real gate. Per-user first
+    // (5/day), then the shared non-admin pool (50/day); admin skips and burns neither.
+    if (!admin) {
+      const uq = aiUserQuota(owner);
+      if (uq.askUserDayLeft <= 0) return withBudget({ ok: false, error: "ask-user-cap" });
+      if (!askDayLeft()) return withBudget({ ok: false, error: "ask-daily-cap" });
+    }
     askHits.push(now);
     // Enrich each row with the canonical company name from sectors.js (server-owned, so the
     // analyst maps ticker->company reliably instead of guessing). Unseeded names stay ticker-only.
@@ -7023,7 +7280,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       }
     } else res = await analyst();
     res.model = AI_MODEL; res.provider = AI_PROVIDER;
-    if (res.ok) { askDay.count++; persistAiReports();   // a real model call landed — burn one, persist the counter
+    if (res.ok) { if (!admin) { askDay.count++; aiUserBurnAsk(owner); } persistAiReports();   // a real model call landed — burn one (admin burns nothing), persist the counters
       askCache.set(cacheKey, { at: Date.now(), res }); if (askCache.size > 200) askCache.clear(); }
     return withBudget(res);
   }
@@ -10266,6 +10523,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // AI analyst report: cached read, on-demand generation (TTL cooldown enforced inside), and
     // the recent-reports list for the Report tab.
     getAiReport,
+    getAiQuota: (owner, admin) => admin ? { admin: true } : aiUserQuota(owner),
+    listSectors: () => { const out = new Map();
+      for (const r of rows.values()) { if (!r || r.delisted || r.uni === "main") continue;
+        const c = classifyCached(r.ticker, r.uni); if (c.assetClass !== "Equity") continue;
+        out.set(c.sector, (out.get(c.sector) || 0) + 1); }
+      return [...out.entries()].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).map(([name, n]) => ({ name, n })); },
     // Coinalyze deriv context: cached read (per-coin), manual refresh (cooldown enforced inside),
     // and the collision-proof ETag key for serveKeyed — coin + content clock + this coin's manual
     // refresh stamp + the as-of minute, so a cooldown tick or staleness advance is never frozen
