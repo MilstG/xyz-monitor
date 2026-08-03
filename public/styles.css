@@ -1161,6 +1161,11 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
    visibly the unit you are acting on before you click a state. */
 .adm-row:hover{background:var(--panel)}
 .adm-row.dim{opacity:.34}
+/* nested per-universe scope rows (2026.08.03-02): indented under their parent tab with a left rail,
+   slightly smaller controls — same three-state buttons, same write path, only the presentation nests */
+.adm-row.adm-scope{margin-left:22px;border-left:1px solid var(--border);padding-left:14px;border-bottom-style:dashed}
+.adm-row.adm-scope .adm-lab{font-size:12.5px;color:var(--muted)}
+.adm-row.adm-scope .adm-b{padding:2px 9px;font-size:11.5px}
 .adm-meta{flex:1;min-width:0}
 .adm-lab{font-family:var(--disp);font-size:13.5px}
 .adm-key{font-family:var(--mono);font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

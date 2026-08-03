@@ -3202,32 +3202,44 @@ function renderAdmin(){
   if(_adm.error){ host.innerHTML='<div class="msg">Could not load feature state — '+esc(_adm.error)+'</div>'; return; }
   const man=_adm.manifest||[];
   const groups=[['tab','Tabs'],['act','Actions']];
+  // One row renderer for parents and their nested scope children — the scope rows are the SAME
+  // three-state control on the same write path (setAdmFlag), only presented indented under the tab
+  // whose payloads they slice. `scope:true` adds the indent class and swaps the route line for an
+  // honest description of what a scope actually is (it owns no route — it filters payload rows).
+  const rowHtml=(m,scope)=>{
+    const locked=!m.settable;
+    // A pinned/locked row shows its state as a static chip, not a control whose write the server
+    // would refuse — offering a button that always fails is worse than offering none.
+    const seg=locked
+      ? '<span class="adm-lock" title="'+(m.pin?'Always public — this is the fallback every gated view falls through to':'Always admin — this is the panel that controls every other flag')+'">'+esc(admLabel(m.state))+' · locked</span>'
+      : ['public','admin','off'].map(v=>'<button type="button" class="adm-b'+(m.state===v?' on '+v:'')+'" data-k="'+esc(m.key)+'" data-v="'+v+'"'+(_admBusy===m.key?' disabled':'')+'>'+v+'</button>').join('');
+    const dim=_admVap && m.state!=='public';
+    return '<div class="adm-row'+(scope?' adm-scope':'')+(dim?' dim':'')+'">'
+      +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+'</div>'
+      +'<div class="adm-key">'+esc(m.key)+(scope?' · filters payload rows · no route of its own':(m.routes&&m.routes.length?' · '+esc(m.routes.join(', ')):' · no route'))+'</div></div>'
+      +'<div class="adm-seg">'+seg+'</div></div>';
+  };
   let h='';
   for(const [kind,title] of groups){
     const rows=man.filter(m=>m.kind===kind);
     if(!rows.length) continue;
     h+='<div class="adm-grp">'+esc(title)+'</div>';
     for(const m of rows){
-      const locked=!m.settable;
-      // A pinned/locked row shows its state as a static chip, not a control whose write the server
-      // would refuse — offering a button that always fails is worse than offering none.
-      const seg=locked
-        ? '<span class="adm-lock" title="'+(m.pin?'Always public — this is the fallback every gated view falls through to':'Always admin — this is the panel that controls every other flag')+'">'+esc(admLabel(m.state))+' · locked</span>'
-        : ['public','admin','off'].map(v=>'<button type="button" class="adm-b'+(m.state===v?' on '+v:'')+'" data-k="'+esc(m.key)+'" data-v="'+v+'"'+(_admBusy===m.key?' disabled':'')+'>'+v+'</button>').join('');
-      const dim=_admVap && m.state!=='public';
-      h+='<div class="adm-row'+(dim?' dim':'')+'">'
-        +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+'</div>'
-        +'<div class="adm-key">'+esc(m.key)+(m.routes&&m.routes.length?' · '+esc(m.routes.join(', ')):' · no route')+'</div></div>'
-        +'<div class="adm-seg">'+seg+'</div></div>';
+      h+=rowHtml(m,false);
+      // Scope children nest directly under their parent tab. The manifest is the only source of
+      // the linkage (m.parent, shipped by the server) — nothing here hardcodes which tabs split.
+      if(kind==='tab') for(const c of man.filter(x=>x.kind==='scope'&&x.parent===m.key)) h+=rowHtml(c,true);
     }
   }
   host.innerHTML=h;
   host.querySelectorAll('.adm-b').forEach(b=>b.addEventListener('click',()=>setAdmFlag(b.dataset.k,b.dataset.v)));
   const c=_adm.counts||{};
   const cnt=el('adm-count');
-  if(cnt) cnt.innerHTML='Public users see <b>'+(c.public||0)+'</b> of '+(c.total||0)+' · <b>'+(c.admin||0)+'</b> admin-only · <b>'+(c.off||0)+'</b> off';
+  if(cnt) cnt.innerHTML='Public users see <b>'+(c.public||0)+'</b> of '+(c.total||0)+' · <b>'+(c.admin||0)+'</b> admin-only · <b>'+(c.off||0)+'</b> off'+(c.scoped?' · <b>'+c.scoped+'</b> scoped':'');
   const pv=el('adm-prev');
-  if(pv){ const pub=man.filter(m=>m.kind==='tab'&&m.state==='public');
+  if(pv){ // the preview reflects the RESOLVED public set, not raw states — a public-state tab whose
+    // scopes are all closed self-demotes server-side and must not preview as visible
+    const pub=man.filter(m=>m.kind==='tab'&&(_adm.resolvedPublic?!!_adm.resolvedPublic[m.key]:m.state==='public'));
     pv.innerHTML=pub.length?pub.map(m=>'<span class="adm-chip">'+esc(m.label)+'</span>').join(''):'<span class="adm-none">no tabs visible to the public</span>'; }
   const ft=el('adm-foot');
   if(ft) ft.innerHTML='Server-enforced: a gated tab is absent from the markup and every route it owns returns 403. '
@@ -5349,6 +5361,7 @@ function actDetail(r){
 }
 let _actMaxBars=10, _actMinRR='2.00';
 function renderActionable(){
+  if(state.view==='actionable' && scopeGuard('actionable')) return;   // flipped scope re-enters this renderer
   const box=el('act-body'); if(!box) return;
   const d=_act;
   if(!d){ box.innerHTML='<div class="msg">Loading\u2026</div>'; return; }
@@ -5467,6 +5480,18 @@ function setSigTabBadge(){
   tb.textContent = n>0 ? `Signals (${n})` : 'Signals';
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
+// Scope guard (2026.08.03-02): the server never ships a hidden universe's rows, so a viewer parked
+// in that universe would see an empty board with no explanation. Rather than mount an "unavailable"
+// state (the hidden slice must not advertise itself), flip the global scope to the visible universe
+// when a scoped tab renders — the pill and every scoped panel simply live where the data is.
+// featureOn reads the SERVER-resolved set (never re-derived); both scopes hidden is unreachable
+// here because the parent tab self-demotes server-side first. Returns true when it flipped: the
+// caller must bail, setScope's applyScope has already re-entered the renderer in the visible scope.
+function scopeGuard(parent){
+  const cur=state.scope==='crypto'?'cx':'eq', other=cur==='cx'?'eq':'cx';
+  if(!featureOn(parent+'.'+cur) && featureOn(parent+'.'+other)){ setScope(other==='cx'?'crypto':'stocks'); return true; }
+  return false;
+}
 
 // ===== earnings calendar =====
 // Server-fetched (Finnhub, 6h refresh, /data warm cache) and filtered server-side to the xyz
@@ -6679,6 +6704,7 @@ function sigRecordHtml(d){
 }
 function renderSignals(){
   const box=el('signals-body'); if(!box) return;
+  if(state.view==='signals' && scopeGuard('signals')) return;   // flipped scope re-enters this renderer
   const d=state.signals, view=sigViewPref(), mvThr=sigMovePref(), prOn=sigPrimePref();
   const mvBtn=(v,lbl)=>`<button type="button" class="cdtf${mvThr===v?' on':''}" data-mv="${v}" data-tip="${v===0?'show every signal regardless of target distance':`hide setups whose playbook target sits closer than ${lbl} from the live mark \u2014 statistically fine, but a few bp of expected move is not hand-tradeable. Signals with no computable target are hidden too while a threshold is active.`}">${v===0?'any':'\u2265'+lbl}</button>`;
   const seg=`<span class="sig-segs"><span class="cdtf-seg"><button type="button" class="cdtf${prOn?' on':''}" data-pr="1" data-tip="show only \u2605 prime setups \u2014 \u226560% hit, positive expectancy, sound structure at fire time \u2014 and switch the stats below to the record of prime claims only">\u2605 prime</button></span>`
