@@ -5441,7 +5441,7 @@ function renderActionable(){
   box.querySelectorAll('[data-rep]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
     showView('report'); if(typeof reportOpenFor==='function') reportOpenFor(b.dataset.rep); }));
   box.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
-    const cn=b.dataset.dr; if(state.rows.has(cn)){ showView('markets'); openDetail(cn); } }));
+    const cn=b.dataset.dr; if(state.rows.has(cn)) openDetail(cn); }));   // in-place drawer — no tab switch
 }
 
 // ===== signals tab =====
@@ -5821,7 +5821,7 @@ function renderEarnings(){
   if(!groups.size&&!mgroups.size){
     html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
     box.innerHTML=html;
-    box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+    box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
   wireEarnVoid(box);
     return;
   }
@@ -5856,7 +5856,7 @@ function renderEarnings(){
   }
   html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst. Macro rows work the same way universe-wide \u2014 an FOMC/CPI/NFP print \u2264 1 day out flags session-spanning signals on <b>both</b> universes with the same cap, and events inside an open setup\u2019s horizon are flagged on the Actionable board (\u25c6) and in AI reports. Macro dates come from the Fed\u2019s published schedule and FRED; prior values are the previous print (labeled by month), never consensus \u2014 no street-estimate feed exists here, so there is no beat/miss verdict, only prior \u2192 actual and the tape.</div>`;
   box.innerHTML=html;
-  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
   wireEarnVoid(box);
 }
 
@@ -5989,7 +5989,7 @@ function renderTrend(){
     _trendMA=[_trendMA[1],p];   // drop the older, keep the newer, add the pick
     renderTrend();              // instant chip feedback; the board swaps in when the fetch lands
     loadTrend(); });
-  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // drawer opens in place — the trend board stays underneath (no tab bounce)
   // chart button: opens the ladder chart modal; stopPropagation so the row's drawer click is untouched
   box.querySelectorAll('.tchart-btn').forEach(b=>b.addEventListener('click',(ev)=>{ ev.stopPropagation(); openTrendChart(b.dataset.coin,side); }));
 }

@@ -1222,7 +1222,8 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .act-set-strip b{color:var(--text)}
 .act-set-t{border-collapse:collapse;font-size:12px;margin:2px 0 12px;max-width:640px;width:100%}
 .act-set-t th{color:var(--faint);font-weight:400;text-align:left;padding:3px 8px;font-size:11px}
-.act-set-t td{padding:4px 8px;font-family:var(--mono)}
+.act-set-t td{padding:4px 8px;font-family:var(--mono);white-space:nowrap}
+.act-set-t td:first-child{white-space:normal;width:100%}
 .act-set-t tbody tr{border-top:1px solid var(--border)}
 .act-set-t .act-set-mut td{color:var(--muted)}
 .act-set-eps td{font-family:var(--mono);font-size:12px}
