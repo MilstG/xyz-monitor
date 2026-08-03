@@ -27,6 +27,7 @@
 .term-panel[hidden]{display:none}
 #focusChip[hidden]{display:none}
 .seg[hidden]{display:none}
+.scope[hidden]{display:none}
 .cg-basectl[hidden]{display:none}   /* -07: runtime-templated hidden, so the markup audit never saw it — the spread-mode base select was painting in Index mode and read as a forced basket comparison */
 /* Industry-board honesty chips: «thin» (n<5, noisier stats) and «= sector» (fallback group). */
 .sthin{display:inline-block;font-size:9px;color:var(--muted);border:1px solid var(--border);border-radius:3px;padding:0 4px;margin-left:6px;letter-spacing:.04em;vertical-align:1px;font-style:normal;font-weight:400}
