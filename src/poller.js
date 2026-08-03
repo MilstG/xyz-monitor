@@ -7,7 +7,7 @@ const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust,
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, macroStatText, FOMC_DECISIONS,
-  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, validateBriefSections, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape } = require("./compute");
+  briefMovers, briefRankGroups, briefBreadth, renderBrief, validateBriefProse, validateBriefSections, briefVisibleLen, BRIEF_GROUP_MIN, earnPrintRow, SCHED_KINDS, schedNormDays, schedResolve, schedDueAt, schedDaysLabel, validateLandProse, renderLandscape, briefSalvageProse } = require("./compute");
 const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, intrabarCross, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
@@ -8967,12 +8967,23 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     let obj = null;
     try { obj = JSON.parse(String(call.text).replace(/^```(?:json)?|```$/gm, "").trim()); }
     catch (_) { return { ok: false, error: "unparseable model output" }; }
-    const v = validateLandProse(obj, ctx);
+    let v = validateLandProse(obj, ctx);
+    let cut = 0, cutWhy = null;
+    if (!v.ok && /(?:number|name) not in context/.test(v.error)) {
+      // Proportionate rung: a fabrication hit costs the SENTENCE, not the commentary. The salvaged
+      // text re-runs the FULL validator (paragraph count, advice, markup, refs), so nothing ships
+      // that whole-object validation would not have passed on its own.
+      const sv = briefSalvageProse(obj.story, ctx);
+      if (sv.cut && sv.text) {
+        const v2 = validateLandProse({ story: sv.text, refs: obj.refs }, ctx);
+        if (v2.ok) { v = v2; cut = sv.cut; cutWhy = sv.why; log("landscape: salvaged — " + sv.cut + " sentence(s) withheld (" + sv.why + ")"); }
+      }
+    }
     if (!v.ok) return { ok: false, error: v.error };
     const d = briefDayKey(Date.now());
     if (landDay.d !== d) landDay = { d, n: 0 };
     landDay.n++;
-    return { ok: true, story: v.story, refs: v.refs, model: used };
+    return { ok: true, story: v.story, refs: v.refs, model: used, cut, cutWhy };
   }
 
   // One generation per hour-bucket, shared by everyone waking in it — same economics as the brief.
@@ -8988,8 +8999,11 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     if (LAND_ON) {
       try {
         const p = await landProse(ctx);
-        if (p.ok) { prose = { story: p.story, refs: p.refs }; model = p.model; }
-        else { degraded = p.error; landLastErr = p.error; }
+        if (p.ok) {
+          prose = { story: p.story, refs: p.refs }; model = p.model;
+          // Salvage ships the prose AND the note: ctx.proseErr renders alongside it now.
+          if (p.cut) { degraded = p.cut + " sentence(s) withheld \u2014 " + p.cutWhy; landLastErr = degraded; }
+        } else { degraded = p.error; landLastErr = p.error; }
       } catch (e) { degraded = (e && e.message) || String(e); landLastErr = degraded; }
     } else degraded = "disabled";
     if (degraded) ctx.proseErr = degraded;
@@ -9348,6 +9362,21 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (briefDay.d !== d) briefDay = { d, n: 0 };
     briefDay.n++;
     if (v.ok) return { ok: true, story: v.story, closing: v.closing, model: used };
+    // Whole-object validation failed. First the finest honest rung: a number/name hit costs the
+    // SENTENCE that carries it — salvage both sections and re-run the whole-object validator, so
+    // nothing ships that the gate would not pass verbatim. Only then fall to section-level rescue.
+    if (/(?:number|name) not in context/.test(v.error)) {
+      const so = { story: briefSalvageProse(obj.story, ctx), closing: briefSalvageProse(obj.closing, ctx) };
+      const cut = so.story.cut + so.closing.cut;
+      if (cut && (so.story.text || so.closing.text)) {
+        const v2 = validateBriefProse({ story: so.story.text || " ", closing: so.closing.text || " " }, ctx);
+        if (v2.ok) {
+          const why = [so.story.why, so.closing.why].filter(Boolean).join("; ");
+          log("brief prose: salvaged — " + cut + " sentence(s) withheld (" + why + ")");
+          return { ok: true, story: v2.story, closing: v2.closing, model: used, partial: cut + " sentence(s)", partialWhy: why };
+        }
+      }
+    }
     // Whole-object validation failed. Before giving up the entire prose layer, ask which SECTION
     // failed: one bad figure in the closing used to cost the story as well, and the reader paid
     // twice for one mistake. A section that passes on its own is clean by the same gate that

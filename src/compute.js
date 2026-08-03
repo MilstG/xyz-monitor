@@ -5823,7 +5823,21 @@ function briefContextNames(ctx) {
 // the handful of market nouns that are not instruments in this system.
 const BRIEF_NAME_OK = new Set(["A", "I", "AI", "US", "IT", "EU", "UK", "GDP", "CPI", "PCE", "PPI", "FOMC",
   "ET", "UTC", "AM", "PM", "OI", "APR", "EMA", "DMA", "RS", "R", "THE", "AND", "BUT", "FED", "NFP",
-  "Q1", "Q2", "Q3", "Q4", "H1", "H2", "S&P", "SP", "TV", "CEO", "CFO", "USD", "OK", "NASDAQ", "DOW"]);
+  "Q1", "Q2", "Q3", "Q4", "H1", "H2", "S&P", "SP", "TV", "CEO", "CFO", "USD", "OK", "NASDAQ", "DOW",
+  // 2026.08.03-01: the U.S/EV screenshots. Ordinary market-prose acronyms that are not
+  // instruments in this system — a stray one of these was discarding whole briefs. Roster tickers
+  // are unaffected: whitelisting only skips REJECTION, it grants nothing a citation wouldn't.
+  "EV", "EVS", "ETF", "ETFS", "IPO", "IPOS", "EPS", "ATH", "ATL", "YTD", "YOY", "QOQ", "BPS",
+  "OPEC", "ECB", "BOJ", "BOE", "PBOC", "IMF", "NATO", "VIX", "DXY", "M&A", "USA"]);
+// Dotted abbreviations tokenize WITH their internal dots ("U.S." -> token "U.S", "U.K" -> "U.K"),
+// so the whitelist and the roster are consulted under BOTH the raw token and its dot-stripped
+// form. Without this, "the U.S. economy" was "name not in context: U.S" and the reader got a
+// warning line instead of the commentary — the gate rejecting the most common word in macro prose.
+function briefNameOk(tok, names) {
+  if (BRIEF_NAME_OK.has(tok) || names.has(tok)) return true;
+  const bare = tok.replace(/\./g, "");
+  return bare !== tok && (BRIEF_NAME_OK.has(bare) || names.has(bare));
+}
 // Per-section verdict. validateBriefProse below keeps its all-or-nothing contract because callers
 // and tests depend on it; this reports which sections individually pass, so the caller can ship a
 // clean story when only the closing is bad. Losing both halves to one number in one paragraph was
@@ -5842,6 +5856,41 @@ function validateBriefSections(prose, ctx) {
   }
   return out;
 }
+// One code path for the fabrication gates: the validators and the sentence-salvage pass below
+// MUST judge text by the identical rule, or salvage could ship what validation would reject.
+function briefTextViolation(text, nums, names) {
+  for (const raw of String(text).match(/\d+(?:[.,]\d+)?/g) || []) {
+    const t = raw.replace(/,/g, "");
+    if (!/\./.test(t) && +t <= 99) continue;              // small counts are prose, not claims
+    const norm = t.replace(/\.?0+$/, "");
+    if (nums.has(norm) || nums.has(t)) continue;
+    return `number not in context: ${raw}`;
+  }
+  for (const tok of String(text).match(/\b[A-Z][A-Z0-9.&]{1,9}\b/g) || []) {
+    if (briefNameOk(tok, names)) continue;
+    return `name not in context: ${tok}`;
+  }
+  return null;
+}
+// Proportionate response to a fabrication hit: cut the SENTENCE that carries it, keep the rest.
+// The gate exists to stop an invented figure or name reaching a phone — discarding three clean
+// paragraphs over one token was the validator answering a sentence-sized offence with a
+// message-sized punishment (the same disproportion the soft length budget already fixed).
+// Only the number/name gates are salvageable: advice and markup are the model misbehaving,
+// not a vocabulary miss, and stay hard failures.
+function briefSalvageProse(text, ctx) {
+  const nums = briefContextNumbers(ctx), names = briefContextNames(ctx);
+  let cut = 0; const errs = [];
+  const kept = String(text || "").split(/\n{2,}/).map((p) => {
+    const sents = p.trim().split(/(?<=[.!?])\s+/);
+    return sents.filter((sn) => {
+      const e = briefTextViolation(sn, nums, names);
+      if (e) { cut++; if (errs.length < 3) errs.push(e); return false; }
+      return true;
+    }).join(" ").trim();
+  }).filter(Boolean);
+  return { text: kept.join("\n\n"), cut, why: errs.join("; ") };
+}
 function validateBriefProse(prose, ctx, only) {
   const p = prose && typeof prose === "object" ? prose : null;
   if (!p) return { ok: false, error: "not an object" };
@@ -5856,22 +5905,10 @@ function validateBriefProse(prose, ctx, only) {
   // No advice. The brief describes where risk sits; it does not tell anyone what to do.
   if (/\b(?:you should|i'd (?:buy|sell|short|long)|we recommend|recommend (?:buying|selling)|take profit|add here|buy the|sell the)\b/i.test(text))
     return { ok: false, error: "directional instruction" };
-  const nums = briefContextNumbers(ctx);
-  for (const raw of text.match(/\d+(?:[.,]\d+)?/g) || []) {
-    const t = raw.replace(/,/g, "");
-    if (!/\./.test(t) && +t <= 99) continue;              // small counts are prose, not claims
-    // Exact forms only. An earlier version also accepted a match after Math.round, which let an
-    // invented "7.77" through on any context that happened to contain an 8 somewhere — precisely
-    // the failure this gate exists to catch.
-    const norm = t.replace(/\.?0+$/, "");
-    if (nums.has(norm) || nums.has(t)) continue;
-    return { ok: false, error: `number not in context: ${raw}` };
-  }
-  const names = briefContextNames(ctx);
-  for (const tok of text.match(/\b[A-Z][A-Z0-9.&]{1,9}\b/g) || []) {
-    if (BRIEF_NAME_OK.has(tok) || names.has(tok)) continue;
-    return { ok: false, error: `name not in context: ${tok}` };
-  }
+  // Exact numeric forms only (a Math.round tolerance once let an invented "7.77" through on any
+  // context containing an 8). Both gates live in briefTextViolation — the salvage pass's rule.
+  const gv = briefTextViolation(text, briefContextNumbers(ctx), briefContextNames(ctx));
+  if (gv) return { ok: false, error: gv };
   return { ok: true, story: p.story.trim(), closing: p.closing.trim() };
 }
 
@@ -5893,6 +5930,9 @@ module.exports.briefAssemble = briefAssemble;
 module.exports.briefSectionText = briefSectionText;
 module.exports.briefContextNumbers = briefContextNumbers;
 module.exports.briefContextNames = briefContextNames;
+module.exports.briefNameOk = briefNameOk;
+module.exports.briefTextViolation = briefTextViolation;
+module.exports.briefSalvageProse = briefSalvageProse;
 module.exports.validateBriefProse = validateBriefProse;
 module.exports.validateBriefSections = validateBriefSections;
 
@@ -6109,19 +6149,8 @@ function validateLandProse(prose, ctx) {
   for (const r of refs) if (!ids.has(r)) return { ok: false, error: `ref not in context: ${r}` };
   // Numbers and names ride the same gates the brief uses — commentary is allowed to be relational,
   // not to be numerically inventive.
-  const nums = briefContextNumbers(ctx);
-  for (const raw of v.match(/\d+(?:[.,]\d+)?/g) || []) {
-    const t = raw.replace(/,/g, "");
-    if (!/\./.test(t) && +t <= 99) continue;
-    const norm = t.replace(/\.?0+$/, "");
-    if (nums.has(norm) || nums.has(t)) continue;
-    return { ok: false, error: `number not in context: ${raw}` };
-  }
-  const names = briefContextNames(ctx);
-  for (const tok of v.match(/\b[A-Z][A-Z0-9.&]{1,9}\b/g) || []) {
-    if (BRIEF_NAME_OK.has(tok) || names.has(tok)) continue;
-    return { ok: false, error: `name not in context: ${tok}` };
-  }
+  const gv = briefTextViolation(v, briefContextNumbers(ctx), briefContextNames(ctx));
+  if (gv) return { ok: false, error: gv };
   return { ok: true, story: v.trim(), refs };
 }
 
@@ -6140,6 +6169,9 @@ function renderLandscape(ctx, prose) {
   }
   const byId = new Map();
   for (const cl of c.news || []) for (const h of cl.items || []) if (h && h.id) byId.set(String(h.id), h);
+  // A salvage cut ships the prose AND says so: the reader must never wonder whether a short
+  // paragraph means a quiet day or the gate quietly eating a sentence.
+  const cutNote = c.proseErr ? `<i>\u26a0 ${tgEscape(briefClip(c.proseErr, 120))}</i>` : null;
   const rawParas = prose.story.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);   // unescaped, for the final clip
   const paras = rawParas.map((x) => tgEscape(x));                                       // what actually renders
   const srcLine = (h) => {
@@ -6150,6 +6182,7 @@ function renderLandscape(ctx, prose) {
   const cited = (prose.refs || []).map((r) => byId.get(String(r))).filter(Boolean);
   const build = (nSrc) => {
     const out = [head, stamp, "", paras.join("\n\n")];
+    if (cutNote) out.push("", cutNote);
     if (nSrc > 0) {
       out.push("");
       out.push("\ud83d\udcce <b>Sources</b>");
