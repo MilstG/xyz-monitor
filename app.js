@@ -26,6 +26,10 @@ const COLS=[
       return `<td class="${f.c}" title="${t2}">${f.t}${flag}</td>`; }},
   {key:'prem', label:'Prem', type:'num', tip:'Perp vs oracle dislocation in basis points: (mark \u2212 oracle) / oracle. When the cash market is closed the oracle sits near the last print, so a persistent premium (perp rich) or discount (perp cheap) IS the live off-hours price discovery \u2014 the tradeable dislocation. Hover a cell for the exact mark vs oracle prices.',
     td:r=>premCell(r)},
+  {key:'m5', label:'5m', type:'num', tip:'5-minute price change: live mark vs the mark ~5 minutes ago, sampled server-side every 15s from the SAME streaming mark the Price column shows \u2014 one code path, accurate to within one tick of the true lookback. The sample ring is memory-only: for the first ~5 minutes after a deploy, or across a feed gap wider than 90s at the lookback point, this is an honest dash \u2014 never a longer move wearing a 5m label. Hidden by default \u2014 enable it here in the column menu.',
+    td:r=>`<td class="${scCls(r)}"${shade(r.m5,1)}>${pctInner(r.m5)}</td>`},
+  {key:'m15', label:'15m', type:'num', tip:'15-minute price change: live mark vs the mark ~15 minutes ago, sampled server-side every 15s from the same streaming mark the Price column shows. Memory-only ring: dashes for the first ~15 minutes after a deploy or across a feed gap wider than 90s \u2014 the label is exact or the cell is blank. Hidden by default \u2014 enable it here in the column menu.',
+    td:r=>`<td class="${scCls(r)}"${shade(r.m15,1.8)}>${pctInner(r.m15)}</td>`},
   {key:'h1', label:'1h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h1,2.5)}>${pctInner(r.h1)}</td>`},
   {key:'h4', label:'4h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h4,4)}>${pctInner(r.h4)}</td>`},
   {key:'d1', label:'1d', type:'num', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
@@ -113,8 +117,8 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','h1','h4','d1','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
-const DEFAULT_HIDDEN=['prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','m5','m15','h1','h4','d1','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_HIDDEN=['m5','m15','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
@@ -258,7 +262,11 @@ function nowChip(coin,c,opts){
 }
 
 // ===== row helpers =====
-function recomputeChanges(r){ const cur=r.px, ref=r.ref; if(cur==null||!ref)return;
+function recomputeChanges(r){ const cur=r.px; if(cur==null)return;
+  // 5m/15m read the server's ring references (p5m/p15m on the row), not the hourly-spine ref —
+  // they exist before the spine warms and null out independently (deploy warm-up / feed gap).
+  r.m5=r.p5m>0?(cur-r.p5m)/r.p5m*100:null; r.m15=r.p15m>0?(cur-r.p15m)/r.p15m*100:null;
+  const ref=r.ref; if(!ref)return;
   r.h1=ref.p1h?(cur-ref.p1h)/ref.p1h*100:null; r.h4=ref.p4h?(cur-ref.p4h)/ref.p4h*100:null;
   r.d7=ref.p7d?(cur-ref.p7d)/ref.p7d*100:null;  r.d30=ref.p30d?(cur-ref.p30d)/ref.p30d*100:null; }
 function setPrice(r,px){ if(px==null)return; if(r.px!=null&&px!==r.px) r.flash=px>r.px?'up':'down'; r.px=px; }
@@ -390,6 +398,10 @@ function applySnapshot(s){
       // would wear a stale group on any long-lived page until reload. (Build -05: this line is the
       // fix for -04's field-name-mismatch bug — the wire carried ind, this explicit merge dropped it.)
       r.ind=(m.ind!==undefined)?m.ind:undefined; }
+    // 5m/15m ring references: absence on the wire MEANS no honest reference right now (server
+    // warm-up or a feed gap at the lookback point) — clear rather than keep, or a long-lived page
+    // would compute a "5m" change against a reference minutes older than its label.
+    r.p5m=(m.p5m!=null)?m.p5m:null; r.p15m=(m.p15m!=null)?m.p15m:null;
     r.fundPct=(m.fundPct!=null)?m.fundPct:r.fundPct;
     if(m.red!==undefined) r.red=m.red;             // {dcap,hit,n} or null — fixed 31d/4h red-tape resilience, server-computed
     if(m.rvol!==undefined) r.rvolByWin=m.rvol;     // {h1,h4,d1} clock-hour-matched relative volume, server-computed
@@ -471,8 +483,67 @@ function renderFreshTray(h){ const box=el('freshtray'); if(!box||!h) return;
     else { age=now-ts; cls=age>s.stale?'stale':(age>s.warn?'warn':'ok'); }
     const ageTxt=age!=null?aiFmtAgo(age)+' ago':(failing?'fetch failing':'no data yet');
     return `<span class="fdot ${cls}" title="${esc(s.tip)} — ${ageTxt}"><i></i>${esc(label)}</span>`; }).join('');
-  box.innerHTML=dots; box.hidden=false; }
-async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); renderFreshTray(h); if(h&&h.ai) renderAskBudget(h.ai.askDayLeft, h.ai.askPerDay); }catch(_){ } }
+  // Event-loop dot: value-graded (p99 ms), not age-graded like the feed dots — the thresholds are
+  // the worker-thread decision gate itself: green <20ms, amber <50ms, red ≥50ms. Reads the LIVE
+  // still-open window so a stall shows within one 45s tray poll, not at the next 6h window close.
+  let loopDot='';
+  if(h.loop&&h.loop.p99!=null){ const p=h.loop.p99, cls=p>=50?'stale':(p>=20?'warn':'ok');
+    // -08: the histogram's worst number now carries a NAME. h.ticks is worst-first from the server;
+    // the top entry is the answer to "what was that max". Async ticks are yielding builds — their
+    // duration is wall time across yields, not loop hold, and the label says so honestly.
+    let culprit='';
+    if(Array.isArray(h.ticks)&&h.ticks.length){ const w=h.ticks[0];
+      culprit=` — worst tick: ${w.name} ${w.worst>=1000?(w.worst/1000).toFixed(1)+'s':w.worst+'ms'}${w.async?' (yielding build, wall time)':''} ${aiFmtAgo(Date.now()-w.worstAt)} ago`; }
+    loopDot=`<span class="fdot ${cls}" title="event loop delay (live window) — p50 ${h.loop.p50}ms · p99 ${p}ms · max ${h.loop.max}ms — green <20 · amber <50 · red \u226550 (the worker-thread gate)${culprit}"><i></i>Loop</span>`; }
+  box.innerHTML=dots+loopDot; box.hidden=false; }
+async function updateFreshTray(){ try{ const h=await fetchJSON('/api/health'); _lastHealth=h; renderFreshTray(h); if(h&&h.ai) renderAskBudget(h.ai.askDayLeft, h.ai.askPerDay); renderAdmLoop(h); }catch(_){ } }
+// Last /api/health payload, shared with the admin loop row so opening the panel between tray polls
+// renders instantly from the 45s-old read instead of a blank box.
+let _lastHealth=null;
+// ===== admin panel: event-loop latency row (build 2026.07.29-04) ===============================
+// Phase 0 of the perf batch: chips for the live window + a p99-per-window sparkline over the
+// persisted 7d ring, with the 50ms decision-gate line drawn as a dashed reference. Admin-only by
+// placement (it lives inside view-admin, whose route/tab gating is already server-enforced).
+function renderAdmLoop(h){ const box=el('admLoop'); if(!box) return;
+  if(!h||!h.loop){ return; }
+  const L=h.loop, ring=Array.isArray(L.hist)?L.hist:[];
+  const chip=(v,lab,tip)=>{ const cls=v>=50?'bad':(v>=20?'warn':'ok');
+    return `<span class="alp-chip ${cls}" data-tip="${esc(tip)}">${esc(lab)} ${v}ms</span>`; };
+  const me=L.maxEver?`<span class="alp-chip dim" data-tip="worst single stall ever observed on this data dir — kept separately so one boot spike stays attributable without polluting the rolling read">maxEver ${L.maxEver.v}ms · ${new Date(L.maxEver.t).toISOString().slice(5,16).replace('T',' ')}</span>`:'';
+  const winH=Math.round((L.windowMs||0)/3600e3), liveMin=Math.round((L.sinceMs||0)/60e3);
+  let spark='<div class="alp-none">no closed windows yet — first ring point lands at the '+winH+'h mark (or on the next deploy, which folds the open window in)</div>';
+  if(ring.length){
+    const W=600,H=72,top=6,bot=58,vmax=Math.max(60,...ring.map(r=>r[2]));
+    const xs=ring.length>1?(i)=>i*(W/(ring.length-1)):()=>W/2;
+    const y=(v)=>bot-Math.min(v,vmax)/vmax*(bot-top);
+    const pts=ring.map((r,i)=>xs(i).toFixed(1)+','+y(r[2]).toFixed(1)).join(' ');
+    const gate=y(50);
+    spark=`<svg class="alp-spark" viewBox="0 0 ${W} ${H}" data-n="${ring.length}">`
+      +`<line x1="0" y1="${bot}" x2="${W}" y2="${bot}" class="alp-base"/>`
+      +`<line x1="0" y1="${gate.toFixed(1)}" x2="${W}" y2="${gate.toFixed(1)}" class="alp-gate"/>`
+      +`<text x="${W-4}" y="${(gate-4).toFixed(1)}" text-anchor="end" class="alp-gtxt">50ms</text>`
+      +(ring.length>1?`<polyline class="alp-line" points="${pts}"/>`:`<circle class="alp-dotp" cx="${xs(0).toFixed(1)}" cy="${y(ring[0][2]).toFixed(1)}" r="2.5"/>`)
+      +`<line class="alp-cx" x1="0" y1="0" x2="0" y2="${H}" visibility="hidden"/>`
+      +`<circle class="alp-cd" r="3" visibility="hidden"/></svg>`
+      +`<div class="alp-ro" hidden></div>`;
+  }
+  box.innerHTML=`<div class="alp-head"><span class="alp-t">Event loop</span><span class="sec">live window ${liveMin}m of ${winH}h · ring ${ring.length}/28 · p99 per closed window</span></div>`
+    +`<div class="alp-chips">${chip(L.p50,'p50','median tick delay, live window')}${chip(L.p99,'p99','99th-percentile tick delay, live window — the decision-gate number: sustained \u226550ms for a week justifies moving builds to worker threads; sustained <50ms kills that work item')}${chip(L.max,'max','worst stall in the live window')}${me}</div>${spark}`;
+  box.hidden=false;
+  const svg=box.querySelector('.alp-spark');
+  if(svg&&ring.length){
+    const cx=svg.querySelector('.alp-cx'), cd=svg.querySelector('.alp-cd'), ro=box.querySelector('.alp-ro');
+    const W=600,top=6,bot=58,vmax=Math.max(60,...ring.map(r=>r[2]));
+    svg.addEventListener('mousemove',(e)=>{ const r=svg.getBoundingClientRect();
+      const x=(e.clientX-r.left)/r.width*W;
+      const i=ring.length>1?Math.max(0,Math.min(ring.length-1,Math.round(x/(W/(ring.length-1))))):0;
+      const px=ring.length>1?i*(W/(ring.length-1)):W/2, py=bot-Math.min(ring[i][2],vmax)/vmax*(bot-top);
+      cx.setAttribute('x1',px); cx.setAttribute('x2',px); cx.setAttribute('visibility','visible');
+      cd.setAttribute('cx',px); cd.setAttribute('cy',py); cd.setAttribute('visibility','visible');
+      ro.textContent=new Date(ring[i][0]).toISOString().slice(5,16).replace('T',' ')+'  p50 '+ring[i][1]+'  p99 '+ring[i][2]+'  max '+ring[i][3]+'ms';
+      ro.style.left=Math.min(px/W*r.width+10, r.width-190)+'px'; ro.hidden=false; });
+    svg.addEventListener('mouseleave',()=>{ cx.setAttribute('visibility','hidden'); cd.setAttribute('visibility','hidden'); ro.hidden=true; });
+  } }
 // Ambient ask-AI budget chip in the terminal bar. Shared group pool, resets midnight UTC; green
 // with headroom, amber when low (<=25%), red at zero. Fed by the 45s health poll AND by each ask
 // response (askDayLeft/askPerDay ride on every /api/ask reply) so it updates the instant you spend.
@@ -835,17 +906,58 @@ function carryCell(r){ const v=r.carry;
   const c=v>0.05?'pos':(v<-0.05?'neg':'sec'), fAPR=(r._carryF!=null)?r._carryF:null;
   const t=`funding ${fAPR!=null?(fAPR>=0?'+':'')+fAPR.toFixed(0)+'% APR':'n/a'} \u00f7 vol ${r.vol30!=null?r.vol30.toFixed(0)+'%':'n/a'} \u2014 ${v>=0?'shorts are paid':'longs are paid'} ${Math.abs(v).toFixed(2)} vol-units/yr to hold`;
   return `<td${shade(v,1)} title="${esc(t)}"><span class="${c}">${v>=0?'+':''}${v.toFixed(2)}</span></td>`; }
+// ===== row-level table patching (build 2026.07.29-09) ==========================================
+// The content short-circuit skips UNCHANGED snapshots; this handles the other 99%: one tick moved,
+// and the old path re-parsed a 140-row table's innerHTML and re-laid-out everything. Now the row
+// STRINGS are still all built every render — string concat was never the cost; parse + layout was
+// — and the DOM is only touched where a row's string actually differs from what that row already
+// is. One code path is preserved at the level that matters: rowHtml() is the ONLY producer of row
+// markup, full rebuild and patch both consume its exact output, so the patched table is byte-
+// identical to a rebuild BY CONSTRUCTION (and the harness proves it, not just asserts it).
+//
+// The patch path only runs when the table SHAPE is provably unchanged: same coins in the same
+// order, same visible column set, same bench row, and the live DOM has exactly the row count we
+// think it has. Any mismatch — sort flips, filter edits, scope/column changes, or an external
+// write like errRow() replacing the tbody — fails the gate and takes the full rebuild, which also
+// re-primes the cache. Self-healing beats clever: the cache can never wedge the board, because
+// disagreement with reality always resolves to "rebuild everything", never to "trust the cache".
+let _rowCache=null, _rowStruct='';
+function rowHtml(r, vc, bScope){
+  const cls=(r.coin===bScope)?' class="benchrow"':'';
+  let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>';
+  r.flash=null;   // consumed into this string exactly as the rebuild path always did — the NEXT
+                  // render produces a flash-free string, so the patcher clears the class then
+  return row;
+}
+// Split out for the execution-smoke harness: given aligned old/new row strings and a children-like
+// list, rewrite ONLY the slots whose strings differ. Returns the write count — the perf claim is
+// "unchanged rows cost zero DOM writes", and the test asserts the number, not the vibe.
+function patchRowsInto(children, oldHtml, newHtml){
+  let writes=0;
+  for(let i=0;i<newHtml.length;i++){ if(oldHtml[i]!==newHtml[i]){ children[i].outerHTML=newHtml[i]; writes++; } }
+  return writes;
+}
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts();
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
-  if(!rows.length){ body.innerHTML=`<tr><td colspan="${vc.length}"><div class="msg"><span class="big">No matches</span>Clear the filters to see all markets.</div></td></tr>`; return; }
-  const out=[];
+  if(!rows.length){ body.innerHTML=`<tr><td colspan="${vc.length}"><div class="msg"><span class="big">No matches</span>Clear the filters to see all markets.</div></td></tr>`; _rowCache=null; return; }
   const bScope=scopeBench();
-  for(const r of rows){ const cls=(r.coin===bScope)?' class="benchrow"':'';
-    let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>'; r.flash=null; out.push(row); }
-  body.innerHTML=out.join('');
-  applyKsel();   // innerHTML rebuild wipes the j/k highlight — re-pin it to the selected coin
+  const out=[], coins=[];
+  for(const r of rows){ out.push(rowHtml(r, vc, bScope)); coins.push(r.coin); }
+  // Structural signature: row identity+order, visible columns, bench. \u0001/\u0002 separators can
+  // never appear in a coin or column key, so the signature is collision-free by construction.
+  const struct=coins.join('\u0001')+'\u0002'+vc.map(c=>c.key).join('\u0001')+'\u0002'+(bScope||'');
+  if(_rowCache && struct===_rowStruct && body.children.length===out.length){
+    const oldHtml=coins.map(c=>_rowCache.get(c));
+    patchRowsInto(body.children, oldHtml, out);
+    for(let i=0;i<coins.length;i++) if(oldHtml[i]!==out[i]) _rowCache.set(coins[i], out[i]);
+  } else {
+    body.innerHTML=out.join('');
+    _rowCache=new Map(); for(let i=0;i<coins.length;i++) _rowCache.set(coins[i], out[i]);
+    _rowStruct=struct;
+  }
+  applyKsel();   // rebuild wipes the j/k highlight; a patch may have replaced the selected row — re-pin either way
 }
 function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(r.d1));
   if(rows.length<3){ el('movers').hidden=true; return; } el('movers').hidden=false;
@@ -2067,6 +2179,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     ${splitHtml}
     <div id="dseries"></div>
     ${r.uni==='main'?'<div id="dderivs"></div>':''}
+    ${r.uni==='xyz'?'<div id="dfund"></div>':''}
     <div id="dledger"></div>
     <div id="dnews"></div>
     <div class="dsec">Metrics</div>
@@ -2096,6 +2209,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   loadDrawerCandles(coin);
   loadDrawerLedger(coin);
   if(r.uni==='main') loadDrawerDerivs(coin);
+  if(r.uni==='xyz') loadDrawerFund(coin);
   fillDrawerNews(); if(!state.news) loadNews();   // slice from the shared payload; first open triggers the fetch
   { const dai=el('dai'); if(dai){ dai.onclick=()=>{ closeDetail(); openAiReport(coin); };
     // state-aware label: annotate with the shared cache's age so the group knows a read exists
@@ -2182,6 +2296,74 @@ async function loadDrawerSeries(coin){
       html+=`<div class="dsec">Funding APR ${span(s.funding)} · now ${(last>=0?'+':'')+last.toFixed(1)}%</div>${sparkline(v,{zero:true,color:'var(--blue)'})}`; }
     box.innerHTML = html || '<div class="dsec">OI / funding history</div><div class="sec" style="font-size:12px">collecting — the trend appears here as history accrues server-side</div>';
   }catch(_){}
+}
+// ===== drawer: fundamentals panel (xyz equity universe · Finnhub basic financials) =====
+// Equity-side counterpart to the derivs panel. Everything is the server payload; the three
+// price-sensitive figures (mkt cap / P/E / P/S) are derived server-side off the live mark, so this
+// panel can never disagree with the price in the drawer header. Client renders, never re-derives.
+let FUNDSEQ=0;
+function loadDrawerFund(coin){ const box=el('dfund'); if(!box) return; const seq=++FUNDSEQ;
+  fetchJSON('/api/fundamentals?coin='+encodeURIComponent(coin))
+    .then(d=>{ if(state.detail!==coin||seq!==FUNDSEQ||!box.isConnected) return; renderFund(box,coin,d); })
+    .catch(()=>{ if(state.detail===coin&&box.isConnected) box.innerHTML=''; }); }
+function renderFund(box,coin,d){
+  if(!d||d.enabled===false){ box.innerHTML=''; return; }   // no FINNHUB_TOKEN on the server — the panel simply doesn't exist
+  const head=`<div class="dsec" data-tip="company fundamentals for the underlying \u2014 Finnhub basic financials + profile \u00b7 point-in-time, quarterly-updated, refreshed daily server-side \u00b7 US listings only (free tier) \u00b7 market cap / P/E / P/S are derived live off this board\u2019s mark, everything else is the cached quarterly figure">Fundamentals <span class="dzsrc">finnhub \u00b7 basic financials \u2014 not live</span></div>`;
+  if(!d.covered){
+    const why=esc(d.reason||'not covered');
+    const tail=d.pending?'':`<span class="why">Absent, never guessed \u2014 same gate as the earnings tab: a name the US feed can\u2019t resolve gets no fabricated grid.</span>`;
+    box.innerHTML=head+`<div class="fnnone">${d.pending?'Collecting \u2014 not fetched yet. The panel fills once the slow rotation reaches this name.':`Not covered on this feed \u2014 <b>${why}</b>.`}${tail}</div>`;
+    return;
+  }
+  const num=(v,dg)=>(v==null||!isFinite(v))?null:(+v).toFixed(dg==null?2:dg);
+  const na='<span class="na">\u00b7</span>';
+  // trillion-aware compact formatter (fmtUsd caps at B) — local so no shared helper is touched
+  const nfc=(v,dg)=>{ const a=Math.abs(v); if(a>=1e12)return (v/1e12).toFixed(dg)+'T'; if(a>=1e9)return (v/1e9).toFixed(dg)+'B'; if(a>=1e6)return (v/1e6).toFixed(dg)+'M'; if(a>=1e3)return (v/1e3).toFixed(1)+'K'; return (+v).toFixed(0); };
+  const pct=(v,dg)=>num(v,dg)==null?na:num(v,dg)+'%';
+  const pe = d.peNm ? '<span class="na" data-tip="trailing EPS is negative or zero \u2014 P/E is not meaningful">n/m</span>' : (num(d.pe,1)!=null?num(d.pe,1):na);
+  const chip=(k,v,t)=>`<div class="dzchip" data-tip="${esc(t)}"><span class="dzk">${k}</span><span class="dzv">${v}</span></div>`;
+  let html=head;
+  html+=`<div class="fnsub"><span class="fndot"></span>${esc(d.name||coin)}${d.ind?' \u00b7 '+esc(d.ind):''}${d.asOf?' \u00b7 refreshed '+fmtAge(Date.now()-d.asOf)+' ago':''}</div>`;
+  html+=`<div class="dzchips">`
+    +chip('mkt cap', d.mcap!=null?'$'+nfc(d.mcap,2):na, 'market cap = live mark \u00d7 shares outstanding (Finnhub profile) \u2014 derived off the board price, so it tracks the header')
+    +chip('P/E (TTM)', pe, 'live mark \u00f7 trailing-12m EPS \u2014 derived here so it never disagrees with the price above')
+    +chip('P/S (TTM)', d.ps!=null?num(d.ps,1):na, 'live mark \u00f7 trailing-12m sales per share')
+    +chip('div yield', pct(d.divY,2), 'indicated annual dividend yield (TTM)')
+    +`</div>`;
+  // 52-week range bar with crosshair readout
+  if(d.wkHi!=null&&d.wkLo!=null&&d.px!=null&&d.wkHi>d.wkLo){
+    const posPct=Math.max(0,Math.min(1,d.rangePos!=null?d.rangePos:((d.px-d.wkLo)/(d.wkHi-d.wkLo))))*100;
+    const offHi=((d.px/d.wkHi)-1)*100;
+    html+=`<div class="fnlbl">52-week range \u00b7 hover to scan</div>`
+      +`<div class="fnrange" id="fnrng" data-lo="${d.wkLo}" data-hi="${d.wkHi}" data-px="${d.px}">`
+      +`<span class="lo">${num(d.wkLo,2)}</span><span class="hi">${num(d.wkHi,2)}</span>`
+      +`<span class="mk" style="left:${posPct.toFixed(2)}%"></span></div>`
+      +`<div class="fnread" id="fnread">now <b>${num(d.px,2)}</b> \u00b7 ${posPct.toFixed(0)}% of range \u00b7 <span class="${offHi>=-0.05?'pos':'neg'}">${offHi>=0?'+':''}${offHi.toFixed(1)}%</span> from 52w high${d.wkHiD?' ('+esc(d.wkHiD)+')':''}</div>`;
+  }
+  // margins (TTM), each bar hoverable
+  if(d.gm!=null||d.om!=null||d.nm!=null){
+    const bar=(k,v)=>{ if(v==null||!isFinite(v)) return `<div class="fnbar" data-tip="${k} margin (TTM): no data"><span class="bk">${k}</span><span class="track"></span><span class="bv na">\u00b7</span></div>`;
+      const neg=v<0, w=Math.max(2,Math.min(100,Math.abs(v))), col=neg?'var(--down)':(v>=45?'var(--up)':(v>=20?'var(--accent)':'var(--blue)'));
+      return `<div class="fnbar${neg?' neg':''}" data-tip="${k} margin (TTM): ${v.toFixed(1)}%"><span class="bk">${k}</span><span class="track"><span class="fill" style="width:${w}%;background:${col}"></span></span><span class="bv">${v.toFixed(1)}%</span></div>`; };
+    html+=`<div class="fnlbl">Margins (TTM)</div><div class="fnbars">`+bar('gross',d.gm)+bar('operating',d.om)+bar('net',d.nm)+`</div>`;
+  }
+  // detail grid
+  const st=(k,v)=>`<div class="dstat"><span class="dk">${k}</span><span class="dv">${v}</span></div>`;
+  const g=(v)=>num(v,1)==null?na:`<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${num(v,1)}%</span>`;
+  html+=`<div class="dgrid" style="margin-top:12px">`
+    +st('EPS TTM', d.epsTTM!=null?num(d.epsTTM,2):na)+st('rev/sh TTM', d.revPsTTM!=null?num(d.revPsTTM,2):na)
+    +st('rev growth', g(d.revG))+st('EPS growth', g(d.epsG))
+    +st('P/B', d.pb!=null?num(d.pb,1):na)+st('ROE', pct(d.roe,1))
+    +st('ROA', pct(d.roa,1))+st('shares out', d.shares!=null?nfc(d.shares*1e6,2):na)
+    +`</div>`;
+  box.innerHTML=html;
+  // crosshair readout on the 52w bar — local mousemove (no shared chart machinery needed for one bar)
+  const rng=el('fnrng'), read=el('fnread');
+  if(rng&&read){ const lo=+rng.dataset.lo, hi=+rng.dataset.hi, px=+rng.dataset.px, base=read.innerHTML;
+    rng.addEventListener('mousemove',e=>{ const rc=rng.getBoundingClientRect(); const fr=Math.max(0,Math.min(1,(e.clientX-rc.left)/rc.width)); const v=lo+(hi-lo)*fr; const dv=((v/px)-1)*100;
+      read.innerHTML=`at <b>${v.toFixed(2)}</b> \u00b7 ${(fr*100).toFixed(0)}% of range \u00b7 <span class="${v>=px?'pos':'neg'}">${dv>=0?'+':''}${dv.toFixed(1)}%</span> vs mark ${px.toFixed(2)}`; });
+    rng.addEventListener('mouseleave',()=>read.innerHTML=base);
+  }
 }
 // ===== drawer: deriv-context panel (crypto universe · aggregated CEX via Coinalyze) =====
 // Everything rendered here is the server payload — chips, buckets, cascade flags. Nothing is
@@ -2397,6 +2579,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
     if(Array.isArray(p.colOrder)){ const v=p.colOrder.filter(k=>COL_BY_KEY[k]);
       for(const c of COLS) if(!v.includes(c.key)){ v.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) state.colHidden.add(c.key); }
       colAdjacent(v,'momp','mom');   // the candidate migrates in NEXT TO the incumbent, not appended at the far right
+      colAdjacent(v,'m5','px'); colAdjacent(v,'m15','m5');   // the intraday pair migrates in next to Price, ahead of 1h
       state.colOrder=v; }
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
@@ -2441,6 +2624,7 @@ function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
   const hid=new Set((Array.isArray(src.colHidden)?src.colHidden:[]).filter(k=>COL_BY_KEY[k]));
   for(const c of COLS) if(!ord.includes(c.key)){ ord.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) hid.add(c.key); }
   colAdjacent(ord,'momp','mom');   // same adjacency rule for saved layouts
+  colAdjacent(ord,'m5','px'); colAdjacent(ord,'m15','m5');
   state.colOrder=ord; state.colHidden=hid;
   if(src.sortKey&&COL_BY_KEY[src.sortKey]){ state.sortKey=src.sortKey; state.sortDir=src.sortDir==='asc'?'asc':'desc'; }
   state.watchOnly=!!src.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly);
@@ -2814,7 +2998,7 @@ const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
-async function openAdmin(){ if(!IS_ADMIN) return; renderAdmin(); await loadAdmin(); }
+async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); await loadAdmin(); }
 async function loadAdmin(){
   try{ _adm=await fetchJSON('/api/features'); }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
@@ -2855,6 +3039,7 @@ function renderAdmRecips(){
     const bH=(r.briefHour!=null?r.briefHour:null);
     const bLbl=bH!=null?`${String(bH).padStart(2,'0')}:00${r.briefUtc?' UTC':''}`:'off';
     const briefChip=openR?`<button type="button" class="cdtf${bH!=null?' on':''}" data-apbrief="${esc(r.chat)}" data-tip="the morning brief for THIS recipient \u2014 click to set the hour or turn it off. Setting it from here records the hour only, never your timezone: stamping your offset onto somebody else's account would move their delivery without them asking.">brief ${esc(bLbl)}</button>`:'';
+    const opChip=openR?`<button type="button" class="cdtf${r.admin?' on':''}" data-aop="${esc(r.chat)}" data-tip="operator designation. The operator receives server-health (ops) alerts and the \u2018send test\u2019 fires from the boxes above. Any number of recipients can hold it; zero means test buttons refuse rather than guess. Click to toggle.">\u265b operator${r.admin?'':' \u00b7 off'}</button>`:'';
     const schedChips=openR?((P.schedKinds||[]).map(k=>{
       const sc=(r.sched&&r.sched[k.k])||null, h=sc?sc.hour:null;
       const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''}${sc&&sc.days?' \u00b7 '+sc.daysLabel:''}`:'off';
@@ -2863,7 +3048,7 @@ function renderAdmRecips(){
     return `<div class="arule" style="flex-wrap:wrap"><span class="arec-h" data-admexp="${esc(r.chat)}"><span class="asec-c">${openR?'\u25be':'\u25b8'}</span><b class="${dot}">\u25cf</b> ${esc(r.name)} <span class="sec">${esc(r.mask)} \u00b7 ${r.admin?'operator':'public'} \u00b7 ${nOn} class(es) \u00b7 ${r.sentHour}/${P.capHour}h${r.mine?' \u00b7 yours':(r.owned?' \u00b7 another browser':' \u00b7 unclaimed')}</span></span>`
       +(r.owned?'':`<button type="button" class="cdtf" data-admclaim="${esc(r.chat)}" style="margin-left:auto" data-tip="this recipient was linked before per-browser ownership existed, so no browser manages it. Claiming moves it to THIS browser and it appears in your alerts panel with its class chips and quiet hours.">claim</button>`)
       +`<span class="ax" data-admunlink="${esc(r.chat)}" title="revoke this recipient">\u2715</span>`
-      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${schedChips}</span>`:'')+`</div>`; }).join('')
+      +(openR?`<span style="display:flex;gap:4px;width:100%;margin-top:5px;flex-wrap:wrap">${chips}${opChip}${schedChips}</span>`:'')+`</div>`; }).join('')
     : '<div class="sec" style="font-size:12px;padding:4px">Nobody has linked a telegram account.</div>');
   b.querySelectorAll('[data-admexp]').forEach(x=>x.addEventListener('click',()=>{
     admRecOpen[x.dataset.admexp]=!admRecOpen[x.dataset.admexp]; renderAdmRecips(); }));
@@ -2881,6 +3066,11 @@ function renderAdmRecips(){
     // No tz in this write. An admin setting somebody else's hour from their own browser would
     // otherwise stamp the operator's offset onto that person's record and silently move them.
     pushAct('/api/alerts/prefs',{chat:rec.chat, digestHour: v===''?null:+v}).then(()=>renderAdmRecips()); }));
+  b.querySelectorAll('[data-aop]').forEach(x=>x.addEventListener('click',()=>{
+    const rec=rows.find(r=>r.chat===x.dataset.aop); if(!rec) return;
+    const to=!rec.admin;
+    if(!confirm((to?'Make ':'Remove ')+rec.name+(to?' the operator? They will receive server-health (ops) alerts and the test fires from the admin boxes.':' as operator? They will stop receiving ops alerts and test fires.'))) return;
+    pushAct('/api/alerts/prefs',{chat:rec.chat, operator:to}).then(()=>renderAdmRecips()); }));
   b.querySelectorAll('[data-asched]').forEach(x=>x.addEventListener('click',()=>{
     const rec=rows.find(r=>r.chat===x.dataset.aschat); if(!rec) return;
     const k=x.dataset.asched, kind=((P.schedKinds)||[]).find(z=>z.k===k)||{};
@@ -2908,6 +3098,20 @@ function renderAdmBrief(){
   box.hidden=false;
   const P=pushState;
   const rows=(P&&P.recipients)||[];
+  // The operator's own schedule, stated inside each box rather than only on a roster chip you have
+  // to know to expand. One resolved line, click to edit, same validated route as everything else.
+  const mySchedRow=(k)=>{
+    const kind=((P&&P.schedKinds)||[]).find(z=>z.k===k)||{};
+    // Prefer the row this browser linked; fall back to the designated operator, since that is who
+    // the admin boxes serve — an operator administering from a second machine still sees and edits
+    // their own schedule here instead of a dead "link a telegram" line.
+    const me=rows.find(r=>r.mine)||rows.find(r=>r.admin);
+    if(!me) return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <span class="warn">link a telegram or mark an operator below</span></div>`;
+    const sc=(me.sched&&me.sched[k])||null, h=sc?sc.hour:null;
+    const lbl=h!=null?`${String(h).padStart(2,'0')}:00${sc&&sc.utc?' UTC':''} \u00b7 ${esc(sc&&sc.daysLabel||'daily')}`:'off';
+    return `<div class="sec" style="font-size:11.5px;margin-top:4px">your schedule: <button type="button" class="cdtf${h!=null?' on':''}" data-mysched="${esc(k)}" data-tip="when YOUR copy of ${esc(kind.label||k)} arrives \u2014 hour and days. Everyone else\u2019s is on their roster row.">${esc(lbl)}</button></div>`;
+  };
+
   const utcN=rows.filter(r=>r.briefHour!=null&&r.briefUtc).length;
   const onN=rows.filter(r=>r.briefHour!=null).length;
   const st=(P&&P.brief)||null;
@@ -2920,8 +3124,9 @@ function renderAdmBrief(){
     +`<div class="abr-row">`
       +`<button type="button" class="cdtf" id="adm-brief" data-tip="re-serves this hour\u2019s brief \u2014 no model call, no budget spent">send test (cached)</button>`
       +`<button type="button" class="cdtf" id="adm-brief-f" data-tip="regenerate from live state and spend one of today\u2019s brief budget">send test (fresh)</button>`
-      +`<span class="sec" style="font-size:11px">\u2192 telegram account(s) linked from this browser</span>`
-    +`</div><div class="abr-r" id="adm-brief-r"></div>`;
+      +`<span class="sec" style="font-size:11px" data-tip="test fires go ONLY to the recipient(s) marked operator on the roster below \u2014 never to anyone else. Toggle who is operator with the crown chip on their row.">\u2192 operator only</span>`
+    +`</div><div class="abr-r" id="adm-brief-r"></div>`
+    +mySchedRow('brief');
   // Separate state line and test pair, not a shared row with the brief: separate schedules,
   // separate budgets, separate failure modes — one averaged row would hide exactly the case worth
   // seeing, the brief fine and the commentary dead.
@@ -2934,14 +3139,15 @@ function renderAdmBrief(){
     +`<div class="abr-row">`
       +`<button type="button" class="cdtf" id="adm-land" data-tip="re-serves this hour\u2019s commentary \u2014 no model call, no budget spent">send test (cached)</button>`
       +`<button type="button" class="cdtf" id="adm-land-f" data-tip="regenerate from the live headline corpus and spend one of today\u2019s landscape budget">send test (fresh)</button>`
-    +`</div><div class="abr-r" id="adm-land-r"></div>`;
+    +`</div><div class="abr-r" id="adm-land-r"></div>`
+    +mySchedRow('landscape');
   // Report what actually shipped: parts, entity-parsed length of each, whether the prose layer
   // degraded, and which budget-ladder steps fired. A silent success tells the operator nothing
   // about whether the message that landed is the message they designed.
   const briefRun=(fresh)=>{
     const out=el('adm-brief-r'); if(out) out.textContent='sending\u2026';
     ['adm-brief','adm-brief-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
-    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh})})
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fresh:!!fresh, operator:true})})
       .then(r=>r.json().catch(()=>null)).then(d=>{
         if(!out) return;
         if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
@@ -2957,7 +3163,7 @@ function renderAdmBrief(){
   const landRun=(fresh)=>{
     const out=el('adm-land-r'); if(out) out.textContent='sending\u2026';
     ['adm-land','adm-land-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=true; });
-    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'landscape',fresh:!!fresh})})
+    fetch('/api/alerts/brief-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'landscape',fresh:!!fresh, operator:true})})
       .then(r=>r.json().catch(()=>null)).then(d=>{
         if(!out) return;
         if(!d||!d.ok){ out.innerHTML='<span class="neg">'+esc((d&&d.error)||'failed')+'</span>'; return; }
@@ -2971,6 +3177,17 @@ function renderAdmBrief(){
       }).catch(()=>{ if(out) out.innerHTML='<span class="neg">request failed</span>'; })
       .finally(()=>{ ['adm-land','adm-land-f'].forEach(id=>{ const x=el(id); if(x) x.disabled=false; }); });
   };
+  box.querySelectorAll('[data-mysched]').forEach(x=>x.addEventListener('click',()=>{
+    const k=x.dataset.mysched, kind=((P&&P.schedKinds)||[]).find(z=>z.k===k)||{};
+    const me=rows.find(r=>r.mine); if(!me) return;
+    const sc=(me.sched&&me.sched[k])||null;
+    const cur=sc&&sc.hour!=null?String(sc.hour):String(kind.defaultHour!=null?kind.defaultHour:10);
+    const v=(prompt((kind.label||k)+' at which local hour for YOU? (0-23, blank to turn it off)',cur)||'').trim();
+    if(v===''){ pushAct('/api/alerts/prefs',{chat:me.chat, sched:{[k]:{h:null}}, tz:-new Date().getTimezoneOffset()}).then(()=>renderAdmBrief()); return; }
+    const d=(prompt('Which days? ("all", "weekdays", "mon,wed,fri" or "MWF")',sc&&sc.days?sc.days.join(','):(kind.defaultDays?kind.defaultDays.join(','):'all'))||'').trim();
+    const days=schedDaysClient(d);
+    if(days===undefined){ alert('Could not read those days. Try "all", "weekdays", "mon,wed,fri" or "MWF".'); return; }
+    pushAct('/api/alerts/prefs',{chat:me.chat, sched:{[k]:{h:+v, days}}, tz:-new Date().getTimezoneOffset()}).then(()=>renderAdmBrief()); }));
   { const x=el('adm-land'); if(x) x.addEventListener('click',()=>landRun(false)); }
   { const x=el('adm-land-f'); if(x) x.addEventListener('click',()=>landRun(true)); }
   { const x=el('adm-brief'); if(x) x.addEventListener('click',()=>briefRun(false)); }
@@ -2985,32 +3202,44 @@ function renderAdmin(){
   if(_adm.error){ host.innerHTML='<div class="msg">Could not load feature state — '+esc(_adm.error)+'</div>'; return; }
   const man=_adm.manifest||[];
   const groups=[['tab','Tabs'],['act','Actions']];
+  // One row renderer for parents and their nested scope children — the scope rows are the SAME
+  // three-state control on the same write path (setAdmFlag), only presented indented under the tab
+  // whose payloads they slice. `scope:true` adds the indent class and swaps the route line for an
+  // honest description of what a scope actually is (it owns no route — it filters payload rows).
+  const rowHtml=(m,scope)=>{
+    const locked=!m.settable;
+    // A pinned/locked row shows its state as a static chip, not a control whose write the server
+    // would refuse — offering a button that always fails is worse than offering none.
+    const seg=locked
+      ? '<span class="adm-lock" title="'+(m.pin?'Always public — this is the fallback every gated view falls through to':'Always admin — this is the panel that controls every other flag')+'">'+esc(admLabel(m.state))+' · locked</span>'
+      : ['public','admin','off'].map(v=>'<button type="button" class="adm-b'+(m.state===v?' on '+v:'')+'" data-k="'+esc(m.key)+'" data-v="'+v+'"'+(_admBusy===m.key?' disabled':'')+'>'+v+'</button>').join('');
+    const dim=_admVap && m.state!=='public';
+    return '<div class="adm-row'+(scope?' adm-scope':'')+(dim?' dim':'')+'">'
+      +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+'</div>'
+      +'<div class="adm-key">'+esc(m.key)+(scope?' · filters payload rows · no route of its own':(m.routes&&m.routes.length?' · '+esc(m.routes.join(', ')):' · no route'))+'</div></div>'
+      +'<div class="adm-seg">'+seg+'</div></div>';
+  };
   let h='';
   for(const [kind,title] of groups){
     const rows=man.filter(m=>m.kind===kind);
     if(!rows.length) continue;
     h+='<div class="adm-grp">'+esc(title)+'</div>';
     for(const m of rows){
-      const locked=!m.settable;
-      // A pinned/locked row shows its state as a static chip, not a control whose write the server
-      // would refuse — offering a button that always fails is worse than offering none.
-      const seg=locked
-        ? '<span class="adm-lock" title="'+(m.pin?'Always public — this is the fallback every gated view falls through to':'Always admin — this is the panel that controls every other flag')+'">'+esc(admLabel(m.state))+' · locked</span>'
-        : ['public','admin','off'].map(v=>'<button type="button" class="adm-b'+(m.state===v?' on '+v:'')+'" data-k="'+esc(m.key)+'" data-v="'+v+'"'+(_admBusy===m.key?' disabled':'')+'>'+v+'</button>').join('');
-      const dim=_admVap && m.state!=='public';
-      h+='<div class="adm-row'+(dim?' dim':'')+'">'
-        +'<div class="adm-meta"><div class="adm-lab">'+esc(m.label)+'</div>'
-        +'<div class="adm-key">'+esc(m.key)+(m.routes&&m.routes.length?' · '+esc(m.routes.join(', ')):' · no route')+'</div></div>'
-        +'<div class="adm-seg">'+seg+'</div></div>';
+      h+=rowHtml(m,false);
+      // Scope children nest directly under their parent tab. The manifest is the only source of
+      // the linkage (m.parent, shipped by the server) — nothing here hardcodes which tabs split.
+      if(kind==='tab') for(const c of man.filter(x=>x.kind==='scope'&&x.parent===m.key)) h+=rowHtml(c,true);
     }
   }
   host.innerHTML=h;
   host.querySelectorAll('.adm-b').forEach(b=>b.addEventListener('click',()=>setAdmFlag(b.dataset.k,b.dataset.v)));
   const c=_adm.counts||{};
   const cnt=el('adm-count');
-  if(cnt) cnt.innerHTML='Public users see <b>'+(c.public||0)+'</b> of '+(c.total||0)+' · <b>'+(c.admin||0)+'</b> admin-only · <b>'+(c.off||0)+'</b> off';
+  if(cnt) cnt.innerHTML='Public users see <b>'+(c.public||0)+'</b> of '+(c.total||0)+' · <b>'+(c.admin||0)+'</b> admin-only · <b>'+(c.off||0)+'</b> off'+(c.scoped?' · <b>'+c.scoped+'</b> scoped':'');
   const pv=el('adm-prev');
-  if(pv){ const pub=man.filter(m=>m.kind==='tab'&&m.state==='public');
+  if(pv){ // the preview reflects the RESOLVED public set, not raw states — a public-state tab whose
+    // scopes are all closed self-demotes server-side and must not preview as visible
+    const pub=man.filter(m=>m.kind==='tab'&&(_adm.resolvedPublic?!!_adm.resolvedPublic[m.key]:m.state==='public'));
     pv.innerHTML=pub.length?pub.map(m=>'<span class="adm-chip">'+esc(m.label)+'</span>').join(''):'<span class="adm-none">no tabs visible to the public</span>'; }
   const ft=el('adm-foot');
   if(ft) ft.innerHTML='Server-enforced: a gated tab is absent from the markup and every route it owns returns 403. '
@@ -4611,6 +4840,11 @@ function applyScope(){
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
 
   if(!tabVisible(state.view)) { showView('markets'); }   // a scope flip OR a flag change can strand the active view
+  // -06: flipping the pill to a universe the ACTIVE scoped tab cannot show is a navigation, not a
+  // dead click — honour the chosen universe and land on Markets there. The -04 pill-hiding is gone:
+  // both pills stay mounted everywhere; entry into a scoped tab from the hidden side still
+  // auto-flips (scopeGuard in the renderers), only the mid-tab flip routes away.
+  else if((state.view==='signals'||state.view==='actionable') && !featureOn(state.view+'.'+(state.scope==='crypto'?'cx':'eq'))) showView('markets');
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
   // The industry layer is equities-only (crypto's sectors ARE its fine grouping) — the toggle
   // hides in crypto scope rather than sitting there as a no-op. sectGrpActive() already treats
@@ -4934,8 +5168,17 @@ function actSortSave(){ try{ store.set(ASKEY,JSON.stringify(_actSort)); }catch(_
 // sub-2:1 positive-EV family; each bucket includes every outcome its episodes reached (target,
 // void, expired) — a grinder that tagged its modest target belongs to the grinders row.
 let _actEpOpen={}, _actSetOpen=(store.get('actSettled')==='1');
+// Settled record only grows (out-of-sample rows are never pruned), so the episode list is paged.
+// Size is sticky across visits and shared by both universes; the batch index is kept PER universe
+// so switching scope holds each side's place instead of snapping the other back to the top.
+let _actEpPage={};
+let _actEpSize=(()=>{ const v=+store.get('actEpSize'); return (v===10||v===20||v===50)?v:20; })();
+function actEpSizeSet(n){ if(n!==10&&n!==20&&n!==50) return; _actEpSize=n; try{ store.set('actEpSize',String(n)); }catch(_){} }
 function actSetPct(x){ return x==null?'\u2014':Math.round(x*100)+'%'; }
 function actSetR(x){ return x==null?'\u2014':`<span class="${x>0?'pos':x<0?'neg':'sec'}">${x>0?'+':''}${x.toFixed(2)}R</span>`; }
+// Lateness is a COST: positive means the board's surfacing lost you R, so positive reads red.
+// The generic R formatter painted +0.73R of lateness green — the exact opposite of its meaning.
+function actSetCost(x){ return x==null?'\u2014':`<span class="${x>0.005?'neg':x<-0.005?'pos':'sec'}">${x>0?'+':''}${x.toFixed(2)}R</span>`; }
 function actSetDays(ms){ return ms==null?'\u2014':(ms/86400000).toFixed(1)+'d'; }
 function actSettled(d,wantU){
   const st=d&&d.settled, u=st&&st.perUni&&st.perUni[wantU];
@@ -4949,7 +5192,10 @@ function actSettled(d,wantU){
     +`<span data-tip="every distinct suggestion that ever appeared in this scope \u2014 one episode per underlying claim, flicker reappearances folded into the original">shown <b>${a.n+u.open}</b></span>`
     +`<span data-tip="episodes whose claim is still inside its horizon \u2014 they score when it resolves, whether or not the row is still on the board">open <b>${u.open}</b></span>`
     +`<span data-tip="episodes whose claim resolved \u2014 scored from the geometry frozen at first appearance">resolved <b>${a.n}</b></span>`
-    +(u.lat!=null?`<span data-tip="avg R at the fire mark minus avg R from the first-shown mark \u2014 the measured cost of the board surfacing late (confirmation, record and EV gates all delay a row)">lateness ${actSetR(-Math.abs(u.lat)===u.lat?u.lat:u.lat)}</span>`:'')
+    +(u.lat!=null?`<span data-tip="avg R at the fire mark minus avg R from the first-shown mark, over the ${u.latN||0} episode(s) with a trustworthy first-shown stamp \u2014 the measured cost of the board surfacing late (confirmation, record and EV gates all delay a row). Positive is a COST and reads red.${u.btN?` ${u.btN} boot-stamped episode(s) (\u27f2) are excluded \u2014 their stamp is a lower bound on visibility, not a surfacing.`:''}">lateness ${actSetCost(u.lat)}</span>`:(u.btN&&u.all.n?`<span class="sec" data-tip="every resolved episode here is boot-stamped (\u27f2): the first-shown stamps are the feature's own birth, not surfacings, so a lateness number would be manufactured. It starts measuring with the first episode shown by a running process.">lateness \u2014 (${u.btN} boot-stamped)</span>`:''))
+    +((u.split&&u.split.n)?`<span data-tip="fire\u2192shown split over ${u.split.n} resolved episode(s) with full stamps${u.split.excl?` (${u.split.excl} pre-stamp/boot excluded \u2014 dashes over invented numbers)`:''}. cadence = claim fired \u2192 first board build that evaluated it (pure latency \u2014 the event-driven rebuild attacks this); gate = that build \u2192 first shown (EV/tradeable gates holding the row back \u2014 a selection effect no speed fix touches). Medians.">fire\u2192shown ${actAgo(u.split.cadMed)} cadence \u00b7 ${actAgo(u.split.gateMed)} gated</span>`
+      :((u.split&&u.split.excl&&u.all.n)?`<span class="sec" data-tip="every resolved episode predates the decomposition stamps or is boot-stamped \u2014 the split starts measuring with episodes evaluated by a running post-stamp process">fire\u2192shown \u2014 (${u.split.excl} unstamped)</span>`:''))
+    +(u.clus?`<span class="neg" data-tip="resolved episodes of the same family and side first shown on the SAME build \u2014 one correlated market condition observed several times, not independent samples. Read n accordingly: a cluster of four is closer to one observation than to four.">${u.clus} correlated cluster${u.clus===1?'':'s'}</span>`:'')
     +(u.flick?`<span data-tip="rows that dropped off (the mark wobbled through a gate) and reappeared \u2014 folded into their original episode so oscillation never manufactures sample size">${u.flick} flicker${u.flick===1?'':'s'} folded</span>`:'')
     +(st.dropped?`<span data-tip="episodes shown but unscoreable \u2014 the claim was voided or purged, or no exit price survived. Counted, never silently gone.">${st.dropped} unscoreable</span>`:'')
     +(a.approx?`<span data-tip="episodes scored with a gap in the hourly spine (a restart trimmed it): level touches were unknowable, so they scored at their endpoints \u2014 labeled, not hidden">${a.approx} approx</span>`:'')
@@ -4958,39 +5204,56 @@ function actSettled(d,wantU){
   const row=(lbl,tip,b,mut)=>`<tr${mut?' class="act-set-mut"':''}><td><span data-tip="${esc(tip)}">${lbl}</span></td>`
     +`<td style="text-align:right">${b.n}</td>`
     +`<td style="text-align:right" class="sec">${b.n?`${b.t}t / ${b.v}v / ${b.x}x`:'\u2014'}</td>`
-    +`<td style="text-align:right">${b.n?`<span class="${b.hit>=0.5?'pos':'neg'}">${actSetPct(b.hit)}</span>`:'\u2014'}</td>`
-    +`<td style="text-align:right">${actSetR(b.avgE)}</td>`
+    +`<td style="text-align:right">${b.x?`<span class="pos">${b.xp||0}+</span><span class="sec"> / </span><span class="neg">${b.xn||0}\u2212</span>`:'\u2014'}</td>`
+    +`<td style="text-align:right">${b.hit!=null?`<span class="${b.hit>=0.5?'pos':'neg'}">${actSetPct(b.hit)}</span>`:'\u2014'}</td>`
     +`<td style="text-align:right">${actSetR(b.avgM)}</td>`
+    +`<td style="text-align:right" class="sec">${actSetR(b.avgE)}</td>`
     +`<td style="text-align:right">${b.pf!=null?b.pf.toFixed(2):'\u2014'}</td></tr>`;
   h+=`<table class="act-set-t"><thead><tr><th></th>`
-    +`<th data-tip="resolved episodes in this bucket" style="text-align:right">n</th>`
-    +`<th data-tip="how those resolutions split: t = target touched, v = void touched, x = expired between the levels" style="text-align:right">t/v/x</th>`
-    +`<th data-tip="share of resolved episodes positive at the fire mark" style="text-align:right">hit</th>`
-    +`<th data-tip="avg realized R at the fire mark \u2014 the basis the family record was scored on: were the plans good" style="text-align:right">avg @fire</th>`
-    +`<th data-tip="avg realized R from the live mark at FIRST appearance \u2014 what acting on the board actually got" style="text-align:right">avg @shown</th>`
-    +`<th data-tip="gross win R \u00f7 gross loss R, at the fire mark" style="text-align:right">pf</th></tr></thead><tbody>`
+    +`<th data-tip="resolved episodes in this bucket. Correlated same-build clusters are tagged on their rows below \u2014 a cluster counts here as its full size but is closer to ONE observation." style="text-align:right">n</th>`
+    +`<th data-tip="how those resolutions split: t = target touched, v = void touched, x = expired between the levels \u2014 partial outcomes, never hits" style="text-align:right">t/v/x</th>`
+    +`<th data-tip="expiries split by the sign of R@shown \u2014 the basis a reader could actually have had. Disclosed separately precisely so a favorable drift can never pad the hit rate." style="text-align:right">exp \u00b1</th>`
+    +`<th data-tip="targets over level-touched resolutions ONLY (t \u00f7 (t+v)). Expiries are excluded \u2014 a dash means nothing has touched a level yet, and no rate is claimed." style="text-align:right">hit</th>`
+    +`<th data-tip="avg realized R from the live mark at FIRST appearance \u2014 what acting on the board actually got. The economically meaningful number: the first price anyone watching could have had." style="text-align:right">avg @shown</th>`
+    +`<th data-tip="avg realized R at the fire mark \u2014 a diagnostic counterfactual: the basis the family record was scored on, at a price nobody watching the board could trade. The gap to @shown is the lateness cost." style="text-align:right">avg @fire</th>`
+    +`<th data-tip="gross win R \u00f7 gross loss R at the SHOWN mark \u2014 priced on the basis a reader could actually trade" style="text-align:right">pf</th></tr></thead><tbody>`
     +row('2+1 \u2014 \u22652:1 at fire','the level-triggered family: frozen R:R cleared 2:1 at fire. All of its outcomes \u2014 targets, voids, expiries \u2014 are in this row.',u.cls.rr)
     +row('grinders \u2014 sub-2:1, +EV','the statistical family: below 2:1 at fire, positive expectancy anyway. All of its outcomes are here too \u2014 a grinder that tagged its modest target counts exactly like a 2+1 that tagged its big one.',u.cls.ev)
     +row('all resolved','both families combined \u2014 the whole record',a,true)
     +`</tbody></table>`;
   const eps=(st.episodes||[]).filter(e=>e.uni===wantU).slice().reverse();
   if(eps.length){
+    // Page the record. Only the current batch is ever in the DOM, so the settled list stays bounded
+    // no matter how large the out-of-sample record grows. Batch index is per universe and clamped
+    // here (a size change can drop the last page out from under the stored index).
+    const epsTotal=eps.length, epsSize=_actEpSize, epsPages=Math.max(1,Math.ceil(epsTotal/epsSize));
+    let epsPg=_actEpPage[wantU]||0; if(epsPg>epsPages-1) epsPg=epsPages-1; if(epsPg<0) epsPg=0; _actEpPage[wantU]=epsPg;
+    const epsStart=epsPg*epsSize, epsEnd=Math.min(epsStart+epsSize,epsTotal), epsPageRows=eps.slice(epsStart,epsStart+epsSize);
+    if(epsTotal>10){
+      const szBtn=n=>`<button type="button" class="act-ep-sz${n===epsSize?' on':''}" data-epsz="${n}">${n}</button>`;
+      h+=`<div class="act-ep-pager" data-tip="the settled record only grows \u2014 this pages it. Batch size is remembered; the batch you're on is kept per universe, so crypto and stocks hold their own place.">`
+        +`<span class="act-ep-show">show ${szBtn(10)}${szBtn(20)}${szBtn(50)}</span>`
+        +`<span class="act-ep-nav"><span class="sec">${epsStart+1}\u2013${epsEnd} of ${epsTotal} \u00b7 batch ${epsPg+1}/${epsPages}</span>`
+        +`<button type="button" class="act-ep-pg" data-eppg="-1"${epsPg<=0?' disabled':''}>\u2190 prev</button>`
+        +`<button type="button" class="act-ep-pg" data-eppg="1"${epsPg>=epsPages-1?' disabled':''}>next \u2192</button></span></div>`;
+    }
     h+=`<table class="trend-t act-set-eps"><thead><tr><th>name</th><th>event</th><th>class</th><th>side</th>`
-      +`<th data-tip="when the row first appeared on the board" style="text-align:right">shown</th>`
-      +`<th data-tip="how the claim resolved: target / void touched first, or expired between them (a candle spanning both scores pessimistically as the void)">outcome</th>`
-      +`<th data-tip="realized R at the fire mark" style="text-align:right">R@fire</th>`
-      +`<th data-tip="realized R from the mark at first appearance" style="text-align:right">R@shown</th>`
-      +`<th data-tip="first appearance to resolution (or to the level touch that decided it)" style="text-align:right">held</th><th></th></tr></thead><tbody>`;
-    for(const e of eps){ const op=!!_actEpOpen[e.k];
+      +`<th data-tip="when the row first appeared on the board \u00b7 \u27f2 marks a boot-stamped episode: the stamp is the record's own first scan, a LOWER BOUND on when the row was visible \u2014 excluded from the headline lateness" style="text-align:right">shown</th>`
+      +`<th data-tip="how the claim resolved \u2014 target / void touched first, or expired between them (a candle spanning both scores pessimistically as the void) \u2014 with the price it was scored at: the frozen level for touches, the mark at horizon for expiries">outcome</th>`
+      +`<th data-tip="realized R from the mark at first appearance \u2014 what acting on this row when it appeared actually got" style="text-align:right">R@shown</th>`
+      +`<th data-tip="realized R at the fire mark \u2014 diagnostic counterfactual: nobody watching the board could have had this price" style="text-align:right">R@fire</th>`
+      +`<th data-tip="first appearance to resolution (or to the level touch that decided it) \u2014 NOT the claim's full life: a claim surfaced near its horizon shows a short hold by construction" style="text-align:right">held</th><th></th></tr></thead><tbody>`;
+    for(const e of epsPageRows){ const op=!!_actEpOpen[e.k];
       const oc=e.kind==='target'?'pos':e.kind==='void'?'neg':'sec';
+      const opx=e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx;
       h+=`<tr class="act-set-ep" data-epk="${esc(e.k)}"><td class="${e.side==='long'?'pos':'neg'}"><span class="tk">${esc(e.t)}</span></td>`
-        +`<td class="sec">${esc(e.label||e.ev)}</td>`
+        +`<td class="sec">${esc(e.label||e.ev)}${e.cor?` <span class="act-tf neg" data-tip="one of ${e.cor} resolved episodes of this family and side first shown on the SAME build \u2014 one correlated market condition, not ${e.cor} independent observations">corr \u00d7${e.cor}</span>`:''}</td>`
         +`<td class="sec">${e.cls==='ev'?'grinder':'2+1'}</td>`
         +`<td class="${e.side==='long'?'pos':'neg'}">${e.side}</td>`
-        +`<td class="sec" style="text-align:right">${actAgo(Date.now()-e.tShow)}</td>`
-        +`<td class="${oc}">${e.kind}${e.approx?' \u2248':''}</td>`
-        +`<td style="text-align:right">${actSetR(e.rE)}</td>`
+        +`<td class="sec" style="text-align:right">${actAgo(Date.now()-e.tShow)}${e.bt?` <span data-tip="boot-stamped: opened on the record's first scan for a claim fired ${e.tFire?actAgo(e.tShow-e.tFire)+' earlier':'well before'} \u2014 the row may have been visible before the stamp; excluded from the headline lateness">\u27f2</span>`:''}</td>`
+        +`<td class="${oc}">${e.kind}${e.approx?' \u2248':''}${opx!=null?` <span class="sec">@ ${fmtPrice(opx)}</span>`:''}</td>`
         +`<td style="text-align:right">${actSetR(e.rM)}</td>`
+        +`<td style="text-align:right" class="sec">${actSetR(e.rE)}</td>`
         +`<td class="sec" style="text-align:right">${actSetDays(e.held)}</td>`
         +`<td>${op?'\u25be':'\u25b8'}</td></tr>`;
       if(op) h+=`<tr class="act-detrow"><td colspan="10">${actEpDetail(e)}</td></tr>`;
@@ -5002,11 +5265,16 @@ function actSettled(d,wantU){
 }
 function actEpDetail(e){
   const risk=Math.abs(e.fired-e.void), riskPct=e.fired?(risk/e.fired*100):null;
+  const opx=e.kind==='target'?e.target:e.kind==='void'?e.void:e.exitPx;
   return `<div class="act-set-det">`
     +`<span>first shown <b>${new Date(e.tShow).toISOString().slice(0,16).replace('T',' ')}</b> at mark <b>${fmtPrice(e.markShow)}</b>${e.tFire?` \u00b7 claim fired <b>${actAgo(e.tShow-e.tFire)}</b> earlier`:''}</span>`
+    +(e.bt?`<span class="sec">\u27f2 boot-stamped \u2014 the first-shown stamp is the record's own first scan; the row may have been visible earlier, so this episode's lateness is a lower bound and it is excluded from the headline lateness number</span>`:'')
+    +((e.tBld!=null&&e.tFire!=null&&e.tShow!=null&&!e.bt&&!e.be)?`<span>fire\u2192shown: <b>${actAgo(e.tBld-e.tFire)}</b> to first evaluating build \u00b7 <b>${actAgo(e.tShow-e.tBld)}</b> held at the gates</span>`
+      :(e.be?`<span class="sec">\u27f2 build-stamped \u2014 the first-evaluated stamp was minted on a fresh process's first build (a lower bound, not a measurement); excluded from the fire\u2192shown split</span>`:''))
+    +(e.cor?`<span class="sec">corr \u00d7${e.cor} \u2014 one of ${e.cor} same-family, same-side episodes first shown on the same build: one correlated market condition, not ${e.cor} independent observations</span>`:'')
     +`<span>frozen: fired <b>${fmtPrice(e.fired)}</b> \u00b7 void <b>${fmtPrice(e.void)}</b> \u00b7 target <b>${fmtPrice(e.target)}</b>${riskPct!=null?` \u00b7 risk <b>${riskPct.toFixed(2)}%</b>`:''}</span>`
     +`<span>displayed at show: r:r <b>${e.rr!=null?e.rr.toFixed(2):'\u2014'}</b> \u00b7 ev <b>${e.evR!=null?(e.evR>0?'+':'')+e.evR.toFixed(2)+'R':'\u2014'}</b>${e.rec&&e.rec.n?` \u00b7 rec <b>${Math.round(e.rec.hit*100)}%\u00b7${e.rec.n}</b>`:''}</span>`
-    +`<span>resolved <b>${e.tRes?new Date(e.tRes).toISOString().slice(0,16).replace('T',' '):'\u2014'}</b> \u2014 <b>${e.kind}</b>${e.approx?' <span class="sec" data-tip="hourly-spine gap over this window: level touches were unknowable, scored at the endpoints">(approx \u2014 spine gap)</span>':''}${e.flick?` \u00b7 ${e.flick} flicker${e.flick===1?'':'s'} folded`:''}</span>`
+    +`<span>resolved <b>${e.tRes?new Date(e.tRes).toISOString().slice(0,16).replace('T',' '):'\u2014'}</b> \u2014 <b>${e.kind}</b>${opx!=null?` at <b>${fmtPrice(opx)}</b>`:e.kind==='expired'?' <span class="sec">(exit price not recorded \u2014 pre-fix episode)</span>':''}${e.approx?' <span class="sec" data-tip="hourly-spine gap over this window: level touches were unknowable, scored at the endpoints">(approx \u2014 spine gap)</span>':''}${e.flick?` \u00b7 ${e.flick} flicker${e.flick===1?'':'s'} folded`:''}</span>`
     +`</div>`;
 }
 function actSettledWire(box){
@@ -5014,6 +5282,20 @@ function actSettledWire(box){
   if(tg) tg.addEventListener('click',()=>{ _actSetOpen=!_actSetOpen; try{ store.set('actSettled',_actSetOpen?'1':'0'); }catch(_){} renderActionable(); });
   box.querySelectorAll('tr.act-set-ep').forEach(tr=>tr.addEventListener('click',()=>{
     const k=tr.dataset.epk; _actEpOpen[k]=!_actEpOpen[k]; renderActionable(); }));
+  // Size change holds your place by row anchor: the first row of the current batch stays on screen
+  // rather than snapping to the top when the page grows or shrinks.
+  box.querySelectorAll('.act-ep-sz').forEach(b=>b.addEventListener('click',ev=>{
+    ev.stopPropagation();
+    const n=+b.dataset.epsz, u=state.scope==='crypto'?'crypto':'stocks';
+    const anchor=(_actEpPage[u]||0)*_actEpSize;
+    actEpSizeSet(n); _actEpPage[u]=Math.floor(anchor/n);
+    renderActionable(); }));
+  box.querySelectorAll('.act-ep-pg').forEach(b=>b.addEventListener('click',ev=>{
+    ev.stopPropagation();
+    if(b.disabled) return;
+    const u=state.scope==='crypto'?'crypto':'stocks';
+    _actEpPage[u]=(_actEpPage[u]||0)+(+b.dataset.eppg);
+    renderActionable(); }));
 }
 function actRR(x){ return x!=null&&isFinite(x)?(+x).toFixed(2):'\u2014'; }
 function actEV(x){ return x!=null&&isFinite(x)?((x>=0?'+':'')+(+x).toFixed(2)):'\u2014'; }
@@ -5088,6 +5370,7 @@ function actDetail(r){
 }
 let _actMaxBars=10, _actMinRR='2.00';
 function renderActionable(){
+  if(state.view==='actionable' && scopeGuard('actionable')) return;   // flipped scope re-enters this renderer
   const box=el('act-body'); if(!box) return;
   const d=_act;
   if(!d){ box.innerHTML='<div class="msg">Loading\u2026</div>'; return; }
@@ -5158,7 +5441,7 @@ function renderActionable(){
   box.querySelectorAll('[data-rep]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
     showView('report'); if(typeof reportOpenFor==='function') reportOpenFor(b.dataset.rep); }));
   box.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation();
-    const cn=b.dataset.dr; if(state.rows.has(cn)){ showView('markets'); openDetail(cn); } }));
+    const cn=b.dataset.dr; if(state.rows.has(cn)) openDetail(cn); }));   // in-place drawer — no tab switch
 }
 
 // ===== signals tab =====
@@ -5206,6 +5489,19 @@ function setSigTabBadge(){
   tb.textContent = n>0 ? `Signals (${n})` : 'Signals';
 }
 function openSignals(){ renderSignals(); if(Date.now()-_sigLast>30*1000) loadSignals(); }
+// Scope guard (2026.08.03-02): the server never ships a hidden universe's rows, so a viewer parked
+// in that universe would see an empty board with no explanation. Rather than mount an "unavailable"
+// state (the hidden slice must not advertise itself), flip the global scope to the visible universe
+// when a scoped tab renders — the pill and every scoped panel simply live where the data is.
+// featureOn reads the SERVER-resolved set (never re-derived); both scopes hidden is unreachable
+// here because the parent tab self-demotes server-side first. Returns true when it flipped: the
+// caller must bail, setScope's applyScope has already re-entered the renderer in the visible scope.
+function scopeGuard(parent){
+  const cur=state.scope==='crypto'?'cx':'eq', other=cur==='cx'?'eq':'cx';
+  if(!featureOn(parent+'.'+cur) && featureOn(parent+'.'+other)){ setScope(other==='cx'?'crypto':'stocks'); return true; }
+  return false;
+}
+
 
 // ===== earnings calendar =====
 // Server-fetched (Finnhub, 6h refresh, /data warm cache) and filtered server-side to the xyz
@@ -5525,7 +5821,7 @@ function renderEarnings(){
   if(!groups.size&&!mgroups.size){
     html+='<div class="msg">No upcoming reports in the next '+(d.windowDays||14)+' days for this universe.</div>';
     box.innerHTML=html;
-    box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+    box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
   wireEarnVoid(box);
     return;
   }
@@ -5560,7 +5856,7 @@ function renderEarnings(){
   }
   html+=`<div class="sec" style="font-size:11px;margin-top:14px;line-height:1.5">Dates and sessions are the feed\u2019s scheduled values and can move \u2014 companies reschedule. Session-spanning signals (breakout, gap, overnight drift) on names reporting \u2264 1 day out carry an <i>earnings</i> flag on the Signals tab and have their evidence contribution capped: the base rates weren\u2019t sampled around a known binary catalyst. Macro rows work the same way universe-wide \u2014 an FOMC/CPI/NFP print \u2264 1 day out flags session-spanning signals on <b>both</b> universes with the same cap, and events inside an open setup\u2019s horizon are flagged on the Actionable board (\u25c6) and in AI reports. Macro dates come from the Fed\u2019s published schedule and FRED; prior values are the previous print (labeled by month), never consensus \u2014 no street-estimate feed exists here, so there is no beat/miss verdict, only prior \u2192 actual and the tape.</div>`;
   box.innerHTML=html;
-  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  box.querySelectorAll('.earn-row[data-coin]').forEach(rw=>rw.addEventListener('click',(ev)=>{ if(ev.target.closest('a,button')) return; const c=rw.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // in-place drawer — no tab switch
   wireEarnVoid(box);
 }
 
@@ -5693,7 +5989,7 @@ function renderTrend(){
     _trendMA=[_trendMA[1],p];   // drop the older, keep the newer, add the pick
     renderTrend();              // instant chip feedback; the board swaps in when the fetch lands
     loadTrend(); });
-  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)){ showView('markets'); openDetail(c); } }));
+  box.querySelectorAll('tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>{ const c=tr.dataset.coin; if(state.rows.has(c)) openDetail(c); }));   // drawer opens in place — the trend board stays underneath (no tab bounce)
   // chart button: opens the ladder chart modal; stopPropagation so the row's drawer click is untouched
   box.querySelectorAll('.tchart-btn').forEach(b=>b.addEventListener('click',(ev)=>{ ev.stopPropagation(); openTrendChart(b.dataset.coin,side); }));
 }
@@ -6216,7 +6512,7 @@ function sigCardHtml(gr, rank, collapsible){
       +`<span class="sig-chip" data-tip="${esc(EV_TIP[g.ev]||g.label)}">${esc(g.label)}</span>`
       +`<span class="sig-line1">${g.prime?'<i class="sig-prime" data-tip="prime setup: \u226560% hit, positive expectancy, sound structure (R/R \u22651.2 where levels exist), not unproven/decayed/no-edge \u2014 the bars this signal clears to earn emphasis">\u2605 prime</i>':''}<span class="sig-read">${esc(g.reading)}</span>`
       +`<span class="sig-meta">${g.confl?`<span class="sig-chip bad" data-tip="${esc(`conflicting signals \u00b7 a long-side and a short-side event are BOTH live on this name${(g.conflWith&&g.conflWith.length)?` \u00b7 opposing: ${g.conflWith.map(o=>`${o.label} (${(o.side||'').toUpperCase()}, score ${o.score})`).join('; ')} \u2014 the counterpart may rank below the visible list or be hidden by your filters; the conflict stands because both are live and both claims are on the books`:''} \u00b7 no confluence bonus is granted amid contradiction \u00b7 each claim resolves independently on its own record \u2014 the ledger, not the dashboard, decides which side was right`)}">\u21c4 conflict</span>`:''}${trigChip(g)}</span></span>`
-      +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with resolved count, so trust migrates from backtest to reality`:''))}">${hist}${flags}</span>`
+      +`<span class="sig-hist" data-tip="${esc((ownOk?'own base rate \u00b7 this market\u2019s median forward outcome and hit share across past occurrences, over the stated horizon':(g.pooled?'pooled base rate \u00b7 fewer than 8 occurrences on this market, so evidence pools across every market in its asset class \u00b7 broader sample, applied at a 30% score discount':EV_TIP[g.ev]||''))+(g.liveW?` \u00b7 evidence is Bayesian-blended with the live out-of-sample record at ${g.liveW}% weight \u2014 the weight grows with the number of independent tape-days those resolutions fell on (not the raw claim count \u2014 forty firings into one green day are one draw), and the live record it blends toward weights recent resolutions most (a decayed edge fades from the score over a quarter), so trust migrates from backtest to reality at the pace real independent evidence accrues`:''))}">${hist}${flags}</span>`
       +(g.play?playRow(g):'')
       +`</div>`;
   }
@@ -6418,6 +6714,7 @@ function sigRecordHtml(d){
 }
 function renderSignals(){
   const box=el('signals-body'); if(!box) return;
+  if(state.view==='signals' && scopeGuard('signals')) return;   // flipped scope re-enters this renderer
   const d=state.signals, view=sigViewPref(), mvThr=sigMovePref(), prOn=sigPrimePref();
   const mvBtn=(v,lbl)=>`<button type="button" class="cdtf${mvThr===v?' on':''}" data-mv="${v}" data-tip="${v===0?'show every signal regardless of target distance':`hide setups whose playbook target sits closer than ${lbl} from the live mark \u2014 statistically fine, but a few bp of expected move is not hand-tradeable. Signals with no computable target are hidden too while a threshold is active.`}">${v===0?'any':'\u2265'+lbl}</button>`;
   const seg=`<span class="sig-segs"><span class="cdtf-seg"><button type="button" class="cdtf${prOn?' on':''}" data-pr="1" data-tip="show only \u2605 prime setups \u2014 \u226560% hit, positive expectancy, sound structure at fire time \u2014 and switch the stats below to the record of prime claims only">\u2605 prime</button></span>`
@@ -6954,7 +7251,26 @@ function warmCount(){
   if(!w||!(w.d>0)) return '';
   return ` <span class="sec">(server backfill in progress — <b>${w.d}</b> market${w.d===1?'':'s'} remaining, refreshing every 20s)</span>`;
 }
-function startCycle(){ clearInterval(cycleTimer); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }, state.refreshMs); nextCycle=Date.now()+state.refreshMs; }
+// ===== SSE version push (build 2026.07.29-07) ==================================================
+// The server pushes {dataTs, alertVer, v} the second the content clock or alert seq moves; the
+// reaction is the SAME loadSnapshot the poll runs — the stream changes WHEN we pull, never WHAT.
+// While the stream is healthy the poll survives as a stretched 120s fallback (belt and braces: a
+// proxy can wedge a stream half-open without erroring); any stream error snaps the cadence back
+// instantly and EventSource handles its own reconnect. No EventSource support = the poll exactly
+// as it always was.
+let _sseOk=false, _sseSrc=null;
+function startEvents(){ if(typeof EventSource==='undefined'||_sseSrc) return;
+  try{ _sseSrc=new EventSource('/api/events'); }catch(_){ return; }
+  _sseSrc.onopen=()=>{ _sseOk=true; startCycle(); };
+  _sseSrc.onerror=()=>{ if(_sseOk){ _sseOk=false; startCycle(); } };   // reconnects itself; we just restore the fast poll
+  _sseSrc.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch(_){ return; }
+    // A pushed dataTs we already hold is a no-op (the initial sync frame, typically). A new one —
+    // including the new `v` a redeploy pushes via the reconnect's first frame — pulls immediately;
+    // applySnapshot's own short-circuit and alertVer handling then do exactly what they do on a poll.
+    if(d&&d.dataTs&&d.dataTs!==state.dataTs){ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); } };
+}
+function _cycleMs(){ return _sseOk?Math.max(state.refreshMs,120000):state.refreshMs; }
+function startCycle(){ clearInterval(cycleTimer); const ms=_cycleMs(); cycleTimer=setInterval(()=>{ loadSnapshot(); nextCycle=Date.now()+_cycleMs(); }, ms); nextCycle=Date.now()+ms; }
 function setRefresh(ms){ state.refreshMs=ms; state.pollMs=ms; startCycle(); }
 function forceRefresh(){ loadSnapshot(); nextCycle=Date.now()+state.refreshMs; }
 setInterval(()=>{ const left=Math.max(0,nextCycle-Date.now()), m=Math.floor(left/60000), s=Math.floor((left%60000)/1000);
@@ -7623,6 +7939,36 @@ async function termReports(){ let d=state.report.list;
   if(!list.length) return termOut('<span class="sec">no AI reports generated yet</span> <span class="tp-trans">— try <span class="ex" data-tcmd="report NVDA">report NVDA</span></span>');
   const lines=list.slice(0,8).map(x=>`<span class="tp-trans">${termAgo(x.ts)}</span> <span class="tp-deep" data-tcmd="report ${tesc(x.ticker)}">${tpad(tesc(x.ticker),7)}</span> <span class="tp-chip ${x.bias==='long'?'l':x.bias==='short'?'s':''}">${tesc(x.bias||'—')}</span> ${tesc((x.headline||'').slice(0,64))}`).join('\n');
   termOut(`<span class="tp-hd">recent AI reports</span> <span class="tp-trans">· shared across the group</span>\n${lines}`); }
+// ---- external fundamentals cards (SEC EDGAR) ----
+// Card builders are PURE string functions (fetch-free) so the test suite can execute them
+// against fixture payloads and assert real markup — the behavioral-render doctrine. Every
+// number on these cards is a filed figure shaped server-side; a missing field renders as an
+// explicit em-dash because the filer never tagged it, not because we dropped it.
+function tmoney(v){ if(v==null||!isFinite(v)) return '\u2014'; const a=Math.abs(v), sg=v<0?'-':'';
+  if(a>=1e12) return sg+'$'+(a/1e12).toFixed(2)+'T'; if(a>=1e9) return sg+'$'+(a/1e9).toFixed(2)+'B';
+  if(a>=1e6) return sg+'$'+(a/1e6).toFixed(1)+'M'; if(a>=1e3) return sg+'$'+(a/1e3).toFixed(1)+'K'; return sg+'$'+a.toFixed(2); }
+function tcount(v){ if(v==null||!isFinite(v)) return '\u2014'; const a=Math.abs(v);
+  if(a>=1e9) return (v/1e9).toFixed(2)+'B'; if(a>=1e6) return (v/1e6).toFixed(1)+'M'; if(a>=1e3) return (v/1e3).toFixed(1)+'K'; return String(v); }
+function termFundCard(d){
+  if(!d||!d.ok) return `<span class="sec">${tesc((d&&d.error)||'fundamentals unavailable')}</span>`;
+  const x=d.data||{}, f=x.fields||{};
+  const row=(lbl,fd,fmt)=>`<span class="tp-k">${tpad(lbl,14)}</span> <b>${fd?fmt(fd.v):'\u2014'}</b>${fd&&fd.period?` <span class="tp-trans">${tesc(String(fd.period))}</span>`:''}`;
+  const lines=[ row('assets',f.assets,tmoney), row('liabilities',f.liabilities,tmoney), row('equity',f.equity,tmoney),
+    row('cash',f.cash,tmoney), row('lt debt',f.debt,tmoney), row('net cash',f.netCash,tmoney),
+    row('revenue',f.revenue,tmoney), row('net income',f.netIncome,tmoney),
+    row('diluted eps',f.eps,(v)=>'$'+(+v).toFixed(2)), row('shares out',f.shares,tcount) ];
+  return `<span class="tp-hd">${tesc(d.ticker)} fundamentals</span>${x.name?` <span class="tp-trans">\u00b7 ${tesc(x.name)}</span>`:''}\n${lines.join('\n')}\n<span class="tp-trans">source: ${tesc(d.src||'SEC EDGAR')}${x.asOf?` \u00b7 latest filing data through ${tesc(String(x.asOf))}`:''} \u00b7 filed figures only \u2014 an em-dash means the filer never tagged that concept</span>`; }
+function termEtfCard(d){
+  if(!d||!d.ok) return `<span class="sec">${tesc((d&&d.error)||'holdings unavailable')}</span>`;
+  const x=d.data||{}, hs=Array.isArray(x.holdings)?x.holdings:[];
+  const rows=hs.map((h,i)=>`<span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(h.pct!=null?h.pct.toFixed(2)+'%':'\u2014',8,true)}  ${tesc(h.name||'\u2014')}`).join('\n');
+  return `<span class="tp-hd">${tesc(d.symbol)} holdings</span>${x.seriesName?` <span class="tp-trans">\u00b7 ${tesc(x.seriesName)}</span>`:''}\n<span class="tp-th">${tpad('#',3)} ${tpad('% NAV',8,true)}  NAME</span>\n${rows||'<span class="sec">no holdings parsed</span>'}\n<span class="tp-trans">${x.n?`top ${Math.min(hs.length,x.n)} of ${x.n} positions`:''}${x.totAssets?` \u00b7 total assets ${tmoney(x.totAssets)}`:''}${x.asOf?` \u00b7 as of ${tesc(String(x.asOf))}`:''} \u00b7 ${tesc(d.lag||'source: SEC EDGAR N-PORT')}</span>`; }
+async function termFund(t){ const T=String(t||'').toUpperCase(); if(!T) return termErr('usage: fund <ticker>');
+  const think=termThinking(); try{ const d=await fetchJSON('/api/fund/'+encodeURIComponent(T)); think.remove(); termOut(termFundCard(d)); }
+  catch(_){ think.remove(); termErr('fundamentals fetch failed \u2014 try again in a moment'); } }
+async function termEtf(t){ const T=String(t||'').toUpperCase(); if(!T) return termErr('usage: etf <symbol>');
+  const think=termThinking(); try{ const d=await fetchJSON('/api/etf/'+encodeURIComponent(T)); think.remove(); termOut(termEtfCard(d)); }
+  catch(_){ think.remove(); termErr('holdings fetch failed \u2014 try again in a moment'); } }
 function termCompare(a,b){ termHi(a.coin);
   const F=['price','d1','d7','funding','fundpct','squeeze','momentum','vstape','oi','vol','beta','dd'];
   const cell=(r,k)=>{ const f=TFIELD[k], v=f.g(r); return v==null||!isFinite(v)?'—':f.f(v); };
@@ -7685,6 +8031,13 @@ function nlResolve(text){ const rawWords=text.split(/\s+/); const s=' '+text.toL
   // failure the escalation contract forbids. A ticker inside a causal question is context for the
   // AI, never the answer. Runs before every local mapping; mirrored server-side in classifyAsk.
   if(/\bwhy\b|\bhow come\b|\bcaus(e|es|ed|ing)\b|\bexplain\b|\breasons?\b|\bdriving\b|\bwhat happened\b|\bgoing on\b|\bbehind (the|this|its)\b/.test(s)) return null;
+  // ---- external filed data (SEC) ----
+  // "balance sheet of X" / "what's inside QQQ" are pull-through commands, not board lenses —
+  // they map locally so a plain-English ask never burns AI budget on something the grammar owns.
+  if(/\b(balance sheet|fundamentals?|financials|income statement|debt load|cash position|net income|shares outstanding)\b/.test(s)&&tk) return 'fund '+tk;
+  if(/\b(holdings?|composition|constituents|top holdings|made up of|what'?s inside|whats inside)\b/.test(s)){
+    const sym=tk||rawWords.map(x=>x.replace(/[?!.,]/g,'')).find(x=>/^[A-Z]{2,6}$/.test(x)&&x===x.toUpperCase());
+    if(sym) return 'etf '+sym; }
   // ---- whole-board questions (no ticker needed) ----
   if(/\bbreadth\b/.test(s)||/\b(hows?|how is|how are|how does|whats) the (market|tape|board)\b/.test(s)
     ||/\b(market|tape) (doing|look|looking|today)\b/.test(s)||/\bhow many (names? )?(are )?(up|down|green|red)\b/.test(s)
@@ -7764,6 +8117,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='vs'||head==='compare') return !!(termFind(p[1])&&termFind(p[2]));
   if(head==='comp') return p.slice(1).filter(x=>termFind(x)||isBasketName(x)).length>=2;
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
+  if(head==='fund'||head==='bs'||head==='balance'||head==='etf'||head==='holdings') return !!p[1];   // symbols may live outside the universe (ETFs)
   if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
   if(head==='ratio') return p.length>=2;
   return false; }
@@ -7778,6 +8132,8 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='sectors') return termSectors(tfield(p[1])||'d1');
   if(h==='news'){ const rr=termFind(p[1]); const nn=p.slice(1).map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); return termNewsCmd(rr?rr.ticker.toUpperCase():null,nn); }
   if(h==='reports') return termReports();
+  if(h==='fund'||h==='bs'||h==='balance') return termFund(p[1]);
+  if(h==='etf'||h==='holdings') return termEtf(p[1]);
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
   if(h==='comp'){ const cr=state.scope==='crypto';
     const tks=[...new Set(p.slice(1).map(x=>{ const r=termFind(x); if(r) return (r.ticker||'').toUpperCase();
@@ -7956,6 +8312,8 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('ratio <a>/<b> [tf]',20)}</span><span class="sec">synthetic pair candles (1h·4h·12h·1d) with an honest EMA200 — "ratio MAG7/EWZ 4h"</span>
 <span class="amber">${tpad('signals · reports',20)}</span><span class="sec">active signals · recent AI reports</span>
 <span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
+<span class="amber">${tpad('fund <ticker>',20)}</span><span class="sec">latest SEC-filed balance sheet + income facts \u00b7 XBRL, on demand</span>
+<span class="amber">${tpad('etf <symbol>',20)}</span><span class="sec">ETF/fund composition from the latest N-PORT filing (30\u201360d lag)</span>
 <span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
 <span class="amber">${tpad('admin unlock',20)}</span><span class="sec">+ password — unlock AI generation for this session (echo redacted)</span>
 <span class="amber">${tpad('admin lock',20)}</span><span class="sec">re-lock AI generation now</span>
@@ -7967,7 +8325,7 @@ function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) 
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
 // ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
-const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','help','clear','stocks','crypto'];
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','help','clear','stocks','crypto'];
 const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
@@ -7975,6 +8333,7 @@ function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toL
   if(termFind(p[0])) return TERM_FIELDS.filter(f=>f.startsWith(cur)).map(f=>p.slice(0,-1).join(' ')+' '+f);
   if(h==='top'||h==='bottom') return ['vol','funding','squeeze','momentum','oi','carry','gainers','losers','d7','d30','rvol','vsvwap','gap','adr','vol30'].filter(x=>x.startsWith(cur)).map(x=>h+' '+x);
   if(h==='earnings') return ['today','tomorrow','week','recent'].concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur)).map(x=>'earnings '+x);
+  if(h==='fund') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>'fund '+x);
   if(h==='report'||h==='signals'||h==='corr'||h==='comp'||h==='diverge'||h==='news'||h==='vs'||h==='compare') return termActive().map(r=>r.ticker.toLowerCase()).filter(x=>x.startsWith(cur)).map(x=>p.slice(0,-1).join(' ')+' '+x);
   return []; }
 let termHist=[], termHi_=-1;
@@ -8015,6 +8374,7 @@ function termAutoGrow(el){ if(!el) return; el.style.height='auto'; el.style.heig
   termHint(); } }
 
 (async ()=>{
+  startEvents();   // push channel first: a change during boot loads lands as an instant re-pull
   await Promise.all([loadSnapshot(), loadDaily()]);
   applyHash();
   startCycle();
