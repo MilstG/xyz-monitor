@@ -4838,9 +4838,13 @@ function applyScope(){
   // true to show in crypto scope.
   applyTabVisibility();   // scope AND flags, composed in one place — this loop used to duplicate the scope half and drift from showView's copy
   document.querySelectorAll('[data-scope]').forEach(b=>b.classList.toggle('on', b.dataset.scope===state.scope));
-  if(typeof applyScopePills==='function') applyScopePills();
 
   if(!tabVisible(state.view)) { showView('markets'); }   // a scope flip OR a flag change can strand the active view
+  // -06: flipping the pill to a universe the ACTIVE scoped tab cannot show is a navigation, not a
+  // dead click — honour the chosen universe and land on Markets there. The -04 pill-hiding is gone:
+  // both pills stay mounted everywhere; entry into a scoped tab from the hidden side still
+  // auto-flips (scopeGuard in the renderers), only the mid-tab flip routes away.
+  else if((state.view==='signals'||state.view==='actionable') && !featureOn(state.view+'.'+(state.scope==='crypto'?'cx':'eq'))) showView('markets');
   if(typeof syncCorrLookback==='function') syncCorrLookback();   // swap the lookback segment for the active universe
   // The industry layer is equities-only (crypto's sectors ARE its fine grouping) — the toggle
   // hides in crypto scope rather than sitting there as a no-op. sectGrpActive() already treats
@@ -4864,7 +4868,6 @@ function showView(v){
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
-  if(typeof applyScopePills==='function') applyScopePills();   // a scoped tab hides its hidden universe's pill; every other tab restores both
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
   setHidden('view-markets', v!=='markets');
   setHidden('view-trend', v!=='trend');
@@ -5494,19 +5497,7 @@ function scopeGuard(parent){
   if(!featureOn(parent+'.'+cur) && featureOn(parent+'.'+other)){ setScope(other==='cx'?'crypto':'stocks'); return true; }
   return false;
 }
-// Pill visibility (2026.08.03-03): while a SCOPED tab is active, the hidden universe's pill does not
-// mount at all — the -02 build left it clickable, and clicking it started a fight: setScope flipped
-// the universe, the guard flipped it straight back, and the pill read as dead until the viewer left
-// the tab. Hiding the pill is the mockup's contract anyway (the hidden slice must not advertise
-// itself). Every other tab shows both pills — the global scope switch is Markets-land and untouched.
-function scopePillFor(view){ return view==='signals'||view==='actionable'?view:null; }
-function applyScopePills(){
-  const parent=scopePillFor(state.view);
-  document.querySelectorAll('.scope[data-scope]').forEach(b=>{
-    const key=b.dataset.scope==='crypto'?'cx':'eq';
-    b.hidden=!!parent && !featureOn(parent+'.'+key);
-  });
-}
+
 
 // ===== earnings calendar =====
 // Server-fetched (Finnhub, 6h refresh, /data warm cache) and filtered server-side to the xyz
