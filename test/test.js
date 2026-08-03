@@ -7798,14 +7798,18 @@ test("features: scope enforcement wiring — routes, memo, wire, panel (manifest
   // empty (or self-advertising) state, and the panel nests scope rows off the shipped parent link.
   assert.ok(app.includes("function scopeGuard(parent)"), "the client scope guard is missing");
   assert.ok(app.includes("scopeGuard('signals')") && app.includes("scopeGuard('actionable')"), "both scoped renderers must run the guard");
-  // -04: the hidden universe's PILL must not mount while a scoped tab is active — a mounted pill
-  // plus the guard is a fight (click flips scope, guard flips it back, pill reads as dead). The
-  // applier must run on BOTH transitions: entering/leaving a tab (showView) and scope flips
-  // (applyScope), or a restored pill/stale hide survives one of the two paths.
-  assert.ok(app.includes("function applyScopePills()"), "the scope-pill applier is missing");
-  assert.ok(app.includes("b.hidden=!!parent && !featureOn(parent+'.'+key)"), "the applier must both hide and RESTORE via featureOn — a hide-only pass strands the pill hidden after a flag opens");
-  assert.equal((app.match(/applyScopePills\(\)/g) || []).length >= 3, true, "applyScopePills must be wired into showView and applyScope, not just defined");
-  assert.ok(css.includes(".scope[hidden]{display:none}"), "the scope pill needs its [hidden] guard — the display:flex-beats-[hidden] bug class");
+  // -06 (reversing -04): both universe pills stay MOUNTED at all times — hiding one made the app
+  // lie about what exists. A mid-tab flip into a universe the active scoped tab cannot show is a
+  // navigation: applyScope routes to Markets in the chosen universe instead of letting the render
+  // guard flip the pill straight back (the -02/-04 fight). Entry auto-flip is untouched.
+  assert.ok(!/applyScopePills/.test(app), "the -04 pill-hiding must stay deleted — pills always mount");
+  assert.ok(app.includes("else if((state.view==='signals'||state.view==='actionable') && !featureOn(state.view+'.'+(state.scope==='crypto'?'cx':'eq'))) showView('markets');"),
+    "a scope flip into a hidden slice must land on Markets in that universe, not fight the guard");
+  assert.ok(css.includes(".scope[hidden]{display:none}"), "the [hidden] guard stays — cheap insurance for any future hider");
+  // -05: settled-table cells never wrap — a split "11+ / 14−" reads as two numbers. The label
+  // column is the ONE cell allowed to wrap; it soaks the width so the numeric columns stay whole.
+  assert.ok(css.includes(".act-set-t td{padding:4px 8px;font-family:var(--mono);white-space:nowrap}"), "settled numeric cells must be nowrap");
+  assert.ok(css.includes(".act-set-t td:first-child{white-space:normal;width:100%}"), "the settled label column must absorb the slack width");
   assert.ok(/x\.kind==='scope'&&x\.parent===m\.key/.test(app), "the admin panel must nest scope rows via the manifest's parent link, not a hardcoded list");
   assert.ok(app.includes("' \u00b7 <b>'+c.scoped+'</b> scoped'") || app.includes("scoped':''"), "the counts line must disclose the scoped split");
   assert.ok(css.includes(".adm-row.adm-scope"), "nested scope rows need their indent style");
@@ -11811,7 +11815,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.03-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.03-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
