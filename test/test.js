@@ -1888,7 +1888,7 @@ test("ai report v6: news-grounded context, no-invention rule, crypto positioning
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   for (const pin of ["cr.fundingPctile31d = fp", "cr.oiChg24Pct",
-    "const AI_SCHEMA_V = 9;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
+    "const AI_SCHEMA_V = 10;", "NEWS CONTRACT", "context.news.verified is empty you MUST NOT",
     "invented news", "rel7dPct", "rel30dPct", "context.crypto",
     // v7 earnings reported-vs-upcoming split
     "earnEntryState(x, now) === \"upcoming\"", "e.reported =",
@@ -2670,7 +2670,7 @@ test("server route manifest: every load-bearing API route is registered exactly 
   assert.equal(srv.split('fastify.post("/api/ask"').length - 1, 1, "POST /api/ask must be registered exactly once");
   // Admin budget reset is a POST backed by poller.resetAiDay — pin route, mapping, and export.
   assert.equal(srv.split('fastify.post("/api/ai-reset"').length - 1, 1, "POST /api/ai-reset must be registered exactly once");
-  assert.ok(srv.includes('r.error === "cooldown" || r.error === "daily-cap" ? 429'), "/api/ai-report must map daily-cap to 429 like cooldown");
+  assert.ok(srv.includes('r.error === "user-day-cap" || r.error === "user-month-cap"') && srv.includes('capped ? 429'), "/api/ai-report must map every cap (shared + per-user) to 429 like cooldown");
   // -11 perf: candles + series must go through serveKeyed (ETag 304 + gzip memo), NOT no-store.
   // A raw serveCached here would be a correctness BUG — etagFor keys only on dataTs, which these
   // payloads lack, so every coin would share W/"0" and a client could get a 304 for the wrong
@@ -2700,32 +2700,137 @@ test("server route manifest: every load-bearing API route is registered exactly 
     assert.ok(new RegExp(`(function ${g}\\(|${g}\\s*:)`).test(pol), `route references undefined poller getter: ${g}`);
 });
 
-test("AI admin gate: server locks generation behind an unlock cookie, no script/header bypass", () => {
+test("AI access model: open to authenticated users with per-user caps; xyzai is an admin EXEMPTION, not a gate", () => {
+  // DELIBERATE REVERSAL (2026.08.03-09): the locked-by-default posture was replaced with
+  // open-with-caps by explicit product decision. This test pins the NEW contract; restoring
+  // an ai-locked hard gate would be a regression against that decision.
   const fs = require("fs"), path = require("path");
   const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  // Signing: the unlock secret is DERIVED from ADMIN_PASSWORD (rotating it revokes every unlock),
-  // and both the signer and verifier exist.
+  // The unlock machinery still exists — as the admin exemption — and stays password-derived,
+  // fail-closed, HttpOnly, and browser-only.
   assert.ok(srv.includes("xyzmon-ai-unlock|") && /const AI_UNLOCK_SECRET/.test(srv), "AI unlock secret must derive from ADMIN_PASSWORD");
   assert.ok(srv.includes("function signAiUnlock") && srv.includes("function aiUnlockOk"), "AI unlock signer/verifier missing");
-  // Fail-closed: no admin password => no valid unlock, ever.
   assert.ok(/aiUnlockOk[\s\S]{0,120}!ADMIN_PASSWORD/.test(srv), "aiUnlockOk must reject when ADMIN_PASSWORD is unset (fail closed)");
-  // Enforcement: the shared AI-cost hook must require the xyzai unlock on top of authentication,
-  // and emit the distinct 'ai-locked' code (so the client can prompt for the password vs a login).
-  assert.ok(srv.includes('error: "ai-locked"') && /aiUnlockOk\(getCookie\(req, "xyzai"\)\)/.test(srv), "AI-cost hook must gate on the xyzai unlock cookie with an ai-locked 401");
-  // Cookie is HttpOnly and browser-session-lived (no Max-Age on set); mint + clear helpers exist.
   assert.ok(srv.includes("function setAiUnlockCookie") && srv.includes("function clearAiUnlockCookie"), "xyzai cookie set/clear helpers missing");
   assert.ok(/aiCookieAttrs[\s\S]{0,400}HttpOnly/.test(srv), "xyzai must be HttpOnly");
-  // No header/Basic bypass: the ONLY unlock affordance is the password route (no X-Admin-Password).
-  assert.ok(!/x-admin-password/i.test(srv), "there must be no header bypass for the AI gate (browser+password only)");
-  // Routes registered exactly once, backed by the shared admin check.
+  assert.ok(!/x-admin-password/i.test(srv), "there must be no header path to the admin exemption");
+  // The hook must NOT hard-401 authenticated non-admins any more: no ai-locked emission.
+  assert.ok(!srv.includes('error: "ai-locked"'), "the ai-locked hard gate must be gone — AI is open with caps");
+  // Authentication is still mandatory on the AI-cost paths.
+  assert.ok(/AI_COST_PATHS[\s\S]{0,400}reqAuthed\(req\)/.test(srv), "AI-cost hook must still require authentication");
+  // Identity threading: one aiWho helper (xyzown owner + xyzai/xyzadm admin) feeds all three surfaces.
+  assert.ok(/const aiWho = \(req, reply\) => \(\{ owner: ensureOwner\(req, reply\)/.test(srv), "aiWho helper missing");
+  assert.ok(srv.includes("poller.generateAiReport(String(b.coin || \"\"), aiWho(req, reply))"), "generation must carry who");
+  assert.ok(srv.includes('poller.askBoard(b.q || "", b.ctx || {}, aiWho(req, reply))'), "ask must carry who");
+  assert.ok(srv.includes("poller.getAiQuota(ensureOwner(req, reply), admin)"), "ai-status must surface the caller's quota");
+  // Poller: per-user constants pinned (3/day, 20/month reports; 5/day asks), soft-cap honesty noted.
+  assert.ok(/AI_USER_PER_DAY = Math\.max\(1, Number\(process\.env\.AI_USER_PER_DAY\) \|\| 3\)/.test(pol), "per-user report day cap must default to 3");
+  assert.ok(/AI_USER_PER_MONTH = Math\.max\(1, Number\(process\.env\.AI_USER_PER_MONTH\) \|\| 20\)/.test(pol), "per-user report month cap must default to 20");
+  assert.ok(/ASK_USER_PER_DAY = Math\.max\(1, Number\(process\.env\.ASK_USER_PER_DAY\) \|\| 5\)/.test(pol), "per-user ask day cap must default to 5");
+  assert.ok(pol.includes("HONESTY NOTE: xyzown is a cookie"), "the soft-cap caveat must be documented at the constants");
+  assert.ok(pol.includes('error: "user-day-cap"') && pol.includes('error: "user-month-cap"') && pol.includes('error: "ask-user-cap"'), "per-user cap error codes missing");
+  // Admin burns NOTHING: every burn site is guarded on !admin.
+  assert.equal((pol.match(/if \(!admin\) \{ aiDay\.count\+\+; aiUserBurnReport\(owner\); \}/g) || []).length, 2, "both report burn sites (name + group) must be admin-guarded");
+  assert.ok(pol.includes("if (!admin) { askDay.count++; aiUserBurnAsk(owner); }"), "ask burn must be admin-guarded");
+  // Per-user counters persist with the report cache and are pruned (cookie churn bounded).
+  assert.ok(pol.includes("users, reports: [...aiReports.values()]"), "per-user quotas must persist with the report cache");
+  assert.ok(/45 \* DAY/.test(pol) && /slice\(0, 500\)/.test(pol), "quota map must prune (45d / 500 entries)");
+  // Admin plumbing unchanged: routes once, shared password check, shared lockout.
   assert.equal(srv.split('fastify.post("/api/ai-unlock"').length - 1, 1, "POST /api/ai-unlock registered exactly once");
   assert.equal(srv.split('fastify.post("/api/ai-lock"').length - 1, 1, "POST /api/ai-lock registered exactly once");
   assert.equal(srv.split('fastify.get("/api/ai-status"').length - 1, 1, "GET /api/ai-status registered exactly once");
   assert.ok(srv.includes("poller.checkAdminPassword"), "unlock route must verify via poller.checkAdminPassword");
   assert.ok(/function checkAdminPassword/.test(pol) && /checkAdminPassword,/.test(pol), "poller.checkAdminPassword missing or not exported");
-  // The reset route must still share that one check (one lockout surface, not two).
   assert.ok(/function resetAiDay[\s\S]{0,160}checkAdminPassword\(password\)/.test(pol), "resetAiDay must route through checkAdminPassword (shared lockout)");
+});
+
+test("per-user AI quotas: exhaustion, admin exemption, and group reports end to end (injected transport)", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  process.env.OPENAI_API_KEY = "test-key";
+  process.env.AI_USER_PER_DAY = "2";   // fast exhaustion
+  try {
+    const groupJson = JSON.stringify({ bias: "long", headline: "Breadth improving across the basket",
+      read: ["Paragraph one of the group read.", "Paragraph two of the group read."],
+      leaders: "Leaders paragraph.", laggards: "Laggards paragraph.", risks: ["macro print ahead"], watch: ["breadth rolling over"] });
+    let calls = 0;
+    const aiFetch = async () => { calls++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: groupJson }, finish_reason: "stop" }] }) }; };
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+    // Seed 3 live equities with enough daily history for the aggregates.
+    const now = Date.now(), mk = (n) => { const a = []; for (let i = 0; i < n; i++)
+      a.push({ t: now - (n - i) * 86400000, o: 100, h: 101 + i * 0.1, l: 99, c: 100 + i * 0.1, v: 1e6 }); return a; };
+    for (const t of ["AAA", "BBB", "CCC"]) p.seedRowNow(t, { px: 110, uni: "xyz", vol: 1e6, dailyRaw: mk(60) });
+    // Group key canonicalization: unsorted input resolves to the sorted cache identity.
+    const r1 = await p.generateAiReport("grp:bkt:CCC+AAA+BBB", { owner: "user1", admin: false });
+    assert.equal(r1.ok, true, "group generation must succeed: " + (r1.error || ""));
+    assert.equal(r1.report.kind, "group", "report must carry the group kind");
+    assert.equal(r1.report.coin, "grp:bkt:AAA+BBB+CCC", "basket key must canonicalize sorted");
+    assert.ok(Array.isArray(r1.report.ai.read) && r1.report.ai.read.length >= 2, "group read paragraphs must survive validation");
+    assert.ok(r1.report.computed && Array.isArray(r1.report.computed.ewIndex) && r1.report.computed.ewIndex.length > 10, "EW index must ship with the report");
+    assert.ok(r1.report.computed.breadth && r1.report.computed.breadth.n === 3, "breadth must count all members");
+    assert.equal(r1.userDayLeft, 1, "one of the user's 2 daily generations spent");
+    // The cached group report reads back through the same getter, canonicalized.
+    const g = p.getAiReport("grp:bkt:BBB+AAA+CCC", { owner: "user1", admin: false });
+    assert.equal(g.kind, "group"); assert.ok(g.status === "fresh", "fresh straight after generation");
+    // Second spend hits the per-user day cap on the third try — the shared pool is untouched enough.
+    const r2 = await p.generateAiReport("grp:sec:Information Technology", { owner: "user1", admin: false });
+    // (sector may or may not resolve with only 3 seeded names — accept either a success or a clean sector error)
+    if (r2.ok) {
+      const r3 = await p.generateAiReport("grp:bkt:AAA+BBB", { owner: "user1", admin: false });
+      assert.equal(r3.error, "user-day-cap", "third generation must hit the per-user day cap");
+    } else {
+      const r2b = await p.generateAiReport("grp:bkt:AAA+BBB", { owner: "user1", admin: false });
+      assert.equal(r2b.ok, true, "a valid basket must still generate: " + (r2b.error || ""));
+      const r3 = await p.generateAiReport("grp:bkt:AAA+CCC", { owner: "user1", admin: false });
+      assert.equal(r3.error, "user-day-cap", "third generation must hit the per-user day cap");
+    }
+    // A different user has their own budget.
+    const o1 = await p.generateAiReport("grp:bkt:BBB+CCC", { owner: "user2", admin: false });
+    assert.equal(o1.ok, true, "a fresh owner has a fresh budget: " + (o1.error || ""));
+    // Admin sails through caps and burns nothing.
+    const sharedBefore = p.getAiReport("grp:bkt:AAA+BBB+CCC", { admin: true }).dayLeft;
+    const a1 = await p.generateAiReport("grp:bkt:AAA+CCC", { owner: "user1", admin: true });
+    assert.equal(a1.ok, true, "admin must bypass the exhausted per-user cap: " + (a1.error || ""));
+    assert.equal(a1.admin, true, "admin flag must ride the response");
+    const sharedAfter = p.getAiReport("grp:bkt:AAA+BBB+CCC", { admin: true }).dayLeft;
+    assert.equal(sharedAfter, sharedBefore, "an admin generation must not burn the shared pool");
+    // Bad group keys fail closed with honest errors.
+    const bad = await p.generateAiReport("grp:bkt:AAA", { owner: "user2", admin: false });
+    assert.ok(/bad group key/.test(bad.error), "a 1-ticker basket is rejected at the key");
+    const unk = await p.generateAiReport("grp:bkt:AAA+ZZZ", { owner: "user2", admin: false });
+    assert.ok(/not in the live equity universe: ZZZ/.test(unk.error), "unknown members are named, never silently dropped");
+    // Ask per-user cap: 5/day default is env-overridable; exercise via ASK_USER_PER_DAY.
+  } finally { delete process.env.OPENAI_API_KEY; delete process.env.AI_USER_PER_DAY; }
+});
+
+test("ask per-user cap: 5/day per owner over the shared pool, admin exempt and burns nothing", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  process.env.OPENAI_API_KEY = "test-key";
+  process.env.ASK_USER_PER_DAY = "1";
+  try {
+    let calls = 0;
+    const aiFetch = async () => { calls++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "screen funding<0 & squeeze>50" }, finish_reason: "stop" }] }) }; };
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, aiFetch });
+    const uni = [{ t: "SOL", sqz: 71, f: -22 }];
+    const a = await p.askBoard("most crowded shorts?", { universe: uni }, { owner: "u1", admin: false });
+    assert.equal(a.ok, true); assert.equal(a.askUserDayLeft, 0, "the single per-user ask is spent");
+    const b = await p.askBoard("top funding names?", { universe: uni }, { owner: "u1", admin: false });
+    assert.equal(b.error, "ask-user-cap", "second distinct ask hits the per-user cap before the shared pool");
+    const sharedBefore = b.askDayLeft, callsBefore = calls;
+    const c = await p.askBoard("what about momentum leaders?", { universe: uni }, { owner: "u1", admin: true });
+    assert.equal(c.ok, true, "admin bypasses the per-user cap");
+    assert.equal(c.askDayLeft, sharedBefore, "admin asks must not burn the shared pool");
+    assert.ok(calls > callsBefore, "the admin ask really hit the transport");
+    const d = await p.askBoard("most crowded shorts?", { universe: uni }, { owner: "u2", admin: false });
+    assert.equal(d.cached, true, "another user re-asking the same question rides the cache");
+    assert.equal(d.askUserDayLeft, 1, "a cache hit burns nothing from the new user's budget");
+  } finally { delete process.env.OPENAI_API_KEY; delete process.env.ASK_USER_PER_DAY; }
 });
 
 test("stop geometry: validator, hydrate repair of fabricated stop-aware wins, open-claim voiding", () => {
@@ -3950,7 +4055,7 @@ test("client -74: side-typed glyphs + legend ship end to end; schema bumped so -
   for (const frag of ["AI_MK", "ai-mkleg", "proven-edge signals only", "g.kind==='short'", "distinct signal types at onset", "outTxt", "marksSuppressed"])
     assert.ok(app.includes(frag), `app.js missing -74 marker: ${frag}`);
   assert.ok(css.includes(".ai-mkleg"), "styles.css missing the marker legend");
-  for (const frag of ["const AI_SCHEMA_V = 9;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
+  for (const frag of ["const AI_SCHEMA_V = 10;", "aiMarksNow", "aiEvEdge", "AI_MARK_MIN_N", "runsOn", "lastEnd", "marksSuppressed"])
     assert.ok(pol.includes(frag), `poller.js missing -74 marker: ${frag}`);
 });
 
@@ -4523,7 +4628,7 @@ test("daily report budget + admin reset + terra effort routing", async () => {
 test("ask daily budget: cap enforced, only successful non-cached calls burn it, surfaced everywhere, chip wired", async () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(/ASK_REPORTS_PER_DAY = Math\.max\(1, Number\(process\.env\.ASK_MAX_PER_DAY\) \|\| 40\)/.test(pol), "ask daily cap must default to 40, env ASK_MAX_PER_DAY");
+  assert.ok(/ASK_REPORTS_PER_DAY = Math\.max\(1, Number\(process\.env\.ASK_MAX_PER_DAY\) \|\| 50\)/.test(pol), "ask daily cap must default to 50, env ASK_MAX_PER_DAY");
   assert.ok(pol.includes('error: "ask-daily-cap"'), "askBoard must fail closed with ask-daily-cap");
   assert.ok(pol.includes("askDay.count++;"), "a successful ask must burn budget");
   assert.ok(pol.includes("day: aiDay, askDay,"), "ask budget must persist with the report budget (redeploy can't refill)");
@@ -4569,7 +4674,8 @@ test("ask daily budget: cap enforced, only successful non-cached calls burn it, 
   assert.ok(app.includes("function renderAskBudget"), "ambient chip renderer missing");
   assert.ok(/renderAskBudget\(h\.ai\.askDayLeft, h\.ai\.askPerDay\)/.test(app), "chip must be fed by the health poll");
   assert.ok(app.includes("renderAskBudget(d.askDayLeft, d.askPerDay)"), "chip must update from each ask response");
-  assert.ok(app.includes("'ask-daily-cap'") && app.includes("daily AI limit reached"), "client must handle the ask daily-cap message");
+  assert.ok(app.includes("'ask-user-cap'") && app.includes("your daily AI limit is reached"), "client must handle the per-user ask cap distinctly");
+  assert.ok(app.includes("'ask-daily-cap'") && app.includes("the shared daily AI pool is exhausted"), "client must handle the shared-pool cap message");
   assert.ok(app.includes("ask calls left today") || app.includes("call':'calls'"), "analyst tail must show remaining ask budget");
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.ok(html.includes('id="termBudget"'), "terminal bar must contain the budget chip");
@@ -5549,7 +5655,7 @@ test("levels -09: manifest — detector, context block, snap rule and prompt con
     assert.ok(cmp.includes(pin), `compute.js missing -09 pin: ${pin}`);
   for (const pin of [
     "const AI_LEVEL_K = 3, AI_LEVEL_TAU = 0.4, AI_LEVEL_MINN = 2, AI_LEVEL_MAX = 8;",
-    "const AI_SNAP_TOL = 0.5;", "const AI_SCHEMA_V = 9;",
+    "const AI_SNAP_TOL = 0.5;", "const AI_SCHEMA_V = 10;",
     "ctx.levels = lv || { n: 0, items: [], note:",
     "does not sit on any detected structural level", "(snapped to structure)",
     // the prompt must POINT at the field — the old wording asked for swing data the context never shipped
@@ -11863,7 +11969,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.03-08"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.03-09"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
