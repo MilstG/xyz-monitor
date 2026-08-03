@@ -11358,6 +11358,49 @@ async function settledPoller() {
   return { p, COIN, px, hourly, saved, HOUR_, DAY_, endH };
 }
 
+test("fire->shown decomposition -07: pure split math, stamping through the real machinery, and the chained rebuild", async () => {
+  const C = require("../src/compute");
+  // Unit truths first — the pure math must refuse before it guesses.
+  const H = 3600e3;
+  assert.deepEqual(C.epLatParts({ tFire: 10, tBld: 10 + 2 * H, tShow: 10 + 3 * H }), { cad: 2 * H, gate: H });
+  assert.equal(C.epLatParts({ tFire: 10, tBld: 5, tShow: 20 }), null, "tBld before tFire is damage, refused not clamped");
+  assert.equal(C.epLatParts({ tFire: 10, tShow: 20 }), null, "a pre-stamp episode yields no number");
+  assert.equal(C.epLatParts({ tFire: 10, tBld: 12, tShow: 20, bt: 1 }), null, "boot-shown stamps are lower bounds — excluded");
+  assert.equal(C.epLatParts({ tFire: 10, tBld: 12, tShow: 20, be: 1 }), null, "boot-evaluated stamps too");
+  const agg = C.epLatSplit([
+    { tFire: 0, tBld: 2 * H, tShow: 3 * H }, { tFire: 0, tBld: 4 * H, tShow: 9 * H },
+    { tFire: 0, tBld: 6 * H, tShow: 6 * H }, { tFire: 0, tShow: 5 }, { bt: 1, tFire: 0, tBld: 1, tShow: 2 }]);
+  assert.equal(agg.n, 3); assert.equal(agg.excl, 2, "pre-stamp and boot episodes are counted out, never averaged in");
+  assert.equal(agg.cadMed, 4 * H); assert.equal(agg.gateMed, H, "medians over the stamped set only");
+  assert.equal(agg.gateAvg, (H + 5 * H + 0) / 3);
+  assert.deepEqual(C.epLatSplit([]), { n: 0, excl: 0, cadMed: null, cadAvg: null, gateMed: null, gateAvg: null });
+  // Now the real machinery: the harness claim must come out the other side with a full stamp
+  // ladder and a split on the payload — string pins cannot prove the stamps flow (the -84 lesson).
+  const { p } = await settledPoller();
+  const ep = p.boardEpStateNow().open[0];
+  assert.ok(Number.isFinite(ep.tBld), "an opened episode must carry the first-evaluated stamp");
+  assert.ok(ep.tFire <= ep.tBld && ep.tBld <= ep.tShow, "the stamp ladder must be ordered fire <= evaluated <= shown");
+  assert.equal(ep.be, undefined, "a claim fired BY this process is properly timed — the epoch test, not a first-build flag, decides the lower bound");
+  const a = p.getActionable(true);
+  assert.ok(a.settled.perUni.stocks.split, "the split block must ride the settled payload");
+  // Persistence roundtrip: the evaluation stamps ride the board blob — a deploy is not an evaluation.
+  const fs2 = require("fs"), path2 = require("path");
+  const pol = fs2.readFileSync(path2.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("evalT: [...actEval].map(([k, v]) => [k, v.t, v.b ? 1 : 0])"), "actEval must persist in the board blob");
+  assert.ok(pol.includes('if (Array.isArray(d.board.evalT)) for (const t of d.board.evalT)'), "…and hydrate from it");
+  // The chained rebuild: through chainBuild ONLY (a bare call is the interleave hazard the chain
+  // exists to forbid), flagged from openLedger for real claims only, debounced and floor-limited.
+  assert.ok(pol.includes('if (vi == null) actKick = true;'), "only real claims kick the board — shadows are bookkeeping");
+  assert.ok(pol.includes('chainBuild("buildActionable", buildActionable).catch'), "the kick must go through chainBuild");
+  assert.ok(pol.includes("if (Date.now() - actBuilt > 5000)"), "the 5s floor keeps a cascade day from stampeding the chain");
+  assert.ok(!/if \(actKick\) \{\s*buildActionable\(/.test(pol), "never a bare buildActionable from the signals pass");
+  // The stamp lands BEFORE any gate in the candidate loop — that placement IS the boundary
+  // between the cadence component and the gate component.
+  const stampAt = pol.indexOf("actEval.set(e.key, { t: now, b: Number.isFinite(e.t0)");
+  const firstGate = pol.indexOf("if (!r || r.delisted || !(r.px > 0)) continue;", pol.indexOf("const cands = [];"));
+  assert.ok(stampAt > 0 && firstGate > 0 && stampAt < firstGate, "the evaluation stamp must precede every candidate gate");
+});
+
 test("settled -15: an episode opens at first appearance, flicker folds instead of duplicating, and the payload ships the record", async () => {
   const { p, COIN, px } = await settledPoller();
   const a = p.getActionable(true);
@@ -11815,7 +11858,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.03-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.03-07"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
