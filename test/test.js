@@ -7733,18 +7733,30 @@ test("features: scope filters — the payload a scoped caller receives (behavior
   // Input must not be mutated by the filtering pass.
   assert.equal(full.signals.length, 2); assert.equal(full.countU.x, 3); assert.ok(full.records["0"]);
 
-  // Actionable: rows by uni, count restated, per-universe settled sliced, confirmed restated.
+  // Actionable: rows by uni, count restated, settled sliced INSIDE its real shape. The fixture
+  // mirrors boardSettled's actual return ({since, dropped, perUni, episodes}) — the -02 regression
+  // shipped because the fixture and the filter agreed on a shape the builder never produced.
   const act = { ts: 1, dataTs: 5, params: { p: 1 }, coverage: { confirmed: 4, untakeable: 7 },
-    settled: { stocks: { all: {} }, crypto: { all: {} } },
+    settled: { since: 123, dropped: 1, perUni: { stocks: { all: { n: 2 } }, crypto: { all: { n: 3 } } },
+      episodes: [{ k: "e1", uni: "stocks" }, { k: "c1", uni: "crypto" }] },
     rows: [{ coin: "xyz:TSLA", uni: "stocks" }, { coin: "ETH", uni: "crypto" }], count: 2 };
   const apub = C.scopeFilterActionable(act, { cx: true, eq: false, all: false });
   assert.deepEqual(apub.rows.map((r) => r.coin), ["ETH"], "equity board rows must be absent for a crypto-only caller");
   assert.equal(apub.count, 1);
   assert.equal(apub.coverage.confirmed, 1, "coverage.confirmed must be restated over the visible slice");
   assert.equal(apub.coverage.untakeable, 7, "engine-wide rejection diagnostics stay");
-  assert.equal(apub.settled.stocks, null, "the hidden universe's settled record must be withheld");
-  assert.ok(apub.settled.crypto, "the visible universe's settled record must survive");
+  assert.equal(apub.settled.perUni.stocks, null, "the hidden universe's settled panel must be withheld");
+  assert.deepEqual(apub.settled.perUni.crypto, { all: { n: 3 } }, "the visible universe's settled panel must survive IN PLACE — the client reads st.perUni[scope]");
+  assert.equal(apub.settled.since, 123); assert.equal(apub.settled.dropped, 1);
+  assert.deepEqual(apub.settled.episodes.map((e) => e.k), ["c1"], "hidden-universe episode rows must be dropped, visible ones kept");
   assert.equal(C.scopeFilterActionable(act, { cx: true, eq: true, all: true }), act, "vis.all identity for the board too");
+  assert.equal(act.settled.episodes.length, 2, "the input settled record must not be mutated");
+  // Shape agreement with the REAL builder (the -84 lesson, applied to fixtures): the fields this
+  // fixture claims must be the fields boardSettled actually emits — a drifted fixture re-opens
+  // exactly the hole -02 shipped through.
+  const polSrc = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(polSrc.includes("return { since: boardEpSince || null, dropped: boardEpDropped, perUni: per,"),
+    "boardSettled's return shape moved — update scopeFilterActionable AND this fixture together");
 
   // Trigger predicate: signal-borne kinds sliced by coin against their OWN parent's set; every
   // other kind passes untouched (it belongs to a feature with its own gate).
@@ -7786,6 +7798,14 @@ test("features: scope enforcement wiring — routes, memo, wire, panel (manifest
   // empty (or self-advertising) state, and the panel nests scope rows off the shipped parent link.
   assert.ok(app.includes("function scopeGuard(parent)"), "the client scope guard is missing");
   assert.ok(app.includes("scopeGuard('signals')") && app.includes("scopeGuard('actionable')"), "both scoped renderers must run the guard");
+  // -04: the hidden universe's PILL must not mount while a scoped tab is active — a mounted pill
+  // plus the guard is a fight (click flips scope, guard flips it back, pill reads as dead). The
+  // applier must run on BOTH transitions: entering/leaving a tab (showView) and scope flips
+  // (applyScope), or a restored pill/stale hide survives one of the two paths.
+  assert.ok(app.includes("function applyScopePills()"), "the scope-pill applier is missing");
+  assert.ok(app.includes("b.hidden=!!parent && !featureOn(parent+'.'+key)"), "the applier must both hide and RESTORE via featureOn — a hide-only pass strands the pill hidden after a flag opens");
+  assert.equal((app.match(/applyScopePills\(\)/g) || []).length >= 3, true, "applyScopePills must be wired into showView and applyScope, not just defined");
+  assert.ok(css.includes(".scope[hidden]{display:none}"), "the scope pill needs its [hidden] guard — the display:flex-beats-[hidden] bug class");
   assert.ok(/x\.kind==='scope'&&x\.parent===m\.key/.test(app), "the admin panel must nest scope rows via the manifest's parent link, not a hardcoded list");
   assert.ok(app.includes("' \u00b7 <b>'+c.scoped+'</b> scoped'") || app.includes("scoped':''"), "the counts line must disclose the scoped split");
   assert.ok(css.includes(".adm-row.adm-scope"), "nested scope rows need their indent style");
@@ -11791,7 +11811,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.03-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.03-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
