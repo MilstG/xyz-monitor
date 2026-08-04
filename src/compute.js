@@ -6304,16 +6304,28 @@ function validateLandProse(prose, ctx) {
     return { ok: false, error: "directional instruction" };
   const ids = new Set();
   for (const cl of (ctx && ctx.news) || []) for (const h of cl.items || []) if (h && h.id) ids.add(String(h.id));
-  const refs = Array.isArray(p.refs) ? [...new Set(p.refs.map((x) => String(x)))] : null;
+  let refs = Array.isArray(p.refs) ? [...new Set(p.refs.map((x) => String(x)))] : null;
   if (!refs) return { ok: false, error: "refs missing" };
   if (refs.length < LAND_REFS_MIN) return { ok: false, error: `refs too few (${refs.length})` };
-  if (refs.length > LAND_REFS_MAX) return { ok: false, error: `refs too many (${refs.length})` };
+  // Existence is checked over the FULL list, before any trim: a hallucinated citation anywhere is
+  // a grounding failure and stays fatal regardless of how many real ones surround it.
   for (const r of refs) if (!ids.has(r)) return { ok: false, error: `ref not in context: ${r}` };
+  // Over-citation is NOT a validity failure — the same lesson the prose-length check learned above.
+  // Too few refs means under-grounded commentary (fatal); too many means a verbose but fully
+  // verified footer, which is a LENGTH problem, and the renderer's shed ladder owns length. The
+  // 2026-08-04 09:04 send proved the asymmetry the hard way: a 15-ref story, every ref real, was
+  // discarded whole and the trader got "commentary unavailable" instead of a read. Trim to the
+  // first LAND_REFS_MAX in citation order and say so — the note ships with the message.
+  let refsNote = null;
+  if (refs.length > LAND_REFS_MAX) {
+    refsNote = `sources trimmed ${refs.length}\u2192${LAND_REFS_MAX}`;
+    refs = refs.slice(0, LAND_REFS_MAX);
+  }
   // Numbers and names ride the same gates the brief uses — commentary is allowed to be relational,
   // not to be numerically inventive.
   const gv = briefTextViolation(v, briefContextNumbers(ctx), briefContextNames(ctx));
   if (gv) return { ok: false, error: gv };
-  return { ok: true, story: v.trim(), refs };
+  return { ok: true, story: v.trim(), refs, refsNote };
 }
 
 // One message, always. Heading, the paragraphs, then the cited headlines as links — the sources

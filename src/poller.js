@@ -9342,7 +9342,7 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     const d = briefDayKey(Date.now());
     if (landDay.d !== d) landDay = { d, n: 0 };
     landDay.n++;
-    return { ok: true, story: v.story, refs: v.refs, model: used, cut, cutWhy };
+    return { ok: true, story: v.story, refs: v.refs, model: used, cut, cutWhy, refsNote: v.refsNote || null };
   }
 
   // One generation per hour-bucket, shared by everyone waking in it — same economics as the brief.
@@ -9360,8 +9360,12 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
         const p = await landProse(ctx);
         if (p.ok) {
           prose = { story: p.story, refs: p.refs }; model = p.model;
-          // Salvage ships the prose AND the note: ctx.proseErr renders alongside it now.
-          if (p.cut) { degraded = p.cut + " sentence(s) withheld \u2014 " + p.cutWhy; landLastErr = degraded; }
+          // Salvage ships the prose AND the note: ctx.proseErr renders alongside it now. A refs
+          // trim is the same kind of honest disclosure — combined when both happen on one send.
+          const notes = [];
+          if (p.cut) notes.push(p.cut + " sentence(s) withheld \u2014 " + p.cutWhy);
+          if (p.refsNote) { notes.push(p.refsNote); log("landscape: " + p.refsNote); }
+          if (notes.length) { degraded = notes.join(" \u00b7 "); landLastErr = degraded; }
         } else { degraded = p.error; landLastErr = p.error; }
       } catch (e) { degraded = (e && e.message) || String(e); landLastErr = degraded; }
     } else degraded = "disabled";
