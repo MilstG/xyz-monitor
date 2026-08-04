@@ -11969,7 +11969,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.03-09"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.04-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14874,6 +14874,37 @@ test("landscape prose: refs are the grounding contract and every gate the brief 
   assert.ok(overBudget.length > C.LAND_PROSE_MAX, "the guard's story must actually exceed the soft budget");
   assert.equal(C.validateLandProse({ story: overBudget, refs: ["h1", "h2"] }, ctx).ok, true,
     "over the soft budget is not a validity failure — the renderer's shed ladder fits it, never a wholesale discard");
+
+  // Regression (the 2026-08-04 09:04 send): a 15-ref story with every ref REAL was discarded whole
+  // — "refs too many (15)" — and the trader got "commentary unavailable". Over-citation is the
+  // refs-side twin of the soft-budget lesson above: too FEW refs is under-grounded commentary and
+  // stays fatal; too MANY fully-verified refs is verbosity, which is trimmed and disclosed.
+  const wide = { at: Date.now(), news: [{ sector: "Everything", items:
+    Array.from({ length: 16 }, (_, i) => ({ id: "w" + i, t: "T" + i, h: "headline " + i, u: "https://ex.com/w" + i })) }] };
+  const wideRefs = Array.from({ length: 15 }, (_, i) => "w" + i);
+  const vt = C.validateLandProse({ story: two, refs: wideRefs }, wide);
+  assert.equal(vt.ok, true, "15 verified refs must never cost the commentary");
+  assert.equal(vt.refs.length, 12, "trimmed to LAND_REFS_MAX in citation order");
+  assert.deepEqual(vt.refs, wideRefs.slice(0, 12), "the FIRST cited survive — citation order is the model's own priority");
+  assert.equal(vt.refsNote, "sources trimmed 15\u219212", "the trim is disclosed, never silent");
+  assert.equal(C.validateLandProse({ story: two, refs: ["h1", "h2"] }, ctx).refsNote, null,
+    "an in-budget footer carries no note");
+  // Existence is checked over the FULL list BEFORE the trim: a hallucinated ref hiding at
+  // position 15 must not be trimmed into innocence.
+  const withGhost = wideRefs.slice(0, 14).concat(["ghost99"]);
+  assert.ok(/ref not in context: ghost99/.test(C.validateLandProse({ story: two, refs: withGhost }, wide).error),
+    "a fabricated citation past the trim boundary is still fatal — trim must not launder grounding");
+  assert.ok(/refs too few/.test(C.validateLandProse({ story: two, refs: ["h1"] }, ctx).error),
+    "the asymmetry holds: under-grounded stays a hard reject");
+  // Wiring: the note travels landProse -> generateLandscape's degraded channel, so it renders
+  // with the message via ctx.proseErr like every other salvage disclosure.
+  const fs2 = require("fs"), path2 = require("path");
+  const polSrc = fs2.readFileSync(path2.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of ["refsNote: v.refsNote || null", "if (p.refsNote) { notes.push(p.refsNote)", "notes.join(\" \\u00b7 \")"])
+    assert.ok(polSrc.includes(pin), `refs-trim wiring pin missing: ${pin}`);
+  const cmpSrc = fs2.readFileSync(path2.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(/for \(const r of refs\) if \(!ids\.has\(r\)\)[\s\S]{0,900}refs\.length > LAND_REFS_MAX/.test(cmpSrc),
+    "ordering pin: existence check must run over the full list BEFORE the trim");
 });
 
 test("landscape render: sources footer, URL guard, honest degradation, shed order", () => {
