@@ -77,8 +77,10 @@ test("classify: indices, ETFs, FX, crypto, commodities", () => {
 });
 
 test("classify: dex-specific pre-IPO / thematic tickers", () => {
-  assert.equal(classify("SPCX").assetClass, "Pre-IPO");
+  // SPCX graduated 2026-06-12 (Nasdaq listing) — Equity now, and the label must NOT claim synthetic.
+  assert.equal(classify("SPCX").assetClass, "Equity");
   assert.equal(classify("SPCX").sector, "Industrials");
+  assert.equal(classify("ANDURIL").assetClass, "Pre-IPO");
   assert.equal(classify("ZHIPU").sector, "Information Technology");
   assert.equal(classify("STRC").sector, "Financials");
   assert.equal(classify("DRAM").sector, "Thematic");
@@ -11969,7 +11971,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.04-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.04-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -13188,8 +13190,10 @@ test("displayName: a label table, separate from the headline-alias table, null w
   for (const [t, v] of Object.entries(DISPLAY_NAMES).concat(Object.entries(CRYPTO_NAMES)))
     assert.ok(typeof v === "string" && v.trim().length > 1, `display name for ${t} must be a real label`);
   // Pre-IPO synthetics must SAY they are synthetics — the label is where that disclosure lives.
-  for (const t of ["SPCX", "OPENAI", "ANTHROPIC", "XAI"])
+  for (const t of ["OPENAI", "ANTHROPIC", "XAI", "ANDURIL", "RAMP"])
     assert.ok(/pre-IPO synthetic/.test(DISPLAY_NAMES[t]), `${t} label must disclose it is a synthetic`);
+  // Graduated names must DROP the disclosure — a listed equity labeled "synthetic" is a lie in the other direction.
+  assert.ok(!/pre-IPO synthetic/.test(DISPLAY_NAMES["SPCX"]), "SPCX graduated — label must not claim synthetic");
 });
 
 test("macroLane: scoped topics, broad tape, or no lane at all — never a bare fallback", () => {
