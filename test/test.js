@@ -2273,6 +2273,36 @@ test("earnings: parser carries actuals and revenue for beat/miss", () => {
   assert.equal(out[1].q, null, "missing quarter is unknown, never guessed");
 });
 
+test("earnings: epsActual 0 is a feed placeholder — null, never a fabricated verdict", () => {
+  const { parseEarningsCalendar, scrubPlaceholderActuals, earnEntryState } = require("../src/compute");
+  const symMap = new Map([["AMD", { coin: "xyz:AMD", ticker: "AMD" }], ["SPCX", { coin: "xyz:SPCX", ticker: "SPCX" }]]);
+  // The live 2026-08-04 shape: report-day rows with epsActual:0 before the real number lands.
+  const out = parseEarningsCalendar({ earningsCalendar: [
+    { symbol: "AMD", date: "2026-08-04", hour: "amc", epsEstimate: 1.63, epsActual: 0 },
+    { symbol: "SPCX", date: "2026-08-04", hour: "amc", epsEstimate: -0.26, epsActual: 0 },
+    { symbol: "AMD", date: "2026-05-05", hour: "amc", epsEstimate: 0, epsActual: 1.37 },
+  ] }, symMap);
+  const amd = out.find((e) => e.t === "AMD" && e.d === "2026-08-04");
+  const spcx = out.find((e) => e.t === "SPCX");
+  const est0 = out.find((e) => e.d === "2026-05-05");
+  assert.equal(amd.epsA, null, "AMD 0.00 actual is a placeholder, not a 0.00-vs-1.63 miss");
+  assert.equal(spcx.epsA, null, "SPCX 0.00 actual is a placeholder, not a 0.00-vs--0.26 beat");
+  assert.equal(est0.eps, 0, "a 0.00 ESTIMATE survives — plausible and verdict-safe");
+  assert.equal(est0.epsA, 1.37, "nonzero actuals untouched");
+  assert.equal(earnEntryState(amd, Date.UTC(2026, 7, 4, 16, 0)), "upcoming",
+    "placeholder actual no longer flips report-day AMC to reported before the close");
+  // Retroactive scrub for pre-fix persisted prints (merge can never blank an actual itself).
+  const scrubbed = scrubPlaceholderActuals([
+    { t: "AMD", d: "2026-08-04", s: "AMC", eps: 1.63, epsA: 0 },
+    { t: "NVDA", d: "2026-07-13", s: "AMC", eps: 5.6234, epsA: 5.712 },
+    null,
+  ]);
+  assert.equal(scrubbed[0].epsA, null, "persisted placeholder zero scrubbed at hydrate");
+  assert.equal(scrubbed[0].eps, 1.63, "other fields untouched");
+  assert.equal(scrubbed[1].epsA, 5.712, "real actuals never touched");
+  assert.equal(scrubPlaceholderActuals(null).length, 0, "malformed input is empty, not a throw");
+});
+
 test("earnings: print merge dedupes, upgrades in place with actuals, never blanks them", () => {
   const { mergeEarnPrints } = require("../src/compute");
   const now = Date.UTC(2026, 6, 13);
@@ -11971,7 +12001,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.04-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.04-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
