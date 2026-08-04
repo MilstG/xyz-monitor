@@ -12,7 +12,7 @@ const SECTOR_TICKERS = {
   "Consumer Staples": ["PG","KO","PEP","COST","WMT","PM","MO","MDLZ","TGT","KMB","GIS","KHC","SYY","STZ","KDP","MNST","HSY","KR","ADM","DG","DLTR","CLX","CHD","MKC","K","HRL","TSN","CAG","CPB","EL","KVUE","BG","TAP"],
   "Health Care": ["UNH","JNJ","LLY","ABBV","MRK","PFE","TMO","ABT","DHR","AMGN","BMY","GILD","CVS","MDT","ISRG","ELV","VRTX","REGN","CI","ZTS","BSX","HCA","SYK","BDX","HUM","MRNA","BIIB","IDXX","DXCM","IQV","MCK","CNC","GEHC","EW","A","RMD","WST","BAX","ZBH","MTD","COR","ALGN","HOLX","STE","HIMS"],
   "Financials": ["BRK.B","BRKB","JPM","V","MA","BAC","WFC","GS","MS","SPGI","AXP","BLK","C","SCHW","CB","PGR","MMC","PNC","USB","TFC","AON","ICE","CME","COF","MET","AIG","PRU","TRV","ALL","BK","AFL","MSCI","PYPL","SQ","COIN","HOOD","FIS","FI","GPN","DFS","SYF","MCO","AJG","NDAQ","STT","FITB","HBAN","RF","CFG","KEY","AMP","TROW","CRCL","BX","STRC"],
-  "Industrials": ["CAT","HON","UPS","BA","GE","RTX","UNP","DE","LMT","ADP","GD","NOC","ETN","MMM","ITW","EMR","CSX","FDX","NSC","WM","GEV","PH","TDG","CTAS","PCAR","CARR","OTIS","CMI","ROK","IR","FAST","ODFL","LUV","DAL","UAL","AAL","PAYX","VRSK","URI","LHX","RSG","GWW","AME","DOV","HWM","WAB","EFX","XYL","FTV","PWR","BLDR","J","RKLB","BE"],
+  "Industrials": ["CAT","HON","UPS","BA","GE","RTX","UNP","DE","LMT","ADP","GD","NOC","ETN","MMM","ITW","EMR","CSX","FDX","NSC","WM","GEV","PH","TDG","CTAS","PCAR","CARR","OTIS","CMI","ROK","IR","FAST","ODFL","LUV","DAL","UAL","AAL","PAYX","VRSK","URI","LHX","RSG","GWW","AME","DOV","HWM","WAB","EFX","XYL","FTV","PWR","BLDR","J","RKLB","BE","SPCX"],
   "Energy": ["XOM","CVX","COP","SLB","EOG","MPC","PSX","VLO","WMB","OKE","HES","OXY","KMI","HAL","DVN","BKR","FANG","TRGP","CTRA","MRO","APA","EQT","LNG","OVV","MTDR","DINO"],
   "Materials": ["LIN","APD","SHW","ECL","FCX","NEM","DOW","DD","NUE","CTVA","VMC","MLM","PPG","ALB","IFF","LYB","STLD","CF","MOS","CE","EMN","IP","PKG","AMCR","BALL","AVY","FMC","USAR"],
   "Utilities": ["NEE","DUK","SO","D","AEP","SRE","EXC","XEL","ED","PEG","WEC","AWK","PCG","EIX","DTE","AEE","ETR","ES","FE","PPL","CMS","CNP","NRG","VST","LNT","EVRG","ATO","NI","PNW"],
@@ -21,7 +21,15 @@ const SECTOR_TICKERS = {
 
 const SECTOR_ETF = { XLE:"Energy", XOP:"Energy", SMH:"Information Technology", SOXX:"Information Technology", XLK:"Information Technology", XLF:"Financials", XLV:"Health Care", XLI:"Industrials", XLP:"Consumer Staples", XLY:"Consumer Discretionary", XLB:"Materials", XLU:"Utilities", XLRE:"Real Estate", XLC:"Communication Services", URNM:"Materials", URA:"Materials" };
 // Pre-IPO synthetic perps (track a private company's implied valuation before listing).
-const PREIPO = { SPCX:"Industrials", OPENAI:"Information Technology", ANTHROPIC:"Information Technology", CURSOR:"Information Technology", XAI:"Information Technology", DATABRICKS:"Information Technology", STRIPE:"Financials", REVOLUT:"Financials", DISCORD:"Communication Services", CANVA:"Information Technology", RAMP:"Financials", ANDURIL:"Industrials", FIGURE:"Industrials" };
+// GRADUATION IS A CURATED EDIT, NEVER AUTO-DETECTED: several synthetic tickers collide with
+// real listed symbols (RAMP is LiveRamp on NYSE; FIGURE, DISCORD are plausible future
+// collisions), so matching a symbol against an external listings feed would silently
+// reclassify a private synthetic the moment an unrelated company lists under the same code.
+// When a name actually lists: move the ticker into SECTOR_TICKERS, drop it here, update its
+// DISPLAY_NAMES label (the "pre-IPO synthetic" disclosure must go), and add a COMPANY_NAMES
+// alias — earnings-calendar eligibility then follows automatically from assetClass "Equity".
+// Graduated: SPCX (SpaceX, Nasdaq listing 2026-06-12).
+const PREIPO = { OPENAI:"Information Technology", ANTHROPIC:"Information Technology", CURSOR:"Information Technology", XAI:"Information Technology", DATABRICKS:"Information Technology", STRIPE:"Financials", REVOLUT:"Financials", DISCORD:"Communication Services", CANVA:"Information Technology", RAMP:"Financials", ANDURIL:"Industrials", FIGURE:"Industrials" };
 // Thematic / synthetic price indices that don't map to a single company.
 const THEMATIC = new Set(["DRAM","H100","BOT","GPU","HBM","WAFER","COMPUTE","NAND","MEMORY"]);
 const REGION_ETF = new Set(["EWY","EWJ","EWZ","EWT","EWG","EWU","EWH","EWA","EWW","EWC","FXI","MCHI","INDA","EEM","VEA","VWO","SPY","QQQ","IWM","DIA","VOO"]);
@@ -184,7 +192,7 @@ const COMPANY_NAMES = {
   ABBV:["AbbVie"], HIMS:["Hims"], XOM:["Exxon"], CVX:["Chevron"], COP:["ConocoPhillips"], SLB:["Schlumberger","SLB"],
   OXY:["Occidental"], LNG:["Cheniere"], CAT:["Caterpillar"], BA:["Boeing"], GE:["GE Aerospace","General Electric"],
   LMT:["Lockheed"], RTX:["RTX","Raytheon"], NOC:["Northrop"], DE:["Deere"], UPS:["UPS"], FDX:["FedEx"],
-  RKLB:["Rocket Lab"], BE:["Bloom Energy"], WMT:["Walmart"], COST:["Costco"], TGT:["Target"], KO:["Coca-Cola"],
+  RKLB:["Rocket Lab"], BE:["Bloom Energy"], SPCX:["SpaceX","Space Exploration Technologies"], WMT:["Walmart"], COST:["Costco"], TGT:["Target"], KO:["Coca-Cola"],
   PEP:["Pepsi"], PG:["Procter"], MCD:["McDonald"], SBUX:["Starbucks"], NKE:["Nike"], HD:["Home Depot"], LOW:["Lowe's"],
   BKNG:["Booking"], ABNB:["Airbnb"], MAR:["Marriott"], RIVN:["Rivian"], LCID:["Lucid"], F:["Ford"], GM:["General Motors"],
   NEE:["NextEra"], DUK:["Duke Energy"], VST:["Vistra"], NRG:["NRG"], FCX:["Freeport"], NEM:["Newmont"], NUE:["Nucor"],
@@ -255,7 +263,7 @@ const DISPLAY_NAMES = {
   GD:"General Dynamics", NOC:"Northrop Grumman", ETN:"Eaton Corp.", MMM:"3M Co.", CSX:"CSX Corp.",
   FDX:"FedEx Corp.", NSC:"Norfolk Southern", GEV:"GE Vernova", TDG:"TransDigm Group", PCAR:"PACCAR Inc.",
   LUV:"Southwest Airlines", DAL:"Delta Air Lines", UAL:"United Airlines", AAL:"American Airlines",
-  LHX:"L3Harris Technologies", RKLB:"Rocket Lab", BE:"Bloom Energy",
+  LHX:"L3Harris Technologies", RKLB:"Rocket Lab", BE:"Bloom Energy", SPCX:"SpaceX (Space Exploration Technologies)",
   XOM:"Exxon Mobil", CVX:"Chevron Corp.", COP:"ConocoPhillips", SLB:"SLB (Schlumberger)",
   EOG:"EOG Resources", MPC:"Marathon Petroleum", PSX:"Phillips 66", VLO:"Valero Energy",
   OXY:"Occidental Petroleum", HAL:"Halliburton Co.", FANG:"Diamondback Energy", EQT:"EQT Corp.",
@@ -265,7 +273,7 @@ const DISPLAY_NAMES = {
   NEE:"NextEra Energy", DUK:"Duke Energy", SO:"Southern Co.", VST:"Vistra Corp.", NRG:"NRG Energy",
   PLD:"Prologis Inc.", AMT:"American Tower", EQIX:"Equinix Inc.", CCI:"Crown Castle", SPG:"Simon Property Group",
   // pre-IPO synthetics: the perp tracks an implied private valuation, and the label says so
-  SPCX:"SpaceX (pre-IPO synthetic)", OPENAI:"OpenAI (pre-IPO synthetic)", ANTHROPIC:"Anthropic (pre-IPO synthetic)",
+  OPENAI:"OpenAI (pre-IPO synthetic)", ANTHROPIC:"Anthropic (pre-IPO synthetic)",
   CURSOR:"Cursor / Anysphere (pre-IPO synthetic)", XAI:"xAI (pre-IPO synthetic)", DATABRICKS:"Databricks (pre-IPO synthetic)",
   STRIPE:"Stripe (pre-IPO synthetic)", REVOLUT:"Revolut (pre-IPO synthetic)", DISCORD:"Discord (pre-IPO synthetic)",
   CANVA:"Canva (pre-IPO synthetic)", RAMP:"Ramp (pre-IPO synthetic)", ANDURIL:"Anduril (pre-IPO synthetic)",
