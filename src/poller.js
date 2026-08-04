@@ -17,7 +17,7 @@ const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggr
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
+const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
@@ -3928,7 +3928,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     earnSig = data.entries.map((e) => e.t + e.d + e.s).join(",");
     earnVer = data.ts || Date.now();
     lastEarnOk = data.ts || 0;   // honest: staleness counts from the fetch that produced it
-    earnPrints = Array.isArray(data.prints) ? data.prints : [];
+    // scrub pre-fix persisted placeholder actuals (epsA:0) — merge can never blank them itself
+    earnPrints = scrubPlaceholderActuals(Array.isArray(data.prints) ? data.prints : []);
     earnVoids = new Set(Array.isArray(data.voids) ? data.voids.filter((v) => typeof v === "string") : []);
     if (earnVoids.size) earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t + "|" + p.d));
     earnHistDone = data.histDone2 === true;   // versioned: the truncated v1 backfill does not count

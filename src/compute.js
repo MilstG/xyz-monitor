@@ -3885,7 +3885,17 @@ function parseEarningsCalendar(json, symMap) {
     // a genuine -0.5% miss) into "0.8 vs 0.8 miss +0.0%" — a display contradicting its own
     // verdict. Verdict and surprise must be computed from values that preserve the difference.
     const q2 = (x) => typeof x === "number" && isFinite(x) ? +x.toFixed(4) : null;
-    const eps = q2(e.epsEstimate), epsA = q2(e.epsActual);
+    // ACTUALS only: an exact 0 actual is a feed PLACEHOLDER, not a print (observed live
+    // 2026-08-04: AMD "EPS 0.00 vs 1.63 est · miss" and SPCX "0.00 vs -0.26 · beat" on report
+    // day — Finnhub fills epsActual:0 before the real number lands). A genuine 0.0000 EPS is
+    // indistinguishable on the wire, so the honest choice is null / not-yet-reported: a delayed
+    // verdict beats a fabricated one, the merge upgrades the row in place when the real actual
+    // arrives on a later fetch, and a true-zero print still resolves "reported" via the session
+    // clock in earnEntryState — it just shows no EPS verdict rather than a lie. ESTIMATES keep
+    // 0: a 0.00 estimate is plausible and harmless (it only suppresses surprise%, never invents
+    // a verdict).
+    const eps = q2(e.epsEstimate);
+    const epsA0 = q2(e.epsActual), epsA = epsA0 === 0 ? null : epsA0;
     // Revenue ships in raw units (feed reports dollars); quantize to 3 significant figures —
     // the display only ever shows "$41.2B", full doubles are payload weight for nothing.
     const q3 = (x) => typeof x === "number" && isFinite(x) && x !== 0 ? +x.toPrecision(3) : null;
@@ -4067,6 +4077,15 @@ module.exports.earnChunks = earnChunks;
 module.exports.purgeStalePrints = purgeStalePrints;
 module.exports.reconcileEarnPrints = reconcileEarnPrints;
 
+// Retroactive leg of the placeholder fix: persisted prints written BEFORE the parser started
+// nulling epsActual:0 still carry the fabricated zero, and mergeEarnPrints's "an actual, once
+// stored, can never be blanked" rule (correct for real actuals) means a refetch parsing the same
+// row as null can never self-heal it. Scrub runs at hydrate time, pure: epsA===0 -> null, all
+// other fields untouched. The real actual then lands via the normal merge upgrade path.
+function scrubPlaceholderActuals(prints) {
+  if (!Array.isArray(prints)) return [];
+  return prints.map((p) => p && p.epsA === 0 ? Object.assign({}, p, { epsA: null }) : p);
+}
 // ---- earnings print history + reaction study ---------------------------------------------------
 // Past prints are the raw material for the per-ticker reaction study. Like the OI log, they
 // accrue and can't be re-fetched reliably (the feed's historical depth is not guaranteed), so
@@ -4140,6 +4159,7 @@ function earnReactionsFor(prints, daily) {
   };
 }
 module.exports.mergeEarnPrints = mergeEarnPrints;
+module.exports.scrubPlaceholderActuals = scrubPlaceholderActuals;
 module.exports.earnReactionsFor = earnReactionsFor;
 
 // ===== Coinalyze derivatives context (crypto universe) ==========================================
