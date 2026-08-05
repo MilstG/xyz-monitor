@@ -32,7 +32,8 @@ const COLS=[
     td:r=>`<td class="${scCls(r)}"${shade(r.m15,1.8)}>${pctInner(r.m15)}</td>`},
   {key:'h1', label:'1h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h1,2.5)}>${pctInner(r.h1)}</td>`},
   {key:'h4', label:'4h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h4,4)}>${pctInner(r.h4)}</td>`},
-  {key:'d1', label:'1d', type:'num', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
+  {key:'d1', label:'24h', type:'num', tip:'Rolling 24-hour change: live mark vs Hyperliquid\u2019s prevDayPx (the price ~24h ago), so the window slides continuously \u2014 at 3pm it measures against yesterday 3pm, not the day boundary. For "since today started" see D open.', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
+  {key:'dopen', label:'D open', type:'num', tip:'% change since the open of the current UTC day. Perps trade continuously, so today\u2019s open IS the prior day\u2019s close from the daily-close series \u2014 same convention as M open / Y open. Contrast with 24h, which is a rolling window; this one anchors on the day boundary. Hover for the exact open price. Dash while daily history backfills \u2014 honest null, never a guess.', td:r=>dopenCell(r)},
   {key:'d7', label:'7d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d7,12)}>${pctInner(r.d7)}</td>`},
   {key:'d30', label:'30d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d30,25)}>${pctInner(r.d30)}</td>`},
   {key:'gap', label:'Gap', type:'num', tip:'Last close\u2192open gap \u2014 how much the perp moved from the most recent cash-session close to the next open (overnight 16:00\u219209:30 ET, or Fri\u2192Mon over a weekend). One move, always the latest, regardless of the timeframe selector. Hover for the cumulative off-hours drift over ~30d. Measured on US session hours, so it reads cleanest for US-linked names.',
@@ -117,9 +118,9 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','m5','m15','h1','h4','d1','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','m5','m15','h1','h4','d1','dopen','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const DEFAULT_HIDDEN=['m5','m15','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
-const LAYOUT_V=3; // bump to force a one-time reset of saved layouts to the new default (v3: prem column placed after funding; sqz/carry screens added)
+const LAYOUT_V=4; // bump to force a one-time reset of saved layouts to the new default (v4: 1d relabeled 24h, D open column added between it and 7d)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
@@ -670,9 +671,10 @@ function computeDerived(){
     // the vs-YTD-hi coverage guard (a truncated series that merely starts after Jan 1 must
     // dash, not masquerade as a new listing); the monthly boundary is always within reach of
     // both retention windows, so only genuine new listings ever hit the fallback there.
-    { const cl=r.daily; let yo=null, mo=null;
+    { const cl=r.daily; let yo=null, mo=null, dop=null;
       if(Array.isArray(cl)&&cl.length){
-        const nowD=new Date(), y0=Date.UTC(nowD.getUTCFullYear(),0,1), m0=Date.UTC(nowD.getUTCFullYear(),nowD.getUTCMonth(),1);
+        const nowD=new Date(), y0=Date.UTC(nowD.getUTCFullYear(),0,1), m0=Date.UTC(nowD.getUTCFullYear(),nowD.getUTCMonth(),1),
+          d0=Date.UTC(nowD.getUTCFullYear(),nowD.getUTCMonth(),nowD.getUTCDate());   // today's UTC 00:00 — the D-open anchor
         const openAt=(b)=>{ let prev=null;
           for(const k of cl){ const c=+k.c; if(!isFinite(c)) continue;
             if(k.t<b) prev=c; else return prev!=null?prev:c; }
@@ -680,9 +682,13 @@ function computeDerived(){
         const coveredY = cl[0].t<=y0+3*DAY || (r.uni!=='main' ? cl[0].t>y0 : cl.length<28);
         if(coveredY) yo=openAt(y0);
         mo=openAt(m0);
+        dop=openAt(d0);   // prior UTC day's close = today's open on a continuously-traded perp — same convention as the M/Y rungs
       }
       r.yopen=(yo!=null&&yo>0)?yo:undefined;
-      r.mopen=(mo!=null&&mo>0)?mo:undefined; }
+      r.mopen=(mo!=null&&mo>0)?mo:undefined;
+      r.dopenPx=(dop!=null&&dop>0)?dop:undefined;
+      // Sortable value IS the % — the column shows only the change; the level lives in the hover.
+      r.dopen=(r.dopenPx!=null&&r.px>0&&isFinite(r.px))?(r.px/r.dopenPx-1)*100:undefined; }
     // premium / squeeze / carry — all off data already in the row (oracle, window funding, ΔOI, vol)
     const fw=(r.fundByWin?(r.fundByWin[tfKey]??r.funding):r.funding);
     r.prem=(r.px!=null&&r.oracle>0)?(r.px/r.oracle-1)*1e4:undefined;
@@ -872,6 +878,12 @@ function openCell(r,key,lbl){ const v=r[key];
   if(v==null||!isFinite(v)) return `<td><span class="na" title="needs daily history reaching the ${key==='yopen'?'start of the year \u2014 crypto retention is 31d, so outside January this is out of reach by design; equities fill in as the daily backfill loads':'start of the month \u2014 fills in as daily history loads'}">\u2014</span></td>`;
   const above=r.px!=null&&isFinite(r.px)?r.px>=v:null, d=above!=null&&v>0?((r.px/v-1)*100):null;
   return `<td class="${above==null?'sec':(above?'pos':'neg')}" title="${lbl} ${fmtPrice(v)}${d!=null?` \u00b7 price ${d>=0?'+':''}${d.toFixed(1)}% ${d>=0?'above':'below'}`:''}">${fmtPrice(v)}</td>`; }
+// D open: pure % since the current UTC day's open, shaded like the sibling change columns.
+// ~3% full shade — tighter than 24h's 5% band because a partial day prints smaller moves.
+// The exact open level rides the hover only; the cell and the sort value are the same number.
+function dopenCell(r){ const v=r.dopen;
+  if(v==null||!isFinite(v)) return '<td><span class="na" title="needs daily history \u2014 fills in as the daily backfill loads">\u2014</span></td>';
+  return `<td${shade(v,3)} title="since today\u2019s UTC open ${fmtPrice(r.dopenPx)} \u00b7 the prior day\u2019s close on a continuously-traded perp">${pctInner(v)}</td>`; }
 function premCell(r){ if(r.prem==null||!isFinite(r.prem)) return '<td><span class="na" title="needs both mark and oracle prices">·</span></td>';
   const v=r.prem, c=v>0.5?'pos':(v<-0.5?'neg':'sec');
   const t=`mark ${fmtPrice(r.px)} vs oracle ${fmtPrice(r.oracle)} \u2014 perp ${v>=0?'rich (premium)':'cheap (discount)'} ${Math.abs(v).toFixed(1)}bp`+
@@ -2755,7 +2767,7 @@ function alertText(ev){
       const names=(ev.tomorrow||[]).slice(0,6).map(e=>e.t).join(', ');
       return `earnings calendar \u00b7 ${up} reporting tomorrow${names?' ('+names+(up>6?'\u2026':'')+')':''}${rp?` \u00b7 ${rp} reported today`:''}`;
     }
-    return `${ev.t} reports ${ev.when}${ev.session?' ('+ev.session+')':''}${ev.claim?' \u00b7 open '+ev.claim+' claim':''}`;
+    return `${ev.t} reports ${ev.when}${ev.session?' ('+ev.session+')':''}`;   // claim gates the alert server-side, never renders — positioning stays off earnings messages
   }
   if(k==='macro'){
     const st=macroStatFmt({k:ev.k},ev.sub==='result'?ev.actual:ev.prior).replace(/<\/?b>/g,'').replace(/<span[^>]*>|<\/span>/g,'');
