@@ -12002,7 +12002,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.04-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.05-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16061,4 +16061,36 @@ test("earnings payloads and renderers carry no positioning anywhere", () => {
   // Client bell log: the earnings line renders without the claim suffix even on old entries.
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(!app.includes("' \\u00b7 open '+ev.claim+' claim'"), "bell-log earnings line no longer renders the claim");
+});
+
+// ===== build 2026.08.05-01: the calendar alert can no longer fabricate a print ===============
+// Live 2026-08-05: SNDK "EPS 0.00 vs 35.14 est · miss" and WDC "0.00 vs 3.33 · miss" on the
+// Telegram calendar. The parser's placeholder scrub was fine — epsA arrived null — but the
+// composer gated on Number.isFinite(+e.epsA), and +null === 0, so a missing actual coerced into
+// a real-looking 0.00 and MANUFACTURED a miss verdict next to the day move. Behavioral: the
+// composer is executed against the exact live shapes, not string-pinned (the -84 lesson).
+test("earnings preview composer: a null or placeholder-zero actual is 'not in the feed yet', never a 0.00 miss", () => {
+  const C = require("../src/compute");
+  const msg = (reported) => C.pushFmt({ kind: "earnings", sub: "preview", d: "2026-08-05",
+    tomorrow: [{ t: "DKNG", s: "AMC", eps: 0.03 }], reported }, {});
+  // null actual (the live SNDK/WDC shape): no EPS number, no verdict, day move intact
+  const m1 = msg([{ t: "WDC", s: "BMO", eps: 3.33, epsA: null, d1: -14.6 }]);
+  assert.ok(/WDC \u2014 actual not in the feed yet \u00b7 day -14\.6%/.test(m1),
+    "null actual reads as absent with the day move, got: " + m1);
+  assert.ok(!/0\.00/.test(m1) && !/miss/.test(m1), "no fabricated 0.00, no fabricated verdict");
+  // literal-zero actual (pre-scrub persisted garbage): same doctrine as the parser — absent
+  const m2 = msg([{ t: "SNDK", s: "BMO", eps: 35.14, epsA: 0, d1: -7.0 }]);
+  assert.ok(/actual not in the feed yet/.test(m2) && !/miss/.test(m2),
+    "a composer-reaching zero actual is the placeholder, never a verdict");
+  // a REAL print still renders in full — the fix must not eat genuine verdicts
+  const m3 = msg([{ t: "LLY", s: "BMO", eps: 6.07, epsA: 8.38, d1: 3.8 }]);
+  assert.ok(/LLY \u2014 EPS 8\.38 vs 6\.07 est \u00b7 beat \u00b7 day \+3\.8%/.test(m3), "real beat intact: " + m3);
+  // null estimate on the tomorrow leg: no "est 0.00" either (+null hits eps the same way)
+  const m4 = C.pushFmt({ kind: "earnings", sub: "preview", d: "2026-08-05",
+    tomorrow: [{ t: "XYZ", s: "AMC", eps: null }], reported: [] }, {});
+  assert.ok(/XYZ \u2014 after close$/m.test(m4) && !/est 0\.00/.test(m4), "missing estimate renders nothing, not est 0.00");
+  // wiring pin: the composer's gates require presence before coercion, actual additionally != 0
+  const cmp = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(cmp.includes("const fin = (x) => x != null && Number.isFinite(+x);")
+    && cmp.includes("const hasA = (x) => fin(x) && +x !== 0;"), "presence-gated helpers pinned in the preview block");
 });
