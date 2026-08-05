@@ -4701,25 +4701,33 @@ function pushFmt(ev, opts) {
       const up = Array.isArray(ev.tomorrow) ? ev.tomorrow : [];
       const rep = Array.isArray(ev.reported) ? ev.reported : [];
       const sess = (s) => (s === "BMO" ? "pre-market" : s === "AMC" ? "after close" : s === "DMH" ? "during hours" : "time TBD");
+      // Null-honest numeric gate. Number.isFinite(+x) alone is a trap here: +null === 0, so a
+      // row whose actual hadn't landed rendered as "EPS 0.00 vs est · miss" — a fabricated
+      // verdict on a print that hadn't happened (live 2026-08-05: SNDK/WDC). The gate requires
+      // presence BEFORE coercion. For the ACTUAL specifically, a literal 0 is also treated as
+      // absent: the parser nulls Finnhub's epsActual:0 placeholder at the pipe mouth, so a 0
+      // reaching this composer can only be pre-fix persisted garbage — same doctrine, same fate.
+      const fin = (x) => x != null && Number.isFinite(+x);
+      const hasA = (x) => fin(x) && +x !== 0;
       const lines = [g + " <b>Earnings calendar</b>"];
       if (up.length) {
         lines.push("");
         lines.push("<b>Reporting tomorrow</b> \u00b7 " + up.length);
         for (const e of up) lines.push("\u00b7 " + tgEsc(e.t) + " \u2014 " + tgEsc(sess(e.s))
-          + (Number.isFinite(+e.eps) ? " \u00b7 est " + (+e.eps).toFixed(2) : ""));
+          + (fin(e.eps) ? " \u00b7 est " + (+e.eps).toFixed(2) : ""));
         if (+ev.moreUp > 0) lines.push("<i>+" + Math.round(+ev.moreUp) + " more \u2014 list cap</i>");
       }
       if (rep.length) {
         lines.push("");
         lines.push("<b>Reported today</b> \u00b7 " + rep.length);
         for (const e of rep) {
-          const has = Number.isFinite(+e.epsA) && Number.isFinite(+e.eps);
+          const has = hasA(e.epsA) && fin(e.eps);
           const verdict = has ? (+e.epsA > +e.eps ? "beat" : +e.epsA < +e.eps ? "miss" : "in line") : null;
           lines.push("\u00b7 " + tgEsc(e.t) + " \u2014 "
-            + (Number.isFinite(+e.epsA)
+            + (hasA(e.epsA)
               ? "EPS " + (+e.epsA).toFixed(2) + (has ? " vs " + (+e.eps).toFixed(2) + " est \u00b7 " + verdict : "")
               : "actual not in the feed yet")
-            + (Number.isFinite(+e.d1) ? " \u00b7 day " + (+e.d1 >= 0 ? "+" : "") + (+e.d1).toFixed(1) + "%" : ""));
+            + (fin(e.d1) ? " \u00b7 day " + (+e.d1 >= 0 ? "+" : "") + (+e.d1).toFixed(1) + "%" : ""));
         }
         if (+ev.moreRep > 0) lines.push("<i>+" + Math.round(+ev.moreRep) + " more \u2014 list cap</i>");
       }
