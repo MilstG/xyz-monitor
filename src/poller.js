@@ -8930,8 +8930,11 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
       const key = tk + "|" + prox.e.d;
       if (earnAlerted.has(key)) continue;
       earnAlerted.set(key, now);
+      // The open claim is the GATE, never the content: this alert exists because the print decides
+      // an open trade, but the message itself is an earnings notice — positioning stays off the
+      // wire (Telegram and the bell feed both read this payload).
       emitTrig("earnings", { coin: e.coin, t: tk, when: prox.diff === 0 ? "today" : "tomorrow",
-        session: prox.e.s || null, date: prox.e.d, claim: EV_LABEL[e.ev] || e.ev }, now);
+        session: prox.e.s || null, date: prox.e.d }, now);
       fired++;
     }
     // Bounded: one entry per ticker per report date, and report dates stop mattering once past.
@@ -8954,20 +8957,16 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     const day = etDayStr(now);
     if (earnPrevDay === day) return 0;
     if (etParts(now).h < EARN_PREVIEW_ET_HOUR) return 0;
-    // Open announced claims, keyed by ticker: the calendar flags the names you actually have money
-    // on inline, so the scoped leg above stays the interruption and this stays the reference.
-    const claims = new Map();
-    for (const e of ledgerOpen.values()) {
-      if (!isOpenAnnounced(e) || !e.ticker) continue;
-      if (!claims.has(e.ticker)) claims.set(e.ticker, EV_LABEL[e.ev] || e.ev);
-    }
+    // Positioning stays OUT of the calendar: this is a roster-wide reference message, and open
+    // claims are the urgent leg's gate, not calendar content (2026.08.04-04 — the inline claim
+    // flags were removed on request; the payload never carries them now).
     const dayMove = new Map();
     for (const r of rows.values()) if (r.ticker && !r.delisted && Number.isFinite(r.d1)) dayMove.set(r.ticker, r.d1);
     const tomorrow = [], reported = [];
     for (const [tk, arr] of earnMap) {
       for (const e of arr) {
         const df = earnDayDiff(e.d, now);
-        if (df === 1) { tomorrow.push({ t: tk, s: e.s || "TBD", eps: e.eps, claim: claims.get(tk) || undefined }); break; }
+        if (df === 1) { tomorrow.push({ t: tk, s: e.s || "TBD", eps: e.eps }); break; }
         if (df === 0) { reported.push({ t: tk, s: e.s || "TBD", eps: e.eps, epsA: e.epsA, d1: dayMove.has(tk) ? dayMove.get(tk) : undefined }); break; }
       }
     }

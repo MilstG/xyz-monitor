@@ -4706,8 +4706,7 @@ function pushFmt(ev, opts) {
         lines.push("");
         lines.push("<b>Reporting tomorrow</b> \u00b7 " + up.length);
         for (const e of up) lines.push("\u00b7 " + tgEsc(e.t) + " \u2014 " + tgEsc(sess(e.s))
-          + (Number.isFinite(+e.eps) ? " \u00b7 est " + (+e.eps).toFixed(2) : "")
-          + (e.claim ? " \u00b7 <b>open " + tgEsc(e.claim) + " claim</b>" : ""));
+          + (Number.isFinite(+e.eps) ? " \u00b7 est " + (+e.eps).toFixed(2) : ""));
         if (+ev.moreUp > 0) lines.push("<i>+" + Math.round(+ev.moreUp) + " more \u2014 list cap</i>");
       }
       if (rep.length) {
@@ -4731,10 +4730,12 @@ function pushFmt(ev, opts) {
       // here and out() filters falsy lines, which would collapse the three blocks into one wall.
       return lines.join("\n");
     }
+    // Positioning never rides an earnings message: the open claim gates the urgent leg
+    // server-side, but the notice itself is calendar content only — old ring entries that
+    // still carry ev.claim render clean here too.
     const head = g + " <b>" + name + "</b> \u00b7 reports " + tgEsc(ev.when || "soon")
       + (ev.session ? " (" + tgEsc(ev.session) + ")" : "");
-    return out([head, ev.claim ? "you hold an open <b>" + tgEsc(ev.claim) + "</b> claim on it" : "",
-      link("open " + (ev.t || ev.coin))]);
+    return out([head, link("open " + (ev.t || ev.coin))]);
   }
 
   if (kind === "macro") {
