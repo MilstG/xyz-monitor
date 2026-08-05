@@ -2513,7 +2513,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
   const need = ["closeDetail", "showView", "openDetail", "renderSignals", "sigCardHtml", "sigRowHtml",
     "trigChip", "playRow", "rrChip", "recCurveSvg", "openHelp", "closeHelp",
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
-    "ddCell", "ddyCell", "openCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
+    "ddCell", "ddyCell", "openCell", "dopenCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
     "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
@@ -9547,7 +9547,8 @@ test("new classes are opt-in: an absent selection means the DEFAULT set, never e
   const m = C.pushFmt(filing, {});
   assert.ok(m.includes("8-K") && m.includes("Item 2.02") && m.includes("sec.gov"));
   const e = C.pushFmt({ kind: "earnings", coin: "X", t: "X", when: "tomorrow", session: "amc", claim: "breakout" }, {});
-  assert.ok(/tomorrow/.test(e) && /open <b>breakout<\/b> claim/.test(e), "the earnings alert says WHY you are being told");
+  assert.ok(/tomorrow/.test(e) && /amc/.test(e), "the earnings alert carries the schedule");
+  assert.ok(!/claim/i.test(e), "positioning never renders on an earnings message — even when an old ring entry still carries ev.claim");
   const a = C.pushFmt({ kind: "ai", coin: "X", t: "X", from: "wait", to: "enter_on_pullback", note: "n" }, {});
   assert.ok(a.includes("wait") && a.includes("enter_on_pullback"));
 });
@@ -12001,7 +12002,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.04-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.04-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14045,8 +14046,9 @@ test("the widened earnings class did not weaken the claim-scoped leg", () => {
   assert.ok(/if \(!isOpenAnnounced\(e\)\) continue;/.test(scan), "shadows and unannounced claims stay excluded");
   assert.ok(/prox\.diff > 1/.test(scan), "today or tomorrow only");
   const C = require("../src/compute");
-  assert.ok(/open <b>breakout<\/b> claim/.test(C.pushFmt({ kind: "earnings", coin: "X", t: "X", when: "tomorrow", session: "amc", claim: "breakout" }, {})),
-    "the urgent leg's message is untouched by the preview branch");
+  const urg = C.pushFmt({ kind: "earnings", coin: "X", t: "X", when: "tomorrow", session: "amc", claim: "breakout" }, {});
+  assert.ok(/reports tomorrow/.test(urg) && !/claim/i.test(urg),
+    "the urgent leg still fires from the preview branch, and never renders positioning");
 });
 
 test("client: the macro class and the preview shape are renderable in the bell log", () => {
@@ -14250,7 +14252,7 @@ test("-10 markets defaults: the shipped visible set matches the intended columns
   const ord = app.match(/const DEFAULT_ORDER=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim());
   const hid = new Set(app.match(/const DEFAULT_HIDDEN=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim()));
   const visible = ord.filter(k => !hid.has(k));
-  assert.deepEqual(visible, ["ticker", "px", "h1", "h4", "d1", "d7", "d30", "gap", "rs", "vstape", "momp", "vol", "funding", "rvol", "adr", "turn", "vwap"],
+  assert.deepEqual(visible, ["ticker", "px", "h1", "h4", "d1", "dopen", "d7", "d30", "gap", "rs", "vstape", "momp", "vol", "funding", "rvol", "adr", "turn", "vwap"],
     "default visible columns match the requested set, in order");
   assert.ok(hid.has("dvb"), "Δ vs ⬒ hidden by default");
   assert.ok(app.includes("dvbBasket:'MAG7'"), "the Δ column defaults to MAG7");
@@ -15988,4 +15990,75 @@ test("brief: a partial prose pass ships the clean half and discloses the withhel
   // Silence about the withholding would read as a model that had nothing to add.
   assert.ok(msgs.includes("commentary unavailable"), "and the reader is told why");
   assert.ok(msgs.includes("closing withheld"));
+});
+
+// ===== build 2026.08.04-04: 1d relabeled 24h, D open column (since UTC daily open) ===========
+// The 24h column always was a rolling window (Hyperliquid prevDayPx); the rename plus tooltip
+// makes the semantics honest on the label, and D open answers the question the old label
+// implied. Manifest pins for the wiring, real execution for the cell markup.
+test("D open column: manifest wiring — placed after 24h, visible by default, layout reset armed", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // label rename, with the rolling-window disclosure on the tooltip
+  assert.ok(/key:'d1', label:'24h'/.test(app), "1d column relabeled 24h");
+  assert.ok(app.includes("Rolling 24-hour change") && app.includes("prevDayPx"), "24h tooltip discloses the rolling window and its source");
+  // new column exists, right after d1 in COLS and in the default order, and NOT hidden
+  assert.ok(/key:'dopen', label:'D open'/.test(app), "D open column defined");
+  const ord = app.match(/const DEFAULT_ORDER=\[[^\]]*\];/)[0];
+  assert.ok(ord.includes("'d1','dopen','d7'"), "D open sits between 24h and 7d in the default order");
+  const hid = app.match(/const DEFAULT_HIDDEN=\[[^\]]*\];/)[0];
+  assert.ok(!hid.includes("'dopen'"), "D open is visible by default — it is the point of the column");
+  assert.ok(/const LAYOUT_V=4;/.test(app), "LAYOUT_V bumped so saved layouts pick the column up");
+  // anchor derivation: today's UTC day boundary through the SAME openAt walk the M/Y rungs use,
+  // % stored as the sortable row value, level kept separately for the hover only
+  for (const pin of ["nowD.getUTCDate())", "dop=openAt(d0)", "r.dopenPx=(dop!=null&&dop>0)?dop:undefined",
+    "r.dopen=(r.dopenPx!=null&&r.px>0&&isFinite(r.px))?(r.px/r.dopenPx-1)*100:undefined"])
+    assert.ok(app.includes(pin), `D open derivation pin missing: ${pin}`);
+});
+
+test("D open cell: executed against real row shapes — % only, shaded, level in hover, honest dash", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => { const i = app.indexOf("function " + name); assert.ok(i >= 0, name + " missing");
+    let d = 0, j = i; for (; j < app.length; j++) { if (app[j] === "{") d++; else if (app[j] === "}") { d--; if (d === 0) break; } }
+    return app.slice(i, j + 1); };
+  const nf = app.match(/const nf=\(x,d\)=>[^;]*;/)[0];
+  const R = new Function(nf + "\n" + grab("fmtPrice") + "\n" + grab("fmtPct") + "\n" + grab("shade") + "\n" +
+    grab("pctInner") + "\n" + grab("dopenCell") + "\nreturn dopenCell;")();
+  // up day: green %, magnitude shading present, exact open level in the title, NO price in the cell body
+  const up = R({ dopen: 1.23, dopenPx: 182.05, px: 184.29 });
+  assert.ok(up.includes('class="pos"') && up.includes("+1.23%"), "positive % rendered green");
+  assert.ok(up.includes("rgba(70,185,126"), "green magnitude shade applied");
+  assert.ok(up.includes("182.05") && /title="[^"]*182\.05/.test(up), "open level rides the hover");
+  assert.ok(!/>[^<]*182\.05/.test(up.replace(/title="[^"]*"/, "")), "cell body carries the % only, never the price");
+  // down day shades red; flat day renders sec with no shade at all
+  const dn = R({ dopen: -0.9, dopenPx: 243.3, px: 241.1 });
+  assert.ok(dn.includes('class="neg"') && dn.includes("rgba(229,96,77"), "negative % shades red");
+  assert.ok(R({ dopen: 0, dopenPx: 100, px: 100 }).includes("0.000"), "zero move: shade alpha collapses to 0.000 — same convention as every sibling change column");
+  // missing anchor: honest dash with the backfill explanation, not a zero
+  const na = R({ dopen: undefined });
+  assert.ok(na.includes("\u2014") && na.includes("daily backfill"), "no anchor: dash + disclosure, never a fabricated 0");
+});
+
+// ===== build 2026.08.04-04 (leg 2): positioning stays OFF earnings messages ==================
+// The open claim remains the urgent leg's GATE (the scoping tests above still pin it) but it
+// must never appear as message CONTENT — not in Telegram, not in the bell log, not in the
+// payload. Renderers stay defensive so old persisted ring entries carrying ev.claim print clean.
+test("earnings payloads and renderers carry no positioning anywhere", () => {
+  const fs = require("fs"), path = require("path");
+  const C = require("../src/compute");
+  // Preview: a tomorrow row that (as an old ring entry might) still carries a claim renders without it.
+  const prev = C.pushFmt({ kind: "earnings", sub: "preview", d: "2026-08-04",
+    tomorrow: [{ t: "CRCL", s: "BMO", eps: 0.22, claim: "Trend retest (short)" }, { t: "LLY", s: "BMO", eps: 6.07 }],
+    reported: [{ t: "AMD", s: "AMC", eps: 1.63, epsA: 0.0, d1: -1.8 }] }, {});
+  assert.ok(/Reporting tomorrow/.test(prev) && /CRCL/.test(prev) && /est 0\.22/.test(prev), "calendar content intact");
+  assert.ok(!/claim/i.test(prev) && !/retest/i.test(prev), "no claim, no signal name — positioning never renders on the calendar");
+  // Source: the poller stamps no claim field onto either earnings payload anymore.
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const scan = pol.slice(pol.indexOf("function earnScan()"), pol.indexOf("// ---- macro class"));
+  assert.ok(!/claim:/.test(scan), "neither earnings leg emits a claim field — the gate is server-side only");
+  assert.ok(/if \(!isOpenAnnounced\(e\)\) continue;/.test(scan), "…while the urgent leg's claim GATE is untouched");
+  // Client bell log: the earnings line renders without the claim suffix even on old entries.
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(!app.includes("' \\u00b7 open '+ev.claim+' claim'"), "bell-log earnings line no longer renders the claim");
 });
