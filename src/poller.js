@@ -4685,7 +4685,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (!auditAppend({ k: "ack", ts: Date.now(), ticker: T })) return { ok: false, error: "persist failed" };
     return { ok: true };
   }
-  function sectorAuditApply(tickerRaw, sectorRaw) {
+  function sectorAuditApply(tickerRaw, sectorRaw, indRaw) {
     // The one-click resolution for a FLAGGED name: an admin picking between the two sectors the
     // sources offered. Manual applies are stamped by:"admin" and validated like the auto path.
     const T = String(tickerRaw || "").toUpperCase().trim();
@@ -4696,9 +4696,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const fl = m.flagged.find((f) => f.ticker === T);
     if (!fl) return { ok: false, error: "no flagged entry for " + T };
     const action = fl.action === "graduate" ? "graduate" : "classify";
-    if (!auditAppend({ k: "apply", ts: Date.now(), ticker: T, action, sector, ind: sector,
+    // Optional industry group: free text, sanitized and length-capped; blank means the honest
+    // sector fallback (renders italic like every other fallback group). Never a validity concern
+    // beyond shape — the industry lens is a display grouping, not a correctness claim.
+    const ind = String(indRaw || "").replace(/[<>]/g, "").trim().slice(0, 40) || sector;
+    if (!auditAppend({ k: "apply", ts: Date.now(), ticker: T, action, sector, ind,
       ev: Object.assign({ resolvedFrom: fl.reason }, fl.ev || null), by: "admin" })) return { ok: false, error: "persist failed" };
-    pushOps("sector audit", T + " " + (action === "graduate" ? "graduated" : "classified") + " " + sector + " by admin (resolved: " + fl.reason + ")", "info");
+    pushOps("sector audit", T + " " + (action === "graduate" ? "graduated" : "classified") + " " + sector + (ind !== sector ? " / " + ind : "") + " by admin (resolved: " + fl.reason + ")", "info");
     return { ok: true };
   }
   auditHydrate();
