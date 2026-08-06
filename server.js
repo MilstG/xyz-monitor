@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.05-03";
+const VERSION = "2026.08.05-04";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -907,7 +907,7 @@ async function main() {
     reply.header("cache-control", "no-store");
     if (!isAdmin(req)) return reply.code(403).send({ error: "forbidden" });
     const b = req.body || {};
-    const r = poller.sectorAuditApply(String(b.ticker || ""), String(b.sector || ""));
+    const r = poller.sectorAuditApply(String(b.ticker || ""), String(b.sector || ""), String(b.ind || ""));
     return reply.code(r.ok ? 200 : 400).send(r);
   });
   fastify.post("/api/sector-audit/ack", { bodyLimit: 4 * 1024 }, (req, reply) => {
