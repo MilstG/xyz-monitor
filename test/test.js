@@ -12002,7 +12002,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.05-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.05-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16267,6 +16267,7 @@ test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, rout
   const once = (str, needle, what) => assert.strictEqual(str.split(needle).length - 1, 1, what + " pinned exactly once");
   once(srv, '"/api/sector-audit/ack"', "ack route");
   once(app, "'.aud-sel[data-t=", "manual sector picker wiring");
+  once(app, 'class="aud-ind"', "optional industry input rendered once per flagged row template");
   assert.ok(app.includes("_audShowAck"), "show-cleared toggle present");
   // the -02 store persistence must be present — the web-UI deploy dropped it once already
   once(stf, "saveSectorAudit(data)", "audit persistence survived the deploy round-trip");
@@ -16302,10 +16303,11 @@ test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, rout
     assert.ok(p.sectorAuditAck("KLARNA").ok, "ack is idempotent");
     assert.ok(p.getSectorAudit().applied.find((a) => a.ticker === "KLARNA").ack, "served payload carries ack");
     assert.strictEqual(S.classify("KLARNA", "xyz").sector, "Financials", "board classification untouched by ack");
-    // the no-data manual path: same apply verb, admin-stamped, full machinery
-    assert.ok(p.sectorAuditApply("UNITREE", "Industrials").ok, "no-data flag resolves via manual apply");
+    // the no-data manual path: same apply verb, admin-stamped, full machinery — now WITH an
+    // optional industry group (sanitized, capped, sector fallback when blank)
+    assert.ok(p.sectorAuditApply("UNITREE", "Industrials", " Robotics<b> ").ok, "no-data flag resolves via manual apply");
     const u = S.classify("UNITREE", "xyz");
-    assert.deepStrictEqual([u.sector, u.auto], ["Industrials", "cls"], "manually classified with provenance");
+    assert.deepStrictEqual([u.sector, u.ind, u.auto], ["Industrials", "Roboticsb", "cls"], "manually classified with sanitized industry + provenance");
     assert.ok(p.sectorAuditRevert("UNITREE").ok && S.classify("UNITREE", "xyz").assetClass === "Unclassified",
       "and revertable like every overlay entry");
   } finally { S.setSectorOverlay([]); p.stop && p.stop(); }
