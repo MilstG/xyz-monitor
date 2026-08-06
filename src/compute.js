@@ -6880,6 +6880,10 @@ function sectorAuditDecide(cand) {
 // Pure fold over the persisted record list -> the state everything reads. Records (append-only):
 //   {k:"apply", ts, ticker, action, sector, ind, ev, by}   by: "auto" | "admin"
 //   {k:"flag",  ts, ticker, action, reason, ev}
+//   {k:"ack",   ts, ticker}                                 admin "clear": hides the applied row in
+//                                                           the panel; the OVERLAY STAYS ACTIVE.
+//                                                           A newer apply un-hides (fresh evidence
+//                                                           deserves fresh eyes).
 //   {k:"revert", ts, ticker}                                revert PINS: never auto re-applied
 //   {k:"run",   ts, applied, flagged, err?}
 // Atomicity: the fold validates every record shape and skips garbage — a corrupt line loses that
@@ -6894,6 +6898,8 @@ function mergeSectorAudit(records) {
       applied.set(T, { ticker: T, ts: Number(r.ts) || 0, action: r.action === "graduate" ? "graduate" : "classify",
         sector: String(r.sector), ind: r.ind ? String(r.ind) : String(r.sector), ev: r.ev || null, by: r.by === "admin" ? "admin" : "auto" });
       flagged.delete(T);
+    } else if (r.k === "ack" && T) {
+      const a = applied.get(T); if (a) a.ack = true;
     } else if (r.k === "revert" && T) {
       applied.delete(T); pinned.add(T);
     } else if (r.k === "flag" && T) {

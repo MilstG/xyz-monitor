@@ -27,6 +27,7 @@ function openStore(dataDir) {
   const pushFile = path.join(dataDir, "alertpush.json");   // telegram recipients + delivery cursor
   const rulesFile = path.join(dataDir, "alertrules.json");  // user-authored metric rules (group-shared)
   const basketsFile = path.join(dataDir, "baskets.json");   // user-defined custom baskets (group-shared CONFIG)
+  const sectorAuditFile = path.join(dataDir, "sector-audit.json");   // weekly classification audit record log (CONFIG-grade)
   const beatFile = path.join(dataDir, "volume-heartbeat.json");
   const aiFile = path.join(dataDir, "ai-reports.json");
   const flagsFile = path.join(dataDir, "flags.json");     // admin feature-visibility overrides
@@ -295,6 +296,23 @@ function openStore(dataDir) {
     },
     loadBaskets() {
       try { if (fs.existsSync(basketsFile)) return JSON.parse(fs.readFileSync(basketsFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    // Weekly sector-audit record log (build 2026.08.05-02). Append-only in content, atomic in
+    // write — CONFIG-grade like rules/baskets: an applied graduation is a classification the whole
+    // board depends on, so a corrupt cache must never take it. Records are validated at fold time
+    // (compute.mergeSectorAudit), so a bad line loses that line, never the file.
+    saveSectorAudit(data) {
+      try {
+        const tmp = sectorAuditFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, sectorAuditFile);
+        return true;
+      } catch (_) { return false; }
+    },
+    loadSectorAudit() {
+      try { if (fs.existsSync(sectorAuditFile)) return JSON.parse(fs.readFileSync(sectorAuditFile, "utf8")); }
       catch (_) {}
       return null;
     },

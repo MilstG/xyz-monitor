@@ -4672,6 +4672,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     pushOps("sector audit", T + " overlay entry reverted by admin \u2014 pinned against auto re-apply", "info");
     return { ok: true };
   }
+  function sectorAuditAck(tickerRaw) {
+    // "Clear" for an applied row: acknowledgement only — the overlay entry STAYS ACTIVE, the panel
+    // just stops showing it. Any later apply record for the same ticker un-hides it, so a changed
+    // classification always resurfaces for review. Revert remains the only way to undo the entry.
+    const T = String(tickerRaw || "").toUpperCase().trim();
+    if (!T) return { ok: false, error: "no ticker" };
+    const m = auditState();
+    const a = m.applied.find((x) => x.ticker === T);
+    if (!a) return { ok: false, error: "no applied entry for " + T };
+    if (a.ack) return { ok: true };   // idempotent — a second clear is not an error
+    if (!auditAppend({ k: "ack", ts: Date.now(), ticker: T })) return { ok: false, error: "persist failed" };
+    return { ok: true };
+  }
   function sectorAuditApply(tickerRaw, sectorRaw) {
     // The one-click resolution for a FLAGGED name: an admin picking between the two sectors the
     // sources offered. Manual applies are stamped by:"admin" and validated like the auto path.
@@ -10610,6 +10623,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getSectorAudit,                              // admin panel payload: applied overlay + flags + pins
     sectorAuditRevert,                           // admin: revert one applied entry (pins it)
     sectorAuditApply,                            // admin: resolve a flagged name to a chosen sector
+    sectorAuditAck,                              // admin: clear an applied row from the panel (overlay stays active)
     sectorAuditRunNow: sectorAuditRun,           // admin "run now" + harness entry
     auditSeedNow: (records) => { auditRecs = Array.isArray(records) ? records : []; return applyAuditOverlay(); },   // harness: stage a record log without disk or fetches
     auditStateNow: auditState,                   // harness: inspect the folded state
