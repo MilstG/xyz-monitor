@@ -3033,6 +3033,8 @@ async function loadAdmin(){
 // decision actually saw, rendered as a hover title — nothing here re-derives or summarizes it.
 let _aud=null,_audBusy=false,_audShowAck=false;
 async function loadAudit(){ try{ _aud=await fetchJSON('/api/sector-audit'); }catch(e){ _aud={error:String(e&&e.message||e)}; } renderAudit(); }
+function audIndOf(host,t){ const sel='.aud-ind[data-t="'+(window.CSS&&CSS.escape?CSS.escape(t):t)+'"]';
+  const i=host.querySelector(sel); return i&&i.value?i.value.trim():''; }
 function audEvTitle(ev){ if(!ev) return ''; const parts=[];
   for(const k of ['reason','resolvedFrom','confidence','name','expectedName','edgarName','exchange','ipo','finnhubIndustry','sic','finnSector','sicSector','error'])
     if(ev[k]!=null&&ev[k]!=='') parts.push(k+': '+(k==='confidence'?Number(ev[k]).toFixed(2):ev[k]));
@@ -3082,19 +3084,20 @@ function renderAudit(){
         +(pick?'<span style="white-space:nowrap"><select class="aud-sel" data-t="'+esc(f.ticker)+'" title="No source offered a sector \u2014 pick one to classify this name manually (admin-stamped, revertable)"><option value="">sector\u2026</option>'
           +_aud.gics.map(g=>'<option>'+esc(g)+'</option>').join('')+'</select>'
           +'<button class="aud-fix aud-go" data-t="'+esc(f.ticker)+'"'+(_audBusy?' disabled':'')
-          +' title="Apply the chosen sector as an admin-stamped overlay entry \u2014 same revert/pin machinery as auto applies">apply</button></span>':'')
+          +' title="Apply the chosen sector (and industry, if typed) as an admin-stamped overlay entry \u2014 same revert/pin machinery as auto applies">apply</button></span>':'')
+        +((pick||opts.length)?'<input class="aud-ind" data-t="'+esc(f.ticker)+'" maxlength="40" placeholder="industry (optional)" title="Optional industry group for the sectors tab \u2014 blank falls back to the sector name (renders italic like every fallback group)">':'')
         +'</div></div>'
         +'<div class="aud-ev" title="'+audEvTitle(f.ev)+'">'+fmtT(f.ts)+' \u00b7 '+audEvTitle(f.ev).slice(0,180)+'</div></div>'; } }
   if((_aud.pinned||[]).length) h+='<div class="aud-sub" style="margin-top:6px" title="Reverted names \u2014 the audit never auto re-applies these; only a manual apply can">pinned: '+_aud.pinned.map(esc).join(', ')+'</div>';
   host.innerHTML=h;
   const rb=el('audRun'); if(rb) rb.addEventListener('click',()=>audPost('/api/sector-audit/run',{}));
   host.querySelectorAll('.aud-rev').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/revert',{ticker:b.dataset.t})));
-  host.querySelectorAll('.aud-fix:not(.aud-go):not(.aud-ack)').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:b.dataset.s})));
+  host.querySelectorAll('.aud-fix:not(.aud-go):not(.aud-ack)').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:b.dataset.s,ind:audIndOf(host,b.dataset.t)})));
   host.querySelectorAll('.aud-ack').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/ack',{ticker:b.dataset.t})));
   host.querySelectorAll('.aud-go').forEach(b=>b.addEventListener('click',()=>{
     const sel=host.querySelector('.aud-sel[data-t="'+(window.CSS&&CSS.escape?CSS.escape(b.dataset.t):b.dataset.t)+'"]');
     const sec=sel&&sel.value; if(!sec){ pushToast('audit: pick a sector first'); return; }
-    audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:sec}); }));
+    audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:sec,ind:audIndOf(host,b.dataset.t)}); }));
   const tog=el('audAckTog'); if(tog) tog.addEventListener('click',(e)=>{ e.preventDefault(); _audShowAck=!_audShowAck; renderAudit(); });
 }
 function admLabel(st){ return st==='public'?'public':st==='admin'?'admin':'off'; }

@@ -1315,3 +1315,4 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .aud-fix{font-size:11px;padding:2px 8px;margin-left:6px;cursor:pointer}
 .auto-chip{background:#132a3a;color:#4aa8e0;padding:0 5px;border-radius:3px;font-size:10px;margin-left:5px;cursor:default}
 .auto-chip.grad{background:#153524;color:#39c07f}
+.aud-ind{font-size:11px;padding:2px 6px;margin-left:6px;width:150px;background:transparent;border:1px solid var(--line,#1d2733);color:inherit}
