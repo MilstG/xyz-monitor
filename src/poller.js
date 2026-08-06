@@ -4,6 +4,7 @@
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
+const { sectorAuditDecide, mergeSectorAudit, sectorAuditDue } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible, epLatSplit } = require("./compute");
 const { validateBasket, basketCloses, ratioCloses, emaSeries, BASKET_FLOOR, BASKET_MIN_MEMBERS, BASKET_MAX_MEMBERS, BASKET_MAX_CUSTOM } = require("./compute");
 const { MACRO_RELEASES, parseFredReleases, parseFredReleasesDates, fredObsSeries, yoyPct, momPct, momDelta, lastObs, macroExpectedObsMonth, buildMacroEntries, macroEntryState, macroWithin, etParts, macroStatText, FOMC_DECISIONS,
@@ -24,7 +25,7 @@ const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./comput
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
-const { classify, nameAliases, companyName, displayName, macroLane } = require("./sectors");
+const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 const TF = { h1: HOUR, h4: 4 * HOUR, d1: DAY, d7: 7 * DAY, d30: 30 * DAY };
@@ -1175,6 +1176,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         ref: trimRef(r.ref), feat: trimFeat(r.feat),
         doi: trimWin(computeDoi(r)), fundByWin: trimWin(computeFundWin(r), 6),
         sector: cl.sector, assetClass: cl.assetClass,
+        // Overlay provenance (build 2026.08.05-02): present ONLY when the classification came from
+        // the sector-audit overlay ("cls" auto-classified, "grad" auto-graduated). Read off the
+        // same classify() result as the sector itself — one code path, board and audit panel agree.
+        secAuto: cl.auto || undefined,
         // Industry group (build -04): shipped ONLY when it differs from the sector — the client's
         // contract is `r.ind || r.sector`, so an absent field IS the fallback, not a gap. Keeps
         // the payload thin for the majority of instruments where the two coincide.
@@ -4527,6 +4532,164 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     });
   }
 
+  // ---- weekly sector audit (build 2026.08.05-02) ----------------------------------------------
+  // The classification watchdog with a WRITE arm: once a week it (a) resolves roster tickers every
+  // static table declined (Unclassified) and (b) checks curated PREIPO names for a real listing —
+  // and, when the evidence gate passes, APPLIES the change as a persisted overlay entry rather
+  // than flagging it for a human. The curated tables in sectors.js stay untouched (they are source
+  // code; a job cannot durably edit them) — the overlay is the runtime layer classify() consults,
+  // and it wins only where the tables are silent or a graduation supersedes a PREIPO row.
+  // Transparency is the license for the write arm: every applied change lands as an ops event with
+  // its evidence, every classified name wears an `auto` provenance mark on the ONE classify() path
+  // every consumer reads, the full record log is served to the admin panel, and any entry reverts
+  // with one click — a reverted ticker is PINNED and never auto re-applied. Decisions are pure
+  // (compute.sectorAuditDecide) against real fetched shapes; this block only fetches + assembles.
+  // Frozen geometry note: an applied change alters classification GOING FORWARD only — fired
+  // ledger signals keep their stamped geometry, and no historical series restarts.
+  const SECTOR_AUDIT_TICK_MS = 60 * 60 * 1000;   // hourly due-check; the run itself fires Sundays >= 12:00 UTC
+  const SECTOR_AUDIT_MAX_CANDIDATES = 20;        // per run — bounds external API weight; leftovers wait a week
+  let auditRecs = [];                            // the append-only record log, persisted whole (atomic)
+  let auditRunning = false;
+  function auditState() { return mergeSectorAudit(auditRecs); }
+  function applyAuditOverlay() {
+    const m = auditState();
+    setSectorOverlay(m.active);
+    _clsCache.clear();   // classification changed -> every cached verdict is stale; rebuilt lazily
+    return m;
+  }
+  function auditHydrate() {
+    try { const d = store.loadSectorAudit && store.loadSectorAudit();
+      if (d && Array.isArray(d.records)) auditRecs = d.records; } catch (_) {}
+    applyAuditOverlay();
+  }
+  function auditAppend(rec) {
+    // Validate-then-mutate: the record must survive the fold before it enters the log, so a bad
+    // write can never poison the persisted state (atomic state changes, same rule as the ledger).
+    const trial = mergeSectorAudit([...auditRecs, rec]);
+    if (!trial) return false;
+    auditRecs.push(rec);
+    if (auditRecs.length > 2000) auditRecs = auditRecs.slice(-2000);   // years of weekly runs; bound anyway
+    const ok = store.saveSectorAudit ? store.saveSectorAudit({ records: auditRecs }) : false;
+    applyAuditOverlay();
+    return ok !== false;
+  }
+  async function finnProfile(sym, token) {
+    const r = await extGet("https://finnhub.io/api/v1/stock/profile2?symbol=" + encodeURIComponent(sym) + "&token=" + encodeURIComponent(token), "json");
+    if (!r.ok || !r.body || typeof r.body !== "object" || !r.body.name) return null;
+    return { name: r.body.name || null, exchange: r.body.exchange || null, ipo: r.body.ipo || null,
+      finnhubIndustry: r.body.finnhubIndustry || null };
+  }
+  async function edgarSicFor(T, maps) {
+    const hit = maps && maps.co ? maps.co.get(T) : null;
+    if (!hit) return { sic: null, edgarName: null };
+    const sub = await extGet("https://data.sec.gov/submissions/CIK" + cikPad(hit.cik) + ".json", "json");
+    const sic = sub.ok && sub.body && sub.body.sic != null ? Number(sub.body.sic) : null;
+    return { sic: Number.isFinite(sic) && sic > 0 ? sic : null, edgarName: hit.name || (sub.ok && sub.body && sub.body.name) || null };
+  }
+  async function sectorAuditRun() {
+    if (auditRunning) return { ok: false, error: "already running" };
+    auditRunning = true;
+    const startedAt = Date.now();
+    try {
+      const token = process.env.FINNHUB_TOKEN || "";
+      if (!token) {
+        auditAppend({ k: "run", ts: startedAt, applied: 0, flagged: 0, err: "FINNHUB_TOKEN not set" });
+        pushOps("sector audit", "weekly run skipped — FINNHUB_TOKEN not set", "warn");
+        return { ok: false, error: "FINNHUB_TOKEN not set" };
+      }
+      const m = auditState();
+      const onRoster = new Set(activeMarkets().map((r) => String(r.ticker || "").toUpperCase()).filter(Boolean));
+      const cands = [];
+      // (a) unresolved roster names: every static table AND the current overlay already declined.
+      for (const r of activeMarkets()) {
+        const T = String(r.ticker || "").toUpperCase();
+        if (!T || r.delisted || m.pinned.has(T)) continue;
+        if (classify(T, r.uni).assetClass !== "Unclassified") continue;
+        cands.push({ kind: "classify", ticker: T });
+      }
+      // (b) curated PREIPO names still classifying as Pre-IPO (an active graduate overlay entry
+      // already moved them to Equity, so re-checking those is free of double-apply by construction).
+      for (const T of Object.keys(PREIPO)) {
+        if (!onRoster.has(T) || m.pinned.has(T)) continue;
+        if (classify(T, "xyz").assetClass !== "Pre-IPO") continue;
+        cands.push({ kind: "graduate", ticker: T, curSector: PREIPO[T] });
+      }
+      const work = cands.slice(0, SECTOR_AUDIT_MAX_CANDIDATES);
+      const maps = await ensureCikMaps();   // null when sec.gov is down — decide() degrades to flags, honestly
+      let applied = 0, flagged = 0;
+      for (const c of work) {
+        try {
+          const profile = await finnProfile(c.ticker, token);
+          const sec = await edgarSicFor(c.ticker, maps);
+          const cand = c.kind === "graduate"
+            ? { kind: "graduate", ticker: c.ticker, curSector: c.curSector,
+                expectedNames: [displayName ? displayName(c.ticker) : null, ...(nameAliases(c.ticker) || [])]
+                  .map((n) => String(n || "").replace(/\s*\(pre-IPO synthetic\)\s*$/i, "")).filter(Boolean),
+                profile, sic: sec.sic, edgarName: sec.edgarName }
+            : { kind: "classify", ticker: c.ticker, profile, sic: sec.sic };
+          const d = sectorAuditDecide(cand);
+          if (d.apply && GICS_SET.has(d.sector)) {
+            auditAppend({ k: "apply", ts: Date.now(), ticker: c.ticker, action: d.action,
+              sector: d.sector, ind: d.ind || d.sector, ev: Object.assign({ confidence: d.confidence, reason: d.reason }, d.ev), by: "auto" });
+            applied++;
+            pushOps("sector audit", (d.action === "graduate"
+              ? c.ticker + " graduated Pre-IPO \u2192 Equity \u00b7 " + d.sector + " (name match " + d.confidence.toFixed(2) + ", exchange " + (d.ev.exchange || "?") + (d.ev.ipo ? ", IPO " + d.ev.ipo : "") + ") \u2014 earnings-calendar eligible next hydrate"
+              : c.ticker + " classified " + d.sector + " / " + (d.ind || d.sector) + " (Finnhub + EDGAR SIC agree, conf " + d.confidence.toFixed(2) + ")") + " \u2014 revert in Admin \u00b7 Classification audit", "info");
+          } else {
+            auditAppend({ k: "flag", ts: Date.now(), ticker: c.ticker, action: d.action, reason: d.reason,
+              ev: Object.assign({ confidence: d.confidence }, d.ev) });
+            flagged++;
+          }
+        } catch (e) {
+          auditAppend({ k: "flag", ts: Date.now(), ticker: c.ticker, action: c.kind, reason: "error",
+            ev: { error: String(e && e.message || e) } });
+          flagged++;
+        }
+      }
+      auditAppend({ k: "run", ts: startedAt, applied, flagged });
+      log("sector audit: " + work.length + " candidate(s), " + applied + " applied, " + flagged + " flagged" + (cands.length > work.length ? " (" + (cands.length - work.length) + " deferred to next run)" : ""));
+      if (applied || flagged) pushOps("sector audit", "weekly run: " + applied + " applied, " + flagged + " flagged \u2014 details in Admin \u00b7 Classification audit", "info", applied === 0);
+      return { ok: true, candidates: work.length, applied, flagged };
+    } finally { auditRunning = false; }
+  }
+  async function sectorAuditTick() {
+    if (!sectorAuditDue(Date.now(), auditState().lastRun)) return;
+    await sectorAuditRun();
+  }
+  function getSectorAudit() {
+    const m = auditState();
+    return { ts: Date.now(), lastRun: m.lastRun || null, running: auditRunning,
+      lastRunRec: m.lastRunRec ? { ts: m.lastRunRec.ts, applied: m.lastRunRec.applied, flagged: m.lastRunRec.flagged, err: m.lastRunRec.err || null } : null,
+      applied: m.applied, flagged: m.flagged, pinned: [...m.pinned].sort(),
+      gics: [...GICS_SET].sort() };
+  }
+  function sectorAuditRevert(tickerRaw) {
+    const T = String(tickerRaw || "").toUpperCase().trim();
+    if (!T) return { ok: false, error: "no ticker" };
+    const m = auditState();
+    if (![...m.applied].some((a) => a.ticker === T)) return { ok: false, error: "no applied entry for " + T };
+    if (!auditAppend({ k: "revert", ts: Date.now(), ticker: T })) return { ok: false, error: "persist failed" };
+    pushOps("sector audit", T + " overlay entry reverted by admin \u2014 pinned against auto re-apply", "info");
+    return { ok: true };
+  }
+  function sectorAuditApply(tickerRaw, sectorRaw) {
+    // The one-click resolution for a FLAGGED name: an admin picking between the two sectors the
+    // sources offered. Manual applies are stamped by:"admin" and validated like the auto path.
+    const T = String(tickerRaw || "").toUpperCase().trim();
+    const sector = String(sectorRaw || "");
+    if (!T) return { ok: false, error: "no ticker" };
+    if (!GICS_SET.has(sector)) return { ok: false, error: "unknown sector" };
+    const m = auditState();
+    const fl = m.flagged.find((f) => f.ticker === T);
+    if (!fl) return { ok: false, error: "no flagged entry for " + T };
+    const action = fl.action === "graduate" ? "graduate" : "classify";
+    if (!auditAppend({ k: "apply", ts: Date.now(), ticker: T, action, sector, ind: sector,
+      ev: Object.assign({ resolvedFrom: fl.reason }, fl.ev || null), by: "admin" })) return { ok: false, error: "persist failed" };
+    pushOps("sector audit", T + " " + (action === "graduate" ? "graduated" : "classified") + " " + sector + " by admin (resolved: " + fl.reason + ")", "info");
+    return { ok: true };
+  }
+  auditHydrate();
+
   function getTgChannels() {
     return { ts: Date.now(), max: TG_MAX, channels: tgChannels.map((c) => Object.assign({ c }, tgStatus.get(c) || { lastOk: null, error: null, posts: 0 })) };
   }
@@ -5311,6 +5474,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // payload, so evaluating on any other clock would mean judging a number the board isn't showing.
     setInterval(safeTick(ruleScan, "ruleScan"), 15 * 1000);
     setInterval(safeTick(earnScan, "earnScan"), 60 * 60 * 1000);
+    // Weekly classification audit: hourly due-check, fires Sundays >= 12:00 UTC once per ISO week.
+    // Isolated like briefTick — an audit failure must never take the poller loop with it.
+    setInterval(() => { sectorAuditTick().catch((e) => log("sector audit failed (isolated, server stays up): " + (e && e.message))); }, SECTOR_AUDIT_TICK_MS);
     // The calendar lanes. Macro runs every 5 min because the imminent leg is a 60-minute window
     // against an 08:30/14:00 ET clock — an hourly scan would miss it as often as it caught it.
     // The first pass is deliberately early (the warm macro cache is already on disk by then) so a
@@ -10441,6 +10607,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     etfHoldings,                                 // on-demand SEC N-PORT pull for the terminal's `etf` card
     fundSeedNow: (t, res) => { fundCache.set(String(t).toUpperCase(), { at: Date.now(), res }); },   // harness: stage filed facts without an EDGAR round trip
     filingScanNow: filingScan,                   // harness: feed parsed EDGAR items without a fetch
+    getSectorAudit,                              // admin panel payload: applied overlay + flags + pins
+    sectorAuditRevert,                           // admin: revert one applied entry (pins it)
+    sectorAuditApply,                            // admin: resolve a flagged name to a chosen sector
+    sectorAuditRunNow: sectorAuditRun,           // admin "run now" + harness entry
+    auditSeedNow: (records) => { auditRecs = Array.isArray(records) ? records : []; return applyAuditOverlay(); },   // harness: stage a record log without disk or fetches
+    auditStateNow: auditState,                   // harness: inspect the folded state
     earnScanNow: earnScan,                       // harness: run the proximity check on demand
     earnRebuildNow: rebuildEarnMap,              // harness: stage a calendar without a Finnhub round trip
     earnPreviewNow: earnPreviewScan,             // harness: run the daily calendar without waiting for 17:00 ET

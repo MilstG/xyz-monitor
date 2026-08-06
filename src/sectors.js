@@ -45,6 +45,34 @@ for (const [sector, arr] of Object.entries(SECTOR_TICKERS)) for (const t of arr)
 
 function norm(t) { return String(t || "").toUpperCase().replace(/[^A-Z0-9.]/g, ""); }
 
+// ---- runtime classification overlay (build 2026.08.05-02) -------------------------------------
+// The weekly sector-audit job's write surface. The curated tables above are SOURCE CODE — a job
+// cannot durably edit them (Railway redeploys from git) — so audit decisions land as a persisted
+// overlay the poller loads from /data and installs here. Precedence is deliberate and narrow:
+//   · a "graduate" entry supersedes the PREIPO table only (Pre-IPO -> Equity; sector stays the
+//     CURATED Pre-IPO sector — graduation changes asset class, it never invents a new sector);
+//   · a "classify" entry fills ONLY where every static table is silent (the Unclassified branch);
+//   · a curated SECTOR_TICKERS entry always wins — the overlay can never reclassify a curated name.
+// Entries carry `auto` in the classify() result ("grad"/"cls") so every consumer — board payload,
+// admin panel, terminal — reads provenance off the ONE classification path, never a side channel.
+// Sector values are validated against the GICS table here (defense in depth: the poller validates
+// too, but a corrupt overlay file must not be able to mint a sector the client has never heard of).
+const GICS_SECTORS = new Set(Object.keys(SECTOR_TICKERS));
+const OVERLAY = new Map();   // TICKER -> { action: "classify"|"graduate", sector, ind }
+function setSectorOverlay(list) {
+  OVERLAY.clear();
+  for (const e of (Array.isArray(list) ? list : [])) {
+    const T = norm(e && e.ticker); if (!T) continue;
+    const action = e.action === "graduate" ? "graduate" : "classify";
+    const sector = String((e && e.sector) || "");
+    if (!GICS_SECTORS.has(sector)) continue;   // invalid sector -> entry dropped, ticker stays honest
+    const ind = e && e.ind ? String(e.ind) : sector;
+    OVERLAY.set(T, { action, sector, ind });
+  }
+  return OVERLAY.size;
+}
+function overlayFor(t) { return OVERLAY.get(norm(t)) || null; }
+
 // ---- industry groups (build 2026.07.28-04) ----------------------------------------------------
 // A finer, trader-oriented grouping LAYERED ON TOP of the GICS sector — never replacing it.
 // Rationale: Info Tech is a ~70-ticker mega-bucket where AAPL/MSFT volume-weighting drowns a
@@ -155,6 +183,11 @@ function classify(ticker, uni) {
   const T = norm(ticker), Td = T.replace(/\./g, "");
   if (EQ[T]) return { assetClass: "Equity", sector: EQ[T], ind: indOf(T, Td, EQ[T]) };
   if (EQ[Td]) return { assetClass: "Equity", sector: EQ[Td], ind: indOf(T, Td, EQ[Td]) };
+  const ov = OVERLAY.get(T) || OVERLAY.get(Td);
+  // Graduation outranks the PREIPO row it supersedes — that is its entire job. The curated
+  // industry group (indOf) still applies if one exists; the overlay's ind is only the fallback.
+  if (ov && ov.action === "graduate") { const ci = indOf(T, Td, null);
+    return { assetClass: "Equity", sector: ov.sector, ind: ci || (ov.ind !== ov.sector ? ov.ind : ov.sector), auto: "grad" }; }
   if (PREIPO[T]) return { assetClass: "Pre-IPO", sector: PREIPO[T], ind: indOf(T, Td, PREIPO[T]) };
   if (THEMATIC.has(T)) return { assetClass: "Thematic", sector: "Thematic", ind: indOf(T, Td, "Thematic") };
   if (SECTOR_ETF[T]) return { assetClass: "ETF", sector: SECTOR_ETF[T], ind: indOf(T, Td, SECTOR_ETF[T]) };
@@ -165,6 +198,8 @@ function classify(ticker, uni) {
   if (FX.has(T) || FX.has(Td)) return { assetClass: "FX", sector: "FX", ind: "FX" };
   if (/^[A-Z]{6}$/.test(Td)) { const a = Td.slice(0, 3), b = Td.slice(3); if (CCY.has(a) && CCY.has(b)) return { assetClass: "FX", sector: "FX", ind: "FX" }; }
   if (CCY.has(Td)) return { assetClass: "FX", sector: "FX", ind: "FX" };
+  // Overlay "classify" entries fill ONLY here — every static table above already declined.
+  if (ov) return { assetClass: "Equity", sector: ov.sector, ind: ov.ind !== ov.sector ? ov.ind : ov.sector, auto: "cls" };
   return { assetClass: "Unclassified", sector: "Unclassified", ind: "Unclassified" };
 }
 
@@ -480,5 +515,5 @@ function macroLane(t, uni) {
   return L || null;
 }
 
-module.exports = { classify, nameAliases, companyName, displayName, macroLane, MACRO_LANES, DISPLAY_NAMES, CRYPTO_NAMES, IND_TICKERS, SECTOR_TICKERS };
+module.exports = { classify, nameAliases, companyName, displayName, macroLane, MACRO_LANES, DISPLAY_NAMES, CRYPTO_NAMES, IND_TICKERS, SECTOR_TICKERS, setSectorOverlay, overlayFor, PREIPO, GICS_SECTORS };
 

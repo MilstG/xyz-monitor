@@ -6743,3 +6743,179 @@ function hourlyPickBetter(cand, best) {
 }
 module.exports.hourlyPickTier = hourlyPickTier;
 module.exports.hourlyPickBetter = hourlyPickBetter;
+
+// ===== weekly sector audit (pure) ==============================================================
+// The decision core behind poller's sectorAudit job (build 2026.08.05-02). Everything that decides
+// lives here, behaviorally testable against real fixtures; the poller only fetches and assembles.
+// Two candidate kinds:
+//   · "classify" — a roster ticker every static table declined (Unclassified). Auto-applies ONLY
+//     when two independent sources agree on the GICS sector (Finnhub profile industry AND SEC
+//     EDGAR SIC). One source, or a disagreement, is a FLAG — honest null over false precision.
+//   · "graduate" — a curated PREIPO ticker that may have listed. Auto-applies ONLY on a high-
+//     confidence company-NAME match (never a bare symbol match — RAMP is LiveRamp on NYSE; a
+//     symbol collision must land as a hold, not a graduation) plus a listed exchange. The sector
+//     is the CURATED Pre-IPO sector, unchanged: graduation moves asset class, never sector.
+// Finnhub profile2 `finnhubIndustry` -> GICS sector. Curated like every other map in this repo:
+// unknown values return null and the candidate flags, never guesses.
+const FINN_SECTOR = {
+  "Technology": "Information Technology", "Semiconductors": "Information Technology",
+  "Software": "Information Technology", "Computers": "Information Technology",
+  "Electronic Equipment & Instruments": "Information Technology", "Communications": "Communication Services",
+  "Media": "Communication Services", "Telecommunication": "Communication Services",
+  "Entertainment": "Communication Services", "Financial Services": "Financials", "Banking": "Financials",
+  "Insurance": "Financials", "Capital Markets": "Financials", "Consumer products": "Consumer Staples",
+  "Food Products": "Consumer Staples", "Beverages": "Consumer Staples", "Tobacco": "Consumer Staples",
+  "Retail": "Consumer Discretionary", "Automobiles": "Consumer Discretionary",
+  "Hotels, Restaurants & Leisure": "Consumer Discretionary", "Textiles, Apparel & Luxury Goods": "Consumer Discretionary",
+  "Leisure Products": "Consumer Discretionary", "Pharmaceuticals": "Health Care", "Biotechnology": "Health Care",
+  "Health Care": "Health Care", "Life Sciences Tools & Services": "Health Care", "Medical Devices": "Health Care",
+  "Aerospace & Defense": "Industrials", "Machinery": "Industrials", "Industrial Conglomerates": "Industrials",
+  "Airlines": "Industrials", "Road & Rail": "Industrials", "Logistics & Transportation": "Industrials",
+  "Professional Services": "Industrials", "Building": "Industrials", "Trading Companies & Distributors": "Industrials",
+  "Energy": "Energy", "Oil, Gas & Consumable Fuels": "Energy", "Energy Equipment & Services": "Energy",
+  "Chemicals": "Materials", "Metals & Mining": "Materials", "Packaging": "Materials",
+  "Construction Materials": "Materials", "Paper & Forest": "Materials",
+  "Utilities": "Utilities", "Electric Utilities": "Utilities", "Gas Utilities": "Utilities",
+  "Real Estate": "Real Estate", "Real Estate Management & Development": "Real Estate", "REITs": "Real Estate",
+};
+// SIC major-division -> GICS sector, coarse by construction. Only the AGREEMENT with the Finnhub
+// lane matters, so a coarse-but-honest mapping is exactly right; ranges without a defensible GICS
+// home return null (agriculture, public administration) and the candidate flags.
+function sicToSector(sicRaw) {
+  const sic = Number(sicRaw);
+  if (!Number.isFinite(sic) || sic <= 0) return null;
+  if (sic >= 100 && sic <= 999) return null;                              // agriculture — no GICS home
+  if (sic >= 1000 && sic <= 1299) return sic >= 1200 ? "Energy" : "Materials";   // coal->Energy, metal mining->Materials
+  if (sic >= 1300 && sic <= 1399) return "Energy";
+  if (sic >= 1400 && sic <= 1499) return "Materials";
+  if (sic >= 1500 && sic <= 1799) return "Industrials";
+  if (sic >= 2000 && sic <= 2199) return "Consumer Staples";
+  if (sic >= 2200 && sic <= 2399) return "Consumer Discretionary";
+  if (sic >= 2400 && sic <= 2699) return "Materials";
+  if (sic >= 2700 && sic <= 2799) return "Communication Services";
+  if (sic >= 2800 && sic <= 2899) return sic >= 2830 && sic <= 2836 ? "Health Care" : "Materials";  // pharma carve-out
+  if (sic >= 2900 && sic <= 2999) return "Energy";
+  if (sic >= 3000 && sic <= 3399) return "Materials";
+  if (sic >= 3400 && sic <= 3499) return "Industrials";
+  if (sic >= 3500 && sic <= 3579) return "Industrials";
+  if (sic === 3571 || sic === 3572 || sic === 3575 || sic === 3576 || sic === 3577 || sic === 3578) return "Information Technology";
+  if (sic >= 3580 && sic <= 3599) return "Industrials";
+  if (sic >= 3600 && sic <= 3699) return "Information Technology";
+  if (sic >= 3700 && sic <= 3799) return sic >= 3760 && sic <= 3769 ? "Industrials" : "Consumer Discretionary";  // space vehicles carve-out
+  if (sic >= 3800 && sic <= 3859) return "Health Care";
+  if (sic >= 3860 && sic <= 3999) return "Consumer Discretionary";
+  if (sic >= 4000 && sic <= 4799) return sic >= 4800 ? null : (sic >= 4600 && sic <= 4699 ? "Energy" : "Industrials");  // pipelines->Energy
+  if (sic >= 4800 && sic <= 4899) return "Communication Services";
+  if (sic >= 4900 && sic <= 4999) return "Utilities";
+  if (sic >= 5000 && sic <= 5199) return "Industrials";
+  if (sic >= 5200 && sic <= 5999) return sic >= 5400 && sic <= 5499 ? "Consumer Staples" : "Consumer Discretionary";
+  if (sic >= 6000 && sic <= 6499) return "Financials";
+  if (sic >= 6500 && sic <= 6599) return "Real Estate";
+  if (sic >= 6600 && sic <= 6999) return "Financials";
+  if (sic >= 7000 && sic <= 7299) return "Consumer Discretionary";
+  if (sic >= 7300 && sic <= 7379) return sic >= 7370 ? "Information Technology" : "Industrials";
+  if (sic >= 7380 && sic <= 7999) return "Consumer Discretionary";
+  if (sic >= 8000 && sic <= 8099) return "Health Care";
+  if (sic >= 8100 && sic <= 8999) return "Industrials";
+  return null;
+}
+// Company-name similarity for the graduation gate. Corporate suffixes and punctuation are noise;
+// what must match are the DISTINCTIVE tokens ("figure" vs "liveramp"). Score = token Jaccard with
+// a containment boost (an exact prefix like "Figure AI" inside "Figure AI, Inc." scores 1).
+const NAME_STOP = new Set(["inc", "incorporated", "corp", "corporation", "co", "company", "ltd", "limited",
+  "plc", "holdings", "holding", "group", "technologies", "technology", "the", "sa", "nv", "ag", "llc", "lp"]);
+function nameTokens(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((t) => t && !NAME_STOP.has(t));
+}
+function nameMatchScore(expected, got) {
+  const a = nameTokens(expected), b = nameTokens(got);
+  if (!a.length || !b.length) return 0;
+  const A = new Set(a), B = new Set(b);
+  let inter = 0; for (const t of A) if (B.has(t)) inter++;
+  const jac = inter / (A.size + B.size - inter);
+  const contains = a.every((t) => B.has(t)) || b.every((t) => A.has(t));
+  return contains ? Math.max(jac, 0.95) : jac;
+}
+const AUDIT_GRAD_GATE = 0.9;   // graduation confidence floor — below it is a hold, never an apply
+// The one decision function. cand:
+//   { kind:"classify", ticker, profile:{name,exchange,ipo,finnhubIndustry}|null, sic|null }
+//   { kind:"graduate", ticker, curSector, expectedName, profile:{...}|null, sic|null, edgarName|null }
+// Returns { apply, action, sector, ind, confidence, reason, ev } — ev is the evidence blob stamped
+// into the persisted record verbatim, so the panel shows exactly what the decision saw.
+function sectorAuditDecide(cand) {
+  const p = cand.profile || null;
+  const ev = { name: p && p.name || null, exchange: p && p.exchange || null, ipo: p && p.ipo || null,
+    finnhubIndustry: p && p.finnhubIndustry || null, sic: cand.sic != null ? Number(cand.sic) : null };
+  if (cand.kind === "graduate") {
+    // The expected name may have several honest spellings ("SpaceX" AND "Space Exploration
+    // Technologies") — the gate takes the BEST match across all of them, and a graduation is only
+    // as trustworthy as its strongest alias hit.
+    const names = (Array.isArray(cand.expectedNames) ? cand.expectedNames : [cand.expectedName]).filter(Boolean);
+    ev.expectedName = names[0] || null;
+    if (cand.edgarName) ev.edgarName = cand.edgarName;
+    if (!names.length) return { apply: false, action: "graduate", reason: "no-display-name", confidence: 0, ev };
+    const best = (got) => names.reduce((m, n) => Math.max(m, nameMatchScore(n, got)), 0);
+    // Symbol collision guard FIRST: if the SEC ticker map resolves this symbol to a company whose
+    // name does NOT match the private company, an unrelated listing owns the code — hard hold.
+    if (cand.edgarName && best(cand.edgarName) < 0.5)
+      return { apply: false, action: "graduate", reason: "collision-hold", confidence: best(cand.edgarName), ev };
+    if (!p || !p.name) return { apply: false, action: "graduate", reason: "no-profile", confidence: 0, ev };
+    const score = best(p.name);
+    if (score < AUDIT_GRAD_GATE) return { apply: false, action: "graduate", reason: "name-mismatch", confidence: score, ev };
+    if (!p.exchange) return { apply: false, action: "graduate", reason: "no-exchange", confidence: score, ev };
+    return { apply: true, action: "graduate", sector: cand.curSector, ind: cand.curSector,
+      confidence: score, reason: "listed", ev };
+  }
+  // classify: two-source agreement or nothing.
+  const fs = p && p.finnhubIndustry ? (FINN_SECTOR[p.finnhubIndustry] || null) : null;
+  const ss = sicToSector(cand.sic);
+  ev.finnSector = fs; ev.sicSector = ss;
+  if (fs && ss && fs === ss)
+    return { apply: true, action: "classify", sector: fs, ind: p && p.finnhubIndustry ? String(p.finnhubIndustry) : fs,
+      confidence: 0.99, reason: "sources-agree", ev };
+  if (fs && ss) return { apply: false, action: "classify", reason: "sources-disagree", confidence: 0.5, ev };
+  if (fs || ss) return { apply: false, action: "classify", reason: "single-source", confidence: 0.4, ev };
+  return { apply: false, action: "classify", reason: "no-data", confidence: 0, ev };
+}
+// Pure fold over the persisted record list -> the state everything reads. Records (append-only):
+//   {k:"apply", ts, ticker, action, sector, ind, ev, by}   by: "auto" | "admin"
+//   {k:"flag",  ts, ticker, action, reason, ev}
+//   {k:"revert", ts, ticker}                                revert PINS: never auto re-applied
+//   {k:"run",   ts, applied, flagged, err?}
+// Atomicity: the fold validates every record shape and skips garbage — a corrupt line loses that
+// line, never the file.
+function mergeSectorAudit(records) {
+  const applied = new Map(), pinned = new Set(), flagged = new Map();
+  let lastRun = 0, lastRunRec = null;
+  for (const r of (Array.isArray(records) ? records : [])) {
+    if (!r || typeof r !== "object") continue;
+    const T = r.ticker != null ? String(r.ticker).toUpperCase() : null;
+    if (r.k === "apply" && T && r.sector) {
+      applied.set(T, { ticker: T, ts: Number(r.ts) || 0, action: r.action === "graduate" ? "graduate" : "classify",
+        sector: String(r.sector), ind: r.ind ? String(r.ind) : String(r.sector), ev: r.ev || null, by: r.by === "admin" ? "admin" : "auto" });
+      flagged.delete(T);
+    } else if (r.k === "revert" && T) {
+      applied.delete(T); pinned.add(T);
+    } else if (r.k === "flag" && T) {
+      if (!applied.has(T)) flagged.set(T, { ticker: T, ts: Number(r.ts) || 0,
+        action: r.action === "graduate" ? "graduate" : "classify", reason: String(r.reason || ""), ev: r.ev || null });
+    } else if (r.k === "run") {
+      lastRun = Math.max(lastRun, Number(r.ts) || 0); lastRunRec = r;
+    }
+  }
+  return { active: [...applied.values()], applied: [...applied.values()].sort((a, b) => b.ts - a.ts),
+    flagged: [...flagged.values()].sort((a, b) => b.ts - a.ts), pinned, lastRun, lastRunRec };
+}
+// Weekly trigger predicate, frozen-clock testable. The anchor is the most recent Sunday 12:00 UTC
+// at or before `now`; the run is due when the last run predates that anchor and now has passed it.
+function sectorAuditDue(now, lastRun) {
+  const d = new Date(now);
+  const daysSinceSun = d.getUTCDay();
+  const anchor = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - daysSinceSun, 12, 0, 0);
+  return now >= anchor && (Number(lastRun) || 0) < anchor;
+}
+module.exports.sectorAuditDecide = sectorAuditDecide;
+module.exports.mergeSectorAudit = mergeSectorAudit;
+module.exports.sectorAuditDue = sectorAuditDue;
+module.exports.nameMatchScore = nameMatchScore;
+module.exports.sicToSector = sicToSector;
