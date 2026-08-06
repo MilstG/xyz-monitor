@@ -12002,7 +12002,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.05-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.05-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16250,5 +16250,63 @@ test("audit poller verbs: seed -> revert pins against re-apply, manual apply res
     assert.deepStrictEqual([n.sector, n.auto], ["Industrials", "cls"], "admin-applied entry classifies with provenance");
     assert.strictEqual(p.getSectorAudit().applied.find((a) => a.ticker === "NEURA").by, "admin", "stamped by:admin");
     assert.ok(!p.getSectorAudit().flagged.some((f) => f.ticker === "NEURA"), "flag cleared by the apply");
+  } finally { S.setSectorOverlay([]); p.stop && p.stop(); }
+});
+
+
+// ===== build 2026.08.05-03: audit panel verbs — manual classify for no-data flags, "clear" ack ==
+// Two admin affordances on the existing machinery, zero new decision paths: a sector picker for
+// flags where NO source offered a verdict (routes through the same by:"admin" apply), and an
+// acknowledgement that hides an applied row while the overlay STAYS ACTIVE — revert remains the
+// only way to undo an entry, and a newer apply un-hides the row so fresh evidence gets fresh eyes.
+test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, route + verb pinned", () => {
+  const fs = require("fs"), path = require("path");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const stf = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  const once = (str, needle, what) => assert.strictEqual(str.split(needle).length - 1, 1, what + " pinned exactly once");
+  once(srv, '"/api/sector-audit/ack"', "ack route");
+  once(app, "'.aud-sel[data-t=", "manual sector picker wiring");
+  assert.ok(app.includes("_audShowAck"), "show-cleared toggle present");
+  // the -02 store persistence must be present — the web-UI deploy dropped it once already
+  once(stf, "saveSectorAudit(data)", "audit persistence survived the deploy round-trip");
+
+  const C = require("../src/compute");
+  const base = [
+    { k: "apply", ts: 1, ticker: "KLARNA", action: "classify", sector: "Financials", ind: "Fintech", ev: {}, by: "auto" },
+  ];
+  // ack hides but does not deactivate
+  const m1 = C.mergeSectorAudit([...base, { k: "ack", ts: 2, ticker: "KLARNA" }]);
+  assert.ok(m1.applied[0].ack === true, "ack folds onto the applied row");
+  assert.ok(m1.active.some((a) => a.ticker === "KLARNA"), "overlay entry STAYS ACTIVE after ack");
+  // a newer apply resurfaces the row
+  const m2 = C.mergeSectorAudit([...base, { k: "ack", ts: 2, ticker: "KLARNA" },
+    { k: "apply", ts: 3, ticker: "KLARNA", action: "classify", sector: "Financials", ind: "Payments", ev: {}, by: "auto" }]);
+  assert.ok(!m2.applied[0].ack, "re-apply clears the ack — changed evidence resurfaces");
+  // ack on a reverted/absent ticker is inert in the fold
+  const m3 = C.mergeSectorAudit([{ k: "ack", ts: 1, ticker: "GHOST" }]);
+  assert.strictEqual(m3.applied.length, 0, "stray ack folds to nothing");
+
+  // poller verb, behaviorally
+  const { createPoller } = require("../src/poller");
+  const S = require("../src/sectors");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+    saveSectorAudit: () => true, loadSectorAudit: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  try {
+    p.auditSeedNow([{ k: "apply", ts: 1, ticker: "KLARNA", action: "classify", sector: "Financials", ind: "Fintech", ev: {}, by: "auto" },
+      { k: "flag", ts: 2, ticker: "UNITREE", action: "classify", reason: "no-data", ev: {} }]);
+    assert.ok(!p.sectorAuditAck("NOPE").ok, "ack requires an applied entry");
+    assert.ok(p.sectorAuditAck("KLARNA").ok, "ack applies");
+    assert.ok(p.sectorAuditAck("KLARNA").ok, "ack is idempotent");
+    assert.ok(p.getSectorAudit().applied.find((a) => a.ticker === "KLARNA").ack, "served payload carries ack");
+    assert.strictEqual(S.classify("KLARNA", "xyz").sector, "Financials", "board classification untouched by ack");
+    // the no-data manual path: same apply verb, admin-stamped, full machinery
+    assert.ok(p.sectorAuditApply("UNITREE", "Industrials").ok, "no-data flag resolves via manual apply");
+    const u = S.classify("UNITREE", "xyz");
+    assert.deepStrictEqual([u.sector, u.auto], ["Industrials", "cls"], "manually classified with provenance");
+    assert.ok(p.sectorAuditRevert("UNITREE").ok && S.classify("UNITREE", "xyz").assetClass === "Unclassified",
+      "and revertable like every overlay entry");
   } finally { S.setSectorOverlay([]); p.stop && p.stop(); }
 });
