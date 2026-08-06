@@ -398,7 +398,10 @@ function applySnapshot(s){
       // clear rather than keep, or a name whose industry is later removed from the curated table
       // would wear a stale group on any long-lived page until reload. (Build -05: this line is the
       // fix for -04's field-name-mismatch bug — the wire carried ind, this explicit merge dropped it.)
-      r.ind=(m.ind!==undefined)?m.ind:undefined; }
+      r.ind=(m.ind!==undefined)?m.ind:undefined;
+      // Audit-overlay provenance rides the same payload in lockstep: absent MEANS curated — clear
+      // rather than keep, or a reverted overlay entry would wear a stale "auto" chip until reload.
+      r.secAuto=(m.secAuto!==undefined)?m.secAuto:undefined; }
     // 5m/15m ring references: absence on the wire MEANS no honest reference right now (server
     // warm-up or a feed gap at the lookback point) — clear rather than keep, or a long-lived page
     // would compute a "5m" change against a reference minutes older than its label.
@@ -3018,11 +3021,65 @@ const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
-async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); await loadAdmin(); }
+async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); await loadAdmin(); }
 async function loadAdmin(){
   try{ _adm=await fetchJSON('/api/features'); }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
   renderAdmin(); }
+// ===== admin panel: weekly classification audit =================================================
+// Reads /api/sector-audit (the folded record log). Three verbs, all admin-gated server-side:
+// revert an applied entry (pins it against auto re-apply), resolve a flagged name to one of the
+// sectors the sources offered, run the audit now. Every row's evidence is the persisted blob the
+// decision actually saw, rendered as a hover title — nothing here re-derives or summarizes it.
+let _aud=null,_audBusy=false;
+async function loadAudit(){ try{ _aud=await fetchJSON('/api/sector-audit'); }catch(e){ _aud={error:String(e&&e.message||e)}; } renderAudit(); }
+function audEvTitle(ev){ if(!ev) return ''; const parts=[];
+  for(const k of ['reason','resolvedFrom','confidence','name','expectedName','edgarName','exchange','ipo','finnhubIndustry','sic','finnSector','sicSector','error'])
+    if(ev[k]!=null&&ev[k]!=='') parts.push(k+': '+(k==='confidence'?Number(ev[k]).toFixed(2):ev[k]));
+  return esc(parts.join(' \u00b7 ')); }
+async function audPost(url,body){ if(_audBusy) return; _audBusy=true; renderAudit();
+  try{ const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok) pushToast('audit: '+(d.error||('HTTP '+r.status)));
+  }catch(e){ pushToast('audit: '+String(e&&e.message||e)); }
+  _audBusy=false; await loadAudit(); }
+function renderAudit(){
+  const host=el('admAuditBox'); if(!host) return;
+  if(!_aud){ host.innerHTML='<div class="aud-head"><div class="aud-title">Classification audit</div><div class="aud-sub">Loading\u2026</div></div>'; return; }
+  if(_aud.error){ host.innerHTML='<div class="aud-head"><div class="aud-title">Classification audit</div><div class="aud-sub">could not load \u2014 '+esc(_aud.error)+'</div></div>'; return; }
+  const fmtT=(ts)=>ts?new Date(ts).toISOString().slice(0,16).replace('T',' ')+' UTC':'never';
+  let h='<div class="aud-head"><div class="aud-title">Classification audit</div>'
+    +'<div class="aud-sub">weekly \u00b7 Sundays 12:00 UTC \u00b7 last run '+fmtT(_aud.lastRun)
+    +(_aud.lastRunRec?' ('+(_aud.lastRunRec.applied||0)+' applied, '+(_aud.lastRunRec.flagged||0)+' flagged'+(_aud.lastRunRec.err?' \u00b7 '+esc(_aud.lastRunRec.err):'')+')':'')
+    +'</div><button class="btn" id="audRun" style="margin-left:auto"'+(_audBusy||_aud.running?' disabled':'')
+    +' title="Run the audit now instead of waiting for Sunday \u2014 same gates, same record log">'+(_aud.running?'running\u2026':'\u25b8 run now')+'</button></div>';
+  const applied=_aud.applied||[], flagged=_aud.flagged||[];
+  if(!applied.length&&!flagged.length) h+='<div class="msg">Nothing applied or flagged \u2014 every roster name resolves against the curated tables.</div>';
+  if(applied.length){ h+='<div class="aud-grp">Applied \u00b7 overlay active</div>';
+    for(const a of applied){ const grad=a.action==='graduate';
+      h+='<div class="aud-row"><div class="aud-top"><div><b>'+esc(a.ticker)+'</b>'
+        +'<span class="aud-badge '+(grad?'grad':'cls')+'">'+(grad?'GRADUATED':'CLASSIFIED')+'</span>'
+        +(a.by==='admin'?'<span class="aud-badge adm" title="applied manually by an admin resolving a flag">admin</span>':'')
+        +esc(grad?('Pre-IPO \u2192 Equity \u00b7 '+a.sector):(a.sector+(a.ind&&a.ind!==a.sector?' / '+a.ind:'')))+'</div>'
+        +'<button class="aud-rev" data-t="'+esc(a.ticker)+'"'+(_audBusy?' disabled':'')
+        +' title="Remove this overlay entry \u2014 the ticker reverts to its table classification and is PINNED: the audit will never auto re-apply it">revert</button></div>'
+        +'<div class="aud-ev" title="'+audEvTitle(a.ev)+'">'+fmtT(a.ts)+' \u00b7 '+audEvTitle(a.ev).slice(0,180)+'</div></div>'; } }
+  if(flagged.length){ h+='<div class="aud-grp">Flagged \u00b7 no auto-write</div>';
+    for(const f of flagged){ const ev=f.ev||{};
+      // sources-disagree offers BOTH sectors the evidence named as one-click resolutions.
+      const opts=f.reason==='sources-disagree'?[ev.finnSector,ev.sicSector].filter(Boolean):(f.reason==='single-source'?[ev.finnSector||ev.sicSector].filter(Boolean):[]);
+      h+='<div class="aud-row flag"><div class="aud-top"><div><b>'+esc(f.ticker)+'</b>'
+        +'<span class="aud-badge hold">'+esc((f.reason||'hold').toUpperCase().replace(/-/g,' '))+'</span>'
+        +opts.map(o=>'<button class="aud-fix" data-t="'+esc(f.ticker)+'" data-s="'+esc(o)+'"'+(_audBusy?' disabled':'')
+          +' title="Resolve this hold: apply '+esc(o)+' as an admin-stamped overlay entry">apply '+esc(o)+'</button>').join('')
+        +'</div></div>'
+        +'<div class="aud-ev" title="'+audEvTitle(f.ev)+'">'+fmtT(f.ts)+' \u00b7 '+audEvTitle(f.ev).slice(0,180)+'</div></div>'; } }
+  if((_aud.pinned||[]).length) h+='<div class="aud-sub" style="margin-top:6px" title="Reverted names \u2014 the audit never auto re-applies these; only a manual apply can">pinned: '+_aud.pinned.map(esc).join(', ')+'</div>';
+  host.innerHTML=h;
+  const rb=el('audRun'); if(rb) rb.addEventListener('click',()=>audPost('/api/sector-audit/run',{}));
+  host.querySelectorAll('.aud-rev').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/revert',{ticker:b.dataset.t})));
+  host.querySelectorAll('.aud-fix').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:b.dataset.s})));
+}
 function admLabel(st){ return st==='public'?'public':st==='admin'?'admin':'off'; }
 // Everyone's linked telegram accounts, in the admin panel rather than the bell. Collapsed by
 // default and deliberately plain: this is an operator's roster for revoking access, not a place to
@@ -7837,7 +7894,7 @@ function termCard(r){ const apr=termAprOf(r), fp=r.fundPct;
   termOut(lines.join('\n')); }
 function termFieldCmd(r,fname){
   if((fname||'').toLowerCase().replace(/[^a-z]/g,'')==='sector'){ termHi(r.coin);
-    return termOut(`${termTkHdr(r)}\n<span class="tp-k">sector</span> <b>${r.sector?tesc(r.sector):'—'}</b>`); }
+    return termOut(`${termTkHdr(r)}\n<span class="tp-k">sector</span> <b>${r.sector?tesc(r.sector):'—'}</b>${r.secAuto?` <span class="auto-chip${r.secAuto==='grad'?' grad':''}" title="${r.secAuto==='grad'?'auto-graduated Pre-IPO \u2192 Equity by the weekly sector audit \u2014 evidence + revert in Admin \u00b7 Classification audit':'auto-classified by the weekly sector audit (Finnhub + EDGAR agreement) \u2014 evidence + revert in Admin \u00b7 Classification audit'}">auto${r.secAuto==='grad'?'\u00b7grad':''}</span>`:''}`); }
   const fk=tfield(fname); if(!fk){ termAsk(r.ticker+' '+fname); return; }   // unknown lens -> let the AI try, don't fake a card
   const F=TFIELD[fk], v=F.g(r); termHi(r.coin);
   termOut(`${termTkHdr(r)}\n<span class="tp-k">${F.l}</span> <b>${v==null||!isFinite(v)?'—':F.f(v)}</b>`); }
