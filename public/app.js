@@ -3031,7 +3031,7 @@ async function loadAdmin(){
 // revert an applied entry (pins it against auto re-apply), resolve a flagged name to one of the
 // sectors the sources offered, run the audit now. Every row's evidence is the persisted blob the
 // decision actually saw, rendered as a hover title — nothing here re-derives or summarizes it.
-let _aud=null,_audBusy=false;
+let _aud=null,_audBusy=false,_audShowAck=false;
 async function loadAudit(){ try{ _aud=await fetchJSON('/api/sector-audit'); }catch(e){ _aud={error:String(e&&e.message||e)}; } renderAudit(); }
 function audEvTitle(ev){ if(!ev) return ''; const parts=[];
   for(const k of ['reason','resolvedFrom','confidence','name','expectedName','edgarName','exchange','ipo','finnhubIndustry','sic','finnSector','sicSector','error'])
@@ -3053,32 +3053,49 @@ function renderAudit(){
     +(_aud.lastRunRec?' ('+(_aud.lastRunRec.applied||0)+' applied, '+(_aud.lastRunRec.flagged||0)+' flagged'+(_aud.lastRunRec.err?' \u00b7 '+esc(_aud.lastRunRec.err):'')+')':'')
     +'</div><button class="btn" id="audRun" style="margin-left:auto"'+(_audBusy||_aud.running?' disabled':'')
     +' title="Run the audit now instead of waiting for Sunday \u2014 same gates, same record log">'+(_aud.running?'running\u2026':'\u25b8 run now')+'</button></div>';
-  const applied=_aud.applied||[], flagged=_aud.flagged||[];
-  if(!applied.length&&!flagged.length) h+='<div class="msg">Nothing applied or flagged \u2014 every roster name resolves against the curated tables.</div>';
-  if(applied.length){ h+='<div class="aud-grp">Applied \u00b7 overlay active</div>';
+  const appliedAll=_aud.applied||[], flagged=_aud.flagged||[];
+  const acked=appliedAll.filter(a=>a.ack), applied=_audShowAck?appliedAll:appliedAll.filter(a=>!a.ack);
+  if(!appliedAll.length&&!flagged.length) h+='<div class="msg">Nothing applied or flagged \u2014 every roster name resolves against the curated tables.</div>';
+  if(applied.length){ h+='<div class="aud-grp">Applied \u00b7 overlay active'
+      +(acked.length?' <a href="#" id="audAckTog" style="float:right;font-size:11px" title="Cleared rows are hidden acknowledgements \u2014 their overlay entries are still active on the board">'+(_audShowAck?'hide cleared':'show cleared ('+acked.length+')')+'</a>':'')+'</div>';
     for(const a of applied){ const grad=a.action==='graduate';
-      h+='<div class="aud-row"><div class="aud-top"><div><b>'+esc(a.ticker)+'</b>'
+      h+='<div class="aud-row'+(a.ack?' reverted':'')+'"><div class="aud-top"><div><b>'+esc(a.ticker)+'</b>'
         +'<span class="aud-badge '+(grad?'grad':'cls')+'">'+(grad?'GRADUATED':'CLASSIFIED')+'</span>'
         +(a.by==='admin'?'<span class="aud-badge adm" title="applied manually by an admin resolving a flag">admin</span>':'')
         +esc(grad?('Pre-IPO \u2192 Equity \u00b7 '+a.sector):(a.sector+(a.ind&&a.ind!==a.sector?' / '+a.ind:'')))+'</div>'
+        +'<span style="white-space:nowrap">'+(a.ack?'':'<button class="aud-fix aud-ack" data-t="'+esc(a.ticker)+'"'+(_audBusy?' disabled':'')
+        +' title="Clear this row from the panel \u2014 acknowledgement only: the overlay entry STAYS ACTIVE and the board keeps this classification. It resurfaces automatically if the audit ever re-applies with new evidence.">clear</button>')
         +'<button class="aud-rev" data-t="'+esc(a.ticker)+'"'+(_audBusy?' disabled':'')
-        +' title="Remove this overlay entry \u2014 the ticker reverts to its table classification and is PINNED: the audit will never auto re-apply it">revert</button></div>'
+        +' title="Remove this overlay entry \u2014 the ticker reverts to its table classification and is PINNED: the audit will never auto re-apply it">revert</button></span></div>'
         +'<div class="aud-ev" title="'+audEvTitle(a.ev)+'">'+fmtT(a.ts)+' \u00b7 '+audEvTitle(a.ev).slice(0,180)+'</div></div>'; } }
   if(flagged.length){ h+='<div class="aud-grp">Flagged \u00b7 no auto-write</div>';
     for(const f of flagged){ const ev=f.ev||{};
       // sources-disagree offers BOTH sectors the evidence named as one-click resolutions.
       const opts=f.reason==='sources-disagree'?[ev.finnSector,ev.sicSector].filter(Boolean):(f.reason==='single-source'?[ev.finnSector||ev.sicSector].filter(Boolean):[]);
+      // No source offered a sector (no-data / error): the admin picks one. Manual applies are
+      // by:"admin"-stamped overlay entries with the full revert/pin machinery — same as always.
+      const pick=!opts.length&&f.action!=='graduate'&&(_aud.gics||[]).length;
       h+='<div class="aud-row flag"><div class="aud-top"><div><b>'+esc(f.ticker)+'</b>'
         +'<span class="aud-badge hold">'+esc((f.reason||'hold').toUpperCase().replace(/-/g,' '))+'</span>'
         +opts.map(o=>'<button class="aud-fix" data-t="'+esc(f.ticker)+'" data-s="'+esc(o)+'"'+(_audBusy?' disabled':'')
           +' title="Resolve this hold: apply '+esc(o)+' as an admin-stamped overlay entry">apply '+esc(o)+'</button>').join('')
+        +(pick?'<span style="white-space:nowrap"><select class="aud-sel" data-t="'+esc(f.ticker)+'" title="No source offered a sector \u2014 pick one to classify this name manually (admin-stamped, revertable)"><option value="">sector\u2026</option>'
+          +_aud.gics.map(g=>'<option>'+esc(g)+'</option>').join('')+'</select>'
+          +'<button class="aud-fix aud-go" data-t="'+esc(f.ticker)+'"'+(_audBusy?' disabled':'')
+          +' title="Apply the chosen sector as an admin-stamped overlay entry \u2014 same revert/pin machinery as auto applies">apply</button></span>':'')
         +'</div></div>'
         +'<div class="aud-ev" title="'+audEvTitle(f.ev)+'">'+fmtT(f.ts)+' \u00b7 '+audEvTitle(f.ev).slice(0,180)+'</div></div>'; } }
   if((_aud.pinned||[]).length) h+='<div class="aud-sub" style="margin-top:6px" title="Reverted names \u2014 the audit never auto re-applies these; only a manual apply can">pinned: '+_aud.pinned.map(esc).join(', ')+'</div>';
   host.innerHTML=h;
   const rb=el('audRun'); if(rb) rb.addEventListener('click',()=>audPost('/api/sector-audit/run',{}));
   host.querySelectorAll('.aud-rev').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/revert',{ticker:b.dataset.t})));
-  host.querySelectorAll('.aud-fix').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:b.dataset.s})));
+  host.querySelectorAll('.aud-fix:not(.aud-go):not(.aud-ack)').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:b.dataset.s})));
+  host.querySelectorAll('.aud-ack').forEach(b=>b.addEventListener('click',()=>audPost('/api/sector-audit/ack',{ticker:b.dataset.t})));
+  host.querySelectorAll('.aud-go').forEach(b=>b.addEventListener('click',()=>{
+    const sel=host.querySelector('.aud-sel[data-t="'+(window.CSS&&CSS.escape?CSS.escape(b.dataset.t):b.dataset.t)+'"]');
+    const sec=sel&&sel.value; if(!sec){ pushToast('audit: pick a sector first'); return; }
+    audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:sec}); }));
+  const tog=el('audAckTog'); if(tog) tog.addEventListener('click',(e)=>{ e.preventDefault(); _audShowAck=!_audShowAck; renderAudit(); });
 }
 function admLabel(st){ return st==='public'?'public':st==='admin'?'admin':'off'; }
 // Everyone's linked telegram accounts, in the admin panel rather than the bell. Collapsed by
