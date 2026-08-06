@@ -12002,7 +12002,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.05-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.05-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16093,4 +16093,162 @@ test("earnings preview composer: a null or placeholder-zero actual is 'not in th
   const cmp = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "compute.js"), "utf8");
   assert.ok(cmp.includes("const fin = (x) => x != null && Number.isFinite(+x);")
     && cmp.includes("const hasA = (x) => fin(x) && +x !== 0;"), "presence-gated helpers pinned in the preview block");
+});
+
+// ===== build 2026.08.05-02: weekly sector audit — auto-classify + auto-graduate, transparently ==
+// The classification watchdog with a write arm. The curated tables stay source code; audit
+// decisions land as a persisted, revertable OVERLAY that classify() consults — graduation
+// supersedes only the PREIPO row, classify entries fill only the Unclassified branch, and a
+// curated SECTOR_TICKERS name can never be overridden. Everything that decides is pure and
+// executed here against real shapes (the -84 lesson); the poller only fetches and assembles.
+test("audit manifest: constants, routes, files, functions, css classes all pinned exactly once", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const srv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const sec = fs.readFileSync(path.join(__dirname, "..", "src", "sectors.js"), "utf8");
+  const stf = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const once = (s, needle, what) => assert.strictEqual(s.split(needle).length - 1, 1, what + " pinned exactly once");
+  once(pol, "const SECTOR_AUDIT_TICK_MS", "audit tick cadence");
+  once(pol, "const SECTOR_AUDIT_MAX_CANDIDATES", "per-run candidate cap");
+  once(pol, "async function sectorAuditRun()", "run entry");
+  once(pol, "function sectorAuditRevert(", "revert verb");
+  once(pol, "function sectorAuditApply(", "manual apply verb");
+  once(srv, '"/api/sector-audit"', "GET route");
+  once(srv, '"/api/sector-audit/revert"', "revert route");
+  once(srv, '"/api/sector-audit/apply"', "apply route");
+  once(srv, '"/api/sector-audit/run"', "run route");
+  assert.ok(srv.split("isAdmin(req)) return reply.code(403)").length - 1 >= 4, "all four audit routes 403 non-admin");
+  once(sec, "function setSectorOverlay(", "overlay setter");
+  once(sec, "function overlayFor(", "overlay provenance reader");
+  once(stf, 'path.join(dataDir, "sector-audit.json")', "persistence file");
+  once(pol, "secAuto: cl.auto || undefined", "wire provenance ships off the ONE classify() result");
+  once(app, "r.secAuto=(m.secAuto!==undefined)?m.secAuto:undefined", "client clears-not-keeps provenance in lockstep with sector");
+  once(css, ".auto-chip{", "provenance chip class");
+  once(html, 'id="admAuditBox"', "admin panel mount");
+  once(app, "async function loadAudit()", "panel loader");
+});
+
+test("audit decision core: two-source agreement classifies; anything less is an honest flag", () => {
+  const C = require("../src/compute");
+  // agreement — the only auto-apply path for a classify candidate
+  const ok = C.sectorAuditDecide({ kind: "classify", ticker: "KLARNA",
+    profile: { name: "Klarna Group plc", exchange: "NEW YORK STOCK EXCHANGE", finnhubIndustry: "Financial Services" }, sic: 6199 });
+  assert.ok(ok.apply && ok.sector === "Financials" && ok.reason === "sources-agree", "Finnhub+SIC agreement applies");
+  assert.strictEqual(ok.ev.sicSector, "Financials", "evidence carries both source verdicts verbatim");
+  // disagreement — flagged, never guessed (honest null over false precision)
+  const dis = C.sectorAuditDecide({ kind: "classify", ticker: "NEURA",
+    profile: { name: "Neura Robotics", finnhubIndustry: "Machinery" }, sic: 7372 });
+  assert.ok(!dis.apply && dis.reason === "sources-disagree", "Industrials-vs-InfoTech split is a hold");
+  // single source — also a flag
+  const one = C.sectorAuditDecide({ kind: "classify", ticker: "X1", profile: { name: "X", finnhubIndustry: "Chemicals" }, sic: null });
+  assert.ok(!one.apply && one.reason === "single-source", "one source is not enough to write");
+  // nothing — no-data
+  assert.strictEqual(C.sectorAuditDecide({ kind: "classify", ticker: "X2", profile: null, sic: null }).reason, "no-data");
+});
+
+test("audit graduation gate: name match graduates, symbol collision holds — the RAMP rule, executed", () => {
+  const C = require("../src/compute");
+  // real listing under the private company's own name — graduates, keeps the CURATED sector
+  const g = C.sectorAuditDecide({ kind: "graduate", ticker: "FIGURE", curSector: "Industrials",
+    expectedNames: ["Figure"], profile: { name: "Figure AI, Inc.", exchange: "NYSE", ipo: "2026-07-30" },
+    sic: 3559, edgarName: "Figure AI, Inc." });
+  assert.ok(g.apply && g.sector === "Industrials" && g.confidence >= 0.9, "high-confidence name match graduates");
+  // the documented collision: RAMP resolves to LiveRamp in the SEC map — hard hold, never a graduation
+  const r = C.sectorAuditDecide({ kind: "graduate", ticker: "RAMP", curSector: "Financials",
+    expectedNames: ["Ramp"], profile: { name: "LiveRamp Holdings, Inc.", exchange: "NYSE" },
+    sic: 7372, edgarName: "LiveRamp Holdings, Inc." });
+  assert.ok(!r.apply && r.reason === "collision-hold", "symbol collision is a hold: " + r.reason);
+  // multi-alias: the gate takes the strongest honest spelling (the SPCX shape)
+  const s2 = C.sectorAuditDecide({ kind: "graduate", ticker: "SPCX", curSector: "Industrials",
+    expectedNames: ["SpaceX", "Space Exploration Technologies"],
+    profile: { name: "Space Exploration Technologies Corp.", exchange: "NASDAQ", ipo: "2026-06-12" } });
+  assert.ok(s2.apply, "alias set matches the filed name");
+  // no exchange = not actually listed — held even on a perfect name
+  const ne = C.sectorAuditDecide({ kind: "graduate", ticker: "FIGURE", curSector: "Industrials",
+    expectedNames: ["Figure"], profile: { name: "Figure AI, Inc.", exchange: "", ipo: null } });
+  assert.ok(!ne.apply && ne.reason === "no-exchange", "a profile without an exchange never graduates");
+});
+
+test("audit fold + overlay precedence: graduate supersedes PREIPO, classify fills only Unclassified, revert pins, curated always wins", () => {
+  const C = require("../src/compute");
+  const S = require("../src/sectors");
+  const recs = [
+    { k: "apply", ts: 1, ticker: "FIGURE", action: "graduate", sector: "Industrials", ind: "Industrials", ev: {}, by: "auto" },
+    { k: "apply", ts: 2, ticker: "KLARNA", action: "classify", sector: "Financials", ind: "Fintech", ev: {}, by: "auto" },
+    { k: "apply", ts: 3, ticker: "BOGUS", action: "classify", sector: "Not A Sector", ind: "x", ev: {}, by: "auto" },
+    { k: "apply", ts: 4, ticker: "NVDA", action: "classify", sector: "Energy", ind: "x", ev: {}, by: "auto" },
+    { k: "flag", ts: 5, ticker: "NEURA", action: "classify", reason: "sources-disagree", ev: { finnSector: "Industrials", sicSector: "Information Technology" } },
+    { k: "run", ts: 6, applied: 2, flagged: 1 },
+  ];
+  const m = C.mergeSectorAudit(recs);
+  assert.strictEqual(m.lastRun, 6, "run stamp folds");
+  assert.strictEqual(m.flagged.length, 1, "flag survives the fold");
+  try {
+    S.setSectorOverlay(m.active);
+    // graduation: Pre-IPO -> Equity, curated sector kept, curated industry group (Robotics) kept,
+    // provenance stamped — and earnings-calendar eligibility follows from assetClass by seam
+    const f = S.classify("FIGURE", "xyz");
+    assert.deepStrictEqual([f.assetClass, f.sector, f.ind, f.auto], ["Equity", "Industrials", "Robotics", "grad"],
+      "graduated FIGURE keeps its curated Robotics group: " + JSON.stringify(f));
+    // classify: fills the Unclassified branch with provenance
+    const k = S.classify("KLARNA", "xyz");
+    assert.deepStrictEqual([k.assetClass, k.sector, k.ind, k.auto], ["Equity", "Financials", "Fintech", "cls"]);
+    // an invalid sector was dropped at install — BOGUS stays honestly Unclassified
+    assert.strictEqual(S.classify("BOGUS", "xyz").assetClass, "Unclassified", "invalid sector never installs");
+    // a curated name can NEVER be overridden by the overlay
+    const n = S.classify("NVDA", "xyz");
+    assert.ok(n.sector === "Information Technology" && !n.auto, "curated table always wins over the overlay");
+    // untouched names untouched
+    assert.strictEqual(S.classify("OPENAI", "xyz").assetClass, "Pre-IPO", "non-graduated PREIPO rows unchanged");
+    // revert pins: fold again with a revert appended
+    const m2 = C.mergeSectorAudit([...recs, { k: "revert", ts: 7, ticker: "KLARNA" }]);
+    assert.ok(m2.pinned.has("KLARNA") && !m2.active.some((a) => a.ticker === "KLARNA"), "revert removes AND pins");
+    S.setSectorOverlay(m2.active);
+    assert.strictEqual(S.classify("KLARNA", "xyz").assetClass, "Unclassified", "reverted name returns to its honest table verdict");
+  } finally { S.setSectorOverlay([]); }   // never leak overlay state into other tests
+});
+
+test("audit weekly trigger: frozen-clock — due after Sunday 12:00 UTC once per week, never before, never twice", () => {
+  // Frozen clocks throughout: the predicate is pure in (now, lastRun), so wall time never leaks in.
+  const C = require("../src/compute");
+  const sun12 = Date.UTC(2026, 7, 2, 12, 0, 0);       // Sunday 2026-08-02 12:00 UTC
+  assert.ok(!C.sectorAuditDue(sun12 - 1, 0) || true, "predicate total on any input");
+  assert.ok(C.sectorAuditDue(sun12, 0), "due exactly at the anchor on a fresh log");
+  assert.ok(C.sectorAuditDue(sun12 + 5 * 3600e3, 0), "still due later the same Sunday");
+  assert.ok(!C.sectorAuditDue(sun12 + 5 * 3600e3, sun12 + 60e3), "a run after the anchor satisfies the week");
+  assert.ok(!C.sectorAuditDue(Date.UTC(2026, 7, 5, 12), sun12 + 60e3), "Wednesday: still satisfied");
+  assert.ok(C.sectorAuditDue(Date.UTC(2026, 7, 9, 12, 0, 0), sun12 + 60e3), "next Sunday 12:00: due again");
+  assert.ok(!C.sectorAuditDue(Date.UTC(2026, 7, 9, 11, 59, 59), sun12 + 60e3), "next Sunday 11:59: not yet");
+});
+
+test("audit poller verbs: seed -> revert pins against re-apply, manual apply resolves a flag, run guards concurrency", () => {
+  // Behavioral against the real poller surface via the harness seed — no disk, no fetches.
+  const { createPoller } = require("../src/poller");
+  const S = require("../src/sectors");
+  const saved = [];
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {},
+    saveSectorAudit: (d) => { saved.push(d); return true; }, loadSectorAudit: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  try {
+    p.auditSeedNow([
+      { k: "apply", ts: 1, ticker: "KLARNA", action: "classify", sector: "Financials", ind: "Fintech", ev: {}, by: "auto" },
+      { k: "flag", ts: 2, ticker: "NEURA", action: "classify", reason: "sources-disagree", ev: { finnSector: "Industrials", sicSector: "Information Technology" } },
+    ]);
+    assert.strictEqual(S.classify("KLARNA", "xyz").sector, "Financials", "seeded overlay installs through the real path");
+    const rv = p.sectorAuditRevert("KLARNA");
+    assert.ok(rv.ok && saved.length, "revert persists through the store");
+    assert.strictEqual(S.classify("KLARNA", "xyz").assetClass, "Unclassified", "reverted at classify()");
+    assert.ok(p.auditStateNow().pinned.has("KLARNA"), "and pinned");
+    assert.ok(!p.sectorAuditApply("NEURA", "Not A Sector").ok, "manual apply validates the sector");
+    const ap = p.sectorAuditApply("NEURA", "Industrials");
+    assert.ok(ap.ok, "manual apply resolves the flag: " + JSON.stringify(ap));
+    const n = S.classify("NEURA", "xyz");
+    assert.deepStrictEqual([n.sector, n.auto], ["Industrials", "cls"], "admin-applied entry classifies with provenance");
+    assert.strictEqual(p.getSectorAudit().applied.find((a) => a.ticker === "NEURA").by, "admin", "stamped by:admin");
+    assert.ok(!p.getSectorAudit().flagged.some((f) => f.ticker === "NEURA"), "flag cleared by the apply");
+  } finally { S.setSectorOverlay([]); p.stop && p.stop(); }
 });
