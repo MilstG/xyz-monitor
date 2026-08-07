@@ -12002,7 +12002,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.05-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.07-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16311,4 +16311,109 @@ test("audit ack: clears the row, keeps the overlay, resurfaces on re-apply, rout
     assert.ok(p.sectorAuditRevert("UNITREE").ok && S.classify("UNITREE", "xyz").assetClass === "Unclassified",
       "and revertable like every overlay entry");
   } finally { S.setSectorOverlay([]); p.stop && p.stop(); }
+});
+
+// ================================================================================================
+// Markets group lens (build 2026.08.07-01): Stocks | Sectors | Industries on the Markets tab.
+// ================================================================================================
+
+test("markets group lens: manifest pins across app.js / index.html / styles.css", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "function mktGrp()", "state.scope==='crypto'&&g==='industries'",   // crypto coerces industries -> sectors, never rewrites the choice
+    "function computeMktGroups(rows, mode, wt)", "function mktGroupCohesion(list)",
+    "function groupRowsSorted()", "function buildGroupHead()", "function renderGroupBoard()",
+    "function drillInto(name)", "function clearDrill()", "function updateDrillChip()",
+    "function setGrp(v)", "function syncGrpSeg()", "function thresholdRows(rows)",
+    "grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null",
+    "if(mktGrp()!=='names'){ renderGroupBoard(); return; }",           // render() branches to the lens
+    "if(mktGrp()!=='names'){ buildGroupHead(); return; }",             // buildHead() branches with it
+    "_rowCache=null; _rowStruct='';",                                  // the names-mode row patcher never diffs against group markup
+    "state.grpDrill&&state.grpDrill.set",                              // drill filter applied in sortedRows
+    "||mktGrp()!=='names') return;",                                   // j/k/Enter stay a names-view affordance
+    "if(state.grpDrill){ state.grpDrill=null; updateDrillChip(); }",   // a scope flip clears the drill — a cross-universe member set would empty the board
+    "else if(state.grpDrill) clearDrill()",                            // Escape clears the drill after ksel — parity with the chip's ×
+    "xyz-markets-${mktGrp()}.csv",                                     // lens CSV export
+    "grp:state.grp, grpWt:state.grpWt",                                // persisted...
+    "if(p.grp==='sectors'||p.grp==='industries'||p.grp==='names') state.grp=p.grp",   // ...and restored, validated
+    "mode==='industries'?(r.ind||r.sector):r.sector",                  // grouping keys = the classification contract, verbatim
+    "mode==='industries' && ms.every(m=>!m.ind)",                      // fallback industry groups marked, never hidden
+  ]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
+  // Every lens column is declared in GCOLS with its key.
+  for (const k of ["'name'","'n'","'dopen'","'h1'","'h4'","'d1'","'d7'","'d30'","'mopen'","'yopen'","'br'","'doi'","'rvol'","'vol'","'oi'","'coh'","'bw'"])
+    assert.ok(app.includes("{key:" + k + ", label:"), "GCOLS column missing: " + k);
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  for (const pin of ['id="grpseg"', 'data-grp="names"', 'data-grp="sectors"', 'data-grp="industries"',
+    'id="grpwtseg"', 'data-gwt="vol"', 'data-gwt="eq"', 'id="drillchip"'])
+    assert.ok(ht.includes(pin), "index pin missing: " + pin);
+  const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const pin of [".drillchip{", ".drillchip .x", ".drillchip[hidden]{display:none}"])
+    assert.ok(cs.includes(pin), "styles pin missing: " + pin);
+});
+
+// The aggregation engine, executed for real (the -84 lesson: string pins prove presence, not
+// behavior). computeMktGroups is deliberately dependency-free, so the extracted source runs as-is.
+function mktGroupsFn() {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const a = app.indexOf("function computeMktGroups"), b = app.indexOf("function mktGroupCohesion");
+  assert.ok(a >= 0 && b > a, "computeMktGroups must precede mktGroupCohesion for extraction");
+  return new Function(app.slice(a, b) + "; return computeMktGroups;")();
+}
+function mktGroupsFixture() {
+  return [
+    { coin: "xyz:NVDA", ticker: "NVDA", sector: "Information Technology", ind: "Semiconductors", assetClass: "Equity",
+      px: 100, vol: 300, oi: 10, d1: 3, h1: 1, h4: 2, d7: 5, d30: 10, dopen: 2, doi: 4, rvol: 1.5, mopen: 90, yopen: 80 },
+    { coin: "xyz:AMD", ticker: "AMD", sector: "Information Technology", ind: "Semiconductors", assetClass: "Equity",
+      px: 200, vol: 100, oi: 5, d1: -1, h1: -0.5, h4: 0.5, d7: 2, d30: null, dopen: -0.5, doi: -2, rvol: 0.8, mopen: null, yopen: 180 },
+    { coin: "xyz:ORCL", ticker: "ORCL", sector: "Information Technology", assetClass: "Equity",   // no curated ind -> sector fallback
+      px: 50, vol: 0, oi: 2, d1: 2, h1: 0.2, h4: 0.4, d7: 1, d30: 4, dopen: 1, doi: 1, rvol: 1.0, mopen: 100, yopen: 40 },
+    { coin: "xyz:XOM", ticker: "XOM", sector: "Energy", ind: "E&P/Majors", assetClass: "Equity",
+      px: 120, vol: 50, oi: 20, d1: 2.4, h1: 0.3, h4: 0.8, d7: 4.1, d30: 6.2, dopen: 1.1, doi: 4.8, rvol: 1.7, mopen: 115, yopen: 105 },
+    { coin: "xyz:MYSTERY", ticker: "MYSTERY", px: 10, vol: 5, oi: 1, d1: 0.5 },                    // no sector at all -> Unclassified
+  ];
+}
+
+test("computeMktGroups: vol-weighted averages with per-key coverage renormalization (behavioral)", () => {
+  const fn = mktGroupsFn();
+  const list = fn(mktGroupsFixture(), "sectors", "vol");
+  const it = list.find((g) => g.name === "Information Technology");
+  assert.ok(it && it.n === 3, "IT sector groups its three members");
+  // 24h: all three report. Vol weights 300/100/0 -> NVDA .75, AMD .25, ORCL 0 -> 0.75*3 + 0.25*(-1) = 2.0
+  assert.ok(Math.abs(it.agg.d1.v - 2.0) < 1e-9 && it.agg.d1.n === 3, "vol-weighted 24h = 2.0 over 3/3 members");
+  // 30d: AMD is null -> excluded, weights renormalize over NVDA+ORCL (300/0) -> NVDA alone = 10, coverage 2/3
+  assert.ok(Math.abs(it.agg.d30.v - 10) < 1e-9 && it.agg.d30.n === 2, "missing 30d excluded with weights renormalized, coverage disclosed");
+  // M open: distance from the LEVEL, per member — NVDA (100/90-1)*100; AMD null; ORCL vol-0 so weight 0
+  assert.ok(Math.abs(it.agg.mopen.v - ((100 / 90 - 1) * 100)) < 1e-9 && it.agg.mopen.n === 2, "mopen% derived from px vs the open level");
+  // Breadth + best/worst pinned to 24h
+  assert.equal(it.brUp, 2); assert.equal(it.brN, 3);
+  assert.deepStrictEqual([it.best.t, it.worst.t], ["NVDA", "AMD"], "best/worst by 24h");
+  assert.ok(Math.abs(it.best.v - 3) < 1e-9 && Math.abs(it.worst.v - (-1)) < 1e-9);
+  assert.equal(it.totVol, 400); assert.equal(it.totOI, 17);
+  assert.ok(list.find((g) => g.name === "Energy") && list.find((g) => g.name === "Unclassified"), "Energy and Unclassified rows exist");
+});
+
+test("computeMktGroups: equal weighting is one member one vote; zero-vol members count fully", () => {
+  const fn = mktGroupsFn();
+  const it = fn(mktGroupsFixture(), "sectors", "eq").find((g) => g.name === "Information Technology");
+  assert.ok(Math.abs(it.agg.d1.v - (3 - 1 + 2) / 3) < 1e-9, "equal-weighted 24h = 4/3");
+  // 30d equal: NVDA 10, ORCL 4 (AMD null) -> 7 over 2 members
+  assert.ok(Math.abs(it.agg.d30.v - 7) < 1e-9 && it.agg.d30.n === 2, "equal weighting renormalizes over reporting members too");
+});
+
+test("computeMktGroups: industries mode groups on ind||sector; fallback groups are marked, never hidden", () => {
+  const fn = mktGroupsFn();
+  const list = fn(mktGroupsFixture(), "industries", "vol");
+  const semi = list.find((g) => g.name === "Semiconductors");
+  assert.ok(semi && semi.n === 2 && !semi.fall, "curated industry groups NVDA+AMD");
+  assert.deepStrictEqual(semi.members.map((r) => r.ticker).sort(), ["AMD", "NVDA"]);
+  const fb = list.find((g) => g.name === "Information Technology");
+  assert.ok(fb && fb.n === 1 && fb.fall === true && fb.members[0].ticker === "ORCL",
+    "a name with no curated industry falls back to its sector as a VISIBLY marked group");
+  const ep = list.find((g) => g.name === "E&P/Majors");
+  assert.ok(ep && ep.n === 1, "cross-checked: XOM lands in its curated industry");
+  // Sectors mode must ignore `ind` entirely — the two lenses may never blur.
+  const sec = fn(mktGroupsFixture(), "sectors", "vol").find((g) => g.name === "Semiconductors");
+  assert.equal(sec, undefined, "sectors mode never groups on the industry key");
 });
