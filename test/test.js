@@ -12004,7 +12004,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.07-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.07-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16638,6 +16638,8 @@ test("chip stories manifest: tag rendered on name and group chips, story leads e
   ]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
   assert.ok((app.match(/class="tag t-\$\{/g) || []).length === 2, "the visible tag renders on BOTH chip flavors");
   const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const pin of [".achip .tag{", ".achip .tag.t-turn", ".achip .tag.t-dist"])
+  for (const pin of [".achip .tag{", ".achip .tag.t-turn", ".achip .tag.t-dist",
+    ".achip .rt{min-width:56px;flex:none;white-space:nowrap}",   // -06: fixed cells never shrink below content â€” the "+29.60%M +67" glue
+    ".achip .why{color:var(--muted);font-size:10.5px;flex:1;min-width:140px}"])
     assert.ok(cs.includes(pin), "styles pin missing: " + pin);
 });
