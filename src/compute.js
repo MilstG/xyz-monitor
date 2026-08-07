@@ -1446,6 +1446,31 @@ function detectPead(prints, daily, px, sd30) {
 //   dayHi/dayLo : the prior completed session's high / low (the swept levels)
 //   px   : current mark
 //   frac : min pierce past the level, as a multiple of the window's median 5m range (default 0.25)
+// ===== dip reclaim — the "strongest bid" read (build 2026.08.07-02) ============================
+// Finds the deepest peak→trough dip inside a 5m tail and measures how much of it price has been
+// clawed back and how fast — demand response to supply, the thing no return blend captures. It
+// rides the EXACT tail the sweep detector already reads: one archive read, two studies. bars are
+// readCandles rows [ts,o,h,l,c,v] ascending; sqlite can hand back strings, so everything is
+// coerced and NaN math fails closed (null), never throws. minDipPct gates noise per universe —
+// an equity's 0.4% is a real dip, a perp's is a heartbeat. Returns { dip, rec, mins }: dip depth
+// in % of the peak, fraction reclaimed clamped to [0, 1.5] (a strong bid can run past the old
+// peak), whole minutes since the trough printed — or null when there is no honest claim.
+function dipReclaim(bars, px, nowMs, minDipPct) {
+  if (!Array.isArray(bars) || bars.length < 12 || !(px > 0) || !(nowMs > 0)) return null;
+  const floor = (minDipPct > 0 ? minDipPct : 0.35) / 100;
+  let peak = -Infinity, dip = 0, dipPeak = 0, trough = 0, troughT = 0;
+  for (const b of bars) {
+    const t = +b[0], h = +b[2], l = +b[3];
+    if (!Number.isFinite(t) || !Number.isFinite(h) || !Number.isFinite(l)) continue;
+    if (h > peak) peak = h;
+    if (peak > 0) { const d = (peak - l) / peak; if (d > dip) { dip = d; dipPeak = peak; trough = l; troughT = t; } }
+  }
+  if (!(dip >= floor) || !(trough > 0) || !(dipPeak > trough)) return null;
+  const rec = (px - trough) / (dipPeak - trough);
+  if (!Number.isFinite(rec)) return null;
+  const mins = Math.max(1, Math.round((nowMs - troughT) / 60000));
+  return { dip: +(dip * 100).toFixed(2), rec: +Math.min(1.5, Math.max(0, rec)).toFixed(3), mins };
+}
 function detectSweep(m5, dayHi, dayLo, px, frac) {
   if (!Array.isArray(m5) || m5.length < 12 || !(px > 0)) return null;
   const f = frac > 0 ? frac : 0.25;
@@ -3683,7 +3708,7 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, pxRingP
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, intrabarCross, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
-  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectLevels, nextLevelAbove, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
+  EV_META, playbook, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, LVL_MAP_W, emaCrossOutcomes, emaCrossStudy, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, dipReclaim, detectLevels, nextLevelAbove, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, studyBreakdown, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats,
   // EMA trend ladder (Trend tab)
   emaLast, bucketCandles, trendState, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS,
   closedBars, closedLadder, trendWhen,

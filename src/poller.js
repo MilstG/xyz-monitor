@@ -13,7 +13,7 @@ const {
   studyBigMove, studyBreakout, studyBreakdown, studyVolShift, studyGapFade, studyFundFlip, confSplit, studyOIFlush, studyFPDiv, compressionNow, offDriftStats, retStd, dailyRets, intrabarCross, stdev, stopGeometryOk, fadeStats,
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
-const { pxRingPush, pxRingRef } = require("./compute");
+const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
 const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
@@ -108,6 +108,7 @@ const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m
 const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
 const SWEEP_LOOK_MS = 4 * HOUR;            // 5m tail scanned for a prior-session-level stop-run (~48 bars; detector needs >=12)
+const RECLAIM_MIN_DIP_PCT = 0.35;          // min peak→trough depth (% of peak) before a dip-reclaim claim exists — below it the "dip" is xyz bar noise. Rides the sweep tail; crypto would need its own (much higher) floor when it gets a lane.
 const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept level, as a fraction of the window's median 5m range
 const WICK_FRAC = 0.55;                    // min wick share of the bar's range for a fill claim (dominant wick, not a doji tail)
 const WICK_SIZE_MULT = 1.1;                // the wick bar's range vs its own trailing-30 median — a real bar, not noise
@@ -1170,6 +1171,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         // wider than PX_RING_TOL_MS at the lookback point: the client dashes, never guesses.
         p5m: sig(pxRingRef(r.pxRing, nowMs, 5 * 60 * 1000, PX_RING_TOL_MS), 9) ?? undefined,
         p15m: sig(pxRingRef(r.pxRing, nowMs, 15 * 60 * 1000, PX_RING_TOL_MS), 9) ?? undefined,
+        // dip-reclaim claim off the 5m archive tail (xyz only — the exact tail the sweep detector
+        // reads). {d,r,m} = dip depth %, fraction reclaimed, minutes since the trough. Absent =
+        // no fresh claim (dip under the floor, archive off, or crypto): the client dashes.
+        bid: r.bidInfo ? { d: r.bidInfo.dip, r: r.bidInfo.rec, m: r.bidInfo.mins } : undefined,
         px: sig(r.px, 9), prevDay: sig(r.prevDay, 9), funding: sig(r.funding, 6),
         vol: rnd(r.vol, 0), oi: rnd(r.oi, 0), oiBase: sig(r.oiBase, 9),
         oracle: sig(r.oracle, 9), d1: rnd(r.d1, 4),
@@ -2714,8 +2719,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // (never the in-progress bar). Same isolated try — a bad read can't take the board down.
           if (r.uni === "xyz" && store.candlesEnabled && store.candlesEnabled() && r.dailyRaw && r.dailyRaw.length >= 2) {
             const pdr = r.dailyRaw[r.dailyRaw.length - 2], dayHi = pdr && +pdr.h, dayLo = pdr && +pdr.l;
+            // ONE range-queried archive read feeds two studies: the sweep detector below and the
+            // dip-reclaim ("strongest bid") read shipped on the wire. Reclaim has no prior-day
+            // dependency, so it runs off the tail unconditionally; the sweep keeps its level gate.
+            const tail5 = store.readCandles(r.coin, now - SWEEP_LOOK_MS, now);
+            r.bidInfo = dipReclaim(tail5, r.px, now, RECLAIM_MIN_DIP_PCT);   // null = no honest claim right now
             if (dayHi > 0 && dayLo > 0) {
-              const sw = detectSweep(store.readCandles(r.coin, now - SWEEP_LOOK_MS, now), dayHi, dayLo, r.px, SWEEP_FRAC);
+              const sw = detectSweep(tail5, dayHi, dayLo, r.px, SWEEP_FRAC);
               if (sw && stopGeometryOk(sw.side, r.px, sw.stop))
                 openLedger(r, "sweep", { score: 0, reading: "" }, sw.side === "long" ? 1 : -1,
                   { sd0: +sd30.toFixed(3), psd: sw.side, pn: 1, stp: sw.stop,
