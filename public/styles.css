@@ -1316,3 +1316,13 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .auto-chip{background:#132a3a;color:#4aa8e0;padding:0 5px;border-radius:3px;font-size:10px;margin-left:5px;cursor:default}
 .auto-chip.grad{background:#153524;color:#39c07f}
 .aud-ind{font-size:11px;padding:2px 6px;margin-left:6px;width:150px;background:transparent;border:1px solid var(--line,#1d2733);color:inherit}
+
+/* ===== markets group lens (build 2026.08.07-01) ===== */
+/* The drill chip — the visible trace that the names table is filtered to one group's members
+   after a group-row click. Amber-bordered so an unexpected short table is never a mystery. */
+.drillchip{display:inline-flex;align-items:center;gap:7px;padding:4px 6px 4px 11px;border:1px solid var(--accent);border-radius:7px;background:rgba(227,165,60,.08);font-size:12px}
+.drillchip .t{color:var(--accent);font-weight:600}
+.drillchip .n{color:var(--muted);font-size:11px}
+.drillchip .x{background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;padding:0 4px;line-height:1}
+.drillchip .x:hover{color:var(--text)}
+.drillchip[hidden]{display:none}

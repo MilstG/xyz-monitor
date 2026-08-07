@@ -91,6 +91,18 @@
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
     <input id="filter" type="text" placeholder="Filter ticker…" autocomplete="off" spellcheck="false"/>
   </div>
+  <span class="drillchip" id="drillchip" hidden></span>
+  <div class="seg" id="grpseg" role="group" aria-label="Grouping" title="Group lens — the same board, one row per name, sector or industry. Sector/industry rows are the weighted average of exactly the names the table shows (hover any cell for weighting + coverage); click a group row to drill into its members.">
+    <span class="seglbl">group</span>
+    <button type="button" data-grp="names" class="active">stocks</button>
+    <button type="button" data-grp="sectors">sectors</button>
+    <button type="button" data-grp="industries" title="the finer curated split (Semis vs Software vs Memory, Banks vs Capital Markets…) — equities only; crypto's curated sectors are already its fine grouping">industries</button>
+  </div>
+  <div class="seg" id="grpwtseg" role="group" aria-label="Group weighting" hidden title="How members average into a group cell — by 24h volume (the tape's own weighting) or one member one vote. Volume and OI columns are straight sums either way.">
+    <span class="seglbl">weight</span>
+    <button type="button" data-gwt="vol" class="active">by volume</button>
+    <button type="button" data-gwt="eq">equal</button>
+  </div>
   <div class="seg" id="tfseg" role="group" aria-label="Analysis window">
     <span class="seglbl">window</span>
     <button type="button" data-tf="1h">1h</button>

@@ -123,6 +123,10 @@ const DEFAULT_HIDDEN=['m5','m15','prem','trend','dvb','dcap','hitr','beta','mom'
 const LAYOUT_V=4; // bump to force a one-time reset of saved layouts to the new default (v4: 1d relabeled 24h, D open column added between it and 7d)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
+  // Markets group lens: 'names' = the classic per-market table; 'sectors'/'industries' aggregate
+  // it in place. grpSort is the lens's own sort (the names sort must survive a round trip);
+  // grpDrill is the transient member filter a group-row click leaves behind — never persisted.
+  grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null,
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
@@ -274,6 +278,11 @@ function setPrice(r,px){ if(px==null)return; if(r.px!=null&&px!==r.px) r.flash=p
 function inScope(r){ return (r.uni==='main')===(state.scope==='crypto'); }
 function scopeBench(){ return state.scope==='crypto'?state.benchMain:state.benchCoin; }
 function activeRows(){ const a=[]; for(const r of state.rows.values()) if(!r.delisted&&inScope(r))a.push(r); return a; }
+// Effective grouping lens for the Markets tab. The industry layer is equities-only (crypto's
+// curated sectors ARE its fine grouping — sectors.js sets ind===sector there), so crypto scope
+// coerces 'industries' to 'sectors': the stocks-side choice is preserved, never silently
+// rewritten, and flipping back restores it.
+function mktGrp(){ const g=state.grp||'names'; return (state.scope==='crypto'&&g==='industries')?'sectors':g; }
 // ===== ΔOI regime =====
 // Category (price×OI signs, with a noise dead-zone) + conviction (magnitude, OI-led) +
 // funding corroboration (does the crowded/paying side agree with the story?).
@@ -754,7 +763,9 @@ function moveColumn(src, dst, after){
   ord.splice(after?i+1:i, 0, src);
   state.colOrder=ord; clearDropMarks(); buildHead(); render(); savePrefs();
 }
-function buildHead(){ const tr=el('head'); tr.innerHTML='';
+function buildHead(){
+  if(mktGrp()!=='names'){ buildGroupHead(); return; }   // the lens owns the header: fixed columns, own sort, no drag/reorder
+  const tr=el('head'); tr.innerHTML='';
   visibleCols().forEach(c=>{ const th=document.createElement('th'); th.tabIndex=0; th.dataset.key=c.key; th.setAttribute('role','columnheader'); th.draggable=true;
     let label=c.label; if(c.key==='rs')label=`vs ${state.scope==='crypto'?'BTC':'S&amp;P'} (${state.tf})`; if(c.key==='doi')label=`ΔOI (${state.tf})`;
     if(c.key==='vstape')label=`vs tape (${state.tf})`; if(c.key==='rvol')label=`RVOL (${['1h','4h','1d'].includes(state.tf)?state.tf:'—'})`;
@@ -781,19 +792,23 @@ function buildHead(){ const tr=el('head'); tr.innerHTML='';
     tr.appendChild(th); }); }
 function sortBy(key){ if(state.sortKey===key) state.sortDir=state.sortDir==='asc'?'desc':'asc';
   else { state.sortKey=key; state.sortDir=(COLS.find(c=>c.key===key).def)||'desc'; } buildHead(); render(); savePrefs(); }
+// Vol/OI thresholds, factored so the names table and the group lens filter MEMBERS by the exact
+// same rule — a group aggregate is always computed over precisely the rows the names view would
+// show under the same Filters popover.
+function thresholdRows(rows){ const fl=state.filters;
+  if(fl.volMin==null&&fl.volMax==null&&fl.oiMin==null&&fl.oiMax==null) return rows;
+  return rows.filter(r=>{
+    if(fl.volMin!=null && !(r.vol!=null&&r.vol>=fl.volMin)) return false;
+    if(fl.volMax!=null && !(r.vol!=null&&r.vol<=fl.volMax)) return false;
+    if(fl.oiMin!=null  && !(r.oi!=null &&r.oi >=fl.oiMin )) return false;
+    if(fl.oiMax!=null  && !(r.oi!=null &&r.oi <=fl.oiMax )) return false;
+    return true; }); }
 function sortedRows(){ let rows=activeRows(); const f=state.filter.trim().toUpperCase();
   if(featureOn('baskets') && (!state.colHidden.has('dvb')||state.sortKey==='dvb')) computeDvb(rows);
+  if(state.grpDrill&&state.grpDrill.set) rows=rows.filter(r=>state.grpDrill.set.has(r.coin));   // group drill-down: visible chip, one × to clear
   if(f) rows=rows.filter(r=>r.ticker.toUpperCase().includes(f)||r.coin.toUpperCase().includes(f));
   if(state.watchOnly) rows=rows.filter(r=>state.watch.has(r.coin));
-  const fl=state.filters;
-  if(fl.volMin!=null||fl.volMax!=null||fl.oiMin!=null||fl.oiMax!=null){
-    rows=rows.filter(r=>{
-      if(fl.volMin!=null && !(r.vol!=null&&r.vol>=fl.volMin)) return false;
-      if(fl.volMax!=null && !(r.vol!=null&&r.vol<=fl.volMax)) return false;
-      if(fl.oiMin!=null  && !(r.oi!=null &&r.oi >=fl.oiMin )) return false;
-      if(fl.oiMax!=null  && !(r.oi!=null &&r.oi <=fl.oiMax )) return false;
-      return true; });
-  }
+  rows=thresholdRows(rows);
   const k=state.sortKey, dir=state.sortDir==='asc'?1:-1, col=COLS.find(c=>c.key===k);
   rows.sort((a,b)=>{ let av=a[k],bv=b[k]; if(col.type==='str')return dir*String(av).localeCompare(String(bv));
     const an=(av==null||!isFinite(av)),bn=(bv==null||!isFinite(bv)); if(an&&bn)return 0; if(an)return 1; if(bn)return -1; return dir*(av-bv); });
@@ -952,8 +967,195 @@ function patchRowsInto(children, oldHtml, newHtml){
   for(let i=0;i<newHtml.length;i++){ if(oldHtml[i]!==newHtml[i]){ children[i].outerHTML=newHtml[i]; writes++; } }
   return writes;
 }
+// ===== markets group lens (build 2026.08.07-01) ================================================
+// The Markets tab's other two views: the same board, one row per SECTOR or INDUSTRY instead of
+// per name — every window column at once, in numbers. Pure client-side aggregation over the exact
+// rows the names view renders: computeDerived has already stamped every windowed field on the
+// member rows, so a group cell is BY CONSTRUCTION the weighted average of what the names view
+// shows (one code path, no second source of truth, no server work). Grouping keys reuse the
+// classification contract verbatim: sectors -> r.sector, industries -> r.ind||r.sector (the
+// server only ships `ind` when it differs from the sector — the fallback IS the contract, the
+// same rule the Sectors tab renders, marked visibly here too). Every aggregate is computed ONLY
+// over members that have the value, with per-key weight renormalization, and each cell's hover
+// discloses that coverage — a group average never silently absorbs missing history as zero.
+function computeMktGroups(rows, mode, wt){
+  const groups=new Map();
+  for(const r of rows){
+    const g=(mode==='industries'?(r.ind||r.sector):r.sector)||'Unclassified';
+    let o=groups.get(g); if(!o){ o={name:g, assetClass:r.assetClass||'\u2014', members:[]}; groups.set(g,o); }
+    if((r.assetClass||'\u2014')!==o.assetClass) o.assetClass='Mixed';
+    o.members.push(r);
+  }
+  const KEYS=['dopen','h1','h4','d1','d7','d30','doi','rvol'];
+  const list=[];
+  for(const o of groups.values()){
+    const ms=o.members, byVol=wt!=='eq';
+    // Monthly / yearly distance per member: px vs the stored open LEVEL — the same math openCell
+    // renders per name, restated once here so the group column has a number to average and sort.
+    const mv=ms.map(r=>({ r,
+      mopenPct:(r.mopen>0&&r.px>0&&isFinite(r.px))?(r.px/r.mopen-1)*100:null,
+      yopenPct:(r.yopen>0&&r.px>0&&isFinite(r.px))?(r.px/r.yopen-1)*100:null }));
+    // Weighted average over members that HAVE the value. Vol weights renormalize per key: a
+    // member missing one window drops out of that column's weights only — it never drags the
+    // average toward zero, and it stays fully weighted in every column it does have.
+    const wavg=(sel)=>{ const vals=[]; let wsum=0;
+      for(const m of mv){ const v=sel(m); if(v==null||!isFinite(v))continue; vals.push([m,v]); if(byVol&&m.r.vol>0)wsum+=m.r.vol; }
+      let s=0,ww=0;
+      for(const [m,v] of vals){ const wi=byVol?(wsum>0?((m.r.vol>0?m.r.vol:0)/wsum):1/vals.length):1/vals.length; s+=wi*v; ww+=wi; }
+      return { v: ww>0?s/ww:null, n:vals.length }; };
+    const agg={};
+    for(const k of KEYS) agg[k]=wavg(m=>(m.r[k]!=null&&isFinite(m.r[k]))?m.r[k]:null);
+    agg.mopen=wavg(m=>m.mopenPct); agg.yopen=wavg(m=>m.yopenPct);
+    const withD1=ms.filter(r=>r.d1!=null&&isFinite(r.d1));
+    let best=null,worst=null;
+    for(const r of withD1){ if(!best||r.d1>best.d1)best=r; if(!worst||r.d1<worst.d1)worst=r; }
+    let totVol=0,totOI=0; for(const r of ms){ if(r.vol)totVol+=r.vol; if(r.oi)totOI+=r.oi; }
+    list.push({ name:o.name, assetClass:o.assetClass, n:ms.length, members:ms,
+      fall: mode==='industries' && ms.every(m=>!m.ind),   // no member carries a curated industry -> the group IS its sector, shown as such
+      agg, brUp:withD1.filter(r=>r.d1>0).length, brN:withD1.length,
+      best: best?{t:best.ticker,v:best.d1}:null, worst: worst?{t:worst.ticker,v:worst.d1}:null,
+      totVol, totOI });
+  }
+  return list;
+}
+function mktGroupCohesion(list){
+  // 90d average pairwise daily-return correlation INSIDE each group — the "does the label trade
+  // as one block" column, same definition as the Sectors board (high = own the theme, any name;
+  // low = a stock-picker's bucket where Best/Worst matters more than the average). The
+  // correlation build is the one non-trivial compute on this board, so it is memoized on
+  // (scope, membership) with a 5-minute staleness cap: membership changes rebuild immediately,
+  // ordinary ticks reuse.
+  const withDaily=[], idxSeen=new Set();
+  for(const g of list) for(const r of g.members) if(r.daily&&!idxSeen.has(r.coin)){ idxSeen.add(r.coin); withDaily.push(r); }
+  const sig=state.scope+'|'+withDaily.map(r=>r.coin).sort().join(',');
+  if(!(MKTGRP.coh && MKTGRP.cohSig===sig && Date.now()-MKTGRP.cohAt<300000)){
+    if(withDaily.length>1){ const {C}=buildCorr(withDaily,90);
+      MKTGRP.coh={C, idx:new Map(withDaily.map((r,i)=>[r.coin,i]))}; }
+    else MKTGRP.coh=null;
+    MKTGRP.cohSig=sig; MKTGRP.cohAt=Date.now();
+  }
+  for(const g of list){ g.cohesion=null; const c=MKTGRP.coh; if(!c) continue;
+    const idx=g.members.map(r=>c.idx.get(r.coin)).filter(i=>i!=null);
+    let s=0,n=0;
+    for(let a=0;a<idx.length;a++)for(let b=a+1;b<idx.length;b++){ const v=c.C[idx[a]][idx[b]]; if(v!=null&&isFinite(v)){s+=v;n++;} }
+    g.cohesion=n?s/n:null; }
+}
+const MKTGRP={ cohSig:'', coh:null, cohAt:0 };
+function gAggTd(g,k,cap,lbl){ const a=g.agg[k];
+  if(!a||a.v==null) return `<td><span class="na" title="${esc(lbl)} \u2014 no member in this group has the value yet (disclosed gap, never zero-filled)">\u2014</span></td>`;
+  const p=fmtPct(a.v);
+  const cov=`${state.grpWt==='eq'?'equal':'vol'}-weighted \u00b7 ${a.n}/${g.n} members${a.n<g.n?' \u2014 the rest lack this window (excluded, weights renormalized)':''}`;
+  return `<td${shade(a.v,cap)} title="${esc(lbl)} \u00b7 ${esc(cov)}"><span class="${p.c}">${p.t}</span></td>`; }
+const GCOLS=[
+  {key:'name', label:'Group', tip:'Sector (GICS + asset classes) or industry group \u2014 same curated classification the Sectors tab uses. Click a row to drill in: the table flips to the names view filtered to this group\u2019s members, with a chip to clear. Industry rows marked "= sector" have no curated split \u2014 the group is the sector itself, shown honestly rather than hidden.',
+    val:g=>g.name,
+    td:g=>`<td style="color:var(--text);font-weight:600" title="click \u2192 ${state.scope==='crypto'?'coins':'stocks'} view filtered to its ${g.n} member${g.n===1?'':'s'}">${esc(sectorShort(g.name))}${g.fall?' <span class="sec" style="font-style:italic;font-size:10px" title="no curated industry split for these names \u2014 the group is the GICS sector itself">= sector</span>':''}</td>`},
+  {key:'n', label:'#', tip:'Members in the group \u2014 after the Filters popover (vol/OI thresholds and \u2605-only apply to MEMBERS before aggregation, so this board always aggregates exactly what the names view would show).',
+    val:g=>g.n, td:g=>`<td class="sec">${g.n}</td>`},
+  {key:'dopen', label:'D open', tip:'Weighted average of members\u2019 % change since the current UTC day\u2019s open \u2014 the day-boundary read, vs the rolling 24h column. Hover any cell for weighting + coverage.',
+    val:g=>g.agg.dopen.v, td:g=>gAggTd(g,'dopen',4,'since the UTC day open')},
+  {key:'h1', label:'1h', tip:'Weighted average 1h return of the members.', val:g=>g.agg.h1.v, td:g=>gAggTd(g,'h1',2.5,'1h return')},
+  {key:'h4', label:'4h', tip:'Weighted average 4h return of the members.', val:g=>g.agg.h4.v, td:g=>gAggTd(g,'h4',4,'4h return')},
+  {key:'d1', label:'24h', tip:'Weighted average rolling-24h return of the members \u2014 the default sort.', val:g=>g.agg.d1.v, td:g=>gAggTd(g,'d1',5,'rolling 24h return')},
+  {key:'d7', label:'7d', tip:'Weighted average 7d return of the members.', val:g=>g.agg.d7.v, td:g=>gAggTd(g,'d7',12,'7d return')},
+  {key:'d30', label:'30d', tip:'Weighted average 30d return of the members.', val:g=>g.agg.d30.v, td:g=>gAggTd(g,'d30',25,'30d return')},
+  {key:'mopen', label:'M open', tip:'Weighted average of members\u2019 distance from the month\u2019s opening level \u2014 (price \u00f7 monthly open \u2212 1), the same math the names view\u2019s M open column shows per ticker.',
+    val:g=>g.agg.mopen.v, td:g=>gAggTd(g,'mopen',10,'vs the month open')},
+  {key:'yopen', label:'Y open', tip:'Weighted average of members\u2019 distance from the yearly opening level (Jan 1 UTC). Crypto\u2019s 31d retention only reaches the anchor in January \u2014 honest dashes otherwise, same as the names view.',
+    val:g=>g.agg.yopen.v, td:g=>gAggTd(g,'yopen',25,'vs the yearly open')},
+  {key:'br', label:'Breadth', tip:'Share of members up over the rolling 24h \u2014 the "is the average everyone, or one name" check. Hover for the raw count.',
+    val:g=>g.brN?g.brUp/g.brN:null,
+    td:g=>g.brN?`<td class="sec" title="${g.brUp}/${g.brN} members up (24h)">${Math.round(100*g.brUp/g.brN)}%</td>`:'<td><span class="na">\u2014</span></td>'},
+  {key:'doi', label:'\u0394OI', tip:'Weighted average open-interest change over the selected window \u2014 is money entering or leaving the whole group. Follows the window selector like the names view.',
+    val:g=>g.agg.doi.v, td:g=>gAggTd(g,'doi',10,'\u0394OI over the window')},
+  {key:'rvol', label:'RVOL', tip:'Weighted average relative volume (clock-hour matched, per member) over the selected window \u2014 defined up to 1d, dashes on 7d/30d, same as the names view.',
+    val:g=>g.agg.rvol.v,
+    td:g=>{ const a=g.agg.rvol; if(!a||a.v==null) return '<td><span class="na" title="RVOL is defined up to the 1d window \u2014 or member baselines are still building">\u2014</span></td>';
+      const hi=a.v>=1.5;
+      return `<td class="${hi?'':'sec'}"${hi?' style="color:var(--accent)"':''} title="${state.grpWt==='eq'?'equal':'vol'}-weighted \u00b7 ${a.n}/${g.n} members">\u00d7${a.v.toFixed(1)}</td>`; }},
+  {key:'vol', label:'24h Vol', tip:'Sum of members\u2019 24h notional volume \u2014 a straight sum regardless of the weighting toggle.', val:g=>g.totVol, td:g=>`<td class="sec">${fmtUsd(g.totVol)}</td>`},
+  {key:'oi', label:'OI', tip:'Sum of members\u2019 open interest.', val:g=>g.totOI, td:g=>`<td class="sec">${fmtUsd(g.totOI)}</td>`},
+  {key:'coh', label:'Coh', tip:'Cohesion: average pairwise daily-return correlation between the group\u2019s members (90d) \u2014 the Sectors-board definition. High (\u22650.6): the group trades as one block, the label is the trade. Low: a stock-picker\u2019s bucket \u2014 the average hides dispersion, read Best \u00b7 Worst instead. Dot while daily history builds or with a single member.',
+    val:g=>g.cohesion,
+    td:g=>`<td class="sec" title="${g.cohesion==null?(g.n<2?'single member \u2014 cohesion needs a pair':'daily history still loading for these members'):'avg internal daily-return correlation (90d)'}">${g.cohesion==null?'\u00b7':g.cohesion.toFixed(2)}</td>`},
+  {key:'bw', label:'Best \u00b7 Worst', tip:'Top and bottom member by rolling-24h return \u2014 the aggregate-liar detector: it tells you whether the group average is everyone, or one name dragging the rest. Pinned to 24h regardless of sort.',
+    val:null,
+    td:g=>{ if(!g.best) return '<td><span class="na">\u2014</span></td>';
+      const pb=fmtPct(g.best.v), pw=fmtPct(g.worst.v);
+      return `<td title="top / bottom member by 24h return"><span class="${pb.c}">${pb.t}</span> <span class="sec">${esc(g.best.t)}</span>${g.worst.t!==g.best.t?` \u00b7 <span class="${pw.c}">${pw.t}</span> <span class="sec">${esc(g.worst.t)}</span>`:''}</td>`; }},
+];
+function groupRowsSorted(){
+  let rows=activeRows();
+  if(state.watchOnly) rows=rows.filter(r=>state.watch.has(r.coin));
+  rows=thresholdRows(rows);
+  const list=computeMktGroups(rows, mktGrp(), state.grpWt);
+  mktGroupCohesion(list);
+  const f=state.filter.trim().toUpperCase();
+  const out=f?list.filter(g=>g.name.toUpperCase().includes(f)||g.members.some(r=>r.ticker.toUpperCase().includes(f))):list;
+  const gs=state.grpSort, col=GCOLS.find(c=>c.key===gs.key&&c.val)||GCOLS.find(c=>c.key==='d1');
+  const d=gs.dir==='asc'?1:-1;
+  out.sort((a,b)=>{ const av=col.val(a), bv=col.val(b);
+    if(typeof av==='string'||typeof bv==='string') return d*String(av).localeCompare(String(bv));
+    const an=(av==null||!isFinite(av)), bn=(bv==null||!isFinite(bv)); if(an&&bn)return 0; if(an)return 1; if(bn)return -1; return d*(av-bv); });
+  return out;
+}
+function buildGroupHead(){ const tr=el('head'); tr.innerHTML='';
+  for(const c of GCOLS){ const th=document.createElement('th'); th.tabIndex=0; th.dataset.key=c.key; th.setAttribute('role','columnheader');
+    let label=c.label; if(c.key==='doi')label=`\u0394OI (${state.tf})`; if(c.key==='rvol')label=`RVOL (${['1h','4h','1d'].includes(state.tf)?state.tf:'\u2014'})`;
+    const active=state.grpSort.key===c.key;
+    th.setAttribute('aria-sort', active?(state.grpSort.dir==='asc'?'ascending':'descending'):'none');
+    if(c.tip) th.title=c.tip;
+    th.innerHTML=label+(active?`<span class="arw">${state.grpSort.dir==='asc'?'\u25b2':'\u25bc'}</span>`:'');
+    if(c.val){ th.addEventListener('click',()=>grpSortBy(c.key));
+      th.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();grpSortBy(c.key);}}); }
+    tr.appendChild(th); } }
+function grpSortBy(key){ const c=GCOLS.find(x=>x.key===key); if(!c||!c.val) return;
+  if(state.grpSort.key===key) state.grpSort.dir=state.grpSort.dir==='asc'?'desc':'asc';
+  else state.grpSort={key, dir:key==='name'?'asc':'desc'};
+  buildHead(); render(); }
+function renderGroupBoard(){
+  const body=el('body'), list=groupRowsSorted();
+  _rowCache=null; _rowStruct='';   // the names-mode row patcher must never diff against group markup — returning to names always full-rebuilds
+  const fc=el('fcount'); if(fc) fc.textContent='';
+  if(!list.length){ body.innerHTML=`<tr><td colspan="${GCOLS.length}"><div class="msg"><span class="big">No matches</span>Clear the filter to see every group.</div></td></tr>`; return; }
+  body.innerHTML=list.map(g=>{ let row=`<tr data-grp="${esc(g.name)}" style="cursor:pointer">`; for(const c of GCOLS) row+=c.td(g); return row+'</tr>'; }).join('');
+  body.querySelectorAll('tr[data-grp]').forEach(tr=>tr.addEventListener('click',()=>drillInto(tr.dataset.grp)));
+}
+function drillInto(name){
+  const g=groupRowsSorted().find(x=>x.name===name); if(!g) return;
+  state.grpDrill={label:name, set:new Set(g.members.map(r=>r.coin))};
+  state.grp='names';
+  // The text filter's job was finding the group; carried into the names view it would filter the
+  // very members the click just selected. Cleared, visibly (the input empties with it).
+  state.filter=''; const fi=el('filter'); if(fi) fi.value='';
+  syncGrpSeg(); updateDrillChip(); buildHead(); render(); savePrefs();
+}
+function clearDrill(){ state.grpDrill=null; updateDrillChip(); buildHead(); render(); }
+function updateDrillChip(){ const c=el('drillchip'); if(!c) return;
+  if(!state.grpDrill){ c.hidden=true; c.innerHTML=''; return; }
+  c.hidden=false;
+  c.innerHTML=`<span class="t">${esc(sectorShort(state.grpDrill.label))}</span><span class="n">${state.grpDrill.set.size} names</span><button type="button" class="x" title="clear \u2014 back to the full universe">\u00d7</button>`;
+  c.querySelector('.x').addEventListener('click',clearDrill); }
+function setGrp(v){
+  if(v!=='sectors'&&v!=='industries') v='names';
+  state.grp=v;
+  state.grpDrill=null; updateDrillChip();   // entering a lens always clears a previous drill — no invisible member filter under a fresh grouping
+  syncGrpSeg(); buildHead(); render(); savePrefs(); }
+function syncGrpSeg(){
+  const eff=mktGrp(), cr=state.scope==='crypto', seg=el('grpseg'); if(!seg) return;
+  seg.querySelectorAll('button').forEach(b=>{ b.classList.toggle('active', b.dataset.grp===eff);
+    if(b.dataset.grp==='names') b.textContent=cr?'coins':'stocks';
+    if(b.dataset.grp==='industries') b.hidden=cr; });
+  const wt=el('grpwtseg'); if(wt){ wt.hidden=eff==='names';
+    wt.querySelectorAll('button').forEach(b=>b.classList.toggle('active', b.dataset.gwt===state.grpWt)); }
+  // The column & layout menus configure the NAMES table — parked, not repurposed, while a group
+  // lens is up; the lens's fixed column set never touches a saved layout.
+  const cm=document.querySelector('.colmenu'), lm=document.querySelector('.laymenu');
+  if(cm) cm.style.display=eff==='names'?'':'none';
+  if(lm) lm.style.display=eff==='names'?'':'none'; }
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts();
+  if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, whichever tab is on top
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
   if(!rows.length){ body.innerHTML=`<tr><td colspan="${vc.length}"><div class="msg"><span class="big">No matches</span>Clear the filters to see all markets.</div></td></tr>`; _rowCache=null; return; }
@@ -2155,7 +2357,15 @@ function csvCell(k,r){ switch(k){
   case 'vwap': return r.vwap30!=null&&isFinite(r.vwap30)?r.vwap30:'';
   case 'vsvwap': return r.vsvwap!=null&&isFinite(r.vsvwap)?r.vsvwap.toFixed(3):'';
   case 'vol': return r.vol; case 'oi': return r.oi; default: return ''; } }
-function exportMarkets(){ const cols=visibleCols(); const head=cols.map(c=>c.label.replace(/&amp;/g,'&'));
+function exportMarkets(){
+  if(mktGrp()!=='names'){   // the lens exports exactly what's on screen: same groups, same sort, same weighting
+    const list=groupRowsSorted(), n2=v=>(v!=null&&isFinite(v))?v.toFixed(2):'';
+    const head=['Group','Type','Members','Dopen%','1h%','4h%','24h%','7d%','30d%','Mopen%','Yopen%','Breadth%','DeltaOI%','RVOL','Vol24h','OI','Cohesion','Best','Best24h%','Worst','Worst24h%'];
+    const body=list.map(g=>[g.name,g.assetClass,g.n,n2(g.agg.dopen.v),n2(g.agg.h1.v),n2(g.agg.h4.v),n2(g.agg.d1.v),n2(g.agg.d7.v),n2(g.agg.d30.v),n2(g.agg.mopen.v),n2(g.agg.yopen.v),
+      g.brN?Math.round(100*g.brUp/g.brN):'',n2(g.agg.doi.v),n2(g.agg.rvol.v),g.totVol?Math.round(g.totVol):'',g.totOI?Math.round(g.totOI):'',
+      g.cohesion!=null?g.cohesion.toFixed(3):'',g.best?g.best.t:'',g.best?n2(g.best.v):'',g.worst?g.worst.t:'',g.worst?n2(g.worst.v):'']);
+    downloadCSV(`xyz-markets-${mktGrp()}.csv`,[head,...body]); return; }
+  const cols=visibleCols(); const head=cols.map(c=>c.label.replace(/&amp;/g,'&'));
   const body=sortedRows().map(r=>cols.map(c=>csvCell(c.key,r))); downloadCSV('xyz-markets.csv',[head,...body]); }
 function exportCorr(){ const rows=CORR._rows, C=CORR._C, ord=CORR._ord; if(!rows||!C||!ord){ return; }
   const head=['',...ord.map(i=>rows[i].ticker)];
@@ -2594,7 +2804,7 @@ let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
   colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, dvbBasket:state.dvbBasket||null,
-  sectGrp:state.sect.grp,
+  sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
   updateLayoutBtn(); }, 250); }
 function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(_){ p=null; } if(!p) return;
@@ -2609,6 +2819,8 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(p.tf&&TF_MAP[p.tf]) state.tf=p.tf;
   if(typeof p.refreshMs==='number'&&p.refreshMs>0){ state.refreshMs=p.refreshMs; state.pollMs=p.refreshMs; }
   if(p.sortKey&&COL_BY_KEY[p.sortKey]){ state.sortKey=p.sortKey; state.sortDir=p.sortDir==='asc'?'asc':'desc'; }
+  if(p.grp==='sectors'||p.grp==='industries'||p.grp==='names') state.grp=p.grp;   // the drill filter is deliberately NOT persisted — a reload always lands on the full lens
+  if(p.grpWt==='eq'||p.grpWt==='vol') state.grpWt=p.grpWt;
   if(typeof p.dvbBasket==='string'&&/^[A-Z][A-Z0-9]{1,11}$/.test(p.dvbBasket)) state.dvbBasket=p.dvbBasket;
   if(typeof p.filterText==='string') state.filter=p.filterText;
   if(Array.isArray(p.watch)) state.watch=new Set(p.watch);
@@ -4947,6 +5159,8 @@ function applyScope(){
   // hides in crypto scope rather than sitting there as a no-op. sectGrpActive() already treats
   // crypto scope as 'sector', so the grouping key and the visible control can never disagree.
   const gseg=el('sectgrp'); if(gseg) gseg.hidden=cr;
+  if(state.grpDrill){ state.grpDrill=null; updateDrillChip(); }   // a drill pins ONE universe's coins — carried across the flip it would filter the new universe to an empty board under a stale chip
+  syncGrpSeg();   // markets group lens: hide the industries button on crypto (coerced to sectors), relabel names 'stocks'/'coins'
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
@@ -7454,6 +7668,10 @@ function setWindow(tf){ state.tf=tf;
   savePrefs(); }
 document.querySelectorAll('#tfseg button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');
   b.addEventListener('click',()=>setWindow(b.dataset.tf)); });
+document.querySelectorAll('#grpseg button').forEach(b=>b.addEventListener('click',()=>setGrp(b.dataset.grp)));
+document.querySelectorAll('#grpwtseg button').forEach(b=>b.addEventListener('click',()=>{
+  state.grpWt=b.dataset.gwt==='eq'?'eq':'vol'; syncGrpSeg(); render(); savePrefs(); }));
+syncGrpSeg();   // after loadPrefs: reflect the restored lens (buttons, weighting seg, parked column/layout menus)
 document.querySelectorAll('#sectf button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');
   b.addEventListener('click',()=>setWindow(b.dataset.tf)); });
 document.querySelectorAll('#sectwt button').forEach(b=>{ if(b.dataset.wt===state.sect.wt)b.classList.add('active');
@@ -7559,11 +7777,11 @@ document.addEventListener('keydown',e=>{
     let id=map[state.view];
     if(!id){ showView('markets'); id='filter'; }
     const inp=el(id); if(inp){ inp.focus(); inp.select&&inp.select(); } return; }
-  if(state.view!=='markets'||state.detail) return;   // j/k/Enter drive the markets table only, and never under an open drawer
+  if(state.view!=='markets'||state.detail||mktGrp()!=='names') return;   // j/k/Enter drive the markets NAMES table only — never under an open drawer or a group lens
   if(e.key==='j'){ e.preventDefault(); kmoveSel(1); return; }
   if(e.key==='k'){ e.preventDefault(); kmoveSel(-1); return; }
   if(e.key==='Enter'&&state.ksel&&state.rows.has(state.ksel)){ e.preventDefault(); openDetail(state.ksel); return; }
-  if(e.key==='Escape'&&state.ksel){ state.ksel=null; applyKsel(); } });
+  if(e.key==='Escape'){ if(state.ksel){ state.ksel=null; applyKsel(); } else if(state.grpDrill) clearDrill(); } });   // two-stage: first the row highlight, then the drill filter — keyboard parity with the chip's ×
 
 // ===== mobile column preset: the phone-width table, as a built-in layout =====
 // Columns that survive a ~390px viewport with the ticker pinned: price, the day, the week,
@@ -7604,6 +7822,8 @@ const HELP={
 markets:`
 <div class="hlp-h">The table</div>
 <p>One row per market, one column per lens. The <b>window selector</b> (1h–30d) re-anchors every windowed column at once: <b>vs S&amp;P</b>, <b>ΔOI</b>, <b>Squeeze</b>, <b>Carry</b>, and Avg Range all answer "over this window". Click any header to sort; drag in the column menu (⚙) to reorder or hide. Cell shading scales with the size of the move — a wall of deep red 7d cells IS the market breadth read. <b>★</b> pins a name to the top. Everything deep-links: the URL carries your view, so a layout can be shared. <b>Layouts</b> saves the whole arrangement as a named view — columns + order, sort, window, vol/OI filters, ★-only — and switches between them in one click; there is no one-size-fits-all table. The active name shows on the button, with a • when the live view has drifted from the saved one (open the menu to re-save). Stored per browser, so the phone can hold different layouts than the desktop. The ticker search box and the scope toggle are deliberately not part of a layout.</p>
+<div class="hlp-h">Group lens — sectors &amp; industries</div>
+<p>The <b>group</b> toggle re-renders the same board with one row per <b>sector</b> (GICS + asset classes) or <b>industry</b> (the finer curated split — Semis vs Software vs Memory, Banks vs Capital Markets), every window column at once: D open, 1h→30d, M/Y open, breadth, ΔOI, RVOL, volume, OI, cohesion. Each cell is the <b>weighted average of exactly the rows the names view shows</b> — vol-weighted by default (equal on the toggle), computed only over members that have the value, with the hover disclosing coverage; a missing window is excluded and the weights renormalize, never zero-filled. <b>Best · Worst</b> (pinned to 24h) is the aggregate-liar detector: whether the group number is everyone, or one name dragging the rest — read it against <b>Cohesion</b> (90d avg internal correlation: high = the label trades as one block, low = a stock-picker's bucket). <b>Click a group row</b> to drill in: the table flips back to names filtered to its members, with a chip to clear. Vol/OI filters and ★-only apply to members <i>before</i> aggregation; industries are equities-only (crypto's curated sectors are already its fine grouping); industry rows marked <i>= sector</i> have no curated split yet. CSV exports whichever lens is on screen.</p>
 <div class="hlp-h">Funding — the crowd's payment</div>
 <p>Annualized APR: <b class="pos">green = longs pay</b> to hold (crowded long), <b class="neg">red = shorts pay</b> (crowded short — squeeze fuel). The ▴/▾ percentile flag fires when today's funding sits at a monthly extreme of that market's <i>own</i> 31d distribution — the crowd is paying near its max, the classic mean-reversion zone. <b>Carry</b> divides window funding by realized vol: how much you're paid per unit of risk just for taking the unpopular side.</p>
 <div class="hlp-h">ΔOI and the regime tag</div>
