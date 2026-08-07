@@ -12004,7 +12004,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.07-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.07-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16465,7 +16465,7 @@ function actionMathFns() {
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const a = app.indexOf("const ACT_LEGS="), b = app.indexOf("// end action math");
   assert.ok(a >= 0 && b > a, "action math block must sit between ACT_LEGS and its extraction marker");
-  return new Function(app.slice(a, b) + "; return { ACT_LEGS, accelPace, heatOf, pickAction };")();
+  return new Function(app.slice(a, b) + "; return { ACT_LEGS, accelPace, heatOf, pickAction, shareDeltaPp, groupHeatOf, bidPhrase, chipStory };")();
 }
 
 test("action math: pace acceleration, flow-confirmed heat, and the three gates (behavioral)", () => {
@@ -16518,15 +16518,15 @@ test("rotation + action manifest: wire, merge, leaders fill, drill unification, 
     "function actionScores()", "function renderActionLists()", "function actChip(s, kind)",
     "if(state.grpDrill&&state.grpDrill.set) rows=rows.filter(r=>state.grpDrill.set.has(r.coin));   // the lists always describe exactly the rows the table shows",
     "renderActionLists();   // the rate-of-change lists under the table describe exactly what it just rendered",
-    "renderActionLists();   // hides itself in lens mode — the lists are a names-level surface",
+    "renderActionLists();   // -05: group heating/cooling + name-level bid render under the lens too",
     "function drillMembers(label, coins)",                                       // one drill entry point...
     "drillMembers(name, g.members.map(r=>r.coin));",                             // ...used by the lens row click...
     "db.onclick=()=>drillMembers(g.name, g.members.map(r=>r.coin));",            // ...and the sector-detail button
     'id="sectDetDrill"',
     "out.push({name:g.name, x, y, vol:g.totVol, doi:g.doi, coins:g.members.map(r=>r.coin)});",
     "const fC=fN==null?'var(--muted)':(fN>=0?'var(--up)':'var(--down)');",       // leaders money-fill
-    "actOpen2:state.actOpen?1:0,",                                           // -03 pref key: the -02 key stored the unchosen default, see loadPrefs comment
-    "state.actOpen = p.actOpen2===undefined ? true : !!p.actOpen2;",           // open by default, explicit collapse respected
+    "actOpen2:state.actOpen?1:0,",                                           // -03 pref key: the -02 key stored the unchosen collapsed default, see loadPrefs comment
+    "state.actOpen = p.actOpen2===undefined ? true : !!p.actOpen2;",           // open by default (-03), explicit collapse respected
     "actOpen:true,",
   ]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
@@ -16534,5 +16534,110 @@ test("rotation + action manifest: wire, merge, leaders fill, drill unification, 
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
   const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   for (const pin of [".actwrap{", ".achip{", ".acol .ah.hbid"])
+    assert.ok(cs.includes(pin), "styles pin missing: " + pin);
+});
+
+test("leaders rank arrows: trajectory glyph, quadrant color, phrase honest about which side of the S&P (build -04)", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "const q=leadQuad(s.x,s.y);",                                              // rank list speaks the map's own quadrant vocabulary
+    "behind the S&amp;P, but closing the gap — losing by less lately, not beating it",
+    "still ahead of the S&amp;P, but the lead is shrinking",
+    "ahead of the S&amp;P and pulling further away (lead growing)",
+    "behind the S&amp;P and falling further behind",
+    '`<span style="color:${q.c}" title="${phrase} — ${q.l}">${s.y>=0?\'▲\':\'▼\'}</span>`',
+  ]) assert.ok(app.includes(pin), "leaders-rank pin missing: " + pin);
+  assert.ok(!app.includes('title="beating the S&amp;P by more lately (lead growing)">▲'),
+    "the one-phrase-for-all-quadrants arrow must stay dead — it claimed laggards were beating the index");
+  assert.ok(app.includes("const rowTip=`${s.name}: ${s.x>=0?'+':''}${s.x.toFixed(1)}% vs the S&P over ${wl} · trajectory ${s.y>=0?'+':''}${s.y.toFixed(1)}pp"),
+    "rank rows hover with full name, exact distance and trajectory magnitude — the arrow only shows its sign");
+  assert.ok(app.includes('width:128px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'),
+    "rank labels never wrap rows out of alignment — ellipsis with the full name in the row hover");
+});
+
+// ================================================================================================
+// Action lists in the group lens (build 2026.08.07-05): share-of-tape confirm, name-level bid.
+// ================================================================================================
+
+test("group action math: share-of-tape delta, group heat, honest reclaim phrasing (behavioral)", () => {
+  const fns = actionMathFns();   // the extraction block now also carries the -05 group functions
+  const { shareDeltaPp, groupHeatOf, bidPhrase, groupHeatOfMissing } = { ...fns };
+  // share: 30 of 100 today vs 20 of 100 baseline = +10pp of the tape; zero-sum arithmetic exactly
+  assert.ok(Math.abs(fns.shareDeltaPp(30, 100, 20, 100) - 10) < 1e-12, "+10pp when the mix shifts toward the group");
+  assert.ok(Math.abs(fns.shareDeltaPp(30, 100, 20, 100) + fns.shareDeltaPp(70, 100, 80, 100)) < 1e-12,
+    "shares are zero-sum: one group's gain is exactly the rest's loss");
+  assert.equal(fns.shareDeltaPp(30, 100, 20, 0), null, "no baseline volume -> null, never a fabricated share");
+  assert.equal(fns.shareDeltaPp(30, 0, 20, 100), null, "no live tape -> null");
+  // group heat: accel + OI term + share term; share saturates via tanh(Δ/3)
+  assert.ok(Math.abs(fns.groupHeatOf(1, 8, 3) - (1 + 0.6 * Math.tanh(1) + 0.4 * Math.tanh(1))) < 1e-12, "all three terms live");
+  assert.ok(Math.abs(fns.groupHeatOf(1, null, null) - 1) < 1e-12, "missing flow -> bare accel");
+  assert.equal(fns.groupHeatOf(null, 8, 3), null, "no accel, no heat");
+  // reclaim phrasing: past 1.0 the percentage form is banned — "through the old high" with the exact overshoot
+  assert.equal(fns.bidPhrase({ d: 5.41, r: 1.5, m: 216 }),
+    "−5.41% dip fully reclaimed, +2.71% past the old high · ~3.6h since the low",
+    "a clamped 1.5 reclaim reads as through-the-high, never as 150%");
+  assert.equal(fns.bidPhrase({ d: 7.29, r: 0.72, m: 198 }),
+    "72% of −7.29% reclaimed · ~3.3h since the low", "sub-1.0 keeps the percentage form");
+  assert.equal(fns.bidPhrase(null), "", "no claim, no phrase");
+});
+
+test("action lens manifest: group rendering, name-level bid, share hover, drill routing", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "function groupActionScores()", "function groupShareInputs(rows, mode, wt)", "function groupChip(s, kind)",
+    "function shareDeltaPp(volNow, volAllNow, volBase, volAllBase)", "function groupHeatOf(accel, doi, dSharePp)",
+    "function bidPhrase(b)", "why=bidPhrase(s.bid);",
+    "const NB=grouped?pickAction(actionScores().scored):null;",                 // bid never aggregates: name-level even under a lens
+    "const grouped=mktGrp()!=='names';",
+    "if(state.view!=='markets'){ aw.hidden=true; return; }",                    // the old lens-mode hide is gone — the strip regroups instead
+    "0.4*Math.tanh(dSharePp/3)",                                                // the share confirm, pinned
+    "share ${s.shNow.toFixed(1)}% vs ${s.shBase.toFixed(1)}% base",             // the numbers spelled out on the chip
+    "if(c.dataset.grp) c.addEventListener('click',()=>drillInto(c.dataset.grp));",
+    "renderActionLists();   // -05: group heating/cooling + name-level bid render under the lens too",
+  ]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
+  assert.ok(!app.includes("if(state.view!=='markets'||mktGrp()!=='names'){ aw.hidden=true; return; }"),
+    "the -02 lens-mode hide must stay dead");
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(ht.includes("share-of-tape replaces RVOL as the volume confirm"), "header title documents the group behavior");
+});
+
+test("chip stories: the level-vs-derivative tension said out loud, per quadrant of it (behavioral)", () => {
+  const { chipStory } = actionMathFns();
+  // heating, red name: the KIOXIA case — buying the hole is a TURN ATTEMPT, not a bug
+  const turn = chipStory('heat', -5.3, 2.4, null, false);
+  assert.equal(turn.tag, 'turn attempt');
+  assert.ok(/still DOWN over the window/.test(turn.text) && /buying this hole/.test(turn.text) && /unproven/i.test(turn.text),
+    "a red heater explains itself: down, being bought, early, unproven");
+  // heating, green name
+  assert.equal(chipStory('heat', 2.1, 1.0, null, false).tag, 'extending');
+  // cooling with OI leaving: the ZHIPU case — green AND on the cooling list IS the take-profit print
+  const dist = chipStory('cool', 17.7, -7.3, null, false);
+  assert.equal(dist.tag, 'distribution');
+  assert.ok(/GREEN over the window/.test(dist.text) && /money walking out/.test(dist.text) && /take-profit/.test(dist.text),
+    "a green cooler explains the trap: level fine, pace dead, money leaving");
+  // cooling with OI holding: digestion, not exit
+  assert.equal(chipStory('cool', 3.0, 1.8, null, false).tag, 'pause');
+  assert.equal(chipStory('cool', 3.0, null, null, false).tag, 'pause', "no OI data cannot claim distribution");
+  // bid variants
+  assert.equal(chipStory('bid', null, null, 1.5, false).tag, 'through the high');
+  assert.equal(chipStory('bid', null, null, 0.7, false).tag, 'absorbing');
+  // group flavor addresses the group, not the name
+  assert.ok(/The group is still DOWN/.test(chipStory('heat', -2, 0, null, true).text), "grouped wording");
+});
+
+test("chip stories manifest: tag rendered on name and group chips, story leads every hover", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "function chipStory(kind, winRet, doi, rec, grouped)",
+    "let why, tip, story=chipStory(kind, s.winRet, r.doi, s.bid?s.bid.r:null, false);",
+    "const story=chipStory(kind, s.winRet, g.agg.doi?g.agg.doi.v:null, null, true);",
+    "${story.tag.toUpperCase()} — ${story.text}",                              // the story LEADS the hover, recipe follows
+  ]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
+  assert.ok((app.match(/class="tag t-\$\{/g) || []).length === 2, "the visible tag renders on BOTH chip flavors");
+  const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const pin of [".achip .tag{", ".achip .tag.t-turn", ".achip .tag.t-dist"])
     assert.ok(cs.includes(pin), "styles pin missing: " + pin);
 });
