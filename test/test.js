@@ -12004,7 +12004,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.07-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.07-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16525,7 +16525,9 @@ test("rotation + action manifest: wire, merge, leaders fill, drill unification, 
     'id="sectDetDrill"',
     "out.push({name:g.name, x, y, vol:g.totVol, doi:g.doi, coins:g.members.map(r=>r.coin)});",
     "const fC=fN==null?'var(--muted)':(fN>=0?'var(--up)':'var(--down)');",       // leaders money-fill
-    "actOpen:state.actOpen?1:0,", "state.actOpen=!!p.actOpen;",
+    "actOpen2:state.actOpen?1:0,",                                           // -03 pref key: the -02 key stored the unchosen default, see loadPrefs comment
+    "state.actOpen = p.actOpen2===undefined ? true : !!p.actOpen2;",           // open by default, explicit collapse respected
+    "actOpen:true,",
   ]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="actwrap"', 'id="acthead"', 'id="actbody"', 'id="actmeta"'])
