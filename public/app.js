@@ -127,7 +127,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   // it in place. grpSort is the lens's own sort (the names sort must survive a round trip);
   // grpDrill is the transient member filter a group-row click leaves behind — never persisted.
   grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null,
-  actOpen:false,   // action lists under the markets table: collapsed by default, open state persisted
+  actOpen:true,   // action lists under the markets table: OPEN by default (-03), collapse persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
@@ -2907,7 +2907,7 @@ let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
   colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, dvbBasket:state.dvbBasket||null,
-  sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt, actOpen:state.actOpen?1:0,
+  sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt, actOpen2:state.actOpen?1:0,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
   updateLayoutBtn(); }, 250); }
 function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(_){ p=null; } if(!p) return;
@@ -2923,7 +2923,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(typeof p.refreshMs==='number'&&p.refreshMs>0){ state.refreshMs=p.refreshMs; state.pollMs=p.refreshMs; }
   if(p.sortKey&&COL_BY_KEY[p.sortKey]){ state.sortKey=p.sortKey; state.sortDir=p.sortDir==='asc'?'asc':'desc'; }
   if(p.grp==='sectors'||p.grp==='industries'||p.grp==='names') state.grp=p.grp;   // the drill filter is deliberately NOT persisted — a reload always lands on the full lens
-  state.actOpen=!!p.actOpen;   // action lists open/closed, restored as saved
+  state.actOpen = p.actOpen2===undefined ? true : !!p.actOpen2;   // -03: open unless explicitly collapsed. New key on purpose — the -02 key (actOpen) stored the unchosen collapsed DEFAULT in every browser that saved prefs, so honoring it would pin the strip shut for exactly the people who never chose that. The old key is ignored, not migrated.
   if(p.grpWt==='eq'||p.grpWt==='vol') state.grpWt=p.grpWt;
   if(typeof p.dvbBasket==='string'&&/^[A-Z][A-Z0-9]{1,11}$/.test(p.dvbBasket)) state.dvbBasket=p.dvbBasket;
   if(typeof p.filterText==='string') state.filter=p.filterText;
