@@ -1044,7 +1044,9 @@ test("swing shadow setups: detectors, geometry, fundflip stop, gapfade wiring, E
   assert.ok(pol.includes('ev === "gap" || ev === "gapfade"'), "gapfade rides the gap resolution calendar");
   assert.ok(pol.includes('openLedger(r, "reclaim"') && pol.includes('openLedger(r, "mapull"'), "swing shadow fire sites present");
   assert.ok(pol.includes('openLedger(r, "sweep"'), "5m sweep shadow fire site present");
-  assert.ok(pol.includes('detectSweep(store.readCandles(r.coin, now - SWEEP_LOOK_MS, now)'), "sweep reads the 5m archive tail, prior-session levels from dailyRaw");
+  assert.ok(pol.includes('const tail5 = store.readCandles(r.coin, now - SWEEP_LOOK_MS, now);') &&
+    pol.includes('detectSweep(tail5, dayHi, dayLo, r.px, SWEEP_FRAC)'),
+    "sweep reads the 5m archive tail (hoisted since -02 so dip-reclaim shares the read), prior-session levels from dailyRaw");
   assert.ok(pol.includes('r.uni === "xyz" && store.candlesEnabled'), "sweep is gated xyz-only and behind the optional 5m archive");
   assert.ok(pol.includes('playbook("fundflip", { logGeo: r.uni === "main", dir: s0, px: r.px, sd30 })'),
     "fundflip call site feeds the stop context AND the universe's geometry mode");
@@ -12002,7 +12004,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.07-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.07-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -15430,7 +15432,7 @@ test("5m/15m columns: server wiring — ring sampled in buildSnapshot, refs ship
   // pure math lives in compute and is exported — the poller only assembles
   assert.ok(cmp.includes("function pxRingPush(") && cmp.includes("function pxRingRef("), "ring math lives in compute.js");
   assert.ok(cmp.includes("pxRingPush, pxRingRef,"), "ring helpers exported from compute");
-  assert.ok(pol.includes('const { pxRingPush, pxRingRef } = require("./compute");'), "poller imports the ring helpers");
+  assert.ok(pol.includes('const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");'), "poller imports the ring helpers (+ dipReclaim since -02)");
   // tunables pinned: 20 min depth, 90s tolerance
   assert.ok(pol.includes("PX_RING_DEPTH_MS = 20 * 60 * 1000"), "ring depth pinned at 20 min");
   assert.ok(pol.includes("PX_RING_TOL_MS = 90 * 1000"), "lookback tolerance pinned at 90s");
@@ -16416,4 +16418,119 @@ test("computeMktGroups: industries mode groups on ind||sector; fallback groups a
   // Sectors mode must ignore `ind` entirely — the two lenses may never blur.
   const sec = fn(mktGroupsFixture(), "sectors", "vol").find((g) => g.name === "Semiconductors");
   assert.equal(sec, undefined, "sectors mode never groups on the industry key");
+});
+
+// ================================================================================================
+// Rotation upgrades + action lists (build 2026.08.07-02): leaders money-fill, sector-detail →
+// Markets drill, and the heating / cooling / strongest-bid strip under the markets table.
+// ================================================================================================
+
+test("dipReclaim: measures the deepest dip's reclaim, floors noise, fails closed (behavioral)", () => {
+  const { dipReclaim } = require("../src/compute");
+  const M = 5 * 60 * 1000, t0 = 1_754_000_000_000;
+  // 24 bars: ramp to a 100 peak at bar 6, dip to 96 at bar 12, recover into the read.
+  const bars = [];
+  for (let i = 0; i < 24; i++) {
+    const h = i < 6 ? 98 + i / 3 : i === 6 ? 100 : i < 12 ? 100 - (i - 6) * 0.6 : 97.4 + (i - 12) * 0.2;
+    const l = h - 0.4;
+    bars.push([t0 + i * M, h - 0.2, h, l, h - 0.1, 1000]);
+  }
+  const now = t0 + 24 * M;
+  const out = dipReclaim(bars, 99.0, now, 0.35);
+  assert.ok(out, "a 4% dip clears the floor");
+  // trough = low of bar 11: h=97.0, l=96.6 -> dip vs the 100 peak = 3.4%; px 99.0 reclaims (99-96.6)/(100-96.6)
+  assert.ok(Math.abs(out.dip - 3.4) < 1e-9, "dip depth measured against the running peak's high, in % of the peak");
+  assert.ok(Math.abs(out.rec - +( (99.0 - 96.6) / (100 - 96.6) ).toFixed(3)) < 1e-9, "reclaimed fraction = (px − trough) / (peak − trough)");
+  assert.equal(out.mins, Math.round((now - (t0 + 11 * M)) / 60000), "minutes since the trough bar printed");
+  // a bid that runs past the old peak caps at 1.5 — strength acknowledged, not unbounded
+  assert.equal(dipReclaim(bars, 110, now, 0.35).rec, 1.5, "reclaim clamps at 1.5");
+  // px back AT the trough: zero reclaimed, never negative
+  assert.equal(dipReclaim(bars, 96.6, now, 0.35).rec, 0, "no claw-back = 0, floor of the clamp");
+  // floor: the same shape scaled to a 0.2% dip is bar noise, not a claim
+  const tiny = bars.map((b) => [b[0], 100 + (b[1] - 100) * 0.05, 100 + (b[2] - 100) * 0.05, 100 + (b[3] - 100) * 0.05, 100 + (b[4] - 100) * 0.05, b[5]]);
+  assert.equal(dipReclaim(tiny, 100, now, 0.35), null, "sub-floor dips return null — no fabricated bids");
+  // fails closed on every degenerate input
+  assert.equal(dipReclaim(bars.slice(0, 8), 99, now, 0.35), null, "<12 bars: not enough structure");
+  assert.equal(dipReclaim(null, 99, now, 0.35), null, "null tail");
+  assert.equal(dipReclaim(bars, 0, now, 0.35), null, "no live price");
+  // sqlite string values coerce, same contract as detectSweep
+  const str = bars.map((b) => b.map(String));
+  assert.ok(Math.abs(dipReclaim(str, 99.0, now, 0.35).dip - 3.4) < 1e-9, "string bars coerce cleanly");
+});
+
+// The client action math, executed from source (the -84 lesson): ACT_LEGS through the extraction
+// marker is dependency-free by design, so the real shipped functions run against fixtures.
+function actionMathFns() {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const a = app.indexOf("const ACT_LEGS="), b = app.indexOf("// end action math");
+  assert.ok(a >= 0 && b > a, "action math block must sit between ACT_LEGS and its extraction marker");
+  return new Function(app.slice(a, b) + "; return { ACT_LEGS, accelPace, heatOf, pickAction };")();
+}
+
+test("action math: pace acceleration, flow-confirmed heat, and the three gates (behavioral)", () => {
+  const { ACT_LEGS, accelPace, heatOf, pickAction } = actionMathFns();
+  // every window pairs with its natural fast leg — the multi-timeframe contract
+  assert.deepStrictEqual(ACT_LEGS["1h"], ["m15", 0.25, "h1", 1]);
+  assert.deepStrictEqual(ACT_LEGS["1d"], ["h4", 4, "d1", 24]);
+  assert.deepStrictEqual(ACT_LEGS["30d"], ["d7", 168, "d30", 720]);
+  // accel: fast leg minus the window's own pace. +2% fast vs a +6% window over 4/24h -> 2 − 6·(1/6) = +1
+  assert.ok(Math.abs(accelPace(2, 6, 4, 24) - 1) < 1e-12, "outrunning the pace is positive");
+  assert.ok(Math.abs(accelPace(0, 6, 4, 24) + 1) < 1e-12, "a flat fast leg under a rising window is a stall");
+  assert.equal(accelPace(null, 6, 4, 24), null, "missing leg -> null, never 0");
+  // heat: ΔOI always confirms; RVOL only inside its clock-matched ≤1d domain
+  assert.ok(Math.abs(heatOf(1, 8, 2, 24) - (1 + 0.6 * Math.tanh(1) + 0.4)) < 1e-12, "1d window: both flow terms live");
+  assert.ok(Math.abs(heatOf(1, 8, 2, 168) - (1 + 0.6 * Math.tanh(1))) < 1e-12, "7d window: RVOL dropped, not faked");
+  assert.ok(Math.abs(heatOf(1, null, null, 24) - 1) < 1e-12, "missing flow -> bare accel, no invented terms");
+  assert.equal(heatOf(null, 8, 2, 24), null, "no accel, no heat");
+  // gates: heating needs positive accel AND heat; cooling needs a trend vs the tape that is stalling;
+  // bid needs a majority reclaim; ranking = dip × rec / √mins
+  const scored = [
+    { r: {}, winRel: 3, accel: 1.2, heat: 1.8, bid: null },                       // heating
+    { r: {}, winRel: 4, accel: -0.9, heat: -1.1, bid: null },                     // cooling: ahead, stalling
+    { r: {}, winRel: -2, accel: -1.5, heat: -2.0, bid: null },                    // laggard: NEITHER list — the ignore pile
+    { r: {}, winRel: 0.5, accel: 0.4, heat: -0.2, bid: null },                    // accel up but flow against it: not heating
+    { r: {}, winRel: 0, accel: 0, heat: 0, bid: { d: 3.0, r: 0.9, m: 90 } },      // strong bid
+    { r: {}, winRel: 0, accel: 0, heat: 0, bid: { d: 1.0, r: 0.95, m: 30 } },     // shallower but faster
+    { r: {}, winRel: 0, accel: 0, heat: 0, bid: { d: 4.0, r: 0.3, m: 60 } },      // deep dip, minority reclaim: no claim
+  ];
+  const picks = pickAction(scored);
+  assert.equal(picks.heat.length, 1); assert.ok(picks.heat[0].accel === 1.2);
+  assert.equal(picks.cool.length, 1); assert.ok(picks.cool[0].winRel === 4, "only the stalled LEADER cools — laggards are ignored, not listed");
+  assert.equal(picks.bid.length, 2, "sub-50% reclaims never rank");
+  assert.ok(Math.abs(picks.bid[0].bidScore - 3.0 * 0.9 / Math.sqrt(90)) < 1e-12 &&
+    picks.bid[0].bidScore > picks.bid[1].bidScore, "rank = dip × rec / √mins, deep-and-fast first");
+});
+
+test("rotation + action manifest: wire, merge, leaders fill, drill unification, markup, styles", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  for (const pin of [
+    "const RECLAIM_MIN_DIP_PCT = 0.35;",
+    "const tail5 = store.readCandles(r.coin, now - SWEEP_LOOK_MS, now);",       // ONE archive read...
+    "r.bidInfo = dipReclaim(tail5, r.px, now, RECLAIM_MIN_DIP_PCT);",           // ...feeds the reclaim...
+    "const sw = detectSweep(tail5, dayHi, dayLo, r.px, SWEEP_FRAC);",           // ...and the sweep detector
+    "bid: r.bidInfo ? { d: r.bidInfo.dip, r: r.bidInfo.rec, m: r.bidInfo.mins } : undefined,",
+  ]) assert.ok(pol.includes(pin), "poller pin missing: " + pin);
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  for (const pin of [
+    "r.bid=(m.bid!==undefined&&m.bid!==null)?m.bid:null;",                      // absence clears, never carries
+    "function actionScores()", "function renderActionLists()", "function actChip(s, kind)",
+    "if(state.grpDrill&&state.grpDrill.set) rows=rows.filter(r=>state.grpDrill.set.has(r.coin));   // the lists always describe exactly the rows the table shows",
+    "renderActionLists();   // the rate-of-change lists under the table describe exactly what it just rendered",
+    "renderActionLists();   // hides itself in lens mode — the lists are a names-level surface",
+    "function drillMembers(label, coins)",                                       // one drill entry point...
+    "drillMembers(name, g.members.map(r=>r.coin));",                             // ...used by the lens row click...
+    "db.onclick=()=>drillMembers(g.name, g.members.map(r=>r.coin));",            // ...and the sector-detail button
+    'id="sectDetDrill"',
+    "out.push({name:g.name, x, y, vol:g.totVol, doi:g.doi, coins:g.members.map(r=>r.coin)});",
+    "const fC=fN==null?'var(--muted)':(fN>=0?'var(--up)':'var(--down)');",       // leaders money-fill
+    "actOpen:state.actOpen?1:0,", "state.actOpen=!!p.actOpen;",
+  ]) assert.ok(app.includes(pin), "app.js pin missing: " + pin);
+  const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  for (const pin of ['id="actwrap"', 'id="acthead"', 'id="actbody"', 'id="actmeta"'])
+    assert.ok(ht.includes(pin), "index pin missing: " + pin);
+  const cs = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  for (const pin of [".actwrap{", ".achip{", ".acol .ah.hbid"])
+    assert.ok(cs.includes(pin), "styles pin missing: " + pin);
 });
