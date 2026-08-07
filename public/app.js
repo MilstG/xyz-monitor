@@ -1117,7 +1117,7 @@ function grpSortBy(key){ const c=GCOLS.find(x=>x.key===key); if(!c||!c.val) retu
   buildHead(); render(); }
 function renderGroupBoard(){
   const body=el('body'), list=groupRowsSorted();
-  renderActionLists();   // hides itself in lens mode — the lists are a names-level surface
+  renderActionLists();   // -05: group heating/cooling + name-level bid render under the lens too
   _rowCache=null; _rowStruct='';   // the names-mode row patcher must never diff against group markup — returning to names always full-rebuilds
   const fc=el('fcount'); if(fc) fc.textContent='';
   if(!list.length){ body.innerHTML=`<tr><td colspan="${GCOLS.length}"><div class="msg"><span class="big">No matches</span>Clear the filter to see every group.</div></td></tr>`; return; }
@@ -1190,6 +1190,50 @@ function pickAction(scored){
     .sort((a,b)=>b.bidScore-a.bidScore).slice(0,5);
   return { heat, cool, bid };
 }
+// Group flavor (-05): at group level the volume confirm is Δ SHARE OF TAPE, not aggregated RVOL —
+// rotation between groups is zero-sum by definition (one group's +4pp of the tape is someone
+// else's −4pp), and share delta only moves when the MIX moves; on a hot day every group can print
+// RVOL ×1.5 at once and learn nothing. Names keep RVOL (their own clock-matched baseline).
+function shareDeltaPp(volNow, volAllNow, volBase, volAllBase){
+  if(!(volNow>=0)||!(volAllNow>0)||!(volBase>=0)||!(volAllBase>0)) return null;
+  return (volNow/volAllNow - volBase/volAllBase)*100;   // percentage points of the tape, today vs the group's own baseline mix
+}
+function groupHeatOf(accel, doi, dSharePp){
+  if(accel==null) return null;
+  const oiTerm = 0.6*Math.tanh(((doi!=null&&isFinite(doi))?doi:0)/8);
+  const shTerm = (dSharePp!=null&&isFinite(dSharePp)) ? 0.4*Math.tanh(dSharePp/3) : 0;   // ±4pp of tape ≈ saturating — a huge mix shift
+  return accel + oiTerm + shTerm;
+}
+function bidPhrase(b){
+  // rec is clamped at 1.5; past 1.0 the honest read is "fully reclaimed and through the old high"
+  // — (rec−1)·dip is exactly how far past it, in % of the peak. "150% reclaimed" reads as a bug.
+  if(!(b&&b.d>0)) return '';
+  const t = b.m<90 ? '~'+b.m+'m' : '~'+(b.m/60).toFixed(1)+'h';
+  return b.r>=1
+    ? `−${b.d.toFixed(2)}% dip fully reclaimed, +${((b.r-1)*b.d).toFixed(2)}% past the old high · ${t} since the low`
+    : `${Math.round(b.r*100)}% of −${b.d.toFixed(2)}% reclaimed · ${t} since the low`;
+}
+// Chip stories (-05): the plain-English read of why a chip is on its list — the derivative-vs-level
+// tension is the POINT of the strip (red names heat when someone buys the hole; green names cool
+// when money leaves while the day still looks great), but it reads as a bug unless said out loud.
+// Pure classifier: {tag, text} from the same numbers the chip shows. grouped flavors the wording.
+function chipStory(kind, winRet, doi, rec, grouped){
+  const u=grouped?'group':'name', U=grouped?'The group':'It';
+  if(kind==='bid'){
+    return rec!=null&&rec>=1
+      ? {tag:'through the high', text:'The whole dip was bought back and price pushed PAST where it broke down from — the most aggressive demand print a tape gives. Not momentum: this is supply being absorbed faster than it appears.'}
+      : {tag:'absorbing', text:'A real dip is being bought back quickly. Demand response, not momentum — a '+u+' can sit flat on the day while soaking up every dip, and that is the strongest bid on the board.'};
+  }
+  if(kind==='heat'){
+    return (winRet!=null&&winRet<0)
+      ? {tag:'turn attempt', text:U+' is still DOWN over the window — that is why the color is red — but the fast leg is outrunning the window\u2019s own pace: someone is buying this hole right now. Early by construction and unproven; by the time it is green, it has already moved. Judge it against '+(grouped?'breadth':'M')+'.'}
+      : {tag:'extending', text:'Already up AND still outrunning its own pace — trend acceleration, not a bounce. The flow terms say whether new money agrees.'};
+  }
+  // cooling
+  return (doi!=null&&doi<-2)
+    ? {tag:'distribution', text:U+' is GREEN over the window — that is exactly the trap. The pace is dead and open interest is leaving: money walking out while the day still looks fine. The level will keep looking fine for days after the pace dies; this is the take-profit print no returns table can show.'}
+    : {tag:'pause', text:'Pace has stalled but money has NOT left (\u0394OI flat or building) — digestion is as likely as exit. Watch the OI term: distribution starts when it turns.'};
+}
 // end action math (extraction marker — the tests slice from ACT_LEGS to this line and execute it)
 function actTapeRet(rows, key){ let s=0,w=0,se=0,n=0;
   for(const r of rows){ const v=r[key]; if(v==null||!isFinite(v)) continue; se+=v; n++; const wt=r.vol>0?r.vol:0; if(wt>0){ s+=wt*v; w+=wt; } }
@@ -1214,46 +1258,120 @@ function actionScores(){
 function actChip(s, kind){
   const r=s.r, mom=(r.mom!=null&&isFinite(r.mom))?(r.mom>0?'+':'')+Math.round(r.mom):'·';
   const ret=s.winRet==null?'·':(s.winRet>=0?'+':'')+s.winRet.toFixed(2)+'%';
-  let why, tip;
+  let why, tip, story=chipStory(kind, s.winRet, r.doi, s.bid?s.bid.r:null, false);
   if(kind==='bid'){
-    why=`${Math.round(s.bid.r*100)}% of −${s.bid.d.toFixed(2)}% reclaimed · ${s.bid.m<90?'~'+s.bid.m+'m':'~'+(s.bid.m/60).toFixed(1)+'h'} since the low`;
-    tip=`dip-reclaim off the 5m archive (last 4h): the deepest peak→trough dip and how much of it price clawed back.\nrank = dip × reclaimed ÷ √minutes — deep dips bought back fast outrank shallow slow ones.\nMOM ${mom} — level next to the derivative.`;
+    why=bidPhrase(s.bid);
+    tip=`${story.tag.toUpperCase()} — ${story.text}\n\ndip-reclaim off the 5m archive (last 4h): the deepest peak→trough dip and how much of it price clawed back.\nrank = dip × reclaimed ÷ √minutes — deep dips bought back fast outrank shallow slow ones.\nMOM ${mom} — level next to the derivative.`;
   } else {
     const parts=[`accel ${s.accel>=0?'+':''}${s.accel.toFixed(2)}`];
     if(r.doi!=null&&isFinite(r.doi)) parts.push(`ΔOI ${r.doi>=0?'+':''}${r.doi.toFixed(1)}%`);
     const rv=(r.rvolByWin&&r.rvolByWin[s._wk]!=null)?r.rvolByWin[s._wk]:null;
     if(rv!=null) parts.push(`RVOL ×${rv.toFixed(1)}`);
     why=parts.join(' · ');
-    tip=`heat ${s.heat>=0?'+':''}${s.heat.toFixed(2)} = accel + 0.6·tanh(ΔOI/8)${s._wH<=24?' + 0.4·clamp(RVOL−1,−1,2)':' (RVOL dropped — clock-matched, ≤1d only)'}\naccel = fast leg − window pace, both vs the tape (${s._fk} vs ${s._wk}).\nMOM ${mom} — the LEVEL: high MOM + this ${kind==='cool'?'stall is the take-profit read':'acceleration is confirmation'}.`;
+    tip=`${story.tag.toUpperCase()} — ${story.text}\n\nheat ${s.heat>=0?'+':''}${s.heat.toFixed(2)} = accel + 0.6·tanh(ΔOI/8)${s._wH<=24?' + 0.4·clamp(RVOL−1,−1,2)':' (RVOL dropped — clock-matched, ≤1d only)'}\naccel = fast leg − window pace, both vs the tape (${s._fk} vs ${s._wk}).\nMOM ${mom} — the LEVEL: high MOM + this ${kind==='cool'?'stall is the take-profit read':'acceleration is confirmation'}.`;
   }
   return `<div class="achip" data-coin="${esc(r.coin)}" title="${esc(tip)}">
     <span class="tk">${esc(r.ticker)}</span><span class="${(s.winRet||0)>=0?'pos':'neg'} rt">${ret}</span>
     <span class="mm" title="momentum LEVEL (the board column) — printed so level and rate-of-change read together">M ${mom}</span>
+    <span class="tag t-${kind==='bid'?(s.bid&&s.bid.r>=1?'thru':'abs'):(kind==='heat'?((s.winRet!=null&&s.winRet<0)?'turn':'ext'):((r.doi!=null&&r.doi<-2)?'dist':'pause'))}" title="${esc(story.text)}">${story.tag}</span>
     <span class="why">${why}</span></div>`;
+}
+// Group baseline share: each member's trailing ~30d volume summed per group, over the covered
+// universe total — client-side from the daily tuples' v column, coverage disclosed in the hover.
+function groupShareInputs(rows, mode, wt){
+  const groups=computeMktGroups(rows, mode, wt);
+  let allNow=0, allBase=0;
+  const per=new Map();
+  for(const g of groups){
+    let base=0, cov=0;
+    for(const r of g.members){ if(!r.daily) continue;
+      let b=0,n=0; for(const k of r.daily){ const v=parseFloat(k.v); if(isFinite(v)&&v>0){ b+=v; n++; } }
+      if(n>=5){ base+=b; cov++; } }
+    per.set(g.name,{base,cov});
+    allNow+=g.totVol||0; allBase+=base;
+  }
+  return {groups, per, allNow, allBase};
+}
+function groupActionScores(){
+  const legs=ACT_LEGS[state.tf]||ACT_LEGS['1d'], fk=legs[0], fH=legs[1], wk=legs[2], wH=legs[3];
+  const rows=thresholdRows(activeRows());
+  const {groups, per, allNow, allBase}=groupShareInputs(rows, mktGrp(), state.grpWt);
+  const tf=actTapeRet(rows,fk), tw=actTapeRet(rows,wk);   // the tape is still the NAMES — groups are measured against the same tape the names are
+  const scored=[];
+  for(const g of groups){
+    if(g.name==='Unclassified'&&g.n<2) continue;
+    // group fast leg: m15 isn't a lens column, so aggregate it here with the SAME weights
+    let fv=null;
+    if(fk==='m15'){ let sm=0,wm=0,eq=0,en=0; for(const r of g.members){ const v=r.m15; if(v==null||!isFinite(v)) continue; en++; eq+=v; const wt2=(state.grpWt!=='eq'&&r.vol>0)?r.vol:0; if(wt2>0){ sm+=wt2*v; wm+=wt2; } } fv=wm>0?sm/wm:(en?eq/en:null); }
+    else fv=(g.agg[fk]&&g.agg[fk].v!=null)?g.agg[fk].v:null;
+    const wv=(g.agg[wk]&&g.agg[wk].v!=null)?g.agg[wk].v:null;
+    const fastRel=(fv!=null&&tf!=null)?fv-tf:null, winRel=(wv!=null&&tw!=null)?wv-tw:null;
+    const accel=accelPace(fastRel,winRel,fH,wH);
+    if(accel==null) continue;
+    const sh=per.get(g.name)||{base:0,cov:0};
+    const dSh=shareDeltaPp(g.totVol||0, allNow, sh.base, allBase);
+    const shNow=allNow>0?100*(g.totVol||0)/allNow:null, shBase=allBase>0?100*sh.base/allBase:null;
+    scored.push({ g, winRet:wv, winRel, accel, heat:groupHeatOf(accel, g.agg.doi?g.agg.doi.v:null, dSh),
+      dSh, shNow, shBase, shCov:sh.cov, bid:null });
+  }
+  return { scored, fk, fH, wk, wH, n:groups.length };
+}
+function groupChip(s, kind){
+  const g=s.g, ret=s.winRet==null?'·':(s.winRet>=0?'+':'')+s.winRet.toFixed(2)+'%';
+  const br=(g.brN>0)?Math.round(100*g.brUp/g.brN)+'%':'·';
+  const shTxt=(s.shNow!=null&&s.shBase!=null)?`share ${s.shNow.toFixed(1)}% vs ${s.shBase.toFixed(1)}% base (${s.dSh>=0?'+':''}${s.dSh.toFixed(1)}pp)`:'share n/a';
+  const parts=[`accel ${s.accel>=0?'+':''}${s.accel.toFixed(2)}`];
+  if(g.agg.doi&&g.agg.doi.v!=null) parts.push(`ΔOI ${g.agg.doi.v>=0?'+':''}${g.agg.doi.v.toFixed(1)}%`);
+  parts.push(shTxt);
+  const story=chipStory(kind, s.winRet, g.agg.doi?g.agg.doi.v:null, null, true);
+  const tip=`${story.tag.toUpperCase()} — ${story.text}\n\ngroup heat ${s.heat>=0?'+':''}${s.heat.toFixed(2)} = accel + 0.6·tanh(ΔOI/8) + 0.4·tanh(Δshare/3)\naccel = group fast leg − group window pace, both vs the names tape.\nΔshare = today's slice of total volume vs this group's own ~30d baseline mix — zero-sum by construction: a group only gains tape someone else lost (baseline covers ${s.shCov}/${g.n} members with volume history).\nbreadth ${br} of members up over the window. Click = drill into the members.`;
+  return `<div class="achip" data-grp="${esc(g.name)}" title="${esc(tip)}">
+    <span class="tk">${esc(sectorShort(g.name))}</span><span class="${(s.winRet||0)>=0?'pos':'neg'} rt">${ret}</span>
+    <span class="mm" title="breadth — members up over the window (groups have no MOM; breadth is the level check here)">B ${br}</span>
+    <span class="tag t-${kind==='heat'?((s.winRet!=null&&s.winRet<0)?'turn':'ext'):((g.agg.doi&&g.agg.doi.v!=null&&g.agg.doi.v<-2)?'dist':'pause')}" title="${esc(story.text)}">${story.tag}</span>
+    <span class="why">${parts.join(' · ')}</span></div>`;
 }
 function renderActionLists(){
   const aw=el('actwrap'); if(!aw) return;
-  if(state.view!=='markets'||mktGrp()!=='names'){ aw.hidden=true; return; }
+  if(state.view!=='markets'){ aw.hidden=true; return; }
   aw.hidden=false;
   const hd=el('acthead'), bd=el('actbody'), meta=el('actmeta'), caret=el('actcaret');
   if(caret) caret.textContent=state.actOpen?'▾':'▸';
   if(hd) hd.setAttribute('aria-expanded', state.actOpen?'true':'false');
   if(bd) bd.hidden=!state.actOpen;
-  const A=actionScores(), picks=pickAction(A.scored);
-  for(const arr of [picks.heat,picks.cool,picks.bid]) for(const s of arr){ s._wk=A.wk; s._fk=A.fk; s._wH=A.wH; }
-  if(meta) meta.textContent=`${state.tf} window · ${A.n} names${state.grpDrill?' · '+sectorShort(state.grpDrill.label):''}`;
+  const grouped=mktGrp()!=='names';
+  const A=grouped?null:actionScores();
+  const GA=grouped?groupActionScores():null;
+  const picks=grouped?pickAction(GA.scored):pickAction(A.scored);
+  // The bid column NEVER aggregates — a dip is an event in time; averaging member dips of
+  // different depths at different moments describes nothing. In a lens it stays name-level,
+  // computed over the same member universe the lens is aggregating, and says so.
+  const NB=grouped?pickAction(actionScores().scored):null;
+  const bidPicks=grouped?NB.bid:picks.bid;
+  if(!grouped) for(const arr of [picks.heat,picks.cool,picks.bid]) for(const s of arr){ s._wk=A.wk; s._fk=A.fk; s._wH=A.wH; }
+  else for(const s of bidPicks){ s._wk='d1'; s._fk='h4'; s._wH=24; }
+  if(meta) meta.textContent=`${state.tf} window · ${grouped?GA.n+' '+(mktGrp()==='industries'?'industries':'sectors'):(A.n+' names')}${state.grpDrill?' · '+sectorShort(state.grpDrill.label):''}`;
   if(!state.actOpen||!bd) return;
   const empty=m=>`<div class="sec" style="padding:6px 2px">${m}</div>`;
+  const render1=(arr,kind)=>arr.map(s=>grouped&&kind!=='bid'?groupChip(s,kind):actChip(s,kind)).join('');
   const col=(title,cls,tip,arr,kind,note)=>`<div class="acol"><div class="ah ${cls}" title="${esc(tip)}">${title}</div>`+
-    (note?empty(note):(arr.length?arr.map(s=>actChip(s,kind)).join(''):empty('nothing qualifies right now — an honest empty list, not a hidden one')))+`</div>`;
+    (note?empty(note):(arr.length?render1(arr,kind):empty('nothing qualifies right now — an honest empty list, not a hidden one')))+`</div>`;
   const bidNote=state.scope==='crypto'
     ? 'equities only for now — the reclaim read rides the 5m archive tail the sweep lane already pulls per xyz name; spending sixty more archive reads per pass on the perp universe has not been earned yet'
-    : (picks.bid.length?null:null);
+    : null;
+  const unit=grouped?(mktGrp()==='industries'?'industries':'sectors'):'names';
   bd.innerHTML =
-    col('HEATING — starting to move','hup','pace acceleration confirmed by flow: fast leg outrunning the window pace (both vs the tape), ΔOI and RVOL agreeing. What deserves attention it is not yet getting.',picks.heat,'heat',null)+
-    col('COOLING — had a trend, stalling','hcool','names still AHEAD of the tape over the window whose fast leg has stopped keeping pace. High MOM here is the take-profit read — the level looks fine for days after the pace dies.',picks.cool,'cool',null)+
-    col('STRONGEST BID — bought back fastest','hbid','the server\u2019s dip-reclaim claims: deepest recent dip, how much of it got reclaimed, how fast. Demand response, not momentum \u2014 a flat name absorbing every dip has the strongest bid on the board.',picks.bid,'bid',bidNote);
-  bd.querySelectorAll('.achip').forEach(c=>c.addEventListener('click',()=>openDetail(c.dataset.coin)));
+    col(`HEATING — ${unit} starting to move`,'hup',grouped
+      ?'group pace acceleration confirmed by flow: the group\u2019s fast leg outrunning its window pace (both vs the names tape), ΔOI building and its SHARE OF THE TAPE growing vs its own baseline mix — rotation is zero-sum, share only moves when the mix moves.'
+      :'pace acceleration confirmed by flow: fast leg outrunning the window pace (both vs the tape), ΔOI and RVOL agreeing. What deserves attention it is not yet getting.',picks.heat,'heat',null)+
+    col(`COOLING — had a trend, stalling`,'hcool',grouped
+      ?'groups still AHEAD of the names tape over the window whose pace has died — the rotation exit: the group label keeps looking fine for days after the pace goes.'
+      :'names still AHEAD of the tape over the window whose fast leg has stopped keeping pace. High MOM here is the take-profit read — the level looks fine for days after the pace dies.',picks.cool,'cool',null)+
+    col(`STRONGEST BID — names, bought back fastest`,'hbid','the server\u2019s dip-reclaim claims: deepest recent dip, how much of it got reclaimed, how fast. Demand response, not momentum. Always name-level — a dip is an event in time, so it does not aggregate; in a lens this column ranks the same members the lens is averaging.',bidPicks,'bid',bidNote);
+  bd.querySelectorAll('.achip').forEach(c=>{
+    if(c.dataset.grp) c.addEventListener('click',()=>drillInto(c.dataset.grp));
+    else c.addEventListener('click',()=>openDetail(c.dataset.coin));
+  });
 }
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts();
@@ -7504,13 +7622,26 @@ function renderLeaders(data){
 function leadersRankHtml(data){
   const sorted=[...data].sort((a,b)=>b.x-a.x);
   const maxAbs=Math.max(0.5,...sorted.map(s=>Math.abs(s.x)));
+  const wl=leadersDays()+'d';
   const li=s=>{ const ahead=s.x>=0, w=Math.round(Math.abs(s.x)/maxAbs*88);
-    const arrow=s.y>=0?'<span class="pos" title="beating the S&amp;P by more lately (lead growing)">▲</span>':'<span class="neg" title="lead is shrinking">▼</span>';
-    return `<div class="crow lrow" data-sect="${esc(s.name)}"><span class="ct" style="width:104px">${esc(sectorShort(s.name))}</span>`+
+    // The arrow is the TRAJECTORY (y sign); which story that tells depends on which side of the
+    // S&P the group sits (x sign) — a laggard improving is closing a gap, not "beating by more".
+    // Glyph by trajectory, color + phrase by quadrant: same leadQuad the map bubbles use.
+    const q=leadQuad(s.x,s.y);
+    const phrase = ahead
+      ? (s.y>=0 ? 'ahead of the S&amp;P and pulling further away (lead growing)'
+                : 'still ahead of the S&amp;P, but the lead is shrinking')
+      : (s.y>=0 ? 'behind the S&amp;P, but closing the gap — losing by less lately, not beating it'
+                : 'behind the S&amp;P and falling further behind');
+    const arrow=`<span style="color:${q.c}" title="${phrase} — ${q.l}">${s.y>=0?'▲':'▼'}</span>`;
+    // Row hover carries what the glyphs compress: full group name, exact distance vs the S&P,
+    // the trajectory MAGNITUDE (the arrow only shows its sign), and the quadrant verdict.
+    const rowTip=`${s.name}: ${s.x>=0?'+':''}${s.x.toFixed(1)}% vs the S&P over ${wl} · trajectory ${s.y>=0?'+':''}${s.y.toFixed(1)}pp (recent half vs earlier half) — ${q.l}`;
+    return `<div class="crow lrow" data-sect="${esc(s.name)}" title="${esc(rowTip)}"><span class="ct" style="width:128px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sectorShort(s.name))}</span>`+
       `<span class="cv ${ahead?'pos':'neg'}" style="width:56px;margin-left:0">${ahead?'+':''}${s.x.toFixed(1)}%</span>`+
       `<span style="width:16px;text-align:center">${arrow}</span>`+
       `<span class="cbar" style="width:${w}px;background:${ahead?'var(--up)':'var(--down)'};opacity:.55"></span></div>`; };
-  return `<div class="cp-sub" style="margin:16px 2px 8px">${sectGrpActive()?'Industry groups':'Sectors'} ranked vs the S&amp;P (${leadersDays()}d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ lead growing · ▼ shrinking · click a row to drill in</span></div>`+
+  return `<div class="cp-sub" style="margin:16px 2px 8px">${sectGrpActive()?'Industry groups':'Sectors'} ranked vs the S&amp;P (${leadersDays()}d) <span class="sec" style="text-transform:none;letter-spacing:0">· ▲ trajectory improving · ▼ deteriorating · arrow color = quadrant (hover it — what "improving" means depends on which side of the S&amp;P the group sits) · click a row to drill in</span></div>`+
     sorted.map(li).join('');
 }
 function attachLeadersHandlers(){ el('sect-map').querySelectorAll('.lead, .lrow').forEach(g=>g.addEventListener('click',()=>{ state.sect.sel=g.dataset.sect; renderSectorDetail(); el('sect-detail').scrollIntoView({behavior:'smooth',block:'nearest'}); })); }
@@ -7939,7 +8070,7 @@ markets:`
 <div class="hlp-h">Group lens — sectors &amp; industries</div>
 <p>The <b>group</b> toggle re-renders the same board with one row per <b>sector</b> (GICS + asset classes) or <b>industry</b> (the finer curated split — Semis vs Software vs Memory, Banks vs Capital Markets), every window column at once: D open, 1h→30d, M/Y open, breadth, ΔOI, RVOL, volume, OI, cohesion. Each cell is the <b>weighted average of exactly the rows the names view shows</b> — vol-weighted by default (equal on the toggle), computed only over members that have the value, with the hover disclosing coverage; a missing window is excluded and the weights renormalize, never zero-filled. <b>Best · Worst</b> (pinned to 24h) is the aggregate-liar detector: whether the group number is everyone, or one name dragging the rest — read it against <b>Cohesion</b> (90d avg internal correlation: high = the label trades as one block, low = a stock-picker's bucket). <b>Click a group row</b> to drill in: the table flips back to names filtered to its members, with a chip to clear. Vol/OI filters and ★-only apply to members <i>before</i> aggregation; industries are equities-only (crypto's curated sectors are already its fine grouping); industry rows marked <i>= sector</i> have no curated split yet. CSV exports whichever lens is on screen.</p>
 <div class="hlp-h">Action strip — heating · cooling · strongest bid</div>
-<p>The collapsible strip under the table is the <b>rate-of-change</b> read next to the table's levels, and it always describes <b>exactly the rows the table shows</b> — scope, the window selector, vol/OI filters and any active drill all apply. Per name, <b>accel</b> = the window's natural fast leg (1h→15m, 4h→1h, 1d→4h, 7d→1d, 30d→7d) minus the window's own pace, both measured relative to the tape; <b>heat</b> = accel + 0.6·tanh(ΔOI/8) + 0.4·clamp(RVOL−1) — flow can only <i>confirm</i> an acceleration, never replace it, and RVOL (clock-matched, ≤1d only) is dropped at 7d/30d, not faked. <b>HEATING</b> = positive accel with flow agreeing: what is starting. <b>COOLING</b> = names still <i>ahead of the tape</i> whose pace has died — with a high MOM this is the take-profit read, and it is a different animal from "never went anywhere", which makes no list at all. <b>STRONGEST BID</b> ranks the server's dip-reclaim claims off the 5m archive (equities, last 4h): the deepest peak→trough dip, the fraction reclaimed, minutes since the low, ranked dip × reclaimed ÷ √minutes — demand response, not momentum; a flat name absorbing every dip has the strongest bid on the board. <b>M</b> on every chip is the momentum <i>level</i>, printed so the pair reads at a glance: high/high = ride, high/stalling = exit, low/accelerating = new rotation. Empty lists are honest, not hidden. Click a chip to open the name's drawer.</p>
+<p>The collapsible strip under the table is the <b>rate-of-change</b> read next to the table's levels, and it always describes <b>exactly the rows the table shows</b> — scope, the window selector, vol/OI filters and any active drill all apply. Per name, <b>accel</b> = the window's natural fast leg (1h→15m, 4h→1h, 1d→4h, 7d→1d, 30d→7d) minus the window's own pace, both measured relative to the tape; <b>heat</b> = accel + 0.6·tanh(ΔOI/8) + 0.4·clamp(RVOL−1) — flow can only <i>confirm</i> an acceleration, never replace it, and RVOL (clock-matched, ≤1d only) is dropped at 7d/30d, not faked. <b>HEATING</b> = positive accel with flow agreeing: what is starting. <b>COOLING</b> = names still <i>ahead of the tape</i> whose pace has died — with a high MOM this is the take-profit read, and it is a different animal from "never went anywhere", which makes no list at all. <b>STRONGEST BID</b> ranks the server's dip-reclaim claims off the 5m archive (equities, last 4h): the deepest peak→trough dip, the fraction reclaimed, minutes since the low, ranked dip × reclaimed ÷ √minutes — demand response, not momentum; a flat name absorbing every dip has the strongest bid on the board. <b>M</b> on every chip is the momentum <i>level</i>, printed so the pair reads at a glance: high/high = ride, high/stalling = exit, low/accelerating = new rotation. Empty lists are honest, not hidden. Click a chip to open the name's drawer. <b>In a group lens</b> the strip regroups with the table: HEATING/COOLING become sector/industry rows (accel on the group aggregates vs the same names tape) whose volume confirm is <b>Δ share of tape</b> — today's slice of total volume vs the group's own ~30d baseline mix — instead of RVOL, because rotation between groups is zero-sum: share only moves when the mix moves, while every group can print RVOL ×1.5 at once on a hot day and tell you nothing. Group chips show <b>B</b> (breadth) where names show MOM, and click-drill into their members. STRONGEST BID stays name-level in every lens — a dip is an event in time and does not aggregate.</p>
 <div class="hlp-h">Funding — the crowd's payment</div>
 <p>Annualized APR: <b class="pos">green = longs pay</b> to hold (crowded long), <b class="neg">red = shorts pay</b> (crowded short — squeeze fuel). The ▴/▾ percentile flag fires when today's funding sits at a monthly extreme of that market's <i>own</i> 31d distribution — the crowd is paying near its max, the classic mean-reversion zone. <b>Carry</b> divides window funding by realized vol: how much you're paid per unit of risk just for taking the unpopular side.</p>
 <div class="hlp-h">ΔOI and the regime tag</div>

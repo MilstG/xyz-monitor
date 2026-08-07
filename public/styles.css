@@ -1345,3 +1345,13 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .achip .rt{min-width:56px}
 .achip .mm{color:var(--muted);font-size:10.5px;min-width:38px}
 .achip .why{color:var(--muted);font-size:10.5px}
+
+/* story tags (-05): one word naming which story a chip is — the level color and the list
+   membership deliberately disagree (turn attempts are red, distribution is green); the tag says so. */
+.achip .tag{font-size:9.5px;letter-spacing:.4px;text-transform:uppercase;padding:1px 6px;border-radius:8px;border:1px solid var(--border);color:var(--muted);white-space:nowrap}
+.achip .tag.t-turn{color:var(--blue);border-color:var(--blue)}
+.achip .tag.t-ext{color:var(--up);border-color:var(--up)}
+.achip .tag.t-dist{color:var(--down);border-color:var(--down)}
+.achip .tag.t-pause{color:var(--accent);border-color:var(--accent)}
+.achip .tag.t-thru{color:var(--blue);border-color:var(--blue)}
+.achip .tag.t-abs{color:var(--muted)}
