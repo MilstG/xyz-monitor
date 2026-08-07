@@ -127,6 +127,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   // it in place. grpSort is the lens's own sort (the names sort must survive a round trip);
   // grpDrill is the transient member filter a group-row click leaves behind — never persisted.
   grp:'names', grpWt:'vol', grpSort:{key:'d1',dir:'desc'}, grpDrill:null,
+  actOpen:false,   // action lists under the markets table: collapsed by default, open state persisted
   filters:{volMin:null,volMax:null,oiMin:null,oiMax:null}, corr:{tf:'30', ctf:'1d', topN:40, selected:null, search:'', topPairs:10, pair:null, showBuiltins:false},
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
@@ -415,6 +416,7 @@ function applySnapshot(s){
     // warm-up or a feed gap at the lookback point) — clear rather than keep, or a long-lived page
     // would compute a "5m" change against a reference minutes older than its label.
     r.p5m=(m.p5m!=null)?m.p5m:null; r.p15m=(m.p15m!=null)?m.p15m:null;
+    r.bid=(m.bid!==undefined&&m.bid!==null)?m.bid:null;   // dip-reclaim claim {d,r,m} (xyz, 5m archive tail) — absence MEANS no fresh claim: clear, never carry a stale bid
     r.fundPct=(m.fundPct!=null)?m.fundPct:r.fundPct;
     if(m.red!==undefined) r.red=m.red;             // {dcap,hit,n} or null — fixed 31d/4h red-tape resilience, server-computed
     if(m.rvol!==undefined) r.rvolByWin=m.rvol;     // {h1,h4,d1} clock-hour-matched relative volume, server-computed
@@ -1115,20 +1117,26 @@ function grpSortBy(key){ const c=GCOLS.find(x=>x.key===key); if(!c||!c.val) retu
   buildHead(); render(); }
 function renderGroupBoard(){
   const body=el('body'), list=groupRowsSorted();
+  renderActionLists();   // hides itself in lens mode — the lists are a names-level surface
   _rowCache=null; _rowStruct='';   // the names-mode row patcher must never diff against group markup — returning to names always full-rebuilds
   const fc=el('fcount'); if(fc) fc.textContent='';
   if(!list.length){ body.innerHTML=`<tr><td colspan="${GCOLS.length}"><div class="msg"><span class="big">No matches</span>Clear the filter to see every group.</div></td></tr>`; return; }
   body.innerHTML=list.map(g=>{ let row=`<tr data-grp="${esc(g.name)}" style="cursor:pointer">`; for(const c of GCOLS) row+=c.td(g); return row+'</tr>'; }).join('');
   body.querySelectorAll('tr[data-grp]').forEach(tr=>tr.addEventListener('click',()=>drillInto(tr.dataset.grp)));
 }
+// One entry point for every member drill — the lens row click AND the sector-detail → Markets
+// button route through here, so the chip, the filter clear and the persistence rules can never fork.
+function drillMembers(label, coins){
+  state.grpDrill={label, set:new Set(coins)};
+  state.grp='names';
+  state.filter=''; const fi=el('filter'); if(fi) fi.value='';   // the text filter's job was finding the group; carried along it would filter the very members just selected
+  syncGrpSeg(); updateDrillChip(); savePrefs();
+  if(state.view==='markets'){ buildHead(); render(); }
+  else { showView('markets'); buildHead(); render(); }   // cross-tab entry: land on Markets already drilled
+}
 function drillInto(name){
   const g=groupRowsSorted().find(x=>x.name===name); if(!g) return;
-  state.grpDrill={label:name, set:new Set(g.members.map(r=>r.coin))};
-  state.grp='names';
-  // The text filter's job was finding the group; carried into the names view it would filter the
-  // very members the click just selected. Cleared, visibly (the input empties with it).
-  state.filter=''; const fi=el('filter'); if(fi) fi.value='';
-  syncGrpSeg(); updateDrillChip(); buildHead(); render(); savePrefs();
+  drillMembers(name, g.members.map(r=>r.coin));
 }
 function clearDrill(){ state.grpDrill=null; updateDrillChip(); buildHead(); render(); }
 function updateDrillChip(){ const c=el('drillchip'); if(!c) return;
@@ -1153,6 +1161,100 @@ function syncGrpSeg(){
   const cm=document.querySelector('.colmenu'), lm=document.querySelector('.laymenu');
   if(cm) cm.style.display=eff==='names'?'':'none';
   if(lm) lm.style.display=eff==='names'?'':'none'; }
+// ===== action lists: heating / cooling / strongest bid (build 2026.08.07-02) ===================
+// The rate-of-change companion to the momentum LEVEL. Per window, each name gets a pace
+// acceleration — how much its fast leg outran the window's own pace, both measured relative to
+// the tape — and a heat score in which flow (ΔOI, clock-matched RVOL) only CONFIRMS that
+// acceleration, never replaces it. HEATING is what is starting; COOLING is what had a trend vs
+// the tape and is stalling (a different animal from "never went anywhere", which is the ignore
+// pile and gets no list); STRONGEST BID ranks the server's dip-reclaim claims — demand response,
+// not momentum. MOM is printed on every chip so level and derivative read together: high/high =
+// ride, high/negative = exit, low/positive = new rotation. Recipes verbatim in every hover.
+// ACT_LEGS: window -> [fast field, fast hours, window field, window hours].
+const ACT_LEGS={ '1h':['m15',0.25,'h1',1], '4h':['h1',1,'h4',4], '1d':['h4',4,'d1',24], '7d':['d1',24,'d7',168], '30d':['d7',168,'d30',720] };
+function accelPace(fastRel, winRel, fastH, winH){
+  if(fastRel==null||winRel==null||!isFinite(fastRel)||!isFinite(winRel)||!(fastH>0)||!(winH>0)) return null;
+  return fastRel - winRel*(fastH/winH);   // 0 = tracking its own window pace; + = outrunning it; − = stalling
+}
+function heatOf(accel, doi, rvol, winH){
+  if(accel==null) return null;
+  const oiTerm = 0.6*Math.tanh(((doi!=null&&isFinite(doi))?doi:0)/8);
+  const rvTerm = (winH<=24 && rvol!=null && isFinite(rvol)) ? 0.4*Math.min(2,Math.max(-1,rvol-1)) : 0;   // RVOL is clock-matched and only exists ≤1d — dropped, not faked, at 7d/30d
+  return accel + oiTerm + rvTerm;
+}
+function pickAction(scored){
+  const heat = scored.filter(s=>s.accel!=null&&s.accel>0&&s.heat>0).sort((a,b)=>b.heat-a.heat).slice(0,5);
+  const cool = scored.filter(s=>s.winRel!=null&&s.winRel>0&&s.accel!=null&&s.accel<0).sort((a,b)=>a.heat-b.heat).slice(0,5);
+  const bid  = scored.filter(s=>s.bid&&s.bid.r>=0.5&&s.bid.d>0&&s.bid.m>0)
+    .map(s=>({...s, bidScore:s.bid.d*s.bid.r/Math.sqrt(s.bid.m)}))
+    .sort((a,b)=>b.bidScore-a.bidScore).slice(0,5);
+  return { heat, cool, bid };
+}
+// end action math (extraction marker — the tests slice from ACT_LEGS to this line and execute it)
+function actTapeRet(rows, key){ let s=0,w=0,se=0,n=0;
+  for(const r of rows){ const v=r[key]; if(v==null||!isFinite(v)) continue; se+=v; n++; const wt=r.vol>0?r.vol:0; if(wt>0){ s+=wt*v; w+=wt; } }
+  return w>0?s/w:(n?se/n:null); }   // vol-weighted tape return per leg; equal-weight fallback when nothing carries volume
+function actionScores(){
+  const legs=ACT_LEGS[state.tf]||ACT_LEGS['1d'], fk=legs[0], fH=legs[1], wk=legs[2], wH=legs[3];
+  let rows=thresholdRows(activeRows());
+  if(state.grpDrill&&state.grpDrill.set) rows=rows.filter(r=>state.grpDrill.set.has(r.coin));   // the lists always describe exactly the rows the table shows
+  const tf=actTapeRet(rows,fk), tw=actTapeRet(rows,wk);
+  const scored=[];
+  for(const r of rows){
+    const fv=r[fk], wv=r[wk];
+    const fastRel=(fv!=null&&isFinite(fv)&&tf!=null)?fv-tf:null;
+    const winRel =(wv!=null&&isFinite(wv)&&tw!=null)?wv-tw:null;
+    const accel=accelPace(fastRel,winRel,fH,wH);
+    if(accel==null&&!r.bid) continue;
+    const rv=(r.rvolByWin&&r.rvolByWin[wk]!=null)?r.rvolByWin[wk]:null;
+    scored.push({ r, winRet:wv, winRel, accel, heat:heatOf(accel,r.doi,rv,wH), bid:r.bid||null });
+  }
+  return { scored, fk, fH, wk, wH, n:rows.length };
+}
+function actChip(s, kind){
+  const r=s.r, mom=(r.mom!=null&&isFinite(r.mom))?(r.mom>0?'+':'')+Math.round(r.mom):'·';
+  const ret=s.winRet==null?'·':(s.winRet>=0?'+':'')+s.winRet.toFixed(2)+'%';
+  let why, tip;
+  if(kind==='bid'){
+    why=`${Math.round(s.bid.r*100)}% of −${s.bid.d.toFixed(2)}% reclaimed · ${s.bid.m<90?'~'+s.bid.m+'m':'~'+(s.bid.m/60).toFixed(1)+'h'} since the low`;
+    tip=`dip-reclaim off the 5m archive (last 4h): the deepest peak→trough dip and how much of it price clawed back.\nrank = dip × reclaimed ÷ √minutes — deep dips bought back fast outrank shallow slow ones.\nMOM ${mom} — level next to the derivative.`;
+  } else {
+    const parts=[`accel ${s.accel>=0?'+':''}${s.accel.toFixed(2)}`];
+    if(r.doi!=null&&isFinite(r.doi)) parts.push(`ΔOI ${r.doi>=0?'+':''}${r.doi.toFixed(1)}%`);
+    const rv=(r.rvolByWin&&r.rvolByWin[s._wk]!=null)?r.rvolByWin[s._wk]:null;
+    if(rv!=null) parts.push(`RVOL ×${rv.toFixed(1)}`);
+    why=parts.join(' · ');
+    tip=`heat ${s.heat>=0?'+':''}${s.heat.toFixed(2)} = accel + 0.6·tanh(ΔOI/8)${s._wH<=24?' + 0.4·clamp(RVOL−1,−1,2)':' (RVOL dropped — clock-matched, ≤1d only)'}\naccel = fast leg − window pace, both vs the tape (${s._fk} vs ${s._wk}).\nMOM ${mom} — the LEVEL: high MOM + this ${kind==='cool'?'stall is the take-profit read':'acceleration is confirmation'}.`;
+  }
+  return `<div class="achip" data-coin="${esc(r.coin)}" title="${esc(tip)}">
+    <span class="tk">${esc(r.ticker)}</span><span class="${(s.winRet||0)>=0?'pos':'neg'} rt">${ret}</span>
+    <span class="mm" title="momentum LEVEL (the board column) — printed so level and rate-of-change read together">M ${mom}</span>
+    <span class="why">${why}</span></div>`;
+}
+function renderActionLists(){
+  const aw=el('actwrap'); if(!aw) return;
+  if(state.view!=='markets'||mktGrp()!=='names'){ aw.hidden=true; return; }
+  aw.hidden=false;
+  const hd=el('acthead'), bd=el('actbody'), meta=el('actmeta'), caret=el('actcaret');
+  if(caret) caret.textContent=state.actOpen?'▾':'▸';
+  if(hd) hd.setAttribute('aria-expanded', state.actOpen?'true':'false');
+  if(bd) bd.hidden=!state.actOpen;
+  const A=actionScores(), picks=pickAction(A.scored);
+  for(const arr of [picks.heat,picks.cool,picks.bid]) for(const s of arr){ s._wk=A.wk; s._fk=A.fk; s._wH=A.wH; }
+  if(meta) meta.textContent=`${state.tf} window · ${A.n} names${state.grpDrill?' · '+sectorShort(state.grpDrill.label):''}`;
+  if(!state.actOpen||!bd) return;
+  const empty=m=>`<div class="sec" style="padding:6px 2px">${m}</div>`;
+  const col=(title,cls,tip,arr,kind,note)=>`<div class="acol"><div class="ah ${cls}" title="${esc(tip)}">${title}</div>`+
+    (note?empty(note):(arr.length?arr.map(s=>actChip(s,kind)).join(''):empty('nothing qualifies right now — an honest empty list, not a hidden one')))+`</div>`;
+  const bidNote=state.scope==='crypto'
+    ? 'equities only for now — the reclaim read rides the 5m archive tail the sweep lane already pulls per xyz name; spending sixty more archive reads per pass on the perp universe has not been earned yet'
+    : (picks.bid.length?null:null);
+  bd.innerHTML =
+    col('HEATING — starting to move','hup','pace acceleration confirmed by flow: fast leg outrunning the window pace (both vs the tape), ΔOI and RVOL agreeing. What deserves attention it is not yet getting.',picks.heat,'heat',null)+
+    col('COOLING — had a trend, stalling','hcool','names still AHEAD of the tape over the window whose fast leg has stopped keeping pace. High MOM here is the take-profit read — the level looks fine for days after the pace dies.',picks.cool,'cool',null)+
+    col('STRONGEST BID — bought back fastest','hbid','the server\u2019s dip-reclaim claims: deepest recent dip, how much of it got reclaimed, how fast. Demand response, not momentum \u2014 a flat name absorbing every dip has the strongest bid on the board.',picks.bid,'bid',bidNote);
+  bd.querySelectorAll('.achip').forEach(c=>c.addEventListener('click',()=>openDetail(c.dataset.coin)));
+}
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts();
   if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, whichever tab is on top
@@ -1175,6 +1277,7 @@ function render(){
     _rowStruct=struct;
   }
   applyKsel();   // rebuild wipes the j/k highlight; a patch may have replaced the selected row — re-pin either way
+  renderActionLists();   // the rate-of-change lists under the table describe exactly what it just rendered
 }
 function updateMovers(){ const rows=activeRows().filter(r=>r.d1!=null&&isFinite(r.d1));
   if(rows.length<3){ el('movers').hidden=true; return; } el('movers').hidden=false;
@@ -2804,7 +2907,7 @@ let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
   colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
   sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, dvbBasket:state.dvbBasket||null,
-  sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt,
+  sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt, actOpen:state.actOpen?1:0,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
   updateLayoutBtn(); }, 250); }
 function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(_){ p=null; } if(!p) return;
@@ -2820,6 +2923,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(typeof p.refreshMs==='number'&&p.refreshMs>0){ state.refreshMs=p.refreshMs; state.pollMs=p.refreshMs; }
   if(p.sortKey&&COL_BY_KEY[p.sortKey]){ state.sortKey=p.sortKey; state.sortDir=p.sortDir==='asc'?'asc':'desc'; }
   if(p.grp==='sectors'||p.grp==='industries'||p.grp==='names') state.grp=p.grp;   // the drill filter is deliberately NOT persisted — a reload always lands on the full lens
+  state.actOpen=!!p.actOpen;   // action lists open/closed, restored as saved
   if(p.grpWt==='eq'||p.grpWt==='vol') state.grpWt=p.grpWt;
   if(typeof p.dvbBasket==='string'&&/^[A-Z][A-Z0-9]{1,11}$/.test(p.dvbBasket)) state.dvbBasket=p.dvbBasket;
   if(typeof p.filterText==='string') state.filter=p.filterText;
@@ -7225,7 +7329,7 @@ function renderSectors(){
   const list=computeSectors();
   const secNoun=sectGrpActive()?'industry group':'sector', secNounPl=sectGrpActive()?'industry groups':'sectors';
   const lg=el('sect-legend'); if(lg) lg.innerHTML = state.sect.mode==='leaders'
-    ? `<b>Leadership map</b> — where each ${secNoun} sits vs the S&amp;P over the last <b>${leadersDays()}d</b>${leadersFloored()?' <span class="sec">(leadership needs a multi-day window, so intraday selections show 7d — use the rotation board below for shorter windows)</span>':''}. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> ${secNounPl} are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume. The <b>dotted tail</b> behind each bubble is its recent path (oldest → now) — hover the tail dots for the values.`
+    ? `<b>Leadership map</b> — where each ${secNoun} sits vs the S&amp;P over the last <b>${leadersDays()}d</b>${leadersFloored()?' <span class="sec">(leadership needs a multi-day window, so intraday selections show 7d — use the rotation board below for shorter windows)</span>':''}. <b>Right</b> = beating the S&amp;P, <b>left</b> = behind it. <b>Up</b> = its lead is <i>growing</i>, <b>down</b> = <i>shrinking</i>. So <b class="pos">top-right</b> ${secNounPl} are winning and pulling further ahead; <b class="neg">bottom-left</b> are losing and falling further behind. Bubble size = 24h volume. Bubble <b>fill</b> = money over the selected window: <b class="pos">green</b> = OI building (money in), <b class="neg">red</b> = leaving; deeper fill = bigger ΔOI. The outline keeps the quadrant color. The <b>dotted tail</b> behind each bubble is its recent path (oldest → now) — hover the tail dots for the values.`
     : '<b>Flow map</b> — horizontal = capital direction (price + OI conviction) over the selected window, vertical = activity heat (volume + volatility). Top-right = accumulation, top-left = distribution. Bubble size = 24h volume.';
   if(state.sect.mode==='leaders'){
     const data=computeLeaders(list);
@@ -7285,7 +7389,7 @@ function computeLeaders(list, offset){
     const x=((iEnd/i0-1)-benchRet)*100;                    // % ahead of / behind the S&P
     let y=0;                                                // change in that lead (recent vs earlier)
     if(iMid!=null&&iMid>0){ const exEarly=((iMid/i0-1)-benchEarly)*100, exLate=((iEnd/iMid-1)-benchLate)*100; y=exLate-exEarly; }
-    out.push({name:g.name, x, y, vol:g.totVol});
+    out.push({name:g.name, x, y, vol:g.totVol, doi:g.doi, coins:g.members.map(r=>r.coin)});   // doi/coins power the money-fill and the Markets drill
   }
   return out.length?out:null;
 }
@@ -7372,7 +7476,8 @@ function renderLeaders(data){
   layoutMapLabels(nodes,{px0,px1,py1,py0});
   for(const n of nodes){ const sec=n.sec, q=leadQuad(sec.x,sec.y), col=q.c;
     const dir=sec.y>=0?'lead growing':'lead shrinking';
-    const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ${wl}, ${dir} — ${q.l}. Dotted tail = its path (oldest → now).`;
+    const oiTxt=(sec.doi!=null&&isFinite(sec.doi))?`ΔOI (${state.tf}) ${sec.doi>=0?'+':''}${sec.doi.toFixed(2)}% — money ${sec.doi>=0?'coming in':'leaving'}`:'ΔOI n/a';
+    const tip=`${sec.name}: ${sec.x>=0?'+':''}${sec.x.toFixed(1)}% vs S&P over ${wl}, ${dir} — ${q.l}. ${oiTxt}. Dotted tail = its path (oldest → now). Click = detail below; the detail has the → Markets drill.`;
     const lp=mapLabelSvg(n,10.5);
     s+=`<g class="lead" data-sect="${esc(sec.name)}" style="cursor:pointer"><title>${esc(tip)}</title>`;
     s+=lp.leader;
@@ -7385,7 +7490,13 @@ function renderLeaders(data){
         const dt=`${sec.name} · ${p.t.o} bench-day${p.t.o===1?'':'s'} ago: ${p.t.x>=0?'+':''}${p.t.x.toFixed(1)}% vs S&P, ${p.t.y>=0?'lead growing':'lead shrinking'}`;
         s+=`<circle cx="${p.px.toFixed(1)}" cy="${p.py.toFixed(1)}" r="${(2+i*0.7).toFixed(1)}" fill="${col}" fill-opacity="${(0.28+0.16*i).toFixed(2)}"><title>${esc(dt)}</title></circle>`; });
     }
-    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r.toFixed(1)}" fill="${col}" fill-opacity="0.3" stroke="${col}" stroke-width="1.5"/>`;
+    // Fill answers "is money coming or going" independently of position: green = OI building over
+    // the selected window, red = leaving, depth scales with |ΔOI| (saturating at 8%); neutral grey
+    // when the group ships no ΔOI. The quadrant keeps the OUTLINE — two dimensions, one bubble.
+    const fN=(sec.doi!=null&&isFinite(sec.doi))?sec.doi:null;
+    const fC=fN==null?'var(--muted)':(fN>=0?'var(--up)':'var(--down)');
+    const fO=fN==null?'0.10':(0.14+0.30*Math.min(1,Math.abs(fN)/8)).toFixed(2);
+    s+=`<circle cx="${n.cx.toFixed(1)}" cy="${n.cy.toFixed(1)}" r="${n.r.toFixed(1)}" fill="${fC}" fill-opacity="${fO}" stroke="${col}" stroke-width="1.5"/>`;
     s+=lp.txt+`</g>`; }
   s+='</svg>';
   return s + leadersRankHtml(data);
@@ -7486,7 +7597,8 @@ function renderSectorDetail(){
   const st=(k,v)=>`<span>${k}<b>${v}</b></span>`;
   p.hidden=false;
   p.innerHTML=`<div class="cp-head">${esc(sectorShort(g.name))} <span class="sec" style="font-weight:400">— ${g.gics?esc(g.gics)+' · ':''}${esc(g.assetClass)} · ${g.n} markets · ${state.tf} window</span>`+
-    `<button class="btn xtiny" id="sectDetClose" style="float:right">✕</button></div>`+
+    `<button class="btn xtiny" id="sectDetClose" style="float:right">✕</button>`+
+    `<button class="btn xtiny" id="sectDetDrill" style="float:right;margin-right:6px" title="open the Markets table filtered to exactly these members — same drill the group lens uses, one code path">→ Markets</button></div>`+
     `<div class="pairstats">${st('rotation ', rotCell(g.rotation))}${st('heat ', g.heat)}`+
       `${st('return ', g.ret==null?'—':`<span class="${g.ret>=0?'pos':'neg'}">${g.ret>=0?'+':''}${g.ret.toFixed(2)}%</span>`)}`+
       `${st('ΔOI ', g.doi==null?'—':`<span class="${g.doi>=0?'pos':'neg'}">${g.doi>=0?'+':''}${g.doi.toFixed(2)}%</span>`)}`+
@@ -7497,6 +7609,7 @@ function renderSectorDetail(){
     `<div class="cp-sub">Members <span class="sec" style="text-transform:none;letter-spacing:0">· sorted by ${state.tf} return · click to open the ticker</span></div>`+
     `<div style="overflow-x:auto"><table class="ptbl"><thead><tr><th>Ticker</th><th>${state.tf}</th><th>ΔOI</th><th>Mom</th><th>Vol</th><th>24h Vol</th></tr></thead><tbody>${ms.map(mrow).join('')}</tbody></table></div>`;
   el('sectDetClose').onclick=()=>{ state.sect.sel=null; p.hidden=true; renderSectorBoard(SECT._rows); };
+  { const db=el('sectDetDrill'); if(db) db.onclick=()=>drillMembers(g.name, g.members.map(r=>r.coin)); }
   p.querySelectorAll('tbody tr[data-coin]').forEach(tr=>tr.addEventListener('click',()=>openDetail(tr.dataset.coin)));
   renderSectorBoard(SECT._rows);
 }
@@ -7669,6 +7782,7 @@ function setWindow(tf){ state.tf=tf;
 document.querySelectorAll('#tfseg button').forEach(b=>{ if(b.dataset.tf===state.tf)b.classList.add('active');
   b.addEventListener('click',()=>setWindow(b.dataset.tf)); });
 document.querySelectorAll('#grpseg button').forEach(b=>b.addEventListener('click',()=>setGrp(b.dataset.grp)));
+{ const ah=el('acthead'); if(ah) ah.addEventListener('click',()=>{ state.actOpen=!state.actOpen; renderActionLists(); savePrefs(); }); }
 document.querySelectorAll('#grpwtseg button').forEach(b=>b.addEventListener('click',()=>{
   state.grpWt=b.dataset.gwt==='eq'?'eq':'vol'; syncGrpSeg(); render(); savePrefs(); }));
 syncGrpSeg();   // after loadPrefs: reflect the restored lens (buttons, weighting seg, parked column/layout menus)
@@ -7824,6 +7938,8 @@ markets:`
 <p>One row per market, one column per lens. The <b>window selector</b> (1h–30d) re-anchors every windowed column at once: <b>vs S&amp;P</b>, <b>ΔOI</b>, <b>Squeeze</b>, <b>Carry</b>, and Avg Range all answer "over this window". Click any header to sort; drag in the column menu (⚙) to reorder or hide. Cell shading scales with the size of the move — a wall of deep red 7d cells IS the market breadth read. <b>★</b> pins a name to the top. Everything deep-links: the URL carries your view, so a layout can be shared. <b>Layouts</b> saves the whole arrangement as a named view — columns + order, sort, window, vol/OI filters, ★-only — and switches between them in one click; there is no one-size-fits-all table. The active name shows on the button, with a • when the live view has drifted from the saved one (open the menu to re-save). Stored per browser, so the phone can hold different layouts than the desktop. The ticker search box and the scope toggle are deliberately not part of a layout.</p>
 <div class="hlp-h">Group lens — sectors &amp; industries</div>
 <p>The <b>group</b> toggle re-renders the same board with one row per <b>sector</b> (GICS + asset classes) or <b>industry</b> (the finer curated split — Semis vs Software vs Memory, Banks vs Capital Markets), every window column at once: D open, 1h→30d, M/Y open, breadth, ΔOI, RVOL, volume, OI, cohesion. Each cell is the <b>weighted average of exactly the rows the names view shows</b> — vol-weighted by default (equal on the toggle), computed only over members that have the value, with the hover disclosing coverage; a missing window is excluded and the weights renormalize, never zero-filled. <b>Best · Worst</b> (pinned to 24h) is the aggregate-liar detector: whether the group number is everyone, or one name dragging the rest — read it against <b>Cohesion</b> (90d avg internal correlation: high = the label trades as one block, low = a stock-picker's bucket). <b>Click a group row</b> to drill in: the table flips back to names filtered to its members, with a chip to clear. Vol/OI filters and ★-only apply to members <i>before</i> aggregation; industries are equities-only (crypto's curated sectors are already its fine grouping); industry rows marked <i>= sector</i> have no curated split yet. CSV exports whichever lens is on screen.</p>
+<div class="hlp-h">Action strip — heating · cooling · strongest bid</div>
+<p>The collapsible strip under the table is the <b>rate-of-change</b> read next to the table's levels, and it always describes <b>exactly the rows the table shows</b> — scope, the window selector, vol/OI filters and any active drill all apply. Per name, <b>accel</b> = the window's natural fast leg (1h→15m, 4h→1h, 1d→4h, 7d→1d, 30d→7d) minus the window's own pace, both measured relative to the tape; <b>heat</b> = accel + 0.6·tanh(ΔOI/8) + 0.4·clamp(RVOL−1) — flow can only <i>confirm</i> an acceleration, never replace it, and RVOL (clock-matched, ≤1d only) is dropped at 7d/30d, not faked. <b>HEATING</b> = positive accel with flow agreeing: what is starting. <b>COOLING</b> = names still <i>ahead of the tape</i> whose pace has died — with a high MOM this is the take-profit read, and it is a different animal from "never went anywhere", which makes no list at all. <b>STRONGEST BID</b> ranks the server's dip-reclaim claims off the 5m archive (equities, last 4h): the deepest peak→trough dip, the fraction reclaimed, minutes since the low, ranked dip × reclaimed ÷ √minutes — demand response, not momentum; a flat name absorbing every dip has the strongest bid on the board. <b>M</b> on every chip is the momentum <i>level</i>, printed so the pair reads at a glance: high/high = ride, high/stalling = exit, low/accelerating = new rotation. Empty lists are honest, not hidden. Click a chip to open the name's drawer.</p>
 <div class="hlp-h">Funding — the crowd's payment</div>
 <p>Annualized APR: <b class="pos">green = longs pay</b> to hold (crowded long), <b class="neg">red = shorts pay</b> (crowded short — squeeze fuel). The ▴/▾ percentile flag fires when today's funding sits at a monthly extreme of that market's <i>own</i> 31d distribution — the crowd is paying near its max, the classic mean-reversion zone. <b>Carry</b> divides window funding by realized vol: how much you're paid per unit of risk just for taking the unpopular side.</p>
 <div class="hlp-h">ΔOI and the regime tag</div>

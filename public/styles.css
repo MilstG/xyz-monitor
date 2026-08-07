@@ -1326,3 +1326,22 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .drillchip .x{background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;padding:0 4px;line-height:1}
 .drillchip .x:hover{color:var(--text)}
 .drillchip[hidden]{display:none}
+
+/* ===== action lists (build 2026.08.07-02) ===== */
+/* Collapsible rate-of-change strip under the markets table. Chips are click-through to the drawer. */
+.actwrap{margin:10px 0 4px;border:1px solid var(--border);border-radius:8px;background:var(--panel)}
+.acthead{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:none;border:none;color:var(--text);font-family:var(--mono);font-size:12.5px;padding:8px 12px;cursor:pointer}
+.acthead .caret{color:var(--accent);width:12px}
+.acthead .sec{font-size:11px}
+.actbody{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;padding:2px 12px 12px}
+.actbody[hidden]{display:none}
+.acol .ah{font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;margin:4px 0 6px;cursor:default}
+.acol .ah.hup{color:var(--up)}
+.acol .ah.hcool{color:var(--accent)}
+.acol .ah.hbid{color:var(--blue)}
+.achip{display:flex;gap:8px;align-items:baseline;border:1px solid var(--border);border-radius:6px;background:var(--panel2);padding:5px 8px;margin:3px 0;cursor:pointer}
+.achip:hover{border-color:var(--accent)}
+.achip .tk{color:var(--text);font-weight:600;min-width:52px}
+.achip .rt{min-width:56px}
+.achip .mm{color:var(--muted);font-size:10.5px;min-width:38px}
+.achip .why{color:var(--muted);font-size:10.5px}
