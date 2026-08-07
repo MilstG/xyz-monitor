@@ -1339,16 +1339,19 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .acol .ah.hup{color:var(--up)}
 .acol .ah.hcool{color:var(--accent)}
 .acol .ah.hbid{color:var(--blue)}
-.achip{display:flex;gap:8px;align-items:baseline;border:1px solid var(--border);border-radius:6px;background:var(--panel2);padding:5px 8px;margin:3px 0;cursor:pointer}
+.achip{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;border:1px solid var(--border);border-radius:6px;background:var(--panel2);padding:5px 8px;margin:3px 0;cursor:pointer}
 .achip:hover{border-color:var(--accent)}
-.achip .tk{color:var(--text);font-weight:600;min-width:52px}
-.achip .rt{min-width:56px}
-.achip .mm{color:var(--muted);font-size:10.5px;min-width:38px}
-.achip .why{color:var(--muted);font-size:10.5px}
+/* fixed cells never shrink below their content — min-width alone let flex squeeze "+29.60%" into
+   56px and the overflow spilled into the M column with no gap. flex:none sizes to content; the
+   why text is the only flexible cell and wraps inside its own box. */
+.achip .tk{color:var(--text);font-weight:600;min-width:52px;flex:none;white-space:nowrap}
+.achip .rt{min-width:56px;flex:none;white-space:nowrap}
+.achip .mm{color:var(--muted);font-size:10.5px;min-width:38px;flex:none;white-space:nowrap}
+.achip .why{color:var(--muted);font-size:10.5px;flex:1;min-width:140px}
 
 /* story tags (-05): one word naming which story a chip is — the level color and the list
    membership deliberately disagree (turn attempts are red, distribution is green); the tag says so. */
-.achip .tag{font-size:9.5px;letter-spacing:.4px;text-transform:uppercase;padding:1px 6px;border-radius:8px;border:1px solid var(--border);color:var(--muted);white-space:nowrap}
+.achip .tag{font-size:9.5px;letter-spacing:.4px;text-transform:uppercase;padding:1px 6px;border-radius:8px;border:1px solid var(--border);color:var(--muted);white-space:nowrap;flex:none}
 .achip .tag.t-turn{color:var(--blue);border-color:var(--blue)}
 .achip .tag.t-ext{color:var(--up);border-color:var(--up)}
 .achip .tag.t-dist{color:var(--down);border-color:var(--down)}
