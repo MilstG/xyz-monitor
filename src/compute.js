@@ -99,6 +99,31 @@ function featuresFromHourly(c, now, HOUR, DAY) {
   return { ref, feat };
 }
 
+// Anchored intraday bucket opens (H / 4h / 12h, UTC-aligned) from the PACKED hourly spine — the
+// D-open pattern extended down the ladder (build 2026.08.10-01). The open of the current bucket is
+// the `o` of the hourly candle sitting exactly ON the bucket boundary; for the 1h rung that is the
+// forming candle's own open, which is fixed at birth and therefore safe to read mid-bar. If that
+// candle hasn't reached the spine yet (refresh lag in the seconds after a boundary), the PRIOR
+// hour's close is the same level by perp continuity — the exact convention D open already states
+// ("today's open IS the prior day's close"). Neither present -> null: an honest dash, never the
+// previous bucket's open wearing this bucket's label. Pure; reverse-scans only the spine tail.
+function bucketOpens(hs, now, HOUR) {
+  const out = { h: null, h4: null, h12: null };
+  if (!Array.isArray(hs) || !hs.length || !Number.isFinite(now)) return out;
+  for (const [key, W] of [["h", HOUR], ["h4", 4 * HOUR], ["h12", 12 * HOUR]]) {
+    const start = Math.floor(now / W) * W;
+    let open = null, prevClose = null;
+    for (let i = hs.length - 1; i >= 0; i--) {
+      const t = +hs[i][0];
+      if (t < start - HOUR) break;                    // spine is time-ascending — nothing older can match
+      if (t === start) { const o = +hs[i][1]; if (Number.isFinite(o) && o > 0) open = o; }
+      else if (t === start - HOUR) { const c = +hs[i][4]; if (Number.isFinite(c) && c > 0) prevClose = c; }
+    }
+    out[key] = open != null ? open : prevClose;
+  }
+  return out;
+}
+
 // ---- short-horizon mark-price ring (5m / 15m screener columns, build 2026.07.29-04) ----------
 // The board's window deltas read hourly-spine references (featuresFromHourly.ref); a 5- or
 // 15-minute change has no honest source there. The 5m ARCHIVE won't do either: it holds only
@@ -3701,7 +3726,7 @@ function duelStats(rows, minN) {
   return { n, meanA, meanB, winB, t, verdict };
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
+module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, bucketOpens, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,

@@ -14,7 +14,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
-const { featuresFromHourly, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
+const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
@@ -1156,6 +1156,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           }
         }
       } catch (_) {}
+      // Anchored intraday opens (H / 4h / 12h UTC buckets) — computed HERE at snapshot time
+      // against the live clock, never at hourly-refresh time: an anchor derived from a stale
+      // `now` is the previous bucket wearing this one's label. Cheap: a reverse scan of the
+      // spine's last ~13 rows per snapshot build.
+      const bopen = bucketOpens(r.hourlyRaw, nowMs, HOUR);
       return {
         fundPct, red, rvol, swr, swrT, swrV, swrS,
         casc: casc || undefined, cascT: casc ? casc.t : undefined,
@@ -1171,6 +1176,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         // wider than PX_RING_TOL_MS at the lookback point: the client dashes, never guesses.
         p5m: sig(pxRingRef(r.pxRing, nowMs, 5 * 60 * 1000, PX_RING_TOL_MS), 9) ?? undefined,
         p15m: sig(pxRingRef(r.pxRing, nowMs, 15 * 60 * 1000, PX_RING_TOL_MS), 9) ?? undefined,
+        // Anchored intraday opens — shipped as LEVELS like ref.p1h/p5m so the client derives the
+        // % the same way it does every other window (one convention, one code path with D open).
+        // Absent (undefined) when the spine hasn't reached the bucket boundary: the client
+        // dashes, never measures against a stale anchor.
+        hopenPx: sig(bopen.h, 9) ?? undefined,
+        h4openPx: sig(bopen.h4, 9) ?? undefined,
+        h12openPx: sig(bopen.h12, 9) ?? undefined,
         // dip-reclaim claim off the 5m archive tail (xyz only — the exact tail the sweep detector
         // reads). {d,r,m} = dip depth %, fraction reclaimed, minutes since the trough. Absent =
         // no fresh claim (dip under the floor, archive off, or crypto): the client dashes.
