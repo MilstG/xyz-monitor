@@ -5490,8 +5490,9 @@ test("build -07 manifest: pair math welded across compute.js and app.js; duel pl
     assert.ok(ord.includes("mom") && ord.includes("momp"), "both momentum columns exist in DEFAULT_ORDER");
     assert.ok(!hid.has("momp"), "MOM+ visible by default");
     assert.ok(hid.has("mom"), "plain MOM hidden by default (the -10 default set)"); }
-  // -04: the 5m/15m pair added two adjacency calls per merge site (m5 beside px, m15 beside m5)
-  assert.equal(app.split("colAdjacent(").length - 1, 7, "adjacency migration: one definition + (momp, m5, m15) on the prefs path + the same three on the layout path");
+  // -04: the 5m/15m pair added two adjacency calls per merge site (m5 beside px, m15 beside m5);
+  // 2026.08.10-01: the anchored-open trio (hopen/h4open/h12open beside dopen) added three more per site
+  assert.equal(app.split("colAdjacent(").length - 1, 13, "adjacency migration: one definition + (momp, m5, m15, hopen, h4open, h12open) on the prefs path + the same six on the layout path");
   assert.ok(app.includes("renderDuelSection()") && app.includes("loadDuelData()"), "duel panel wired into the backtest render");
   // -08: the hot dot rides BOTH momentum cells — it flags the name, not the incumbent score,
   // and must survive when only one of the two columns is visible.
@@ -12004,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.07-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.10-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -15492,8 +15493,8 @@ test("5m/15m columns: client wiring — hidden by default, adjacent to Price, ho
   // snapshot fold: absence on the wire CLEARS the refs (the ind-lockstep lesson — no stale reference under a fresh label)
   assert.ok(app.includes("r.p5m=(m.p5m!=null)?m.p5m:null; r.p15m=(m.p15m!=null)?m.p15m:null;"), "absent wire refs clear to null, never persist stale");
   // recomputeChanges derives m5/m15 from the ring refs BEFORE the hourly-spine ref guard
-  assert.ok(/function recomputeChanges\(r\)\{ const cur=r\.px; if\(cur==null\)return;[\s\S]{0,400}r\.m5=r\.p5m>0[\s\S]{0,200}const ref=r\.ref; if\(!ref\)return;/.test(app),
-    "m5/m15 compute ahead of the ref guard — the ring warms before the spine and must not wait on it");
+  assert.ok(/function recomputeChanges\(r\)\{ const cur=r\.px; if\(cur==null\)return;[\s\S]{0,400}r\.m5=r\.p5m>0[\s\S]{0,900}const ref=r\.ref; if\(!ref\)return;/.test(app),
+    "m5/m15 compute ahead of the ref guard — the ring warms before the spine and must not wait on it (2026.08.10-01: the anchored-open trio derives in between, also ahead of the guard — wire refs, no spine dependency)");
   // mobile preset excludes them (curated set unchanged) — they stay opt-in there too
   assert.ok(!app.match(/const MOBILE_COLS=\[[^\]]*\]/)[0].includes("'m5'"), "mobile preset stays curated — m5 not in it");
 });
@@ -16007,7 +16008,7 @@ test("D open column: manifest wiring — placed after 24h, visible by default, l
   // new column exists, right after d1 in COLS and in the default order, and NOT hidden
   assert.ok(/key:'dopen', label:'D open'/.test(app), "D open column defined");
   const ord = app.match(/const DEFAULT_ORDER=\[[^\]]*\];/)[0];
-  assert.ok(ord.includes("'d1','dopen','d7'"), "D open sits between 24h and 7d in the default order");
+  assert.ok(ord.includes("'d1','dopen','hopen','h4open','h12open','d7'"), "D open leads the anchored block (2026.08.10-01: + H/4h/12h open) between 24h and 7d in the default order");
   const hid = app.match(/const DEFAULT_HIDDEN=\[[^\]]*\];/)[0];
   assert.ok(!hid.includes("'dopen'"), "D open is visible by default — it is the point of the column");
   assert.ok(/const LAYOUT_V=4;/.test(app), "LAYOUT_V bumped so saved layouts pick the column up");
@@ -16642,4 +16643,113 @@ test("chip stories manifest: tag rendered on name and group chips, story leads e
     ".achip .rt{min-width:56px;flex:none;white-space:nowrap}",   // -06: fixed cells never shrink below content — the "+29.60%M +67" glue
     ".achip .why{color:var(--muted);font-size:10.5px;flex:1;min-width:140px}"])
     assert.ok(cs.includes(pin), "styles pin missing: " + pin);
+});
+
+// ===== anchored intraday opens (H / 4h / 12h), build 2026.08.10-01 =========================
+// The D-open pattern extended down the ladder: % since the current UTC bucket opened, shipped as
+// reference LEVELS in the snapshot, derived client-side — the rolling h1/h4/d1 columns untouched.
+
+test("bucketOpens: boundary candle's own open per rung, frozen clock, UTC bucket alignment", () => {
+  const { bucketOpens } = require("../src/compute");
+  const H = 3600 * 1000;
+  const N = 1000003;                       // hour index: N%4=3, N%12=7 — three DISTINCT bucket starts
+  const now = N * H + 37 * 60 * 1000;      // mid-hour, frozen
+  const o = (i) => i - 999980, c = (i) => o(i) + 0.5;
+  const spine = [];
+  for (let i = N - 20; i <= N; i++) spine.push([i * H, o(i), o(i) + 1, o(i) - 1, c(i), 10]);
+  const b = bucketOpens(spine, now, H);
+  assert.equal(b.h, o(N), "1h rung reads the FORMING candle's own open — fixed at birth, safe mid-bar");
+  assert.equal(b.h4, o(N - 3), "4h rung anchors on the UTC 00/04/08... boundary candle (N%4=3 back)");
+  assert.equal(b.h12, o(N - 7), "12h rung anchors on the UTC 00/12 boundary candle (N%12=7 back)");
+});
+
+test("bucketOpens: prior-close fallback by perp continuity; a missing pair is an honest null", () => {
+  const { bucketOpens } = require("../src/compute");
+  const H = 3600 * 1000, N = 1000003, now = N * H + 37 * 60 * 1000;
+  const o = (i) => i - 999980, c = (i) => o(i) + 0.5;
+  const mk = (skip) => { const s = []; for (let i = N - 20; i <= N; i++) if (!skip.has(i)) s.push([i * H, o(i), o(i) + 1, o(i) - 1, c(i), 10]); return s; };
+  // refresh lag: the forming candle hasn't reached the spine — the prior hour's CLOSE is the same
+  // level on a continuously-traded perp (D open's own stated convention), so the rung stays live
+  const lag = bucketOpens(mk(new Set([N])), now, H);
+  assert.equal(lag.h, c(N - 1), "1h falls back to the prior candle's close, never the previous bucket's open");
+  assert.equal(lag.h4, o(N - 3), "other rungs unaffected by the 1h boundary gap");
+  // both the boundary candle AND its predecessor missing -> null: dash beats a stale anchor
+  const hole = bucketOpens(mk(new Set([N - 7, N - 8])), now, H);
+  assert.equal(hole.h12, null, "a two-candle hole at the 12h boundary is an honest null");
+  assert.equal(hole.h, o(N), "the 1h rung still reads its own boundary candle");
+  // a non-finite open on the boundary candle degrades to the fallback, not to garbage
+  const bad = mk(new Set([N])); bad.push([N * H, NaN, 1, 1, NaN, 10]);
+  assert.equal(bucketOpens(bad, now, H).h, c(N - 1), "non-finite boundary open -> prior close, not NaN");
+  // degenerate inputs
+  assert.deepEqual(bucketOpens([], now, H), { h: null, h4: null, h12: null }, "empty spine -> all null");
+  assert.deepEqual(bucketOpens(null, now, H), { h: null, h4: null, h12: null }, "no spine -> all null");
+});
+
+test("bucketOpens: on a shared boundary the forming candle serves every rung", () => {
+  const { bucketOpens } = require("../src/compute");
+  const H = 3600 * 1000, M = 999996;       // M%12=0 — a 00/12 UTC boundary is also a 4h and 1h boundary
+  const now = M * H + 60 * 1000;           // one minute into all three buckets at once
+  const b = bucketOpens([[M * H, 42.5, 43, 42, 42.75, 10]], now, H);
+  assert.equal(b.h, 42.5); assert.equal(b.h4, 42.5); assert.equal(b.h12, 42.5);
+});
+
+test("snapshot wiring: mapMarket ships hopenPx/h4openPx/h12openPx from bucketOpens at SNAPSHOT time", () => {
+  // End-to-end through the real poller (the -84 lesson: a unit test plus a string pin does not
+  // prove the field reaches the wire). The clock cannot be injected into buildSnapshot, so the
+  // expectation is bracketed: the shipped level must match bucketOpens evaluated at a time just
+  // before OR just after the build — the same pure function the unit tests above pin down.
+  const { createPoller } = require("../src/poller");
+  const { bucketOpens } = require("../src/compute");
+  const H = 3600 * 1000;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {} };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  const t0 = Date.now(), H0 = Math.floor(t0 / H);
+  const o = (i) => (i % 100000) + 0.25, cl = (i) => o(i) + 0.5;   // hour-injective levels, exact in 9 sig digits
+  const objSpine = [], packed = [];
+  for (let i = H0 - 15; i <= H0; i++) {
+    objSpine.push({ t: i * H, o: o(i), h: o(i) + 1, l: o(i) - 1, c: cl(i), v: 10 });
+    packed.push([i * H, o(i), o(i) + 1, o(i) - 1, cl(i), 10]);
+  }
+  p.seedRowNow("xyz:TOPEN", { px: 100, ticker: "TOPEN", uni: "xyz", vol: 1e6, hourlyRaw: objSpine });
+  p.buildSnapshotNow();
+  const t1 = Date.now();
+  const row = (p.getSnapshot().markets || []).find((m) => m.coin === "xyz:TOPEN");
+  assert.ok(row, "seeded row reaches the snapshot");
+  const a = bucketOpens(packed, t0, H), b = bucketOpens(packed, t1, H);
+  for (const [field, key] of [["hopenPx", "h"], ["h4openPx", "h4"], ["h12openPx", "h12"]]) {
+    assert.ok(row[field] != null && isFinite(row[field]), field + " ships as a finite reference LEVEL");
+    assert.ok(row[field] === a[key] || row[field] === b[key],
+      field + " must equal bucketOpens at the snapshot's own clock (bracketed against a boundary race)");
+  }
+  // a spineless row dashes rather than guesses: absence on the wire, not a zero
+  p.seedRowNow("xyz:NOSPINE", { px: 100, ticker: "NOSPINE", uni: "xyz", vol: 1e6 });
+  p.buildSnapshotNow();
+  const bare = (p.getSnapshot().markets || []).find((m) => m.coin === "xyz:NOSPINE");
+  assert.ok(bare && bare.hopenPx === undefined && bare.h4openPx === undefined && bare.h12openPx === undefined,
+    "no spine -> the fields are absent (client dashes), never null-as-zero");
+});
+
+test("anchored-open wiring pins: poller snapshot path + client column family, defaults, migration", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  // poller: computed at snapshot time from the live clock, shipped sig-quantized like p5m/p15m
+  assert.ok(pol.includes("const bopen = bucketOpens(r.hourlyRaw, nowMs, HOUR)"), "mapMarket must anchor on the snapshot's own nowMs");
+  assert.ok(pol.includes("hopenPx: sig(bopen.h, 9) ?? undefined"), "hopenPx ships quantized, absent-when-null");
+  assert.ok(pol.includes("h4openPx: sig(bopen.h4, 9) ?? undefined") && pol.includes("h12openPx: sig(bopen.h12, 9) ?? undefined"), "4h/12h levels ship the same way");
+  // client: copy (absence-means-clear), one-code-path derivation, the shared renderer, three column defs
+  assert.ok(app.includes("r.hopenPx=(m.hopenPx!=null)?m.hopenPx:null;"), "snapshot copy must clear on absence — a kept stale anchor lies");
+  assert.ok(app.includes("r.hopen=r.hopenPx>0?(cur-r.hopenPx)/r.hopenPx*100:null;"), "hopen % derives from the shipped level in recomputeChanges");
+  assert.ok(app.includes("r.h4open=r.h4openPx>0?") && app.includes("r.h12open=r.h12openPx>0?"), "4h/12h derive the same way");
+  assert.ok(app.includes("function anchOpenCell(r,key,pxKey,what,cap)"), "shared anchored-open renderer missing");
+  for (const k of ["hopen", "h4open", "h12open"]) {
+    assert.ok(app.includes("{key:'" + k + "',"), "COLS entry for " + k + " missing");
+    assert.ok(new RegExp("DEFAULT_HIDDEN=\\[[^\\]]*'" + k + "'").test(app), k + " must ship hidden by default");
+    assert.ok(new RegExp("DEFAULT_ORDER=\\[[^\\]]*'dopen','hopen','h4open','h12open'").test(app), "the trio sits next to D open in the default order");
+  }
+  // saved-layout migration: the trio slots in next to D open at BOTH merge sites, never appended far right
+  assert.equal((app.match(/colAdjacent\((v|ord),'hopen','dopen'\)/g) || []).length, 2, "hopen adjacency migration must run in loadPrefs AND layout apply");
+  assert.equal((app.match(/colAdjacent\((v|ord),'h4open','hopen'\)/g) || []).length, 2, "h4open adjacency migration at both sites");
+  assert.equal((app.match(/colAdjacent\((v|ord),'h12open','h4open'\)/g) || []).length, 2, "h12open adjacency migration at both sites");
 });
