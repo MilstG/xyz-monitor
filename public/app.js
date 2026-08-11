@@ -34,6 +34,9 @@ const COLS=[
   {key:'h4', label:'4h', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.h4,4)}>${pctInner(r.h4)}</td>`},
   {key:'d1', label:'24h', type:'num', tip:'Rolling 24-hour change: live mark vs Hyperliquid\u2019s prevDayPx (the price ~24h ago), so the window slides continuously \u2014 at 3pm it measures against yesterday 3pm, not the day boundary. For "since today started" see D open.', td:r=>`<td${shade(r.d1,5)}>${pctInner(r.d1)}</td>`},
   {key:'dopen', label:'D open', type:'num', tip:'% change since the open of the current UTC day. Perps trade continuously, so today\u2019s open IS the prior day\u2019s close from the daily-close series \u2014 same convention as M open / Y open. Contrast with 24h, which is a rolling window; this one anchors on the day boundary. Hover for the exact open price. Dash while daily history backfills \u2014 honest null, never a guess.', td:r=>dopenCell(r)},
+  {key:'hopen', label:'H open', type:'num', tip:'% change since the current UTC hour opened \u2014 what the forming 1h candle shows on a chart, vs the rolling 1h column. Anchors at :00 and resets there by construction, so it reads small early in the hour: that\u2019s the anchor, not a data gap. Hover for the exact open. Dash while the hourly spine catches up to the boundary \u2014 honest null, never a stale anchor. Hidden by default \u2014 enable it here in the column menu.', td:r=>anchOpenCell(r,'hopen','hopenPx','current UTC hour',1.5)},
+  {key:'h4open', label:'4h open', type:'num', tip:'% change since the current UTC 4h bucket opened (00/04/08/12/16/20) \u2014 the forming 4h candle\u2019s read on a chart, vs the rolling 4h column. Resets at each bucket boundary by construction. Hover for the exact open. Dash while the spine catches up \u2014 honest null, never a stale anchor. Hidden by default \u2014 enable it here in the column menu.', td:r=>anchOpenCell(r,'h4open','h4openPx','current UTC 4h bucket',2.5)},
+  {key:'h12open', label:'12h open', type:'num', tip:'% change since the current UTC 12h bucket opened (00/12) \u2014 the forming 12h candle\u2019s read, vs the rolling window columns. Resets at each boundary by construction. Hover for the exact open. Dash while the spine catches up \u2014 honest null, never a stale anchor. Hidden by default \u2014 enable it here in the column menu.', td:r=>anchOpenCell(r,'h12open','h12openPx','current UTC 12h bucket',3.5)},
   {key:'d7', label:'7d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d7,12)}>${pctInner(r.d7)}</td>`},
   {key:'d30', label:'30d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d30,25)}>${pctInner(r.d30)}</td>`},
   {key:'gap', label:'Gap', type:'num', tip:'Last close\u2192open gap \u2014 how much the perp moved from the most recent cash-session close to the next open (overnight 16:00\u219209:30 ET, or Fri\u2192Mon over a weekend). One move, always the latest, regardless of the timeframe selector. Hover for the cumulative off-hours drift over ~30d. Measured on US session hours, so it reads cleanest for US-linked names.',
@@ -118,8 +121,8 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','m5','m15','h1','h4','d1','dopen','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
-const DEFAULT_HIDDEN=['m5','m15','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_HIDDEN=['m5','m15','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const LAYOUT_V=4; // bump to force a one-time reset of saved layouts to the new default (v4: 1d relabeled 24h, D open column added between it and 7d)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
@@ -272,6 +275,11 @@ function recomputeChanges(r){ const cur=r.px; if(cur==null)return;
   // 5m/15m read the server's ring references (p5m/p15m on the row), not the hourly-spine ref —
   // they exist before the spine warms and null out independently (deploy warm-up / feed gap).
   r.m5=r.p5m>0?(cur-r.p5m)/r.p5m*100:null; r.m15=r.p15m>0?(cur-r.p15m)/r.p15m*100:null;
+  // Anchored intraday opens: % derived from the shipped LEVEL against the live mark — the exact
+  // math dopenCell/openCell restate, one convention for every anchored column.
+  r.hopen=r.hopenPx>0?(cur-r.hopenPx)/r.hopenPx*100:null;
+  r.h4open=r.h4openPx>0?(cur-r.h4openPx)/r.h4openPx*100:null;
+  r.h12open=r.h12openPx>0?(cur-r.h12openPx)/r.h12openPx*100:null;
   const ref=r.ref; if(!ref)return;
   r.h1=ref.p1h?(cur-ref.p1h)/ref.p1h*100:null; r.h4=ref.p4h?(cur-ref.p4h)/ref.p4h*100:null;
   r.d7=ref.p7d?(cur-ref.p7d)/ref.p7d*100:null;  r.d30=ref.p30d?(cur-ref.p30d)/ref.p30d*100:null; }
@@ -416,6 +424,10 @@ function applySnapshot(s){
     // warm-up or a feed gap at the lookback point) — clear rather than keep, or a long-lived page
     // would compute a "5m" change against a reference minutes older than its label.
     r.p5m=(m.p5m!=null)?m.p5m:null; r.p15m=(m.p15m!=null)?m.p15m:null;
+    // Anchored intraday open LEVELS (H/4h/12h UTC buckets). Absence on the wire MEANS the spine
+    // hasn't reached the bucket boundary — clear rather than keep, or the column would measure
+    // against the previous bucket's anchor under this bucket's label.
+    r.hopenPx=(m.hopenPx!=null)?m.hopenPx:null; r.h4openPx=(m.h4openPx!=null)?m.h4openPx:null; r.h12openPx=(m.h12openPx!=null)?m.h12openPx:null;
     r.bid=(m.bid!==undefined&&m.bid!==null)?m.bid:null;   // dip-reclaim claim {d,r,m} (xyz, 5m archive tail) — absence MEANS no fresh claim: clear, never carry a stale bid
     r.fundPct=(m.fundPct!=null)?m.fundPct:r.fundPct;
     if(m.red!==undefined) r.red=m.red;             // {dcap,hit,n} or null — fixed 31d/4h red-tape resilience, server-computed
@@ -904,6 +916,11 @@ function openCell(r,key,lbl){ const v=r[key];
 function dopenCell(r){ const v=r.dopen;
   if(v==null||!isFinite(v)) return '<td><span class="na" title="needs daily history \u2014 fills in as the daily backfill loads">\u2014</span></td>';
   return `<td${shade(v,3)} title="since today\u2019s UTC open ${fmtPrice(r.dopenPx)} \u00b7 the prior day\u2019s close on a continuously-traded perp">${pctInner(v)}</td>`; }
+// One renderer for the H/4h/12h anchored-open family — dopenCell's contract (the % in the cell,
+// the anchor level in the hover, shade cap scaled to the bucket width) parameterized per rung.
+function anchOpenCell(r,key,pxKey,what,cap){ const v=r[key];
+  if(v==null||!isFinite(v)) return '<td><span class="na" title="hourly spine hasn\u2019t reached this bucket\u2019s boundary yet (deploy warm-up or a fetch gap) \u2014 dash, never a stale anchor">\u2014</span></td>';
+  return `<td${shade(v,cap)} title="since the ${what} opened at ${fmtPrice(r[pxKey])} \u00b7 anchored on the UTC bucket boundary \u2014 contrast with the rolling window columns">${pctInner(v)}</td>`; }
 function premCell(r){ if(r.prem==null||!isFinite(r.prem)) return '<td><span class="na" title="needs both mark and oracle prices">·</span></td>';
   const v=r.prem, c=v>0.5?'pos':(v<-0.5?'neg':'sec');
   const t=`mark ${fmtPrice(r.px)} vs oracle ${fmtPrice(r.oracle)} \u2014 perp ${v>=0?'rich (premium)':'cheap (discount)'} ${Math.abs(v).toFixed(1)}bp`+
@@ -3034,6 +3051,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
       for(const c of COLS) if(!v.includes(c.key)){ v.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) state.colHidden.add(c.key); }
       colAdjacent(v,'momp','mom');   // the candidate migrates in NEXT TO the incumbent, not appended at the far right
       colAdjacent(v,'m5','px'); colAdjacent(v,'m15','m5');   // the intraday pair migrates in next to Price, ahead of 1h
+      colAdjacent(v,'hopen','dopen'); colAdjacent(v,'h4open','hopen'); colAdjacent(v,'h12open','h4open');   // the anchored-open trio migrates in next to D open
       state.colOrder=v; }
     if(Array.isArray(p.colHidden)) state.colHidden=new Set(p.colHidden.filter(k=>COL_BY_KEY[k]));
   }
@@ -3082,6 +3100,7 @@ function applyLayout(name){ const s=name!=null?state.layouts.list[name]:null;
   for(const c of COLS) if(!ord.includes(c.key)){ ord.push(c.key); if(DEFAULT_HIDDEN.includes(c.key)) hid.add(c.key); }
   colAdjacent(ord,'momp','mom');   // same adjacency rule for saved layouts
   colAdjacent(ord,'m5','px'); colAdjacent(ord,'m15','m5');
+  colAdjacent(ord,'hopen','dopen'); colAdjacent(ord,'h4open','hopen'); colAdjacent(ord,'h12open','h4open');
   state.colOrder=ord; state.colHidden=hid;
   if(src.sortKey&&COL_BY_KEY[src.sortKey]){ state.sortKey=src.sortKey; state.sortDir=src.sortDir==='asc'?'asc':'desc'; }
   state.watchOnly=!!src.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly);
