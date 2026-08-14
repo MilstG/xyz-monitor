@@ -15,7 +15,9 @@ const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, windo
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
-    td:r=>`<td><span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}</td>`},
+    td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${cdsHtml(r)}</td>`},
+  {key:'sess', label:'Sess', type:'str', def:'asc', tip:'Home market of the reference line under the perp \u2014 KR (KRX), JP (TSE), HK (HKEX) for foreign listings with no US symbol; US for everything else. Lit dot = that exchange is OPEN right now (server-computed, holiday-aware). US\u00b7TW etc. on ADRs = US-listed line (full ET machinery applies) with the home line leading it overnight \u2014 context, never anchoring. Stocks scope only.',
+    td:r=>sessCell(r)},
   {key:'px', label:'Price', type:'num',
     td:r=>`<td class="px${r.flash?' flash-'+r.flash:''}">${fmtPrice(r.px)}</td>`},
   {key:'funding', label:'Funding (APR)', type:'num',
@@ -39,7 +41,7 @@ const COLS=[
   {key:'h12open', label:'12h open', type:'num', tip:'% change since the current UTC 12h bucket opened (00/12) \u2014 the forming 12h candle\u2019s read, vs the rolling window columns. Resets at each boundary by construction. Hover for the exact open. Dash while the spine catches up \u2014 honest null, never a stale anchor. Hidden by default \u2014 enable it here in the column menu.', td:r=>anchOpenCell(r,'h12open','h12openPx','current UTC 12h bucket',3.5)},
   {key:'d7', label:'7d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d7,12)}>${pctInner(r.d7)}</td>`},
   {key:'d30', label:'30d', type:'num', td:r=>`<td class="${scCls(r)}"${shade(r.d30,25)}>${pctInner(r.d30)}</td>`},
-  {key:'gap', label:'Gap', type:'num', tip:'Last close\u2192open gap \u2014 how much the perp moved from the most recent cash-session close to the next open (overnight 16:00\u219209:30 ET, or Fri\u2192Mon over a weekend). One move, always the latest, regardless of the timeframe selector. Hover for the cumulative off-hours drift over ~30d. Measured on US session hours, so it reads cleanest for US-linked names.',
+  {key:'gap', label:'Gap', type:'num', tip:'Last close\u2192open gap \u2014 how much the perp moved from the most recent cash-session close to the next open, measured on the name\u2019s HOME session: 16:00\u219209:30 ET for US names, the KRX/TSE/HKEX boundary for foreign-home names (SMSN gaps on Seoul\u2019s clock, not New York\u2019s). One move, always the latest, regardless of the timeframe selector. Hover for the cumulative off-hours drift over ~30d.',
     td:r=>gapCell(r)},
   {key:'trend', label:'30d trend', type:'num', tip:'30-day price path (sparkline). Sorts by 30-day % change.', td:r=>trendCell(r)},
   {key:'rs', label:'vs S&P', type:'num', tip:'Excess return vs the S&P 500 perp over the window (this market % − S&P %).',
@@ -121,9 +123,9 @@ function liq24Cell(r){ if(r.uni!=='main') return '<td><span class="na">\u2014</s
   return `<td class="${sk||'sec'}" title="24h forced liquidations ${fmtUsd(tot)} \u00b7 longs ${fmtUsd(L)} (${lp}%) / shorts ${fmtUsd(S)} (${100-lp}%)${lp>=67?' \u2014 long-side flush':(lp<=33?' \u2014 short-side squeeze':'')} \u00b7 aggregated CEX (Coinalyze), USD source-converted \u2014 context, not HL-native">${fmtUsd(tot)}</td>`; }
 const COL_BY_KEY={}; COLS.forEach(c=>COL_BY_KEY[c.key]=c);
 // Default table layout (order + which columns show). Hidden by default: beta, Vol(ann), ΔOI, Squeeze, Carry, OI.
-const DEFAULT_ORDER=['ticker','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
+const DEFAULT_ORDER=['ticker','sess','px','m5','m15','h1','h4','d1','dopen','hopen','h4open','h12open','d7','d30','gap','rs','vstape','momp','vol','funding','rvol','adr','turn','vwap','prem','trend','dvb','dcap','hitr','mom','dd','ddy','yopen','mopen','beta','vol30','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
 const DEFAULT_HIDDEN=['m5','m15','hopen','h4open','h12open','prem','trend','dvb','dcap','hitr','beta','mom','vol30','dd','swr','ddy','yopen','mopen','doi','sqz','cascT','liq24','carry','oi','ma20','ma50','ma100','ma200','vsvwap'];
-const LAYOUT_V=4; // bump to force a one-time reset of saved layouts to the new default (v4: 1d relabeled 24h, D open column added between it and 7d)
+const LAYOUT_V=5; // bump to force a one-time reset of saved layouts to the new default (v5: sess home-market chip column after ticker)
 
 const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return localStorage.getItem('xyz-scope')==='crypto'?'crypto':'stocks';}catch(_){return 'stocks';}})(), sortKey:'vol', sortDir:'desc', filter:'', tf:'1d', refreshMs:60000, benchCoin:null, benchMain:null, dvbBasket:'MAG7',
   // Markets group lens: 'names' = the classic per-market table; 'sectors'/'industries' aggregate
@@ -138,6 +140,8 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
     direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'' },
   duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
   watch:new Set(), watchOnly:false, detail:null,
+  homeMkts:null, homeState:null,   // home-session defs + live per-market state — server-computed, client renders only
+  dimOff:(()=>{try{return localStorage.getItem('xyz-dimoff')==='1';}catch(_){return false;}})(),   // variant A: dim foreign-home rows while their exchange sleeps
   report:{ coin:null, data:null, list:null, gen:false, tick:null, tf:'1d' },   // AI analyst report tab
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
@@ -454,6 +458,15 @@ function applySnapshot(s){
     const cl=!!s.offHours.closed;
     if(prev!=null&&prev!==cl) loadDaily();
     state._ohClosed=cl; }
+  // Home-market states ride the same snapshot. A flip on ANY home exchange refreshes /api/daily
+  // for the same reason a US flip does: closed→open needs the freshly completed close→open gap
+  // for that market's names, open→closed needs their new liveClose anchors.
+  if(s.homeMkts) state.homeMkts=s.homeMkts;
+  if(s.homeState){ const prev=state._hmSig;
+    const sig=['KR','JP','HK'].map(k=>s.homeState[k]&&s.homeState[k].closed?1:0).join('');
+    state.homeState=s.homeState;
+    if(prev!=null&&prev!==sig) loadDaily();
+    state._hmSig=sig; }
   updateBenchNote();
   updateAggregates(); render(); updateMovers(); updateSyncProgress(); renderRegimeStrip();
 }
@@ -721,7 +734,9 @@ function computeDerived(){
     r.sqz=computeSqueeze(r,fw);
     r._carryF=(fw!=null&&isFinite(fw))?fw*24*365*100:null;
     r.carry=(r._carryF!=null&&r.vol30!=null&&isFinite(r.vol30)&&r.vol30>5)?r._carryF/r.vol30:undefined;
-    r.gap = r.uni==='main' ? undefined : ((state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone);   // crypto never gaps (24/7); else live in-progress gap when the cash market is closed, else the last completed gap
+    r.sess = r.uni==='main' ? undefined : (r.hm || 'US');   // sortable home-market key (chip column)
+    { const oh=rowSessState(r);   // foreign-home rows gap on THEIR market's state, never the US flag
+      r.gap = r.uni==='main' ? undefined : ((oh && oh.closed && r.closePx>0 && isFinite(r.px)) ? (r.px/r.closePx-1)*100 : r.gapDone); }   // crypto never gaps (24/7); else live in-progress gap when the name's cash market is closed, else the last completed gap
     r.trend=(r.d30!=null&&isFinite(r.d30))?r.d30:undefined;
     r.turn=(r.oi>0&&r.vol>0)?r.oi/r.vol:undefined;
     // Simple moving averages of DAILY closes. null until enough history: crypto (31d retention)
@@ -829,13 +844,85 @@ function sortedRows(){ let rows=activeRows(); const f=state.filter.trim().toUppe
   if(state.watch.size){ const star=rows.filter(r=>state.watch.has(r.coin)), rest=rows.filter(r=>!state.watch.has(r.coin)); rows=[...star,...rest]; }
   return rows; }
 function pctInner(v){ if(v===undefined)return '<span class="ph">·</span>'; const p=fmtPct(v); return `<span class="${p.c}">${p.t}</span>`; }
+// ===== home sessions (build 2026.08.14-01) ==================================================
+// Everything here RENDERS server truth: state.homeMkts (static wall-clock defs + fixed offsets
+// + curated-calendar horizon) and state.homeState (live open/closed + next flip, holiday-aware,
+// approx-flagged past the horizon) both ride the snapshot. The client converts wall clocks to
+// ET for DRAWING only — it never decides whether a market is open.
+function rowSessState(r){ return (r&&r.hm&&state.homeState&&state.homeState[r.hm])?state.homeState[r.hm]:state.offHours; }
+function sessEx(mk){ const d=state.homeMkts&&state.homeMkts[mk]; return d?d.ex:mk; }
+function sessOpenNow(mk){ const st=state.homeState&&state.homeState[mk]; return st?!st.closed:false; }
+function sessDur(ms){ if(!(ms>0)) return '0m'; const h=Math.floor(ms/3600000), m=Math.round(ms%3600000/60000); return (h?h+'h ':'')+m+'m'; }
+function _p2(n){ return String(n).padStart(2,'0'); }
+function _etOffMin(){ const p=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date());
+  const g=t=>+p.find(x=>x.type===t).value; let h=g('hour'); if(h===24)h=0;
+  return Math.round((Date.UTC(g('year'),g('month')-1,g('day'),h,g('minute'))-Date.now())/60000); }   // -240 EDT / -300 EST, DST-correct via Intl
+function _etNowMin(){ const p=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date());
+  const g=t=>+p.find(x=>x.type===t).value; let h=g('hour'); if(h===24)h=0; return h*60+g('minute'); }
+// Home wall-clock minutes -> ET wall-clock minutes (fixed home offset from the wire; ET via Intl).
+function homeWallToEtMin(d, mins){ return ((mins - d.off*60 + _etOffMin())%1440+1440)%1440; }
+function sessCell(r){
+  if(r.uni==='main') return '<td></td>';   // 24/7 book — the column renders empty in crypto scope
+  if(!r.hm){
+    const lbl='US'+(r.hadr?'\u00b7'+r.hadr:'');
+    const t=r.hadr
+      ? 'US-listed ADR \u2014 the listed line trades US hours, so every ET anchor applies as-is. The '+r.hadr+' home line leads it overnight: context, never anchoring.'
+      : 'US listing \u2014 the ET session machinery applies as-is.';
+    return `<td><span class="sesschip us" title="${esc(t)}"><i class="sdot"></i>${lbl}</span></td>`;
+  }
+  const d=state.homeMkts&&state.homeMkts[r.hm], st=state.homeState&&state.homeState[r.hm], open=sessOpenNow(r.hm);
+  const hrs=d?`${_p2(d.o[0])}:${_p2(d.o[1])}\u2013${_p2(d.c[0])}:${_p2(d.c[1])} local${d.lunch?' (lunch halt)':''}`:'';
+  const apx=st&&st.approx?' \u00b7 past the curated calendar horizon \u2014 weekend-only approximation until the next year\u2019s table ships':'';
+  const t=`home line trades on ${sessEx(r.hm)}${hrs?' \u00b7 '+hrs:''} \u2014 the mirror image of the ET day. Exchange is ${open?'OPEN':'closed'} right now${st&&st.nextT?' \u00b7 '+(open?'closes':'opens')+' in '+sessDur(st.nextT-Date.now()):''}${apx}. Gap/overnight machinery for this name is anchored HERE, never to ET.`;
+  return `<td><span class="sesschip${open?' on':''}${st&&st.approx?' apx':''}" title="${esc(t)}"><i class="sdot"></i>${r.hm}</span></td>`;
+}
+// Variant C — the status rail on the row's left edge: amber = home exchange open, dark = closed.
+function railHtml(r){
+  if(!r.hm) return '';
+  const open=sessOpenNow(r.hm);
+  return `<i class="hrail${open?' on':''}" title="${esc(sessEx(r.hm)+(open?' open \u2014 home price discovery is live':' closed \u2014 the reference book under this perp is asleep'))}"></i>`;
+}
+// Variant E — the countdown microline under the ticker: the only indicator that answers WHEN.
+function cdsHtml(r){
+  if(!r.hm||!state.homeState||!state.homeState[r.hm]) return '';
+  const st=state.homeState[r.hm]; if(!st.nextT) return '';
+  const ms=st.nextT-Date.now(); if(!(ms>0)) return '';
+  return `<div class="cds${st.closed?'':' on'}" title="${esc('server-computed against the '+sessEx(r.hm)+' calendar'+(st.approx?' \u2014 approximate (past the curated horizon)':''))}">${sessEx(r.hm)} ${st.closed?'opens':'closes'} ${sessDur(ms)}</div>`;
+}
+// Drawer session ribbon: home lane vs US cash lane on a 24h ET axis, live needle, wrap-safe.
+function sessDrawerHtml(r){
+  if(!r.hm||!state.homeMkts||!state.homeMkts[r.hm]) return '';
+  const d=state.homeMkts[r.hm], st=(state.homeState&&state.homeState[r.hm])||{};
+  const W=460,H=70, x=f=>(f*W);
+  const rects=(a,b)=>b>a?[[a,b]]:[[a,1],[0,b]];   // ET day-fraction bands, midnight-wrap safe
+  const band=(f0,f1,y,cls,tt)=>rects(f0,f1).map(bb=>`<rect x="${x(bb[0]).toFixed(1)}" y="${y}" width="${(x(bb[1])-x(bb[0])).toFixed(1)}" height="12" class="${cls}"><title>${esc(tt)}</title></rect>`).join('');
+  const segs=d.lunch?[[d.o,d.lunch[0]],[d.lunch[1],d.c]]:[[d.o,d.c]];
+  let home='';
+  for(const sg of segs){
+    const f0=homeWallToEtMin(d,sg[0][0]*60+sg[0][1])/1440, f1=homeWallToEtMin(d,sg[1][0]*60+sg[1][1])/1440;
+    home+=band(f0,f1,8,'srb-home',`${sessEx(r.hm)} session \u00b7 ${_p2(sg[0][0])}:${_p2(sg[0][1])}\u2013${_p2(sg[1][0])}:${_p2(sg[1][1])} local`);
+  }
+  const us=band(9.5/24,16/24,32,'srb-us','US cash session \u00b7 09:30\u201316:00 ET');
+  let ticks='';
+  for(let h=0;h<=24;h+=6){ const X=x(h/24).toFixed(1);
+    ticks+=`<line x1="${X}" y1="50" x2="${X}" y2="54" class="srb-tick"/><text x="${X}" y="64" text-anchor="${h===0?'start':(h===24?'end':'middle')}" class="srb-lbl">${_p2(h%24)}</text>`; }
+  const nf=_etNowMin()/1440;
+  const needle=`<line x1="${x(nf).toFixed(1)}" y1="4" x2="${x(nf).toFixed(1)}" y2="48" class="srb-now"><title>now</title></line>`;
+  const stateLine=`${sessEx(r.hm)} ${st.closed?'closed':'open'} now${st.nextT?` \u00b7 ${st.closed?'opens':'closes'} in ${sessDur(st.nextT-Date.now())}`:''}${st.approx?' \u00b7 approx \u2014 past the curated calendar horizon':''}`;
+  return `<div class="dsec" data-tip="when this name\u2019s reference actually discovers price \u2014 the ${esc(sessEx(r.hm))} session (amber) vs the US cash session (blue) on a 24h ET axis. During US hours the oracle under this perp is coasting on a closed home book; gap/overnight machinery for this name is anchored to the amber band.">Home session \u00b7 ${esc(sessEx(r.hm))}</div>`+
+    `<div class="dsessrib"><svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`+
+    `<text x="0" y="6" class="srb-lane">HOME</text><text x="0" y="30" class="srb-lane">US</text>`+
+    home+us+`<line x1="0" y1="50" x2="${W}" y2="50" class="srb-axis"/>`+ticks+needle+`</svg>`+
+    `<div class="srb-state">${esc(stateLine)}</div></div>`;
+}
 function gapCell(r){ const g=r.gap;
-  const live = !!(state.offHours && state.offHours.closed && r.closePx>0 && isFinite(r.px));
+  const oh=rowSessState(r);
+  const live = !!(oh && oh.closed && r.closePx>0 && isFinite(r.px));
   const t = (g!=null&&isFinite(g))
-    ? (live ? 'Live \u2014 move since the last cash close (market closed now)' : 'Last close\u2192open gap')
+    ? (live ? `Live \u2014 move since the last cash close (${r.hm?sessEx(r.hm):'market'} closed now)` : `Last close\u2192open gap${r.hm?' \u00b7 anchored to '+sessEx(r.hm)+' sessions':''}`)
         + ((r.gap30!=null&&isFinite(r.gap30))?' \u00b7 30d off-hours drift '+(r.gap30>0?'+':'')+r.gap30.toFixed(1)+'%':'')
     : 'Off-hours (overnight + weekend) gap \u2014 fills in with the hourly spine';
-  const dot = live ? '<span class="live-dot" title="live \u2014 market closed">\u25cf</span>' : '';
+  const dot = live ? `<span class="live-dot" title="live \u2014 ${r.hm?sessEx(r.hm):'market'} closed">\u25cf</span>` : '';
   return `<td${shade(g,4)} title="${esc(t)}">${pctInner(g)}${dot}</td>`; }
 function momCell(r){ if(r.mom===undefined)return '<span class="ph">·</span>'; if(r.mom===null)return '<span class="na">—</span>';
   const sign=r.mom>0?'+':'';
@@ -872,7 +959,7 @@ function rvolCell(r){ const tfKey=TF_MAP[state.tf]||'d1';
   if(!(tfKey==='h1'||tfKey==='h4'||tfKey==='d1')) return '<td><span class="na" title="RVOL is defined up to the 1d window \u2014 clock-hour matching has no meaning beyond a day">\u2014</span></td>';
   if(r.rvol==null||!isFinite(r.rvol)) return '<td><span class="na" title="needs enough hourly history for a same-clock-hours baseline (\u22657 prior days with coverage)">\u2014</span></td>';
   const c=r.rvol>=2?'accent':(r.rvol<0.5?'sec':''), t=Math.min(Math.max(r.rvol-1,0)/4,1)*0.20;
-  return `<td${c?` class="${c}"`:''} style="background:rgba(251,139,30,${t.toFixed(3)})" title="notional over the last ${state.tf} \u00f7 median of the same clock hours across the prior month \u2014 ${r.rvol>=2?'genuinely elevated for this time of day':(r.rvol<0.5?'well below its norm for this time of day':'in line with its norm for this time of day')}${state.offHours&&state.offHours.closed&&r.uni!=='main'?' \u00b7 cash market closed: judged against prior off-hours, real but thinner':''}">\u00d7${r.rvol>=10?r.rvol.toFixed(0):r.rvol.toFixed(1)}</td>`; }
+  return `<td${c?` class="${c}"`:''} style="background:rgba(251,139,30,${t.toFixed(3)})" title="notional over the last ${state.tf} \u00f7 median of the same clock hours across the prior month \u2014 ${r.rvol>=2?'genuinely elevated for this time of day':(r.rvol<0.5?'well below its norm for this time of day':'in line with its norm for this time of day')}${(x=>x&&x.closed)(rowSessState(r))&&r.uni!=='main'?' \u00b7 '+(r.hm?sessEx(r.hm):'cash market')+' closed: judged against prior off-hours, real but thinner':''}">\u00d7${r.rvol>=10?r.rvol.toFixed(0):r.rvol.toFixed(1)}</td>`; }
 function oiCell(r){ if(r.doi==null)return '<span class="na" title="collecting OI history (server-side, accrues over time)">—</span>';
   const oc=r.doi>0?'pos':(r.doi<0?'neg':'sec'), sign=r.doi>0?'+':'';
   let s=`<span class="${oc}">${sign}${r.doi.toFixed(2)}%</span>`;
@@ -924,7 +1011,7 @@ function anchOpenCell(r,key,pxKey,what,cap){ const v=r[key];
 function premCell(r){ if(r.prem==null||!isFinite(r.prem)) return '<td><span class="na" title="needs both mark and oracle prices">·</span></td>';
   const v=r.prem, c=v>0.5?'pos':(v<-0.5?'neg':'sec');
   const t=`mark ${fmtPrice(r.px)} vs oracle ${fmtPrice(r.oracle)} \u2014 perp ${v>=0?'rich (premium)':'cheap (discount)'} ${Math.abs(v).toFixed(1)}bp`+
-    (state.offHours&&state.offHours.closed?' \u00b7 cash market closed: this dislocation is the live off-hours price discovery':'');
+    ((x=>x&&x.closed)(rowSessState(r))?' \u00b7 '+(r.hm?sessEx(r.hm):'cash market')+' closed: this dislocation is the live off-hours price discovery':'');
   return `<td${shade(v,25)} title="${esc(t)}"><span class="${c}">${v>=0?'+':''}${v.toFixed(1)}bp</span></td>`; }
 // Squeeze susceptibility 0-100. Necessary condition: crowded shorts, i.e. the window-average
 // funding is NEGATIVE (shorts pay longs to stay short — conviction crowding). That crowding
@@ -972,7 +1059,9 @@ function carryCell(r){ const v=r.carry;
 // disagreement with reality always resolves to "rebuild everything", never to "trust the cache".
 let _rowCache=null, _rowStruct='';
 function rowHtml(r, vc, bScope){
-  const cls=(r.coin===bScope)?' class="benchrow"':'';
+  const dim = state.dimOff && r.hm && !sessOpenNow(r.hm);   // variant A: only foreign-home rows, only while their exchange sleeps
+  const cc = (r.coin===bScope?'benchrow':'')+(dim?(r.coin===bScope?' ':'')+'dimoff':'');
+  const cls = cc?` class="${cc}"`:'';
   let row=`<tr data-coin="${esc(r.coin)}"${cls}>`; for(const c of vc) row+=c.td(r); row+='</tr>';
   r.flash=null;   // consumed into this string exactly as the rebuild path always did — the NEXT
                   // render produces a flash-free string, so the patcher clears the class then
@@ -2629,12 +2718,13 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   const li=(t,v)=>`<div class="crow"><span class="ct">${esc(t)}</span>${bar(v)}<span class="cv ${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(2)}</span></div>`;
   const starred=state.watch.has(coin);
   const split=r.uni==='main'?null:sessionSplit30(r);   // no cash session exists to decompose against
+  const sessLbl=r.hm?`the ${sessEx(r.hm)} home session`:'09:30\u201316:00 ET';   // the overnight holds under `split` are already home-anchored server-side
   const splitHtml = split
     ? `<div class="dsec" data-tip="30d off-hours split \u00b7 return decomposed into what accrued off-hours (overnight + weekend close\u2192open) vs during cash sessions \u00b7 a persistent off-hours drift is the overnight-effect edge this panel exists to expose">Where the 30d return happened</div>`+
       `<div class="dsplit">`+
         `<span data-tip="total 30d price return">total <b class="${split.total>=0?'pos':'neg'}">${split.total>=0?'+':''}${split.total.toFixed(1)}%</b></span>`+
         `<span data-tip="compounded across ${split.n} close\u2192open holds (overnight + weekend)">off-hours <b class="${split.off>=0?'pos':'neg'}">${split.off>=0?'+':''}${split.off.toFixed(1)}%</b></span>`+
-        `<span data-tip="the residual: what accrued 09:30\u201316:00 ET">session <b class="${split.sess>=0?'pos':'neg'}">${split.sess>=0?'+':''}${split.sess.toFixed(1)}%</b></span>`+
+        `<span data-tip="the residual: what accrued during ${esc(sessLbl)}">session <b class="${split.sess>=0?'pos':'neg'}">${split.sess>=0?'+':''}${split.sess.toFixed(1)}%</b></span>`+
         (Math.abs(split.off)>Math.abs(split.total)*0.7&&Math.abs(split.total)>2?`<span class="sec" style="font-size:10.5px" data-tip="\u226570% of the 30d move accrued while the cash market was closed">\u26a1 overnight-driven</span>`:'')+
       `</div>`
     : '';
@@ -2644,6 +2734,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
       <button class="dclose" id="dclose" title="close">✕</button></div>
     ${r.nm?`<div class="dname" data-tip="the instrument behind the ticker — static server-side map; a name that isn\u2019t seeded shows no line rather than a guess">${esc(r.nm)}</div>`:''}
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized into a plain-language read with scenarios and R/R">AI report →</span></div>
+    ${sessDrawerHtml(r)}
     ${earnDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>
@@ -4057,6 +4148,24 @@ function clockScaffold(cx,cy,ri,ro,cash){
   }
   return s;
 }
+// Home-session arc(s) for a foreign-home ticker (build 2026.08.14-01): the KRX/TSE/HKEX window
+// converted to ET hours (fixed home offset from the wire, ET offset via Intl), wrap-safe, lunch
+// halts drawn as separate arcs. Amber to contrast the blue US cash arc.
+function homeArcSvg(cx,cy,ri,ro,mk){
+  const d=state.homeMkts&&state.homeMkts[mk]; if(!d) return '';
+  const segs=d.lunch?[[d.o,d.lunch[0]],[d.lunch[1],d.c]]:[[d.o,d.c]];
+  let s='';
+  for(const sg of segs){
+    const a=homeWallToEtMin(d,sg[0][0]*60+sg[0][1])/60, b=homeWallToEtMin(d,sg[1][0]*60+sg[1][1])/60;
+    const spans=b>a?[[a,b]]:[[a,24],[0,b]];   // midnight-ET wrap
+    for(const sp of spans){
+      s+=`<path d="${clockWedge(cx,cy,ri-3,ro+10,clockDeg(sp[0]),clockDeg(sp[1]))}" fill="var(--accent)" opacity="0.10"><title>${sessEx(mk)} home session (ET hours)</title></path>`;
+    }
+    for(const hh of [a,b]){ const [p,q]=clockPolar(cx,cy,ri-3,clockDeg(hh)), [u,v]=clockPolar(cx,cy,ro+3,clockDeg(hh));
+      s+=`<line x1="${p.toFixed(1)}" y1="${q.toFixed(1)}" x2="${u.toFixed(1)}" y2="${v.toFixed(1)}" stroke="var(--accent)" stroke-width="1" opacity="0.6"/>`; }
+  }
+  return s;
+}
 function activityClockSvg(vec, metric){
   const W=240,H=240, cx=120,cy=120, ri=30, roMax=94;
   const arr = (metric==='volume'?vec.qr:vec.vr)||[];
@@ -4066,6 +4175,7 @@ function activityClockSvg(vec, metric){
   const rOf=v=> ri + (v/maxV)*(roMax-ri);
   let s=`<svg viewBox="0 0 ${W} ${H}" class="sclock" style="width:100%;height:auto;display:block">`;
   s+=clockScaffold(cx,cy,ri,roMax,_szCash());
+  if(vec.hm) s+=homeArcSvg(cx,cy,ri,roMax,vec.hm);   // amber home-session arc for a foreign-home name — the empirical check that its hump sits where the home market trades
   // concentric ×-average reference rings + labels (readable magnitude)
   for(let k=0.5;k<=maxV+1e-9;k+=0.5){ if(k<0.5) continue; const r=rOf(k), one=Math.abs(k-1)<1e-9;
     s+=`<circle cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="none" stroke="${one?'var(--muted)':'var(--grid)'}" stroke-width="1"${one?' stroke-dasharray="2 3"':''}/>`;
@@ -4123,7 +4233,7 @@ function renderClocks(hc){
     `<div style="flex:1 1 240px;min-width:230px" class="s-card"><div style="color:var(--text);font-size:13px;font-weight:600;margin-bottom:6px">Funding — <span style="color:var(--up)">receive</span> / <span style="color:var(--down)">pay</span> by hour</div>${fundingClockSvg(vec.fund)}</div>`+
     `</div>`;
   const _tz=_szTz();
-  const cap=`Midnight ${_tz} at top, clockwise. Left clock: spoke length = that hour's range/volume vs the day's average — rings mark 1×, 2×…${_szCash()?' and the blue arc is the US cash session':''}. Right clock: color = carry direction, brightness = size. `+
+  const cap=`Midnight ${_tz} at top, clockwise. Left clock: spoke length = that hour's range/volume vs the day's average — rings mark 1×, 2×…${_szCash()?' and the blue arc is the US cash session':''}${vec.hm?`; the amber arc is the ${sessEx(vec.hm)} home session — if this name's hump doesn't sit inside it, the home-session premise is wrong for the perp's own flow`:''}. Right clock: color = carry direction, brightness = size. `+
     (ph!=null?`Busiest near <b>${ph}:00 ${_tz}</b>`:'')+(fh!=null&&Number.isFinite(vec.fund[fh])?`; strongest carry near <b>${fh}:00 ${_tz}</b> (${vec.fund[fh]>0?'longs pay':'longs receive'})`:'')+`. <b>Hover</b> a wedge for exact values.`;
   return sHead('Hour-of-day clocks',`the robust timing layer — range volatility, volume and funding by ${_tz} hour`)+controls+twin+sCap(cap);
 }
@@ -7866,6 +7976,11 @@ el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
   if(star){ e.stopPropagation(); toggleWatch(star.dataset.star); return; }
   const tr=e.target.closest('tr[data-coin]'); if(tr) openDetail(tr.dataset.coin); });
 el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
+{ const db=el('dimOff');   // variant A toggle — visual only, per browser, never part of a saved layout
+  if(db){ db.classList.toggle('on', state.dimOff);
+    db.addEventListener('click',()=>{ state.dimOff=!state.dimOff; db.classList.toggle('on', state.dimOff);
+      try{ localStorage.setItem('xyz-dimoff', state.dimOff?'1':'0'); }catch(_){}
+      render(); }); } }
 el('drawerbg').addEventListener('click', closeDetail);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && state.detail) closeDetail(); });
 el('bellBtn').addEventListener('click',e=>{ e.stopPropagation(); const pop=el('alertpop');
@@ -8098,6 +8213,8 @@ markets:`
 <p><b>Momentum</b> (−100…+100) is self-normalizing: risk-adjusted multi-horizon returns × trend quality, tilted by range position, modulated by OI conviction — comparable across a quiet FX pair and a violent pre-IPO synthetic. The ● dot means volume above the market's own norm. <b>vs 30d hi / vs YTD hi</b> are distance below the high (0% = at it now). <b>Y open / M open</b> show the level the period opened at — on a 24/7 perp that IS the prior day's close — green when price is above. MAs are daily-close SMAs; dashes are honest (not enough history), never fabricated. <b>VWAP 30d / vs VWAP</b> (hidden by default) are the volume-weighted counterpart: Σ(typical price × volume) ÷ Σ(volume) over ~31 days of hourly candles, typical = (H+L+C)/3 per bar. Where the MAs weight every day equally, VWAP weights by where the volume actually printed — read it as the average recent holder's entry. Positive vs VWAP = the month's buyers are in profit; deeply negative = trapped supply overhead. Honest caveat: it's a candle-level approximation of tick VWAP (no per-fill data in candles), slightly less exact on thin markets. Both scopes, fills in as hourly history loads.</p>
 <div class="hlp-h">Prem and Gap — the off-hours edge</div>
 <p><b>Prem</b> is the perp vs oracle dislocation in bp. When the cash market is <i>closed</i>, the oracle freezes near the last print — so a persistent premium or discount is the live off-hours price discovery, and the tradeable reversion. <b>Gap</b> is the last close→open move (live while the market is closed); its hover carries the cumulative 30d off-hours drift — a persistent sign there is the overnight effect.</p>
+<div class="hlp-h">Home sessions — the names that live on Seoul/Tokyo/Hong Kong time</div>
+<p>A handful of equities have no US symbol: their reference line trades on <b>KRX</b> (SMSN, SKHX, HYUNDAI), <b>TSE</b> (SOFTBANK, KIOXIA, IBIDEN) or <b>HKEX</b> (ZHIPU, MINIMAX) — roughly the <i>ET evening</i>, the mirror image of the US day. The <b>Sess</b> chip carries the home market with a lit dot while that exchange is open (server-computed against its real holiday calendar); the amber <b>rail</b> on the row's left edge is the same state in peripheral vision, and the microline under the ticker counts down to the next open/close. For these names <b>Gap</b>, the overnight holds and the drawer's session split are <b>anchored to the home exchange</b> — SMSN gaps on Seoul's clock, never New York's — and they are excluded from the ET-pooled session composites rather than contaminating them. ADRs (TSM, ASML, ARM, BABA) show <i>US·TW</i>-style chips: the listed line is a US instrument, so ET machinery applies as-is; the home code is context. The <b>☾ dim</b> toggle in the filter menu fades foreign-home rows while their exchange sleeps — the perp still trades, but the oracle under it is coasting. Past the curated calendar horizon the state degrades to weekend-only and says so on hover.</p>
 <div class="hlp-h">Squeeze &amp; OI/Vol</div>
 <p><b>Squeeze</b> (0–100) is how loaded the spring is: crowding (shorts paying) × fuel (OI building) × trigger (price pressing the 30d high). Zero whenever funding is positive — no crowded shorts, no squeeze. <b>OI/Vol</b> is standing positioning ÷ daily flow: ≥2× means stale, crowded positioning that can't exit quickly — fragile to squeezes and unwinds. High squeeze + negative funding + rising OI + high OI/Vol is the full configuration.</p>
 <div class="hlp-h">Red-tape resilience &amp; RVOL (hidden by default — column menu ⚙)</div>

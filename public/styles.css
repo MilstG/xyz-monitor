@@ -1358,3 +1358,33 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .achip .tag.t-pause{color:var(--accent);border-color:var(--accent)}
 .achip .tag.t-thru{color:var(--blue);border-color:var(--blue)}
 .achip .tag.t-abs{color:var(--muted)}
+
+/* ===== home sessions (build 2026.08.14-01) ================================================= */
+/* Sess chip: home market of the reference line. Lit dot = exchange open now (server truth). */
+.sesschip{display:inline-flex;align-items:center;gap:4px;font-size:9px;font-weight:600;letter-spacing:.08em;
+  padding:1px 6px;border-radius:2px;border:1px solid var(--border);color:var(--muted);background:rgba(255,255,255,.02);vertical-align:1px;}
+.sesschip .sdot{width:5px;height:5px;border-radius:50%;background:#333c4a;flex:none;}
+.sesschip.on{border-color:rgba(251,139,30,.55);color:var(--accent);}
+.sesschip.on .sdot{background:var(--up);box-shadow:0 0 5px rgba(63,174,118,.7);}
+.sesschip.us{color:var(--faint);}
+.sesschip.apx{border-style:dashed;}   /* past the curated calendar horizon — weekend-only approximation */
+/* Variant C — status rail on the row's left edge (foreign-home rows only). */
+td.tkc{position:relative;}
+.hrail{position:absolute;left:0;top:0;bottom:0;width:2px;background:#232c3b;}
+.hrail.on{background:var(--accent);box-shadow:0 0 4px rgba(251,139,30,.35);}
+/* Variant E — countdown microline under the ticker. */
+.cds{font-size:9px;color:var(--faint);letter-spacing:.04em;margin-top:1px;line-height:1.2;white-space:nowrap;}
+.cds.on{color:rgba(251,139,30,.75);}   /* home exchange open — counting down to its close */
+/* Variant A — dim toggle: fade the row, keep the chip/rail readable. */
+tr.dimoff td{opacity:.45;}
+tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
+/* Drawer session ribbon. */
+.dsessrib{margin:4px 0 8px;}
+.dsessrib .srb-home{fill:#59400f;stroke:rgba(251,139,30,.55);stroke-width:1;}
+.dsessrib .srb-us{fill:#16222f;stroke:#24384d;stroke-width:1;}
+.dsessrib .srb-axis{stroke:var(--border);stroke-width:1;}
+.dsessrib .srb-tick{stroke:var(--border);stroke-width:1;}
+.dsessrib .srb-lbl{fill:var(--faint);font-size:8.5px;}
+.dsessrib .srb-lane{fill:var(--faint);font-size:7.5px;letter-spacing:.1em;}
+.dsessrib .srb-now{stroke:var(--up);stroke-width:1;filter:drop-shadow(0 0 3px rgba(63,174,118,.6));}
+.dsessrib .srb-state{font-size:10.5px;color:var(--muted);margin-top:2px;}
