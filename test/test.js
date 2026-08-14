@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.10-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.14-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -14255,7 +14255,7 @@ test("-10 markets defaults: the shipped visible set matches the intended columns
   const ord = app.match(/const DEFAULT_ORDER=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim());
   const hid = new Set(app.match(/const DEFAULT_HIDDEN=\[([^\]]*)\]/)[1].split(",").map(x => x.replace(/'/g, "").trim()));
   const visible = ord.filter(k => !hid.has(k));
-  assert.deepEqual(visible, ["ticker", "px", "h1", "h4", "d1", "dopen", "d7", "d30", "gap", "rs", "vstape", "momp", "vol", "funding", "rvol", "adr", "turn", "vwap"],
+  assert.deepEqual(visible, ["ticker", "sess", "px", "h1", "h4", "d1", "dopen", "d7", "d30", "gap", "rs", "vstape", "momp", "vol", "funding", "rvol", "adr", "turn", "vwap"],   // 2026.08.14-01: sess home-market chip rides visible beside the ticker
     "default visible columns match the requested set, in order");
   assert.ok(hid.has("dvb"), "Δ vs ⬒ hidden by default");
   assert.ok(app.includes("dvbBasket:'MAG7'"), "the Δ column defaults to MAG7");
@@ -15820,7 +15820,8 @@ test("row patching 2026.07.29-09: patched output is byte-identical to a rebuild 
   const escSrc = app.match(/function esc\([\s\S]*?\n(?=function|const|let)/)[0];
   const rowSrc = app.match(/function rowHtml\(r, vc, bScope\)\{[\s\S]*?\n\}/)[0];
   const patchSrc = app.match(/function patchRowsInto\(children, oldHtml, newHtml\)\{[\s\S]*?\n\}/)[0];
-  const api = new Function(escSrc + "\n" + rowSrc + "\n" + patchSrc + "\n;return { rowHtml, patchRowsInto };")();
+  const sessOpenSrc = app.match(/function sessOpenNow\(mk\)\{.*\}/)[0];   // rowHtml's home-session dependency (2026.08.14-01)
+  const api = new Function("const state={dimOff:false,homeState:null,homeMkts:null};\n" + escSrc + "\n" + sessOpenSrc + "\n" + rowSrc + "\n" + patchSrc + "\n;return { rowHtml, patchRowsInto };")();
   const vc = [
     { key: "ticker", td: (r) => `<th class="rl">${r.ticker}</th>` },
     { key: "px",     td: (r) => `<td>${r.px}</td>` },
@@ -16011,7 +16012,7 @@ test("D open column: manifest wiring — placed after 24h, visible by default, l
   assert.ok(ord.includes("'d1','dopen','hopen','h4open','h12open','d7'"), "D open leads the anchored block (2026.08.10-01: + H/4h/12h open) between 24h and 7d in the default order");
   const hid = app.match(/const DEFAULT_HIDDEN=\[[^\]]*\];/)[0];
   assert.ok(!hid.includes("'dopen'"), "D open is visible by default — it is the point of the column");
-  assert.ok(/const LAYOUT_V=4;/.test(app), "LAYOUT_V bumped so saved layouts pick the column up");
+  assert.ok(/const LAYOUT_V=5;/.test(app), "LAYOUT_V bumped so saved layouts pick the column up (v5: sess column, 2026.08.14-01)");
   // anchor derivation: today's UTC day boundary through the SAME openAt walk the M/Y rungs use,
   // % stored as the sortable row value, level kept separately for the hover only
   for (const pin of ["nowD.getUTCDate())", "dop=openAt(d0)", "r.dopenPx=(dop!=null&&dop>0)?dop:undefined",
@@ -16753,3 +16754,132 @@ test("anchored-open wiring pins: poller snapshot path + client column family, de
   assert.equal((app.match(/colAdjacent\((v|ord),'h4open','hopen'\)/g) || []).length, 2, "h4open adjacency migration at both sites");
   assert.equal((app.match(/colAdjacent\((v|ord),'h12open','h4open'\)/g) || []).length, 2, "h12open adjacency migration at both sites");
 });
+
+// ===== home sessions: KRX/TSE/HKEX re-anchoring (build 2026.08.14-01) =========================
+// Behavioral tests execute the REAL calendar math (the -84 lesson: string pins prove nothing
+// about correctness); manifest pins below prove the wiring exists in poller/app/index/styles.
+{
+  const { homeMkt, homeAdr } = require("../src/sectors");
+  const { HOME_MKTS, homeCalCovered, homeCalHorizon, homeDayStatus, homeWallToUtc,
+    homeMarketSessions, homeCashAnchors, homeClosedWindows, homeOvernightAnchors, homeWeekendAnchors } = require("../src/compute");
+
+  test("homeMkt: curated foreign-home set, ADRs stay US, crypto scope always null", () => {
+    for (const t of ["SMSN", "SKHX", "HYUNDAI"]) assert.equal(homeMkt(t), "KR", t + " -> KR");
+    for (const t of ["SOFTBANK", "KIOXIA", "IBIDEN"]) assert.equal(homeMkt(t), "JP", t + " -> JP");
+    for (const t of ["ZHIPU", "MINIMAX"]) assert.equal(homeMkt(t), "HK", t + " -> HK (HKEX listings, Jan 2026)");
+    for (const t of ["NVDA", "TSM", "ASML", "ARM", "BABA", "AAPL"]) assert.equal(homeMkt(t), null, t + " keeps the full ET machinery");
+    assert.equal(homeMkt("SMSN", "main"), null, "crypto scope never routes to a home market");
+    assert.equal(homeMkt("smsn"), "KR", "norm() applies — case-insensitive");
+    // ADR annotation lives in a SEPARATE table so it can never leak into anchoring.
+    assert.equal(homeAdr("TSM"), "TW"); assert.equal(homeAdr("BABA"), "HK"); assert.equal(homeAdr("SMSN"), null);
+  });
+
+  test("homeDayStatus: curated 2026 closures land, half days distinct, weekends always closed", () => {
+    // KRX: Seollal block + observed Liberation Day + year-end closure.
+    assert.equal(homeDayStatus("KR", 2026, 2, 16), 2, "Seollal Mon");
+    assert.equal(homeDayStatus("KR", 2026, 2, 18), 2, "Seollal Wed");
+    assert.equal(homeDayStatus("KR", 2026, 8, 17), 2, "Liberation Day observed Mon");
+    assert.equal(homeDayStatus("KR", 2026, 12, 31), 2, "KRX year-end closure");
+    assert.equal(homeDayStatus("KR", 2026, 8, 13), 0, "regular Thursday trades");
+    // TSE: exchange New-Year closure, Golden Week, the Sep 22 bridge holiday, year-end.
+    assert.equal(homeDayStatus("JP", 2026, 1, 2), 2, "TSE Jan 2 exchange closure");
+    assert.equal(homeDayStatus("JP", 2026, 5, 6), 2, "Constitution Day observed (Golden Week)");
+    assert.equal(homeDayStatus("JP", 2026, 9, 22), 2, "bridge holiday between Respect-for-Aged and the equinox");
+    assert.equal(homeDayStatus("JP", 2026, 7, 20), 2, "Marine Day");
+    // HKEX: CNY block Tue-Thu (Mon 16th OPEN), half days close 12:00 local.
+    assert.equal(homeDayStatus("HK", 2026, 2, 16), 0, "HKEX trades the Monday KRX doesn't");
+    assert.equal(homeDayStatus("HK", 2026, 2, 17), 2, "CNY");
+    assert.equal(homeDayStatus("HK", 2026, 12, 24), 1, "Christmas Eve half day");
+    assert.equal(homeDayStatus("HK", 2026, 12, 31), 1, "NYE half day");
+    // Weekends closed in every market regardless of table coverage.
+    assert.equal(homeDayStatus("KR", 2026, 8, 15), 2, "Saturday");
+    assert.equal(homeDayStatus("JP", 2027, 1, 3), 2, "Sunday beyond the horizon is still closed");
+  });
+
+  test("home calendars: fixed-offset wall clocks are exact (no DST in KST/JST/HKT)", () => {
+    // 09:00 KST on 2026-08-13 is exactly 00:00 UTC the same date.
+    assert.equal(homeWallToUtc("KR", 2026, 8, 13, 9, 0), Date.UTC(2026, 7, 13, 0, 0));
+    // 09:30 HKT (UTC+8) is 01:30 UTC.
+    assert.equal(homeWallToUtc("HK", 2026, 8, 13, 9, 30), Date.UTC(2026, 7, 13, 1, 30));
+    const ses = homeMarketSessions("KR", Date.UTC(2026, 7, 13, 0, 0) - DAY, Date.UTC(2026, 7, 13, 0, 0) + DAY)
+      .filter((x) => x.open === Date.UTC(2026, 7, 13, 0, 0));
+    assert.equal(ses.length, 1, "the Aug 13 KRX session exists exactly once");
+    assert.equal(ses[0].close, Date.UTC(2026, 7, 13, 6, 30), "15:30 KST close = 06:30 UTC");
+    // HK half day: Dec 24 closes at 12:00 HKT = 04:00 UTC.
+    const hd = homeMarketSessions("HK", Date.UTC(2026, 11, 23), Date.UTC(2026, 11, 25))
+      .filter((x) => x.open === homeWallToUtc("HK", 2026, 12, 24, 9, 30));
+    assert.equal(hd.length, 1);
+    assert.equal(hd[0].close, homeWallToUtc("HK", 2026, 12, 24, 12, 0), "half day closes at the half mark, not 16:00");
+  });
+
+  test("home closed windows: same 40h overnight/weekend split as the ET engine, holiday spans pool", () => {
+    // A plain KRX Tue->Wed night is an overnight; the Chuseok span (Wed 23rd close -> Mon 28th
+    // open, with 24-25 closed + the weekend) is one long weekend-class hold.
+    const s = homeWallToUtc("KR", 2026, 9, 20, 0, 0), e = homeWallToUtc("KR", 2026, 9, 30, 0, 0);
+    const wins = homeClosedWindows("KR", s, e);
+    const night = wins.find((w) => w.enter === homeWallToUtc("KR", 2026, 9, 22, 15, 30));
+    assert.ok(night && night.tag === "overnight", "Tue 22nd close -> Wed 23rd open is a plain overnight");
+    const chuseok = wins.find((w) => w.enter === homeWallToUtc("KR", 2026, 9, 23, 15, 30));
+    assert.ok(chuseok, "the Chuseok window exists");
+    assert.equal(chuseok.exit, homeWallToUtc("KR", 2026, 9, 28, 9, 0), "spans 24-25 closed + weekend to Monday's open");
+    assert.equal(chuseok.tag, "weekend", ">=40h behaves like one hold, exactly as US holiday weekends do");
+    assert.equal(homeOvernightAnchors("KR", s, e).concat(homeWeekendAnchors("KR", s, e)).length, wins.length,
+      "the two filters partition the closed windows");
+    const cash = homeCashAnchors("KR", s, e);
+    assert.ok(cash.every((a) => a.tag === "cash" && a.exit > a.enter), "cash anchors well-formed");
+    assert.ok(!cash.some((a) => a.enter === homeWallToUtc("KR", 2026, 9, 24, 9, 0)), "no session minted on a Chuseok closure");
+  });
+
+  test("home calendars: past the curated horizon the engine degrades to weekend-only and SAYS so", () => {
+    assert.equal(homeCalHorizon("KR"), 2026, "curated through 2026 — extending is a curated edit when KRX publishes 2027");
+    assert.equal(homeCalCovered("KR", 2026), true);
+    assert.equal(homeCalCovered("KR", 2027), false, "consumers must flag 2027 as approximate");
+    // 2027-02-08 area will hold Seollal, but without the table a plain weekday reads as open —
+    // that is the DEGRADE contract: weekend-only, never a guessed lunar date.
+    assert.equal(homeDayStatus("KR", 2027, 2, 10), 0, "weekday beyond horizon trades under the approximation");
+    assert.equal(homeDayStatus("KR", 2027, 2, 13), 2, "Saturday beyond horizon still closed");
+    for (const mk of ["KR", "JP", "HK"]) assert.ok(HOME_MKTS[mk] && HOME_MKTS[mk].utcOff >= 8, mk + " def present");
+  });
+
+  test("home-session wiring manifest: poller re-anchors, ships state; client renders it; A+C+E present", () => {
+    const fs = require("fs"), path = require("path");
+    const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+    for (const pin of ["computeOffHoursHome", "homeStateAll", "HOME_MKTS_WIRE", "rowOffState",
+      "hm: homeMkt(r.ticker, r.uni) || undefined", "hadr: homeAdr(r.ticker) || undefined",
+      "homeMkts: HOME_MKTS_WIRE, homeState", "offHoursBy", "foreignExcluded",
+      "homeOvernightAnchors(hmk", "homeWeekendAnchors(hmk"])
+      assert.ok(pol.includes(pin), "poller pin missing: " + pin);
+    // The daily + snapshot signatures must both carry the home flips, or foreign names go stale.
+    assert.ok(/\["KR", "JP", "HK"\]\.map\(\(k\) => \(offHoursBy\[k\]\.closed \? 1 : 0\)\)/.test(pol), "daily sig signs home flips");
+    assert.ok(/\["KR", "JP", "HK"\]\.map\(\(k\) => \(homeState\[k\]\.closed \? 1 : 0\)/.test(pol), "snapshot csig signs home flips");
+    const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+    for (const pin of ["function rowSessState", "function sessCell", "function railHtml", "function cdsHtml",
+      "function sessDrawerHtml", "function homeArcSvg", "key:'sess'", "state.dimOff", "s.homeState", "s.homeMkts",
+      "if(prev!=null&&prev!==sig) loadDaily()"])
+      assert.ok(app.includes(pin), "app pin missing: " + pin);
+    // Variant A dims via a row class the cache/patcher can diff; the gap cell reads the ROW's state.
+    assert.ok(app.includes("'dimoff'") || app.includes('"dimoff"') || app.includes("dimoff'"), "dimoff row class");
+    assert.ok(app.includes("const oh=rowSessState(r)"), "gap live-mode keys off the row's own market");
+    // Variant A executed through the REAL rowHtml (the -84 lesson: the class must actually land):
+    // a KR-home row under dimOff with KRX closed dims; a US row never does; benchrow composes.
+    const escSrc = app.match(/function esc\([\s\S]*?\n(?=function|const|let)/)[0];
+    const rowSrc = app.match(/function rowHtml\(r, vc, bScope\)\{[\s\S]*?\n\}/)[0];
+    const sessOpenSrc = app.match(/function sessOpenNow\(mk\)\{.*\}/)[0];
+    const mk = new Function("const state={dimOff:true,homeState:{KR:{closed:true},JP:{closed:false}},homeMkts:null};\n"
+      + escSrc + "\n" + sessOpenSrc + "\n" + rowSrc + "\n;return rowHtml;")();
+    const vc = [{ key: "ticker", td: (r) => `<td>${r.ticker}</td>` }];
+    assert.ok(/class="dimoff"/.test(mk({ coin: "x:SMSN", ticker: "SMSN", hm: "KR", flash: null }, vc, null)),
+      "KR-home row dims while KRX is closed and the toggle is armed");
+    assert.ok(!/dimoff/.test(mk({ coin: "x:SOFTBANK", ticker: "SOFTBANK", hm: "JP", flash: null }, vc, null)),
+      "JP-home row stays full-strength while TSE is open — dim keys off the ROW's market, not a global");
+    assert.ok(!/dimoff/.test(mk({ coin: "x:NVDA", ticker: "NVDA", flash: null }, vc, null)),
+      "US rows never dim");
+    assert.ok(/class="benchrow dimoff"/.test(mk({ coin: "x:SMSN", ticker: "SMSN", hm: "KR", flash: null }, vc, "x:SMSN")),
+      "bench + dim compose in one class attribute");
+    const idx = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+    assert.ok(idx.includes('id="dimOff"'), "dim toggle button in the filter popover");
+    const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+    for (const pin of [".sesschip", ".hrail", ".cds", "tr.dimoff td", ".dsessrib"])
+      assert.ok(css.includes(pin), "css pin missing: " + pin);
+  });
+}
