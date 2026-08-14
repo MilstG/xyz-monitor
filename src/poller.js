@@ -16,6 +16,7 @@ const {
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
 const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
+  HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
@@ -25,7 +26,7 @@ const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./comput
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
-const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO } = require("./sectors");
+const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO, homeMkt, homeAdr } = require("./sectors");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
 const TF = { h1: HOUR, h4: 4 * HOUR, d1: DAY, d7: 7 * DAY, d30: 30 * DAY };
@@ -965,6 +966,40 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const a of wins) if (nowMs >= a.enter && nowMs < a.exit) return { closed: true, closeT: a.enter, openT: a.exit };
     return { closed: false };
   }
+  // Per-HOME-market open/closed state (build 2026.08.14-01): the same shape as computeOffHours
+  // but anchored to KRX/TSE/HKEX for the foreign-home names. `nextT` is the next state change
+  // either way (closed -> its open, open -> its close) so the client's countdown microline is a
+  // single server-computed number — the client never re-derives calendars. `approx` flips when
+  // `now` is past the curated holiday table's horizon (weekend-only degrade): the state is still
+  // served, but consumers flag it as approximate rather than trusting it.
+  function computeOffHoursHome(mk, nowMs) {
+    const s = nowMs - 12 * DAY, e = nowMs + 12 * DAY;   // wide enough to bridge Golden Week / Chuseok spans
+    const approx = !homeCalCovered(mk, new Date(nowMs + HOME_MKTS[mk].utcOff * HOUR).getUTCFullYear());
+    const wins = homeClosedWindows(mk, s, e);
+    for (const a of wins) if (nowMs >= a.enter && nowMs < a.exit)
+      return { closed: true, closeT: a.enter, openT: a.exit, nextT: a.exit, approx: approx || undefined };
+    // open now: the close of the current session = the enter of the next closed window
+    let nxt = null;
+    for (const a of wins) if (a.enter > nowMs && (nxt == null || a.enter < nxt)) nxt = a.enter;
+    return { closed: false, nextT: nxt || undefined, approx: approx || undefined };
+  }
+  function homeStateAll(nowMs) {
+    const out = {};
+    for (const mk in HOME_MKTS) out[mk] = computeOffHoursHome(mk, nowMs);
+    return out;
+  }
+  // Static wire defs for the client's chips/ribbon (wall-clock windows + fixed offset + the
+  // curated calendar horizon). One producer: the client renders these, it never re-declares them.
+  const HOME_MKTS_WIRE = {};
+  for (const mk in HOME_MKTS) { const M = HOME_MKTS[mk];
+    HOME_MKTS_WIRE[mk] = { ex: M.ex, off: M.utcOff, o: M.o, c: M.c, lunch: M.lunch || undefined, calThrough: homeCalHorizon(mk) }; }
+  // Row -> its own market state: the foreign-home names read their home exchange, everything
+  // else reads the US cash flag. dc is the daily cache (carries offHoursBy stamped at build).
+  function rowOffState(dc, r) {
+    const mk = homeMkt(r.ticker, r.uni);
+    if (mk && dc && dc.offHoursBy && dc.offHoursBy[mk]) return dc.offHoursBy[mk];
+    return dc ? dc.offHours : null;
+  }
 
   // Quantize one market's snapshot fields (see rnd/sig at top). Never mutates the row —
   // r.feat/r.ref are shared with persistence and the feature math.
@@ -1207,6 +1242,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         // the client renders the bare ticker and shows no tape, never a guess.
         nm: displayName(r.ticker, r.uni) || undefined,
         mlane: macroLane(r.ticker, r.uni) || undefined,
+        // Home-market classification (build 2026.08.14-01): hm = the exchange whose session the
+        // machinery is anchored to for this name (KR/JP/HK; absent = US, the default). hadr is
+        // ADR context ONLY — a US-listed line whose home line leads it overnight; it never
+        // changes anchoring. Both from the curated sectors table — one producer, never re-derived.
+        hm: homeMkt(r.ticker, r.uni) || undefined,
+        hadr: homeAdr(r.ticker) || undefined,
       };
     };
     const markets = activeMarkets().map(mapMarket);
@@ -1214,6 +1255,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // (tabs, studies, treemap, leaders) is untouched until the scope switcher lands in Build B.
     const mainMkts = crypto ? mainMarkets().map(mapMarket) : [];
     const offHours = computeOffHours(Date.now());
+    const homeState = homeStateAll(Date.now());   // KRX/TSE/HKEX open/closed + next flip, for chips/countdowns/live-gap mode on foreign-home rows
     // live warmup counts: h = markets without hourly features yet, d = markets with no daily
     // closes servable at all (no 370d backfill AND no hourly spine to derive from) — lets the
     // client show "N still backfilling" instead of a mystery placeholder, and poll accordingly
@@ -1232,6 +1274,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     for (const m of markets) csig += markSig(m);
     for (const m of mainMkts) csig += markSig(m);
     csig += "#" + (offHours.closed ? 1 : 0) + ":" + (offHours.closeT || 0) + ":" + (offHours.openT || 0)
+      // Home-market flips ride the signature for the same reason the US one does: a KRX open at
+      // 20:00 ET must flip SMSN's chip/live-gap on the next poll, even while the US board idles.
+      + "#" + ["KR", "JP", "HK"].map((k) => (homeState[k].closed ? 1 : 0) + ":" + (homeState[k].nextT || 0)).join(",")
       + "#" + warmH + "," + warmD
       + "#" + sig(curCorr, 6) + "," + curCorrPct + "," + curCorrN + "," + regimeHist.length
       + "#" + tapeXyz.redBars + "," + (crypto ? tapeMain.redBars : 0)
@@ -1251,6 +1296,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       redBars: { xyz: tapeXyz.redBars, main: crypto ? tapeMain.redBars : 0 },
       v: version || null,
       offHours,
+      // Home sessions (build 2026.08.14-01): static defs (wall-clock windows, fixed UTC offset,
+      // curated-calendar horizon) + the live per-market state. The client renders BOTH — chips,
+      // rails, countdowns, the drawer ribbon — and computes neither.
+      homeMkts: HOME_MKTS_WIRE, homeState,
       warm: { h: warmH, d: warmD },
       regime: { corr: curCorr, corrPct: curCorrPct, corrN: curCorrN, corrSamples: regimeHist.length },
     };
@@ -1315,6 +1364,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let ohlcN = 0, oiN = 0;   // sig terms: names whose latest tuple carries a high, and total OI points — so OHLC upgrades and OI growth bust the cache despite unchanged bar counts
     const nowMs = Date.now();
     const offHours = computeOffHours(nowMs);   // kept here too for client compatibility; the snapshot copy is the fresh one
+    const offHoursBy = homeStateAll(nowMs);    // per-HOME-market states — the foreign-home rows anchor to these, never to the US flag
     let coins = 0, lens = 0;
     for (const r of activeMarkets()) {
       const hs = getHourly(r.coin);   // normalized array spine [[t,o,h,l,c,v], ...]; the boundary engine + priceAsOf are array-indexed
@@ -1329,23 +1379,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         for (const [t, rate] of fh) { const d = Math.floor(t / DAY) * DAY; byDay.set(d, (byDay.get(d) || 0) + rate); }
         funding[r.coin] = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([d, f]) => [d, +f.toFixed(8)]);
       }
-      // overnight + weekend holds (buy at close, sell before open) via the boundary engine; memoized to the spine version
+      // overnight + weekend holds (buy at close, sell before open) via the boundary engine; memoized
+      // to the spine version. RE-ANCHORED per row (build 2026.08.14-01): a foreign-home name's
+      // close->open is its HOME exchange's boundary — 15:30 KST -> 09:00 KST next session for a
+      // KRX name — never the ET one. The liveClose anchor keys off the SAME market's state, so the
+      // live in-progress gap for SMSN runs while KRX is closed, not while NYSE is.
       if (hs.length > 2) {
+        const hmk = homeMkt(r.ticker, r.uni);
         if (r._ovTs !== r.hourlyTs) {
           const start = hs[0][0], end = hs[hs.length - 1][0];
-          const anchors = overnightAnchors(start, end).concat(weekendAnchors(start, end));
+          const anchors = hmk
+            ? homeOvernightAnchors(hmk, start, end).concat(homeWeekendAnchors(hmk, start, end))
+            : overnightAnchors(start, end).concat(weekendAnchors(start, end));
           r._ovClose = runHolds(hs, fh, anchors).map((h) => [Math.floor(h.exit / DAY) * DAY, +h.gross.toFixed(8), +(h.funding || 0).toFixed(8)]).sort((a, b) => a[0] - b[0]);
           r._ovTs = r.hourlyTs;
         }
         if (r._ovClose && r._ovClose.length) overnight[r.coin] = r._ovClose;
-        if (offHours.closed) { const pc = priceAsOf(hs, offHours.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
+        const oh = hmk ? offHoursBy[hmk] : offHours;
+        if (oh.closed) { const pc = priceAsOf(hs, oh.closeT, 3 * HOUR); if (pc > 0) liveClose[r.coin] = +pc.toFixed(8); }  // price at the last close, for the live in-progress gap
       }
     }
-    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + ohlcN + ":" + oiN;   // session flip busts it (fresh liveClose/gap direction); ohlcN/oiN bust it as warm closes-only bars upgrade in place
+    const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + ["KR", "JP", "HK"].map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
     if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
     dailySig = sig; dailyVer = Date.now();   // content changed -> new ETag + fresh object
     if (crypto) buildDailyMain(daily, funding, oi);
-    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, liveClose, oi };
+    dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, offHoursBy, liveClose, oi };
   }
 
   // ---- signal engine (served at /api/signals) ---------------------------------------------
@@ -1432,7 +1490,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     const hs = getHourly(r.coin);
     if (hs.length > 48) {
-      const wins = overnightAnchors(hs[0][0], hs[hs.length - 1][0]).concat(weekendAnchors(hs[0][0], hs[hs.length - 1][0]));
+      // Home-anchored windows for foreign-home names (build 2026.08.14-01): SMSN's gap σ and
+      // overnight drift are measured across KRX boundaries, or they're measuring nothing.
+      const hmk = homeMkt(r.ticker, r.uni);
+      const wins = hmk
+        ? homeOvernightAnchors(hmk, hs[0][0], hs[hs.length - 1][0]).concat(homeWeekendAnchors(hmk, hs[0][0], hs[hs.length - 1][0]))
+        : overnightAnchors(hs[0][0], hs[hs.length - 1][0]).concat(weekendAnchors(hs[0][0], hs[hs.length - 1][0]));
       st.gap = studyGapFade(hs, wins, 3 * HOUR);
       st.ondrift = offDriftStats(hs, wins, 3 * HOUR);
     }
@@ -2879,7 +2942,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           }
         }
       }
-      if (dc.offHours && dc.offHours.closed && st.gap && st.gap.sd > 0) {
+      const rOff = rowOffState(dc, r);   // foreign-home names gap on THEIR market's clock (2026.08.14-01)
+      if (rOff && rOff.closed && st.gap && st.gap.sd > 0) {
         const pc = dc.liveClose[r.coin];
         if (pc > 0) {
           const g = (r.px / pc - 1) * 100, gz = Math.abs(g) / st.gap.sd;
@@ -3005,8 +3069,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           const evd = evidence(null, "prem", null, undefined, r.uni);
           const sig = mkSignal(r, "prem", `${prem >= 0 ? "+" : ""}${prem.toFixed(1)}bp vs oracle (${z >= 0 ? "+" : ""}${z.toFixed(1)}\u03c3 of its 7d baseline)`,
             (Math.abs(z) - 2) * 12 + 18, evd,
-            { horizon: dc.offHours && dc.offHours.closed ? "cash market closed \u2014 live off-hours price discovery" : EV_META.prem.horizon });
-          sig.play = playbook("prem", { prem, oracle: r.oracle, closed: !!(dc.offHours && dc.offHours.closed) });
+            { horizon: rOff && rOff.closed ? "cash market closed \u2014 live off-hours price discovery" : EV_META.prem.horizon });
+          sig.play = playbook("prem", { prem, oracle: r.oracle, closed: !!(rOff && rOff.closed) });
           out.push(sig); openLedger(r, "prem", sig, prem >= 0 ? -1 : 1, { prem0: +prem.toFixed(1) });
         }
       }
@@ -3417,6 +3481,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const cls = U.classOf(r);
         return {
           coin: r.coin, ticker: r.ticker, sector: U.isCrypto ? "Crypto" : classifyCached(r.ticker).sector, assetClass: cls,
+          hm: U.isCrypto ? undefined : (homeMkt(r.ticker, r.uni) || undefined),   // home-session shading on the per-ticker activity clock
           hours: Array.isArray(r.hourlyRaw) ? r.hourlyRaw.length : 0,
           funding: r.fundH ? r.fundH.size : 0,
         };
@@ -3496,8 +3561,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const end = Math.floor(now / HOUR) * HOUR;
     const start = end - (U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS) * DAY;
     const tol = 3 * HOUR;
-    const eq = U.roster().filter((r) =>
+    // Foreign-home names are EXCLUDED from the pooled ET session composite (build 2026.08.14-01):
+    // their close->open lives on KRX/TSE/HKEX boundaries, so pooling them under ET anchors would
+    // contaminate the composite in both directions. Forward-only, per the frozen-geometry doctrine —
+    // per-ticker home-anchored holds still ship on /api/daily; only this cross-name pooling drops them.
+    const all = U.roster().filter((r) =>
       U.studyEligible(r) && Array.isArray(r.hourlyRaw) && r.hourlyRaw.length >= SESSION_MIN_SPINE);
+    const eq = U.isCrypto ? all : all.filter((r) => !homeMkt(r.ticker, r.uni));
+    const foreignExcluded = all.length - eq.length;
     if (eq.length < SESSION_MIN_EQUITIES) return { pending: true, equityCount: eq.length, need: SESSION_MIN_EQUITIES, isCrypto: U.isCrypto };
     // Equity: cash / overnight / weekend around the US session. Crypto (24/7): the two holds that
     // survive a continuous book — the whole UTC day, and the Fri->Mon weekend. No cash leg exists.
@@ -3516,6 +3587,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       window: { start, end, days: U.isCrypto ? MAIN_SPINE_DAYS : HOURLY_HISTORY_DAYS },
       isCrypto: U.isCrypto,
       equityCount: eq.length,
+      foreignExcluded,   // KRX/TSE/HKEX-home names dropped from the ET pooled composite — declared so absence is auditable
       fundingEndpoint: fundingCoverage(U).endpoint,
       sessions,
       headline: {   // the "buy at close, sell before open" story lives in the overnight session
@@ -3562,6 +3634,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const vm = _nanmean(raw.vol), qm = _nanmean(raw.volume);
       tickers.push({
         coin: r.coin, ticker: r.ticker, sector: U.isCrypto ? "Crypto" : classifyCached(r.ticker).sector, assetClass: cls,
+          hm: U.isCrypto ? undefined : (homeMkt(r.ticker, r.uni) || undefined),   // home-session shading on the per-ticker activity clock
         vr: _round(_normTo(raw.vol, vm), 3),
         qr: _round(_normTo(raw.volume, qm), 3),
         fund: _round(raw.fund, 9),

@@ -73,6 +73,23 @@ function setSectorOverlay(list) {
 }
 function overlayFor(t) { return OVERLAY.get(norm(t)) || null; }
 
+// ---- home-market classification (build 2026.08.14-01) -----------------------------------------
+// Foreign listings WITHOUT a US symbol: the reference line under the perp discovers price on an
+// Asian exchange, so the ET session machinery is re-anchored to the home market for these names
+// (see compute.js HOME_MKTS). Curated and NEVER guessed — an unlisted ticker returns null and
+// keeps the full ET machinery, which is the correct default for every US listing.
+// KR = KRX (SMSN Samsung 005930, SKHX SK Hynix 000660, HYUNDAI 005380).
+// JP = TSE (SOFTBANK 9984, KIOXIA 285A, IBIDEN 4062).
+// HK = HKEX (ZHIPU 02513.HK and MINIMAX — both listed Hong Kong, Jan 2026).
+const HOME_MKT = { SMSN: "KR", SKHX: "KR", HYUNDAI: "KR", SOFTBANK: "JP", KIOXIA: "JP", IBIDEN: "JP", ZHIPU: "HK", MINIMAX: "HK" };
+// ADR ANNOTATION ONLY — these are US-listed instruments, so every ET anchor is already correct
+// for the listed line; the home code is context (the overseas line leads it overnight), and it
+// must NEVER route a name into the home-anchored machinery. Kept in a separate table so the two
+// meanings cannot be conflated by a future edit.
+const HOME_ADR = { TSM: "TW", ASML: "NL", ARM: "GB", BABA: "HK" };
+function homeMkt(t, uni) { if (uni === "main") return null; return HOME_MKT[norm(t)] || null; }
+function homeAdr(t) { return HOME_ADR[norm(t)] || null; }
+
 // ---- industry groups (build 2026.07.28-04) ----------------------------------------------------
 // A finer, trader-oriented grouping LAYERED ON TOP of the GICS sector — never replacing it.
 // Rationale: Info Tech is a ~70-ticker mega-bucket where AAPL/MSFT volume-weighting drowns a
@@ -515,5 +532,5 @@ function macroLane(t, uni) {
   return L || null;
 }
 
-module.exports = { classify, nameAliases, companyName, displayName, macroLane, MACRO_LANES, DISPLAY_NAMES, CRYPTO_NAMES, IND_TICKERS, SECTOR_TICKERS, setSectorOverlay, overlayFor, PREIPO, GICS_SECTORS };
+module.exports = { classify, nameAliases, companyName, displayName, macroLane, MACRO_LANES, DISPLAY_NAMES, CRYPTO_NAMES, IND_TICKERS, SECTOR_TICKERS, setSectorOverlay, overlayFor, PREIPO, GICS_SECTORS, homeMkt, homeAdr };
 

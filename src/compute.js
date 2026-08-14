@@ -455,6 +455,95 @@ function closedWindows(startMs, endMs) {
 function overnightAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "overnight"); }
 function weekendAnchors(startMs, endMs) { return closedWindows(startMs, endMs).filter((a) => a.tag === "weekend"); }
 
+// ---- home-market calendars: KRX / TSE / HKEX (build 2026.08.14-01) --------------------------
+// The xyz universe carries foreign listings with no US symbol (SMSN, SKHX, HYUNDAI on KRX;
+// SOFTBANK, KIOXIA, IBIDEN on TSE; ZHIPU, MINIMAX on HKEX). Their reference line discovers
+// price in the ASIAN session — the mirror image of everything the ET machinery assumes — so
+// their gap/overnight/session anchors are RE-ANCHORED to the home exchange, never left on ET.
+// Doctrine mirrors the US calendar above with one deliberate difference: US holidays are
+// algorithmic (stable federal rules), but Seollal/Chuseok/CNY are lunar and Japan's calendar
+// mixes Happy-Monday floats with equinoxes — computing those is where silent bugs live, so
+// closures are a CURATED STATIC TABLE per year (sources: KRX / JPX / HKEX published calendars).
+// Outside the table's horizon the engine degrades to weekend-only and homeCalCovered() reports
+// it, so consumers can FLAG the approximation instead of shipping a wrong anchor as truth.
+// Lunch halts (TSE 11:30-12:30, HKEX 12:00-13:00 local) are deliberately NOT modeled in the
+// hold anchors: the hourly spine cannot resolve a 60-minute intra-day gap, and a session split
+// in two would double every overnight window. One day = one session, open -> close.
+// KST/JST/HKT observe no DST — the fixed utcOff is exact, not an approximation.
+const HOME_MKTS = {
+  KR: { ex: "KRX",  utcOff: 9, o: [9, 0],  c: [15, 30], half: null,    lunch: null },
+  JP: { ex: "TSE",  utcOff: 9, o: [9, 0],  c: [15, 30], half: null,    lunch: [[11, 30], [12, 30]] },
+  HK: { ex: "HKEX", utcOff: 8, o: [9, 30], c: [16, 0],  half: [12, 0], lunch: [[12, 0], [13, 0]] },
+};
+// Curated closures, LOCAL calendar dates. status 2 = closed, 1 = half day (close at `half`).
+// 2026 per the exchanges' published calendars (KRX incl. Jun 3 election + Dec 31 year-end;
+// TSE incl. Jan 2 + Dec 31 exchange closures and the Sep 22 bridge holiday; HKEX half days
+// Christmas Eve + New Year's Eve close 12:00 HKT). Extending the horizon is a curated edit:
+// add the next year's rows when the exchange publishes them — never compute lunar dates here.
+const HOME_CAL = {
+  KR: { 2026: { closed: ["1-1", "2-16", "2-17", "2-18", "3-2", "5-1", "5-5", "5-25", "6-3", "7-17", "8-17", "9-24", "9-25", "10-5", "10-9", "12-25", "12-31"], half: [] } },
+  JP: { 2026: { closed: ["1-1", "1-2", "1-12", "2-11", "2-23", "3-20", "4-29", "5-4", "5-5", "5-6", "7-20", "8-11", "9-21", "9-22", "9-23", "10-12", "11-3", "11-23", "12-31"], half: [] } },
+  HK: { 2026: { closed: ["1-1", "2-17", "2-18", "2-19", "4-3", "4-6", "4-7", "5-1", "5-25", "6-19", "7-1", "10-1", "10-19", "12-25"], half: ["12-24", "12-31"] } },
+};
+function homeCalCovered(mk, y) { const c = HOME_CAL[mk]; return !!(c && c[y]); }
+function homeCalHorizon(mk) { const c = HOME_CAL[mk]; if (!c) return null; let hi = null; for (const y of Object.keys(c)) { const n = +y; if (hi == null || n > hi) hi = n; } return hi; }
+// 0 = regular, 1 = half day, 2 = closed. Outside the curated horizon: weekend-only (degrade),
+// reported separately via homeCalCovered so consumers flag it rather than trust it.
+const _homeCalIdx = new Map();   // mk|y -> Map("mo-d" -> status)
+function homeDayStatus(mk, y, mo, d) {
+  const wd = wallWd(y, mo, d);
+  if (wd === 0 || wd === 6) return 2;
+  const key = mk + "|" + y;
+  let m = _homeCalIdx.get(key);
+  if (m === undefined) {
+    const c = HOME_CAL[mk] && HOME_CAL[mk][y];
+    m = c ? new Map() : null;
+    if (c) { for (const s of c.closed) m.set(s, 2); for (const s of (c.half || [])) m.set(s, 1); }
+    _homeCalIdx.set(key, m);
+  }
+  if (!m) return 0;   // outside horizon — weekend-only degrade
+  return m.get(mo + "-" + d) || 0;
+}
+// Fixed-offset wall clock (no DST in KST/JST/HKT): UTC = local wall - utcOff.
+function homeWallToUtc(mk, y, mo, d, h, mi) { return Date.UTC(y, mo - 1, d, h, mi) - HOME_MKTS[mk].utcOff * HOUR; }
+function homeDays(mk, startMs, endMs) {
+  const off = HOME_MKTS[mk].utcOff * HOUR, out = [];
+  let t = Math.floor((startMs + off) / DAY) * DAY;
+  for (; t - off <= endMs; t += DAY) { const x = new Date(t); out.push({ y: x.getUTCFullYear(), mo: x.getUTCMonth() + 1, d: x.getUTCDate() }); }
+  return out;
+}
+// All home cash sessions overlapping [startMs, endMs] (padded like marketSessions above).
+function homeMarketSessions(mk, startMs, endMs) {
+  const M = HOME_MKTS[mk]; if (!M) return [];
+  const out = [];
+  for (const w of homeDays(mk, startMs - DAY, endMs + DAY)) {
+    const st = homeDayStatus(mk, w.y, w.mo, w.d);
+    if (st === 2) continue;
+    const cl = st === 1 && M.half ? M.half : M.c;
+    out.push({ open: homeWallToUtc(mk, w.y, w.mo, w.d, M.o[0], M.o[1]), close: homeWallToUtc(mk, w.y, w.mo, w.d, cl[0], cl[1]) });
+  }
+  return out;
+}
+function homeCashAnchors(mk, startMs, endMs) {
+  const out = [];
+  for (const s of homeMarketSessions(mk, startMs, endMs))
+    if (s.open >= startMs && s.close <= endMs) out.push({ enter: s.open, exit: s.close, tag: "cash" });
+  return out;
+}
+// Same 40h overnight/weekend split as the ET engine — Chuseok/Golden-Week spans behave like
+// one hold, exactly as US holiday weekends do.
+function homeClosedWindows(mk, startMs, endMs) {
+  const ses = homeMarketSessions(mk, startMs - 8 * DAY, endMs + 8 * DAY), out = [];
+  for (let i = 0; i + 1 < ses.length; i++) {
+    const enter = ses[i].close, exit = ses[i + 1].open;
+    if (enter >= startMs && exit <= endMs)
+      out.push({ enter, exit, tag: exit - enter < 40 * HOUR ? "overnight" : "weekend" });
+  }
+  return out;
+}
+function homeOvernightAnchors(mk, startMs, endMs) { return homeClosedWindows(mk, startMs, endMs).filter((a) => a.tag === "overnight"); }
+function homeWeekendAnchors(mk, startMs, endMs) { return homeClosedWindows(mk, startMs, endMs).filter((a) => a.tag === "weekend"); }
+
 // ---- 24/7 (crypto) anchor generators -------------------------------------------------------
 // A perp book never closes, so cash/overnight/weekend are meaningless. The two holds that DO carry
 // meaning on a continuous book:
@@ -3730,6 +3819,8 @@ module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, bucketO
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
+  HOME_MKTS, homeCalCovered, homeCalHorizon, homeDayStatus, homeWallToUtc, homeMarketSessions,
+  homeCashAnchors, homeClosedWindows, homeOvernightAnchors, homeWeekendAnchors,
   utcDayAnchors, cryptoWeekendAnchors,
   usDayStatus, marketSessions, closedWindows,
   summarizeEvents, retStd, dailyRets, intrabarCross, studyBigMove, studyBreakout, studyVolShift, studyGapFade, studyFundFlip,
