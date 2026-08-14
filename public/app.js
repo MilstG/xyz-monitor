@@ -858,7 +858,9 @@ function pctInner(v){ if(v===undefined)return '<span class="ph">·</span>'; cons
 function rowSessState(r){ return (r&&r.hm&&state.homeState&&state.homeState[r.hm])?state.homeState[r.hm]:state.offHours; }
 function sessEx(mk){ const d=state.homeMkts&&state.homeMkts[mk]; return d?d.ex:mk; }
 function sessOpenNow(mk){ const st=state.homeState&&state.homeState[mk]; return st?!st.closed:false; }
-function sessDur(ms){ if(!(ms>0)) return '0m'; const h=Math.floor(ms/3600000), m=Math.round(ms%3600000/60000); return (h?h+'h ':'')+m+'m'; }
+function sessDur(ms){ if(!(ms>0)) return '0m'; const h=Math.floor(ms/3600000), m=Math.round(ms%3600000/60000);
+  if(h>=48) return Math.floor(h/24)+'d '+(h%24)+'h';   // -03: '80h 26m' is a math quiz; '3d 8h' is a read
+  return (h?h+'h ':'')+m+'m'; }
 function _p2(n){ return String(n).padStart(2,'0'); }
 function _etOffMin(){ const p=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date());
   const g=t=>+p.find(x=>x.type===t).value; let h=g('hour'); if(h===24)h=0;

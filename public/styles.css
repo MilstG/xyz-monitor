@@ -1370,10 +1370,10 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 .sesschip.apx{border-style:dashed;}   /* past the curated calendar horizon — weekend-only approximation */
 /* Variant C — status rail on the row's left edge (foreign-home rows only). */
 td.tkc{position:relative;}
-.hrail{position:absolute;left:0;top:0;bottom:0;width:2px;background:#232c3b;}
+.hrail{position:absolute;left:0;top:0;bottom:0;width:2px;background:#435062;}   /* -03: closed state must be VISIBLE on the dark rows — a state indicator that vanishes half the time is half an indicator */
 .hrail.on{background:var(--accent);box-shadow:0 0 4px rgba(251,139,30,.35);}
 /* Variant E — countdown microline under the ticker. */
-.cds{font-size:9px;color:var(--faint);letter-spacing:.04em;margin-top:1px;line-height:1.2;white-space:nowrap;}
+.cds{font-size:8.5px;color:var(--faint);letter-spacing:.03em;margin-top:0;line-height:1.05;white-space:nowrap;}   /* -03: tighter — the microline was growing foreign rows into visual boxes */
 .cds.on{color:rgba(251,139,30,.75);}   /* home exchange open — counting down to its close */
 /* Variant A — dim toggle: fade the row, keep the chip/rail readable. */
 tr.dimoff td{opacity:.45;}
