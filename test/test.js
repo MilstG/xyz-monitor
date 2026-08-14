@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.14-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.14-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16883,3 +16883,62 @@ test("anchored-open wiring pins: poller snapshot path + client column family, de
       assert.ok(css.includes(pin), "css pin missing: " + pin);
   });
 }
+
+// The -01 field-drop bug, made unrepeatable (same shape as -04/ind): the poller shipped hm/hadr,
+// applySnapshot's EXPLICIT merge dropped them, every Sess chip rendered US. String pins on the
+// wire and on sessCell could not catch it — only pushing a payload through the REAL ingestion
+// path can. -17 harness pattern, exactly as the -05 ind regression does.
+test("2026.08.14-02 regression: applySnapshot carries hm/hadr into state.rows; chip + live gap read them", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const { els, mk } = _sessDomStub();
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/" }, matchMedia: () => ({ matches: false, addEventListener() {} }) };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  try {
+    const S = require("../src/sectors");
+    let H = null;
+    eval(app + "\n; H={state, applySnapshot, sessCell, rowSessState, railHtml, cdsHtml};");
+    // Rows EXACTLY as the poller ships them — hm/hadr from the same curated accessors, one code path.
+    const wire = (t) => ({ coin: "xyz:" + t, ticker: t, uni: "xyz",
+      hm: S.homeMkt(t, "xyz") || undefined, hadr: S.homeAdr(t) || undefined,
+      px: 100, prevDay: 99, vol: 1e8, oi: 5e7 });
+    const homeState = { KR: { closed: true, closeT: 1, openT: 2, nextT: Date.now() + 3600000 },
+      JP: { closed: false, nextT: Date.now() + 7200000 }, HK: { closed: true, nextT: Date.now() + 60000 } };
+    const homeMkts = { KR: { ex: "KRX", off: 9, o: [9, 0], c: [15, 30], calThrough: 2026 },
+      JP: { ex: "TSE", off: 9, o: [9, 0], c: [15, 30], lunch: [[11, 30], [12, 30]], calThrough: 2026 },
+      HK: { ex: "HKEX", off: 8, o: [9, 30], c: [16, 0], lunch: [[12, 0], [13, 0]], calThrough: 2026 } };
+    H.applySnapshot({ markets: ["SMSN", "SOFTBANK", "ZHIPU", "TSM", "NVDA"].map(wire), mainMarkets: [], dataTs: 7,
+      homeMkts, homeState });
+    // 1) the fields SURVIVE ingestion — the exact copy that was missing in -01
+    assert.equal(H.state.rows.get("xyz:SMSN").hm, "KR", "hm must survive the explicit merge");
+    assert.equal(H.state.rows.get("xyz:SOFTBANK").hm, "JP");
+    assert.equal(H.state.rows.get("xyz:ZHIPU").hm, "HK");
+    assert.equal(H.state.rows.get("xyz:TSM").hm, undefined, "ADRs stay US on the wire and after the merge");
+    assert.equal(H.state.rows.get("xyz:TSM").hadr, "TW", "ADR annotation survives beside it");
+    assert.equal(H.state.rows.get("xyz:NVDA").hm, undefined);
+    // 2) the defs + live states landed
+    assert.equal(H.state.homeMkts.KR.ex, "KRX"); assert.equal(H.state.homeState.KR.closed, true);
+    // 3) the renderers actually read the merged rows — chips per market, not a wall of US
+    assert.ok(/>KR</.test(H.sessCell(H.state.rows.get("xyz:SMSN"))), "SMSN chip renders KR");
+    assert.ok(/sesschip on/.test(H.sessCell(H.state.rows.get("xyz:SOFTBANK"))), "open TSE lights the JP chip");
+    assert.ok(/US\u00b7TW/.test(H.sessCell(H.state.rows.get("xyz:TSM"))), "TSM chip renders US\u00b7TW");
+    assert.ok(/hrail/.test(H.railHtml(H.state.rows.get("xyz:SMSN"))) && /KRX opens/.test(H.cdsHtml(H.state.rows.get("xyz:SMSN"))),
+      "rail + countdown render from the merged row");
+    // 4) live gap mode keys off the ROW's market: SMSN reads KR's closed state even with US open
+    H.state.offHours = { closed: false };
+    assert.equal(H.rowSessState(H.state.rows.get("xyz:SMSN")).closed, true, "SMSN gap runs on Seoul's clock");
+    assert.equal(H.rowSessState(H.state.rows.get("xyz:NVDA")).closed, false, "US names keep the US flag");
+    // 5) lockstep self-heal: a payload without hm CLEARS a stale chip
+    H.applySnapshot({ markets: [Object.assign(wire("SMSN"), { hm: undefined })], mainMarkets: [], dataTs: 8, homeMkts, homeState });
+    assert.equal(H.state.rows.get("xyz:SMSN").hm, undefined, "hm rides the snapshot in lockstep — stale classes self-heal");
+  } finally {
+    global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
+  }
+});
