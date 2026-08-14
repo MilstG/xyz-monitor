@@ -81,7 +81,11 @@ function overlayFor(t) { return OVERLAY.get(norm(t)) || null; }
 // KR = KRX (SMSN Samsung 005930, SKHX SK Hynix 000660, HYUNDAI 005380).
 // JP = TSE (SOFTBANK 9984, KIOXIA 285A, IBIDEN 4062).
 // HK = HKEX (ZHIPU 02513.HK and MINIMAX — both listed Hong Kong, Jan 2026).
-const HOME_MKT = { SMSN: "KR", SKHX: "KR", HYUNDAI: "KR", SOFTBANK: "JP", KIOXIA: "JP", IBIDEN: "JP", ZHIPU: "HK", MINIMAX: "HK" };
+const HOME_MKT = { SMSN: "KR", SKHX: "KR", HYUNDAI: "KR", SOFTBANK: "JP", KIOXIA: "JP", IBIDEN: "JP", ZHIPU: "HK", MINIMAX: "HK",
+  // Index perps (2026.08.14-03): the cash Nikkei/KOSPI only PRINT during TSE/KRX hours — outside
+  // them the reference level freezes exactly like a single name's book, so they anchor home too.
+  // (Futures trade nearly 24h elsewhere, but the oracle tracks the index, not CME/SGX futures.)
+  JP225: "JP", KR200: "KR" };
 // ADR ANNOTATION ONLY — these are US-listed instruments, so every ET anchor is already correct
 // for the listed line; the home code is context (the overseas line leads it overnight), and it
 // must NEVER route a name into the home-anchored machinery. Kept in a separate table so the two
