@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.14-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.14-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16767,6 +16767,10 @@ test("anchored-open wiring pins: poller snapshot path + client column family, de
     for (const t of ["SMSN", "SKHX", "HYUNDAI"]) assert.equal(homeMkt(t), "KR", t + " -> KR");
     for (const t of ["SOFTBANK", "KIOXIA", "IBIDEN"]) assert.equal(homeMkt(t), "JP", t + " -> JP");
     for (const t of ["ZHIPU", "MINIMAX"]) assert.equal(homeMkt(t), "HK", t + " -> HK (HKEX listings, Jan 2026)");
+    // Index perps (-03): the cash index only prints during home hours — same freeze as a single name.
+    assert.equal(homeMkt("JP225"), "JP", "Nikkei perp anchors to TSE");
+    assert.equal(homeMkt("KR200"), "KR", "KOSPI perp anchors to KRX");
+    assert.equal(homeMkt("KORU"), null, "US-listed leveraged ETF stays US — the listed line IS the reference");
     for (const t of ["NVDA", "TSM", "ASML", "ARM", "BABA", "AAPL"]) assert.equal(homeMkt(t), null, t + " keeps the full ET machinery");
     assert.equal(homeMkt("SMSN", "main"), null, "crypto scope never routes to a home market");
     assert.equal(homeMkt("smsn"), "KR", "norm() applies — case-insensitive");
