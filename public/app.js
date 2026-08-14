@@ -424,6 +424,12 @@ function applySnapshot(s){
       // Audit-overlay provenance rides the same payload in lockstep: absent MEANS curated — clear
       // rather than keep, or a reverted overlay entry would wear a stale "auto" chip until reload.
       r.secAuto=(m.secAuto!==undefined)?m.secAuto:undefined; }
+    // Home-market classification rides EVERY snapshot in lockstep: absent on the wire MEANS US
+    // (the default), so copy unconditionally — keep-on-absent would freeze a stale KR/JP/HK chip
+    // if a name ever left the curated table. (2026.08.14-02: the -01 miss was the -04 `ind` bug
+    // again — the wire carried hm/hadr, this explicit merge dropped them, every chip rendered US.
+    // The regression below pushes a payload through the REAL applySnapshot, not string pins.)
+    r.hm=(m.hm!==undefined)?m.hm:undefined; r.hadr=(m.hadr!==undefined)?m.hadr:undefined;
     // 5m/15m ring references: absence on the wire MEANS no honest reference right now (server
     // warm-up or a feed gap at the lookback point) — clear rather than keep, or a long-lived page
     // would compute a "5m" change against a reference minutes older than its label.
