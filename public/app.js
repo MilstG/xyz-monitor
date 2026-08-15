@@ -3567,7 +3567,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
+const HASH_VIEWS=new Set(['markets','focus','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -5540,6 +5540,7 @@ function showView(v){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
   setHidden('view-markets', v!=='markets');
+  setHidden('view-focus', v!=='focus');
   setHidden('view-trend', v!=='trend');
   setHidden('view-sectors', v!=='sectors');
   setHidden('view-corr', v!=='corr');
@@ -5551,6 +5552,7 @@ function showView(v){
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
   setHidden('view-admin', v!=='admin');
+  if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
   if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
   if(v==='sessions') renderSessions();
@@ -8206,6 +8208,15 @@ document.querySelectorAll('#corrtop button').forEach(b=>{ if(+b.dataset.k===stat
 let corrSearchT=null;
 // ===== per-tab help ("?" in the nav): how to READ each view, not just what it shows =====
 const HELP={
+focus:`
+<div class="hlp-h">What this list is</div>
+<p>Six seats, <b>stamped once at the 09:30 ET cash open</b>, one late fill at +1h, then immutable for the day — a compressed morning scan, not a signal. The engine reads only what the board already computed (gap machinery, clock-matched RVOL, the OI history, the earnings calendar, the news tape, the 30d extremes) and freezes it. It never reshuffles at 10:47 because a number ticked; yesterday's list stays viewable exactly as stamped.</p>
+<div class="hlp-h">How seats are earned</div>
+<p>A disclosed <b>loudness ordering</b> (in compute, one formula): |gap σ| + RVOL excess + |ΔOI| + a flat earnings boost + a small headline count. Every unit is the name's <b>own distribution</b> — a +1.1% gap on a sleepy name outranks +2.9% on a high-beta one when the σ says so. <b>Max 2 seats per cluster</b> (curated industry): six seats should be six trades, not one theme wearing six tickers. The cut line discloses what just missed and why (rank vs cluster cap). Foreign-home names (KRX/TSE/HKEX) are excluded by doctrine — their gap anchors to the wrong exchange for an ET open stamp. $200k volume floor: a seat you cannot exit is not a seat.</p>
+<div class="hlp-h">The +1h columns</div>
+<p><b>sVWAP</b>, <b>1H HI</b>, <b>1H LO</b> (actual prices) fill once at 10:30 ET from the 5m archive and freeze. The <b>1H RANGE</b> bar shows where the open sat in the hour's eventual range (grey) vs the 10:30 print (amber) — the "who won the first hour" read. A name missing from the archive shows dashes, never guesses.</p>
+<div class="hlp-h">The chart (▦)</div>
+<p>3m/5m/15m candles aggregated from <b>one live 1-minute pull</b> covering the pre-open hour + session — one source, three views, and the gap is visible forming in the dark pre-open band. The frozen 1H HI/LO and open draw <b>verbatim from the stamped row</b>; the VWAP line is the chart's own series (labeled), with the frozen board sVWAP restated in the header so the two sit side by side rather than being conflated. Crosshair for exact OHLC.</p>`,
 markets:`
 <div class="hlp-h">The table</div>
 <p>One row per market, one column per lens. The <b>window selector</b> (1h–30d) re-anchors every windowed column at once: <b>vs S&amp;P</b>, <b>ΔOI</b>, <b>Squeeze</b>, <b>Carry</b>, and Avg Range all answer "over this window". Click any header to sort; drag in the column menu (⚙) to reorder or hide. Cell shading scales with the size of the move — a wall of deep red 7d cells IS the market breadth read. <b>★</b> pins a name to the top. Everything deep-links: the URL carries your view, so a layout can be shared. <b>Layouts</b> saves the whole arrangement as a named view — columns + order, sort, window, vol/OI filters, ★-only — and switches between them in one click; there is no one-size-fits-all table. The active name shows on the button, with a • when the live view has drifted from the saved one (open the menu to re-save). Stored per browser, so the phone can hold different layouts than the desktop. The ticker search box and the scope toggle are deliberately not part of a layout.</p>
@@ -8355,7 +8366,7 @@ news:`
 function openHelp(){
   const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
   const v=state.scope==='crypto'?'markets':state.view;
-  const TITLES={markets:'Markets',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest'};
+  const TITLES={markets:'Markets',focus:'Focus',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest'};
   m.innerHTML=`<div class="hlp-head">How to read: ${TITLES[v]||v}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
     +(HELP[v]||HELP.markets);
@@ -8372,7 +8383,7 @@ function closeHelp(){ const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=
 // live universe can't be jumped to. Results are: matching tabs first, then matching tickers. Enter
 // opens the ticker's drawer; Shift+Enter opens its AI report; a tab row switches tabs.
 const CMDK_TABS=[
-  {v:'markets',label:'Markets'},{v:'trend',label:'Trend'},{v:'sectors',label:'Sectors'},
+  {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'trend',label:'Trend'},{v:'sectors',label:'Sectors'},
   {v:'corr',label:'Correlation'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
   {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'admin',label:'Admin'}];
@@ -10099,4 +10110,328 @@ async function loadAiRecent(){
       `<table class="ai-rec"><tr><th>ticker</th><th>uni</th><th>read</th><th>ev</th><th>generated</th><th>state</th></tr>${rows}</table>`;
     box.querySelectorAll('[data-aicoin]').forEach(el2=>el2.addEventListener('click',()=>{ aiPick(el2.dataset.aicoin); }));
   }catch(_){}
+}
+
+// ===== FOCUS tab (build 2026.08.15-01) ==========================================================
+// Six seats, frozen at the cash open, one +1h fill at 10:30 ET, immutable for the rest of the day.
+// Everything rendered here is the server's stamped payload RESTATED — the client re-derives
+// nothing: gap/σ/RVOL/ΔOI/level distances and the +1h record all arrive frozen from /api/focus,
+// and the chart's reference lines are those exact numbers. The only chart-local series is the
+// plotted VWAP line, which is necessarily computed from the exact candles on screen (a continuous
+// line cannot be shipped as one frozen scalar) and is labeled as the chart series; the frozen
+// board sVWAP is restated verbatim in the modal header so any divergence is visible, not hidden.
+const FOC={ data:null, timer:0, sortK:null, sortDir:-1, showPrev:false, order:null, vis:null };
+const FOC_LS='xyz-focus-cols';
+function focPrefsLoad(){ try{ const p=JSON.parse(store.get(FOC_LS)||'null');
+  if(p&&Array.isArray(p.order)&&p.vis&&typeof p.vis==='object'){ FOC.order=p.order; FOC.vis=p.vis; } }catch(_){} }
+function focPrefsSave(){ try{ store.set(FOC_LS, JSON.stringify({order:FOC.order, vis:FOC.vis})); }catch(_){} }
+function focPx(v){ if(v==null||!isFinite(v)) return '—'; return v>=500?v.toFixed(1):v>=100?v.toFixed(2):v>=1?v.toFixed(3):v.toPrecision(4); }
+function focSgn(v,d){ if(v==null||!isFinite(v)) return null; const n=v.toFixed(d==null?1:d); return (v>0?'+':'')+n; }
+function focCls(v){ return v>0?'pos':v<0?'neg':''; }
+function focNa(tip){ return `<span class="na" data-tip="${esc(tip||'not available — honest null, never a guess')}">—</span>`; }
+// Chips: pure display assembly of the row's own stamped numbers — the WHY strip.
+function focChips(p){
+  const c=[];
+  if(p.ern) c.push(['ern','ERN '+(p.ern==='bmo'?'BMO':'AMC'), p.ern==='bmo'?'Reported this morning before the open (Finnhub calendar)':'Reported yesterday after the close (Finnhub calendar)']);
+  if(p.gapSigma!=null&&isFinite(p.gapSigma)&&Math.abs(p.gapSigma)>=0.7)
+    c.push(['gap','GAP '+focSgn(p.gapPct)+'%', `${focSgn(p.gapSigma)}σ of this name's own overnight gaps (σ=${p.gapSd!=null?p.gapSd.toFixed(2)+'%':'—'})`]);
+  if(p.rvol!=null&&p.rvol>=1.3) c.push(['rvol','RVOL '+p.rvol.toFixed(1)+'×','Clock-matched: this hour vs the same clock hour\u2019s prior-month median notional']);
+  if(p.oiDelta!=null&&Math.abs(p.oiDelta)>=5) c.push(['oi','OI '+focSgn(p.oiDelta)+'%','Overnight change in open interest on the HIP-3 perp']);
+  if(p.news24!=null&&p.news24>0) c.push(['news','NEWS '+p.news24,'Headlines matched to this name in the last 24h (News tab feed) — count only, the headlines themselves live on the News tab']);
+  if(p.lvlDistSd!=null) c.push([p.lvlDistSd>=1.5?'void':'lvl', (p.lvlDistSd>=1.5?'ROOM ':'LVL ')+p.lvlDistSd.toFixed(1)+'σ '+(p.lvlSide==='above'?'↑':'↓'),
+    p.lvlDistSd>=1.5?`Nearest 30d extreme is ${p.lvlDistSd.toFixed(1)}σ ${p.lvlSide} — room to move`:`30d ${p.lvlSide==='above'?'high':'low'} only ${p.lvlDistSd.toFixed(1)}σ away — structure ${p.lvlSide==='above'?'overhead':'underfoot'}`]);
+  if(p.cluster) c.push(['clu',esc(p.cluster),'Cluster (curated industry / sector): max 2 seats per cluster — names sharing it are likely the same trade today. Informational, never a gate on your picks.']);
+  return `<span class="focchips">${c.map(x=>`<span class="focchip ${x[0]}" data-tip="${esc(x[2])}">${x[1]}</span>`).join('')}</span>`;
+}
+const FOC_COLS=[
+  {k:'ticker', label:'TICKER', left:1, lock:1, tip:'The six seats, loudest first by default (the disclosed loudness score is the tiebreak ordering, not a signal). ▦ opens today\u2019s session chart. Drag any header to rearrange; ⚙ to show/hide. Foreign-home names (KRX/TSE/HKEX) never appear here — their gap anchors to the wrong exchange for a 09:30 ET stamp.',
+   td:(p)=>`<td class="l focticker">${esc(p.ticker)}<button type="button" class="focchbtn" data-foct="${esc(p.ticker)}" data-tip="Session chart — 3m/5m/15m candles incl. the pre-open hour, chart-series VWAP, and the frozen 1H HI/LO drawn verbatim">▦</button></td>`, sv:p=>p.ticker},
+  {k:'why', label:'WHY', left:1, nosort:1, tip:'Why this name earned a seat — every chip restates a stamped number (hover for it). Chips appear only past their own noise floor; a quiet field is simply absent.',
+   td:(p)=>`<td class="l">${focChips(p)}</td>`},
+  {k:'gap', label:'GAP', tip:'Overnight gap, raw % — previous session\u2019s TRUE close (half days close 13:00 ET; the calendar engine carries that) to the price at the stamp. The dim σ alongside is the same move in units of this name\u2019s OWN overnight-gap distribution: ±0.7σ is noise, ±2σ is an event regardless of the raw %.',
+   td:(p)=>{ if(p.gapPct==null) return `<td>${focNa('no prior-close anchor in the spine')}</td>`;
+     return `<td class="${focCls(p.gapPct)}" data-tip="${esc(`prev close ${focPx(p.prevClose)} → ${focPx(p.px)} at the stamp${p.gapSigma!=null?` · ${focSgn(p.gapSigma)}σ of its own gaps`:' · σ unavailable (fewer than 10 overnight samples)'}`)}">${focSgn(p.gapPct)}%${p.gapSigma!=null?`<span class="focsig">${focSgn(p.gapSigma)}σ</span>`:''}</td>`; }, sv:p=>p.gapPct},
+  {k:'gapS', label:'GAP σ', vis0:0, tip:'The gap in σ units alone, sortable — hidden by default (GAP already carries it inline). Enable to sort by relative surprise instead of raw size.',
+   td:(p)=>p.gapSigma==null?`<td>${focNa('fewer than 10 overnight-gap samples — no σ is claimed')}</td>`:`<td class="${focCls(p.gapSigma)}">${focSgn(p.gapSigma)}σ</td>`, sv:p=>p.gapSigma},
+  {k:'rvol', label:'RVOL', tip:'Clock-matched relative volume at the stamp: the last clock hour vs the same clock hour\u2019s prior-month median notional — the pre-open read. 1.0× = normal for this time of day.',
+   td:(p)=>p.rvol==null?`<td>${focNa('spine too short for a clock-matched norm')}</td>`:`<td>${p.rvol.toFixed(1)}×</td>`, sv:p=>p.rvol},
+  {k:'oid', label:'OI Δ', tip:'Change in open interest over the overnight window (prev close → stamp) on the HIP-3 perp. Dash = the OI series is too sparse on this name to be honest, never a guessed zero.',
+   td:(p)=>p.oiDelta==null?`<td>${focNa('OI history too sparse over the overnight window')}</td>`:`<td class="${focCls(p.oiDelta)}">${focSgn(p.oiDelta)}%</td>`, sv:p=>p.oiDelta},
+  {k:'lvl', label:'→LVL', tip:'Distance to the nearer 30d extreme (high overhead or low underfoot, completed UTC days off the hourly spine) in σ of this name\u2019s own daily moves. Small = stamped into structure; ≥1.5σ = room. The finer level-map read lives on the ticker\u2019s drawer — this column is deliberately the cheap honest subset.',
+   td:(p)=>p.lvlDistSd==null?`<td>${focNa('spine or σ too short for a level read')}</td>`:`<td class="dim" data-tip="${esc(`30d ${p.lvlSide==='above'?'high':'low'} is ${p.lvlDistSd.toFixed(1)}σ ${p.lvlSide}`)}">${p.lvlDistSd.toFixed(1)}σ</td>`, sv:p=>p.lvlDistSd},
+  {k:'vwap', label:'sVWAP', h1:1, tip:'Session VWAP over the first hour (5m archive: Σ typical·vol ÷ Σ vol), and where the 10:30 price sat vs it. Fills once at +1h, then frozen with the row.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+     if(h.vwap==null) return `<td>${focNa('archive bars carried no volume — VWAP not claimed (extremes still real)')}</td>`;
+     const d=h.lastPx>0?((h.lastPx/h.vwap-1)*100):null;
+     return `<td data-tip="${esc(`first-hour VWAP ${focPx(h.vwap)} · 10:30 print ${focPx(h.lastPx)}${d!=null?` (${focSgn(d)}% ${d>=0?'above':'below'})`:''}`)}">${focPx(h.vwap)}${d!=null?` <span class="${focCls(d)}">(${focSgn(d)}%)</span>`:''}</td>`; }, sv:p=>p.h1&&p.h1.vwap!=null&&p.h1.lastPx>0?((p.h1.lastPx/p.h1.vwap-1)*100):null},
+  {k:'hi1', label:'1H HI', h1:1, tip:'Highest PRICE printed in the first hour after the open (5m archive, true bar extremes). Hover for the % from the archive open. Frozen at 10:30 ET.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+     const pc=h.openPx>0?((h.hi/h.openPx-1)*100):null;
+     return `<td class="pos" data-tip="${esc(`${focPx(h.hi)}${pc!=null?` · ${focSgn(pc)}% from the ${focPx(h.openPx)} open`:''} · ${h.bars}/12 bars`)}">${focPx(h.hi)}</td>`; }, sv:p=>p.h1?p.h1.hi:null},
+  {k:'lo1', label:'1H LO', h1:1, tip:'Lowest PRICE printed in the first hour after the open (5m archive, true bar extremes). Hover for the % from the archive open. Frozen at 10:30 ET.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+     const pc=h.openPx>0?((h.lo/h.openPx-1)*100):null;
+     return `<td class="neg" data-tip="${esc(`${focPx(h.lo)}${pc!=null?` · ${focSgn(pc)}% from the ${focPx(h.openPx)} open`:''} · ${h.bars}/12 bars`)}">${focPx(h.lo)}</td>`; }, sv:p=>p.h1?p.h1.lo:null},
+  {k:'rng', label:'1H RANGE', h1:1, nosort:1, tip:'The first hour as a bar: low→high span, grey tick = where the open sat in the hour\u2019s eventual range, amber tick = the 10:30 print. An open pinned to one end that closed at the other is the \u201cwho won the first hour\u201d read.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+     const rng=h.hi-h.lo; if(!(rng>0)) return `<td>${focNa('zero first-hour range')}</td>`;
+     const op=h.openPx!=null?Math.min(100,Math.max(0,(h.openPx-h.lo)/rng*100)):null;
+     const nw=h.lastPx!=null?Math.min(100,Math.max(0,(h.lastPx-h.lo)/rng*100)):null;
+     return `<td data-tip="${esc(`${focPx(h.lo)} → ${focPx(h.hi)} · grey = open ${focPx(h.openPx)} · amber = 10:30 print ${focPx(h.lastPx)}`)}"><span class="focrbar"><span class="focrfill"></span>${op!=null?`<span class="focropen" style="left:${op.toFixed(0)}%"></span>`:''}${nw!=null?`<span class="focrnow" style="left:${nw.toFixed(0)}%"></span>`:''}</span></td>`; }},
+];
+function focCol(k){ return FOC_COLS.find(c=>c.k===k); }
+function focActiveCols(){
+  if(!FOC.order){ FOC.order=FOC_COLS.map(c=>c.k); }
+  if(!FOC.vis){ FOC.vis={}; for(const c of FOC_COLS) FOC.vis[c.k]=c.vis0!==0; }
+  for(const c of FOC_COLS){ if(FOC.order.indexOf(c.k)<0) FOC.order.push(c.k); if(!(c.k in FOC.vis)) FOC.vis[c.k]=c.vis0!==0; }   // a new build's column self-heals into saved prefs
+  return FOC.order.map(focCol).filter(c=>c&&FOC.vis[c.k]);
+}
+function focStateLine(d){
+  const day=FOC.showPrev?d.prev:d.today;
+  if(FOC.showPrev&&d.prev) return `<span class="focstamp"><span class="focdot prev"></span>PRIOR LIST · ${esc(d.prev.day)}${d.prev.filledAt?' · +1H FILLED':''}</span>`;
+  if(d.state==='pre') return `<span class="focstamp"><span class="focdot pre"></span>PRE-OPEN · stamps at the 09:30 ET open${d.open?` (${Math.max(0,Math.round((d.open-Date.now())/60000))}m)`:''}</span>`;
+  if(d.state==='pending') return `<span class="focstamp"><span class="focdot pre"></span>OPEN PASSED · stamping on the next tick…</span>`;
+  if(d.state==='offday') return `<span class="focstamp"><span class="focdot prev"></span>NO SESSION TODAY${d.prev?' · showing the prior list':''}</span>`;
+  if(day) return `<span class="focstamp"><span class="focdot"></span>FROZEN @ OPEN${day.late?' <span class="foclate" data-tip="Stamped after a boot that landed past 09:30 — the snapshot is later than the open and says so, same disclosure as boot-stamped episodes">LATE</span>':''} · ${new Date(day.frozenAt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})} ET-side${day.filledAt?' · 1H CONFIRMED':' · sVWAP / 1H HI / 1H LO fill at +1h'}</span>`;
+  return '';
+}
+function renderFocus(){
+  const w=el('focuswrap'); if(!w||!FOC.data) return;
+  const d=FOC.data;
+  const day=FOC.showPrev?(d.prev||null):(d.today||( (d.state==='pre'||d.state==='offday') ? d.prev : null));
+  const usingPrevAuto=!FOC.showPrev&&!d.today&&day&&day===d.prev;
+  let html=`<div class="focbar">${focStateLine(d)}`
+    +(usingPrevAuto?`<span class="focnote">no stamp yet today — the prior list stands below</span>`:'')
+    +(day&&day.fillNote?`<span class="focnote err" data-tip="the +1h columns need the on-disk 5m archive">${esc(day.fillNote)}</span>`:'')
+    +`<span class="focsp"></span>`
+    +(d.prev&&d.today?`<button type="button" class="btn xtiny" id="focprev" data-tip="Toggle yesterday\u2019s frozen list — what you were watching, exactly as stamped">${FOC.showPrev?'◂ today':'◂ '+esc(d.prev.day)}</button>`:'')
+    +`<button type="button" class="btn xtiny" id="focgear" data-tip="Show/hide columns — same model as the Markets column menu. Drag headers directly to rearrange; the layout persists per browser.">⚙ columns</button>`
+    +`</div>`;
+  if(!day){ html+=`<div class="msg">${d.state==='pre'?'The list stamps at the open — nothing to show yet today, and no prior list is stored.':'No focus list stored yet. The first stamp lands at the next cash open.'}</div>`;
+    w.innerHTML=html; focWireBar(); return; }
+  const filled=!!day.filledAt;
+  const cols=focActiveCols();
+  let rows=[...day.rows];
+  const sc=FOC.sortK&&focCol(FOC.sortK);
+  if(sc&&sc.sv){ rows.sort((a,b)=>{ const x=sc.sv(a),y=sc.sv(b);
+    if(x==null&&y==null)return 0; if(x==null)return 1; if(y==null)return -1;
+    return (typeof x==='string'?String(x).localeCompare(String(y)):x-y)*FOC.sortDir; }); }
+  // default order = the stamped order (loudest first, already sorted server-side by focusSelect)
+  html+=`<table class="foctbl"><thead><tr>`+cols.map(c=>
+    `<th class="${c.left?'l':''}" draggable="${c.lock?'false':'true'}" data-fock="${c.k}" data-tip="${esc(c.tip)}">${c.label}${FOC.sortK===c.k?`<span class="focarr">${FOC.sortDir<0?'▼':'▲'}</span>`:''}</th>`).join('')
+    +`</tr></thead><tbody>`;
+  for(const p of rows){
+    html+=`<tr>`+cols.map(c=>{
+      if(c.h1&&!filled) return `<td class="focpend" data-tip="Fills once at +1h from the 5m archive, then the row is frozen for the day">+1h…</td>`;
+      return c.td(p);
+    }).join('')+`</tr>`;
+  }
+  html+=`</tbody></table>`;
+  if(Array.isArray(day.cuts)&&day.cuts.length){
+    html+=`<div class="foccut"><b>CAPPED AT ${d.cap||6}</b> — a great selection, not a big one. Just missed: `
+      +day.cuts.map(c=>`<span class="foccutn" data-tip="${esc(`score ${c.score!=null?c.score.toFixed(2):'—'}${c.gapPct!=null?` · gap ${focSgn(c.gapPct)}%`:''}${c.rvol!=null?` · RVOL ${c.rvol.toFixed(1)}×`:''}${c.why==='cluster'?` · cut on the ${d.perCluster||2}-per-cluster cap (${c.cluster||'?'} already seated)`:' · below the cap by rank'}`)}">${esc(c.ticker)}</span>`).join(' · ')
+      +`</div>`;
+  }
+  html+=`<div class="focfoot">Frozen list — stamped once at the cash open, one fill at +1h, never reshuffled intraday. Equities on the ET clock only; max ${d.perCluster||2} seats per cluster; $${Math.round((d.minVol||0)/1000)}k volume floor. Every σ is the name\u2019s own distribution. Dashes are honest nulls.</div>`;
+  w.innerHTML=html;
+  focWireBar(); focWireTable();
+}
+function focWireBar(){
+  const g=el('focgear'); if(g) g.onclick=(e)=>{ e.stopPropagation(); focMenuToggle(g); };
+  const pv=el('focprev'); if(pv) pv.onclick=()=>{ FOC.showPrev=!FOC.showPrev; renderFocus(); };
+}
+let _focDragK=null;
+function focWireTable(){
+  const w=el('focuswrap'); if(!w) return;
+  w.querySelectorAll('th[data-fock]').forEach(th=>{
+    const k=th.dataset.fock, c=focCol(k);
+    th.addEventListener('click',()=>{ if(!c||c.nosort) return;
+      if(FOC.sortK===k) FOC.sortDir*=-1; else { FOC.sortK=k; FOC.sortDir=-1; } renderFocus(); });
+    th.addEventListener('dragstart',e=>{ _focDragK=k; th.classList.add('focdrag'); e.dataTransfer.effectAllowed='move'; });
+    th.addEventListener('dragend',()=>{ _focDragK=null; renderFocus(); });
+    th.addEventListener('dragover',e=>{ if(!_focDragK||_focDragK===k) return; e.preventDefault();
+      const r=th.getBoundingClientRect(), left=e.clientX<r.left+r.width/2;
+      th.classList.toggle('focdrop-l',left); th.classList.toggle('focdrop-r',!left); });
+    th.addEventListener('dragleave',()=>th.classList.remove('focdrop-l','focdrop-r'));
+    th.addEventListener('drop',e=>{ e.preventDefault(); if(!_focDragK||_focDragK===k) return;
+      const r=th.getBoundingClientRect(), before=e.clientX<r.left+r.width/2;
+      FOC.order=FOC.order.filter(x=>x!==_focDragK);
+      const i=FOC.order.indexOf(k);
+      FOC.order.splice(before?i:i+1,0,_focDragK);
+      _focDragK=null; focPrefsSave(); renderFocus(); });
+  });
+  w.querySelectorAll('.focchbtn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); focChartOpen(b.dataset.foct); }));
+}
+function focMenuToggle(anchor){
+  let m=el('focmenu');
+  if(m&&!m.hidden){ m.hidden=true; return; }
+  if(!m){ m=document.createElement('div'); m.id='focmenu'; document.body.appendChild(m);
+    document.addEventListener('click',e=>{ const mm=el('focmenu'); if(mm&&!mm.hidden&&!mm.contains(e.target)) mm.hidden=true; }); }
+  focActiveCols();   // ensure order/vis exist
+  m.innerHTML=`<div class="focm-h">COLUMNS</div>`+FOC_COLS.map(c=>
+    `<label class="${c.lock?'lock':''}"><input type="checkbox" ${FOC.vis[c.k]?'checked':''} ${c.lock?'disabled':''} data-fock="${c.k}">${c.label}${c.h1?' <span class="focsig">+1h</span>':''}</label>`).join('')
+    +`<div class="focm-note">GAP σ is hidden by default — the GAP column carries it inline. Drag headers on the table to reorder; both persist per browser.</div>`;
+  m.querySelectorAll('input').forEach(i=>i.addEventListener('change',()=>{ FOC.vis[i.dataset.fock]=i.checked; focPrefsSave(); renderFocus(); }));
+  const r=anchor.getBoundingClientRect();
+  m.style.left=Math.min(r.left, window.innerWidth-230)+'px'; m.style.top=(r.bottom+6)+'px';
+  m.hidden=false;
+}
+function openFocus(){
+  focPrefsLoad();
+  focFetch();
+  if(!FOC.timer) FOC.timer=setInterval(()=>{ const v=el('view-focus'); if(v&&!v.hidden) focFetch(); },60000);
+}
+async function focFetch(){
+  try{ const d=await fetchJSON('/api/focus'); FOC.data=d; renderFocus(); }
+  catch(e){ const w=el('focuswrap'); if(w&&!FOC.data) w.innerHTML=`<div class="msg err"><span class="big">Couldn't load the focus list</span>${esc((e&&e.message)||'network error')}. Will retry on the next interval.</div>`; }
+}
+// ---- FOCUS chart modal ------------------------------------------------------------------------
+// One live 1m pull per open (pre-open hour + session so far, server-memoized); 3m/5m/15m all
+// aggregate from that ONE base client-side — one source, three views. Reference lines (open,
+// frozen 1H HI/LO) are the payload's numbers verbatim; the VWAP LINE is the chart series
+// (cumulative from the candles on screen, session-anchored at the open, labeled as such), with
+// the frozen board sVWAP restated in the header so the two are side by side, never conflated.
+const FOCCH={ p:null, day:null, tf:5, base:null, hover:null };
+function focChartEnsureDom(){
+  if(el('focmodal')) return;
+  const d=document.createElement('div'); d.id='focmodal'; d.hidden=true;
+  d.innerHTML=`<div id="focwin">
+    <div class="focch-head"><span class="focch-t" id="focch-t"></span><span class="focch-sub" id="focch-sub"></span>
+      <span class="focch-tf"><button type="button" data-foctf="3">3M</button><button type="button" data-foctf="5" class="on">5M</button><button type="button" data-foctf="15">15M</button></span>
+      <button type="button" class="focch-x" id="focch-x" data-tip="close (Esc)">✕</button></div>
+    <div class="focch-leg"><span><i class="fk" style="border-color:var(--acc2,#4da3d8)"></i>VWAP (chart series, from the open)</span><span><i class="fk d" style="border-color:var(--up)"></i>1H HI (frozen)</span><span><i class="fk d" style="border-color:var(--down)"></i>1H LO (frozen)</span><span><i class="fk d" style="border-color:var(--muted)"></i>open</span><span class="dim">dark band = pre-open hour</span></div>
+    <div id="focch-read">hover for OHLC · chart VWAP · Δ from open</div>
+    <div id="focch-wrap"><canvas id="focch-cc"></canvas></div></div>`;
+  document.body.appendChild(d);
+  d.addEventListener('click',e=>{ if(e.target.id==='focmodal') focChartClose(); });
+  el('focch-x').onclick=focChartClose;
+  d.querySelectorAll('[data-foctf]').forEach(b=>b.onclick=()=>{ FOCCH.tf=+b.dataset.foctf;
+    d.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x===b)); focChartDraw(); });
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&el('focmodal')&&!el('focmodal').hidden) focChartClose(); });
+  const cc=el('focch-cc');
+  cc.addEventListener('mousemove',e=>{ if(!FOCCH._geom) return;
+    const r=cc.getBoundingClientRect(), x=e.clientX-r.left, g=FOCCH._geom;
+    const i=Math.floor((x-g.padL)/((g.W-g.padL-g.padR)/g.n));
+    FOCCH.hover=Math.max(0,Math.min(g.n-1,i)); focChartDraw(); });
+  cc.addEventListener('mouseleave',()=>{ FOCCH.hover=null; focChartDraw(); });
+  window.addEventListener('resize',()=>{ const m=el('focmodal'); if(m&&!m.hidden) focChartDraw(); });
+}
+async function focChartOpen(ticker){
+  const d=FOC.data; if(!d) return;
+  const day=FOC.showPrev?(d.prev||null):(d.today||d.prev); if(!day) return;
+  const p=day.rows.find(x=>x.ticker===ticker); if(!p) return;
+  focChartEnsureDom();
+  FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.hover=null; FOCCH.tf=5;
+  const m=el('focmodal'); m.hidden=false;
+  m.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x.dataset.foctf==='5'));
+  el('focch-t').textContent=ticker;
+  el('focch-sub').textContent='loading 1m session…';
+  el('focch-read').textContent='hover for OHLC · chart VWAP · Δ from open';
+  const from=day.open-3600000, to=Math.min(Date.now(), day.close||Date.now());
+  try{
+    const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(p.coin)+'&res=1m&from='+from+'&to='+to);
+    FOCCH.base=Array.isArray(res.candles)?res.candles:[];
+    const h=p.h1;
+    el('focch-sub').textContent=`pre-open + session · prev close ${focPx(p.prevClose)} · stamp ${focPx(p.px)}`
+      +(h?` · frozen: 1H ${focPx(h.lo)}–${focPx(h.hi)}${h.vwap!=null?` · board sVWAP ${focPx(h.vwap)}`:''}`:' · +1h not filled yet — HI/LO lines pending');
+    focChartDraw();
+  }catch(e){ el('focch-sub').textContent='1m fetch failed — '+((e&&e.message)||'network error'); }
+}
+function focChartClose(){ const m=el('focmodal'); if(m) m.hidden=true; FOCCH.p=null; FOCCH.base=null; FOCCH._geom=null; }
+function focAgg(base,k,openMs){
+  // k-minute buckets anchored at the OPEN, extending backwards through the pre-open hour, so a
+  // bucket boundary always lands exactly on 09:30 — the pre-open and the session never share a bar.
+  const by=new Map();
+  for(const b of base){ const t=+b[0]; if(!isFinite(t)) continue;
+    const off=Math.floor((t-openMs)/(k*60000)), t0=openMs+off*k*60000;
+    let g=by.get(t0); if(!g) by.set(t0,g=[]); g.push(b); }
+  const out=[];
+  for(const [t0,g] of [...by.entries()].sort((a,b)=>a[0]-b[0])){
+    g.sort((a,b)=>a[0]-b[0]);
+    out.push([t0, +g[0][1], Math.max(...g.map(x=>+x[2])), Math.min(...g.map(x=>+x[3])), +g[g.length-1][4], g.reduce((s,x)=>s+(+x[5]||0),0)]);
+  }
+  return out;
+}
+function focChartDraw(){
+  const p=FOCCH.p, day=FOCCH.day; if(!p||!day||!FOCCH.base) return;
+  const cc=el('focch-cc'); if(!cc) return;
+  const bars=focAgg(FOCCH.base, FOCCH.tf, day.open);
+  const n=bars.length;
+  const dpr=window.devicePixelRatio||1, W=cc.clientWidth||800, H=440;
+  cc.width=W*dpr; cc.height=H*dpr;
+  const g=cc.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,W,H);
+  const cs=getComputedStyle(document.body);
+  const C={ up:(cs.getPropertyValue('--up')||'#35c06f').trim(), down:(cs.getPropertyValue('--down')||'#e05252').trim(),
+    acc:(cs.getPropertyValue('--accent')||'#e8a33d').trim(), sec:(cs.getPropertyValue('--muted')||'#7E8794').trim(),
+    line:(cs.getPropertyValue('--border')||'#1e2530').trim(), blu:'#4da3d8' };
+  if(!n){ g.fillStyle=C.sec; g.font='12px monospace'; g.fillText('no 1m candles returned for this window',20,40);
+    FOCCH._geom=null; return; }
+  const padL=8,padR=70,padT=10,volH=50,padB=26, pH=H-padT-padB-volH-8;
+  const h1=p.h1;
+  let hi=Math.max(...bars.map(b=>b[2])), lo=Math.min(...bars.map(b=>b[3]));
+  if(h1){ hi=Math.max(hi,h1.hi); lo=Math.min(lo,h1.lo); }
+  const span=(hi-lo)||1; hi+=span*.05; lo-=span*.05;
+  const X=i=>padL+(i+.5)*(W-padL-padR)/n, Y=v=>padT+(hi-v)/(hi-lo)*pH;
+  const bw=Math.max(2.5,(W-padL-padR)/n*.62);
+  // chart-series session VWAP: cumulative typical·vol from the OPEN bar onward — null before it
+  let pv=0,vv=0; const vwapS=bars.map(b=>{ if(b[0]<day.open) return null;
+    const v=+b[5]; if(v>0){ pv+=((+b[2])+(+b[3])+(+b[4]))/3*v; vv+=v; } return vv>0?pv/vv:null; });
+  // pre-open band + open boundary
+  let preN=0; for(const b of bars){ if(b[0]<day.open) preN++; else break; }
+  if(preN>0){ g.fillStyle='rgba(0,0,0,0.28)'; g.fillRect(padL,padT,X(preN-1)+bw/2-padL,pH+volH+8); }
+  const xOpen=preN>0?X(preN-1)+bw/2:padL;
+  g.strokeStyle='rgba(232,163,61,0.35)'; g.lineWidth=1;
+  g.beginPath(); g.moveTo(xOpen,padT); g.lineTo(xOpen,H-padB); g.stroke();
+  g.font='10px monospace'; g.textAlign='center'; g.fillStyle=C.sec;
+  if(preN>0) g.fillText('PRE',X(Math.max(0,Math.floor(preN/2))),padT+10);
+  // grid + y labels
+  g.textAlign='left';
+  for(let i=0;i<=4;i++){ const v=lo+(hi-lo)*i/4, y=Y(v);
+    g.strokeStyle=C.line; g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke();
+    g.fillStyle=C.sec; g.fillText(focPx(v),W-padR+6,y+3); }
+  // reference lines: open (archive open when filled, stamp mark before), frozen 1H HI/LO verbatim
+  const refLine=(v,col,lab)=>{ if(v==null||!isFinite(v)) return; const y=Y(v);
+    g.strokeStyle=col; g.setLineDash([5,4]); g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke(); g.setLineDash([]);
+    g.fillStyle=col; g.fillText(lab+' '+focPx(v),W-padR+6,y-4); };
+  refLine(h1&&h1.openPx!=null?h1.openPx:p.px, C.sec, h1&&h1.openPx!=null?'O':'stamp');
+  if(h1){ refLine(h1.hi,C.up,'1H HI'); refLine(h1.lo,C.down,'1H LO'); }
+  // volume
+  const vMax=Math.max(...bars.map(b=>+b[5]||0),1e-9);
+  for(let i=0;i<n;i++){ const b=bars[i], up=b[4]>=b[1];
+    g.fillStyle=b[0]<day.open?'rgba(107,118,134,0.3)':(up?'rgba(53,192,111,0.35)':'rgba(224,82,82,0.35)');
+    const vh=(+b[5]||0)/vMax*volH; g.fillRect(X(i)-bw/2,H-padB-vh,bw,vh); }
+  // candles (pre-open dimmer)
+  for(let i=0;i<n;i++){ const b=bars[i], up=b[4]>=b[1], a=b[0]<day.open?0.45:0.9;
+    const col=up?`rgba(53,192,111,${a})`:`rgba(224,82,82,${a})`;
+    g.strokeStyle=col; g.beginPath(); g.moveTo(X(i),Y(b[2])); g.lineTo(X(i),Y(b[3])); g.stroke();
+    g.fillStyle=col; const yO=Y(b[1]), yC=Y(b[4]);
+    g.fillRect(X(i)-bw/2,Math.min(yO,yC),bw,Math.max(1,Math.abs(yC-yO))); }
+  // VWAP line (chart series, session-anchored)
+  g.strokeStyle=C.blu; g.lineWidth=1.6; g.beginPath(); let started=false;
+  for(let i=0;i<n;i++){ if(vwapS[i]==null) continue; const y=Y(vwapS[i]);
+    started?g.lineTo(X(i),y):g.moveTo(X(i),y); started=true; }
+  if(started) g.stroke();
+  // x labels on the half-hours (ET)
+  g.fillStyle=C.sec; g.textAlign='center';
+  for(let i=0;i<n;i++){ const dt=new Date(bars[i][0]);
+    const et=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:false}).format(dt);
+    if(/:(00|30)$/.test(et)&&(FOCCH.tf<15||/:00$/.test(et))) g.fillText(et,X(i),H-8); }
+  g.fillText('open',xOpen,H-padB+18);
+  // crosshair
+  const hv=FOCCH.hover;
+  if(hv!=null&&bars[hv]){
+    const b=bars[hv], x=X(hv);
+    g.strokeStyle='rgba(200,209,220,0.35)'; g.setLineDash([3,3]);
+    g.beginPath(); g.moveTo(x,padT); g.lineTo(x,H-padB); g.stroke();
+    const yC=Y(b[4]); g.beginPath(); g.moveTo(padL,yC); g.lineTo(W-padR,yC); g.stroke(); g.setLineDash([]);
+    const anchor=h1&&h1.openPx!=null?h1.openPx:p.px;
+    const dpc=anchor>0?((b[4]/anchor-1)*100):null;
+    const et=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:false}).format(new Date(b[0]));
+    const vtxt=vwapS[hv]==null?' · VWAP <span class="na">—</span>':(()=>{ const vd=(b[4]/vwapS[hv]-1)*100;
+      return ` · VWAP <b>${focPx(vwapS[hv])}</b> <span class="${focCls(vd)}">(${focSgn(vd)}%)</span>`; })();
+    el('focch-read').innerHTML=(b[0]<day.open?'<span class="focpre">PRE</span>':'')
+      +`<b>${et} ET</b> · O <b>${focPx(b[1])}</b> H <b>${focPx(b[2])}</b> L <b>${focPx(b[3])}</b> C <b>${focPx(b[4])}</b>`
+      +vtxt+(dpc!=null?` · Δ${h1&&h1.openPx!=null?'open':'stamp'} <span class="${focCls(dpc)}">${focSgn(dpc)}%</span>`:'');
+  } else if(el('focch-read')) el('focch-read').textContent='hover for OHLC · chart VWAP · Δ from open';
+  FOCCH._geom={W,padL,padR,n};
 }

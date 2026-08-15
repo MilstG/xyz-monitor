@@ -1388,3 +1388,75 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .dsessrib .srb-lane{fill:var(--faint);font-size:7.5px;letter-spacing:.1em;}
 .dsessrib .srb-now{stroke:var(--up);stroke-width:1;filter:drop-shadow(0 0 3px rgba(63,174,118,.6));}
 .dsessrib .srb-state{font-size:10.5px;color:var(--muted);margin-top:2px;}
+
+/* ===== FOCUS tab (build 2026.08.15-01) ===== */
+.focbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:10px}
+.focstamp{color:var(--accent);font-family:var(--mono);font-size:12px;letter-spacing:.8px;font-weight:600}
+.focdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:1px}
+.focdot.pre{background:var(--muted)} .focdot.prev{background:var(--faint)}
+.foclate{color:var(--down);border:1px solid var(--down);border-radius:3px;padding:0 4px;font-size:9px;letter-spacing:1px;vertical-align:1px}
+.focnote{color:var(--muted);font-size:11px}
+.focnote.err{color:var(--down)}
+.focsp{flex:1}
+.foctbl{border-collapse:collapse;width:100%;background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.foctbl th,.foctbl td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-family:var(--mono);font-size:12.5px}
+.foctbl th{color:var(--muted);font-size:10px;letter-spacing:1px;font-weight:600;cursor:pointer;user-select:none;background:var(--panel2)}
+.foctbl th:hover{color:var(--text)}
+.foctbl th.focdrag{opacity:.35}
+.foctbl th.focdrop-l{box-shadow:inset 2px 0 0 var(--accent)}
+.foctbl th.focdrop-r{box-shadow:inset -2px 0 0 var(--accent)}
+.focarr{color:var(--accent);font-size:9px;margin-left:2px}
+.foctbl th.l,.foctbl td.l{text-align:left}
+.foctbl tbody tr:hover{background:var(--panel2)}
+.foctbl .dim{color:var(--muted)}
+.focticker{color:var(--text);font-weight:700;font-size:13px}
+.focchbtn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--mono);font-size:10px;padding:1px 6px;margin-left:7px;cursor:pointer;border-radius:4px;vertical-align:1px}
+.focchbtn:hover{color:var(--accent);border-color:var(--accent-dim)}
+.focsig{color:var(--faint);font-size:10px;margin-left:4px}
+.focpend{color:var(--faint);font-style:italic;font-size:11px}
+.focchips{display:flex;gap:4px;flex-wrap:wrap}
+.focchip{font-size:9px;letter-spacing:.5px;padding:1px 5px;border:1px solid var(--border);border-radius:3px;color:var(--muted);background:var(--panel2);cursor:default;font-family:var(--mono)}
+.focchip.ern{color:#d8b25a;border-color:#4a3d1e}
+.focchip.gap{color:var(--blue);border-color:#2a3a55}
+.focchip.rvol{color:var(--up);border-color:#1e4030}
+.focchip.oi{color:#c084e0;border-color:#3d2a4d}
+.focchip.news{color:var(--text);border-color:#3a4350}
+.focchip.void{color:var(--accent);border-color:#4a3a1e}
+.focchip.lvl{color:var(--down);border-color:#4d2822}
+.focchip.clu{color:var(--muted);border-style:dashed}
+.focrbar{display:inline-block;width:76px;height:8px;background:var(--panel2);border:1px solid var(--border);position:relative;vertical-align:-1px;border-radius:2px}
+.focrfill{position:absolute;inset:0;background:#232d3b;border-radius:2px}
+.focropen{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--muted)}
+.focrnow{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--accent)}
+.foccut{margin-top:8px;padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--faint);font-size:10.5px;font-family:var(--mono);letter-spacing:.3px}
+.foccut b{color:var(--muted);letter-spacing:1px}
+.foccutn{color:var(--muted);border-bottom:1px dotted var(--faint);cursor:default;margin:0 2px}
+.focfoot{margin-top:8px;color:var(--faint);font-size:10.5px;line-height:1.6}
+#focmenu{position:fixed;z-index:70;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;box-shadow:0 8px 22px rgba(0,0,0,.55);min-width:200px}
+#focmenu[hidden]{display:none}
+#focmenu .focm-h{color:var(--faint);font-size:9px;letter-spacing:1px;margin:2px 0 6px;font-family:var(--mono)}
+#focmenu label{display:flex;gap:8px;align-items:center;color:var(--text);font-size:11.5px;padding:3px 0;cursor:pointer;font-family:var(--mono)}
+#focmenu label.lock{color:var(--faint);cursor:default}
+#focmenu input{accent-color:var(--accent)}
+#focmenu .focm-note{color:var(--faint);font-size:9.5px;margin-top:8px;border-top:1px solid var(--border);padding-top:6px;max-width:220px;line-height:1.5}
+#focmodal{position:fixed;inset:0;background:rgba(4,6,10,.78);z-index:60;display:flex;align-items:center;justify-content:center}
+#focmodal[hidden]{display:none}
+#focwin{background:var(--panel);border:1px solid var(--border);border-radius:12px;width:min(960px,95vw);box-shadow:0 20px 60px rgba(0,0,0,.7);overflow:hidden}
+.focch-head{display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--border)}
+.focch-t{color:var(--text);font-weight:700;font-size:14px;font-family:var(--mono)}
+.focch-sub{color:var(--muted);font-size:11px;font-family:var(--mono)}
+.focch-tf{display:flex;border:1px solid var(--border);border-radius:6px;margin-left:auto;overflow:hidden}
+.focch-tf button{background:var(--panel2);border:0;color:var(--muted);font-family:var(--mono);font-size:11px;padding:4px 12px;cursor:pointer}
+.focch-tf button.on{background:var(--accent-dim);color:#fff}
+.focch-tf button:not(:last-child){border-right:1px solid var(--border)}
+.focch-x{background:transparent;border:0;color:var(--muted);font-size:16px;cursor:pointer;padding:2px 8px;margin-left:8px}
+.focch-x:hover{color:var(--down)}
+.focch-leg{display:flex;gap:16px;padding:6px 14px;border-bottom:1px solid var(--border);font-size:10px;color:var(--muted);flex-wrap:wrap;font-family:var(--mono)}
+.focch-leg .fk{display:inline-block;width:16px;height:0;border-top:2px solid;vertical-align:3px;margin-right:5px}
+.focch-leg .fk.d{border-top-style:dashed}
+.focch-leg .dim{color:var(--faint)}
+#focch-read{padding:5px 14px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--border);min-height:26px;font-family:var(--mono)}
+#focch-read b{color:var(--text);font-weight:600}
+.focpre{color:var(--faint);border:1px solid var(--border);border-radius:3px;padding:0 4px;font-size:9px;letter-spacing:1px;margin-right:6px}
+#focch-wrap{position:relative;padding:6px 8px 10px}
+#focch-cc{display:block;width:100%;height:440px;cursor:crosshair}

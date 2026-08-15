@@ -63,6 +63,7 @@
     <button class="scope on" data-scope="stocks">Stocks</button><button class="scope" data-scope="crypto">Crypto</button>
   </span>
   <button class="tab active" data-view="markets">Markets</button>
+  <button class="tab" data-view="focus" id="tab-focus" title="Today's 6 most tradeable equities, frozen at the cash open — gap in the name's own σ, clock-matched RVOL, overnight ΔOI, catalyst chips, distance to structure. sVWAP + first-hour high/low fill once at 10:30 ET, then the list is immutable for the day. Max 2 seats per industry cluster; the cut line discloses what just missed.">Focus</button>
   <button class="tab" data-view="trend" title="EMA 13/21 ribbon evaluated on D1 · H12 · H4 · H1 — ranked long &amp; short trend leaderboards for both universes, with continuation-entry retest flags">Trend</button>
   <button class="tab" data-view="sectors">Sectors</button>
   <button class="tab" data-view="corr">Correlation</button>
@@ -172,6 +173,10 @@
 </div>
 
 </div><!-- /view-markets -->
+
+<section id="view-focus" hidden>
+  <div id="focuswrap"><div class="msg">Loading the focus list…</div></div>
+</section>
 
 <section id="view-trend" hidden>
   <div class="controls">
