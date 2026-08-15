@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.14-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.15-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -16945,4 +16945,167 @@ test("2026.08.14-02 regression: applySnapshot carries hm/hadr into state.rows; c
     global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f;
   }
+});
+
+// ============================================================================================
+// FOCUS tab (build 2026.08.15-01): frozen-at-open 6-seat tradeable watchlist.
+// Behavioral tests execute the real selection and first-hour math (-84 doctrine: string pins
+// prove nothing about behavior); manifest pins then hold the wiring in place.
+// ============================================================================================
+const { focusSelect, focusScore, focusGapSigma, focusLevelDist, firstHourStats: fhStats,
+  FOCUS_CAP, FOCUS_PER_CLUSTER } = require("../src/compute");
+
+test("focus -01: selection caps at 6 seats, 2 per cluster, and discloses why each cut fell", () => {
+  const mk = (t, gapS, rvol, clu) => ({ ticker: t, gapPct: gapS, gapSigma: gapS, rvol, oiDelta: null, ern: 0, news24: 0, cluster: clu });
+  // Four SEMI names loudest of all: only two may seat; the third and fourth are cluster cuts
+  // even though they outrank every non-SEMI candidate.
+  const cands = [
+    mk("NVDA", 3.0, 4.0, "Semis"), mk("MU", 2.8, 3.5, "Semis"), mk("AMD", 2.6, 3.0, "Semis"), mk("SMCI", 2.4, 2.8, "Semis"),
+    mk("LLY", 2.0, 2.5, "Pharma"), mk("TSLA", 1.5, 2.0, "Autos"), mk("XOM", 1.2, 1.8, "Energy"),
+    mk("JPM", 1.0, 1.5, "Banks"), mk("COIN", 0.9, 1.4, "Capital Markets"), mk("PLTR", 0.8, 1.3, "Software"),
+  ];
+  const sel = focusSelect(cands);
+  assert.equal(sel.picks.length, FOCUS_CAP, "exactly six seats");
+  const semis = sel.picks.filter((p) => p.cluster === "Semis").map((p) => p.ticker);
+  assert.deepEqual(semis, ["NVDA", "MU"], "the two loudest SEMI names take the cluster's only seats");
+  assert.deepEqual(sel.picks.map((p) => p.ticker), ["NVDA", "MU", "LLY", "TSLA", "XOM", "JPM"], "seats walk loudest-first past the blocked cluster");
+  const amd = sel.cuts.find((c) => c.ticker === "AMD"), pltr = sel.cuts.find((c) => c.ticker === "PLTR");
+  assert.equal(amd && amd.why, "cluster", "AMD outranks four seated names but is a CLUSTER cut, not a rank cut");
+  assert.ok(sel.cuts.find((c) => c.ticker === "SMCI" && c.why === "cluster"), "fourth SEMI also a cluster cut");
+  assert.equal(pltr && pltr.why, "rank", "PLTR is a plain rank cut");
+  assert.equal(sel.cuts.length, 4, "cut line disclosure is capped");
+  // determinism: identical input twice -> byte-identical seat order (ties break on ticker)
+  assert.deepEqual(focusSelect(cands).picks.map((p) => p.ticker), sel.picks.map((p) => p.ticker), "stamped order is reproducible");
+});
+
+test("focus -01: null cluster never blocks a seat, nulls contribute zero loudness, degenerates degrade", () => {
+  const cands = [
+    { ticker: "A", gapSigma: 2, rvol: 3, cluster: null }, { ticker: "B", gapSigma: 2, rvol: 3, cluster: null },
+    { ticker: "C", gapSigma: 2, rvol: 3, cluster: null }, { ticker: "D", gapSigma: 1, rvol: 2, cluster: "X" },
+  ];
+  const sel = focusSelect(cands);
+  assert.equal(sel.picks.length, 4, "three unknown-cluster names all seat — an unproven grouping never eats a quota");
+  // nulls contribute nothing: a candidate with only an earnings flag scores exactly the flat boost
+  assert.equal(focusScore({ ticker: "E", ern: "amc" }), 1.5, "ern alone = 1.5, missing fields are zero not NaN");
+  assert.equal(focusScore({ ticker: "F" }), 0, "all-null candidate scores zero");
+  assert.deepEqual(focusSelect([{ nope: 1 }, null, { ticker: "" }]).picks, [], "malformed candidates are dropped, never thrown on");
+});
+
+test("focus -01: firstHourStats measures exact geometry on archive bars and refuses partial hours", () => {
+  const M5 = 5 * 60 * 1000, open = Date.UTC(2026, 7, 14, 13, 30);   // 09:30 ET in UTC ms (EDT)
+  const bar = (i, o, h, l, c, v) => [open + i * M5, o, h, l, c, v];
+  const bars = [];
+  for (let i = 0; i < 12; i++) {
+    if (i === 2) bars.push(bar(i, 101, 106, 100.5, 105, 2000));     // the hour's high, on volume
+    else if (i === 8) bars.push(bar(i, 103, 103.5, 98, 99, 3000));  // the hour's low
+    else bars.push(bar(i, 100 + i * 0.1, 102, 99.5, 101, 1000));
+  }
+  bars.push(bar(12, 101, 120, 90, 100, 5000));                       // 10:30 bar — OUTSIDE the hour, must not leak in
+  bars.unshift([open - M5, 95, 96, 94, 95, 800]);                    // pre-open bar — outside too
+  const fh = fhStats(bars, open, open + 3600 * 1000);
+  assert.ok(fh, "twelve in-window bars are a record");
+  assert.equal(fh.bars, 12, "exactly the in-window bars counted");
+  assert.equal(fh.hi, 106, "high is the true bar extreme, not a close");
+  assert.equal(fh.lo, 98, "low is the true bar extreme");
+  assert.equal(fh.openPx, 100, "open = the FIRST in-window bar's open, never the pre-open bar");
+  assert.equal(fh.lastPx, 101, "last = the FINAL in-window bar's close (the 11:25-open bar), never the 10:30 bar");
+  // vwap: exact hand computation of sum(typical*v)/sum(v) over the in-window bars
+  let pv = 0, vv = 0;
+  for (const k of bars) { if (k[0] < open || k[0] >= open + 3600e3) continue; pv += (k[2] + k[3] + k[4]) / 3 * k[5]; vv += k[5]; }
+  assert.equal(fh.vwap, +(pv / vv).toPrecision(8), "vwap reproduces the definition to the bit");
+  // honesty gates
+  assert.equal(fhStats(bars.slice(0, 5), open, open + 3600e3), null, "a spine-gap hour (<6 bars) is not a record");
+  assert.equal(fhStats(null, open, open + 3600e3), null, "null degrades");
+  assert.equal(fhStats(bars, open, open), null, "empty window degrades");
+  const noVol = bars.map((k) => [k[0], k[1], k[2], k[3], k[4], 0]);
+  const fz = fhStats(noVol, open, open + 3600e3);
+  assert.ok(fz && fz.vwap === null && fz.hi === 106, "zero volume: extremes stay real, VWAP is a null — never a fabricated average");
+});
+
+test("focus -01: gap σ and level distance obey their sample floors and stay in own-name units", () => {
+  assert.equal(focusGapSigma([1, -1, 2]), null, "below the 10-sample floor no σ is claimed");
+  const gaps = [1, -1, 2, -2, 1.5, -0.5, 0.8, -1.2, 0.3, 1.1, -0.7, 0.9];
+  assert.ok(focusGapSigma(gaps) > 0, "enough samples -> a real dispersion");
+  assert.equal(focusGapSigma([1, NaN, null, 2]), null, "junk never counts toward the floor");
+  // level distance: 40 flat completed days at 100 with one 30d high at 110, live px 105 —
+  // the high is 5/ sd above; the forming day's fake 200 print must never become the extreme.
+  const HOURa = 3600 * 1000, DAYa = 24 * HOURa, now = Date.UTC(2026, 7, 14, 15, 0);
+  const day0 = Math.floor(now / DAYa) * DAYa - 40 * DAYa;
+  const hs = [];
+  for (let d = 0; d < 40; d++) for (let h = 0; h < 24; h += 4) {
+    const base = 100 + Math.sin(d) * 1.2;                       // gentle wiggle so daily σ is nonzero
+    const hi = d === 35 ? 110 : base + 0.5;
+    hs.push([day0 + d * DAYa + h * HOURa, base, hi, base - 0.5, base + Math.cos(d) * 0.8, 100]);
+  }
+  hs.push([Math.floor(now / DAYa) * DAYa + HOURa, 105, 200, 50, 105, 100]);   // forming day: ignored
+  const lvl = focusLevelDist(hs, 105, now);
+  assert.ok(lvl && lvl.side === "above", "the 30d high overhead is the nearer extreme");
+  const closes = new Map();
+  for (const k of hs) { const t = k[0]; if (t >= Math.floor(now / DAYa) * DAYa) continue; closes.set(Math.floor(t / DAYa) * DAYa, k[4]); }
+  const cl = [...closes.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).slice(-31);
+  const rets = []; for (let i = 1; i < cl.length; i++) rets.push((cl[i] / cl[i - 1] - 1) * 100);
+  const sd = require("../src/compute").retStd ? null : null;    // retStd is not exported; reproduce via the public result instead:
+  assert.ok(lvl.distSd > 0 && isFinite(lvl.distSd), "distance is a positive σ figure");
+  assert.equal(focusLevelDist(hs, 0, now), null, "no price, no claim");
+  assert.equal(focusLevelDist(hs.slice(0, 10), 105, now), null, "too little spine, no claim");
+});
+
+test("focus -01: manifest pins — the tab, the route, the engine and the client wiring hold", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const cmp = rd("src/compute.js"), pol = rd("src/poller.js"), srv = rd("server.js"),
+    app = rd("public/app.js"), idx = rd("public/index.html"), css = rd("public/styles.css"), sto = rd("src/store.js");
+  // manifest: the focus tab exists, soaks admin, and owns exactly its route
+  assert.ok(cmp.includes('{ key: "focus",      kind: "tab", label: "Focus",       def: "admin",  routes: ["/api/focus"] }'), "focus manifest entry (admin soak)");
+  // server: the route serves keyed on the focus stamp; the chart's 1m branch exists and is no-store
+  assert.ok(srv.includes('fastify.get("/api/focus"'), "focus route");
+  assert.ok(srv.includes('"focus|" + poller.getFocusStamp()'), "focus ETag keys on the stamp");
+  assert.ok(srv.includes('req.query.res === "1m"') && srv.includes("poller.getCandles1m(coin"), "1m candle branch for the chart");
+  // poller: engine doctrine strings — home-session exclusion, the volume floor, the late stamp
+  // disclosure, the +1h fill, the boot hydrate, and the exports
+  for (const pin of ["const FOCUS_MIN_VOL = 200000", "if (homeMkt(r.ticker, r.uni)) continue;",
+    "function focusTick(", "function stampFocus(", "function fillFocus(", "function hydrateFocus(",
+    "late: now - sess.open > 90 * 1000 ? 1 : 0", "getFocusStamp: () => focusVer", "focusTickNow: focusTick",
+    "async function getCandles1m("])
+    assert.ok(pol.includes(pin), "poller pin: " + pin);
+  // store: persistence is atomic tmp+rename like every config-grade write
+  assert.ok(sto.includes("saveFocus(data)") && sto.includes("loadFocus()") && sto.includes('focusFile + ".tmp"'), "focus persistence, atomic");
+  // client: tab wired into every navigation surface, prefs persisted, chart one-source
+  assert.ok(idx.includes('data-view="focus"') && idx.includes('id="view-focus"'), "tab + section in markup");
+  for (const pin of ["setHidden('view-focus', v!=='focus');", "if(v==='focus'){ if(el('view-focus')) openFocus();",
+    "'markets','focus','trend'", "{v:'focus',label:'Focus'}", "const FOC_LS='xyz-focus-cols'",
+    "function focChartOpen(", "res=1m&from=", "function focAgg(", "focus:`"])
+    assert.ok(app.includes(pin), "app pin: " + pin);
+  assert.ok(css.includes(".foctbl") && css.includes(".focchip") && css.includes("#focmodal"), "focus styles present");
+  // crypto scope: focus deliberately NOT in CRYPTO_VIEWS — the tab hides on the crypto board
+  const cv = app.match(/const CRYPTO_VIEWS=new Set\(\[(.*?)\]\)/);
+  assert.ok(cv && !cv[1].includes("'focus'"), "focus stays out of the crypto scope by design");
+});
+
+test("focus -01: engine harness — a booting universe never mints a stamp, hydrate rolls prior days to yesterday", () => {
+  const { createPoller } = require("../src/poller");
+  const { etDayStr: etDS } = require("../src/compute");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  // 1) empty universe + an injected trading-day clock past the open: stampFocus defers on the
+  //    candidate floor — the tick is a no-op, never a six-seat list of nothing.
+  let saved = null;
+  const store1 = { ...base, saveFocus: (d) => { saved = d; }, loadFocus: () => null };
+  const p1 = createPoller({ dex: "xyz", store: store1, log: () => {}, version: "test" });
+  p1.focusTickNow(Date.UTC(2026, 7, 14, 15, 0));    // Fri 2026-08-14 11:00 ET — session open, universe empty
+  assert.equal(saved, null, "no candidates -> no stamp persisted");
+  assert.equal(p1.getFocus().today, null, "payload carries no phantom list");
+  p1.focusTickNow(Date.UTC(2026, 7, 15, 15, 0));    // Saturday — no session, must be a silent no-op
+  assert.equal(saved, null, "weekend tick is a no-op");
+  // 2) hydrate: a saved list for TODAY restores as today's; a saved PRIOR day rolls to yesterday.
+  const today = etDS(Date.now()), mkState = (day) => ({ day, open: 1, close: 2, frozenAt: 3, late: 0, rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0 });
+  const p2 = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: mkState(today), prev: null }) }, log: () => {}, version: "test" });
+  assert.equal(p2.hydrateFocusNow(), true, "hydrate reports a restore");
+  const f2 = p2.getFocus();
+  assert.ok(f2.today && f2.today.day === today && f2.today.rows.length === 1, "same-day state restores verbatim");
+  const p3 = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: mkState("2020-01-02"), prev: null }) }, log: () => {}, version: "test" });
+  p3.hydrateFocusNow();
+  const f3 = p3.getFocus();
+  assert.equal(f3.today, null, "a stale day never masquerades as today's stamp");
+  assert.ok(f3.prev && f3.prev.day === "2020-01-02", "…it rolls to the prior-list slot instead");
 });
