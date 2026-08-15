@@ -14,6 +14,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
+const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER } = require("./compute");
 const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
@@ -5555,6 +5556,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // spines" with no error to show — no retry would ever come. Arming it here means the loop
     // exists no matter what else on the boot path fails, so the tab always self-heals.
     setInterval(safeTick(() => { buildAnalyticsSafe("stocks"); if (crypto) buildAnalyticsSafe("crypto"); }, "buildAnalytics"), ANALYTICS_MS);
+    // FOCUS stamp/fill loop — armed with the analytics loop for the same reason it sits this
+    // early: it must exist even if a later boot step throws, or the day's list would silently
+    // never stamp. A boot after 09:30 stamps on the first tick with the disclosed `late` flag.
+    setInterval(safeTick(() => focusTick(), "focusTick"), 30 * 1000);
+    if (hydrateFocus()) log(`Restored FOCUS list${focusState ? `: ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.filledAt ? " (+1h filled)" : ""}` : " (prior day only)"} — the day's stamp survives a redeploy`);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     hydrateLedger();
@@ -10592,6 +10598,143 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     return vis.all ? full : scopedBody("act", full, vis);
   }
 
+  // ===== FOCUS: the frozen-at-open tradeable watchlist (build 2026.08.15-01) ==================
+  // Six seats, stamped once when the US cash session opens, one late fill at +1h from the 5m
+  // archive, then immutable for the day. Selection math lives in compute (focusSelect / focusScore
+  // — the loudness formula is disclosed there); this is thin assembly: every field is a
+  // restatement of something the poller already computed (the rvol memo, the OI history, the
+  // earnings map, the news tape, the off-hours hold record). One code path, no re-derivation.
+  // Scope: xyz EQUITIES on the ET clock only. Foreign-home names (KRX/TSE/HKEX) are excluded by
+  // doctrine, not oversight — their reference book discovers price in the ASIAN session, so a
+  // 09:30 ET "open snapshot" would anchor their gap to the wrong exchange (2026.08.14-01 rule).
+  const FOCUS_MIN_VOL = 200000;        // $200k 24h notional floor: a seat you cannot exit is not a seat
+  const FOCUS_MIN_CANDS = 8;           // below this the universe is still booting — defer, retry next tick
+  let focusState = null, focusPrev = null, focusVer = 0;
+  function hydrateFocus() {
+    const data = store.loadFocus ? store.loadFocus() : null;
+    if (!data) return false;
+    const today = etDayStr(Date.now());
+    if (data.state && data.state.day === today) { focusState = data.state; focusPrev = data.prev || null; }
+    else if (data.state) focusPrev = data.state;               // a saved prior day rolls to "yesterday"
+    else focusPrev = data.prev || null;
+    focusVer = Date.now();
+    return !!(focusState || focusPrev);
+  }
+  function focusPersist() { if (store.saveFocus) store.saveFocus({ state: focusState, prev: focusPrev }); focusVer = Date.now(); }
+  function focusCandidates(now, prevCloseT) {
+    const out = [], yest = etDayStr(prevCloseT), today = etDayStr(now);
+    for (const r of rows.values()) {
+      if (r.uni !== "xyz" || r.delisted || !r.ticker || !(r.px > 0)) continue;
+      const cl = classifyCached(r.ticker, r.uni);
+      if (!cl || cl.assetClass !== "Equity") continue;
+      if (homeMkt(r.ticker, r.uni)) continue;                  // home session is not this session
+      if (!(r.vol >= FOCUS_MIN_VOL)) continue;
+      const hs = getHourly(r.coin);
+      const pc = priceAsOf(hs, prevCloseT, 3 * HOUR);
+      const gapPct = pc > 0 ? +((r.px / pc - 1) * 100).toFixed(3) : null;
+      // gap σ from the name's OWN off-hours hold record — the same holds the Markets gap hover
+      // summarizes, so the two tabs can never claim different distributions.
+      const gaps = Array.isArray(r._ovClose) ? r._ovClose.map((x) => (x[1] - 1) * 100) : [];
+      const gsd = focusGapSigma(gaps);
+      const gapSigma = gapPct != null && gsd != null && gsd > 0 ? +(gapPct / gsd).toFixed(2) : null;
+      const rvol = r._rv && Number.isFinite(r._rv.h1) ? +r._rv.h1.toFixed(2) : null;   // clock-matched, the board's own memo
+      let oiDelta = null;
+      try {
+        const od = oiDeltaPct(hist.get(r.coin), r.oiBase, Math.max(now - prevCloseT, HOUR));
+        if (Number.isFinite(od)) oiDelta = +od.toFixed(1);
+      } catch (_) {}
+      let ern = 0;
+      const ea = earnMap.get(r.ticker);
+      if (Array.isArray(ea)) for (const e of ea) {
+        if (e.d === today && e.s === "bmo") { ern = "bmo"; break; }
+        if (e.d === yest && e.s === "amc") { ern = "amc"; break; }
+      }
+      let news24 = 0;
+      for (const a of newsItems) if (a && a.rel === 1 && a.pub >= now - DAY && String(a.tk || "").toUpperCase() === r.ticker) news24++;
+      const lvl = focusLevelDist(hs, r.px, now);
+      out.push({ ticker: r.ticker, coin: r.coin, px: +(+r.px).toPrecision(8), prevClose: pc > 0 ? +pc.toPrecision(8) : null,
+        gapPct, gapSigma, gapSd: gsd != null ? +gsd.toFixed(3) : null, rvol, oiDelta, ern, news24,
+        lvlDistSd: lvl ? lvl.distSd : null, lvlSide: lvl ? lvl.side : null,
+        cluster: cl.ind || cl.sector || null, vol: r.vol || 0 });
+    }
+    return out;
+  }
+  function stampFocus(sess, now) {
+    if (focusState && focusState.day !== etDayStr(now)) { focusPrev = focusState; focusState = null; }
+    // The gap anchor is the PREVIOUS session's true close, read off the calendar engine — never a
+    // fixed offset (half days close 13:00 ET; marketSessions carries that, same fix as studyGapFade).
+    let prevCloseT = null;
+    for (const s of marketSessions(sess.open - 9 * DAY, sess.open)) if (s.close < sess.open) prevCloseT = s.close;
+    if (prevCloseT == null) return;
+    const cands = focusCandidates(now, prevCloseT);
+    if (cands.length < FOCUS_MIN_CANDS) return;                // spines still booting — the 30s tick retries
+    const sel = focusSelect(cands);
+    focusState = { day: etDayStr(now), open: sess.open, close: sess.close, prevCloseT,
+      frozenAt: now, late: now - sess.open > 90 * 1000 ? 1 : 0,   // boot-stamped after the open: DISCLOSED, same honesty as episode boot stamps
+      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null };
+    focusPersist();
+    log(`FOCUS stamped ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.late ? ` (LATE \u2014 ${Math.round((now - sess.open) / 60000)}m after the open)` : ""}, ${focusState.cuts.length} cut(s) disclosed`);
+  }
+  function fillFocus(now) {
+    const st = focusState;
+    if (!st || st.filledAt) return;
+    const canRead = store.candlesEnabled && store.candlesEnabled();
+    for (const p of st.rows) {
+      const bars = canRead ? store.readCandles(p.coin, st.open - 1, st.open + HOUR + 1) : [];
+      p.h1 = firstHourStats(bars, st.open, st.open + HOUR);    // null = archive gap for THIS name: an honest dash, never a guess
+    }
+    st.filledAt = now;
+    st.fillNote = canRead ? null : "5m archive disabled \u2014 first-hour columns cannot fill";
+    focusPersist();
+    log(`FOCUS +1h fill: ${st.rows.filter((p) => p.h1).length}/${st.rows.length} seat(s) carry a first-hour record${st.fillNote ? " \u2014 " + st.fillNote : ""}`);
+  }
+  function focusTick(nowInj) {
+    const now = Number.isFinite(nowInj) ? nowInj : Date.now();
+    const today = etDayStr(now);
+    const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
+    if (!sess) return;                                         // weekend / holiday: yesterday's list stands
+    if (now >= sess.open && (!focusState || focusState.day !== today)) stampFocus(sess, now);
+    if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
+  }
+  function getFocus() {
+    const now = Date.now(), today = etDayStr(now);
+    const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
+    let state = "offday";
+    if (focusState && focusState.day === today) state = focusState.filledAt ? "filled" : "frozen";
+    else if (sess) state = now < sess.open ? "pre" : "pending";
+    return { ts: now, dataTs: focusVer, state, day: today,
+      open: sess ? sess.open : null, close: sess ? sess.close : null,
+      cap: FOCUS_CAP, perCluster: FOCUS_PER_CLUSTER, minVol: FOCUS_MIN_VOL,
+      today: focusState && focusState.day === today ? focusState : null,
+      prev: focusPrev,
+      archive: { enabled: !!(store.candlesEnabled && store.candlesEnabled()) } };
+  }
+  // On-demand 1-minute candles for the FOCUS chart: ONE live pull covering the pre-open hour plus
+  // the session so far, memoized ~55s per coin+window so the 3m/5m/15m toggles aggregate
+  // client-side from the same base instead of refetching — one source, three views. Deliberately
+  // NOT the 5m archive: 3m does not aggregate from 5m, and the pre-open hour must come from the
+  // SAME series as the session or the chart would stitch two sources at 09:30.
+  const focusM1 = new Map();           // coin -> { key, at, out }
+  async function getCandles1m(coin, fromQ, toQ) {
+    const r = rows.get(coin);
+    if (!r || r.delisted) return { coin, res: "1m", candles: [], error: "unknown market" };
+    const now = Date.now();
+    let from = Math.trunc(+fromQ), to = Math.trunc(+toQ);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) { to = now; from = now - 8 * HOUR; }
+    from = Math.max(from, now - 3 * DAY);
+    to = Math.min(to, now);
+    if (to - from > 30 * HOUR) from = to - 30 * HOUR;          // one session + pre-open, with slack — never a bulk-history endpoint
+    const key = from + "|" + Math.floor(to / 60000);
+    const m = focusM1.get(coin);
+    if (m && m.key === key && now - m.at < 55 * 1000) return m.out;
+    const raw = await fetchCandles(coin, "1m", from, to, M5_FETCH_WEIGHT);
+    const candles = packHours(raw).filter((k) => k[0] >= from && k[0] <= to);
+    const out = { coin, res: "1m", from, to, ts: now, candles };
+    focusM1.set(coin, { key, at: now, out });
+    if (focusM1.size > 12) focusM1.delete(focusM1.keys().next().value);
+    return out;
+  }
+
   return {
     start,
     getSnapshot: () => snapshotCache,
@@ -10627,6 +10770,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getFunding,
     getCandles,
     getCandles5m,
+    // FOCUS tab (build 2026.08.15-01): the frozen list, its ETag stamp, the chart's 1m feed,
+    // and a harness hook to run one stamp/fill tick at an injected clock.
+    getFocus,
+    getFocusStamp: () => focusVer,
+    getCandles1m,
+    focusTickNow: focusTick,
+    hydrateFocusNow: hydrateFocus,
     getCryptoCorr, getCryptoCorrStamp,
     getCandleCoverage,
     // 5m archive freshness stamp for the route ETag: the coin's last-captured bar ts (in-memory,

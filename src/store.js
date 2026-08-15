@@ -34,6 +34,7 @@ function openStore(dataDir) {
   const duelFile = path.join(dataDir, "duel.json");         // score-duel daily snapshots + rank-IC series
   const derivFile = path.join(dataDir, "derivs.log");        // Coinalyze 15-min rows: coin\tts\tlongLiq\tshortLiq\toi
   const derivMapFile = path.join(dataDir, "derivmap.json");  // resolved base-asset -> Coinalyze symbol map
+  const focusFile = path.join(dataDir, "focus.json");        // FOCUS tab: today's frozen list + yesterday's, verbatim
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
   let buf = [];
@@ -630,6 +631,21 @@ function openStore(dataDir) {
     },
     // Resolved symbol map (base asset -> {sym, venue}) — config-grade, atomic like the rest,
     // so a boot never has to re-spend call budget re-resolving an unchanged universe.
+    // FOCUS list (build 2026.08.15-01): { state, prev } — today's frozen 6-seat list and the
+    // prior day's, exactly as stamped. Atomic tmp+rename like every other config-grade write, so
+    // a mid-write crash can never leave a half list that a boot would then serve as truth.
+    saveFocus(data) {
+      try {
+        const tmp = focusFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, focusFile);
+      } catch (_) {}
+    },
+    loadFocus() {
+      try { if (fs.existsSync(focusFile)) return JSON.parse(fs.readFileSync(focusFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
     saveDerivMap(data) {
       try {
         const tmp = derivMapFile + ".tmp";

@@ -5222,6 +5222,10 @@ const FEATURES = [
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
   { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },
+  // FOCUS (build 2026.08.15-01): the frozen-at-open 6-seat tradeable watchlist. Admin while it
+  // soaks — same doctrine as baskets/actionable. One route; the chart's 1m fetch rides
+  // /api/candles under the pinned markets key, so gating focus can never strand a chart request.
+  { key: "focus",      kind: "tab", label: "Focus",       def: "admin",  routes: ["/api/focus"] },
   { key: "treemap",    kind: "tab", label: "Treemap",     def: "public", runtime: true, routes: [] },
   { key: "ai.generate",   kind: "act", label: "AI report generation", def: "admin",  routes: ["POST /api/ai-report"] },
   { key: "ai.ask",        kind: "act", label: "Terminal AI fallback", def: "admin",  routes: ["POST /api/ask"] },
@@ -7066,3 +7070,132 @@ module.exports.mergeSectorAudit = mergeSectorAudit;
 module.exports.sectorAuditDue = sectorAuditDue;
 module.exports.nameMatchScore = nameMatchScore;
 module.exports.sicToSector = sicToSector;
+
+// ===== FOCUS tab: frozen-at-open tradeable watchlist (build 2026.08.15-01) ====================
+// A discretionary morning shortlist, NOT a signal: 6 seats, stamped once at the cash open,
+// one late fill at +1h, immutable for the day. All math lives here so the poller's snapshot job
+// is thin assembly and the whole engine is testable without a server. Doctrine carried over:
+// every unit is the name's OWN distribution (never raw % across names), nulls contribute
+// nothing (a name is never boosted by missing data), and a sparse series is a dash, not a zero.
+const FOCUS_CAP = 6;                 // hard seat count — a great selection, not a big one
+const FOCUS_PER_CLUSTER = 2;         // max seats per cluster: 6 names should be 6 trades, not one theme
+const FOCUS_CUT_N = 4;               // how many just-missed names the cut line discloses
+const FOCUS_MIN_GAP_N = 10;          // overnight-gap samples before a σ is claimed
+
+// Overnight-gap dispersion from the row's own off-hours hold record ((gross-1)*100 per hold).
+// retStd is the same winsorized estimator every other σ in the codebase uses. Below the sample
+// floor -> null: the gap ships raw with no σ rather than a fake one.
+function focusGapSigma(gapsPct, minN) {
+  if (!Array.isArray(gapsPct)) return null;
+  const g = gapsPct.filter((x) => Number.isFinite(x));
+  return retStd(g, minN == null ? FOCUS_MIN_GAP_N : minN);
+}
+
+// Distance to the nearest 30d extreme, in σ of the name's own daily returns — the cheap, honest
+// subset of "room vs wall". Derived entirely from the hourly spine (dailyRaw goes closes-only
+// after a warm boot, so its lows cannot be trusted for this): completed UTC days only, the
+// forming day never contributes an extreme. Returns { distSd, side: 'above'|'below' } for the
+// NEARER of (30d high overhead, 30d low underfoot), or null when the spine or σ can't carry it.
+function focusLevelDist(hourly, px, now) {
+  if (!Array.isArray(hourly) || hourly.length < 48 || !(px > 0)) return null;
+  const DAY_ = 86400 * 1000;
+  const nowDay = Math.floor((Number.isFinite(now) ? now : Date.now()) / DAY_) * DAY_;
+  const cut = nowDay - 30 * DAY_;
+  let hi = -Infinity, lo = Infinity;
+  const dayClose = new Map();                            // UTC day -> last close (daily sd sample)
+  for (const k of hourly) {
+    const t = +k[0]; if (!Number.isFinite(t) || t >= nowDay) continue;
+    const d = Math.floor(t / DAY_) * DAY_;
+    const c = +k[4]; if (Number.isFinite(c) && c > 0) dayClose.set(d, c);
+    if (t < cut) continue;
+    const h = +k[2], l = +k[3];
+    if (Number.isFinite(h) && h > hi) hi = h;
+    if (Number.isFinite(l) && l < lo) lo = l;
+  }
+  if (!(hi > 0) || !(lo > 0) || hi < lo) return null;
+  const closes = [...dayClose.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).slice(-31);
+  const rets = [];
+  for (let i = 1; i < closes.length; i++) if (closes[i - 1] > 0) rets.push((closes[i] / closes[i - 1] - 1) * 100);
+  const sd = retStd(rets, 10);
+  if (sd == null || !(sd > 0)) return null;
+  const upPct = (hi - px) / px * 100, dnPct = (px - lo) / px * 100;   // negative = already through it
+  const up = Math.abs(upPct) / sd, dn = Math.abs(dnPct) / sd;
+  return up <= dn ? { distSd: +up.toFixed(2), side: "above" } : { distSd: +dn.toFixed(2), side: "below" };
+}
+
+// First-hour record from 5m archive bars [t,o,h,l,c,v]: a bar belongs to the hour iff its START
+// is in [openMs, endMs) — the 10:25 bar closes 10:30 and is the last one in. hi/lo over true
+// bar extremes; session VWAP = Σ(typical·v)/Σv with typical = (h+l+c)/3; all-zero volume ->
+// vwap null (honest null), extremes still real. Below minBars (default 6 of 12) the hour is a
+// spine gap, not a record -> null. openPx = first in-window bar's open, lastPx = last bar's close.
+function firstHourStats(bars, openMs, endMs, minBars) {
+  if (!Array.isArray(bars) || !Number.isFinite(openMs) || !Number.isFinite(endMs) || endMs <= openMs) return null;
+  const inw = [];
+  for (const k of bars) {
+    const t = +k[0];
+    if (Number.isFinite(t) && t >= openMs && t < endMs) inw.push(k);
+  }
+  inw.sort((a, b) => a[0] - b[0]);
+  if (inw.length < (Number.isFinite(minBars) ? minBars : 6)) return null;
+  let hi = -Infinity, lo = Infinity, pv = 0, vv = 0;
+  for (const k of inw) {
+    const h = +k[2], l = +k[3], c = +k[4], v = +k[5];
+    if (Number.isFinite(h) && h > hi) hi = h;
+    if (Number.isFinite(l) && l < lo) lo = l;
+    if (Number.isFinite(v) && v > 0 && Number.isFinite(h) && Number.isFinite(l) && Number.isFinite(c)) { pv += (h + l + c) / 3 * v; vv += v; }
+  }
+  if (!(hi > 0) || !(lo > 0) || hi < lo) return null;
+  const o = +inw[0][1], c = +inw[inw.length - 1][4];
+  return { hi: +hi.toPrecision(8), lo: +lo.toPrecision(8),
+    vwap: vv > 0 ? +(pv / vv).toPrecision(8) : null,
+    openPx: Number.isFinite(o) && o > 0 ? +o.toPrecision(8) : null,
+    lastPx: Number.isFinite(c) && c > 0 ? +c.toPrecision(8) : null,
+    bars: inw.length };
+}
+
+// Loudness: an ORDERING for a discretionary watchlist, deliberately simple and fully disclosed.
+// |gapσ| capped at 4, RVOL's excess over 1× at 0.8/unit capped at 4 units, |ΔOI| at 1 per 15%
+// capped at 2, a scheduled earnings print is worth a flat 1.5, headlines 0.25 each capped at 3.
+// Nulls contribute 0. Not tunable per-request on purpose: one formula, one answer, testable.
+function focusScore(c) {
+  let s = 0;
+  if (Number.isFinite(c.gapSigma)) s += Math.min(Math.abs(c.gapSigma), 4);
+  if (Number.isFinite(c.rvol)) s += Math.min(Math.max(c.rvol - 1, 0), 5) * 0.8;
+  if (Number.isFinite(c.oiDelta)) s += Math.min(Math.abs(c.oiDelta), 30) / 15;
+  if (c.ern) s += 1.5;
+  if (Number.isFinite(c.news24)) s += Math.min(c.news24, 3) * 0.25;
+  return +s.toFixed(4);
+}
+
+// The whole selection in one deterministic pass. Walk loudest-first; a candidate whose cluster
+// already holds FOCUS_PER_CLUSTER seats is cut with why:'cluster' (the six seats should be six
+// different trades); past FOCUS_CAP everything is cut with why:'rank'. Cluster null never blocks
+// (unknown grouping must not eat a seat quota it was never proven to share). Ties break on
+// ticker so the stamped list is reproducible to the byte. Cuts disclose the first FOCUS_CUT_N.
+function focusSelect(cands, opts) {
+  const o = opts || {};
+  const cap = Number.isFinite(o.cap) ? o.cap : FOCUS_CAP;
+  const perCluster = Number.isFinite(o.perCluster) ? o.perCluster : FOCUS_PER_CLUSTER;
+  const cutN = Number.isFinite(o.cutN) ? o.cutN : FOCUS_CUT_N;
+  const rows = (Array.isArray(cands) ? cands : [])
+    .filter((c) => c && typeof c.ticker === "string" && c.ticker)
+    .map((c) => ({ ...c, score: focusScore(c) }))
+    .sort((a, b) => (b.score - a.score) || (a.ticker < b.ticker ? -1 : 1));
+  const picks = [], cuts = [], seats = new Map();
+  for (const c of rows) {
+    if (picks.length >= cap) { cuts.push({ ...c, why: "rank" }); continue; }
+    const cl = c.cluster || null;
+    if (cl != null && (seats.get(cl) || 0) >= perCluster) { cuts.push({ ...c, why: "cluster" }); continue; }
+    if (cl != null) seats.set(cl, (seats.get(cl) || 0) + 1);
+    picks.push(c);
+  }
+  return { picks, cuts: cuts.slice(0, cutN) };
+}
+module.exports.FOCUS_CAP = FOCUS_CAP;
+module.exports.FOCUS_PER_CLUSTER = FOCUS_PER_CLUSTER;
+module.exports.FOCUS_CUT_N = FOCUS_CUT_N;
+module.exports.focusGapSigma = focusGapSigma;
+module.exports.focusLevelDist = focusLevelDist;
+module.exports.firstHourStats = firstHourStats;
+module.exports.focusScore = focusScore;
+module.exports.focusSelect = focusSelect;
