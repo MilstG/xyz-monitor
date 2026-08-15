@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.14-03";
+const VERSION = "2026.08.15-01";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -963,6 +963,15 @@ async function main() {
     // separate axis from tf= (ladder timeframes) and days= (hourly spine). Downsampled server-side;
     // ETag folds in the coin's last-captured-bar stamp so a new bar mints a fresh key. Same
     // serveKeyed path as the rest of the route (the manifest pins /api/candles -> serveKeyed).
+    // res=1m (build 2026.08.15-01): the FOCUS chart's base series — a LIVE 1-minute pull covering
+    // the pre-open hour + session so far, memoized in the poller (~55s per coin+window) so the
+    // 3m/5m/15m toggles aggregate client-side from one base. Async and window-capped in
+    // getCandles1m; served no-store because the memo IS the cache and a forming minute must
+    // never 304 against the tape. Rides the pinned markets key like the rest of /api/candles.
+    if (req.query && req.query.res === "1m") {
+      reply.header("cache-control", "no-store");
+      return poller.getCandles1m(coin, req.query.from, req.query.to);
+    }
     if (req.query && (req.query.res === "5m" || req.query.res === "5")) {
       const from = req.query.from, to = req.query.to, max = req.query.max;
       const key = "candles5m|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
@@ -993,6 +1002,14 @@ async function main() {
   // the cache with live freshness (fresh / stale / invalidated + reason); POST generates — the
   // TTL cooldown is enforced server-side (429), so the shared cache IS the group's rate limit.
   // Session-gated like every route; the API key never leaves the server.
+  // FOCUS (build 2026.08.15-01): the frozen-at-open 6-seat watchlist — today's stamp, the +1h
+  // fill, the cut line and yesterday's list, all verbatim from the poller's persisted state.
+  // Keyed on the focus stamp alone: the payload only changes when a stamp, fill or day-roll
+  // lands, so everything else 304s. Route gated by the "focus" manifest key.
+  fastify.get("/api/focus", (req, reply) => {
+    const key = "focus|" + poller.getFocusStamp();
+    return serveKeyed(req, reply, key, () => poller.getFocus(), { state: "off", today: null, prev: null });
+  });
   fastify.get("/api/ai-report", (req, reply) => {
     reply.header("cache-control", "no-store");
     const coin = (req.query && req.query.coin) || "";
