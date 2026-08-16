@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.15-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.15-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17108,4 +17108,77 @@ test("focus -01: engine harness — a booting universe never mints a stamp, hydr
   const f3 = p3.getFocus();
   assert.equal(f3.today, null, "a stale day never masquerades as today's stamp");
   assert.ok(f3.prev && f3.prev.day === "2020-01-02", "…it rolls to the prior-list slot instead");
+});
+
+// ============================================================================================
+// FOCUS -02: the 09:00 preview pool, the TG news lane, and the stamp-vs-preview disclosure.
+// ============================================================================================
+const { focusPreview, focusDiff, FOCUS_PREVIEW_N } = require("../src/compute");
+
+test("focus -02: TG lane weighs into loudness exactly as disclosed, count-capped, null-safe", () => {
+  // headlines: 0.25 each capped at 3 counted; TG <4h: 0.5 each capped at 2 counted (max +1.0)
+  assert.equal(focusScore({ ticker: "A", news24: 4, tg4h: 3 }), 0.25 * 3 + 0.5 * 2, "both lanes hit their caps");
+  assert.equal(focusScore({ ticker: "B", news24: 1, tg4h: 1 }), 0.25 + 0.5, "one wire + one fresh TG item");
+  assert.equal(focusScore({ ticker: "C", tg4h: 1 }), 0.5, "a TG item with no 24h wire count still weighs");
+  assert.equal(focusScore({ ticker: "D", news24: 2 }), 0.5, "no tg4h field -> the lane contributes zero, never NaN");
+  // a fresh TG mention can flip an ordering the wire count alone would not
+  const a = { ticker: "AA", gapSigma: 1.0, news24: 3 }, b = { ticker: "BB", gapSigma: 1.0, news24: 0, tg4h: 2 };
+  assert.ok(focusScore(b) > focusScore(a), "two fresh TG items outrank three stale wire headlines");
+});
+
+test("focus -02: the preview pool is top-10 by the SAME loudness with NO cluster gate", () => {
+  const mk = (t, g, clu) => ({ ticker: t, gapSigma: g, cluster: clu });
+  // gap σ values stay UNDER the score's |gapσ| cap of 4 — at or above it, loudness ties and the
+  // ticker tiebreak takes over (that capping is itself covered by the ordering assertions below).
+  const cands = [mk("N", 3.9, "SEMI"), mk("M", 3.6, "SEMI"), mk("A", 3.3, "SEMI"), mk("S", 3.0, "SEMI"),
+    mk("L", 2.7, "PH"), mk("T", 2.4, "AU"), mk("X", 2, "EN"), mk("J", 1.5, "BK"), mk("C", 1, "CM"),
+    mk("P", 0.5, "SW"), mk("Q", 0.4, "SW"), mk("R", 0.3, "SW")];
+  const pv = focusPreview(cands);
+  assert.equal(pv.length, FOCUS_PREVIEW_N, "exactly ten");
+  assert.deepEqual(pv.slice(0, 4).map((x) => x.ticker), ["N", "M", "A", "S"], "all four SEMI names present — the prep pool ignores the cap the stamp will apply");
+  assert.ok(!pv.find((x) => x.ticker === "Q") && !pv.find((x) => x.ticker === "R"), "eleventh and twelfth stay out");
+  assert.ok(pv.every((x) => typeof x.score === "number"), "scores ride along for the rank read");
+  assert.deepEqual(focusPreview(cands, 3).map((x) => x.ticker), ["N", "M", "A"], "n is honored");
+  assert.deepEqual(focusPreview(null), [], "null degrades");
+});
+
+test("focus -02: the stamp-vs-preview diff is exact set math", () => {
+  const d = focusDiff(["NVDA", "MU", "LLY", "TSLA", "COIN", "PLTR"], ["NVDA", "MU", "LLY", "TSLA", "XOM", "COIN"]);
+  assert.deepEqual(d.added, ["XOM"], "the seat XOM took is disclosed");
+  assert.deepEqual(d.dropped, ["PLTR"], "the seat PLTR lost is disclosed");
+  assert.deepEqual(focusDiff(["A"], ["A"]), { added: [], dropped: [] }, "a matching stamp discloses an empty diff, not silence");
+  assert.deepEqual(focusDiff(null, ["A"]), { added: ["A"], dropped: [] }, "no preview -> everything reads as added, nothing throws");
+});
+
+test("focus -02: engine harness — no phantom preview on a booting universe, weekends clear the pool", () => {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveFocus: () => {}, loadFocus: () => null };
+  const p = createPoller({ dex: "xyz", store: base, log: () => {}, version: "test" });
+  p.focusTickNow(Date.UTC(2026, 7, 14, 13, 10));   // Fri 09:10 ET — inside the preview window, universe empty
+  assert.equal(p.getFocus().preview, null, "below the candidate floor no preview is minted — a prep list of nothing is not shown");
+  p.focusTickNow(Date.UTC(2026, 7, 15, 13, 10));   // Saturday — silent no-op
+  assert.equal(p.getFocus().preview, null, "weekend keeps the pool clear");
+});
+
+test("focus -02: manifest pins — preview machinery, TG lane, diff disclosure, client wiring", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const cmp = rd("src/compute.js"), pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css");
+  for (const pin of ["function focusPreview(", "function focusDiff(", "const FOCUS_PREVIEW_N = 10",
+    "if (Number.isFinite(c.tg4h)) s += Math.min(c.tg4h, 2) * 0.5"])
+    assert.ok(cmp.includes(pin), "compute pin: " + pin);
+  for (const pin of ["const FOCUS_PREVIEW_LEAD = 30 * 60 * 1000", "function buildFocusPreview(",
+    "IN-MEMORY ONLY, never persisted", "if (a.tg && a.pub >= now - 4 * HOUR) tg4h++;",
+    "const newsTop = matched.slice(0, 3)", "pvDiff", "focusPv = null;",
+    "now >= sess.open - FOCUS_PREVIEW_LEAD && now < sess.open"])
+    assert.ok(pol.includes(pin), "poller pin: " + pin);
+  for (const pin of ["d.state==='preview'", "foccutrule", "focrank", "focbelow", "\\u0394 vs preview:",
+    "stamp = preview", "'TG':'WIRE'", "no sentiment scoring"])
+    assert.ok(app.includes(pin), "app pin: " + pin);
+  assert.ok(css.includes(".focbar.preview") && css.includes(".foccutrule") && css.includes(".focchip.news.hot"), "preview styles present");
+  // the preview is a pool, not a record: nothing in the poller may ever persist it
+  assert.ok(!pol.includes("saveFocus({ state: focusState, prev: focusPrev, pv") && !/saveFocus\([^)]*focusPv/.test(pol),
+    "focusPv can never reach the store");
 });
