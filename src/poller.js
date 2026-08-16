@@ -14,7 +14,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
-const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER } = require("./compute");
+const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N } = require("./compute");
 const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
@@ -10609,7 +10609,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // 09:30 ET "open snapshot" would anchor their gap to the wrong exchange (2026.08.14-01 rule).
   const FOCUS_MIN_VOL = 200000;        // $200k 24h notional floor: a seat you cannot exit is not a seat
   const FOCUS_MIN_CANDS = 8;           // below this the universe is still booting — defer, retry next tick
+  const FOCUS_PREVIEW_LEAD = 30 * 60 * 1000;   // preview window opens 09:00 ET — earlier and the σ/RVOL reads are mostly noise
   let focusState = null, focusPrev = null, focusVer = 0;
+  let focusPv = null;                  // { at, day, rows, sig } — the live preview pool. IN-MEMORY ONLY, never persisted: only the stamp is a record.
   function hydrateFocus() {
     const data = store.loadFocus ? store.loadFocus() : null;
     if (!data) return false;
@@ -10649,29 +10651,68 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
         if (e.d === today && e.s === "bmo") { ern = "bmo"; break; }
         if (e.d === yest && e.s === "amc") { ern = "amc"; break; }
       }
-      let news24 = 0;
-      for (const a of newsItems) if (a && a.rel === 1 && a.pub >= now - DAY && String(a.tk || "").toUpperCase() === r.ticker) news24++;
+      // One pass over the matched tape: 24h count, the TG-lane 4h count (the user's own curated
+      // channels naming this ticker — extra loudness weight, disclosed in focusScore), and the
+      // top 3 headlines VERBATIM for the chip hover. Restated feed data only — a headline that
+      // was never fetched can never appear here (fabrication-prevention by construction).
+      let news24 = 0, tg4h = 0;
+      const matched = [];
+      for (const a of newsItems) {
+        if (!a || a.rel !== 1 || !(a.pub >= now - DAY) || String(a.tk || "").toUpperCase() !== r.ticker) continue;
+        news24++;
+        if (a.tg && a.pub >= now - 4 * HOUR) tg4h++;
+        matched.push(a);
+      }
+      matched.sort((x, y) => y.pub - x.pub);
+      const newsTop = matched.slice(0, 3).map((a) => [a.tg ? 1 : 0, String(a.h || "").slice(0, 110), a.pub]);
       const lvl = focusLevelDist(hs, r.px, now);
       out.push({ ticker: r.ticker, coin: r.coin, px: +(+r.px).toPrecision(8), prevClose: pc > 0 ? +pc.toPrecision(8) : null,
-        gapPct, gapSigma, gapSd: gsd != null ? +gsd.toFixed(3) : null, rvol, oiDelta, ern, news24,
+        gapPct, gapSigma, gapSd: gsd != null ? +gsd.toFixed(3) : null, rvol, oiDelta, ern, news24, tg4h, newsTop,
         lvlDistSd: lvl ? lvl.distSd : null, lvlSide: lvl ? lvl.side : null,
         cluster: cl.ind || cl.sector || null, vol: r.vol || 0 });
     }
     return out;
   }
-  function stampFocus(sess, now) {
-    if (focusState && focusState.day !== etDayStr(now)) { focusPrev = focusState; focusState = null; }
+  function focusPrevClose(sess) {
     // The gap anchor is the PREVIOUS session's true close, read off the calendar engine — never a
     // fixed offset (half days close 13:00 ET; marketSessions carries that, same fix as studyGapFade).
     let prevCloseT = null;
     for (const s of marketSessions(sess.open - 9 * DAY, sess.open)) if (s.close < sess.open) prevCloseT = s.close;
+    return prevCloseT;
+  }
+  // PREVIEW (build 2026.08.15-02): the 09:00–09:30 prep pool. Same candidate assembly as the
+  // stamp — the gap here is simply the LIVE in-progress read against the same prev-close anchor —
+  // ranked by the same loudness, top 10, cluster cap deliberately NOT applied (a prep pool shows
+  // the whole field; the chip discloses which names the cap will block). Rebuilt every tick while
+  // the window is open; the ETag only bumps when the pool actually changed, so a still pre-market
+  // does not churn 304s. Never persisted, never scored, retired the moment the stamp exists.
+  function buildFocusPreview(sess, now) {
+    const prevCloseT = focusPrevClose(sess);
+    if (prevCloseT == null) return;
+    const cands = focusCandidates(now, prevCloseT);
+    if (cands.length < FOCUS_MIN_CANDS) return;                // booting universe: no phantom preview either
+    const rows = focusPreview(cands, FOCUS_PREVIEW_N);
+    const sig = rows.map((x) => x.ticker + "|" + (x.gapPct == null ? "" : x.gapPct.toFixed(1)) + "|" + (x.rvol == null ? "" : x.rvol.toFixed(1))).join(",");
+    if (focusPv && focusPv.sig === sig && focusPv.day === etDayStr(now)) { focusPv.at = now; return; }   // unchanged pool: refresh the clock, keep the ETag
+    focusPv = { at: now, day: etDayStr(now), rows, sig };
+    focusVer = Date.now();
+  }
+  function stampFocus(sess, now) {
+    if (focusState && focusState.day !== etDayStr(now)) { focusPrev = focusState; focusState = null; }
+    const prevCloseT = focusPrevClose(sess);
     if (prevCloseT == null) return;
     const cands = focusCandidates(now, prevCloseT);
     if (cands.length < FOCUS_MIN_CANDS) return;                // spines still booting — the 30s tick retries
     const sel = focusSelect(cands);
+    // Stamp-vs-preview disclosure: the diff is against the LAST preview's likely six (its top-6
+    // zone, the dashed rule the user prepped against) — persisted on the record, so "my prep
+    // silently drifted from the stamp" can never happen. No preview today -> no diff claimed.
+    const pvRef = focusPv && focusPv.day === etDayStr(now) ? focusPv : null;
+    const pvDiff = pvRef ? { pvAt: pvRef.at, ...focusDiff(pvRef.rows.slice(0, FOCUS_CAP).map((x) => x.ticker), sel.picks.map((x) => x.ticker)) } : null;
     focusState = { day: etDayStr(now), open: sess.open, close: sess.close, prevCloseT,
       frozenAt: now, late: now - sess.open > 90 * 1000 ? 1 : 0,   // boot-stamped after the open: DISCLOSED, same honesty as episode boot stamps
-      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null };
+      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, pvDiff };
+    focusPv = null;                                            // the preview retires the moment the record exists
     focusPersist();
     log(`FOCUS stamped ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.late ? ` (LATE \u2014 ${Math.round((now - sess.open) / 60000)}m after the open)` : ""}, ${focusState.cuts.length} cut(s) disclosed`);
   }
@@ -10692,18 +10733,24 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const now = Number.isFinite(nowInj) ? nowInj : Date.now();
     const today = etDayStr(now);
     const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
-    if (!sess) return;                                         // weekend / holiday: yesterday's list stands
+    if (!sess) { focusPv = null; return; }                     // weekend / holiday: yesterday's list stands, no preview
+    if (now >= sess.open - FOCUS_PREVIEW_LEAD && now < sess.open && (!focusState || focusState.day !== today))
+      buildFocusPreview(sess, now);
     if (now >= sess.open && (!focusState || focusState.day !== today)) stampFocus(sess, now);
+    if (focusState && focusState.day === today && focusPv) focusPv = null;   // belt + braces: a stamp always retires the pool
     if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
   }
   function getFocus() {
     const now = Date.now(), today = etDayStr(now);
     const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
     let state = "offday";
+    const pv = (!focusState || focusState.day !== today) && focusPv && focusPv.day === today ? focusPv : null;
     if (focusState && focusState.day === today) state = focusState.filledAt ? "filled" : "frozen";
+    else if (pv) state = "preview";
     else if (sess) state = now < sess.open ? "pre" : "pending";
     return { ts: now, dataTs: focusVer, state, day: today,
       open: sess ? sess.open : null, close: sess ? sess.close : null,
+      preview: pv ? { at: pv.at, rows: pv.rows } : null, previewN: FOCUS_PREVIEW_N, previewLeadMs: FOCUS_PREVIEW_LEAD,
       cap: FOCUS_CAP, perCluster: FOCUS_PER_CLUSTER, minVol: FOCUS_MIN_VOL,
       today: focusState && focusState.day === today ? focusState : null,
       prev: focusPrev,

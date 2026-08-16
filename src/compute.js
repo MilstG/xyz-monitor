@@ -7156,6 +7156,9 @@ function firstHourStats(bars, openMs, endMs, minBars) {
 // Loudness: an ORDERING for a discretionary watchlist, deliberately simple and fully disclosed.
 // |gapσ| capped at 4, RVOL's excess over 1× at 0.8/unit capped at 4 units, |ΔOI| at 1 per 15%
 // capped at 2, a scheduled earnings print is worth a flat 1.5, headlines 0.25 each capped at 3.
+// TG lane (-02): a curated-Telegram-channel item naming the ticker in the last 4h is the user's
+// own curation saying "this moves price" — 0.5 each, capped at 1.0. Count + recency + source
+// only, NEVER sentiment: the score says attention is here, direction stays the trader's read.
 // Nulls contribute 0. Not tunable per-request on purpose: one formula, one answer, testable.
 function focusScore(c) {
   let s = 0;
@@ -7164,7 +7167,28 @@ function focusScore(c) {
   if (Number.isFinite(c.oiDelta)) s += Math.min(Math.abs(c.oiDelta), 30) / 15;
   if (c.ern) s += 1.5;
   if (Number.isFinite(c.news24)) s += Math.min(c.news24, 3) * 0.25;
+  if (Number.isFinite(c.tg4h)) s += Math.min(c.tg4h, 2) * 0.5;
   return +s.toFixed(4);
+}
+// PREVIEW pool (build 2026.08.15-02): the 09:00–09:30 prep list. Top N by the SAME loudness
+// formula, deliberately WITHOUT the cluster cap — a prep pool should show the whole field,
+// including names the cap will block at the stamp (their cluster chip says so). Ties break on
+// ticker like the stamp, so a still tape produces a still preview. Never persisted by callers.
+const FOCUS_PREVIEW_N = 10;
+function focusPreview(cands, n) {
+  const N = Number.isFinite(n) ? n : FOCUS_PREVIEW_N;
+  return (Array.isArray(cands) ? cands : [])
+    .filter((c) => c && typeof c.ticker === "string" && c.ticker)
+    .map((c) => ({ ...c, score: focusScore(c) }))
+    .sort((a, b) => (b.score - a.score) || (a.ticker < b.ticker ? -1 : 1))
+    .slice(0, N);
+}
+// Stamp-vs-preview disclosure: which tickers entered/left between the last preview's likely six
+// and the frozen six. Pure set math so the banner's diff line is testable to the element.
+function focusDiff(prevTickers, stampTickers) {
+  const a = new Set(Array.isArray(prevTickers) ? prevTickers : []);
+  const b = new Set(Array.isArray(stampTickers) ? stampTickers : []);
+  return { added: [...b].filter((t) => !a.has(t)).sort(), dropped: [...a].filter((t) => !b.has(t)).sort() };
 }
 
 // The whole selection in one deterministic pass. Walk loudest-first; a candidate whose cluster
@@ -7198,4 +7222,7 @@ module.exports.focusGapSigma = focusGapSigma;
 module.exports.focusLevelDist = focusLevelDist;
 module.exports.firstHourStats = firstHourStats;
 module.exports.focusScore = focusScore;
+module.exports.FOCUS_PREVIEW_N = FOCUS_PREVIEW_N;
+module.exports.focusPreview = focusPreview;
+module.exports.focusDiff = focusDiff;
 module.exports.focusSelect = focusSelect;
