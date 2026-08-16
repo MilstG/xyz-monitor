@@ -10137,7 +10137,13 @@ function focChips(p){
     c.push(['gap','GAP '+focSgn(p.gapPct)+'%', `${focSgn(p.gapSigma)}σ of this name's own overnight gaps (σ=${p.gapSd!=null?p.gapSd.toFixed(2)+'%':'—'})`]);
   if(p.rvol!=null&&p.rvol>=1.3) c.push(['rvol','RVOL '+p.rvol.toFixed(1)+'×','Clock-matched: this hour vs the same clock hour\u2019s prior-month median notional']);
   if(p.oiDelta!=null&&Math.abs(p.oiDelta)>=5) c.push(['oi','OI '+focSgn(p.oiDelta)+'%','Overnight change in open interest on the HIP-3 perp']);
-  if(p.news24!=null&&p.news24>0) c.push(['news','NEWS '+p.news24,'Headlines matched to this name in the last 24h (News tab feed) — count only, the headlines themselves live on the News tab']);
+  if(p.news24!=null&&p.news24>0){
+    const age=(pub)=>{ const m=Math.max(1,Math.round((Date.now()-pub)/60000)); return m<60?m+'m':m<1440?Math.round(m/60)+'h':Math.round(m/1440)+'d'; };
+    const lines=(p.newsTop||[]).map(n=>'['+(n[0]?'TG':'WIRE')+' '+age(n[2])+'] '+String(n[1]).replace(/ \u00b7 /g,' \u2022 '));
+    if(p.tg4h) lines.push('\u26a1 your Telegram channel(s) named this ticker in the last 4h \u2014 TG items carry extra loudness weight (+0.5 each, cap 1.0, disclosed in compute)');
+    lines.push('count + recency + source only \u2014 no sentiment scoring, direction is your read; full stories live on the News tab');
+    c.push(['news'+(p.tg4h?' hot':''),'NEWS '+p.news24+(p.tg4h?' \u26a1':''), p.news24+' headline(s) in 24h \u2014 verbatim from the feed \u00b7 '+lines.join(' \u00b7 ')]);
+  }
   if(p.lvlDistSd!=null) c.push([p.lvlDistSd>=1.5?'void':'lvl', (p.lvlDistSd>=1.5?'ROOM ':'LVL ')+p.lvlDistSd.toFixed(1)+'σ '+(p.lvlSide==='above'?'↑':'↓'),
     p.lvlDistSd>=1.5?`Nearest 30d extreme is ${p.lvlDistSd.toFixed(1)}σ ${p.lvlSide} — room to move`:`30d ${p.lvlSide==='above'?'high':'low'} only ${p.lvlDistSd.toFixed(1)}σ away — structure ${p.lvlSide==='above'?'overhead':'underfoot'}`]);
   if(p.cluster) c.push(['clu',esc(p.cluster),'Cluster (curated industry / sector): max 2 seats per cluster — names sharing it are likely the same trade today. Informational, never a gate on your picks.']);
@@ -10189,6 +10195,7 @@ function focActiveCols(){
 function focStateLine(d){
   const day=FOC.showPrev?d.prev:d.today;
   if(FOC.showPrev&&d.prev) return `<span class="focstamp"><span class="focdot prev"></span>PRIOR LIST · ${esc(d.prev.day)}${d.prev.filledAt?' · +1H FILLED':''}</span>`;
+  if(d.state==='preview'&&d.preview) return `<span class="focstamp pv"><span class="focdot pv"></span>PREVIEW · 09:00\u201309:30 ET · LIVE, NOT A RECORD · pool refreshed ${new Date(d.preview.at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>`;
   if(d.state==='pre') return `<span class="focstamp"><span class="focdot pre"></span>PRE-OPEN · stamps at the 09:30 ET open${d.open?` (${Math.max(0,Math.round((d.open-Date.now())/60000))}m)`:''}</span>`;
   if(d.state==='pending') return `<span class="focstamp"><span class="focdot pre"></span>OPEN PASSED · stamping on the next tick…</span>`;
   if(d.state==='offday') return `<span class="focstamp"><span class="focdot prev"></span>NO SESSION TODAY${d.prev?' · showing the prior list':''}</span>`;
@@ -10200,9 +10207,29 @@ function renderFocus(){
   const d=FOC.data;
   const day=FOC.showPrev?(d.prev||null):(d.today||( (d.state==='pre'||d.state==='offday') ? d.prev : null));
   const usingPrevAuto=!FOC.showPrev&&!d.today&&day&&day===d.prev;
+  // PREVIEW (build 2026.08.15-02): the 09:00 prep pool — its own render path. Rank column, ten
+  // rows, a dashed rule after the likely six, dimmed below it. No sorting, no drag, no h1
+  // columns: a live pool re-ranks itself; user reordering of a list that reshuffles under the
+  // cursor is churn, not control. The stamp table keeps all of that as before.
+  if(!FOC.showPrev&&d.state==='preview'&&d.preview&&Array.isArray(d.preview.rows)){
+    const pcols=focActiveCols().filter(c=>!c.h1);
+    let html=`<div class="focbar preview">${focStateLine(d)}<span class="focnote">Top ${d.previewN||10} by loudness, re-ranked as the pre-market tape moves. Cluster cap NOT applied \u2014 this is the prep pool; the dashed rule marks the likely six. Nothing here persists; only the 09:30 stamp is a record.</span><span class="focsp"></span><button type="button" class="btn xtiny" id="focgear" data-tip="Show/hide columns \u2014 shared with the stamped table\u2019s layout">\u2699 columns</button></div>`;
+    html+=`<table class="foctbl pv"><thead><tr><th class="l" data-tip="preview rank by loudness \u2014 the same disclosed formula the stamp uses">#</th>`
+      +pcols.map(c=>`<th class="${c.left?'l':''}" data-tip="${esc(c.tip)}">${c.label}</th>`).join('')+`</tr></thead><tbody>`;
+    d.preview.rows.forEach((p,i)=>{
+      html+=`<tr class="${i>=(d.cap||6)?'focbelow':''}"><td class="l focrank">${i+1}</td>`+pcols.map(c=>c.td(p)).join('')+`</tr>`;
+      if(i===(d.cap||6)-1) html+=`<tr class="foccutrule"><td colspan="${pcols.length+1}" data-tip="the stamp cut zone: at 09:30 the ${d.perCluster||2}-per-cluster cap applies and the list freezes at ${d.cap||6}"></td></tr>`;
+    });
+    html+=`</tbody></table><div class="focfoot">Gap is the LIVE in-progress read vs the last cash close \u2014 still moving until the bell. If the stamp differs from this preview, the open banner will say exactly how.</div>`;
+    w.innerHTML=html; focWireBar();
+    w.querySelectorAll('.focchbtn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); focChartOpen(b.dataset.foct); }));
+    return;
+  }
   let html=`<div class="focbar">${focStateLine(d)}`
     +(usingPrevAuto?`<span class="focnote">no stamp yet today — the prior list stands below</span>`:'')
     +(day&&day.fillNote?`<span class="focnote err" data-tip="the +1h columns need the on-disk 5m archive">${esc(day.fillNote)}</span>`:'')
+    +(day&&day.pvDiff&&((day.pvDiff.added||[]).length||(day.pvDiff.dropped||[]).length)?`<span class="focdiff" data-tip="${esc(`the tape moved between the ${new Date(day.pvDiff.pvAt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})} preview and the bell \u2014 disclosed so your prep never silently drifts from the record`)}"><b>\u0394 vs preview:</b> ${(day.pvDiff.added||[]).map(t=>'+'+esc(t)).concat((day.pvDiff.dropped||[]).map(t=>'\u2212'+esc(t))).join(' ')}</span>`:'')
+    +(day&&day.pvDiff&&!(day.pvDiff.added||[]).length&&!(day.pvDiff.dropped||[]).length?`<span class="focnote" data-tip="the frozen six match the last preview\u2019s likely six exactly">stamp = preview</span>`:'')
     +`<span class="focsp"></span>`
     +(d.prev&&d.today?`<button type="button" class="btn xtiny" id="focprev" data-tip="Toggle yesterday\u2019s frozen list — what you were watching, exactly as stamped">${FOC.showPrev?'◂ today':'◂ '+esc(d.prev.day)}</button>`:'')
     +`<button type="button" class="btn xtiny" id="focgear" data-tip="Show/hide columns — same model as the Markets column menu. Drag headers directly to rearrange; the layout persists per browser.">⚙ columns</button>`
@@ -10318,8 +10345,10 @@ function focChartEnsureDom(){
 }
 async function focChartOpen(ticker){
   const d=FOC.data; if(!d) return;
-  const day=FOC.showPrev?(d.prev||null):(d.today||d.prev); if(!day) return;
-  const p=day.rows.find(x=>x.ticker===ticker); if(!p) return;
+  let day=FOC.showPrev?(d.prev||null):(d.today||d.prev), p=day&&day.rows.find(x=>x.ticker===ticker);
+  if(!p&&d.state==='preview'&&d.preview){ p=d.preview.rows.find(x=>x.ticker===ticker);
+    if(p) day={ open:d.open, close:d.close, rows:d.preview.rows }; }   // preview chart: live pre-open candles, no frozen lines yet
+  if(!day||!p) return;
   focChartEnsureDom();
   FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.hover=null; FOCCH.tf=5;
   const m=el('focmodal'); m.hidden=false;
