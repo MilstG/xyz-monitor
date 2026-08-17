@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.16-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.17-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17060,13 +17060,14 @@ test("focus -01: manifest pins — the tab, the route, the engine and the client
   // server: the route serves keyed on the focus stamp; the chart's 1m branch exists and is no-store
   assert.ok(srv.includes('fastify.get("/api/focus"'), "focus route");
   assert.ok(srv.includes('"focus|" + poller.getFocusStamp()'), "focus ETag keys on the stamp");
-  assert.ok(srv.includes('req.query.res === "1m"') && srv.includes("poller.getCandles1m(coin"), "1m candle branch for the chart");
+  // chart source contract (re-pinned 2026.08.17-01): the 1m live branch is RETIRED — its absence
+  // is the pin now, and the chart must read the archive's 5m route instead.
+  assert.ok(!srv.includes('req.query.res === "1m"') && !srv.includes("poller.getCandles1m("), "the live 1m branch stays retired");
   // poller: engine doctrine strings — home-session exclusion, the volume floor, the late stamp
   // disclosure, the +1h fill, the boot hydrate, and the exports
   for (const pin of ["const FOCUS_MIN_VOL = 200000", "if (homeMkt(r.ticker, r.uni)) continue;",
     "function focusTick(", "function stampFocus(", "function fillFocus(", "function hydrateFocus(",
-    "late: now - sess.open > 90 * 1000 ? 1 : 0", "getFocusStamp: () => focusVer", "focusTickNow: focusTick",
-    "async function getCandles1m("])
+    "late: now - sess.open > 90 * 1000 ? 1 : 0", "getFocusStamp: () => focusVer", "focusTickNow: focusTick"])
     assert.ok(pol.includes(pin), "poller pin: " + pin);
   // store: persistence is atomic tmp+rename like every config-grade write
   assert.ok(sto.includes("saveFocus(data)") && sto.includes("loadFocus()") && sto.includes('focusFile + ".tmp"'), "focus persistence, atomic");
@@ -17074,7 +17075,7 @@ test("focus -01: manifest pins — the tab, the route, the engine and the client
   assert.ok(idx.includes('data-view="focus"') && idx.includes('id="view-focus"'), "tab + section in markup");
   for (const pin of ["setHidden('view-focus', v!=='focus');", "if(v==='focus'){ if(el('view-focus')) openFocus();",
     "'markets','focus','funds','trend'", "{v:'focus',label:'Focus'}", "const FOC_LS='xyz-focus-cols'",
-    "function focChartOpen(", "res=1m&from=", "function focAgg(", "focus:`"])
+    "function focChartOpen(", "res=5m&from=", "&max=2000", "function focAgg(", "focus:`"])
     assert.ok(app.includes(pin), "app pin: " + pin);
   assert.ok(css.includes(".foctbl") && css.includes(".focchip") && css.includes("#focmodal"), "focus styles present");
   // crypto scope: focus deliberately NOT in CRYPTO_VIEWS — the tab hides on the crypto board
@@ -17613,4 +17614,28 @@ test("whale cadence -05: fast polling runs through the post-deadline grace windo
   // The gate line itself, pinned: slow belongs to 'upcoming' alone.
   const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
   assert.ok(pol.includes('win.state === "upcoming" ? WHALE_OFF_WINDOW_MS : WHALE_IN_WINDOW_MS'), "cadence keys on upcoming-only — open AND grace both poll fast");
+});
+
+// ============================================================================================
+// FOCUS -03 (build 2026.08.17-01): chart re-sourced — 72h from the 5m archive, TFs 5m/15m/1h/4h.
+// ============================================================================================
+test("focus chart -17.01: manifest pins — archive-sourced 72h chart, retired 1m path stays dead", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const app = rd("public/app.js"), pol = rd("src/poller.js"), srv = rd("server.js");
+  // timeframe set: exactly 5/15/60/240, 3m gone, default 15m
+  for (const pin of ['data-foctf="5"', 'data-foctf="15" class="on"', 'data-foctf="60"', 'data-foctf="240"'])
+    assert.ok(app.includes(pin), "tf pin: " + pin);
+  assert.ok(!app.includes('data-foctf="3"'), "the 3m button stays retired");
+  assert.ok(app.includes("const FOCCH_HOURS=72"), "72h lookback constant");
+  assert.ok(app.includes("FOCCH.tf=15"), "default timeframe is 15m over a 72h span");
+  // one-source rule: the chart reads the archive route, never a live candle pull
+  assert.ok(app.includes("res=5m&from=") && app.includes("&max=2000"), "archive fetch with the anti-coarsen cap");
+  assert.ok(!app.includes("res=1m"), "no 1m fetch remains anywhere in the client");
+  assert.ok(app.includes("res.enabled===false"), "a disabled archive is said out loud, not rendered as an empty tape");
+  // calendar-driven shading: the payload ships session windows and the client consumes them
+  assert.ok(pol.includes("sessions: marketSessions(now - 78 * HOUR, now + 36 * HOUR)"), "session windows ride the focus payload");
+  assert.ok(app.includes("(FOC.data&&FOC.data.sessions)||[]") && app.includes("OFF-SESSION"), "client shades off-session from the calendar, labels the crosshair");
+  assert.ok(!pol.includes("getCandles1m,"), "poller no longer exports a 1m getter");
+  assert.ok(srv.includes("res=1m RETIRED"), "the retirement is documented at the route, not silently deleted");
 });
