@@ -11259,36 +11259,20 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     return { ts: now, dataTs: focusVer, state, day: today,
       open: sess ? sess.open : null, close: sess ? sess.close : null,
       preview: pv ? { at: pv.at, rows: pv.rows } : null, previewN: FOCUS_PREVIEW_N, previewLeadMs: FOCUS_PREVIEW_LEAD,
+      // Chart shading (build 2026.08.17-01): cash-session windows across the chart's 72h
+      // lookback (+ the next session), from the same calendar engine as the stamp — the client
+      // dims off-session time instead of guessing at a fixed 16:00-to-09:30 rhythm that half
+      // days and holidays would falsify.
+      sessions: marketSessions(now - 78 * HOUR, now + 36 * HOUR).map((s) => ({ open: s.open, close: s.close })),
       cap: FOCUS_CAP, perCluster: FOCUS_PER_CLUSTER, minVol: FOCUS_MIN_VOL,
       today: focusState && focusState.day === today ? focusState : null,
       prev: focusPrev,
       archive: { enabled: !!(store.candlesEnabled && store.candlesEnabled()) } };
   }
-  // On-demand 1-minute candles for the FOCUS chart: ONE live pull covering the pre-open hour plus
-  // the session so far, memoized ~55s per coin+window so the 3m/5m/15m toggles aggregate
-  // client-side from the same base instead of refetching — one source, three views. Deliberately
-  // NOT the 5m archive: 3m does not aggregate from 5m, and the pre-open hour must come from the
-  // SAME series as the session or the chart would stitch two sources at 09:30.
-  const focusM1 = new Map();           // coin -> { key, at, out }
-  async function getCandles1m(coin, fromQ, toQ) {
-    const r = rows.get(coin);
-    if (!r || r.delisted) return { coin, res: "1m", candles: [], error: "unknown market" };
-    const now = Date.now();
-    let from = Math.trunc(+fromQ), to = Math.trunc(+toQ);
-    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) { to = now; from = now - 8 * HOUR; }
-    from = Math.max(from, now - 3 * DAY);
-    to = Math.min(to, now);
-    if (to - from > 30 * HOUR) from = to - 30 * HOUR;          // one session + pre-open, with slack — never a bulk-history endpoint
-    const key = from + "|" + Math.floor(to / 60000);
-    const m = focusM1.get(coin);
-    if (m && m.key === key && now - m.at < 55 * 1000) return m.out;
-    const raw = await fetchCandles(coin, "1m", from, to, M5_FETCH_WEIGHT);
-    const candles = packHours(raw).filter((k) => k[0] >= from && k[0] <= to);
-    const out = { coin, res: "1m", from, to, ts: now, candles };
-    focusM1.set(coin, { key, at: now, out });
-    if (focusM1.size > 12) focusM1.delete(focusM1.keys().next().value);
-    return out;
-  }
+  // getCandles1m RETIRED (build 2026.08.17-01): with the 3m timeframe gone, every FOCUS chart
+  // timeframe (5m/15m/1h/4h) aggregates from the local 5m archive via getCandles5m — the same
+  // series the +1h fill reads. No live pull, no memo, no second source to disagree with.
+
 
   return {
     start,
@@ -11325,11 +11309,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getFunding,
     getCandles,
     getCandles5m,
-    // FOCUS tab (build 2026.08.15-01): the frozen list, its ETag stamp, the chart's 1m feed,
-    // and a harness hook to run one stamp/fill tick at an injected clock.
+    // FOCUS tab (build 2026.08.15-01, chart re-sourced 2026.08.17-01): the frozen list, its
+    // ETag stamp, and a harness hook to run one stamp/fill tick at an injected clock. The chart
+    // reads the 5m archive via getCandles5m — no dedicated candle export anymore.
     getFocus,
     getFocusStamp: () => focusVer,
-    getCandles1m,
     focusTickNow: focusTick,
     // 13F whale lane (build 2026.08.16-01): FUNDS tab payloads, watchlist writes, and harness
     // hooks that run the real ingest/poll/season paths against injected fixtures.
