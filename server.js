@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.16-06";
+const VERSION = "2026.08.17-01";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -963,15 +963,11 @@ async function main() {
     // separate axis from tf= (ladder timeframes) and days= (hourly spine). Downsampled server-side;
     // ETag folds in the coin's last-captured-bar stamp so a new bar mints a fresh key. Same
     // serveKeyed path as the rest of the route (the manifest pins /api/candles -> serveKeyed).
-    // res=1m (build 2026.08.15-01): the FOCUS chart's base series — a LIVE 1-minute pull covering
-    // the pre-open hour + session so far, memoized in the poller (~55s per coin+window) so the
-    // 3m/5m/15m toggles aggregate client-side from one base. Async and window-capped in
-    // getCandles1m; served no-store because the memo IS the cache and a forming minute must
-    // never 304 against the tape. Rides the pinned markets key like the rest of /api/candles.
-    if (req.query && req.query.res === "1m") {
-      reply.header("cache-control", "no-store");
-      return poller.getCandles1m(coin, req.query.from, req.query.to);
-    }
+    // res=1m RETIRED (build 2026.08.17-01): the FOCUS chart dropped its 3m timeframe, and with
+    // 5m/15m/1h/4h all divisible by five, the chart now reads the local 5m ARCHIVE through the
+    // res=5m branch below — the same series that fills the +1h columns. One source for board
+    // and chart, zero live fetches on modal open, and the pre-open/overnight bars come free
+    // because the perps trade (and the capture lane records) around the clock.
     if (req.query && (req.query.res === "5m" || req.query.res === "5")) {
       const from = req.query.from, to = req.query.to, max = req.query.max;
       const key = "candles5m|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
