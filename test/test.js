@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.17-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.17-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17741,4 +17741,15 @@ test("focus -17.03: PX column pins — one accessor, frozen ticks labeled, hones
   // with a live PX beside it, every frozen tick must say it is frozen
   assert.ok(app.includes("the 10:30 print (FROZEN") && app.includes("frozen (live price → PX column)"),
     "the range bar's amber tick can no longer be misread as live");
+});
+
+
+test("whale put/call coloring (2026.08.17-04): option badges carry their side — puts down-red, calls up-green, everywhere they render", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes('whl-put ${p.put}'), "modal badge carries the side class");
+  assert.ok(/whl-oc '\+r\.put\+'/.test(app), "season/crowding suffixes carry it");
+  assert.ok(app.includes("p.put==='put'?'neg':'pos'") && app.includes("r.put==='put'?'neg':'pos'"), "terminal cards reuse the terminal's own side colors");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".whl-put.put") && css.includes(".whl-put.call") && css.includes(".whl-oc.put"), "side colors styled off --up/--down");
 });
