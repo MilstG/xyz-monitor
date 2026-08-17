@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.15-02";
+const VERSION = "2026.08.16-01";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1009,6 +1009,46 @@ async function main() {
   fastify.get("/api/focus", (req, reply) => {
     const key = "focus|" + poller.getFocusStamp();
     return serveKeyed(req, reply, key, () => poller.getFocus(), { state: "off", today: null, prev: null });
+  });
+  // FUNDS / 13F whale lane (build 2026.08.16-01). ONE exact read path — list, per-fund detail and
+  // season all ride query params on /api/whale so the manifest's exact-path gate is a single wall
+  // over the whole tab. Detail and season resolve ticker matches asynchronously (the SEC name map
+  // may need a fetch), so those two branches bypass serveKeyed's sync build and ship no-cache with
+  // the stamp folded into a weak ETag by hand — same 304 economics, async-safe.
+  fastify.get("/api/whale", async (req, reply) => {
+    const qq = req.query || {};
+    if (qq.fund) {
+      const body = await poller.getWhaleFund(String(qq.fund), qq.full === "1");
+      const tag = 'W/"whale-f|' + String(qq.fund) + "|" + (qq.full === "1" ? 1 : 0) + "|" + poller.getWhaleStamp() + '"';
+      reply.header("cache-control", "no-cache").header("etag", tag);
+      if (req.headers["if-none-match"] === tag) return reply.code(304).send();
+      return reply.send(body);
+    }
+    if (qq.season != null) {
+      const body = await poller.getWhaleSeasonQ(String(qq.season));
+      const tag = 'W/"whale-s|' + String(qq.season) + "|" + poller.getWhaleStamp() + '"';
+      reply.header("cache-control", "no-cache").header("etag", tag);
+      if (req.headers["if-none-match"] === tag) return reply.code(304).send();
+      return reply.send(body);
+    }
+    const key = "whale|" + poller.getWhaleStamp();
+    return serveKeyed(req, reply, key, () => poller.getWhale(), { ts: 0, watch: [], window: null });
+  });
+  // Watchlist writes. The manifest's whale.write key gates audience; this handler RECHECKS the
+  // admin cookie because gate and authz are different axes (the features-POST posture): flipping
+  // the FUNDS tab public must never open the list to public edits. mark-seen is the one exception —
+  // any authenticated viewer clearing their own unseen badge is UX, not authorship.
+  fastify.post("/api/whale/watch", { bodyLimit: 8 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const b = req.body || {};
+    const op = String(b.op || "");
+    if (op === "seen") return poller.whaleSeen(String(b.key || ""));
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    if (op === "search") return poller.whaleSearch(String(b.q || ""));
+    if (op === "add") return poller.whaleAdd(+b.cik, String(b.name || ""));
+    if (op === "rm") return poller.whaleRm(String(b.key || ""));
+    if (op === "mute") return poller.whaleMute(String(b.key || ""), !!b.on);
+    return reply.code(400).send({ ok: false, error: "unknown op" });
   });
   fastify.get("/api/ai-report", (req, reply) => {
     reply.header("cache-control", "no-store");
