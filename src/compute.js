@@ -5226,12 +5226,23 @@ const FEATURES = [
   // soaks — same doctrine as baskets/actionable. One route; the chart's 1m fetch rides
   // /api/candles under the pinned markets key, so gating focus can never strand a chart request.
   { key: "focus",      kind: "tab", label: "Focus",       def: "admin",  routes: ["/api/focus"] },
+  // FUNDS (build 2026.08.16-01): the 13F watchlist tab — tracked institutional filers, filing
+  // badges, per-fund books, the quarterly season summary. Admin while it soaks, same doctrine as
+  // FOCUS. One exact read route carries the whole tab (list, fund detail and season ride query
+  // params on /api/whale — the manifest gate matches exact paths, so params keep it one wall);
+  // the write verbs live under their own act key below so flipping the TAB public can never
+  // open the watchlist to public edits.
+  { key: "funds",      kind: "tab", label: "Funds",       def: "admin",  routes: ["/api/whale"] },
   { key: "treemap",    kind: "tab", label: "Treemap",     def: "public", runtime: true, routes: [] },
   { key: "ai.generate",   kind: "act", label: "AI report generation", def: "admin",  routes: ["POST /api/ai-report"] },
   { key: "ai.ask",        kind: "act", label: "Terminal AI fallback", def: "admin",  routes: ["POST /api/ask"] },
   { key: "ai.reset",      kind: "act", label: "AI budget reset",      def: "admin",  routes: ["POST /api/ai-reset"] },
   { key: "export.ledger", kind: "act", label: "Ledger CSV export",    def: "public", routes: ["/api/export/ledger"] },
   { key: "news.write",    kind: "act", label: "Edit news channels",   def: "admin",  routes: ["POST /api/news/channels"] },
+  // Watchlist writes (add / rm / mute / mark-seen). def:"admin" AND the handler re-checks the
+  // admin cookie — the manifest gate is audience visibility, the in-handler check is authz; the
+  // two fail independently and both must pass. Mirrors the features-POST posture.
+  { key: "whale.write",   kind: "act", label: "Edit 13F watchlist",   def: "admin",  routes: ["POST /api/whale/watch"] },
   { key: "earnings.void", kind: "act", label: "Void an earnings row", def: "admin",  routes: ["POST /api/earnings/void"] },
   { key: "derivs.refresh", kind: "act", label: "Force derivs refresh", def: "admin", routes: ["POST /api/derivs/refresh"] },
   // Custom baskets + ratio pair candles (build 2026.07.28-06). One key covers the registry, the
@@ -6865,6 +6876,203 @@ function parseNportHoldings(xml, maxN) {
 }
 module.exports.pickXbrlFacts = pickXbrlFacts;
 module.exports.parseNportHoldings = parseNportHoldings;
+
+// ===== 13F whale lane — SEC EDGAR 13F-HR infotable (build 2026.08.16-01) ========================
+// Institutional quarter-end books for the FUNDS tab + `whale` terminal family. Everything here is
+// pure: XML in, shaped objects out — poller.js owns fetching/caching, app.js owns rendering.
+// Honesty contract, stated once and enforced below:
+//   • Every number is the FILING's own number. `value` is read verbatim (whole USD per the current
+//     EDGAR infotable spec) — never unit-guessed, never re-priced.
+//   • A share delta is only claimed when BOTH legs report sshPrnamtType SH; principal-amount rows
+//     and mixed aggregates get a value delta only, with the share column an honest null.
+//   • put/call rows are a DIFFERENT position from the common line and are never merged into it.
+//   • 13F is quarter-end, filed up to 45 days late, long US-listed equity + listed options only.
+//     The caller's card must say so; these functions just refuse to blur it.
+// Namespace-tolerant tag reads: filers ship infotables both bare (<nameOfIssuer>) and prefixed
+// (<ns1:nameOfIssuer>); one regex serves both. Same regex-over-XML rationale as N-PORT above —
+// the SEC controls the schema, blocks are flat, a full XML parser buys nothing.
+function xmlTag13(block, tag) {
+  const m = block.match(new RegExp("<(?:[A-Za-z0-9]+:)?" + tag + "(?:\\s[^>]*)?>([\\s\\S]*?)</(?:[A-Za-z0-9]+:)?" + tag + ">"));
+  return m ? xmlEnt(m[1].trim()) : null;
+}
+function parse13FInfotable(xml) {
+  const s = String(xml || "");
+  const blocks = s.match(/<(?:[A-Za-z0-9]+:)?infoTable(?:\s[^>]*)?>[\s\S]*?<\/(?:[A-Za-z0-9]+:)?infoTable>/g) || [];
+  const rows = [];
+  for (const b of blocks) {
+    const name = xmlTag13(b, "nameOfIssuer");
+    const cusip = xmlTag13(b, "cusip");
+    if (!name || !cusip) continue;   // an infoTable without issuer+cusip is malformed — skip, never guess
+    const vRaw = xmlTag13(b, "value");
+    const shRaw = xmlTag13(b, "sshPrnamt");
+    const put = String(xmlTag13(b, "putCall") || "").trim().toLowerCase();   // "" | "put" | "call"
+    rows.push({
+      name: String(name).replace(/\s+/g, " ").slice(0, 80),
+      cls: String(xmlTag13(b, "titleOfClass") || "").replace(/\s+/g, " ").slice(0, 24) || null,
+      cusip: String(cusip).replace(/\s+/g, "").toUpperCase().slice(0, 9),
+      value: vRaw != null && Number.isFinite(+vRaw) ? +vRaw : null,
+      shares: shRaw != null && Number.isFinite(+shRaw) ? +shRaw : null,
+      shType: String(xmlTag13(b, "sshPrnamtType") || "").trim().toUpperCase() || null,   // SH | PRN
+      put: put === "put" ? "put" : put === "call" ? "call" : null,
+    });
+  }
+  return rows.length ? { rows, n: rows.length } : null;
+}
+// Aggregate raw infotable rows into the book. 13F filers commonly split one position across many
+// rows (per-manager discretion, sole/shared voting splits) — the book view joins them on
+// cusip|putCall. Shares sum only while every constituent row is SH; one PRN row poisons the
+// aggregate's share count to null (value still sums — value is always USD).
+function whaleBook(parsed) {
+  if (!parsed || !Array.isArray(parsed.rows) || !parsed.rows.length) return null;
+  const agg = new Map();   // cusip|put -> position
+  let total = 0;
+  for (const r of parsed.rows) {
+    if (r.value == null) continue;   // a row the filer priced as nothing cannot enter a value-ranked book
+    total += r.value;
+    const k = r.cusip + "|" + (r.put || "");
+    let p = agg.get(k);
+    if (!p) { p = { cusip: r.cusip, put: r.put, name: r.name, cls: r.cls, value: 0, shares: 0, shOk: true }; agg.set(k, p); }
+    p.value += r.value;
+    if (r.shType === "SH" && r.shares != null && p.shOk) p.shares += r.shares;
+    else p.shOk = false;
+    if (r.name && r.name.length < p.name.length) p.name = r.name;   // shortest variant reads cleanest; identity is the cusip
+  }
+  const positions = [...agg.values()].map((p) => ({
+    cusip: p.cusip, put: p.put, name: p.name, cls: p.cls, value: p.value,
+    shares: p.shOk ? p.shares : null,                       // honest null: PRN or mixed rows — no share count is claimed
+    pct: total > 0 ? (p.value / total) * 100 : null,        // % of 13F total value — computed here, disclosed as such
+  })).sort((a, b) => b.value - a.value);
+  return { total, n: positions.length, nRaw: parsed.n, positions };
+}
+// QoQ join on cusip|put. Classes: opened (no prior leg), exited (no current leg), added/trimmed
+// (value moved ≥0.5% of the position or any share change — a pure mark-to-market drift with
+// unchanged shares is NOT a trade and reads as flat), flat.
+function whaleDelta(cur, prev) {
+  const key = (p) => p.cusip + "|" + (p.put || "");
+  const pm = new Map(); if (prev) for (const p of prev.positions) pm.set(key(p), p);
+  const lanes = { opened: [], added: [], trimmed: [], exited: [] };
+  const flows = { opened: 0, added: 0, trimmed: 0, exited: 0 };
+  const rows = [];
+  const seen = new Set();
+  for (const p of (cur ? cur.positions : [])) {
+    const k = key(p); seen.add(k);
+    const q = pm.get(k);
+    let d = null;
+    if (!prev) d = { cls: "na" };                              // no prior filing held — no delta is claimed, not "all new"
+    else if (!q) { d = { cls: "new", dVal: p.value }; lanes.opened.push({ ...p, dVal: p.value }); flows.opened += p.value; }
+    else {
+      const dSh = p.shares != null && q.shares != null ? p.shares - q.shares : null;
+      const dVal = p.value - q.value;
+      const moved = dSh != null ? dSh !== 0 : Math.abs(dVal) >= Math.max(1, q.value) * 0.005;
+      if (!moved) d = { cls: "flat", dSh: dSh != null ? 0 : null, dVal };
+      else {
+        const up = dSh != null ? dSh > 0 : dVal > 0;
+        d = { cls: up ? "add" : "trim", dSh, dVal };
+        (up ? lanes.added : lanes.trimmed).push({ ...p, dSh, dVal });
+        if (up) flows.added += dVal; else flows.trimmed += dVal;
+      }
+    }
+    rows.push({ ...p, d });
+  }
+  if (prev && cur) for (const [k, q] of pm) if (!seen.has(k)) {
+    lanes.exited.push({ cusip: q.cusip, put: q.put, name: q.name, prevVal: q.value });
+    flows.exited -= q.value;
+  }
+  for (const l of Object.keys(lanes)) lanes[l].sort((a, b) => Math.abs((b.dVal != null ? b.dVal : b.prevVal) || 0) - Math.abs((a.dVal != null ? a.dVal : a.prevVal) || 0));
+  return { rows, lanes, flows, hasPrev: !!prev };
+}
+// Issuer-name normalization for the conservative name→ticker match against the SEC company map.
+// Both sides pass through the SAME function, so equality is symmetric. Trailing tokens in the
+// suffix set (and trailing single letters — share classes in filing names) strip repeatedly;
+// "THE " strips once at the head. Deliberately conservative: a miss renders the filed name,
+// a false match would chart the wrong company. No fuzzy matching, ever.
+const WHALE_NAME_SUFFIX = new Set(["INC", "INCORPORATED", "CORP", "CORPORATION", "CO", "COM", "COS", "LTD", "LIMITED",
+  "PLC", "LLC", "LP", "SA", "NV", "AG", "SE", "ADR", "ADS", "SHS", "CL", "CLASS", "NEW", "HLDG", "HLDGS", "HOLDING",
+  "HOLDINGS", "GROUP", "GRP", "TR", "TRUST", "FD", "FUND", "ETF", "DEL", "COMPANY", "COMPANIES", "PETE", "PETROLEUM"]);
+function whaleNameKey(name) {
+  let t = String(name || "").toUpperCase().replace(/&/g, " AND ").replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (t.startsWith("THE ")) t = t.slice(4);
+  const w = t.split(" ");
+  while (w.length > 1 && (WHALE_NAME_SUFFIX.has(w[w.length - 1]) || w[w.length - 1].length === 1)) w.pop();
+  return w.join(" ");
+}
+// Filing-window arithmetic. 13F-HR is due 45 days after quarter end; a weekend due date rolls to
+// the next business day (holiday rolls are NOT modeled — a ±1-day deadline error costs one extra
+// poll day, and a curated holiday table for one date a quarter is not worth its drift risk; the
+// roll rule is disclosed here so the simplification is testable, not silent).
+function whaleQLabel(y, qi) { return "Q" + (qi + 1) + " " + y; }
+function whaleWindow(nowMs) {
+  const d = new Date(nowMs);
+  const qi = Math.floor(d.getUTCMonth() / 3);                       // current calendar quarter index
+  const qEnd = (y, i) => Date.UTC(y, i * 3 + 3, 0, 23, 59, 59);     // last day of quarter i
+  const roll = (ts) => { const g = new Date(ts).getUTCDay(); return g === 6 ? ts + 2 * 864e5 : g === 0 ? ts + 864e5 : ts; };
+  const win = (y, i) => { const e = qEnd(y, i); return { q: whaleQLabel(y, i), end: e, opens: e + 1, deadline: roll(e + 45 * 864e5) }; };
+  // The season being filed NOW is the last COMPLETED quarter; if its deadline (+3d grace for
+  // laggards/amendments) has passed, the active season rolls forward to the quarter in progress.
+  let y = d.getUTCFullYear(), i = qi - 1; if (i < 0) { i = 3; y--; }
+  let cur = win(y, i);
+  if (nowMs > cur.deadline + 3 * 864e5) { i = qi; y = d.getUTCFullYear(); cur = win(y, i); }
+  const next = win(i === 3 ? y + 1 : y, (i + 1) % 4);
+  return { cur, next,
+    state: nowMs < cur.opens ? "upcoming" : nowMs <= cur.deadline ? "open" : "closed" };
+}
+function whaleQOfPeriod(iso) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})/); if (!m) return null;
+  return whaleQLabel(+m[1], Math.floor((+m[2] - 1) / 3));
+}
+// Cross-fund season aggregation. Input: [{ key, cur: whaleBook, prev: whaleBook|null }].
+// Issuer identity stays cusip|put — the same key every delta uses; blending an issuer's common
+// line with its option lines would fabricate a flow nobody filed. Each lane row carries its
+// per-fund legs verbatim and domPct — the largest single leg's share of the gross flow — because
+// with a single-digit watchlist one whale can BE the consensus and the row must say so.
+function whaleSeason(funds) {
+  const byKey = new Map();   // cusip|put -> { name, put, legs:[], holdSet, addSet, trimSet, newSet, exitSet }
+  const ent = (p) => {
+    const k = p.cusip + "|" + (p.put || "");
+    let e = byKey.get(k);
+    if (!e) { e = { cusip: p.cusip, put: p.put, name: p.name, legs: [], hold: [], add: [], trim: [], opened: [], exit: [], state: {} }; byKey.set(k, e); }
+    if (p.name && p.name.length < e.name.length) e.name = p.name;
+    return e;
+  };
+  for (const f of funds) {
+    if (!f || !f.cur) continue;
+    const dd = whaleDelta(f.cur, f.prev);
+    for (const r of dd.rows) {
+      const e = ent(r);
+      const c = r.d && r.d.cls;
+      if (c === "new") { e.opened.push({ key: f.key, val: r.value }); e.legs.push({ key: f.key, dVal: r.value, opened: 1 }); e.hold.push(f.key); e.state[f.key] = "new"; }
+      else if (c === "add") { e.add.push(f.key); e.legs.push({ key: f.key, dVal: r.d.dVal, dSh: r.d.dSh }); e.hold.push(f.key); e.state[f.key] = "add"; }
+      else if (c === "trim") { e.trim.push(f.key); e.legs.push({ key: f.key, dVal: r.d.dVal, dSh: r.d.dSh }); e.hold.push(f.key); e.state[f.key] = "trim"; }
+      else { e.hold.push(f.key); e.state[f.key] = "hold"; }   // flat or no-prior: a holder, not a flow
+    }
+    for (const x of dd.lanes.exited) { const e = ent(x); e.exit.push({ key: f.key, prevVal: x.prevVal }); e.legs.push({ key: f.key, dVal: -x.prevVal, exited: 1 }); e.state[f.key] = "exit"; }
+  }
+  const dom = (legs) => { const g = legs.reduce((s, l) => s + Math.abs(l.dVal || 0), 0);
+    return g > 0 ? Math.max(...legs.map((l) => Math.abs(l.dVal || 0))) / g * 100 : null; };
+  const rows = [...byKey.values()].map((e) => ({ cusip: e.cusip, put: e.put, name: e.name,
+    net: e.legs.reduce((s, l) => s + (l.dVal || 0), 0), legs: e.legs, domPct: dom(e.legs),
+    held: new Set(e.hold).size, adding: e.add.length + e.opened.length, cutting: e.trim.length + e.exit.length,
+    opened: e.opened, exited: e.exit, state: e.state }));
+  const bought = rows.filter((r) => r.net > 0 && r.legs.some((l) => l.dVal)).sort((a, b) => b.net - a.net).slice(0, 12);
+  const sold = rows.filter((r) => r.net < 0 && r.legs.some((l) => l.dVal)).sort((a, b) => a.net - b.net).slice(0, 12);
+  const opens = rows.filter((r) => r.opened.length).map((r) => ({ cusip: r.cusip, put: r.put, name: r.name,
+    n: r.opened.length, tot: r.opened.reduce((s, o) => s + o.val, 0), funds: r.opened }))
+    .sort((a, b) => b.n - a.n || b.tot - a.tot).slice(0, 12);
+  const exits = rows.filter((r) => r.exited.length).map((r) => ({ cusip: r.cusip, put: r.put, name: r.name,
+    n: r.exited.length, tot: r.exited.reduce((s, o) => s + o.prevVal, 0), funds: r.exited }))
+    .sort((a, b) => b.n - a.n || b.tot - a.tot).slice(0, 12);
+  const crowd = rows.filter((r) => r.held >= 2).sort((a, b) => b.held - a.held ||
+    (b.adding + b.cutting) - (a.adding + a.cutting)).slice(0, 10)
+    .map((r) => ({ cusip: r.cusip, put: r.put, name: r.name, held: r.held, adding: r.adding, cutting: r.cutting, state: r.state }));
+  return { bought, sold, opens, exits, crowd, nFunds: funds.filter((f) => f && f.cur).length };
+}
+module.exports.parse13FInfotable = parse13FInfotable;
+module.exports.whaleBook = whaleBook;
+module.exports.whaleDelta = whaleDelta;
+module.exports.whaleNameKey = whaleNameKey;
+module.exports.whaleWindow = whaleWindow;
+module.exports.whaleQOfPeriod = whaleQOfPeriod;
+module.exports.whaleSeason = whaleSeason;
 
 // ===== hourly fetch scheduling (pure) ==========================================================
 // The comparator behind the hourly worker's pick(). Volume ordering is the right default — the

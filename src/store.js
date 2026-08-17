@@ -35,6 +35,7 @@ function openStore(dataDir) {
   const derivFile = path.join(dataDir, "derivs.log");        // Coinalyze 15-min rows: coin\tts\tlongLiq\tshortLiq\toi
   const derivMapFile = path.join(dataDir, "derivmap.json");  // resolved base-asset -> Coinalyze symbol map
   const focusFile = path.join(dataDir, "focus.json");        // FOCUS tab: today's frozen list + yesterday's, verbatim
+  const whaleFile = path.join(dataDir, "whale.json");        // 13F watchlist + cached quarterly books + unseen state + season builds
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
   let buf = [];
@@ -643,6 +644,22 @@ function openStore(dataDir) {
     },
     loadFocus() {
       try { if (fs.existsSync(focusFile)) return JSON.parse(fs.readFileSync(focusFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    // 13F whale lane (build 2026.08.16-01). One JSON blob: watchlist entries, the cached quarterly
+    // books per CIK (full aggregated positions — capping them would fake exits at the cap line),
+    // unseen-filing state and persisted season builds. Same tmp+rename atomicity as every other
+    // config-grade file; a torn write can never half-replace the watchlist.
+    saveWhale(data) {
+      try {
+        const tmp = whaleFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, whaleFile);
+      } catch (_) {}
+    },
+    loadWhale() {
+      try { if (fs.existsSync(whaleFile)) return JSON.parse(fs.readFileSync(whaleFile, "utf8")); }
       catch (_) {}
       return null;
     },

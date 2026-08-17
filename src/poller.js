@@ -25,6 +25,7 @@ const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TRE
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
+const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleWindow, whaleQOfPeriod, whaleSeason } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO, homeMkt, homeAdr } = require("./sectors");
@@ -4628,6 +4629,380 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     });
   }
 
+
+  // ---- 13F whale lane (build 2026.08.16-01) ---------------------------------------------------
+  // The FUNDS tab + `whale` terminal family: a persisted watchlist of institutional 13F filers,
+  // a per-CIK submissions poll that catches new 13F-HR/-HR/A accessions, cached quarterly books
+  // (current + prior, full aggregated positions), unseen-filing badges, filing-lane tape rows,
+  // `filing`-class push events and the once-per-quarter season aggregate. All math is pure
+  // (compute.parse13FInfotable / whaleBook / whaleDelta / whaleSeason / whaleWindow); this block
+  // only fetches, sequences and persists — the fund/etf lane's division of labor, one lane over.
+  // Freeze rule: an ingested filing is never refetched or recomputed; only a strictly newer
+  // accession for the same quarter (an HR/A amendment) may supersede it, and the supersede is
+  // recorded so the card can say "amended", never silently drift. Same transport (extGet + SEC_UA
+  // + injected extFetch test hook) and the same error discipline as fund/etf: misses cache
+  // briefly, nothing can hammer sec.gov.
+  const WHALE_POLL_MS = 10 * 60 * 1000;          // due-check tick; per-fund cadence gates below
+  const WHALE_IN_WINDOW_MS = 30 * 60 * 1000;     // per-fund submissions poll inside a filing window
+  const WHALE_OFF_WINDOW_MS = 24 * HOUR;         // and outside it — filings can't exist, amendments can
+  const WHALE_POS_CAP = 6000;                    // stored positions per filing; past it the book is truncated WITH a disclosure flag
+  const WHALE_TOP_N = 15;                        // detail card default; `full` escapes it client-side
+  let whaleState = { watch: [], filings: {}, unseen: {}, seasons: {} };
+  // filings: { [cik]: { [q]: { acc, form, filedAt, period, book, amended? , truncated? } } }
+  let whaleVer = 0;                              // ETag stamp — bumps on any state change the payload can see
+  let whalePrimed = false;                       // first poll pass after boot seeds silently (the filingPrimed rule)
+  let whalePolling = false;
+  const whaleLastPoll = new Map();               // cik -> ts of last submissions check
+  let whaleNameMap = null, whaleNameMapAt = 0;   // normalized issuer name -> ticker (from the SEC company map)
+  function whaleBump() { whaleVer = Date.now(); }
+  function whalePersist() {
+    store.saveWhale && store.saveWhale({ ts: Date.now(), watch: whaleState.watch,
+      filings: whaleState.filings, unseen: whaleState.unseen, seasons: whaleState.seasons });
+  }
+  function whaleHydrate() {
+    try {
+      const d = store.loadWhale && store.loadWhale();
+      if (d && typeof d === "object") {
+        if (Array.isArray(d.watch)) whaleState.watch = d.watch.filter((w) => w && w.key && w.cik);
+        if (d.filings && typeof d.filings === "object") whaleState.filings = d.filings;
+        if (d.unseen && typeof d.unseen === "object") whaleState.unseen = d.unseen;
+        if (d.seasons && typeof d.seasons === "object") whaleState.seasons = d.seasons;
+      }
+    } catch (_) {}
+    whaleBump();
+    // A hydrated watchlist means past filings were already announced in a prior life — prime
+    // immediately so the first poll can't re-announce them. An EMPTY list has nothing to blast.
+    whalePrimed = true;
+  }
+  // Normalized-name -> ticker map from the same company_tickers.json the fund lane already pulls.
+  // Conservative by construction: whaleNameKey on BOTH sides, first ticker wins a key, a collision
+  // (two tickers normalizing identically) evicts the key entirely — a wrong chart link is worse
+  // than a name-only row.
+  async function whaleTickerMap() {
+    const now = Date.now();
+    if (whaleNameMap && now - whaleNameMapAt < FUND_TTL) return whaleNameMap;
+    const maps = await ensureCikMaps();
+    if (!maps) return whaleNameMap;   // stale beats empty; null on first miss means name-only rows
+    const m = new Map(), dead = new Set();
+    for (const [sym, e] of maps.co) {
+      if (!e || !e.name) continue;
+      const k = whaleNameKey(e.name);
+      if (!k || dead.has(k)) continue;
+      if (m.has(k) && m.get(k) !== sym) { m.delete(k); dead.add(k); continue; }
+      m.set(k, sym);
+    }
+    whaleNameMap = m; whaleNameMapAt = now;
+    return m;
+  }
+  function whaleTickerOf(name, tmap) {
+    if (!tmap) return null;
+    const t = tmap.get(whaleNameKey(name));
+    return t || null;
+  }
+  // EDGAR full-text search for `whale add <name>`: filer-name -> CIK candidates. The endpoint is
+  // the one the EDGAR search UI itself uses; the shape is parsed defensively and a raw CIK number
+  // bypasses search entirely, so a search outage degrades to "paste the CIK", never to "can't add".
+  async function whaleSearch(qRaw) {
+    const q = String(qRaw || "").trim().slice(0, 60);
+    if (!q) return { ok: false, error: "usage: whale add <fund name or CIK>" };
+    if (/^\d{1,10}$/.test(q)) {   // raw CIK — resolve straight off submissions for the canonical name
+      const sub = await extGet("https://data.sec.gov/submissions/CIK" + cikPad(+q) + ".json", "json");
+      if (!sub.ok) return { ok: false, error: "EDGAR submissions: " + sub.error };
+      return { ok: true, candidates: [{ cik: +q, name: String(sub.body && sub.body.name || "CIK " + q).slice(0, 60) }] };
+    }
+    const url = "https://efts.sec.gov/LATEST/search-index?q=" + encodeURIComponent('"' + q + '"') + "&forms=13F-HR";
+    const r = await extGet(url, "json");
+    if (!r.ok) return { ok: false, error: "EDGAR search: " + r.error + " — a raw CIK number still works: whale add <cik>" };
+    const seen = new Set(), out = [];
+    const hits = r.body && r.body.hits && Array.isArray(r.body.hits.hits) ? r.body.hits.hits : [];
+    for (const h of hits) {
+      const s = h && h._source; if (!s) continue;
+      const ciks = Array.isArray(s.cik) ? s.cik : [s.cik];
+      const names = Array.isArray(s.display_names) ? s.display_names : [];
+      for (let i = 0; i < ciks.length && out.length < 5; i++) {
+        const cik = +ciks[i]; if (!Number.isFinite(cik) || seen.has(cik)) continue;
+        seen.add(cik);
+        const nm = String(names[i] || names[0] || "CIK " + cik).replace(/\s*\(CIK[^)]*\)\s*/i, "").trim().slice(0, 60);
+        out.push({ cik, name: nm });
+      }
+      if (out.length >= 5) break;
+    }
+    if (!out.length) return { ok: false, error: "no 13F-HR filer matched \u201c" + q + "\u201d \u2014 a hedge fund's legal filer name often differs from its brand name; a raw CIK also works" };
+    return { ok: true, candidates: out };
+  }
+  function whaleKeyFor(name) {
+    // User-facing handle: first meaningful word of the filer name, uppercased, de-collided with a
+    // numeric suffix. Purely a label — identity is always the CIK.
+    const base = (whaleNameKey(name).split(" ")[0] || "FUND").slice(0, 12) || "FUND";
+    let k = base, n = 2;
+    while (whaleState.watch.some((w) => w.key === k)) k = base + (n++);
+    return k;
+  }
+  function whaleByKey(keyRaw) {
+    const k = String(keyRaw || "").toUpperCase().trim();
+    return whaleState.watch.find((w) => w.key === k) || null;
+  }
+  function whaleAdd(cik, name) {
+    if (!Number.isFinite(+cik)) return { ok: false, error: "bad CIK" };
+    if (whaleState.watch.some((w) => +w.cik === +cik)) return { ok: false, error: "already watching CIK " + cik };
+    if (whaleState.watch.length >= 24) return { ok: false, error: "watchlist cap (24) reached" };
+    const w = { key: whaleKeyFor(name), name: String(name || "CIK " + cik).slice(0, 60), cik: +cik, notify: 1, addedAt: Date.now() };
+    whaleState.watch.push(w);
+    whaleLastPoll.delete(+cik);   // poll it on the next tick
+    whaleBump(); whalePersist();
+    log(`whale: watching ${w.key} (${w.name}, CIK ${w.cik})`);
+    return { ok: true, fund: w };
+  }
+  function whaleRm(keyRaw) {
+    const w = whaleByKey(keyRaw);
+    if (!w) return { ok: false, error: "not watching \u201c" + String(keyRaw || "") + "\u201d" };
+    whaleState.watch = whaleState.watch.filter((x) => x !== w);
+    delete whaleState.unseen[w.cik];
+    // Cached filings stay — history kept, row hidden (re-adding the fund restores it whole).
+    whaleBump(); whalePersist();
+    return { ok: true, fund: w };
+  }
+  function whaleMute(keyRaw, on) {
+    const w = whaleByKey(keyRaw);
+    if (!w) return { ok: false, error: "not watching \u201c" + String(keyRaw || "") + "\u201d" };
+    w.notify = on ? 0 : 1;   // on === "mute this" (the op's name); notify is the stored inverse
+    whaleBump(); whalePersist();
+    return { ok: true, fund: w };
+  }
+  function whaleSeen(keyRaw) {
+    const w = whaleByKey(keyRaw);
+    if (!w) return { ok: false, error: "unknown fund" };
+    if (whaleState.unseen[w.cik]) { delete whaleState.unseen[w.cik]; whaleBump(); whalePersist(); }
+    return { ok: true };
+  }
+  // Ingest one filing: submissions row -> filing index -> infotable XML -> parsed book -> store.
+  // Returns { ok, q, ... } or { ok:false, error }. Never throws to the caller.
+  async function whaleIngest(w, acc, form, filedAt, period) {
+    const cik = +w.cik, accNo = String(acc).replace(/-/g, "");
+    const idx = await extGet("https://www.sec.gov/Archives/edgar/data/" + cik + "/" + accNo + "/index.json", "json");
+    if (!idx.ok) return { ok: false, error: "filing index: " + idx.error };
+    const items = idx.body && idx.body.directory && Array.isArray(idx.body.directory.item) ? idx.body.directory.item : [];
+    // The infotable document's NAME varies wildly per filer; the primary_doc.xml is the cover page.
+    // Pick the largest non-primary .xml — the infotable dwarfs everything else in a 13F folder.
+    const xmls = items.filter((it) => /\.xml$/i.test(String(it.name || "")) && !/^primary_doc\.xml$/i.test(String(it.name || "")))
+      .sort((a, b) => (+b.size || 0) - (+a.size || 0));
+    if (!xmls.length) return { ok: false, error: "no infotable XML in the filing folder" };
+    const x = await extGet("https://www.sec.gov/Archives/edgar/data/" + cik + "/" + accNo + "/" + xmls[0].name, "xml");
+    if (!x.ok) return { ok: false, error: "infotable fetch: " + x.error };
+    const parsed = parse13FInfotable(x.body);
+    if (!parsed) return { ok: false, error: "infotable parsed to zero holdings" };
+    const book = whaleBook(parsed);
+    if (!book) return { ok: false, error: "book aggregation produced nothing" };
+    let truncated = 0;
+    if (book.positions.length > WHALE_POS_CAP) { truncated = book.positions.length - WHALE_POS_CAP; book.positions = book.positions.slice(0, WHALE_POS_CAP); }
+    const q = whaleQOfPeriod(period) || whaleQOfPeriod(filedAt) || "?";
+    const f = whaleState.filings[cik] || (whaleState.filings[cik] = {});
+    const had = f[q];
+    f[q] = { acc: String(acc), form: String(form), filedAt, period: period || null, book,
+      url: "https://www.sec.gov/Archives/edgar/data/" + cik + "/" + accNo + "/",
+      amended: had && had.acc !== String(acc) ? 1 : (had && had.amended) || 0,
+      truncated: truncated || undefined };
+    whaleBump(); whalePersist();
+    return { ok: true, q, amended: !!(had && had.acc !== String(acc)), book };
+  }
+  // Find the two most recent DISTINCT-period 13F rows in a submissions JSON. The newest accession
+  // per period wins (that is exactly what an HR/A is); returns newest-period-first.
+  function whalePickFilings(sub) {
+    const rec = sub && sub.filings && sub.filings.recent;
+    if (!rec || !Array.isArray(rec.form)) return [];
+    const byPeriod = new Map();   // period -> { acc, form, filedAt, period }
+    for (let i = 0; i < rec.form.length; i++) {
+      const fm = String(rec.form[i] || "");
+      if (!/^13F-HR(\/A)?$/.test(fm)) continue;
+      const period = String(rec.reportDate && rec.reportDate[i] || "");
+      const filedAt = Date.parse(String(rec.filingDate && rec.filingDate[i] || "")) || 0;
+      const row = { acc: String(rec.accessionNumber[i]), form: fm, filedAt, period };
+      const had = byPeriod.get(period);
+      if (!had || row.filedAt >= had.filedAt) byPeriod.set(period, row);
+    }
+    return [...byPeriod.values()].sort((a, b) => String(b.period).localeCompare(String(a.period))).slice(0, 2);
+  }
+  // One fund's poll: submissions -> newest filing row -> ingest if the accession is new to us.
+  // Also backfills the prior quarter once, so the delta strip has its other leg.
+  async function whalePollFund(w, now) {
+    const sub = await extGet("https://data.sec.gov/submissions/CIK" + cikPad(+w.cik) + ".json", "json");
+    if (!sub.ok) return;
+    const rows2 = whalePickFilings(sub.body);
+    if (!rows2.length) return;
+    const cur = rows2[0];
+    const q = whaleQOfPeriod(cur.period);
+    const have = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
+    if (!have || have.acc !== cur.acc) {
+      const r = await whaleIngest(w, cur.acc, cur.form, cur.filedAt, cur.period);
+      if (r.ok) {
+        // Announce only when primed AND the filing is actually fresh — the filingScan rule, wider
+        // window (13Fs are quarterly events; 7d covers a weekend-straddling deadline). A fund
+        // added mid-quarter ingests its months-old book silently: history, not news.
+        if (!whalePrimed || !(cur.filedAt > 0) || now - cur.filedAt > 7 * DAY) { /* seeded */ }
+        else {
+          whaleState.unseen[w.cik] = cur.acc;
+          const total = r.book.total, dd = whaleDelta(r.book, whalePrevBook(w.cik, q));
+          const brief = r.q + " book " + whaleMoney(total) + " \u00b7 " + r.book.n + " positions" +
+            (dd.hasPrev ? " \u00b7 " + dd.lanes.opened.length + " new \u00b7 " + dd.lanes.exited.length + " exit" : "");
+          if (w.notify) emitTrig("filing", { whale: 1, fund: w.key, t: w.key, coin: null,
+            form: cur.form, h: w.name + " \u2014 " + brief, url: whaleState.filings[w.cik][r.q].url, pub: cur.filedAt || now }, now);
+          // Tape row on the NEWS filings lane — watched funds only; the deadline-day firehose
+          // stays out by construction because only the watchlist is ever polled.
+          newsItems = mergeNews(newsItems, [{ id: "whale:" + cur.acc, tk: w.key, wh: 1, fl: 1, mat: 1,
+            form: cur.form, h: w.name + " \u00b7 " + brief + " \u2192 FUNDS", src: "EDGAR",
+            url: whaleState.filings[w.cik][r.q].url, pub: cur.filedAt || now }], now);
+          buildNewsPayload();
+          persistTriggers();
+          log(`whale: ${w.key} filed ${cur.form} for ${r.q}${r.amended ? " (amendment supersedes)" : ""}`);
+        }
+        // NB: no season build here. The prior-quarter backfill below hasn't run yet, so a build at
+        // this instant would see prev=null, class nothing, and (until the sig fix that accompanied
+        // this comment) freeze that empty read behind an unchanged signature. The ONE build site is
+        // the end of whaleTick, after every ingest of the pass — including backfills.
+      }
+    }
+    // Prior-quarter backfill (once): the delta's other leg. Never re-ingested after it exists.
+    if (rows2[1]) {
+      const pq = whaleQOfPeriod(rows2[1].period);
+      const havePrev = whaleState.filings[w.cik] && whaleState.filings[w.cik][pq];
+      if (!havePrev || havePrev.acc !== rows2[1].acc) await whaleIngest(w, rows2[1].acc, rows2[1].form, rows2[1].filedAt, rows2[1].period);
+    }
+  }
+  function whalePrevBook(cik, q) {
+    const f = whaleState.filings[cik]; if (!f) return null;
+    // Quarter labels sort wrong across years lexically ("Q4 2025" > "Q1 2026") — sort by the
+    // period DATE instead, which every entry carries.
+    const rows2 = Object.values(f).filter((x) => x && x.period).sort((a, b) => String(a.period).localeCompare(String(b.period)));
+    const i = rows2.findIndex((x) => whaleQOfPeriod(x.period) === q);
+    return i > 0 ? rows2[i - 1].book : null;
+  }
+  function whaleMoney(v) { if (v == null || !isFinite(v)) return "\u2014"; const a = Math.abs(v), s = v < 0 ? "-" : "";
+    if (a >= 1e12) return s + "$" + (a / 1e12).toFixed(2) + "T"; if (a >= 1e9) return s + "$" + (a / 1e9).toFixed(1) + "B";
+    if (a >= 1e6) return s + "$" + (a / 1e6).toFixed(1) + "M"; if (a >= 1e3) return s + "$" + (a / 1e3).toFixed(1) + "K"; return s + "$" + a.toFixed(0); }
+  // Season build: fires when every watched fund has a book for the season quarter, or at
+  // deadline+1d with whoever made it (missing filers disclosed in the build). An HR/A landing
+  // after a build reruns it with an `amended` note — persisted per quarter, past seasons kept.
+  function whaleSeasonMaybe(now) {
+    if (!whaleState.watch.length) return;
+    const win = whaleWindow(now);
+    const q = win.cur.q;
+    const funds = whaleState.watch.map((w) => {
+      const f = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
+      return { key: w.key, name: w.name, cik: w.cik, cur: f ? f.book : null, prev: whalePrevBook(w.cik, q), filedAt: f ? f.filedAt : null, amended: f ? !!f.amended : false };
+    });
+    const filed = funds.filter((x) => x.cur);
+    if (!filed.length) return;
+    const allIn = filed.length === whaleState.watch.length;
+    const pastDeadline = now > win.cur.deadline + 864e5;
+    if (!allIn && !pastDeadline) return;
+    const had = whaleState.seasons[q];
+    // The sig covers BOTH legs of every fund's delta: the season's own accessions AND the prior
+    // quarter's. A late prior-quarter backfill or an HR/A on EITHER leg changes what the aggregate
+    // would say, so either must reopen the build — a sig over current accessions alone froze the
+    // first (prev-less) read forever, which the end-to-end test now pins.
+    const prevAccOf = (cik, sq) => {
+      const f = whaleState.filings[cik]; if (!f) return "";
+      const rows3 = Object.values(f).filter((x) => x && x.period).sort((a, b) => String(a.period).localeCompare(String(b.period)));
+      const i = rows3.findIndex((x) => whaleQOfPeriod(x.period) === sq);
+      return i > 0 ? rows3[i - 1].acc : "";
+    };
+    const sig = funds.map((x) => ((whaleState.filings[x.cik] && whaleState.filings[x.cik][q] || {}).acc || "") + ":" + prevAccOf(x.cik, q)).join("|");
+    if (had && had.sig === sig) return;   // nothing new since the last build
+    const agg = whaleSeason(filed.map((x) => ({ key: x.key, cur: x.cur, prev: x.prev })));
+    whaleState.seasons[q] = { q, at: now, sig, agg,
+      filedN: filed.length, watchN: whaleState.watch.length,
+      missing: funds.filter((x) => !x.cur).map((x) => x.key),
+      amended: had ? 1 : 0,   // any rebuild after the first is by definition amendment-driven
+      closedAt: allIn ? Math.max(...filed.map((x) => x.filedAt || 0)) : null };
+    whaleBump(); whalePersist();
+    if (whalePrimed) pushOps("13F season " + q, (allIn ? "all " + filed.length : filed.length + "/" + whaleState.watch.length) +
+      " watched funds filed \u2014 season summary " + (had ? "rebuilt (amendment)" : "built"), "info", true);
+    log(`whale: season ${q} ${had ? "rebuilt" : "built"} (${filed.length}/${whaleState.watch.length} funds)`);
+  }
+  async function whaleTick(nowArg) {
+    if (whalePolling) return;
+    whalePolling = true;
+    const now = nowArg || Date.now();
+    try {
+      const win = whaleWindow(now);
+      // In-window: filings can land any minute. Out-of-window: only amendments can appear — a
+      // daily glance is plenty and keeps the off-season EDGAR load at ~watchlist-size/day.
+      const gap = win.state === "open" ? WHALE_IN_WINDOW_MS : WHALE_OFF_WINDOW_MS;
+      for (const w of whaleState.watch) {
+        const last = whaleLastPoll.get(+w.cik) || 0;
+        if (now - last < gap) continue;
+        whaleLastPoll.set(+w.cik, now);
+        try { await whalePollFund(w, now); }
+        catch (e) { log("whale poll " + w.key + " failed (isolated): " + (e && e.message)); }
+      }
+      whaleSeasonMaybe(now);
+    } finally {
+      whalePolling = false;
+      whalePrimed = true;   // whatever the first pass found is now seeded; everything after announces
+    }
+  }
+  // ---- payload getters (routes read these; client renders them verbatim) ----------------------
+  function getWhale() {
+    const now = Date.now();
+    const win = whaleWindow(now);
+    const watch = whaleState.watch.map((w) => {
+      const f = whaleState.filings[w.cik] || {};
+      const rows2 = Object.values(f).filter((x) => x && x.period).sort((a, b) => String(b.period).localeCompare(String(a.period)));
+      const cur = rows2[0] || null;
+      const prev = rows2[1] || null;
+      const top = cur && cur.book.positions[0] || null;
+      return { key: w.key, name: w.name, cik: w.cik, notify: w.notify ? 1 : 0,
+        q: cur ? whaleQOfPeriod(cur.period) : null, form: cur ? cur.form : null,
+        filedAt: cur ? cur.filedAt : null, amended: cur ? !!cur.amended : false,
+        total: cur ? cur.book.total : null, n: cur ? cur.book.n : null,
+        dPct: cur && prev && prev.book.total > 0 ? (cur.book.total / prev.book.total - 1) * 100 : null,
+        top: top ? { name: top.name, pct: top.pct } : null,
+        unseen: whaleState.unseen[w.cik] ? 1 : 0 };
+    });
+    const seasons = Object.keys(whaleState.seasons).sort((a, b) => {
+      const pa = whaleState.seasons[a], pb = whaleState.seasons[b];
+      return (pb.at || 0) - (pa.at || 0);
+    });
+    return { ts: now, dataTs: whaleVer, window: win, watch,
+      unseenAny: watch.some((x) => x.unseen) ? 1 : 0,
+      seasonQ: seasons.length ? seasons[0] : null, seasonList: seasons };
+  }
+  async function getWhaleFund(keyRaw, full) {
+    const w = whaleByKey(keyRaw);
+    if (!w) return { ok: false, error: "not watching \u201c" + String(keyRaw || "") + "\u201d \u2014 say whale for the list" };
+    const f = whaleState.filings[w.cik] || {};
+    const rows2 = Object.values(f).filter((x) => x && x.period).sort((a, b) => String(b.period).localeCompare(String(a.period)));
+    const cur = rows2[0];
+    if (!cur) return { ok: false, error: w.key + " has no ingested 13F yet \u2014 first poll lands within the half hour" };
+    const q = whaleQOfPeriod(cur.period);
+    const prev = whalePrevBook(w.cik, q);
+    const dd = whaleDelta(cur.book, prev);
+    const tmap = await whaleTickerMap().catch(() => null);
+    const lim = full ? cur.book.positions.length : WHALE_TOP_N;
+    const positions = dd.rows.slice(0, lim).map((p) => ({ name: p.name, cusip: p.cusip, put: p.put, cls: p.cls,
+      value: p.value, shares: p.shares, pct: p.pct, d: p.d, tk: whaleTickerOf(p.name, tmap) }));
+    const lane = (l) => l.slice(0, 8).map((p) => ({ name: p.name, put: p.put, dVal: p.dVal != null ? p.dVal : (p.prevVal != null ? -p.prevVal : null),
+      dSh: p.dSh != null ? p.dSh : null, prevVal: p.prevVal, tk: whaleTickerOf(p.name, tmap) }));
+    return { ok: true, key: w.key, name: w.name, cik: w.cik, q, form: cur.form, filedAt: cur.filedAt,
+      period: cur.period, ageDays: cur.filedAt ? Math.round((Date.now() - cur.filedAt) / 864e5) : null,
+      amended: !!cur.amended, truncated: cur.truncated || 0, url: cur.url,
+      total: cur.book.total, n: cur.book.n, nRaw: cur.book.nRaw,
+      prevTotal: prev ? prev.total : null, hasPrev: dd.hasPrev,
+      lanes: { opened: lane(dd.lanes.opened), added: lane(dd.lanes.added), trimmed: lane(dd.lanes.trimmed), exited: lane(dd.lanes.exited) },
+      flows: dd.flows, positions, shown: positions.length };
+  }
+  async function getWhaleSeasonQ(qRaw) {
+    const q = String(qRaw || "").trim() || (getWhale().seasonQ || "");
+    const s = whaleState.seasons[q];
+    if (!s) return { ok: false, error: q ? "no season build for " + q : "no season built yet \u2014 it lands when the watched funds file" };
+    const tmap = await whaleTickerMap().catch(() => null);
+    const tag = (rows3) => rows3.map((r) => Object.assign({}, r, { tk: whaleTickerOf(r.name, tmap) }));
+    return { ok: true, q: s.q, at: s.at, filedN: s.filedN, watchN: s.watchN, missing: s.missing,
+      amended: !!s.amended, closedAt: s.closedAt,
+      agg: { bought: tag(s.agg.bought), sold: tag(s.agg.sold), opens: tag(s.agg.opens),
+        exits: tag(s.agg.exits), crowd: tag(s.agg.crowd), nFunds: s.agg.nFunds } };
+  }
+
   // ---- weekly sector audit (build 2026.08.05-02) ----------------------------------------------
   // The classification watchdog with a WRITE arm: once a week it (a) resolves roster tickers every
   // static table declined (Unclassified) and (b) checks curated PREIPO names for a real listing —
@@ -5561,6 +5936,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // never stamp. A boot after 09:30 stamps on the first tick with the disclosed `late` flag.
     setInterval(safeTick(() => focusTick(), "focusTick"), 30 * 1000);
     if (hydrateFocus()) log(`Restored FOCUS list${focusState ? `: ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.filledAt ? " (+1h filled)" : ""}` : " (prior day only)"} — the day's stamp survives a redeploy`);
+    // 13F whale lane: hydrate the watchlist + cached books, then a due-check tick. The tick is
+    // isolated like the sector audit — a sec.gov outage must never take the poller loop with it —
+    // and per-fund cadence gates inside whaleTick keep the EDGAR load at watchlist-scale.
+    whaleHydrate();
+    if (whaleState.watch.length) log(`Restored 13F watchlist: ${whaleState.watch.length} fund(s), ${Object.keys(whaleState.filings).length} with cached books — FUNDS tab warm`);
+    setInterval(() => { whaleTick().catch((e) => log("whale tick failed (isolated, server stays up): " + (e && e.message))); }, WHALE_POLL_MS);
+    setTimeout(() => { whaleTick().catch((e) => log("whale first tick failed (isolated): " + (e && e.message))); }, 20 * 1000);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
     hydrateLedger();
@@ -7435,9 +7817,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     + "screen <field><op><value> [& <field><op><value> ...] (fields: funding fundpct squeeze momentum oi vol vstape doi beta dd ddy carry turn d1 d7 d30 h1 h4 gap prem rvol adr vol30 rs dcap hitr vsvwap vsma20 vsma50 vsma100 vsma200 vsyopen vsmopen; ops: > < >= <= =); "
     + "<TICKER> ; <TICKER> <field> ; signals [TICKER] ; corr <A> <B> ; diverge <TICKER> ; vs <A> <B> ; "
     + "earnings [TICKER|today|tomorrow|week|recent] ; news [TICKER] ; breadth [d1|d7|d30] ; sectors [d1|d7|d30] ; reports ; "
-    + "fund <TICKER> (latest SEC-filed balance sheet + income facts) ; etf <SYMBOL> (latest SEC N-PORT holdings of an ETF/fund)";
+    + "fund <TICKER> (latest SEC-filed balance sheet + income facts) ; etf <SYMBOL> (latest SEC N-PORT holdings of an ETF/fund) ; whale (the tracked 13F fund watchlist) ; whale <FUND> (one tracked fund's latest 13F book + quarter-over-quarter delta) ; whale season (this quarter's cross-fund 13F summary: most bought, most sold, consensus opens, exits)";
   const ASK_PLANNER_SYS = "You translate a trader's natural-language question about a markets dashboard into EXACTLY ONE query in this grammar, and output ONLY that query — no prose, no backticks, no explanation.\nGrammar: " + ASK_GRAMMAR
-    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>; a question about a company's balance sheet, fundamentals, financials, debt, cash position, filed revenue or net income maps to fund <TICKER>; a question about an ETF's or fund's holdings, composition, constituents or what it contains maps to etf <SYMBOL> (for fund and etf the symbol MAY be outside context.tickers when the user names it explicitly). context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current question may be a follow-up — resolve it against that context, and a complaint about a prior answer means the ORIGINAL question was answered wrongly, so re-map the original intent. If the question cannot be expressed in this grammar, output exactly: NONE";
+    + "\nRules: use only the exact field/metric names above; use only tickers listed in context.tickers; 'crowded short' -> screen funding<0 & squeeze>50; 'overheated'/'crowded long' -> screen fundpct>85; 'near highs' -> screen dd>-3; 'oversold' -> screen dd<-25; 'paid to be short' -> screen carry>0.3; 'above their 200dma' -> screen vsma200>0; 'unusual volume' -> screen rvol>2; a question naming one ticker plus one measurable maps to <TICKER> <field>; two tickers side by side maps to vs <A> <B>; a question about a company's balance sheet, fundamentals, financials, debt, cash position, filed revenue or net income maps to fund <TICKER>; a question about an ETF's or fund's holdings, composition, constituents or what it contains maps to etf <SYMBOL> (for fund and etf the symbol MAY be outside context.tickers when the user names it explicitly); a question about what a TRACKED HEDGE FUND or institutional investor (a 13F filer named in context.whales, when present) bought, sold, holds or filed maps to whale <FUND> using that fund's key from context.whales; a question about what funds bought or sold this quarter overall, hedge-fund consensus, or 13F season maps to whale season. context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current question may be a follow-up — resolve it against that context, and a complaint about a prior answer means the ORIGINAL question was answered wrongly, so re-map the original intent. If the question cannot be expressed in this grammar, output exactly: NONE";
   const ASK_ANALYST_SYS = "You are a markets analyst embedded in a trading dashboard. Every entry in context.markets is one market's live fields (absent keys mean that value is genuinely unavailable for that name): name = the company's common name, px = price, d1/d7/d30/h1/h4 = % change over that window, gap = today's open gap %, pr = perp premium %, f = funding APR %, fp = funding percentile, sqz = squeeze 0-100, mom = momentum, vs = vs-tape %, rs = vs-S&P %, oi, vol, doi = OI change %, rv = relative volume, adr = avg daily range %, v30 = 30d realized vol, beta, hitr = follow-through hit rate %, dd = % below 30d high, ddy = % below 52w high, yo = yearly open price, mo = monthly open price, m20/m50/m100/m200 = moving averages, vw = % vs 30d vwap, sector. NUMBERS RULE: every price, %, level or figure you cite must come from these fields or simple arithmetic on them (e.g. px vs yo is the YTD move; px vs m200 is distance to the 200dma) — never invent or estimate a figure that is not in or derivable from the data. IDENTITY RULE: for what a company IS or what it makes — its products, business lines, sub-industry, competitors — you MAY use well-known general knowledge, but ONLY about tickers present in context.markets, and NEVER name a company that is not in that list. When an answer leans on general knowledge rather than the live fields, note that briefly. context.history, when present, holds this session's prior exchanges oldest-first (q = the user's earlier message, a = the answer they got): the current message may be a follow-up — resolve pronouns and complaints against it, and a message like 'not what I asked' means a prior answer missed the ORIGINAL question, so answer that original question properly now. context.fundamentals, when present, holds SEC-filed facts for named tickers ({t}, {asOf}, facts keyed assets/liabilities/equity/cash/debt/netCash/revenue/netIncome/eps/shares, each {v} in USD or shares with its filing {period}): these are filed figures, cite them with their period and treat an absent key as genuinely unfiled. context.news, when present, holds the ONLY headlines you may reference ({h} = headline, {tk} = verified ticker or null for macro tape, {ageH} = hours old): for 'why is X moving' questions, cite a matching headline when one plausibly explains the move, and say plainly when none does — then read the tape (sector.rel via sector peers in context.markets, beta, funding, volume) instead of inventing a catalyst. Be concise: 2-4 sentences. Name the specific tickers and cite the values you used. If the data does not support an answer, say so plainly. No preamble, no disclaimers.";
   // Causal/explanatory intent routes to the analyst wherever it sits in the sentence — the
   // anchored-only version classified "what could be causing DRAM dump today" as planner, which
@@ -7457,6 +7839,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     // fund/etf take symbols that may live OUTSIDE the trading universe (an ETF is not a perp
     // listing) — validate shape, not membership; the fetch path reports honestly on unknowns.
     if (h === "fund" || h === "etf") return p[1] != null && /^[A-Za-z0-9.\-]{1,10}$/.test(p[1]);
+    // whale: bare (watchlist), season, or a fund key. Keys validate at execution against the
+    // live watchlist — same shape-not-membership rule; an unknown key gets an honest miss card.
+    if (h === "whale") return p[1] == null || p[1].toLowerCase() === "season" || /^[A-Za-z0-9]{1,12}$/.test(p[1]);
     return !!(tickerSet && tickerSet.has(H));   // <TICKER> or <TICKER> <field>
   }
   async function askBoard(q, ctx, who) {
@@ -7556,6 +7941,9 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     let res;
     if (mode0 === "planner") {
       const pp = { question: q, scope: ctx.scope || null, tickers: [...tickerSet] };
+      // Watched 13F funds, key + name, so "what did <fund> buy" can resolve to whale <KEY>.
+      // Names ride along because the user says "Berkshire", never "BRK-the-watchlist-key".
+      if (whaleState.watch.length) pp.whales = whaleState.watch.map((w) => ({ key: w.key, name: w.name }));
       if (hist.length) pp.history = hist;
       const c = await callBoth(ASK_PLANNER_SYS, pp, 1500);
       if (!c.ok) res = { ok: false, error: c.error || "model call failed" };
@@ -10823,6 +11211,19 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getFocusStamp: () => focusVer,
     getCandles1m,
     focusTickNow: focusTick,
+    // 13F whale lane (build 2026.08.16-01): FUNDS tab payloads, watchlist writes, and harness
+    // hooks that run the real ingest/poll/season paths against injected fixtures.
+    getWhale,
+    getWhaleStamp: () => whaleVer,
+    getWhaleFund,
+    getWhaleSeasonQ,
+    whaleSearch,
+    whaleAdd, whaleRm, whaleMute, whaleSeen,
+    whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
+    hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()
+    whaleIngestNow: whaleIngest,                 // harness: push one filing through the REAL ingest path
+    whaleSeasonNow: whaleSeasonMaybe,            // harness: force a season-build attempt
+    whalePrimeNow: () => { whalePrimed = true; },
     hydrateFocusNow: hydrateFocus,
     getCryptoCorr, getCryptoCorrStamp,
     getCandleCoverage,
