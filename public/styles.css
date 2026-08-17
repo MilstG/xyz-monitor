@@ -1581,3 +1581,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 #focch-vbar{margin:2px 14px 10px;height:6px;background:var(--panel2);border:1px solid var(--border);position:relative;border-radius:3px}
 #focch-vwin{position:absolute;top:0;bottom:0;background:#2a3a52;border:1px solid #3d5578;border-radius:3px;cursor:grab;touch-action:none;min-width:6px}
 #focch-vwin:active{cursor:grabbing}
+
+/* ===== FOCUS forming cells (build 2026.08.17-03) ===== */
+.foctbl td[data-forming]{font-style:italic;opacity:.82;position:relative}
+.foctbl td[data-forming]::after{content:'~';color:var(--accent);font-size:9px;margin-left:4px;font-style:normal;opacity:.9}

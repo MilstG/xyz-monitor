@@ -10167,6 +10167,26 @@ const FOC_COLS=[
    td:(p)=>`<td class="l focticker">${esc(p.ticker)}<button type="button" class="focchbtn" data-foct="${esc(p.ticker)}" data-tip="Session chart — 72h of 5m/15m/1h/4h candles from the local archive, off-session time dimmed, chart-series VWAP, and the frozen 1H HI/LO drawn verbatim">▦</button></td>`, sv:p=>p.ticker},
   {k:'why', label:'WHY', left:1, nosort:1, tip:'Why this name earned a seat — every chip restates a stamped number (hover for it). Chips appear only past their own noise floor; a quiet field is simply absent.',
    td:(p)=>`<td class="l">${focChips(p)}</td>`},
+  {k:'px', label:'PX', tip:'LIVE price from the board\u2019s own streaming snapshot \u2014 the same number the Markets tab shows, by construction (one accessor, no second feed). Colored by the move vs the previous close, so the color carries the whole day including the gap. Refreshes with the tab (~1/min). Everything else on this row is frozen or forming reference \u2014 this column is where you are sitting against it; hover for \u0394 vs prev close, open, sVWAP and the 1H range position.',
+   td:(p)=>{
+     const lv=liveMark(p.coin);
+     const h=p.h1;
+     const px=lv!=null?lv:(h&&h.lastPx!=null?h.lastPx:null);
+     if(px==null) return `<td>${focNa('no live mark and no archive print for this name')}</td>`;
+     const dPc=p.prevClose>0?((px/p.prevClose-1)*100):null;
+     const parts=[];
+     if(dPc!=null) parts.push(`\u0394 prev close ${focSgn(dPc)}%`);
+     const oAnchor=h&&h.openPx!=null?h.openPx:p.px;
+     if(oAnchor>0) parts.push(`\u0394 ${h&&h.openPx!=null?'open':'stamp'} ${focSgn((px/oAnchor-1)*100)}%`);
+     if(h&&h.vwap!=null) parts.push(`\u0394 sVWAP ${focSgn((px/h.vwap-1)*100)}%`);
+     if(h&&h.hi>h.lo){
+       parts.push(px>h.hi?`${focSgn((px/h.hi-1)*100)}% above the 1H HI`
+         :px<h.lo?`${focSgn((px/h.lo-1)*100)}% below the 1H LO`
+         :`inside the 1H range \u00b7 ${Math.round((px-h.lo)/(h.hi-h.lo)*100)}th pctile`);
+     }
+     if(lv==null) parts.push('live mark unavailable \u2014 showing the last archive print (stale)');
+     return `<td class="${focCls(dPc)}${lv==null?' dim':''}" data-tip="${esc(parts.join(' \u00b7 ')||'live price')}">${focPx(px)}</td>`;
+   }, sv:(p)=>{ const lv=liveMark(p.coin); return lv!=null?lv:(p.h1&&p.h1.lastPx!=null?p.h1.lastPx:null); }},
   {k:'gap', label:'GAP', tip:'Overnight gap, raw % — previous session\u2019s TRUE close (half days close 13:00 ET; the calendar engine carries that) to the price at the stamp. The dim σ alongside is the same move in units of this name\u2019s OWN overnight-gap distribution: ±0.7σ is noise, ±2σ is an event regardless of the raw %.',
    td:(p)=>{ if(p.gapPct==null) return `<td>${focNa('no prior-close anchor in the spine')}</td>`;
      return `<td class="${focCls(p.gapPct)}" data-tip="${esc(`prev close ${focPx(p.prevClose)} → ${focPx(p.px)} at the stamp${p.gapSigma!=null?` · ${focSgn(p.gapSigma)}σ of its own gaps`:' · σ unavailable (fewer than 10 overnight samples)'}`)}">${focSgn(p.gapPct)}%${p.gapSigma!=null?`<span class="focsig">${focSgn(p.gapSigma)}σ</span>`:''}</td>`; }, sv:p=>p.gapPct},
@@ -10191,12 +10211,12 @@ const FOC_COLS=[
    td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
      const pc=h.openPx>0?((h.lo/h.openPx-1)*100):null;
      return `<td class="neg" data-tip="${esc(`${focPx(h.lo)}${pc!=null?` · ${focSgn(pc)}% from the ${focPx(h.openPx)} open`:''} · ${h.bars}/12 bars`)}">${focPx(h.lo)}</td>`; }, sv:p=>p.h1?p.h1.lo:null},
-  {k:'rng', label:'1H RANGE', h1:1, nosort:1, tip:'The first hour as a bar: low→high span, grey tick = where the open sat in the hour\u2019s eventual range, amber tick = the 10:30 print. An open pinned to one end that closed at the other is the \u201cwho won the first hour\u201d read.',
+  {k:'rng', label:'1H RANGE', h1:1, nosort:1, tip:'The first hour as a bar: low→high span, grey tick = where the open sat in the hour\u2019s eventual range, amber tick = the 10:30 print (FROZEN \u2014 the live price lives in the PX column, never here). An open pinned to one end that closed at the other is the \u201cwho won the first hour\u201d read.',
    td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
      const rng=h.hi-h.lo; if(!(rng>0)) return `<td>${focNa('zero first-hour range')}</td>`;
      const op=h.openPx!=null?Math.min(100,Math.max(0,(h.openPx-h.lo)/rng*100)):null;
      const nw=h.lastPx!=null?Math.min(100,Math.max(0,(h.lastPx-h.lo)/rng*100)):null;
-     return `<td data-tip="${esc(`${focPx(h.lo)} → ${focPx(h.hi)} · grey = open ${focPx(h.openPx)} · amber = 10:30 print ${focPx(h.lastPx)}`)}"><span class="focrbar"><span class="focrfill"></span>${op!=null?`<span class="focropen" style="left:${op.toFixed(0)}%"></span>`:''}${nw!=null?`<span class="focrnow" style="left:${nw.toFixed(0)}%"></span>`:''}</span></td>`; }},
+     return `<td data-tip="${esc(`${focPx(h.lo)} → ${focPx(h.hi)} · grey = open ${focPx(h.openPx)} · amber = 10:30 print ${focPx(h.lastPx)}, frozen (live price → PX column)`)}"><span class="focrbar"><span class="focrfill"></span>${op!=null?`<span class="focropen" style="left:${op.toFixed(0)}%"></span>`:''}${nw!=null?`<span class="focrnow" style="left:${nw.toFixed(0)}%"></span>`:''}</span></td>`; }},
 ];
 function focCol(k){ return FOC_COLS.find(c=>c.k===k); }
 function focActiveCols(){
@@ -10208,11 +10228,11 @@ function focActiveCols(){
 function focStateLine(d){
   const day=FOC.showPrev?d.prev:d.today;
   if(FOC.showPrev&&d.prev) return `<span class="focstamp"><span class="focdot prev"></span>PRIOR LIST · ${esc(d.prev.day)}${d.prev.filledAt?' · +1H FILLED':''}</span>`;
-  if(d.state==='preview'&&d.preview) return `<span class="focstamp pv"><span class="focdot pv"></span>PREVIEW · 09:00\u201309:30 ET · LIVE, NOT A RECORD · pool refreshed ${new Date(d.preview.at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>`;
+  if(d.state==='preview'&&d.preview) return `<span class="focstamp pv"><span class="focdot pv"></span>PREVIEW · 09:00\u201309:30 ET · LIVE, NOT A RECORD · pool refreshed ${new Date(d.preview.at).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit'})} ET</span>`;
   if(d.state==='pre') return `<span class="focstamp"><span class="focdot pre"></span>PRE-OPEN · stamps at the 09:30 ET open${d.open?` (${Math.max(0,Math.round((d.open-Date.now())/60000))}m)`:''}</span>`;
   if(d.state==='pending') return `<span class="focstamp"><span class="focdot pre"></span>OPEN PASSED · stamping on the next tick…</span>`;
   if(d.state==='offday') return `<span class="focstamp"><span class="focdot prev"></span>NO SESSION TODAY${d.prev?' · showing the prior list':''}</span>`;
-  if(day) return `<span class="focstamp"><span class="focdot"></span>FROZEN @ OPEN${day.late?' <span class="foclate" data-tip="Stamped after a boot that landed past 09:30 — the snapshot is later than the open and says so, same disclosure as boot-stamped episodes">LATE</span>':''} · ${new Date(day.frozenAt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})} ET-side${day.filledAt?' · 1H CONFIRMED':' · sVWAP / 1H HI / 1H LO fill at +1h'}</span>`;
+  if(day) return `<span class="focstamp"><span class="focdot"></span>FROZEN @ OPEN${day.late?' <span class="foclate" data-tip="Stamped after a boot that landed past 09:30 — the snapshot is later than the open and says so, same disclosure as boot-stamped episodes">LATE</span>':''} · stamped ${new Date(day.frozenAt).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'})} ET${day.filledAt?' · 1H CONFIRMED':' · sVWAP / 1H HI / 1H LO <span data-tip="forming — the hour so far from closed 5m bars with the live mark folded into hi/lo/last (never into VWAP: a mark has no volume); republished ~1/min and replaced wholesale by the frozen record at 10:30 ET">forming, freeze at +1h</span>'}</span>`;
   return '';
 }
 function renderFocus(){
@@ -10241,7 +10261,7 @@ function renderFocus(){
   let html=`<div class="focbar">${focStateLine(d)}`
     +(usingPrevAuto?`<span class="focnote">no stamp yet today — the prior list stands below</span>`:'')
     +(day&&day.fillNote?`<span class="focnote err" data-tip="the +1h columns need the on-disk 5m archive">${esc(day.fillNote)}</span>`:'')
-    +(day&&day.pvDiff&&((day.pvDiff.added||[]).length||(day.pvDiff.dropped||[]).length)?`<span class="focdiff" data-tip="${esc(`the tape moved between the ${new Date(day.pvDiff.pvAt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})} preview and the bell \u2014 disclosed so your prep never silently drifts from the record`)}"><b>\u0394 vs preview:</b> ${(day.pvDiff.added||[]).map(t=>'+'+esc(t)).concat((day.pvDiff.dropped||[]).map(t=>'\u2212'+esc(t))).join(' ')}</span>`:'')
+    +(day&&day.pvDiff&&((day.pvDiff.added||[]).length||(day.pvDiff.dropped||[]).length)?`<span class="focdiff" data-tip="${esc(`the tape moved between the ${new Date(day.pvDiff.pvAt).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'})} ET preview and the bell \u2014 disclosed so your prep never silently drifts from the record`)}"><b>\u0394 vs preview:</b> ${(day.pvDiff.added||[]).map(t=>'+'+esc(t)).concat((day.pvDiff.dropped||[]).map(t=>'\u2212'+esc(t))).join(' ')}</span>`:'')
     +(day&&day.pvDiff&&!(day.pvDiff.added||[]).length&&!(day.pvDiff.dropped||[]).length?`<span class="focnote" data-tip="the frozen six match the last preview\u2019s likely six exactly">stamp = preview</span>`:'')
     +`<span class="focsp"></span>`
     +(d.prev&&d.today?`<button type="button" class="btn xtiny" id="focprev" data-tip="Toggle yesterday\u2019s frozen list — what you were watching, exactly as stamped">${FOC.showPrev?'◂ today':'◂ '+esc(d.prev.day)}</button>`:'')
@@ -10262,7 +10282,13 @@ function renderFocus(){
     +`</tr></thead><tbody>`;
   for(const p of rows){
     html+=`<tr>`+cols.map(c=>{
-      if(c.h1&&!filled) return `<td class="focpend" data-tip="Fills once at +1h from the 5m archive, then the row is frozen for the day">+1h…</td>`;
+      if(c.h1&&!filled){
+        // forming edition (build 2026.08.17-03): the hour so far — closed 5m bars + the live
+        // mark — restyled as forming and replaced wholesale by the frozen record at 10:30.
+        const f=(!FOC.showPrev&&d.forming&&d.forming.map&&d.forming.map[p.ticker])||null;
+        if(f) return c.td({...p,h1:f}).replace('<td','<td data-forming="1"');
+        return `<td class="focpend" data-tip="Fills once at +1h from the 5m archive, then the row is frozen for the day — forming reads appear once the first 5m bar closes">+1h…</td>`;
+      }
       return c.td(p);
     }).join('')+`</tr>`;
   }
