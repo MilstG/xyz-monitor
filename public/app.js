@@ -8224,7 +8224,7 @@ focus:`
 <div class="hlp-h">The +1h columns</div>
 <p><b>sVWAP</b>, <b>1H HI</b>, <b>1H LO</b> (actual prices) fill once at 10:30 ET from the 5m archive and freeze. The <b>1H RANGE</b> bar shows where the open sat in the hour's eventual range (grey) vs the 10:30 print (amber) — the "who won the first hour" read. A name missing from the archive shows dashes, never guesses.</p>
 <div class="hlp-h">The chart (▦)</div>
-<p>3m/5m/15m candles aggregated from <b>one live 1-minute pull</b> covering the pre-open hour + session — one source, three views, and the gap is visible forming in the dark pre-open band. The frozen 1H HI/LO and open draw <b>verbatim from the stamped row</b>; the VWAP line is the chart's own series (labeled), with the frozen board sVWAP restated in the header so the two sit side by side rather than being conflated. Crosshair for exact OHLC.</p>`,
+<p>5m/15m/1h/4h candles over the <b>last 72h, read from the local 5m archive</b> — the exact series that fills the +1h columns, so board and chart cannot disagree, and no live fetch happens on open. Off-session time (nights, weekends, holidays) shades dark from the calendar engine; the gap is visible forming across it. The frozen 1H HI/LO and open draw <b>verbatim from the stamped row</b>; the VWAP line is the chart's own session-anchored series (labeled), with the frozen board sVWAP restated in the header so the two sit side by side rather than being conflated. Crosshair for exact OHLC.</p>`,
 markets:`
 <div class="hlp-h">The table</div>
 <p>One row per market, one column per lens. The <b>window selector</b> (1h–30d) re-anchors every windowed column at once: <b>vs S&amp;P</b>, <b>ΔOI</b>, <b>Squeeze</b>, <b>Carry</b>, and Avg Range all answer "over this window". Click any header to sort; drag in the column menu (⚙) to reorder or hide. Cell shading scales with the size of the move — a wall of deep red 7d cells IS the market breadth read. <b>★</b> pins a name to the top. Everything deep-links: the URL carries your view, so a layout can be shared. <b>Layouts</b> saves the whole arrangement as a named view — columns + order, sort, window, vol/OI filters, ★-only — and switches between them in one click; there is no one-size-fits-all table. The active name shows on the button, with a • when the live view has drifted from the saved one (open the menu to re-save). Stored per browser, so the phone can hold different layouts than the desktop. The ticker search box and the scope toggle are deliberately not part of a layout.</p>
@@ -10164,7 +10164,7 @@ function focChips(p){
 }
 const FOC_COLS=[
   {k:'ticker', label:'TICKER', left:1, lock:1, tip:'The six seats, loudest first by default (the disclosed loudness score is the tiebreak ordering, not a signal). ▦ opens today\u2019s session chart. Drag any header to rearrange; ⚙ to show/hide. Foreign-home names (KRX/TSE/HKEX) never appear here — their gap anchors to the wrong exchange for a 09:30 ET stamp.',
-   td:(p)=>`<td class="l focticker">${esc(p.ticker)}<button type="button" class="focchbtn" data-foct="${esc(p.ticker)}" data-tip="Session chart — 3m/5m/15m candles incl. the pre-open hour, chart-series VWAP, and the frozen 1H HI/LO drawn verbatim">▦</button></td>`, sv:p=>p.ticker},
+   td:(p)=>`<td class="l focticker">${esc(p.ticker)}<button type="button" class="focchbtn" data-foct="${esc(p.ticker)}" data-tip="Session chart — 72h of 5m/15m/1h/4h candles from the local archive, off-session time dimmed, chart-series VWAP, and the frozen 1H HI/LO drawn verbatim">▦</button></td>`, sv:p=>p.ticker},
   {k:'why', label:'WHY', left:1, nosort:1, tip:'Why this name earned a seat — every chip restates a stamped number (hover for it). Chips appear only past their own noise floor; a quiet field is simply absent.',
    td:(p)=>`<td class="l">${focChips(p)}</td>`},
   {k:'gap', label:'GAP', tip:'Overnight gap, raw % — previous session\u2019s TRUE close (half days close 13:00 ET; the calendar engine carries that) to the price at the stamp. The dim σ alongside is the same move in units of this name\u2019s OWN overnight-gap distribution: ±0.7σ is noise, ±2σ is an event regardless of the raw %.',
@@ -10326,20 +10326,26 @@ async function focFetch(){
   catch(e){ const w=el('focuswrap'); if(w&&!FOC.data) w.innerHTML=`<div class="msg err"><span class="big">Couldn't load the focus list</span>${esc((e&&e.message)||'network error')}. Will retry on the next interval.</div>`; }
 }
 // ---- FOCUS chart modal ------------------------------------------------------------------------
-// One live 1m pull per open (pre-open hour + session so far, server-memoized); 3m/5m/15m all
+// (superseded note, kept for history: the -02 chart pulled 1m live; see the -01 block below)
 // aggregate from that ONE base client-side — one source, three views. Reference lines (open,
 // frozen 1H HI/LO) are the payload's numbers verbatim; the VWAP LINE is the chart series
 // (cumulative from the candles on screen, session-anchored at the open, labeled as such), with
 // the frozen board sVWAP restated in the header so the two are side by side, never conflated.
-const FOCCH={ p:null, day:null, tf:5, base:null, hover:null };
+// Re-sourced 2026.08.17-01: 72h lookback from the local 5m ARCHIVE (the same series the +1h
+// fill reads — board and chart share one source, no live pull). 3m retired; 5m/15m/1h/4h all
+// aggregate from the 5m base with buckets anchored at today's open. Off-session time is dimmed
+// from the server's calendar windows, never a guessed fixed rhythm. Default 15m: 288 bars over
+// 72h reads; 864 five-minute bars are one click away for the microstructure look.
+const FOCCH_HOURS=72;
+const FOCCH={ p:null, day:null, tf:15, base:null, hover:null };
 function focChartEnsureDom(){
   if(el('focmodal')) return;
   const d=document.createElement('div'); d.id='focmodal'; d.hidden=true;
   d.innerHTML=`<div id="focwin">
     <div class="focch-head"><span class="focch-t" id="focch-t"></span><span class="focch-sub" id="focch-sub"></span>
-      <span class="focch-tf"><button type="button" data-foctf="3">3M</button><button type="button" data-foctf="5" class="on">5M</button><button type="button" data-foctf="15">15M</button></span>
+      <span class="focch-tf"><button type="button" data-foctf="5">5M</button><button type="button" data-foctf="15" class="on">15M</button><button type="button" data-foctf="60">1H</button><button type="button" data-foctf="240">4H</button></span>
       <button type="button" class="focch-x" id="focch-x" data-tip="close (Esc)">✕</button></div>
-    <div class="focch-leg"><span><i class="fk" style="border-color:var(--acc2,#4da3d8)"></i>VWAP (chart series, from the open)</span><span><i class="fk d" style="border-color:var(--up)"></i>1H HI (frozen)</span><span><i class="fk d" style="border-color:var(--down)"></i>1H LO (frozen)</span><span><i class="fk d" style="border-color:var(--muted)"></i>open</span><span class="dim">dark band = pre-open hour</span></div>
+    <div class="focch-leg"><span><i class="fk" style="border-color:var(--acc2,#4da3d8)"></i>VWAP (chart series, from the open)</span><span><i class="fk d" style="border-color:var(--up)"></i>1H HI (frozen)</span><span><i class="fk d" style="border-color:var(--down)"></i>1H LO (frozen)</span><span><i class="fk d" style="border-color:var(--muted)"></i>open</span><span class="dim">dark bands = off-session (nights, weekends, holidays — from the calendar engine)</span></div>
     <div id="focch-read">hover for OHLC · chart VWAP · Δ from open</div>
     <div id="focch-wrap"><canvas id="focch-cc"></canvas></div></div>`;
   document.body.appendChild(d);
@@ -10363,26 +10369,30 @@ async function focChartOpen(ticker){
     if(p) day={ open:d.open, close:d.close, rows:d.preview.rows }; }   // preview chart: live pre-open candles, no frozen lines yet
   if(!day||!p) return;
   focChartEnsureDom();
-  FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.hover=null; FOCCH.tf=5;
+  FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.hover=null; FOCCH.tf=15;
   const m=el('focmodal'); m.hidden=false;
-  m.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x.dataset.foctf==='5'));
+  m.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x.dataset.foctf==='15'));
   el('focch-t').textContent=ticker;
-  el('focch-sub').textContent='loading 1m session…';
+  el('focch-sub').textContent='loading 72h from the 5m archive…';
   el('focch-read').textContent='hover for OHLC · chart VWAP · Δ from open';
-  const from=day.open-3600000, to=Math.min(Date.now(), day.close||Date.now());
+  const to=Date.now(), from=to-FOCCH_HOURS*3600000;
   try{
-    const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(p.coin)+'&res=1m&from='+from+'&to='+to);
+    // max=2000 keeps the archive route from coarsening (72h of 5m is 864 bars) — the client's
+    // open-anchored aggregation needs true 5m, not server-side absolute-time buckets.
+    const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(p.coin)+'&res=5m&from='+from+'&to='+to+'&max=2000');
     FOCCH.base=Array.isArray(res.candles)?res.candles:[];
+    if(res.enabled===false){ el('focch-sub').textContent='5m archive disabled on this deploy — no chart source'; return; }
     const h=p.h1;
-    el('focch-sub').textContent=`pre-open + session · prev close ${focPx(p.prevClose)} · stamp ${focPx(p.px)}`
+    el('focch-sub').textContent=`last ${FOCCH_HOURS}h · prev close ${focPx(p.prevClose)} · stamp ${focPx(p.px)}`
       +(h?` · frozen: 1H ${focPx(h.lo)}–${focPx(h.hi)}${h.vwap!=null?` · board sVWAP ${focPx(h.vwap)}`:''}`:' · +1h not filled yet — HI/LO lines pending');
     focChartDraw();
   }catch(e){ el('focch-sub').textContent='1m fetch failed — '+((e&&e.message)||'network error'); }
 }
 function focChartClose(){ const m=el('focmodal'); if(m) m.hidden=true; FOCCH.p=null; FOCCH.base=null; FOCCH._geom=null; }
 function focAgg(base,k,openMs){
-  // k-minute buckets anchored at the OPEN, extending backwards through the pre-open hour, so a
-  // bucket boundary always lands exactly on 09:30 — the pre-open and the session never share a bar.
+  // k-minute buckets anchored at TODAY'S OPEN, extending backwards through the 72h lookback, so
+  // a bucket boundary always lands exactly on 09:30 — off-session and session never share a bar
+  // (k in {5,15,60,240}; the base is the 5m archive, and all four divide cleanly).
   const by=new Map();
   for(const b of base){ const t=+b[0]; if(!isFinite(t)) continue;
     const off=Math.floor((t-openMs)/(k*60000)), t0=openMs+off*k*60000;
@@ -10418,14 +10428,23 @@ function focChartDraw(){
   // chart-series session VWAP: cumulative typical·vol from the OPEN bar onward — null before it
   let pv=0,vv=0; const vwapS=bars.map(b=>{ if(b[0]<day.open) return null;
     const v=+b[5]; if(v>0){ pv+=((+b[2])+(+b[3])+(+b[4]))/3*v; vv+=v; } return vv>0?pv/vv:null; });
-  // pre-open band + open boundary
-  let preN=0; for(const b of bars){ if(b[0]<day.open) preN++; else break; }
-  if(preN>0){ g.fillStyle='rgba(0,0,0,0.28)'; g.fillRect(padL,padT,X(preN-1)+bw/2-padL,pH+volH+8); }
-  const xOpen=preN>0?X(preN-1)+bw/2:padL;
+  // off-session shading (2026.08.17-01): dim every bar outside the server's calendar windows —
+  // half days and holidays shade correctly because the windows come from the same calendar
+  // engine as the stamp, not a guessed 16:00→09:30 rhythm. Amber boundary at today's open.
+  const sess=(FOC.data&&FOC.data.sessions)||[];
+  const inSess=(t)=>{ for(const sw of sess){ if(t>=sw.open&&t<sw.close) return true; } return false; };
+  g.fillStyle='rgba(0,0,0,0.28)';
+  let runA=-1;
+  for(let i=0;i<=n;i++){
+    const off=i<n&&!inSess(bars[i][0]);
+    if(off&&runA<0) runA=i;
+    if((!off||i===n)&&runA>=0){ const x0=X(runA)-bw/2, x1=X(i-1)+bw/2; g.fillRect(x0,padT,x1-x0,pH+volH+8); runA=-1; }
+  }
+  let openI=-1; for(let i=0;i<n;i++){ if(bars[i][0]>=day.open){ openI=i; break; } }
+  const xOpen=openI>=0?X(openI)-bw/2:padL;
   g.strokeStyle='rgba(232,163,61,0.35)'; g.lineWidth=1;
   g.beginPath(); g.moveTo(xOpen,padT); g.lineTo(xOpen,H-padB); g.stroke();
   g.font='10px monospace'; g.textAlign='center'; g.fillStyle=C.sec;
-  if(preN>0) g.fillText('PRE',X(Math.max(0,Math.floor(preN/2))),padT+10);
   // grid + y labels
   g.textAlign='left';
   for(let i=0;i<=4;i++){ const v=lo+(hi-lo)*i/4, y=Y(v);
@@ -10453,11 +10472,11 @@ function focChartDraw(){
   for(let i=0;i<n;i++){ if(vwapS[i]==null) continue; const y=Y(vwapS[i]);
     started?g.lineTo(X(i),y):g.moveTo(X(i),y); started=true; }
   if(started) g.stroke();
-  // x labels on the half-hours (ET)
+  // x labels: a 72h span needs day context — weekday + ET time, thinned to ~10 labels
   g.fillStyle=C.sec; g.textAlign='center';
-  for(let i=0;i<n;i++){ const dt=new Date(bars[i][0]);
-    const et=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:false}).format(dt);
-    if(/:(00|30)$/.test(et)&&(FOCCH.tf<15||/:00$/.test(et))) g.fillText(et,X(i),H-8); }
+  const step=Math.max(1,Math.round(n/10));
+  const xfmt=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short',hour:'numeric',minute:'2-digit',hour12:false});
+  for(let i=0;i<n;i+=step) g.fillText(xfmt.format(new Date(bars[i][0])).replace(',',''),X(i),H-8);
   g.fillText('open',xOpen,H-padB+18);
   // crosshair
   const hv=FOCCH.hover;
@@ -10471,7 +10490,8 @@ function focChartDraw(){
     const et=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:false}).format(new Date(b[0]));
     const vtxt=vwapS[hv]==null?' · VWAP <span class="na">—</span>':(()=>{ const vd=(b[4]/vwapS[hv]-1)*100;
       return ` · VWAP <b>${focPx(vwapS[hv])}</b> <span class="${focCls(vd)}">(${focSgn(vd)}%)</span>`; })();
-    el('focch-read').innerHTML=(b[0]<day.open?'<span class="focpre">PRE</span>':'')
+    const offSess=!inSess(b[0]);
+    el('focch-read').innerHTML=(offSess?'<span class="focpre">OFF-SESSION</span>':'')
       +`<b>${et} ET</b> · O <b>${focPx(b[1])}</b> H <b>${focPx(b[2])}</b> L <b>${focPx(b[3])}</b> C <b>${focPx(b[4])}</b>`
       +vtxt+(dpc!=null?` · Δ${h1&&h1.openPx!=null?'open':'stamp'} <span class="${focCls(dpc)}">${focSgn(dpc)}%</span>`:'');
   } else if(el('focch-read')) el('focch-read').textContent='hover for OHLC · chart VWAP · Δ from open';
