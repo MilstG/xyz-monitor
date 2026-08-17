@@ -10530,8 +10530,8 @@ function renderFunds(){
     return `<tr class="whl-row${w.unseen?' unseen':''}" data-whlopen="${esc(w.key)}">`
       +`<td class="l">${bell}</td>`
       +`<td class="l"><span class="whl-name">${esc(w.name)}</span>${badge}<div class="whl-sub">whale ${esc(w.key)} \u00b7 CIK ${esc(String(w.cik))}</div></td>`
-      +`<td>${w.q?esc(w.q):'<span class="na" data-tip="no 13F ingested yet — first poll lands within the half hour">\u2014</span>'}${w.filedAt?` <span class="sec">\u00b7 filed ${esc(whlDateStr(w.filedAt))}</span>`:''}</td>`
-      +`<td class="r">${w.total!=null?whlMoney(w.total):'\u2014'}</td>`
+      +`<td>${w.q?esc(w.q):'<span class="na" data-tip="no 13F ingested yet — the poll finds it within the half hour, or pull now">\u2014</span>'+(IS_ADMIN?'<button type="button" class="whl-btn whl-pull" data-whlpull="'+esc(w.key)+'" data-tip="check EDGAR for this filer\u2019s latest 13F right now — one on-demand fetch, at most once a minute per fund">find latest filing</button>':'')}${w.filedAt?` <span class="sec">\u00b7 filed ${esc(whlDateStr(w.filedAt))}</span>`:''}</td>`
+      +`<td class="r"${w.scaled?' data-tip="filer reported values in the pre-2023 thousands convention — corrected \u00d71000 (detected: filed value \u00f7 shares implied sub-$1 prices; rule + sample floor in compute, flagged on the stored filing)"':''}>${w.total!=null?whlMoney(w.total):'\u2014'}${w.scaled?'<span class="whl-scl" data-tip="values corrected \u00d71000 — filer used the pre-2023 thousands convention; detection disclosed, never a silent guess">\u00d7k</span>':''}</td>`
       +`<td class="r ${w.dPct>0?'pos':w.dPct<0?'neg':''}" data-tip="13F book value vs the prior filed quarter — value change, NOT performance (flows and marks are indistinguishable in a 13F)">${w.dPct!=null?(w.dPct>0?'+':'')+w.dPct.toFixed(1)+'%':'\u2014'}</td>`
       +`<td class="r">${w.n!=null?w.n:'\u2014'}</td>`
       +`<td class="l">${w.top?`${esc(w.top.name.slice(0,22))} <span class="sec">${w.top.pct!=null?w.top.pct.toFixed(1)+'%':''}</span>`:'\u2014'}</td>`
@@ -10562,8 +10562,9 @@ function whlBindList(box){
     if(!confirm('Remove '+k+' from the watchlist? History is kept; the row is hidden.')) return;
     const r=await whlPost({op:'rm',key:k}); if(r&&r.ok) whlFetch(); else alert((r&&r.error)||'remove failed'); });
   box.querySelectorAll('[data-whlopen]').forEach(tr=>tr.onclick=(ev)=>{
-    if(ev.target.closest('[data-whlbell],[data-whlrm]')) return;
+    if(ev.target.closest('[data-whlbell],[data-whlrm],[data-whlpull]')) return;
     whlOpenFund(tr.dataset.whlopen); });
+  box.querySelectorAll('[data-whlpull]').forEach(b=>b.onclick=async(ev)=>{ ev.stopPropagation(); whlPull(b.dataset.whlpull, b); });
   const go=el('whl-addgo'), q=el('whl-addq');
   const doSearch=async()=>{
     const v=(q&&q.value||'').trim(); if(!v) return;
@@ -10631,6 +10632,16 @@ function renderWhlSeason(){
   host.querySelectorAll('[data-whlq]').forEach(b=>b.onclick=async()=>{
     try{ WHL.season=await fetchJSON('/api/whale?season='+encodeURIComponent(b.dataset.whlq)); renderWhlSeason(); }catch(_){} });
 }
+// On-demand pull: the row/modal "find latest filing" button and the terminal's `whale pull`
+// share this one path. The button narrates its own lifecycle in place (finding… / up to date /
+// the error verbatim) instead of an alert — the answer belongs where the question was asked.
+async function whlPull(key, btn){
+  if(btn){ btn.disabled=true; btn.textContent='finding\u2026'; }
+  const r=await whlPost({op:'pull',key});
+  if(r&&r.ok){ if(btn) btn.textContent=r.ingested?'found '+(r.q||''):'up to date'; whlFetch(); }
+  else if(btn){ btn.disabled=false; btn.textContent='find latest filing'; btn.setAttribute('data-tip',esc((r&&r.error)||'pull failed')); }
+  return r;
+}
 // ---- fund detail modal ------------------------------------------------------------------------
 function whlModalEnsure(){
   if(el('whlmodal')) return;
@@ -10650,7 +10661,11 @@ async function whlOpenFund(key,full){
   let f;
   try{ f=await fetchJSON('/api/whale?fund='+encodeURIComponent(key)+(full?'&full=1':'')); }
   catch(e){ el('whlbody').innerHTML=`<div class="msg err">${esc(e.message||'fetch failed')}</div>`; return; }
-  if(!f.ok){ el('whlbody').innerHTML=`<div class="msg err">${esc(f.error||'unavailable')}</div>`; return; }
+  if(!f.ok){
+    el('whlbody').innerHTML=`<div class="msg err">${esc(f.error||'unavailable')}</div>`
+      +(IS_ADMIN&&/no ingested 13F/.test(f.error||'')?`<button type="button" class="whl-btn" id="whl-mpull">find latest filing</button>`:'');
+    const mp=el('whl-mpull'); if(mp) mp.onclick=async()=>{ const r=await whlPull(key,mp); if(r&&r.ok) whlOpenFund(key); };
+    return; }
   renderWhlFund(f,!!full);
 }
 function whlDeltaBox(lbl,cls,rows,flow){
@@ -10676,13 +10691,13 @@ function renderWhlFund(f,full){
     +(f.n>10?`<span class="whl-cseg rest" style="width:${Math.max(0,100-f.positions.slice(0,10).reduce((s,p)=>s+(p.pct||0),0)).toFixed(1)}%" data-tip="${esc('other '+(f.n-10)+' position(s)')}"></span>`:'');
   el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
     +`<div class="whl-meta"><span class="sec">quarter</span> <b>${esc(f.q||'?')}</b> <span class="sec">(period ${esc(f.period||'?')} \u00b7 ${esc(f.form||'13F-HR')} filed ${esc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old at pull':''}${f.amended?' \u00b7 AMENDED':''})</span></div>`
-    +`<div class="whl-meta"><span class="sec">13F book</span> <b>${whlMoney(f.total)}</b> <span class="sec">across ${f.n} position(s)${f.nRaw>f.n?' ('+f.nRaw+' filed rows aggregated on cusip)':''}${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.truncated?' \u00b7 stored book truncated at cap ('+f.truncated+' tail positions dropped, disclosed)':''}</span></div>`
+    +`<div class="whl-meta"><span class="sec">13F book</span> <b>${whlMoney(f.total)}</b> <span class="sec">across ${f.n} position(s)${f.nRaw>f.n?' ('+f.nRaw+' filed rows aggregated on cusip)':''}${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.truncated?' \u00b7 stored book truncated at cap ('+f.truncated+' tail positions dropped, disclosed)':''}${f.scaled?' \u00b7 <span class="whl-sclnote" data-tip="the 2023 13F amendments moved values to whole dollars, but this filer still reports in thousands — EDGAR accepts both silently. Detection: median filed value \u00f7 shares across SH rows implied sub-$1 share prices (\u2265 3-row sample floor); options and principal-amount rows excluded. Corrected \u00d71000, flagged on the stored filing.">values \u00d71000 (thousands filer)</span>':''}</span></div>`
     +(f.hasPrev?`<div class="whl-dstrip">${whlDeltaBox('NEW','new',f.lanes.opened,f.flows.opened)}${whlDeltaBox('ADDED','pos',f.lanes.added,f.flows.added)}${whlDeltaBox('TRIMMED','neg',f.lanes.trimmed,f.flows.trimmed)}${whlDeltaBox('EXITED','exitc',f.lanes.exited,f.flows.exited)}</div>`
       :`<div class="sec whl-meta">no prior quarter ingested yet \u2014 the delta strip appears once both legs exist</div>`)
     +`<div class="tblwrap"><table class="whl-tbl"><thead><tr><th class="r">#</th><th class="r">% BOOK</th><th class="r">VALUE</th><th class="r" data-tip="shares as filed; a dash means the filing mixed principal-amount rows — no share count is claimed">SHARES</th><th class="r" data-tip="quarter-over-quarter: share delta when both filings report SH counts, value delta otherwise (disclosed per cell)">\u0394 QoQ</th><th class="l">NAME</th></tr></thead><tbody>${rows}</tbody></table></div>`
     +(!full&&f.n>f.shown?`<button type="button" class="whl-btn" id="whl-full">show all ${f.n} positions</button>`:'')
     +`<div class="whl-clbl">CONCENTRATION \u00b7 % OF 13F BOOK</div><div class="whl-cbar">${conc}</div>`
-    +`<div class="whl-foot">source: SEC EDGAR 13F-HR \u00b7 quarter-end snapshot filed up to 45 days late \u2014 positioning HISTORY, not the current book \u00b7 long US-listed equity + listed options only; shorts, futures, non-US and cash are invisible \u00b7 % of book is value \u00f7 filing total \u00b7 tickers only on exact normalized name matches</div>`;
+    +`<div class="whl-foot">source: SEC EDGAR 13F-HR \u00b7 quarter-end snapshot filed up to 45 days late \u2014 positioning HISTORY, not the current book \u00b7 long US-listed equity + listed options only; shorts, futures, non-US and cash are invisible \u00b7 % of book is value \u00f7 filing total \u00b7 tickers only on exact normalized name matches${f.scaled?' \u00b7 this filer reports in the pre-2023 thousands convention \u2014 values corrected \u00d71000, detection rule disclosed on the book line':''}</div>`;
   const fb=el('whl-full'); if(fb) fb.onclick=()=>whlOpenFund(f.key,true);
   el('whlbody').querySelectorAll('[data-whltk]').forEach(t=>t.onclick=()=>{
     const r=[...state.rows.values()].find(x=>x.ticker===t.dataset.whltk&&!x.delisted);
@@ -10706,7 +10721,7 @@ function termWhaleFund(key,full){
     const rows=f.positions.slice(0,full?f.positions.length:10).map((p,i)=>{
       const d=!p.d||p.d.cls==='na'?'\u2014':p.d.cls==='new'?'<span class="amber">NEW</span>':p.d.cls==='flat'?'\u2014':(p.d.dSh!=null?`<span class="${p.d.dSh>0?'pos':'neg'}">${whlSgnSh(p.d.dSh)}</span>`:`<span class="${p.d.dVal>0?'pos':'neg'}">${(p.d.dVal>0?'+':'\u2212')+whlMoney(Math.abs(p.d.dVal)).slice(1)}</span>`);
       return `  <span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(p.pct!=null?p.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad(whlMoney(p.value),8,true)} ${tpad(d,10,true)}  ${tesc(p.name.slice(0,26))}${p.put?' <span class="sec">'+tesc(p.put.toUpperCase())+'</span>':''}${p.tk?' <span class="tp-deep" data-tcmd="'+tesc(p.tk)+'">'+tesc(p.tk)+'</span>':''}`; }).join('\n');
-    termOut(`<span class="tp-hd">${tesc(f.key)} 13F</span> <span class="tp-trans">\u00b7 ${tesc(f.name)} \u00b7 CIK ${tesc(String(f.cik))}</span>\n<span class="tp-k">${tpad('quarter',14)}</span> <b>${tesc(f.q||'?')}</b> <span class="tp-trans">(filed ${tesc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old':''}${f.amended?' \u00b7 AMENDED':''})</span>\n<span class="tp-k">${tpad('book',14)}</span> <b>${whlMoney(f.total)}</b> <span class="tp-trans">\u00b7 ${f.n} positions${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}</span>${dl}\n<span class="tp-th">  ${tpad('#',3)} ${tpad('%BOOK',7,true)} ${tpad('VALUE',8,true)} ${tpad('\u0394QoQ',10,true)}  NAME</span>\n${rows}\n<span class="tp-trans">${full?'':'top '+Math.min(10,f.positions.length)+' of '+f.n+' \u00b7 <span class="ex" data-tcmd="whale '+tesc(f.key)+' full">whale '+tesc(f.key)+' full</span> for all \u00b7 '}quarter-end snapshot filed up to 45d late \u00b7 long US book only \u00b7 full card on the FUNDS tab</span>`);
+    termOut(`<span class="tp-hd">${tesc(f.key)} 13F</span> <span class="tp-trans">\u00b7 ${tesc(f.name)} \u00b7 CIK ${tesc(String(f.cik))}</span>\n<span class="tp-k">${tpad('quarter',14)}</span> <b>${tesc(f.q||'?')}</b> <span class="tp-trans">(filed ${tesc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old':''}${f.amended?' \u00b7 AMENDED':''})</span>\n<span class="tp-k">${tpad('book',14)}</span> <b>${whlMoney(f.total)}</b> <span class="tp-trans">\u00b7 ${f.n} positions${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.scaled?' \u00b7 values \u00d71000 (thousands filer, corrected + disclosed)':''}</span>${dl}\n<span class="tp-th">  ${tpad('#',3)} ${tpad('%BOOK',7,true)} ${tpad('VALUE',8,true)} ${tpad('\u0394QoQ',10,true)}  NAME</span>\n${rows}\n<span class="tp-trans">${full?'':'top '+Math.min(10,f.positions.length)+' of '+f.n+' \u00b7 <span class="ex" data-tcmd="whale '+tesc(f.key)+' full">whale '+tesc(f.key)+' full</span> for all \u00b7 '}quarter-end snapshot filed up to 45d late \u00b7 long US book only \u00b7 full card on the FUNDS tab</span>`);
     whlPost({op:'seen',key:f.key});
   }).catch(()=>{ think.remove(); termErr('whale fetch failed \u2014 try again in a moment'); });
 }
@@ -10744,6 +10759,14 @@ async function termWhale(args){
     if((args[2]||'').toLowerCase()!=='yes') return termOut(`<span class="err">confirm:</span> remove ${tesc(k)} from the watchlist? <span class="tp-trans">history kept, row hidden \u00b7 <span class="ex" data-tcmd="whale rm ${tesc(k)} yes">whale rm ${tesc(k)} yes</span></span>`);
     const r=await whlPost({op:'rm',key:k});
     return r&&r.ok?termOut(`<span class="pos">removed</span> ${tesc(k)}`):termErr(tesc((r&&r.error)||'remove failed'));
+  }
+  if(sub==='pull'){
+    if(!IS_ADMIN) return termErr('whale pull is admin-only');
+    const k=(args[1]||'').toUpperCase(); if(!k) return termErr('usage: whale pull <key> \u2014 check EDGAR for the latest 13F right now');
+    const think=termThinking(); const r=await whlPull(k); think.remove();
+    if(!r||!r.ok) return termErr(tesc((r&&r.error)||'pull failed'));
+    return r.ingested?termOut(`<span class="pos">ingested</span> ${tesc(k)} ${tesc(r.q||'')} <span class="tp-trans">\u00b7 ${whlMoney(r.total)} \u00b7 ${r.n} positions \u00b7 <span class="ex" data-tcmd="whale ${tesc(k)}">whale ${tesc(k)}</span> for the book</span>`)
+      :termOut(`<span class="sec">up to date</span> <span class="tp-trans">\u00b7 EDGAR's newest 13F for ${tesc(k)} was already on file (${tesc(r.q||'')})</span>`);
   }
   if(sub==='mute'||sub==='unmute'){
     if(!IS_ADMIN) return termErr('whale '+sub+' is admin-only');

@@ -1566,3 +1566,11 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .whlc0{background:#f0a531}.whlc1{background:#4fb3d9}.whlc2{background:#38b57f}.whlc3{background:#9a7fd6}.whlc4{background:#e0564f}
 .whlc5{background:#c9a15a}.whlc6{background:#5a8fd0}.whlc7{background:#3f8f74}.whlc8{background:#7a6ab0}.whlc9{background:#b05050}
 .nbadge.whl{border-color:var(--accent);color:var(--accent)}
+
+/* -03: inline "find latest filing" pull button on a bookless row */
+.whl-pull{margin-left:8px;padding:2px 8px;font-size:10.5px;vertical-align:1px}
+.whl-pull:disabled{opacity:.55;cursor:default}
+
+/* -04: thousands-convention correction marker */
+.whl-scl{display:inline-block;margin-left:5px;font-size:9px;letter-spacing:.5px;color:var(--muted);border:1px solid var(--border);border-radius:2px;padding:0 3px;vertical-align:1px}
+.whl-sclnote{border-bottom:1px dotted var(--muted)}
