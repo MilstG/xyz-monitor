@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.17-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.17-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17638,4 +17638,31 @@ test("focus chart -17.01: manifest pins — archive-sourced 72h chart, retired 1
   assert.ok(app.includes("(FOC.data&&FOC.data.sessions)||[]") && app.includes("OFF-SESSION"), "client shades off-session from the calendar, labels the crosshair");
   assert.ok(!pol.includes("getCandles1m,"), "poller no longer exports a 1m getter");
   assert.ok(srv.includes("res=1m RETIRED"), "the retirement is documented at the route, not silently deleted");
+});
+
+// ============================================================================================
+// FOCUS chart viewport (build 2026.08.17-02): zoom/pan over the one archive fetch.
+// ============================================================================================
+test("focus chart -17.02: manifest pins — viewport math, one-fetch invariant, touch path", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const app = rd("public/app.js"), css = rd("public/styles.css");
+  // per-TF default windows + zoom clamp: 5m opens on 12h, 15m on 36h, 1h/4h full 72h, floor 2h
+  assert.ok(app.includes("const FOCCH_DEF={5:12*3600000,15:36*3600000,60:72*3600000,240:72*3600000}"), "per-timeframe default windows");
+  assert.ok(app.includes("const FOCCH_MIN_SPAN=2*3600000"), "zoom floor");
+  for (const pin of ["function focChartResetView(", "function focChartClampView(", "function focAggCached("])
+    assert.ok(app.includes(pin), "viewport fn pin: " + pin);
+  // interactions: wheel about the cursor, double-click reset, pointer pan, two-pointer pinch,
+  // minimap drag — all over the cached base, and the wheel handler must not scroll the page
+  for (const pin of ["cc.addEventListener('wheel'", "{passive:false}", "cc.addEventListener('dblclick'",
+    "cc.addEventListener('pointerdown'", "ptrs.size===2", "pinchRef", "el('focch-vwin')"])
+    assert.ok(app.includes(pin), "interaction pin: " + pin);
+  // one-fetch invariant: the viewport slices a full-base aggregate; the session VWAP is computed
+  // over the WHOLE series and sliced by offset — zoom can never restart it at the view edge
+  assert.ok(app.includes("if(FOCCH.agg&&FOCCH.agg.tf===FOCCH.tf) return FOCCH.agg;"), "aggregate cached per timeframe");
+  assert.ok(app.includes("vwapS[off+i]") && app.includes("vwapS[off+hv]"), "VWAP sliced by offset, never recomputed per viewport");
+  assert.ok(app.includes("const fhInView=") , "frozen 1H refs stretch the y-scale only when the first hour is in view");
+  // touch: canvas and minimap both opt out of native gestures so pinch/drag reach the handlers
+  assert.ok(css.includes("#focch-cc{touch-action:none}") && css.includes("#focch-vbar"), "touch-action + minimap styles");
+  assert.ok((app.match(/res=5m&from=/g) || []).length === 1 && !app.includes("res=1m"), "the focus chart's only fetch is the single archive pull — other tabs' candle fetches are out of scope");
 });
