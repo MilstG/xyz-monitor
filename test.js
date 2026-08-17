@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.17-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.17-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17665,4 +17665,80 @@ test("focus chart -17.02: manifest pins — viewport math, one-fetch invariant, 
   // touch: canvas and minimap both opt out of native gestures so pinch/drag reach the handlers
   assert.ok(css.includes("#focch-cc{touch-action:none}") && css.includes("#focch-vbar"), "touch-action + minimap styles");
   assert.ok((app.match(/res=5m&from=/g) || []).length === 1 && !app.includes("res=1m"), "the focus chart's only fetch is the single archive pull — other tabs' candle fetches are out of scope");
+});
+
+// ============================================================================================
+// FOCUS forming reads (build 2026.08.17-03): live +1h columns between the stamp and the freeze.
+// ============================================================================================
+const { foldLiveMark } = require("../src/compute");
+
+test("focus -17.03: foldLiveMark widens extremes with the mark and never touches VWAP", () => {
+  const base = { hi: 105, lo: 99, vwap: 102.5, openPx: 100, lastPx: 104, bars: 4 };
+  const up = foldLiveMark(base, 107);
+  assert.equal(up.hi, 107, "a mark above the closed-bar high widens it");
+  assert.equal(up.lo, 99, "…without touching the low");
+  assert.equal(up.lastPx, 107, "last is the mark");
+  assert.equal(up.vwap, 102.5, "VWAP is untouched — a mark has no volume, folding it would fabricate weight");
+  assert.equal(up.openPx, 100, "openPx stays archive-only");
+  const inside = foldLiveMark(base, 101);
+  assert.equal(inside.hi, 105, "an inside mark widens nothing");
+  assert.equal(inside.lastPx, 101, "…but still refreshes last");
+  const bare = foldLiveMark(null, 88);
+  assert.deepEqual(bare, { hi: 88, lo: 88, vwap: null, openPx: null, lastPx: 88, bars: 0 },
+    "no closed bars yet: the mark alone is the forming read, VWAP/open honestly null");
+  assert.equal(foldLiveMark(base, null), base, "no mark -> the stats pass through untouched");
+  assert.equal(foldLiveMark(null, null), null, "nothing in, nothing out");
+});
+
+test("focus -17.03: a partial forming window is a real read at minBars=1", () => {
+  const M5 = 5 * 60 * 1000, open = Date.UTC(2026, 7, 17, 13, 30);
+  const bars = [[open, 100, 101.5, 99.5, 101, 500], [open + M5, 101, 102, 100.8, 101.7, 400]];
+  const g = fhStats(bars, open, open + 12 * 60 * 1000, 1);
+  assert.ok(g && g.bars === 2 && g.hi === 102 && g.lo === 99.5, "two closed bars form a read under minBars=1");
+  assert.ok(g.vwap != null, "volume present -> a forming VWAP exists");
+  assert.equal(fhStats([], open, open + M5, 1), null, "zero closed bars is still no read — the fold supplies the mark-only case");
+});
+
+test("focus -17.03: manifest pins — forming engine transient, cadence, client styling, ET clocks", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css"), cmp = rd("src/compute.js");
+  for (const pin of ["let focusForming = null;", "function buildFocusForming(", "now - focusForming.at < 55 * 1000",
+    "firstHourStats(bars, st.open, endW, 1)", "foldLiveMark(f, r && r.px > 0 ? +r.px : null)",
+    "focusForming = null;               // the frozen record replaces every forming read"])
+    assert.ok(pol.includes(pin), "poller pin: " + pin);
+  assert.ok(cmp.includes("function foldLiveMark("), "pure fold lives in compute");
+  // transience: the persistence call site must remain exactly the two-field record
+  assert.ok(pol.includes("store.saveFocus({ state: focusState, prev: focusPrev })") && !/saveFocus\([^)]*[Ff]orming/.test(pol),
+    "forming reads can never reach the store");
+  assert.ok(pol.includes("forming: focusState && focusState.day === today && !focusState.filledAt && focusForming ? focusForming : null"),
+    "the payload carries forming only between stamp and freeze");
+  for (const pin of ['data-forming="1"', "forming, freeze at +1h", "forming reads appear once the first 5m bar closes"])
+    assert.ok(app.includes(pin), "app pin: " + pin);
+  assert.ok(css.includes("td[data-forming]"), "forming cells styled distinct from frozen");
+  // ET clocks: every focus-module time string renders in America/New_York, labeled ET
+  assert.ok(!app.includes("ET-side"), "the mislabeled local-time stamp is gone");
+  for (const pin of ["stamped ${new Date(day.frozenAt).toLocaleTimeString('en-US',{timeZone:'America/New_York'",
+    "{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit'})} ET</span>"])
+    assert.ok(app.includes(pin), "ET clock pin");
+});
+
+// ============================================================================================
+// FOCUS PX column (folded into build 2026.08.17-03): where you sit vs the frozen geometry.
+// ============================================================================================
+test("focus -17.03: PX column pins — one accessor, frozen ticks labeled, honest staleness", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public/app.js"), "utf8");
+  // the column reads liveMark — the screener's own accessor — so the two tabs can never disagree
+  assert.ok(app.includes("{k:'px', label:'PX'"), "PX column exists");
+  assert.ok((app.match(/liveMark\(p\.coin\)/g) || []).length >= 2, "PX reads the board's live-mark accessor (cell + sort)");
+  // fallback + staleness honesty: no live mark -> the last archive print, said out loud, dimmed
+  assert.ok(app.includes("live mark unavailable \\u2014 showing the last archive print (stale)"), "stale fallback is disclosed");
+  assert.ok(app.includes("no live mark and no archive print for this name"), "double-miss is a dash, never a fabrication");
+  // where-am-I readout: prev close, open/stamp, sVWAP, and the 1H range position
+  for (const pin of ["\\u0394 prev close", "\\u0394 sVWAP", "above the 1H HI", "below the 1H LO", "inside the 1H range"])
+    assert.ok(app.includes(pin), "readout pin: " + pin);
+  // with a live PX beside it, every frozen tick must say it is frozen
+  assert.ok(app.includes("the 10:30 print (FROZEN") && app.includes("frozen (live price → PX column)"),
+    "the range bar's amber tick can no longer be misread as live");
 });
