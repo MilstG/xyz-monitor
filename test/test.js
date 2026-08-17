@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.16-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.16-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17316,7 +17316,7 @@ test("whale lane end-to-end: add by CIK, poll ingests real filings through the r
   const row = w.watch[0];
   assert.equal(row.q, "Q2 2026"); assert.equal(row.total, 2000); assert.equal(row.n, 2);
   assert.ok(Math.abs(row.dPct - (2000 / 2300 - 1) * 100) < 1e-9, "book QoQ vs the prior filed quarter");
-  assert.equal(row.unseen, 1, "primed + filed within 7d of the injected clock -> announced AND badged");
+  assert.equal(row.unseen, 0, "-03 rule: a fund's FIRST ingest is backfill — silent even when the filing is fresh; announce needs a prior book (staged in the pull test)");
   assert.equal(w.window.cur.q, "Q2 2026");
   const f = await p.getWhaleFund("berkshire");
   assert.ok(f.ok, "fund card: " + (f.error || ""));
@@ -17424,4 +17424,192 @@ test("whale search -02: layered lanes — prefix resolves via autocomplete, comp
   r = await p.whaleSearch("Duquesne Family Office LLC");
   assert.ok(r.ok && r.candidates[0].cik === 1536411, "single-match feed shape parses");
   assert.equal(r.candidates[0].name, "DUQUESNE FAMILY OFFICE & CO LLC", "XML entities decoded in the name");
+});
+
+test("whale pull -03: 'find latest filing' populates a dash row on demand, first ingest is silent, a NEW accession on a watched book announces, cooldown holds", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => null };
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t2) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t2 });
+  const info = (v) => `<x><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><cusip>037833100</cusip><value>${v}</value><shrsOrPrnAmt><sshPrnamt>10</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable></x>`;
+  // Staged submissions: the Q2 filing "lands at EDGAR" only after stage flips — this is how the
+  // test tells backfill (first ingest, silent) from news (new accession on a watched book).
+  let stage = 1;
+  const NOWD = Date.now();
+  const freshDate = new Date(NOWD - 2 * 86400e3).toISOString().slice(0, 10);   // filed 2d ago — inside the 7d freshness leg
+  const hits = [];
+  const extFetch = async (url) => { hits.push(url);
+    if (url.includes("company_tickers")) return J({});
+    if (url.includes("submissions/CIK0001067983")) {
+      const one = { form: ["13F-HR"], accessionNumber: ["0001-26-000001"], filingDate: ["2026-05-15"], reportDate: ["2026-03-31"] };
+      const two = { form: ["13F-HR", "13F-HR"], accessionNumber: ["0001-26-000002", "0001-26-000001"], filingDate: [freshDate, "2026-05-15"], reportDate: ["2026-06-30", "2026-03-31"] };
+      return J({ name: "BERKSHIRE HATHAWAY INC", filings: { recent: stage === 1 ? one : two } });
+    }
+    if (url.includes("submissions/CIK0000000555")) return J({ name: "STEADY FUND LP", filings: { recent: {
+      form: ["13F-HR"], accessionNumber: ["0005-26-000001"], filingDate: ["2026-05-15"], reportDate: ["2026-03-31"] } } });
+    if (url.includes("submissions/CIK0000424242")) return J({ name: "NOT A 13F SHOP LLC", filings: { recent: {
+      form: ["8-K", "10-K"], accessionNumber: ["a", "b"], filingDate: ["2026-08-01", "2026-02-01"], reportDate: ["", ""] } } });
+    if (url.includes("/000126000001/index.json") || url.includes("/000526000001/index.json"))
+      return J({ directory: { item: [{ name: "primary_doc.xml", size: 900 }, { name: "infotable.xml", size: 5000 }] } });
+    if (url.includes("/000126000002/index.json")) return J({ directory: { item: [{ name: "primary_doc.xml", size: 900 }, { name: "infotable.xml", size: 6000 }] } });
+    if (url.includes("/000126000001/infotable.xml")) return X(info(1000));
+    if (url.includes("/000126000002/infotable.xml")) return X(info(1500));
+    if (url.includes("/000526000001/infotable.xml")) return X(info(700));
+    return { ok: false, status: 404, error: "404" };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  p.whaleAdd(1067983, "Berkshire Hathaway Inc");
+  p.whaleAdd(555, "Steady Fund LP");
+  // Stage 1 — a scheduled tick backfills Q1 for both. First ingest: SILENT, whatever the date.
+  await p.whaleTickNow(NOWD - 25 * 3600e3);
+  assert.equal(p.getWhale().watch[0].q, "Q1 2026");
+  assert.equal(p.getWhale().unseenAny, 0, "first-ever ingest is backfill — no badge, no alert");
+  // Stage 2 — the Q2 filing lands at EDGAR; the operator hits the button instead of waiting.
+  stage = 2;
+  let r = await p.whalePull("BERKSHIRE");
+  assert.ok(r.ok, "pull ingests: " + (r.error || ""));
+  assert.equal(r.ingested, true); assert.equal(r.q, "Q2 2026"); assert.equal(r.total, 1500);
+  assert.equal(p.getWhale().watch[0].q, "Q2 2026", "dash-to-data without waiting out the cadence");
+  assert.equal(p.getWhale().watch[0].unseen, 1, "a NEW accession on a fund that already had a book IS news — badged and announced");
+  p.whaleSeen("BERKSHIRE");
+  // Already current: pull on a fund whose newest is on file reports 'up to date', not a fake
+  // refresh. Runs BEFORE the zero-fetch check below — this pull also stamps STEADY's cadence, so
+  // the tick that follows has NO fund legitimately due (the first draft asserted zero fetches
+  // while STEADY's 25h-old stamp made one re-poll correct, and the suite rightly said so).
+  r = await p.whalePull("STEADY");
+  assert.ok(r.ok && r.ingested === false && /already up to date/.test(r.note), "honest no-op when EDGAR has nothing newer");
+  // Cooldown: a double-click is one fetch; and the scheduled tick right after fetches nothing either.
+  const n0 = hits.length;
+  r = await p.whalePull("BERKSHIRE");
+  assert.ok(!r.ok && /once a minute/.test(r.error), "60s per-fund cooldown, said out loud");
+  await p.whaleTickNow(NOWD);
+  assert.equal(hits.length, n0, "both cadences stamped by their pulls — zero back-to-back EDGAR hits from click or tick");
+  // A watched filer with no 13F history: the button tells the truth instead of spinning forever.
+  p.whaleAdd(424242, "Not A 13F Shop LLC");
+  r = await p.whalePull("NOT");
+  assert.ok(!r.ok && /no 13F-HR on record/.test(r.error), "non-filer -> honest reason, not an empty row and silence");
+  r = await p.whalePull("NOPE");
+  assert.ok(!r.ok && /not watching/.test(r.error));
+  const fs = require("fs"), path = require("path");
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(/op === "pull"[\s\S]{0,80}whalePull/.test(sv), "route op wired");
+  assert.ok(sv.indexOf('op === "pull"') > sv.indexOf("if (!isAdmin(req)) return"), "pull sits BEHIND the in-handler admin recheck");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("data-whlpull=") && app.includes("find latest filing") && app.includes("sub==='pull'"), "row button + terminal verb present");
+  assert.ok(/data-whlbell\],\[data-whlrm\],\[data-whlpull\]/.test(app), "row-open click guard knows the new button — a pull click must not also open the modal");
+});
+test("whale scale -04: thousands-convention filings detected by implied share price, corrected x1000, flagged; stored data heals at hydrate", async () => {
+  const C = require("../src/compute");
+  // Pure rule: thousands vs dollars vs the sample floor vs excluded row types.
+  assert.equal(C.whale13FScale([{ value: 150, shares: 1000 }, { value: 80, shares: 500 }, { value: 12, shares: 100 }]).mult, 1000, "sub-$1 implied prices -> thousands");
+  assert.equal(C.whale13FScale([{ value: 150000, shares: 1000 }, { value: 80000, shares: 500 }, { value: 12000, shares: 100 }]).mult, 1, "normal implied prices -> verbatim");
+  assert.equal(C.whale13FScale([{ value: 150, shares: 1000 }, { value: 80, shares: 500 }]).mult, 1, "under the 3-row floor NOTHING is claimed — verbatim");
+  assert.equal(C.whale13FScale([{ value: 1, shares: 100, put: "put" }, { value: 2, shares: 100, put: "call" },
+    { value: 150000, shares: 1000 }, { value: 80000, shares: 500 }, { value: 12000, shares: 100 }]).mult, 1, "options rows never enter the sample (premium is not a share price)");
+  assert.equal(C.whale13FScale([{ value: 200, shares: 200000, shType: "PRN" }, { value: 150000, shares: 1000 },
+    { value: 80000, shares: 500 }, { value: 12000, shares: 100 }]).mult, 1, "principal-amount rows never enter the sample");
+  // Ingest path: a thousands-style infotable lands as corrected dollars, flagged.
+  const { createPoller } = require("../src/poller");
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const infoThousands = `<x>` +
+    `<infoTable><nameOfIssuer>ALPHA CORP</nameOfIssuer><cusip>AAA000000</cusip><value>900000</value><shrsOrPrnAmt><sshPrnamt>3000000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>` +
+    `<infoTable><nameOfIssuer>BETA CORP</nameOfIssuer><cusip>BBB000000</cusip><value>500000</value><shrsOrPrnAmt><sshPrnamt>2500000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>` +
+    `<infoTable><nameOfIssuer>GAMMA CORP</nameOfIssuer><cusip>CCC000000</cusip><value>100000</value><shrsOrPrnAmt><sshPrnamt>400000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable></x>`;
+  const mkStore = (loaded) => ({ loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => loaded });
+  const extFetch = async (url) => {
+    if (url.includes("company_tickers")) return J({});
+    if (url.includes("submissions/CIK0000000777")) return J({ name: "OLDSCHOOL CAPITAL LP", filings: { recent: {
+      form: ["13F-HR"], accessionNumber: ["0007-26-000001"], filingDate: ["2026-08-14"], reportDate: ["2026-06-30"] } } });
+    if (url.includes("/000726000001/index.json")) return J({ directory: { item: [{ name: "primary_doc.xml", size: 900 }, { name: "infotable.xml", size: 5000 }] } });
+    if (url.includes("/000726000001/infotable.xml")) return X(infoThousands);
+    return { ok: false, status: 404, error: "404" };
+  };
+  const p = createPoller({ dex: "xyz", store: mkStore(null), log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  p.whaleAdd(777, "Oldschool Capital LP");
+  const r = await p.whalePull("OLDSCHOOL");
+  assert.ok(r.ok, "ingest: " + (r.error || ""));
+  assert.equal(r.total, 1.5e9, "filed 1,500,000 in thousands -> a $1.5B book, not $1.5M");
+  const w = p.getWhale().watch[0];
+  assert.equal(w.scaled, 1, "list payload carries the correction flag");
+  const f = await p.getWhaleFund("OLDSCHOOL");
+  assert.equal(f.scaled, 1, "fund card carries it too");
+  assert.equal(f.positions[0].value, 900e6, "every position in one currency — deltas and season read corrected dollars");
+  // Hydrate migration: a filing stored by a pre--04 build (verbatim thousands, no scaleChecked)
+  // heals in place at boot — flagged, x1000, no refetch. A dollars filing just gets the check mark.
+  const stored = { ts: 1, watch: [{ key: "OLD", name: "Oldschool Capital LP", cik: 777, notify: 1, addedAt: 1 },
+      { key: "MODERN", name: "Modern Fund LP", cik: 888, notify: 1, addedAt: 1 }],
+    filings: {
+      "777": { "Q2 2026": { acc: "a", form: "13F-HR", filedAt: 1, period: "2026-06-30", url: null,
+        book: { total: 1500000, n: 3, nRaw: 3, positions: [
+          { cusip: "AAA000000", put: null, name: "ALPHA CORP", cls: null, value: 900000, shares: 3000000, pct: 60 },
+          { cusip: "BBB000000", put: null, name: "BETA CORP", cls: null, value: 500000, shares: 2500000, pct: 33.3 },
+          { cusip: "CCC000000", put: null, name: "GAMMA CORP", cls: null, value: 100000, shares: 400000, pct: 6.7 }] } } },
+      "888": { "Q2 2026": { acc: "b", form: "13F-HR", filedAt: 1, period: "2026-06-30", url: null,
+        book: { total: 3e9, n: 3, nRaw: 3, positions: [
+          { cusip: "DDD000000", put: null, name: "DELTA CORP", cls: null, value: 2e9, shares: 10e6, pct: 66.7 },
+          { cusip: "EEE000000", put: null, name: "EPS CORP", cls: null, value: 0.8e9, shares: 4e6, pct: 26.7 },
+          { cusip: "FFF000000", put: null, name: "ZETA CORP", cls: null, value: 0.2e9, shares: 1e6, pct: 6.7 }] } } } },
+    unseen: {}, seasons: {} };
+  const p2 = createPoller({ dex: "xyz", store: mkStore(stored), log: () => {}, version: "test", crypto: false,
+    extFetch: async () => ({ ok: false, status: 404, error: "404" }) });
+  p2.hydrateWhaleNow();
+  const rows = p2.getWhale().watch;
+  const old2 = rows.find((x) => x.key === "OLD"), modern = rows.find((x) => x.key === "MODERN");
+  assert.equal(old2.total, 1.5e9, "stored thousands filing healed x1000 at hydrate — no refetch");
+  assert.equal(old2.scaled, 1, "and flagged");
+  assert.equal(modern.total, 3e9, "a dollars filing is untouched");
+  assert.equal(modern.scaled, 0, "and carries no false flag");
+  const app = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("thousands convention") && app.includes("\\u00d7k"), "correction is DISCLOSED on the row, the card and the terminal — never silent");
+});
+
+test("whale cadence -05: fast polling runs through the post-deadline grace window; only pre-quarter-end 'upcoming' is slow", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => null };
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const hits = [];
+  // Submissions with no 13F rows: every poll is exactly one fetch and ingests nothing — the test
+  // measures the CADENCE, not the ingest path (which has its own coverage).
+  const extFetch = async (url) => { hits.push(url);
+    if (url.includes("company_tickers")) return J({});
+    if (url.includes("submissions/")) return J({ name: "QUIET LP", filings: { recent: { form: [], accessionNumber: [], filingDate: [], reportDate: [] } } });
+    return { ok: false, status: 404, error: "404" };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  p.whaleAdd(9001, "Quiet LP");
+  const subHits = () => hits.filter((u) => u.includes("submissions/")).length;
+  const C = require("../src/compute");
+  // GRACE: Aug 16 2026 — Q2 deadline (Fri Aug 14) passed, season not yet rolled. The exact
+  // Pershing scenario: a deadline-evening filing must be found in minutes, not tomorrow.
+  const GRACE = Date.UTC(2026, 7, 16, 12, 0, 0);
+  assert.equal(C.whaleWindow(GRACE).state, "closed", "fixture clock sits inside the grace window");
+  await p.whaleTickNow(GRACE);
+  const n1 = subHits();
+  await p.whaleTickNow(GRACE + 31 * 60 * 1000);   // +31min: past the 30min fast gate
+  assert.equal(subHits(), n1 + 1, "grace window polls at the FAST cadence — the -05 fix; the old state==='open' gate would have waited 24h here");
+  await p.whaleTickNow(GRACE + 45 * 60 * 1000);   // +45min: inside the fast gate since the last poll
+  assert.equal(subHits(), n1 + 1, "and the fast gate still gates — no hammering");
+  // UPCOMING: Aug 20 2026 — grace over, season rolled to Q3, quarter still in progress. Only a
+  // stray amendment can appear; a daily glance is the whole job.
+  const UP = Date.UTC(2026, 7, 20, 12, 0, 0);
+  assert.equal(C.whaleWindow(UP).state, "upcoming", "fixture clock sits in the between-seasons stretch");
+  await p.whaleTickNow(UP);                       // 4d past the last poll — this one legitimately fetches and anchors the cadence
+  const n2 = subHits();
+  await p.whaleTickNow(UP + 31 * 60 * 1000);      // fast-gate width past the anchor — must NOT fetch out of season
+  assert.equal(subHits(), n2, "upcoming stays on the slow cadence");
+  await p.whaleTickNow(UP + 26 * 3600e3);         // past the 24h slow gate
+  assert.equal(subHits(), n2 + 1, "and the daily glance still happens");
+  // The gate line itself, pinned: slow belongs to 'upcoming' alone.
+  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes('win.state === "upcoming" ? WHALE_OFF_WINDOW_MS : WHALE_IN_WINDOW_MS'), "cadence keys on upcoming-only — open AND grace both poll fast");
 });
