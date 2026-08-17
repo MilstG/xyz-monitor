@@ -4699,9 +4699,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const t = tmap.get(whaleNameKey(name));
     return t || null;
   }
-  // EDGAR full-text search for `whale add <name>`: filer-name -> CIK candidates. The endpoint is
-  // the one the EDGAR search UI itself uses; the shape is parsed defensively and a raw CIK number
-  // bypasses search entirely, so a search outage degrades to "paste the CIK", never to "can't add".
+  // `whale add <name>` resolution: filer-name -> CIK candidates, LAYERED, most-forgiving lane
+  // first. The original single-lane version phrase-searched EDGAR full-text — which searches
+  // DOCUMENT CONTENTS, exact-phrase, so a prefix like "Duq" (or even a full legal name, depending
+  // on how it appears in the doc body) returned nothing. That was the wrong tool holding the only
+  // key. The lanes now, deduped on CIK in order:
+  //   1) EDGAR's entity autocomplete (?keysTyped=) — the box the EDGAR UI's own company field
+  //      uses. Prefix-friendly: "Duq" resolves. Not filtered to 13F filers, so a hit here is a
+  //      CANDIDATE; the first poll after add verifies honestly (no 13F history -> the row says so).
+  //   2) browse-edgar company search, type=13F-HR — prefix match on the official company DB,
+  //      restricted to entities that actually filed 13F-HR. Verified hits, so they rank FIRST.
+  //   3) the old full-text phrase search, last resort only when 1+2 both came up empty.
+  // Every lane is parsed defensively and any lane may be down; a raw CIK number still bypasses
+  // search entirely, so total search outage degrades to "paste the CIK", never to "can't add".
+  const whaleEnt = (s) => String(s).replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'");
   async function whaleSearch(qRaw) {
     const q = String(qRaw || "").trim().slice(0, 60);
     if (!q) return { ok: false, error: "usage: whale add <fund name or CIK>" };
@@ -4710,24 +4721,61 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!sub.ok) return { ok: false, error: "EDGAR submissions: " + sub.error };
       return { ok: true, candidates: [{ cik: +q, name: String(sub.body && sub.body.name || "CIK " + q).slice(0, 60) }] };
     }
-    const url = "https://efts.sec.gov/LATEST/search-index?q=" + encodeURIComponent('"' + q + '"') + "&forms=13F-HR";
-    const r = await extGet(url, "json");
-    if (!r.ok) return { ok: false, error: "EDGAR search: " + r.error + " — a raw CIK number still works: whale add <cik>" };
-    const seen = new Set(), out = [];
-    const hits = r.body && r.body.hits && Array.isArray(r.body.hits.hits) ? r.body.hits.hits : [];
-    for (const h of hits) {
-      const s = h && h._source; if (!s) continue;
-      const ciks = Array.isArray(s.cik) ? s.cik : [s.cik];
-      const names = Array.isArray(s.display_names) ? s.display_names : [];
-      for (let i = 0; i < ciks.length && out.length < 5; i++) {
-        const cik = +ciks[i]; if (!Number.isFinite(cik) || seen.has(cik)) continue;
-        seen.add(cik);
-        const nm = String(names[i] || names[0] || "CIK " + cik).replace(/\s*\(CIK[^)]*\)\s*/i, "").trim().slice(0, 60);
-        out.push({ cik, name: nm });
+    const CAP = 8;
+    const seen = new Set();
+    const verified = [], extra = [];   // 13F-verified hits rank ahead of unverified autocomplete hits
+    const put = (arr, cik, name) => {
+      if (!Number.isFinite(cik) || cik <= 0 || seen.has(cik)) return;
+      seen.add(cik);
+      const nm = whaleEnt(String(name || "CIK " + cik)).replace(/\s*\(CIK[^)]*\)\s*/i, "").replace(/\s+/g, " ").trim().slice(0, 60);
+      arr.push({ cik, name: nm || "CIK " + cik });
+    };
+    // Lane 2 first in code (verified hits must claim their CIKs before autocomplete dedupes them
+    // into the unverified bucket) — presentation order is verified-then-extra either way.
+    const atom = await extGet("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company="
+      + encodeURIComponent(q) + "&type=13F-HR&count=10&output=atom", "xml");
+    if (atom.ok && typeof atom.body === "string") {
+      // Two shapes share one parse: the multi-match COMPANY LIST (one <company-info> per entry)
+      // and the single-match filing feed (one <company-info> for the whole document). Both carry
+      // <cik> + <conformed-name> inside the block; anything else about the atom is ignored.
+      const blocks = atom.body.match(/<company-info>[\s\S]*?<\/company-info>/g) || [];
+      for (const b of blocks) {
+        const c = b.match(/<cik>0*(\d+)<\/cik>/i);
+        const n = b.match(/<conformed-name>([\s\S]*?)<\/conformed-name>/i);
+        if (c) put(verified, +c[1], n ? n[1] : null);
+        if (verified.length >= CAP) break;
       }
-      if (out.length >= 5) break;
     }
-    if (!out.length) return { ok: false, error: "no 13F-HR filer matched \u201c" + q + "\u201d \u2014 a hedge fund's legal filer name often differs from its brand name; a raw CIK also works" };
+    // Lane 1: entity autocomplete. _id carries the CIK (sometimes zero-padded); the entity string
+    // sometimes embeds "(CIK NNN)" — put() strips it either way.
+    if (verified.length < CAP) {
+      const ac = await extGet("https://efts.sec.gov/LATEST/search-index?keysTyped=" + encodeURIComponent(q), "json");
+      const hits = ac.ok && ac.body && ac.body.hits && Array.isArray(ac.body.hits.hits) ? ac.body.hits.hits : [];
+      for (const h of hits) {
+        if (!h) continue;
+        const s = h._source || {};
+        const idCik = /^0*\d+$/.test(String(h._id || "")) ? +String(h._id).replace(/^0+/, "") : null;
+        const parCik = (String(s.entity || "").match(/\(CIK\s*0*(\d+)\)/i) || [])[1];
+        put(extra, idCik != null ? idCik : (parCik != null ? +parCik : +s.cik), s.entity || s.name);
+        if (verified.length + extra.length >= CAP) break;
+      }
+    }
+    // Lane 3: the old full-text phrase search — kept ONLY as a net under the first two, because
+    // it does catch a fund whose exact legal name appears verbatim in filings when the company DB
+    // spelling differs from what the user typed.
+    if (!verified.length && !extra.length) {
+      const r = await extGet("https://efts.sec.gov/LATEST/search-index?q=" + encodeURIComponent('"' + q + '"') + "&forms=13F-HR", "json");
+      const hits = r.ok && r.body && r.body.hits && Array.isArray(r.body.hits.hits) ? r.body.hits.hits : [];
+      for (const h of hits) {
+        const s = h && h._source; if (!s) continue;
+        const ciks = Array.isArray(s.cik) ? s.cik : [s.cik];
+        const names = Array.isArray(s.display_names) ? s.display_names : [];
+        for (let i = 0; i < ciks.length; i++) { put(extra, +ciks[i], names[i] || names[0]); if (extra.length >= CAP) break; }
+        if (extra.length >= CAP) break;
+      }
+    }
+    const out = verified.concat(extra).slice(0, CAP);
+    if (!out.length) return { ok: false, error: "no EDGAR entity matched \u201c" + q + "\u201d \u2014 a fund's legal filer name can differ from its brand name (try a shorter prefix); a raw CIK number always works: whale add <cik>" };
     return { ok: true, candidates: out };
   }
   function whaleKeyFor(name) {
