@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.16-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.16-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17568,6 +17568,7 @@ test("whale scale -04: thousands-convention filings detected by implied share pr
   assert.equal(modern.scaled, 0, "and carries no false flag");
   const app = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(app.includes("thousands convention") && app.includes("\\u00d7k"), "correction is DISCLOSED on the row, the card and the terminal — never silent");
+  assert.ok(app.includes("never read as returns") && app.includes("ENTERING the 13F universe"), "-06: the \u0394QoQ header carries the five-inputs framing — the column must never present as performance");
 });
 
 test("whale cadence -05: fast polling runs through the post-deadline grace window; only pre-quarter-end 'upcoming' is slow", async () => {
