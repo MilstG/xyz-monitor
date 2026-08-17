@@ -25,7 +25,7 @@ const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TRE
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
-const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleWindow, whaleQOfPeriod, whaleSeason } = require("./compute");
+const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleWindow, whaleQOfPeriod, whaleSeason, whale13FScale } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO, homeMkt, homeAdr } = require("./sectors");
@@ -4669,6 +4669,27 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (d.seasons && typeof d.seasons === "object") whaleState.seasons = d.seasons;
       }
     } catch (_) {}
+    // Scale migration (build -04): filings ingested before the thousands-convention detector
+    // existed were stored verbatim — a thousands filer's book sits 1000x small on the volume.
+    // Re-run the SAME rule against the stored aggregated positions (SH rows kept their share
+    // counts, so the implied-price test still works) and heal in place, flagged, no refetch.
+    // scaleChecked marks every filing exactly once; a dollars filing gets the flag and no change.
+    let healed = 0;
+    for (const cik of Object.keys(whaleState.filings)) {
+      const byQ = whaleState.filings[cik];
+      for (const q of Object.keys(byQ)) {
+        const fl = byQ[q];
+        if (!fl || fl.scaleChecked || !fl.book || !Array.isArray(fl.book.positions)) continue;
+        const det = whale13FScale(fl.book.positions);
+        if (det.mult > 1) {
+          for (const pos of fl.book.positions) pos.value *= det.mult;
+          fl.book.total *= det.mult;
+          fl.scaled = 1; healed++;
+        } else fl.scaled = 0;
+        fl.scaleChecked = 1;
+      }
+    }
+    if (healed) { whalePersist(); log(`whale: scale migration corrected ${healed} stored filing(s) reported in the pre-2023 thousands convention (x1000, flagged + disclosed)`); }
     whaleBump();
     // A hydrated watchlist means past filings were already announced in a prior life — prime
     // immediately so the first poll can't re-announce them. An EMPTY list has nothing to blast.
@@ -4839,6 +4860,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (!x.ok) return { ok: false, error: "infotable fetch: " + x.error };
     const parsed = parse13FInfotable(x.body);
     if (!parsed) return { ok: false, error: "infotable parsed to zero holdings" };
+    // Thousands-convention correction (build -04): rule + floor live in compute.whale13FScale;
+    // applied to the RAW rows so aggregation, deltas and the season all see one currency. The
+    // flag rides the stored filing and every card discloses it.
+    const scale = whale13FScale(parsed.rows);
+    if (scale.mult > 1) for (const r0 of parsed.rows) if (r0.value != null) r0.value *= scale.mult;
     const book = whaleBook(parsed);
     if (!book) return { ok: false, error: "book aggregation produced nothing" };
     let truncated = 0;
@@ -4849,7 +4875,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     f[q] = { acc: String(acc), form: String(form), filedAt, period: period || null, book,
       url: "https://www.sec.gov/Archives/edgar/data/" + cik + "/" + accNo + "/",
       amended: had && had.acc !== String(acc) ? 1 : (had && had.amended) || 0,
-      truncated: truncated || undefined };
+      truncated: truncated || undefined,
+      scaled: scale.mult > 1 ? 1 : 0, scaleChecked: 1 };
     whaleBump(); whalePersist();
     return { ok: true, q, amended: !!(had && had.acc !== String(acc)), book };
   }
@@ -4872,21 +4899,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   }
   // One fund's poll: submissions -> newest filing row -> ingest if the accession is new to us.
   // Also backfills the prior quarter once, so the delta strip has its other leg.
+  // Returns a status object (build -03) so the on-demand pull can surface what happened; the
+  // scheduled tick ignores it. { ok, ingested?, q?, error? } — every early exit names its reason.
   async function whalePollFund(w, now) {
     const sub = await extGet("https://data.sec.gov/submissions/CIK" + cikPad(+w.cik) + ".json", "json");
-    if (!sub.ok) return;
+    if (!sub.ok) return { ok: false, error: "EDGAR submissions: " + sub.error };
     const rows2 = whalePickFilings(sub.body);
-    if (!rows2.length) return;
+    if (!rows2.length) return { ok: false, error: "no 13F-HR on record for this filer at EDGAR \u2014 it may not be a 13F filer, or it files under a different CIK" };
     const cur = rows2[0];
     const q = whaleQOfPeriod(cur.period);
     const have = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
+    // Snapshot BEFORE ingest: did this fund already have ANY book on file? The announce gate below
+    // keys on it (build -03): a fund's FIRST ingest is a backfill — the operator just added it, or
+    // just hit "find latest filing" — and is history by definition, silent regardless of how fresh
+    // the filing is. Only a NEW accession landing on a fund that already had a book is the thing
+    // the alert class exists for: they filed while you were watching. This is clock-free, so the
+    // deadline-week failure mode (add a fund the day after the deadline, blast every Telegram
+    // subscriber with a "new" filing they conceptually just missed) cannot exist.
+    const hadAny = !!(whaleState.filings[w.cik] && Object.keys(whaleState.filings[w.cik]).length);
     if (!have || have.acc !== cur.acc) {
       const r = await whaleIngest(w, cur.acc, cur.form, cur.filedAt, cur.period);
       if (r.ok) {
-        // Announce only when primed AND the filing is actually fresh — the filingScan rule, wider
-        // window (13Fs are quarterly events; 7d covers a weekend-straddling deadline). A fund
-        // added mid-quarter ingests its months-old book silently: history, not news.
-        if (!whalePrimed || !(cur.filedAt > 0) || now - cur.filedAt > 7 * DAY) { /* seeded */ }
+        // Announce gate, all three legs: primed (boot backlog seeds silently) AND fresh (7d — a
+        // filing found late is history, the filingScan rule at quarterly width) AND hadAny (first
+        // ingest is backfill, see above).
+        if (!whalePrimed || !hadAny || !(cur.filedAt > 0) || now - cur.filedAt > 7 * DAY) { /* seeded */ }
         else {
           whaleState.unseen[w.cik] = cur.acc;
           const total = r.book.total, dd = whaleDelta(r.book, whalePrevBook(w.cik, q));
@@ -4915,6 +4952,34 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const havePrev = whaleState.filings[w.cik] && whaleState.filings[w.cik][pq];
       if (!havePrev || havePrev.acc !== rows2[1].acc) await whaleIngest(w, rows2[1].acc, rows2[1].form, rows2[1].filedAt, rows2[1].period);
     }
+    const got = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
+    return got ? { ok: true, ingested: !have || have.acc !== cur.acc, q, total: got.book.total, n: got.book.n }
+               : { ok: false, error: "filing found but ingest failed \u2014 see the server log" };
+  }
+  // On-demand pull (build -03): "find latest filing" — a fund row showing dashes shouldn't have
+  // to wait out the poll cadence. Runs the SAME whalePollFund path (no special ingest logic to
+  // drift), bypasses the cadence gate once, then STAMPS it so the scheduled tick doesn't re-fetch
+  // right after. 60s per-fund cooldown: EDGAR is polite infrastructure and a button is a
+  // double-click machine. Announce rules unchanged — an old filing pulled on demand ingests
+  // silently (history, not news); season gets its build attempt like any other ingest pass.
+  const WHALE_PULL_CD = 60 * 1000;
+  const whalePullAt = new Map();   // cik -> last on-demand pull ts
+  async function whalePull(keyRaw) {
+    const w = whaleByKey(keyRaw);
+    if (!w) return { ok: false, error: "not watching \u201c" + String(keyRaw || "") + "\u201d" };
+    const now = Date.now();
+    const last = whalePullAt.get(+w.cik) || 0;
+    if (now - last < WHALE_PULL_CD) return { ok: false, error: "just pulled \u2014 EDGAR is checked at most once a minute per fund; try again shortly" };
+    whalePullAt.set(+w.cik, now);
+    whaleLastPoll.set(+w.cik, now);   // the scheduled tick treats this as the fund's poll
+    let r;
+    try { r = await whalePollFund(w, now); }
+    catch (e) { return { ok: false, error: "pull failed: " + (e && e.message) }; }
+    whaleSeasonMaybe(now);
+    if (!r || !r.ok) return { ok: false, error: (r && r.error) || "pull produced nothing" };
+    return { ok: true, key: w.key, q: r.q, total: r.total, n: r.n,
+      ingested: !!r.ingested,   // false = EDGAR's latest was already on file — the dash means THEY haven't filed, not that we haven't looked
+      note: r.ingested ? null : "already up to date \u2014 EDGAR's newest 13F for this filer was on file; the row is current" };
   }
   function whalePrevBook(cik, q) {
     const f = whaleState.filings[cik]; if (!f) return null;
@@ -4973,9 +5038,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const now = nowArg || Date.now();
     try {
       const win = whaleWindow(now);
-      // In-window: filings can land any minute. Out-of-window: only amendments can appear — a
-      // daily glance is plenty and keeps the off-season EDGAR load at ~watchlist-size/day.
-      const gap = win.state === "open" ? WHALE_IN_WINDOW_MS : WHALE_OFF_WINDOW_MS;
+      // Fast cadence runs through the WHOLE filing season: the open window AND the 3-day grace
+      // after the deadline (state "closed" — whaleWindow only reports "closed" inside grace;
+      // past it the season rolls forward and reads "upcoming"). Build -05 fix: the gate used to
+      // key on state === "open" alone, which dropped polling to 24h at the exact moment the
+      // deadline passed — while the grace window exists precisely BECAUSE filings land late
+      // (deadline-evening filers, weekend straddles, quick HR/A amendments). A deadline-day
+      // filing could sit undetected for a day, through the weekend everyone reads 13Fs. Slow
+      // cadence now belongs only to "upcoming" — the stretch where the season quarter hasn't
+      // even ended and nothing but a stray amendment can appear.
+      const gap = win.state === "upcoming" ? WHALE_OFF_WINDOW_MS : WHALE_IN_WINDOW_MS;
       for (const w of whaleState.watch) {
         const last = whaleLastPoll.get(+w.cik) || 0;
         if (now - last < gap) continue;
@@ -5002,7 +5074,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       return { key: w.key, name: w.name, cik: w.cik, notify: w.notify ? 1 : 0,
         q: cur ? whaleQOfPeriod(cur.period) : null, form: cur ? cur.form : null,
         filedAt: cur ? cur.filedAt : null, amended: cur ? !!cur.amended : false,
-        total: cur ? cur.book.total : null, n: cur ? cur.book.n : null,
+        total: cur ? cur.book.total : null, n: cur ? cur.book.n : null, scaled: cur ? (cur.scaled ? 1 : 0) : 0,
         dPct: cur && prev && prev.book.total > 0 ? (cur.book.total / prev.book.total - 1) * 100 : null,
         top: top ? { name: top.name, pct: top.pct } : null,
         unseen: whaleState.unseen[w.cik] ? 1 : 0 };
@@ -5033,7 +5105,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       dSh: p.dSh != null ? p.dSh : null, prevVal: p.prevVal, tk: whaleTickerOf(p.name, tmap) }));
     return { ok: true, key: w.key, name: w.name, cik: w.cik, q, form: cur.form, filedAt: cur.filedAt,
       period: cur.period, ageDays: cur.filedAt ? Math.round((Date.now() - cur.filedAt) / 864e5) : null,
-      amended: !!cur.amended, truncated: cur.truncated || 0, url: cur.url,
+      amended: !!cur.amended, truncated: cur.truncated || 0, url: cur.url, scaled: cur.scaled ? 1 : 0,
       total: cur.book.total, n: cur.book.n, nRaw: cur.book.nRaw,
       prevTotal: prev ? prev.total : null, hasPrev: dd.hasPrev,
       lanes: { opened: lane(dd.lanes.opened), added: lane(dd.lanes.added), trimmed: lane(dd.lanes.trimmed), exited: lane(dd.lanes.exited) },
@@ -11266,7 +11338,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getWhaleFund,
     getWhaleSeasonQ,
     whaleSearch,
-    whaleAdd, whaleRm, whaleMute, whaleSeen,
+    whaleAdd, whaleRm, whaleMute, whaleSeen, whalePull,
     whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
     hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()
     whaleIngestNow: whaleIngest,                 // harness: push one filing through the REAL ingest path

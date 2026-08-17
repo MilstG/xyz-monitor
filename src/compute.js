@@ -6881,8 +6881,10 @@ module.exports.parseNportHoldings = parseNportHoldings;
 // Institutional quarter-end books for the FUNDS tab + `whale` terminal family. Everything here is
 // pure: XML in, shaped objects out — poller.js owns fetching/caching, app.js owns rendering.
 // Honesty contract, stated once and enforced below:
-//   • Every number is the FILING's own number. `value` is read verbatim (whole USD per the current
-//     EDGAR infotable spec) — never unit-guessed, never re-priced.
+//   • Every number is the FILING's own number, read verbatim AT PARSE. The one correction ever
+//     applied is the thousands-convention scale fix (whale13FScale below): rule-based, sample-
+//     floored, flagged on the stored filing and disclosed on every card — never a silent guess,
+//     never a re-price.
 //   • A share delta is only claimed when BOTH legs report sshPrnamtType SH; principal-amount rows
 //     and mixed aggregates get a value delta only, with the share column an honest null.
 //   • put/call rows are a DIFFERENT position from the common line and are never merged into it.
@@ -6917,6 +6919,30 @@ function parse13FInfotable(xml) {
     });
   }
   return rows.length ? { rows, n: rows.length } : null;
+}
+// Reporting-scale detector (build 2026.08.16-04). The 2023 13F amendments moved values to WHOLE
+// dollars, but a nontrivial share of filers still submit in the pre-2023 THOUSANDS convention —
+// EDGAR accepts both, silently. Read verbatim, a thousands filing shows a $290B book as $290M and
+// every position 1000x small. This is not fixed by guessing: for SH rows (no options, no
+// principal-amount), value / shares is an implied per-share price, and the two hypotheses sit
+// three orders of magnitude apart — dollars-reporting implies normal share prices, thousands-
+// reporting implies a book of sub-dollar stocks, which does not exist at 13F filer scale. Rule,
+// stated once and testable: across >= 3 usable rows, median implied price < $1 -> the filing is in
+// thousands, multiply by 1000 and FLAG it (the flag rides the stored filing and every card
+// discloses the correction). Below the sample floor, or median >= $1: verbatim, no claim. Options
+// rows are excluded (their value is option premium, not underlying price); PRN/mixed rows have no
+// honest share count and exclude themselves.
+function whale13FScale(rows) {
+  const ratios = [];
+  for (const r of (rows || [])) {
+    if (!r || r.put || !(r.shares > 0) || !(r.value > 0)) continue;
+    if (r.shType != null && r.shType !== "SH") continue;
+    ratios.push(r.value / r.shares);
+  }
+  if (ratios.length < 3) return { mult: 1, n: ratios.length, med: null };   // sample floor — verbatim, nothing claimed
+  ratios.sort((a, b) => a - b);
+  const med = ratios[Math.floor(ratios.length / 2)];
+  return med < 1 ? { mult: 1000, n: ratios.length, med } : { mult: 1, n: ratios.length, med };
 }
 // Aggregate raw infotable rows into the book. 13F filers commonly split one position across many
 // rows (per-manager discretion, sole/shared voting splits) — the book view joins them on
@@ -7067,6 +7093,7 @@ function whaleSeason(funds) {
   return { bought, sold, opens, exits, crowd, nFunds: funds.filter((f) => f && f.cur).length };
 }
 module.exports.parse13FInfotable = parse13FInfotable;
+module.exports.whale13FScale = whale13FScale;
 module.exports.whaleBook = whaleBook;
 module.exports.whaleDelta = whaleDelta;
 module.exports.whaleNameKey = whaleNameKey;
