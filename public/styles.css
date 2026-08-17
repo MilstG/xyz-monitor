@@ -1585,3 +1585,10 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 /* ===== FOCUS forming cells (build 2026.08.17-03) ===== */
 .foctbl td[data-forming]{font-style:italic;opacity:.82;position:relative}
 .foctbl td[data-forming]::after{content:'~';color:var(--accent);font-size:9px;margin-left:4px;font-style:normal;opacity:.9}
+
+/* 2026.08.17-04: option badges colored by side — puts read as downside bets, calls as upside, at a glance */
+.whl-put.put{border-color:var(--down);color:var(--down)}
+.whl-put.call{border-color:var(--up);color:var(--up)}
+.whl-oc{font-size:10px;letter-spacing:.5px}
+.whl-oc.put{color:var(--down)}
+.whl-oc.call{color:var(--up)}

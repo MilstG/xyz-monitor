@@ -10743,7 +10743,7 @@ function whlLaneRows(rows,kind){
   const max=Math.max(...rows.map(r=>Math.abs(r.net!=null?r.net:r.tot)||0),1);
   return rows.slice(0,6).map(r=>{
     const v=r.net!=null?r.net:(kind==='exits'?-r.tot:r.tot);
-    const nm=(r.tk?r.tk:esc(r.name.slice(0,16)))+(r.put?' <span class="sec">'+esc(r.put)+'s</span>':'');
+    const nm=(r.tk?r.tk:esc(r.name.slice(0,16)))+(r.put?' <span class="whl-oc '+r.put+'">'+esc(r.put)+'s</span>':'');
     const legs=(r.legs||r.funds||[]).map(l=>l.dVal!=null||l.opened||l.exited?whlLegLine(l):esc(l.key)+' '+whlMoney(l.val!=null?l.val:-(l.prevVal||0))).join(' \u00b7 ');
     const dom=r.domPct!=null&&r.domPct>=75&&(r.legs||[]).length>1?' \u00b7 one fund is '+r.domPct.toFixed(0)+'% of this flow \u2014 a single whale can BE the consensus':'';
     const fn=(r.n!=null?r.n:(r.legs?new Set(r.legs.map(l=>l.key)).size:0));
@@ -10765,7 +10765,7 @@ function renderWhlSeason(){
   }).join('');
   const crowd=a.crowd.length?a.crowd.slice(0,8).map(r=>
     `<div class="whl-crow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 held by ${r.held} of ${a.nFunds} \u00b7 ${r.adding} adding \u00b7 ${r.cutting} cutting \u00b7 grid order = watchlist order">`
-    +`<span class="whl-snm">${r.tk?r.tk:esc(r.name.slice(0,16))}${r.put?' <span class="sec">'+esc(r.put)+'s</span>':''}</span>`
+    +`<span class="whl-snm">${r.tk?r.tk:esc(r.name.slice(0,16))}${r.put?' <span class="whl-oc '+r.put+'">'+esc(r.put)+'s</span>':''}</span>`
     +`<span class="whl-cells">${cells(r)}</span><span class="sec">${r.held}/${a.nFunds}${r.adding?' \u00b7 '+r.adding+' adding':''}${r.cutting?' \u00b7 '+r.cutting+' cutting':''}</span></div>`).join('')
     :'<div class="sec">no name is held by 2+ watched funds</div>';
   host.innerHTML=`<div class="whl-shd"><span class="whl-hd">${esc(s.q)} \u00b7 13F SEASON</span>`
@@ -10837,7 +10837,7 @@ function renderWhlFund(f,full){
     +`<td class="r">${whlMoney(p.value)}</td>`
     +`<td class="r">${whlSh(p.shares)}</td>`
     +`<td class="r">${dcell(p)}</td>`
-    +`<td class="l">${esc(p.name)}${p.put?` <span class="whl-put">${esc(p.put.toUpperCase())}</span>`:''}${p.tk?` <span class="whl-tk" data-whltk="${esc(p.tk)}">${esc(p.tk)}</span>`:''}</td></tr>`).join('');
+    +`<td class="l">${esc(p.name)}${p.put?` <span class="whl-put ${p.put}">${esc(p.put.toUpperCase())}</span>`:''}${p.tk?` <span class="whl-tk" data-whltk="${esc(p.tk)}">${esc(p.tk)}</span>`:''}</td></tr>`).join('');
   const conc=f.positions.slice(0,10).map((p,i)=>`<span class="whl-cseg whlc${i%10}" style="width:${Math.max(0.4,p.pct||0)}%" data-tip="${esc((p.tk||p.name.slice(0,20))+' \u00b7 '+(p.pct!=null?p.pct.toFixed(1):'?')+'% of the 13F book')}"></span>`).join('')
     +(f.n>10?`<span class="whl-cseg rest" style="width:${Math.max(0,100-f.positions.slice(0,10).reduce((s,p)=>s+(p.pct||0),0)).toFixed(1)}%" data-tip="${esc('other '+(f.n-10)+' position(s)')}"></span>`:'');
   el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
@@ -10871,7 +10871,7 @@ function termWhaleFund(key,full){
     const dl=f.hasPrev?`\n<span class="tp-k">${tpad('QoQ',14)}</span> <span class="pos">${f.lanes.opened.length} new</span> \u00b7 <span class="pos">${f.lanes.added.length} added</span> \u00b7 <span class="neg">${f.lanes.trimmed.length} trimmed</span> \u00b7 <span class="sec">${f.lanes.exited.length} exited</span>`:'';
     const rows=f.positions.slice(0,full?f.positions.length:10).map((p,i)=>{
       const d=!p.d||p.d.cls==='na'?'\u2014':p.d.cls==='new'?'<span class="amber">NEW</span>':p.d.cls==='flat'?'\u2014':(p.d.dSh!=null?`<span class="${p.d.dSh>0?'pos':'neg'}">${whlSgnSh(p.d.dSh)}</span>`:`<span class="${p.d.dVal>0?'pos':'neg'}">${(p.d.dVal>0?'+':'\u2212')+whlMoney(Math.abs(p.d.dVal)).slice(1)}</span>`);
-      return `  <span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(p.pct!=null?p.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad(whlMoney(p.value),8,true)} ${tpad(d,10,true)}  ${tesc(p.name.slice(0,26))}${p.put?' <span class="sec">'+tesc(p.put.toUpperCase())+'</span>':''}${p.tk?' <span class="tp-deep" data-tcmd="'+tesc(p.tk)+'">'+tesc(p.tk)+'</span>':''}`; }).join('\n');
+      return `  <span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(p.pct!=null?p.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad(whlMoney(p.value),8,true)} ${tpad(d,10,true)}  ${tesc(p.name.slice(0,26))}${p.put?' <span class="'+(p.put==='put'?'neg':'pos')+'">'+tesc(p.put.toUpperCase())+'</span>':''}${p.tk?' <span class="tp-deep" data-tcmd="'+tesc(p.tk)+'">'+tesc(p.tk)+'</span>':''}`; }).join('\n');
     termOut(`<span class="tp-hd">${tesc(f.key)} 13F</span> <span class="tp-trans">\u00b7 ${tesc(f.name)} \u00b7 CIK ${tesc(String(f.cik))}</span>\n<span class="tp-k">${tpad('quarter',14)}</span> <b>${tesc(f.q||'?')}</b> <span class="tp-trans">(filed ${tesc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old':''}${f.amended?' \u00b7 AMENDED':''})</span>\n<span class="tp-k">${tpad('book',14)}</span> <b>${whlMoney(f.total)}</b> <span class="tp-trans">\u00b7 ${f.n} positions${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.scaled?' \u00b7 values \u00d71000 (thousands filer, corrected + disclosed)':''}</span>${dl}\n<span class="tp-th">  ${tpad('#',3)} ${tpad('%BOOK',7,true)} ${tpad('VALUE',8,true)} ${tpad('\u0394QoQ',10,true)}  NAME</span>\n${rows}\n<span class="tp-trans">${full?'':'top '+Math.min(10,f.positions.length)+' of '+f.n+' \u00b7 <span class="ex" data-tcmd="whale '+tesc(f.key)+' full">whale '+tesc(f.key)+' full</span> for all \u00b7 '}quarter-end snapshot filed up to 45d late \u00b7 long US book only \u00b7 full card on the FUNDS tab</span>`);
     whlPost({op:'seen',key:f.key});
   }).catch(()=>{ think.remove(); termErr('whale fetch failed \u2014 try again in a moment'); });
@@ -10881,7 +10881,7 @@ function termWhaleSeason(q){
   fetchJSON('/api/whale?season='+encodeURIComponent(q||'')).then(s=>{ think.remove();
     if(!s.ok) return termErr(tesc(s.error||'no season'));
     const a=s.agg;
-    const l=(rows,neg)=>rows.slice(0,3).map(r=>`${r.tk?tesc(r.tk):tesc(r.name.slice(0,14))}${r.put?' '+tesc(r.put)+'s':''} ${(r.net!=null?(r.net>0?'+':'\u2212')+whlMoney(Math.abs(r.net)).slice(1):whlMoney(r.tot))}${r.n!=null?' ('+r.n+'/'+a.nFunds+')':''}`).join(' \u00b7 ')||'\u2014';
+    const l=(rows,neg)=>rows.slice(0,3).map(r=>`${r.tk?tesc(r.tk):tesc(r.name.slice(0,14))}${r.put?' <span class="'+(r.put==='put'?'neg':'pos')+'">'+tesc(r.put)+'s</span>':''} ${(r.net!=null?(r.net>0?'+':'\u2212')+whlMoney(Math.abs(r.net)).slice(1):whlMoney(r.tot))}${r.n!=null?' ('+r.n+'/'+a.nFunds+')':''}`).join(' \u00b7 ')||'\u2014';
     termOut(`<span class="tp-hd">${tesc(s.q)} 13F season</span> <span class="tp-trans">\u00b7 ${s.filedN}/${s.watchN} filed${s.missing&&s.missing.length?' \u00b7 missing '+tesc(s.missing.join(',')):''}${s.amended?' \u00b7 rebuilt after amendment':''}</span>\n<span class="tp-k">${tpad('most bought',14)}</span> <span class="pos">${l(a.bought)}</span>\n<span class="tp-k">${tpad('most sold',14)}</span> <span class="neg">${l(a.sold)}</span>\n<span class="tp-k">${tpad('opens',14)}</span> <span class="amber">${l(a.opens)}</span>\n<span class="tp-k">${tpad('exits',14)}</span> <span class="sec">${l(a.exits)}</span>\n<span class="tp-k">${tpad('crowding',14)}</span> ${a.crowd.slice(0,3).map(r=>(r.tk?tesc(r.tk):tesc(r.name.slice(0,12)))+' '+r.held+'/'+a.nFunds).join(' \u00b7 ')||'\u2014'}\n<span class="tp-trans">consensus across your ${a.nFunds} watched fund(s) only \u2014 full breakdown with per-fund legs lives on the FUNDS tab</span>`);
   }).catch(()=>{ think.remove(); termErr('season fetch failed'); });
 }
