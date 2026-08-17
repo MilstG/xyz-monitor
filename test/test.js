@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.15-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.16-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17073,7 +17073,7 @@ test("focus -01: manifest pins — the tab, the route, the engine and the client
   // client: tab wired into every navigation surface, prefs persisted, chart one-source
   assert.ok(idx.includes('data-view="focus"') && idx.includes('id="view-focus"'), "tab + section in markup");
   for (const pin of ["setHidden('view-focus', v!=='focus');", "if(v==='focus'){ if(el('view-focus')) openFocus();",
-    "'markets','focus','trend'", "{v:'focus',label:'Focus'}", "const FOC_LS='xyz-focus-cols'",
+    "'markets','focus','funds','trend'", "{v:'focus',label:'Focus'}", "const FOC_LS='xyz-focus-cols'",
     "function focChartOpen(", "res=1m&from=", "function focAgg(", "focus:`"])
     assert.ok(app.includes(pin), "app pin: " + pin);
   assert.ok(css.includes(".foctbl") && css.includes(".focchip") && css.includes("#focmodal"), "focus styles present");
@@ -17181,4 +17181,197 @@ test("focus -02: manifest pins — preview machinery, TG lane, diff disclosure, 
   // the preview is a pool, not a record: nothing in the poller may ever persist it
   assert.ok(!pol.includes("saveFocus({ state: focusState, prev: focusPrev, pv") && !/saveFocus\([^)]*focusPv/.test(pol),
     "focusPv can never reach the store");
+});
+
+// ===== 13F whale lane (build 2026.08.16-01) =====================================================
+// The FUNDS tab end to end. Pure layer first (parser, book aggregation, delta classes, name
+// normalization, filing-window arithmetic, season aggregation), then the poller lane through the
+// REAL fetch/ingest/poll paths against an injected transport (the -84/-87 doctrine: behavioral
+// tests on real code paths, fixtures on the wire, no harness patches masking production logic),
+// then the wiring manifest.
+
+test("whale pure: infotable parses bare + namespaced, book aggregates on cusip|put, PRN poisons shares honestly", () => {
+  const C = require("../src/compute");
+  const xml = `<edgarSubmission>
+    <ns1:infoTable><ns1:nameOfIssuer>APPLE INC</ns1:nameOfIssuer><ns1:titleOfClass>COM</ns1:titleOfClass><ns1:cusip>037833100</ns1:cusip><ns1:value>1000</ns1:value>
+      <ns1:shrsOrPrnAmt><ns1:sshPrnamt>10</ns1:sshPrnamt><ns1:sshPrnamtType>SH</ns1:sshPrnamtType></ns1:shrsOrPrnAmt></ns1:infoTable>
+    <ns1:infoTable><ns1:nameOfIssuer>APPLE INC</ns1:nameOfIssuer><ns1:cusip>037833100</ns1:cusip><ns1:value>500</ns1:value>
+      <ns1:shrsOrPrnAmt><ns1:sshPrnamt>5</ns1:sshPrnamt><ns1:sshPrnamtType>SH</ns1:sshPrnamtType></ns1:shrsOrPrnAmt></ns1:infoTable>
+    <infoTable><nameOfIssuer>ALIBABA GROUP HLDG</nameOfIssuer><cusip>01609W102</cusip><value>300</value>
+      <shrsOrPrnAmt><sshPrnamt>3</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt><putCall>Put</putCall></infoTable>
+    <infoTable><nameOfIssuer>BOND THING</nameOfIssuer><cusip>999999999</cusip><value>200</value>
+      <shrsOrPrnAmt><sshPrnamt>200000</sshPrnamt><sshPrnamtType>PRN</sshPrnamtType></shrsOrPrnAmt></infoTable>
+  </edgarSubmission>`;
+  const p = C.parse13FInfotable(xml);
+  assert.equal(p.n, 4, "all four filed rows parse, prefixed and bare alike");
+  const b = C.whaleBook(p);
+  assert.equal(b.total, 2000, "total is the sum of filed values, verbatim");
+  assert.equal(b.n, 3, "two AAPL rows joined on cusip; the BABA PUT stays its own position");
+  const aapl = b.positions.find((x) => x.cusip === "037833100");
+  assert.equal(aapl.value, 1500); assert.equal(aapl.shares, 15, "SH rows sum");
+  assert.ok(Math.abs(aapl.pct - 75) < 1e-9, "pct = value / filing total");
+  const baba = b.positions.find((x) => x.put === "put");
+  assert.ok(baba, "putCall rows keep their put identity — never merged into a common line");
+  const prn = b.positions.find((x) => x.cusip === "999999999");
+  assert.equal(prn.shares, null, "a PRN row's aggregate claims NO share count — honest null, value still real");
+  assert.equal(prn.value, 200);
+  assert.equal(C.parse13FInfotable("<x>no tables</x>"), null, "zero holdings -> null, never an empty book");
+});
+
+test("whale pure: delta classes — new/add/trim/exit/flat, value-only when shares aren't comparable, no-prev claims nothing", () => {
+  const C = require("../src/compute");
+  const P = (cusip, value, shares, put) => ({ cusip, put: put || null, name: cusip, cls: null, value, shares, pct: null });
+  const cur = { total: 100, n: 4, positions: [P("AAA", 40, 40), P("BBB", 30, 10), P("CCC", 20, null), P("DDD", 10, 10)] };
+  const prev = { total: 90, n: 4, positions: [P("AAA", 35, 30), P("BBB", 40, 20), P("CCC", 25, null), P("EEE", 5, 5)] };
+  const d = C.whaleDelta(cur, prev);
+  assert.equal(d.rows.find((r) => r.cusip === "AAA").d.cls, "add");
+  assert.equal(d.rows.find((r) => r.cusip === "AAA").d.dSh, 10, "share delta claimed when both legs are SH");
+  assert.equal(d.rows.find((r) => r.cusip === "BBB").d.cls, "trim");
+  const ccc = d.rows.find((r) => r.cusip === "CCC").d;
+  assert.equal(ccc.dSh, null, "no share delta across incomparable legs");
+  assert.equal(ccc.cls, "trim", "value moved -> still classed, by value");
+  assert.equal(d.rows.find((r) => r.cusip === "DDD").d.cls, "new");
+  assert.equal(d.lanes.exited.length, 1); assert.equal(d.lanes.exited[0].cusip, "EEE");
+  assert.equal(d.flows.opened, 10); assert.equal(d.flows.exited, -5);
+  const noPrev = C.whaleDelta(cur, null);
+  assert.equal(noPrev.hasPrev, false);
+  assert.ok(noPrev.rows.every((r) => r.d.cls === "na"), "without a prior filing NOTHING is classed new — no delta is claimed");
+  // Mark-to-market drift with unchanged shares is not a trade.
+  const flat = C.whaleDelta({ total: 50, n: 1, positions: [P("AAA", 50, 30)] }, { total: 40, n: 1, positions: [P("AAA", 40, 30)] });
+  assert.equal(flat.rows[0].d.cls, "flat", "same shares, different mark -> flat, not 'add'");
+});
+
+test("whale pure: name normalization is symmetric and conservative; filing window rolls weekend deadlines only", () => {
+  const C = require("../src/compute");
+  assert.equal(C.whaleNameKey("ALIBABA GROUP HLDG ADR"), C.whaleNameKey("Alibaba Group Holding Limited"));
+  assert.equal(C.whaleNameKey("OCCIDENTAL PETE"), C.whaleNameKey("Occidental Petroleum Corp"));
+  assert.equal(C.whaleNameKey("BERKSHIRE HATHAWAY INC CL B"), "BERKSHIRE HATHAWAY", "class suffixes strip, trailing single letters strip");
+  assert.notEqual(C.whaleNameKey("MICRON TECHNOLOGY"), C.whaleNameKey("MICRO TECHNOLOGY"), "no fuzzy matching — near-names stay distinct");
+  const w = C.whaleWindow(Date.UTC(2026, 7, 16));   // Aug 16 2026: Q2 deadline (Aug 14, a Friday) just passed
+  assert.equal(w.cur.q, "Q2 2026"); assert.equal(w.state, "closed");
+  assert.equal(new Date(w.cur.deadline).getUTCDay(), 5, "Jun 30 + 45d lands Fri Aug 14 — no roll needed");
+  const w3 = C.whaleWindow(Date.UTC(2026, 9, 20));  // Oct 20: Q3 window open; Sep 30 + 45d = Sat Nov 14 -> rolls to Mon
+  assert.equal(w3.cur.q, "Q3 2026"); assert.equal(w3.state, "open");
+  assert.equal(new Date(w3.cur.deadline).getUTCDay(), 1, "weekend due date rolls to Monday");
+  assert.equal(C.whaleQOfPeriod("2026-06-30"), "Q2 2026");
+});
+
+test("whale pure: season lanes carry per-fund legs, domPct discloses single-whale consensus, crowding states per fund", () => {
+  const C = require("../src/compute");
+  const P = (cusip, value, shares) => ({ cusip, put: null, name: cusip + " CORP", cls: null, value, shares, pct: null });
+  const A = { key: "A", cur: { total: 1000, n: 2, positions: [P("NVDA1", 900, 90), P("UNH1", 100, 10)] },
+              prev: { total: 800, n: 1, positions: [P("NVDA1", 800, 80)] } };
+  const B = { key: "B", cur: { total: 100, n: 1, positions: [P("NVDA1", 100, 11)] },
+              prev: { total: 95, n: 1, positions: [P("NVDA1", 95, 10)] } };
+  const s = C.whaleSeason([A, B]);
+  assert.equal(s.nFunds, 2);
+  const nv = s.bought.find((r) => r.cusip === "NVDA1");
+  assert.ok(nv, "both funds added NVDA1 -> most-bought lane");
+  assert.equal(nv.legs.length, 2, "per-fund legs ride the row verbatim");
+  assert.ok(nv.domPct > 90, "one whale is ~95% of the flow and the row SAYS so");
+  const op = s.opens.find((r) => r.cusip === "UNH1");
+  assert.ok(op && op.n === 1 && op.funds[0].key === "A", "opens lane: who opened, with size");
+  const cr = s.crowd.find((r) => r.cusip === "NVDA1");
+  assert.ok(cr && cr.held === 2, "crowding: held by both");
+  assert.equal(cr.state.A, "add"); assert.equal(cr.state.B, "add");
+});
+
+test("whale lane end-to-end: add by CIK, poll ingests real filings through the real path, delta + tickers + unseen + announce gating + season", async () => {
+  const { createPoller } = require("../src/poller");
+  let saved = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: (d) => { saved = d; }, loadWhale: () => null };
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const NOW = Date.UTC(2026, 7, 16, 12, 0, 0);   // in Q2's grace window: season quarter is Q2 2026
+  const infoQ2 = `<x><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><cusip>037833100</cusip><value>1500</value><shrsOrPrnAmt><sshPrnamt>15</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>` +
+    `<infoTable><nameOfIssuer>UNITEDHEALTH GROUP INC</nameOfIssuer><cusip>91324P102</cusip><value>500</value><shrsOrPrnAmt><sshPrnamt>5</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable></x>`;
+  const infoQ1 = `<x><infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><cusip>037833100</cusip><value>2000</value><shrsOrPrnAmt><sshPrnamt>20</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>` +
+    `<infoTable><nameOfIssuer>ULTA BEAUTY INC</nameOfIssuer><cusip>90384S303</cusip><value>300</value><shrsOrPrnAmt><sshPrnamt>3</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable></x>`;
+  const hits = [];
+  const extFetch = async (url) => { hits.push(url);
+    if (url.includes("company_tickers.json")) return J({ 0: { cik_str: 111, ticker: "AAPL", title: "Apple Inc." }, 1: { cik_str: 112, ticker: "UNH", title: "UnitedHealth Group Incorporated" } });
+    if (url.includes("company_tickers_mf.json")) return J({ fields: ["cik"], data: [] });
+    if (url.includes("submissions/CIK0001067983")) return J({ name: "BERKSHIRE HATHAWAY INC", filings: { recent: {
+      form: ["13F-HR", "13F-HR", "8-K"], accessionNumber: ["0001-26-000002", "0001-26-000001", "0001-26-000003"],
+      filingDate: ["2026-08-14", "2026-05-15", "2026-08-01"], reportDate: ["2026-06-30", "2026-03-31", ""] } } });
+    if (url.includes("/000126000002/index.json")) return J({ directory: { item: [
+      { name: "primary_doc.xml", size: 900 }, { name: "form13fInfoTable.xml", size: 5000 }, { name: "cover.htm", size: 100 }] } });
+    if (url.includes("/000126000002/form13fInfoTable.xml")) return X(infoQ2);
+    if (url.includes("/000126000001/index.json")) return J({ directory: { item: [
+      { name: "primary_doc.xml", size: 900 }, { name: "infotable.xml", size: 4000 }] } });
+    if (url.includes("/000126000001/infotable.xml")) return X(infoQ1);
+    return { ok: false, status: 404 };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();   // empty store hydrate primes announcements (nothing to blast)
+  const add = p.whaleAdd(1067983, "Berkshire Hathaway Inc");
+  assert.ok(add.ok, "add by CIK: " + (add.error || ""));
+  assert.equal(add.fund.key, "BERKSHIRE", "key derives from the normalized name");
+  await p.whaleTickNow(NOW);
+  // Ingested both quarters through the real path: filing index -> largest non-primary XML -> parse.
+  const w = p.getWhale();
+  assert.equal(w.watch.length, 1);
+  const row = w.watch[0];
+  assert.equal(row.q, "Q2 2026"); assert.equal(row.total, 2000); assert.equal(row.n, 2);
+  assert.ok(Math.abs(row.dPct - (2000 / 2300 - 1) * 100) < 1e-9, "book QoQ vs the prior filed quarter");
+  assert.equal(row.unseen, 1, "primed + filed within 7d of the injected clock -> announced AND badged");
+  assert.equal(w.window.cur.q, "Q2 2026");
+  const f = await p.getWhaleFund("berkshire");
+  assert.ok(f.ok, "fund card: " + (f.error || ""));
+  assert.equal(f.hasPrev, true);
+  assert.equal(f.lanes.opened.length, 1, "UNH opened");
+  assert.equal(f.lanes.opened[0].tk, "UNH", "conservative name match tagged the ticker");
+  assert.equal(f.lanes.exited.length, 1, "ULTA exited");
+  const aapl = f.positions.find((x) => x.cusip === "037833100");
+  assert.equal(aapl.tk, "AAPL"); assert.equal(aapl.d.cls, "trim"); assert.equal(aapl.d.dSh, -5);
+  // Season: sole watched fund filed -> builds for Q2.
+  p.whaleSeasonNow(NOW);
+  const s = await p.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s.ok, "season built: " + (s.error || ""));
+  assert.equal(s.filedN, 1); assert.equal(s.agg.nFunds, 1);
+  assert.ok(s.agg.opens.some((r) => r.tk === "UNH"), "season opens lane carries the matched ticker");
+  // Unseen clears via seen; persistence saw every write.
+  p.whaleSeen("BERKSHIRE");
+  assert.equal(p.getWhale().watch[0].unseen, 0, "opening the fund clears the badge");
+  assert.ok(saved && saved.watch.length === 1 && saved.filings["1067983"], "state persisted through the store");
+  // Re-poll inside the cadence gate: zero new EDGAR requests.
+  const n0 = hits.length;
+  await p.whaleTickNow(NOW + 60 * 1000);
+  assert.equal(hits.length, n0, "per-fund cadence gate holds — a tick a minute later fetches nothing");
+  // rm/mute round-trip.
+  assert.ok(p.whaleMute("BERKSHIRE", true).ok);
+  assert.equal(p.getWhale().watch[0].notify, 0);
+  assert.ok(p.whaleRm("BERKSHIRE").ok);
+  assert.equal(p.getWhale().watch.length, 0, "removed — history kept in filings, row gone");
+});
+
+test("whale wiring manifest: feature keys, routes, tab markup, terminal + planner grammar, store pair, exports", () => {
+  const fs = require("fs"), path = require("path");
+  const C = require("../src/compute");
+  const funds = C.FEATURES.find((f) => f.key === "funds");
+  assert.ok(funds && funds.kind === "tab" && funds.def === "admin", "FUNDS ships admin, flippable public");
+  assert.deepEqual(funds.routes, ["/api/whale"], "one exact read path carries the whole tab");
+  const ww = C.FEATURES.find((f) => f.key === "whale.write");
+  assert.ok(ww && ww.def === "admin" && ww.routes[0] === "POST /api/whale/watch", "writes gate separately from the tab");
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(sv.includes('fastify.get("/api/whale"') && sv.includes('fastify.post("/api/whale/watch"'), "routes registered");
+  assert.ok(/op === "seen"[\s\S]{0,120}?if \(!isAdmin\(req\)\) return/.test(sv), "seen is any-viewer; every other write rechecks the admin cookie in-handler");
+  const ih = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  assert.ok(ih.includes('data-view="funds"') && ih.includes('id="view-funds"'), "tab button + section in the shell");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("'funds'") && /setHidden\('view-funds', v!=='funds'\)/.test(app), "showView wired");
+  assert.ok(/if\(v==='funds'\)\{ if\(el\('view-funds'\)\) openFunds\(\)/.test(app), "open hook");
+  assert.ok(/h==='whale'\|\|h==='13f'\) return termWhale/.test(app), "termExec routes whale");
+  assert.ok(app.includes("'fund','etf','whale'"), "TERM_VERBS carries whale (completion engine)");
+  assert.ok(app.includes("data-whale=") && app.includes("whlOpenFund(k)"), "news filings lane deep-links a whale row to the FUNDS tab, never a ticker drawer");
+  assert.ok(app.includes("no prior filing ingested") && app.includes("share count not claimed"), "honest-null framing rendered, not implied");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(pol.includes("whale <FUND>") && pol.includes("whale season") && pol.includes("context.whales"), "planner grammar advertises the family and the watchlist rides the context");
+  assert.ok(/WHALE_IN_WINDOW_MS = 30 \* 60 \* 1000/.test(pol) && /WHALE_OFF_WINDOW_MS = 24 \* HOUR/.test(pol), "window-aware poll cadence pinned");
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(st.includes("saveWhale(data)") && st.includes("loadWhale()"), "store pair present");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".whl-cell.new") && css.includes("#tab-funds.whl-dot::after"), "crowding cells + tab dot styled");
 });
