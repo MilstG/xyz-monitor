@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.16-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.16-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17374,4 +17374,54 @@ test("whale wiring manifest: feature keys, routes, tab markup, terminal + planne
   assert.ok(st.includes("saveWhale(data)") && st.includes("loadWhale()"), "store pair present");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".whl-cell.new") && css.includes("#tab-funds.whl-dot::after"), "crowding cells + tab dot styled");
+});
+
+test("whale search -02: layered lanes — prefix resolves via autocomplete, company-DB hits verify + rank first, FTS is last resort, outage degrades honestly", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => null };
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const MISS = { ok: false, status: 404 };
+  // Switchable per-lane behavior so one poller instance exercises every degradation path.
+  const lanes = { atom: null, keys: null, fts: null };
+  const hits = [];
+  const extFetch = async (url) => { hits.push(url);
+    if (url.includes("browse-edgar")) return lanes.atom || MISS;
+    if (url.includes("keysTyped=")) return lanes.keys || MISS;
+    if (url.includes("search-index?q=")) return lanes.fts || MISS;
+    return MISS;
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  const atomList = X(`<feed><entry><company-info><cik>0001536411</cik><conformed-name>DUQUESNE FAMILY OFFICE LLC</conformed-name></company-info></entry>` +
+    `<entry><company-info><cik>0009999901</cik><conformed-name>DUQUESNE CAPITAL MGMT LLC</conformed-name></company-info></entry></feed>`);
+  const keysHits = J({ hits: { hits: [
+    { _id: "0001536411", _source: { entity: "DUQUESNE FAMILY OFFICE LLC (CIK 0001536411)" } },   // dup of a verified hit — must dedupe
+    { _id: "0007777777", _source: { entity: "DUQUESNE LIGHT HOLDINGS INC" } } ] } });            // unverified extra — ranks after
+  // 1) Both prefix lanes up: "Duq" resolves; verified company-DB hits rank ahead of autocomplete;
+  //    the shared CIK appears exactly once; FTS is never even called.
+  lanes.atom = atomList; lanes.keys = keysHits; lanes.fts = J({ hits: { hits: [] } });
+  let r = await p.whaleSearch("Duq");
+  assert.ok(r.ok, "prefix search resolves: " + (r.error || ""));
+  assert.deepEqual(r.candidates.map((c) => c.cik), [1536411, 9999901, 7777777], "verified-first order, deduped on CIK");
+  assert.equal(r.candidates[0].name, "DUQUESNE FAMILY OFFICE LLC", "parenthetical CIK stripped, entities decoded");
+  assert.ok(!hits.some((u) => u.includes("search-index?q=")), "FTS untouched while the prefix lanes deliver");
+  // 2) Company DB down: autocomplete alone still answers — a prefix miss in one lane is not a miss.
+  lanes.atom = MISS; hits.length = 0;
+  r = await p.whaleSearch("Duquesne Family Office");
+  assert.ok(r.ok && r.candidates.some((c) => c.cik === 1536411), "autocomplete lane carries the load alone");
+  // 3) Both prefix lanes down: the old FTS phrase lane is the net, not the door.
+  lanes.keys = MISS; lanes.fts = J({ hits: { hits: [{ _source: { cik: [1536411], display_names: ["DUQUESNE FAMILY OFFICE LLC (CIK 0001536411)"] } }] } });
+  r = await p.whaleSearch("DUQUESNE FAMILY OFFICE LLC");
+  assert.ok(r.ok && r.candidates[0].cik === 1536411, "FTS fallback still lands the fund");
+  // 4) Everything down: honest error that names the raw-CIK escape hatch.
+  lanes.fts = MISS;
+  r = await p.whaleSearch("Duq");
+  assert.ok(!r.ok && /raw CIK/.test(r.error), "total outage degrades to 'paste the CIK', never a silent empty list");
+  // 5) The single-company atom shape (exact name match returns a filing FEED, not a list) parses too.
+  lanes.atom = X(`<feed><title>DUQUESNE FAMILY OFFICE LLC filings</title><company-info><cik>1536411</cik><conformed-name>DUQUESNE FAMILY OFFICE &amp; CO LLC</conformed-name><addresses/></company-info><entry><title>13F-HR</title></entry></feed>`);
+  r = await p.whaleSearch("Duquesne Family Office LLC");
+  assert.ok(r.ok && r.candidates[0].cik === 1536411, "single-match feed shape parses");
+  assert.equal(r.candidates[0].name, "DUQUESNE FAMILY OFFICE & CO LLC", "XML entities decoded in the name");
 });
