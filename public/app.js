@@ -3567,7 +3567,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -5541,6 +5541,7 @@ function showView(v){
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
   setHidden('view-markets', v!=='markets');
   setHidden('view-focus', v!=='focus');
+  setHidden('view-funds', v!=='funds');
   setHidden('view-trend', v!=='trend');
   setHidden('view-sectors', v!=='sectors');
   setHidden('view-corr', v!=='corr');
@@ -5553,6 +5554,7 @@ function showView(v){
   setHidden('view-report', v!=='report');
   setHidden('view-admin', v!=='admin');
   if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
+  if(v==='funds'){ if(el('view-funds')) openFunds(); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
   if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
   if(v==='sessions') renderSessions();
@@ -6932,10 +6934,15 @@ function fmtTrig(t0){ if(t0==null) return ''; const d=new Date(t0), n=new Date()
 function newsRow(a,now,inDrawer){
   const age=fmtAge(now-a.pub), old=now-a.pub>86400000;
   if(a.fl){
+    // Whale rows (a.wh): a watched FUND's 13F landing on the tape. The badge deep-links to the
+    // fund's book on the FUNDS tab — a fund key is not a ticker and must never hit openDetail.
+    const badge=a.wh
+      ?`<span class="nbadge whl" data-whale="${esc(a.tk)}" data-tip="${esc('a watched 13F filer \u2014 click for the fund\u2019s book on the FUNDS tab')}">${esc(a.tk)}</span>`
+      :`<span class="nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}" data-coin="${esc(a.coin||'')}" data-tip="${esc('click for the '+a.tk+' drawer')}">${esc(a.tk)}</span>`;
     return `<div class="nrow${old?' old':''}">`
       +`<span class="nage" data-tip="${esc(new Date(a.pub).toLocaleString())}">${age}</span>`
       +`<span class="nform${a.mat?' mat':''}" data-form="${esc(a.form)}" data-tip="${esc((a.mat?'material form':'routine form')+' \u00b7 click to filter to '+a.form+' filings')}">${esc(a.form)}</span>`
-      +`<span class="nbadge${a.sig?' sig':(a.ed!=null?' earn':'')}" data-coin="${esc(a.coin||'')}" data-tip="${esc('click for the '+a.tk+' drawer')}">${esc(a.tk)}</span>`
+      +badge
       +`<span class="nhl">${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-tip="${esc(a.h)}">${esc(a.h)}</a>`:esc(a.h)}</span>`
       +`<span class="nsrc">EDGAR \u2197</span>`
       +`</div>`;
@@ -7051,6 +7058,7 @@ function bindNews(box){
   box.querySelectorAll('[data-nflform]').forEach(b=>b.onclick=()=>{ newsFlForm=''; renderNews(); });
   box.querySelectorAll('.nform[data-form]').forEach(b=>b.onclick=()=>{ newsFlForm=b.dataset.form; renderNews(); });
   box.querySelectorAll('.nbadge[data-coin]').forEach(b=>b.onclick=()=>{ const c=b.dataset.coin; if(c) openDetail(c); });
+  box.querySelectorAll('.nbadge[data-whale]').forEach(b=>b.onclick=()=>{ const k=b.dataset.whale; showView('funds'); if(k) whlOpenFund(k); });
 }
 function fillDrawerNews(){
   const box=el('dnews'); if(!box||!state.detail) return;
@@ -8383,7 +8391,7 @@ function closeHelp(){ const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=
 // live universe can't be jumped to. Results are: matching tabs first, then matching tickers. Enter
 // opens the ticker's drawer; Shift+Enter opens its AI report; a tab row switches tabs.
 const CMDK_TABS=[
-  {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'trend',label:'Trend'},{v:'sectors',label:'Sectors'},
+  {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'funds',label:'Funds'},{v:'trend',label:'Trend'},{v:'sectors',label:'Sectors'},
   {v:'corr',label:'Correlation'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
   {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'admin',label:'Admin'}];
@@ -8742,6 +8750,8 @@ function termWin(s){ for(const [re,k] of TWINDOWS) if(re.test(s)) return k; retu
 function nlResolve(text){ const rawWords=text.split(/\s+/); const s=' '+text.toLowerCase().replace(/[?!.,]/g,' ').replace(/\s+/g,' ').trim()+' ';
   const nt=nlTickers(rawWords); const found=nt.rs; const tk=found.length?found[0].ticker:null;
   const win=termWin(s); const n=(s.match(/\b(\d{1,3})\b/)||[])[1];
+  if(/\b13 ?fs?\b/.test(s)&&/\b(season|summary|quarter|consensus)\b/.test(s)) return 'whale season';
+  if((/\b13 ?fs?\b/.test(s)||/\bwhales?\b/.test(s))&&!tk) return 'whale';   // "show me the 13fs" — the watchlist; a named fund is the planner's job (it sees context.whales)
   if(/\b(help|how do i|what can|commands)\b/.test(s)) return 'help';
   if(/\b(clear|reset|wipe)\b/.test(s)) return 'clear';
   // Causal / explanatory intent -> the analyst, ALWAYS. "why is DRAM dumping so much today"
@@ -8837,6 +8847,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='comp') return p.slice(1).filter(x=>termFind(x)||isBasketName(x)).length>=2;
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
   if(head==='fund'||head==='bs'||head==='balance'||head==='etf'||head==='holdings') return !!p[1];   // symbols may live outside the universe (ETFs)
+  if(head==='whale'||head==='13f') return true;   // bare = watchlist; args validate server-side against the live list
   if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
   if(head==='ratio') return p.length>=2;
   return false; }
@@ -8852,6 +8863,7 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='news'){ const rr=termFind(p[1]); const nn=p.slice(1).map(x=>/^\d+$/.test(x)?+x:null).find(x=>x!=null); return termNewsCmd(rr?rr.ticker.toUpperCase():null,nn); }
   if(h==='reports') return termReports();
   if(h==='fund'||h==='bs'||h==='balance') return termFund(p[1]);
+  if(h==='whale'||h==='13f') return termWhale(p.slice(1));
   if(h==='etf'||h==='holdings') return termEtf(p[1]);
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
   if(h==='comp'){ const cr=state.scope==='crypto';
@@ -9046,6 +9058,7 @@ function termHelp(){ termOut(`<span class="tp-hd">ask the board</span> <span cla
 <span class="amber">${tpad('report <ticker>',20)}</span><span class="sec">open the AI analyst report</span>
 <span class="amber">${tpad('fund <ticker>',20)}</span><span class="sec">latest SEC-filed balance sheet + income facts \u00b7 XBRL, on demand</span>
 <span class="amber">${tpad('etf <symbol>',20)}</span><span class="sec">ETF/fund composition from the latest N-PORT filing (30\u201360d lag)</span>
+<span class="amber">${tpad('whale [fund]',20)}</span><span class="sec">tracked 13F funds \u00b7 whale KEY = the book \u00b7 whale season = quarter summary \u00b7 add/rm/mute (admin)</span>
 <span class="amber">${tpad('admin reset-reports',20)}</span><span class="sec">+ password — reset the daily report budget (echo is redacted)</span>
 <span class="amber">${tpad('report sector',20)}</span><span class="sec">+ name — AI group report on a GICS sector (e.g. report sector Energy)</span>
 <span class="amber">${tpad('report basket',20)}</span><span class="sec">+ tickers — AI group report on a custom basket (2-12 live equities)</span>
@@ -9059,7 +9072,7 @@ function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) 
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
 // ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
-const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','help','clear','stocks','crypto'];
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','whale','help','clear','stocks','crypto'];
 const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
@@ -10463,4 +10476,281 @@ function focChartDraw(){
       +vtxt+(dpc!=null?` · Δ${h1&&h1.openPx!=null?'open':'stamp'} <span class="${focCls(dpc)}">${focSgn(dpc)}%</span>`:'');
   } else if(el('focch-read')) el('focch-read').textContent='hover for OHLC · chart VWAP · Δ from open';
   FOCCH._geom={W,padL,padR,n};
+}
+
+// ===== FUNDS tab — 13F whale watchlist (build 2026.08.16-01) ====================================
+// Everything rendered here is the server's payload RESTATED: books, deltas, season lanes and the
+// filing window all arrive computed from /api/whale and the client re-derives nothing (the
+// concentration bar's widths are the payload's own pct values, not a client re-sum). Honesty
+// framing is part of the layout, not a footnote option: staleness is stamped in the header, share
+// columns dash when the filing mixed principal rows, a season lane row whose flow is one whale's
+// leg says so on hover. The `whale` terminal family reads the SAME endpoints — one code path.
+const WHL={ data:null, season:null, timer:0, edit:false, cand:null, addPend:false };
+function whlMoney(v){ return tmoney(v); }
+function whlSh(v){ if(v==null||!isFinite(v)) return '\u2014'; return tcount(v); }
+function whlSgnSh(v){ if(v==null||!isFinite(v)) return null; return (v>0?'+':'\u2212')+tcount(Math.abs(v)); }
+function whlAge(ts){ if(!ts) return '\u2014'; const d=Math.round((Date.now()-ts)/86400000); return d<=0?'today':d+'d ago'; }
+function whlDateStr(ts){ return ts?new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'\u2014'; }
+function whlFundName(key){ const w=WHL.data&&WHL.data.watch.find(x=>x.key===key); return w?w.name:key; }
+async function whlPost(body){
+  const r=await fetch('/api/whale/watch',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify(body||{})});
+  if(r.status===403) return { ok:false, error:'admin only' };
+  try{ return await r.json(); }catch(_){ return { ok:false, error:'HTTP '+r.status }; }
+}
+function openFunds(){
+  whlFetch();
+  if(!WHL.timer) WHL.timer=setInterval(()=>{ const v=el('view-funds'); if(v&&!v.hidden) whlFetch(); },60000);
+}
+async function whlFetch(){
+  try{
+    const d=await fetchJSON('/api/whale'); WHL.data=d;
+    if(d.seasonQ){ try{ WHL.season=await fetchJSON('/api/whale?season='+encodeURIComponent(d.seasonQ)); }catch(_){ WHL.season=null; } }
+    else WHL.season=null;
+    renderFunds(); whlTabDot();
+  }catch(e){ const w=el('fundswrap'); if(w&&!WHL.data) w.innerHTML=`<div class="msg err"><span class="big">Couldn't load the fund watchlist</span>${esc((e&&e.message)||'network error')}. Will retry on the next interval.</div>`; }
+}
+// Tab badge: the amber dot on the FUNDS tab mirrors any unseen filing — cleared by opening the
+// fund, exactly like the row badge, so the tab can never nag about something already read.
+function whlTabDot(){ const t=el('tab-funds'); if(t) t.classList.toggle('whl-dot', !!(WHL.data&&WHL.data.unseenAny)); }
+function whlWindowLine(w){
+  if(!w||!w.cur) return '';
+  const dl=new Date(w.cur.deadline).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+  const op=new Date(w.cur.opens).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+  const nx=w.next?` \u00b7 next: ${esc(w.next.q)} due ${new Date(w.next.deadline).toLocaleDateString('en-US',{month:'short',day:'numeric'})}`:'';
+  const lbl=w.state==='open'?`window OPEN \u00b7 due ${dl}`:w.state==='upcoming'?`window opens ${op} \u00b7 due ${dl}`:`window closed ${dl}`;
+  return `<span class="sec" data-tip="13F-HR is due 45 days after quarter end (weekend due dates roll to the next business day; holiday rolls are not modeled — disclosed simplification) · badges arm when the window opens · the season summary builds when every watched fund has filed, or at deadline+1 with whoever made it">${esc(w.cur.q)} \u00b7 ${lbl}${nx}</span>`;
+}
+function renderFunds(){
+  const box=el('fundswrap'); if(!box||!WHL.data) return;
+  const d=WHL.data;
+  const rows=d.watch.map(w=>{
+    const bell=`<button type="button" class="whl-bell${w.notify?'':' off'}" data-whlbell="${esc(w.key)}" data-tip="${w.notify?'notify: ON — a new 13F fires a filing alert (bell log + Telegram for subscribers of the filing class); click to mute this fund':'notify: OFF — row still updates and badges, it just never alerts; click to unmute'}">${w.notify?'\ud83d\udd14':'\ud83d\udd15'}</button>`;
+    const badge=w.unseen?`<span class="whl-badge" data-tip="new filing — unseen · clears when you open the fund">NEW 13F</span>`:(w.amended?`<span class="whl-badge hra" data-tip="the latest ingested filing is a 13F-HR/A amendment — it supersedes the original for the same quarter; the card always reads the newest accession">HR/A</span>`:'');
+    const del=WHL.edit?`<button type="button" class="whl-del" data-whlrm="${esc(w.key)}" data-tip="remove from watchlist — cached history kept, row hidden; re-adding restores it">\u00d7</button>`:'';
+    return `<tr class="whl-row${w.unseen?' unseen':''}" data-whlopen="${esc(w.key)}">`
+      +`<td class="l">${bell}</td>`
+      +`<td class="l"><span class="whl-name">${esc(w.name)}</span>${badge}<div class="whl-sub">whale ${esc(w.key)} \u00b7 CIK ${esc(String(w.cik))}</div></td>`
+      +`<td>${w.q?esc(w.q):'<span class="na" data-tip="no 13F ingested yet — first poll lands within the half hour">\u2014</span>'}${w.filedAt?` <span class="sec">\u00b7 filed ${esc(whlDateStr(w.filedAt))}</span>`:''}</td>`
+      +`<td class="r">${w.total!=null?whlMoney(w.total):'\u2014'}</td>`
+      +`<td class="r ${w.dPct>0?'pos':w.dPct<0?'neg':''}" data-tip="13F book value vs the prior filed quarter — value change, NOT performance (flows and marks are indistinguishable in a 13F)">${w.dPct!=null?(w.dPct>0?'+':'')+w.dPct.toFixed(1)+'%':'\u2014'}</td>`
+      +`<td class="r">${w.n!=null?w.n:'\u2014'}</td>`
+      +`<td class="l">${w.top?`${esc(w.top.name.slice(0,22))} <span class="sec">${w.top.pct!=null?w.top.pct.toFixed(1)+'%':''}</span>`:'\u2014'}</td>`
+      +`<td>${del}</td></tr>`;
+  }).join('');
+  const addRow=WHL.edit?`<div class="whl-add"><input id="whl-addq" placeholder="add fund — name or CIK, resolved via EDGAR search" maxlength="60">`
+    +`<button type="button" id="whl-addgo">search</button><div id="whl-cand"></div></div>`:'';
+  box.innerHTML=`<div class="whl-head"><span class="whl-hd" data-tip="Quarter-end institutional books from SEC EDGAR 13F-HR filings — filed up to 45 days late, long US-listed equity + listed options only. Positioning HISTORY, never the current book; shorts, futures, non-US and cash are invisible here.">TRACKED FUNDS</span>`
+    +`<span class="sec">${d.watch.length} filer${d.watch.length===1?'':'s'} \u00b7 13F-HR watched via EDGAR</span>`
+    +`<span class="whl-sp"></span>${whlWindowLine(d.window)}`
+    +(IS_ADMIN?`<button type="button" id="whl-edit" class="whl-btn${WHL.edit?' on':''}">${WHL.edit?'DONE':'EDIT'}</button>`:'')+`</div>`
+    +(d.watch.length?`<div class="tblwrap"><table class="whl-tbl"><thead><tr><th></th><th class="l">FUND</th><th class="l">LAST 13F</th><th class="r">BOOK</th><th class="r" data-tip="book value vs prior quarter — value change, not performance">\u0394 QoQ</th><th class="r">POS</th><th class="l">TOP HOLDING</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      :`<div class="msg">No funds watched yet${IS_ADMIN?' \u2014 hit EDIT and add one by name or CIK':' \u2014 the operator curates this list'}.</div>`)
+    +addRow
+    +`<div id="whl-season"></div>`
+    +`<div class="whl-foot">source: SEC EDGAR 13F-HR \u00b7 values verbatim from filings (whole USD) \u00b7 tickers appear only where the issuer name matched the SEC company map exactly after normalization \u2014 unmatched rows keep the filed name, nothing is guessed \u00b7 list + books persist on the data volume</div>`;
+  whlBindList(box);
+  renderWhlSeason();
+}
+function whlBindList(box){
+  const eb=el('whl-edit'); if(eb) eb.onclick=()=>{ WHL.edit=!WHL.edit; WHL.cand=null; renderFunds(); };
+  box.querySelectorAll('[data-whlbell]').forEach(b=>b.onclick=async(ev)=>{ ev.stopPropagation();
+    const w=WHL.data.watch.find(x=>x.key===b.dataset.whlbell); if(!w) return;
+    const r=await whlPost({op:'mute',key:w.key,on:!!w.notify});   // on=true means MUTE when currently notifying
+    if(r&&r.ok!==false) whlFetch(); });
+  box.querySelectorAll('[data-whlrm]').forEach(b=>b.onclick=async(ev)=>{ ev.stopPropagation();
+    const k=b.dataset.whlrm;
+    if(!confirm('Remove '+k+' from the watchlist? History is kept; the row is hidden.')) return;
+    const r=await whlPost({op:'rm',key:k}); if(r&&r.ok) whlFetch(); else alert((r&&r.error)||'remove failed'); });
+  box.querySelectorAll('[data-whlopen]').forEach(tr=>tr.onclick=(ev)=>{
+    if(ev.target.closest('[data-whlbell],[data-whlrm]')) return;
+    whlOpenFund(tr.dataset.whlopen); });
+  const go=el('whl-addgo'), q=el('whl-addq');
+  const doSearch=async()=>{
+    const v=(q&&q.value||'').trim(); if(!v) return;
+    el('whl-cand').innerHTML='<span class="sec">searching EDGAR\u2026</span>';
+    const r=await whlPost({op:'search',q:v});
+    if(!r||!r.ok){ el('whl-cand').innerHTML=`<span class="err">${esc((r&&r.error)||'search failed')}</span>`; return; }
+    el('whl-cand').innerHTML=r.candidates.map((c,i)=>`<button type="button" class="whl-cand" data-whladd="${c.cik}" data-whlname="${esc(c.name)}">${esc(c.name)} <span class="sec">CIK ${c.cik}</span></button>`).join('');
+    el('whl-cand').querySelectorAll('[data-whladd]').forEach(b=>b.onclick=async()=>{
+      const r2=await whlPost({op:'add',cik:+b.dataset.whladd,name:b.dataset.whlname});
+      if(r2&&r2.ok){ if(q) q.value=''; el('whl-cand').innerHTML=`<span class="pos">added ${esc(r2.fund.key)} \u2014 watching for 13F-HR</span>`; whlFetch(); }
+      else el('whl-cand').innerHTML=`<span class="err">${esc((r2&&r2.error)||'add failed')}</span>`; });
+  };
+  if(go) go.onclick=doSearch;
+  if(q) q.onkeydown=(e)=>{ if(e.key==='Enter') doSearch(); };
+}
+// ---- season panel -----------------------------------------------------------------------------
+function whlLegLine(l){
+  const who=esc(l.key);
+  if(l.opened) return who+' opened '+whlMoney(l.dVal);
+  if(l.exited) return who+' exited (was '+whlMoney(-l.dVal)+')';
+  return who+' '+(l.dSh!=null?((l.dSh>0?'+':'\u2212')+tcount(Math.abs(l.dSh))+' sh'):((l.dVal>0?'+':'\u2212')+whlMoney(Math.abs(l.dVal)).slice(1)));
+}
+function whlLaneRows(rows,kind){
+  if(!rows||!rows.length) return '<div class="sec">nothing this quarter</div>';
+  const max=Math.max(...rows.map(r=>Math.abs(r.net!=null?r.net:r.tot)||0),1);
+  return rows.slice(0,6).map(r=>{
+    const v=r.net!=null?r.net:(kind==='exits'?-r.tot:r.tot);
+    const nm=(r.tk?r.tk:esc(r.name.slice(0,16)))+(r.put?' <span class="sec">'+esc(r.put)+'s</span>':'');
+    const legs=(r.legs||r.funds||[]).map(l=>l.dVal!=null||l.opened||l.exited?whlLegLine(l):esc(l.key)+' '+whlMoney(l.val!=null?l.val:-(l.prevVal||0))).join(' \u00b7 ');
+    const dom=r.domPct!=null&&r.domPct>=75&&(r.legs||[]).length>1?' \u00b7 one fund is '+r.domPct.toFixed(0)+'% of this flow \u2014 a single whale can BE the consensus':'';
+    const fn=(r.n!=null?r.n:(r.legs?new Set(r.legs.map(l=>l.key)).size:0));
+    return `<div class="whl-srow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 ${esc(legs)}${esc(dom)}">`
+      +`<span class="whl-snm">${nm}</span><span class="whl-sfn">${fn}/${WHL.season.agg.nFunds}</span>`
+      +`<span class="whl-sbar"><span class="whl-sfill ${kind}" style="width:${Math.round(Math.abs(v)/max*100)}%"></span></span>`
+      +`<span class="whl-sfl ${v>0?(kind==='opens'?'new':'pos'):(kind==='exits'?'exitc':'neg')}">${(v>0?'+':'\u2212')}${whlMoney(Math.abs(v)).slice(1)}</span></div>`;
+  }).join('');
+}
+function renderWhlSeason(){
+  const host=el('whl-season'); if(!host) return;
+  const s=WHL.season;
+  if(!s||!s.ok){ host.innerHTML=WHL.data&&WHL.data.watch.length?`<div class="whl-shd"><span class="whl-hd">13F SEASON</span><span class="sec">${esc((s&&s.error)||'no season built yet \u2014 it lands when the watched funds file')}</span></div>`:''; return; }
+  const a=s.agg;
+  const cells=(r)=>WHL.data.watch.map(w=>{
+    const st=r.state&&r.state[w.key];
+    const lbl=st==='new'?'NEW this quarter':st==='add'?'added':st==='trim'?'trimmed':st==='exit'?'exited':st==='hold'?'holds, unchanged':'no position';
+    return `<span class="whl-cell ${st||'none'}" data-tip="${esc(w.key)} \u2014 ${lbl}"></span>`;
+  }).join('');
+  const crowd=a.crowd.length?a.crowd.slice(0,8).map(r=>
+    `<div class="whl-crow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 held by ${r.held} of ${a.nFunds} \u00b7 ${r.adding} adding \u00b7 ${r.cutting} cutting \u00b7 grid order = watchlist order">`
+    +`<span class="whl-snm">${r.tk?r.tk:esc(r.name.slice(0,16))}${r.put?' <span class="sec">'+esc(r.put)+'s</span>':''}</span>`
+    +`<span class="whl-cells">${cells(r)}</span><span class="sec">${r.held}/${a.nFunds}${r.adding?' \u00b7 '+r.adding+' adding':''}${r.cutting?' \u00b7 '+r.cutting+' cutting':''}</span></div>`).join('')
+    :'<div class="sec">no name is held by 2+ watched funds</div>';
+  host.innerHTML=`<div class="whl-shd"><span class="whl-hd">${esc(s.q)} \u00b7 13F SEASON</span>`
+    +`<span class="sec">${s.filedN}/${s.watchN} watched funds filed${s.missing&&s.missing.length?' \u00b7 missing: '+esc(s.missing.join(', ')):''}${s.amended?' \u00b7 rebuilt after amendment':''}${s.closedAt?' \u00b7 closed '+esc(whlDateStr(s.closedAt)):''}</span>`
+    +(WHL.data.seasonList&&WHL.data.seasonList.length>1?`<span class="whl-sp"></span><span class="whl-qnav">${WHL.data.seasonList.map(q=>`<button type="button" data-whlq="${esc(q)}" class="${WHL.season.q===q?'on':''}">${esc(q)}</button>`).join('')}</span>`:'')+`</div>`
+    +`<div class="whl-grid">`
+    +`<div class="whl-lane"><div class="whl-lhd pos">MOST BOUGHT \u00b7 net $ across watchlist</div>${whlLaneRows(a.bought,'buy')}</div>`
+    +`<div class="whl-lane"><div class="whl-lhd neg">MOST SOLD \u00b7 net $ across watchlist</div>${whlLaneRows(a.sold,'sell')}</div>`
+    +`<div class="whl-lane"><div class="whl-lhd new">CONSENSUS OPENS \u00b7 new positions</div>${whlLaneRows(a.opens,'opens')}</div>`
+    +`<div class="whl-lane"><div class="whl-lhd exitc">EXITS \u00b7 positions closed</div>${whlLaneRows(a.exits,'exits')}</div>`
+    +`</div>`
+    +`<div class="whl-crowd"><div class="whl-lhd amber">CROWDING \u00b7 who holds what</div>${crowd}`
+    +`<div class="whl-legend"><span><span class="whl-cell none"></span>no position</span><span><span class="whl-cell hold"></span>holds</span><span><span class="whl-cell add"></span>added</span><span><span class="whl-cell trim"></span>trimmed</span><span><span class="whl-cell new"></span>new</span><span><span class="whl-cell exit"></span>exited</span></div></div>`
+    +`<div class="whl-foot">consensus across YOUR ${a.nFunds} watched fund(s) only \u2014 not the market \u00b7 net $ mixes share deltas and value deltas where shares aren't comparable (options/PRN rows); hover shows the per-fund legs verbatim \u00b7 a lane row dominated by one fund's leg says so on hover</div>`;
+  host.querySelectorAll('[data-whlq]').forEach(b=>b.onclick=async()=>{
+    try{ WHL.season=await fetchJSON('/api/whale?season='+encodeURIComponent(b.dataset.whlq)); renderWhlSeason(); }catch(_){} });
+}
+// ---- fund detail modal ------------------------------------------------------------------------
+function whlModalEnsure(){
+  if(el('whlmodal')) return;
+  const d=document.createElement('div'); d.id='whlmodal'; d.hidden=true;
+  d.innerHTML=`<div id="whlwin"><button type="button" class="whl-x" id="whl-x" data-tip="close (Esc)">\u2715</button><div id="whlbody"></div></div>`;
+  document.body.appendChild(d);
+  d.addEventListener('click',(e)=>{ if(e.target===d) whlModalClose(); });
+  el('whl-x').onclick=whlModalClose;
+  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'&&!d.hidden) whlModalClose(); });
+}
+function whlModalClose(){ const d=el('whlmodal'); if(d) d.hidden=true; }
+async function whlOpenFund(key,full){
+  whlModalEnsure();
+  const d=el('whlmodal'); d.hidden=false;
+  el('whlbody').innerHTML='<div class="msg">Loading the book\u2026</div>';
+  whlPost({op:'seen',key}).then(()=>whlFetch());   // clears the badge for everyone — seen is group state, like the rest of the app
+  let f;
+  try{ f=await fetchJSON('/api/whale?fund='+encodeURIComponent(key)+(full?'&full=1':'')); }
+  catch(e){ el('whlbody').innerHTML=`<div class="msg err">${esc(e.message||'fetch failed')}</div>`; return; }
+  if(!f.ok){ el('whlbody').innerHTML=`<div class="msg err">${esc(f.error||'unavailable')}</div>`; return; }
+  renderWhlFund(f,!!full);
+}
+function whlDeltaBox(lbl,cls,rows,flow){
+  const tip=rows.length?rows.slice(0,6).map(r=>(r.tk?r.tk:r.name.slice(0,18))+' '+(r.dSh!=null?((r.dSh>0?'+':'\u2212')+tcount(Math.abs(r.dSh))+' sh'):(r.dVal!=null?((r.dVal>0?'+':'\u2212')+whlMoney(Math.abs(r.dVal)).slice(1)):''))).join(' \u00b7 '):'none this quarter';
+  return `<div class="whl-dbox" data-tip="${esc(lbl+' \u00b7 '+tip)}"><div class="whl-dlb">${lbl}</div><div class="whl-dn ${cls}">${rows.length}</div><div class="whl-dfl">${flow!==0?(flow>0?'+':'\u2212')+whlMoney(Math.abs(flow)).slice(1):'\u2014'}</div></div>`;
+}
+function renderWhlFund(f,full){
+  const dcell=(p)=>{
+    if(!p.d||p.d.cls==='na') return `<span class="na" data-tip="no prior filing ingested — no delta is claimed, not 'all new'">\u2014</span>`;
+    if(p.d.cls==='new') return `<span class="new">NEW</span>`;
+    if(p.d.cls==='flat') return `<span class="sec">\u2014</span>`;
+    if(p.d.dSh!=null) return `<span class="${p.d.dSh>0?'pos':'neg'}">${whlSgnSh(p.d.dSh)}</span>`;
+    return `<span class="${p.d.dVal>0?'pos':'neg'}" data-tip="value delta only — share counts aren't comparable across the two filings (options or principal-amount rows)">${(p.d.dVal>0?'+':'\u2212')}${whlMoney(Math.abs(p.d.dVal)).slice(1)}</span>`;
+  };
+  const rows=f.positions.map((p,i)=>`<tr class="whl-prow" data-tip="${esc(p.name+(p.put?' ('+p.put+'s)':'')+' \u00b7 cusip '+p.cusip+(p.cls?' \u00b7 '+p.cls:'')+' \u00b7 value $'+Math.round(p.value).toLocaleString()+(p.shares!=null?' \u00b7 '+Math.round(p.shares).toLocaleString()+' sh':' \u00b7 share count not claimed (PRN/mixed rows)')+(p.tk?' \u00b7 matched \u2192 '+p.tk:' \u00b7 not matched to a ticker \u2014 filed name only'))}">`
+    +`<td class="r sec">${i+1}</td>`
+    +`<td class="r">${p.pct!=null?p.pct.toFixed(1)+'%':'\u2014'}</td>`
+    +`<td class="r">${whlMoney(p.value)}</td>`
+    +`<td class="r">${whlSh(p.shares)}</td>`
+    +`<td class="r">${dcell(p)}</td>`
+    +`<td class="l">${esc(p.name)}${p.put?` <span class="whl-put">${esc(p.put.toUpperCase())}</span>`:''}${p.tk?` <span class="whl-tk" data-whltk="${esc(p.tk)}">${esc(p.tk)}</span>`:''}</td></tr>`).join('');
+  const conc=f.positions.slice(0,10).map((p,i)=>`<span class="whl-cseg whlc${i%10}" style="width:${Math.max(0.4,p.pct||0)}%" data-tip="${esc((p.tk||p.name.slice(0,20))+' \u00b7 '+(p.pct!=null?p.pct.toFixed(1):'?')+'% of the 13F book')}"></span>`).join('')
+    +(f.n>10?`<span class="whl-cseg rest" style="width:${Math.max(0,100-f.positions.slice(0,10).reduce((s,p)=>s+(p.pct||0),0)).toFixed(1)}%" data-tip="${esc('other '+(f.n-10)+' position(s)')}"></span>`:'');
+  el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
+    +`<div class="whl-meta"><span class="sec">quarter</span> <b>${esc(f.q||'?')}</b> <span class="sec">(period ${esc(f.period||'?')} \u00b7 ${esc(f.form||'13F-HR')} filed ${esc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old at pull':''}${f.amended?' \u00b7 AMENDED':''})</span></div>`
+    +`<div class="whl-meta"><span class="sec">13F book</span> <b>${whlMoney(f.total)}</b> <span class="sec">across ${f.n} position(s)${f.nRaw>f.n?' ('+f.nRaw+' filed rows aggregated on cusip)':''}${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.truncated?' \u00b7 stored book truncated at cap ('+f.truncated+' tail positions dropped, disclosed)':''}</span></div>`
+    +(f.hasPrev?`<div class="whl-dstrip">${whlDeltaBox('NEW','new',f.lanes.opened,f.flows.opened)}${whlDeltaBox('ADDED','pos',f.lanes.added,f.flows.added)}${whlDeltaBox('TRIMMED','neg',f.lanes.trimmed,f.flows.trimmed)}${whlDeltaBox('EXITED','exitc',f.lanes.exited,f.flows.exited)}</div>`
+      :`<div class="sec whl-meta">no prior quarter ingested yet \u2014 the delta strip appears once both legs exist</div>`)
+    +`<div class="tblwrap"><table class="whl-tbl"><thead><tr><th class="r">#</th><th class="r">% BOOK</th><th class="r">VALUE</th><th class="r" data-tip="shares as filed; a dash means the filing mixed principal-amount rows — no share count is claimed">SHARES</th><th class="r" data-tip="quarter-over-quarter: share delta when both filings report SH counts, value delta otherwise (disclosed per cell)">\u0394 QoQ</th><th class="l">NAME</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    +(!full&&f.n>f.shown?`<button type="button" class="whl-btn" id="whl-full">show all ${f.n} positions</button>`:'')
+    +`<div class="whl-clbl">CONCENTRATION \u00b7 % OF 13F BOOK</div><div class="whl-cbar">${conc}</div>`
+    +`<div class="whl-foot">source: SEC EDGAR 13F-HR \u00b7 quarter-end snapshot filed up to 45 days late \u2014 positioning HISTORY, not the current book \u00b7 long US-listed equity + listed options only; shorts, futures, non-US and cash are invisible \u00b7 % of book is value \u00f7 filing total \u00b7 tickers only on exact normalized name matches</div>`;
+  const fb=el('whl-full'); if(fb) fb.onclick=()=>whlOpenFund(f.key,true);
+  el('whlbody').querySelectorAll('[data-whltk]').forEach(t=>t.onclick=()=>{
+    const r=[...state.rows.values()].find(x=>x.ticker===t.dataset.whltk&&!x.delisted);
+    if(r){ whlModalClose(); openDetail(r.coin); } });
+}
+// ---- terminal: the whale family ---------------------------------------------------------------
+function termWhaleList(){
+  const think=termThinking();
+  fetchJSON('/api/whale').then(d=>{ think.remove(); WHL.data=d;
+    if(!d.watch.length) return termOut('<span class="sec">no funds watched yet'+(IS_ADMIN?' \u2014 <span class="ex" data-tcmd="whale add ">whale add &lt;name or CIK&gt;</span>':' \u2014 the operator curates the list')+'</span>');
+    const lines=d.watch.map(w=>`  <span class="tp-deep" data-tcmd="whale ${tesc(w.key)}">${tpad(tesc(w.key),12)}</span> ${tpad(tesc(w.name.slice(0,22)),24)} ${tpad(w.q?tesc(w.q):'\u2014',8)} ${tpad(w.total!=null?whlMoney(w.total):'\u2014',9,true)} ${tpad(w.dPct!=null?((w.dPct>0?'+':'')+w.dPct.toFixed(1)+'%'):'\u2014',8,true)}${w.unseen?' <span class="amber">\u25cf unseen</span>':''}${w.amended&&!w.unseen?' <span class="sec">HR/A</span>':''}`).join('\n');
+    const win=d.window&&d.window.cur?`${d.window.cur.q} window ${d.window.state} \u00b7 due ${new Date(d.window.cur.deadline).toLocaleDateString('en-US',{month:'short',day:'numeric'})}`:'';
+    termOut(`<span class="tp-hd">tracked 13F funds</span> <span class="tp-trans">\u00b7 the FUNDS tab list, verbatim \u00b7 ${tesc(win)}</span>\n<span class="tp-th">  ${tpad('KEY',12)} ${tpad('NAME',24)} ${tpad('LAST',8)} ${tpad('BOOK',9,true)} ${tpad('\u0394QoQ',8,true)}</span>\n${lines}\n<span class="tp-trans">whale &lt;key&gt; opens the book \u00b7 whale season for the quarter summary \u00b7 quarter-end books filed up to 45d late</span>`);
+  }).catch(()=>{ think.remove(); termErr('whale list fetch failed \u2014 try again in a moment'); });
+}
+function termWhaleFund(key,full){
+  const think=termThinking();
+  fetchJSON('/api/whale?fund='+encodeURIComponent(key)+(full?'&full=1':'')).then(f=>{ think.remove();
+    if(!f.ok) return termErr(tesc(f.error||'unavailable'));
+    const dl=f.hasPrev?`\n<span class="tp-k">${tpad('QoQ',14)}</span> <span class="pos">${f.lanes.opened.length} new</span> \u00b7 <span class="pos">${f.lanes.added.length} added</span> \u00b7 <span class="neg">${f.lanes.trimmed.length} trimmed</span> \u00b7 <span class="sec">${f.lanes.exited.length} exited</span>`:'';
+    const rows=f.positions.slice(0,full?f.positions.length:10).map((p,i)=>{
+      const d=!p.d||p.d.cls==='na'?'\u2014':p.d.cls==='new'?'<span class="amber">NEW</span>':p.d.cls==='flat'?'\u2014':(p.d.dSh!=null?`<span class="${p.d.dSh>0?'pos':'neg'}">${whlSgnSh(p.d.dSh)}</span>`:`<span class="${p.d.dVal>0?'pos':'neg'}">${(p.d.dVal>0?'+':'\u2212')+whlMoney(Math.abs(p.d.dVal)).slice(1)}</span>`);
+      return `  <span class="tp-trans">${tpad(String(i+1),3)}</span> ${tpad(p.pct!=null?p.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad(whlMoney(p.value),8,true)} ${tpad(d,10,true)}  ${tesc(p.name.slice(0,26))}${p.put?' <span class="sec">'+tesc(p.put.toUpperCase())+'</span>':''}${p.tk?' <span class="tp-deep" data-tcmd="'+tesc(p.tk)+'">'+tesc(p.tk)+'</span>':''}`; }).join('\n');
+    termOut(`<span class="tp-hd">${tesc(f.key)} 13F</span> <span class="tp-trans">\u00b7 ${tesc(f.name)} \u00b7 CIK ${tesc(String(f.cik))}</span>\n<span class="tp-k">${tpad('quarter',14)}</span> <b>${tesc(f.q||'?')}</b> <span class="tp-trans">(filed ${tesc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old':''}${f.amended?' \u00b7 AMENDED':''})</span>\n<span class="tp-k">${tpad('book',14)}</span> <b>${whlMoney(f.total)}</b> <span class="tp-trans">\u00b7 ${f.n} positions${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}</span>${dl}\n<span class="tp-th">  ${tpad('#',3)} ${tpad('%BOOK',7,true)} ${tpad('VALUE',8,true)} ${tpad('\u0394QoQ',10,true)}  NAME</span>\n${rows}\n<span class="tp-trans">${full?'':'top '+Math.min(10,f.positions.length)+' of '+f.n+' \u00b7 <span class="ex" data-tcmd="whale '+tesc(f.key)+' full">whale '+tesc(f.key)+' full</span> for all \u00b7 '}quarter-end snapshot filed up to 45d late \u00b7 long US book only \u00b7 full card on the FUNDS tab</span>`);
+    whlPost({op:'seen',key:f.key});
+  }).catch(()=>{ think.remove(); termErr('whale fetch failed \u2014 try again in a moment'); });
+}
+function termWhaleSeason(q){
+  const think=termThinking();
+  fetchJSON('/api/whale?season='+encodeURIComponent(q||'')).then(s=>{ think.remove();
+    if(!s.ok) return termErr(tesc(s.error||'no season'));
+    const a=s.agg;
+    const l=(rows,neg)=>rows.slice(0,3).map(r=>`${r.tk?tesc(r.tk):tesc(r.name.slice(0,14))}${r.put?' '+tesc(r.put)+'s':''} ${(r.net!=null?(r.net>0?'+':'\u2212')+whlMoney(Math.abs(r.net)).slice(1):whlMoney(r.tot))}${r.n!=null?' ('+r.n+'/'+a.nFunds+')':''}`).join(' \u00b7 ')||'\u2014';
+    termOut(`<span class="tp-hd">${tesc(s.q)} 13F season</span> <span class="tp-trans">\u00b7 ${s.filedN}/${s.watchN} filed${s.missing&&s.missing.length?' \u00b7 missing '+tesc(s.missing.join(',')):''}${s.amended?' \u00b7 rebuilt after amendment':''}</span>\n<span class="tp-k">${tpad('most bought',14)}</span> <span class="pos">${l(a.bought)}</span>\n<span class="tp-k">${tpad('most sold',14)}</span> <span class="neg">${l(a.sold)}</span>\n<span class="tp-k">${tpad('opens',14)}</span> <span class="amber">${l(a.opens)}</span>\n<span class="tp-k">${tpad('exits',14)}</span> <span class="sec">${l(a.exits)}</span>\n<span class="tp-k">${tpad('crowding',14)}</span> ${a.crowd.slice(0,3).map(r=>(r.tk?tesc(r.tk):tesc(r.name.slice(0,12)))+' '+r.held+'/'+a.nFunds).join(' \u00b7 ')||'\u2014'}\n<span class="tp-trans">consensus across your ${a.nFunds} watched fund(s) only \u2014 full breakdown with per-fund legs lives on the FUNDS tab</span>`);
+  }).catch(()=>{ think.remove(); termErr('season fetch failed'); });
+}
+async function termWhale(args){
+  if(!featureOn('funds')&&!IS_ADMIN) return termErr('the FUNDS tab is not enabled for this view');
+  const sub=(args[0]||'').toLowerCase();
+  if(!sub) return termWhaleList();
+  if(sub==='season') return termWhaleSeason(args.slice(1).join(' '));
+  if(sub==='add'){
+    if(!IS_ADMIN) return termErr('whale add is admin-only');
+    const q=args.slice(1).join(' ').trim(); if(!q) return termErr('usage: whale add <fund name or CIK>');
+    const think=termThinking(); const r=await whlPost({op:'search',q}); think.remove();
+    if(!r||!r.ok) return termErr(tesc((r&&r.error)||'search failed'));
+    WHL.cand=r.candidates;
+    return termOut(`<span class="tp-hd">EDGAR search</span> <span class="tp-trans">\u00b7 ${r.candidates.length} filer(s) match \u2014 pick one</span>\n`+r.candidates.map((c,i)=>`  <span class="ex" data-tcmd="whale pick ${i+1}">${i+1}</span>  ${tesc(c.name)} <span class="tp-trans">CIK ${c.cik}</span>`).join('\n'));
+  }
+  if(sub==='pick'){
+    const i=(+args[1]||0)-1; const c=WHL.cand&&WHL.cand[i];
+    if(!c) return termErr('nothing pending \u2014 whale add <name> first');
+    const r=await whlPost({op:'add',cik:c.cik,name:c.name}); WHL.cand=null;
+    return r&&r.ok?termOut(`<span class="pos">added</span> ${tesc(r.fund.key)} <span class="tp-trans">\u00b7 ${tesc(r.fund.name)} \u00b7 CIK ${r.fund.cik} \u00b7 watching for 13F-HR \u00b7 notify on</span>`):termErr(tesc((r&&r.error)||'add failed'));
+  }
+  if(sub==='rm'){
+    if(!IS_ADMIN) return termErr('whale rm is admin-only');
+    const k=(args[1]||'').toUpperCase(); if(!k) return termErr('usage: whale rm <key> [yes]');
+    if((args[2]||'').toLowerCase()!=='yes') return termOut(`<span class="err">confirm:</span> remove ${tesc(k)} from the watchlist? <span class="tp-trans">history kept, row hidden \u00b7 <span class="ex" data-tcmd="whale rm ${tesc(k)} yes">whale rm ${tesc(k)} yes</span></span>`);
+    const r=await whlPost({op:'rm',key:k});
+    return r&&r.ok?termOut(`<span class="pos">removed</span> ${tesc(k)}`):termErr(tesc((r&&r.error)||'remove failed'));
+  }
+  if(sub==='mute'||sub==='unmute'){
+    if(!IS_ADMIN) return termErr('whale '+sub+' is admin-only');
+    const k=(args[1]||'').toUpperCase(); if(!k) return termErr('usage: whale '+sub+' <key>');
+    const r=await whlPost({op:'mute',key:k,on:sub==='mute'});
+    return r&&r.ok?termOut(`<span class="pos">${sub==='mute'?'muted':'unmuted'}</span> ${tesc(k)} <span class="tp-trans">${sub==='mute'?'\u00b7 row still updates and badges \u2014 it just never alerts':''}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  const full=(args[1]||'').toLowerCase()==='full';
+  return termWhaleFund(sub.toUpperCase(),full);
 }
