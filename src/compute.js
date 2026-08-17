@@ -7450,6 +7450,16 @@ function focusSelect(cands, opts) {
   }
   return { picks, cuts: cuts.slice(0, cutN) };
 }
+// Forming-read fold (build 2026.08.17-03): extend closed-bar stats with the board's live mark.
+// The mark can only WIDEN hi/lo and refresh lastPx — VWAP and openPx stay archive-only (a mark
+// has no volume; folding it into a VWAP would fabricate weight). A spike seen live is captured
+// by the eventually-closed 5m bar's own extreme, so forming and frozen converge at the freeze.
+function foldLiveMark(stats, px) {
+  if (!(px > 0)) return stats || null;
+  if (!stats) return { hi: +px.toPrecision(8), lo: +px.toPrecision(8), vwap: null, openPx: null, lastPx: +px.toPrecision(8), bars: 0 };
+  return { ...stats, hi: +Math.max(stats.hi, px).toPrecision(8), lo: +Math.min(stats.lo, px).toPrecision(8), lastPx: +px.toPrecision(8) };
+}
+module.exports.foldLiveMark = foldLiveMark;
 module.exports.FOCUS_CAP = FOCUS_CAP;
 module.exports.FOCUS_PER_CLUSTER = FOCUS_PER_CLUSTER;
 module.exports.FOCUS_CUT_N = FOCUS_CUT_N;

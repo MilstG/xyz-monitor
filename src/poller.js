@@ -14,7 +14,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
-const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N } = require("./compute");
+const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark } = require("./compute");
 const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
@@ -11120,6 +11120,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   const FOCUS_PREVIEW_LEAD = 30 * 60 * 1000;   // preview window opens 09:00 ET — earlier and the σ/RVOL reads are mostly noise
   let focusState = null, focusPrev = null, focusVer = 0;
   let focusPv = null;                  // { at, day, rows, sig } — the live preview pool. IN-MEMORY ONLY, never persisted: only the stamp is a record.
+  let focusForming = null;             // { at, map } — forming +1h reads between the stamp and the freeze. Same rule: transient, never persisted.
   function hydrateFocus() {
     const data = store.loadFocus ? store.loadFocus() : null;
     if (!data) return false;
@@ -11224,6 +11225,29 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     focusPersist();
     log(`FOCUS stamped ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.late ? ` (LATE \u2014 ${Math.round((now - sess.open) / 60000)}m after the open)` : ""}, ${focusState.cuts.length} cut(s) disclosed`);
   }
+  // Forming +1h reads (build 2026.08.17-03): between the stamp and the 10:30 freeze, the sVWAP /
+  // 1H HI / 1H LO columns show the hour FORMING — closed 5m bars so far (minBars=1: a partial
+  // hour is exactly what forming means) with the board's live mark folded into hi/lo/last via the
+  // pure fold in compute. Republished at most once a minute; the ETag bump rides focusVer so the
+  // client's 60s poll picks each edition up. At the freeze the frozen record replaces all of it
+  // and the map dies — the record and only the record persists.
+  function buildFocusForming(now) {
+    const st = focusState;
+    if (!st || st.filledAt) return;
+    if (focusForming && now - focusForming.at < 55 * 1000) return;
+    const canRead = store.candlesEnabled && store.candlesEnabled();
+    const endW = Math.min(now, st.open + HOUR);
+    const map = {};
+    for (const p of st.rows) {
+      const bars = canRead ? store.readCandles(p.coin, st.open - 1, endW + 1) : [];
+      let f = firstHourStats(bars, st.open, endW, 1);
+      const r = rows.get(p.coin);
+      f = foldLiveMark(f, r && r.px > 0 ? +r.px : null);
+      if (f) map[p.ticker] = f;
+    }
+    focusForming = { at: now, map };
+    focusVer = Date.now();
+  }
   function fillFocus(now) {
     const st = focusState;
     if (!st || st.filledAt) return;
@@ -11234,6 +11258,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     }
     st.filledAt = now;
     st.fillNote = canRead ? null : "5m archive disabled \u2014 first-hour columns cannot fill";
+    focusForming = null;               // the frozen record replaces every forming read
     focusPersist();
     log(`FOCUS +1h fill: ${st.rows.filter((p) => p.h1).length}/${st.rows.length} seat(s) carry a first-hour record${st.fillNote ? " \u2014 " + st.fillNote : ""}`);
   }
@@ -11241,11 +11266,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const now = Number.isFinite(nowInj) ? nowInj : Date.now();
     const today = etDayStr(now);
     const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
-    if (!sess) { focusPv = null; return; }                     // weekend / holiday: yesterday's list stands, no preview
+    if (!sess) { focusPv = null; focusForming = null; return; }   // weekend / holiday: yesterday's list stands, no preview, no forming
     if (now >= sess.open - FOCUS_PREVIEW_LEAD && now < sess.open && (!focusState || focusState.day !== today))
       buildFocusPreview(sess, now);
     if (now >= sess.open && (!focusState || focusState.day !== today)) stampFocus(sess, now);
     if (focusState && focusState.day === today && focusPv) focusPv = null;   // belt + braces: a stamp always retires the pool
+    if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open) buildFocusForming(now);
     if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
   }
   function getFocus() {
@@ -11259,6 +11285,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     return { ts: now, dataTs: focusVer, state, day: today,
       open: sess ? sess.open : null, close: sess ? sess.close : null,
       preview: pv ? { at: pv.at, rows: pv.rows } : null, previewN: FOCUS_PREVIEW_N, previewLeadMs: FOCUS_PREVIEW_LEAD,
+      forming: focusState && focusState.day === today && !focusState.filledAt && focusForming ? focusForming : null,
       // Chart shading (build 2026.08.17-01): cash-session windows across the chart's 72h
       // lookback (+ the next session), from the same calendar engine as the stamp — the client
       // dims off-session time instead of guessing at a fixed 16:00-to-09:30 rhythm that half
