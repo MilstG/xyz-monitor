@@ -10337,29 +10337,86 @@ async function focFetch(){
 // from the server's calendar windows, never a guessed fixed rhythm. Default 15m: 288 bars over
 // 72h reads; 864 five-minute bars are one click away for the microstructure look.
 const FOCCH_HOURS=72;
-const FOCCH={ p:null, day:null, tf:15, base:null, hover:null };
+const FOCCH={ p:null, day:null, tf:15, base:null, baseFrom:0, baseTo:0, agg:null, view:{from:0,to:0}, hover:null };
 function focChartEnsureDom(){
   if(el('focmodal')) return;
   const d=document.createElement('div'); d.id='focmodal'; d.hidden=true;
   d.innerHTML=`<div id="focwin">
-    <div class="focch-head"><span class="focch-t" id="focch-t"></span><span class="focch-sub" id="focch-sub"></span>
+    <div class="focch-head"><span class="focch-t" id="focch-t"></span><span class="focch-sub" id="focch-sub"></span><span class="focch-view" id="focch-view"></span>
       <span class="focch-tf"><button type="button" data-foctf="5">5M</button><button type="button" data-foctf="15" class="on">15M</button><button type="button" data-foctf="60">1H</button><button type="button" data-foctf="240">4H</button></span>
       <button type="button" class="focch-x" id="focch-x" data-tip="close (Esc)">✕</button></div>
-    <div class="focch-leg"><span><i class="fk" style="border-color:var(--acc2,#4da3d8)"></i>VWAP (chart series, from the open)</span><span><i class="fk d" style="border-color:var(--up)"></i>1H HI (frozen)</span><span><i class="fk d" style="border-color:var(--down)"></i>1H LO (frozen)</span><span><i class="fk d" style="border-color:var(--muted)"></i>open</span><span class="dim">dark bands = off-session (nights, weekends, holidays — from the calendar engine)</span></div>
+    <div class="focch-leg"><span><i class="fk" style="border-color:var(--acc2,#4da3d8)"></i>VWAP (chart series, from the open)</span><span><i class="fk d" style="border-color:var(--up)"></i>1H HI (frozen)</span><span><i class="fk d" style="border-color:var(--down)"></i>1H LO (frozen)</span><span><i class="fk d" style="border-color:var(--muted)"></i>open</span><span class="dim">dark bands = off-session (from the calendar engine) · wheel/pinch = zoom at cursor · drag = pan · double-click = reset</span></div>
     <div id="focch-read">hover for OHLC · chart VWAP · Δ from open</div>
-    <div id="focch-wrap"><canvas id="focch-cc"></canvas></div></div>`;
+    <div id="focch-wrap"><canvas id="focch-cc"></canvas></div>
+    <div id="focch-vbar" data-tip="the 72h base — the highlighted span is your viewport; drag it to pan"><div id="focch-vwin"></div></div></div>`;
   document.body.appendChild(d);
   d.addEventListener('click',e=>{ if(e.target.id==='focmodal') focChartClose(); });
   el('focch-x').onclick=focChartClose;
-  d.querySelectorAll('[data-foctf]').forEach(b=>b.onclick=()=>{ FOCCH.tf=+b.dataset.foctf;
-    d.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x===b)); focChartDraw(); });
+  d.querySelectorAll('[data-foctf]').forEach(b=>b.onclick=()=>{ FOCCH.tf=+b.dataset.foctf; FOCCH.agg=null;
+    d.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x===b));
+    focChartResetView(); focChartDraw(); });
   document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&el('focmodal')&&!el('focmodal').hidden) focChartClose(); });
+  // ---- viewport interactions (build 2026.08.17-02) --------------------------------------------
+  // One fetch, everything else is viewport math over the cached 72h base: wheel (or pinch) zooms
+  // about the cursor time, dragging pans, double-click resets to the timeframe's default window.
+  // Pointer events carry mouse AND touch through one code path — a single touch drags to pan (a
+  // sub-6px tap sets the crosshair instead), two touches pinch about their midpoint.
   const cc=el('focch-cc');
-  cc.addEventListener('mousemove',e=>{ if(!FOCCH._geom) return;
-    const r=cc.getBoundingClientRect(), x=e.clientX-r.left, g=FOCCH._geom;
-    const i=Math.floor((x-g.padL)/((g.W-g.padL-g.padR)/g.n));
-    FOCCH.hover=Math.max(0,Math.min(g.n-1,i)); focChartDraw(); });
-  cc.addEventListener('mouseleave',()=>{ FOCCH.hover=null; focChartDraw(); });
+  const timeAt=(clientX)=>{ const g=FOCCH._geom, r=cc.getBoundingClientRect();
+    if(!g) return FOCCH.view.from;
+    const frac=Math.min(1,Math.max(0,(clientX-r.left-g.padL)/(g.W-g.padL-g.padR)));
+    return FOCCH.view.from+frac*(FOCCH.view.to-FOCCH.view.from); };
+  cc.addEventListener('wheel',e=>{ e.preventDefault();
+    const z=e.deltaY>0?1.18:1/1.18, c=timeAt(e.clientX);
+    FOCCH.view={ from:c-(c-FOCCH.view.from)*z, to:c+(FOCCH.view.to-c)*z };
+    focChartClampView(); focChartDraw(); },{passive:false});
+  cc.addEventListener('dblclick',()=>{ focChartResetView(); focChartDraw(); });
+  const ptrs=new Map(); let panRef=null, pinchRef=null;
+  cc.addEventListener('pointerdown',e=>{ cc.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY,x0:e.clientX,y0:e.clientY});
+    if(ptrs.size===1) panRef={x:e.clientX, from:FOCCH.view.from, to:FOCCH.view.to};
+    if(ptrs.size===2){ const [a,b]=[...ptrs.values()];
+      pinchRef={ d:Math.max(20,Math.abs(a.x-b.x)), from:FOCCH.view.from, to:FOCCH.view.to, mid:timeAt((a.x+b.x)/2) };
+      panRef=null; } });
+  cc.addEventListener('pointermove',e=>{
+    const pt=ptrs.get(e.pointerId);
+    if(pt){ pt.x=e.clientX; pt.y=e.clientY; }
+    if(ptrs.size===2&&pinchRef){ const [a,b]=[...ptrs.values()];
+      const scale=pinchRef.d/Math.max(20,Math.abs(a.x-b.x));   // fingers apart -> smaller span
+      const m=pinchRef.mid;
+      FOCCH.view={ from:m-(m-pinchRef.from)*scale, to:m+(pinchRef.to-m)*scale };
+      focChartClampView(); FOCCH.hover=null; focChartDraw(); return; }
+    if(ptrs.size===1&&panRef&&FOCCH._geom){
+      const g=FOCCH._geom, msPerPx=(panRef.to-panRef.from)/(g.W-g.padL-g.padR);
+      const dx=(e.clientX-panRef.x)*msPerPx;
+      if(Math.abs(e.clientX-pt.x0)>5){
+        FOCCH.view={ from:panRef.from-dx, to:panRef.to-dx };
+        focChartClampView(true); FOCCH.hover=null; focChartDraw(); return; } }
+    if(ptrs.size===0&&FOCCH._geom){   // plain mouse move: crosshair
+      const g=FOCCH._geom, r=cc.getBoundingClientRect();
+      const i=Math.floor((e.clientX-r.left-g.padL)/((g.W-g.padL-g.padR)/g.n));
+      FOCCH.hover=Math.max(0,Math.min(g.n-1,i)); focChartDraw(); } });
+  const ptrEnd=(e)=>{ const pt=ptrs.get(e.pointerId); ptrs.delete(e.pointerId);
+    if(ptrs.size<2) pinchRef=null;
+    if(ptrs.size===0){ panRef=null;
+      if(pt&&Math.abs(pt.x-pt.x0)<6&&Math.abs(pt.y-pt.y0)<6&&e.pointerType!=='mouse'&&FOCCH._geom){
+        const g=FOCCH._geom, r=cc.getBoundingClientRect();   // touch tap = crosshair
+        const i=Math.floor((pt.x-r.left-g.padL)/((g.W-g.padL-g.padR)/g.n));
+        FOCCH.hover=Math.max(0,Math.min(g.n-1,i)); focChartDraw(); } } };
+  cc.addEventListener('pointerup',ptrEnd); cc.addEventListener('pointercancel',ptrEnd);
+  cc.addEventListener('mouseleave',()=>{ if(!ptrs.size){ FOCCH.hover=null; focChartDraw(); } });
+  // minimap: the 72h base with the viewport highlighted — drag the window to pan
+  (function(){ const vb=el('focch-vwin'), bar=el('focch-vbar'); let d0=null;
+    vb.addEventListener('pointerdown',e=>{ vb.setPointerCapture(e.pointerId);
+      d0={x:e.clientX, from:FOCCH.view.from, to:FOCCH.view.to}; e.preventDefault(); });
+    vb.addEventListener('pointermove',e=>{ if(!d0) return;
+      const span=FOCCH.baseTo-FOCCH.baseFrom, w=bar.getBoundingClientRect().width||1;
+      const dx=(e.clientX-d0.x)*span/w;
+      FOCCH.view={ from:d0.from+dx, to:d0.to+dx };
+      focChartClampView(true); focChartDraw(); });
+    const end=()=>{ d0=null; };
+    vb.addEventListener('pointerup',end); vb.addEventListener('pointercancel',end);
+  })();
   window.addEventListener('resize',()=>{ const m=el('focmodal'); if(m&&!m.hidden) focChartDraw(); });
 }
 async function focChartOpen(ticker){
@@ -10369,7 +10426,7 @@ async function focChartOpen(ticker){
     if(p) day={ open:d.open, close:d.close, rows:d.preview.rows }; }   // preview chart: live pre-open candles, no frozen lines yet
   if(!day||!p) return;
   focChartEnsureDom();
-  FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.hover=null; FOCCH.tf=15;
+  FOCCH.p=p; FOCCH.day=day; FOCCH.base=null; FOCCH.agg=null; FOCCH.hover=null; FOCCH.tf=15;
   const m=el('focmodal'); m.hidden=false;
   m.querySelectorAll('[data-foctf]').forEach(x=>x.classList.toggle('on',x.dataset.foctf==='15'));
   el('focch-t').textContent=ticker;
@@ -10382,13 +10439,34 @@ async function focChartOpen(ticker){
     const res=await fetchJSON('/api/candles?coin='+encodeURIComponent(p.coin)+'&res=5m&from='+from+'&to='+to+'&max=2000');
     FOCCH.base=Array.isArray(res.candles)?res.candles:[];
     if(res.enabled===false){ el('focch-sub').textContent='5m archive disabled on this deploy — no chart source'; return; }
+    FOCCH.baseFrom=from; FOCCH.baseTo=to;
+    focChartResetView();
     const h=p.h1;
     el('focch-sub').textContent=`last ${FOCCH_HOURS}h · prev close ${focPx(p.prevClose)} · stamp ${focPx(p.px)}`
       +(h?` · frozen: 1H ${focPx(h.lo)}–${focPx(h.hi)}${h.vwap!=null?` · board sVWAP ${focPx(h.vwap)}`:''}`:' · +1h not filled yet — HI/LO lines pending');
     focChartDraw();
-  }catch(e){ el('focch-sub').textContent='1m fetch failed — '+((e&&e.message)||'network error'); }
+  }catch(e){ el('focch-sub').textContent='archive fetch failed — '+((e&&e.message)||'network error'); }
 }
-function focChartClose(){ const m=el('focmodal'); if(m) m.hidden=true; FOCCH.p=null; FOCCH.base=null; FOCCH._geom=null; }
+function focChartClose(){ const m=el('focmodal'); if(m) m.hidden=true; FOCCH.p=null; FOCCH.base=null; FOCCH.agg=null; FOCCH._geom=null; }
+// ---- viewport state (build 2026.08.17-02) ------------------------------------------------------
+// Per-timeframe default windows: dropping to 5m IS the detail view (last 12h), 15m opens on 36h,
+// 1h/4h show the whole base. Zoom clamps at FOCCH_MIN_SPAN so detail can never become mush; pan
+// clamps at the base edges. All of it is math over the one archive fetch — no refetch, ever.
+const FOCCH_DEF={5:12*3600000,15:36*3600000,60:72*3600000,240:72*3600000};
+const FOCCH_MIN_SPAN=2*3600000;
+function focChartResetView(){
+  const span=Math.min(FOCCH_DEF[FOCCH.tf]||FOCCH_HOURS*3600000, FOCCH.baseTo-FOCCH.baseFrom);
+  FOCCH.view={ from:FOCCH.baseTo-span, to:FOCCH.baseTo };
+}
+function focChartClampView(panOnly){
+  const v=FOCCH.view, lo=FOCCH.baseFrom, hi=FOCCH.baseTo;
+  let span=v.to-v.from;
+  if(!panOnly) span=Math.max(FOCCH_MIN_SPAN, Math.min(span, hi-lo));
+  if(v.from<lo){ v.from=lo; v.to=lo+span; }
+  if(v.to>hi){ v.to=hi; v.from=hi-span; }
+  if(v.from<lo) v.from=lo;
+  if(!panOnly&&v.to-v.from!==span){ if(v.to===hi) v.from=hi-span; else v.to=Math.min(hi,v.from+span); }
+}
 function focAgg(base,k,openMs){
   // k-minute buckets anchored at TODAY'S OPEN, extending backwards through the 72h lookback, so
   // a bucket boundary always lands exactly on 09:30 — off-session and session never share a bar
@@ -10404,11 +10482,22 @@ function focAgg(base,k,openMs){
   }
   return out;
 }
+function focAggCached(){
+  // Aggregate the FULL base once per timeframe and compute the session VWAP over the WHOLE
+  // series — the viewport then slices by index. This is the invariant that keeps zoom honest:
+  // panning half-out of the session can never restart the cumulative VWAP at the view edge.
+  if(FOCCH.agg&&FOCCH.agg.tf===FOCCH.tf) return FOCCH.agg;
+  const bars=focAgg(FOCCH.base, FOCCH.tf, FOCCH.day.open);
+  let pv=0,vv=0;
+  const vwapS=bars.map(b=>{ if(b[0]<FOCCH.day.open) return null;
+    const v=+b[5]; if(v>0){ pv+=((+b[2])+(+b[3])+(+b[4]))/3*v; vv+=v; } return vv>0?pv/vv:null; });
+  FOCCH.agg={ tf:FOCCH.tf, bars, vwapS };
+  return FOCCH.agg;
+}
 function focChartDraw(){
   const p=FOCCH.p, day=FOCCH.day; if(!p||!day||!FOCCH.base) return;
   const cc=el('focch-cc'); if(!cc) return;
-  const bars=focAgg(FOCCH.base, FOCCH.tf, day.open);
-  const n=bars.length;
+  const A=focAggCached(), all=A.bars;
   const dpr=window.devicePixelRatio||1, W=cc.clientWidth||800, H=440;
   cc.width=W*dpr; cc.height=H*dpr;
   const g=cc.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,W,H);
@@ -10416,42 +10505,51 @@ function focChartDraw(){
   const C={ up:(cs.getPropertyValue('--up')||'#35c06f').trim(), down:(cs.getPropertyValue('--down')||'#e05252').trim(),
     acc:(cs.getPropertyValue('--accent')||'#e8a33d').trim(), sec:(cs.getPropertyValue('--muted')||'#7E8794').trim(),
     line:(cs.getPropertyValue('--border')||'#1e2530').trim(), blu:'#4da3d8' };
-  if(!n){ g.fillStyle=C.sec; g.font='12px monospace'; g.fillText('no 1m candles returned for this window',20,40);
+  if(!all.length){ g.fillStyle=C.sec; g.font='12px monospace'; g.fillText('no archive candles in this window',20,40);
+    FOCCH._geom=null; return; }
+  // visible slice
+  const tfMs=FOCCH.tf*60000;
+  let i0=all.findIndex(b=>b[0]+tfMs>FOCCH.view.from); if(i0<0) i0=0;
+  let i1=all.length-1; while(i1>0&&all[i1][0]>FOCCH.view.to) i1--;
+  const off=i0, bars=all.slice(i0,i1+1), n=bars.length;
+  if(!n){ g.fillStyle=C.sec; g.font='12px monospace'; g.fillText('nothing in view — double-click to reset',20,40);
     FOCCH._geom=null; return; }
   const padL=8,padR=70,padT=10,volH=50,padB=26, pH=H-padT-padB-volH-8;
   const h1=p.h1;
+  // y-scale from the VISIBLE bars — zooming into a quiet overnight stretch actually resolves it.
+  // The frozen 1H HI/LO only stretch the scale when the first hour is in (or near) view.
   let hi=Math.max(...bars.map(b=>b[2])), lo=Math.min(...bars.map(b=>b[3]));
-  if(h1){ hi=Math.max(hi,h1.hi); lo=Math.min(lo,h1.lo); }
+  const fhInView=FOCCH.view.from<=day.open+3600000&&FOCCH.view.to>=day.open;
+  if(h1&&fhInView){ hi=Math.max(hi,h1.hi); lo=Math.min(lo,h1.lo); }
   const span=(hi-lo)||1; hi+=span*.05; lo-=span*.05;
   const X=i=>padL+(i+.5)*(W-padL-padR)/n, Y=v=>padT+(hi-v)/(hi-lo)*pH;
-  const bw=Math.max(2.5,(W-padL-padR)/n*.62);
-  // chart-series session VWAP: cumulative typical·vol from the OPEN bar onward — null before it
-  let pv=0,vv=0; const vwapS=bars.map(b=>{ if(b[0]<day.open) return null;
-    const v=+b[5]; if(v>0){ pv+=((+b[2])+(+b[3])+(+b[4]))/3*v; vv+=v; } return vv>0?pv/vv:null; });
-  // off-session shading (2026.08.17-01): dim every bar outside the server's calendar windows —
-  // half days and holidays shade correctly because the windows come from the same calendar
-  // engine as the stamp, not a guessed 16:00→09:30 rhythm. Amber boundary at today's open.
+  const bw=Math.max(1.5,(W-padL-padR)/n*.62);
+  const vwapS=A.vwapS;
+  // off-session shading — windows from the same calendar engine as the stamp
   const sess=(FOC.data&&FOC.data.sessions)||[];
   const inSess=(t)=>{ for(const sw of sess){ if(t>=sw.open&&t<sw.close) return true; } return false; };
   g.fillStyle='rgba(0,0,0,0.28)';
   let runA=-1;
   for(let i=0;i<=n;i++){
-    const off=i<n&&!inSess(bars[i][0]);
-    if(off&&runA<0) runA=i;
-    if((!off||i===n)&&runA>=0){ const x0=X(runA)-bw/2, x1=X(i-1)+bw/2; g.fillRect(x0,padT,x1-x0,pH+volH+8); runA=-1; }
+    const o=i<n&&!inSess(bars[i][0]);
+    if(o&&runA<0) runA=i;
+    if((!o||i===n)&&runA>=0){ const x0=X(runA)-bw/2, x1=X(i-1)+bw/2; g.fillRect(x0,padT,x1-x0,pH+volH+8); runA=-1; }
   }
   let openI=-1; for(let i=0;i<n;i++){ if(bars[i][0]>=day.open){ openI=i; break; } }
-  const xOpen=openI>=0?X(openI)-bw/2:padL;
-  g.strokeStyle='rgba(232,163,61,0.35)'; g.lineWidth=1;
-  g.beginPath(); g.moveTo(xOpen,padT); g.lineTo(xOpen,H-padB); g.stroke();
-  g.font='10px monospace'; g.textAlign='center'; g.fillStyle=C.sec;
+  if(openI>=0&&all[off+openI]&&all[off+openI][0]>=day.open&&(off+openI===0||all[off+openI-1][0]<day.open)){
+    const x=X(openI)-bw/2;
+    g.strokeStyle='rgba(232,163,61,0.35)'; g.lineWidth=1;
+    g.beginPath(); g.moveTo(x,padT); g.lineTo(x,H-padB); g.stroke();
+    g.font='10px monospace'; g.fillStyle=C.sec; g.textAlign='center'; g.fillText('open',x,H-padB+18);
+  }
   // grid + y labels
-  g.textAlign='left';
+  g.font='10px monospace'; g.textAlign='left';
   for(let i=0;i<=4;i++){ const v=lo+(hi-lo)*i/4, y=Y(v);
-    g.strokeStyle=C.line; g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke();
+    g.strokeStyle=C.line; g.lineWidth=1; g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke();
     g.fillStyle=C.sec; g.fillText(focPx(v),W-padR+6,y+3); }
-  // reference lines: open (archive open when filled, stamp mark before), frozen 1H HI/LO verbatim
-  const refLine=(v,col,lab)=>{ if(v==null||!isFinite(v)) return; const y=Y(v);
+  // reference lines — only drawn when inside the visible scale (a zoomed view far from the first
+  // hour should not pin phantom lines to its edges)
+  const refLine=(v,col,lab)=>{ if(v==null||!isFinite(v)||v<lo||v>hi) return; const y=Y(v);
     g.strokeStyle=col; g.setLineDash([5,4]); g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke(); g.setLineDash([]);
     g.fillStyle=col; g.fillText(lab+' '+focPx(v),W-padR+6,y-4); };
   refLine(h1&&h1.openPx!=null?h1.openPx:p.px, C.sec, h1&&h1.openPx!=null?'O':'stamp');
@@ -10459,25 +10557,25 @@ function focChartDraw(){
   // volume
   const vMax=Math.max(...bars.map(b=>+b[5]||0),1e-9);
   for(let i=0;i<n;i++){ const b=bars[i], up=b[4]>=b[1];
-    g.fillStyle=b[0]<day.open?'rgba(107,118,134,0.3)':(up?'rgba(53,192,111,0.35)':'rgba(224,82,82,0.35)');
+    g.fillStyle=!inSess(b[0])?'rgba(107,118,134,0.3)':(up?'rgba(53,192,111,0.35)':'rgba(224,82,82,0.35)');
     const vh=(+b[5]||0)/vMax*volH; g.fillRect(X(i)-bw/2,H-padB-vh,bw,vh); }
-  // candles (pre-open dimmer)
-  for(let i=0;i<n;i++){ const b=bars[i], up=b[4]>=b[1], a=b[0]<day.open?0.45:0.9;
+  // candles (off-session dimmer)
+  for(let i=0;i<n;i++){ const b=bars[i], up=b[4]>=b[1], a=inSess(b[0])?0.9:0.45;
     const col=up?`rgba(53,192,111,${a})`:`rgba(224,82,82,${a})`;
     g.strokeStyle=col; g.beginPath(); g.moveTo(X(i),Y(b[2])); g.lineTo(X(i),Y(b[3])); g.stroke();
     g.fillStyle=col; const yO=Y(b[1]), yC=Y(b[4]);
     g.fillRect(X(i)-bw/2,Math.min(yO,yC),bw,Math.max(1,Math.abs(yC-yO))); }
-  // VWAP line (chart series, session-anchored)
+  // VWAP line — the FULL-session series sliced by the same offsets, never restarted at the edge
   g.strokeStyle=C.blu; g.lineWidth=1.6; g.beginPath(); let started=false;
-  for(let i=0;i<n;i++){ if(vwapS[i]==null) continue; const y=Y(vwapS[i]);
+  for(let i=0;i<n;i++){ const v=vwapS[off+i]; if(v==null) continue; const y=Y(v);
     started?g.lineTo(X(i),y):g.moveTo(X(i),y); started=true; }
-  if(started) g.stroke();
-  // x labels: a 72h span needs day context — weekday + ET time, thinned to ~10 labels
+  if(started) g.stroke(); g.lineWidth=1;
+  // x labels: weekday + ET time when the view spans a night, plain time when zoomed tight
   g.fillStyle=C.sec; g.textAlign='center';
-  const step=Math.max(1,Math.round(n/10));
-  const xfmt=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short',hour:'numeric',minute:'2-digit',hour12:false});
+  const long=(FOCCH.view.to-FOCCH.view.from)>20*3600000;
+  const step=Math.max(1,Math.round(n/9));
+  const xfmt=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',...(long?{weekday:'short'}:{}),hour:'numeric',minute:'2-digit',hour12:false});
   for(let i=0;i<n;i+=step) g.fillText(xfmt.format(new Date(bars[i][0])).replace(',',''),X(i),H-8);
-  g.fillText('open',xOpen,H-padB+18);
   // crosshair
   const hv=FOCCH.hover;
   if(hv!=null&&bars[hv]){
@@ -10487,15 +10585,22 @@ function focChartDraw(){
     const yC=Y(b[4]); g.beginPath(); g.moveTo(padL,yC); g.lineTo(W-padR,yC); g.stroke(); g.setLineDash([]);
     const anchor=h1&&h1.openPx!=null?h1.openPx:p.px;
     const dpc=anchor>0?((b[4]/anchor-1)*100):null;
-    const et=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:false}).format(new Date(b[0]));
-    const vtxt=vwapS[hv]==null?' · VWAP <span class="na">—</span>':(()=>{ const vd=(b[4]/vwapS[hv]-1)*100;
-      return ` · VWAP <b>${focPx(vwapS[hv])}</b> <span class="${focCls(vd)}">(${focSgn(vd)}%)</span>`; })();
+    const et=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short',hour:'numeric',minute:'2-digit',hour12:false}).format(new Date(b[0]));
+    const vtxt=vwapS[off+hv]==null?' · VWAP <span class="na">—</span>':(()=>{ const vd=(b[4]/vwapS[off+hv]-1)*100;
+      return ` · VWAP <b>${focPx(vwapS[off+hv])}</b> <span class="${focCls(vd)}">(${focSgn(vd)}%)</span>`; })();
     const offSess=!inSess(b[0]);
     el('focch-read').innerHTML=(offSess?'<span class="focpre">OFF-SESSION</span>':'')
-      +`<b>${et} ET</b> · O <b>${focPx(b[1])}</b> H <b>${focPx(b[2])}</b> L <b>${focPx(b[3])}</b> C <b>${focPx(b[4])}</b>`
+      +`<b>${et.replace(',','')} ET</b> · O <b>${focPx(b[1])}</b> H <b>${focPx(b[2])}</b> L <b>${focPx(b[3])}</b> C <b>${focPx(b[4])}</b>`
       +vtxt+(dpc!=null?` · Δ${h1&&h1.openPx!=null?'open':'stamp'} <span class="${focCls(dpc)}">${focSgn(dpc)}%</span>`:'');
   } else if(el('focch-read')) el('focch-read').textContent='hover for OHLC · chart VWAP · Δ from open';
-  FOCCH._geom={W,padL,padR,n};
+  FOCCH._geom={W,padL,padR,n,off};
+  // minimap + viewing state
+  const vw=el('focch-vwin');
+  if(vw){ const bspan=Math.max(1,FOCCH.baseTo-FOCCH.baseFrom);
+    vw.style.left=(((FOCCH.view.from-FOCCH.baseFrom)/bspan)*100)+'%';
+    vw.style.width=(Math.max(0.5,((FOCCH.view.to-FOCCH.view.from)/bspan)*100))+'%'; }
+  const vv=el('focch-view');
+  if(vv) vv.textContent=`viewing ${((FOCCH.view.to-FOCCH.view.from)/3600000).toFixed(0)}h of ${FOCCH_HOURS}h · ${n} bars @ ${FOCCH.tf<60?FOCCH.tf+'m':(FOCCH.tf/60)+'h'}`;
 }
 
 // ===== FUNDS tab — 13F whale watchlist (build 2026.08.16-01) ====================================

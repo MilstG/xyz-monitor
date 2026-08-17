@@ -1574,3 +1574,10 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 /* -04: thousands-convention correction marker */
 .whl-scl{display:inline-block;margin-left:5px;font-size:9px;letter-spacing:.5px;color:var(--muted);border:1px solid var(--border);border-radius:2px;padding:0 3px;vertical-align:1px}
 .whl-sclnote{border-bottom:1px dotted var(--muted)}
+
+/* ===== FOCUS chart viewport (build 2026.08.17-02) ===== */
+#focch-cc{touch-action:none}
+.focch-view{color:var(--faint);font-size:10px;font-family:var(--mono);margin-left:8px;white-space:nowrap}
+#focch-vbar{margin:2px 14px 10px;height:6px;background:var(--panel2);border:1px solid var(--border);position:relative;border-radius:3px}
+#focch-vwin{position:absolute;top:0;bottom:0;background:#2a3a52;border:1px solid #3d5578;border-radius:3px;cursor:grab;touch-action:none;min-width:6px}
+#focch-vwin:active{cursor:grabbing}
