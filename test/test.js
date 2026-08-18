@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.18-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.18-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17063,11 +17063,18 @@ test("focus -01: manifest pins — the tab, the route, the engine and the client
   // chart source contract (re-pinned 2026.08.17-01): the 1m live branch is RETIRED — its absence
   // is the pin now, and the chart must read the archive's 5m route instead.
   assert.ok(!srv.includes('req.query.res === "1m"') && !srv.includes("poller.getCandles1m("), "the live 1m branch stays retired");
-  // poller: engine doctrine strings — home-session exclusion, the volume floor, the late stamp
-  // disclosure, the +1h fill, the boot hydrate, and the exports
-  for (const pin of ["const FOCUS_MIN_VOL = 200000", "if (homeMkt(r.ticker, r.uni)) continue;",
+  // poller: engine doctrine strings — home-session exclusion, the late stamp disclosure, the +1h
+  // fill, the boot hydrate, and the exports. The old "const FOCUS_MIN_VOL = 200000" pin RETIRED at
+  // 2026.08.18-03: the wall is no longer a poller constant, it is compute's clamped backstop under
+  // an operator-set floor. Its absence from the poller is the pin now, alongside the gate call.
+  assert.ok(!pol.includes("FOCUS_MIN_VOL"), "the hard-coded poller volume floor stays retired");
+  // The home-session exclusion moved INTO focusEligible at 2026.08.18-03 (one structural
+  // predicate for the engine and the panel scan). The doctrine is unchanged; the pin follows it.
+  for (const pin of ["if (homeMkt(r.ticker, r.uni)) return null;", "function focusEligible(", "function focusScan(",
+    "const g = focusGate(cands, focusLim, FOCUS_BELOW_N);",
     "function focusTick(", "function stampFocus(", "function fillFocus(", "function hydrateFocus(",
-    "late: now - sess.open > 90 * 1000 ? 1 : 0", "getFocusStamp: () => focusVer", "focusTickNow: focusTick"])
+    "late: now - sess.open > 90 * 1000 ? 1 : 0", "getFocusStamp: () => focusVer", "focusTickNow: focusTick",
+    "setFocusLimits,"])
     assert.ok(pol.includes(pin), "poller pin: " + pin);
   // store: persistence is atomic tmp+rename like every config-grade write
   assert.ok(sto.includes("saveFocus(data)") && sto.includes("loadFocus()") && sto.includes('focusFile + ".tmp"'), "focus persistence, atomic");
@@ -17722,7 +17729,9 @@ test("focus -17.03: manifest pins — forming engine transient, cadence, client 
     assert.ok(pol.includes(pin), "poller pin: " + pin);
   assert.ok(cmp.includes("function foldLiveMark("), "pure fold lives in compute");
   // transience: the persistence call site must remain exactly the two-field record
-  assert.ok(pol.includes("store.saveFocus({ state: focusState, prev: focusPrev })") && !/saveFocus\([^)]*[Ff]orming/.test(pol),
+  // 2026.08.18-03: the blob gained `limits` (the wall rides the record, one atomic write). The
+  // load-bearing half of this pin is the NEGATIVE one — forming reads must never reach the store.
+  assert.ok(pol.includes("store.saveFocus({ state: focusState, prev: focusPrev, limits: focusLim })") && !/saveFocus\([^)]*[Ff]orming/.test(pol),
     "forming reads can never reach the store");
   assert.ok(pol.includes("forming: focusState && focusState.day === today && !focusState.filledAt && focusForming ? focusForming : null"),
     "the payload carries forming only between stamp and freeze");
@@ -18000,4 +18009,277 @@ test("focus -03: retirement is one producer and runs ahead of the session gate",
   assert.ok(/utcDay: focusUtcDayStr\(now\)/.test(pol), "the stamp records the UTC day it belongs to");
   assert.ok(/\(st && st\.utcDay\) \|\| \(st \? focusUtcDayStr\(st\.frozenAt \|\| st\.open\) : null\)/.test(pol),
     "pre-build blobs derive their shelf life from frozenAt — the migration, pinned");
+});
+
+// ============================================================================================
+// FOCUS -04 (build 2026.08.18-03): operator-set liquidity floors.
+// "Anything under X is untradeable at my size." Two walls (24h notional, open interest) applied
+// at CANDIDATE ASSEMBLY, before loudness is ever compared, so the 09:00 preview and the 09:30
+// stamp meet the identical filter. Behavioral tests execute the real gate and the real stamp
+// path against seeded universes (-84 doctrine); manifest pins then hold the wiring.
+// ============================================================================================
+const { focusLimits, focusFloorFail, focusGate, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N } = require("../src/compute");
+
+test("focus -04: the limits sanitizer clamps to the backstop — a bad write can loosen nothing", () => {
+  assert.deepEqual(focusLimits(null), { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "absent config = the hard backstop, never an open wall");
+  assert.deepEqual(focusLimits({}), { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "empty object degrades the same way");
+  assert.deepEqual(focusLimits({ vol: 5e6, oi: 750000 }), { vol: 5e6, oi: 750000 }, "an honest pair passes through");
+  assert.deepEqual(focusLimits({ vol: "5000000", oi: "750000" }), { vol: 5e6, oi: 750000 }, "numeric strings (a JSON round-trip, a form post) coerce");
+  // THE FAILURE MODE THIS CLAMP EXISTS FOR: NaN comparisons are all false, so a NaN floor would
+  // have passed EVERY name and silently disabled the wall rather than tightening it.
+  assert.deepEqual(focusLimits({ vol: NaN, oi: NaN }), { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "NaN degrades to the backstop, never to an open wall");
+  assert.deepEqual(focusLimits({ vol: "abc", oi: {} }), { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "garbage degrades identically");
+  assert.deepEqual(focusLimits({ vol: -1, oi: -1 }), { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "negatives cannot dig under the backstop");
+  assert.deepEqual(focusLimits({ vol: 1000, oi: 0 }), { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "a floor BELOW the backstop resolves to the backstop — effective floor is max(hard, yours)");
+  assert.equal(focusLimits({ vol: 5e6 + 0.7 }).vol, 5000001, "floors are whole dollars");
+  assert.deepEqual(focusLimits(focusLimits({ vol: 5e6, oi: 750000 })), { vol: 5e6, oi: 750000 }, "idempotent — re-sanitizing a sanitized pair is a no-op");
+});
+
+test("focus -04: a missing OI read never fails the OI floor — refusing on a number we do not have is fabrication", () => {
+  const L = { vol: 1e6, oi: 1e6 };
+  assert.equal(focusFloorFail({ ticker: "A", vol: 9e6, oi: 9e6 }, L), null, "clears both");
+  assert.equal(focusFloorFail({ ticker: "B", vol: 1e5, oi: 9e6 }, L), "vol", "thin tape");
+  assert.equal(focusFloorFail({ ticker: "C", vol: 9e6, oi: 1e5 }, L), "oi", "thin book");
+  assert.equal(focusFloorFail({ ticker: "D", vol: 1e5, oi: 1e5 }, L), "both", "both walls, disclosed as both");
+  // The honest-null contract, matching the OI Δ column: absent is not zero.
+  assert.equal(focusFloorFail({ ticker: "E", vol: 9e6, oi: null }, L), null, "null OI CLEARS the OI wall — the volume wall still judges it");
+  assert.equal(focusFloorFail({ ticker: "F", vol: 9e6 }, L), null, "an absent oi field behaves the same as an explicit null");
+  assert.equal(focusFloorFail({ ticker: "G", vol: 1e5, oi: null }, L), "vol", "…and a null-OI name can still fail on volume alone, never 'both'");
+  assert.equal(focusFloorFail({ ticker: "H", vol: 9e6, oi: NaN }, L), null, "an unusable OI number is an absence, not a zero");
+  // Boundary: the floor is a floor, not a strict inequality — a name AT the wall clears it.
+  assert.equal(focusFloorFail({ ticker: "I", vol: 1e6, oi: 1e6 }, L), null, "exactly at both walls clears");
+  assert.equal(focusFloorFail({ ticker: "J", vol: 1e6 - 1, oi: 1e6 }, L), "vol", "one dollar under does not");
+  // A candidate with no volume at all is refused, not admitted by an undefined comparison.
+  assert.equal(focusFloorFail({ ticker: "K" }, L), "vol", "a name with no volume read is refused on volume");
+});
+
+test("focus -04: focusGate splits cleared from refused, loudest-first, with the multiple the floor must fall by", () => {
+  const mk = (t, vol, oi, gs) => ({ ticker: t, vol, oi, gapSigma: gs, cluster: "X" });
+  const cands = [mk("PASS1", 9e6, 9e6, 1), mk("QUIET", 1e5, 9e6, 0.2), mk("LOUD", 1e5, 9e6, 3.5),
+    mk("BOOK", 9e6, 1e5, 1.5), mk("NOOI", 9e6, null, 2), mk("BOTH", 5e5, 5e5, 2.5)];
+  const g = focusGate(cands, { vol: 1e6, oi: 1e6 });
+  assert.deepEqual(g.pass.map((c) => c.ticker), ["PASS1", "NOOI"], "cleared keeps candidate order — the caller ranks, the gate does not");
+  assert.equal(g.scanned, 6, "scanned counts the whole field the wall judged");
+  assert.equal(g.belowN, 4, "belowN is the TRUE refused count, not the disclosed slice");
+  // Loudest-first is the whole point: the top row is the loudest thing the wall is refusing.
+  assert.deepEqual(g.below.map((c) => c.ticker), ["LOUD", "BOTH", "BOOK", "QUIET"], "refused set is ordered by loudness, not alphabetically");
+  const by = (t) => g.below.find((c) => c.ticker === t);
+  assert.equal(by("LOUD").why, "vol"); assert.equal(by("BOOK").why, "oi"); assert.equal(by("BOTH").why, "both");
+  assert.equal(by("LOUD").need, 10, "the volume floor would have to fall 10× to admit LOUD");
+  assert.equal(by("BOOK").need, 10, "the OI floor would have to fall 10× to admit BOOK");
+  assert.equal(by("BOTH").need, 2, "a both-fail reports the BINDING wall (the larger drop), never the easier one");
+  assert.ok(g.below.every((c) => typeof c.score === "number"), "loudness rides along so the roster can show what it is refusing");
+  assert.deepEqual(g.limits, { vol: 1e6, oi: 1e6 }, "the gate reports the wall it actually applied");
+  // The disclosed roster is capped; the count is not.
+  const many = Array.from({ length: 40 }, (_, i) => mk("T" + String(i).padStart(2, "0"), 1e5, 9e6, 1));
+  const g2 = focusGate(many, { vol: 1e6, oi: 0 });
+  assert.equal(g2.below.length, FOCUS_BELOW_N, "roster discloses the loudest N");
+  assert.equal(g2.belowN, 40, "…while the count stays honest about the whole tail");
+  assert.equal(focusGate(many, { vol: 1e6, oi: 0 }, 3).below.length, 3, "N is honoured");
+  // Degenerates: a gate is a filter, never a thrower.
+  assert.deepEqual(focusGate(null, null).pass, [], "null candidate list degrades");
+  assert.deepEqual(focusGate([{ nope: 1 }, null, { ticker: "" }], null).pass, [], "malformed candidates are dropped, never thrown on");
+  // No floors set (the backstop only) must still refuse a genuinely untradeable name.
+  const g3 = focusGate([mk("DUST", 1000, 1000, 3)], null);
+  assert.equal(g3.pass.length, 0, "the backstop still bites when no operator floor is set");
+});
+
+// ---- engine harness: the floors against the REAL stamp path ---------------------------------
+// Seeded universe -> real focusTick -> real focusCandidates -> real focusGate -> real focusSelect.
+// Ticker choice is load-bearing: classification resolves off the real sector map, so a made-up
+// symbol is dropped as non-Equity before the wall is ever consulted and would silently prove
+// nothing about the gate.
+function focus04Rig(cfg, opts) {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  let saved = null;
+  const p = createPoller({ dex: "xyz", version: "test", log: () => {},
+    store: { ...base, saveFocus: (d) => { saved = d; }, loadFocus: () => (opts && opts.load ? opts.load : null) } });
+  const OPEN = Date.UTC(2026, 7, 14, 13, 30), H = 3600 * 1000;   // Fri 2026-08-14, 09:30 ET
+  const spine = (px) => { const o = []; for (let i = 48; i >= 0; i--) o.push({ t: OPEN - i * H, o: px, h: px * 1.01, l: px * 0.99, c: px, v: 1e6 }); return o; };
+  Object.entries(cfg).forEach(([t, [vol, oi]], i) =>
+    p.seedRowNow("xyz:" + t, { ticker: t, uni: "xyz", px: 100 + i, vol, oi, oiBase: 1000, hourlyRaw: spine(100 + i) }));
+  return { p, OPEN, saved: () => saved };
+}
+const FOCUS04_FULL = { NVDA: [9e6, 5e6], MU: [9e6, 5e6], AMD: [9e6, 5e6], LLY: [9e6, 5e6], TSLA: [9e6, 5e6],
+  XOM: [9e6, 5e6], JPM: [9e6, 5e6], COIN: [9e6, 1e5], PLTR: [9e6, null], SNOW: [3e5, 9e6] };
+// GRADED depths, for the tests where the wall has to actually bite: only three names sit above
+// $20M, the rest are ordinary names an institutional clip cannot work. A flat fixture would let a
+// "strict" wall pass everything and the test would assert nothing.
+const FOCUS04_GRADED = { NVDA: [40e6, 9e6], MU: [30e6, 9e6], AMD: [22e6, 9e6], LLY: [9e6, 9e6],
+  TSLA: [8e6, 9e6], XOM: [6e6, 9e6], JPM: [5e6, 9e6], COIN: [4e6, 1e5], PLTR: [9e6, null], SNOW: [3e5, 9e6] };
+
+test("focus -04: the floors gate a real stamp, and the record freezes the wall that cut it", () => {
+  const { p, OPEN } = focus04Rig(FOCUS04_FULL);
+  assert.deepEqual(p.setFocusLimits(5e6, 1e6, false), { ok: false, error: "forbidden" }, "a non-admin write is refused outright");
+  assert.deepEqual(p.getFocusLimits().limits, { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "…and changes nothing");
+  assert.deepEqual(p.setFocusLimits(1000, -5, true).limits, { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "an admin write below the backstop resolves TO the backstop");
+  assert.deepEqual(p.setFocusLimits(5e6, 1e6, true).limits, { vol: 5e6, oi: 1e6 }, "an honest write lands");
+
+  p.focusTickNow(OPEN + 60000);
+  const f = p.getFocus(OPEN + 60000);
+  const rec = f.today;
+  assert.ok(rec, "the stamp lands");
+  assert.equal(rec.cleared, 8, "eight names cleared the wall");
+  assert.equal(rec.scanned, 10, "…out of the ten structurally eligible");
+  assert.equal(rec.belowN, 2, "two were refused on size");
+  assert.deepEqual(rec.below.map((b) => b.ticker + ":" + b.why), ["COIN:oi", "SNOW:vol"], "each refusal names the wall it hit");
+  assert.equal(rec.below.find((b) => b.ticker === "SNOW").need, 16.7, "the roster states how far the floor must fall to admit it");
+  // THE OI CONTRACT, end to end: PLTR carries no OI read and seats anyway.
+  assert.ok(rec.rows.some((r) => r.ticker === "PLTR"), "a name with no honest OI read takes a seat — it is never refused on a number we do not have");
+  assert.ok(!rec.rows.some((r) => r.ticker === "COIN" || r.ticker === "SNOW"), "refused names hold no seat");
+  assert.ok(!(rec.cuts || []).some((c) => c.ticker === "COIN" || c.ticker === "SNOW"),
+    "…and they are NOT cuts: cuts lost the ranking, these never entered it — collapsing the two would hide which mechanism refused them");
+  assert.ok(rec.rows.every((r) => r.oi === null || r.oi >= 1e6), "every seated row carries the OI notional the wall judged");
+  assert.deepEqual(rec.limits, { vol: 5e6, oi: 1e6 }, "the wall in force at the stamp is written ONTO the record");
+
+  // IMMUTABILITY: raising the floors afterwards must not rewrite how this list was made.
+  p.setFocusLimits(50e6, 40e6, true);
+  const f2 = p.getFocus(OPEN + 120000);
+  assert.deepEqual(f2.today.limits, { vol: 5e6, oi: 1e6 }, "the frozen record still states the wall it was cut with");
+  assert.equal(f2.today.rows.length, 6, "…and still holds its six seats");
+  assert.deepEqual(f2.today.below.map((b) => b.ticker), ["COIN", "SNOW"], "…and its refused roster is the one from the stamp, not from today's panel value");
+  assert.deepEqual(f2.limits, { vol: 50e6, oi: 40e6 }, "the LIVE wall is a separate field — what the next stamp will use");
+  assert.deepEqual(f2.hard, { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "the backstop ships so the panel can state what it cannot go under");
+});
+
+test("focus -04: a strict wall stamps SHORT — never padded, never mistaken for a booting universe", () => {
+  // THE SPLIT. One count served both roles before this build: the booting check and the seating
+  // check. A strict wall was therefore indistinguishable from a cold universe — the tick deferred,
+  // the stamp never landed, and the tab read "pending" all day with no statement of why.
+  // 1) genuinely booting (five eligible names, pre-floor) -> defer, no record.
+  const boot = focus04Rig({ NVDA: [9e6, 9e6], MU: [9e6, 9e6], AMD: [9e6, 9e6], LLY: [9e6, 9e6], TSLA: [9e6, 9e6] });
+  boot.p.focusTickNow(boot.OPEN + 60000);
+  assert.equal(boot.p.getFocus(boot.OPEN + 60000).today, null, "a booting universe still defers — something IS coming, and a phantom list would deny it");
+  assert.equal(boot.saved(), null, "…and nothing is persisted");
+  // 2) a full field behind a strict wall -> stamp what cleared, however few. Graded volumes so
+  //    the wall genuinely bites: only NVDA/MU/AMD sit above $20M, the rest are ordinary names the
+  //    operator's clip cannot work. Ten eligible (past the booting floor), three cleared.
+  const strict = focus04Rig(FOCUS04_GRADED);
+  strict.p.setFocusLimits(20e6, 4.5e6, true);
+  strict.p.focusTickNow(strict.OPEN + 60000);
+  const rec = strict.p.getFocus(strict.OPEN + 60000).today;
+  assert.ok(rec, "a strict wall does NOT defer — the field is there, the operator's size is the reason it is thin");
+  assert.ok(rec.rows.length < 6 && rec.rows.length > 0, "the list is short, not empty and not padded");
+  assert.equal(rec.rows.length, rec.cleared, "with fewer cleared names than seats, every cleared name seats");
+  assert.equal(rec.scanned, 10, "the record discloses the pre-floor field so 'short' is readable as a choice, not a gap");
+  assert.ok(rec.cleared < 6, "…and how few cleared it");
+  assert.equal(rec.rows.length, 3, "exactly the three names that clear the wall");
+  assert.ok(rec.rows.every((r) => r.vol >= 20e6), "every seat clears the volume wall");
+  assert.ok(rec.rows.every((r) => r.oi === null || r.oi >= 4.5e6), "every seat clears the OI wall or carries no OI read");
+  // 3) idempotence: the day is stamped, so a later tick must not re-cut it against the same wall.
+  const before = JSON.stringify(rec);
+  strict.p.focusTickNow(strict.OPEN + 90000);
+  assert.equal(JSON.stringify(strict.p.getFocus(strict.OPEN + 90000).today), before, "a stamped day is stamped once — the tick does not re-cut it");
+});
+
+test("focus -04: preview and stamp meet the IDENTICAL wall, and a floor change busts the preview", () => {
+  const { p, OPEN } = focus04Rig(FOCUS04_GRADED);
+  p.setFocusLimits(5e6, 1e6, true);
+  const PRE = OPEN - 15 * 60 * 1000;              // 09:15 ET — inside the preview lead
+  p.focusTickNow(PRE);
+  const pv = p.getFocus(PRE).preview;
+  assert.ok(pv, "the prep pool builds");
+  assert.ok(!pv.rows.some((r) => r.ticker === "COIN" || r.ticker === "SNOW"),
+    "the pool is gated by the SAME wall the stamp will use — prepping against names the bell will refuse is the drift this prevents");
+  assert.ok(pv.rows.some((r) => r.ticker === "PLTR"), "…including the missing-OI rule");
+  assert.equal(pv.cleared, 8, "the pool discloses how many cleared");
+  assert.equal(pv.scanned, 10, "…out of how many were eligible");
+  assert.deepEqual(pv.below.map((b) => b.ticker), ["COIN", "SNOW"], "…and which names it is refusing, live");
+  assert.deepEqual(pv.limits, { vol: 5e6, oi: 1e6 }, "the pool states the wall it applied");
+  // A floor change must republish the pool even if the visible ten survive it: the ETag rides a
+  // signature, and a wall the payload does not mention is a wall the client cannot show.
+  const ver = p.getFocusStamp();
+  p.setFocusLimits(20e6, 4.5e6, true);
+  assert.notEqual(p.getFocusStamp(), ver, "the write bumps the stamp so the client's poll picks the new wall up");
+  assert.equal(p.getFocus(PRE).preview, null, "the write drops the stale pool rather than serving one gated on the old wall");
+  p.focusTickNow(PRE + 30000);
+  const pv2 = p.getFocus(PRE + 30000).preview;
+  assert.ok(pv2 && pv2.cleared === 3, "…and the next tick rebuilds it against the new one");
+  assert.deepEqual(pv2.rows.map((r) => r.ticker), ["AMD", "MU", "NVDA"], "only the names that clear the deeper wall survive the rebuild");
+  assert.deepEqual(pv2.limits, { vol: 20e6, oi: 4.5e6 }, "the rebuilt pool states the new wall");
+});
+
+test("focus -04: the floors survive a redeploy, and a corrupt blob cannot open the wall", () => {
+  const stamp = { day: "2026-08-14", utcDay: "2026-08-14", open: 1, close: 2, prevCloseT: 0,
+    frozenAt: Date.UTC(2026, 7, 14, 13, 30), late: 0, rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0,
+    limits: { vol: 5e6, oi: 1e6 }, scanned: 10, cleared: 8, below: [], belowN: 2 };
+  const a = focus04Rig({}, { load: { state: stamp, prev: null, limits: { vol: 5e6, oi: 1e6 } } });
+  a.p.hydrateFocusNow(Date.UTC(2026, 7, 14, 18, 0));
+  assert.deepEqual(a.p.getFocusLimits().limits, { vol: 5e6, oi: 1e6 }, "the wall rides the same blob as the record — one atomic write, restored together");
+  assert.deepEqual(a.p.getFocus(Date.UTC(2026, 7, 14, 18, 0)).today.limits, { vol: 5e6, oi: 1e6 }, "…and the restored record still states its own wall");
+  // A hand-edited or truncated blob must fail CLOSED (to the backstop), never open.
+  const b = focus04Rig({}, { load: { state: stamp, prev: null, limits: { vol: NaN, oi: "open sesame" } } });
+  b.p.hydrateFocusNow(Date.UTC(2026, 7, 14, 18, 0));
+  assert.deepEqual(b.p.getFocusLimits().limits, { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "corrupt floors degrade to the backstop, never to no wall at all");
+  const c = focus04Rig({}, { load: { state: stamp, prev: null } });
+  c.p.hydrateFocusNow(Date.UTC(2026, 7, 14, 18, 0));
+  assert.deepEqual(c.p.getFocusLimits().limits, { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, "a pre-build blob carries no floors and hydrates to the backstop");
+});
+
+test("focus -04: the panel's scan is the ENGINE's eligible field, not a second opinion", () => {
+  // One structural predicate (focusEligible) feeds both the expensive candidate assembly and the
+  // cheap panel scan. If they could drift, every survivor count the panel prints would be a claim
+  // about a different universe than the one the gate actually walks.
+  const { p, OPEN } = focus04Rig(FOCUS04_FULL);
+  const sc = p.getFocusLimits().scan;
+  assert.equal(sc.length, 10, "the scan carries exactly the structurally eligible names");
+  assert.ok(sc.every((r) => Array.isArray(r) && r.length === 4), "compact rows: [ticker, vol, oi, cluster]");
+  assert.ok(sc[0][1] >= sc[sc.length - 1][1], "sorted by volume so the panel's histogram needs no second sort");
+  const noOi = sc.find((r) => r[0] === "PLTR");
+  assert.equal(noOi[2], null, "a missing OI read ships as null — the panel must be able to say 'no read', not '$0'");
+  p.focusTickNow(OPEN + 60000);
+  assert.equal(p.getFocus(OPEN + 60000).today.scanned, sc.length,
+    "the stamp's scanned count and the panel's scan length are the same number, because they are the same predicate");
+});
+
+test("focus -04: manifest pins — the gate, the routes, the two-lock write, the panel and the roster", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const cmp = rd("src/compute.js"), pol = rd("src/poller.js"), srv = rd("server.js"),
+    app = rd("public/app.js"), idx = rd("public/index.html"), css = rd("public/styles.css");
+  // manifest: the write verb owns its own act key, path-wide (the GET returns the scan and is
+  // exactly as admin-only as the write), so opening the focus TAB can never open the wall.
+  assert.ok(cmp.includes('{ key: "focus.limits",  kind: "act", label: "Set FOCUS liquidity floors", def: "admin", routes: ["/api/focus/limits"] }'),
+    "focus.limits manifest entry (admin, path-wide)");
+  const { featureGateFor } = require("../src/compute");
+  assert.equal(featureGateFor("POST", "/api/focus/limits", {}, false), "focus.limits", "a public caller is gated on the write");
+  assert.equal(featureGateFor("GET", "/api/focus/limits", {}, false), "focus.limits", "…and on the read, which carries the scan");
+  assert.equal(featureGateFor("GET", "/api/focus/limits", {}, true), null, "admin proceeds");
+  // compute: the three pure pieces and the backstop live here, not in the poller
+  for (const pin of ["const FOCUS_HARD_VOL = 200000", "function focusLimits(", "function focusFloorFail(",
+    "function focusGate(", "module.exports.focusGate = focusGate;"])
+    assert.ok(cmp.includes(pin), "compute pin: " + pin);
+  // poller: one eligibility predicate, the gate at BOTH call sites, the frozen wall on the record
+  assert.ok(!pol.includes("FOCUS_MIN_VOL"), "no second volume floor survives in the poller");
+  assert.equal(pol.split("focusGate(cands, focusLim").length - 1, 2, "the gate runs at exactly two call sites — preview and stamp, one wall");
+  assert.equal(pol.split("function focusEligible(").length - 1, 1, "exactly one structural predicate");
+  for (const pin of ["limits: g.limits, scanned: g.scanned, cleared: g.pass.length, below: g.below, belowN: g.belowN",
+    "function setFocusLimits(", "focusLim = focusLimits(data.limits);", "store.saveFocus({ state: focusState, prev: focusPrev, limits: focusLim })",
+    "getFocusLimits:", "setFocusLimits,"])
+    assert.ok(pol.includes(pin), "poller pin: " + pin);
+  // the write must not touch the frozen record — the absence of a focusState mutation is the pin
+  const setBody = pol.slice(pol.indexOf("function setFocusLimits("), pol.indexOf("function focusEligible("));
+  assert.ok(!/focusState\s*=/.test(setBody), "setting floors never rewrites today's stamp");
+  assert.ok(setBody.includes("focusPv = null;"), "…it drops the live preview pool so the prep list re-gates");
+  // server: both verbs, admin re-checked in-handler on top of the manifest gate (two locks)
+  assert.ok(srv.includes('fastify.get("/api/focus/limits"') && srv.includes('fastify.post("/api/focus/limits"'), "both limit routes");
+  assert.equal(srv.split("poller.setFocusLimits(").length - 1, 1, "exactly one writer");
+  const limBlock = srv.slice(srv.indexOf('fastify.get("/api/focus/limits"'), srv.indexOf('fastify.get("/api/whale"'));
+  assert.equal(limBlock.split("isAdmin(req)").length - 1, 2, "both verbs re-check the admin cookie — manifest visibility and authz are separate axes");
+  assert.ok(limBlock.includes('cache-control", "no-store"'), "the scan is never cached — calibrating against yesterday's volumes is the failure this prevents");
+  // client: the panel, its hover contract, and the roster
+  for (const pin of ["function renderAdmFloors(", "function admFlHist(", "function admFlProject(",
+    "async function saveAdmFloors(", "loadAdmFloors();", "function focBelowHtml(", "FOC.showBelow"])
+    assert.ok(app.includes(pin), "app pin: " + pin);
+  assert.ok(idx.includes('id="admFloorsBox"'), "the panel has a mount point in the admin view");
+  // EVERY bar carries a readout (the standing hover contract for charts) and the floor line is draggable
+  assert.ok(/admfl-bar[^"]*"[^>]*data-tip=/.test(app), "every histogram bar carries a hover readout");
+  assert.ok(app.includes("sv.addEventListener('mousedown'") && app.includes("sv.addEventListener('mousemove'"), "the floor line is draggable on the chart");
+  // the panel reconciles with the SERVER's resolved floors, never with what was asked
+  assert.ok(app.includes("_admFlV=d.limits.vol; _admFlO=d.limits.oi;"), "the save path adopts the server's clamped answer");
+  // the roster reads the RECORD's own wall, never the live one
+  assert.ok(app.includes("focBelowHtml(day,day.limits||d.limits)"), "the stamped table's roster reads the record's own floors");
+  assert.ok(css.includes(".focbf") && css.includes(".admfl-hist") && css.includes(".admfl-bar"), "roster + panel styles present");
 });
