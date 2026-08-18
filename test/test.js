@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.17-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.18-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17099,16 +17099,29 @@ test("focus -01: engine harness — a booting universe never mints a stamp, hydr
   p1.focusTickNow(Date.UTC(2026, 7, 15, 15, 0));    // Saturday — no session, must be a silent no-op
   assert.equal(saved, null, "weekend tick is a no-op");
   // 2) hydrate: a saved list for TODAY restores as today's; a saved PRIOR day rolls to yesterday.
-  const today = etDS(Date.now()), mkState = (day) => ({ day, open: 1, close: 2, frozenAt: 3, late: 0, rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0 });
-  const p2 = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: mkState(today), prev: null }) }, log: () => {}, version: "test" });
+  // 2026.08.18-02: hydrate rolls on the UTC boundary, so a fixture's frozenAt is load-bearing —
+  // it is what a pre-utcDay blob's shelf life is derived from. `frozenAt: 3` (the epoch) used to
+  // be harmless filler here and is now a lie about when the list was stamped.
+  const NOWMS = Date.now(), today = etDS(NOWMS), utcOf = (t) => new Date(t).toISOString().slice(0, 10);
+  const mkState = (day, frozenAt) => ({ day, utcDay: utcOf(frozenAt), open: 1, close: 2, frozenAt, late: 0,
+    rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0 });
+  const boot = (state) => { const p = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state, prev: null }) }, log: () => {}, version: "test" });
+    p.hydrateFocusNow(); return p.getFocus(); };
+  const p2 = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: mkState(today, NOWMS), prev: null }) }, log: () => {}, version: "test" });
   assert.equal(p2.hydrateFocusNow(), true, "hydrate reports a restore");
   const f2 = p2.getFocus();
   assert.ok(f2.today && f2.today.day === today && f2.today.rows.length === 1, "same-day state restores verbatim");
-  const p3 = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: mkState("2020-01-02"), prev: null }) }, log: () => {}, version: "test" });
-  p3.hydrateFocusNow();
-  const f3 = p3.getFocus();
+  const f3 = boot(mkState("2020-01-02", Date.UTC(2020, 0, 2, 14, 0)));
   assert.equal(f3.today, null, "a stale day never masquerades as today's stamp");
   assert.ok(f3.prev && f3.prev.day === "2020-01-02", "…it rolls to the prior-list slot instead");
+  // Migration: a blob written before this build carries no utcDay. Its shelf life is derived from
+  // frozenAt, so a restart across the boundary retires exactly what the running process would have.
+  const legacyFresh = mkState(today, NOWMS); delete legacyFresh.utcDay;
+  assert.ok(boot(legacyFresh).today, "legacy blob stamped this UTC day survives the restart");
+  const legacyOld = mkState(today, NOWMS - 30 * 3600e3); delete legacyOld.utcDay;
+  const f5 = boot(legacyOld);
+  assert.equal(f5.today, null, "a legacy blob whose ET day still reads as today but was stamped BEFORE the last 00:00 UTC is retired, not resurrected");
+  assert.ok(f5.prev, "…and lands in the prior-list slot, reachable by the toggle");
 });
 
 // ============================================================================================
@@ -17318,7 +17331,7 @@ test("whale lane end-to-end: add by CIK, poll ingests real filings through the r
   assert.equal(row.q, "Q2 2026"); assert.equal(row.total, 2000); assert.equal(row.n, 2);
   assert.ok(Math.abs(row.dPct - (2000 / 2300 - 1) * 100) < 1e-9, "book QoQ vs the prior filed quarter");
   assert.equal(row.unseen, 0, "-03 rule: a fund's FIRST ingest is backfill — silent even when the filing is fresh; announce needs a prior book (staged in the pull test)");
-  assert.equal(w.window.cur.q, "Q2 2026");
+  assert.equal(p.getWhale(NOW).window.cur.q, "Q2 2026", "the filing calendar is read at the FROZEN instant — this assertion must not depend on the day the suite runs");
   const f = await p.getWhaleFund("berkshire");
   assert.ok(f.ok, "fund card: " + (f.error || ""));
   assert.equal(f.hasPrev, true);
@@ -17752,4 +17765,239 @@ test("whale put/call coloring (2026.08.17-04): option badges carry their side �
   assert.ok(app.includes("p.put==='put'?'neg':'pos'") && app.includes("r.put==='put'?'neg':'pos'"), "terminal cards reuse the terminal's own side colors");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".whl-put.put") && css.includes(".whl-put.call") && css.includes(".whl-oc.put"), "side colors styled off --up/--down");
+});
+
+test("whale roster -01 (2026.08.18-01): a watchlist edit reopens the season build; the crowding grid rides the build's own roster", async () => {
+  const C = require("../src/compute");
+  // --- pure leg: the aggregate accounts for who it consumed, and the count derives from that list.
+  const P = (cusip, value, shares) => ({ cusip, put: null, name: cusip + " CORP", cls: null, value, shares, pct: null });
+  const sPure = C.whaleSeason([
+    { key: "A", cik: 11, cur: { total: 100, n: 1, positions: [P("X1", 100, 10)] }, prev: { total: 80, n: 1, positions: [P("X1", 80, 8)] } },
+    { key: "B", cik: 22, cur: { total: 50, n: 1, positions: [P("X1", 50, 5)] }, prev: null },
+    { key: "C", cik: 33, cur: null, prev: null },   // watched, hasn't filed — never part of the roster
+  ]);
+  assert.deepEqual(sPure.roster, [{ key: "A", cik: 11 }, { key: "B", cik: 22 }],
+    "the roster is the FILED funds, carrying CIK — identity, not the de-collidable label");
+  assert.equal(sPure.nFunds, sPure.roster.length, "nFunds derives from the roster; two producers of one count is the bug this build removes");
+
+  // --- end-to-end leg: two filers, one removed, through the real ingest + build path.
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => null };
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const NOW = Date.UTC(2026, 7, 16, 12, 0, 0);   // frozen inside Q2 2026's grace window
+  const tbl = (rows) => "<x>" + rows.map(([nm, cu, v, sh]) =>
+    `<infoTable><nameOfIssuer>${nm}</nameOfIssuer><cusip>${cu}</cusip><value>${v}</value>` +
+    `<shrsOrPrnAmt><sshPrnamt>${sh}</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>`).join("") + "</x>";
+  const AAPL = ["APPLE INC", "037833100"], UNH = ["UNITEDHEALTH GROUP INC", "91324P102"];
+  const books = {
+    "000126000002": tbl([[...AAPL, 1500, 15], [...UNH, 500, 5]]),   // BERKSHIRE Q2 — AAPL trimmed 20->15
+    "000126000001": tbl([[...AAPL, 2000, 20]]),                      // BERKSHIRE Q1
+    "000226000002": tbl([[...AAPL, 800, 8]]),                        // BRIDGEWATER Q2 — AAPL added 6->8
+    "000226000001": tbl([[...AAPL, 600, 6]]),                        // BRIDGEWATER Q1
+  };
+  const subs = (name, pfx) => J({ name, filings: { recent: {
+    form: ["13F-HR", "13F-HR"], accessionNumber: [pfx + "-26-000002", pfx + "-26-000001"],
+    filingDate: ["2026-08-14", "2026-05-15"], reportDate: ["2026-06-30", "2026-03-31"] } } });
+  const extFetch = async (url) => {
+    if (url.includes("company_tickers.json")) return J({ 0: { cik_str: 111, ticker: "AAPL", title: "Apple Inc." } });
+    if (url.includes("company_tickers_mf.json")) return J({ fields: ["cik"], data: [] });
+    if (url.includes("submissions/CIK0001067983")) return subs("BERKSHIRE HATHAWAY INC", "0001");
+    if (url.includes("submissions/CIK0001350694")) return subs("BRIDGEWATER ASSOCIATES LP", "0002");
+    for (const acc of Object.keys(books)) {
+      if (url.includes("/" + acc + "/index.json")) return J({ directory: { item: [
+        { name: "primary_doc.xml", size: 900 }, { name: "form13fInfoTable.xml", size: 5000 }] } });
+      if (url.includes("/" + acc + "/form13fInfoTable.xml")) return X(books[acc]);
+    }
+    return { ok: false, status: 404 };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  assert.ok(p.whaleAdd(1067983, "Berkshire Hathaway Inc", NOW).ok);
+  assert.ok(p.whaleAdd(1350694, "Bridgewater Associates LP", NOW).ok);
+  await p.whaleTickNow(NOW);
+
+  const s0 = await p.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s0.ok, "season built from both filers: " + (s0.error || ""));
+  assert.equal(s0.agg.nFunds, 2);
+  assert.deepEqual(s0.agg.roster.map((r) => r.key).sort(), ["BERKSHIRE", "BRIDGEWATER"]);
+  assert.equal(s0.stale, null, "roster matches the watchlist — nothing to disclose");
+  const aapl0 = s0.agg.crowd.find((r) => r.tk === "AAPL");
+  assert.ok(aapl0 && aapl0.held === 2 && aapl0.adding === 1 && aapl0.cutting === 1,
+    "both hold AAPL; one added, one trimmed");
+
+  // THE REGRESSION. Removing a fund used to leave this aggregate untouched until the next poll —
+  // up to 24h in the "upcoming" stretch — so the denominator kept saying 2 while the grid drew 1.
+  assert.ok(p.whaleRm("BRIDGEWATER", NOW).ok);
+  const s1 = await p.getWhaleSeasonQ("Q2 2026");
+  assert.equal(s1.agg.nFunds, 1, "the removal reopened the build synchronously — no waiting on the cadence");
+  assert.deepEqual(s1.agg.roster.map((r) => r.key), ["BERKSHIRE"], "and the grid's roster shrank with it");
+  assert.equal(s1.stale, null, "a rebuild that succeeded is not stale");
+  assert.equal(s1.amended, false, "a roster edit is NOT an amendment — no filing moved, so the header must not claim one");
+  assert.ok(!s1.agg.crowd.some((r) => r.tk === "AAPL"), "held by one fund is not crowding; the row leaves rather than counting a departed fund");
+
+  // Re-adding restores it whole from cached books, without re-fetching EDGAR.
+  assert.ok(p.whaleAdd(1350694, "Bridgewater Associates LP", NOW).ok);
+  const s2 = await p.getWhaleSeasonQ("Q2 2026");
+  assert.equal(s2.agg.nFunds, 2, "cached filings mean a re-add rebuilds immediately, no poll required");
+
+  // Stale: remove every filer. Nothing remains to build from, so the aggregate outlives its roster
+  // and SAYS SO rather than being deleted or silently describing funds you no longer track.
+  assert.ok(p.whaleRm("BERKSHIRE", NOW).ok);
+  assert.ok(p.whaleRm("BRIDGEWATER", NOW).ok);
+  const s3 = await p.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s3.ok, "the season is KEPT — history is not destroyed to avoid a label");
+  assert.ok(s3.stale, "…and flagged");
+  // Removing BERKSHIRE first rebuilt cleanly down to one fund; removing the LAST filer is the
+  // only edit with nothing to rebuild from, so the frozen build is that one-fund one — not the
+  // original pair. The label reports the build that actually froze, not the roster's whole history.
+  assert.deepEqual(s3.stale.dropped, ["BRIDGEWATER"], "the label names the fund the frozen build was built from");
+  assert.equal(s3.agg.nFunds, 1, "the counts still describe that build, which is what makes them true");
+  assert.ok(s3.agg.roster.every((r) => r.dropped === 1), "every cell in the grid marks itself history");
+});
+
+test("whale roster -01: the crowding grid has ONE producer — cells cannot be drawn from the live watchlist", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const fn = app.slice(app.indexOf("function renderWhlSeason()"));
+  const body = fn.slice(0, fn.indexOf("\nfunction "));
+  const cells = body.slice(body.indexOf("const cells="), body.indexOf("const crowd="));
+  assert.ok(/\(a\.roster\|\|\[\]\)\.map/.test(cells),
+    "cells iterate the season aggregate's roster — the list the counts were computed from");
+  assert.ok(!/WHL\.data\.watch/.test(cells),
+    "and NEVER the live watchlist: that is the two-producer split that let the squares and the N/M contradict each other");
+  assert.ok(/w\.dropped/.test(cells), "a departed fund's square marks itself as history");
+  assert.ok(/whl-stale/.test(body) && /s\.stale/.test(body), "the stale chip renders off the server's flag, never re-derived client-side");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".whl-cell.gone") && css.includes(".whl-stale"), "both new states are styled");
+});
+
+test("whale roster -01: accession and roster signatures are independent — only a filing move is an amendment", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const fn = pol.slice(pol.indexOf("function whaleSeasonMaybe("));
+  const body = fn.slice(0, fn.indexOf("\n  async function"));
+  assert.ok(/const accs = \{\}/.test(body) && /const rosterSig = /.test(body), "two inputs, tracked separately");
+  assert.ok(/!legacy && !accMoved && !rosterMoved/.test(body),
+    "EITHER changing reopens the build — a roster edit changes what the aggregate would say just as an amendment does");
+  assert.ok(/k in had\.accs && had\.accs\[k\] !== accs\[k\]/.test(body),
+    "accessions compare on the INTERSECTION: a flat signature moves whenever the roster does, which is why it can't answer 'did a filing change?'");
+  assert.ok(/amended: had \? \(accMoved \? 1 :/.test(body),
+    "…and only that comparison sets `amended`, or every add/remove announces a filing that never landed");
+  assert.ok(/const legacy = had && !had\.accs/.test(body), "hydrated pre-build blobs rebuild once to adopt the roster");
+  // The roster edits must reach the build directly rather than waiting on whaleTick's cadence.
+  for (const f of ["function whaleAdd(cik, name, nowArg)", "function whaleRm(keyRaw, nowArg)"])
+    assert.ok(pol.includes(f), "clock-injectable roster edit missing: " + f);
+  assert.equal(pol.split("whaleSeasonMaybe(nowArg || Date.now())").length - 1, 2,
+    "both add and remove reopen the build; a route that omits nowArg still gets the real clock");
+});
+
+test("focus -03 (2026.08.18-02): the day's list retires at 00:00 UTC — weekends included, prior list kept", () => {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const FRI = { day: "2026-08-14", utcDay: "2026-08-14", open: Date.UTC(2026, 7, 14, 13, 30),
+    close: Date.UTC(2026, 7, 14, 20, 0), prevCloseT: Date.UTC(2026, 7, 13, 20, 0),
+    frozenAt: Date.UTC(2026, 7, 14, 13, 30), late: 0, rows: [{ ticker: "NVDA" }, { ticker: "MU" }],
+    cuts: [], filledAt: 0, fillNote: null, pvDiff: null };
+  const boot = () => { let saved = null;
+    const p = createPoller({ dex: "xyz", version: "test", log: () => {},
+      store: { ...base, saveFocus: (d) => { saved = d; }, loadFocus: () => ({ state: JSON.parse(JSON.stringify(FRI)), prev: null }) } });
+    p.hydrateFocusNow(Date.UTC(2026, 7, 14, 18, 0));   // boot inside the stamp's own UTC day
+    return { p, saved: () => saved };
+  };
+
+  // Inside the same UTC day — including after the 16:00 ET cash close — the list stands.
+  const a = boot();
+  const T_CLOSE = Date.UTC(2026, 7, 14, 20, 30);     // 16:30 ET Fri, still 2026-08-14 UTC
+  a.p.focusTickNow(T_CLOSE);
+  assert.ok(a.p.getFocus(T_CLOSE).today, "the close does NOT retire the list — the boundary is 00:00 UTC, four hours later");
+  // The tick legitimately writes here (the +1h fill lands an hour after the open) — what matters
+  // is that the write still carries a live state rather than a retirement.
+  assert.ok(!a.saved() || a.saved().state, "any write in-day still carries the stamp, not a retirement");
+
+  // 00:00 UTC crosses (20:00 ET Friday): the list retires and the tab goes empty.
+  const T_AFTER = Date.UTC(2026, 7, 15, 0, 1);
+  a.p.focusTickNow(T_AFTER);
+  const f = a.p.getFocus(T_AFTER);
+  assert.equal(f.today, null, "the day's list is gone");
+  assert.ok(f.prev && f.prev.day === "2026-08-14", "retired, not deleted — it lands behind the yesterday toggle");
+  assert.deepEqual(f.prev.rows.map((r) => r.ticker), ["NVDA", "MU"], "…verbatim, exactly as stamped");
+  assert.ok(a.saved() && a.saved().prev && !a.saved().state, "the retirement persisted, so a redeploy can't resurrect it");
+  assert.equal(f.state, "cleared", "a stamped-then-retired day reads CLEARED, not 'stamping on the next tick'");
+
+  // THE WEEKEND REGRESSION. Retirement runs before the session gate; the old tick returned early
+  // on a day with no session, so a Friday list survived until Monday's stamp.
+  const b = boot();
+  const T_SAT = Date.UTC(2026, 7, 16, 3, 0);       // Sat 23:00 ET — no cash session that ET day
+  b.p.focusTickNow(T_SAT);
+  assert.equal(b.p.getFocus(T_SAT).today, null, "a no-session day still retires the previous list");
+  assert.ok(b.p.getFocus(T_SAT).prev, "…keeping it reachable");
+
+  // Re-ticking after retirement is idempotent: nothing left to retire, prev is not overwritten.
+  const before = b.saved();
+  const T_SAT2 = Date.UTC(2026, 7, 16, 4, 0);
+  b.p.focusTickNow(T_SAT2);
+  assert.equal(b.saved(), before, "no second write — retirement fires once per stamp, not once per tick");
+  assert.ok(b.p.getFocus(T_SAT2).prev.day === "2026-08-14", "and the prior list is not clobbered by an empty one");
+});
+
+test("focus -03: 'cleared' and 'pending' are different claims and must not collapse", () => {
+  const { createPoller } = require("../src/poller");
+  const { etDayStr: etDS } = require("../src/compute");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const NOW = Date.UTC(2026, 7, 14, 22, 0);   // 18:00 ET Friday: after the close, BEFORE the 00:00 UTC boundary
+  const today = etDS(NOW);
+  const mk = (day, utcDay) => ({ day, utcDay, open: 1, close: 2, prevCloseT: 0, frozenAt: NOW - 40 * 3600e3,
+    late: 0, rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0 });
+  // A record for TODAY'S session that has already been retired: nothing more is coming today.
+  const p = createPoller({ dex: "xyz", version: "test", log: () => {},
+    store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: null, prev: mk(today, "1970-01-01") }) } });
+  p.hydrateFocusNow(NOW);
+  assert.equal(p.getFocus(NOW).state, "cleared",
+    "today was stamped and retired — saying 'stamping on the next tick' would promise a list that is never coming");
+  // No record at all for today: the open may genuinely still be pending.
+  const q = createPoller({ dex: "xyz", version: "test", log: () => {},
+    store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: null, prev: mk("2020-01-02", "2020-01-02") }) } });
+  q.hydrateFocusNow(NOW);
+  assert.notEqual(q.getFocus(NOW).state, "cleared", "a prior day's record must not make TODAY look already-retired");
+});
+
+test("focus -03: the prior list renders only when asked, and the toggle survives the clear", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const fn = app.slice(app.indexOf("function renderFocus()"));
+  const body = fn.slice(0, fn.indexOf("\nfunction "));
+  const pick = body.slice(body.indexOf("const day="), body.indexOf("\n  if(!FOC.showPrev"));
+  assert.ok(/const day=FOC\.showPrev\?\(d\.prev\|\|null\):\(d\.today\|\|null\);/.test(pick),
+    "no implicit fallback to d.prev — an empty list is a true statement about the day, a substituted one is not");
+  assert.ok(!/d\.state==='pre'/.test(pick) && !/d\.state==='offday'/.test(pick),
+    "the pre/offday auto-substitution is gone from the selection expression entirely");
+  assert.ok(!body.includes("usingPrevAuto"), "…and so is the banner that narrated it");
+  const bar = body.slice(body.indexOf('id="focprev"') - 200, body.indexOf('id="focprev"') + 120);
+  assert.ok(/\+\(d\.prev\?/.test(bar) && !/d\.prev&&d\.today\?/.test(bar),
+    "the toggle is gated on d.prev ALONE: gating on d.today removes it exactly when the clear makes it the only route back");
+  assert.ok(/d\.state==='cleared'/.test(app) && /00:00 UTC/.test(app), "the cleared state renders its own line");
+  const empty = body.slice(body.indexOf("if(!day){"), body.indexOf("if(!day){") + 700);
+  assert.ok(/d\.state==='cleared'\?/.test(empty) && /d\.state==='offday'\?/.test(empty),
+    "the empty-state copy names the state that produced it rather than one generic message");
+});
+
+test("focus -03: retirement is one producer and runs ahead of the session gate", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const fn = pol.slice(pol.indexOf("function focusTick(nowInj)"));
+  const body = fn.slice(0, fn.indexOf("\n  function getFocus"));
+  const retireAt = body.indexOf("focusRetire(now)"), sessAt = body.indexOf("if (!sess)");
+  assert.ok(retireAt > 0 && sessAt > 0 && retireAt < sessAt,
+    "retirement must precede the no-session early return, or a Friday list survives the whole weekend");
+  assert.ok(!/focusPrev = focusState/.test(pol.slice(pol.indexOf("function stampFocus("), pol.indexOf("function fillFocus("))),
+    "stampFocus no longer rolls the list — focusRetire is the single producer of retirement");
+  assert.equal(pol.split("focusPrev = focusState;").length - 1, 1, "exactly one place in the file retires a stamp");
+  assert.ok(/utcDay: focusUtcDayStr\(now\)/.test(pol), "the stamp records the UTC day it belongs to");
+  assert.ok(/\(st && st\.utcDay\) \|\| \(st \? focusUtcDayStr\(st\.frozenAt \|\| st\.open\) : null\)/.test(pol),
+    "pre-build blobs derive their shelf life from frozenAt — the migration, pinned");
 });
