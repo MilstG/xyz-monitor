@@ -14,7 +14,8 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
-const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark } = require("./compute");
+const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark,
+  focusGate, focusLimits, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N } = require("./compute");
 const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
@@ -11158,10 +11159,23 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // Scope: xyz EQUITIES on the ET clock only. Foreign-home names (KRX/TSE/HKEX) are excluded by
   // doctrine, not oversight — their reference book discovers price in the ASIAN session, so a
   // 09:30 ET "open snapshot" would anchor their gap to the wrong exchange (2026.08.14-01 rule).
-  const FOCUS_MIN_VOL = 200000;        // $200k 24h notional floor: a seat you cannot exit is not a seat
+  // LIQUIDITY FLOORS (build 2026.08.18-03). The $200k volume floor this feature shipped with is
+  // now the BACKSTOP under an operator-set wall (compute.focusLimits clamps to it), because "under
+  // X is untradeable at my size" is a fact about the operator's clip, not about the tape. Two
+  // properties the rest of this block depends on:
+  //   1. The gate runs inside candidate assembly, so preview and stamp meet the same wall.
+  //   2. The floors in force are WRITTEN ONTO the stamp. Raising them tomorrow does not rewrite
+  //      yesterday's record — a track record whose selection wall is unknowable is unreadable.
   const FOCUS_MIN_CANDS = 8;           // below this the universe is still booting — defer, retry next tick
   const FOCUS_PREVIEW_LEAD = 30 * 60 * 1000;   // preview window opens 09:00 ET — earlier and the σ/RVOL reads are mostly noise
+  let focusLim = focusLimits(null);    // { vol, oi } — hydrated from focus.json, written by the admin panel
   let focusState = null, focusPrev = null, focusVer = 0;
+  // The focus ETag stamp is a VERSION, not a clock (2026.08.18-03). It was Date.now() at every
+  // setter, which meant two changes inside the same millisecond produced the same stamp — and the
+  // second one would 304 against the first, serving a body the client had already been told it
+  // had. Rare on the 30s tick, ordinary the moment a human write (a floor change) lands next to a
+  // poll. Monotonic: wall-clock when time has moved, +1 when it has not.
+  const focusBump = () => { focusVer = Math.max(Date.now(), focusVer + 1); return focusVer; };
   let focusPv = null;                  // { at, day, rows, sig } — the live preview pool. IN-MEMORY ONLY, never persisted: only the stamp is a record.
   let focusForming = null;             // { at, map } — forming +1h reads between the stamp and the freeze. Same rule: transient, never persisted.
   function hydrateFocus(nowArg) {
@@ -11171,21 +11185,61 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // carries no utcDay; focusUtcDayOf derives one from frozenAt, so a restart across the boundary
     // retires it correctly instead of resurrecting a list the running process would have dropped.
     const utcToday = focusUtcDayStr(nowArg || Date.now());   // nowArg: suite-only, as with getFocus
+    focusLim = focusLimits(data.limits);                       // absent (or corrupt) -> the hard backstop, never an open wall
     if (data.state && focusUtcDayOf(data.state) === utcToday) { focusState = data.state; focusPrev = data.prev || null; }
     else if (data.state) focusPrev = data.state;               // a saved prior day rolls to "yesterday"
     else focusPrev = data.prev || null;
-    focusVer = Date.now();
+    focusBump();
     return !!(focusState || focusPrev);
   }
-  function focusPersist() { if (store.saveFocus) store.saveFocus({ state: focusState, prev: focusPrev }); focusVer = Date.now(); }
+  // The floors ride the SAME blob as the stamp (no new file, no second write path): one atomic
+  // tmp+rename carries the record and the wall that produced it.
+  function focusPersist() { if (store.saveFocus) store.saveFocus({ state: focusState, prev: focusPrev, limits: focusLim }); focusBump(); }
+  // Admin write. Deliberately does NOT touch focusState: today's list was frozen against the
+  // floors that were standing at 09:30 and stays that way. What it DOES do is drop the live
+  // preview pool, so the 09:00 prep list re-gates on the next 30s tick instead of showing names
+  // the new wall would refuse.
+  function setFocusLimits(vol, oi, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "forbidden" };
+    const next = focusLimits({ vol, oi });
+    focusLim = next;
+    focusPv = null;
+    try { focusPersist(); } catch (_) { return { ok: false, error: "write-failed", limits: next }; }
+    log(`FOCUS floors set: $${next.vol.toLocaleString("en-US")} 24h volume / $${next.oi.toLocaleString("en-US")} OI — live from the next preview tick; today's stamp unchanged`);
+    return { ok: true, limits: next, hard: { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI } };
+  }
+  // STRUCTURAL eligibility — one producer (2026.08.18-03). Who is even in scope for this tab,
+  // before any judgement about size or loudness: a live xyz equity on the ET clock. Extracted so
+  // the expensive candidate assembly and the cheap panel scan cannot drift apart about which
+  // names the universe contains — a floor panel counting a different 84 than the engine gates
+  // would make every survivor count it prints a lie.
+  function focusEligible(r) {
+    if (!r || r.uni !== "xyz" || r.delisted || !r.ticker || !(r.px > 0)) return null;
+    const cl = classifyCached(r.ticker, r.uni);
+    if (!cl || cl.assetClass !== "Equity") return null;
+    if (homeMkt(r.ticker, r.uni)) return null;                 // home session is not this session
+    return cl;
+  }
+  // The floor panel's raw material: every structurally eligible name with the two numbers the
+  // walls judge. Cheap by construction (no news walk, no level math) so the admin panel can ask
+  // for it on demand, and sourced from the SAME predicate the engine gates, so the histogram and
+  // the seat count can never disagree about the field.
+  function focusScan() {
+    const out = [];
+    for (const r of rows.values()) {
+      const cl = focusEligible(r);
+      if (!cl) continue;
+      out.push([r.ticker, Math.round(r.vol || 0), r.oi != null && isFinite(r.oi) ? Math.round(r.oi) : null, cl.ind || cl.sector || null]);
+    }
+    return out.sort((a, b) => b[1] - a[1]);
+  }
   function focusCandidates(now, prevCloseT) {
     const out = [], yest = etDayStr(prevCloseT), today = etDayStr(now);
     for (const r of rows.values()) {
-      if (r.uni !== "xyz" || r.delisted || !r.ticker || !(r.px > 0)) continue;
-      const cl = classifyCached(r.ticker, r.uni);
-      if (!cl || cl.assetClass !== "Equity") continue;
-      if (homeMkt(r.ticker, r.uni)) continue;                  // home session is not this session
-      if (!(r.vol >= FOCUS_MIN_VOL)) continue;
+      const cl = focusEligible(r);
+      if (!cl) continue;
+      // NOTE: no size filter here anymore. The floors are applied by focusGate at the call sites
+      // below, so both callers see the same refused set and can disclose it.
       const hs = getHourly(r.coin);
       const pc = priceAsOf(hs, prevCloseT, 3 * HOUR);
       const gapPct = pc > 0 ? +((r.px / pc - 1) * 100).toFixed(3) : null;
@@ -11224,7 +11278,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       out.push({ ticker: r.ticker, coin: r.coin, px: +(+r.px).toPrecision(8), prevClose: pc > 0 ? +pc.toPrecision(8) : null,
         gapPct, gapSigma, gapSd: gsd != null ? +gsd.toFixed(3) : null, rvol, oiDelta, ern, news24, tg4h, newsTop,
         lvlDistSd: lvl ? lvl.distSd : null, lvlSide: lvl ? lvl.side : null,
-        cluster: cl.ind || cl.sector || null, vol: r.vol || 0 });
+        cluster: cl.ind || cl.sector || null, vol: r.vol || 0,
+        // OI NOTIONAL (2026.08.18-03), the board's own r.oi (oiBase × mark) — the number the OI
+        // floor judges and the roster displays, restated once. null stays null: a sparse OI
+        // series is an honest absence and clears the OI wall by construction (focusFloorFail).
+        oi: r.oi != null && isFinite(r.oi) ? Math.round(r.oi) : null });
     }
     return out;
   }
@@ -11245,12 +11303,15 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const prevCloseT = focusPrevClose(sess);
     if (prevCloseT == null) return;
     const cands = focusCandidates(now, prevCloseT);
+    // Boot check reads the PRE-floor count (see stampFocus for why this split exists).
     if (cands.length < FOCUS_MIN_CANDS) return;                // booting universe: no phantom preview either
-    const rows = focusPreview(cands, FOCUS_PREVIEW_N);
-    const sig = rows.map((x) => x.ticker + "|" + (x.gapPct == null ? "" : x.gapPct.toFixed(1)) + "|" + (x.rvol == null ? "" : x.rvol.toFixed(1))).join(",");
+    const g = focusGate(cands, focusLim, FOCUS_BELOW_N);
+    const rows = focusPreview(g.pass, FOCUS_PREVIEW_N);
+    const sig = rows.map((x) => x.ticker + "|" + (x.gapPct == null ? "" : x.gapPct.toFixed(1)) + "|" + (x.rvol == null ? "" : x.rvol.toFixed(1))).join(",")
+      + "|F" + g.limits.vol + "/" + g.limits.oi + "|b" + g.belowN;   // a floor change is a pool change: it must bust the ETag even if the top ten survive it
     if (focusPv && focusPv.sig === sig && focusPv.day === etDayStr(now)) { focusPv.at = now; return; }   // unchanged pool: refresh the clock, keep the ETag
-    focusPv = { at: now, day: etDayStr(now), rows, sig };
-    focusVer = Date.now();
+    focusPv = { at: now, day: etDayStr(now), rows, sig, below: g.below, belowN: g.belowN, scanned: g.scanned, cleared: g.pass.length, limits: g.limits };
+    focusBump();
   }
   function stampFocus(sess, now) {
     // The old ET-day roll lived here. focusRetire owns retirement now — one producer — and it has
@@ -11259,8 +11320,15 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const prevCloseT = focusPrevClose(sess);
     if (prevCloseT == null) return;
     const cands = focusCandidates(now, prevCloseT);
+    // THE SPLIT (2026.08.18-03), load-bearing: the boot check reads the count BEFORE the floors,
+    // the seating reads the count AFTER. One number served both roles until the floors became
+    // operator-set, at which point a strict wall was indistinguishable from a cold universe — the
+    // tick would defer, the stamp would never land, and the tab would show "pending" all day with
+    // no statement of why. Now a booting universe defers (something IS coming) and a strict wall
+    // stamps whatever cleared, however few, with the count and the refused roster attached.
     if (cands.length < FOCUS_MIN_CANDS) return;                // spines still booting — the 30s tick retries
-    const sel = focusSelect(cands);
+    const g = focusGate(cands, focusLim, FOCUS_BELOW_N);
+    const sel = focusSelect(g.pass);
     // Stamp-vs-preview disclosure: the diff is against the LAST preview's likely six (its top-6
     // zone, the dashed rule the user prepped against) — persisted on the record, so "my prep
     // silently drifted from the stamp" can never happen. No preview today -> no diff claimed.
@@ -11268,10 +11336,15 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const pvDiff = pvRef ? { pvAt: pvRef.at, ...focusDiff(pvRef.rows.slice(0, FOCUS_CAP).map((x) => x.ticker), sel.picks.map((x) => x.ticker)) } : null;
     focusState = { day: etDayStr(now), utcDay: focusUtcDayStr(now), open: sess.open, close: sess.close, prevCloseT,
       frozenAt: now, late: now - sess.open > 90 * 1000 ? 1 : 0,   // boot-stamped after the open: DISCLOSED, same honesty as episode boot stamps
-      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, pvDiff };
+      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, pvDiff,
+      // The wall that produced this list, frozen with it. Never read from focusLim at render time:
+      // that would let today's panel edit silently restate what yesterday's selection was made of.
+      limits: g.limits, scanned: g.scanned, cleared: g.pass.length, below: g.below, belowN: g.belowN };
     focusPv = null;                                            // the preview retires the moment the record exists
     focusPersist();
-    log(`FOCUS stamped ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.late ? ` (LATE \u2014 ${Math.round((now - sess.open) / 60000)}m after the open)` : ""}, ${focusState.cuts.length} cut(s) disclosed`);
+    log(`FOCUS stamped ${focusState.rows.length} seat(s) for ${focusState.day}${focusState.late ? ` (LATE \u2014 ${Math.round((now - sess.open) / 60000)}m after the open)` : ""}, ${focusState.cuts.length} cut(s) disclosed`
+      + ` \u2014 ${g.pass.length}/${g.scanned} cleared the floors ($${g.limits.vol.toLocaleString("en-US")} vol / $${g.limits.oi.toLocaleString("en-US")} OI)`
+      + (sel.picks.length < FOCUS_CAP ? `; SHORT of ${FOCUS_CAP} seats` : ""));
   }
   // Forming +1h reads (build 2026.08.17-03): between the stamp and the 10:30 freeze, the sVWAP /
   // 1H HI / 1H LO columns show the hour FORMING — closed 5m bars so far (minBars=1: a partial
@@ -11294,7 +11367,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       if (f) map[p.ticker] = f;
     }
     focusForming = { at: now, map };
-    focusVer = Date.now();
+    focusBump();
   }
   function fillFocus(now) {
     const st = focusState;
@@ -11362,14 +11435,21 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     else if (sess) state = now < sess.open ? "pre" : "pending";
     return { ts: now, dataTs: focusVer, state, day: today,
       open: sess ? sess.open : null, close: sess ? sess.close : null,
-      preview: pv ? { at: pv.at, rows: pv.rows } : null, previewN: FOCUS_PREVIEW_N, previewLeadMs: FOCUS_PREVIEW_LEAD,
+      preview: pv ? { at: pv.at, rows: pv.rows, below: pv.below || [], belowN: pv.belowN || 0,
+        scanned: pv.scanned || 0, cleared: pv.cleared || 0, limits: pv.limits || focusLimits(focusLim) } : null,
+      previewN: FOCUS_PREVIEW_N, previewLeadMs: FOCUS_PREVIEW_LEAD,
       forming: focusState && focusState.day === today && !focusState.filledAt && focusForming ? focusForming : null,
       // Chart shading (build 2026.08.17-01): cash-session windows across the chart's 72h
       // lookback (+ the next session), from the same calendar engine as the stamp — the client
       // dims off-session time instead of guessing at a fixed 16:00-to-09:30 rhythm that half
       // days and holidays would falsify.
       sessions: marketSessions(now - 78 * HOUR, now + 36 * HOUR).map((s) => ({ open: s.open, close: s.close })),
-      cap: FOCUS_CAP, perCluster: FOCUS_PER_CLUSTER, minVol: FOCUS_MIN_VOL,
+      cap: FOCUS_CAP, perCluster: FOCUS_PER_CLUSTER, belowShown: FOCUS_BELOW_N,
+      // LIVE floors (what the next stamp will use) and the backstop under them. Distinct from
+      // today.limits, which is what THIS record was cut with — the client renders the record's
+      // own wall on the table and the live wall in the panel, and never confuses the two.
+      limits: focusLimits(focusLim), hard: { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI },
+      minVol: focusLimits(focusLim).vol,   // retained key: the older client's footer read it
       today: focusState && focusState.day === today ? focusState : null,
       prev: focusPrev,
       archive: { enabled: !!(store.candlesEnabled && store.candlesEnabled()) } };
@@ -11420,6 +11500,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getFocus,
     getFocusStamp: () => focusVer,
     focusTickNow: focusTick,
+    // Liquidity floors (build 2026.08.18-03): the admin panel's read, its write, and the cheap
+    // structural scan that feeds the panel's distribution — all off the one eligibility predicate.
+    getFocusLimits: () => ({ limits: focusLimits(focusLim), hard: { vol: FOCUS_HARD_VOL, oi: FOCUS_HARD_OI }, scan: focusScan(), belowShown: FOCUS_BELOW_N }),
+    setFocusLimits,
     // 13F whale lane (build 2026.08.16-01): FUNDS tab payloads, watchlist writes, and harness
     // hooks that run the real ingest/poll/season paths against injected fixtures.
     getWhale,

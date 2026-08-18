@@ -5243,6 +5243,14 @@ const FEATURES = [
   // admin cookie — the manifest gate is audience visibility, the in-handler check is authz; the
   // two fail independently and both must pass. Mirrors the features-POST posture.
   { key: "whale.write",   kind: "act", label: "Edit 13F watchlist",   def: "admin",  routes: ["POST /api/whale/watch"] },
+  // FOCUS liquidity floors (build 2026.08.18-03). Same two-lock posture as whale.write: the
+  // manifest gate is audience visibility, the handler's own admin-cookie check is authz, and both
+  // must pass. Its own act key rather than riding the focus TAB key, so opening the tab to the
+  // public can never hand the public the wall that decides what the tab considers.
+  // Path-wide, not method-specific: the GET returns the structural scan (every eligible ticker's
+  // volume and OI), which is exactly as admin-only as the write. A "POST /api/focus/limits" entry
+  // would have left the GET unclaimed and gated by the handler check alone — one wall, not two.
+  { key: "focus.limits",  kind: "act", label: "Set FOCUS liquidity floors", def: "admin", routes: ["/api/focus/limits"] },
   { key: "earnings.void", kind: "act", label: "Void an earnings row", def: "admin",  routes: ["POST /api/earnings/void"] },
   { key: "derivs.refresh", kind: "act", label: "Force derivs refresh", def: "admin", routes: ["POST /api/derivs/refresh"] },
   // Custom baskets + ratio pair candles (build 2026.07.28-06). One key covers the registry, the
@@ -7322,6 +7330,15 @@ const FOCUS_CAP = 6;                 // hard seat count — a great selection, n
 const FOCUS_PER_CLUSTER = 2;         // max seats per cluster: 6 names should be 6 trades, not one theme
 const FOCUS_CUT_N = 4;               // how many just-missed names the cut line discloses
 const FOCUS_MIN_GAP_N = 10;          // overnight-gap samples before a σ is claimed
+// ---- liquidity floors (build 2026.08.18-03) --------------------------------------------------
+// The operator's size, expressed as two walls. HARD_VOL is the backstop the engine has enforced
+// since -01 and keeps enforcing: the effective floor is max(hard, operator's), so a mistyped or
+// hostile write can loosen the tab but never below what it already refused. HARD_OI is 0 because
+// there is no defensible universal OI minimum — an equity perp with thin OI is still exitable at
+// the tape's size; only the operator knows their clip.
+const FOCUS_HARD_VOL = 200000;       // $200k 24h notional: a seat you cannot exit is not a seat
+const FOCUS_HARD_OI = 0;
+const FOCUS_BELOW_N = 14;            // how many below-floor names the roster discloses (loudest first)
 
 // Overnight-gap dispersion from the row's own off-hours hold record ((gross-1)*100 per hold).
 // retStd is the same winsorized estimator every other σ in the codebase uses. Below the sample
@@ -7456,6 +7473,51 @@ function focusSelect(cands, opts) {
   }
   return { picks, cuts: cuts.slice(0, cutN) };
 }
+// ===== liquidity floors (build 2026.08.18-03) =================================================
+// "Anything under X is untradeable at my size." Three pure pieces so the whole wall is testable
+// without a server: sanitize what was stored or posted, decide one name against it, fold a
+// candidate list into cleared + refused. The gate runs at CANDIDATE ASSEMBLY, before loudness is
+// ever compared, so the 09:00 preview and the 09:30 stamp meet the identical wall — one filter,
+// not a display filter racing an engine filter.
+// Sanitizer: anything non-finite, negative, or absent degrades to the hard backstop rather than
+// throwing or disabling the wall. A hand-edited focus.json cannot smuggle a floor BELOW the
+// backstop in, and cannot smuggle NaN in either (NaN comparisons are false, which would silently
+// pass every name — the exact failure mode this clamp exists to make unreachable).
+function focusLimits(raw) {
+  const o = raw && typeof raw === "object" ? raw : {};
+  const n = (v, hard) => { const x = Number(v); return Number.isFinite(x) && x > hard ? Math.round(x) : hard; };
+  return { vol: n(o.vol, FOCUS_HARD_VOL), oi: n(o.oi, FOCUS_HARD_OI) };
+}
+// One name against the wall. Returns null (clears), "vol", "oi", or "both".
+// MISSING OI NEVER FAILS. A null oi means the OI series is too sparse on this name to be honest —
+// the same honest-null the OI Δ column ships — and refusing a name on a number we do not have is
+// a fabricated rejection, not a conservative one. The volume floor still judges it.
+function focusFloorFail(c, lim) {
+  const L = focusLimits(lim);
+  const fv = !(Number(c && c.vol) >= L.vol);
+  const fo = c && c.oi != null && Number.isFinite(Number(c.oi)) && Number(c.oi) < L.oi;
+  return fv && fo ? "both" : fv ? "vol" : fo ? "oi" : null;
+}
+// The fold. `pass` keeps candidate order (the caller ranks); `below` is ordered LOUDEST FIRST so
+// the roster's top row is the loudest thing the wall is refusing today — the only ordering that
+// makes the disclosure a calibration instrument rather than an alphabetical shrug. `need` is the
+// multiple the floor would have to fall by to admit the name: 1.2× is a conversation, 40× is not.
+function focusGate(cands, lim, belowN) {
+  const L = focusLimits(lim);
+  const N = Number.isFinite(belowN) ? belowN : FOCUS_BELOW_N;
+  const rows = (Array.isArray(cands) ? cands : []).filter((c) => c && typeof c.ticker === "string" && c.ticker);
+  const pass = [], below = [];
+  for (const c of rows) {
+    const why = focusFloorFail(c, L);
+    if (!why) { pass.push(c); continue; }
+    const nv = Number(c.vol) > 0 ? L.vol / Number(c.vol) : null;
+    const no = c.oi != null && Number(c.oi) > 0 && L.oi > 0 ? L.oi / Number(c.oi) : null;
+    const need = why === "both" ? Math.max(nv || 0, no || 0) : why === "vol" ? nv : no;
+    below.push({ ...c, score: focusScore(c), why, need: need != null && isFinite(need) ? +need.toFixed(1) : null });
+  }
+  below.sort((a, b) => (b.score - a.score) || (a.ticker < b.ticker ? -1 : 1));
+  return { pass, below: below.slice(0, N), belowN: below.length, scanned: rows.length, limits: L };
+}
 // Forming-read fold (build 2026.08.17-03): extend closed-bar stats with the board's live mark.
 // The mark can only WIDEN hi/lo and refresh lastPx — VWAP and openPx stay archive-only (a mark
 // has no volume; folding it into a VWAP would fabricate weight). A spike seen live is captured
@@ -7469,6 +7531,12 @@ module.exports.foldLiveMark = foldLiveMark;
 module.exports.FOCUS_CAP = FOCUS_CAP;
 module.exports.FOCUS_PER_CLUSTER = FOCUS_PER_CLUSTER;
 module.exports.FOCUS_CUT_N = FOCUS_CUT_N;
+module.exports.FOCUS_HARD_VOL = FOCUS_HARD_VOL;
+module.exports.FOCUS_HARD_OI = FOCUS_HARD_OI;
+module.exports.FOCUS_BELOW_N = FOCUS_BELOW_N;
+module.exports.focusLimits = focusLimits;
+module.exports.focusFloorFail = focusFloorFail;
+module.exports.focusGate = focusGate;
 module.exports.focusGapSigma = focusGapSigma;
 module.exports.focusLevelDist = focusLevelDist;
 module.exports.firstHourStats = firstHourStats;
