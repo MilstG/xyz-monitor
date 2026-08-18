@@ -8986,6 +8986,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
   if(head==='fund'||head==='bs'||head==='balance'||head==='etf'||head==='holdings') return !!p[1];   // symbols may live outside the universe (ETFs)
   if(head==='whale'||head==='13f') return true;   // bare = watchlist; args validate server-side against the live list
+  if(head==='holds'||head==='who') return !!p[1];
   if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
   if(head==='ratio') return p.length>=2;
   return false; }
@@ -9002,6 +9003,7 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='reports') return termReports();
   if(h==='fund'||h==='bs'||h==='balance') return termFund(p[1]);
   if(h==='whale'||h==='13f') return termWhale(p.slice(1));
+  if(h==='holds'||h==='who') return termWhale(['who'].concat(p.slice(1)));
   if(h==='etf'||h==='holdings') return termEtf(p[1]);
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
   if(h==='comp'){ const cr=state.scope==='crypto';
@@ -9210,7 +9212,7 @@ function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) 
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
 // ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
-const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','whale','help','clear','stocks','crypto'];
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','whale','holds','help','clear','stocks','crypto'];
 const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
@@ -10929,6 +10931,8 @@ function renderFunds(){
     +(d.watch.length?`<div class="tblwrap"><table class="whl-tbl"><thead><tr><th></th><th class="l">FUND</th><th class="l">LAST 13F</th><th class="r">BOOK</th><th class="r" data-tip="five inputs, one number: marks + investor flows + options notional expansion + assets ENTERING the 13F universe (an IPO makes a years-old private stake reportable overnight) + rotation from non-13F assets \u00b7 never read as returns \u2014 a fund printing +40% here made nobody 40%; the share-count deltas inside the book are the trustworthy layer, this column is context">\u0394 QoQ</th><th class="r">POS</th><th class="l">TOP HOLDING</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="msg">No funds watched yet${IS_ADMIN?' \u2014 hit EDIT and add one by name or CIK':' \u2014 the operator curates this list'}.</div>`)
     +addRow
+    +`<div class="whl-who"><div class="whl-shd"><span class="whl-hd" data-tip="reverse lookup across the tracked funds' cached 13F books — who holds it, how big, at what conviction, what they did QoQ. Cached state only; a query costs zero EDGAR traffic. QoQ chips come from the SAME delta engine as the fund modal — the two can never disagree.">WHO HOLDS</span>`
+    +`<input id="whl-whoq" placeholder="ticker, name fragment (\u22653 chars), or CUSIP" maxlength="40" autocomplete="off"></div><div id="whl-whoout"></div></div>`
     +`<div id="whl-season"></div>`
     +`<div class="whl-foot">source: SEC EDGAR 13F-HR \u00b7 values verbatim from filings (whole USD) \u00b7 tickers appear only where the issuer name matched the SEC company map exactly after normalization \u2014 unmatched rows keep the filed name, nothing is guessed \u00b7 list + books persist on the data volume</div>`;
   whlBindList(box);
@@ -10948,6 +10952,11 @@ function whlBindList(box){
     if(ev.target.closest('[data-whlbell],[data-whlrm],[data-whlpull]')) return;
     whlOpenFund(tr.dataset.whlopen); });
   box.querySelectorAll('[data-whlpull]').forEach(b=>b.onclick=async(ev)=>{ ev.stopPropagation(); whlPull(b.dataset.whlpull, b); });
+  const wq=el('whl-whoq');
+  if(wq){ wq.value=WHL.whoQ||''; let deb=0;
+    wq.oninput=()=>{ clearTimeout(deb); const v=wq.value; deb=setTimeout(()=>whlWho(v),300); };
+    wq.onkeydown=(e)=>{ if(e.key==='Enter'){ clearTimeout(deb); whlWho(wq.value); } };
+    if(WHL.whoQ) whlWho(WHL.whoQ,true); }
   const go=el('whl-addgo'), q=el('whl-addq');
   const doSearch=async()=>{
     const v=(q&&q.value||'').trim(); if(!v) return;
@@ -10962,6 +10971,50 @@ function whlBindList(box){
   };
   if(go) go.onclick=doSearch;
   if(q) q.onkeydown=(e)=>{ if(e.key==='Enter') doSearch(); };
+}
+// ---- "who holds" reverse lookup (build 2026.08.18-05) -----------------------------------------
+// Renders /api/whale?holds=Q verbatim: aggregate strip, per-fund rows (common + option lines kept
+// separate, side-colored), exits dimmed with their prior value, honest miss with scan counts.
+// Survives re-renders: the query lives on WHL and re-fires after whlFetch repaints the tab.
+async function whlWho(qv,keep){
+  WHL.whoQ=(qv||'').trim();
+  const out=el('whl-whoout'); if(!out) return;
+  if(!WHL.whoQ){ out.innerHTML=''; return; }
+  if(!keep) out.innerHTML='<div class="msg">searching the cached books\u2026</div>';
+  let r; try{ r=await fetchJSON('/api/whale?holds='+encodeURIComponent(WHL.whoQ)); }
+  catch(e){ out.innerHTML=`<div class="msg err">${esc(e.message||'fetch failed')}</div>`; return; }
+  if((el('whl-whoq')&&el('whl-whoq').value.trim())!==WHL.whoQ) return;   // a newer keystroke owns the panel
+  if(!r.ok){ out.innerHTML=`<div class="msg">${esc(r.error||'no result')}</div>`; return; }
+  const chip=(d)=>{ if(!d||d.cls==='na') return '<span class="whl-badge b-na" data-tip="no prior filing ingested for this fund — no delta is claimed">\u2014</span>';
+    const M={new:['NEW','b-new','opened this quarter — no position in the prior filing'],add:['ADDED','b-add','grew vs the prior quarter'],trim:['TRIMMED','b-trim','cut vs the prior quarter'],flat:['FLAT','b-flat','shares unchanged — mark drift only, not a trade']};
+    const m=M[d.cls]||['\u2014','b-na','']; return `<span class="whl-badge ${m[1]}" data-tip="${esc(m[2])}">${m[0]}</span>`; };
+  const dtxt=(d)=>{ if(!d||d.cls==='na'||d.cls==='flat') return '<span class="na">\u2014</span>';
+    if(d.cls==='new') return '<span class="new">opened</span>';
+    if(d.dSh!=null) return `<span class="${d.dSh>0?'pos':'neg'}">${whlSgnSh(d.dSh)}</span>`;
+    if(d.dVal!=null) return `<span class="${d.dVal>0?'pos':'neg'}" data-tip="value delta only — share counts aren't comparable across the two filings">${(d.dVal>0?'+':'\u2212')}${whlMoney(Math.abs(d.dVal)).slice(1)}</span>`;
+    return '<span class="na">\u2014</span>'; };
+  const rows=r.funds.map(f=>{
+    if(!f.held){ const ex=f.exited.map(x=>`${x.put?esc(x.put)+'s ':''}was ${whlMoney(x.prevVal)}`).join(' \u00b7 ');
+      return `<tr class="whl-worow whl-woexit" data-tip="${esc(f.name)} \u2014 held it in the prior quarter, absent from the ${esc(f.q)} filing: EXITED, or fell below reporting — indistinguishable in a 13F">`
+        +`<td class="l"><span class="whl-name">${esc(f.key)}</span><span class="whl-badge b-exit">EXITED</span></td>`
+        +`<td colspan="3" class="l sec">${ex}</td><td></td></tr>`; }
+    return f.lines.map((l,li)=>{
+      const oc=l.put?`<span class="whl-oc ${l.put}" data-tip="a separate 13F line — option value is the UNDERLYING notional per 13F rules, not premium; never merged into the common position">${esc(l.put)}s</span>`:'';
+      return `<tr class="whl-worow" data-whlopen2="${esc(f.key)}" data-tip="${esc(f.name+' \u00b7 '+(l.put?l.put+'s line':'common')+' \u00b7 value $'+Math.round(l.value).toLocaleString()+(l.shares!=null?' \u00b7 '+Math.round(l.shares).toLocaleString()+' sh':' \u00b7 share count not claimed (PRN/mixed rows)')+' \u00b7 rank #'+l.rank+' in their book \u00b7 click for the full book')}">`
+        +`<td class="l">${li===0?`<span class="whl-name">${esc(f.key)}</span>`:''}${oc}${li===0?chip(f.lines[0].d):''}</td>`
+        +`<td class="r">${whlMoney(l.value)}</td>`
+        +`<td class="r" data-tip="value \u00f7 that fund's 13F total — conviction proxy">${l.pct!=null?l.pct.toFixed(1)+'%':'\u2014'}</td>`
+        +`<td class="r" data-tip="rank inside that fund's book by value">#${l.rank}</td>`
+        +`<td class="r">${dtxt(l.d)}</td></tr>`; }).join('');
+  }).join('');
+  const nh=r.notHeld&&r.notHeld.length?`<div class="msg" style="padding:6px 2px">not held: ${r.notHeld.map(esc).join(', ')} <span class="sec">\u2014 absent from their latest filed book; shorts, derivatives and non-US would be invisible anyway</span>${r.noBook&&r.noBook.length?` \u00b7 no book yet: ${r.noBook.map(esc).join(', ')}`:''}</div>`:'';
+  out.innerHTML=`<div class="whl-woagg"><b>${esc(r.name||r.q)}</b>${r.tk?` <span class="whl-tk">${esc(r.tk)}</span>`:''}`
+    +`<span class="sec" data-tip="how your query found it — the match basis is always disclosed: ticker (SEC company map), normalized name, filed-name substring, or exact CUSIP; a miss on all four is an honest miss">matched by ${esc(r.basis)}</span>`
+    +`<span><b>${r.held}</b><span class="sec">/${r.watchN} hold</span></span><span class="sec">combined ${whlMoney(r.combined)}</span>`
+    +(r.adding?`<span class="pos" data-tip="funds whose COMMON line opened or grew — option lines render below but never drive this count (a new puts line is not accumulation)">${r.adding} adding</span>`:'')+(r.cutting?`<span class="neg" data-tip="funds whose COMMON line shrank or exited — options excluded by the same rule">${r.cutting} cutting</span>`:'')+`</div>`
+    +`<div class="tblwrap"><table class="whl-tbl whl-wotbl"><thead><tr><th class="l">FUND</th><th class="r" data-tip="value as filed (thousands-convention filers already corrected \u00d71000 upstream)">VALUE</th><th class="r">% OF BOOK</th><th class="r">RANK</th><th class="r" data-tip="share delta when both quarters report SH counts; value delta otherwise; opened on new positions">\u0394 QoQ</th></tr></thead><tbody>${rows}</tbody></table></div>`+nh
+    +`<div class="whl-foot">searched the latest cached filing of each tracked fund + its prior quarter for exits \u00b7 quarter-end snapshots filed up to 45d late \u2014 positioning history, never the current book</div>`;
+  out.querySelectorAll('[data-whlopen2]').forEach(tr=>tr.onclick=()=>whlOpenFund(tr.dataset.whlopen2));
 }
 // ---- season panel -----------------------------------------------------------------------------
 function whlLegLine(l){
@@ -11153,6 +11206,18 @@ async function termWhale(args){
     if((args[2]||'').toLowerCase()!=='yes') return termOut(`<span class="err">confirm:</span> remove ${tesc(k)} from the watchlist? <span class="tp-trans">history kept, row hidden \u00b7 <span class="ex" data-tcmd="whale rm ${tesc(k)} yes">whale rm ${tesc(k)} yes</span></span>`);
     const r=await whlPost({op:'rm',key:k});
     return r&&r.ok?termOut(`<span class="pos">removed</span> ${tesc(k)}`):termErr(tesc((r&&r.error)||'remove failed'));
+  }
+  if(sub==='who'||sub==='holds'){
+    const qv=args.slice(1).join(' ').trim(); if(!qv) return termErr('usage: whale who <ticker, name fragment, or CUSIP>');
+    const think=termThinking(); let r;
+    try{ r=await fetchJSON('/api/whale?holds='+encodeURIComponent(qv)); }catch(_){ think.remove(); return termErr('lookup failed \u2014 try again in a moment'); }
+    think.remove();
+    if(!r.ok) return termOut(`<span class="sec">${tesc(r.error||'no result')}</span>`);
+    const lines=r.funds.map(f=>{
+      if(!f.held) return `  ${tpad(tesc(f.key),12)} <span class="sec">EXITED \u00b7 ${f.exited.map(x=>(x.put?tesc(x.put)+'s ':'')+'was '+whlMoney(x.prevVal)).join(' \u00b7 ')}</span>`;
+      return f.lines.map((l,li)=>`  ${tpad(li===0?tesc(f.key):'',12)} ${tpad(whlMoney(l.value),9,true)} ${tpad(l.pct!=null?l.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad('#'+l.rank,5,true)} ${l.put?'<span class="'+(l.put==='put'?'neg':'pos')+'">'+tesc(l.put)+'s</span> ':''}${!l.d||l.d.cls==='na'?'\u2014':l.d.cls==='new'?'<span class="amber">opened</span>':l.d.cls==='flat'?'<span class="sec">flat</span>':(l.d.dSh!=null?'<span class="'+(l.d.dSh>0?'pos':'neg')+'">'+whlSgnSh(l.d.dSh)+'</span>':(l.d.dVal!=null?'<span class="'+(l.d.dVal>0?'pos':'neg')+'">'+(l.d.dVal>0?'+':'\u2212')+whlMoney(Math.abs(l.d.dVal)).slice(1)+'</span>':'\u2014'))}`).join('\n');
+    }).join('\n');
+    return termOut(`<span class="tp-hd">who holds ${tesc(r.q)}</span> <span class="tp-trans">\u00b7 ${tesc(r.name||'')} \u00b7 matched by ${tesc(r.basis)} \u00b7 ${r.held}/${r.watchN} hold \u00b7 combined ${whlMoney(r.combined)}</span>\n${lines}${r.notHeld&&r.notHeld.length?`\n<span class="tp-trans">not held: ${r.notHeld.map(tesc).join(', ')} \u00b7 quarter-end books filed up to 45d late \u2014 positioning history, not the current book</span>`:''}`);
   }
   if(sub==='pull'){
     if(!IS_ADMIN) return termErr('whale pull is admin-only');

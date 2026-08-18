@@ -1666,3 +1666,19 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .whl-oc{font-size:10px;letter-spacing:.5px}
 .whl-oc.put{color:var(--down)}
 .whl-oc.call{color:var(--up)}
+
+/* ===== "who holds" panel (build 2026.08.18-05) ===== */
+.whl-who{margin:16px 0 4px}
+#whl-whoq{background:var(--panel2);border:1px solid var(--border);color:var(--text);font:inherit;font-size:12px;padding:6px 12px;border-radius:3px;width:320px;max-width:100%}
+#whl-whoq:focus{outline:none;border-color:var(--accent)}
+.whl-woagg{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;margin:10px 0;padding:9px 12px;border:1px solid var(--border);background:var(--panel2);border-radius:3px}
+.whl-woagg b{font-size:14px}
+.whl-worow{cursor:pointer}
+.whl-worow:hover td{background:rgba(255,255,255,.03)}
+.whl-woexit td{opacity:.5;cursor:default}
+.whl-wotbl{min-width:620px}
+.whl-badge.b-new{border-color:var(--blue,#4fb3d9);color:#4fb3d9;background:rgba(79,179,217,.1)}
+.whl-badge.b-add{border-color:var(--up);color:var(--up);background:rgba(70,185,126,.1)}
+.whl-badge.b-trim{border-color:var(--down);color:var(--down);background:rgba(229,96,77,.1)}
+.whl-badge.b-exit{border-color:#9a7fd6;color:#9a7fd6;background:rgba(154,127,214,.1)}
+.whl-badge.b-flat,.whl-badge.b-na{border-color:var(--border);color:var(--muted);background:none}
