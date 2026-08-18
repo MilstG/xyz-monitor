@@ -8354,7 +8354,7 @@ let corrSearchT=null;
 const HELP={
 focus:`
 <div class="hlp-h">What this list is</div>
-<p>Six seats, <b>stamped once at the 09:30 ET cash open</b>, one late fill at +1h, then immutable for the day — a compressed morning scan, not a signal. The engine reads only what the board already computed (gap machinery, clock-matched RVOL, the OI history, the earnings calendar, the news tape, the 30d extremes) and freezes it. It never reshuffles at 10:47 because a number ticked; yesterday's list stays viewable exactly as stamped.</p>
+<p>Six seats, <b>stamped once at the 09:30 ET cash open</b>, one late fill at +1h, then immutable for the day — a compressed morning scan, not a signal. The engine reads only what the board already computed (gap machinery, clock-matched RVOL, the OI history, the earnings calendar, the news tape, the 30d extremes) and freezes it. The first hour itself is measured on <b>1m</b> bars captured by a lane reserved for the six seats, republished every ~25s until the 10:30 freeze. It never reshuffles at 10:47 because a number ticked; yesterday's list stays viewable exactly as stamped.</p>
 <div class="hlp-h">How seats are earned</div>
 <p>A disclosed <b>loudness ordering</b> (in compute, one formula): |gap σ| + RVOL excess + |ΔOI| + a flat earnings boost + a small headline count. Every unit is the name's <b>own distribution</b> — a +1.1% gap on a sleepy name outranks +2.9% on a high-beta one when the σ says so. <b>Max 2 seats per cluster</b> (curated industry): six seats should be six trades, not one theme wearing six tickers. The cut line discloses what just missed and why (rank vs cluster cap). Foreign-home names (KRX/TSE/HKEX) are excluded by doctrine — their gap anchors to the wrong exchange for an ET open stamp.</p>
 <div class="hlp-h">Liquidity floors</div>
@@ -10271,7 +10271,7 @@ async function loadAiRecent(){
 // plotted VWAP line, which is necessarily computed from the exact candles on screen (a continuous
 // line cannot be shipped as one frozen scalar) and is labeled as the chart series; the frozen
 // board sVWAP is restated verbatim in the modal header so any divergence is visible, not hidden.
-const FOC={ data:null, timer:0, sortK:null, sortDir:-1, showPrev:false, showBelow:false, order:null, vis:null };
+const FOC={ data:null, timer:0, pollMs:0, sortK:null, sortDir:-1, showPrev:false, showBelow:false, order:null, vis:null };
 const FOC_LS='xyz-focus-cols';
 function focPrefsLoad(){ try{ const p=JSON.parse(store.get(FOC_LS)||'null');
   if(p&&Array.isArray(p.order)&&p.vis&&typeof p.vis==='object'){ FOC.order=p.order; FOC.vis=p.vis; } }catch(_){} }
@@ -10279,6 +10279,15 @@ function focPrefsSave(){ try{ store.set(FOC_LS, JSON.stringify({order:FOC.order,
 function focPx(v){ if(v==null||!isFinite(v)) return '—'; return v>=500?v.toFixed(1):v>=100?v.toFixed(2):v>=1?v.toFixed(3):v.toPrecision(4); }
 function focSgn(v,d){ if(v==null||!isFinite(v)) return null; const n=v.toFixed(d==null?1:d); return (v>0?'+':'')+n; }
 function focCls(v){ return v>0?'pos':v<0?'neg':''; }
+// Why a frozen first-hour cell is empty. The record carries per-seat coverage since -04, so the
+// dash can name its own cause: nothing captured, versus captured-but-nothing-printed. Older
+// records carry no coverage and say exactly that rather than guessing at a reason.
+function focDry(p){
+  const cv=p&&p.h1cov;
+  if(!cv) return 'no first-hour record for this name — this stamp predates per-seat coverage, so the cause is not recorded';
+  if(cv.bars===0) return 'no 1m bars were captured for this name in the first hour — the seat lane landed nothing, or the feed served no print. Recorded as zero rather than filled from the mark.';
+  return 'first-hour bars exist but carried no usable geometry';
+}
 function focNa(tip){ return `<span class="na" data-tip="${esc(tip||'not available — honest null, never a guess')}">—</span>`; }
 // Chips: pure display assembly of the row's own stamped numbers — the WHY strip.
 function focChips(p){
@@ -10336,21 +10345,21 @@ const FOC_COLS=[
    td:(p)=>p.oiDelta==null?`<td>${focNa('OI history too sparse over the overnight window')}</td>`:`<td class="${focCls(p.oiDelta)}">${focSgn(p.oiDelta)}%</td>`, sv:p=>p.oiDelta},
   {k:'lvl', label:'→LVL', tip:'Distance to the nearer 30d extreme (high overhead or low underfoot, completed UTC days off the hourly spine) in σ of this name\u2019s own daily moves. Small = stamped into structure; ≥1.5σ = room. The finer level-map read lives on the ticker\u2019s drawer — this column is deliberately the cheap honest subset.',
    td:(p)=>p.lvlDistSd==null?`<td>${focNa('spine or σ too short for a level read')}</td>`:`<td class="dim" data-tip="${esc(`30d ${p.lvlSide==='above'?'high':'low'} is ${p.lvlDistSd.toFixed(1)}σ ${p.lvlSide}`)}">${p.lvlDistSd.toFixed(1)}σ</td>`, sv:p=>p.lvlDistSd},
-  {k:'vwap', label:'sVWAP', h1:1, tip:'Session VWAP over the first hour (5m archive: Σ typical·vol ÷ Σ vol), and where the 10:30 price sat vs it. Fills once at +1h, then frozen with the row.',
-   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+  {k:'vwap', label:'sVWAP', h1:1, tip:'Session VWAP over the first hour (1m archive: Σ typical·vol ÷ Σ vol — the live mark is never folded in, a mark carries no volume), and where the 10:30 price sat vs it. Fills once at +1h, then frozen with the row.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa(focDry(p))}</td>`;
      if(h.vwap==null) return `<td>${focNa('archive bars carried no volume — VWAP not claimed (extremes still real)')}</td>`;
      const d=h.lastPx>0?((h.lastPx/h.vwap-1)*100):null;
      return `<td data-tip="${esc(`first-hour VWAP ${focPx(h.vwap)} · 10:30 print ${focPx(h.lastPx)}${d!=null?` (${focSgn(d)}% ${d>=0?'above':'below'})`:''}`)}">${focPx(h.vwap)}${d!=null?` <span class="${focCls(d)}">(${focSgn(d)}%)</span>`:''}</td>`; }, sv:p=>p.h1&&p.h1.vwap!=null&&p.h1.lastPx>0?((p.h1.lastPx/p.h1.vwap-1)*100):null},
-  {k:'hi1', label:'1H HI', h1:1, tip:'Highest PRICE printed in the first hour after the open (5m archive, true bar extremes). Hover for the % from the archive open. Frozen at 10:30 ET.',
-   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+  {k:'hi1', label:'1H HI', h1:1, tip:'Highest PRICE printed in the first hour after the open (1m archive, true bar extremes). Hover for the % from the archive open. Frozen at 10:30 ET.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa(focDry(p))}</td>`;
      const pc=h.openPx>0?((h.hi/h.openPx-1)*100):null;
      return `<td class="pos" data-tip="${esc(`${focPx(h.hi)}${pc!=null?` · ${focSgn(pc)}% from the ${focPx(h.openPx)} open`:''} · ${h.bars}/12 bars`)}">${focPx(h.hi)}</td>`; }, sv:p=>p.h1?p.h1.hi:null},
-  {k:'lo1', label:'1H LO', h1:1, tip:'Lowest PRICE printed in the first hour after the open (5m archive, true bar extremes). Hover for the % from the archive open. Frozen at 10:30 ET.',
-   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+  {k:'lo1', label:'1H LO', h1:1, tip:'Lowest PRICE printed in the first hour after the open (1m archive, true bar extremes). Hover for the % from the archive open. Frozen at 10:30 ET.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa(focDry(p))}</td>`;
      const pc=h.openPx>0?((h.lo/h.openPx-1)*100):null;
      return `<td class="neg" data-tip="${esc(`${focPx(h.lo)}${pc!=null?` · ${focSgn(pc)}% from the ${focPx(h.openPx)} open`:''} · ${h.bars}/12 bars`)}">${focPx(h.lo)}</td>`; }, sv:p=>p.h1?p.h1.lo:null},
   {k:'rng', label:'1H RANGE', h1:1, nosort:1, tip:'The first hour as a bar: low→high span, grey tick = where the open sat in the hour\u2019s eventual range, amber tick = the 10:30 print (FROZEN \u2014 the live price lives in the PX column, never here). An open pinned to one end that closed at the other is the \u201cwho won the first hour\u201d read.',
-   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa('no first-hour archive record for this name')}</td>`;
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa(focDry(p))}</td>`;
      const rng=h.hi-h.lo; if(!(rng>0)) return `<td>${focNa('zero first-hour range')}</td>`;
      const op=h.openPx!=null?Math.min(100,Math.max(0,(h.openPx-h.lo)/rng*100)):null;
      const nw=h.lastPx!=null?Math.min(100,Math.max(0,(h.lastPx-h.lo)/rng*100)):null;
@@ -10479,7 +10488,14 @@ function renderFocus(){
         // mark — restyled as forming and replaced wholesale by the frozen record at 10:30.
         const f=(!FOC.showPrev&&d.forming&&d.forming.map&&d.forming.map[p.ticker])||null;
         if(f) return c.td({...p,h1:f}).replace('<td','<td data-forming="1"');
-        return `<td class="focpend" data-tip="Fills once at +1h from the 5m archive, then the row is frozen for the day — forming reads appear once the first 5m bar closes">+1h…</td>`;
+        // NO BARS is a statement, not a blank (build 2026.08.18-04). Before this, a seat with an
+        // empty window still rendered numbers: foldLiveMark synthesised hi = lo = last from the
+        // mark, so the row printed a flat line at the current price that was indistinguishable
+        // from a real first-hour read. The mark can widen a measurement; it cannot be one.
+        const cv=(!FOC.showPrev&&d.forming&&d.forming.cov&&d.forming.cov[p.ticker])||null;
+        if(cv&&cv.bars===0&&cv.mins>=2)
+          return `<td class="focpend dry" data-tip="${esc(`no 1m bars captured for ${p.ticker} in the ${cv.mins} minute(s) since the open — the dedicated seat lane has landed nothing for this name, or the feed served no print. Deliberately NOT the mark: a flat high = low = price reads exactly like a real measurement and is not one.`)}">no bars</td>`;
+        return `<td class="focpend" data-tip="Fills once at +1h from the 1m opening-hour archive, then the row is frozen for the day — forming reads appear once the first 1m bar closes">+1h…</td>`;
       }
       return c.td(p);
     }).join('')+`</tr>`;
@@ -10498,7 +10514,7 @@ function renderFocus(){
   html+=`<div class="focfoot">Frozen list — stamped once at the cash open, one fill at +1h, never reshuffled intraday. Equities on the ET clock only; max ${d.perCluster||2} seats per cluster; `
     +(fl?`liquidity floors ${fmtUsd(fl.vol)} 24h volume / ${fmtUsd(fl.oi)} OI${day.cleared!=null?` (${day.cleared} of ${day.scanned} eligible names cleared)`:''}`
         :`liquidity floors not recorded on this stamp — it predates the floor panel`)
-    +`. Every σ is the name\u2019s own distribution. Dashes are honest nulls.</div>`;
+    +`. First-hour geometry (sVWAP · 1H HI · 1H LO) is measured on <b>1m</b> bars from a capture lane reserved for the seated names, republished every ${Math.round((d.formingMs||25000)/1000)}s while forming and frozen at +1h. Every σ is the name\u2019s own distribution. Dashes are honest nulls — a seat with no bars says so rather than showing the mark.</div>`;
   w.innerHTML=html;
   focWireBar(); focWireTable();
 }
@@ -10550,10 +10566,21 @@ function focMenuToggle(anchor){
 function openFocus(){
   focPrefsLoad();
   focFetch();
-  if(!FOC.timer) FOC.timer=setInterval(()=>{ const v=el('view-focus'); if(v&&!v.hidden) focFetch(); },60000);
+  focArmPoll();
+}
+// Poll cadence follows the SERVER's republish rhythm (payload formingMs), not a constant here: a
+// board polling at 60s against a 25s republish is not live, it just looks it. Fast only while the
+// hour is forming — the frozen record cannot change, so paying 30s for it would be pure noise.
+function focArmPoll(){
+  const want=(FOC.data&&FOC.data.state==='frozen'&&FOC.data.today&&!FOC.data.today.filledAt)
+    ? Math.max(10000,(FOC.data.formingMs||25000)+5000) : 60000;
+  if(FOC.timer&&FOC.pollMs===want) return;
+  if(FOC.timer) clearInterval(FOC.timer);
+  FOC.pollMs=want;
+  FOC.timer=setInterval(()=>{ const v=el('view-focus'); if(v&&!v.hidden) focFetch(); },want);
 }
 async function focFetch(){
-  try{ const d=await fetchJSON('/api/focus'); FOC.data=d; renderFocus(); }
+  try{ const d=await fetchJSON('/api/focus'); FOC.data=d; renderFocus(); focArmPoll(); }
   catch(e){ const w=el('focuswrap'); if(w&&!FOC.data) w.innerHTML=`<div class="msg err"><span class="big">Couldn't load the focus list</span>${esc((e&&e.message)||'network error')}. Will retry on the next interval.</div>`; }
 }
 // ---- FOCUS chart modal ------------------------------------------------------------------------

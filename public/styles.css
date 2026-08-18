@@ -1432,6 +1432,8 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .foccut b{color:var(--muted);letter-spacing:1px}
 .foccutn{color:var(--muted);border-bottom:1px dotted var(--faint);cursor:default;margin:0 2px}
 .focfoot{margin-top:8px;color:var(--faint);font-size:10.5px;line-height:1.6}
+/* a seat whose first-hour window captured nothing — stated, not blank, and never the mark */
+.foctbl td.focpend.dry{color:var(--down);opacity:.85;font-style:normal;letter-spacing:.04em}
 /* ---- below-floor roster + short-stamp note (build 2026.08.18-03) --------------------------- */
 .focnote.short{color:var(--accent)}
 .focnote.short b{color:var(--accent)}
