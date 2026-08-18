@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.18-04";
+const VERSION = "2026.08.18-05";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1034,6 +1034,16 @@ async function main() {
     if (qq.fund) {
       const body = await poller.getWhaleFund(String(qq.fund), qq.full === "1");
       const tag = 'W/"whale-f|' + String(qq.fund) + "|" + (qq.full === "1" ? 1 : 0) + "|" + poller.getWhaleStamp() + '"';
+      reply.header("cache-control", "no-cache").header("etag", tag);
+      if (req.headers["if-none-match"] === tag) return reply.code(304).send();
+      return reply.send(body);
+    }
+    if (qq.holds != null) {
+      // "Who holds" reverse lookup — cached books only, zero EDGAR traffic per query. Same weak-
+      // ETag treatment as the other async branches; the query rides the tag so results cache per
+      // search term.
+      const body = await poller.getWhaleHolds(String(qq.holds));
+      const tag = 'W/"whale-h|' + String(qq.holds).slice(0, 40) + "|" + poller.getWhaleStamp() + '"';
       reply.header("cache-control", "no-cache").header("etag", tag);
       if (req.headers["if-none-match"] === tag) return reply.code(304).send();
       return reply.send(body);
