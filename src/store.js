@@ -54,6 +54,7 @@ function openStore(dataDir) {
   // whole sub-store degrades to no-ops via candlesEnabled(); nothing else in the app is affected.
   const candleFile = path.join(dataDir, "candles.db");
   let cdb = null, cInsert = null, cRange = null, cEvict = null, cCov = null, cCount = null;
+  let mInsert = null, mRange = null, mEvict = null, mCov = null;   // 1m opening-hour archive (2026.08.18-04)
   try {
     const { DatabaseSync } = require("node:sqlite");
     cdb = new DatabaseSync(candleFile);
@@ -67,6 +68,18 @@ function openStore(dataDir) {
     cEvict = cdb.prepare("DELETE FROM candles_5m WHERE ts < ?");
     cCov = cdb.prepare("SELECT MIN(ts) AS mn, MAX(ts) AS mx, COUNT(*) AS n FROM candles_5m WHERE coin = ?");
     cCount = cdb.prepare("SELECT COUNT(*) AS n FROM candles_5m");
+    // ---- 1-minute OPENING-HOUR archive (build 2026.08.18-04) ------------------------------
+    // A SEPARATE TABLE, deliberately. Writing 1m bars into candles_5m would put timestamps off
+    // the 5-minute grid into a series four other consumers range-read as 5m (the sweep detector,
+    // dip-reclaim, the crypto correlation matrix, the FOCUS chart) — every one of them would
+    // silently start reading a mixed-resolution series with no way to tell which rows were which.
+    // Tiny by construction: ~6 seats x 60 bars a day, retained 30d, so the whole table is smaller
+    // than one market-day of the 5m archive.
+    cdb.exec("CREATE TABLE IF NOT EXISTS candles_1m (coin TEXT NOT NULL, ts INTEGER NOT NULL, o REAL, h REAL, l REAL, c REAL, v REAL, PRIMARY KEY (coin, ts)) STRICT, WITHOUT ROWID;");
+    mInsert = cdb.prepare("INSERT INTO candles_1m (coin, ts, o, h, l, c, v) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(coin, ts) DO UPDATE SET o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c, v=excluded.v");
+    mRange = cdb.prepare("SELECT ts, o, h, l, c, v FROM candles_1m WHERE coin = ? AND ts >= ? AND ts <= ? ORDER BY ts");
+    mEvict = cdb.prepare("DELETE FROM candles_1m WHERE ts < ?");
+    mCov = cdb.prepare("SELECT MIN(ts) AS mn, MAX(ts) AS mx, COUNT(*) AS n FROM candles_1m WHERE coin = ? AND ts >= ? AND ts <= ?");
   } catch (_) { cdb = null; }
 
   function flush() {
@@ -550,6 +563,47 @@ function openStore(dataDir) {
       catch (_) { return { min: null, max: null, count: 0 }; }
     },
     candleCount() { if (!cdb) return 0; try { const r = cCount.get(); return r ? Number(r.n) || 0 : 0; } catch (_) { return 0; } },
+    // ---- 1m opening-hour archive (build 2026.08.18-04) -----------------------------------
+    // Same shape and same idempotent-upsert discipline as the 5m API, against its own table.
+    // Callers gate on candlesEnabled() exactly as they do for 5m — one flag, one sub-store.
+    insertCandles1m(coin, rows) {
+      if (!cdb || !Array.isArray(rows) || !rows.length) return 0;
+      let n = 0;
+      try {
+        cdb.exec("BEGIN");
+        for (const k of rows) {
+          if (!Array.isArray(k)) continue;
+          const t = +k[0], c = +k[4];
+          if (!Number.isFinite(t) || !Number.isFinite(c)) continue;
+          const o = +k[1], h = +k[2], l = +k[3], v = +k[5];
+          mInsert.run(coin, Math.trunc(t), Number.isFinite(o) ? o : c, Number.isFinite(h) ? h : c, Number.isFinite(l) ? l : c, c, Number.isFinite(v) ? v : 0);
+          n++;
+        }
+        cdb.exec("COMMIT");
+      } catch (_) { try { cdb.exec("ROLLBACK"); } catch (_) {} return 0; }
+      return n;
+    },
+    readCandles1m(coin, from, to) {
+      if (!cdb) return [];
+      try {
+        const out = [];
+        for (const r of mRange.all(coin, Math.trunc(+from), Math.trunc(+to))) out.push([r.ts, r.o, r.h, r.l, r.c, r.v]);
+        return out;
+      } catch (_) { return []; }
+    },
+    evictCandles1m(before) {
+      if (!cdb) return 0;
+      try { return Number(mEvict.run(Math.trunc(+before)).changes) || 0; } catch (_) { return 0; }
+    },
+    // Windowed coverage: how many 1m bars exist for one coin over one span. This is the number the
+    // FOCUS record discloses per seat — "zero bars" has to be a statement the board can make, not
+    // an absence the renderer papers over with the mark.
+    candleCoverage1m(coin, from, to) {
+      if (!cdb) return { min: null, max: null, count: 0 };
+      try { const r = mCov.get(coin, Math.trunc(+from), Math.trunc(+to));
+        return { min: r && r.mn != null ? r.mn : null, max: r && r.mx != null ? r.mx : null, count: r ? Number(r.n) || 0 : 0 }; }
+      catch (_) { return { min: null, max: null, count: 0 }; }
+    },
     // Off-copy for backup: VACUUM INTO writes a clean, defragmented snapshot. This archive is the
     // only copy of anything past the native window, so this is the recovery hedge — the caller
     // schedules it and (ideally) ships the file off-volume. Defaults beside the live db.

@@ -864,6 +864,55 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (closed.length) { store.insertCandles(coin, closed); r.m5LastTs = Math.max(r.m5LastTs, closed[closed.length - 1][0]); }
     r.m5Ts = now;
   }
+  // ---- 1m OPENING-HOUR lane (build 2026.08.18-04) ---------------------------------------------
+  // A capture worker reserved for the FOCUS seats, running only between the stamp and the +1h
+  // freeze. It exists because the shared 5m round-robin cannot make a promise about any individual
+  // market: ~150 names compete on a 5-minute staleness check with per-coin fail backoff up to 15
+  // minutes, which is longer than the entire window being measured. Four of six seats reaching
+  // 10:37 with zero bars was that arithmetic, not bad luck. Six coins on their own lane at 20s
+  // is ~0.3 req/s — a rounding error against the rate budget, and the seats can no longer lose.
+  const M1_TICK = 20 * 1000;          // per-seat pull cadence: comfortably inside the 30s republish
+  const M1_RETENTION_DAYS = 30;       // ~6 seats x 60 bars/day: the whole table is trivial
+  const M1_PAD = 5 * 60 * 1000;       // capture a little before the open and after the freeze — the window's edges are the bars most likely to be missed
+  function m1FilterClosed(raw, now) { return packHours(raw).filter((k) => k[0] + 60000 <= now); }
+  async function capture1m(coin, from, to) {
+    if (!store.candlesEnabled || !store.candlesEnabled() || !store.insertCandles1m) return 0;
+    const r = rows.get(coin);
+    if (!r || r.delisted || r.px == null) return 0;
+    const now = Date.now();
+    const raw = await fetchCandles(coin, "1m", from, Math.min(to, now), M5_FETCH_WEIGHT);
+    if (!Array.isArray(raw) || !raw.length) return 0;
+    // The FORMING bar is never written — same closed-vs-fresh guard the 5m lane uses, so a bar
+    // lands exactly once, when final, and a re-pull absorbs the overlap through the upsert.
+    const closed = m1FilterClosed(raw, now);
+    return closed.length ? store.insertCandles1m(coin, closed) : 0;
+  }
+  // Which coins the lane owes bars to right now: the seated names, while today's window is open.
+  // Reads focusState directly rather than taking a copy — a seat added by a late boot stamp is
+  // covered from the moment it exists, with no second source of "who is seated".
+  function m1Seats(now) {
+    const st = focusState;
+    if (!st || !st.rows || !st.rows.length) return null;
+    if (st.day !== etDayStr(now)) return null;
+    if (now < st.open - M1_PAD || now > st.open + HOUR + M1_PAD) return null;
+    return { st, coins: st.rows.map((p) => p.coin).filter(Boolean) };
+  }
+  async function oneMinWorker() {
+    for (;;) {
+      const now = Date.now();
+      const seats = (store.candlesEnabled && store.candlesEnabled()) ? m1Seats(now) : null;
+      if (!seats) { await sleep(15000); continue; }      // outside the window this lane costs nothing
+      const { st, coins } = seats;
+      for (const coin of coins) {
+        if (inflight.has("m1:" + coin)) continue;
+        inflight.add("m1:" + coin);
+        try { await capture1m(coin, st.open - M1_PAD, st.open + HOUR + M1_PAD); }
+        catch (_) { /* one seat's failure must not cost the other five their window */ }
+        finally { inflight.delete("m1:" + coin); }
+      }
+      await sleep(M1_TICK);
+    }
+  }
   const need5m = (r) => store.candlesEnabled && store.candlesEnabled() && r.px != null &&
     Date.now() - (r.m5Ts || 0) > M5_STALE && Date.now() >= (r.m5FailUntil || 0);
   // One worker suffices: ~150 markets x a tiny tail pull spread over 5 min is well under 1 req/s.
@@ -6048,6 +6097,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const kept = store.candleCount ? store.candleCount() : 0;
         log(`5m archive: ${kept} bar(s) retained, ${dropped} evicted past ${M5_RETENTION_DAYS}d`);
       } catch (e) { log("5m evict failed: " + (e && e.message)); }
+      // 1m opening-hour archive: 30d is plenty — its only consumers are today's forming reads and
+      // the chart's opening-hour base for lists still on the board.
+      try {
+        const d1 = store.evictCandles1m ? store.evictCandles1m(Date.now() - M1_RETENTION_DAYS * DAY) : 0;
+        if (d1) log(`1m opening-hour archive: ${d1} bar(s) evicted past ${M1_RETENTION_DAYS}d`);
+      } catch (e) { log("1m evict failed: " + (e && e.message)); }
     }
     // Heavy-data GC for markets delisted > 7d. They stay in Hyperliquid's meta forever (so the
     // row itself must survive to keep the universe index-aligned for the WS feed), but there's
@@ -6211,6 +6266,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // is simply absent, exactly like a missing external token elsewhere.
     if (store.candlesEnabled && store.candlesEnabled()) {
       fiveMinWorker();
+      // The FOCUS seats' own lane (2026.08.18-04). Separate worker on purpose: it must not queue
+      // behind the shared round-robin, which is the entire reason it exists.
+      oneMinWorker();
       const snap = () => { try { if (store.snapshotCandles()) log("5m archive: off-copy snapshot written (candles.db.bak)"); } catch (_) {} };
       setInterval(snap, M5_SNAPSHOT_MS);
       setTimeout(snap, 10 * 60 * 1000);
@@ -6326,7 +6384,22 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     let hi = Number.isFinite(+to) ? +to : now;
     let lo = Number.isFinite(+from) ? +from : hi - 30 * DAY;
     if (lo > hi) { const t = lo; lo = hi; hi = t; }
-    const rows5 = store.readCandles(coin, lo, hi);   // packed [t,o,h,l,c,v]
+    // BASE SPLICE (build 2026.08.18-04). Where the 1m opening-hour archive covers a span, it is
+    // AUTHORITATIVE and the overlapping 5m rows are dropped rather than merged — the two archives
+    // hold the same trades, so folding both in would double every volume in the window and put a
+    // VWAP out by however much the overlap weighed. 09:30 is a clean 5-minute boundary, so the
+    // seam is exact and no bucket ever straddles it. The 1m bars are then rolled UP to the 5m grid
+    // here, in one place: the client keeps aggregating from a single 5m base and never learns
+    // there are two archives, which is what stops the chart and the board disagreeing.
+    let rows5 = store.readCandles(coin, lo, hi);
+    const win = m1Window(coin, lo, hi);
+    if (win) {
+      const raw1 = store.readCandles1m(coin, win.from, win.to);
+      if (raw1.length) {
+        const rolled = bucketCandles(raw1, 5, 60000).map((b) => [b.t, b.o, b.h, b.l, b.c, b.v]);
+        rows5 = rows5.filter((k) => k[0] < win.from || k[0] > win.to).concat(rolled).sort((a, b) => a[0] - b[0]);
+      }
+    }
     const cap = Math.max(200, Math.min(6000, Number(maxPoints) || 3000));
     let out = rows5;
     if (rows5.length > cap) {
@@ -6342,6 +6415,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     return { coin, res: "5m", enabled: true, from: lo, to: hi,
       coverage: { min: cov.min, max: cov.max, count: cov.count, days: cov.min && cov.max ? +((cov.max - cov.min) / DAY).toFixed(1) : 0 },
       candles: q };
+  }
+  // Which span of a chart request the 1m archive owns for this coin: today's stamped first hour
+  // (and yesterday's, while that list is still readable behind the toggle), clipped to the request.
+  // Derived from the RECORDS' own open times rather than a recomputed session clock — one producer
+  // of "when was the first hour", shared by the lane, the fill and the chart.
+  function m1Window(coin, lo, hi) {
+    if (!store.readCandles1m) return null;
+    const spans = [];
+    for (const st of [focusState, focusPrev]) {
+      if (!st || !st.open || !Array.isArray(st.rows)) continue;
+      if (!st.rows.some((p) => p.coin === coin)) continue;
+      spans.push([st.open, st.open + HOUR]);
+    }
+    if (!spans.length) return null;
+    const from = Math.max(lo, Math.min(...spans.map((s) => s[0])));
+    const to = Math.min(hi, Math.max(...spans.map((s) => s[1])));
+    return to > from ? { from, to } : null;
   }
   function getCandleCoverage(coin) {
     if (!store.candlesEnabled || !store.candlesEnabled()) return { enabled: false };
@@ -11352,21 +11442,33 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // pure fold in compute. Republished at most once a minute; the ETag bump rides focusVer so the
   // client's 60s poll picks each edition up. At the freeze the frozen record replaces all of it
   // and the map dies — the record and only the record persists.
+  // Republish cadence dropped 55s -> 25s at 2026.08.18-04, to sit inside the client's 30s poll.
+  // Safe only because focusBump is monotonic: at this cadence a republish and a human write can
+  // land in the same millisecond, and a wall-clock stamp would have 304'd the second one away.
+  const FOCUS_FORMING_MS = 25 * 1000;
   function buildFocusForming(now) {
     const st = focusState;
     if (!st || st.filledAt) return;
-    if (focusForming && now - focusForming.at < 55 * 1000) return;
+    if (focusForming && now - focusForming.at < FOCUS_FORMING_MS) return;
     const canRead = store.candlesEnabled && store.candlesEnabled();
     const endW = Math.min(now, st.open + HOUR);
-    const map = {};
+    const map = {}, cov = {};
     for (const p of st.rows) {
-      const bars = canRead ? store.readCandles(p.coin, st.open - 1, endW + 1) : [];
-      let f = firstHourStats(bars, st.open, endW, 1);
+      // 1m base (2026.08.18-04). The opening hour is the one window this tab actually measures,
+      // and measuring it in five-minute steps was too coarse to read.
+      const bars = canRead && store.readCandles1m ? store.readCandles1m(p.coin, st.open - 1, endW + 1) : [];
+      const f = firstHourStats(bars, st.open, endW, 1);
       const r = rows.get(p.coin);
-      f = foldLiveMark(f, r && r.px > 0 ? +r.px : null);
-      if (f) map[p.ticker] = f;
+      // COVERAGE IS PART OF THE READ, not a diagnostic beside it. `bars: 0` used to be indistinct
+      // from a real one-bar hour once foldLiveMark turned the mark into hi = lo = last, which
+      // rendered as a flat line at the current price and looked exactly like a measurement.
+      cov[p.ticker] = { bars: bars.length, mins: Math.max(0, Math.round((endW - st.open) / 60000)) };
+      // The mark may only WIDEN an existing read. With no bars there is nothing to widen, and
+      // synthesising a record from the mark alone is the fabrication this build removes.
+      if (!f) continue;
+      map[p.ticker] = foldLiveMark(f, r && r.px > 0 ? +r.px : null);
     }
-    focusForming = { at: now, map };
+    focusForming = { at: now, map, cov, src: "1m", next: now + FOCUS_FORMING_MS };
     focusBump();
   }
   function fillFocus(now) {
@@ -11374,14 +11476,21 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (!st || st.filledAt) return;
     const canRead = store.candlesEnabled && store.candlesEnabled();
     for (const p of st.rows) {
-      const bars = canRead ? store.readCandles(p.coin, st.open - 1, st.open + HOUR + 1) : [];
+      const bars = canRead && store.readCandles1m ? store.readCandles1m(p.coin, st.open - 1, st.open + HOUR + 1) : [];
       p.h1 = firstHourStats(bars, st.open, st.open + HOUR);    // null = archive gap for THIS name: an honest dash, never a guess
+      // Per-seat coverage, frozen with the row. A dash now carries its reason forever: "the lane
+      // captured nothing for this name" is a different statement from "this name did not trade",
+      // and a record that cannot tell them apart cannot be audited later.
+      p.h1cov = { bars: bars.length, mins: 60 };
     }
     st.filledAt = now;
-    st.fillNote = canRead ? null : "5m archive disabled \u2014 first-hour columns cannot fill";
+    st.h1src = "1m";                   // the resolution this geometry was measured at, on the record
+    st.fillNote = canRead ? null : "candle archive disabled \u2014 first-hour columns cannot fill";
     focusForming = null;               // the frozen record replaces every forming read
     focusPersist();
-    log(`FOCUS +1h fill: ${st.rows.filter((p) => p.h1).length}/${st.rows.length} seat(s) carry a first-hour record${st.fillNote ? " \u2014 " + st.fillNote : ""}`);
+    const dry = st.rows.filter((p) => !p.h1).map((p) => p.ticker);
+    log(`FOCUS +1h fill (1m base): ${st.rows.filter((p) => p.h1).length}/${st.rows.length} seat(s) carry a first-hour record`
+      + (dry.length ? ` \u2014 NO BARS for ${dry.join(", ")}` : "") + (st.fillNote ? " \u2014 " + st.fillNote : ""));
   }
   // The day's list dies at 00:00 UTC (2026.08.18-02). Deliberately NOT the ET boundary the rest of
   // this feature runs on: the stamp, the preview and the freeze are all cash-session events, but
@@ -11438,6 +11547,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       preview: pv ? { at: pv.at, rows: pv.rows, below: pv.below || [], belowN: pv.belowN || 0,
         scanned: pv.scanned || 0, cleared: pv.cleared || 0, limits: pv.limits || focusLimits(focusLim) } : null,
       previewN: FOCUS_PREVIEW_N, previewLeadMs: FOCUS_PREVIEW_LEAD,
+      // Republish cadence, shipped rather than hardcoded in the client: the two must not drift, or
+      // the board polls on a rhythm the server is not publishing on and "live" quietly means 60s.
+      formingMs: FOCUS_FORMING_MS, h1src: "1m",
       forming: focusState && focusState.day === today && !focusState.filledAt && focusForming ? focusForming : null,
       // Chart shading (build 2026.08.17-01): cash-session windows across the chart's 72h
       // lookback (+ the next session), from the same calendar engine as the stamp — the client
