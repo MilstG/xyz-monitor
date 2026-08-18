@@ -10231,15 +10231,20 @@ function focStateLine(d){
   if(d.state==='preview'&&d.preview) return `<span class="focstamp pv"><span class="focdot pv"></span>PREVIEW · 09:00\u201309:30 ET · LIVE, NOT A RECORD · pool refreshed ${new Date(d.preview.at).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit'})} ET</span>`;
   if(d.state==='pre') return `<span class="focstamp"><span class="focdot pre"></span>PRE-OPEN · stamps at the 09:30 ET open${d.open?` (${Math.max(0,Math.round((d.open-Date.now())/60000))}m)`:''}</span>`;
   if(d.state==='pending') return `<span class="focstamp"><span class="focdot pre"></span>OPEN PASSED · stamping on the next tick…</span>`;
-  if(d.state==='offday') return `<span class="focstamp"><span class="focdot prev"></span>NO SESSION TODAY${d.prev?' · showing the prior list':''}</span>`;
+  if(d.state==='cleared') return `<span class="focstamp"><span class="focdot prev"></span>CLEARED \u00b7 the day\u2019s list retired at 00:00 UTC${d.prev?` \u00b7 <span data-tip="the stamped record is kept, not deleted \u2014 it is one click away and unchanged">${esc(d.prev.day)} still readable via \u25c2</span>`:''}</span>`;
+  if(d.state==='offday') return `<span class="focstamp"><span class="focdot prev"></span>NO SESSION TODAY${d.prev?` \u00b7 <span data-tip="no stamp happens on a non-session day; the last one is one click away via \u25c2">last list ${esc(d.prev.day)}</span>`:''}</span>`;
   if(day) return `<span class="focstamp"><span class="focdot"></span>FROZEN @ OPEN${day.late?' <span class="foclate" data-tip="Stamped after a boot that landed past 09:30 — the snapshot is later than the open and says so, same disclosure as boot-stamped episodes">LATE</span>':''} · stamped ${new Date(day.frozenAt).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'})} ET${day.filledAt?' · 1H CONFIRMED':' · sVWAP / 1H HI / 1H LO <span data-tip="forming — the hour so far from closed 5m bars with the live mark folded into hi/lo/last (never into VWAP: a mark has no volume); republished ~1/min and replaced wholesale by the frozen record at 10:30 ET">forming, freeze at +1h</span>'}</span>`;
   return '';
 }
 function renderFocus(){
   const w=el('focuswrap'); if(!w||!FOC.data) return;
   const d=FOC.data;
-  const day=FOC.showPrev?(d.prev||null):(d.today||( (d.state==='pre'||d.state==='offday') ? d.prev : null));
-  const usingPrevAuto=!FOC.showPrev&&!d.today&&day&&day===d.prev;
+  // The prior list renders ONLY when explicitly asked for. The old expression fell back to d.prev
+  // in the pre/offday states, so overnight and all weekend the tab showed a stale list under
+  // today's framing — and because focusPrev only rolled forward at the next stamp, in a
+  // long-running process that stale list was the one from TWO sessions ago. An empty list is a
+  // true statement about the day; a silently substituted one is not.
+  const day=FOC.showPrev?(d.prev||null):(d.today||null);
   // PREVIEW (build 2026.08.15-02): the 09:00 prep pool — its own render path. Rank column, ten
   // rows, a dashed rule after the likely six, dimmed below it. No sorting, no drag, no h1
   // columns: a live pool re-ranks itself; user reordering of a list that reshuffles under the
@@ -10259,15 +10264,18 @@ function renderFocus(){
     return;
   }
   let html=`<div class="focbar">${focStateLine(d)}`
-    +(usingPrevAuto?`<span class="focnote">no stamp yet today — the prior list stands below</span>`:'')
     +(day&&day.fillNote?`<span class="focnote err" data-tip="the +1h columns need the on-disk 5m archive">${esc(day.fillNote)}</span>`:'')
     +(day&&day.pvDiff&&((day.pvDiff.added||[]).length||(day.pvDiff.dropped||[]).length)?`<span class="focdiff" data-tip="${esc(`the tape moved between the ${new Date(day.pvDiff.pvAt).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'})} ET preview and the bell \u2014 disclosed so your prep never silently drifts from the record`)}"><b>\u0394 vs preview:</b> ${(day.pvDiff.added||[]).map(t=>'+'+esc(t)).concat((day.pvDiff.dropped||[]).map(t=>'\u2212'+esc(t))).join(' ')}</span>`:'')
     +(day&&day.pvDiff&&!(day.pvDiff.added||[]).length&&!(day.pvDiff.dropped||[]).length?`<span class="focnote" data-tip="the frozen six match the last preview\u2019s likely six exactly">stamp = preview</span>`:'')
     +`<span class="focsp"></span>`
-    +(d.prev&&d.today?`<button type="button" class="btn xtiny" id="focprev" data-tip="Toggle yesterday\u2019s frozen list — what you were watching, exactly as stamped">${FOC.showPrev?'◂ today':'◂ '+esc(d.prev.day)}</button>`:'')
+    +(d.prev?`<button type="button" class="btn xtiny" id="focprev" data-tip="Toggle the last stamped list — what you were watching, exactly as stamped. Gated on d.prev alone: once the 00:00 UTC clear retires today\u2019s list there IS no d.today, and gating on it would take the toggle away at exactly the moment it is the only way back to the record.">${FOC.showPrev?(d.today?'◂ today':'◂ close'):'◂ '+esc(d.prev.day)}</button>`:'')
     +`<button type="button" class="btn xtiny" id="focgear" data-tip="Show/hide columns — same model as the Markets column menu. Drag headers directly to rearrange; the layout persists per browser.">⚙ columns</button>`
     +`</div>`;
-  if(!day){ html+=`<div class="msg">${d.state==='pre'?'The list stamps at the open — nothing to show yet today, and no prior list is stored.':'No focus list stored yet. The first stamp lands at the next cash open.'}</div>`;
+  if(!day){ html+=`<div class="msg">${
+    d.state==='cleared'?`Today\u2019s list retired at the 00:00 UTC boundary. The next one stamps at the 09:30 ET open${d.prev?` \u2014 ${esc(d.prev.day)} is still readable via \u25c2 above`:''}.`
+    :d.state==='offday'?`No cash session today, so no list stamps${d.prev?` \u2014 ${esc(d.prev.day)} is still readable via \u25c2 above`:''}.`
+    :d.state==='pre'?`The list stamps at the open \u2014 nothing to show yet today${d.prev?`; ${esc(d.prev.day)} is readable via \u25c2 above`:', and no prior list is stored'}.`
+    :'No focus list stored yet. The first stamp lands at the next cash open.'}</div>`;
     w.innerHTML=html; focWireBar(); return; }
   const filled=!!day.filledAt;
   const cols=focActiveCols();
@@ -10758,17 +10766,28 @@ function renderWhlSeason(){
   const s=WHL.season;
   if(!s||!s.ok){ host.innerHTML=WHL.data&&WHL.data.watch.length?`<div class="whl-shd"><span class="whl-hd">13F SEASON</span><span class="sec">${esc((s&&s.error)||'no season built yet \u2014 it lands when the watched funds file')}</span></div>`:''; return; }
   const a=s.agg;
-  const cells=(r)=>WHL.data.watch.map(w=>{
+  // Cells ride the SEASON'S OWN ROSTER, not the live watchlist. These two lists diverge the
+  // moment you edit the watchlist, and rendering the squares from one while the N/M beside them
+  // came from the other made the row contradict itself. Worse than the wrong denominator: a fund
+  // added mid-quarter drew a grey "no position" square, which is an absence of measurement being
+  // painted as a finding about a filer. One producer — the build says who it covered, and the
+  // grid draws exactly that.
+  const cells=(r)=>(a.roster||[]).map(w=>{
     const st=r.state&&r.state[w.key];
     const lbl=st==='new'?'NEW this quarter':st==='add'?'added':st==='trim'?'trimmed':st==='exit'?'exited':st==='hold'?'holds, unchanged':'no position';
-    return `<span class="whl-cell ${st||'none'}" data-tip="${esc(w.key)} \u2014 ${lbl}"></span>`;
+    const gone=w.dropped?' \u00b7 no longer watched \u2014 this square is history, not a live holding':'';
+    return `<span class="whl-cell ${st||'none'}${w.dropped?' gone':''}" data-tip="${esc(w.key)} \u2014 ${lbl}${gone}"></span>`;
   }).join('');
   const crowd=a.crowd.length?a.crowd.slice(0,8).map(r=>
-    `<div class="whl-crow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 held by ${r.held} of ${a.nFunds} \u00b7 ${r.adding} adding \u00b7 ${r.cutting} cutting \u00b7 grid order = watchlist order">`
+    `<div class="whl-crow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 held by ${r.held} of ${a.nFunds} \u00b7 ${r.adding} adding \u00b7 ${r.cutting} cutting \u00b7 one square per fund THIS SEASON WAS BUILT FROM \u2014 not the current watchlist, which may have changed since">`
     +`<span class="whl-snm">${r.tk?r.tk:esc(r.name.slice(0,16))}${r.put?' <span class="whl-oc '+r.put+'">'+esc(r.put)+'s</span>':''}</span>`
     +`<span class="whl-cells">${cells(r)}</span><span class="sec">${r.held}/${a.nFunds}${r.adding?' \u00b7 '+r.adding+' adding':''}${r.cutting?' \u00b7 '+r.cutting+' cutting':''}</span></div>`).join('')
     :'<div class="sec">no name is held by 2+ watched funds</div>';
-  host.innerHTML=`<div class="whl-shd"><span class="whl-hd">${esc(s.q)} \u00b7 13F SEASON</span>`
+  // The stale chip fires only when this build covers funds that have since LEFT the watchlist and
+  // the rebuild couldn't run (nothing left to build from). It never fires for the ordinary case —
+  // an edit that reopens the build repaints the whole panel from the new aggregate instead.
+  const staleChip=s.stale?`<span class="whl-stale" data-tip="this aggregate was built from ${esc(s.stale.dropped.join(', '))}, which ${s.stale.dropped.length===1?'is':'are'} no longer watched \u2014 and no watched fund has a filing for this quarter, so it cannot be rebuilt. Kept rather than deleted: it is what the books said at the time. Re-add ${s.stale.dropped.length===1?'the fund':'a fund'}, or wait for the next filing, and it rebuilds.">STALE \u00b7 built from ${esc(s.stale.dropped.join(', '))}, no longer watched</span>`:'';
+  host.innerHTML=`<div class="whl-shd"><span class="whl-hd">${esc(s.q)} \u00b7 13F SEASON</span>${staleChip}`
     +`<span class="sec">${s.filedN}/${s.watchN} watched funds filed${s.missing&&s.missing.length?' \u00b7 missing: '+esc(s.missing.join(', ')):''}${s.amended?' \u00b7 rebuilt after amendment':''}${s.closedAt?' \u00b7 closed '+esc(whlDateStr(s.closedAt)):''}</span>`
     +(WHL.data.seasonList&&WHL.data.seasonList.length>1?`<span class="whl-sp"></span><span class="whl-qnav">${WHL.data.seasonList.map(q=>`<button type="button" data-whlq="${esc(q)}" class="${WHL.season.q===q?'on':''}">${esc(q)}</button>`).join('')}</span>`:'')+`</div>`
     +`<div class="whl-grid">`
