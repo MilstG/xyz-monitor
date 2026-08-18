@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.18-02";
+const VERSION = "2026.08.18-03";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1005,6 +1005,24 @@ async function main() {
   fastify.get("/api/focus", (req, reply) => {
     const key = "focus|" + poller.getFocusStamp();
     return serveKeyed(req, reply, key, () => poller.getFocus(), { state: "off", today: null, prev: null });
+  });
+  // FOCUS liquidity floors (build 2026.08.18-03), admin panel only. GET carries the structural
+  // scan the panel's distribution is drawn from — no-store rather than keyed, because the scan
+  // tracks the live tape and a stale histogram would have the operator calibrating a wall against
+  // yesterday's volumes. Both verbs re-check the admin cookie on top of the manifest gate
+  // (focus.limits): visibility and authz are separate axes and both must pass.
+  fastify.get("/api/focus/limits", (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!isAdmin(req)) return reply.code(403).send({ error: "forbidden" });
+    return poller.getFocusLimits();
+  });
+  // 8 KB cap — the payload is { vol, oi }; anything larger is malformed or hostile (413).
+  fastify.post("/api/focus/limits", { bodyLimit: 8 * 1024 }, (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const b = req.body || {};
+    const r = poller.setFocusLimits(b.vol, b.oi, isAdmin(req));
+    if (!r.ok) return reply.code(r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400).send(r);
+    return reply.send({ ...r, scan: poller.getFocusLimits().scan });
   });
   // FUNDS / 13F whale lane (build 2026.08.16-01). ONE exact read path — list, per-fund detail and
   // season all ride query params on /api/whale so the manifest's exact-path gate is a single wall
