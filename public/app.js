@@ -10928,11 +10928,11 @@ function renderFunds(){
     +`<span class="sec">${d.watch.length} filer${d.watch.length===1?'':'s'} \u00b7 13F-HR watched via EDGAR</span>`
     +`<span class="whl-sp"></span>${whlWindowLine(d.window)}`
     +(IS_ADMIN?`<button type="button" id="whl-edit" class="whl-btn${WHL.edit?' on':''}">${WHL.edit?'DONE':'EDIT'}</button>`:'')+`</div>`
+    +`<div class="whl-who"><div class="whl-shd"><span class="whl-hd" data-tip="reverse lookup across the tracked funds' cached 13F books — who holds it, how big, at what conviction, what they did QoQ. Cached state only; a query costs zero EDGAR traffic. QoQ chips come from the SAME delta engine as the fund modal — the two can never disagree.">WHO HOLDS</span>`
+    +`<input id="whl-whoq" placeholder="search a ticker, company name (\u22653 chars), or CUSIP across the tracked books\u2026" maxlength="40" autocomplete="off"></div><div id="whl-whoout"></div></div>`
     +(d.watch.length?`<div class="tblwrap"><table class="whl-tbl"><thead><tr><th></th><th class="l">FUND</th><th class="l">LAST 13F</th><th class="r">BOOK</th><th class="r" data-tip="five inputs, one number: marks + investor flows + options notional expansion + assets ENTERING the 13F universe (an IPO makes a years-old private stake reportable overnight) + rotation from non-13F assets \u00b7 never read as returns \u2014 a fund printing +40% here made nobody 40%; the share-count deltas inside the book are the trustworthy layer, this column is context">\u0394 QoQ</th><th class="r">POS</th><th class="l">TOP HOLDING</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="msg">No funds watched yet${IS_ADMIN?' \u2014 hit EDIT and add one by name or CIK':' \u2014 the operator curates this list'}.</div>`)
     +addRow
-    +`<div class="whl-who"><div class="whl-shd"><span class="whl-hd" data-tip="reverse lookup across the tracked funds' cached 13F books — who holds it, how big, at what conviction, what they did QoQ. Cached state only; a query costs zero EDGAR traffic. QoQ chips come from the SAME delta engine as the fund modal — the two can never disagree.">WHO HOLDS</span>`
-    +`<input id="whl-whoq" placeholder="ticker, name fragment (\u22653 chars), or CUSIP" maxlength="40" autocomplete="off"></div><div id="whl-whoout"></div></div>`
     +`<div id="whl-season"></div>`
     +`<div class="whl-foot">source: SEC EDGAR 13F-HR \u00b7 values verbatim from filings (whole USD) \u00b7 tickers appear only where the issuer name matched the SEC company map exactly after normalization \u2014 unmatched rows keep the filed name, nothing is guessed \u00b7 list + books persist on the data volume</div>`;
   whlBindList(box);
@@ -10999,7 +10999,8 @@ async function whlWho(qv,keep){
         +`<td class="l"><span class="whl-name">${esc(f.key)}</span><span class="whl-badge b-exit">EXITED</span></td>`
         +`<td colspan="3" class="l sec">${ex}</td><td></td></tr>`; }
     return f.lines.map((l,li)=>{
-      const oc=l.put?`<span class="whl-oc ${l.put}" data-tip="a separate 13F line — option value is the UNDERLYING notional per 13F rules, not premium; never merged into the common position">${esc(l.put)}s</span>`:'';
+      const dupCls=f.lines.filter(x=>!x.put).length>1&&!l.put&&l.cls?` <span class="whl-clstag">${esc(String(l.cls).split(/\s+/).slice(-2).join(' '))}</span>`:'';
+      const oc=l.put?`<span class="whl-oc ${l.put}" data-tip="a separate 13F line — option value is the UNDERLYING notional per 13F rules, not premium; never merged into the common position">${esc(l.put)}s</span>`:dupCls;
       return `<tr class="whl-worow" data-whlopen2="${esc(f.key)}" data-tip="${esc(f.name+' \u00b7 '+(l.put?l.put+'s line':'common')+' \u00b7 value $'+Math.round(l.value).toLocaleString()+(l.shares!=null?' \u00b7 '+Math.round(l.shares).toLocaleString()+' sh':' \u00b7 share count not claimed (PRN/mixed rows)')+' \u00b7 rank #'+l.rank+' in their book \u00b7 click for the full book')}">`
         +`<td class="l">${li===0?`<span class="whl-name">${esc(f.key)}</span>`:''}${oc}${li===0?chip(f.lines[0].d):''}</td>`
         +`<td class="r">${whlMoney(l.value)}</td>`
@@ -11055,9 +11056,17 @@ function renderWhlSeason(){
     const gone=w.dropped?' \u00b7 no longer watched \u2014 this square is history, not a live holding':'';
     return `<span class="whl-cell ${st||'none'}${w.dropped?' gone':''}" data-tip="${esc(w.key)} \u2014 ${lbl}${gone}"></span>`;
   }).join('');
+  // Duplicate display names (GOOG/GOOGL both normalize to "ALPHABET INC"): when a lane shows one
+  // name twice, each row appends its share-class tail (titleOfClass's last two tokens) or the
+  // cusip head — the rows were never wrong, they were indistinguishable.
+  const nameCount={}; a.crowd.forEach(r=>{ const k=(r.tk||r.name)+(r.put||''); nameCount[k]=(nameCount[k]||0)+1; });
+  const disamb=(r)=>{ const k=(r.tk||r.name)+(r.put||''); if((nameCount[k]||0)<2) return '';
+    const t=r.cls?esc(String(r.cls).split(/\s+/).slice(-2).join(' ')):esc(String(r.cusip||'').slice(0,6));
+    return ` <span class="whl-clstag" data-tip="two share classes of one issuer are two cusips and two rows — the tag is the filing's own titleOfClass (or the cusip head when the filer omitted it)">${t}</span>`; };
+  const rosterNote=!(a.roster&&a.roster.length)&&a.crowd.length?`<div class="sec" style="padding:4px 0 8px">grid cells pending one season rebuild \u2014 this build was stored by an older version; the server heals it at boot</div>`:'';
   const crowd=a.crowd.length?a.crowd.slice(0,8).map(r=>
     `<div class="whl-crow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 held by ${r.held} of ${a.nFunds} \u00b7 ${r.adding} adding \u00b7 ${r.cutting} cutting \u00b7 one square per fund THIS SEASON WAS BUILT FROM \u2014 not the current watchlist, which may have changed since">`
-    +`<span class="whl-snm">${r.tk?r.tk:esc(r.name.slice(0,16))}${r.put?' <span class="whl-oc '+r.put+'">'+esc(r.put)+'s</span>':''}</span>`
+    +`<span class="whl-snm">${r.tk?r.tk:esc(r.name.slice(0,16))}${disamb(r)}${r.put?' <span class="whl-oc '+r.put+'">'+esc(r.put)+'s</span>':''}</span>`
     +`<span class="whl-cells">${cells(r)}</span><span class="sec">${r.held}/${a.nFunds}${r.adding?' \u00b7 '+r.adding+' adding':''}${r.cutting?' \u00b7 '+r.cutting+' cutting':''}</span></div>`).join('')
     :'<div class="sec">no name is held by 2+ watched funds</div>';
   // The stale chip fires only when this build covers funds that have since LEFT the watchlist and
@@ -11073,7 +11082,7 @@ function renderWhlSeason(){
     +`<div class="whl-lane"><div class="whl-lhd new">CONSENSUS OPENS \u00b7 new positions</div>${whlLaneRows(a.opens,'opens')}</div>`
     +`<div class="whl-lane"><div class="whl-lhd exitc">EXITS \u00b7 positions closed</div>${whlLaneRows(a.exits,'exits')}</div>`
     +`</div>`
-    +`<div class="whl-crowd"><div class="whl-lhd amber">CROWDING \u00b7 who holds what</div>${crowd}`
+    +`<div class="whl-crowd"><div class="whl-lhd amber">CROWDING \u00b7 who holds what</div>${rosterNote}${crowd}`
     +`<div class="whl-legend"><span><span class="whl-cell none"></span>no position</span><span><span class="whl-cell hold"></span>holds</span><span><span class="whl-cell add"></span>added</span><span><span class="whl-cell trim"></span>trimmed</span><span><span class="whl-cell new"></span>new</span><span><span class="whl-cell exit"></span>exited</span></div></div>`
     +`<div class="whl-foot">consensus across YOUR ${a.nFunds} watched fund(s) only \u2014 not the market \u00b7 net $ mixes share deltas and value deltas where shares aren't comparable (options/PRN rows); hover shows the per-fund legs verbatim \u00b7 a lane row dominated by one fund's leg says so on hover</div>`;
   host.querySelectorAll('[data-whlq]').forEach(b=>b.onclick=async()=>{

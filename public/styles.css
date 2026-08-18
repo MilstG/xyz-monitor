@@ -1682,3 +1682,11 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .whl-badge.b-trim{border-color:var(--down);color:var(--down);background:rgba(229,96,77,.1)}
 .whl-badge.b-exit{border-color:#9a7fd6;color:#9a7fd6;background:rgba(154,127,214,.1)}
 .whl-badge.b-flat,.whl-badge.b-na{border-color:var(--border);color:var(--muted);background:none}
+
+/* 2026.08.18-06: WHO HOLDS promoted to a boxed panel directly under the tab header — the bare
+   label+input of -05 sat above the season block where nobody's eye goes; a search that can't be
+   found is a search that doesn't exist */
+.whl-who{border:1px solid var(--border);background:var(--panel2);border-radius:3px;padding:10px 12px;margin:0 0 14px}
+.whl-who .whl-shd{margin:0}
+#whl-whoq{background:var(--panel);border:1px solid var(--border);color:var(--text);font:inherit;font-size:12px;padding:7px 12px;border-radius:3px;flex:1;min-width:230px;max-width:520px}
+.whl-clstag{display:inline-block;border:1px solid var(--border);color:var(--muted);font-size:9px;letter-spacing:.5px;padding:0 4px;border-radius:2px;margin-left:5px;vertical-align:1px}
