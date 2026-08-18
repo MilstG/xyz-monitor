@@ -3573,7 +3573,7 @@ const HASH_VIEWS=new Set(['markets','focus','funds','trend','sectors','corr','se
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
 // button because a draft state is another way for the panel and the server to disagree.
 let _adm=null, _admVap=false, _admBusy='';
-async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); await loadAdmin(); }
+async function openAdmin(){ if(!IS_ADMIN) return; renderAdmLoop(_lastHealth); updateFreshTray(); renderAdmin(); renderAudit(); loadAudit(); renderAdmFloors(); loadAdmFloors(); await loadAdmin(); }
 async function loadAdmin(){
   try{ _adm=await fetchJSON('/api/features'); }
   catch(e){ _adm={error:String(e&&e.message||e)}; }
@@ -3651,6 +3651,142 @@ function renderAudit(){
     const sec=sel&&sel.value; if(!sec){ pushToast('audit: pick a sector first'); return; }
     audPost('/api/sector-audit/apply',{ticker:b.dataset.t,sector:sec,ind:audIndOf(host,b.dataset.t)}); }));
   const tog=el('audAckTog'); if(tog) tog.addEventListener('click',(e)=>{ e.preventDefault(); _audShowAck=!_audShowAck; renderAudit(); });
+}
+// ===== admin panel: FOCUS liquidity floors (build 2026.08.18-03) ===============================
+// Two walls — 24h notional and open interest — under which a name is not considered for a seat,
+// because a seat you cannot exit at your clip is not a seat. Everything here is drawn from the
+// SERVER's structural scan (/api/focus/limits), not from the markets snapshot in this browser: the
+// engine's eligible universe excludes home-market names, delisted rows and anything without a live
+// mark, and a histogram counting a different field than the gate would make every survivor count
+// it prints a lie.
+// The survivor counts for an UNSAVED value are necessarily a client-side projection — the server
+// has not been asked yet — so they run the same predicate shape the gate does and are labelled as
+// a projection. Once saved, the authoritative numbers arrive on the focus payload with the stamp.
+let _admFl=null,_admFlBusy=false,_admFlDirty=false,_admFlV=null,_admFlO=null;
+async function loadAdmFloors(){
+  try{ _admFl=await fetchJSON('/api/focus/limits'); _admFlV=_admFl.limits.vol; _admFlO=_admFl.limits.oi; _admFlDirty=false; }
+  catch(e){ _admFl={error:String(e&&e.message||e)}; }
+  renderAdmFloors(); }
+// Projection of the wall over the server's scan. Mirrors compute.focusFloorFail exactly, including
+// the rule that a null OI never fails the OI floor — refusing a name on a number we do not have is
+// a fabricated rejection. If this ever drifts from the server, the saved payload's own counts
+// (which the panel prints beside the projection) will disagree visibly rather than silently.
+function admFlProject(vol,oi){
+  const scan=(_admFl&&_admFl.scan)||[];
+  const pass=[],below=[];
+  for(const s of scan){ const fv=!(s[1]>=vol), fo=(s[2]!=null&&s[2]<oi);
+    if(fv||fo) below.push({t:s[0],vol:s[1],oi:s[2],cl:s[3],why:fv&&fo?'both':fv?'vol':'oi'}); else pass.push(s); }
+  return {pass,below};
+}
+// Log-bucket histogram with a per-bar readout (hover contract: every bar states its range, its
+// count, the names inside it and which side of the wall it sits on) plus a draggable floor line.
+function admFlHist(key,idx,floor){
+  const W=520,H=132,PADB=18,PADT=8,LO=4,HI=8.6,NB=18,STEP=(HI-LO)/NB;
+  const scan=(_admFl&&_admFl.scan)||[];
+  const bins=Array.from({length:NB},(_,i)=>({a:LO+i*STEP,b:LO+(i+1)*STEP,n:[]}));
+  let noRead=0;
+  for(const s of scan){ const v=s[idx];
+    if(v==null||!(v>0)){ noRead++; continue; }
+    let i=Math.floor((Math.log10(v)-LO)/STEP); i=Math.max(0,Math.min(NB-1,i)); bins[i].n.push(s[0]); }
+  const max=Math.max(1,...bins.map(b=>b.n.length));
+  const x=lg=>((lg-LO)/(HI-LO))*W, fLg=Math.log10(Math.max(floor,1));
+  let g='';
+  for(const b of bins){
+    const bw=W/NB, bx=x(b.a), bh=(b.n.length/max)*(H-PADB-PADT);
+    const cut=b.b<=fLg||(b.a<fLg&&b.b>fLg);
+    const tip=fmtUsd(Math.pow(10,b.a))+' \u2013 '+fmtUsd(Math.pow(10,b.b))+' \u00b7 '+b.n.length+' name'+(b.n.length===1?'':'s')
+      +(b.n.length?' \u00b7 '+b.n.slice(0,8).join(' ')+(b.n.length>8?' +'+(b.n.length-8):''):'')
+      +' \u00b7 '+(cut?'below your floor':'clears your floor');
+    g+='<rect class="admfl-bar'+(cut?' cut':'')+'" x="'+(bx+0.6).toFixed(1)+'" y="'+(H-PADB-bh).toFixed(1)+'" width="'+(bw-1.2).toFixed(1)+'" height="'+Math.max(bh,1).toFixed(1)+'" data-tip="'+esc(tip)+'"></rect>';
+  }
+  for(let lg=5;lg<=8;lg++) g+='<text class="admfl-ax" x="'+(x(lg)+2).toFixed(1)+'" y="'+(H-6)+'">'+fmtUsd(Math.pow(10,lg))+'</text>';
+  const fx=Math.max(0,Math.min(W,x(fLg)));
+  g+='<line class="admfl-line" x1="'+fx.toFixed(1)+'" y1="'+(PADT-4)+'" x2="'+fx.toFixed(1)+'" y2="'+(H-PADB)+'"></line>'
+    +'<polygon class="admfl-grab" points="'+(fx-4).toFixed(1)+','+(PADT-4)+' '+(fx+4).toFixed(1)+','+(PADT-4)+' '+fx.toFixed(1)+','+(PADT+3)+'"></polygon>'
+    +'<text class="admfl-ax on" x="'+Math.min(fx+6,W-52).toFixed(1)+'" y="'+(PADT+4)+'">'+fmtUsd(floor)+'</text>'
+    +(noRead?'<text class="admfl-ax" x="2" y="'+(PADT+4)+'" data-tip="'+esc(noRead+' name(s) carry no honest '+(idx===2?'OI':'volume')+' read \u2014 they clear this wall by construction rather than being refused on a number we do not have')+'">'+noRead+' no read</text>':'');
+  return '<svg class="admfl-hist" data-flk="'+key+'" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" role="img" aria-label="distribution of eligible names by '+(idx===2?'open interest':'24h notional volume')+'">'+g+'</svg>';
+}
+function renderAdmFloors(){
+  const host=el('admFloorsBox'); if(!host||!IS_ADMIN) return;
+  if(!_admFl){ host.innerHTML='<div class="msg">Loading FOCUS floors…</div>'; return; }
+  if(_admFl.error){ host.innerHTML='<div class="msg">Could not load the FOCUS floors — '+esc(_admFl.error)+'</div>'; return; }
+  const V=_admFlV,O=_admFlO,hard=_admFl.hard||{vol:200000,oi:0};
+  const pr=admFlProject(V,O), n=(_admFl.scan||[]).length;
+  const thin=pr.pass.length?pr.pass.reduce((a,b)=>a[1]<b[1]?a:b):null;
+  const loud=pr.below.length?pr.below[0]:null;
+  const short=pr.pass.length<6;
+  const chip=(k,v)=>'<button type="button" class="admfl-chip'+((k==='v'?V:O)===v?' on':'')+'" data-flq="'+k+'" data-flv="'+v+'">'+fmtUsd(v)+'</button>';
+  host.innerHTML='<div class="admfl-h">'
+      +'<div><div class="adm-title">FOCUS liquidity floors</div>'
+      +'<div class="adm-sub">Names under these walls are never considered for a seat. Applied at candidate assembly, so the 09:00 preview and the 09:30 stamp meet the same wall.</div></div>'
+      +'<div class="admfl-state'+(_admFlDirty?' dirty':'')+'" data-tip="'+esc(_admFlDirty?'Unsaved — the engine is still gating on the saved wall':'Saved — the next stamp gates on this')+'">'+(_admFlDirty?'unsaved':'in force')+'</div></div>'
+    +'<div class="admfl-grid">'
+      +'<div><label class="admfl-lab" for="admFlVol">Minimum 24h notional volume</label>'
+        +'<div class="admfl-in"><span>$</span><input id="admFlVol" type="text" inputmode="numeric" value="'+V.toLocaleString('en-US')+'" aria-label="Minimum 24h notional volume in dollars"></div>'
+        +'<div class="admfl-chips">'+[200000,1000000,5000000,25000000].map(v=>chip('v',v)).join('')+'</div>'
+        +admFlHist('v',1,V)
+        +'<div class="admfl-note">'+n+' name'+(n===1?'':'s')+' in scope after the foreign-home exclusion. Click or drag a chart to set its floor.</div></div>'
+      +'<div><label class="admfl-lab" for="admFlOi">Minimum open interest</label>'
+        +'<div class="admfl-in"><span>$</span><input id="admFlOi" type="text" inputmode="numeric" value="'+O.toLocaleString('en-US')+'" aria-label="Minimum open interest in dollars"></div>'
+        +'<div class="admfl-chips">'+[0,250000,1000000,5000000].map(v=>chip('o',v)).join('')+'</div>'
+        +admFlHist('o',2,O)
+        +'<div class="admfl-note">OI notional on the HIP-3 perp. A name with no honest OI read <span data-tip="Missing OI is not zero OI \u2014 it means the series is too sparse on that name to be honest. The volume floor still judges it.">is never cut on this floor</span>.</div></div>'
+    +'</div>'
+    +'<div class="admfl-ro">'
+      +'<div class="admfl-t"><div class="k">clear both floors</div><div class="v'+(pr.pass.length<6?' warn':'')+'">'+pr.pass.length+'</div><div class="s">of '+n+' in scope</div></div>'
+      +'<div class="admfl-t"><div class="k">below floor</div><div class="v">'+pr.below.length+'</div><div class="s">excluded from candidacy</div></div>'
+      +'<div class="admfl-t"><div class="k">thinnest cleared</div><div class="v sm">'+(thin?esc(thin[0]):'\u2014')+'</div><div class="s">'+(thin?fmtUsd(thin[1])+' vol \u00b7 '+(thin[2]==null?'no OI read':fmtUsd(thin[2])+' OI'):'nothing clears')+'</div></div>'
+      +'<div class="admfl-t"><div class="k">loudest refused</div><div class="v sm">'+(loud?esc(loud.t):'\u2014')+'</div><div class="s">'+(loud?fmtUsd(loud.vol)+' vol \u00b7 '+(loud.oi==null?'no OI read':fmtUsd(loud.oi)+' OI'):'nothing refused')+'</div></div>'
+    +'</div>'
+    +(short?'<div class="admfl-warn">Only '+pr.pass.length+' name'+(pr.pass.length===1?'':'s')+' would clear this wall \u2014 the stamp seats what cleared and says so, rather than padding the list or withholding it. The universe-booting check reads the pre-floor count, so a strict wall can never be mistaken for a cold start.</div>':'')
+    +'<div class="admfl-act">'
+      +'<button type="button" class="btn" id="admFlSave"'+(_admFlBusy||!_admFlDirty?' disabled':'')+'>'+(_admFlBusy?'Saving\u2026':'Save floors')+'</button>'
+      +'<button type="button" class="btn xtiny" id="admFlReset" data-tip="Drop both walls to the hard backstop">reset to backstop</button>'
+      +'<span class="admfl-foot">Effective floor is max(backstop, yours) \u2014 backstop '+fmtUsd(hard.vol)+' volume / '+fmtUsd(hard.oi)+' OI, so a typo can loosen the tab but never below what the engine already refused. '
+      +'Counts above are a projection over the live scan; the stamped record carries the authoritative ones. '
+      +'<b>Today\u2019s stamp is frozen with the floors that stood at 09:30 and does not move when you save</b> \u2014 the wall rides the record so a track record stays readable.</span>'
+    +'</div>';
+  const vi=el('admFlVol'),oi=el('admFlOi');
+  const commit=(which,val)=>{ const v=Math.max(0,Math.round(val)||0);
+    if(which==='v') _admFlV=v; else _admFlO=v;
+    _admFlDirty=(_admFlV!==_admFl.limits.vol)||(_admFlO!==_admFl.limits.oi); renderAdmFloors(); };
+  const num=s=>{ const v=parseFloat(String(s).replace(/[^0-9.]/g,'')); return isFinite(v)?v:0; };
+  if(vi){ vi.addEventListener('change',()=>commit('v',num(vi.value)));
+    vi.addEventListener('keydown',e=>{ if(e.key==='Enter') commit('v',num(vi.value)); }); }
+  if(oi){ oi.addEventListener('change',()=>commit('o',num(oi.value)));
+    oi.addEventListener('keydown',e=>{ if(e.key==='Enter') commit('o',num(oi.value)); }); }
+  host.querySelectorAll('.admfl-chip').forEach(b=>b.addEventListener('click',()=>commit(b.dataset.flq==='v'?'v':'o',+b.dataset.flv)));
+  host.querySelectorAll('.admfl-hist').forEach(sv=>{
+    const LO=4,HI=8.6;
+    const at=ev=>{ const r=sv.getBoundingClientRect(); if(!r.width) return;
+      const f=Math.max(0,Math.min(1,((ev.touches?ev.touches[0].clientX:ev.clientX)-r.left)/r.width));
+      commit(sv.dataset.flk,Math.pow(10,LO+f*(HI-LO))); };
+    sv.addEventListener('mousedown',e=>{ e.preventDefault(); sv._d=1; at(e); });
+    sv.addEventListener('mousemove',e=>{ if(sv._d) at(e); });
+    sv.addEventListener('mouseup',()=>{ sv._d=0; });
+    sv.addEventListener('mouseleave',()=>{ sv._d=0; });
+  });
+  const sb=el('admFlSave'); if(sb) sb.addEventListener('click',saveAdmFloors);
+  const rb=el('admFlReset'); if(rb) rb.addEventListener('click',()=>{ _admFlV=hard.vol; _admFlO=hard.oi;
+    _admFlDirty=(_admFlV!==_admFl.limits.vol)||(_admFlO!==_admFl.limits.oi); renderAdmFloors(); });
+}
+async function saveAdmFloors(){
+  if(_admFlBusy||!_admFl||_admFl.error) return;
+  _admFlBusy=true; renderAdmFloors();
+  try{
+    const r=await fetch('/api/focus/limits',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({vol:_admFlV,oi:_admFlO})});
+    const d=await r.json().catch(()=>({}));
+    _admFlBusy=false;
+    if(!r.ok||!d.ok){ pushToast('Could not save the FOCUS floors — '+((d&&d.error)||('HTTP '+r.status))); renderAdmFloors(); return; }
+    // Reconcile with what the server actually RESOLVED, never with what was asked: the clamp to the
+    // backstop happens server-side, so a below-backstop entry must come back showing the backstop.
+    _admFl={..._admFl,limits:d.limits,hard:d.hard||_admFl.hard,scan:d.scan||_admFl.scan};
+    _admFlV=d.limits.vol; _admFlO=d.limits.oi; _admFlDirty=false;
+    renderAdmFloors();
+    pushToast('FOCUS floors saved — '+fmtUsd(d.limits.vol)+' volume / '+fmtUsd(d.limits.oi)+' OI. Live from the next preview tick; today\u2019s stamp unchanged.');
+    if(FOC.data) focFetch();
+  }catch(e){ _admFlBusy=false; renderAdmFloors(); pushToast('Network error saving the FOCUS floors'); }
 }
 function admLabel(st){ return st==='public'?'public':st==='admin'?'admin':'off'; }
 // Everyone's linked telegram accounts, in the admin panel rather than the bell. Collapsed by
@@ -8220,7 +8356,9 @@ focus:`
 <div class="hlp-h">What this list is</div>
 <p>Six seats, <b>stamped once at the 09:30 ET cash open</b>, one late fill at +1h, then immutable for the day — a compressed morning scan, not a signal. The engine reads only what the board already computed (gap machinery, clock-matched RVOL, the OI history, the earnings calendar, the news tape, the 30d extremes) and freezes it. It never reshuffles at 10:47 because a number ticked; yesterday's list stays viewable exactly as stamped.</p>
 <div class="hlp-h">How seats are earned</div>
-<p>A disclosed <b>loudness ordering</b> (in compute, one formula): |gap σ| + RVOL excess + |ΔOI| + a flat earnings boost + a small headline count. Every unit is the name's <b>own distribution</b> — a +1.1% gap on a sleepy name outranks +2.9% on a high-beta one when the σ says so. <b>Max 2 seats per cluster</b> (curated industry): six seats should be six trades, not one theme wearing six tickers. The cut line discloses what just missed and why (rank vs cluster cap). Foreign-home names (KRX/TSE/HKEX) are excluded by doctrine — their gap anchors to the wrong exchange for an ET open stamp. $200k volume floor: a seat you cannot exit is not a seat.</p>
+<p>A disclosed <b>loudness ordering</b> (in compute, one formula): |gap σ| + RVOL excess + |ΔOI| + a flat earnings boost + a small headline count. Every unit is the name's <b>own distribution</b> — a +1.1% gap on a sleepy name outranks +2.9% on a high-beta one when the σ says so. <b>Max 2 seats per cluster</b> (curated industry): six seats should be six trades, not one theme wearing six tickers. The cut line discloses what just missed and why (rank vs cluster cap). Foreign-home names (KRX/TSE/HKEX) are excluded by doctrine — their gap anchors to the wrong exchange for an ET open stamp.</p>
+<div class="hlp-h">Liquidity floors</div>
+<p>Two walls set in the admin panel — a <b>24h notional minimum</b> and an <b>OI minimum</b> — applied at candidate assembly, before loudness is ever compared: a seat you cannot exit at your size is not a seat. Names that clear the tape but fail a wall never enter the ranking, so they are not "cuts"; they get their own <b>BELOW FLOOR</b> roster under the table, loudest-first, with which wall they failed and how far it would have to fall to admit them. A name whose OI series is too sparse to be honest is <i>never</i> refused on the OI wall — cutting on a number we do not have is a fabricated rejection, and the volume wall still judges it. The floors in force at 09:30 are <b>frozen onto the record</b>: raising them tomorrow never rewrites how yesterday's list was made. If the walls leave fewer than six names, the stamp seats what cleared and says so on the bar rather than padding the list or withholding it — the booting-universe check reads the count <i>before</i> the floors, so a strict wall can never be mistaken for a cold start.</p>
 <div class="hlp-h">The +1h columns</div>
 <p><b>sVWAP</b>, <b>1H HI</b>, <b>1H LO</b> (actual prices) fill once at 10:30 ET from the 5m archive and freeze. The <b>1H RANGE</b> bar shows where the open sat in the hour's eventual range (grey) vs the 10:30 print (amber) — the "who won the first hour" read. A name missing from the archive shows dashes, never guesses.</p>
 <div class="hlp-h">The chart (▦)</div>
@@ -10133,7 +10271,7 @@ async function loadAiRecent(){
 // plotted VWAP line, which is necessarily computed from the exact candles on screen (a continuous
 // line cannot be shipped as one frozen scalar) and is labeled as the chart series; the frozen
 // board sVWAP is restated verbatim in the modal header so any divergence is visible, not hidden.
-const FOC={ data:null, timer:0, sortK:null, sortDir:-1, showPrev:false, order:null, vis:null };
+const FOC={ data:null, timer:0, sortK:null, sortDir:-1, showPrev:false, showBelow:false, order:null, vis:null };
 const FOC_LS='xyz-focus-cols';
 function focPrefsLoad(){ try{ const p=JSON.parse(store.get(FOC_LS)||'null');
   if(p&&Array.isArray(p.order)&&p.vis&&typeof p.vis==='object'){ FOC.order=p.order; FOC.vis=p.vis; } }catch(_){} }
@@ -10236,6 +10374,47 @@ function focStateLine(d){
   if(day) return `<span class="focstamp"><span class="focdot"></span>FROZEN @ OPEN${day.late?' <span class="foclate" data-tip="Stamped after a boot that landed past 09:30 — the snapshot is later than the open and says so, same disclosure as boot-stamped episodes">LATE</span>':''} · stamped ${new Date(day.frozenAt).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'})} ET${day.filledAt?' · 1H CONFIRMED':' · sVWAP / 1H HI / 1H LO <span data-tip="forming — the hour so far from closed 5m bars with the live mark folded into hi/lo/last (never into VWAP: a mark has no volume); republished ~1/min and replaced wholesale by the frozen record at 10:30 ET">forming, freeze at +1h</span>'}</span>`;
   return '';
 }
+// ---- below-floor roster (build 2026.08.18-03) -------------------------------------------------
+// The names that cleared the tape but failed the operator's size walls. NOT folded into the cut
+// line: cuts are names that entered the ranking and lost on rank or the cluster cap, while these
+// never entered it at all — calling both "cuts" would be a category error and would hide which
+// mechanism did the refusing. Ordered loudest-first (server-side, on the record) so the top row is
+// the loudest thing the wall is refusing; `need` is the multiple the floor must fall by to admit
+// it, which is what turns the disclosure into a calibration instrument.
+// Everything here is restated from the payload: the record carries its OWN limits, so yesterday's
+// roster reads against yesterday's wall even after today's panel edit.
+function focBelowHtml(src,lim){
+  const rows=(src&&src.below)||[]; const total=(src&&src.belowN)||0;
+  if(!total) return '';
+  const L=lim||{vol:0,oi:0};
+  const open=!!FOC.showBelow;
+  const why=(w)=>w==='both'?['both','VOL+OI']:w==='vol'?['vol','VOL']:['oi','OI'];
+  let h='<div class="focbf'+(open?' open':'')+'"><div class="focbf-h" id="focbfh" role="button" tabindex="0" aria-expanded="'+(open?'true':'false')+'" data-tip="'+esc('Cleared the tape, failed your size. Floors on this record: $'+Math.round(L.vol).toLocaleString('en-US')+' 24h volume / $'+Math.round(L.oi).toLocaleString('en-US')+' OI. Set them in the admin panel.')+'">'
+    +'<span class="focbf-c">'+(open?'\u25be':'\u25b8')+'</span>BELOW FLOOR <b>'+total+'</b> \u2014 cleared the tape, failed your size</div>';
+  if(open){
+    h+='<table class="foctbl bf"><thead><tr><th class="l">Ticker</th><th class="l">Cluster</th>'
+      +'<th data-tip="the same disclosed loudness formula the seats are ranked by">Loudness</th>'
+      +'<th>Gap</th><th>RVOL</th>'
+      +'<th data-tip="24h notional volume at the stamp">24h vol</th>'
+      +'<th data-tip="open interest notional on the HIP-3 perp \u00b7 \u25cc = no honest read, which clears the OI floor by construction">OI</th>'
+      +'<th class="l">Fails</th>'
+      +'<th data-tip="how far the floor would have to fall to admit this name \u2014 1.2\u00d7 is a calibration question, 40\u00d7 is not">Needs</th></tr></thead><tbody>';
+    for(const p of rows){ const w2=why(p.why);
+      h+='<tr><td class="l">'+esc(p.ticker)+'</td><td class="l dim">'+esc(p.cluster||'\u2014')+'</td>'
+        +'<td>'+(p.score!=null?p.score.toFixed(2):'\u2014')+'</td>'
+        +'<td class="'+focCls(p.gapPct)+'">'+(p.gapPct!=null?focSgn(p.gapPct)+'%':'\u2014')+'</td>'
+        +'<td>'+(p.rvol!=null?p.rvol.toFixed(1)+'\u00d7':'\u2014')+'</td>'
+        +'<td data-tip="'+esc('floor $'+Math.round(L.vol).toLocaleString('en-US')+' \u00b7 this name '+fmtUsd(p.vol))+'">'+fmtUsd(p.vol)+'</td>'
+        +'<td data-tip="'+esc(p.oi==null?'no honest OI read on this name \u2014 never cut on a number we do not have':'floor $'+Math.round(L.oi).toLocaleString('en-US')+' \u00b7 this name '+fmtUsd(p.oi))+'">'+(p.oi==null?'<span class="dim">\u25cc</span>':fmtUsd(p.oi))+'</td>'
+        +'<td class="l"><span class="focbf-w '+w2[0]+'">'+w2[1]+'</span></td>'
+        +'<td>'+(p.need!=null?p.need.toFixed(1)+'\u00d7':'\u2014')+'</td></tr>';
+    }
+    h+='</tbody></table>';
+    if(total>rows.length) h+='<div class="focbf-n">+'+(total-rows.length)+' quieter name'+(total-rows.length===1?'':'s')+' below the floor \u2014 the roster discloses the loudest '+rows.length+' by design.</div>';
+    h+='<div class="focbf-n">Refused on size, not on rank: these never entered the loudness ordering. Change the walls in the admin panel \u2014 it re-gates the preview immediately and the next stamp, never this record.</div>';
+  }
+  return h+'</div>';
+}
 function renderFocus(){
   const w=el('focuswrap'); if(!w||!FOC.data) return;
   const d=FOC.data;
@@ -10258,12 +10437,17 @@ function renderFocus(){
       html+=`<tr class="${i>=(d.cap||6)?'focbelow':''}"><td class="l focrank">${i+1}</td>`+pcols.map(c=>c.td(p)).join('')+`</tr>`;
       if(i===(d.cap||6)-1) html+=`<tr class="foccutrule"><td colspan="${pcols.length+1}" data-tip="the stamp cut zone: at 09:30 the ${d.perCluster||2}-per-cluster cap applies and the list freezes at ${d.cap||6}"></td></tr>`;
     });
-    html+=`</tbody></table><div class="focfoot">Gap is the LIVE in-progress read vs the last cash close \u2014 still moving until the bell. If the stamp differs from this preview, the open banner will say exactly how.</div>`;
+    html+=`</tbody></table>`+focBelowHtml(d.preview,(d.preview&&d.preview.limits)||d.limits)+`<div class="focfoot">Gap is the LIVE in-progress read vs the last cash close \u2014 still moving until the bell. If the stamp differs from this preview, the open banner will say exactly how.</div>`;
     w.innerHTML=html; focWireBar();
     w.querySelectorAll('.focchbtn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); focChartOpen(b.dataset.foct); }));
     return;
   }
   let html=`<div class="focbar">${focStateLine(d)}`
+    // SHORT STAMP (build 2026.08.18-03): fewer than the cap because the floors refused the rest,
+    // stated on the bar rather than left to be read as a bug. Only when the record actually
+    // carries the scan counts — an older stamp predates them and claims nothing.
+    +(day&&day.rows&&day.cleared!=null&&day.rows.length<(d.cap||6)
+      ? `<span class="focnote short" data-tip="${esc(`only ${day.cleared} of ${day.scanned} eligible names cleared the liquidity floors in force at the stamp ($${Math.round((day.limits&&day.limits.vol)||0).toLocaleString('en-US')} 24h volume / $${Math.round((day.limits&&day.limits.oi)||0).toLocaleString('en-US')} OI). The list seats what cleared — it is never padded, and the booting-universe check reads the pre-floor count so this is not a cold start.`)}"><b>${day.rows.length} of ${d.cap||6} seats</b> — ${day.cleared} name${day.cleared===1?'':'s'} cleared your floors</span>`:'')
     +(day&&day.fillNote?`<span class="focnote err" data-tip="the +1h columns need the on-disk 5m archive">${esc(day.fillNote)}</span>`:'')
     +(day&&day.pvDiff&&((day.pvDiff.added||[]).length||(day.pvDiff.dropped||[]).length)?`<span class="focdiff" data-tip="${esc(`the tape moved between the ${new Date(day.pvDiff.pvAt).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'})} ET preview and the bell \u2014 disclosed so your prep never silently drifts from the record`)}"><b>\u0394 vs preview:</b> ${(day.pvDiff.added||[]).map(t=>'+'+esc(t)).concat((day.pvDiff.dropped||[]).map(t=>'\u2212'+esc(t))).join(' ')}</span>`:'')
     +(day&&day.pvDiff&&!(day.pvDiff.added||[]).length&&!(day.pvDiff.dropped||[]).length?`<span class="focnote" data-tip="the frozen six match the last preview\u2019s likely six exactly">stamp = preview</span>`:'')
@@ -10306,13 +10490,26 @@ function renderFocus(){
       +day.cuts.map(c=>`<span class="foccutn" data-tip="${esc(`score ${c.score!=null?c.score.toFixed(2):'—'}${c.gapPct!=null?` · gap ${focSgn(c.gapPct)}%`:''}${c.rvol!=null?` · RVOL ${c.rvol.toFixed(1)}×`:''}${c.why==='cluster'?` · cut on the ${d.perCluster||2}-per-cluster cap (${c.cluster||'?'} already seated)`:' · below the cap by rank'}`)}">${esc(c.ticker)}</span>`).join(' · ')
       +`</div>`;
   }
-  html+=`<div class="focfoot">Frozen list — stamped once at the cash open, one fill at +1h, never reshuffled intraday. Equities on the ET clock only; max ${d.perCluster||2} seats per cluster; $${Math.round((d.minVol||0)/1000)}k volume floor. Every σ is the name\u2019s own distribution. Dashes are honest nulls.</div>`;
+  html+=focBelowHtml(day,day.limits||d.limits);
+  // The floors quoted here are the RECORD'S OWN (day.limits), not the live ones: this list was cut
+  // against the wall that stood at its stamp, and restating today's panel value under yesterday's
+  // list would misdescribe how it was made. Records predating -03 carry none and say so.
+  const fl=day.limits||null;
+  html+=`<div class="focfoot">Frozen list — stamped once at the cash open, one fill at +1h, never reshuffled intraday. Equities on the ET clock only; max ${d.perCluster||2} seats per cluster; `
+    +(fl?`liquidity floors ${fmtUsd(fl.vol)} 24h volume / ${fmtUsd(fl.oi)} OI${day.cleared!=null?` (${day.cleared} of ${day.scanned} eligible names cleared)`:''}`
+        :`liquidity floors not recorded on this stamp — it predates the floor panel`)
+    +`. Every σ is the name\u2019s own distribution. Dashes are honest nulls.</div>`;
   w.innerHTML=html;
   focWireBar(); focWireTable();
 }
 function focWireBar(){
   const g=el('focgear'); if(g) g.onclick=(e)=>{ e.stopPropagation(); focMenuToggle(g); };
   const pv=el('focprev'); if(pv) pv.onclick=()=>{ FOC.showPrev=!FOC.showPrev; renderFocus(); };
+  // Roster fold. Collapsed by default: the refused set is a calibration instrument you reach for
+  // deliberately, not a permanent second table competing with the six seats for attention.
+  const bf=el('focbfh');
+  if(bf){ const t=()=>{ FOC.showBelow=!FOC.showBelow; renderFocus(); };
+    bf.onclick=t; bf.onkeydown=(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); t(); } }; }
 }
 let _focDragK=null;
 function focWireTable(){
