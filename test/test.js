@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.18-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.18-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17723,7 +17723,10 @@ test("focus -17.03: manifest pins — forming engine transient, cadence, client 
   const fs = require("fs"), path = require("path");
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
   const pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css"), cmp = rd("src/compute.js");
-  for (const pin of ["let focusForming = null;", "function buildFocusForming(", "now - focusForming.at < 55 * 1000",
+  // 2026.08.18-04: the cadence moved 55s -> 25s (FOCUS_FORMING_MS, shipped on the payload) and the
+  // fold is no longer handed a null — a seat with no bars publishes coverage and no record at all.
+  // The transience contract this test guards is unchanged; the two constants it named are not.
+  for (const pin of ["let focusForming = null;", "function buildFocusForming(", "now - focusForming.at < FOCUS_FORMING_MS",
     "firstHourStats(bars, st.open, endW, 1)", "foldLiveMark(f, r && r.px > 0 ? +r.px : null)",
     "focusForming = null;               // the frozen record replaces every forming read"])
     assert.ok(pol.includes(pin), "poller pin: " + pin);
@@ -17735,7 +17738,7 @@ test("focus -17.03: manifest pins — forming engine transient, cadence, client 
     "forming reads can never reach the store");
   assert.ok(pol.includes("forming: focusState && focusState.day === today && !focusState.filledAt && focusForming ? focusForming : null"),
     "the payload carries forming only between stamp and freeze");
-  for (const pin of ['data-forming="1"', "forming, freeze at +1h", "forming reads appear once the first 5m bar closes"])
+  for (const pin of ['data-forming="1"', "forming, freeze at +1h", "forming reads appear once the first 1m bar closes"])
     assert.ok(app.includes(pin), "app pin: " + pin);
   assert.ok(css.includes("td[data-forming]"), "forming cells styled distinct from frozen");
   // ET clocks: every focus-module time string renders in America/New_York, labeled ET
@@ -18282,4 +18285,193 @@ test("focus -04: manifest pins — the gate, the routes, the two-lock write, the
   // the roster reads the RECORD's own wall, never the live one
   assert.ok(app.includes("focBelowHtml(day,day.limits||d.limits)"), "the stamped table's roster reads the record's own floors");
   assert.ok(css.includes(".focbf") && css.includes(".admfl-hist") && css.includes(".admfl-bar"), "roster + panel styles present");
+});
+
+// ============================================================================================
+// FOCUS -05 (build 2026.08.18-04): the opening hour on 1m, a capture lane the seats own, and a
+// dash that states its own cause. The defect this replaces: four of six seats reached 10:37 with
+// zero bars, and foldLiveMark turned the mark into hi = lo = last, so the board printed a flat
+// line at the current price that was indistinguishable from a real first-hour measurement.
+// ============================================================================================
+
+test("focus -05: a seat with no bars produces NO record — the mark can widen a measurement, never be one", () => {
+  const { firstHourStats, foldLiveMark } = require("../src/compute");
+  const open = Date.UTC(2026, 7, 18, 13, 30);
+  // THE REGRESSION, stated as an assertion. foldLiveMark(null, px) still synthesises a
+  // single-point record — that behaviour is correct and load-bearing for a hour that HAS bars but
+  // whose latest extreme is the live mark. What changed is that the forming builder no longer
+  // feeds it a null: with zero bars there is nothing to widen and no record is published.
+  const synth = foldLiveMark(null, 20.127);
+  assert.deepEqual([synth.hi, synth.lo, synth.lastPx, synth.bars], [20.127, 20.127, 20.127, 0],
+    "the fold's null path still fabricates a flat point — which is exactly why it must not be reached with zero bars");
+  assert.equal(synth.vwap, null, "…and it cannot claim a VWAP, which is how the screenshot's dashed sVWAP sat beside numeric HI/LO");
+  assert.equal(firstHourStats([], open, open + 3600e3, 1), null, "no bars in the window -> no stats, at any minBars");
+  // A real one-bar hour is still a real read: the fix must not throw the honest single-bar case out.
+  const one = firstHourStats([[open, 100, 101, 99, 100.5, 5000]], open, open + 3600e3, 1);
+  assert.ok(one && one.bars === 1 && one.hi === 101, "one closed 1m bar is a measurement and stays one");
+  const widened = foldLiveMark(one, 103);
+  assert.equal(widened.hi, 103, "the mark widens the extreme");
+  assert.equal(widened.vwap, one.vwap, "…and never touches VWAP — a mark carries no volume");
+});
+
+test("focus -05: the forming builder publishes coverage for every seat and a record for none that lack bars", () => {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const OPEN = Date.UTC(2026, 7, 14, 13, 30), M = 60000;
+  // Two seats: one the lane captured, one it did not. The stub serves 1m bars ONLY for BE.
+  const bars = [];
+  for (let i = 0; i < 12; i++) bars.push([OPEN + i * M, 100 + i * 0.1, 101 + i * 0.1, 99 + i * 0.1, 100.5 + i * 0.1, 1000]);
+  let read5 = 0, read1 = 0;
+  const store = { ...base, saveFocus: () => {}, loadFocus: () => null,
+    candlesEnabled: () => true,
+    readCandles: () => { read5++; return bars; },                      // the 5m archive: must NOT be consulted
+    readCandles1m: (coin) => { read1++; return coin === "xyz:BE" ? bars : []; } };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const spine = (px) => { const o = []; for (let i = 48; i >= 0; i--) o.push({ t: OPEN - i * 3600e3, o: px, h: px * 1.01, l: px * 0.99, c: px, v: 1e6 }); return o; };
+  for (const [t, px] of [["BE", 218.97], ["KORU", 20.127], ["NVDA", 900], ["MU", 100], ["AMD", 150],
+    ["LLY", 800], ["TSLA", 300], ["XOM", 110], ["JPM", 200], ["COIN", 250]])
+    p.seedRowNow("xyz:" + t, { ticker: t, uni: "xyz", px, vol: 9e6, oi: 9e6, oiBase: 1000, hourlyRaw: spine(px) });
+  p.focusTickNow(OPEN + 20 * M);
+  const f = p.getFocus(OPEN + 20 * M);
+  assert.ok(f.today, "the day stamps");
+  assert.ok(read1 > 0, "the forming read consults the 1m archive");
+  assert.equal(read5, 0, "…and never the 5m archive — one base for the hour this tab measures");
+  const fm = f.forming;
+  assert.ok(fm, "a forming edition publishes");
+  assert.equal(fm.src, "1m", "the edition states its base resolution");
+  if (f.today.rows.some((r) => r.ticker === "BE")) {
+    assert.ok(fm.map.BE, "a seat with bars carries a forming record");
+    assert.ok(fm.cov.BE && fm.cov.BE.bars === 12, "…and its bar count");
+  }
+  if (f.today.rows.some((r) => r.ticker === "KORU")) {
+    assert.equal(fm.map.KORU, undefined, "a seat with NO bars publishes no forming record — not a flat point built from the mark");
+    assert.ok(fm.cov.KORU && fm.cov.KORU.bars === 0, "…but it DOES publish coverage, so the board can say why rather than showing a blank");
+    assert.ok(fm.cov.KORU.mins > 0, "…against the elapsed minutes, so 'zero of twenty' is readable");
+  }
+  assert.ok(fm.next > fm.at, "the edition carries its own next-republish time");
+});
+
+test("focus -05: the freeze reads 1m, records per-seat coverage, and stamps the resolution it measured at", () => {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const OPEN = Date.UTC(2026, 7, 14, 13, 30), M = 60000;
+  const bars = [];
+  for (let i = 0; i < 60; i++) bars.push([OPEN + i * M, 100, 100 + (i === 30 ? 6 : 1), 100 - (i === 45 ? 4 : 1), 100.5, 1000]);
+  let saved = null;
+  const store = { ...base, saveFocus: (d) => { saved = d; }, loadFocus: () => null,
+    candlesEnabled: () => true, readCandles: () => { throw new Error("the freeze must not read the 5m archive"); },
+    readCandles1m: (coin) => (coin === "xyz:KORU" ? [] : bars) };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const spine = (px) => { const o = []; for (let i = 48; i >= 0; i--) o.push({ t: OPEN - i * 3600e3, o: px, h: px * 1.01, l: px * 0.99, c: px, v: 1e6 }); return o; };
+  for (const [t, px] of [["BE", 218.97], ["KORU", 20.127], ["NVDA", 900], ["MU", 100], ["AMD", 150],
+    ["LLY", 800], ["TSLA", 300], ["XOM", 110], ["JPM", 200], ["COIN", 250]])
+    p.seedRowNow("xyz:" + t, { ticker: t, uni: "xyz", px, vol: 9e6, oi: 9e6, oiBase: 1000, hourlyRaw: spine(px) });
+  p.focusTickNow(OPEN + 5 * M);
+  p.focusTickNow(OPEN + 61 * M);                       // past +1h: the freeze fires
+  const rec = p.getFocus(OPEN + 61 * M).today;
+  assert.ok(rec.filledAt, "the record froze");
+  assert.equal(rec.h1src, "1m", "the record states the resolution its geometry was measured at");
+  assert.equal(p.getFocus(OPEN + 61 * M).forming, null, "the frozen record replaces every forming read");
+  for (const seat of rec.rows) {
+    assert.ok(seat.h1cov, "every seat carries coverage, present or absent");
+    if (seat.ticker === "KORU") {
+      assert.equal(seat.h1, null, "a seat the lane never captured freezes as an honest null");
+      assert.equal(seat.h1cov.bars, 0, "…with zero recorded, so the dash can name its cause months later");
+    } else {
+      assert.ok(seat.h1 && seat.h1.bars === 60, "a captured seat freezes 60 one-minute bars");
+      assert.equal(seat.h1.hi, 106, "…with the true bar extreme, not a 5m approximation of it");
+      assert.equal(seat.h1cov.bars, 60);
+    }
+  }
+  assert.ok(saved && saved.state && saved.state.h1src === "1m", "the resolution persists with the record");
+});
+
+test("focus -05: the chart splices 1m over the same window and never counts a trade twice", () => {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const OPEN = Date.UTC(2026, 7, 14, 13, 30), M = 60000, F = 5 * M;
+  // The SAME hour in both archives — which is the whole hazard: these are the same trades.
+  const b5 = [], b1 = [];
+  for (let i = 0; i < 12; i++) b5.push([OPEN + i * F, 100, 102, 98, 101, 5000]);
+  for (let i = 0; i < 60; i++) b1.push([OPEN + i * M, 100, 102, 98, 101, 1000]);
+  const pre = [];
+  for (let i = 12; i >= 1; i--) pre.push([OPEN - i * F, 99, 99.5, 98.5, 99, 4000]);
+  const store = { ...base, saveFocus: () => {}, loadFocus: () => null, candlesEnabled: () => true,
+    candleCoverage: () => ({ min: OPEN - 12 * F, max: OPEN + 12 * F, count: 24 }),
+    readCandles: (c, lo, hi) => [...pre, ...b5].filter((k) => k[0] >= lo && k[0] <= hi),
+    readCandles1m: (c, lo, hi) => b1.filter((k) => k[0] >= lo && k[0] <= hi) };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const spine = (px) => { const o = []; for (let i = 48; i >= 0; i--) o.push({ t: OPEN - i * 3600e3, o: px, h: px * 1.01, l: px * 0.99, c: px, v: 1e6 }); return o; };
+  for (const [t, px] of [["BE", 100], ["NVDA", 900], ["MU", 100], ["AMD", 150], ["LLY", 800],
+    ["TSLA", 300], ["XOM", 110], ["JPM", 200], ["COIN", 250], ["PLTR", 60]])
+    p.seedRowNow("xyz:" + t, { ticker: t, uni: "xyz", px, vol: 9e6, oi: 9e6, oiBase: 1000, hourlyRaw: spine(px) });
+  p.focusTickNow(OPEN + 5 * M);
+  const seat = p.getFocus(OPEN + 5 * M).today.rows[0].coin;
+  const out = p.getCandles5m(seat, OPEN - 12 * F, OPEN + 12 * F, 6000);
+  const inWin = out.candles.filter((k) => k[0] >= OPEN && k[0] < OPEN + 12 * F);
+  assert.equal(inWin.length, 12, "the window still yields twelve 5m buckets — the 1m base is rolled UP, not shipped raw");
+  // THE DOUBLE-COUNT GUARD. 5 x 1000 = 5000 per bucket, exactly the 5m bar's own volume. Summing
+  // both archives would give 10000 and quietly double every volume (and skew every VWAP) in the
+  // one window this tab measures most closely.
+  assert.ok(inWin.every((k) => k[5] === 5000), "each spliced bucket carries the volume ONCE — overlapping 5m rows are dropped, never added");
+  assert.equal(out.candles.filter((k) => k[0] < OPEN).length, 12, "pre-open bars still come from the 5m archive");
+  const ts = out.candles.map((k) => k[0]);
+  assert.deepEqual(ts, [...ts].sort((a, b) => a - b), "the spliced series stays ordered across the seam");
+  assert.equal(new Set(ts).size, ts.length, "no timestamp appears twice — the seam is exact, not overlapping");
+  // A coin that never held a seat has no 1m window and is untouched by any of this.
+  const other = p.getCandles5m("xyz:NOTASEAT", OPEN - 12 * F, OPEN + 12 * F, 6000);
+  assert.ok(other.candles.length > 0, "a non-seat still charts from the 5m archive alone");
+});
+
+test("focus -05: the seat lane is scoped to the seats and to the window, and idles the rest of the day", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The lane must read the seats from focusState — one producer of "who is seated" — rather than
+  // keeping its own list that a late boot stamp could leave stale.
+  const w = pol.slice(pol.indexOf("function m1Seats("), pol.indexOf("const need5m ="));
+  assert.ok(w.includes("const st = focusState;"), "the lane reads the live stamp, never a copy");
+  assert.ok(w.includes("st.day !== etDayStr(now)"), "a stale day's seats are not captured");
+  assert.ok(/now < st\.open - M1_PAD \|\| now > st\.open \+ HOUR \+ M1_PAD/.test(w), "the window is the stamped hour plus a pad at both edges");
+  assert.ok(w.includes("await sleep(15000); continue;"), "outside the window the lane idles rather than spinning");
+  assert.ok(w.includes('inflight.has("m1:"'), "per-coin inflight guard, like every other lane");
+  assert.ok(/catch \(_\) \{ \/\* one seat's failure must not cost the other five their window \*\//.test(w),
+    "one seat's failure cannot take the window from the rest — the starvation this build exists to fix");
+  // The 1m bars must land in their OWN table: candles_5m is range-read as 5m by four other
+  // consumers, and mixing off-grid timestamps into it would corrupt all of them silently.
+  const sto = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(sto.includes("CREATE TABLE IF NOT EXISTS candles_1m"), "1m bars have their own table");
+  assert.ok(sto.includes("insertCandles1m(coin, rows)") && sto.includes("readCandles1m(coin, from, to)")
+    && sto.includes("evictCandles1m(before)"), "the 1m sub-store carries insert, read and retention");
+  assert.ok(!/insertCandles\(coin, rows\)[\s\S]{0,400}candles_1m/.test(sto), "the 5m writer never touches the 1m table");
+  assert.ok(pol.includes("store.insertCandles1m(coin, closed)"), "the lane writes only closed bars");
+  assert.ok(pol.includes("k[0] + 60000 <= now"), "…on a one-minute closed-bar guard");
+});
+
+test("focus -05: manifest pins — 1m base everywhere the hour is measured, 30s cadence, honest dash", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css");
+  // engine: both the forming read and the freeze read 1m; neither reads 5m for the hour
+  assert.equal(pol.split("store.readCandles1m(p.coin").length - 1, 2, "forming and freeze both read the 1m archive — exactly two sites");
+  assert.ok(!/readCandles\(p\.coin/.test(pol), "no first-hour path reads the 5m archive any more");
+  assert.ok(pol.includes("const FOCUS_FORMING_MS = 25 * 1000"), "republish cadence sits inside the client's 30s poll");
+  assert.ok(pol.includes("formingMs: FOCUS_FORMING_MS"), "…and ships on the payload so the two cannot drift");
+  assert.ok(pol.includes('st.h1src = "1m";'), "the freeze stamps its resolution on the record");
+  assert.ok(pol.includes("cov[p.ticker] = { bars: bars.length"), "forming publishes per-seat coverage");
+  assert.ok(pol.includes("p.h1cov = { bars: bars.length"), "the frozen record carries it too");
+  assert.ok(pol.includes("if (!f) continue;"), "no bars -> no forming record, so the fold is never handed a null");
+  // splice: 1m authoritative, overlapping 5m dropped
+  assert.ok(pol.includes("rows5.filter((k) => k[0] < win.from || k[0] > win.to).concat(rolled)"),
+    "the overlapping 5m rows are DROPPED before the 1m rollup is concatenated — the double-count guard");
+  assert.ok(pol.includes("bucketCandles(raw1, 5, 60000)"), "1m rolls up to the 5m grid server-side, so the client keeps one base");
+  assert.ok(pol.includes("function m1Window("), "one resolver owns which span the 1m archive covers");
+  // client: cadence follows the server, the dry cell states itself, no 1m timeframe is offered
+  assert.ok(app.includes("function focArmPoll(") && app.includes("(FOC.data.formingMs||25000)"), "the poll follows the server's cadence");
+  assert.ok(app.includes("function focDry(") && app.includes('focpend dry'), "a seat with no bars has its own state and its own reason");
+  assert.ok(!/data-tf="1"/.test(app) && !/>1m</.test(app.slice(app.indexOf("function focChartOpen("), app.indexOf("function focChartOpen(") + 9000)),
+    "the 1m timeframe is never offered in the chart selector — it is a base, not a view");
+  assert.ok(css.includes(".foctbl td.focpend.dry"), "the dry state is visually distinct from 'still filling'");
 });
