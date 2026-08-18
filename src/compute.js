@@ -7090,7 +7090,13 @@ function whaleSeason(funds) {
   const crowd = rows.filter((r) => r.held >= 2).sort((a, b) => b.held - a.held ||
     (b.adding + b.cutting) - (a.adding + a.cutting)).slice(0, 10)
     .map((r) => ({ cusip: r.cusip, put: r.put, name: r.name, held: r.held, adding: r.adding, cutting: r.cutting, state: r.state }));
-  return { bought, sold, opens, exits, crowd, nFunds: funds.filter((f) => f && f.cur).length };
+  // The ROSTER is the aggregate's own account of which funds it consumed — identity by CIK, the
+  // label alongside for display. Everything downstream (the crowding grid's cells, the N/M
+  // denominator) reads THIS, never the live watchlist: a build describes the funds it was built
+  // from, and a roster change after the fact is a rebuild, not a re-render. nFunds derives from
+  // the roster rather than recounting, so the count and the cells cannot disagree by construction.
+  const roster = funds.filter((f) => f && f.cur).map((f) => ({ key: f.key, cik: f.cik != null ? +f.cik : null }));
+  return { bought, sold, opens, exits, crowd, roster, nFunds: roster.length };
 }
 module.exports.parse13FInfotable = parse13FInfotable;
 module.exports.whale13FScale = whale13FScale;

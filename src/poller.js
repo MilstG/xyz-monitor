@@ -4811,7 +4811,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const k = String(keyRaw || "").toUpperCase().trim();
     return whaleState.watch.find((w) => w.key === k) || null;
   }
-  function whaleAdd(cik, name) {
+  // `nowArg` exists for the suite, not for callers: the season build reads the filing calendar off
+  // the clock, so a test that freezes time must be able to hand the same instant to the roster edit
+  // it hands to the tick. Routes omit it and get Date.now(), which is the only correct value there.
+  function whaleAdd(cik, name, nowArg) {
     if (!Number.isFinite(+cik)) return { ok: false, error: "bad CIK" };
     if (whaleState.watch.some((w) => +w.cik === +cik)) return { ok: false, error: "already watching CIK " + cik };
     if (whaleState.watch.length >= 24) return { ok: false, error: "watchlist cap (24) reached" };
@@ -4819,16 +4822,23 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     whaleState.watch.push(w);
     whaleLastPoll.delete(+cik);   // poll it on the next tick
     whaleBump(); whalePersist();
+    // The roster IS an input to the season aggregate, so editing it reopens the build here rather
+    // than at the next tick. Without this the panel's counts describe the OLD watchlist until the
+    // cadence comes round — up to 24h in the "upcoming" stretch — while the grid beside them has
+    // already moved. The rebuild is cheap (pure math over books already on the volume) and is a
+    // no-op whenever the roster change didn't alter what the aggregate consumed.
+    whaleSeasonMaybe(nowArg || Date.now());
     log(`whale: watching ${w.key} (${w.name}, CIK ${w.cik})`);
     return { ok: true, fund: w };
   }
-  function whaleRm(keyRaw) {
+  function whaleRm(keyRaw, nowArg) {
     const w = whaleByKey(keyRaw);
     if (!w) return { ok: false, error: "not watching \u201c" + String(keyRaw || "") + "\u201d" };
     whaleState.watch = whaleState.watch.filter((x) => x !== w);
     delete whaleState.unseen[w.cik];
     // Cached filings stay — history kept, row hidden (re-adding the fund restores it whole).
     whaleBump(); whalePersist();
+    whaleSeasonMaybe(nowArg || Date.now());   // same reason as whaleAdd: the roster is a build input
     return { ok: true, fund: w };
   }
   function whaleMute(keyRaw, on) {
@@ -5019,13 +5029,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const i = rows3.findIndex((x) => whaleQOfPeriod(x.period) === sq);
       return i > 0 ? rows3[i - 1].acc : "";
     };
-    const sig = funds.map((x) => ((whaleState.filings[x.cik] && whaleState.filings[x.cik][q] || {}).acc || "") + ":" + prevAccOf(x.cik, q)).join("|");
-    if (had && had.sig === sig) return;   // nothing new since the last build
-    const agg = whaleSeason(filed.map((x) => ({ key: x.key, cur: x.cur, prev: x.prev })));
-    whaleState.seasons[q] = { q, at: now, sig, agg,
+    // Two signatures, because the build has two independent inputs and they mean different things.
+    // accSig is the FILING leg (both accessions per fund, keyed by CIK so it is order-free);
+    // rosterSig is WHO WAS WATCHED. Either changing must reopen the build — a roster edit changes
+    // what the aggregate would say just as surely as an amendment does — but only an accSig move
+    // is an amendment, and conflating the two made every add/remove announce a filing that never
+    // landed. The legacy single `sig` is absent on hydrated pre-2026.08.18-01 blobs, so the first
+    // build after deploy rebuilds once and adopts the roster. That is the intended migration.
+    const accs = {};
+    for (const x of funds) accs[+x.cik] = ((whaleState.filings[x.cik] && whaleState.filings[x.cik][q] || {}).acc || "") + ":" + prevAccOf(x.cik, q);
+    const rosterSig = funds.map((x) => +x.cik).sort((a, b) => a - b).join(",");
+    // The accession comparison runs over the INTERSECTION of the two rosters, not over a flat
+    // string. A joined signature moves whenever the roster does — it cannot help but — so testing
+    // it for "did a filing change?" answers yes on every add and remove, and the amendment flag
+    // becomes a lie about EDGAR. Asking only whether a fund present in BOTH builds changed its
+    // accessions separates the two questions properly.
+    const legacy = had && !had.accs;   // pre-2026.08.18-01 blob: rebuild once to adopt the roster
+    const accMoved = !!(had && had.accs) && Object.keys(accs).some((k) => k in had.accs && had.accs[k] !== accs[k]);
+    const rosterMoved = !had || had.rosterSig !== rosterSig;
+    if (had && !legacy && !accMoved && !rosterMoved) return;   // nothing new since the last build
+    const agg = whaleSeason(filed.map((x) => ({ key: x.key, cik: x.cik, cur: x.cur, prev: x.prev })));
+    whaleState.seasons[q] = { q, at: now, accs, rosterSig, agg,
       filedN: filed.length, watchN: whaleState.watch.length,
       missing: funds.filter((x) => !x.cur).map((x) => x.key),
-      amended: had ? 1 : 0,   // any rebuild after the first is by definition amendment-driven
+      // Amendment means a FILING moved. A roster edit rebuilds without claiming one.
+      amended: had ? (accMoved ? 1 : (had.amended || 0)) : 0,
       closedAt: allIn ? Math.max(...filed.map((x) => x.filedAt || 0)) : null };
     whaleBump(); whalePersist();
     if (whalePrimed) pushOps("13F season " + q, (allIn ? "all " + filed.length : filed.length + "/" + whaleState.watch.length) +
@@ -5062,8 +5090,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
   }
   // ---- payload getters (routes read these; client renders them verbatim) ----------------------
-  function getWhale() {
-    const now = Date.now();
+  // `nowArg`: same suite-only contract as the roster edits. This getter reports the FILING
+  // CALENDAR, which moves on its own whether or not the data does, so a test that freezes time
+  // must be able to freeze it here too. Reading Date.now() unconditionally is what let the
+  // end-to-end test pass for months and then go red on 2026-08-18 — the morning Q2's grace window
+  // closed — with no code change behind it. Routes omit the argument and get the real clock.
+  function getWhale(nowArg) {
+    const now = nowArg || Date.now();
     const win = whaleWindow(now);
     const watch = whaleState.watch.map((w) => {
       const f = whaleState.filings[w.cik] || {};
@@ -5117,10 +5150,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (!s) return { ok: false, error: q ? "no season build for " + q : "no season built yet \u2014 it lands when the watched funds file" };
     const tmap = await whaleTickerMap().catch(() => null);
     const tag = (rows3) => rows3.map((r) => Object.assign({}, r, { tk: whaleTickerOf(r.name, tmap) }));
+    // Staleness, stated rather than hidden. A build can outlive its roster: remove the only filer
+    // (or every filer) and whaleSeasonMaybe has nothing to build from, so it early-returns and this
+    // aggregate keeps describing funds you no longer watch. Deleting the quarter would be
+    // destroying history to hide a label, so the season stands and SAYS what it is. Identity is the
+    // CIK, never the key — keys are de-collided labels and free up for reuse the moment a fund
+    // leaves the list, so comparing on them would call a reused label a survivor.
+    const watchedCik = new Set(whaleState.watch.map((w) => +w.cik));
+    const roster = (s.agg.roster || []).map((r) => Object.assign({}, r, { dropped: r.cik != null && !watchedCik.has(+r.cik) ? 1 : 0 }));
+    const dropped = roster.filter((r) => r.dropped).map((r) => r.key);
     return { ok: true, q: s.q, at: s.at, filedN: s.filedN, watchN: s.watchN, missing: s.missing,
       amended: !!s.amended, closedAt: s.closedAt,
+      stale: dropped.length ? { dropped, watchN: whaleState.watch.length } : null,
       agg: { bought: tag(s.agg.bought), sold: tag(s.agg.sold), opens: tag(s.agg.opens),
-        exits: tag(s.agg.exits), crowd: tag(s.agg.crowd), nFunds: s.agg.nFunds } };
+        exits: tag(s.agg.exits), crowd: tag(s.agg.crowd), roster, nFunds: s.agg.nFunds } };
   }
 
   // ---- weekly sector audit (build 2026.08.05-02) ----------------------------------------------
@@ -11121,11 +11164,14 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   let focusState = null, focusPrev = null, focusVer = 0;
   let focusPv = null;                  // { at, day, rows, sig } — the live preview pool. IN-MEMORY ONLY, never persisted: only the stamp is a record.
   let focusForming = null;             // { at, map } — forming +1h reads between the stamp and the freeze. Same rule: transient, never persisted.
-  function hydrateFocus() {
+  function hydrateFocus(nowArg) {
     const data = store.loadFocus ? store.loadFocus() : null;
     if (!data) return false;
-    const today = etDayStr(Date.now());
-    if (data.state && data.state.day === today) { focusState = data.state; focusPrev = data.prev || null; }
+    // Hydrate rolls on the SAME boundary the live tick does. A blob written before 2026.08.18-02
+    // carries no utcDay; focusUtcDayOf derives one from frozenAt, so a restart across the boundary
+    // retires it correctly instead of resurrecting a list the running process would have dropped.
+    const utcToday = focusUtcDayStr(nowArg || Date.now());   // nowArg: suite-only, as with getFocus
+    if (data.state && focusUtcDayOf(data.state) === utcToday) { focusState = data.state; focusPrev = data.prev || null; }
     else if (data.state) focusPrev = data.state;               // a saved prior day rolls to "yesterday"
     else focusPrev = data.prev || null;
     focusVer = Date.now();
@@ -11207,7 +11253,9 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     focusVer = Date.now();
   }
   function stampFocus(sess, now) {
-    if (focusState && focusState.day !== etDayStr(now)) { focusPrev = focusState; focusState = null; }
+    // The old ET-day roll lived here. focusRetire owns retirement now — one producer — and it has
+    // always already fired by the time a stamp is possible: the UTC boundary (20:00 ET) precedes
+    // the next ET day, which precedes the next 09:30 open.
     const prevCloseT = focusPrevClose(sess);
     if (prevCloseT == null) return;
     const cands = focusCandidates(now, prevCloseT);
@@ -11218,7 +11266,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // silently drifted from the stamp" can never happen. No preview today -> no diff claimed.
     const pvRef = focusPv && focusPv.day === etDayStr(now) ? focusPv : null;
     const pvDiff = pvRef ? { pvAt: pvRef.at, ...focusDiff(pvRef.rows.slice(0, FOCUS_CAP).map((x) => x.ticker), sel.picks.map((x) => x.ticker)) } : null;
-    focusState = { day: etDayStr(now), open: sess.open, close: sess.close, prevCloseT,
+    focusState = { day: etDayStr(now), utcDay: focusUtcDayStr(now), open: sess.open, close: sess.close, prevCloseT,
       frozenAt: now, late: now - sess.open > 90 * 1000 ? 1 : 0,   // boot-stamped after the open: DISCLOSED, same honesty as episode boot stamps
       rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, pvDiff };
     focusPv = null;                                            // the preview retires the moment the record exists
@@ -11262,11 +11310,32 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     focusPersist();
     log(`FOCUS +1h fill: ${st.rows.filter((p) => p.h1).length}/${st.rows.length} seat(s) carry a first-hour record${st.fillNote ? " \u2014 " + st.fillNote : ""}`);
   }
+  // The day's list dies at 00:00 UTC (2026.08.18-02). Deliberately NOT the ET boundary the rest of
+  // this feature runs on: the stamp, the preview and the freeze are all cash-session events, but
+  // the LIST'S SHELF LIFE is a reading rhythm, and the operator reads this board on UTC days. That
+  // makes 20:00 ET the retirement hour in summer and 19:00 in winter — four-ish hours after the
+  // close, and the one place in FOCUS where a DST shift moves something. Stated here so nobody
+  // later "fixes" it back to ET thinking it was an oversight.
+  // Retirement runs BEFORE the session gate, or a Friday list would survive the whole weekend:
+  // Saturday has no session, the old tick returned early, and nothing ever retired it.
+  const focusUtcDayStr = (ts) => new Date(ts).toISOString().slice(0, 10);
+  const focusUtcDayOf = (st) => (st && st.utcDay) || (st ? focusUtcDayStr(st.frozenAt || st.open) : null);
+  function focusRetire(now) {
+    if (!focusState) return false;
+    if (focusUtcDayOf(focusState) === focusUtcDayStr(now)) return false;
+    focusPrev = focusState;            // survives behind the "yesterday" toggle — retired, not deleted
+    focusState = null;
+    focusForming = null;               // forming reads belong to a stamp that no longer exists
+    focusPersist();                    // bumps focusVer, so the client's poll sees the empty list
+    log(`FOCUS retired ${focusPrev.day} at the 00:00 UTC boundary — list empty until the next stamp`);
+    return true;
+  }
   function focusTick(nowInj) {
     const now = Number.isFinite(nowInj) ? nowInj : Date.now();
     const today = etDayStr(now);
+    focusRetire(now);
     const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
-    if (!sess) { focusPv = null; focusForming = null; return; }   // weekend / holiday: yesterday's list stands, no preview, no forming
+    if (!sess) { focusPv = null; focusForming = null; return; }   // weekend / holiday: no preview, no forming
     if (now >= sess.open - FOCUS_PREVIEW_LEAD && now < sess.open && (!focusState || focusState.day !== today))
       buildFocusPreview(sess, now);
     if (now >= sess.open && (!focusState || focusState.day !== today)) stampFocus(sess, now);
@@ -11274,13 +11343,22 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open) buildFocusForming(now);
     if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
   }
-  function getFocus() {
-    const now = Date.now(), today = etDayStr(now);
+  // `nowArg`: the same suite-only contract as getWhale. This payload's whole state machine is a
+  // function of the clock — which ET session day it is, whether the open has passed, whether the
+  // 00:00 UTC boundary has crossed — so a test that freezes time and cannot freeze it HERE is
+  // reduced to asserting against whatever day the suite happens to run on. Routes omit it.
+  function getFocus(nowArg) {
+    const now = nowArg || Date.now(), today = etDayStr(now);
     const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
     let state = "offday";
     const pv = (!focusState || focusState.day !== today) && focusPv && focusPv.day === today ? focusPv : null;
     if (focusState && focusState.day === today) state = focusState.filledAt ? "filled" : "frozen";
     else if (pv) state = "preview";
+    // "cleared" separates two situations the old machine collapsed into "pending": today HAS been
+    // stamped and then retired at 00:00 UTC (nothing more is coming), versus the open has passed
+    // and the stamp hasn't landed yet (something IS coming). Derived from the retired record's own
+    // session day rather than a flag, so it survives a restart without extra persistence.
+    else if (focusPrev && focusPrev.day === today) state = "cleared";
     else if (sess) state = now < sess.open ? "pre" : "pending";
     return { ts: now, dataTs: focusVer, state, day: today,
       open: sess ? sess.open : null, close: sess ? sess.close : null,
