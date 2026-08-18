@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.18-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.18-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -18548,4 +18548,63 @@ test("whale who-holds (2026.08.18-05): reverse lookup matches by ticker/name/sub
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(app.includes("whl-whoq") && app.includes("whlWho(") && app.includes("sub==='who'||sub==='holds'"), "panel + terminal verbs present");
   assert.ok(app.includes("data-whlopen2"), "a holds row deep-links to the fund's full book");
+});
+
+test("whale season roster (2026.08.18-06): the producer exists — build writes agg.roster, payload serves cells, roster-less stored builds heal at hydrate without claiming amendment", async () => {
+  const { createPoller } = require("../src/poller");
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const row = (nm, cu, v, sh, cls) => `<infoTable><nameOfIssuer>${nm}</nameOfIssuer>${cls ? "<titleOfClass>" + cls + "</titleOfClass>" : ""}<cusip>${cu}</cusip><value>${v}</value><shrsOrPrnAmt><sshPrnamt>${sh}</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>`;
+  // Both funds hold BOTH Alphabet share classes — the duplicate-name case — plus a mover.
+  const bookOf = (v) => `<x>${row("ALPHABET INC", "02079K305", v, 1e6, "CAP STK CL A")}${row("ALPHABET INC", "02079K107", v * 0.8, 8e5, "CAP STK CL C")}${row("MICRON TECHNOLOGY INC", "595112103", v * 0.5, 4e5)}</x>`;
+  const sub = (pfx) => J({ name: "X", filings: { recent: {
+    form: ["13F-HR", "13F-HR"], accessionNumber: [pfx + "-26-000002", pfx + "-26-000001"],
+    filingDate: ["2026-08-14", "2026-05-15"], reportDate: ["2026-06-30", "2026-03-31"] } } });
+  const idx = J({ directory: { item: [{ name: "primary_doc.xml", size: 9 }, { name: "infotable.xml", size: 999 }] } });
+  const mkFetch = () => async (url) => {
+    if (url.includes("company_tickers")) return J({});
+    if (url.includes("submissions/CIK0000000201")) return sub("0201");
+    if (url.includes("submissions/CIK0000000202")) return sub("0202");
+    if (url.includes("infotable.xml")) return X(url.includes("/020126") ? bookOf(url.endsWith("2/infotable.xml") ? 1000e6 : 900e6) : bookOf(url.endsWith("2/infotable.xml") ? 600e6 : 500e6));
+    if (url.includes("/index.json")) return idx;
+    return { ok: false, status: 404, error: "404" };
+  };
+  const mkStore = (loaded, sink) => ({ loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: (d) => { if (sink) sink.d = d; }, loadWhale: () => loaded });
+  // Leg 1: a fresh build writes the roster — covered funds, watchlist order, key+cik.
+  const sink = {};
+  const p = createPoller({ dex: "xyz", store: mkStore(null, sink), log: () => {}, version: "test", crypto: false, extFetch: mkFetch() });
+  p.hydrateWhaleNow();
+  p.whaleAdd(201, "Gamma Capital LP"); p.whaleAdd(202, "Delta Advisors LLC");
+  await p.whalePull("GAMMA"); await p.whalePull("DELTA");
+  p.whaleSeasonNow(Date.UTC(2026, 7, 16, 12));   // injected grace clock — the real clock sits past Q2's grace, where the window builder has already rolled to Q3
+  const s = await p.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s.ok, s.error || "");
+  assert.deepEqual(s.agg.roster.map((r) => r.key), ["GAMMA", "DELTA"], "roster: covered funds, watch order");
+  assert.ok(s.agg.roster.every((r) => Number.isFinite(+r.cik) && !r.dropped), "cik identity present, nobody falsely dropped");
+  const alph = s.agg.crowd.filter((r) => r.name === "ALPHABET INC");
+  assert.equal(alph.length, 2, "two share classes stay two crowd rows");
+  assert.ok(alph.every((r) => r.cls) && alph[0].cls !== alph[1].cls, "each carries its own titleOfClass for on-screen disambiguation");
+  assert.ok(alph.every((r) => r.state.GAMMA && r.state.DELTA), "cells have per-fund states for every roster fund");
+  // Leg 2: a stored -18-01..-05 blob (accs present, agg.roster ABSENT) heals at hydrate alone —
+  // no tick, no pull — and the heal does not claim an amendment.
+  const stored = sink.d;
+  assert.ok(stored && stored.seasons["Q2 2026"], "fixture: leg-1 state persisted");
+  delete stored.seasons["Q2 2026"].agg.roster;                       // exactly what -18-01..-05 wrote
+  stored.seasons["Q2 2026"].amended = 0;
+  const p2 = createPoller({ dex: "xyz", store: mkStore(stored, null), log: () => {}, version: "test", crypto: false,
+    extFetch: async () => ({ ok: false, status: 404, error: "404" }) });
+  p2.hydrateWhaleNow();
+  const s2 = await p2.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s2.ok && s2.agg.roster.length === 2, "roster-less stored season healed at hydrate, zero fetches");
+  assert.equal(s2.amended, false, "a shape heal is not an amendment — nothing at EDGAR moved");
+  // Wiring pins for the client half.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.indexOf("whl-who") < app.indexOf("d.watch.length?") && app.indexOf("whl-who") > app.indexOf("whl-head"), "-06: the search panel sits under the tab header, ABOVE the watchlist table — a search nobody finds is a search that doesn't exist");
+  assert.ok(app.includes("whl-clstag"), "duplicate display names get their share-class tag");
+  assert.ok(app.includes("grid cells pending one season rebuild"), "defensive note if an unhealed payload ever serves");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".whl-who{border:1px solid"), "the panel is boxed, not a bare label");
 });
