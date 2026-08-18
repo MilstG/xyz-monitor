@@ -5194,6 +5194,79 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       lanes: { opened: lane(dd.lanes.opened), added: lane(dd.lanes.added), trimmed: lane(dd.lanes.trimmed), exited: lane(dd.lanes.exited) },
       flows: dd.flows, positions, shown: positions.length };
   }
+  // "Who holds" reverse lookup (build 2026.08.18-05): given a ticker, a name fragment or a CUSIP,
+  // scan every tracked fund's latest cached book (plus its prior quarter, for exits) and answer
+  // who holds it, how big, at what conviction, and what they did with it QoQ. Cached state only —
+  // a query costs zero EDGAR traffic. One-code-path integrity: the QoQ chips come from the SAME
+  // whaleDelta the fund modal renders, so this panel can never disagree with the book view.
+  // Match lanes, in order, basis always disclosed: (1) exact ticker via the SEC company map
+  // (SYM -> official name -> whaleNameKey), (2) normalized-name equality on the query itself,
+  // (3) filed-name substring (>= 3 chars — shorter fragments only match as tickers), (4) exact
+  // 9-char CUSIP. Common and option lines stay separate per fund, never merged.
+  async function getWhaleHolds(qRaw) {
+    const q = String(qRaw || "").trim();
+    if (!q) return { ok: false, error: "usage: whale who <ticker, name fragment, or CUSIP>" };
+    const QU = q.toUpperCase();
+    const qKey = whaleNameKey(q);
+    const isCusip = /^[A-Z0-9]{9}$/.test(QU);
+    let tkKey = null, tk = null;
+    try {
+      const maps = await ensureCikMaps();
+      if (maps && maps.co.has(QU)) { tk = QU; tkKey = whaleNameKey((maps.co.get(QU) || {}).name || ""); }
+    } catch (_) {}
+    const subOk = q.length >= 3;
+    const match = (p) => {
+      if (isCusip && p.cusip === QU) return "cusip";
+      const nk = whaleNameKey(p.name);
+      if (tkKey && nk === tkKey) return "ticker";
+      if (qKey && nk === qKey) return "name";
+      if (subOk && String(p.name).toUpperCase().includes(QU)) return "substring";
+      return null;
+    };
+    const funds = [], notHeld = [], noBook = [];
+    let combined = 0, adding = 0, cutting = 0, nPositions = 0, nBooks = 0;
+    let dispName = null, basis = null;
+    const BASIS_RANK = { cusip: 4, ticker: 3, name: 2, substring: 1 };
+    for (const w of whaleState.watch) {
+      const byQ = whaleState.filings[w.cik] || {};
+      const rows2 = Object.values(byQ).filter((x) => x && x.period).sort((a, b) => String(b.period).localeCompare(String(a.period)));
+      const cur = rows2[0];
+      if (!cur) { noBook.push(w.key); continue; }
+      nBooks++; nPositions += cur.book.n;
+      const dd = whaleDelta(cur.book, whalePrevBook(w.cik, whaleQOfPeriod(cur.period)));
+      const lines = [];
+      for (let i = 0; i < dd.rows.length; i++) {
+        const p = dd.rows[i];
+        const m = match(p);
+        if (!m) continue;
+        if (!basis || BASIS_RANK[m] > BASIS_RANK[basis]) basis = m;
+        if (!dispName || p.name.length < dispName.length) dispName = p.name;
+        lines.push({ put: p.put, cusip: p.cusip, value: p.value, shares: p.shares, pct: p.pct, rank: i + 1, d: p.d });
+      }
+      const exited = dd.lanes.exited.filter((x) => match(x)).map((x) => ({ put: x.put, prevVal: x.prevVal }));
+      if (lines.length) {
+        combined += lines.reduce((s, l) => s + (l.value || 0), 0);
+        // The adding/cutting strip counts COMMON-equity lines only. A new puts line is a bearish
+        // (or hedging) expression — counting it as "adding" would read as accumulation, the exact
+        // opposite of what the filer did. Option lines still render per fund with full detail;
+        // they just never drive the directional counts. Disclosed on the strip's hover.
+        if (lines.some((l) => !l.put && l.d && (l.d.cls === "new" || l.d.cls === "add"))) adding++;
+        if (lines.some((l) => !l.put && l.d && l.d.cls === "trim")) cutting++;
+        funds.push({ key: w.key, name: w.name, q: whaleQOfPeriod(cur.period), held: 1, lines, exited });
+      } else if (exited.length) {
+        if (exited.some((x) => !x.put)) cutting++;   // same rule on the way out — an expired options line is not a directional exit
+        funds.push({ key: w.key, name: w.name, q: whaleQOfPeriod(cur.period), held: 0, lines: [], exited });
+      } else notHeld.push(w.key);
+    }
+    if (!funds.length) return { ok: false, miss: 1, q, nBooks, nPositions, noBook,
+      error: "no tracked fund's latest 13F contains \u201c" + q + "\u201d \u2014 searched " + nBooks + " book(s), " + nPositions
+        + " positions, by ticker, normalized name" + (subOk ? ", substring" : "") + " and CUSIP. Not held \u2260 not owned: shorts, futures, non-US and anything bought since quarter-end are invisible in a 13F." };
+    const basisLabel = basis === "ticker" ? 'ticker "' + tk + '" \u2192 filed name' : basis === "cusip" ? "exact CUSIP"
+      : basis === "name" ? "normalized name" : "filed-name substring";
+    funds.sort((a, b) => (b.lines.reduce((s, l) => s + (l.value || 0), 0)) - (a.lines.reduce((s, l) => s + (l.value || 0), 0)));
+    return { ok: true, q, name: dispName, tk, basis: basisLabel, funds, notHeld, noBook,
+      combined, adding, cutting, held: funds.filter((f) => f.held).length, watchN: whaleState.watch.length };
+  }
   async function getWhaleSeasonQ(qRaw) {
     const q = String(qRaw || "").trim() || (getWhale().seasonQ || "");
     const s = whaleState.seasons[q];
@@ -11621,6 +11694,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getWhale,
     getWhaleStamp: () => whaleVer,
     getWhaleFund,
+    getWhaleHolds,
     getWhaleSeasonQ,
     whaleSearch,
     whaleAdd, whaleRm, whaleMute, whaleSeen, whalePull,
