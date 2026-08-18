@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.18-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.18-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -18474,4 +18474,78 @@ test("focus -05: manifest pins — 1m base everywhere the hour is measured, 30s 
   assert.ok(!/data-tf="1"/.test(app) && !/>1m</.test(app.slice(app.indexOf("function focChartOpen("), app.indexOf("function focChartOpen(") + 9000)),
     "the 1m timeframe is never offered in the chart selector — it is a base, not a view");
   assert.ok(css.includes(".foctbl td.focpend.dry"), "the dry state is visually distinct from 'still filling'");
+});
+
+test("whale who-holds (2026.08.18-05): reverse lookup matches by ticker/name/substring/cusip with disclosed basis, keeps option lines separate, surfaces exits, misses honestly", async () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => null };
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const row = (nm, cu, v, sh, pc) => `<infoTable><nameOfIssuer>${nm}</nameOfIssuer><cusip>${cu}</cusip><value>${v}</value><shrsOrPrnAmt><sshPrnamt>${sh}</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>${pc ? "<putCall>" + pc + "</putCall>" : ""}</infoTable>`;
+  // Fund A: AAPL common (trimmed) + AAPL puts (new) + UNH; prior quarter had AAPL bigger + ULTA (exit).
+  const A_Q2 = `<x>${row("APPLE INC", "037833100", 1000e6, 10e6)}${row("APPLE INC", "037833100", 200e6, 2e6, "Put")}${row("UNITEDHEALTH GROUP INC", "91324P102", 300e6, 1e6)}</x>`;
+  const A_Q1 = `<x>${row("APPLE INC", "037833100", 1500e6, 15e6)}${row("ULTA BEAUTY INC", "90384S303", 90e6, 2e5)}</x>`;
+  // Fund B: AAPL common (added).
+  const B_Q2 = `<x>${row("APPLE INC", "037833100", 400e6, 4e6)}${row("NVIDIA CORPORATION", "67066G104", 250e6, 5e5)}</x>`;
+  const B_Q1 = `<x>${row("APPLE INC", "037833100", 300e6, 3e6)}${row("NVIDIA CORPORATION", "67066G104", 200e6, 4e5)}</x>`;
+  const sub = (accQ2, accQ1) => J({ name: "X", filings: { recent: {
+    form: ["13F-HR", "13F-HR"], accessionNumber: [accQ2, accQ1],
+    filingDate: ["2026-08-14", "2026-05-15"], reportDate: ["2026-06-30", "2026-03-31"] } } });
+  const idx = J({ directory: { item: [{ name: "primary_doc.xml", size: 9 }, { name: "infotable.xml", size: 999 }] } });
+  const extFetch = async (url) => {
+    if (url.includes("company_tickers.json")) return J({ 0: { cik_str: 1, ticker: "AAPL", title: "Apple Inc." }, 1: { cik_str: 2, ticker: "NVDA", title: "NVIDIA Corporation" } });
+    if (url.includes("company_tickers_mf")) return J({ fields: ["cik"], data: [] });
+    if (url.includes("submissions/CIK0000000101")) return sub("0101-26-000002", "0101-26-000001");
+    if (url.includes("submissions/CIK0000000102")) return sub("0102-26-000002", "0102-26-000001");
+    if (url.includes("/010126000002/infotable.xml")) return X(A_Q2);
+    if (url.includes("/010126000001/infotable.xml")) return X(A_Q1);
+    if (url.includes("/010226000002/infotable.xml")) return X(B_Q2);
+    if (url.includes("/010226000001/infotable.xml")) return X(B_Q1);
+    if (url.includes("/index.json")) return idx;
+    return { ok: false, status: 404, error: "404" };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  p.whaleAdd(101, "Alpha Capital LP"); p.whaleAdd(102, "Beta Partners LLC");
+  await p.whalePull("ALPHA"); await p.whalePull("BETA");
+  // Ticker lane: AAPL resolves via the company map; basis disclosed; both funds found, sorted by size.
+  let r = await p.getWhaleHolds("AAPL");
+  assert.ok(r.ok, r.error || "");
+  assert.ok(/ticker "AAPL"/.test(r.basis), "basis names the lane that matched");
+  assert.equal(r.held, 2); assert.equal(r.watchN, 2);
+  assert.equal(r.funds[0].key, "ALPHA", "sorted by combined position size");
+  const alpha = r.funds[0];
+  assert.equal(alpha.lines.length, 2, "common and puts are SEPARATE lines, never merged");
+  const common = alpha.lines.find((l) => !l.put), puts = alpha.lines.find((l) => l.put === "put");
+  assert.equal(common.d.cls, "trim"); assert.equal(common.d.dSh, -5e6, "share delta off the real delta engine");
+  assert.equal(puts.d.cls, "new", "the puts line opened this quarter");
+  assert.equal(common.rank, 1, "rank inside the fund's book");
+  assert.equal(r.combined, 1000e6 + 200e6 + 400e6, "combined sums every matched line");
+  assert.equal(r.adding, 1, "BETA's common grew — and ALPHA's NEW PUTS line must NOT count as adding (options never drive the directional strip)");
+  assert.equal(r.cutting, 1, "ALPHA's common trim");
+  // Exit lane: ULTA held in Q1, absent in Q2 — surfaced as an exited fund row, counted as cutting.
+  r = await p.getWhaleHolds("ULTA");
+  assert.ok(r.ok);
+  assert.equal(r.held, 0); assert.equal(r.funds.length, 1);
+  assert.equal(r.funds[0].key, "ALPHA"); assert.equal(r.funds[0].exited[0].prevVal, 90e6);
+  assert.ok(r.notHeld.includes("BETA"), "the fund that never touched it is listed not-held");
+  // Substring lane (>=3 chars) + name lane.
+  r = await p.getWhaleHolds("unitedhealth");
+  assert.ok(r.ok && r.held === 1 && r.funds[0].key === "ALPHA");
+  // CUSIP lane, exact 9 chars.
+  r = await p.getWhaleHolds("67066G104");
+  assert.ok(r.ok && /CUSIP/.test(r.basis) && r.funds[0].key === "BETA");
+  // Two-char query only matches as a ticker — no substring fishing.
+  r = await p.getWhaleHolds("UN");
+  assert.ok(!r.ok && r.miss === 1, "short fragments don't substring-match");
+  assert.ok(/searched 2 book/.test(r.error) && /Not held \u2260 not owned/.test(r.error), "the miss states scan scope and the 13F blindness caveat");
+  // Wiring pins.
+  const fs = require("fs"), path = require("path");
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(sv.includes("qq.holds != null") && sv.includes("getWhaleHolds"), "route branch wired");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("whl-whoq") && app.includes("whlWho(") && app.includes("sub==='who'||sub==='holds'"), "panel + terminal verbs present");
+  assert.ok(app.includes("data-whlopen2"), "a holds row deep-links to the fund's full book");
 });
