@@ -7064,8 +7064,9 @@ function whaleSeason(funds) {
   const ent = (p) => {
     const k = p.cusip + "|" + (p.put || "");
     let e = byKey.get(k);
-    if (!e) { e = { cusip: p.cusip, put: p.put, name: p.name, legs: [], hold: [], add: [], trim: [], opened: [], exit: [], state: {} }; byKey.set(k, e); }
+    if (!e) { e = { cusip: p.cusip, put: p.put, name: p.name, cls: p.cls || null, legs: [], hold: [], add: [], trim: [], opened: [], exit: [], state: {} }; byKey.set(k, e); }
     if (p.name && p.name.length < e.name.length) e.name = p.name;
+    if (!e.cls && p.cls) e.cls = p.cls;   // share-class label (titleOfClass) — two cusips of one issuer normalize to the SAME display name (GOOG/GOOGL); cls is how the rows tell apart on screen
     return e;
   };
   for (const f of funds) {
@@ -7083,7 +7084,7 @@ function whaleSeason(funds) {
   }
   const dom = (legs) => { const g = legs.reduce((s, l) => s + Math.abs(l.dVal || 0), 0);
     return g > 0 ? Math.max(...legs.map((l) => Math.abs(l.dVal || 0))) / g * 100 : null; };
-  const rows = [...byKey.values()].map((e) => ({ cusip: e.cusip, put: e.put, name: e.name,
+  const rows = [...byKey.values()].map((e) => ({ cusip: e.cusip, put: e.put, name: e.name, cls: e.cls,
     net: e.legs.reduce((s, l) => s + (l.dVal || 0), 0), legs: e.legs, domPct: dom(e.legs),
     held: new Set(e.hold).size, adding: e.add.length + e.opened.length, cutting: e.trim.length + e.exit.length,
     opened: e.opened, exited: e.exit, state: e.state }));
@@ -7097,7 +7098,7 @@ function whaleSeason(funds) {
     .sort((a, b) => b.n - a.n || b.tot - a.tot).slice(0, 12);
   const crowd = rows.filter((r) => r.held >= 2).sort((a, b) => b.held - a.held ||
     (b.adding + b.cutting) - (a.adding + a.cutting)).slice(0, 10)
-    .map((r) => ({ cusip: r.cusip, put: r.put, name: r.name, held: r.held, adding: r.adding, cutting: r.cutting, state: r.state }));
+    .map((r) => ({ cusip: r.cusip, put: r.put, name: r.name, cls: r.cls, held: r.held, adding: r.adding, cutting: r.cutting, state: r.state }));
   // The ROSTER is the aggregate's own account of which funds it consumed — identity by CIK, the
   // label alongside for display. Everything downstream (the crowding grid's cells, the N/M
   // denominator) reads THIS, never the live watchlist: a build describes the funds it was built

@@ -4740,6 +4740,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       }
     }
     if (healed) { whalePersist(); log(`whale: scale migration corrected ${healed} stored filing(s) reported in the pre-2023 thousands convention (x1000, flagged + disclosed)`); }
+    // Season shape heal, AT hydrate, sweeping EVERY stored quarter — not through whaleSeasonMaybe,
+    // which only ever looks at the CURRENT window's quarter: once a season's grace ends the
+    // builder rolls forward and a roster-less stored build for the closed quarter would stay
+    // broken forever (exactly the state a post-grace deploy of this fix would otherwise land in).
+    // Rebuild is pure math over the stored books of today's watchlist for that quarter; the
+    // getter's dropped-fund marking and the stale chip own the disclosure if the roster changed
+    // since. A quarter with no rebuildable books keeps its old agg — the client note covers it.
+    try {
+      let sHealed = 0;
+      for (const q of Object.keys(whaleState.seasons)) {
+        const sn = whaleState.seasons[q];
+        if (!sn || (sn.agg && Array.isArray(sn.agg.roster) && sn.agg.roster.length)) continue;
+        const funds = whaleState.watch.map((w) => {
+          const f = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
+          return f ? { key: w.key, cik: +w.cik, cur: f.book, prev: whalePrevBook(w.cik, q) } : null;
+        }).filter(Boolean);
+        if (!funds.length) continue;
+        const agg = whaleSeason(funds);
+        agg.roster = funds.map((x) => ({ key: x.key, cik: +x.cik }));
+        sn.agg = agg; sn.at = Date.now(); sn.healed = 1;   // amended untouched — nothing at EDGAR moved
+        sn.rosterSig = funds.map((x) => +x.cik).sort((a, b) => a - b).join(",");
+        sHealed++;
+      }
+      if (sHealed) { whalePersist(); log(`whale: season shape heal rebuilt ${sHealed} stored quarter(s) whose grid roster had no producer (2026.08.18-01..-05 builds)`); }
+    } catch (_) {}
     whaleBump();
     // A hydrated watchlist means past filings were already announced in a prior life — prime
     // immediately so the first poll can't re-announce them. An EMPTY list has nothing to blast.
@@ -5097,8 +5122,21 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const legacy = had && !had.accs;   // pre-2026.08.18-01 blob: rebuild once to adopt the roster
     const accMoved = !!(had && had.accs) && Object.keys(accs).some((k) => k in had.accs && had.accs[k] !== accs[k]);
     const rosterMoved = !had || had.rosterSig !== rosterSig;
-    if (had && !legacy && !accMoved && !rosterMoved) return;   // nothing new since the last build
+    // Shape migration: builds persisted while agg.roster had no producer (2026.08.18-01 through
+    // -05) carry accs but an empty grid. Rebuild them once; pure math over stored books, and it
+    // is NOT an amendment — nothing at EDGAR moved.
+    const shapeStale = !!(had && (!had.agg || !Array.isArray(had.agg.roster) || !had.agg.roster.length));
+    if (had && !legacy && !accMoved && !rosterMoved && !shapeStale) return;   // nothing new since the last build
     const agg = whaleSeason(filed.map((x) => ({ key: x.key, cik: x.cik, cur: x.cur, prev: x.prev })));
+    // THE producer of agg.roster (fix, build 2026.08.18-06). The -18-01 rework wired everything
+    // that READS the roster — the getter's dropped-fund marking, the client's one-square-per-
+    // covered-fund grid, the rebuild triggers — but nothing ever WROTE it, so every payload
+    // served roster:[] and the crowding grid drew zero cells. The -84 lesson, verbatim: the
+    // consumer chain was pinned by strings while the field had no producer; only a behavioral
+    // test that walks build -> payload -> cells could have caught it, and now one does. Roster =
+    // the funds the build actually covered (filed only, watchlist order) — a watched-but-unfiled
+    // fund lives in `missing`, never as a grey square pretending to be a measured "no position".
+    agg.roster = filed.map((x) => ({ key: x.key, cik: +x.cik }));
     whaleState.seasons[q] = { q, at: now, accs, rosterSig, agg,
       filedN: filed.length, watchN: whaleState.watch.length,
       missing: funds.filter((x) => !x.cur).map((x) => x.key),
@@ -5241,7 +5279,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (!m) continue;
         if (!basis || BASIS_RANK[m] > BASIS_RANK[basis]) basis = m;
         if (!dispName || p.name.length < dispName.length) dispName = p.name;
-        lines.push({ put: p.put, cusip: p.cusip, value: p.value, shares: p.shares, pct: p.pct, rank: i + 1, d: p.d });
+        lines.push({ put: p.put, cusip: p.cusip, cls: p.cls || null, value: p.value, shares: p.shares, pct: p.pct, rank: i + 1, d: p.d });
       }
       const exited = dd.lanes.exited.filter((x) => match(x)).map((x) => ({ put: x.put, prevVal: x.prevVal }));
       if (lines.length) {
