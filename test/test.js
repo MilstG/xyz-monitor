@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.19-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.19-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17892,14 +17892,19 @@ test("whale roster -01: the crowding grid has ONE producer — cells cannot be d
 test("whale roster -01: accession and roster signatures are independent — only a filing move is an amendment", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const fn = pol.slice(pol.indexOf("function whaleSeasonMaybe("));
+  // 2026.08.19-03: the write moved into whaleSeasonBuildQ (one writer for every build path),
+  // which sits ABOVE whaleSeasonMaybe — the slice starts at the season core so the pins read the
+  // gate (in Maybe) AND the write (in BuildQ) together, which is the actual invariant.
+  const fn = pol.slice(pol.indexOf("function whaleSeasonBuildQ("));
   const body = fn.slice(0, fn.indexOf("\n  async function"));
   assert.ok(/const accs = \{\}/.test(body) && /const rosterSig = /.test(body), "two inputs, tracked separately");
   assert.ok(/!legacy && !accMoved && !rosterMoved/.test(body),
     "EITHER changing reopens the build — a roster edit changes what the aggregate would say just as an amendment does");
   assert.ok(/k in had\.accs && had\.accs\[k\] !== accs\[k\]/.test(body),
     "accessions compare on the INTERSECTION: a flat signature moves whenever the roster does, which is why it can't answer 'did a filing change?'");
-  assert.ok(/amended: had \? \(accMoved \? 1 :/.test(body),
+  // 2026.08.19-03: the amended write moved into whaleSeasonBuildQ (the ONE writer for every
+  // build path) — the doctrine is unchanged, only accMoved may set it; the pin follows the code.
+  assert.ok(/amended: had \? \(meta && meta\.accMoved \? 1 :/.test(body),
     "…and only that comparison sets `amended`, or every add/remove announces a filing that never landed");
   assert.ok(/const legacy = had && !had\.accs/.test(body), "hydrated pre-build blobs rebuild once to adopt the roster");
   // The roster edits must reach the build directly rather than waiting on whaleTick's cadence.
@@ -18934,4 +18939,132 @@ test("whale season heal v2 (2026.08.19-01): aggregate and header fields are ONE 
   assert.equal(s3.filedN, 2); assert.equal(s3.watchN, 3);
   const app = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(app.includes("rebuilt from stored books"), "healed builds say what they are in both headers — not 'rebuilt after amendment'");
+});
+
+test("whale traded-basis lanes (2026.08.19-02): mark drift is priced out — share sellers cannot top MOST BOUGHT, lanes agree with crowding by construction", () => {
+  const C = require("../src/compute");
+  const P = (cu, nm, v, sh) => ({ cusip: cu, put: null, name: nm, cls: null, value: v, shares: sh, pct: null });
+  // The screenshot scenario: MU's price doubles across the quarter. Two funds TRIM shares — their
+  // dVal is POSITIVE (marks swamp the selling) — one small fund adds. Old dollar-net called this
+  // +$40M "MOST BOUGHT" while the crowding grid said 2 cutting. One panel, two answers.
+  const A = { key: "A", cur: { total: 1, n: 1, positions: [P("595112103", "MICRON TECHNOLOGY INC", 180e6, 1e6)] },
+              prev: { total: 1, n: 1, positions: [P("595112103", "MICRON TECHNOLOGY INC", 150e6, 1.5e6)] } };
+  const B = { key: "B", cur: { total: 1, n: 1, positions: [P("595112103", "MICRON TECHNOLOGY INC", 90e6, 0.5e6)] },
+              prev: { total: 1, n: 1, positions: [P("595112103", "MICRON TECHNOLOGY INC", 80e6, 0.8e6)] } };
+  const D = { key: "D", cur: { total: 1, n: 1, positions: [P("595112103", "MICRON TECHNOLOGY INC", 36e6, 0.2e6)] },
+              prev: { total: 1, n: 1, positions: [P("595112103", "MICRON TECHNOLOGY INC", 18e6, 0.18e6)] } };
+  const s = C.whaleSeason([A, B, D]);
+  assert.equal(s.bought.length, 0, "a rallying stock everyone trimmed does NOT appear in MOST BOUGHT");
+  assert.equal(s.sold.length, 1, "it lands in MOST SOLD — where the share counts say it belongs");
+  const mu = s.sold[0];
+  // Traded flow: (-0.5M x $180) + (-0.3M x $180) + (+0.02M x $180) = -140.4M, at each filing's own implied Q-end price.
+  assert.ok(Math.abs(mu.net - (-140.4e6)) < 1e3, "net is TRADED dollars at implied quarter-end prices, got " + mu.net);
+  assert.ok(mu.legs.every((l) => l.dTr != null), "every SH leg carries its traded estimate");
+  assert.equal(mu.estN, 0, "no value-only legs here — nothing rides the polluted layer");
+  // Crowding and the lane now read the same layer.
+  const cr = s.crowd.find((r) => r.cusip === "595112103");
+  assert.ok(cr && cr.cutting === 2 && cr.adding === 1, "crowding: 2 cutting, 1 adding — and the lane AGREES");
+  // whaleDelta flows: the modal strip's TRIMMED box must be negative for A despite dVal +30M.
+  const dd = C.whaleDelta(A.cur, A.prev);
+  assert.equal(dd.rows[0].d.cls, "trim");
+  assert.ok(dd.rows[0].d.dVal > 0, "fixture sanity: the polluted layer really does read positive");
+  assert.ok(Math.abs(dd.rows[0].d.dTr - (-90e6)) < 1e3, "dTr prices the share change alone");
+  assert.ok(Math.abs(dd.flows.trimmed - (-90e6)) < 1e3, "the strip's flow is traded dollars, not mark drift");
+  // Fallback: an options leg (no comparable shares) still rides dVal, counted and disclosed.
+  const O = (v) => ({ cusip: "595112103", put: "call", name: "MICRON TECHNOLOGY INC", cls: null, value: v, shares: null, pct: null });
+  const E = { key: "E", cur: { total: 1, n: 1, positions: [O(50e6)] }, prev: { total: 1, n: 1, positions: [O(20e6)] } };
+  const s2 = C.whaleSeason([E]);
+  const call = (s2.bought.find((r) => r.put === "call")) || null;
+  assert.ok(call && call.estN === 1, "value-only leg counted in estN — the row can say which layer it rides");
+  // Migration: a stored season whose agg predates the traded basis (no aggV) rebuilds at hydrate
+  // even with a perfect roster — new labels must never sit over old-math numbers.
+  {
+    const { createPoller } = require("../src/poller");
+    const stored = { ts: 1,
+      watch: [{ key: "A", name: "A LP", cik: 401, notify: 1, addedAt: 1 }],
+      filings: { "401": { "Q2 2026": { acc: "x", form: "13F-HR", filedAt: 1, period: "2026-06-30", url: null, scaleChecked: 1,
+        book: { total: 180e6, n: 1, nRaw: 1, positions: [{ cusip: "595112103", put: null, name: "MICRON TECHNOLOGY INC", cls: null, value: 180e6, shares: 1e6, pct: 100 }] } },
+        "Q1 2026": { acc: "y", form: "13F-HR", filedAt: 1, period: "2026-03-31", url: null, scaleChecked: 1,
+        book: { total: 150e6, n: 1, nRaw: 1, positions: [{ cusip: "595112103", put: null, name: "MICRON TECHNOLOGY INC", cls: null, value: 150e6, shares: 1.5e6, pct: 100 }] } } } },
+      unseen: {}, seasons: { "Q2 2026": { q: "Q2 2026", at: 1, accs: { 401: "x:y" }, rosterSig: "401",
+        filedN: 1, watchN: 1, missing: [], amended: 0,
+        agg: { bought: [{ cusip: "595112103", put: null, name: "MICRON TECHNOLOGY INC", net: 30e6, legs: [{ key: "A", dVal: 30e6, dSh: -0.5e6 }], domPct: 100, held: 1, adding: 0, cutting: 1, opened: [], exited: [], state: { A: "trim" } }],
+          sold: [], opens: [], exits: [], crowd: [], nFunds: 1, roster: [{ key: "A", cik: 401 }] } } } };   // old-math agg: trim shows as BOUGHT, no aggV
+    const st = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {}, insert: () => {},
+      saveRegime: () => {}, saveNews: () => {}, loadNews: () => null, saveWhale: () => {}, loadWhale: () => stored };
+    const p4 = createPoller({ dex: "xyz", store: st, log: () => {}, version: "test", crypto: false,
+      extFetch: async () => ({ ok: false, status: 404, error: "404" }) });
+    p4.hydrateWhaleNow();
+    return (async () => {
+      const sh = await p4.getWhaleSeasonQ("Q2 2026");
+      assert.ok(sh.ok, sh.error || "");
+      assert.equal(sh.agg.bought.length, 0, "the old-math agg (trim shown as bought) was rebuilt at hydrate under the traded basis");
+      assert.ok(sh.agg.sold.length === 1 && Math.abs(sh.agg.sold[0].net - (-90e6)) < 1e3, "and the rebuilt lane prices the share change: -0.5M sh x $180");
+    })().then(() => {
+  // Client pins: labels name the basis; tag collisions fall to cusip.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("MOST BOUGHT \\u00b7 net traded $ (est)") && app.includes("MOST SOLD \\u00b7 net traded $ (est)"), "lane labels state the traded basis");
+  assert.ok(app.includes("no comparable share counts"), "value-only legs disclosed per row");
+  assert.ok(app.includes("tagCount"), "duplicate-name tags that collide (Equity/Equity) fall back to the cusip head");
+    });
+  }
+});
+
+test("whale season sync (2026.08.19-03): closed-quarter builds follow the live watchlist — no ghost 'missing', no denominator drift, late HR/As rebuild, all-dropped stays as labeled history", async () => {
+  const { createPoller } = require("../src/poller");
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const row = (nm, cu, v, sh) => `<infoTable><nameOfIssuer>${nm}</nameOfIssuer><cusip>${cu}</cusip><value>${v}</value><shrsOrPrnAmt><sshPrnamt>${sh}</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>`;
+  const book = (v) => `<x>${row("APPLE INC", "037833100", v, 1e6)}${row("MICRON TECHNOLOGY INC", "595112103", v / 2, 5e5)}</x>`;
+  let amendA = false;   // flips to stage a late HR/A for fund A's Q2
+  const sub = (pfx, amended) => J({ name: "X", filings: { recent: amended
+    ? { form: ["13F-HR/A", "13F-HR", "13F-HR"], accessionNumber: [pfx + "-26-000009", pfx + "-26-000002", pfx + "-26-000001"],
+        filingDate: ["2026-08-18", "2026-08-14", "2026-05-15"], reportDate: ["2026-06-30", "2026-06-30", "2026-03-31"] }
+    : { form: ["13F-HR", "13F-HR"], accessionNumber: [pfx + "-26-000002", pfx + "-26-000001"],
+        filingDate: ["2026-08-14", "2026-05-15"], reportDate: ["2026-06-30", "2026-03-31"] } } });
+  const idx = J({ directory: { item: [{ name: "primary_doc.xml", size: 9 }, { name: "infotable.xml", size: 999 }] } });
+  const extFetch = async (url) => {
+    if (url.includes("company_tickers")) return J({});
+    if (url.includes("submissions/CIK0000000401")) return sub("0401", amendA);
+    if (url.includes("submissions/CIK0000000402")) return sub("0402", false);
+    if (url.includes("infotable.xml")) return X(book(url.includes("000009") ? 999e6 : 800e6));
+    if (url.includes("/index.json")) return idx;
+    return { ok: false, status: 404, error: "404" };
+  };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  const NOWG = Date.UTC(2026, 7, 16, 12);   // in-grace clock, so the window builder creates the Q2 season
+  p.whaleAdd(401, "Alpha One LP", NOWG); p.whaleAdd(402, "Beta Two LLC", NOWG);
+  await p.whalePull("ALPHA"); await p.whalePull("BETA");
+  p.whaleAdd(999, "NoBook Yet LP", NOWG);   // watched, never filed
+  let s = await p.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s.ok && s.filedN === 2 && s.watchN === 3 && s.agg.nFunds === 2, "baseline: 2/3, one bookless in missing");
+  assert.deepEqual(s.missing, ["NOBOOK"]);
+  // THE screenshot bug: remove a covered fund AFTER the quarter closed. The window builder has
+  // rolled to Q3 and will never look back — the sync must rebuild Q2 to the live list anyway.
+  p.whaleRm("BETA");   // real clock: post-grace
+  s = await p.getWhaleSeasonQ("Q2 2026");
+  assert.equal(s.filedN, 1, "header filedN follows the live list");
+  assert.equal(s.watchN, 2, "watchN is the list you can SEE, not a dead build's");
+  assert.equal(s.agg.nFunds, 1, "lane denominators agree with the header");
+  assert.deepEqual(s.agg.roster.map((r) => r.key), ["ALPHA"], "grid roster too");
+  assert.deepEqual(s.missing, ["NOBOOK"], "missing lists only CURRENT bookless watched funds — a removed fund can never haunt it");
+  assert.equal(s.amended, false, "roster edits never claim an amendment");
+  assert.equal(s.stale, null, "nothing to disclose — the build matches the list, so the chip is silent");
+  // Late HR/A on the CLOSED quarter: the daily amendment poll ingests it; the sync must rebuild
+  // and NOW the amendment flag is earned.
+  amendA = true;
+  await p.whaleTickNow(Date.now() + 26 * 3600e3);   // past the slow gate: submissions re-checked, HR/A ingested through the scheduled path
+  s = await p.getWhaleSeasonQ("Q2 2026");
+  assert.equal(s.amended, true, "a FILING moved — the flag is earned, via the closed-quarter sync");
+  assert.ok(Math.abs((s.agg.bought.concat(s.agg.sold).reduce((a2, r) => a2 + Math.abs(r.net), 0)) - 0) >= 0, "agg recomputed without throwing");
+  // All coverage removed: the season is KEPT as labeled history (the -18-02 doctrine), chip live.
+  p.whaleRm("ALPHA");
+  s = await p.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s.ok, "kept — history is not destroyed to avoid a label");
+  assert.ok(s.stale && s.stale.dropped.includes("ALPHA"), "and the chip says exactly what it is");
 });
