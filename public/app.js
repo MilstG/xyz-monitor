@@ -10972,50 +10972,132 @@ function whlBindList(box){
   if(go) go.onclick=doSearch;
   if(q) q.onkeydown=(e)=>{ if(e.key==='Enter') doSearch(); };
 }
-// ---- "who holds" reverse lookup (build 2026.08.18-05) -----------------------------------------
-// Renders /api/whale?holds=Q verbatim: aggregate strip, per-fund rows (common + option lines kept
-// separate, side-colored), exits dimmed with their prior value, honest miss with scan counts.
-// Survives re-renders: the query lives on WHL and re-fires after whlFetch repaints the tab.
+// ---- "who holds" reverse lookup ---------------------------------------------------------------
+// Renders /api/whale?holds=Q verbatim. -07: the payload is a LIST OF ISSUERS, not one merged
+// result. The strongest match renders in full; every other issuer the query touched renders as a
+// collapsed strip that expands in place. A query like "amd" legitimately hits two companies and
+// a query like "capital" hits five — a switch would hide them behind a click and a stack would
+// bury the answer you wanted, so weak matches are subordinate but present, ranked by lane
+// strength. Survives re-renders: the query and the expanded set live on WHL and re-fire after
+// whlFetch repaints the tab.
+const WHO_DIR={add:['ADDED','b-add','net share count grew vs the prior filed quarter, across this fund\u2019s COMMON lines only'],
+  trim:['TRIMMED','b-trim','net share count shrank vs the prior filed quarter, across this fund\u2019s COMMON lines only'],
+  new:['NEW','b-new','opened this quarter \u2014 no position in the prior filing'],
+  flat:['FLAT','b-flat','share count unchanged \u2014 mark drift only, not a trade'],
+  exit:['EXITED','b-exit','held it in the prior quarter, absent from the latest filing: exited, or fell below reporting \u2014 indistinguishable in a 13F'],
+  na:['\u2014','b-na','no prior filing ingested for this fund, or the position is option lines only \u2014 no direction claimed']};
+// One chip component for every lot class. -06 rendered option lines as bare coloured text and
+// common lines as a bordered tag, picked by an unrelated condition (does this fund hold 2+ common
+// lots), so the same column carried two different widgets and the fund name ran straight into the
+// class with no separator. Options are a COLOUR here, not a different component.
+function whoLot(l){
+  const lbl=l.put?esc(l.put.toUpperCase())+'S':(l.cls?esc(String(l.cls).toUpperCase().split(/\s+/).slice(-2).join(' ')):'COM');
+  return `<span class="wo-cls${l.put?' '+esc(l.put):''}">${lbl}</span>`;
+}
+// Sub-0.05% is "<0.1%", never a fabricated 0.0%. A rounded zero on a real position reads as an
+// absent position, which is the one thing this panel exists to distinguish.
+function whoPct(p){ if(p==null) return '<span class="na">\u2014</span>';
+  if(p>0&&p<0.05) return '<span class="sec">&lt;0.1%</span>';
+  return p.toFixed(1)+'%'; }
+// The unit is always printed. "+3.3M" sitting next to "$9.36B" is unreadable: shares and dollars
+// are both plausible and the column mixes them by design (share deltas where both quarters report
+// SH counts, value deltas where they don't).
+function whoD(d){
+  if(!d||d.cls==='na') return '<span class="na" data-tip="no prior filing ingested \u2014 no delta is claimed, not \u2018all new\u2019">\u2014</span>';
+  if(d.cls==='new') return '<span class="new">opened</span>';
+  if(d.cls==='flat') return '<span class="sec">flat</span>';
+  if(d.dSh!=null) return `<span class="${d.dSh>0?'pos':'neg'}">${whlSgnSh(d.dSh)} sh</span>`;
+  if(d.dVal!=null) return `<span class="${d.dVal>0?'pos':'neg'}" data-tip="value delta only \u2014 share counts aren\u2019t comparable across the two filings (options or principal-amount rows)">${(d.dVal>0?'+':'\u2212')}${whlMoney(Math.abs(d.dVal)).slice(1)}</span>`;
+  return '<span class="na">\u2014</span>';
+}
+function whoTable(iss){
+  const rows=iss.funds.map(f=>{
+    const d=WHO_DIR[f.dir]||WHO_DIR.na;
+    const mix=f.mixed?` <span class="wo-mix" data-tip="legs disagree \u2014 at least one lot grew while another shrank. The chip prints the NET direction across this fund\u2019s common lines, so the fund is counted ONCE in the strip above; the per-lot deltas below show both sides.">\u00b1</span>`:'';
+    if(!f.held){
+      const ex=f.exited.map(x=>`${x.put?esc(x.put)+'s ':''}was ${whlMoney(x.prevVal)}`).join(' \u00b7 ');
+      return `<tr class="wo-fund wo-exit" data-whlopen2="${esc(f.key)}" data-tip="${esc(f.name)} \u2014 held it in the ${esc(f.q)} prior quarter and it is absent from the latest filed book: EXITED, or fell below reporting \u2014 a 13F cannot tell the two apart">`
+        +`<td class="l"><span class="whl-name">${esc(f.key)}</span><span class="whl-badge b-exit">EXITED</span></td>`
+        +`<td colspan="4" class="l sec">${ex}</td></tr>`;
+    }
+    const fv=f.lines.reduce((s,l)=>s+(l.value||0),0);
+    const fp=f.lines.reduce((s,l)=>s+(l.pct||0),0);
+    const best=Math.min.apply(null,f.lines.map(l=>l.rank));
+    // The fund's OWN roll-up. -06 put the fund name, the direction chip and the largest lot's
+    // numbers on one row, so a fund's headline was whichever lot happened to sort first.
+    const head=`<tr class="wo-fund" data-whlopen2="${esc(f.key)}" data-tip="${esc(f.name+' \u00b7 '+f.q+' book \u00b7 '+f.lines.length+' filed line(s) on this issuer \u00b7 combined '+whlMoney(fv)+' \u00b7 best rank #'+best+' \u00b7 click for the full book')}">`
+      +`<td class="l"><span class="whl-name">${esc(f.key)}</span>`
+      +`<span class="whl-badge ${d[1]}" data-tip="${esc(d[2])}">${d[0]}</span>${mix}</td>`
+      +`<td class="r wo-n">${whlMoney(fv)}</td>`
+      +`<td class="r wo-n">${whoPct(fp)}</td>`
+      +`<td class="r wo-n sec" data-tip="best (lowest) rank this issuer reaches in that fund\u2019s book \u2014 per-lot ranks below">#${best}</td>`
+      +`<td class="r wo-n sec">\u2014</td></tr>`;
+    const lots=f.lines.map(l=>`<tr class="wo-lot" data-whlopen2="${esc(f.key)}" data-tip="${esc(f.name+' \u00b7 '+(l.put?l.put+'s line':'common')+' \u00b7 cusip '+l.cusip+(l.cls?' \u00b7 '+l.cls:'')+' \u00b7 value $'+Math.round(l.value).toLocaleString()+(l.shares!=null?' \u00b7 '+Math.round(l.shares).toLocaleString()+' sh':' \u00b7 share count not claimed (PRN/mixed rows)')+' \u00b7 rank #'+l.rank+' in their book'+(l.put?' \u00b7 a separate 13F line: option value is the UNDERLYING notional per 13F rules, not premium, and is never merged into the common position':'')+' \u00b7 click for the full book')}">`
+      +`<td class="l">${whoLot(l)}</td>`
+      +`<td class="r wo-n">${whlMoney(l.value)}</td>`
+      +`<td class="r wo-n" data-tip="value \u00f7 that fund\u2019s 13F total \u2014 conviction proxy">${whoPct(l.pct)}</td>`
+      +`<td class="r wo-n sec">#${l.rank}</td>`
+      +`<td class="r wo-n">${whoD(l.d)}</td></tr>`).join('');
+    return head+lots;
+  }).join('');
+  return `<div class="tblwrap"><table class="whl-tbl whl-wotbl">`
+    +`<colgroup><col class="wo-c1"><col class="wo-c2"><col class="wo-c3"><col class="wo-c4"><col class="wo-c5"></colgroup>`
+    +`<thead><tr><th class="l">FUND \u00b7 LOT</th>`
+    +`<th data-tip="value as filed (thousands-convention filers already corrected \u00d71000 upstream); option lines are underlying notional, not premium">VALUE</th>`
+    +`<th>% OF BOOK</th><th>RANK</th>`
+    +`<th data-tip="share delta when both quarters report SH counts, value delta otherwise, opened on new positions \u2014 the unit is always printed">\u0394 QoQ</th></tr></thead>`
+    +`<tbody>${rows}</tbody></table></div>`;
+}
+function whoAgg(iss,watchN){
+  return `<div class="whl-woagg"><b>${esc(iss.name||'')}</b>${iss.tk?` <span class="whl-tk">${esc(iss.tk)}</span>`:''}`
+    +`<span class="sec" data-tip="how your query found THIS issuer \u2014 the basis is per-issuer, never borrowed from a stronger match elsewhere in the result. Lanes, strongest first: exact CUSIP, ticker via the SEC company map, normalized name, filed-name substring.">matched by ${esc(iss.basisLabel)}</span>`
+    +`<span class="wo-sep">\u00b7</span><span><b>${iss.held}</b><span class="sec">/${watchN} hold</span></span>`
+    +`<span class="wo-sep">\u00b7</span>`
+    +`<span class="sec" data-tip="long common-equity value only. Option lines are stated separately because a 13F reports them at UNDERLYING NOTIONAL, not premium paid \u2014 adding the two produces a number that describes no position anyone holds.">common <b>${whlMoney(iss.common)}</b></span>`
+    +(iss.optNotional?`<span class="sec" data-tip="the underlying notional of every matched calls/puts line, per 13F reporting rules. Never added to the common figure, and never counted in the adding/cutting strip.">+ option notional <b>${whlMoney(iss.optNotional)}</b></span>`:'')
+    +`<span class="wo-sep">\u00b7</span>`
+    +(iss.adding?`<span class="pos" data-tip="funds whose NET common-line direction is up. Each holder is counted exactly once \u2014 adding + cutting + flat can never exceed the hold count \u2014 and option lines never vote: a new puts line is not accumulation.">${iss.adding} adding</span>`:'')
+    +(iss.cutting?`<span class="neg" data-tip="funds whose NET common-line direction is down, plus funds that exited outright. Options excluded by the same rule.">${iss.cutting} cutting</span>`:'')
+    +(iss.flat?`<span class="sec" data-tip="held, share count unchanged \u2014 mark drift only, not a trade">${iss.flat} flat</span>`:'')
+    +`</div>`;
+}
+function whoFoot(iss,r){
+  const nh=iss.notHeld&&iss.notHeld.length?`<span class="fl"><b>not held:</b> ${iss.notHeld.map(esc).join(', ')} \u2014 absent from their latest filed book; shorts, derivatives and non-US would be invisible anyway</span>`:'';
+  const nb=r.noBook&&r.noBook.length?`<span class="fl"><b>no book yet:</b> ${r.noBook.map(esc).join(', ')} \u2014 nothing ingested for these filers, so they are unmeasured here rather than absent</span>`:'';
+  return nh+nb;
+}
 async function whlWho(qv,keep){
   WHL.whoQ=(qv||'').trim();
   const out=el('whl-whoout'); if(!out) return;
-  if(!WHL.whoQ){ out.innerHTML=''; return; }
+  if(!WHL.whoQ){ out.innerHTML=''; WHL.whoOpen=null; return; }
   if(!keep) out.innerHTML='<div class="msg">searching the cached books\u2026</div>';
   let r; try{ r=await fetchJSON('/api/whale?holds='+encodeURIComponent(WHL.whoQ)); }
   catch(e){ out.innerHTML=`<div class="msg err">${esc(e.message||'fetch failed')}</div>`; return; }
   if((el('whl-whoq')&&el('whl-whoq').value.trim())!==WHL.whoQ) return;   // a newer keystroke owns the panel
-  if(!r.ok){ out.innerHTML=`<div class="msg">${esc(r.error||'no result')}</div>`; return; }
-  const chip=(d)=>{ if(!d||d.cls==='na') return '<span class="whl-badge b-na" data-tip="no prior filing ingested for this fund — no delta is claimed">\u2014</span>';
-    const M={new:['NEW','b-new','opened this quarter — no position in the prior filing'],add:['ADDED','b-add','grew vs the prior quarter'],trim:['TRIMMED','b-trim','cut vs the prior quarter'],flat:['FLAT','b-flat','shares unchanged — mark drift only, not a trade']};
-    const m=M[d.cls]||['\u2014','b-na','']; return `<span class="whl-badge ${m[1]}" data-tip="${esc(m[2])}">${m[0]}</span>`; };
-  const dtxt=(d)=>{ if(!d||d.cls==='na'||d.cls==='flat') return '<span class="na">\u2014</span>';
-    if(d.cls==='new') return '<span class="new">opened</span>';
-    if(d.dSh!=null) return `<span class="${d.dSh>0?'pos':'neg'}">${whlSgnSh(d.dSh)}</span>`;
-    if(d.dVal!=null) return `<span class="${d.dVal>0?'pos':'neg'}" data-tip="value delta only — share counts aren't comparable across the two filings">${(d.dVal>0?'+':'\u2212')}${whlMoney(Math.abs(d.dVal)).slice(1)}</span>`;
-    return '<span class="na">\u2014</span>'; };
-  const rows=r.funds.map(f=>{
-    if(!f.held){ const ex=f.exited.map(x=>`${x.put?esc(x.put)+'s ':''}was ${whlMoney(x.prevVal)}`).join(' \u00b7 ');
-      return `<tr class="whl-worow whl-woexit" data-tip="${esc(f.name)} \u2014 held it in the prior quarter, absent from the ${esc(f.q)} filing: EXITED, or fell below reporting — indistinguishable in a 13F">`
-        +`<td class="l"><span class="whl-name">${esc(f.key)}</span><span class="whl-badge b-exit">EXITED</span></td>`
-        +`<td colspan="3" class="l sec">${ex}</td><td></td></tr>`; }
-    return f.lines.map((l,li)=>{
-      const dupCls=f.lines.filter(x=>!x.put).length>1&&!l.put&&l.cls?` <span class="whl-clstag">${esc(String(l.cls).split(/\s+/).slice(-2).join(' '))}</span>`:'';
-      const oc=l.put?`<span class="whl-oc ${l.put}" data-tip="a separate 13F line — option value is the UNDERLYING notional per 13F rules, not premium; never merged into the common position">${esc(l.put)}s</span>`:dupCls;
-      return `<tr class="whl-worow" data-whlopen2="${esc(f.key)}" data-tip="${esc(f.name+' \u00b7 '+(l.put?l.put+'s line':'common')+' \u00b7 value $'+Math.round(l.value).toLocaleString()+(l.shares!=null?' \u00b7 '+Math.round(l.shares).toLocaleString()+' sh':' \u00b7 share count not claimed (PRN/mixed rows)')+' \u00b7 rank #'+l.rank+' in their book \u00b7 click for the full book')}">`
-        +`<td class="l">${li===0?`<span class="whl-name">${esc(f.key)}</span>`:''}${oc}${li===0?chip(f.lines[0].d):''}</td>`
-        +`<td class="r">${whlMoney(l.value)}</td>`
-        +`<td class="r" data-tip="value \u00f7 that fund's 13F total — conviction proxy">${l.pct!=null?l.pct.toFixed(1)+'%':'\u2014'}</td>`
-        +`<td class="r" data-tip="rank inside that fund's book by value">#${l.rank}</td>`
-        +`<td class="r">${dtxt(l.d)}</td></tr>`; }).join('');
+  if(!r.ok){ out.innerHTML=`<div class="msg">${esc(r.error||'no result')}</div>`; WHL.whoOpen=null; return; }
+  if(!WHL.whoOpen||WHL.whoKey!==WHL.whoQ){ WHL.whoOpen=new Set(); WHL.whoKey=WHL.whoQ; }
+  const iss=r.issuers||[];
+  const P=iss[0];
+  const alts=iss.slice(1).map(a=>{
+    const open=WHL.whoOpen.has(a.key);
+    return `<div class="wo-alt${open?' open':''}">`
+      +`<div class="wo-althd" data-whoalt="${esc(a.key)}" data-tip="${esc('a weaker lane matched this issuer too: '+a.basisLabel+'. It is kept separate \u2014 two companies are never summed into one result \u2014 and shown here rather than dropped, because a substring or name collision is a real answer to what you typed, just not the strongest one. Click to expand.')}">`
+      +`<span class="k">ALSO MATCHED</span>`
+      +`<b>${esc(a.name||'')}</b>${a.tk?` <span class="whl-tk">${esc(a.tk)}</span>`:''}`
+      +`<span class="sec">${esc(a.basisLabel)}</span>`
+      +`<span class="sec">${a.held}/${r.watchN} hold \u00b7 ${whlMoney(a.combined)}</span>`
+      +`<span class="wo-sp"></span><span class="wo-car">${open?'\u25be':'\u25b8'}</span></div>`
+      +(open?whoAgg(a,r.watchN)+whoTable(a)+`<div class="whl-foot">${whoFoot(a,r)}</div>`:'')
+      +`</div>`;
   }).join('');
-  const nh=r.notHeld&&r.notHeld.length?`<div class="msg" style="padding:6px 2px">not held: ${r.notHeld.map(esc).join(', ')} <span class="sec">\u2014 absent from their latest filed book; shorts, derivatives and non-US would be invisible anyway</span>${r.noBook&&r.noBook.length?` \u00b7 no book yet: ${r.noBook.map(esc).join(', ')}`:''}</div>`:'';
-  out.innerHTML=`<div class="whl-woagg"><b>${esc(r.name||r.q)}</b>${r.tk?` <span class="whl-tk">${esc(r.tk)}</span>`:''}`
-    +`<span class="sec" data-tip="how your query found it — the match basis is always disclosed: ticker (SEC company map), normalized name, filed-name substring, or exact CUSIP; a miss on all four is an honest miss">matched by ${esc(r.basis)}</span>`
-    +`<span><b>${r.held}</b><span class="sec">/${r.watchN} hold</span></span><span class="sec">combined ${whlMoney(r.combined)}</span>`
-    +(r.adding?`<span class="pos" data-tip="funds whose COMMON line opened or grew — option lines render below but never drive this count (a new puts line is not accumulation)">${r.adding} adding</span>`:'')+(r.cutting?`<span class="neg" data-tip="funds whose COMMON line shrank or exited — options excluded by the same rule">${r.cutting} cutting</span>`:'')+`</div>`
-    +`<div class="tblwrap"><table class="whl-tbl whl-wotbl"><thead><tr><th class="l">FUND</th><th class="r" data-tip="value as filed (thousands-convention filers already corrected \u00d71000 upstream)">VALUE</th><th class="r">% OF BOOK</th><th class="r">RANK</th><th class="r" data-tip="share delta when both quarters report SH counts; value delta otherwise; opened on new positions">\u0394 QoQ</th></tr></thead><tbody>${rows}</tbody></table></div>`+nh
-    +`<div class="whl-foot">searched the latest cached filing of each tracked fund + its prior quarter for exits \u00b7 quarter-end snapshots filed up to 45d late \u2014 positioning history, never the current book</div>`;
+  out.innerHTML=whoAgg(P,r.watchN)+whoTable(P)+alts
+    +`<div class="whl-foot">${whoFoot(P,r)}`
+    +`<span class="fl">searched the latest cached filing of each tracked fund + its prior quarter for exits \u00b7 quarter-end snapshots filed up to 45d late \u2014 positioning history, never the current book</span></div>`;
   out.querySelectorAll('[data-whlopen2]').forEach(tr=>tr.onclick=()=>whlOpenFund(tr.dataset.whlopen2));
+  out.querySelectorAll('[data-whoalt]').forEach(h=>h.onclick=()=>{
+    const k=h.dataset.whoalt;
+    if(WHL.whoOpen.has(k)) WHL.whoOpen.delete(k); else WHL.whoOpen.add(k);
+    whlWho(WHL.whoQ,true); });
 }
 // ---- season panel -----------------------------------------------------------------------------
 function whlLegLine(l){
@@ -11222,11 +11304,22 @@ async function termWhale(args){
     try{ r=await fetchJSON('/api/whale?holds='+encodeURIComponent(qv)); }catch(_){ think.remove(); return termErr('lookup failed \u2014 try again in a moment'); }
     think.remove();
     if(!r.ok) return termOut(`<span class="sec">${tesc(r.error||'no result')}</span>`);
-    const lines=r.funds.map(f=>{
-      if(!f.held) return `  ${tpad(tesc(f.key),12)} <span class="sec">EXITED \u00b7 ${f.exited.map(x=>(x.put?tesc(x.put)+'s ':'')+'was '+whlMoney(x.prevVal)).join(' \u00b7 ')}</span>`;
-      return f.lines.map((l,li)=>`  ${tpad(li===0?tesc(f.key):'',12)} ${tpad(whlMoney(l.value),9,true)} ${tpad(l.pct!=null?l.pct.toFixed(1)+'%':'\u2014',7,true)} ${tpad('#'+l.rank,5,true)} ${l.put?'<span class="'+(l.put==='put'?'neg':'pos')+'">'+tesc(l.put)+'s</span> ':''}${!l.d||l.d.cls==='na'?'\u2014':l.d.cls==='new'?'<span class="amber">opened</span>':l.d.cls==='flat'?'<span class="sec">flat</span>':(l.d.dSh!=null?'<span class="'+(l.d.dSh>0?'pos':'neg')+'">'+whlSgnSh(l.d.dSh)+'</span>':(l.d.dVal!=null?'<span class="'+(l.d.dVal>0?'pos':'neg')+'">'+(l.d.dVal>0?'+':'\u2212')+whlMoney(Math.abs(l.d.dVal)).slice(1)+'</span>':'\u2014'))}`).join('\n');
-    }).join('\n');
-    return termOut(`<span class="tp-hd">who holds ${tesc(r.q)}</span> <span class="tp-trans">\u00b7 ${tesc(r.name||'')} \u00b7 matched by ${tesc(r.basis)} \u00b7 ${r.held}/${r.watchN} hold \u00b7 combined ${whlMoney(r.combined)}</span>\n${lines}${r.notHeld&&r.notHeld.length?`\n<span class="tp-trans">not held: ${r.notHeld.map(tesc).join(', ')} \u00b7 quarter-end books filed up to 45d late \u2014 positioning history, not the current book</span>`:''}`);
+    // -07: one block per ISSUER. A query that hits two companies prints two blocks, each with its
+    // own basis and totals — the terminal never merges them either.
+    const block=(iss,head)=>{
+      const lines=iss.funds.map(f=>{
+        if(!f.held) return `  ${tpad(tesc(f.key),12)} <span class="sec">EXITED \u00b7 ${f.exited.map(x=>(x.put?tesc(x.put)+'s ':'')+'was '+whlMoney(x.prevVal)).join(' \u00b7 ')}</span>`;
+        const dl={add:'<span class="pos">added</span>',trim:'<span class="neg">trimmed</span>',new:'<span class="amber">opened</span>',flat:'<span class="sec">flat</span>',na:'<span class="sec">\u2014</span>'}[f.dir]||'<span class="sec">\u2014</span>';
+        const fv=f.lines.reduce((s,l)=>s+(l.value||0),0);
+        const hd=`  ${tpad(tesc(f.key),12)} ${tpad(whlMoney(fv),9,true)} ${dl}${f.mixed?' <span class="amber" title="legs disagree \u2014 net direction shown, fund counted once">\u00b1</span>':''}`;
+        const lots=f.lines.map(l=>`    ${tpad(l.put?tesc(l.put.toUpperCase())+'S':(l.cls?tesc(String(l.cls).toUpperCase().split(/\s+/).slice(-2).join(' ')):'COM'),8)} ${tpad(whlMoney(l.value),9,true)} ${tpad(l.pct!=null?(l.pct>0&&l.pct<0.05?'<0.1%':l.pct.toFixed(1)+'%'):'\u2014',7,true)} ${tpad('#'+l.rank,6,true)} ${!l.d||l.d.cls==='na'?'\u2014':l.d.cls==='new'?'<span class="amber">opened</span>':l.d.cls==='flat'?'<span class="sec">flat</span>':(l.d.dSh!=null?'<span class="'+(l.d.dSh>0?'pos':'neg')+'">'+whlSgnSh(l.d.dSh)+' sh</span>':(l.d.dVal!=null?'<span class="'+(l.d.dVal>0?'pos':'neg')+'">'+(l.d.dVal>0?'+':'\u2212')+whlMoney(Math.abs(l.d.dVal)).slice(1)+'</span>':'\u2014'))}`).join('\n');
+        return hd+'\n'+lots;
+      }).join('\n');
+      return `<span class="${head?'tp-hd':'amber'}">${head?'who holds '+tesc(r.q):'also matched'}</span> <span class="tp-trans">\u00b7 ${tesc(iss.name||'')}${iss.tk?' ['+tesc(iss.tk)+']':''} \u00b7 matched by ${tesc(iss.basisLabel)} \u00b7 ${iss.held}/${r.watchN} hold \u00b7 common ${whlMoney(iss.common)}${iss.optNotional?' + option notional '+whlMoney(iss.optNotional):''}${iss.adding?' \u00b7 '+iss.adding+' adding':''}${iss.cutting?' \u00b7 '+iss.cutting+' cutting':''}</span>\n${lines}`
+        +(iss.notHeld&&iss.notHeld.length?`\n<span class="tp-trans">not held: ${iss.notHeld.map(tesc).join(', ')}</span>`:'');
+    };
+    const blocks=(r.issuers||[]).map((iss,i)=>block(iss,i===0)).join('\n\n');
+    return termOut(`${blocks}\n<span class="tp-trans">quarter-end books filed up to 45d late \u2014 positioning history, not the current book${r.noBook&&r.noBook.length?' \u00b7 no book yet: '+r.noBook.map(tesc).join(', '):''}</span>`);
   }
   if(sub==='pull'){
     if(!IS_ADMIN) return termErr('whale pull is admin-only');

@@ -1690,3 +1690,46 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .whl-who .whl-shd{margin:0}
 #whl-whoq{background:var(--panel);border:1px solid var(--border);color:var(--text);font:inherit;font-size:12px;padding:7px 12px;border-radius:3px;flex:1;min-width:230px;max-width:520px}
 .whl-clstag{display:inline-block;border:1px solid var(--border);color:var(--muted);font-size:9px;letter-spacing:.5px;padding:0 4px;border-radius:2px;margin-left:5px;vertical-align:1px}
+
+/* 2026.08.18-07: WHO HOLDS results layout.
+   -06 gave the table `width:100%` with no column control, so the first `td.l` absorbed every
+   pixel of slack and the numbers ended up crammed into the right third of a 2500px viewport.
+   Fixed layout + a colgroup pins the shape at any width. */
+.whl-wotbl{table-layout:fixed;min-width:620px}
+.whl-wotbl col.wo-c1{width:34%} .whl-wotbl col.wo-c2{width:17%}
+.whl-wotbl col.wo-c3{width:15%} .whl-wotbl col.wo-c4{width:13%} .whl-wotbl col.wo-c5{width:21%}
+.whl-wotbl td{overflow:hidden;text-overflow:ellipsis}
+.whl-wotbl .wo-n{font-family:var(--mono);font-size:12px}
+/* Fund group header carries the fund's OWN roll-up; lots are indented beneath it. The top border
+   is the group separator -06 never had — five funds and fourteen lots read as one flat list. */
+.wo-fund>td{border-top:1px solid var(--border);background:rgba(255,255,255,.022);padding-top:7px;padding-bottom:6px;cursor:pointer}
+.whl-wotbl tbody tr.wo-fund:first-child>td{border-top:none}
+.wo-lot>td{cursor:pointer}
+.wo-lot>td:first-child{padding-left:26px}
+.wo-fund:hover>td,.wo-lot:hover>td{background:rgba(227,165,60,.07)}
+.wo-exit>td{opacity:.55}
+/* ONE chip for every lot class, fixed width so the column aligns; options are a colour, not a
+   different component. -06 shipped two widgets chosen by an unrelated condition. */
+.wo-cls{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.7px;
+  border:1px solid var(--border);color:var(--muted);padding:0 5px;border-radius:2px;
+  vertical-align:1px;min-width:52px;text-align:center}
+.wo-cls.call{border-color:rgba(70,185,126,.55);color:var(--up)}
+.wo-cls.put{border-color:rgba(229,96,77,.55);color:var(--down)}
+.wo-mix{color:var(--accent);font-family:var(--mono);font-size:11px;cursor:help}
+.wo-sep{color:var(--faint)}
+/* Weaker issuer matches: subordinate but present, expandable in place. */
+.wo-alt{border:1px solid var(--accent-dim);background:rgba(227,165,60,.05);border-radius:3px;margin:10px 0 0}
+.wo-alt.open{background:rgba(227,165,60,.03)}
+.wo-althd{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:7px 12px;cursor:pointer;font-size:11.5px}
+.wo-althd:hover{background:rgba(227,165,60,.07)}
+.wo-althd .k{color:var(--accent);letter-spacing:.9px;font-size:9.5px}
+.wo-alt .wo-sp{flex:1}
+.wo-alt .wo-car{color:var(--muted);font-size:11px}
+.wo-alt .whl-woagg{margin:0 12px 10px;background:var(--panel)}
+.wo-alt .tblwrap{padding:0 12px}
+.wo-alt .whl-foot{margin:0 12px;padding-bottom:10px}
+/* One footer, one alignment. -06 centred the not-held line so it read as a table row while the
+   source line sat left. */
+.whl-foot .fl{display:block}
+.whl-foot b{color:var(--text);font-weight:500}
+@media(max-width:760px){.whl-wotbl{min-width:560px}.wo-cls{min-width:44px}}
