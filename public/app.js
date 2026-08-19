@@ -11114,8 +11114,9 @@ function whlLaneRows(rows,kind){
     const nm=(r.tk?r.tk:esc(r.name.slice(0,16)))+(r.put?' <span class="whl-oc '+r.put+'">'+esc(r.put)+'s</span>':'');
     const legs=(r.legs||r.funds||[]).map(l=>l.dVal!=null||l.opened||l.exited?whlLegLine(l):esc(l.key)+' '+whlMoney(l.val!=null?l.val:-(l.prevVal||0))).join(' \u00b7 ');
     const dom=r.domPct!=null&&r.domPct>=75&&(r.legs||[]).length>1?' \u00b7 one fund is '+r.domPct.toFixed(0)+'% of this flow \u2014 a single whale can BE the consensus':'';
+    const estn=r.estN?' \u00b7 '+r.estN+' leg(s) had no comparable share counts (options/PRN) \u2014 those ride at value change, the polluted layer':'';
     const fn=(r.n!=null?r.n:(r.legs?new Set(r.legs.map(l=>l.key)).size:0));
-    return `<div class="whl-srow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 ${esc(legs)}${esc(dom)}">`
+    return `<div class="whl-srow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 ${esc(legs)}${esc(dom)}${esc(estn||'')}">`
       +`<span class="whl-snm">${nm}</span><span class="whl-sfn">${fn}/${WHL.season.agg.nFunds}</span>`
       +`<span class="whl-sbar"><span class="whl-sfill ${kind}" style="width:${Math.round(Math.abs(v)/max*100)}%"></span></span>`
       +`<span class="whl-sfl ${v>0?(kind==='opens'?'new':'pos'):(kind==='exits'?'exitc':'neg')}">${(v>0?'+':'\u2212')}${whlMoney(Math.abs(v)).slice(1)}</span></div>`;
@@ -11142,9 +11143,16 @@ function renderWhlSeason(){
   // name twice, each row appends its share-class tail (titleOfClass's last two tokens) or the
   // cusip head — the rows were never wrong, they were indistinguishable.
   const nameCount={}; a.crowd.forEach(r=>{ const k=(r.tk||r.name)+(r.put||''); nameCount[k]=(nameCount[k]||0)+1; });
+  const tagOf=(r)=>r.cls?String(r.cls).split(/\s+/).slice(-2).join(' '):null;
+  const tagCount={}; a.crowd.forEach(r=>{ const k=(r.tk||r.name)+(r.put||''); if((nameCount[k]||0)>=2){ const t=(k+'\u0000')+(tagOf(r)||''); tagCount[t]=(tagCount[t]||0)+1; } });
   const disamb=(r)=>{ const k=(r.tk||r.name)+(r.put||''); if((nameCount[k]||0)<2) return '';
-    const t=r.cls?esc(String(r.cls).split(/\s+/).slice(-2).join(' ')):esc(String(r.cusip||'').slice(0,6));
-    return ` <span class="whl-clstag" data-tip="two share classes of one issuer are two cusips and two rows — the tag is the filing's own titleOfClass (or the cusip head when the filer omitted it)">${t}</span>`; };
+    // titleOfClass first — but two filers can both write just "Equity", which disambiguates
+    // nothing; when the tags inside the group collide, the cusip head takes over (two share
+    // classes can never share one).
+    const tg=tagOf(r);
+    const collided=!tg||tagCount[(k+'\u0000')+tg]>1;
+    const t=collided?esc(String(r.cusip||'').slice(0,6)):esc(tg);
+    return ` <span class="whl-clstag" data-tip="two share classes of one issuer are two cusips and two rows — tagged by the filing's titleOfClass, or the cusip head when the filed titles collide or are missing">${t}</span>`; };
   const rosterNote=!(a.roster&&a.roster.length)&&a.crowd.length?`<div class="sec" style="padding:4px 0 8px">grid cells pending one season rebuild \u2014 this build was stored by an older version; the server heals it at boot</div>`:'';
   const crowd=a.crowd.length?a.crowd.slice(0,8).map(r=>
     `<div class="whl-crow" data-tip="${esc((r.tk?r.tk+' \u00b7 ':'')+r.name)} \u00b7 held by ${r.held} of ${a.nFunds} \u00b7 ${r.adding} adding \u00b7 ${r.cutting} cutting \u00b7 one square per fund THIS SEASON WAS BUILT FROM \u2014 not the current watchlist, which may have changed since">`
@@ -11159,8 +11167,8 @@ function renderWhlSeason(){
     +`<span class="sec">${s.filedN}/${s.watchN} watched funds filed${s.missing&&s.missing.length?' \u00b7 missing: '+esc(s.missing.join(', ')):''}${s.healed?' \u00b7 <span data-tip="this aggregate was rebuilt from the books stored on the volume (a shape migration) — header counts, lanes and grid all describe THIS rebuild; the original build\u2019s roster was unrecoverable">rebuilt from stored books</span>':s.amended?' \u00b7 rebuilt after amendment':''}${s.closedAt?' \u00b7 closed '+esc(whlDateStr(s.closedAt)):''}</span>`
     +(WHL.data.seasonList&&WHL.data.seasonList.length>1?`<span class="whl-sp"></span><span class="whl-qnav">${WHL.data.seasonList.map(q=>`<button type="button" data-whlq="${esc(q)}" class="${WHL.season.q===q?'on':''}">${esc(q)}</button>`).join('')}</span>`:'')+`</div>`
     +`<div class="whl-grid">`
-    +`<div class="whl-lane"><div class="whl-lhd pos">MOST BOUGHT \u00b7 net $ across watchlist</div>${whlLaneRows(a.bought,'buy')}</div>`
-    +`<div class="whl-lane"><div class="whl-lhd neg">MOST SOLD \u00b7 net $ across watchlist</div>${whlLaneRows(a.sold,'sell')}</div>`
+    +`<div class="whl-lane"><div class="whl-lhd pos" data-tip="net TRADED dollars: each fund's share change \u00d7 that filing's own implied quarter-end price (value \u00f7 shares) — mark drift is priced OUT, so a stock that rallied while everyone trimmed can no longer sit here; legs without comparable shares (options/PRN) fall back to value change and the row says so on hover. Estimate at quarter-end marks, from filed numbers only.">MOST BOUGHT \u00b7 net traded $ (est)</div>${whlLaneRows(a.bought,'buy')}</div>`
+    +`<div class="whl-lane"><div class="whl-lhd neg" data-tip="same traded-dollar basis as MOST BOUGHT — share change \u00d7 implied quarter-end price; these lanes and the crowding grid now read the SAME layer (share counts) and cannot disagree">MOST SOLD \u00b7 net traded $ (est)</div>${whlLaneRows(a.sold,'sell')}</div>`
     +`<div class="whl-lane"><div class="whl-lhd new">CONSENSUS OPENS \u00b7 new positions</div>${whlLaneRows(a.opens,'opens')}</div>`
     +`<div class="whl-lane"><div class="whl-lhd exitc">EXITS \u00b7 positions closed</div>${whlLaneRows(a.exits,'exits')}</div>`
     +`</div>`
@@ -11230,7 +11238,7 @@ function renderWhlFund(f,full){
   el('whlbody').innerHTML=`<div class="whl-mhd"><span class="whl-hd">${esc(f.name)}</span><span class="sec">\u00b7 CIK ${esc(String(f.cik))} \u00b7 whale ${esc(f.key)}</span>${f.url?` <a class="whl-lnk" href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">EDGAR \u2197</a>`:''}</div>`
     +`<div class="whl-meta"><span class="sec">quarter</span> <b>${esc(f.q||'?')}</b> <span class="sec">(period ${esc(f.period||'?')} \u00b7 ${esc(f.form||'13F-HR')} filed ${esc(whlDateStr(f.filedAt))} \u00b7 ${f.ageDays!=null?f.ageDays+'d old at pull':''}${f.amended?' \u00b7 AMENDED':''})</span></div>`
     +`<div class="whl-meta"><span class="sec">13F book</span> <b>${whlMoney(f.total)}</b> <span class="sec">across ${f.n} position(s)${f.nRaw>f.n?' ('+f.nRaw+' filed rows aggregated on cusip)':''}${f.prevTotal!=null?' \u00b7 vs '+whlMoney(f.prevTotal)+' prior Q':''}${f.truncated?' \u00b7 stored book truncated at cap ('+f.truncated+' tail positions dropped, disclosed)':''}${f.scaled?' \u00b7 <span class="whl-sclnote" data-tip="the 2023 13F amendments moved values to whole dollars, but this filer still reports in thousands — EDGAR accepts both silently. Detection: median filed value \u00f7 shares across SH rows implied sub-$1 share prices (\u2265 3-row sample floor); options and principal-amount rows excluded. Corrected \u00d71000, flagged on the stored filing.">values \u00d71000 (thousands filer)</span>':''}</span></div>`
-    +(f.hasPrev?`<div class="whl-dstrip">${whlDeltaBox('NEW','new',f.lanes.opened,f.flows.opened)}${whlDeltaBox('ADDED','pos',f.lanes.added,f.flows.added)}${whlDeltaBox('TRIMMED','neg',f.lanes.trimmed,f.flows.trimmed)}${whlDeltaBox('EXITED','exitc',f.lanes.exited,f.flows.exited)}</div>`
+    +(f.hasPrev?`<div class="whl-dstrip" data-tip="$ flows on the ADDED/TRIMMED boxes are TRADED dollars (share change \u00d7 the filing's implied quarter-end price) where shares were comparable — mark drift no longer counts as flow; NEW and EXITED are position values at their quarter-end marks">${whlDeltaBox('NEW','new',f.lanes.opened,f.flows.opened)}${whlDeltaBox('ADDED','pos',f.lanes.added,f.flows.added)}${whlDeltaBox('TRIMMED','neg',f.lanes.trimmed,f.flows.trimmed)}${whlDeltaBox('EXITED','exitc',f.lanes.exited,f.flows.exited)}</div>`
       :`<div class="sec whl-meta">no prior quarter ingested yet \u2014 the delta strip appears once both legs exist</div>`)
     +`<div class="tblwrap"><table class="whl-tbl"><thead><tr><th class="r">#</th><th class="r">% BOOK</th><th class="r">VALUE</th><th class="r" data-tip="shares as filed; a dash means the filing mixed principal-amount rows — no share count is claimed">SHARES</th><th class="r" data-tip="quarter-over-quarter: share delta when both filings report SH counts, value delta otherwise (disclosed per cell)">\u0394 QoQ</th><th class="l">NAME</th></tr></thead><tbody>${rows}</tbody></table></div>`
     +(!full&&f.n>f.shown?`<button type="button" class="whl-btn" id="whl-full">show all ${f.n} positions</button>`:'')
@@ -11269,7 +11277,7 @@ function termWhaleSeason(q){
     if(!s.ok) return termErr(tesc(s.error||'no season'));
     const a=s.agg;
     const l=(rows,neg)=>rows.slice(0,3).map(r=>`${r.tk?tesc(r.tk):tesc(r.name.slice(0,14))}${r.put?' <span class="'+(r.put==='put'?'neg':'pos')+'">'+tesc(r.put)+'s</span>':''} ${(r.net!=null?(r.net>0?'+':'\u2212')+whlMoney(Math.abs(r.net)).slice(1):whlMoney(r.tot))}${r.n!=null?' ('+r.n+'/'+a.nFunds+')':''}`).join(' \u00b7 ')||'\u2014';
-    termOut(`<span class="tp-hd">${tesc(s.q)} 13F season</span> <span class="tp-trans">\u00b7 ${s.filedN}/${s.watchN} filed${s.missing&&s.missing.length?' \u00b7 missing '+tesc(s.missing.join(',')):''}${s.healed?' \u00b7 rebuilt from stored books':s.amended?' \u00b7 rebuilt after amendment':''}</span>\n<span class="tp-k">${tpad('most bought',14)}</span> <span class="pos">${l(a.bought)}</span>\n<span class="tp-k">${tpad('most sold',14)}</span> <span class="neg">${l(a.sold)}</span>\n<span class="tp-k">${tpad('opens',14)}</span> <span class="amber">${l(a.opens)}</span>\n<span class="tp-k">${tpad('exits',14)}</span> <span class="sec">${l(a.exits)}</span>\n<span class="tp-k">${tpad('crowding',14)}</span> ${a.crowd.slice(0,3).map(r=>(r.tk?tesc(r.tk):tesc(r.name.slice(0,12)))+' '+r.held+'/'+a.nFunds).join(' \u00b7 ')||'\u2014'}\n<span class="tp-trans">consensus across your ${a.nFunds} watched fund(s) only \u2014 full breakdown with per-fund legs lives on the FUNDS tab</span>`);
+    termOut(`<span class="tp-hd">${tesc(s.q)} 13F season</span> <span class="tp-trans">\u00b7 ${s.filedN}/${s.watchN} filed${s.missing&&s.missing.length?' \u00b7 missing '+tesc(s.missing.join(',')):''}${s.healed?' \u00b7 rebuilt from stored books':s.amended?' \u00b7 rebuilt after amendment':''}</span>\n<span class="tp-k" data-tip="net traded $ — share change \u00d7 implied quarter-end price">${tpad('most bought',14)}</span> <span class="pos">${l(a.bought)}</span>\n<span class="tp-k">${tpad('most sold',14)}</span> <span class="neg">${l(a.sold)}</span>\n<span class="tp-k">${tpad('opens',14)}</span> <span class="amber">${l(a.opens)}</span>\n<span class="tp-k">${tpad('exits',14)}</span> <span class="sec">${l(a.exits)}</span>\n<span class="tp-k">${tpad('crowding',14)}</span> ${a.crowd.slice(0,3).map(r=>(r.tk?tesc(r.tk):tesc(r.name.slice(0,12)))+' '+r.held+'/'+a.nFunds).join(' \u00b7 ')||'\u2014'}\n<span class="tp-trans">consensus across your ${a.nFunds} watched fund(s) only \u2014 full breakdown with per-fund legs lives on the FUNDS tab</span>`);
   }).catch(()=>{ think.remove(); termErr('season fetch failed'); });
 }
 async function termWhale(args){
