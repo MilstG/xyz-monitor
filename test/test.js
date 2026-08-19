@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.18-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.18-07"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17110,8 +17110,11 @@ test("focus -01: engine harness — a booting universe never mints a stamp, hydr
   // it is what a pre-utcDay blob's shelf life is derived from. `frozenAt: 3` (the epoch) used to
   // be harmless filler here and is now a lie about when the list was stamped.
   const NOWMS = Date.now(), today = etDS(NOWMS), utcOf = (t) => new Date(t).toISOString().slice(0, 10);
-  const mkState = (day, frozenAt) => ({ day, utcDay: utcOf(frozenAt), open: 1, close: 2, frozenAt, late: 0,
-    rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0 });
+  // open/close are real session bounds, not sentinels (2026.08.18-07). `open: 1, close: 2` alongside
+  // a live frozenAt describes a record stamped decades after its own session closed — the exact
+  // shape the boot repair now refuses. Filler in a fixture is still a claim about the record.
+  const mkState = (day, frozenAt) => ({ day, utcDay: utcOf(frozenAt), open: frozenAt,
+    close: frozenAt + 6.5 * 3600e3, frozenAt, late: 0, rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0 });
   const boot = (state) => { const p = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state, prev: null }) }, log: () => {}, version: "test" });
     p.hydrateFocusNow(); return p.getFocus(); };
   const p2 = createPoller({ dex: "xyz", store: { ...base, saveFocus: () => {}, loadFocus: () => ({ state: mkState(today, NOWMS), prev: null }) }, log: () => {}, version: "test" });
@@ -17956,6 +17959,139 @@ test("focus -03 (2026.08.18-02): the day's list retires at 00:00 UTC — weekend
   assert.ok(b.p.getFocus(T_SAT2).prev.day === "2026-08-14", "and the prior list is not clobbered by an empty one");
 });
 
+// ============================================================================================
+// FOCUS -07 (build 2026.08.18-07): the 00:00 UTC retirement must not re-stamp, and the +1h freeze
+// must not race the 1m writer.
+//
+// WHY THE -02 SUITE MISSED THIS. The retirement test above is behavioural and it passes — but its
+// fixture universe is EMPTY (`loadAll: () => new Map()`, no seeded rows). At the boundary tick the
+// retirement fires, the stamp gate is reached on the same tick with a null state, and stampFocus
+// then returns on the candidate floor because there is nothing to stamp. The adjacent path was
+// exercised and proved nothing. In production the universe holds 65 names and the identical tick
+// minted a second FROZEN @ OPEN record from the 20:00 ET tape, over the top of the real 09:30 one.
+// So the seeded rig is not incidental here: it IS the test.
+// ============================================================================================
+test("focus -07: the 00:00 UTC retirement retires and stops — it must never re-stamp from the evening tape", () => {
+  const { p, OPEN, saved } = focus04Rig(FOCUS04_FULL);
+  const CLOSE = Date.UTC(2026, 7, 14, 20, 0);          // Fri 2026-08-14 16:00 ET
+  p.focusTickNow(OPEN + 60000);
+  const real = p.getFocus(OPEN + 60000).today;
+  assert.ok(real && real.rows.length, "the genuine 09:30 stamp lands first");
+  assert.equal(real.frozenAt, OPEN + 60000, "…stamped at the open, not later");
+  assert.equal(real.late, 0);
+
+  // 00:00 UTC Saturday IS 20:00 ET Friday: focusRetire nulls the state, and the ET session for that
+  // ET day opened ten and a half hours ago. This is the exact production tick.
+  const BOUNDARY = Date.UTC(2026, 7, 15, 0, 1);
+  assert.ok(BOUNDARY > CLOSE, "the retirement boundary sits AFTER the cash close — that is the hazard");
+  p.focusTickNow(BOUNDARY);
+  const f = p.getFocus(BOUNDARY);
+  assert.equal(f.today, null, "no second record is minted from the evening tape");
+  assert.equal(f.state, "cleared", "the day reads CLEARED — the state -02 introduced was unreachable until now");
+  assert.ok(f.prev && f.prev.frozenAt === OPEN + 60000, "the genuine open stamp is what survives behind the toggle");
+  assert.deepEqual(f.prev.rows.map((r) => r.ticker), real.rows.map((r) => r.ticker), "…verbatim, not re-selected");
+  assert.ok(saved() && saved().prev && !saved().state, "and that is what persisted, so a redeploy cannot resurrect it");
+
+  // Re-ticking through the rest of the ET day keeps refusing. A bound that only holds for one tick
+  // is not a bound.
+  for (const t of [BOUNDARY + 30 * 60000, BOUNDARY + 3 * 3600e3]) {
+    p.focusTickNow(t);
+    assert.equal(p.getFocus(t).today, null, "still refused at " + new Date(t).toISOString());
+  }
+});
+
+test("focus -07: a phantom record is repaired at boot, and the real stamp is recovered rather than guessed", () => {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const OPEN = Date.UTC(2026, 7, 14, 13, 30), CLOSE = Date.UTC(2026, 7, 14, 20, 0);
+  const mk = (frozenAt, utcDay, tick, open) => ({ day: "2026-08-14", utcDay, open: open || OPEN, close: CLOSE,
+    prevCloseT: Date.UTC(2026, 7, 13, 20, 0), frozenAt, late: frozenAt - OPEN > 90000 ? 1 : 0,
+    rows: [{ ticker: tick }], cuts: [], filledAt: frozenAt, fillNote: null, pvDiff: null });
+  const REAL = mk(OPEN + 11000, "2026-08-14", "NBIS");
+  const PHANTOM = mk(Date.UTC(2026, 7, 15, 0, 0, 17), "2026-08-15", "SNDK");   // stamped 4h after its own close
+  const NOW = Date.UTC(2026, 7, 15, 2, 0);      // Fri 22:00 ET — inside the phantom's UTC day, so it would otherwise be kept
+  const boot = (blob) => { const p = createPoller({ dex: "xyz", version: "test", log: () => {},
+    store: { ...base, saveFocus: () => {}, loadFocus: () => JSON.parse(JSON.stringify(blob)) } });
+    p.hydrateFocusNow(NOW); return p.getFocus(NOW); };
+
+  const a = boot({ state: PHANTOM, prev: REAL });
+  assert.equal(a.today, null, "the phantom is never served as today's list");
+  assert.ok(a.prev && a.prev.rows[0].ticker === "NBIS", "the genuine open stamp is promoted back out of the prior slot");
+  assert.equal(a.prev.frozenAt, OPEN + 11000, "…the real one, identified by its own frozenAt, not by position");
+
+  // Nothing to recover: the phantom still dies, and NO substitute is invented for it.
+  const b = boot({ state: PHANTOM, prev: null });
+  assert.equal(b.today, null, "the phantom dies whether or not a real record survives");
+  assert.equal(b.prev, null, "an unrecoverable day stays a hole — never back-filled with the phantom itself");
+
+  // A prior record from a DIFFERENT session is not the missing stamp. The hard case is one that
+  // claims the same ET day and is still inside the current UTC day, so a day-string match would
+  // promote it and it would render as today's list: recovery keys on the session's own `open`, and
+  // only an exact match is the record the phantom was written over.
+  const OTHER = mk(OPEN + 20000, "2026-08-15", "WDC", OPEN + 1);
+  const c = boot({ state: PHANTOM, prev: OTHER });
+  assert.equal(c.today, null, "a record for another session is never promoted into today's slot");
+  assert.ok(c.prev && c.prev.rows[0].ticker === "WDC", "…it is left exactly where it was found");
+
+  // A clean blob is untouched by the repair — it must not fire on honest records.
+  const d = boot({ state: mk(OPEN + 11000, "2026-08-15", "NBIS"), prev: null });
+  assert.ok(d.today && d.today.rows[0].ticker === "NBIS", "an in-day honest stamp still hydrates as today's list");
+});
+
+// The 10:30 freeze fired the instant the clock reached open+1h and captured whatever the 1m writer
+// had flushed — 59 of 60 minutes, recorded as `bars: 59`, frozen forever.
+function focus07LaneRig() {
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const OPEN = Date.UTC(2026, 7, 14, 13, 30), M = 60000;
+  const bars = []; for (let i = 0; i < 60; i++) bars.push([OPEN + i * M, 100, 106, 94, 101, 1000]);
+  const lane = { posted: 59 };            // how many 1m bars the writer has actually flushed
+  const store = { ...base, saveFocus: () => {}, loadFocus: () => null, candlesEnabled: () => true,
+    readCandles: () => [], readCandles1m: (c, lo, hi) => bars.slice(0, lane.posted).filter((k) => k[0] >= lo && k[0] <= hi) };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const spine = (px) => { const o = []; for (let i = 48; i >= 0; i--) o.push({ t: OPEN - i * 3600e3, o: px, h: px * 1.01, l: px * 0.99, c: px, v: 1e6 }); return o; };
+  for (const [t, px] of [["BE", 100], ["NVDA", 900], ["MU", 100], ["AMD", 150], ["LLY", 800],
+    ["TSLA", 300], ["XOM", 110], ["JPM", 200], ["COIN", 250], ["PLTR", 60]])
+    p.seedRowNow("xyz:" + t, { ticker: t, uni: "xyz", px, vol: 9e6, oi: 9e6, oiBase: 1000, hourlyRaw: spine(px) });
+  p.focusTickNow(OPEN + 5 * M);
+  return { p, OPEN, M, lane };
+}
+
+test("focus -07: the +1h freeze holds for the last 1m bar instead of freezing a 59-minute hour", () => {
+  const { p, OPEN, M, lane } = focus07LaneRig();
+  assert.ok(p.getFocus(OPEN + 5 * M).today, "the stamp lands");
+
+  p.focusTickNow(OPEN + 61 * M);
+  assert.equal(p.getFocus(OPEN + 61 * M).today.filledAt, 0,
+    "a 59-of-60 hour does NOT freeze — the writer is one bar behind, which is not the same as done");
+  assert.ok(p.getFocus(OPEN + 61 * M).forming, "…and the columns keep reading FORMING while it waits");
+
+  lane.posted = 60;                       // the 10:29 bar lands
+  p.focusTickNow(OPEN + 62 * M);
+  const rec = p.getFocus(OPEN + 62 * M).today;
+  assert.ok(rec.filledAt, "the freeze lands once the hour is complete");
+  assert.equal(rec.fillNote, null, "a complete hour claims no shortfall");
+  for (const r of rec.rows) {
+    assert.equal(r.h1.bars, 60, "the frozen geometry is measured over all sixty minutes");
+    assert.equal(r.h1cov.inWin, 60, "…and the record says so, per seat");
+    assert.equal(r.h1cov.mins, 60);
+  }
+});
+
+test("focus -07: the grace is bounded — a lane that never completes still freezes, and discloses", () => {
+  const { p, OPEN, M, lane } = focus07LaneRig();
+  assert.equal(lane.posted, 59, "the writer stalls one bar short for good");
+  p.focusTickNow(OPEN + 61 * M);
+  assert.equal(p.getFocus(OPEN + 61 * M).today.filledAt, 0, "held inside the grace");
+  p.focusTickNow(OPEN + 66 * M);          // past +1h +5m
+  const rec = p.getFocus(OPEN + 66 * M).today;
+  assert.ok(rec.filledAt, "the wait is bounded — the record freezes rather than staying forming all day");
+  assert.match(rec.fillNote, /short of 60 1m bars/, "…and states the shortfall instead of implying a full hour");
+  for (const r of rec.rows) assert.equal(r.h1cov.inWin, 59, "the per-seat count is the honest one");
+});
+
 test("focus -03: 'cleared' and 'pending' are different claims and must not collapse", () => {
   const { createPoller } = require("../src/poller");
   const { etDayStr: etDS } = require("../src/compute");
@@ -18205,7 +18341,8 @@ test("focus -04: preview and stamp meet the IDENTICAL wall, and a floor change b
 });
 
 test("focus -04: the floors survive a redeploy, and a corrupt blob cannot open the wall", () => {
-  const stamp = { day: "2026-08-14", utcDay: "2026-08-14", open: 1, close: 2, prevCloseT: 0,
+  const stamp = { day: "2026-08-14", utcDay: "2026-08-14", open: Date.UTC(2026, 7, 14, 13, 30),
+    close: Date.UTC(2026, 7, 14, 20, 0), prevCloseT: 0,
     frozenAt: Date.UTC(2026, 7, 14, 13, 30), late: 0, rows: [{ ticker: "NVDA" }], cuts: [], filledAt: 0,
     limits: { vol: 5e6, oi: 1e6 }, scanned: 10, cleared: 8, below: [], belowN: 2 };
   const a = focus04Rig({}, { load: { state: stamp, prev: null, limits: { vol: 5e6, oi: 1e6 } } });
@@ -18461,7 +18598,8 @@ test("focus -05: manifest pins — 1m base everywhere the hour is measured, 30s 
   assert.ok(pol.includes("formingMs: FOCUS_FORMING_MS"), "…and ships on the payload so the two cannot drift");
   assert.ok(pol.includes('st.h1src = "1m";'), "the freeze stamps its resolution on the record");
   assert.ok(pol.includes("cov[p.ticker] = { bars: bars.length"), "forming publishes per-seat coverage");
-  assert.ok(pol.includes("p.h1cov = { bars: bars.length"), "the frozen record carries it too");
+  assert.ok(/r\.p\.h1cov = \{ bars: r\.n, mins, inWin:/.test(pol),
+    "the frozen record carries coverage too — raw read AND the in-window count the geometry used");
   assert.ok(pol.includes("if (!f) continue;"), "no bars -> no forming record, so the fold is never handed a null");
   // splice: 1m authoritative, overlapping 5m dropped
   assert.ok(pol.includes("rows5.filter((k) => k[0] < win.from || k[0] > win.to).concat(rolled)"),
