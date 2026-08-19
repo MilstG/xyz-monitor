@@ -11380,8 +11380,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   let focusPv = null;                  // { at, day, rows, sig } — the live preview pool. IN-MEMORY ONLY, never persisted: only the stamp is a record.
   let focusForming = null;             // { at, map } — forming +1h reads between the stamp and the freeze. Same rule: transient, never persisted.
   function hydrateFocus(nowArg) {
-    const data = store.loadFocus ? store.loadFocus() : null;
-    if (!data) return false;
+    const raw = store.loadFocus ? store.loadFocus() : null;
+    if (!raw) return false;
+    // Boot repair runs BEFORE the roll: a phantom must never reach the utcDay comparison, or it
+    // would be retired into `prev` on top of the genuine record it was written over.
+    const data = focusSanitize(raw);
     // Hydrate rolls on the SAME boundary the live tick does. A blob written before 2026.08.18-02
     // carries no utcDay; focusUtcDayOf derives one from frozenAt, so a restart across the boundary
     // retires it correctly instead of resurrecting a list the running process would have dropped.
@@ -11582,21 +11585,39 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     focusForming = { at: now, map, cov, src: "1m", next: now + FOCUS_FORMING_MS };
     focusBump();
   }
+  // THE FREEZE GRACE (2026.08.18-07). This fired the instant the clock reached open+1h, which races
+  // the 1m archive writer: the 10:29 bar lands a beat after 10:30, so the frozen record captured 59
+  // of 60 minutes and recorded `bars: 59` while claiming to be the first hour. Every frozen record
+  // since the 1m switch is short its final minute — small in price, wrong in kind, and permanent,
+  // because the geometry is immutable once written. So a PARTIAL hour holds the freeze and the 30s
+  // tick retries until the lane completes or the grace expires. A seat with NO bars at all does not
+  // hold it: that is an absent lane, not a late one, and waiting cannot fix it. On expiry the record
+  // freezes regardless and states how short it came — a bounded wait, never an open-ended one.
+  const FOCUS_FILL_GRACE = 5 * 60 * 1000;
   function fillFocus(now) {
     const st = focusState;
     if (!st || st.filledAt) return;
     const canRead = store.candlesEnabled && store.candlesEnabled();
+    const mins = Math.round(HOUR / 60000);
+    const reads = [];
     for (const p of st.rows) {
       const bars = canRead && store.readCandles1m ? store.readCandles1m(p.coin, st.open - 1, st.open + HOUR + 1) : [];
-      p.h1 = firstHourStats(bars, st.open, st.open + HOUR);    // null = archive gap for THIS name: an honest dash, never a guess
+      reads.push({ p, n: bars.length, h1: firstHourStats(bars, st.open, st.open + HOUR) });
+    }
+    const partial = reads.filter((r) => r.h1 && r.h1.bars < mins);
+    if (partial.length && now < st.open + HOUR + FOCUS_FILL_GRACE) return;   // hold; the tick retries
+    for (const r of reads) {
+      r.p.h1 = r.h1;                   // null = archive gap for THIS name: an honest dash, never a guess
       // Per-seat coverage, frozen with the row. A dash now carries its reason forever: "the lane
       // captured nothing for this name" is a different statement from "this name did not trade",
-      // and a record that cannot tell them apart cannot be audited later.
-      p.h1cov = { bars: bars.length, mins: 60 };
+      // and a record that cannot tell them apart cannot be audited later. `inWin` is the count the
+      // geometry was actually computed from; `bars` is the raw read and carries the window slop.
+      r.p.h1cov = { bars: r.n, mins, inWin: r.h1 ? r.h1.bars : 0 };
     }
     st.filledAt = now;
     st.h1src = "1m";                   // the resolution this geometry was measured at, on the record
-    st.fillNote = canRead ? null : "candle archive disabled \u2014 first-hour columns cannot fill";
+    st.fillNote = !canRead ? "candle archive disabled \u2014 first-hour columns cannot fill"
+      : (partial.length ? `froze at the +${Math.round(FOCUS_FILL_GRACE / 60000)}m grace with ${partial.length} seat(s) short of ${mins} 1m bars \u2014 the lane did not complete the hour` : null);
     focusForming = null;               // the frozen record replaces every forming read
     focusPersist();
     const dry = st.rows.filter((p) => !p.h1).map((p) => p.ticker);
@@ -11613,9 +11634,29 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // Saturday has no session, the old tick returned early, and nothing ever retired it.
   const focusUtcDayStr = (ts) => new Date(ts).toISOString().slice(0, 10);
   const focusUtcDayOf = (st) => (st && st.utcDay) || (st ? focusUtcDayStr(st.frozenAt || st.open) : null);
+  // A record stamped after its own session's close (2026.08.18-07). Structurally impossible for an
+  // honest stamp now that the window is bounded, so any blob carrying one is a -02-era phantom.
+  // Kept as a predicate rather than a version check: it tests the record's own internal consistency,
+  // which is the thing that actually makes it invalid, and it stays true whatever produced it.
+  function focusPhantom(st) { return !!(st && st.close > 0 && st.frozenAt > st.close); }
+  // Boot repair. The phantom is dropped, never retired: retiring it would push it into `prev` and
+  // evict the genuine record sitting there — which is exactly how 2026-08-17's list was lost. When
+  // `prev` holds the real stamp for the SAME session, it is promoted back into the record slot and
+  // the normal UTC roll below decides its shelf life from there. No fabrication: if the real record
+  // is gone it is gone, and `prev` is left exactly as found rather than back-filled with a guess.
+  function focusSanitize(data) {
+    if (!data || !focusPhantom(data.state)) return data;
+    const real = data.prev && data.prev.open === data.state.open && !focusPhantom(data.prev) ? data.prev : null;
+    log(`FOCUS boot repair: dropped a phantom ${data.state.day} record stamped ${Math.round((data.state.frozenAt - data.state.close) / 60000)}m after its own close`
+      + (real ? " \u2014 the genuine open stamp was recovered from the prior slot" : " \u2014 no genuine stamp for that session survives; the day stays a hole"));
+    return { ...data, state: real, prev: real ? null : (data.prev || null) };
+  }
   function focusRetire(now) {
     if (!focusState) return false;
     if (focusUtcDayOf(focusState) === focusUtcDayStr(now)) return false;
+    // No phantom guard here on purpose: the stamp window can no longer mint one, and hydrate is the
+    // single repair point for legacy blobs. A defensive branch at this line would be unreachable by
+    // any test, and unreachable code is not a safeguard — it is a claim nobody can check.
     focusPrev = focusState;            // survives behind the "yesterday" toggle — retired, not deleted
     focusState = null;
     focusForming = null;               // forming reads belong to a stamp that no longer exists
@@ -11631,10 +11672,21 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (!sess) { focusPv = null; focusForming = null; return; }   // weekend / holiday: no preview, no forming
     if (now >= sess.open - FOCUS_PREVIEW_LEAD && now < sess.open && (!focusState || focusState.day !== today))
       buildFocusPreview(sess, now);
-    if (now >= sess.open && (!focusState || focusState.day !== today)) stampFocus(sess, now);
-    if (focusState && focusState.day === today && focusPv) focusPv = null;   // belt + braces: a stamp always retires the pool
-    if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open) buildFocusForming(now);
-    if (focusState && focusState.day === today && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
+    // THE STAMP WINDOW (2026.08.18-07), bounded at BOTH ends. The open bound was always here; the
+    // close bound is the fix for a re-stamp that shipped at -02 and fired every trading night at
+    // 20:00 ET. focusRetire nulls the state at the 00:00 UTC boundary — 20:00 ET in summer — and
+    // this gate then read a null state on an ET day whose session had opened ten hours earlier, so
+    // it minted a second "FROZEN @ OPEN" record out of the 20:00 tape: full-day gap and RVOL reads
+    // wearing open-gap labels, stamped and frozen in the same tick, over the top of the real 09:30
+    // record. A frozen-at-OPEN list stamped after its own session closed is not a late stamp, it is
+    // a different measurement wearing the stamp's name, and no clock choice upstream can make it
+    // valid. The latch is the session's own `open` rather than an ET day string for the same
+    // reason: a record must be pinned to the session it claims, not to a string that matches one.
+    if (now >= sess.open && now < sess.close && (!focusState || focusState.open !== sess.open)) stampFocus(sess, now);
+    const held = !!(focusState && focusState.open === sess.open);
+    if (held && focusPv) focusPv = null;   // belt + braces: a stamp always retires the pool
+    if (held && !focusState.filledAt && now >= sess.open) buildFocusForming(now);
+    if (held && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
   }
   // `nowArg`: the same suite-only contract as getWhale. This payload's whole state machine is a
   // function of the clock — which ET session day it is, whether the open has passed, whether the
