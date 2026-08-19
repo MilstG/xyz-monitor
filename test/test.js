@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.18-07"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.18-08"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -18686,6 +18686,137 @@ test("whale who-holds (2026.08.18-05): reverse lookup matches by ticker/name/sub
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(app.includes("whl-whoq") && app.includes("whlWho(") && app.includes("sub==='who'||sub==='holds'"), "panel + terminal verbs present");
   assert.ok(app.includes("data-whlopen2"), "a holds row deep-links to the fund's full book");
+});
+
+test("whale who-holds -07: a spelling collision is two issuers, never one merged result — per-issuer basis/name/ticker/totals, exclusive direction counts, common vs option notional split", async () => {
+  const { createPoller } = require("../src/poller");
+  const C = require("../src/compute");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: () => {}, loadWhale: () => null };
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const row = (nm, cu, v, sh, pc, cls) => `<infoTable><nameOfIssuer>${nm}</nameOfIssuer>${cls ? "<titleOfClass>" + cls + "</titleOfClass>" : ""}<cusip>${cu}</cusip><value>${v}</value><shrsOrPrnAmt><sshPrnamt>${sh}</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt>${pc ? "<putCall>" + pc + "</putCall>" : ""}</infoTable>`;
+  // The shipped -06 failure, reproduced exactly: the query "AMD" resolves to ADVANCED MICRO
+  // DEVICES by ticker AND appears inside "AMDOCS LTD" by substring. Two issuers, two CUSIP
+  // prefixes (007903 / G02602). ALPHA holds both.
+  // ALPHA also holds AMD across TWO common lots that move in OPPOSITE directions (COM up, SHS
+  // down) — the -06 double-count fixture — plus an options line that must never vote.
+  const A_Q2 = `<x>${row("ADVANCED MICRO DEVICES INC", "007903107", 900e6, 9e6, null, "COM")}`
+    + `${row("AMD INC", "007903206", 20e6, 2e5, null, "SHS")}`
+    + `${row("ADVANCED MICRO DEVICES INC", "007903107", 500e6, 5e6, "Put", "COM")}`
+    + `${row("AMDOCS LTD", "G02602103", 30e6, 3e5, null, "COM")}</x>`;
+  const A_Q1 = `<x>${row("ADVANCED MICRO DEVICES INC", "007903107", 600e6, 6e6, null, "COM")}`
+    + `${row("AMD INC", "007903206", 40e6, 4e5, null, "SHS")}`
+    + `${row("AMDOCS LTD", "G02602103", 20e6, 2e5, null, "COM")}</x>`;
+  // BETA holds ONLY the collision name — it must be not-held on AMD and a holder on AMDOCS.
+  const B_Q2 = `<x>${row("AMDOCS LTD", "G02602103", 50e6, 5e5, null, "COM")}</x>`;
+  const B_Q1 = `<x>${row("AMDOCS LTD", "G02602103", 80e6, 8e5, null, "COM")}</x>`;
+  const sub = (a2, a1) => J({ name: "X", filings: { recent: {
+    form: ["13F-HR", "13F-HR"], accessionNumber: [a2, a1],
+    filingDate: ["2026-08-14", "2026-05-15"], reportDate: ["2026-06-30", "2026-03-31"] } } });
+  const idx = J({ directory: { item: [{ name: "primary_doc.xml", size: 9 }, { name: "infotable.xml", size: 999 }] } });
+  const extFetch = async (url) => {
+    if (url.includes("company_tickers.json")) return J({ 0: { cik_str: 1, ticker: "AMD", title: "Advanced Micro Devices, Inc." },
+      1: { cik_str: 2, ticker: "DOX", title: "Amdocs Limited" } });
+    if (url.includes("company_tickers_mf")) return J({ fields: ["cik"], data: [] });
+    if (url.includes("submissions/CIK0000000201")) return sub("0201-26-000002", "0201-26-000001");
+    if (url.includes("submissions/CIK0000000202")) return sub("0202-26-000002", "0202-26-000001");
+    if (url.includes("/020126000002/infotable.xml")) return X(A_Q2);
+    if (url.includes("/020126000001/infotable.xml")) return X(A_Q1);
+    if (url.includes("/020226000002/infotable.xml")) return X(B_Q2);
+    if (url.includes("/020226000001/infotable.xml")) return X(B_Q1);
+    if (url.includes("/index.json")) return idx;
+    return { ok: false, status: 404, error: "404" };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  p.whaleAdd(201, "Alpha Capital LP"); p.whaleAdd(202, "Beta Partners LLC");
+  await p.whalePull("ALPHA"); await p.whalePull("BETA");
+
+  // --- the issuer key is identity, not spelling -------------------------------------------------
+  assert.equal(C.whaleIssuerKey("007903107", "ADVANCED MICRO DEVICES INC"), "C:007903");
+  assert.equal(C.whaleIssuerKey("G02602103", "AMDOCS LTD"), "C:G02602");
+  assert.notEqual(C.whaleIssuerKey("007903107", "X"), C.whaleIssuerKey("G02602103", "X"),
+    "two issuers whose names collide must never share a key");
+  assert.equal(C.whaleIssuerKey("BAD", "AMDOCS LTD"), "N:AMDOCS", "no usable cusip falls back to the normalized name");
+
+  const r = await p.getWhaleHolds("AMD");
+  assert.ok(r.ok, r.error || "");
+  assert.equal(r.issuers.length, 2, "one query, two issuers — the collision is SPLIT, not unioned");
+
+  // --- primary: strongest lane first, with its own name and ticker chip -------------------------
+  const amd = r.issuers[0];
+  assert.equal(amd.key, "C:007903", "the ticker lane outranks the substring lane");
+  // ALPHA files the same issuer under two spellings ("ADVANCED MICRO DEVICES INC" on the COM and
+  // puts lines, "AMD INC" on the second share class). The display name is the spelling the most
+  // filers used, longest on a tie — NOT the shortest, which is the -06 rule that let a 10-char
+  // coincidence title a panel about a 26-char company.
+  assert.equal(amd.name, "ADVANCED MICRO DEVICES INC",
+    "display name is the modal filed spelling for THIS issuer, not the shortest one in the bucket");
+  assert.ok(amd.funds[0].lines.length === 3, "all three lines are in this issuer despite the spelling split");
+  assert.ok(/ticker "AMD"/.test(amd.basisLabel), "basis is disclosed per issuer");
+  assert.equal(amd.tk, "AMD");
+  assert.equal(r.name, amd.name, "top-level mirrors the primary issuer for existing callers");
+  assert.equal(r.basis, amd.basisLabel);
+
+  // --- secondary: its own weaker basis, and NO borrowed ticker chip ------------------------------
+  const dox = r.issuers[1];
+  assert.equal(dox.key, "C:G02602");
+  assert.equal(dox.name, "AMDOCS LTD");
+  assert.ok(/substring/.test(dox.basisLabel), "the weak lane is named as the weak lane");
+  assert.equal(dox.tk, null,
+    "the AMD ticker chip belongs to the issuer the company map resolved — -06 stamped it on every issuer in the result");
+
+  // --- totals are per-issuer and split by instrument ---------------------------------------------
+  assert.equal(amd.common, 900e6 + 20e6, "common equity only");
+  assert.equal(amd.optNotional, 500e6, "option underlying notional stated separately, never summed in");
+  assert.equal(amd.combined, 920e6 + 500e6);
+  assert.equal(dox.common, 30e6 + 50e6, "AMDOCS totals contain no AMD value whatsoever");
+  assert.ok(dox.combined < amd.combined && dox.combined === 80e6, "-06 reported one combined figure spanning both companies");
+
+  // --- holders and not-held are per-issuer ------------------------------------------------------
+  assert.equal(amd.held, 1); assert.deepEqual(amd.notHeld, ["BETA"]);
+  assert.equal(dox.held, 2); assert.deepEqual(dox.notHeld, []);
+
+  // --- direction is exclusive: one fund, one vote ------------------------------------------------
+  // ALPHA's AMD lots disagree (COM +3M sh, SHS -200k sh). -06 answered both `.some()` questions
+  // and incremented adding AND cutting off the same fund.
+  const alpha = amd.funds.find((f) => f.key === "ALPHA");
+  assert.equal(alpha.lines.length, 3,
+    "two share classes (007903107 COM, 007903206 SHS) plus the puts line — DIFFERENT cusips, SAME issuer, so the 6-char prefix is what folds them together");
+  assert.equal(alpha.mixed, 1, "the row DISCLOSES that its legs disagree");
+  assert.equal(alpha.dir, "add", "net across common lines decides; the puts line does not vote");
+  assert.equal(amd.adding + amd.cutting + amd.flat, amd.held,
+    "counts can never exceed the holder count — the shipped panel printed 3 adding + 2 cutting against 4 hold");
+  assert.equal(amd.adding, 1); assert.equal(amd.cutting, 0);
+  assert.equal(alpha.lines.length, 3, "COM, SHS and the puts line stay separate");
+  assert.ok(alpha.lines.some((l) => l.put === "put") && alpha.lines.some((l) => l.cls && /SHS/.test(l.cls)),
+    "the lot class rides every line so one chip component can render them all");
+  // BETA cut AMDOCS; ALPHA grew it. Same denominator rule on the other issuer.
+  assert.equal(dox.adding, 1); assert.equal(dox.cutting, 1);
+  assert.equal(dox.adding + dox.cutting + dox.flat, dox.held);
+
+  // --- an options-only holder is not a directional holder ----------------------------------------
+  const optOnly = require("../src/poller");
+  void optOnly;
+  const r2 = await p.getWhaleHolds("007903107");
+  assert.ok(r2.ok && /CUSIP/.test(r2.basis) && r2.issuers.length === 1,
+    "an exact CUSIP resolves to exactly one issuer — no substring fishing alongside it");
+
+  // --- client + wiring pins ----------------------------------------------------------------------
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("r.issuers") && app.includes("data-whoalt"), "the panel reads the issuer list and can expand a weaker match");
+  assert.ok(app.includes("function whoLot(") && !app.includes("whl-clstag\">"),
+    "one lot-class chip component; the -06 two-widget split is gone");
+  assert.ok(/&lt;0\.1%/.test(app), "sub-0.05% renders as <0.1%, never a fabricated 0.0%");
+  assert.ok(app.includes("whlSgnSh(d.dSh)} sh"), "the share unit is printed on the delta column");
+  assert.ok(app.includes("optNotional"), "common and option notional are shown as two figures");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".whl-wotbl{table-layout:fixed") && css.includes("col.wo-c1"),
+    "columns are pinned — -06 let the FUND column absorb every pixel of slack");
+  assert.ok(css.includes(".wo-fund>td{border-top"), "fund groups are visually separated");
 });
 
 test("whale season roster (2026.08.18-06): the producer exists — build writes agg.roster, payload serves cells, roster-less stored builds heal at hydrate without claiming amendment", async () => {
