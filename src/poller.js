@@ -4740,57 +4740,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       }
     }
     if (healed) { whalePersist(); log(`whale: scale migration corrected ${healed} stored filing(s) reported in the pre-2023 thousands convention (x1000, flagged + disclosed)`); }
-    // Season shape heal, AT hydrate, sweeping EVERY stored quarter — not through whaleSeasonMaybe,
-    // which only ever looks at the CURRENT window's quarter: once a season's grace ends the
-    // builder rolls forward and a roster-less stored build for the closed quarter would stay
-    // broken forever (exactly the state a post-grace deploy of this fix would otherwise land in).
-    // Rebuild is pure math over the stored books of today's watchlist for that quarter; the
-    // getter's dropped-fund marking and the stale chip own the disclosure if the roster changed
-    // since. A quarter with no rebuildable books keeps its old agg — the client note covers it.
-    try {
-      let sHealed = 0;
-      for (const q of Object.keys(whaleState.seasons)) {
-        const sn = whaleState.seasons[q];
-        if (!sn) continue;
-        // Heal v2 (build 2026.08.19-01). The v1 heal rebuilt agg but left filedN/watchN/missing
-        // describing the ORIGINAL build — one panel then said "7/8 filed" in the header while
-        // every lane said /6, with the stale chip narrating a third story on top. A build's
-        // metadata and its aggregate are ONE computation and must be written together — the
-        // frozen-geometry rule applied to seasons. v2 rewrites the descriptive fields with the
-        // aggregate, and re-runs on v1-healed blobs (persisted mismatches self-repaired; the
-        // roster-exists gate alone would have frozen them broken forever).
-        const needsHeal = !(sn.agg && Array.isArray(sn.agg.roster) && sn.agg.roster.length) || (sn.healed && sn.healv !== 2);
-        if (!needsHeal) continue;
-        const funds = whaleState.watch.map((w) => {
-          const f = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
-          return f ? { key: w.key, cik: +w.cik, cur: f.book, prev: whalePrevBook(w.cik, q) } : null;
-        }).filter(Boolean);
-        if (!funds.length) continue;
-        const agg = whaleSeason(funds);
-        agg.roster = funds.map((x) => ({ key: x.key, cik: +x.cik }));
-        sn.agg = agg; sn.at = Date.now(); sn.healed = 1; sn.healv = 2;   // amended untouched — nothing at EDGAR moved
-        sn.rosterSig = funds.map((x) => +x.cik).sort((a, b) => a - b).join(",");
-        // The descriptive fields now describe THIS build: how many of today's watchlist it
-        // covered, and who on today's watchlist had no book for the quarter (that IS "missing"
-        // for the computation the panel is actually showing — the original build's roster is
-        // unknowable, which is the whole reason the heal exists).
-        sn.filedN = funds.length;
-        sn.watchN = whaleState.watch.length;
-        sn.missing = whaleState.watch.filter((w) => !funds.some((x) => +x.cik === +w.cik)).map((w) => w.key);
-        // accs rewritten to describe THIS build too, with REAL prev legs — an in-grace heal's
-        // quarter is still the window builder's quarter, and a sloppy accs here would read as a
-        // phantom "amendment" on the next whaleSeasonMaybe pass.
-        sn.accs = {};
-        for (const x of funds) {
-          const byQ2 = whaleState.filings[x.cik] || {};
-          const seq = Object.values(byQ2).filter((y) => y && y.period).sort((a, b) => String(a.period).localeCompare(String(b.period)));
-          const qi = seq.findIndex((y) => whaleQOfPeriod(y.period) === q);
-          sn.accs[+x.cik] = ((byQ2[q] || {}).acc || "") + ":" + (qi > 0 ? seq[qi - 1].acc : "");
-        }
-        sHealed++;
-      }
-      if (sHealed) { whalePersist(); log(`whale: season heal v2 rebuilt ${sHealed} stored quarter(s) — aggregate and header fields now describe the same computation`); }
-    } catch (_) {}
+    // Season drift sync AT hydrate: subsumes the -18-06 shape heal and the -19-01 heal v2 — one
+    // detector (whaleSeasonSyncAll) now repairs roster drift, missing/aggV-stale aggregates and
+    // metadata mismatches alike, so the first payload after any deploy already tells one story.
+    try { whaleSeasonSyncAll(Date.now()); } catch (_) {}
     whaleBump();
     // A hydrated watchlist means past filings were already announced in a prior life — prime
     // immediately so the first poll can't re-announce them. An EMPTY list has nothing to blast.
@@ -4929,6 +4882,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // already moved. The rebuild is cheap (pure math over books already on the volume) and is a
     // no-op whenever the roster change didn't alter what the aggregate consumed.
     whaleSeasonMaybe(nowArg || Date.now());
+    whaleSeasonSyncAll(nowArg || Date.now());   // closed quarters follow the roster too — the header can never disagree with the fund list
     log(`whale: watching ${w.key} (${w.name}, CIK ${w.cik})`);
     return { ok: true, fund: w };
   }
@@ -4940,6 +4894,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Cached filings stay — history kept, row hidden (re-adding the fund restores it whole).
     whaleBump(); whalePersist();
     whaleSeasonMaybe(nowArg || Date.now());   // same reason as whaleAdd: the roster is a build input
+    whaleSeasonSyncAll(nowArg || Date.now());
     return { ok: true, fund: w };
   }
   function whaleMute(keyRaw, on) {
@@ -5106,6 +5061,76 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // Season build: fires when every watched fund has a book for the season quarter, or at
   // deadline+1d with whoever made it (missing filers disclosed in the build). An HR/A landing
   // after a build reruns it with an `amended` note — persisted per quarter, past seasons kept.
+  // ---- season core (build 2026.08.19-03) ------------------------------------------------------
+  // ONE writer for a quarter's season build, used by the window builder, roster edits, amendment
+  // sync and the hydrate heal alike. The bug class this kills: header fields (filedN / watchN /
+  // missing) frozen at build time while the watchlist lived on — a closed quarter never rebuilt
+  // on roster edits, so the panel said "7/9 filed · missing: GREENLIGHT" over a 9-fund list that
+  // contained no Greenlight and lanes that said /7. A season is a VIEW over stored filings for
+  // the funds you watch NOW; the filings are the frozen history, the view recomputes. Metadata
+  // and aggregate are written together, always — the frozen-geometry rule for derived builds.
+  function whaleSeasonPrevAcc(cik, sq) {
+    const f = whaleState.filings[cik]; if (!f) return "";
+    const seq = Object.values(f).filter((x) => x && x.period).sort((a, b) => String(a.period).localeCompare(String(b.period)));
+    const i = seq.findIndex((x) => whaleQOfPeriod(x.period) === sq);
+    return i > 0 ? seq[i - 1].acc : "";
+  }
+  function whaleSeasonInputs(q) {
+    const funds = whaleState.watch.map((w) => {
+      const f = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
+      return { key: w.key, name: w.name, cik: +w.cik, cur: f ? f.book : null, prev: whalePrevBook(w.cik, q), filedAt: f ? f.filedAt : null };
+    });
+    const filed = funds.filter((x) => x.cur);
+    const accs = {};
+    for (const x of filed) accs[+x.cik] = ((whaleState.filings[x.cik] && whaleState.filings[x.cik][q] || {}).acc || "") + ":" + whaleSeasonPrevAcc(x.cik, q);
+    return { funds, filed, accs, rosterSig: filed.map((x) => +x.cik).sort((a, b) => a - b).join(",") };
+  }
+  function whaleSeasonBuildQ(q, now, meta) {
+    const inp = whaleSeasonInputs(q);
+    if (!inp.filed.length) {
+      // Nobody on today's watchlist has a book for this quarter. The -18-02 doctrine holds here:
+      // the stored season is KEPT, untouched — history is not destroyed to avoid a label; the
+      // STALE chip and the getter's dropped-fund marking already narrate exactly what it is. The
+      // desync bug this build kills is the UNLABELED kind (a live view quietly disagreeing with
+      // the fund list); an all-dropped season is labeled history, which is a different thing.
+      return { kept: true };
+    }
+    const had = whaleState.seasons[q];
+    const agg = whaleSeason(inp.filed.map((x) => ({ key: x.key, cik: x.cik, cur: x.cur, prev: x.prev })));
+    agg.roster = inp.filed.map((x) => ({ key: x.key, cik: +x.cik }));
+    agg.aggV = 2;   // aggregate-math version: 2 = traded-dollar lanes; bump on any basis change so stored builds rebuild instead of wearing new labels over old numbers
+    whaleState.seasons[q] = { q, at: now, accs: inp.accs, rosterSig: inp.rosterSig, agg,
+      filedN: inp.filed.length, watchN: whaleState.watch.length,
+      missing: inp.funds.filter((x) => !x.cur).map((x) => x.key),
+      // Amendment means a FILING moved (meta.accMoved); everything else preserves the flag.
+      amended: had ? (meta && meta.accMoved ? 1 : (had.amended || 0)) : 0,
+      healed: meta && meta.heal ? 1 : (had && had.healed) || 0, healv: 2,
+      closedAt: inp.filed.length === whaleState.watch.length ? Math.max(...inp.filed.map((x) => x.filedAt || 0)) : null };
+    whaleBump(); whalePersist();
+    return { built: true, filedN: inp.filed.length };
+  }
+  // Drift sync across EVERY stored quarter: rebuild wherever the stored build no longer matches
+  // what the current watchlist + stored filings would produce — roster edits, late HR/As landing
+  // on closed quarters, aggregate-math bumps, and the -18/-19 heal generations all reduce to this
+  // one detector. Pure math over stored books; zero EDGAR traffic; idempotent (a rebuilt quarter
+  // matches its own inputs on the next pass).
+  function whaleSeasonSyncAll(now) {
+    let n = 0;
+    for (const q of Object.keys(whaleState.seasons)) {
+      const sn = whaleState.seasons[q]; if (!sn) continue;
+      const inp = whaleSeasonInputs(q);
+      if (!inp.filed.length) continue;   // all-dropped: kept + chip-disclosed, never rebuilt into nothing (see whaleSeasonBuildQ)
+      const shape = !sn.agg || !Array.isArray(sn.agg.roster) || !sn.agg.roster.length || sn.agg.aggV !== 2;
+      const roster = sn.rosterSig !== inp.rosterSig || sn.watchN !== whaleState.watch.length;
+      const accMoved = !!sn.accs && Object.keys(inp.accs).some((k) => k in sn.accs && sn.accs[k] !== inp.accs[k]);
+      const accNew = !sn.accs || Object.keys(inp.accs).some((k) => !(k in sn.accs));
+      if (!shape && !roster && !accMoved && !accNew) continue;
+      const r = whaleSeasonBuildQ(q, now, { accMoved, heal: shape && !accMoved && !roster });
+      if (r && (r.built || r.deleted)) n++;
+    }
+    if (n) log(`whale: season sync rebuilt ${n} stored quarter(s) — watchlist, filings and aggregates describe one state again`);
+    return n;
+  }
   function whaleSeasonMaybe(now) {
     if (!whaleState.watch.length) return;
     const win = whaleWindow(now);
@@ -5148,28 +5173,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const legacy = had && !had.accs;   // pre-2026.08.18-01 blob: rebuild once to adopt the roster
     const accMoved = !!(had && had.accs) && Object.keys(accs).some((k) => k in had.accs && had.accs[k] !== accs[k]);
     const rosterMoved = !had || had.rosterSig !== rosterSig;
-    // Shape migration: builds persisted while agg.roster had no producer (2026.08.18-01 through
-    // -05) carry accs but an empty grid. Rebuild them once; pure math over stored books, and it
-    // is NOT an amendment — nothing at EDGAR moved.
-    const shapeStale = !!(had && (!had.agg || !Array.isArray(had.agg.roster) || !had.agg.roster.length));
+    const shapeStale = !!(had && (!had.agg || !Array.isArray(had.agg.roster) || !had.agg.roster.length || had.agg.aggV !== 2));
     if (had && !legacy && !accMoved && !rosterMoved && !shapeStale) return;   // nothing new since the last build
-    const agg = whaleSeason(filed.map((x) => ({ key: x.key, cik: x.cik, cur: x.cur, prev: x.prev })));
-    // THE producer of agg.roster (fix, build 2026.08.18-06). The -18-01 rework wired everything
-    // that READS the roster — the getter's dropped-fund marking, the client's one-square-per-
-    // covered-fund grid, the rebuild triggers — but nothing ever WROTE it, so every payload
-    // served roster:[] and the crowding grid drew zero cells. The -84 lesson, verbatim: the
-    // consumer chain was pinned by strings while the field had no producer; only a behavioral
-    // test that walks build -> payload -> cells could have caught it, and now one does. Roster =
-    // the funds the build actually covered (filed only, watchlist order) — a watched-but-unfiled
-    // fund lives in `missing`, never as a grey square pretending to be a measured "no position".
-    agg.roster = filed.map((x) => ({ key: x.key, cik: +x.cik }));
-    whaleState.seasons[q] = { q, at: now, accs, rosterSig, agg,
-      filedN: filed.length, watchN: whaleState.watch.length,
-      missing: funds.filter((x) => !x.cur).map((x) => x.key),
-      // Amendment means a FILING moved. A roster edit rebuilds without claiming one.
-      amended: had ? (accMoved ? 1 : (had.amended || 0)) : 0,
-      closedAt: allIn ? Math.max(...filed.map((x) => x.filedAt || 0)) : null };
-    whaleBump(); whalePersist();
+    // The write lives in whaleSeasonBuildQ — ONE writer for every path (window build, roster
+    // edit, amendment sync, hydrate heal), so metadata and aggregate can never desync again.
+    whaleSeasonBuildQ(q, now, { accMoved });
     if (whalePrimed) pushOps("13F season " + q, (allIn ? "all " + filed.length : filed.length + "/" + whaleState.watch.length) +
       " watched funds filed \u2014 season summary " + (had ? "rebuilt (amendment)" : "built"), "info", true);
     log(`whale: season ${q} ${had ? "rebuilt" : "built"} (${filed.length}/${whaleState.watch.length} funds)`);
@@ -5198,6 +5206,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         catch (e) { log("whale poll " + w.key + " failed (isolated): " + (e && e.message)); }
       }
       whaleSeasonMaybe(now);
+      whaleSeasonSyncAll(now);   // a late HR/A ingested for a CLOSED quarter must rebuild that quarter — the window builder never looks back
     } finally {
       whalePolling = false;
       whalePrimed = true;   // whatever the first pass found is now seeded; everything after announces

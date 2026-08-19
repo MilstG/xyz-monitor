@@ -6997,13 +6997,24 @@ function whaleDelta(cur, prev) {
     else {
       const dSh = p.shares != null && q.shares != null ? p.shares - q.shares : null;
       const dVal = p.value - q.value;
+      // dTr — the TRADED-dollar estimate (build 2026.08.19-02): shares traded x the filing's own
+      // implied quarter-end price (value / shares of the current leg). dVal is the polluted layer
+      // — marks, flows and trades all mixed — and summing it into a lane labeled "bought" let a
+      // mark-only rally masquerade as buying: MU sat atop MOST BOUGHT at +$6.5B while four of the
+      // five legs SOLD shares and the crowding grid said "4 cutting" two panels down. One panel,
+      // two answers. dTr prices only the share CHANGE, from filed numbers alone — an estimate at
+      // the quarter-end mark, disclosed as such, and null exactly where shares aren't comparable
+      // (options / PRN legs), where the caller falls back to dVal and says so.
+      const dTr = dSh != null && p.shares > 0 && p.value > 0 ? dSh * (p.value / p.shares) : null;
       const moved = dSh != null ? dSh !== 0 : Math.abs(dVal) >= Math.max(1, q.value) * 0.005;
       if (!moved) d = { cls: "flat", dSh: dSh != null ? 0 : null, dVal };
       else {
         const up = dSh != null ? dSh > 0 : dVal > 0;
-        d = { cls: up ? "add" : "trim", dSh, dVal };
-        (up ? lanes.added : lanes.trimmed).push({ ...p, dSh, dVal });
-        if (up) flows.added += dVal; else flows.trimmed += dVal;
+        d = { cls: up ? "add" : "trim", dSh, dVal, dTr };
+        (up ? lanes.added : lanes.trimmed).push({ ...p, dSh, dVal, dTr });
+        // Flows sum TRADED dollars where shares are comparable, value change only where they are
+        // not — so the modal's delta strip and the season lanes stop counting mark drift as flow.
+        if (up) flows.added += (dTr != null ? dTr : dVal); else flows.trimmed += (dTr != null ? dTr : dVal);
       }
     }
     rows.push({ ...p, d });
@@ -7091,17 +7102,22 @@ function whaleSeason(funds) {
     for (const r of dd.rows) {
       const e = ent(r);
       const c = r.d && r.d.cls;
-      if (c === "new") { e.opened.push({ key: f.key, val: r.value }); e.legs.push({ key: f.key, dVal: r.value, opened: 1 }); e.hold.push(f.key); e.state[f.key] = "new"; }
-      else if (c === "add") { e.add.push(f.key); e.legs.push({ key: f.key, dVal: r.d.dVal, dSh: r.d.dSh }); e.hold.push(f.key); e.state[f.key] = "add"; }
-      else if (c === "trim") { e.trim.push(f.key); e.legs.push({ key: f.key, dVal: r.d.dVal, dSh: r.d.dSh }); e.hold.push(f.key); e.state[f.key] = "trim"; }
+      if (c === "new") { e.opened.push({ key: f.key, val: r.value }); e.legs.push({ key: f.key, dVal: r.value, dTr: r.value, opened: 1 }); e.hold.push(f.key); e.state[f.key] = "new"; }
+      else if (c === "add") { e.add.push(f.key); e.legs.push({ key: f.key, dVal: r.d.dVal, dTr: r.d.dTr != null ? r.d.dTr : null, dSh: r.d.dSh }); e.hold.push(f.key); e.state[f.key] = "add"; }
+      else if (c === "trim") { e.trim.push(f.key); e.legs.push({ key: f.key, dVal: r.d.dVal, dTr: r.d.dTr != null ? r.d.dTr : null, dSh: r.d.dSh }); e.hold.push(f.key); e.state[f.key] = "trim"; }
       else { e.hold.push(f.key); e.state[f.key] = "hold"; }   // flat or no-prior: a holder, not a flow
     }
-    for (const x of dd.lanes.exited) { const e = ent(x); e.exit.push({ key: f.key, prevVal: x.prevVal }); e.legs.push({ key: f.key, dVal: -x.prevVal, exited: 1 }); e.state[f.key] = "exit"; }
+    for (const x of dd.lanes.exited) { const e = ent(x); e.exit.push({ key: f.key, prevVal: x.prevVal }); e.legs.push({ key: f.key, dVal: -x.prevVal, dTr: -x.prevVal, exited: 1 }); e.state[f.key] = "exit"; }
   }
-  const dom = (legs) => { const g = legs.reduce((s, l) => s + Math.abs(l.dVal || 0), 0);
-    return g > 0 ? Math.max(...legs.map((l) => Math.abs(l.dVal || 0))) / g * 100 : null; };
+  // Every dollar readout below runs on the TRADED basis: a leg's flow is dTr (share change x the
+  // filing's implied quarter-end price) where shares were comparable, dVal only where they were
+  // not. The lanes now agree with the crowding grid by construction — both read share changes.
+  const flowOf = (l) => (l.dTr != null ? l.dTr : (l.dVal || 0));
+  const dom = (legs) => { const g = legs.reduce((s, l) => s + Math.abs(flowOf(l)), 0);
+    return g > 0 ? Math.max(...legs.map((l) => Math.abs(flowOf(l)))) / g * 100 : null; };
   const rows = [...byKey.values()].map((e) => ({ cusip: e.cusip, put: e.put, name: e.name, cls: e.cls,
-    net: e.legs.reduce((s, l) => s + (l.dVal || 0), 0), legs: e.legs, domPct: dom(e.legs),
+    net: e.legs.reduce((s, l) => s + flowOf(l), 0), legs: e.legs, domPct: dom(e.legs),
+    estN: e.legs.filter((l) => l.dTr == null && l.dVal).length,   // legs where only the polluted value delta existed — disclosed on the row
     held: new Set(e.hold).size, adding: e.add.length + e.opened.length, cutting: e.trim.length + e.exit.length,
     opened: e.opened, exited: e.exit, state: e.state }));
   const bought = rows.filter((r) => r.net > 0 && r.legs.some((l) => l.dVal)).sort((a, b) => b.net - a.net).slice(0, 12);
