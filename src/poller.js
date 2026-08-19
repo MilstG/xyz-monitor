@@ -26,7 +26,7 @@ const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TRE
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
-const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleWindow, whaleQOfPeriod, whaleSeason, whale13FScale } = require("./compute");
+const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleIssuerKey, whaleWindow, whaleQOfPeriod, whaleSeason, whale13FScale } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO, homeMkt, homeAdr } = require("./sectors");
@@ -5232,15 +5232,57 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       lanes: { opened: lane(dd.lanes.opened), added: lane(dd.lanes.added), trimmed: lane(dd.lanes.trimmed), exited: lane(dd.lanes.exited) },
       flows: dd.flows, positions, shown: positions.length };
   }
-  // "Who holds" reverse lookup (build 2026.08.18-05): given a ticker, a name fragment or a CUSIP,
-  // scan every tracked fund's latest cached book (plus its prior quarter, for exits) and answer
-  // who holds it, how big, at what conviction, and what they did with it QoQ. Cached state only —
-  // a query costs zero EDGAR traffic. One-code-path integrity: the QoQ chips come from the SAME
-  // whaleDelta the fund modal renders, so this panel can never disagree with the book view.
+  // "Who holds" reverse lookup. Given a ticker, a name fragment or a CUSIP, scan every tracked
+  // fund's latest cached book (plus its prior quarter, for exits) and answer who holds it, how
+  // big, at what conviction, and what they did with it QoQ. Cached state only — a query costs
+  // zero EDGAR traffic. One-code-path integrity: the QoQ chips come from the SAME whaleDelta the
+  // fund modal renders, so this panel can never disagree with the book view.
+  //
   // Match lanes, in order, basis always disclosed: (1) exact ticker via the SEC company map
   // (SYM -> official name -> whaleNameKey), (2) normalized-name equality on the query itself,
   // (3) filed-name substring (>= 3 chars — shorter fragments only match as tickers), (4) exact
   // 9-char CUSIP. Common and option lines stay separate per fund, never merged.
+  //
+  // -07: matched rows are GROUPED BY ISSUER (whaleIssuerKey, i.e. the CUSIP's 6-char issuer
+  // prefix) before anything is summarized. -06 kept one basis, one display name and one combined
+  // total for the whole result set, which produced a specific, reproducible lie: "amd" matches
+  // ADVANCED MICRO DEVICES by ticker and AMDOCS LTD by substring, so `basis` (a single variable
+  // taking the max lane rank across every matched row) stamped 'matched by ticker "AMD"' onto the
+  // Amdocs lines, `dispName` (shortest matched name) titled the whole panel AMDOCS, and
+  // `combined` added two unrelated companies together. Each issuer now carries its OWN basis,
+  // name, ticker chip, funds, totals and not-held list; issuers rank by lane strength then size,
+  // and the client renders the strongest in full with the rest collapsed. A weak match is
+  // disclosed, never merged and never silently dropped.
+  //
+  // Top-level fields mirror issuers[0] so existing callers (the terminal verb, the route) keep
+  // reading the primary result without a shape migration.
+  const HOLDS_BASIS_RANK = { cusip: 4, ticker: 3, name: 2, substring: 1 };
+  const holdsBasisLabel = (b, tk) => b === "ticker" ? 'ticker "' + tk + '" \u2192 filed name'
+    : b === "cusip" ? "exact CUSIP" : b === "name" ? "normalized name" : "filed-name substring";
+  // A fund's direction on one issuer, over its COMMON lines only. -06 asked two independent
+  // `.some()` questions — "any common line added?" and "any common line trimmed?" — and a fund
+  // holding two common lots that moved opposite ways answered yes to both, incrementing adding
+  // AND cutting. The strip then printed counts that summed past the holder count (the shipped
+  // "4/7 hold - 3 adding - 2 cutting"), and the row chip, which read only lines[0], showed one of
+  // the two directions as if it were the fund's whole answer. One fund, one direction: legs are
+  // netted, and when they genuinely disagree the row says so rather than being counted twice.
+  // Option lines never vote — a new puts line is a bearish or hedging expression, and counting it
+  // as accumulation would print the opposite of what the filer did.
+  function holdsDir(lines) {
+    const com = lines.filter((l) => !l.put);
+    if (!com.length) return { dir: "na", mixed: 0 };                 // options-only: not a directional holder
+    const live = com.filter((l) => l.d && l.d.cls !== "na");
+    if (!live.length) return { dir: "na", mixed: 0 };                // no prior filing — no delta claimed
+    if (live.every((l) => l.d.cls === "new")) return { dir: "new", mixed: 0 };
+    const up = live.filter((l) => l.d.cls === "add" || l.d.cls === "new").length;
+    const dn = live.filter((l) => l.d.cls === "trim").length;
+    const mixed = up > 0 && dn > 0 ? 1 : 0;
+    if (!mixed) return { dir: up > 0 ? "add" : dn > 0 ? "trim" : "flat", mixed: 0 };
+    // Legs disagree. dVal is present on every non-na cell (share counts are not — options and
+    // PRN rows carry none), so the NET is priced in dollars and the disagreement is disclosed.
+    const net = live.reduce((s, l) => s + (l.d.dVal || 0), 0);
+    return { dir: net > 0 ? "add" : net < 0 ? "trim" : "flat", mixed: 1 };
+  }
   async function getWhaleHolds(qRaw) {
     const q = String(qRaw || "").trim();
     if (!q) return { ok: false, error: "usage: whale who <ticker, name fragment, or CUSIP>" };
@@ -5261,10 +5303,19 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (subOk && String(p.name).toUpperCase().includes(QU)) return "substring";
       return null;
     };
-    const funds = [], notHeld = [], noBook = [];
-    let combined = 0, adding = 0, cutting = 0, nPositions = 0, nBooks = 0;
-    let dispName = null, basis = null;
-    const BASIS_RANK = { cusip: 4, ticker: 3, name: 2, substring: 1 };
+    // Issuer buckets, keyed on identity rather than on the string that happened to match.
+    const iss = new Map();
+    const bucket = (p, m) => {
+      const ik = whaleIssuerKey(p.cusip, p.name) || ("N:" + String(p.name || "").toUpperCase());
+      let b = iss.get(ik);
+      if (!b) b = { key: ik, names: new Map(), basis: null, tkHit: 0 }, iss.set(ik, b);
+      if (!b.basis || HOLDS_BASIS_RANK[m] > HOLDS_BASIS_RANK[b.basis]) b.basis = m;
+      if (m === "ticker") b.tkHit = 1;   // the ticker chip belongs to the issuer the map resolved, not to every issuer in the result
+      b.names.set(p.name, (b.names.get(p.name) || 0) + 1);
+      return b;
+    };
+    const perFund = [], noBook = [];
+    let nPositions = 0, nBooks = 0;
     for (const w of whaleState.watch) {
       const byQ = whaleState.filings[w.cik] || {};
       const rows2 = Object.values(byQ).filter((x) => x && x.period).sort((a, b) => String(b.period).localeCompare(String(a.period)));
@@ -5272,38 +5323,64 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!cur) { noBook.push(w.key); continue; }
       nBooks++; nPositions += cur.book.n;
       const dd = whaleDelta(cur.book, whalePrevBook(w.cik, whaleQOfPeriod(cur.period)));
-      const lines = [];
+      const byIss = new Map();
+      const slot = (bk) => { let e = byIss.get(bk); if (!e) e = { lines: [], exited: [] }, byIss.set(bk, e); return e; };
       for (let i = 0; i < dd.rows.length; i++) {
         const p = dd.rows[i];
-        const m = match(p);
-        if (!m) continue;
-        if (!basis || BASIS_RANK[m] > BASIS_RANK[basis]) basis = m;
-        if (!dispName || p.name.length < dispName.length) dispName = p.name;
-        lines.push({ put: p.put, cusip: p.cusip, cls: p.cls || null, value: p.value, shares: p.shares, pct: p.pct, rank: i + 1, d: p.d });
+        const m = match(p); if (!m) continue;
+        slot(bucket(p, m).key).lines.push({ put: p.put, cusip: p.cusip, cls: p.cls || null,
+          value: p.value, shares: p.shares, pct: p.pct, rank: i + 1, d: p.d });
       }
-      const exited = dd.lanes.exited.filter((x) => match(x)).map((x) => ({ put: x.put, prevVal: x.prevVal }));
-      if (lines.length) {
-        combined += lines.reduce((s, l) => s + (l.value || 0), 0);
-        // The adding/cutting strip counts COMMON-equity lines only. A new puts line is a bearish
-        // (or hedging) expression — counting it as "adding" would read as accumulation, the exact
-        // opposite of what the filer did. Option lines still render per fund with full detail;
-        // they just never drive the directional counts. Disclosed on the strip's hover.
-        if (lines.some((l) => !l.put && l.d && (l.d.cls === "new" || l.d.cls === "add"))) adding++;
-        if (lines.some((l) => !l.put && l.d && l.d.cls === "trim")) cutting++;
-        funds.push({ key: w.key, name: w.name, q: whaleQOfPeriod(cur.period), held: 1, lines, exited });
-      } else if (exited.length) {
-        if (exited.some((x) => !x.put)) cutting++;   // same rule on the way out — an expired options line is not a directional exit
-        funds.push({ key: w.key, name: w.name, q: whaleQOfPeriod(cur.period), held: 0, lines: [], exited });
-      } else notHeld.push(w.key);
+      for (const x of dd.lanes.exited) {
+        const m = match(x); if (!m) continue;
+        slot(bucket(x, m).key).exited.push({ put: x.put, prevVal: x.prevVal });
+      }
+      perFund.push({ key: w.key, name: w.name, q: whaleQOfPeriod(cur.period), byIss });
     }
-    if (!funds.length) return { ok: false, miss: 1, q, nBooks, nPositions, noBook,
+    const issuers = [];
+    for (const b of iss.values()) {
+      const fl = [], notHeld = [];
+      for (const pf of perFund) {
+        const e = pf.byIss.get(b.key);
+        if (!e || (!e.lines.length && !e.exited.length)) { notHeld.push(pf.key); continue; }
+        fl.push({ key: pf.key, name: pf.name, q: pf.q, held: e.lines.length ? 1 : 0,
+          lines: e.lines, exited: e.exited, dir: null, mixed: 0 });
+      }
+      // Value is split by INSTRUMENT, never summed across it. 13F reports an options line at the
+      // UNDERLYING NOTIONAL, not the premium paid, so adding it to a common-equity line produces
+      // a figure that describes no position any filer holds — and at option-heavy filers it is
+      // the figure that dominates. Two numbers, because they are two things.
+      let common = 0, optNotional = 0, adding = 0, cutting = 0, flat = 0;
+      for (const f of fl) {
+        for (const l of f.lines) { if (l.put) optNotional += l.value || 0; else common += l.value || 0; }
+        if (f.held) { const d = holdsDir(f.lines); f.dir = d.dir; f.mixed = d.mixed; }
+        else f.dir = f.exited.some((x) => !x.put) ? "exit" : "na";   // an expired options line is not a directional exit
+        if (f.dir === "add" || f.dir === "new") adding++;
+        else if (f.dir === "trim" || f.dir === "exit") cutting++;
+        else if (f.dir === "flat") flat++;
+      }
+      const val = (f) => f.lines.reduce((s, l) => s + (l.value || 0), 0);
+      fl.sort((a, c) => val(c) - val(a));
+      // Display name: the spelling the most filers used, longest on a tie. -06 took the SHORTEST
+      // name across the whole result, which is how a 10-character coincidence outranked the
+      // 26-character company the query actually resolved to.
+      let name = null, best = -1;
+      for (const [n, c] of b.names) if (c > best || (c === best && n.length > String(name).length)) { name = n; best = c; }
+      issuers.push({ key: b.key, name, tk: b.tkHit ? tk : null, basis: b.basis,
+        basisLabel: holdsBasisLabel(b.basis, tk), funds: fl, notHeld,
+        held: fl.filter((f) => f.held).length, combined: common + optNotional,
+        common, optNotional, adding, cutting, flat });
+    }
+    if (!issuers.length) return { ok: false, miss: 1, q, nBooks, nPositions, noBook,
       error: "no tracked fund's latest 13F contains \u201c" + q + "\u201d \u2014 searched " + nBooks + " book(s), " + nPositions
         + " positions, by ticker, normalized name" + (subOk ? ", substring" : "") + " and CUSIP. Not held \u2260 not owned: shorts, futures, non-US and anything bought since quarter-end are invisible in a 13F." };
-    const basisLabel = basis === "ticker" ? 'ticker "' + tk + '" \u2192 filed name' : basis === "cusip" ? "exact CUSIP"
-      : basis === "name" ? "normalized name" : "filed-name substring";
-    funds.sort((a, b) => (b.lines.reduce((s, l) => s + (l.value || 0), 0)) - (a.lines.reduce((s, l) => s + (l.value || 0), 0)));
-    return { ok: true, q, name: dispName, tk, basis: basisLabel, funds, notHeld, noBook,
-      combined, adding, cutting, held: funds.filter((f) => f.held).length, watchN: whaleState.watch.length };
+    issuers.sort((a, c) => HOLDS_BASIS_RANK[c.basis] - HOLDS_BASIS_RANK[a.basis] || c.combined - a.combined);
+    const P = issuers[0];
+    return { ok: true, q, issuers, watchN: whaleState.watch.length, noBook,
+      // primary mirror — the shape every -06 caller already reads
+      name: P.name, tk: P.tk, basis: P.basisLabel, funds: P.funds, notHeld: P.notHeld,
+      combined: P.combined, common: P.common, optNotional: P.optNotional,
+      held: P.held, adding: P.adding, cutting: P.cutting, flat: P.flat };
   }
   async function getWhaleSeasonQ(qRaw) {
     const q = String(qRaw || "").trim() || (getWhale().seasonQ || "");

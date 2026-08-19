@@ -7030,6 +7030,22 @@ function whaleNameKey(name) {
   while (w.length > 1 && (WHALE_NAME_SUFFIX.has(w[w.length - 1]) || w[w.length - 1].length === 1)) w.pop();
   return w.join(" ");
 }
+// Issuer IDENTITY, which is a different question from issuer NAME. A reverse lookup that groups
+// on the matched name unions two companies the moment one spells like the other: "AMD" resolves
+// to Advanced Micro Devices by ticker AND appears inside "AMDOCS LTD" by substring, and the -06
+// panel rendered both under one header, one basis and one combined total. A CUSIP's first six
+// characters ARE the issuer (the next two are the issue, the last is a check digit), so every
+// share class, every options line and every filer's spelling of the same company collapse to one
+// key and two different companies can never collapse into each other. No CUSIP on the row (it
+// happens: malformed filings) falls back to the normalized name, which is weaker but still an
+// identity rather than a coincidence of letters — and the fallback is marked so a caller can
+// tell the two apart.
+function whaleIssuerKey(cusip, name) {
+  const c = String(cusip || "").trim().toUpperCase();
+  if (/^[A-Z0-9]{9}$/.test(c)) return "C:" + c.slice(0, 6);
+  const k = whaleNameKey(name);
+  return k ? "N:" + k : null;
+}
 // Filing-window arithmetic. 13F-HR is due 45 days after quarter end; a weekend due date rolls to
 // the next business day (holiday rolls are NOT modeled — a ±1-day deadline error costs one extra
 // poll day, and a curated holiday table for one date a quarter is not worth its drift risk; the
@@ -7112,6 +7128,7 @@ module.exports.whale13FScale = whale13FScale;
 module.exports.whaleBook = whaleBook;
 module.exports.whaleDelta = whaleDelta;
 module.exports.whaleNameKey = whaleNameKey;
+module.exports.whaleIssuerKey = whaleIssuerKey;
 module.exports.whaleWindow = whaleWindow;
 module.exports.whaleQOfPeriod = whaleQOfPeriod;
 module.exports.whaleSeason = whaleSeason;
