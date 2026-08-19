@@ -10605,7 +10605,7 @@ function focChartEnsureDom(){
     <div class="focch-head"><span class="focch-t" id="focch-t"></span><span class="focch-sub" id="focch-sub"></span><span class="focch-view" id="focch-view"></span>
       <span class="focch-tf"><button type="button" data-foctf="5">5M</button><button type="button" data-foctf="15" class="on">15M</button><button type="button" data-foctf="60">1H</button><button type="button" data-foctf="240">4H</button></span>
       <button type="button" class="focch-x" id="focch-x" data-tip="close (Esc)">✕</button></div>
-    <div class="focch-leg"><span><i class="fk" style="border-color:var(--acc2,#4da3d8)"></i>VWAP (chart series, from the open)</span><span><i class="fk d" style="border-color:var(--up)"></i>1H HI (frozen)</span><span><i class="fk d" style="border-color:var(--down)"></i>1H LO (frozen)</span><span><i class="fk d" style="border-color:var(--muted)"></i>open</span><span class="dim">dark bands = off-session (from the calendar engine) · wheel/pinch = zoom at cursor · drag = pan · double-click = reset</span></div>
+    <div class="focch-leg"><span><i class="fk" style="border-color:var(--acc2,#4da3d8)"></i>VWAP (chart series, per session)</span><span><i class="fk d" style="border-color:var(--up)"></i>1H HI (frozen)</span><span><i class="fk d" style="border-color:var(--down)"></i>1H LO (frozen)</span><span><i class="fk d" style="border-color:var(--muted)"></i>open</span><span class="dim">dark bands = off-session (from the calendar engine) · frozen lines live inside their own session · wheel/pinch = zoom at cursor · drag = pan · double-click = reset</span></div>
     <div id="focch-read">hover for OHLC · chart VWAP · Δ from open</div>
     <div id="focch-wrap"><canvas id="focch-cc"></canvas></div>
     <div id="focch-vbar" data-tip="the 72h base — the highlighted span is your viewport; drag it to pan"><div id="focch-vwin"></div></div></div>`;
@@ -10742,16 +10742,63 @@ function focAgg(base,k,openMs){
   }
   return out;
 }
+// ---- session windows: ONE list, read by the shading, the VWAP and the frozen lines alike -------
+// The cash windows come from the server's calendar engine (half days and holidays included), never
+// from a guessed 09:30-to-16:00 rhythm. If the payload ever ships without them, fall back to the
+// ONE window the charted record itself carries — degraded to a single session, never to "no
+// sessions at all", which would silently erase the VWAP.
+function focChartSessions(){
+  const s=(FOC.data&&Array.isArray(FOC.data.sessions)&&FOC.data.sessions.length)?FOC.data.sessions:null;
+  if(s) return s;
+  const d=FOCCH.day;
+  return (d&&d.open!=null)?[{ open:d.open, close:(d.close!=null?d.close:Infinity) }]:[];
+}
+// Index of the session containing t, or -1. Windows are [open, close) — a bar stamped exactly at
+// the close belongs to the NEXT window, which is the same convention the shading already used.
+function focSessIdx(sess,t){
+  for(let i=0;i<sess.length;i++){ if(t>=sess[i].open&&t<sess[i].close) return i; }
+  return -1;
+}
+// Visible index span of one window inside an aggregated bar array — pure index math, extracted so
+// the clip is testable without a canvas. [-1,-1] means the window has no bar on screen, and its
+// geometry must therefore not be drawn AT ALL rather than pinned to the view edges.
+function focSessSpan(bars,open,close){
+  let a=-1,b=-1;
+  for(let i=0;i<bars.length;i++){ const t=bars[i][0];
+    if(t>=open&&t<close){ if(a<0) a=i; b=i; } }
+  return [a,b];
+}
+// Contiguous non-null runs of a series. The VWAP is stroked as RUNS, never as one path that skips
+// the nulls — skipping bridges Tuesday's close to Wednesday's open with a straight line that no
+// session ever traded.
+function focRuns(vals,off,n){
+  const runs=[]; let cur=null;
+  for(let i=0;i<n;i++){ const v=vals[off+i];
+    if(v==null){ cur=null; continue; }
+    if(!cur){ cur=[]; runs.push(cur); } cur.push([i,v]); }
+  return runs;
+}
 function focAggCached(){
-  // Aggregate the FULL base once per timeframe and compute the session VWAP over the WHOLE
-  // series — the viewport then slices by index. This is the invariant that keeps zoom honest:
-  // panning half-out of the session can never restart the cumulative VWAP at the view edge.
-  if(FOCCH.agg&&FOCCH.agg.tf===FOCCH.tf) return FOCCH.agg;
+  // Aggregate the FULL base once per timeframe and compute the VWAP over the WHOLE series — the
+  // viewport then slices by index. This is the invariant that keeps zoom honest: panning half-out
+  // of a session can never restart the cumulative VWAP at the view edge.
+  // 2026.08.19-04: the series is PER SESSION. One anchored run used to accumulate straight through
+  // the close, so a dead session's VWAP kept drawing across the overnight and into the next
+  // pre-market — a level that had stopped existing hours earlier, rendered as if it were live.
+  // Each cash window now anchors its own run at its own open and dies at its own close; off-session
+  // bars are null, and a null is a BREAK in the line, not a bridge across it.
+  const sess=focChartSessions();
+  const sn=sess.map(s=>s.open+':'+s.close).join('|');
+  if(FOCCH.agg&&FOCCH.agg.tf===FOCCH.tf&&FOCCH.agg.sn===sn) return FOCCH.agg;
   const bars=focAgg(FOCCH.base, FOCCH.tf, FOCCH.day.open);
-  let pv=0,vv=0;
-  const vwapS=bars.map(b=>{ if(b[0]<FOCCH.day.open) return null;
-    const v=+b[5]; if(v>0){ pv+=((+b[2])+(+b[3])+(+b[4]))/3*v; vv+=v; } return vv>0?pv/vv:null; });
-  FOCCH.agg={ tf:FOCCH.tf, bars, vwapS };
+  let pv=0,vv=0,cur=-1;
+  const vwapS=bars.map(b=>{
+    const si=focSessIdx(sess,b[0]);
+    if(si<0) return null;                        // off-session: no VWAP exists, and the line breaks
+    if(si!==cur){ cur=si; pv=0; vv=0; }          // a new session anchors its own run at its own open
+    const v=+b[5]; if(v>0){ pv+=((+b[2])+(+b[3])+(+b[4]))/3*v; vv+=v; }
+    return vv>0?pv/vv:null; });
+  FOCCH.agg={ tf:FOCCH.tf, sn, bars, vwapS };
   return FOCCH.agg;
 }
 function focChartDraw(){
@@ -10786,8 +10833,8 @@ function focChartDraw(){
   const bw=Math.max(1.5,(W-padL-padR)/n*.62);
   const vwapS=A.vwapS;
   // off-session shading — windows from the same calendar engine as the stamp
-  const sess=(FOC.data&&FOC.data.sessions)||[];
-  const inSess=(t)=>{ for(const sw of sess){ if(t>=sw.open&&t<sw.close) return true; } return false; };
+  const sess=focChartSessions();
+  const inSess=(t)=>focSessIdx(sess,t)>=0;
   g.fillStyle='rgba(0,0,0,0.28)';
   let runA=-1;
   for(let i=0;i<=n;i++){
@@ -10809,11 +10856,31 @@ function focChartDraw(){
     g.fillStyle=C.sec; g.fillText(focPx(v),W-padR+6,y+3); }
   // reference lines — only drawn when inside the visible scale (a zoomed view far from the first
   // hour should not pin phantom lines to its edges)
-  const refLine=(v,col,lab)=>{ if(v==null||!isFinite(v)||v<lo||v>hi) return; const y=Y(v);
-    g.strokeStyle=col; g.setLineDash([5,4]); g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke(); g.setLineDash([]);
-    g.fillStyle=col; g.fillText(lab+' '+focPx(v),W-padR+6,y-4); };
-  refLine(h1&&h1.openPx!=null?h1.openPx:p.px, C.sec, h1&&h1.openPx!=null?'O':'stamp');
-  if(h1){ refLine(h1.hi,C.up,'1H HI'); refLine(h1.lo,C.down,'1H LO'); }
+  // 2026.08.19-04: the frozen trio is clipped to the charted record's OWN cash window. Drawn edge
+  // to edge they read as live levels hours after the session that produced them had closed — and
+  // to the LEFT of an open they did not yet exist at. The span is the first and last visible bars
+  // inside that window; if none are on screen the line is not drawn at all.
+  const daySi=focSessIdx(sess,day.open);
+  const daySw=daySi>=0?sess[daySi]:{ open:day.open, close:(day.close!=null?day.close:Infinity) };
+  const [sI0,sI1]=focSessSpan(bars,daySw.open,daySw.close);
+  const segX0=sI0>=0?Math.max(padL,X(sI0)-bw/2):null, segX1=sI1>=0?Math.min(W-padR,X(sI1)+bw/2):null;
+  const refLine=(v,col,lab,clip)=>{ if(v==null||!isFinite(v)||v<lo||v>hi) return;
+    const x0=clip?segX0:padL, x1=clip?segX1:(W-padR);
+    if(x0==null||x1==null||x1-x0<1) return;
+    const y=Y(v);
+    g.strokeStyle=col; g.setLineDash([5,4]); g.beginPath(); g.moveTo(x0,y); g.lineTo(x1,y); g.stroke(); g.setLineDash([]);
+    // The price label follows the line's END: in the right gutter while the session still runs to
+    // the edge, otherwise beside the stub — never marooned in a gutter the line never reaches.
+    const txt=lab+' '+focPx(v), tw=g.measureText(txt).width;
+    g.fillStyle=col;
+    if(!clip||x1>=(W-padR)-1){ g.textAlign='left'; g.fillText(txt,W-padR+6,y-4); }
+    else if((W-padR)-x1>=tw+10){ g.textAlign='left'; g.fillText(txt,x1+6,y-4); }
+    else { g.textAlign='right'; g.fillText(txt,x1-6,y-4); }
+    g.textAlign='left'; };
+  // The stamp fallback is a LIVE price reference, not session geometry (preview state, or +1h not
+  // filled yet) — it keeps the full width. The frozen trio belongs to the record's session alone.
+  if(h1&&h1.openPx!=null) refLine(h1.openPx,C.sec,'O',true); else refLine(p.px,C.sec,'stamp',false);
+  if(h1){ refLine(h1.hi,C.up,'1H HI',true); refLine(h1.lo,C.down,'1H LO',true); }
   // volume
   const vMax=Math.max(...bars.map(b=>+b[5]||0),1e-9);
   for(let i=0;i<n;i++){ const b=bars[i], up=b[4]>=b[1];
@@ -10825,11 +10892,13 @@ function focChartDraw(){
     g.strokeStyle=col; g.beginPath(); g.moveTo(X(i),Y(b[2])); g.lineTo(X(i),Y(b[3])); g.stroke();
     g.fillStyle=col; const yO=Y(b[1]), yC=Y(b[4]);
     g.fillRect(X(i)-bw/2,Math.min(yO,yC),bw,Math.max(1,Math.abs(yC-yO))); }
-  // VWAP line — the FULL-session series sliced by the same offsets, never restarted at the edge
-  g.strokeStyle=C.blu; g.lineWidth=1.6; g.beginPath(); let started=false;
-  for(let i=0;i<n;i++){ const v=vwapS[off+i]; if(v==null) continue; const y=Y(v);
-    started?g.lineTo(X(i),y):g.moveTo(X(i),y); started=true; }
-  if(started) g.stroke(); g.lineWidth=1;
+  // VWAP — the per-session series sliced by the same offsets, never restarted at the view edge,
+  // and stroked as separate runs so the overnight gap is a gap and not a straight line through it
+  g.strokeStyle=C.blu; g.lineWidth=1.6;
+  for(const run of focRuns(vwapS,off,n)){ g.beginPath();
+    for(let k=0;k<run.length;k++){ const x=X(run[k][0]), y=Y(run[k][1]); k?g.lineTo(x,y):g.moveTo(x,y); }
+    g.stroke(); }
+  g.lineWidth=1;
   // x labels: weekday + ET time when the view spans a night, plain time when zoomed tight
   g.fillStyle=C.sec; g.textAlign='center';
   const long=(FOCCH.view.to-FOCCH.view.from)>20*3600000;
