@@ -4751,7 +4751,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       let sHealed = 0;
       for (const q of Object.keys(whaleState.seasons)) {
         const sn = whaleState.seasons[q];
-        if (!sn || (sn.agg && Array.isArray(sn.agg.roster) && sn.agg.roster.length)) continue;
+        if (!sn) continue;
+        // Heal v2 (build 2026.08.19-01). The v1 heal rebuilt agg but left filedN/watchN/missing
+        // describing the ORIGINAL build — one panel then said "7/8 filed" in the header while
+        // every lane said /6, with the stale chip narrating a third story on top. A build's
+        // metadata and its aggregate are ONE computation and must be written together — the
+        // frozen-geometry rule applied to seasons. v2 rewrites the descriptive fields with the
+        // aggregate, and re-runs on v1-healed blobs (persisted mismatches self-repaired; the
+        // roster-exists gate alone would have frozen them broken forever).
+        const needsHeal = !(sn.agg && Array.isArray(sn.agg.roster) && sn.agg.roster.length) || (sn.healed && sn.healv !== 2);
+        if (!needsHeal) continue;
         const funds = whaleState.watch.map((w) => {
           const f = whaleState.filings[w.cik] && whaleState.filings[w.cik][q];
           return f ? { key: w.key, cik: +w.cik, cur: f.book, prev: whalePrevBook(w.cik, q) } : null;
@@ -4759,11 +4768,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (!funds.length) continue;
         const agg = whaleSeason(funds);
         agg.roster = funds.map((x) => ({ key: x.key, cik: +x.cik }));
-        sn.agg = agg; sn.at = Date.now(); sn.healed = 1;   // amended untouched — nothing at EDGAR moved
+        sn.agg = agg; sn.at = Date.now(); sn.healed = 1; sn.healv = 2;   // amended untouched — nothing at EDGAR moved
         sn.rosterSig = funds.map((x) => +x.cik).sort((a, b) => a - b).join(",");
+        // The descriptive fields now describe THIS build: how many of today's watchlist it
+        // covered, and who on today's watchlist had no book for the quarter (that IS "missing"
+        // for the computation the panel is actually showing — the original build's roster is
+        // unknowable, which is the whole reason the heal exists).
+        sn.filedN = funds.length;
+        sn.watchN = whaleState.watch.length;
+        sn.missing = whaleState.watch.filter((w) => !funds.some((x) => +x.cik === +w.cik)).map((w) => w.key);
+        // accs rewritten to describe THIS build too, with REAL prev legs — an in-grace heal's
+        // quarter is still the window builder's quarter, and a sloppy accs here would read as a
+        // phantom "amendment" on the next whaleSeasonMaybe pass.
+        sn.accs = {};
+        for (const x of funds) {
+          const byQ2 = whaleState.filings[x.cik] || {};
+          const seq = Object.values(byQ2).filter((y) => y && y.period).sort((a, b) => String(a.period).localeCompare(String(b.period)));
+          const qi = seq.findIndex((y) => whaleQOfPeriod(y.period) === q);
+          sn.accs[+x.cik] = ((byQ2[q] || {}).acc || "") + ":" + (qi > 0 ? seq[qi - 1].acc : "");
+        }
         sHealed++;
       }
-      if (sHealed) { whalePersist(); log(`whale: season shape heal rebuilt ${sHealed} stored quarter(s) whose grid roster had no producer (2026.08.18-01..-05 builds)`); }
+      if (sHealed) { whalePersist(); log(`whale: season heal v2 rebuilt ${sHealed} stored quarter(s) — aggregate and header fields now describe the same computation`); }
     } catch (_) {}
     whaleBump();
     // A hydrated watchlist means past filings were already announced in a prior life — prime
@@ -5398,7 +5424,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const roster = (s.agg.roster || []).map((r) => Object.assign({}, r, { dropped: r.cik != null && !watchedCik.has(+r.cik) ? 1 : 0 }));
     const dropped = roster.filter((r) => r.dropped).map((r) => r.key);
     return { ok: true, q: s.q, at: s.at, filedN: s.filedN, watchN: s.watchN, missing: s.missing,
-      amended: !!s.amended, closedAt: s.closedAt,
+      amended: !!s.amended, healed: s.healed ? 1 : 0, closedAt: s.closedAt,
       stale: dropped.length ? { dropped, watchN: whaleState.watch.length } : null,
       agg: { bought: tag(s.agg.bought), sold: tag(s.agg.sold), opens: tag(s.agg.opens),
         exits: tag(s.agg.exits), crowd: tag(s.agg.crowd), roster, nFunds: s.agg.nFunds } };
