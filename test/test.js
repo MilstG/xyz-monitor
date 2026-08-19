@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.18-08"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.19-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -18876,4 +18876,62 @@ test("whale season roster (2026.08.18-06): the producer exists — build writes 
   assert.ok(app.includes("grid cells pending one season rebuild"), "defensive note if an unhealed payload ever serves");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   assert.ok(css.includes(".whl-who{border:1px solid"), "the panel is boxed, not a bare label");
+});
+
+test("whale season heal v2 (2026.08.19-01): aggregate and header fields are ONE computation — v1-healed mismatches self-repair, counts agree everywhere", async () => {
+  const { createPoller } = require("../src/poller");
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const X = (t) => ({ ok: true, json: async () => { throw new Error("xml"); }, text: async () => t });
+  const row = (nm, cu, v, sh) => `<infoTable><nameOfIssuer>${nm}</nameOfIssuer><cusip>${cu}</cusip><value>${v}</value><shrsOrPrnAmt><sshPrnamt>${sh}</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>`;
+  const book = `<x>${row("APPLE INC", "037833100", 500e6, 5e6)}${row("MICRON TECHNOLOGY INC", "595112103", 300e6, 2e6)}</x>`;
+  const sub = (pfx) => J({ name: "X", filings: { recent: {
+    form: ["13F-HR", "13F-HR"], accessionNumber: [pfx + "-26-000002", pfx + "-26-000001"],
+    filingDate: ["2026-08-14", "2026-05-15"], reportDate: ["2026-06-30", "2026-03-31"] } } });
+  const idx = J({ directory: { item: [{ name: "primary_doc.xml", size: 9 }, { name: "infotable.xml", size: 999 }] } });
+  const extFetch = async (url) => {
+    if (url.includes("company_tickers")) return J({});
+    if (url.includes("submissions/CIK0000000301")) return sub("0301");
+    if (url.includes("submissions/CIK0000000302")) return sub("0302");
+    if (url.includes("infotable.xml")) return X(book);
+    if (url.includes("/index.json")) return idx;
+    return { ok: false, status: 404, error: "404" };
+  };
+  const sink = {};
+  const mkStore = (loaded) => ({ loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveWhale: (d) => { sink.d = d; }, loadWhale: () => loaded });
+  // Assemble real state: 2 funds with Q2 books, season built in-window.
+  const p = createPoller({ dex: "xyz", store: mkStore(null), log: () => {}, version: "test", crypto: false, extFetch });
+  p.hydrateWhaleNow();
+  p.whaleAdd(301, "Epsilon Capital LP"); p.whaleAdd(302, "Zeta Partners LLC");
+  await p.whalePull("EPSILON"); await p.whalePull("ZETA");
+  p.whaleSeasonNow(Date.UTC(2026, 7, 16, 12));
+  // Forge the exact production wreck the screenshot showed: a v1-healed blob whose agg says 2
+  // funds while the header fields still describe a dead 8-fund build, PLUS a watch entry with no
+  // book (the "missing" fund), PLUS amended=1 narrating an old amendment over it all.
+  const stored = sink.d;
+  const sn = stored.seasons["Q2 2026"];
+  sn.healed = 1; delete sn.healv;
+  sn.filedN = 7; sn.watchN = 8; sn.missing = ["PERSHING"]; sn.amended = 1;
+  stored.watch.push({ key: "NOBOOK", name: "No Book Yet LP", cik: 999, notify: 1, addedAt: 1 });
+  const p2 = createPoller({ dex: "xyz", store: mkStore(stored), log: () => {}, version: "test", crypto: false,
+    extFetch: async () => ({ ok: false, status: 404, error: "404" }) });
+  p2.hydrateWhaleNow();   // heal v2 fires here — no fetches, pure math
+  const s = await p2.getWhaleSeasonQ("Q2 2026");
+  assert.ok(s.ok, s.error || "");
+  assert.equal(s.agg.nFunds, 2, "aggregate covers the 2 funds with stored books");
+  assert.equal(s.filedN, 2, "header filedN describes the SAME computation as the lanes");
+  assert.equal(s.watchN, 3, "watchN is today's watchlist, not a dead build's");
+  assert.deepEqual(s.missing, ["NOBOOK"], "missing = today's watched funds without a book for the quarter — not a ghost from the old build");
+  assert.equal(s.agg.roster.length, 2, "grid roster matches too — one story on the whole panel");
+  assert.equal(s.healed, 1, "payload says it was healed; the client renders that instead of the amendment text");
+  // Idempotence: a second boot re-runs nothing (healv=2 sticks) and the state is stable.
+  const stored2 = sink.d;
+  const p3 = createPoller({ dex: "xyz", store: mkStore(stored2), log: () => {}, version: "test", crypto: false,
+    extFetch: async () => ({ ok: false, status: 404, error: "404" }) });
+  p3.hydrateWhaleNow();
+  const s3 = await p3.getWhaleSeasonQ("Q2 2026");
+  assert.equal(s3.filedN, 2); assert.equal(s3.watchN, 3);
+  const app = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("rebuilt from stored books"), "healed builds say what they are in both headers — not 'rebuilt after amendment'");
 });
