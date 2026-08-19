@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.19-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.19-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -17658,7 +17658,9 @@ test("focus chart -17.01: manifest pins — archive-sourced 72h chart, retired 1
   assert.ok(app.includes("res.enabled===false"), "a disabled archive is said out loud, not rendered as an empty tape");
   // calendar-driven shading: the payload ships session windows and the client consumes them
   assert.ok(pol.includes("sessions: marketSessions(now - 78 * HOUR, now + 36 * HOUR)"), "session windows ride the focus payload");
-  assert.ok(app.includes("(FOC.data&&FOC.data.sessions)||[]") && app.includes("OFF-SESSION"), "client shades off-session from the calendar, labels the crosshair");
+  // -19-04: the read moved into focChartSessions, the ONE window list the shading, the VWAP and the
+  // frozen lines all consume — the pin follows the invariant, not the old inline expression.
+  assert.ok(app.includes("function focChartSessions(") && app.includes("FOC.data.sessions") && app.includes("OFF-SESSION"), "client shades off-session from the calendar, labels the crosshair");
   assert.ok(!pol.includes("getCandles1m,"), "poller no longer exports a 1m getter");
   assert.ok(srv.includes("res=1m RETIRED"), "the retirement is documented at the route, not silently deleted");
 });
@@ -17682,8 +17684,10 @@ test("focus chart -17.02: manifest pins — viewport math, one-fetch invariant, 
     assert.ok(app.includes(pin), "interaction pin: " + pin);
   // one-fetch invariant: the viewport slices a full-base aggregate; the session VWAP is computed
   // over the WHOLE series and sliced by offset — zoom can never restart it at the view edge
-  assert.ok(app.includes("if(FOCCH.agg&&FOCCH.agg.tf===FOCCH.tf) return FOCCH.agg;"), "aggregate cached per timeframe");
-  assert.ok(app.includes("vwapS[off+i]") && app.includes("vwapS[off+hv]"), "VWAP sliced by offset, never recomputed per viewport");
+  assert.ok(app.includes("if(FOCCH.agg&&FOCCH.agg.tf===FOCCH.tf&&FOCCH.agg.sn===sn) return FOCCH.agg;"), "aggregate cached per timeframe AND per session list (-19-04)");
+  // -19-04: the stroke reads the series through focRuns(vwapS,off,n) instead of indexing inline —
+  // same offset slice, same one-aggregate rule, now split into per-session runs on the way out.
+  assert.ok(app.includes("focRuns(vwapS,off,n)") && app.includes("vwapS[off+hv]"), "VWAP sliced by offset, never recomputed per viewport");
   assert.ok(app.includes("const fhInView=") , "frozen 1H refs stretch the y-scale only when the first hour is in view");
   // touch: canvas and minimap both opt out of native gestures so pinch/drag reach the handlers
   assert.ok(css.includes("#focch-cc{touch-action:none}") && css.includes("#focch-vbar"), "touch-action + minimap styles");
@@ -19067,4 +19071,166 @@ test("whale season sync (2026.08.19-03): closed-quarter builds follow the live w
   s = await p.getWhaleSeasonQ("Q2 2026");
   assert.ok(s.ok, "kept — history is not destroyed to avoid a label");
   assert.ok(s.stale && s.stale.dropped.includes("ALPHA"), "and the chip says exactly what it is");
+});
+
+// ================================================================================================
+// FOCUS chart: session-scoped VWAP and frozen geometry (build 2026.08.19-04)
+// ------------------------------------------------------------------------------------------------
+// The reported defect: a session's VWAP and its frozen 1H HI/LO kept drawing after that session had
+// closed — the blue line accumulated straight through the overnight into the next pre-market, and
+// the dashed lines spanned the full 72h in BOTH directions, including hours before the range they
+// describe existed. These tests execute the real client functions against real bar fixtures; a
+// string pin would have passed the whole time the bug was on screen (the -84 lesson).
+// ================================================================================================
+const FOCCH_SRC = (() => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i > -1, name + " present in app.js");
+    let d = 0;
+    for (let k = app.indexOf("{", i); k < app.length; k++) {
+      if (app[k] === "{") d++; else if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); }
+    }
+    throw new Error("unbalanced " + name);
+  };
+  return { app, grab };
+})();
+// One fixture, shared: a 5m tape running Monday night -> Tuesday cash -> Tuesday night -> Wednesday
+// pre-market -> Wednesday cash. Frozen clock (wall-clock independence): every boundary is derived
+// from these constants, never from Date.now().
+const FOCCH_FIX = (() => {
+  const M = 60000, H = 3600000;
+  const tueOpen = Date.UTC(2026, 7, 18, 13, 30);           // 09:30 ET
+  const tueClose = tueOpen + 6.5 * H;                       // 16:00 ET
+  const wedOpen = tueOpen + 24 * H, wedClose = tueClose + 24 * H;
+  const sessions = [{ open: tueOpen, close: tueClose }, { open: wedOpen, close: wedClose }];
+  // 5m bars from 12h before Tuesday's open to 1h after Wednesday's open. Price and volume vary per
+  // bar so a VWAP that failed to reset would land on a visibly different number than one that did.
+  const base = [];
+  for (let t = tueOpen - 12 * H; t <= wedOpen + 1 * H; t += 5 * M) {
+    const i = (t - (tueOpen - 12 * H)) / (5 * M);
+    const px = 100 + (i % 17), vol = 10 + (i % 7);
+    base.push([t, px, px + 1, px - 1, px, vol]);
+  }
+  return { M, H, tueOpen, tueClose, wedOpen, wedClose, sessions, base };
+})();
+function focchApi(sessions, day, tf) {
+  const { grab } = FOCCH_SRC;
+  const src = grab("focChartSessions") + "\n" + grab("focSessIdx") + "\n" + grab("focSessSpan") + "\n"
+    + grab("focRuns") + "\n" + grab("focAgg") + "\n" + grab("focAggCached");
+  const FOC = { data: sessions ? { sessions } : {} };
+  const FOCCH = { tf, day, base: FOCCH_FIX.base, agg: null };
+  const api = new Function("FOC", "FOCCH", src
+    + "\n;return { focChartSessions, focSessIdx, focSessSpan, focRuns, focAgg, focAggCached, FOCCH };")(FOC, FOCCH);
+  return api;
+}
+
+test("FOCUS chart -04: the VWAP is PER SESSION — it dies at its own close and re-anchors at the next open", () => {
+  const F = FOCCH_FIX;
+  const api = focchApi(F.sessions, { open: F.tueOpen, close: F.tueClose }, 15);
+  const { bars, vwapS } = api.focAggCached();
+  assert.ok(bars.length > 100, "fixture aggregated to a real bar array");
+  const at = (t) => { const i = bars.findIndex((b) => b[0] === t); assert.ok(i > -1, "bar at " + t); return i; };
+  // Before Tuesday's open: no session, no VWAP. (This part was already right; it must stay right.)
+  assert.equal(vwapS[at(F.tueOpen - 2 * F.H)], null, "pre-market has no VWAP");
+  assert.equal(vwapS[at(F.tueOpen - 15 * F.M)], null, "the bar before the open has no VWAP");
+  // Inside Tuesday: live.
+  assert.ok(vwapS[at(F.tueOpen)] != null, "the opening bar anchors the run");
+  assert.ok(vwapS[at(F.tueOpen + 2 * F.H)] != null, "mid-session VWAP is live");
+  // THE BUG. Every one of these was a real number before this build.
+  assert.equal(vwapS[at(F.tueClose)], null, "the closing bucket ends the session — no VWAP AT the close");
+  assert.equal(vwapS[at(F.tueClose + 30 * F.M)], null, "post-market: the session is over, the line is gone");
+  assert.equal(vwapS[at(F.tueOpen + 18 * F.H)], null, "overnight: no VWAP survives the night");
+  assert.equal(vwapS[at(F.wedOpen - 30 * F.M)], null, "next pre-market: yesterday's VWAP does not lead into today");
+  // Wednesday re-anchors at ITS open, carrying nothing from Tuesday.
+  const wI = at(F.wedOpen), wb = bars[wI];
+  assert.ok(vwapS[wI] != null, "Wednesday's opening bar anchors a NEW run");
+  const ownTypical = (wb[2] + wb[3] + wb[4]) / 3;
+  assert.ok(Math.abs(vwapS[wI] - ownTypical) < 1e-9,
+    `first bar of a session VWAPs to its own typical price (${vwapS[wI]} vs ${ownTypical}) — a carried-over run could not`);
+  // And the whole invariant, stated once: a VWAP point can never land where the shading is dark.
+  const sess = api.focChartSessions();
+  for (let i = 0; i < bars.length; i++) {
+    if (vwapS[i] != null) assert.ok(api.focSessIdx(sess, bars[i][0]) >= 0,
+      "VWAP point at " + new Date(bars[i][0]).toISOString() + " sits outside every cash window");
+  }
+});
+
+test("FOCUS chart -04: nulls BREAK the VWAP path — the overnight is a gap, never a straight line across it", () => {
+  const F = FOCCH_FIX;
+  const api = focchApi(F.sessions, { open: F.tueOpen, close: F.tueClose }, 15);
+  const { bars, vwapS } = api.focAggCached();
+  const runs = api.focRuns(vwapS, 0, bars.length);
+  assert.equal(runs.length, 2, "two sessions on the tape -> two strokes, not one continuous line");
+  const spanOf = (r) => [bars[r[0][0]][0], bars[r[r.length - 1][0]][0]];
+  const [a0, a1] = spanOf(runs[0]), [b0, b1] = spanOf(runs[1]);
+  assert.ok(a0 === F.tueOpen && a1 < F.tueClose, "run 1 is Tuesday's cash window and nothing else");
+  assert.ok(b0 === F.wedOpen && b1 <= F.wedClose, "run 2 starts at Wednesday's open");
+  assert.ok(a1 < b0, "the runs do not touch — the gap between them is the night");
+  // Mutation guard: a path that merely SKIPS nulls yields one run and would bridge the gap.
+  const naive = [];
+  for (let i = 0; i < bars.length; i++) if (vwapS[i] != null) naive.push(i);
+  assert.ok(naive.length > runs[0].length, "the skip-nulls path would have joined the two sessions into one stroke");
+});
+
+test("FOCUS chart -04: frozen 1H geometry is clipped to its OWN session, in both directions", () => {
+  const F = FOCCH_FIX;
+  const api = focchApi(F.sessions, { open: F.tueOpen, close: F.tueClose }, 15);
+  const { bars } = api.focAggCached();
+  const [i0, i1] = api.focSessSpan(bars, F.tueOpen, F.tueClose);
+  assert.ok(i0 > 0, "the span does not start at index 0 — the lines no longer reach back before the open");
+  assert.ok(i1 < bars.length - 1, "the span does not end at the last bar — the lines no longer run to the right edge");
+  assert.equal(bars[i0][0], F.tueOpen, "the clip starts exactly at the open");
+  assert.ok(bars[i1][0] < F.tueClose && bars[i1][0] + 15 * F.M >= F.tueClose, "and ends on the last bucket inside the close");
+  // A viewport that contains no bar of that session draws NOTHING — the old code pinned the dashes
+  // to the view edges regardless of where the session was.
+  const night = bars.filter((b) => b[0] > F.tueClose && b[0] < F.wedOpen);
+  assert.ok(night.length > 10, "fixture really has an overnight stretch");
+  assert.deepEqual(api.focSessSpan(night, F.tueOpen, F.tueClose), [-1, -1],
+    "session off screen -> no span -> no line");
+  // A session still running (close in the future) clips to the last bar it has, not to nothing.
+  const [w0, w1] = api.focSessSpan(bars, F.wedOpen, F.wedClose);
+  assert.ok(w0 > -1 && bars[w1][0] === bars[bars.length - 1][0], "a live session runs to the last bar on the tape");
+});
+
+test("FOCUS chart -04: with no calendar windows the chart degrades to the record's own session, never to a blank", () => {
+  const F = FOCCH_FIX;
+  const api = focchApi(null, { open: F.tueOpen, close: F.tueClose }, 15);   // payload without sessions
+  const sess = api.focChartSessions();
+  assert.equal(sess.length, 1, "one window, from the record itself");
+  assert.equal(sess[0].open, F.tueOpen);
+  assert.equal(sess[0].close, F.tueClose);
+  const { bars, vwapS } = api.focAggCached();
+  const at = (t) => bars.findIndex((b) => b[0] === t);
+  assert.ok(vwapS[at(F.tueOpen + F.H)] != null, "the VWAP still draws inside the charted session");
+  assert.equal(vwapS[at(F.tueClose + F.H)], null, "and still dies at the close — the fallback is not a licence to run forever");
+  // A record with no close (live session, close not yet known) runs open-ended rather than empty.
+  const live = focchApi(null, { open: F.tueOpen, close: null }, 15);
+  assert.equal(live.focChartSessions()[0].close, Infinity, "an unknown close is open-ended, not zero");
+  const lv = live.focAggCached();
+  assert.ok(lv.vwapS[lv.bars.length - 1] != null, "so the live run reaches the last bar");
+});
+
+test("FOCUS chart -04: the aggregate cache re-keys on the session list, so a calendar refresh cannot serve a stale VWAP", () => {
+  const F = FOCCH_FIX;
+  const api = focchApi(F.sessions, { open: F.tueOpen, close: F.tueClose }, 15);
+  const first = api.focAggCached();
+  assert.ok(api.focAggCached() === first, "same tf + same windows -> the cached object, not a rebuild");
+  assert.ok(typeof first.sn === "string" && first.sn.includes(String(F.tueOpen)), "the cache key carries the windows");
+});
+
+test("FOCUS chart -04: client manifest — the session helpers exist exactly once and the draw path uses them", () => {
+  const { app } = FOCCH_SRC;
+  for (const name of ["focChartSessions", "focSessIdx", "focSessSpan", "focRuns"]) {
+    const n = (app.match(new RegExp("^function " + name + "\\(", "gm")) || []).length;
+    assert.equal(n, 1, `${name} defined exactly once (found ${n})`);
+  }
+  const draw = app.slice(app.indexOf("function focChartDraw("), app.indexOf("function focChartDraw(") + 9000);
+  assert.ok(draw.includes("focSessSpan(bars,"), "the clip span is computed by the shared helper, not re-derived inline");
+  assert.ok(draw.includes("focRuns(vwapS,"), "the VWAP is stroked as runs");
+  assert.ok(draw.includes("const refLine=(v,col,lab,clip)=>") && !draw.includes("const refLine=(v,col,lab)=>"),
+    "refLine takes a clip flag — the unclipped edge-to-edge signature is gone");
+  assert.ok(!/const sess=\(FOC\.data&&FOC\.data\.sessions\)/.test(draw),
+    "the shading reads the shared window list — one definition, so shading and VWAP can never disagree");
 });
