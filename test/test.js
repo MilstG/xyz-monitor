@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.19-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.19-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19459,8 +19459,8 @@ test("focus -05: manifest — close fill wired into the tick, touch reorder wire
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
   const app = rd("public/app.js"), pol = rd("src/poller.js"), css = rd("public/styles.css");
   for (const pin of ["function closeFocus(", "const FOCUS_CLOSE_GRACE", "const FOCUS_CLOSE_SLOP",
-    "if (held && !focusState.closedAt && now >= sess.close) closeFocus(now);",
-    "closedAt: 0, closeNote: null"])
+    "if (held && now >= sess.close) closeFocus(focusState, now);",
+    "closedAt: 0, closeNote: null, closeLate: 0"])
     assert.ok(pol.includes(pin), "poller pin: " + pin);
   assert.ok(pol.includes("store.readCandles1m(p.coin, st.open - 1, st.close + 1)"),
     "the close read is bounded by the record's own session, not by now");
@@ -19474,4 +19474,101 @@ test("focus -05: manifest — close fill wired into the tick, touch reorder wire
   assert.ok(app.includes("if(!c||c.nosort||_focDragK) return;"), "a drag in flight is never also a sort");
   assert.ok(css.includes(".foctbl th[data-fock]") && css.includes("touch-action:pan-y"),
     "the header opts out of the long-press callout while the board stays scrollable");
+});
+
+// ================================================================================================
+// FOCUS: the LATE close fill (build 2026.08.19-06)
+// ------------------------------------------------------------------------------------------------
+// -05 shipped a close that could only fill while the record sat in the live slot: between 16:00 ET
+// and the 00:00 UTC retire — four hours in EDT, three in EST. A deploy inside that window lost the
+// session's close permanently, which is exactly what happened on 2026-08-19. The correction is that
+// this read was never time-sensitive: it is bounded by the record's own open and close, so taking it
+// at 21:00 returns what taking it at 16:01 would have. These tests pin that equivalence directly —
+// the late fill must be byte-identical to the on-time one, or the fix is a different measurement.
+// ================================================================================================
+test("focus -06: a record that retired unfilled still gets its close, and it is the SAME read", () => {
+  const M = 60000;
+  // On time: the fill lands in the live slot at 16:02.
+  const a = focus05CloseRig();
+  a.p.focusTickNow(a.CLOSE + 2 * M);
+  const onTime = a.p.getFocus(a.CLOSE + 2 * M).today;
+  assert.ok(onTime.closedAt, "baseline: the on-time fill lands");
+  assert.equal(onTime.closeLate, 0, "and does not claim to be late");
+
+  // Late: nothing ticks until 21:12 ET — past the 00:00 UTC retire, so the record is in `prev`.
+  const b = focus05CloseRig();
+  const LATE = Date.UTC(2026, 7, 20, 1, 12);          // 2026-08-19 21:12 ET, the screenshot's clock
+  assert.ok(LATE > b.CLOSE, "the late tick really is after the close");
+  b.p.focusTickNow(LATE);
+  const d = b.p.getFocus(LATE);
+  assert.equal(d.today, null, "the record has retired out of the live slot");
+  assert.ok(d.prev && d.prev.closedAt, "…and the retired record fills anyway — this is the -05 bug");
+  assert.ok(d.prev.closeLate > 300, "the record discloses how late the read was taken");
+  // THE EQUIVALENCE. Same window, same bars, same answer — the only difference is the disclosure.
+  assert.deepEqual(d.prev.rows.map((r) => r.closePx), onTime.rows.map((r) => r.closePx),
+    "the late read returns exactly the on-time read — the window is the record's, not the clock's");
+  assert.deepEqual(d.prev.rows.map((r) => r.closeCov.inWin), onTime.rows.map((r) => r.closeCov.inWin),
+    "…including per-seat coverage");
+  assert.deepEqual(d.prev.rows.map((r) => r.closeCov.bars), onTime.rows.map((r) => r.closeCov.bars),
+    "…and the RAW read count: a late fill that widened its window to `now` would sweep the "
+    + "after-hours tape into the coverage even though the price came out right");
+  assert.equal(d.prev.closeNote, null, "a complete lane read late still claims no shortfall");
+  // Idempotent: a filled record is never re-read, however many ticks follow.
+  const px = d.prev.rows[0].closePx, at = d.prev.closedAt;
+  b.p.focusTickNow(LATE + 30 * M);
+  const again = b.p.getFocus(LATE + 30 * M).prev;
+  assert.equal(again.rows[0].closePx, px, "a filled close never moves again");
+  assert.equal(again.closedAt, at, "…and the fill is not re-stamped on every tick");
+});
+
+test("focus -06: the late fill runs on weekends — a Friday close missed at 16:00 lands on Saturday", () => {
+  const M = 60000;
+  const { p, CLOSE } = focus05CloseRig();             // Friday 2026-08-14
+  const SAT = Date.UTC(2026, 7, 15, 18, 0);           // Saturday 14:00 ET — no session at all
+  p.focusTickNow(SAT);
+  const d = p.getFocus(SAT);
+  assert.equal(d.state, "offday", "it really is a non-session day");
+  assert.ok(d.prev && d.prev.closedAt,
+    "the fill runs BEFORE the session lookup returns early — otherwise Friday waits for Monday and dies");
+  assert.ok(Math.abs(d.prev.rows[0].closePx - 138.9) < 1e-6, "and it is Friday's 15:59 print");
+  assert.ok(d.prev.closeLate > (SAT - CLOSE) / M - 5, "disclosed as the day-late read it is");
+});
+
+test("focus -06: the late fill reaches the prior slot ONLY — it never walks back through history", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const tick = pol.slice(pol.indexOf("function focusTick(nowInj)"), pol.indexOf("function focusTick(nowInj)") + 3000);
+  assert.equal((tick.match(/closeFocus\(/g) || []).length, 2, "exactly two fills: the live record and the prior slot");
+  assert.ok(tick.includes("closeFocus(focusPrev, now)") && tick.includes("closeFocus(focusState, now)"),
+    "one call per slot, each naming its record explicitly");
+  assert.ok(!/closedAt\s*&&/.test(tick) && !/!\w+\.closedAt/.test(tick),
+    "neither call site re-checks closedAt — the guard lives inside closeFocus, where a test can reach it");
+  assert.ok(tick.indexOf("closeFocus(focusPrev, now)") < tick.indexOf("const sess = marketSessions"),
+    "the prior-slot fill sits above the session lookup, so a weekend cannot skip it");
+  assert.ok(!/focusPrev\s*=\s*\w+\.prev/.test(pol.slice(pol.indexOf("function closeFocus("), pol.indexOf("function closeFocus(") + 2500)),
+    "the fill mutates the record it was handed and reaches for no other");
+});
+
+test("focus -06: the CLOSE cell stops promising a fill once the session is over", () => {
+  const row = { ticker: "NBIS", prevClose: 268.18, h1: { openPx: 268.83 } };
+  const CLOSE = Date.UTC(2026, 7, 14, 20, 0);
+
+  // Session still running: the promise is honest, so it stands.
+  const live = focColsApi()({ _day: { closedAt: 0, close: Date.now() + 3600e3 } }, () => "", () => null, () => {});
+  assert.match(live.focCol("close").td(row), /at close/, "before 16:00 the cell still says the close is ahead");
+
+  // Session over, never filled: a dash that names the silence, not a promise nobody will keep.
+  const dead = focColsApi()({ _day: { closedAt: 0, close: CLOSE } }, () => "", () => null, () => {});
+  const cell = dead.focCol("close").td(row);
+  assert.ok(!/at close/.test(cell), "a finished session never claims a fill is still coming");
+  assert.match(cell, /—/, "it is a dash");
+  assert.match(cell, /without its close ever being measured/, "…that says exactly which silence this is");
+  assert.ok(!/268|241|237/.test(cell), "and still no price stands in for the close that was missed");
+
+  // Filled late: the number, plus the disclosure that the read was taken hours after the fact.
+  const late = focColsApi()({ _day: { closedAt: 1, close: CLOSE, closeLate: 312 } }, () => "", () => null, () => {});
+  const lc = late.focCol("close").td({ ...row, closePx: 237.60, closeCov: { bars: 390, inWin: 390, slopMin: 1 } });
+  assert.match(lc, /237\.60/, "the late-filled close renders normally");
+  assert.match(lc, /read 312m after the close/, "…with when it was read stated on the cell");
+  assert.match(lc, /-11\.6%/, "and the move off the open is unchanged by the lateness");
 });
