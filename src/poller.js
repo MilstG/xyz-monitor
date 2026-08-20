@@ -11652,7 +11652,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const pvDiff = pvRef ? { pvAt: pvRef.at, ...focusDiff(pvRef.rows.slice(0, FOCUS_CAP).map((x) => x.ticker), sel.picks.map((x) => x.ticker)) } : null;
     focusState = { day: etDayStr(now), utcDay: focusUtcDayStr(now), open: sess.open, close: sess.close, prevCloseT,
       frozenAt: now, late: now - sess.open > 90 * 1000 ? 1 : 0,   // boot-stamped after the open: DISCLOSED, same honesty as episode boot stamps
-      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, closedAt: 0, closeNote: null, pvDiff,
+      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, closedAt: 0, closeNote: null, closeLate: 0, pvDiff,
       // The wall that produced this list, frozen with it. Never read from focusLim at render time:
       // that would let today's panel edit silently restate what yesterday's selection was made of.
       limits: g.limits, scanned: g.scanned, cleared: g.pass.length, below: g.below, belowN: g.belowN };
@@ -11744,13 +11744,17 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
   // regardless and states how short it came.
   // The window is bounded at both ends by the record's OWN session, never by "the last bar before
   // now" — a read taken at 18:00 must return the 16:00 print, not the after-hours tape.
-  // If the process is down from the close through the 00:00 UTC retire, the fill never runs and the
-  // column dashes forever. That is the correct outcome: a close is a measurement of a session, and
-  // a session nobody measured has no close. It is never back-filled from a later or coarser read.
+  // -19-06 TAKES A RECORD rather than reading focusState, and the reason is a correction. -05 said
+  // "a session nobody measured has no close" and refused to fill a retired record. That collapsed
+  // two different things: the STAMP measures the live tape and genuinely cannot be taken late, but
+  // this read is bounded by the record's own open and close, so taking it at 21:00 returns exactly
+  // what taking it at 16:01 would have. Nothing about it drifts with the reading time. Under the old
+  // rule the fill had a four-hour window (three in EST) between the close and the 00:00 UTC retire,
+  // and any deploy or restart spanning it lost that session's close permanently — which is what
+  // happened on 2026-08-19. The archive holding the window is the only thing that ever mattered.
   const FOCUS_CLOSE_GRACE = 5 * 60 * 1000;
   const FOCUS_CLOSE_SLOP = 2 * 60 * 1000;   // a complete 1m lane leaves exactly one bar-width of slop
-  function closeFocus(now) {
-    const st = focusState;
+  function closeFocus(st, now) {
     if (!st || st.closedAt || !Number.isFinite(st.close)) return;
     const canRead = store.candlesEnabled && store.candlesEnabled();
     const reads = [];
@@ -11768,11 +11772,14 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       r.p.closeCov = { bars: r.n, inWin: r.c ? r.c.bars : 0, slopMin: r.c ? Math.round(r.c.slopMs / 60000) : null };
     }
     st.closedAt = now;
+    // `late` is disclosure, not decoration: a fill taken hours after the close is the same read, but
+    // the record should say when it was taken so a thin `bars` count can be reasoned about later.
+    st.closeLate = now > st.close + FOCUS_CLOSE_GRACE ? Math.round((now - st.close) / 60000) : 0;
     st.closeNote = !canRead ? "candle archive disabled \u2014 the close column cannot fill"
       : (short.length ? `closed at the +${Math.round(FOCUS_CLOSE_GRACE / 60000)}m grace with ${short.length} seat(s) whose last 1m bar sits more than ${Math.round(FOCUS_CLOSE_SLOP / 60000)}m before 16:00 \u2014 the lane did not reach the close` : null);
     focusPersist();
     const dry = st.rows.filter((p) => p.closePx == null).map((p) => p.ticker);
-    log(`FOCUS close fill: ${st.rows.filter((p) => p.closePx != null).length}/${st.rows.length} seat(s) carry a session close`
+    log(`FOCUS close fill${st.closeLate ? ` (LATE \u2014 ${st.closeLate}m after the close)` : ""}: ${st.rows.filter((p) => p.closePx != null).length}/${st.rows.length} seat(s) carry a session close`
       + (dry.length ? ` \u2014 NO BARS for ${dry.join(", ")}` : "") + (st.closeNote ? " \u2014 " + st.closeNote : ""));
   }
   // The day's list dies at 00:00 UTC (2026.08.18-02). Deliberately NOT the ET boundary the rest of
@@ -11819,6 +11826,13 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const now = Number.isFinite(nowInj) ? nowInj : Date.now();
     const today = etDayStr(now);
     focusRetire(now);
+    // THE LATE CLOSE (2026.08.19-06). The retired slot gets its close filled too, and this runs
+    // BEFORE the session lookup below on purpose: that lookup returns early on weekends and
+    // holidays, which is exactly when a Friday close missed at 16:00 would otherwise sit unfilled
+    // until Monday and then be retired past reach. Only the `prev` slot is reachable — there is no
+    // walk back through older records, and none is wanted: the read is the same read, but a record
+    // silently changing days after anyone last looked at it is a different kind of claim.
+    if (focusPrev && Number.isFinite(focusPrev.close) && now >= focusPrev.close) closeFocus(focusPrev, now);
     const sess = marketSessions(now - 2 * DAY, now + 2 * DAY).find((s) => etDayStr(s.open) === today) || null;
     if (!sess) { focusPv = null; focusForming = null; return; }   // weekend / holiday: no preview, no forming
     if (now >= sess.open - FOCUS_PREVIEW_LEAD && now < sess.open && (!focusState || focusState.day !== today))
@@ -11838,7 +11852,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (held && focusPv) focusPv = null;   // belt + braces: a stamp always retires the pool
     if (held && !focusState.filledAt && now >= sess.open) buildFocusForming(now);
     if (held && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
-    if (held && !focusState.closedAt && now >= sess.close) closeFocus(now);
+    if (held && now >= sess.close) closeFocus(focusState, now);   // closeFocus owns the already-filled guard
   }
   // `nowArg`: the same suite-only contract as getWhale. This payload's whole state machine is a
   // function of the clock — which ET session day it is, whether the open has passed, whether the
