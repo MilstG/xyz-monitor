@@ -12005,7 +12005,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.19-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.19-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -18601,7 +18601,7 @@ test("focus -05: manifest pins — 1m base everywhere the hour is measured, 30s 
   const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
   const pol = rd("src/poller.js"), app = rd("public/app.js"), css = rd("public/styles.css");
   // engine: both the forming read and the freeze read 1m; neither reads 5m for the hour
-  assert.equal(pol.split("store.readCandles1m(p.coin").length - 1, 2, "forming and freeze both read the 1m archive — exactly two sites");
+  assert.equal(pol.split("store.readCandles1m(p.coin").length - 1, 3, "forming, freeze and the close fill read the 1m archive — exactly three sites (-19-05)");
   assert.ok(!/readCandles\(p\.coin/.test(pol), "no first-hour path reads the 5m archive any more");
   assert.ok(pol.includes("const FOCUS_FORMING_MS = 25 * 1000"), "republish cadence sits inside the client's 30s poll");
   assert.ok(pol.includes("formingMs: FOCUS_FORMING_MS"), "…and ships on the payload so the two cannot drift");
@@ -19233,4 +19233,245 @@ test("FOCUS chart -04: client manifest — the session helpers exist exactly onc
     "refLine takes a clip flag — the unclipped edge-to-edge signature is gone");
   assert.ok(!/const sess=\(FOC\.data&&FOC\.data\.sessions\)/.test(draw),
     "the shading reads the shared window list — one definition, so shading and VWAP can never disagree");
+});
+
+// ================================================================================================
+// FOCUS: session OPEN / CLOSE columns + touch reorder (build 2026.08.19-05)
+// ------------------------------------------------------------------------------------------------
+// The close is the one number on this board that CANNOT be shown early: it is a measurement of a
+// finished session, and the live price is not a stand-in for it. These tests execute the real close
+// read, the real fill gate and the real column builders — the failure mode being guarded against is
+// a close column that quietly renders the after-hours tape, or the live mark, as "the 16:00 print".
+// ================================================================================================
+function focus05CloseRig(opts) {
+  const o = opts || {};
+  const { createPoller } = require("../src/poller");
+  const base = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null };
+  const M = 60000, OPEN = Date.UTC(2026, 7, 14, 13, 30), CLOSE = OPEN + 390 * M;   // Fri 09:30 -> 16:00 ET
+  // 390 in-session 1m bars walking 100 -> 139, then an AFTER-HOURS tape at a wildly different price.
+  // If the close read is bounded by the session the after-hours bars can never reach the column; if
+  // it is bounded by "the last bar before now" they will, and the test says so.
+  const bars = [];
+  for (let i = 0; i < 390; i++) { const px = 100 + i / 10; bars.push([OPEN + i * M, px, px + 0.5, px - 0.5, px, 1000]); }
+  for (let i = 0; i < 60; i++) bars.push([CLOSE + i * M, 400, 401, 399, 400, 500]);
+  const lane = { posted: o.posted == null ? 390 : o.posted };   // in-session bars the 1m writer has flushed
+  const dark = o.dark || [];                                    // tickers whose lane landed nothing (mutable: the caller may darken a seat after the stamp)
+  const store = { ...base, saveFocus: () => {}, loadFocus: () => null, candlesEnabled: () => o.archive !== false,
+    readCandles: () => [],
+    readCandles1m: (coin, lo, hi) => {
+      if (dark.includes(String(coin).split(":")[1])) return [];
+      return bars.slice(0, lane.posted).concat(bars.slice(390)).filter((k) => k[0] >= lo && k[0] <= hi);
+    } };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  const spine = (px) => { const a = []; for (let i = 48; i >= 0; i--) a.push({ t: OPEN - i * 3600e3, o: px, h: px * 1.01, l: px * 0.99, c: px, v: 1e6 }); return a; };
+  for (const [t, px] of [["BE", 100], ["NVDA", 900], ["MU", 100], ["AMD", 150], ["LLY", 800],
+    ["TSLA", 300], ["XOM", 110], ["JPM", 200], ["COIN", 250], ["PLTR", 60]])
+    p.seedRowNow("xyz:" + t, { ticker: t, uni: "xyz", px, vol: 9e6, oi: 9e6, oiBase: 1000, hourlyRaw: spine(px) });
+  p.focusTickNow(OPEN + 5 * M);
+  return { p, OPEN, CLOSE, M, lane, bars };
+}
+
+test("focus -05: the close fills at 16:00 from the session's OWN last bar — never the after-hours tape", () => {
+  const { p, OPEN, CLOSE, M } = focus05CloseRig();
+  assert.ok(p.getFocus(OPEN + 5 * M).today, "the stamp lands");
+  assert.equal(p.getFocus(OPEN + 5 * M).today.closedAt, 0, "nothing is closed at 09:35");
+  // Mid-session: the tick runs, and the close still does not exist. This is the whole point of the
+  // column — a dash here is the truth, and any number would be a fabrication.
+  p.focusTickNow(OPEN + 200 * M);
+  const mid = p.getFocus(OPEN + 200 * M).today;
+  assert.equal(mid.closedAt, 0, "the close does not fill mid-session");
+  for (const r of mid.rows) assert.equal(r.closePx, undefined, "…and no row carries a closePx yet");
+
+  p.focusTickNow(CLOSE + 2 * M);
+  const rec = p.getFocus(CLOSE + 2 * M).today;
+  assert.ok(rec.closedAt, "the fill lands once the session is over");
+  assert.equal(rec.closeNote, null, "a complete lane claims no shortfall");
+  for (const r of rec.rows) {
+    assert.ok(Math.abs(r.closePx - 138.9) < 1e-6, `the 15:59 print, not the 400 after-hours tape (got ${r.closePx})`);
+    assert.equal(r.closeCov.inWin, 390, "measured over the whole cash window");
+    assert.equal(r.closeCov.slopMin, 1, "one bar-width of slop on a complete lane");
+  }
+  // Frozen: a later tick, with the after-hours tape now much longer, must not restate it.
+  p.focusTickNow(CLOSE + 55 * M);
+  assert.ok(Math.abs(p.getFocus(CLOSE + 55 * M).today.rows[0].closePx - 138.9) < 1e-6,
+    "a filled close never moves again — geometry is frozen at the fill, not recomputed per tick");
+});
+
+test("focus -05: a lane short of the close HOLDS the fill, and the wait is bounded", () => {
+  const a = focus05CloseRig({ posted: 387 });          // writer stalled at 15:56
+  a.p.focusTickNow(a.CLOSE + 1 * a.M);
+  assert.equal(a.p.getFocus(a.CLOSE + a.M).today.closedAt, 0,
+    "a lane four minutes short of 16:00 does NOT close — that print is not the close");
+  // The bar lands inside the grace: the fill takes the real one.
+  a.lane.posted = 390;
+  a.p.focusTickNow(a.CLOSE + 2 * a.M);
+  const ok = a.p.getFocus(a.CLOSE + 2 * a.M).today;
+  assert.ok(ok.closedAt && ok.closeNote === null, "the wait pays off — a complete close, no disclosure needed");
+  assert.ok(Math.abs(ok.rows[0].closePx - 138.9) < 1e-6, "and it is the 15:59 print");
+
+  const b = focus05CloseRig({ posted: 387 });          // writer never recovers
+  b.p.focusTickNow(b.CLOSE + 1 * b.M);
+  assert.equal(b.p.getFocus(b.CLOSE + b.M).today.closedAt, 0, "held inside the grace");
+  b.p.focusTickNow(b.CLOSE + 6 * b.M);                 // past close +5m
+  const rec = b.p.getFocus(b.CLOSE + 6 * b.M).today;
+  assert.ok(rec.closedAt, "the wait is bounded — the record closes rather than dashing forever");
+  assert.match(rec.closeNote, /did not reach the close/, "…and states it instead of implying a 16:00 print");
+  assert.equal(rec.rows[0].closeCov.slopMin, 4, "the shortfall rides the row, per seat, forever");
+});
+
+test("focus -05: a seat with no bars dashes and does not hold the others hostage", () => {
+  const dark = [];
+  const { p, OPEN, CLOSE, M } = focus05CloseRig({ dark });
+  dark.push(p.getFocus(OPEN + 5 * M).today.rows[0].ticker);   // darken a seat that actually took one
+  p.focusTickNow(CLOSE + 1 * M);
+  const rec = p.getFocus(CLOSE + M).today;
+  assert.ok(rec.closedAt, "an absent lane is not a late one — it must not hold the fill open");
+  const dry = rec.rows.filter((r) => r.closePx == null);
+  assert.ok(dry.length >= 1 && dry.every((r) => r.closeCov.bars === 0),
+    "the dark seat carries an honest null with its coverage attached");
+  assert.ok(rec.rows.filter((r) => r.closePx != null).length >= 1, "…while every other seat closed normally");
+});
+
+test("focus -05: with the archive disabled the close is refused out loud, never guessed from the mark", () => {
+  const { p, CLOSE, M } = focus05CloseRig({ archive: false });
+  p.focusTickNow(CLOSE + 1 * M);
+  const rec = p.getFocus(CLOSE + M).today;
+  assert.ok(rec.closedAt, "the record still closes — the state machine does not stall on a disabled archive");
+  assert.match(rec.closeNote, /archive disabled/, "and says why every close is a dash");
+  for (const r of rec.rows) assert.equal(r.closePx, null, "not one price is invented from the live mark");
+});
+
+test("focus -05: sessionCloseStats is bounded by the window at BOTH ends", () => {
+  const { sessionCloseStats } = require("../src/compute");
+  const M = 60000, O = 1000000, C = O + 10 * M;
+  const bars = [];
+  for (let i = -5; i < 15; i++) bars.push([O + i * M, 10 + i, 11 + i, 9 + i, 10 + i, 100]);
+  const s = sessionCloseStats(bars, O, C);
+  assert.equal(s.closePx, 19, "the last bar INSIDE the window (t = close - 1m), not the tape beyond it");
+  assert.equal(s.openPx, 10, "the first bar inside it, not the pre-market ones before");
+  assert.equal(s.bars, 10, "exactly the ten in-window bars");
+  assert.equal(s.slopMs, M, "one bar of slop on a complete window");
+  // Unsorted input must not change the answer — the archive is not guaranteed ordered.
+  const shuffled = bars.slice().reverse();
+  assert.equal(sessionCloseStats(shuffled, O, C).closePx, 19, "order of the input does not decide the close");
+  assert.equal(sessionCloseStats([], O, C), null, "no bars -> null, never a zero");
+  assert.equal(sessionCloseStats(bars, C, O), null, "an inverted window is refused rather than guessed");
+  // A window whose last bar sits well short of the close reports the gap rather than hiding it.
+  const short = bars.filter((b) => b[0] < C - 4 * M);
+  assert.equal(sessionCloseStats(short, O, C).slopMs, 5 * M, "the slop is the evidence the close is not the close");
+});
+
+// ---- the two columns, executed ------------------------------------------------------------------
+function focColsApi() {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i > -1, name + " present in app.js");
+    let d = 0;
+    for (let k = app.indexOf("{", i); k < app.length; k++) {
+      if (app[k] === "{") d++; else if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); }
+    }
+    throw new Error("unbalanced " + name);
+  };
+  const i0 = app.indexOf("const FOC_COLS=[");
+  assert.ok(i0 > -1, "FOC_COLS present");
+  const i1 = app.indexOf("\n];", i0);
+  const cols = app.slice(i0, i1 + 3);
+  const src = grab("esc") + "\n" + grab("focPx") + "\n" + grab("focSgn") + "\n" + grab("focCls") + "\n"
+    + grab("focNa") + "\n" + grab("focDry") + "\n" + grab("focCol") + "\n" + grab("focMoveCol") + "\n" + cols;
+  return new Function("FOC", "focChips", "liveMark", "focPrefsSave", src
+    + "\n;return { FOC_COLS, focCol, focMoveCol };");
+}
+function focCols(FOC, saved) {
+  return focColsApi()(FOC, () => "", () => null, () => { if (saved) saved.n++; });
+}
+
+test("focus -05: the CLOSE column tells 'not yet' apart from 'closed, and this seat had nothing'", () => {
+  const FOC = { _day: { closedAt: 0 } };
+  const api = focCols(FOC);
+  const col = api.focCol("close");
+  assert.ok(col, "the CLOSE column exists");
+  const row = { ticker: "NBIS", prevClose: 268.18, h1: { openPx: 268.83 } };
+
+  // Mid-session: a pending cell, and NOT a dash — "the session has not closed" is a different
+  // statement from "no data", and collapsing them is the category error this column must avoid.
+  const pending = col.td(row);
+  assert.match(pending, /at close/, "before 16:00 the cell says the close is still ahead");
+  assert.ok(!/\u2014<\/span>/.test(pending), "…and does not render the na dash, which would mean something else");
+  assert.ok(!/268|241/.test(pending), "no price of any kind stands in for a close that does not exist");
+
+  // Closed, seat had no bars: now it IS a dash, and the dash carries its own reason.
+  FOC._day = { closedAt: 1 };
+  const dark = col.td({ ...row, closePx: null, closeCov: { bars: 0, inWin: 0, slopMin: null } });
+  assert.match(dark, /—/, "a closed session with no bars is an honest dash");
+  assert.match(dark, /landed nothing/, "…and says which of the two silences this was");
+
+  // Closed with a print: the number, plus the move off THIS session's open.
+  const done = col.td({ ...row, closePx: 237.60, closeCov: { bars: 390, inWin: 390, slopMin: 1 } });
+  assert.match(done, /237\.60/, "the close price renders");
+  assert.match(done, /-11\.6%/, "with the move from the 268.83 open, signed");
+  assert.match(done, /neg/, "and coloured by that move");
+  assert.ok(!/lane did not reach/.test(done), "a complete lane makes no shortfall claim");
+
+  // A short lane still shows its number, but discloses the gap and dims it.
+  const short = col.td({ ...row, closePx: 237.60, closeCov: { bars: 386, inWin: 386, slopMin: 4 } });
+  assert.match(short, /4m before 16:00/, "a close read off a short lane says so on the cell");
+  assert.match(short, /class="dim"/, "…and is visually demoted rather than presented as the 16:00 print");
+});
+
+test("focus -05: the OPEN column is the 09:30 archive print, and sorts on it", () => {
+  const api = focCols({ _day: { closedAt: 0 } });
+  const col = api.focCol("open");
+  assert.ok(col && col.h1, "OPEN rides the h1 record, so it forms and freezes with the rest");
+  const row = { ticker: "NBIS", prevClose: 268.18, h1: { openPx: 268.83, hi: 274.91, lo: 262.17 } };
+  const cell = col.td(row);
+  assert.match(cell, /268\.83/, "the opening print renders");
+  assert.match(cell, /\+0\.2% from the 268\.18 prev close/, "hover carries the realised gap");
+  assert.equal(col.sv(row), 268.83, "sortable on the open itself");
+  assert.equal(col.sv({ ticker: "X" }), null, "no h1 -> no sort value, never a zero");
+  assert.match(col.td({ ticker: "X" }), /—/, "…and no h1 renders the dash with its coverage reason");
+  // Once the close exists the open's tooltip carries the day's whole move, from one measurement.
+  assert.match(col.td({ ...row, closePx: 237.60 }), /closed -11\.6% off it/, "the day's move, off the open");
+});
+
+test("focus -05: focMoveCol is the ONE reorder, shared by the mouse and touch paths", () => {
+  const saved = { n: 0 };
+  const FOC = { order: ["ticker", "why", "px", "open", "close", "gap"], _day: null };
+  const api = focCols(FOC, saved);
+  assert.ok(api.focMoveCol("close", "px", true), "a column moves before its target");
+  assert.deepEqual(FOC.order, ["ticker", "why", "close", "px", "open", "gap"]);
+  assert.equal(saved.n, 1, "…and the new order is persisted, once");
+  assert.ok(api.focMoveCol("close", "gap", false), "and after it, on the other side of the drop");
+  assert.deepEqual(FOC.order, ["ticker", "why", "px", "open", "gap", "close"]);
+  // The refusals. Each of these was a way to corrupt the order or lose a column entirely.
+  assert.equal(api.focMoveCol("px", "px", true), false, "a column cannot be dropped on itself");
+  assert.equal(api.focMoveCol("px", "ticker", true), false, "the locked TICKER column is not a drop target");
+  assert.equal(api.focMoveCol("px", "nope", true), false, "an unknown target moves nothing");
+  assert.equal(api.focMoveCol(null, "px", true), false, "no drag key, no move");
+  assert.deepEqual(FOC.order, ["ticker", "why", "px", "open", "gap", "close"], "every refusal left the order intact");
+  assert.equal(saved.n, 2, "and no refusal wrote to storage");
+});
+
+test("focus -05: manifest — close fill wired into the tick, touch reorder wired into the header", () => {
+  const fs = require("fs"), path = require("path");
+  const rd = (f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+  const app = rd("public/app.js"), pol = rd("src/poller.js"), css = rd("public/styles.css");
+  for (const pin of ["function closeFocus(", "const FOCUS_CLOSE_GRACE", "const FOCUS_CLOSE_SLOP",
+    "if (held && !focusState.closedAt && now >= sess.close) closeFocus(now);",
+    "closedAt: 0, closeNote: null"])
+    assert.ok(pol.includes(pin), "poller pin: " + pin);
+  assert.ok(pol.includes("store.readCandles1m(p.coin, st.open - 1, st.close + 1)"),
+    "the close read is bounded by the record's own session, not by now");
+  for (const pin of ["function focMoveCol(", "function focWireTouchDrag(", "const FOC_HOLD_MS",
+    "th.addEventListener('pointerdown'", "th.setPointerCapture(pid)", "{k:'open', label:'OPEN'", "{k:'close', label:'CLOSE'"])
+    assert.ok(app.includes(pin), "client pin: " + pin);
+  assert.equal((app.match(/focMoveCol\(/g) || []).length, 3,
+    "one definition of focMoveCol plus exactly two call sites: the mouse drop and the touch drop");
+  assert.ok(!/FOC\.order\.splice\(/.test(app),
+    "no caller splices the column order directly — every reorder goes through the one validated mutation");
+  assert.ok(app.includes("if(!c||c.nosort||_focDragK) return;"), "a drag in flight is never also a sort");
+  assert.ok(css.includes(".foctbl th[data-fock]") && css.includes("touch-action:pan-y"),
+    "the header opts out of the long-press callout while the board stays scrollable");
 });
