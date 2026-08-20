@@ -14,7 +14,7 @@ const {
   EV_META, playbook, marketSessions, summarizeEvents, shouldPromote, stopTouched, bracketTouch, volumeProfile, levelMap, detectMAPull, detectReclaim, detectFailBrk, detectPead, detectSweep, detectSwingPull, detectBaseBreak, detectEmaBreak, detectEmaRetest, regime200, nearestLevelBelow, structVoid, detectLvlTouch, vpTouchNodes, detectVpTouch, detectLevels, levelOutcomes, levelStudy, sessionRecords, anatomyEnrich, mondayStats, nakedStats, anatomyPool, detectWickFill, detectRoundFront, candleEvents, candlePool, pivotPool, anatomyTickerSummary,
 } = require("./compute");
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
-const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark,
+const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, sessionCloseStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark,
   focusGate, focusLimits, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N } = require("./compute");
 const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
@@ -11652,7 +11652,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     const pvDiff = pvRef ? { pvAt: pvRef.at, ...focusDiff(pvRef.rows.slice(0, FOCUS_CAP).map((x) => x.ticker), sel.picks.map((x) => x.ticker)) } : null;
     focusState = { day: etDayStr(now), utcDay: focusUtcDayStr(now), open: sess.open, close: sess.close, prevCloseT,
       frozenAt: now, late: now - sess.open > 90 * 1000 ? 1 : 0,   // boot-stamped after the open: DISCLOSED, same honesty as episode boot stamps
-      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, pvDiff,
+      rows: sel.picks, cuts: sel.cuts, filledAt: 0, fillNote: null, closedAt: 0, closeNote: null, pvDiff,
       // The wall that produced this list, frozen with it. Never read from focusLim at render time:
       // that would let today's panel edit silently restate what yesterday's selection was made of.
       limits: g.limits, scanned: g.scanned, cleared: g.pass.length, below: g.below, belowN: g.belowN };
@@ -11736,6 +11736,45 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     log(`FOCUS +1h fill (1m base): ${st.rows.filter((p) => p.h1).length}/${st.rows.length} seat(s) carry a first-hour record`
       + (dry.length ? ` \u2014 NO BARS for ${dry.join(", ")}` : "") + (st.fillNote ? " \u2014 " + st.fillNote : ""));
   }
+  // THE CLOSE FILL (2026.08.19-05). Same shape as the +1h fill above, and for the same reason: the
+  // 1m archive writer lands a beat behind the clock, so firing at exactly 16:00 would freeze a
+  // record whose last bar is 15:57 and call it the close. A seat whose lane is short of the final
+  // minutes HOLDS the fill and the 30s tick retries; a seat with no bars at all does not hold it,
+  // because an absent lane is not a late one and waiting cannot fix it. On expiry the record closes
+  // regardless and states how short it came.
+  // The window is bounded at both ends by the record's OWN session, never by "the last bar before
+  // now" — a read taken at 18:00 must return the 16:00 print, not the after-hours tape.
+  // If the process is down from the close through the 00:00 UTC retire, the fill never runs and the
+  // column dashes forever. That is the correct outcome: a close is a measurement of a session, and
+  // a session nobody measured has no close. It is never back-filled from a later or coarser read.
+  const FOCUS_CLOSE_GRACE = 5 * 60 * 1000;
+  const FOCUS_CLOSE_SLOP = 2 * 60 * 1000;   // a complete 1m lane leaves exactly one bar-width of slop
+  function closeFocus(now) {
+    const st = focusState;
+    if (!st || st.closedAt || !Number.isFinite(st.close)) return;
+    const canRead = store.candlesEnabled && store.candlesEnabled();
+    const reads = [];
+    for (const p of st.rows) {
+      const bars = canRead && store.readCandles1m ? store.readCandles1m(p.coin, st.open - 1, st.close + 1) : [];
+      reads.push({ p, n: bars.length, c: sessionCloseStats(bars, st.open, st.close) });
+    }
+    const short = reads.filter((r) => r.c && r.c.slopMs > FOCUS_CLOSE_SLOP);
+    if (short.length && now < st.close + FOCUS_CLOSE_GRACE) return;   // hold; the tick retries
+    for (const r of reads) {
+      r.p.closePx = r.c ? r.c.closePx : null;    // null = no session bars for THIS name: an honest dash
+      // Coverage frozen with the row, exactly as h1cov is. `slopMin` is the gap between the last
+      // bar the archive actually holds and the session close — the number that separates "this is
+      // the 16:00 print" from "this is the last thing the lane managed to write".
+      r.p.closeCov = { bars: r.n, inWin: r.c ? r.c.bars : 0, slopMin: r.c ? Math.round(r.c.slopMs / 60000) : null };
+    }
+    st.closedAt = now;
+    st.closeNote = !canRead ? "candle archive disabled \u2014 the close column cannot fill"
+      : (short.length ? `closed at the +${Math.round(FOCUS_CLOSE_GRACE / 60000)}m grace with ${short.length} seat(s) whose last 1m bar sits more than ${Math.round(FOCUS_CLOSE_SLOP / 60000)}m before 16:00 \u2014 the lane did not reach the close` : null);
+    focusPersist();
+    const dry = st.rows.filter((p) => p.closePx == null).map((p) => p.ticker);
+    log(`FOCUS close fill: ${st.rows.filter((p) => p.closePx != null).length}/${st.rows.length} seat(s) carry a session close`
+      + (dry.length ? ` \u2014 NO BARS for ${dry.join(", ")}` : "") + (st.closeNote ? " \u2014 " + st.closeNote : ""));
+  }
   // The day's list dies at 00:00 UTC (2026.08.18-02). Deliberately NOT the ET boundary the rest of
   // this feature runs on: the stamp, the preview and the freeze are all cash-session events, but
   // the LIST'S SHELF LIFE is a reading rhythm, and the operator reads this board on UTC days. That
@@ -11799,6 +11838,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     if (held && focusPv) focusPv = null;   // belt + braces: a stamp always retires the pool
     if (held && !focusState.filledAt && now >= sess.open) buildFocusForming(now);
     if (held && !focusState.filledAt && now >= sess.open + HOUR) fillFocus(now);
+    if (held && !focusState.closedAt && now >= sess.close) closeFocus(now);
   }
   // `nowArg`: the same suite-only contract as getWhale. This payload's whole state machine is a
   // function of the clock — which ET session day it is, whether the open has passed, whether the

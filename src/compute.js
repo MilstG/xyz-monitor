@@ -7445,7 +7445,30 @@ function firstHourStats(bars, openMs, endMs, minBars) {
     bars: inw.length };
 }
 
-// Loudness: an ORDERING for a discretionary watchlist, deliberately simple and fully disclosed.
+// The session's CLOSING print (build 2026.08.19-05). Deliberately not a variant of the function
+// above: the first hour is a geometry (hi/lo/vwap over a window), while the close is a single bar's
+// close plus the evidence that the bar really is the session's last one. `slopMs` is the distance
+// from the last in-window bar's stamp to the close — 60000 on a complete 1m lane, larger when the
+// archive is short of the final minutes — and it rides the record so a close read off an incomplete
+// tape can never be mistaken later for the real 16:00 print. openPx is restated here from the same
+// window so the day's move is one subtraction against one measurement, not a join across two.
+function sessionCloseStats(bars, openMs, closeMs) {
+  if (!Array.isArray(bars) || !Number.isFinite(openMs) || !Number.isFinite(closeMs) || closeMs <= openMs) return null;
+  const inw = [];
+  for (const k of bars) {
+    const t = +k[0];
+    if (Number.isFinite(t) && t >= openMs && t < closeMs) inw.push(k);
+  }
+  if (!inw.length) return null;
+  inw.sort((a, b) => a[0] - b[0]);
+  const last = inw[inw.length - 1], c = +last[4], o = +inw[0][1];
+  if (!Number.isFinite(c) || !(c > 0)) return null;
+  return { closePx: +c.toPrecision(8),
+    openPx: Number.isFinite(o) && o > 0 ? +o.toPrecision(8) : null,
+    lastT: +last[0], slopMs: closeMs - +last[0], bars: inw.length };
+}
+
+
 // |gapσ| capped at 4, RVOL's excess over 1× at 0.8/unit capped at 4 units, |ΔOI| at 1 per 15%
 // capped at 2, a scheduled earnings print is worth a flat 1.5, headlines 0.25 each capped at 3.
 // TG lane (-02): a curated-Telegram-channel item naming the ticker in the last 4h is the user's
@@ -7574,6 +7597,7 @@ module.exports.focusGate = focusGate;
 module.exports.focusGapSigma = focusGapSigma;
 module.exports.focusLevelDist = focusLevelDist;
 module.exports.firstHourStats = firstHourStats;
+module.exports.sessionCloseStats = sessionCloseStats;
 module.exports.focusScore = focusScore;
 module.exports.FOCUS_PREVIEW_N = FOCUS_PREVIEW_N;
 module.exports.focusPreview = focusPreview;
