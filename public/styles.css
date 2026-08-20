@@ -1402,6 +1402,11 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .foctbl th,.foctbl td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-family:var(--mono);font-size:12.5px}
 .foctbl th{color:var(--muted);font-size:10px;letter-spacing:1px;font-weight:600;cursor:pointer;user-select:none;background:var(--panel2)}
 .foctbl th:hover{color:var(--text)}
+/* touch reorder (2026.08.19-05): the long-press must reach the pointer handlers, so the browser's
+   own press behaviours — text callout, selection, native drag — are off on the header cells. The
+   pan suppression is per-pointer in JS, not here: killing touch-action outright would make the
+   board unscrollable for anyone who happened to start a swipe on the header row. */
+.foctbl th[data-fock]{-webkit-touch-callout:none;-webkit-user-select:none;touch-action:pan-y}
 .foctbl th.focdrag{opacity:.35}
 .foctbl th.focdrop-l{box-shadow:inset 2px 0 0 var(--accent)}
 .foctbl th.focdrop-r{box-shadow:inset -2px 0 0 var(--accent)}

@@ -10312,7 +10312,7 @@ function focChips(p){
   return `<span class="focchips">${c.map(x=>`<span class="focchip ${x[0]}" data-tip="${esc(x[2])}">${x[1]}</span>`).join('')}</span>`;
 }
 const FOC_COLS=[
-  {k:'ticker', label:'TICKER', left:1, lock:1, tip:'The six seats, loudest first by default (the disclosed loudness score is the tiebreak ordering, not a signal). ▦ opens today\u2019s session chart. Drag any header to rearrange; ⚙ to show/hide. Foreign-home names (KRX/TSE/HKEX) never appear here — their gap anchors to the wrong exchange for a 09:30 ET stamp.',
+  {k:'ticker', label:'TICKER', left:1, lock:1, tip:'The six seats, loudest first by default (the disclosed loudness score is the tiebreak ordering, not a signal). ▦ opens today\u2019s session chart. Drag any header to rearrange (press and hold on touch); ⚙ to show/hide. Foreign-home names (KRX/TSE/HKEX) never appear here — their gap anchors to the wrong exchange for a 09:30 ET stamp.',
    td:(p)=>`<td class="l focticker">${esc(p.ticker)}<button type="button" class="focchbtn" data-foct="${esc(p.ticker)}" data-tip="Session chart — 72h of 5m/15m/1h/4h candles from the local archive, off-session time dimmed, chart-series VWAP, and the frozen 1H HI/LO drawn verbatim">▦</button></td>`, sv:p=>p.ticker},
   {k:'why', label:'WHY', left:1, nosort:1, tip:'Why this name earned a seat — every chip restates a stamped number (hover for it). Chips appear only past their own noise floor; a quiet field is simply absent.',
    td:(p)=>`<td class="l">${focChips(p)}</td>`},
@@ -10336,6 +10336,28 @@ const FOC_COLS=[
      if(lv==null) parts.push('live mark unavailable \u2014 showing the last archive print (stale)');
      return `<td class="${focCls(dPc)}${lv==null?' dim':''}" data-tip="${esc(parts.join(' \u00b7 ')||'live price')}">${focPx(px)}</td>`;
    }, sv:(p)=>{ const lv=liveMark(p.coin); return lv!=null?lv:(p.h1&&p.h1.lastPx!=null?p.h1.lastPx:null); }},
+  {k:'open', label:'OPEN', h1:1, tip:'The session\u2019s OPENING print \u2014 the first 1m bar’s open at 09:30 ET, from the archive, not the stamp. Hover for the move off the previous close (the gap, realised) and where the day went from there. Frozen with the row at +1h.',
+   td:(p)=>{ const h=p.h1; if(!h) return `<td>${focNa(focDry(p))}</td>`;
+     if(h.openPx==null) return `<td>${focNa('the first-hour window carried no opening print')}</td>`;
+     const g=p.prevClose>0?((h.openPx/p.prevClose-1)*100):null;
+     const parts=[`09:30 print ${focPx(h.openPx)}`];
+     if(g!=null) parts.push(`${focSgn(g)}% from the ${focPx(p.prevClose)} prev close`);
+     if(p.closePx!=null) parts.push(`closed ${focSgn((p.closePx/h.openPx-1)*100)}% off it`);
+     return `<td data-tip="${esc(parts.join(' \u00b7 '))}">${focPx(h.openPx)}</td>`; }, sv:p=>p.h1?p.h1.openPx:null},
+  {k:'close', label:'CLOSE', tip:'The session\u2019s CLOSING print \u2014 the last 1m bar inside the cash window, read once at 16:00 ET and frozen. Dashes all day because it does not exist yet: a close is a measurement of a finished session, never the live price standing in for one (that lives in PX). The inline % is the move from THIS session’s open.',
+   td:(p)=>{ const day=FOC._day;
+     if(p.closePx==null){
+       if(day&&day.closedAt){ const cv=p.closeCov;
+         return `<td class="dry">${focNa(cv&&cv.bars===0?`no 1m bars were captured for ${p.ticker} inside the cash window \u2014 the seat lane landed nothing, so no close is claimed`:'session bars exist but carried no usable closing print')}</td>`; }
+       return `<td class="focpend" data-tip="Fills once at the 16:00 ET close from the 1m archive, then frozen with the row. The live price is the PX column \u2014 it is not a close and is never shown as one.">at close\u2026</td>`; }
+     const h=p.h1, d=h&&h.openPx>0?((p.closePx/h.openPx-1)*100):null;
+     const cv=p.closeCov, slop=cv&&cv.slopMin!=null?cv.slopMin:null;
+     const parts=[`16:00 print ${focPx(p.closePx)}`];
+     if(d!=null) parts.push(`${focSgn(d)}% from the ${focPx(h.openPx)} open`);
+     if(p.prevClose>0) parts.push(`${focSgn((p.closePx/p.prevClose-1)*100)}% from the prev close`);
+     if(slop!=null&&slop>2) parts.push(`the archive\u2019s last bar sits ${slop}m before 16:00 \u2014 the lane did not reach the close`);
+     return `<td class="${slop!=null&&slop>2?'dim':''}" data-tip="${esc(parts.join(' \u00b7 '))}">${focPx(p.closePx)}${d!=null?` <span class="${focCls(d)}">(${focSgn(d)}%)</span>`:''}</td>`; },
+   sv:p=>p.closePx!=null&&p.h1&&p.h1.openPx>0?((p.closePx/p.h1.openPx-1)*100):null},
   {k:'gap', label:'GAP', tip:'Overnight gap, raw % — previous session\u2019s TRUE close (half days close 13:00 ET; the calendar engine carries that) to the price at the stamp. The dim σ alongside is the same move in units of this name\u2019s OWN overnight-gap distribution: ±0.7σ is noise, ±2σ is an event regardless of the raw %.',
    td:(p)=>{ if(p.gapPct==null) return `<td>${focNa('no prior-close anchor in the spine')}</td>`;
      return `<td class="${focCls(p.gapPct)}" data-tip="${esc(`prev close ${focPx(p.prevClose)} → ${focPx(p.px)} at the stamp${p.gapSigma!=null?` · ${focSgn(p.gapSigma)}σ of its own gaps`:' · σ unavailable (fewer than 10 overnight samples)'}`)}">${focSgn(p.gapPct)}%${p.gapSigma!=null?`<span class="focsig">${focSgn(p.gapSigma)}σ</span>`:''}</td>`; }, sv:p=>p.gapPct},
@@ -10473,6 +10495,11 @@ function renderFocus(){
     :'No focus list stored yet. The first stamp lands at the next cash open.'}</div>`;
     w.innerHTML=html; focWireBar(); return; }
   const filled=!!day.filledAt;
+  // The record being rendered, reachable from the column builders. The CLOSE column's dash has two
+  // different meanings — "the session has not closed yet" and "it closed and this seat had no bars"
+  // — and only the day-level record can tell them apart. A column that cannot distinguish those is
+  // the same category error the h1 coverage work removed.
+  FOC._day=day;
   const cols=focActiveCols();
   let rows=[...day.rows];
   const sc=FOC.sortK&&focCol(FOC.sortK);
@@ -10530,11 +10557,64 @@ function focWireBar(){
     bf.onclick=t; bf.onkeydown=(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); t(); } }; }
 }
 let _focDragK=null;
+// ONE mutation for both input paths (2026.08.19-05). The mouse path and the touch path differ only
+// in how they decide "this column, dropped on that side"; the reorder itself must not be written
+// twice, or the two ways of moving a column drift apart and only one of them gets tested.
+function focMoveCol(dragK,targetK,before){
+  if(!dragK||!targetK||dragK===targetK) return false;
+  const t=focCol(targetK);
+  if(t&&t.lock) return false;               // a locked column is not a drop target either
+  // Validate FIRST, mutate second. Removing the dragged key and only then discovering the target
+  // is unknown drops a column off the board entirely — the order is the user's saved preference,
+  // and a refused gesture must leave it exactly as it was.
+  const next=FOC.order.filter(x=>x!==dragK);
+  if(next.length===FOC.order.length) return false;        // the dragged column is not in the order
+  const i=next.indexOf(targetK);
+  if(i<0) return false;
+  next.splice(before?i:i+1,0,dragK);
+  FOC.order=next; focPrefsSave(); return true;
+}
+// TOUCH REORDER (2026.08.19-05). HTML5 drag events never fire on touch, so on a phone the headers
+// were simply immovable — the ⚙ menu could hide a column but nothing could move one. This is the
+// same gesture expressed in pointer events: press and hold, then drag. The hold matters — a short
+// press is a SORT, and stealing every tap for a drag would break the primary interaction to add a
+// secondary one. Once held, the scroll is suppressed for that pointer only, and releasing outside
+// any header cancels rather than dropping somewhere arbitrary.
+const FOC_HOLD_MS=380, FOC_SLOP=10;
+function focWireTouchDrag(th,k,c){
+  if(c&&c.lock) return;
+  let hold=null,armed=false,x0=0,y0=0,pid=null;
+  const hdrAt=(x,y)=>{ const e=document.elementFromPoint(x,y); return e?e.closest('th[data-fock]'):null; };
+  const clear=()=>{ if(hold) clearTimeout(hold); hold=null;
+    th.closest('table')?.querySelectorAll('th[data-fock]').forEach(o=>o.classList.remove('focdrop-l','focdrop-r'));
+    th.classList.remove('focdrag'); };
+  const end=(drop,x)=>{
+    const was=armed; armed=false; _focDragK=null;
+    if(drop&&was){ const tgt=hdrAt(x,th.getBoundingClientRect().top+2);
+      if(tgt&&tgt!==th){ const r=tgt.getBoundingClientRect();
+        if(focMoveCol(k,tgt.dataset.fock,x<r.left+r.width/2)){ clear(); renderFocus(); return; } } }
+    clear(); if(was) renderFocus(); };
+  th.addEventListener('pointerdown',e=>{ if(e.pointerType==='mouse') return;   // the mouse keeps the native path
+    pid=e.pointerId; x0=e.clientX; y0=e.clientY; armed=false;
+    hold=setTimeout(()=>{ armed=true; _focDragK=k; th.classList.add('focdrag');
+      try{ th.setPointerCapture(pid); }catch(_){}
+      if(navigator.vibrate) try{ navigator.vibrate(8); }catch(_){}
+    },FOC_HOLD_MS); });
+  th.addEventListener('pointermove',e=>{
+    if(!armed){ if(hold&&(Math.abs(e.clientX-x0)>FOC_SLOP||Math.abs(e.clientY-y0)>FOC_SLOP)){ clearTimeout(hold); hold=null; } return; }
+    e.preventDefault();                       // held: this pointer drags the column, it does not scroll
+    const tgt=hdrAt(e.clientX,th.getBoundingClientRect().top+2);
+    th.closest('table')?.querySelectorAll('th[data-fock]').forEach(o=>o.classList.remove('focdrop-l','focdrop-r'));
+    if(tgt&&tgt!==th){ const r=tgt.getBoundingClientRect(), left=e.clientX<r.left+r.width/2;
+      tgt.classList.toggle('focdrop-l',left); tgt.classList.toggle('focdrop-r',!left); } });
+  th.addEventListener('pointerup',e=>{ if(e.pointerType==='mouse') return; end(true,e.clientX); });
+  th.addEventListener('pointercancel',e=>{ if(e.pointerType==='mouse') return; end(false,0); });
+}
 function focWireTable(){
   const w=el('focuswrap'); if(!w) return;
   w.querySelectorAll('th[data-fock]').forEach(th=>{
     const k=th.dataset.fock, c=focCol(k);
-    th.addEventListener('click',()=>{ if(!c||c.nosort) return;
+    th.addEventListener('click',()=>{ if(!c||c.nosort||_focDragK) return;   // a drag is not a sort
       if(FOC.sortK===k) FOC.sortDir*=-1; else { FOC.sortK=k; FOC.sortDir=-1; } renderFocus(); });
     th.addEventListener('dragstart',e=>{ _focDragK=k; th.classList.add('focdrag'); e.dataTransfer.effectAllowed='move'; });
     th.addEventListener('dragend',()=>{ _focDragK=null; renderFocus(); });
@@ -10543,11 +10623,10 @@ function focWireTable(){
       th.classList.toggle('focdrop-l',left); th.classList.toggle('focdrop-r',!left); });
     th.addEventListener('dragleave',()=>th.classList.remove('focdrop-l','focdrop-r'));
     th.addEventListener('drop',e=>{ e.preventDefault(); if(!_focDragK||_focDragK===k) return;
-      const r=th.getBoundingClientRect(), before=e.clientX<r.left+r.width/2;
-      FOC.order=FOC.order.filter(x=>x!==_focDragK);
-      const i=FOC.order.indexOf(k);
-      FOC.order.splice(before?i:i+1,0,_focDragK);
-      _focDragK=null; focPrefsSave(); renderFocus(); });
+      const r=th.getBoundingClientRect();
+      focMoveCol(_focDragK,k,e.clientX<r.left+r.width/2);
+      _focDragK=null; renderFocus(); });
+    focWireTouchDrag(th,k,c);
   });
   w.querySelectorAll('.focchbtn').forEach(b=>b.addEventListener('click',e=>{ e.stopPropagation(); focChartOpen(b.dataset.foct); }));
 }
