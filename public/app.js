@@ -10349,6 +10349,12 @@ const FOC_COLS=[
      if(p.closePx==null){
        if(day&&day.closedAt){ const cv=p.closeCov;
          return `<td class="dry">${focNa(cv&&cv.bars===0?`no 1m bars were captured for ${p.ticker} inside the cash window \u2014 the seat lane landed nothing, so no close is claimed`:'session bars exist but carried no usable closing print')}</td>`; }
+       // The session is OVER and no fill ever landed. "at close…" would be a promise the record
+       // cannot keep, so it becomes a dash that says which silence this is. The fill is attempted
+       // on every tick while the record sits in the prior slot, so this state normally lasts one
+       // poll after a cold boot — it persists only once the record has aged out of that slot.
+       if(day&&day.close&&Date.now()>=day.close)
+         return `<td class="dry">${focNa('this session closed without its close ever being measured \u2014 no process was reading the archive while the record was reachable, and it is not reconstructed from a later or coarser print')}</td>`;
        return `<td class="focpend" data-tip="Fills once at the 16:00 ET close from the 1m archive, then frozen with the row. The live price is the PX column \u2014 it is not a close and is never shown as one.">at close\u2026</td>`; }
      const h=p.h1, d=h&&h.openPx>0?((p.closePx/h.openPx-1)*100):null;
      const cv=p.closeCov, slop=cv&&cv.slopMin!=null?cv.slopMin:null;
@@ -10356,6 +10362,7 @@ const FOC_COLS=[
      if(d!=null) parts.push(`${focSgn(d)}% from the ${focPx(h.openPx)} open`);
      if(p.prevClose>0) parts.push(`${focSgn((p.closePx/p.prevClose-1)*100)}% from the prev close`);
      if(slop!=null&&slop>2) parts.push(`the archive\u2019s last bar sits ${slop}m before 16:00 \u2014 the lane did not reach the close`);
+     if(day&&day.closeLate) parts.push(`read ${day.closeLate}m after the close \u2014 the same bounded window, taken late`);
      return `<td class="${slop!=null&&slop>2?'dim':''}" data-tip="${esc(parts.join(' \u00b7 '))}">${focPx(p.closePx)}${d!=null?` <span class="${focCls(d)}">(${focSgn(d)}%)</span>`:''}</td>`; },
    sv:p=>p.closePx!=null&&p.h1&&p.h1.openPx>0?((p.closePx/p.h1.openPx-1)*100):null},
   {k:'gap', label:'GAP', tip:'Overnight gap, raw % — previous session\u2019s TRUE close (half days close 13:00 ET; the calendar engine carries that) to the price at the stamp. The dim σ alongside is the same move in units of this name\u2019s OWN overnight-gap distribution: ±0.7σ is noise, ±2σ is an event regardless of the raw %.',
