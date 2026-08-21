@@ -5399,6 +5399,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // parser reads headers by NAME, tries two URL naming patterns, and fails with the exact
   // reason in ops; the first real ingest is the true verification.
   const T13F_TOP_CAP = t13fCapOpt || 500;        // option C: top-N per cusip stored; aggregates stay exact over ALL holders
+  const T13F_TOP_SHOW = 20;                     // rows the TOP HOLDERS panel renders (the stored cap above is the deeper index the Δ QoQ leg reads)
   const T13F_URL = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/";
   let t13fBusy = false, t13fProgress = null;
   // What the SEC actually publishes. A 13F data set is NOT a calendar quarter — it is the window in
@@ -5740,7 +5741,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (qs.length && isCusip) {
           const a = store.t13fAgg(qs[0], QU);
           if (a) {
-            const rows3 = store.t13fTop(qs[0], QU, 10);
+            const rows3 = store.t13fTop(qs[0], QU, T13F_TOP_SHOW);
             const prevQ = qs[1] || null;
             const watchByCik = new Map(whaleState.watch.map((w) => [+w.cik, w.key]));
             let anyPrev = false;
@@ -5784,7 +5785,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         let best = null;
         for (const cu of matched) { const a = store.t13fAgg(qs[0], cu); if (a && (!best || a.totVal > best.a.totVal)) best = { cu, a }; }
         if (best) {
-          const rows3 = store.t13fTop(qs[0], best.cu, 10);
+          const rows3 = store.t13fTop(qs[0], best.cu, T13F_TOP_SHOW);
           const prevQ = qs[1] || null;
           const watchByCik = new Map(whaleState.watch.map((w) => [+w.cik, w.key]));
           let anyPrev = false;
