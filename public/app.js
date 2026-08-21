@@ -143,6 +143,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   homeMkts:null, homeState:null,   // home-session defs + live per-market state — server-computed, client renders only
   dimOff:(()=>{try{return localStorage.getItem('xyz-dimoff')==='1';}catch(_){return false;}})(),   // variant A: dim foreign-home rows while their exchange sleeps
   report:{ coin:null, data:null, list:null, gen:false, tick:null, tf:'1d' },   // AI analyst report tab
+  housing:null, housingWin:'5y', liq:null, liqWin:'5y',   // Housing tab: the /api/housing board and the chart window
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
   analytics:{ data:null, err:null, ts:0, regime:{ sel:'all' }, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
@@ -376,6 +377,8 @@ function maybePullSidecars(){
   { const vis=el('view-signals')&&!el('view-signals').hidden;
     if(Date.now()-_sigLast > (vis?60*1000:5*60*1000)) loadSignals(); }
   if(Date.now()-_earnLast > 10*60*1000) loadEarnings();   // 6h server refresh — 10 min client pull is already generous
+  if(el('view-housing')&&!el('view-housing').hidden&&Date.now()-_hsgLast > 15*60*1000) loadHousing();   // 6h server refresh; only pulled while the tab is open
+  if(el('view-liquidity')&&!el('view-liquidity').hidden&&Date.now()-_liqLast > 15*60*1000) loadLiquidity();
   renderMacroStrip();   // cheap re-derive so the strip flips at 8:30 / 14:00 ET between pulls
   if(Date.now()-_newsLast > 3*60*1000) loadNews();   // rotation lands new names every minute server-side
 }
@@ -3567,7 +3570,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -5690,6 +5693,8 @@ function showView(v){
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
   setHidden('view-admin', v!=='admin');
+  setHidden('view-housing', v!=='housing');
+  setHidden('view-liquidity', v!=='liquidity');
   if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
   if(v==='funds'){ if(el('view-funds')) openFunds(); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
@@ -5704,6 +5709,8 @@ function showView(v){
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
   if(v==='sectors') renderSectors();
+  if(v==='housing'){ if(el('view-housing')) openHousing(); else { showView('markets'); return; } }
+  if(v==='liquidity'){ if(el('view-liquidity')) openLiquidity(); else { showView('markets'); return; } }
   if(!state.detail) setHash(v==='markets'?'':v);
 }
 
@@ -6974,6 +6981,274 @@ function earnBadge(r){
   return `<i class="eb ${p.diff===0?'eb0':'eb1'}" title="Earnings ${p.diff===0?'TODAY':'tomorrow'} \u00b7 ${earnSessLbl(p.e.s)}${eps} \u00b7 ${p.e.d} (ET calendar day)">E</i>`;
 }
 function openEarnings(){ renderEarnings(); if(Date.now()-_earnLast>60*1000) loadEarnings(); }
+
+// ---- Liquidity tab (build 2026.08.21-04) ----------------------------------------------------
+// Fed net liquidity board off /api/liquidity. Same contract as Housing: paint from cache, refetch
+// when stale, window client-side, every chart on the shared crosshair.
+let _liqLast=0;
+async function loadLiquidity(){
+  _liqLast=Date.now();
+  try{ const d=await fetchJSON('/api/liquidity');
+    if(d&&d.levels){ state.liq=d; if(el('view-liquidity')&&!el('view-liquidity').hidden) renderLiquidity(); }
+  }catch(_){}
+}
+function openLiquidity(){ renderLiquidity(); if(Date.now()-_liqLast>60*1000) loadLiquidity(); }
+function liqB(v){ if(v==null||!isFinite(v)) return '—'; const a=Math.abs(v); return (v<0?'−':'')+(a>=1000?'$'+(a/1000).toFixed(2)+'T':a>=10?'$'+a.toFixed(0)+'B':'$'+a.toFixed(1)+'B'); }
+function liqSigned(v,unit){ if(v==null||!isFinite(v)) return '<span class="sec">—</span>'; const c=v>0?'pos':v<0?'neg':'sec'; return `<span class="${c}">${v>0?'+':v<0?'−':''}${unit==='bp'?Math.abs(v).toFixed(0)+'bp':liqB(Math.abs(v))}</span>`; }
+// categorical signed bars (YTD by component); items = [{label, effect, delta, net?}]
+function liqBarsSvg(items){
+  const W=560,H=220,pl=48,pr=12,pt=14,pb=34;
+  if(!items||!items.length) return '<div class="msg sec" style="padding:30px 0">no YTD data</div>';
+  let lo=0,hi=0; for(const it of items){ lo=Math.min(lo,it.effect); hi=Math.max(hi,it.effect); }
+  const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
+  const ticks=lcTicks(lo,hi,4), n=items.length, bw=(W-pl-pr)/n;
+  const X=i=>pl+bw*(i+0.5), Y=v=>pt+(H-pt-pb)*(1-(v-lo)/(hi-lo));
+  let s=lcGrid(pl,W-pr,ticks,Y,v=>(v<0?'−':'')+'$'+Math.abs(v).toFixed(0)+'B');
+  s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--faint)"/>`;
+  items.forEach((it,i)=>{ const y0=Y(0),y1=Y(it.effect); const top=Math.min(y0,y1), h=Math.max(1.5,Math.abs(y1-y0));
+    const fill = it.net ? (it.effect>=0?'var(--up)':'var(--down)') : (it.effect>=0?'var(--blue)':'var(--accent)');
+    s+=`<rect x="${(X(i)-bw*0.34).toFixed(1)}" y="${top.toFixed(1)}" width="${(bw*0.68).toFixed(1)}" height="${h.toFixed(1)}" fill="${fill}" rx="2"/>`;
+    s+=`<text x="${X(i).toFixed(1)}" y="${(it.effect>=0?top-5:top+h+11).toFixed(1)}" text-anchor="middle" class="lc-tick" style="fill:var(--text)">${(it.effect>=0?'+':'−')+Math.abs(it.effect).toFixed(0)}</text>`;
+    s+=`<text x="${X(i).toFixed(1)}" y="${H-8}" text-anchor="middle" class="lc-tick">${it.label}</text>`; });
+  const xs=items.map((_,i)=>X(i)), rows=items.map(it=>`<div class="sec">${it.label}${it.net?'':' · '+(it.effect>=0?'adds':'drains')+' liquidity'}</div><div><b>${(it.effect>=0?'+':'−')}${liqB(Math.abs(it.effect))}</b>${it.net?'':` <span class="sec">(level ${it.delta>=0?'+':'−'}${liqB(Math.abs(it.delta))})</span>`}</div>`);
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+// N-series stacked area; series = [{label,color,op,pts:[[d,v]]}] aligned on the first series' dates
+function liqStackSvg(series,o){
+  o=o||{}; const W=o.w||1140,H=o.h||220,pl=52,pr=12,pt=10,pb=20;
+  const base=series[0].pts; if(!base||base.length<2) return '<div class="msg sec" style="padding:30px 0">not enough data in this window</div>';
+  const maps=series.map(sr=>new Map(sr.pts.map(p=>[p[0],p[1]])));
+  const rows0=base.map(p=>[p[0],...maps.map(m=>m.get(p[0])||0)]);
+  let hi=0; for(const r of rows0){ let t=0; for(let k=1;k<r.length;k++) t+=r[k]; hi=Math.max(hi,t); } hi*=1.06;
+  const ticks=lcTicks(0,hi,4);
+  const X=i=>pl+(W-pl-pr)*(i/(rows0.length-1)), Y=v=>pt+(H-pt-pb)*(1-v/hi);
+  let s=lcGrid(pl,W-pr,ticks,Y,v=>liqB(v));
+  s+=hsgXLabels(rows0,W,pl,pr).replace(/__YB__/g,(H-4).toFixed(1));
+  // paint top-down so each lower layer covers the one above down to the baseline
+  for(let k=series.length;k>=1;k--){
+    const d=rows0.map((r,i)=>{ let t=0; for(let j=1;j<=k;j++) t+=r[j]; return (i?'L':'M')+X(i).toFixed(1)+' '+Y(t).toFixed(1); }).join('')+`L${X(rows0.length-1).toFixed(1)} ${Y(0).toFixed(1)}L${X(0).toFixed(1)} ${Y(0).toFixed(1)}Z`;
+    s+=`<path d="${d}" fill="${series[k-1].color}" opacity="${series[k-1].op||.8}"/>`;
+    if(k>1) s+=`<path d="${rows0.map((r,i)=>{ let t=0; for(let j=1;j<k;j++) t+=r[j]; return (i?'L':'M')+X(i).toFixed(1)+' '+Y(t).toFixed(1); }).join('')}" fill="none" stroke="var(--panel)" stroke-width="1.2"/>`;
+  }
+  const xs=rows0.map((_,i)=>X(i)), rows=rows0.map(r=>`<div class="sec">${hsgDate(r[0])}</div>`+series.map((sr,k)=>`<div><span class="sw" style="background:${sr.color}"></span>${sr.label} <b>${liqB(r[k+1])}</b></div>`).join(''));
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+function liqCard(title,chip,kpis,chart,cap,wide){
+  return `<div class="s-card hsg-card${wide?' hsg-wide':''}"><div class="hsg-head"><span class="hsg-title">${title}</span>${chip||''}</div>`+(kpis?`<div class="hsg-kpis">${kpis}</div>`:'')+chart+(cap?`<div class="s-cap">${cap}</div>`:'')+`</div>`;
+}
+function liqChip(sid,kind,tip){ return `<span class="src-chip ${kind||'direct'}" title="${esc(tip||'')}"><i></i>${kind==='proxy'?'Ours':'Direct'} · ${esc(sid)}</span>`; }
+function renderLiquidity(){
+  const root=el('liq-body'); if(!root) return;
+  const d=state.liq;
+  document.querySelectorAll('#liqwin button').forEach(b=>b.classList.toggle('active',b.dataset.w===state.liqWin));
+  if(!d){ root.innerHTML='<div class="msg">Loading…</div>'; return; }
+  const L=d.levels||{}, D=d.derived;
+  if(!Object.keys(L).length){ root.innerHTML=`<div class="msg err">Liquidity board unavailable — ${esc(d.error||'not fetched yet')}.<div class="sec" style="margin-top:6px">Set <b>FRED_KEY</b> on the server and the board fills on the next pass.</div></div>`; return; }
+  const win=state.liqWin, from=hsgWindowStart(win);
+  const cut=pts=>(pts||[]).filter(p=>p[0]>=from);
+  const tile=(k,label,extra)=>{ const x=L[k]; if(!x) return '';
+    const v = x.unit==='%' ? x.v.toFixed(2)+'%' : liqB(x.v);
+    return `<div class="stat"><span class="k">${label}</span><span class="v">${v}</span><span style="font-size:11px">${x.chg!=null?liqSigned(x.chg,x.unit==='%'?'bp':'$'):''} <span class="sec">w/w · ${esc(x.sid)}</span>${extra||''}</span></div>`; };
+  const qt = D&&D.qtEnd ? `<div class="sec" style="font-size:10.5px">QT end (derived): ${hsgDate(D.qtEnd)}</div>` : '';
+  const netTile = D ? `<div class="stat" style="border-left:1px solid var(--border);padding-left:18px"><span class="k">Net liquidity</span><span class="v" style="color:var(--accent)">${liqB(D.last.v)}</span><span style="font-size:11px">${D.prev?liqSigned(+(D.last.v-D.prev.v).toFixed(1)):''} <span class="sec">w/w · ${D.last.pctGdp!=null?D.last.pctGdp.toFixed(1)+'% of GDP':''}</span></span></div>` : '';
+  const tiles=`<div class="hsg-tiles">`+tile('assets','Total assets')+tile('ust','Treasuries',qt)+tile('agency','Agency debt')+tile('mbs','MBS')+tile('tga','TGA')+tile('rrp','ON RRP')+netTile+
+    `<div class="stat" style="margin-left:auto"><span class="k">As of</span><span class="v" style="font-size:13px">${d.asOf?new Date(d.asOf).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}</span><span class="sec" style="font-size:11px">H.4.1 · ${D?hsgDate(D.last.d):''}</span></div></div>`;
+  const cards=[];
+  if(D){
+    const netPts=cut(D.net.map(p=>[p[0],p[1]]));
+    cards.push(liqCard('Net liquidity',liqChip('WALCL − WTREGEN − RRPONTSYD','direct','Total assets minus TGA minus ON RRP, on H.4.1 Wednesday dates. All in billions.'),
+      `<span class="hsg-v">${liqB(D.last.v)}</span><span class="sec hsg-d">${hsgDate(D.last.d)}</span>${D.prev?liqSigned(+(D.last.v-D.prev.v).toFixed(1)):''}<span class="sec">w/w</span>`,
+      hsgLineSvg({unit:'$B',dp:0,k:'net'},netPts,{color:'var(--accent)'}),
+      null));
+    const ytdItems=D.ytd.items.map(it=>({label:it.label,effect:it.effect,delta:it.delta})).concat(D.ytd.net!=null?[{label:'NET Δ',effect:D.ytd.net,net:true}]:[]);
+    const driver=D.ytd.items.slice().sort((a,b)=>Math.abs(b.effect)-Math.abs(a.effect))[0];
+    cards.push(liqCard('Year-to-date change by component',`<span class="src-chip direct"><i></i>${D.ytd.from?hsgDate(D.ytd.from):'Jan 1'} → ${hsgDate(D.ytd.to)}</span>`,
+      `<span class="hsg-v ${D.ytd.net>=0?'pos':'neg'}">${D.ytd.net>=0?'+':'−'}${liqB(Math.abs(D.ytd.net))}</span><span class="sec hsg-d">net liquidity YTD</span>`+sLeg([{color:'var(--blue)',label:'adds liquidity'},{color:'var(--accent)',label:'drains liquidity'}]),
+      liqBarsSvg(ytdItems),
+      driver?`Largest driver: <b>${esc(driver.label)}</b> ${driver.effect>=0?'added':'drained'} ${liqB(Math.abs(driver.effect))}. Bars are signed by liquidity effect — TGA and ON RRP add when they <i>fall</i>.`:''));
+    const gdpPts=cut(D.net.filter(p=>p[2]!=null).map(p=>[p[0],p[2]]));
+    cards.push(liqCard('Net liquidity as % of nominal GDP',liqChip('÷ GDP','direct','Quarterly BEA nominal GDP, forward-filled to each weekly print.'),
+      `<span class="hsg-v">${D.last.pctGdp!=null?D.last.pctGdp.toFixed(1)+'%':'—'}</span><span class="sec hsg-d">${hsgDate(D.last.d)}</span><span class="sec">peak ${D.peak.pctGdp!=null?D.peak.pctGdp.toFixed(1)+'%':'—'} · ${hsgDate(D.peak.d)}</span>`,
+      hsgLineSvg({unit:'%',dp:1},gdpPts,{color:'var(--blue)',zero:win==='max'}),
+      D.last.pctGdp!=null&&D.peak.pctGdp!=null?`${(D.peak.pctGdp-D.last.pctGdp).toFixed(1)}pt below the ${hsgDate(D.peak.d)} peak.`:''));
+  }
+  if(L.reserves) cards.push(liqCard('Bank reserves',liqChip('WRESBAL','proxy','Reserve balances with Federal Reserve Banks — not on the source page; added because it is what the Fed actually targets as "ample".'),
+    `<span class="hsg-v">${liqB(L.reserves.v)}</span><span class="sec hsg-d">${hsgDate(L.reserves.d)}</span>${liqSigned(L.reserves.chg)}<span class="sec">w/w</span>`,
+    hsgLineSvg({unit:'$B',dp:0},cut(L.reserves.obs),{color:'var(--muted)'}),
+    'The 2019 repo spike hit with reserves near $1.4T; the Fed’s own "ample" estimates sit around 10–12% of GDP.'));
+  if(D&&D.sofrIorb&&D.sofrIorb.length){ const si=D.sofrIorb, last=si[si.length-1];
+    cards.push(liqCard('SOFR − IORB',liqChip('SOFR, IORB','proxy','Overnight funding rate minus interest on reserve balances, in bp — not on the source page; the earliest read on reserve scarcity.'),
+      `<span class="hsg-v ${last[1]>0?'neg':'pos'}">${last[1]>0?'+':''}${last[1]}bp</span><span class="sec hsg-d">${hsgDate(last[0])}</span>`,
+      hsgLineSvg({unit:'bp',dp:0},cut(si),{color:'var(--down)'}),
+      'Persistently positive = collateral scarce, reserves getting tight. Negative = cash abundant.')); }
+  let stack='';
+  if(L.ust&&L.mbs&&L.agency){
+    stack=liqCard('Balance-sheet composition',liqChip('TREAST · WSHOMCB · FEDDT','direct','The three securities holdings; the gap to total assets is loans, repo and other assets.'),
+      null, sLeg([{color:'var(--blue)',label:'Treasuries'},{color:'var(--accent)',label:'MBS'},{color:'var(--muted)',label:'Agency debt'}])+
+      liqStackSvg([{label:'Treasuries',color:'var(--blue)',op:.75,pts:cut(L.ust.obs)},{label:'MBS',color:'var(--accent)',op:.6,pts:cut(L.mbs.obs)},{label:'Agency debt',color:'var(--muted)',op:.8,pts:cut(L.agency.obs)}]),
+      null,true);
+  }
+  let drains='';
+  if(L.tga&&L.rrp){
+    drains=liqCard('The drains — TGA and ON RRP',liqChip('WTREGEN · RRPONTSYD','direct','What sits at the Fed outside the banking system. Higher = less liquidity for markets.'),
+      null, sLeg([{color:'var(--accent)',label:'TGA'},{color:'var(--down)',label:'ON RRP (sampled on the H.4.1 Wednesday)'}])+
+      liqStackSvg([{label:'TGA',color:'var(--accent)',op:.6,pts:cut(L.tga.obs)},{label:'ON RRP',color:'var(--down)',op:.55,pts:cut(D?D.net.map(p=>[p[0],p[5]]):L.rrp.obs)}]),
+      null,true);
+  }
+  const missing=(d.missing&&d.missing.length)?`<div class="s-cap" style="margin-top:10px">Absent this pass (not shown stale): ${d.missing.map(esc).join(', ')}</div>`:'';
+  const errl=d.error?`<div class="s-cap" style="margin-top:10px;color:var(--down)">Last refresh failed — showing the previous board. ${esc(d.error)}</div>`:'';
+  root.innerHTML=tiles+`<div class="s-grid">${cards.join('')}</div>`+stack+drains+missing+errl;
+  attachLineHover();
+}
+
+// ---- Housing tab (build 2026.08.21-04) ------------------------------------------------------
+// FRED-fed macro housing / MBS board. Paints from the cached payload, refetches when stale, and
+// every chart rides the shared hoverChart crosshair. Windowing is client-side over the full
+// history the server ships, so the seg switch never costs a request.
+let _hsgLast=0;
+async function loadHousing(){
+  _hsgLast=Date.now();
+  try{ const d=await fetchJSON('/api/housing');
+    if(d&&d.series){ state.housing=d; if(el('view-housing')&&!el('view-housing').hidden) renderHousing(); }
+  }catch(_){}
+}
+function openHousing(){ renderHousing(); if(Date.now()-_hsgLast>60*1000) loadHousing(); }
+function hsgWindowStart(win){
+  const y=new Date().getUTCFullYear();
+  if(win==='1y') return new Date(Date.now()-366*864e5).toISOString().slice(0,10);
+  if(win==='5y') return (y-5)+'-01-01';
+  return '1900-01-01';
+}
+function hsgSlice(ser,win){ const from=hsgWindowStart(win); return (ser&&ser.obs||[]).filter(o=>o[0]>=from); }
+function hsgFmt(v,ser){ if(v==null||!isFinite(v)) return '—';
+  if(ser.unit==='$B') return liqB(v);
+  if(ser.unit==='$k') return '$'+v.toFixed(0)+'k';
+  if(ser.unit==='%') return v.toFixed(ser.dp)+'%';
+  if(ser.unit==='bp') return v.toFixed(0)+'bp';
+  if(ser.unit==='M saar') return v.toFixed(2)+'M';
+  return v.toFixed(ser.dp); }
+function hsgDate(d){ try{ return new Date(d+'T00:00:00Z').toLocaleDateString('en-US',{month:'short',year:'2-digit',timeZone:'UTC'}); }catch(_){ return d; } }
+function hsgXLabels(pts,W,pl,pr){
+  // year ticks at the first observation of each year; thin to <=8 labels
+  const idx=[]; let ly=null;
+  pts.forEach((p,i)=>{ const y=p[0].slice(0,4); if(y!==ly){ ly=y; idx.push(i); } });
+  const step=Math.max(1,Math.ceil(idx.length/8)); let s='';
+  const X=i=>pl+(W-pl-pr)*(pts.length>1?i/(pts.length-1):0.5);
+  idx.forEach((i,k)=>{ if(k%step) return; if(pts.length>12&&i>pts.length*0.97) return;
+    s+=`<text x="${X(i).toFixed(1)}" y="${'__YB__'}" text-anchor="middle" class="lc-tick">'${pts[i][0].slice(2,4)}</text>`; });
+  return s;
+}
+// single-series line (optionally area-filled); pts = [[date, v], ...]
+function hsgLineSvg(ser,pts,o){
+  o=o||{}; const W=o.w||560,H=o.h||190,pl=44,pr=12,pt=10,pb=20;
+  if(!pts||pts.length<2) return '<div class="msg sec" style="padding:30px 0">not enough data in this window</div>';
+  let lo=Infinity,hi=-Infinity; for(const p of pts){ if(p[1]<lo)lo=p[1]; if(p[1]>hi)hi=p[1]; }
+  if(o.zero&&lo>0) lo=0;
+  const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
+  const ticks=lcTicks(lo,hi,4);
+  const X=i=>pl+(W-pl-pr)*(i/(pts.length-1)), Y=v=>pt+(H-pt-pb)*(1-(v-lo)/(hi-lo));
+  const color=o.color||'var(--blue)';
+  let s=lcGrid(pl,W-pr,ticks,Y,v=>hsgFmt(v,ser).replace('.00',''));
+  s+=hsgXLabels(pts,W,pl,pr).replace(/__YB__/g,(H-4).toFixed(1));
+  const d=pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[1]).toFixed(1)).join('');
+  s+=`<path d="${d}L${X(pts.length-1).toFixed(1)} ${Y(lo).toFixed(1)}L${X(0).toFixed(1)} ${Y(lo).toFixed(1)}Z" fill="${color}" opacity=".09"/>`;
+  s+=`<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const L=pts[pts.length-1];
+  s+=`<circle cx="${X(pts.length-1).toFixed(1)}" cy="${Y(L[1]).toFixed(1)}" r="3.5" fill="${color}" stroke="var(--panel)" stroke-width="2"/>`;
+  const xs=pts.map((_,i)=>X(i)), rows=pts.map(p=>`<div class="sec">${hsgDate(p[0])}</div><div><b>${hsgFmt(p[1],ser)}</b></div>`);
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+// diverging bars around zero (SLOOS): above zero paints --down (tightening is the bad side here)
+function hsgDivergeSvg(ser,pts,o){
+  o=o||{}; const W=o.w||560,H=o.h||190,pl=44,pr=12,pt=10,pb=20;
+  if(!pts||pts.length<2) return '<div class="msg sec" style="padding:30px 0">not enough data in this window</div>';
+  let lo=0,hi=0; for(const p of pts){ if(p[1]<lo)lo=p[1]; if(p[1]>hi)hi=p[1]; }
+  const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
+  const ticks=lcTicks(lo,hi,4);
+  const bw=(W-pl-pr)/pts.length;
+  const X=i=>pl+bw*(i+0.5), Y=v=>pt+(H-pt-pb)*(1-(v-lo)/(hi-lo));
+  let s=lcGrid(pl,W-pr,ticks,Y,v=>v.toFixed(0)+'%');
+  s+=hsgXLabels(pts,W,pl+bw/2,pr+bw/2).replace(/__YB__/g,(H-4).toFixed(1));
+  s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--faint)" stroke-dasharray="2 3"/>`;
+  pts.forEach((p,i)=>{ const y0=Y(0), y1=Y(p[1]); const top=Math.min(y0,y1), h=Math.max(1,Math.abs(y1-y0));
+    s+=`<rect x="${(X(i)-bw/2+0.6).toFixed(1)}" y="${top.toFixed(1)}" width="${Math.max(1.2,bw-1.2).toFixed(1)}" height="${h.toFixed(1)}" fill="${p[1]>=0?'var(--down)':'var(--up)'}" rx="1"/>`; });
+  const xs=pts.map((_,i)=>X(i)), rows=pts.map(p=>{ const q=Math.floor((+p[0].slice(5,7)-1)/3)+1;
+    return `<div class="sec">${p[0].slice(0,4)} Q${q}</div><div><b class="${p[1]>=0?'neg':'pos'}">${Math.abs(p[1]).toFixed(1)}%</b> net ${p[1]>=0?'tightening':'easing'}</div>`; });
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+// stacked area: multifamily on the floor, single-family on top (both in M saar)
+function hsgStackSvg(sf,mf,sfPts,mfPts,o){
+  o=o||{}; const W=o.w||1140,H=o.h||200,pl=44,pr=12,pt=10,pb=20;
+  const m=new Map(mfPts.map(p=>[p[0],p[1]]));
+  const pts=sfPts.filter(p=>m.has(p[0])).map(p=>[p[0],p[1],m.get(p[0])]);
+  if(pts.length<2) return '<div class="msg sec" style="padding:30px 0">not enough data in this window</div>';
+  let hi=0; for(const p of pts) hi=Math.max(hi,p[1]+p[2]); hi*=1.08;
+  const ticks=lcTicks(0,hi,4);
+  const X=i=>pl+(W-pl-pr)*(i/(pts.length-1)), Y=v=>pt+(H-pt-pb)*(1-v/hi);
+  let s=lcGrid(pl,W-pr,ticks,Y,v=>v.toFixed(1)+'M');
+  s+=hsgXLabels(pts,W,pl,pr).replace(/__YB__/g,(H-4).toFixed(1));
+  const path=(f)=>pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(f(p)).toFixed(1)).join('')+`L${X(pts.length-1).toFixed(1)} ${Y(0).toFixed(1)}L${X(0).toFixed(1)} ${Y(0).toFixed(1)}Z`;
+  s+=`<path d="${path(p=>p[1]+p[2])}" fill="var(--blue)" opacity=".45"/>`;
+  s+=`<path d="${path(p=>p[2])}" fill="var(--muted)" opacity=".8"/>`;
+  s+=`<path d="${pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[2]).toFixed(1)).join('')}" fill="none" stroke="var(--panel)" stroke-width="1.5"/>`;
+  const xs=pts.map((_,i)=>X(i)), rows=pts.map(p=>`<div class="sec">${hsgDate(p[0])}</div><div><span class="sw" style="background:var(--blue)"></span>single-family <b>${p[1].toFixed(2)}M</b></div><div><span class="sw" style="background:var(--muted)"></span>multifamily <b>${p[2].toFixed(2)}M</b></div>`);
+  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
+}
+function hsgChip(ser){
+  const proxy=!!ser.proxy;
+  return `<span class="src-chip ${proxy?'proxy':'direct'}" title="${esc(ser.src)}${proxy?' — '+esc(ser.proxy):''}"><i></i>${proxy?'Proxy':'Direct'} · ${esc(ser.sid)}</span>`;
+}
+function hsgDelta(ser){
+  const y=ser.yoy; if(!y) return '<span class="sec">12m —</span>';
+  const isLvl = ser.unit==='%'||ser.unit==='bp'||ser.unit==='months'||ser.unit==='% net tightening';
+  const v = isLvl ? y.diff : y.pct;
+  if(v==null) return '<span class="sec">12m —</span>';
+  const txt = isLvl ? (ser.unit==='%' ? (v*100).toFixed(0)+'bp' : ser.unit==='bp' ? v.toFixed(0)+'bp' : ser.unit==='months' ? v.toFixed(1)+' mo' : v.toFixed(1)+'pt') : Math.abs(v).toFixed(1)+'%';
+  // direction semantics: higher rates / spreads / supply / tightening read as the bad side
+  const bad = ser.k==='rate30'||ser.k==='spread'||ser.k==='supply'||ser.k==='sloos';
+  const cls = v===0?'sec':((v>0)!==bad?'pos':'neg');
+  return `<span class="${cls}">${v>0?'▲':'▼'} ${txt.replace('-','')}</span> <span class="sec">12m</span>`;
+}
+function hsgCard(ser,chart,extra){
+  return `<div class="s-card hsg-card">`+
+    `<div class="hsg-head"><span class="hsg-title">${esc(ser.title)}</span>${hsgChip(ser)}</div>`+
+    `<div class="hsg-kpis"><span class="hsg-v">${hsgFmt(ser.last.v,ser)}</span><span class="sec hsg-d">${hsgDate(ser.last.d)}</span>${hsgDelta(ser)}`+
+      `<span class="sec hsg-rng">range ${hsgFmt(ser.lo.v,ser)} – ${hsgFmt(ser.hi.v,ser)}</span></div>`+
+    chart+(extra||'')+(ser.proxy?`<div class="s-cap">${esc(ser.proxy)}</div>`:'')+`</div>`;
+}
+function renderHousing(){
+  const root=el('hsg-body'); if(!root) return;
+  const d=state.housing;
+  document.querySelectorAll('#hsgwin button').forEach(b=>b.classList.toggle('active',b.dataset.w===state.housingWin));
+  if(!d){ root.innerHTML='<div class="msg">Loading…</div>'; return; }
+  const S=d.series||{}; const keys=Object.keys(S);
+  if(!keys.length){ root.innerHTML=`<div class="msg err">Housing board unavailable — ${esc(d.error||'not fetched yet')}.<div class="sec" style="margin-top:6px">Set <b>FRED_KEY</b> on the server (free key at fred.stlouisfed.org) and the board fills on the next pass.</div></div>`; return; }
+  const win=state.housingWin, g=k=>S[k], sl=k=>g(k)?hsgSlice(g(k),win):[];
+  // headline tiles — only for series that came back
+  const tile=(k,label,fmt)=>{ const x=g(k); if(!x) return '';
+    return `<div class="stat"><span class="k">${label}</span><span class="v">${fmt?fmt(x):hsgFmt(x.last.v,x)}</span><span style="font-size:11px">${hsgDelta(x)}</span></div>`; };
+  const tiles=`<div class="hsg-tiles">`+tile('rate30','30y mortgage')+tile('spread','BBB OAS (proxy)')+tile('sf','SF starts')+tile('supply',"Months' supply")+tile('sales','New home sales')+tile('price','Median price')+
+    `<div class="stat" style="margin-left:auto"><span class="k">As of</span><span class="v" style="font-size:13px">${d.asOf?new Date(d.asOf).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}</span><span class="sec" style="font-size:11px">FRED · 6h refresh</span></div></div>`;
+  const cards=[];
+  if(g('rate30')) cards.push(hsgCard(g('rate30'),hsgLineSvg(g('rate30'),sl('rate30'),{color:'var(--blue)'})));
+  if(g('spread')) cards.push(hsgCard(g('spread'),hsgLineSvg(g('spread'),sl('spread'),{color:'var(--accent)'})));
+  if(g('sloos')) cards.push(hsgCard(g('sloos'),hsgDivergeSvg(g('sloos'),sl('sloos')),sLeg([{color:'var(--down)',label:'net % tightening'},{color:'var(--up)',label:'net % easing'}])));
+  if(g('supply')) cards.push(hsgCard(g('supply'),hsgLineSvg(g('supply'),sl('supply'),{color:'var(--accent)',zero:true})));
+  if(g('sales')) cards.push(hsgCard(g('sales'),hsgLineSvg(g('sales'),sl('sales'),{color:'var(--muted)',zero:true})));
+  if(g('price')) cards.push(hsgCard(g('price'),hsgLineSvg(g('price'),sl('price'),{color:'var(--accent)'})));
+  let starts='';
+  if(g('sf')&&g('mf')){ const sf=g('sf'), mf=g('mf');
+    starts=`<div class="s-card hsg-card hsg-wide"><div class="hsg-head"><span class="hsg-title">Housing starts — single-family vs multifamily</span>${hsgChip(sf)}<span class="src-chip direct" title="${esc(mf.src)}"><i></i>Direct · ${esc(mf.sid)}</span></div>`+
+      `<div class="hsg-kpis"><span class="hsg-v">${sf.last.v.toFixed(2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:15px">${mf.last.v.toFixed(2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
+      sLeg([{color:'var(--blue)',label:'Single-family'},{color:'var(--muted)',label:'Multifamily (5+ units)'}])+
+      hsgStackSvg(sf,mf,sl('sf'),sl('mf'))+`</div>`; }
+  const pending=(d.pending||[]).map(p=>`<div class="s-card hsg-card hsg-pending"><div class="hsg-head"><span class="hsg-title">${esc(p.title)}</span><span class="src-chip pending" title="${esc(p.why)}"><i></i>Pending</span></div>`+
+    `<div class="hsg-empty"><div><b>Source:</b> ${esc(p.src)}</div><div class="sec">${esc(p.why)}</div></div></div>`).join('');
+  const missing=(d.missing&&d.missing.length)?`<div class="s-cap" style="margin-top:10px">Absent this pass (not shown stale): ${d.missing.map(esc).join(', ')}</div>`:'';
+  const errl=d.error?`<div class="s-cap" style="margin-top:10px;color:var(--down)">Last refresh failed — showing the previous board. ${esc(d.error)}</div>`:'';
+  root.innerHTML=tiles+`<div class="s-grid">${cards.join('')}</div>`+starts+`<div class="s-grid" style="margin-top:12px">${pending}</div>`+missing+errl;
+  attachLineHover();
+}
 // Adaptive EPS display precision: expand decimals (2 -> 4) until actual and estimate render as
 // DIFFERENT numbers whenever they ARE different. "0.8 vs 0.8 miss +0.0%" (the live NFLX print:
 // 0.8000 actual vs 0.8042 est collapsed at 2dp) is a display contradicting its own verdict —
@@ -8748,6 +9023,8 @@ document.querySelectorAll('#rfseg button').forEach(b=>{ if(+b.dataset.ms===state
   b.addEventListener('click',()=>{ document.querySelectorAll('#rfseg button').forEach(x=>x.classList.toggle('active',x===b));
     setRefresh(+b.dataset.ms); savePrefs(); }); });
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));
+document.querySelectorAll('#hsgwin button').forEach(b=>b.addEventListener('click',()=>{ state.housingWin=b.dataset.w; renderHousing(); }));
+document.querySelectorAll('#liqwin button').forEach(b=>b.addEventListener('click',()=>{ state.liqWin=b.dataset.w; renderLiquidity(); }));
 document.querySelectorAll('[data-scope]').forEach(b=>b.addEventListener('click',()=>setScope(b.dataset.scope)));
 // ===== nav tabs: drag to reorder, order persisted per browser =====
 // Tabs live between the scope switcher and the right-side control cluster. #tabSpacer is the
@@ -8873,6 +9150,15 @@ document.querySelectorAll('#corrtop button').forEach(b=>{ if(+b.dataset.k===stat
 let corrSearchT=null;
 // ===== per-tab help ("?" in the nav): how to READ each view, not just what it shows =====
 const HELP={
+  liquidity:`<div class="hlp-h">What this is</div><p>The Fed's balance sheet netted against the two accounts that pull cash back out of the banking system. <b>Net liquidity = total assets − Treasury General Account − ON RRP</b>. It is the dollar amount actually circulating against risk assets, and its direction has tracked equity drawdowns and melt-ups since 2009. All series are FRED (H.4.1 release, Thursdays ~4:30pm ET); the board refreshes after each release and every 6h otherwise.</p>
+<div class="hlp-h">The tiles</div><p>Total assets and its three big holdings (Treasuries, agency debt, MBS) are Wednesday levels. TGA is the Treasury's checking account at the Fed — a weekly average; when Treasury hoards cash (tax season, post-debt-ceiling rebuild) it drains liquidity. ON RRP is where money funds park cash overnight at the Fed — daily, sampled on the H.4.1 Wednesday. Everything is shown in billions; the H.4.1 lines publish in millions and ON RRP in billions, and the board normalises before subtracting.</p>
+<div class="hlp-h">Year-to-date bars</div><p>Each bar is the change since the last print of the prior year, <i>signed by its liquidity effect</i>: holdings add when they grow; TGA and ON RRP add when they <i>shrink</i>. The net bar is their sum. A blue TGA bar therefore means Treasury ran its balance down, not up.</p>
+<div class="hlp-h">% of GDP</div><p>Net liquidity divided by nominal GDP (quarterly, forward-filled). The level that matters is relative to the economy — $6T meant something different in 2014 than in 2024. The caption shows the peak and how far below it we sit.</p>
+<div class="hlp-h">Plumbing stress (ours)</div><p>Two series the usual net-liquidity pages leave out. <b>Bank reserves</b> are what the Fed actually targets as "ample"; the 2019 repo spike came when they hit ~$1.4T. <b>SOFR − IORB</b> is the overnight funding rate against what the Fed pays on reserves — persistently positive means collateral is scarce and reserves are getting tight, the earliest warning that QT has gone too far. <b>QT end</b> on the Treasuries tile is derived: the first week after the 13-week change in holdings stopped being negative.</p>`,
+  housing:`<div class="hlp-h">What this is</div><p>A macro board for US housing and mortgage credit — the backdrop behind the homebuilders, mortgage servicers, REITs and banks in the universe. Every panel is a public series pulled server-side from FRED and refreshed every 6 hours; nothing here is intraday.</p>
+<div class="hlp-h">Reading the source chips</div><p>Each card carries a chip naming its series. <b>Direct</b> means the panel is the same series the institutional Market Monitor uses. <b>Proxy</b> means the original is paid or proprietary (jumbo rates, NAR existing-home data, Deutsche Bank's non-QM spread) and the card shows the closest public stand-in — the chip text says exactly what differs. <b>Pending</b> cards name a file-fed source (SIFMA, FINRA) that is not wired yet.</p>
+<div class="hlp-h">Panels</div><p><b>Mortgage rate</b> — Freddie Mac 30y conforming, weekly. <b>Lending standards</b> — Fed SLOOS, net % of banks tightening on prime mortgages; above zero is tightening. <b>Starts</b> — single-family and multifamily, millions SAAR. <b>Months' supply</b> — new homes; 6+ months historically reads as a buyer's market. <b>Sales / price</b> — Census new-home sales and the median price of houses sold. <b>Spread proxy</b> — ICE BofA BBB corporate OAS in bp, standing in for non-QM spreads.</p>
+<div class="hlp-h">Change columns</div><p>12m compares the latest print with the observation closest to one year earlier — a missing month returns a dash, never an approximation. Series that didn't come back on the last pass are listed at the foot of the tab rather than shown stale.</p>`,
 focus:`
 <div class="hlp-h">What this list is</div>
 <p>Six seats, <b>stamped once at the 09:30 ET cash open</b>, one late fill at +1h, then immutable for the day — a compressed morning scan, not a signal. The engine reads only what the board already computed (gap machinery, clock-matched RVOL, the OI history, the earnings calendar, the news tape, the 30d extremes) and freezes it. The first hour itself is measured on <b>1m</b> bars captured by a lane reserved for the six seats, republished every ~25s until the 10:30 freeze. It never reshuffles at 10:47 because a number ticked; yesterday's list stays viewable exactly as stamped.</p>
@@ -9033,7 +9319,7 @@ news:`
 function openHelp(){
   const bg=el('helpbg'), m=el('helpmodal'); if(!bg||!m) return;
   const v=state.scope==='crypto'?'markets':state.view;
-  const TITLES={markets:'Markets',focus:'Focus',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest'};
+  const TITLES={markets:'Markets',focus:'Focus',sectors:'Sectors',corr:'Correlation',sessions:'Sessions',signals:'Signals',earnings:'Earnings',backtest:'Backtest',housing:'Housing',liquidity:'Liquidity'};
   m.innerHTML=`<div class="hlp-head">How to read: ${TITLES[v]||v}<button class="btn xtiny" id="helpclose" title="close">\u2715</button></div>`
     +`<div class="hlp-sub">What each element means and \u2014 more importantly \u2014 how to interpret it. Every number in the app also explains itself on hover; this is the map. Nothing here is investment advice.</div>`
     +(HELP[v]||HELP.markets);
@@ -9053,7 +9339,7 @@ const CMDK_TABS=[
   {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'funds',label:'Funds'},{v:'trend',label:'Trend'},{v:'charts',label:'Charts'},{v:'sectors',label:'Sectors'},
   {v:'corr',label:'Correlation'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
-  {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'admin',label:'Admin'}];
+  {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'housing',label:'Housing'},{v:'liquidity',label:'Liquidity'},{v:'admin',label:'Admin'}];
 let _cmdkSel=0, _cmdkRows=[];
 function openCmdk(){ const bg=el('cmdkbg'), m=el('cmdk'), q=el('cmdk-q'); if(!bg||!m||!q) return;
   bg.hidden=false; m.hidden=false; q.value=''; cmdkRender(''); q.focus();

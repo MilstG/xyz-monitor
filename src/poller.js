@@ -6644,6 +6644,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     try { loadMacroCache(); } catch (_) {}
     setTimeout(macroTick, 25 * 1000);
     setInterval(() => { if (Date.now() - lastMacroOk > MACRO_STALE || macroCrossed()) macroTick(); }, MACRO_RETRY_MS);
+    // Housing board: warm-boot from /data, first pull after the macro burst (FRED rate discipline),
+    // then the same 6h-stale / 30min-check cadence — the series move weekly at best.
+    try { loadHousingCache(); } catch (_) {}
+    setTimeout(housingTick, 35 * 1000);
+    setInterval(() => { if (Date.now() - lastHousingOk > HOUSING_STALE) housingTick(); }, HOUSING_RETRY_MS);
+    // Liquidity board: warm-boot, first pull after the housing burst, then refire on staleness OR
+    // when the Thursday H.4.1 release instant crossed since the last good fetch.
+    try { loadLiquidityCache(); } catch (_) {}
+    setTimeout(liqTick, 45 * 1000);
+    setInterval(() => { if (Date.now() - lastLiqOk > LIQ_STALE || liqReleaseCrossed()) liqTick(); }, LIQ_RETRY_MS);
     // Reaction study rerun after the daily backfill has had time to land full candles (opens
     // arrive with the live pull; the warm cache only carries closes) — bumps the ETag on change.
     setTimeout(() => { try { refreshEarnStudy(true); } catch (_) {} }, 10 * 60 * 1000);
@@ -10699,6 +10709,205 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     if (Object.keys(out).length) macroLevels = { at: Date.now(), series: out };
     return macroLevels;
   }
+  // ---- Housing / MBS board (build 2026.08.21-04) --------------------------------------------
+  // Every panel on the Housing tab is a FRED series pulled in full (history for the chart, not
+  // just the latest print). Same degradation contract as the macro tick: no key or a dead series
+  // means that PANEL is absent with its reason on the payload — never stale, never faked. The two
+  // panels whose originals are file-fed (SIFMA issuance, FINRA TRACE volume) are declared here as
+  // `pending` so the tab can say so honestly instead of showing a blank card.
+  const HOUSING_SERIES = [
+    { k: "rate30",  sid: "MORTGAGE30US", title: "30y fixed mortgage rate", unit: "%",   freq: "w", dp: 2, start: "2005-01-01",
+      src: "Freddie Mac PMMS via FRED", proxy: "Original panel is the 30y JUMBO average (Bankrate/Bloomberg, no public API). Conforming tracks it within ~20bp." },
+    { k: "sloos",   sid: "DRTSPM",       title: "Lending standards — prime mortgages", unit: "% net tightening", freq: "q", dp: 1, start: "2000-01-01",
+      src: "Fed SLOOS via FRED" },
+    { k: "sf",      sid: "HOUST1F",      title: "Single-family starts", unit: "M saar", freq: "m", dp: 3, start: "2000-01-01", scale: 0.001,
+      src: "Census via FRED" },
+    { k: "mf",      sid: "HOUST5F",      title: "Multifamily starts (5+)", unit: "M saar", freq: "m", dp: 3, start: "2000-01-01", scale: 0.001,
+      src: "Census via FRED" },
+    { k: "supply",  sid: "MSACSR",       title: "Months' supply — new homes", unit: "months", freq: "m", dp: 1, start: "2000-01-01",
+      src: "Census via FRED", proxy: "Original panel is months' supply of EXISTING homes (NAR, not on FRED since 2022). New-home supply moves in the same direction at a different level." },
+    { k: "sales",   sid: "HSN1F",        title: "New single-family home sales", unit: "M saar", freq: "m", dp: 3, start: "2000-01-01", scale: 0.001,
+      src: "Census via FRED", proxy: "Original panel is EXISTING home sales (NAR, off FRED since 2022). New-home sales are the public stand-in until a Zillow/Redfin feed is wired." },
+    { k: "price",   sid: "MSPUS",        title: "Median sales price of houses sold", unit: "$k", freq: "q", dp: 1, start: "2000-01-01", scale: 0.001,
+      src: "Census/HUD via FRED", proxy: "Original panel is NAR median EXISTING-home price. Census median (new + existing, quarterly) runs higher but tracks the same cycle." },
+    { k: "spread",  sid: "BAMLC0A4CBBB", title: "Credit spread proxy — BBB corporate OAS", unit: "bp", freq: "d", dp: 0, start: "2019-01-01", scale: 100,
+      src: "ICE BofA via FRED", proxy: "Original panel is Deutsche Bank's fixed 2y non-QM spread (proprietary, no public series). ICE BofA BBB OAS is the proxy — same risk-premium cycle, different level." },
+  ];
+  const HOUSING_PENDING = [
+    { k: "issuance", title: "US non-agency MBS issuance", src: "SIFMA US MBS statistics (monthly xlsx, form-gated download)", why: "No API; the workbook sits behind a form. Needs a scheduled download + xlsx parse." },
+    { k: "trace",    title: "MBS secondary trading (TRACE)", src: "FINRA Structured Trading Activity Report (FINRA_IDS_STAR.xlsx)", why: "Public xlsx on cdn.finra.org; needs an xlsx parse and a check of the IG / non-IG split." },
+  ];
+  const HOUSING_STALE = 6 * 3600 * 1000, HOUSING_RETRY_MS = 30 * 60 * 1000;
+  let housingCache = null, housingVer = 0, housingSig = "", lastHousingOk = 0;
+  function housingDress(def, obs) {
+    const sc = def.scale || 1;
+    const pts = obs.map((o) => [o[0], +(o[1] * sc).toFixed(def.dp)]);
+    const last = pts[pts.length - 1];
+    const ms = Date.parse(last[0]);
+    const back = (days) => { const t = ms - days * 24 * 3600e3; for (let i = pts.length - 2; i >= 0; i--) if (Date.parse(pts[i][0]) <= t) return pts[i]; return null; };
+    const yAgo = back(365), wAgo = def.freq === "d" || def.freq === "w" ? back(7) : null, mAgo = def.freq === "m" ? back(28) : null;
+    const pct = (a, b) => (a && b && b[1]) ? +((a[1] / b[1] - 1) * 100).toFixed(1) : null;
+    let lo = pts[0], hi = pts[0];
+    for (const p of pts) { if (p[1] < lo[1]) lo = p; if (p[1] > hi[1]) hi = p; }
+    return { k: def.k, sid: def.sid, title: def.title, unit: def.unit, freq: def.freq, dp: def.dp, src: def.src, proxy: def.proxy || null,
+      n: pts.length, obs: pts, last: { d: last[0], v: last[1] },
+      yoy: yAgo ? { v: yAgo[1], d: yAgo[0], pct: pct(last, yAgo), diff: +(last[1] - yAgo[1]).toFixed(def.dp) } : null,
+      wow: wAgo ? { v: wAgo[1], diff: +(last[1] - wAgo[1]).toFixed(def.dp) } : null,
+      mom: mAgo ? { v: mAgo[1], pct: pct(last, mAgo) } : null,
+      lo: { d: lo[0], v: lo[1] }, hi: { d: hi[0], v: hi[1] } };
+  }
+  async function fetchHousing() {
+    const now = Date.now();
+    const key = process.env.FRED_KEY || "";
+    let err = null;
+    const series = {}, missing = [];
+    if (!key) err = "FRED_KEY not set";
+    else {
+      const fget = async (path, params) => {
+        const q = new URLSearchParams(Object.assign({ api_key: key, file_type: "json" }, params));
+        const res = await fetch("https://api.stlouisfed.org/fred/" + path + "?" + q, {
+          headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        if (!res.ok) throw new Error("FRED HTTP " + res.status);
+        return res.json();
+      };
+      for (const def of HOUSING_SERIES) {
+        try {
+          await sleep(150);
+          const obs = fredObsSeries(await fget("series/observations", { series_id: def.sid, observation_start: def.start, sort_order: "asc", limit: 100000 }));
+          if (obs.length) series[def.k] = housingDress(def, obs); else missing.push(def.sid);
+        } catch (e) { missing.push(def.sid + " (" + ((e && e.message) || "fetch failed") + ")"); }
+      }
+      if (!Object.keys(series).length) err = "FRED unreachable: " + missing.join(", ");
+      else if (missing.length) log("housing: series absent this pass: " + missing.join(", "));
+    }
+    if (err && housingCache && housingCache.series && Object.keys(housingCache.series).length) {
+      // keep the warm board, surface the failure
+      housingCache = Object.assign({}, housingCache, { ts: now, error: err });
+      log("housing: refresh failed, serving warm board (" + err + ")");
+      return;
+    }
+    const sig = Object.keys(series).sort().map((k) => k + ":" + series[k].last.d + ":" + series[k].last.v + ":" + series[k].n).join(",") + "|" + (err || "");
+    if (sig !== housingSig) { housingSig = sig; housingVer = now; }
+    if (!err) lastHousingOk = now;
+    housingCache = { ts: now, dataTs: housingVer, asOf: err ? (housingCache && housingCache.asOf) || null : now, error: err,
+      series, missing, pending: HOUSING_PENDING };
+    if (!err && store.saveHousing) store.saveHousing({ ts: now, series, missing });
+    log("Housing board: " + Object.keys(series).length + "/" + HOUSING_SERIES.length + " FRED series" + (err ? " (" + err + ")" : ""));
+  }
+  const housingTick = () => { fetchHousing().catch((e) => log("housing tick failed: " + (e && e.message))); };
+  function loadHousingCache() {
+    const data = store.loadHousing ? store.loadHousing() : null;
+    if (!data || !data.series || !Object.keys(data.series).length) return false;
+    housingVer = data.ts || Date.now();
+    housingCache = { ts: Date.now(), dataTs: housingVer, asOf: data.ts || null, error: null,
+      series: data.series, missing: data.missing || [], pending: HOUSING_PENDING };
+    return true;
+  }
+  // ---- Liquidity board (build 2026.08.21-04) --------------------------------------------------
+  // Fed net liquidity = total assets − TGA − ON RRP, on the H.4.1 Wednesday dates, plus % of nominal
+  // GDP (quarterly, forward-filled). Everything is normalised to BILLIONS before any arithmetic:
+  // the H.4.1 lines and reserves publish in millions, ON RRP and GDP in billions — mixing them raw
+  // understates ON RRP 1000× (a live bug on at least one public monitor). Refires on the Thursday
+  // ~4:30 ET release instead of blind polling.
+  const LIQ_SERIES = [
+    { k: "assets",   sid: "WALCL",      title: "Total assets",          unit: "$B", scale: 0.001, start: "2002-12-18", freq: "w" },
+    { k: "ust",      sid: "TREAST",     title: "Treasuries held",       unit: "$B", scale: 0.001, start: "2002-12-18", freq: "w" },
+    { k: "agency",   sid: "FEDDT",      title: "Agency debt",           unit: "$B", scale: 0.001, start: "2002-12-18", freq: "w" },
+    { k: "mbs",      sid: "WSHOMCB",    title: "MBS held",              unit: "$B", scale: 0.001, start: "2002-12-18", freq: "w" },
+    { k: "tga",      sid: "WTREGEN",    title: "Treasury General Account", unit: "$B", scale: 0.001, start: "2002-12-18", freq: "w" },
+    { k: "rrp",      sid: "RRPONTSYD",  title: "ON RRP",                unit: "$B", scale: 1,     start: "2002-12-18", freq: "d" },
+    { k: "gdp",      sid: "GDP",        title: "Nominal GDP",           unit: "$B", scale: 1,     start: "2002-01-01", freq: "q" },
+    { k: "reserves", sid: "WRESBAL",    title: "Bank reserves",         unit: "$B", scale: 0.001, start: "2002-12-18", freq: "w" },
+    { k: "sofr",     sid: "SOFR",       title: "SOFR",                  unit: "%",  scale: 1,     start: "2018-04-01", freq: "d" },
+    { k: "iorb",     sid: "IORB",       title: "Interest on reserve balances", unit: "%", scale: 1, start: "2021-07-29", freq: "d" },
+  ];
+  const LIQ_STALE = 6 * 3600 * 1000, LIQ_RETRY_MS = 30 * 60 * 1000;
+  let liqCache = null, liqVer = 0, liqSig = "", lastLiqOk = 0;
+  // value at or before a date (series ascending [[d,v]]) — the alignment rule for daily → Wednesday
+  function liqAt(obs, d) { let lo = 0, hi = obs.length - 1, r = null; while (lo <= hi) { const m = (lo + hi) >> 1; if (obs[m][0] <= d) { r = obs[m]; lo = m + 1; } else hi = m - 1; } return r; }
+  function liqBuild(raw) {
+    const A = raw.assets, T = raw.tga, R = raw.rrp, G = raw.gdp;
+    if (!A || !T) return null;
+    const net = [];
+    for (const [d, a] of A) {
+      const t = liqAt(T, d); if (!t || Date.parse(d) - Date.parse(t[0]) > 7 * 864e5) continue;   // TGA is a weekly avg dated the same Wednesday
+      const rr = R ? liqAt(R, d) : null; const r = rr && (Date.parse(d) - Date.parse(rr[0])) <= 7 * 864e5 ? rr[1] : 0;   // ON RRP: last daily print ≤ Wed; none before 2013 → 0
+      const g = G ? liqAt(G, d) : null;
+      const n = a - t[1] - r;
+      net.push([d, +n.toFixed(1), g ? +(n / g[1] * 100).toFixed(2) : null, +a.toFixed(1), +t[1].toFixed(1), +r.toFixed(1)]);
+    }
+    if (!net.length) return null;
+    const last = net[net.length - 1];
+    let peak = net[0]; for (const p of net) if (p[2] != null && (peak[2] == null || p[2] > peak[2])) peak = p;
+    const wk = liqAt(net, new Date(Date.parse(last[0]) - 7 * 864e5).toISOString().slice(0, 10));
+    const prev = wk && wk[0] !== last[0] ? wk : net[net.length - 2];
+    // YTD: last print of the prior year → latest, signed by liquidity effect (assets add when up, drains add when DOWN)
+    const y0 = last[0].slice(0, 4) + "-01-01";
+    const base = (obs) => obs ? liqAt(obs, y0) : null, cur = (obs) => obs ? obs[obs.length - 1] : null;
+    const items = [];
+    const push = (k, label, obs, drain) => { const b = base(obs), c = cur(obs); if (!b || !c) return; const dv = c[1] - b[1]; items.push({ k, label, delta: +dv.toFixed(1), effect: +((drain ? -dv : dv)).toFixed(1), from: b[0], to: c[0] }); };
+    push("ust", "Treasuries", raw.ust, false); push("agency", "Agency debt", raw.agency, false); push("mbs", "MBS", raw.mbs, false);
+    push("tga", "TGA", raw.tga, true); push("rrp", "ON RRP", raw.rrp, true);
+    const nb = liqAt(net, y0);
+    const ytd = { from: nb ? nb[0] : null, to: last[0], items, net: nb ? +(last[1] - nb[1]).toFixed(1) : null };
+    // QT end: most recent date the 13-week change in Treasury holdings turned non-negative after a run of declines
+    let qtEnd = null;
+    if (raw.ust && raw.ust.length > 30) { const u = raw.ust; for (let i = u.length - 1; i >= 13; i--) { const ch = u[i][1] - u[i - 13][1]; if (ch < -5) { qtEnd = i + 1 < u.length ? u[i + 1][0] : null; break; } } if (qtEnd && qtEnd === u[u.length - 1][0]) qtEnd = null; }
+    // SOFR − IORB (bp) where both print
+    let sofrIorb = null;
+    if (raw.sofr && raw.iorb) { const I = raw.iorb; sofrIorb = raw.sofr.filter((p) => p[0] >= I[0][0]).map((p) => { const i = liqAt(I, p[0]); return i ? [p[0], +((p[1] - i[1]) * 100).toFixed(0)] : null; }).filter(Boolean); }
+    return { net, last: { d: last[0], v: last[1], pctGdp: last[2] }, prev: prev ? { d: prev[0], v: prev[1] } : null, peak: { d: peak[0], pctGdp: peak[2], v: peak[1] }, ytd, qtEnd, sofrIorb };
+  }
+  async function fetchLiquidity() {
+    const now = Date.now();
+    const key = process.env.FRED_KEY || "";
+    let err = null; const raw = {}, levels = {}, missing = [];
+    if (!key) err = "FRED_KEY not set";
+    else {
+      const fget = async (path, params) => {
+        const q = new URLSearchParams(Object.assign({ api_key: key, file_type: "json" }, params));
+        const res = await fetch("https://api.stlouisfed.org/fred/" + path + "?" + q, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        if (!res.ok) throw new Error("FRED HTTP " + res.status);
+        return res.json();
+      };
+      for (const def of LIQ_SERIES) {
+        try {
+          await sleep(150);
+          const obs = fredObsSeries(await fget("series/observations", { series_id: def.sid, observation_start: def.start, sort_order: "asc", limit: 100000 }));
+          if (!obs.length) { missing.push(def.sid); continue; }
+          raw[def.k] = obs.map((o) => [o[0], o[1] * def.scale]);
+          const L = raw[def.k][raw[def.k].length - 1], P = raw[def.k].length > 1 ? raw[def.k][raw[def.k].length - 2] : null;
+          levels[def.k] = { sid: def.sid, title: def.title, unit: def.unit, freq: def.freq, d: L[0], v: +L[1].toFixed(def.unit === "%" ? 2 : 1), chg: P ? +(L[1] - P[1]).toFixed(def.unit === "%" ? 2 : 1) : null,
+            obs: def.k === "gdp" ? undefined : raw[def.k].map((p) => [p[0], +p[1].toFixed(def.unit === "%" ? 2 : 1)]) };
+        } catch (e) { missing.push(def.sid + " (" + ((e && e.message) || "fetch failed") + ")"); }
+      }
+      if (!raw.assets || !raw.tga) err = "FRED unreachable or core series absent: " + missing.join(", ");
+      else if (missing.length) log("liquidity: series absent this pass: " + missing.join(", "));
+    }
+    if (err && liqCache && liqCache.derived) { liqCache = Object.assign({}, liqCache, { ts: now, error: err }); log("liquidity: refresh failed, serving warm board (" + err + ")"); return; }
+    const derived = err ? null : liqBuild(raw);
+    const sig = (derived ? derived.last.d + ":" + derived.last.v + ":" + derived.net.length : "") + "|" + Object.keys(levels).sort().map((k) => k + levels[k].d + levels[k].v).join(",") + "|" + (err || "");
+    if (sig !== liqSig) { liqSig = sig; liqVer = now; }
+    if (!err) lastLiqOk = now;
+    liqCache = { ts: now, dataTs: liqVer, asOf: err ? (liqCache && liqCache.asOf) || null : now, error: err, levels, derived, missing };
+    if (!err && store.saveLiquidity) store.saveLiquidity({ ts: now, levels, derived, missing });
+    log("Liquidity board: " + Object.keys(levels).length + "/" + LIQ_SERIES.length + " FRED series" + (derived ? ", net " + derived.last.v + "B (" + derived.last.pctGdp + "% GDP)" : "") + (err ? " (" + err + ")" : ""));
+  }
+  const liqTick = () => { fetchLiquidity().catch((e) => log("liquidity tick failed: " + (e && e.message))); };
+  function loadLiquidityCache() {
+    const data = store.loadLiquidity ? store.loadLiquidity() : null;
+    if (!data || !data.levels || !Object.keys(data.levels).length) return false;
+    liqVer = data.ts || Date.now();
+    liqCache = { ts: Date.now(), dataTs: liqVer, asOf: data.ts || null, error: null, levels: data.levels, derived: data.derived || null, missing: data.missing || [] };
+    return true;
+  }
+  // H.4.1 lands Thursdays ~16:30 ET. 21:00 UTC covers EDT with margin (EST: 21:30, still before the next check).
+  function liqReleaseCrossed() {
+    const d = new Date(); const dow = d.getUTCDay();
+    const back = (dow - 4 + 7) % 7; const thu = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - back, 21, 0, 0);
+    const lastRel = thu <= Date.now() ? thu : thu - 7 * 864e5;
+    return lastLiqOk < lastRel;
+  }
   // Rate lines for the brief, built ONLY from series that actually came back. 2s10s is derived and
   // therefore requires both legs — a spread computed from one leg would be a fabrication.
   function briefRates() {
@@ -12079,6 +12288,8 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
     getFlags, getFeatures, setFlag,   // feature-visibility state (admin panel)
+    getHousing: () => housingCache,   // Housing tab board (FRED-fed, 6h refresh)
+    getLiquidity: () => liqCache,   // Liquidity tab board (FRED H.4.1, Thursday-aware refresh)
     getEarnings: () => {
       if (!earnCache) return earnCache;
       // filings links overlay at serve time (filings arrive continuously between the 6h

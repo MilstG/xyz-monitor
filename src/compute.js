@@ -5224,6 +5224,11 @@ const FEATURES = [
   { key: "signals",    kind: "tab", label: "Signals",     def: "public", routes: ["/api/signals", "/api/ledger", "/api/triggers"] },
   { key: "earnings",   kind: "tab", label: "Earnings",    def: "public", routes: ["/api/earnings"] },
   { key: "news",       kind: "tab", label: "News",        def: "public", routes: ["/api/news", "/api/news/channels"] },
+  // HOUSING (build 2026.08.21-04): the macro housing / MBS board — FRED-fed, read-only. Ships
+  // admin-only while it soaks (proxy panels need a second look before the group sees them).
+  { key: "housing",    kind: "tab", label: "Housing",     def: "admin",  routes: ["/api/housing"] },
+  // LIQUIDITY (build 2026.08.21-04): Fed net liquidity (H.4.1 − TGA − ON RRP) board. Admin-only while it soaks.
+  { key: "liquidity",  kind: "tab", label: "Liquidity",   def: "admin",  routes: ["/api/liquidity"] },
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
   { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },

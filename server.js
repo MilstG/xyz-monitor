@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.21-03";
+const VERSION = "2026.08.21-04";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -804,6 +804,12 @@ async function main() {
   // dataTs like the other cached payloads, so an unchanged calendar revalidates to a 304.
   fastify.get("/api/earnings", (req, reply) =>
     serveCached(req, reply, poller.getEarnings(), { ts: 0, dataTs: 0, asOf: null, windowDays: 14, source: "finnhub", error: "not fetched yet", entries: [], recent: [], eligible: 0 }));
+  // Housing / MBS board — FRED-fed, 6h server refresh. ETag rides dataTs like the other cached
+  // payloads, so an unchanged board revalidates to a 304.
+  fastify.get("/api/housing", (req, reply) =>
+    serveCached(req, reply, poller.getHousing(), { ts: 0, dataTs: 0, asOf: null, error: "not fetched yet", series: {}, missing: [], pending: [] }));
+  fastify.get("/api/liquidity", (req, reply) =>
+    serveCached(req, reply, poller.getLiquidity(), { ts: 0, dataTs: 0, asOf: null, error: "not fetched yet", levels: {}, derived: null, missing: [] }));
   // Operator surgery for feed-garbage earnings prints (e.g. a phantom report date the feed
   // asserted and never corrected): removes the print from history and the reaction study and
   // tombstones it so no future fetch can resurrect it. Session-gated like every route.

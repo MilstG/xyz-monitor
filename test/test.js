@@ -12205,7 +12205,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-03"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-04"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19777,4 +19777,76 @@ test("focus -06: the CLOSE cell stops promising a fill once the session is over"
   assert.match(lc, /237\.60/, "the late-filled close renders normally");
   assert.match(lc, /read 312m after the close/, "…with when it was read stated on the cell");
   assert.match(lc, /-11\.6%/, "and the move off the open is unchanged by the lateness");
+});
+
+// ===== HOUSING tab (build 2026.08.21-04): source + wiring manifest =============================
+test("housing tab: source + wiring manifest (FRED board, feature-gated route, view wiring)", () => {
+  const fs = require("fs"), path = require("path");
+  const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
+  const srv = R("server.js"), pol = R("src/poller.js"), cmp = R("src/compute.js"), sto = R("src/store.js");
+  const idx = R("public/index.html"), app = R("public/app.js"), css = R("public/styles.css");
+  // manifest entry + gated route, declared once each
+  assert.ok(/\{ key: "housing",\s+kind: "tab",\s+label: "Housing",\s+def: "admin",\s+routes: \["\/api\/housing"\] \}/.test(cmp), "FEATURES entry");
+  assert.strictEqual((srv.match(/fastify\.get\("\/api\/housing"/g) || []).length, 1, "route declared once");
+  assert.ok(srv.includes("poller.getHousing()"), "route reads the poller board");
+  assert.ok(/getHousing\s*:/.test(pol), "poller exports getHousing");
+  // fetcher contract: every series is fetched in full history, per-series isolation, FRED pacing
+  for (const sid of ["MORTGAGE30US", "DRTSPM", "HOUST1F", "HOUST5F", "MSACSR", "HSN1F", "MSPUS", "BAMLC0A4CBBB"])
+    assert.ok(pol.includes(`sid: "${sid}"`), "series " + sid);
+  assert.ok(pol.includes('observation_start: def.start'), "full history, not latest-30");
+  assert.ok(/for \(const def of HOUSING_SERIES\) \{\s*try \{\s*await sleep\(150\);/.test(pol), "per-series try + 150ms pacing");
+  assert.ok(pol.includes("serving warm board"), "failed refresh keeps the warm board");
+  assert.ok(pol.includes("if (!err && store.saveHousing) store.saveHousing("), "persists only good boards, store feature-detected");
+  assert.ok(pol.includes("setTimeout(housingTick, 35 * 1000)"), "armed after the macro burst");
+  // store pair, atomic write
+  assert.ok(/saveHousing\(data\) \{\s*try \{\s*const tmp = housingFile \+ "\.tmp";/.test(sto), "atomic tmp+rename");
+  assert.ok(sto.includes("loadHousing()"), "loadHousing");
+  // view wiring
+  assert.ok(idx.includes('data-view="housing"') && idx.includes('id="view-housing"'), "tab + section");
+  assert.ok(app.includes("setHidden('view-housing', v!=='housing')"), "visibility toggle");
+  assert.ok(app.includes("if(v==='housing'){ if(el('view-housing')) openHousing();"), "dispatch");
+  assert.ok(/HASH_VIEWS=new Set\(\[[^\]]*'housing'/.test(app), "deep link");
+  assert.ok(/CMDK_TABS=\[[\s\S]*?\{v:'housing',label:'Housing'\}/.test(app), "command palette");
+  assert.ok(/\n  housing:`/.test(app) && app.includes("housing:'Housing'"), "help text + title");
+  for (const fn of ["loadHousing", "openHousing", "renderHousing", "hsgLineSvg", "hsgDivergeSvg", "hsgStackSvg"])
+    assert.strictEqual((app.match(new RegExp("^(?:async )?function " + fn + "\\(", "gm")) || []).length, 1, fn + " defined once");
+  assert.ok(app.includes("return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});"), "charts ride the shared crosshair");
+  assert.ok(app.includes("attachLineHover();\n}\n") && /root\.innerHTML=tiles[\s\S]*?attachLineHover\(\);/.test(app), "hover bound after paint");
+  // crypto scope untouched: housing is stocks-only macro, hidden in crypto by viewInScope
+  assert.ok(!/CRYPTO_VIEWS=[^;]*housing/.test(app), "not a crypto view");
+  assert.ok(css.includes(".src-chip.proxy i{background:var(--blue)}"), "proxy chip colour");
+});
+
+test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursday refire, view wiring)", () => {
+  const fs = require("fs"), path = require("path");
+  const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
+  const srv = R("server.js"), pol = R("src/poller.js"), cmp = R("src/compute.js"), sto = R("src/store.js");
+  const idx = R("public/index.html"), app = R("public/app.js");
+  assert.ok(/\{ key: "liquidity",\s+kind: "tab",\s+label: "Liquidity",\s+def: "admin",\s+routes: \["\/api\/liquidity"\] \}/.test(cmp), "FEATURES entry");
+  assert.strictEqual((srv.match(/fastify\.get\("\/api\/liquidity"/g) || []).length, 1, "route declared once");
+  assert.ok(/getLiquidity\s*:/.test(pol), "poller exports getLiquidity");
+  // the seven series on the source page + the three we add
+  for (const sid of ["WALCL", "TREAST", "FEDDT", "WSHOMCB", "WTREGEN", "RRPONTSYD", "GDP", "WRESBAL", "SOFR", "IORB"])
+    assert.ok(pol.includes(`sid: "${sid}"`), "series " + sid);
+  // units: H.4.1 lines + reserves publish in MILLIONS (scale 0.001 → billions); ON RRP and GDP already in billions
+  for (const sid of ["WALCL", "TREAST", "FEDDT", "WSHOMCB", "WTREGEN", "WRESBAL"])
+    assert.ok(new RegExp(`sid: "${sid}",[^\\n]*scale: 0\\.001`).test(pol), sid + " scaled from millions");
+  for (const sid of ["RRPONTSYD", "GDP"])
+    assert.ok(new RegExp(`sid: "${sid}",[^\\n]*scale: 1,`).test(pol), sid + " already billions");
+  assert.ok(pol.includes("const n = a - t[1] - r;"), "net = assets − TGA − ON RRP");
+  assert.ok(pol.includes("Date.parse(d) - Date.parse(rr[0])) <= 7 * 864e5 ? rr[1] : 0"), "ON RRP sampled ≤ Wednesday, zero before the facility existed");
+  assert.ok(pol.includes("effect: +((drain ? -dv : dv)).toFixed(1)"), "YTD bars signed by liquidity effect");
+  assert.ok(pol.includes("function liqReleaseCrossed()") && pol.includes("lastLiqOk > LIQ_STALE || liqReleaseCrossed()"), "Thursday H.4.1 refire");
+  assert.ok(pol.includes("if (!err && store.saveLiquidity) store.saveLiquidity("), "persists good boards only, store feature-detected");
+  assert.ok(/saveLiquidity\(data\) \{\s*try \{\s*const tmp = liqFile \+ "\.tmp";/.test(sto) && sto.includes("loadLiquidity()"), "store pair");
+  assert.ok(idx.includes('data-view="liquidity"') && idx.includes('id="view-liquidity"'), "tab + section");
+  assert.ok(app.includes("setHidden('view-liquidity', v!=='liquidity')"), "visibility toggle");
+  assert.ok(app.includes("if(v==='liquidity'){ if(el('view-liquidity')) openLiquidity();"), "dispatch");
+  assert.ok(/HASH_VIEWS=new Set\(\[[^\]]*'liquidity'/.test(app), "deep link");
+  assert.ok(/CMDK_TABS=\[[\s\S]*?\{v:'liquidity',label:'Liquidity'\}/.test(app), "command palette");
+  assert.ok(/const HELP=\{\s*liquidity:`/.test(app) && app.includes("liquidity:'Liquidity'"), "help text + title");
+  for (const fn of ["loadLiquidity", "openLiquidity", "renderLiquidity", "liqBarsSvg", "liqStackSvg"])
+    assert.strictEqual((app.match(new RegExp("^(?:async )?function " + fn + "\\(", "gm")) || []).length, 1, fn + " defined once");
+  assert.ok(/root\.innerHTML=tiles\+`<div class="s-grid">\$\{cards\.join\(''\)\}<\/div>`\+stack\+drains[\s\S]*?attachLineHover\(\);/.test(app), "hover bound after paint");
+  assert.ok(!/CRYPTO_VIEWS=[^;]*liquidity/.test(app), "not a crypto view");
 });

@@ -20,6 +20,8 @@ function openStore(dataDir) {
   const archiveFile = path.join(dataDir, "ledger-archive.jsonl");
   const earnFile = path.join(dataDir, "earnings.json");
   const macroFile = path.join(dataDir, "macro.json");
+  const housingFile = path.join(dataDir, "housing.json");
+  const liqFile = path.join(dataDir, "liquidity.json");
   const newsFile = path.join(dataDir, "news.json");
   const fundFile = path.join(dataDir, "fundamentals.json");
   const tgFile = path.join(dataDir, "tgchannels.json");
@@ -426,6 +428,30 @@ function openStore(dataDir) {
     },
     loadMacro() {
       try { if (fs.existsSync(macroFile)) return JSON.parse(fs.readFileSync(macroFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    saveHousing(data) {
+      try {
+        const tmp = housingFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, housingFile);
+      } catch (_) {}
+    },
+    loadHousing() {
+      try { if (fs.existsSync(housingFile)) return JSON.parse(fs.readFileSync(housingFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    saveLiquidity(data) {
+      try {
+        const tmp = liqFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, liqFile);
+      } catch (_) {}
+    },
+    loadLiquidity() {
+      try { if (fs.existsSync(liqFile)) return JSON.parse(fs.readFileSync(liqFile, "utf8")); }
       catch (_) {}
       return null;
     },

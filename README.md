@@ -32,6 +32,19 @@ instant, and the per-IP rate limit stops being a per-user problem.
   name's usual range — shown on the tab and in the drawer. Session-spanning ledger claims in
   force within 1 day of a print are tagged (E in claim history) so the earnings-conditioned
   base-rate split accrues out of sample.
+- **Housing tab** (`/api/housing`) — macro housing / MBS board: 30y mortgage rate, Fed SLOOS lending
+  standards, single-family vs multifamily starts, months' supply, new-home sales, median price and a BBB
+  OAS proxy for non-QM spreads. Eight FRED series pulled in full history (needs `FRED_KEY`), refreshed
+  every 6h, warm-cached on the volume (`housing.json`). Each card names its series; a *Proxy* chip says
+  what differs from the paid original (jumbo rates, NAR existing-home data, DB non-QM spreads). SIFMA
+  issuance and FINRA TRACE volume are declared as *Pending* until their file feeds are wired. Ships
+  admin-only.
+- **Liquidity tab** (`/api/liquidity`) — Fed net liquidity board: total assets − TGA − ON RRP on the
+  weekly H.4.1 dates, as dollars and % of nominal GDP, year-to-date change by component (signed by
+  liquidity effect), balance-sheet composition, the TGA/ON RRP drains, plus bank reserves and SOFR−IORB
+  as plumbing-stress reads. Ten FRED series; everything normalised to billions before any arithmetic
+  (H.4.1 lines publish in millions, ON RRP/GDP in billions). Refires after the Thursday ~4:30pm ET
+  release and every 6h otherwise; warm-cached (`liquidity.json`). Ships admin-only.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
