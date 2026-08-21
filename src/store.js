@@ -88,8 +88,11 @@ function openStore(dataDir) {
     // tables per interval, same doctrine as candles_1m: mixing widths into one series would hand
     // every range-reader a mixed-resolution tape with no way to tell which rows are which. No
     // retention/evict lane — depth is the entire point, the native window bounds what can ever
-    // seed, and forward capture adds ~3 rows/market/day across both tables combined.
-    for (const iv of ["12h", "1d"]) {
+    // seed, and forward capture adds ~9 rows/market/day across the three tables combined.
+    // 4h joined at 2026.08.21-03: the CHARTS 4H pane read the 20d intraday base (120 bars), which
+    // cannot carry an EMA200 by construction — at 4h the native window is ~2.3 YEARS, so the pane
+    // moves onto this lane instead of stretching the raw-5m fetch past its cap.
+    for (const iv of ["4h", "12h", "1d"]) {
       const tbl = "candles_" + iv;
       cdb.exec(`CREATE TABLE IF NOT EXISTS ${tbl} (coin TEXT NOT NULL, ts INTEGER NOT NULL, o REAL, h REAL, l REAL, c REAL, v REAL, PRIMARY KEY (coin, ts)) STRICT, WITHOUT ROWID;`);
       deepStmt[iv] = {

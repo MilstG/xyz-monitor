@@ -112,14 +112,14 @@ const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m
 const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
 // ---- deep-history 12h/1d archive (build 2026.08.21-01) ---------------------------------------
-// The native 5000-bar candleSnapshot window is ~6.8y at 12h and ~13.7y at 1d, so unlike the 5m
+// The native 5000-bar candleSnapshot window is ~2.3y at 4h, ~6.8y at 12h and ~13.7y at 1d, so unlike the 5m
 // lane these tables seed BACKWARD to each listing's birth in ONE pull per market per interval,
 // then capture forward on the same closed-bar guard. Feeds the CHARTS tab's 12H/1D panes only —
 // the trend ladder's D1/H12 stay on their own frozen construction (withFormingDaily / spine
 // buckets); on overlap the bars are the same exchange prints, but nothing re-derives across
 // sources. Bars land on HL's own UTC grid, verbatim — no local re-anchoring: a daily bar on a
 // 24/7 perp IS a UTC day, and re-cutting it here would invent a series the exchange never printed.
-const DEEP_IVS = { "12h": 12 * HOUR, "1d": 24 * HOUR };
+const DEEP_IVS = { "4h": 4 * HOUR, "12h": 12 * HOUR, "1d": 24 * HOUR };   // 4h joined -03: ~2.3y native window; the CHARTS 4H pane needs EMA200 depth the 20d intraday base cannot hold
 const DEEP_STALE = 4 * HOUR;          // tail-pull cadence per (market, interval): a few closed bars/day exist at most
 const DEEP_SEED_BARS = 4900;          // just under the native 5000-bar cap — the seed pull asks for everything servable
 const DEEP_SEED_WEIGHT = 60;          // one-time cold pull per (market, interval): up to ~5000 bars in one response
