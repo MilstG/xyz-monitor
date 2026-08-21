@@ -4925,10 +4925,14 @@ test("deep archive: per-interval tables are isolated, upserts idempotent, unknow
     const cov = s.candleCoverageDeep("12h", "xyz:AAPL");
     assert.equal(cov.count, 10); assert.equal(cov.min, base); assert.equal(cov.max, base + 9 * 12 * HOUR);
     assert.equal(s.candleCoverageDeep("1d", "xyz:NVDA").count, 0, "unseeded coin reports zero, never a fabricated span");
+    // 4h joined the lane at -03: same isolation contract as the other two tables
+    assert.equal(s.insertCandlesDeep("4h", "xyz:AAPL", mk(4 * HOUR, 6, 300)), 6, "4h rows land");
+    assert.equal(s.readCandlesDeep("4h", "xyz:AAPL", base, base + 20 * DAY).length, 6);
+    assert.equal(s.readCandlesDeep("12h", "xyz:AAPL", base, base + 20 * DAY).length, 10, "12h table untouched by 4h writes");
     // unknown interval: hard no on every verb — a typo must not create or read a series
-    assert.equal(s.insertCandlesDeep("4h", "xyz:AAPL", mk(4 * HOUR, 3, 1)), 0, "unknown interval writes nothing");
-    assert.deepEqual(s.readCandlesDeep("4h", "xyz:AAPL", 0, Date.now()), [], "unknown interval reads empty");
-    assert.equal(s.candleCoverageDeep("4h", "xyz:AAPL").count, 0);
+    assert.equal(s.insertCandlesDeep("2h", "xyz:AAPL", mk(2 * HOUR, 3, 1)), 0, "unknown interval writes nothing");
+    assert.deepEqual(s.readCandlesDeep("2h", "xyz:AAPL", 0, Date.now()), [], "unknown interval reads empty");
+    assert.equal(s.candleCoverageDeep("2h", "xyz:AAPL").count, 0);
     // a bar with no timestamp/close is not a bar (same gate as the 5m/1m inserts)
     assert.equal(s.insertCandlesDeep("1d", "xyz:BAD", [[NaN, 1, 2, 0, 1, 5], [base, 1, 2, 0, NaN, 5]]), 0, "garbage rows are skipped, not coerced");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -4972,7 +4976,7 @@ test("deep archive: getCandlesDeep — honest downsample, coverage disclosure, c
     const rev = p.getCandlesDeep("xyz:NVDA", "1d", base + 10 * DAY, base, 500);
     assert.equal(rev.candles.length, 11, "reversed bounds are swapped, not rejected");
     // unknown interval: null (the route's guard), NOT an empty-but-plausible series
-    assert.equal(p.getCandlesDeep("xyz:NVDA", "4h", base, base + DAY, 500), null, "res axis stays closed: only 12h/1d exist here");
+    assert.equal(p.getCandlesDeep("xyz:NVDA", "2h", base, base + DAY, 500), null, "res axis stays closed: only 4h/12h/1d exist here");
     // closed-bar guard: the FORMING 12h/1d bar must never land
     const now = Date.now();
     const tail = [[now - 2 * DAY, 1, 2, 0, 1, 5], [now - DAY, 1, 2, 0, 1, 5], [now - 3 * HOUR, 1, 2, 0, 1, 5]];
@@ -4999,18 +5003,18 @@ test("deep archive + CHARTS tab: source + wiring manifest (store, capture lane, 
   const app = rd("public/app.js"), html = rd("public/index.html"), css = rd("public/styles.css");
   const C = require("../src/compute");
   // store: both tables STRICT/WITHOUT ROWID with the upsert, keyed off one statement map
-  assert.ok(sto.includes('for (const iv of ["12h", "1d"]') && sto.includes('const tbl = "candles_" + iv'),
+  assert.ok(sto.includes('for (const iv of ["4h", "12h", "1d"]') && sto.includes('const tbl = "candles_" + iv'),
     "store must build candles_12h/candles_1d off the one interval list (a typo'd third table cannot appear)");
   assert.ok(sto.includes("deepStmt[iv]") && sto.includes("insertCandlesDeep(iv, coin, rows)"), "deep API is interval-keyed, one surface for both tables");
   // capture lane: backward seed + closed-bar guard + worker launched inside the sqlite gate
-  assert.ok(pol.includes('DEEP_IVS = { "12h": 12 * HOUR, "1d": 24 * HOUR }'), "interval map pinned");
+  assert.ok(pol.includes('DEEP_IVS = { "4h": 4 * HOUR, "12h": 12 * HOUR, "1d": 24 * HOUR }'), "interval map pinned (4h joined -03)");
   assert.ok(pol.includes("DEEP_SEED_BARS = 4900"), "seed reaches for the full native window (just under the 5000-bar cap)");
   assert.ok(pol.includes("function captureDeep") && pol.includes("function deepWorker"), "capture + worker present");
   assert.ok(pol.includes("k[0] + w <= now"), "deep closed-bar guard present (forming 12h/1d bar never lands)");
   assert.ok(pol.includes("deepWorker();"), "deep worker launched in start()");
   assert.ok(/getCandlesDeep,/.test(pol) && /getDeepStamp:/.test(pol) && /_deepFilterClosed:/.test(pol), "deep getters + harness hook exported");
   // route: res=12h/res=1d branch on /api/candles — no new route string, manifest still counts one
-  assert.ok(/res === "12h" \|\| req\.query\.res === "1d"/.test(srv), "/api/candles must branch on res=12h|1d");
+  assert.ok(/res === "4h" \|\| req\.query\.res === "12h" \|\| req\.query\.res === "1d"/.test(srv), "/api/candles must branch on res=4h|12h|1d");
   assert.ok(srv.includes('"candlesdeep|"') && srv.includes("poller.getCandlesDeep(") && srv.includes("poller.getDeepStamp("), "deep branch must key + serve via the deep getters");
   assert.equal(srv.split('fastify.get("/api/candles"').length - 1, 1, "still exactly one /api/candles registration");
   // manifest: CHARTS tab exists, public, routeless (the candle routes stay pinned under markets —
@@ -5024,7 +5028,8 @@ test("deep archive + CHARTS tab: source + wiring manifest (store, capture lane, 
   assert.ok(html.includes('data-view="charts"') && html.includes('id="view-charts"') && html.includes('id="chartswrap"'), "charts tab markup present");
   // client: entry point, both source fetches, aggregation, LINK-as-transform, viewport, hover,
   // coverage disclosure, per-browser persistence — and the tab is reachable from every entry path
-  for (const pin of ["function openCharts()", "res=5m&from=", "&res='+CH_SRC_RES[src]", "function chAgg(", "function chZoomAll(", "function chPanAll(", "function chHoverAll(", "function chResetView(", "localStorage.setItem('xyz-charts'", "CH_MTF_SETS", "p.covEl.textContent=cov"])
+  for (const pin of ["function openCharts()", "res=5m&from=", "&res='+CH_SRC_RES[src]", "function chAgg(", "function chZoomAll(", "function chPanAll(", "function chHoverAll(", "function chResetView(", "localStorage.setItem('xyz-charts'", "CH_MTF_SETS",
+    "{k:240,l:'4H',src:'d4h'}", "d4h:'4h'", "240:60*86400000", "p.covEl.textContent=covTxt"])
     assert.ok(app.includes(pin), "charts client marker missing: " + pin);
   assert.ok(app.includes("'markets','focus','funds','trend','charts'"), "HASH_VIEWS must route #charts");
   assert.ok(app.includes("'markets','trend','charts','report'"), "CRYPTO_VIEWS must keep charts visible in crypto scope");
@@ -12200,7 +12205,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
