@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-09"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-10"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19902,54 +19902,81 @@ test("13f ingest: the SEC URL convention, and a default quarter that can exist",
   assert.ok(body.includes("tried.push(url +"), "each attempt logs its FULL url");
 });
 
-// The ribbon was one flex row holding the scope switcher, 18 tabs and two controls, and it had
-// run out of width with four tabs already hidden to make it fit. Tabs now live in four menus; the
-// row holds six triggers. The risk this test guards is DRIFT: a tab added to the server manifest
-// but not to the client taxonomy, and the [hidden] trap that let a closed menu eat its own clicks.
-test("nav groups: every tab is placed, exactly once, and a closed menu is really closed", () => {
+// The ribbon was one flex row holding the scope switcher, 18 tabs and two controls, and it had run
+// out of width with four tabs already hidden to make it fit. Tabs now live in menus the admin can
+// rename and re-assign. The risks guarded here: DRIFT (a tab in the manifest but in no menu), a
+// hostile label reaching the page shell as markup, and the [hidden] trap that let a closed menu
+// swallow every click aimed at its own trigger.
+test("nav groups: every tab is placed once, and renames/moves are validated at the write", () => {
   const fs = require("fs"), path = require("path");
   const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
-  const app = R("public/app.js"), css = R("public/styles.css"), cmp = R("src/compute.js");
-  const F = new Function(
-    app.match(/^const TAB_PINNED = new Set\([\s\S]*?\);$/m)[0] + "\n" +
-    app.match(/^const TAB_GROUPS = \[[\s\S]*?\n\];$/m)[0] +
-    "\nreturn { TAB_PINNED, TAB_GROUPS };")();
+  const app = R("public/app.js"), css = R("public/styles.css"), cmp = R("src/compute.js"), srv = R("server.js");
+  const C = require("../src/compute.js");
 
-  // every tab the SERVER ships is placed by the client taxonomy — this is the drift guard
+  // every tab the manifest ships is placed by the taxonomy — the drift guard
   const shipped = [...cmp.matchAll(/\{ key: "([a-z0-9]+)",\s+kind: "tab"/g)].map((m) => m[1]);
   assert.ok(shipped.length >= 18, "found the tab manifest (" + shipped.length + " tabs)");
   const placed = new Map();
-  for (const g of F.TAB_GROUPS) for (const v of g.views) {
+  for (const g of C.NAV_GROUPS) for (const v of g.views) {
     assert.ok(!placed.has(v), v + " is in one group only, not " + placed.get(v) + " and " + g.key);
     placed.set(v, g.key);
   }
   for (const v of shipped) {
-    assert.ok(F.TAB_PINNED.has(v) || placed.has(v), v + " is pinned or grouped, never orphaned");
-    assert.ok(!(F.TAB_PINNED.has(v) && placed.has(v)), v + " is not both pinned and grouped");
+    assert.ok(C.NAV_PINNED.includes(v) || placed.has(v), v + " is pinned or grouped, never orphaned");
+    assert.ok(!(C.NAV_PINNED.includes(v) && placed.has(v)), v + " is not both pinned and grouped");
   }
-  // and nothing in the taxonomy points at a tab that does not exist
   for (const [v] of placed) assert.ok(shipped.includes(v), v + " is a real tab in FEATURES");
-  for (const v of F.TAB_PINNED) assert.ok(shipped.includes(v), "pinned " + v + " is a real tab");
-
-  // markets stays flat because it is pin:true and every load lands on it; admin because it is a
-  // single locked entry. Both would be a bad two-click trade.
+  for (const v of C.NAV_PINNED) assert.ok(shipped.includes(v), "pinned " + v + " is a real tab");
   assert.ok(/\{ key: "markets",[^}]*pin: true/.test(cmp), "markets is pinned in the manifest too");
-  assert.ok(F.TAB_PINNED.has("markets") && F.TAB_PINNED.has("admin"), "the two flat tabs");
-  assert.ok(F.TAB_GROUPS.length >= 3 && F.TAB_GROUPS.length <= 6,
-    "few enough groups to fit the row (" + F.TAB_GROUPS.length + ")");
+  assert.ok(C.NAV_GROUPS.length >= 3 && C.NAV_GROUPS.length <= 6, "few enough menus to fit the row");
 
-  // the [hidden] trap: .tabmenu/.tabgrp set display, which beats the UA's [hidden] rule on ORIGIN.
-  // Without these two lines a CLOSED menu still intercepted pointer events over its own trigger —
-  // caught by driving a real browser, invisible to any source-level assertion.
+  // ---- renames -------------------------------------------------------------------------------
+  const lbl = (cfg) => C.resolveNavGroups(cfg).map((g) => g.key + "=" + g.label).join(",");
+  assert.ok(lbl({ labels: { tape: "Flow" } }).includes("tape=Flow"), "a rename applies");
+  assert.deepStrictEqual(C.navConfigSanitize({ labels: { tape: "Tape" } }).labels, {},
+    "renaming back to the default stores nothing rather than residue");
+  assert.deepStrictEqual(C.navConfigSanitize({ labels: { nope: "x" } }).labels, {}, "unknown menu rejected");
+  // a label is injected into the page shell, so it is cleaned at the WRITE
+  for (const hostile of ['<img src=x onerror="alert(1)">', "</span><b>x</b>", "a&b'c\"d", "<<>>"])
+    assert.ok(!/[<>&"']/.test(C.navLabelClean(hostile)),
+      "no markup character survives a label: " + JSON.stringify(C.navLabelClean(hostile)));
+  assert.strictEqual(C.navLabelClean('<img src=x onerror="alert(1)">'), "img src=x onerror=",
+    "hostile input is defanged AND capped, not merely escaped at render time");
+  assert.ok(C.navLabelClean("A".repeat(80)).length <= C.NAV_LABEL_MAX, "length capped");
+  assert.strictEqual(C.navLabelClean("  Two   words  "), "Two words", "whitespace collapsed and trimmed");
+  assert.strictEqual(C.navLabelClean("   "), "", "blank means restore the default");
+
+  // ---- moves ---------------------------------------------------------------------------------
+  const moved = C.resolveNavGroups({ views: { backtest: "research" } });
+  assert.ok(!moved.find((g) => g.key === "signals").views.includes("backtest"), "leaves the old menu");
+  assert.ok(moved.find((g) => g.key === "research").views.includes("backtest"), "lands in the new one");
+  // order is canonical, not write-order: two admins making the same moves in a different sequence
+  // must end up with the same ribbon
+  const a = C.resolveNavGroups({ views: { backtest: "research", sectors: "research" } });
+  const b = C.resolveNavGroups({ views: { sectors: "research", backtest: "research" } });
+  assert.deepStrictEqual(a.map((g) => g.views), b.map((g) => g.views), "move order does not matter");
+  assert.deepStrictEqual(C.navConfigSanitize({ views: { markets: "tape" } }).views, {}, "a pinned view cannot be moved");
+  assert.deepStrictEqual(C.navConfigSanitize({ views: { admin: "tape" } }).views, {}, "nor the panel itself");
+  assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "nope" } }).views, {}, "unknown target menu rejected");
+  assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "tape" } }).views, {}, "a move to where it already is stores nothing");
+  // a menu emptied by moves still resolves — the client hides it
+  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape" } });
+  assert.strictEqual(empty.find((g) => g.key === "research").views.length, 0, "a menu can be emptied");
+
+  // ---- wiring --------------------------------------------------------------------------------
+  assert.ok(srv.includes('fastify.post("/api/nav-groups"'), "one route for both operations");
+  assert.ok(srv.includes("window.__NAVGROUPS="), "labels are injected pre-paint, never flashed");
+  assert.ok(app.includes("window.__NAVGROUPS"), "the client reads the injected set");
+  assert.ok(/TAB_GROUPS = \(Array\.isArray\(window\.__NAVGROUPS\)/.test(app), "with a fallback for a failed injection");
+  assert.ok(app.includes("function applyNavGroups"), "the ribbon rebuilds from the server's answer");
+
+  // the [hidden] trap: .tabmenu/.tabgrp set display, which beats the UA rule on ORIGIN. Without
+  // these a CLOSED menu still intercepted pointer events over its own trigger — caught by driving
+  // a real browser, invisible to any source-level assertion.
   assert.ok(css.includes(".tabmenu[hidden]{display:none}"), "closed menu is display:none");
-  assert.ok(css.includes(".tabgrp[hidden]{display:none}"), "emptied group is display:none");
-
-  // the real .tab buttons MOVE into menus — everything keyed off them must keep working
+  assert.ok(css.includes(".tabgrp[hidden]{display:none}"), "emptied menu is display:none");
   assert.ok(app.includes("members.forEach(t=>menu.appendChild(t))"), "tabs are moved, not cloned");
-  assert.ok(/syncTabGroups\(/.test(app) && (app.match(/syncTabGroups\(/g) || []).length >= 4,
-    "group state syncs from showView and the visibility pass");
-  assert.ok(app.includes("if(over.parentNode!==drag.parentNode) return;"), "drag stays inside its own container");
-  assert.ok(!/nav\.insertBefore\(drag,/.test(app), "drag no longer reparents a tab into the flat row");
+  assert.ok(app.includes("if(over.parentNode!==drag.parentNode) return;"), "drag stays inside its own menu");
 });
 
 test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursday refire, view wiring)", () => {

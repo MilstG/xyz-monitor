@@ -13,6 +13,7 @@ function openStore(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, "oi.log");
   const featFile = path.join(dataDir, "features.json");
+  const navGrpFile = path.join(dataDir, "navgroups.json");   // renameable ribbon menu labels
   const regimeFile = path.join(dataDir, "regime.json");
   const hourlyFile = path.join(dataDir, "hourly.ndjson");
   const hourlyJsonFile = path.join(dataDir, "hourly.json");   // legacy whole-object format; read once as a bridge, then retired
@@ -477,6 +478,20 @@ function openStore(dataDir) {
     // would resolve every key back to its manifest default on the next boot, silently reopening
     // whatever had been closed. Absent file is the normal first-boot state, not an error: the
     // manifest defaults ARE the initial configuration.
+    // Nav group labels — {groupKey: label} overrides only, written atomically like the flags file.
+    saveNavGroups(obj) {
+      try {
+        const tmp = navGrpFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(obj || {}));
+        fs.renameSync(tmp, navGrpFile);
+        return true;
+      } catch (_) { return false; }
+    },
+    loadNavGroups() {
+      try { if (fs.existsSync(navGrpFile)) return JSON.parse(fs.readFileSync(navGrpFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
     saveFlags(obj) {
       try {
         const tmp = flagsFile + ".tmp";

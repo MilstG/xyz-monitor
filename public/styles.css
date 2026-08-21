@@ -31,6 +31,30 @@
 .cg-basectl[hidden]{display:none}   /* -07: runtime-templated hidden, so the markup audit never saw it — the spread-mode base select was painting in Index mode and read as a forced basket comparison */
 .tabmenu[hidden]{display:none}      /* -09: display:flex beat [hidden]; a closed menu still ate the clicks on its own trigger */
 .tabgrp[hidden]{display:none}       /* -09: same for a group emptied by scope or a feature flag */
+
+/* ---- admin: rename a ribbon menu, move a tab between menus ---------------------------------- */
+.adm-navgrp{border:1px solid var(--border);border-radius:9px;padding:14px 16px;margin:0 0 14px;background:var(--panel)}
+.adm-navhd{font-family:var(--disp);font-size:14px;font-weight:600;color:var(--text);display:flex;
+  align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.adm-navsub{font-family:var(--mono);font-size:10.5px;color:var(--muted);font-weight:400;letter-spacing:.02em}
+.adm-navgroup{border-top:1px solid var(--border);padding:11px 0 9px}
+.adm-navgroup:first-of-type{border-top:none;padding-top:0}
+.adm-navrow{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+.adm-navname{background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text);
+  font-family:var(--disp);font-size:13.5px;font-weight:500;padding:6px 10px;width:190px}
+.adm-navname:focus{outline:2px solid var(--accent);outline-offset:1px}
+.adm-navname:disabled{opacity:.5}
+.adm-navkey{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.adm-navtabs{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+.adm-navtab{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);
+  border-radius:6px;padding:3px 4px 3px 9px;background:var(--panel2)}
+.adm-navtl{font-family:var(--disp);font-size:12.5px;color:var(--text)}
+.adm-navmove{background:var(--panel);border:1px solid var(--border);border-radius:5px;color:var(--muted);
+  font-family:var(--mono);font-size:10.5px;padding:2px 4px;cursor:pointer}
+.adm-navmove:focus{outline:2px solid var(--accent);outline-offset:1px}
+.adm-navempty{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.adm-navfoot{border-top:1px solid var(--border);margin-top:11px;padding-top:10px;
+  font-size:11.5px;color:var(--muted);line-height:1.5}
 /* Industry-board honesty chips: «thin» (n<5, noisier stats) and «= sector» (fallback group). */
 .sthin{display:inline-block;font-size:9px;color:var(--muted);border:1px solid var(--border);border-radius:3px;padding:0 4px;margin-left:6px;letter-spacing:.04em;vertical-align:1px;font-style:normal;font-weight:400}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);

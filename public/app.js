@@ -3981,7 +3981,62 @@ function renderAdmBrief(){
   { const x=el('adm-brief'); if(x) x.addEventListener('click',()=>briefRun(false)); }
   { const x=el('adm-brief-f'); if(x) x.addEventListener('click',()=>briefRun(true)); }
 }
+// ===== Admin: rename a ribbon menu, move a tab between menus ==================================
+// Same write contract as the feature rows: one field per call, optimistic paint, roll back on
+// failure. The ribbon repaints from the response rather than a reload, so the admin sees the
+// result in the row above while still standing in the panel.
+let _navBusy='';
+function renderAdmNavGroups(){
+  const host=el('adm-navgrp'); if(!host||!IS_ADMIN) return;
+  const label=(v)=>{ const t=document.querySelector('.tab[data-view="'+v+'"]');
+    return t?(t.textContent||v):v; };
+  const opts=(sel)=>TAB_GROUPS.map(g=>'<option value="'+esc(g.key)+'"'+(g.key===sel?' selected':'')+'>'+esc(g.label)+'</option>').join('');
+  let h='<div class="adm-navhd">Ribbon menus<span class="adm-navsub">rename a menu, or move a tab into another one \u2014 everyone sees it</span></div>';
+  for(const g of TAB_GROUPS){
+    h+='<div class="adm-navgroup"><div class="adm-navrow">'
+      +'<input class="adm-navname" data-grp="'+esc(g.key)+'" value="'+esc(g.label)+'" maxlength="18" '
+      +'placeholder="'+esc(g.def||g.label)+'" aria-label="Name for the '+esc(g.label)+' menu"'
+      +(_navBusy===g.key?' disabled':'')+'>'
+      +'<span class="adm-navkey">'+esc(g.key)+(g.def&&g.label!==g.def?' \u00b7 default "'+esc(g.def)+'"':'')+'</span></div>'
+      +'<div class="adm-navtabs">'
+      +(g.views.length?g.views.map(v=>'<span class="adm-navtab"><span class="adm-navtl">'+esc(label(v))+'</span>'
+        +'<select class="adm-navmove" data-view="'+esc(v)+'"'+(_navBusy===v?' disabled':'')+'>'+opts(g.key)+'</select></span>').join('')
+        :'<span class="adm-navempty">empty \u2014 this menu is hidden until a tab moves in</span>')
+      +'</div></div>';
+  }
+  h+='<div class="adm-navfoot">Markets and Admin stay outside the menus: Markets is where every load lands, and Admin is this panel. Clearing a name restores the default.</div>';
+  host.innerHTML=h;
+  host.querySelectorAll('.adm-navname').forEach(inp=>{
+    const send=()=>{ if(inp.__sent===inp.value) return; inp.__sent=inp.value;
+      navWrite({key:inp.dataset.grp,label:inp.value}, inp.dataset.grp); };
+    inp.addEventListener('blur',send);
+    inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); inp.blur(); }
+      if(e.key==='Escape'){ inp.value=(TAB_GROUPS.find(g=>g.key===inp.dataset.grp)||{}).label||''; inp.blur(); } });
+  });
+  host.querySelectorAll('.adm-navmove').forEach(sel=>{
+    sel.addEventListener('change',()=>navWrite({view:sel.dataset.view,group:sel.value}, sel.dataset.view));
+  });
+}
+async function navWrite(body, busyKey){
+  _navBusy=busyKey; renderAdmNavGroups();
+  try{
+    const r=await fetch('/api/nav-groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok){ pushToast('Could not save \u2014 '+((d&&d.error)||('HTTP '+r.status))); }
+    else applyNavGroups(d.groups);
+  }catch(_){ pushToast('Network error saving the ribbon menus'); }
+  _navBusy=''; renderAdmNavGroups();
+}
+// The response is the whole resolved set, so the ribbon is rebuilt from the server's answer rather
+// than from what the panel hoped the write would do — same rule the feature rows follow.
+function applyNavGroups(groups){
+  if(!Array.isArray(groups)||!groups.length) return;
+  TAB_GROUPS.length=0;
+  groups.forEach(g=>TAB_GROUPS.push({key:g.key,label:g.label,def:g.def||g.label,views:(g.views||[]).slice()}));
+  buildTabGroups(); applyTabVisibility(); wireTabDrag();
+}
 function renderAdmin(){
+  renderAdmNavGroups();
   { const h=el('admRecH'), b=el('admRecB');
     if(h&&!h._wired){ h._wired=1; h.addEventListener('click',()=>{ b.hidden=!b.hidden; renderAdmRecips(); }); }
     if(!pushState) loadPush().then(()=>{ renderAdmRecips(); renderAdmBrief(); }); else { renderAdmRecips(); renderAdmBrief(); } }
@@ -9068,7 +9123,14 @@ function wireTabDrag(){ const nav=document.querySelector('nav.tabs'); if(!nav) r
 // flat too — a tab added without touching this list degrades to today's behaviour instead of
 // disappearing.
 const TAB_PINNED = new Set(['markets','admin']);
-const TAB_GROUPS = [
+// Taxonomy AND labels arrive in the page shell, resolved server-side from compute.js — one list
+// answers both "which views does this menu hold" and "what is it called", and the admin's names are
+// on the first painted frame instead of flashing the defaults until a fetch lands. The literal
+// below is the fallback for a shell whose flag slot failed to inject: the ribbon still groups, with
+// default names, which is the same degradation the feature flags already take.
+const TAB_GROUPS = (Array.isArray(window.__NAVGROUPS) && window.__NAVGROUPS.length)
+  ? window.__NAVGROUPS.map(g=>({ key:g.key, label:g.label, def:g.def||g.label, views:(g.views||[]).slice() }))
+  : [
   { key:'tape',     label:'Tape',     views:['trend','charts','treemap','sectors','corr','sessions'] },
   { key:'signals',  label:'Signals',  views:['signals','actionable','focus','backtest'] },
   { key:'macro',    label:'Macro',    views:['earnings','news','housing','liquidity'] },
@@ -9142,6 +9204,8 @@ function syncTabGroups(v){
     if(!menu||!btn) return;
     const shown=[...menu.querySelectorAll('.tab')].filter(t=>!t.hidden);
     wrap.hidden=!shown.length;
+    const g=TAB_GROUPS.find(x=>x.key===wrap.dataset.grp);
+    if(g) btn.querySelector('.lbl').textContent=g.label;   // a rename repaints here, no reload
     btn.querySelector('.cnt').textContent=shown.length?String(shown.length):'';
     btn.classList.toggle('active', shown.some(t=>t.dataset.view===v));
   });

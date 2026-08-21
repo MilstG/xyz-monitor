@@ -3815,7 +3815,8 @@ function duelStats(rows, minN) {
   return { n, meanA, meanB, winB, t, verdict };
 }
 
-module.exports = { stdev, median, linregR2, priceAt, featuresFromHourly, bucketOpens, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
+module.exports = {
+  stdev, median, linregR2, priceAt, featuresFromHourly, bucketOpens, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,
@@ -5209,6 +5210,80 @@ const FEATURE_NEVER_GATE = new Set(["/api/health", "/login", "/logout",
 // sanitizer drops them so a hand-edited flags.json cannot smuggle one in either.
 // runtime:true — the tab is injected by JS at load (Treemap self-installs) rather than living in
 // index.html, so the markup-scanning half of the manifest test must not demand a data-view for it.
+// ===== Nav groups: the ribbon's menus, renameable and re-assignable ==========================
+// The taxonomy lives HERE rather than in app.js so one list answers every question: which views a
+// menu holds (the client renders it), whether a rename targets a real menu and whether a move
+// targets a real view (the server validates both). Group KEYS are structural and never change, so
+// an override always traces back to the menu it belongs to even after two renames.
+//
+// Config shape: { labels: {groupKey: name}, views: {viewKey: groupKey} }. Only DIFFERENCES from the
+// defaults are stored — renaming a menu back, or moving a tab home, leaves no residue behind.
+const NAV_GROUPS = [
+  { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "sessions"] },
+  { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
+  { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
+  { key: "research", label: "Research", views: ["report", "funds"] },
+];
+// markets is pin:true and is where every load lands; admin is the locked panel itself. Both stay
+// flat in the row and are deliberately NOT movable — a one-item menu, or a home two clicks away,
+// is pure cost, and neither is a decision worth exposing as a mistake someone can make.
+const NAV_PINNED = ["markets", "admin"];
+// Canonical order, used to lay out a group after a move: a tab that arrives keeps its place in this
+// list rather than landing wherever the write happened to put it, so two admins making the same
+// moves in a different sequence end up with the same ribbon.
+const NAV_VIEW_ORDER = NAV_GROUPS.reduce((a, g) => a.concat(g.views), []);
+const NAV_LABEL_MAX = 18;
+// One line, no markup, no control characters, no double spaces. The label is injected into the page
+// shell and rendered as a tab, so it is cleaned at the WRITE, not at every read.
+function navLabelClean(v) {
+  return String(v == null ? "" : v).replace(/[\u0000-\u001F\u007F<>&"']/g, " ").replace(/\s+/g, " ").trim().slice(0, NAV_LABEL_MAX);
+}
+function navGroupKeys() { return NAV_GROUPS.map((g) => g.key); }
+function navDefaultOwner() {
+  const o = {};
+  for (const g of NAV_GROUPS) for (const v of g.views) o[v] = g.key;
+  return o;
+}
+// Keeps only known keys carrying a real difference from the default. Anything unknown, empty,
+// pinned or already-default is dropped rather than stored.
+function navConfigSanitize(cfg) {
+  const out = { labels: {}, views: {} };
+  if (!cfg || typeof cfg !== "object") return out;
+  const labels = cfg.labels && typeof cfg.labels === "object" ? cfg.labels : {};
+  for (const g of NAV_GROUPS) {
+    const v = navLabelClean(labels[g.key]);
+    if (v && v !== g.label) out.labels[g.key] = v;
+  }
+  const moves = cfg.views && typeof cfg.views === "object" ? cfg.views : {};
+  const owner = navDefaultOwner(), keys = navGroupKeys();
+  for (const view in moves) {
+    if (!Object.prototype.hasOwnProperty.call(owner, view)) continue;   // unknown or pinned view
+    const g = String(moves[view] || "");
+    if (keys.indexOf(g) < 0 || g === owner[view]) continue;             // unknown group, or already home
+    out.views[view] = g;
+  }
+  return out;
+}
+function resolveNavGroups(cfg) {
+  const c = navConfigSanitize(cfg), owner = navDefaultOwner();
+  for (const v in c.views) owner[v] = c.views[v];
+  return NAV_GROUPS.map((g) => ({
+    key: g.key,
+    label: c.labels[g.key] || g.label,
+    def: g.label,
+    views: NAV_VIEW_ORDER.filter((v) => owner[v] === g.key),
+  }));
+}
+
+module.exports.NAV_GROUPS = NAV_GROUPS;
+module.exports.NAV_PINNED = NAV_PINNED;
+module.exports.NAV_LABEL_MAX = NAV_LABEL_MAX;
+module.exports.navLabelClean = navLabelClean;
+module.exports.navConfigSanitize = navConfigSanitize;
+module.exports.NAV_VIEW_ORDER = NAV_VIEW_ORDER;
+module.exports.navGroupKeys = navGroupKeys;
+module.exports.resolveNavGroups = resolveNavGroups;
+
 const FEATURES = [
   { key: "admin",      kind: "tab", label: "Admin",       def: "admin",  lock: true, routes: [] },
   { key: "markets",    kind: "tab", label: "Markets",     def: "public", pin: true, routes: ["/api/snapshot", "/api/daily", "/api/series", "/api/candles"] },

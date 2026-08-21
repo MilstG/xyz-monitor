@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.21-09";
+const VERSION = "2026.08.21-10";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -505,6 +505,20 @@ async function main() {
     return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
   });
 
+  // One group per call, mirroring /api/features: the panel writes optimistically and rolls back on
+  // failure, so a batch write would make a partial failure ambiguous. An empty label restores the
+  // default rather than erroring — that is what clearing the box means.
+  fastify.post("/api/nav-groups", { bodyLimit: 4 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    const b = req.body || {};
+    // Two operations, one route, distinguished by which field the body carries: {key,label}
+    // renames a menu, {view,group} moves a tab into one.
+    const r = b.view != null
+      ? poller.setNavViewGroup(String(b.view || ""), String(b.group || ""), isAdmin(req))
+      : poller.setNavGroupLabel(String(b.key || ""), String(b.label == null ? "" : b.label), isAdmin(req));
+    return reply.code(r.ok ? 200 : (r.error === "forbidden" ? 403 : r.error === "write-failed" ? 503 : 400)).send(r);
+  });
+
   // Login/logout exist regardless of the gate so a stale xyzauth cookie can always be cleared.
   // One prompt, two outcomes: the shared password grants a session, ADMIN_PASSWORD grants a session
   // AND the admin-view lease. Admin implies site access, so there is no third password and no second
@@ -662,7 +676,11 @@ async function main() {
   })();
   const serveIndex = (req, reply) => {
     const admin = isAdmin(req);
-    const boot = "window.__FLAGS=" + JSON.stringify(resolveFeatures(poller.getFlags(), admin)) + ";window.__ADMIN=" + (admin ? "true" : "false") + ";";
+    // Nav labels ride the same injection: the ribbon must paint with the admin's names on the
+    // FIRST frame, or every load would flash the defaults before a fetch could correct them.
+    const boot = "window.__FLAGS=" + JSON.stringify(resolveFeatures(poller.getFlags(), admin)) +
+      ";window.__ADMIN=" + (admin ? "true" : "false") +
+      ";window.__NAVGROUPS=" + JSON.stringify(poller.getNavGroups()) + ";";
     // Already no-store, so there is no cache to poison with the wrong audience's shell — the reason
     // this per-request body is safe where a cached one would not be.
     return reply.header("cache-control", "no-store").type("text/html; charset=utf-8").send(INDEX_HEAD + boot + INDEX_TAIL);

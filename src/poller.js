@@ -27,6 +27,7 @@ const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaA
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
 const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleIssuerKey, whaleWindow, whaleQOfPeriod, whaleSeason, whale13FScale } = require("./compute");
+const { NAV_VIEW_ORDER, navGroupKeys, navLabelClean, navConfigSanitize, resolveNavGroups } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
 const { classify, nameAliases, companyName, displayName, macroLane, setSectorOverlay, PREIPO, homeMkt, homeAdr } = require("./sectors");
@@ -8970,6 +8971,45 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     log(`feature "${key}" set to ${state} (resolved ${featureState(clean, key)})`);
     return { ok: true, key, state: featureState(clean, key), features: getFeatures(true) };
   }
+  // ---- Nav groups: rename a menu, move a tab between menus (build 2026.08.21-10) --------------
+  // Both are display decisions the admin owns, on the same footing as feature visibility: written
+  // once, stored server-side, seen by everyone. One key or one view per call, mirroring setFlag —
+  // the panel writes optimistically and rolls back on failure, so a batch write would make a
+  // partial failure ambiguous.
+  let navConfig = navConfigSanitize(store.loadNavGroups ? store.loadNavGroups() : null);
+  function getNavGroups() { return resolveNavGroups(navConfig); }
+  function navWrite(next, what) {
+    const san = navConfigSanitize(next);
+    if (!store.saveNavGroups || !store.saveNavGroups(san)) return { ok: false, error: "write-failed" };
+    navConfig = san;
+    log("nav groups: " + what);
+    return { ok: true, groups: getNavGroups() };
+  }
+  function setNavGroupLabel(key, label, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "forbidden" };
+    if (!navGroupKeys().includes(key)) return { ok: false, error: "unknown-group" };
+    // An empty label is the documented way to restore the default, not a validation failure — the
+    // panel's "clear the box" gesture has to mean something honest.
+    const clean = navLabelClean(label);
+    const labels = Object.assign({}, navConfig.labels);
+    if (clean) labels[key] = clean; else delete labels[key];
+    const r = navWrite({ labels, views: navConfig.views },
+      '"' + key + '" labelled "' + (clean || "(default)") + '"');
+    if (r.ok) r.key = key, r.label = r.groups.find((g) => g.key === key).label;
+    return r;
+  }
+  function setNavViewGroup(view, group, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "forbidden" };
+    if (!navGroupKeys().includes(group)) return { ok: false, error: "unknown-group" };
+    // Refuse a pinned or unknown view outright rather than accepting the write and quietly
+    // resolving past it — a 200 that changed nothing reads as success in the panel and in the log.
+    if (!NAV_VIEW_ORDER.includes(view)) return { ok: false, error: "unmovable-view" };
+    const views = Object.assign({}, navConfig.views);
+    views[view] = group;
+    const r = navWrite({ labels: navConfig.labels, views }, '"' + view + '" moved to "' + group + '"');
+    if (r.ok) r.view = view, r.group = group;
+    return r;
+  }
   function resetAiDay(password) {
     const chk = checkAdminPassword(password);
     if (!chk.ok) return chk;
@@ -12638,6 +12678,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     resetAiDay,   // terminal admin command: zero the daily report budget (ADMIN_PASSWORD-gated)
     checkAdminPassword,   // shared ADMIN_PASSWORD verify (+ lockout) — backs the AI unlock route
     getFlags, getFeatures, setFlag,   // feature-visibility state (admin panel)
+    getNavGroups, setNavGroupLabel, setNavViewGroup,   // ribbon menus: rename, and move a tab between them
     getHousing: () => housingCache,   // Housing tab board (FRED-fed, 6h refresh)
     getLiquidity: () => liqCache,   // Liquidity tab board (FRED H.4.1, Thursday-aware refresh)
     getEarnings: () => {
