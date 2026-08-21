@@ -5468,12 +5468,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     t13fBusy = true; t13fProgress = { q, stage: "download", rows: 0 };
     const done = (r) => { t13fBusy = false; t13fProgress = null; return r; };
     try {
+      pushOps("13F data set " + q, "downloading (~300MB \u2014 can take a few minutes on first try)", "info", true);
       let zipBuf = null, urlUsed = null;
+      const tmpZip = require("path").join(require("os").tmpdir(), "t13f-" + q.replace(/\s+/g, "") + ".zip");
       for (const url of t13fZipUrls(q)) {
         try {
           const res = await extFetch(url, { headers: { "user-agent": SEC_UA } });
-          if (res && res.ok) { zipBuf = Buffer.from(await res.arrayBuffer()); urlUsed = url; break; }
-        } catch (_) {}
+          if (!res || !res.ok) continue;
+          // Stream to disk, then read back ONCE. The previous Buffer.from(await res.arrayBuffer())
+          // held the zip TWICE transiently (~700MB peak) — enough to OOM-kill a memory-tight
+          // container mid-ingest, which presents as "ran the command, ops went quiet, no panel".
+          // One buffer is still required for random access to the zip's central directory; one is
+          // the floor, and now it is also the ceiling.
+          if (res.body && typeof res.body.getReader === "function") {
+            const fsm = require("fs");
+            const w = fsm.createWriteStream(tmpZip);
+            const reader = res.body.getReader();
+            for (;;) { const { done: d2, value } = await reader.read(); if (d2) break; w.write(Buffer.from(value)); }
+            await new Promise((res2, rej2) => { w.end(); w.on("finish", res2); w.on("error", rej2); });
+            zipBuf = fsm.readFileSync(tmpZip);
+            try { fsm.unlinkSync(tmpZip); } catch (_) {}
+          } else {
+            zipBuf = Buffer.from(await res.arrayBuffer());   // injected test transports have no stream body
+          }
+          urlUsed = url; break;
+        } catch (_) { try { require("fs").unlinkSync(tmpZip); } catch (_) {} }
       }
       if (!zipBuf) return done({ ok: false, notYet: 1, error: q + " data set not at sec.gov yet (tried both URL patterns) \u2014 it lands ~1 week after the deadline; the weekly check keeps trying" });
       pushOps("13F data set " + q, "downloaded " + (zipBuf.length / 1e6).toFixed(0) + "MB from " + urlUsed.split("/").pop() + " \u2014 ingesting", "info", true);
@@ -5680,9 +5699,46 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         held: fl.filter((f) => f.held).length, combined: common + optNotional,
         common, optNotional, adding, cutting, flat });
     }
-    if (!issuers.length) return { ok: false, miss: 1, q, nBooks, nPositions, noBook,
-      error: "no tracked fund's latest 13F contains \u201c" + q + "\u201d \u2014 searched " + nBooks + " book(s), " + nPositions
-        + " positions, by ticker, normalized name" + (subOk ? ", substring" : "") + " and CUSIP. Not held \u2260 not owned: shorts, futures, non-US and anything bought since quarter-end are invisible in a 13F." };
+    if (!issuers.length) {
+      // A name NOBODY on the watchlist holds is exactly where the market-wide index matters most —
+      // the original -05 cut returned the miss here and the TOP HOLDERS block below never ran (a
+      // gap against the feature's whole point). The index is keyed by CUSIP (the SEC data set
+      // carries no tickers), so: a 9-char CUSIP query still gets the full market answer on a
+      // watchlist miss; a ticker/name query gets an honest one-liner about why it can't.
+      const miss = { ok: false, miss: 1, q, nBooks, nPositions, noBook,
+        error: "no tracked fund's latest 13F contains \u201c" + q + "\u201d \u2014 searched " + nBooks + " book(s), " + nPositions
+          + " positions, by ticker, normalized name" + (subOk ? ", substring" : "") + " and CUSIP. Not held \u2260 not owned: shorts, futures, non-US and anything bought since quarter-end are invisible in a 13F." };
+      try {
+        const qs = store.t13fQuarters ? store.t13fQuarters() : [];
+        if (qs.length && isCusip) {
+          const a = store.t13fAgg(qs[0], QU);
+          if (a) {
+            const rows3 = store.t13fTop(qs[0], QU, 10);
+            const prevQ = qs[1] || null;
+            const watchByCik = new Map(whaleState.watch.map((w) => [+w.cik, w.key]));
+            let anyPrev = false;
+            const list = rows3.map((r) => {
+              const prev = prevQ ? store.t13fHolderRow(prevQ, QU, r.cik) : null;
+              if (prev) anyPrev = true;
+              return { rank: r.rk, cik: r.cik, name: r.name, value: r.value, shares: r.shares,
+                dSh: prev && prev.shares != null && r.shares != null ? r.shares - prev.shares : null,
+                isNew: prevQ && !prev ? 1 : 0, tracked: watchByCik.get(+r.cik) || null };
+            });
+            miss.ok = true; miss.missButTop = 1; miss.name = QU; miss.funds = []; miss.notHeld = whaleState.watch.map((w) => w.key);
+            miss.held = 0; miss.adding = 0; miss.cutting = 0; miss.flat = 0; miss.combined = 0; miss.common = 0; miss.optNotional = 0;
+            miss.watchN = whaleState.watch.length; miss.issuers = []; miss.basis = "exact CUSIP (market-wide index; no tracked fund holds it)";
+            miss.top = { q: qs[0], prevQ, cusip: QU, nFilers: a.nFilers, totVal: a.totVal, rows: list,
+              otherCusips: 0, allNew: prevQ && rows3.length && !anyPrev ? 1 : 0,
+              cap: +(store.t13fMeta && store.t13fMeta("cap")) || T13F_TOP_CAP };
+          }
+        } else if (qs.length && !isCusip) {
+          miss.error += " Market-wide top holders exist for this data set but the index is keyed by CUSIP (the SEC data set carries no tickers) \u2014 search the 9-char CUSIP to get them.";
+        }
+        const t13fS0 = t13fStatus();
+        miss.topMeta = { ready: !!(t13fS0.ready && t13fS0.quarters.length), quarters: t13fS0.quarters, busy: t13fS0.busy };
+      } catch (_) {}
+      return miss;
+    }
     issuers.sort((a, c) => HOLDS_BASIS_RANK[c.basis] - HOLDS_BASIS_RANK[a.basis] || c.combined - a.combined);
     const P = issuers[0];
     // Market-wide TOP HOLDERS (build 2026.08.21-05): when the SEC data-set index has the PRIMARY

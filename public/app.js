@@ -12016,7 +12016,10 @@ async function whlWho(qv,keep){
   let r; try{ r=await fetchJSON('/api/whale?holds='+encodeURIComponent(WHL.whoQ)); }
   catch(e){ out.innerHTML=`<div class="msg err">${esc(e.message||'fetch failed')}</div>`; return; }
   if((el('whl-whoq')&&el('whl-whoq').value.trim())!==WHL.whoQ) return;   // a newer keystroke owns the panel
-  if(!r.ok){ out.innerHTML=`<div class="msg">${esc(r.error||'no result')}</div>`; WHL.whoOpen=null; return; }
+  if(!r.ok){ out.innerHTML=`<div class="msg">${esc(r.error||'no result')}</div>`; WHL.whoOpen=null;
+    if(r.topMeta&&!r.topMeta.ready) out.innerHTML+=`<div class="sec" style="padding:8px 2px">market-wide top holders: ${r.topMeta.busy?'data set ingesting \u2014 a few minutes, progress in ops':'no data set ingested yet \u2014 automatic after each quarter\u2019s deadline, or admin: whale ingest13f'}</div>`;
+    return; }
+  if(r.missButTop){ out.innerHTML=`<div class="msg">no tracked fund holds ${esc(r.q)} \u2014 showing the market-wide answer</div>`; }
   if(!WHL.whoOpen||WHL.whoKey!==WHL.whoQ){ WHL.whoOpen=new Set(); WHL.whoKey=WHL.whoQ; }
   const iss=r.issuers||[];
   const P=iss[0];

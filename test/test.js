@@ -12205,7 +12205,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19989,6 +19989,17 @@ test("whale 13f data-set index (2026.08.21-05): fixture ZIP through the REAL ing
   // Weekly tick wiring + status shape.
   const st = p.t13fStatus();
   assert.deepEqual(st.quarters, ["Q2 2026", "Q1 2026"], "two quarters kept, newest first");
+  // -06: a watchlist MISS with a CUSIP query still gets the market-wide answer — the original
+  // -05 cut returned early and the panel never ran for exactly the names market-wide is FOR.
+  // "AAA000AA1" lives only in MEGA's fixture filing — no tracked fund holds it.
+  const miss = await p.getWhaleHolds("AAA000AA1");
+  assert.ok(miss.ok && miss.missButTop === 1, "cusip miss serves the market answer");
+  assert.equal(miss.top.rows[0].name, "MEGA CAPITAL LP");
+  assert.ok(Math.abs(miss.top.rows[0].value - 2e9) < 1e3, "thousands-corrected even on the miss path");
+  assert.equal(miss.held, 0);
+  // A ticker/name miss cannot map to a CUSIP (the data set carries none) — said, not hidden.
+  const miss2 = await p.getWhaleHolds("ZZZUNKNOWN");
+  assert.ok(!miss2.ok && /keyed by CUSIP/.test(miss2.error), "the why-not is stated on ticker misses when an index exists");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(app.includes("TOP HOLDERS \\u00b7 MARKET-WIDE") && app.includes("whl-trk") && app.includes("sub==='ingest13f'"), "panel + tracked badge + admin verb wired");
   assert.ok(app.includes("INSTITUTIONAL MANAGERS only"), "the IPO invisibility banner exists");
