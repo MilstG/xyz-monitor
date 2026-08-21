@@ -5055,92 +5055,13 @@ test("deep archive + CHARTS tab: source + wiring manifest (store, capture lane, 
     assert.ok(css.includes(cls), "missing charts -02 style: " + cls);
   // right-edge fix: inset mapping used by bars, axis ticks, crosshair AND the pointer inverse,
   // plus the hard clip that makes a straddling bar cut cleanly at the plot edge
-  // -11: the inset is computed from bwAll and hoisted ABOVE the bars block so the study strips
-  // share the candles' exact time->x mapping; the bar/EMA clip is now the PRICE rect (the strips
-  // own the rest of the plot) and each strip clips to its own region. Same guarantees, new names.
-  assert.ok(app.includes("const inset=Math.ceil(bwAll/2)+1;") && app.includes("p._inset=inset;"), "right-edge inset present and stored on the pane");
-  assert.ok(app.includes("ctx.rect(0,PT,pw,priceH); ctx.clip();"), "bar/EMA layer hard-clipped to the price rect");
+  assert.ok(app.includes("const inset=Math.ceil(bw/2)+1;") && app.includes("p._inset=inset;"), "right-edge inset present and stored on the pane");
+  assert.ok(app.includes("ctx.rect(0,PT,pw,ph); ctx.clip();"), "bar/EMA layer hard-clipped to the plot rect");
   assert.ok((app.match(/Xi\(/g) || []).length >= 4, "inset mapping (Xi) drives bars, ticks and the crosshair");
   assert.ok(app.includes("-(p._inset||0)"), "pointer\u2192time inverse shares the inset — the crosshair hovers the bar it points at");
   // live-edge follow: a pinned pane rides new bars, a historical view is never yanked forward
   assert.ok(app.includes("pinned:!!(b&&p.view&&p.view.to>=b.to-p.tf*60000*0.51)"), "pinned-at-edge detection present");
   assert.ok(app.includes("if(q.pinned&&nb&&q.to!=null&&nb.to>q.to&&p.view)"), "only pinned panes follow the advancing close");
-});
-
-test("charts -11: OI/funding study strips — bucket arithmetic, honest gaps, server lane, client wiring", () => {
-  const { bucketOiFunding } = require("../src/compute.js");
-  const t0 = Date.UTC(2026, 7, 21, 12, 0, 0), MIN = 60000;
-
-  // ---- OI is a LEVEL: the bucket's last sample, never a mean ------------------------------------
-  // Eight 4.5-min samples spanning two 15m buckets plus a third. Funding ramps linearly in time so
-  // the time-weighted mean has a closed form to check against.
-  const h = []; for (let i = 0; i < 8; i++) h.push([t0 + i * 4.5 * MIN, 1000 + i * 10, 10 + i]);
-  const r = bucketOiFunding(h, 15, -Infinity, Infinity);
-  assert.deepEqual(r.oi.map((x) => x[0]), [t0, t0 + 15 * MIN, t0 + 30 * MIN], "buckets land on the UTC grid chAgg uses for candles");
-  assert.equal(r.oi[0][1], 1030, "OI bucket = LAST sample in the bucket (a level, not an average)");
-  assert.equal(r.oi[1][1], 1060, "second bucket closes on its own last sample");
-
-  // ---- funding is time-weighted, and segments SPLIT at bucket boundaries ------------------------
-  // Bucket 1 covers samples f=10,11,12,13 at 0/4.5/9/13.5 min plus the 1.5-min head of the segment
-  // running into 15:00, where f interpolates to 13.333. Trapezoids:
-  //   10.5*4.5 + 11.5*4.5 + 12.5*4.5 + ((13+13.3333)/2)*1.5 = 175 over a 15-min span = 11.6667.
-  assert.ok(Math.abs(r.funding[0][1] - 175 / 15) < 1e-9, "funding = time-weighted mean, boundary-straddling segment split in proportion");
-  // The same trapezoid rule fundingAvg uses for fundByWin, so a strip and the board agree.
-  const src = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "compute.js"), "utf8");
-  assert.ok(/function bucketOiFunding[\s\S]{0,3000}\(fa \+ fb\) \/ 2 \* \(b - a\)/.test(src), "bucket funding must integrate by the trapezoid rule, matching fundingAvg");
-
-  // ---- honest gaps: a poller outage is a hole, not a slow drift ---------------------------------
-  const gap = [[t0, 1, 5], [t0 + 6 * 3600000, 2, 25], [t0 + 6 * 3600000 + 4.5 * MIN, 3, 26]];
-  const rg = bucketOiFunding(gap, 60, -Infinity, Infinity);
-  assert.equal(rg.funding.length, 2, "buckets with no sample are ABSENT — never interpolated across a gap");
-  assert.equal(rg.funding[0][1], 5, "a lone sample falls back to its own value, not an integration across the hole");
-  assert.ok(Math.abs(rg.funding[1][1] - 25.5) < 1e-9, "sampling resumes and integration resumes with it");
-  // 75-min cap admits BOTH real cadences: 4.5-min full-res and the 1h thinning past 31d.
-  const thin = [[t0, 1, 10], [t0 + 3600000, 2, 20]];
-  assert.equal(bucketOiFunding(thin, 240, -Infinity, Infinity).funding.length, 1, "hourly-thinned history (past 31d) still integrates — the cap must not strand it");
-
-  // ---- window clipping + degenerate inputs ------------------------------------------------------
-  assert.deepEqual(bucketOiFunding(h, 15, t0 + 15 * MIN, Infinity).oi.map((x) => x[0]), [t0 + 15 * MIN, t0 + 30 * MIN], "from= clips to whole buckets");
-  for (const bad of [[null, 15], [[], 15], [h, 0], [h, -5], ["nope", 15]])
-    assert.deepEqual(bucketOiFunding(bad[0], bad[1]), { oi: [], funding: [] }, "degenerate input yields empty tracks, never a throw");
-
-  // ---- server: the chart lane is a BRANCH of /api/series, still serveKeyed ----------------------
-  const srv = require("fs").readFileSync(require("path").join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(/get\("\/api\/series"[\s\S]{0,1400}Number\.isFinite\(tf\) && tf > 0/.test(srv), "/api/series must carry the tf= chart-pane branch");
-  assert.ok(srv.includes('"series|" + coin + "|tf:" + tf'), "the tf lane needs its own ETag key — a shared key would 304 the wrong timeframe onto a pane");
-  assert.ok(srv.includes("poller.getSeriesTf(coin, tf, +q.from, +q.to)"), "tf lane must read the poller getter, not re-derive client-side");
-  assert.ok(srv.includes("const SERIES_TF_CAP"), "chart lane needs its own point cap (the drawer's 1500 would decimate a 20d 5m window)");
-  const pol = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(pol.includes("function getSeriesTf(") && /getSeriesTf,/.test(pol), "poller must define AND export getSeriesTf");
-  assert.ok(/function getSeriesTf[\s\S]{0,600}bucketOiFunding\(h, tf, from, to\)/.test(pol), "getSeriesTf must delegate to the pure bucketer");
-  assert.ok(/function getSeriesTf[\s\S]{0,600}samples: h\.length/.test(pol), "getSeriesTf must report what the server HOLDS — a pane has to be able to say where OI ends vs the tape");
-
-  // ---- client: strips are their own regions, on the candles' own mapping ------------------------
-  const app = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
-  const css = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "styles.css"), "utf8");
-  for (const pin of ["const CH_STUDS=", "CH.stud", "CH.oiBasis", "function chSerFetch(", "function chLiqFetch(",
-    "function chStudLoad(", "id=\"chstud\"", "id=\"chbasis\"", "const priceH=ph-studH;", "p._fdBand"])
-    assert.ok(app.includes(pin), "charts -11 study marker missing: " + pin);
-  // NEVER a second y-axis on price: the strips must take height OUT of the plot, not overlay it.
-  assert.ok(app.includes("const volH=Math.max(11,priceH*0.15)") && app.includes("((x-lo)/(hi-lo))*(priceH-volH-3)"),
-    "price geometry must measure against priceH — a strip that overlays the plot is a dual-axis chart");
-  assert.ok(app.includes("CH_PRICE_MIN"), "price needs a height floor: a pane whose candles are a smear has stopped being a chart");
-  // The strips must share the candles' exact time->x mapping, or a bar describes the wrong candle.
-  assert.ok(app.includes("const Xi=(t)=>(t-v.from)/span*(pw-inset);") && app.indexOf("const Xi=(t)=>") < app.indexOf("if(!bars.length)"),
-    "Xi must be hoisted above the bars block so strips and candles share one mapping");
-  // tf-specific buckets: a cached payload from another timeframe must never be reused.
-  assert.ok(app.includes("p.ser=null;   // buckets are tf-specific"), "a timeframe switch must invalidate the study payload");
-  assert.ok(app.includes("CH.scache") && app.includes("'&tf='+p.tf"), "study fetch is per-(name,tf) and asks the server for its own bucket grid");
-  // Funding stays off the P&L palette and carries the SERVER's percentile, not a second one.
-  assert.ok(app.includes("ctx.fillStyle=q[1]>=0?acc:blue;"), "funding diverges in amber/blue — the green/red P&L pair would assert that positive funding is good");
-  assert.ok(app.includes("r0.fundPct!=null) rlbl(ry,'now P'+r0.fundPct"), "the live funding percentile must be the server's fundPct — never a second percentile for the same rate");
-  // Absences are drawn as absences, on every branch that can lack a source.
-  for (const miss of ["no CEX counterpart for this HIP-3 listing", "Coinalyze is not configured on this server",
-    "the log starts later than the tape", "samples held for this name yet"])
-    assert.ok(app.includes(miss), "study strips must state a missing source, never draw an empty axis: " + miss);
-  assert.ok(app.includes("OI/funding '+od+'d'"), "coverage line must state the OI archive's own span — it is shorter than the tape's");
-  for (const cls of [".chstud.on", ".chkoi", ".chkfd"])
-    assert.ok(css.includes(cls), "missing charts -11 style: " + cls);
 });
 
 test("charts -02: chEmaWalk arithmetic — SMA seed, honest warm-up nulls, textbook EMA recursion", () => {
@@ -12285,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-11"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-12"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

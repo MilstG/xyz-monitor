@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.21-11";
+const VERSION = "2026.08.21-12";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -164,9 +164,6 @@ const gzipCache = new WeakMap();
 // Uniform-stride downsample of a [[t, v], ...] track to at most `cap` points, keeping the last
 // (live-edge) sample exact so the sparkline's right edge still reflects the current value.
 const SERIES_CAP = 1500;
-// Chart-pane lane cap: a 20d intraday window at 5m is 5760 buckets, the widest a pane ever asks
-// for. Downsample only bites past that, so a pane's strip is bar-exact against its candles.
-const SERIES_TF_CAP = 6000;
 function downsampleSeries(arr, cap) {
   if (!Array.isArray(arr) || arr.length <= cap) return arr || [];
   const step = arr.length / cap, out = [];
@@ -841,23 +838,7 @@ async function main() {
   });
   // Per-market OI + funding history — powers the drawer sparklines.
   fastify.get("/api/series", (req, reply) => {
-    const q = req.query || {};
-    const coin = q.coin || "";
-    // tf= selects the CHART-PANE lane (build 2026.08.21-11): the same OI/funding track bucketed
-    // onto the pane's own timeframe grid, so a study strip lines up bar-for-bar with the candles
-    // above it. Bucketing is server-side for the same reason the derivs panel's is — the client
-    // renders and never re-derives, so a pane and the board's fundByWin columns cannot drift.
-    // Key folds tf and the window alongside the coin's spine stamp; toggling a pane's timeframe
-    // back and forth 304s. Absent tf, the route is the drawer lane below, byte-for-byte unchanged.
-    const tf = +q.tf;
-    if (Number.isFinite(tf) && tf > 0) {
-      const max = Math.min(Math.max(1, +q.max || SERIES_TF_CAP), SERIES_TF_CAP);
-      const key = "series|" + coin + "|tf:" + tf + "|" + (q.from || "") + "|" + (q.to || "") + "|" + max + "|" + poller.getCoinStamp(coin).st;
-      return serveKeyed(req, reply, key,
-        () => { const s = poller.getSeriesTf(coin, tf, +q.from, +q.to);
-          return { coin, tf, oi: downsampleSeries(s.oi, max), funding: downsampleSeries(s.funding, max), cov: s.cov }; },
-        { coin, tf, oi: [], funding: [], cov: null });
-    }
+    const coin = (req.query && req.query.coin) || "";
     // The drawer sparklines are a few hundred px wide; shipping the full 31d full-resolution track
     // (~9k points) is wasted bytes. Uniform-stride down to ~SERIES_CAP points, always keeping the
     // last (live-edge) sample exact. Shape is preserved; nothing downstream reads raw point count.

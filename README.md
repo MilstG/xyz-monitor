@@ -16,22 +16,6 @@ instant, and the per-IP rate limit stops being a per-user problem.
   trend sparklines. Rebuilt every ~60s.
 - **`/api/health`** — liveness + basic stats (used as the Railway healthcheck).
 - **`/api/series?coin=<coin>`** — per-market OI and funding history (powers the ticker drawer sparklines).
-  With `&tf=<minutes>` (plus optional `from`/`to`) it serves the **chart-pane lane** instead: the same
-  track bucketed onto that timeframe's UTC grid — last sample in bucket for OI (a level, not a flow),
-  time-weighted mean for funding (the same trapezoid rule the `fundByWin` columns use) — so a study
-  strip lines up bar-for-bar with the candles above it and cannot drift from the board. Buckets with
-  no sample are absent rather than interpolated, and a sampling gap wider than 75 min is never
-  integrated across. Both lanes read the one OI history, so the drawer sparkline and the pane strip
-  can never show different histories for a name.
-- **Charts tab — OI / funding / liquidation study strips.** Each pane can stack studies *under* the
-  candles, on the pane's own time axis and crosshair: open interest (units or USD notional, the
-  latter derived off the pane's own bucket close), funding as APR diverging around zero with the
-  name's own p10–p90 band, and aggregated CEX liquidations. Never a second y-axis on the price plot —
-  neither series shares a scale with price. Toggled from the toolbar (`STUDIES`), persisted per
-  browser. Every strip discloses its own limits rather than drawing an empty axis: the OI log reaches
-  365d (xyz) / 31d (crypto) against candles seeded to each listing's birth, so the coverage line
-  states both spans; liquidations are Coinalyze CEX aggregate, so they are absent for HIP-3 equity
-  listings and refuse to draw past a 1H pane (48h of hourly buckets is not a year-wide history).
 - **`/api/candles?coin=<coin>&days=N`** — per-market hourly OHLCV (1–60d, default 14; powers the drawer candle chart).
 - **`/api/earnings`** — earnings for the xyz equity universe: upcoming (next 14 days, ET) plus a
   reported window (`recent`, the two prior ET days, derived from the persisted print history) so
