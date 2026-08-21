@@ -3815,8 +3815,77 @@ function duelStats(rows, minN) {
   return { n, meanA, meanB, winB, t, verdict };
 }
 
+// ===== OI / funding on a chart timeframe grid (build 2026.08.21-11) =============================
+// Pure math over the packed OI rows [ts, oiBase, funding] the poller logs every ~4.5 min. Buckets
+// that sample track onto a chart timeframe's UTC grid — floor(t/w)*w, the SAME anchor chAgg uses
+// client-side for candles — so an OI bar and the candle drawn above it cover exactly one interval.
+//   OI      -> LAST sample in the bucket. Open interest is a level, not a flow: the bucket's
+//              closing level is the only summary that composes across timeframes.
+//   funding -> time-weighted mean across the bucket, by the same trapezoid rule fundingAvg uses
+//              for the fundByWin columns, so a pane and the board can never disagree about what
+//              "average funding over this window" means. Segments are split AT bucket boundaries,
+//              so a sample straddling a boundary contributes to both buckets in proportion.
+// Two honest-null rules, both load-bearing:
+//   - a bucket holding no sample is simply ABSENT from the output (the client draws a gap, never
+//     an interpolated bar);
+//   - a sampling gap wider than SAMPLE_MAX_GAP is not integrated across. The log runs at ~4.5 min
+//     full-res and 1h once thinned past 31d, so 75 min admits both cadences and refuses anything
+//     longer — a poller outage is a hole in the record, not a slow drift between two rates.
+const SAMPLE_MAX_GAP = 75 * 60 * 1000;
+function bucketOiFunding(hist, tfMin, from, to) {
+  const out = { oi: [], funding: [] };
+  const w = Math.round(tfMin) * 60000;
+  if (!Array.isArray(hist) || !hist.length || !(w > 0)) return out;
+  const lo = Number.isFinite(from) ? from : -Infinity;
+  const hi = Number.isFinite(to) ? to : Infinity;
+  const oiB = new Map();            // t0 -> last OI level seen in the bucket
+  const twa = new Map();            // t0 -> { area, span } trapezoid accumulator
+  const pm = new Map();             // t0 -> { sum, n } plain mean, the lone-sample fallback
+  const floor0 = (t) => Math.floor(t / w) * w;
+  let pT = null, pF = null;         // previous funding sample (may sit in an earlier bucket)
+  for (const s of hist) {
+    if (!Array.isArray(s)) continue;
+    const t = s[0];
+    if (!Number.isFinite(t)) continue;
+    if (t > hi) break;              // hist is ascending by construction (append-only log)
+    const f = s[2];
+    const fOk = f != null && Number.isFinite(f);
+    if (t < lo) {                   // carry the last pre-window sample as the first segment's left edge
+      if (fOk) { pT = t; pF = f; } else { pT = null; pF = null; }
+      continue;
+    }
+    const t0 = floor0(t);
+    const oi = s[1];
+    if (oi != null && Number.isFinite(oi)) oiB.set(t0, oi);   // ascending -> last write wins
+    if (!fOk) { pT = null; pF = null; continue; }
+    const seen = pm.get(t0);
+    if (seen) { seen.sum += f; seen.n++; } else pm.set(t0, { sum: f, n: 1 });
+    if (pT != null && t > pT && t - pT <= SAMPLE_MAX_GAP) {
+      let a = Math.max(pT, lo);
+      while (a < t) {
+        const b = Math.min(t, floor0(a) + w);
+        const fa = pF + (f - pF) * ((a - pT) / (t - pT));
+        const fb = pF + (f - pF) * ((b - pT) / (t - pT));
+        const k = floor0(a), acc = twa.get(k), area = (fa + fb) / 2 * (b - a);
+        if (acc) { acc.area += area; acc.span += b - a; } else twa.set(k, { area, span: b - a });
+        a = b;
+      }
+    }
+    pT = t; pF = f;
+  }
+  const keys = [...new Set([...oiB.keys(), ...twa.keys(), ...pm.keys()])].sort((a, b) => a - b);
+  for (const k of keys) {
+    const o = oiB.get(k);
+    if (o != null) out.oi.push([k, o]);
+    const acc = twa.get(k);
+    if (acc && acc.span > 0) out.funding.push([k, acc.area / acc.span]);
+    else { const q = pm.get(k); if (q && q.n) out.funding.push([k, q.sum / q.n]); }
+  }
+  return out;
+}
+
 module.exports = {
-  stdev, median, linregR2, priceAt, featuresFromHourly, bucketOpens, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
+  stdev, median, linregR2, priceAt, featuresFromHourly, bucketOpens, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, bucketOiFunding, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,

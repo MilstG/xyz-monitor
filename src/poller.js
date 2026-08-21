@@ -3,6 +3,7 @@
 // and maintains two cached payloads (/api/snapshot and /api/daily) that clients read.
 const { fetchMetaAndCtxs, fetchCandles, fetchFundingHistory, sleep, limiterUsage, createUniverseSocket, createCoinalyze } = require("./hyperliquid");
 const { czMergeHistory, cascadeFlags, derivRollup, aggDerivHourly } = require("./compute");
+const { bucketOiFunding } = require("./compute");
 const { claimGeometryOk, clusterDays, evMeta, capPerUniverse, detectCascExhaust, latestCascade, tradeableNow } = require("./compute");
 const { sectorAuditDecide, mergeSectorAudit, sectorAuditDue } = require("./compute");
 const { FEATURES, FEATURE_STATES, featureFlagsSanitize, featureState, resolveFeatures, featureCounts, featureSettable, featureScopeVis, coinScope, scopeFilterSignals, scopeFilterActionable, scopeEventVisible, epLatSplit } = require("./compute");
@@ -321,6 +322,20 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const oi = [], funding = [];
     for (const s of h) { oi.push([s[0], s[1]]); if (s[2] != null) funding.push([s[0], s[2]]); }
     return { oi, funding };
+  }
+
+  // Same track, bucketed onto a CHART timeframe's grid — the chart-pane lane (build 2026.08.21-11).
+  // The drawer wants the whole rolling track at sparkline resolution; a pane wants its own window on
+  // its own bucket grid so an OI bar lines up with the candle above it. Both read the one hist map,
+  // so the drawer sparkline and the pane strip can never show different histories for a name.
+  // `cov` describes what this server actually HOLDS for the coin, not what the request asked for:
+  // OI can never be re-fetched, so a pane must be able to say "the tape goes back further than the
+  // OI does" rather than implying coverage it doesn't have.
+  function getSeriesTf(coin, tf, from, to) {
+    const h = hist.get(coin) || [];
+    const b = bucketOiFunding(h, tf, from, to);
+    const cov = h.length ? { from: h[0][0], to: h[h.length - 1][0], samples: h.length } : null;
+    return { oi: b.oi, funding: b.funding, cov };
   }
 
   // Per-market hourly OHLCV spine (rolling ~HOURLY_HISTORY_DAYS): [[t,o,h,l,c,v], ...] oldest->newest.
@@ -12619,6 +12634,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     duelTickNow: duelTick,           // harness: run one duel snapshot attempt at an injected clock, with an optional injected universe
     hydrateDuelNow: hydrateDuel,     // harness: hydrate duel state from the (stubbed) store without start()
     getSeries,
+    getSeriesTf,
     // Per-coin cache-key inputs for the candle/series ETag: the spine's data-version stamp (max of
     // hourly + daily update times — bumps exactly when getSeries/getCandles output can change) and
     // the live mark (which drives the tf series' forming bar and streams independently of the

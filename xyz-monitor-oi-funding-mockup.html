@@ -124,7 +124,7 @@ h2::after{content:"";flex:1;height:1px;background:var(--border)}
   <span class="brand">Trade<b>[XYZ]</b></span>
   <span class="hsub">charts tab &middot; open interest &amp; funding studies</span>
   <span class="mockchip">mockup</span>
-  <span class="hnote">synthetic bars &middot; real layout, real data contracts</span>
+  <span class="hnote">the proposal below shipped in build 2026.08.21-11 &middot; bars here are synthetic</span>
 </div></header>
 
 <div class="wrap">
@@ -164,11 +164,11 @@ h2::after{content:"";flex:1;height:1px;background:var(--border)}
       whole xyz equity universe.</div>
   </div>
   <div class="src">
-    <div class="srch"><span class="srct">Chart-aligned series API</span><span class="st work">to build</span></div>
-    <div class="srcp">/api/series has no tf / from params &middot; caps at 1500 points</div>
-    <div class="srcd">The drawer's needs and a pane's needs differ: a pane must bucket OI and funding
-      onto <b>the pane's own timeframe grid</b> and fetch only its window. One additive endpoint
-      change — the storage work is done.</div>
+    <div class="srch"><span class="srct">Chart-aligned series API</span><span class="st have">shipped</span></div>
+    <div class="srcp">/api/series?tf= &middot; build 2026.08.21-11</div>
+    <div class="srcd">The drawer's needs and a pane's needs differ, so <code>/api/series</code> gained a
+      <code>tf=</code> lane that buckets onto <b>the pane's own timeframe grid</b>. Built as an
+      additive branch; the drawer lane is byte-for-byte unchanged.</div>
   </div>
 </div>
 

@@ -1837,7 +1837,12 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .chrd .pos{color:var(--up)} .chrd .neg{color:var(--down)}
 .chcw{flex:1;min-height:0;position:relative}
 .chcw canvas{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}
-.chcov{position:absolute;left:6px;bottom:4px;font:9.5px var(--mono);color:var(--faint);pointer-events:none}
+/* -11: coverage moved out of the plot into its own row. It used to float over the price plot's
+   empty bottom-left; the study strips now own that space, and an overlay there lands on the time
+   axis. A row also lets it carry both spans (tape AND OI archive) without truncating. */
+.chcov{padding:2px 7px 3px;border-top:1px solid var(--border);font:9.5px var(--mono);color:var(--faint);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:14px}
+.chcov:empty{display:none}
 .chempty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--faint);font:11px var(--mono);text-align:center;padding:16px;line-height:1.8}
 .chempty b{color:var(--muted);font-size:12px;font-weight:600}
 .chfoot{padding:6px 10px;border:1px solid var(--border);border-top:0;background:var(--panel);color:var(--faint);font:10px var(--mono);line-height:1.5}
@@ -1850,6 +1855,11 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .chemain.e1{border-bottom:2px solid var(--blue)}
 .chemain.e2{border-bottom:2px solid var(--accent)}
 .chke1{color:var(--blue)} .chke2{color:var(--accent)}
+/* study strips (build 2026.08.21-11): the toggles read as a distinct class of control from the
+   mode/panes segments — they add a REGION to every pane rather than restyling the one that's
+   there — so their on-state takes the OI line's own blue instead of the toolbar accent. */
+.chseg button.chstud.on{color:#0E1116;background:var(--blue);border-color:var(--blue)}
+.chrd .chkoi{color:var(--blue)} .chrd .chkfd{color:var(--accent)}
 
 /* ===== Housing tab (build 2026.08.21-04) ======================================================
    Cards ride .s-card / .s-grid; only the head row, the KPI strip and the source chip are new. */

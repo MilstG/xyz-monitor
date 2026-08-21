@@ -5793,11 +5793,29 @@ const CH_MIN_SPAN=2*3600000;
 const CH_MTF_SETS={4:[15,60,240,1440],6:[5,15,60,240,720,1440],8:[5,15,60,240,720,1440,60,240]};
 const CH_CACHE_MS=60000;                         // per-(name,source) refetch floor; ETag 304s make the refresh nearly free
 const CH_EMA_DEF=[50,200];                       // default pair; both periods user-configurable (2..500)
+// ---- study strips (build 2026.08.21-11) --------------------------------------------------------
+// OI and funding get their OWN region under the candles rather than an overlay: neither shares a
+// scale with price, and a second y-axis on the price plot is the one chart construction that makes
+// two unrelated series look correlated. Each strip sits on the pane's existing time axis and under
+// the pane's existing crosshair, so a read is one hover, not three.
+const CH_STUDS=[{k:'oi',l:'OI'},{k:'fund',l:'FUND'},{k:'liq',l:'LIQ'}];
+const CH_STUD_TIPS={
+  oi:'open interest under every pane, on the pane\u2019s own bucket grid \u2014 last sample in each bucket, from the server\u2019s 4.5-min OI log (365d xyz / 31d crypto). The coverage line states where it ends versus the tape.',
+  fund:'funding as APR under every pane \u2014 time-weighted mean per bucket by the same rule the fundByWin columns use. Amber = longs pay, blue = shorts pay; the shaded band is this name\u2019s own p10\u2013p90.',
+  liq:'aggregated CEX liquidations (Coinalyze) \u2014 crypto only, hourly, last 48h. NOT the Hyperliquid book: a strip that has no source says so rather than drawing an empty axis.'};
+const CH_STUD_GAP=5;                             // px between strips (the 1px rule sits inside it)
+const CH_STUD_MIN=26, CH_STUD_MAX=86;            // strip height clamp
+const CH_PRICE_MIN=64;                           // price never compresses below this, whatever is on
+const CH_SER_MS=60000;                           // per-(name,tf) series refetch floor; ETag 304s are free
+const CH_LIQ_TF_MAX=60;                          // liq buckets are hourly over 48h — meaningless past a 1H pane
 const CH={mode:'grid',n:4,link:false,picks:{stocks:[],crypto:[]},mtf:{stocks:null,crypto:null},slots:[],
   ema:{on:true,p1:CH_EMA_DEF[0],p2:CH_EMA_DEF[1]},
-  panes:[],cache:new Map(),timer:null,built:false,seq:0};
+  stud:{oi:true,fund:true,liq:false},oiBasis:'units',
+  panes:[],cache:new Map(),scache:new Map(),lcache:new Map(),timer:null,built:false,seq:0};
+function chStudList(){ return CH_STUDS.filter(t=>CH.stud[t.k]); }
+function chStudOn(){ return !!(CH.stud.oi||CH.stud.fund); }
 function chEmaPeriod(v,def){ v=Math.round(+v); return Number.isFinite(v)&&v>=2&&v<=500?v:def; }
-function chPrefsSave(){ try{ localStorage.setItem('xyz-charts',JSON.stringify({mode:CH.mode,n:CH.n,link:CH.link,picks:CH.picks,mtf:CH.mtf,slots:CH.slots,ema:CH.ema})); }catch(_){} }
+function chPrefsSave(){ try{ localStorage.setItem('xyz-charts',JSON.stringify({mode:CH.mode,n:CH.n,link:CH.link,picks:CH.picks,mtf:CH.mtf,slots:CH.slots,ema:CH.ema,stud:CH.stud,oiBasis:CH.oiBasis})); }catch(_){} }
 function chPrefsLoad(){
   try{ const p=JSON.parse(localStorage.getItem('xyz-charts')||'null'); if(!p) return;
     if(p.mode==='grid'||p.mode==='mtf') CH.mode=p.mode;
@@ -5807,6 +5825,10 @@ function chPrefsLoad(){
     if(p.mtf&&typeof p.mtf==='object') CH.mtf={stocks:p.mtf.stocks||null,crypto:p.mtf.crypto||null};
     if(Array.isArray(p.slots)) CH.slots=p.slots.slice(0,12);
     if(p.ema&&typeof p.ema==='object') CH.ema={on:p.ema.on!==false,p1:chEmaPeriod(p.ema.p1,CH_EMA_DEF[0]),p2:chEmaPeriod(p.ema.p2,CH_EMA_DEF[1])};
+    // Absent key = a pref saved before the strips existed: fall through to the defaults rather
+    // than reading `undefined` as off, so the feature is visible on an existing browser too.
+    if(p.stud&&typeof p.stud==='object') CH.stud={oi:!!p.stud.oi,fund:!!p.stud.fund,liq:!!p.stud.liq};
+    if(p.oiBasis==='usd'||p.oiBasis==='units') CH.oiBasis=p.oiBasis;
   }catch(_){}
 }
 function chScopeKey(){ return state.scope==='crypto'?'crypto':'stocks'; }
@@ -5832,6 +5854,43 @@ async function chFetch(coin,src){
   const res=await fetchJSON(url);
   const v={at:Date.now(),enabled:res.enabled!==false,candles:Array.isArray(res.candles)?res.candles:[],cov:res.coverage||null};
   CH.cache.set(key,v); return v;
+}
+// ---- study data ---------------------------------------------------------------------------
+// One fetch per (name, timeframe), not per viewport: the pane pulls the whole span its candle
+// SOURCE can show and slices client-side, exactly as it already does with bars — so zoom and pan
+// never touch the network. Intraday panes ask for the 5m archive's own window; deep panes ask for
+// everything the OI log holds (from=0), which is 365d for xyz and 31d for crypto, and the coverage
+// line discloses where that ends versus the tape.
+async function chSerFetch(p){
+  const key=p.coin+'|s'+p.tf, c=CH.scache.get(key);
+  if(c&&Date.now()-c.at<CH_SER_MS) return c;
+  const now=Date.now();
+  const from=p.src==='i'?now-CH_IBASE_DAYS*86400000:0;
+  const res=await fetchJSON('/api/series?coin='+encodeURIComponent(p.coin)+'&tf='+p.tf+(from?'&from='+from:''));
+  const v={at:Date.now(),oi:Array.isArray(res.oi)?res.oi:[],funding:Array.isArray(res.funding)?res.funding:[],cov:res.cov||null};
+  CH.scache.set(key,v); return v;
+}
+// Liquidations are a different animal and are labelled as one: aggregated CEX buckets from
+// Coinalyze, crypto universe only, hourly over the last 48h. One fetch per name (the payload is
+// window-less), and the strip refuses to draw past a 1H pane rather than smearing 48h of history
+// across a year-wide viewport.
+async function chLiqFetch(coin){
+  const c=CH.lcache.get(coin);
+  if(c&&Date.now()-c.at<CH_SER_MS) return c;
+  const res=await fetchJSON('/api/derivs?coin='+encodeURIComponent(coin));
+  const v={at:Date.now(),enabled:res.enabled!==false,err:res.error||null,
+    hours:Array.isArray(res.hours)?res.hours:[],casc:Array.isArray(res.casc)?res.casc:[]};
+  CH.lcache.set(coin,v); return v;
+}
+function chStudLoad(p,seq){
+  if(chStudOn()){
+    chSerFetch(p).then(v=>{ if(seq!==CH.seq) return; p.ser=v; chDraw(p); })
+      .catch(()=>{ if(seq!==CH.seq) return; p.ser={err:true,oi:[],funding:[],cov:null}; chDraw(p); });
+  }
+  if(CH.stud.liq){
+    chLiqFetch(p.coin).then(v=>{ if(seq!==CH.seq) return; p.liq=v; chDraw(p); })
+      .catch(()=>{ if(seq!==CH.seq) return; p.liq={err:'unavailable',hours:[],casc:[]}; chDraw(p); });
+  }
 }
 // Intraday aggregation on the UTC grid: floor(t/w)*w anchors every width at UTC midnight (all four
 // divide a day), so 5m constituents can never straddle a bucket and re-aggregation is stable.
@@ -5893,17 +5952,31 @@ function chBuild(){
       +'<span class="chsp"></span>'
       +'<button type="button" id="chlink" data-tip="broadcast crosshair + zoom/pan across panes — each pane keeps its own span">LINK</button>'
       +'<button type="button" id="chreset" data-tip="reset every pane to its timeframe\u2019s default window">RESET</button>'
+      +'<span class="chlbl">studies</span><span class="chseg" id="chstud">'
+      +CH_STUDS.map(t=>'<button type="button" class="chstud" data-s="'+t.k+'" data-tip="'+CH_STUD_TIPS[t.k]+'">'+t.l+'</button>').join('')+'</span>'
+      +'<span class="chlbl">oi</span><span class="chseg" id="chbasis"><button type="button" data-b="units" data-tip="open interest in CONTRACT UNITS \u2014 the number the exchange reports and the one the OI log stores">UNITS</button><button type="button" data-b="usd" data-tip="units \u00d7 this pane\u2019s own bucket close = USD notional \u2014 derived off the candle drawn above the strip, so the two can never disagree">USD</button></span>'
       +'<span class="chlbl">ema</span><button type="button" id="chemabtn" data-tip="two EMAs on every pane, walked over each pane\u2019s FULL series (not the viewport) \u2014 warm-up bars stay empty rather than plotting an unconverged head">EMA</button>'
       +'<input type="number" id="chema1" class="chemain e1" min="2" max="500" step="1" data-tip="first EMA period (2\u2013500)"><input type="number" id="chema2" class="chemain e2" min="2" max="500" step="1" data-tip="second EMA period (2\u2013500)">'
       +'<span class="chlbl">layouts</span><span class="chpick" id="chslots"></span><button type="button" id="chsave">SAVE</button>'
       +'</div>'
       +'<div class="chgrid" id="chgrid"></div>'
-      +'<div class="chfoot">intraday panes (5m\u20131h): local 5m archive, last '+CH_IBASE_DAYS+'d, UTC-grid buckets \u00b7 4H/12H/1D panes: deep archive seeded to each listing\u2019s birth, bars verbatim from the exchange \u00b7 wheel/pinch = zoom \u00b7 drag = pan \u00b7 double-click = reset \u00b7 per-pane coverage bottom-left</div>';
+      +'<div class="chfoot">intraday panes (5m\u20131h): local 5m archive, last '+CH_IBASE_DAYS+'d, UTC-grid buckets \u00b7 4H/12H/1D panes: deep archive seeded to each listing\u2019s birth, bars verbatim from the exchange \u00b7 studies stack UNDER the candles on the same time axis and the same crosshair (never a second y-axis on price) \u00b7 wheel/pinch = zoom \u00b7 drag = pan \u00b7 double-click = reset \u00b7 each pane states its own coverage on the line beneath it</div>';
     el('chmode').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CH.mode=b.dataset.m; if(CH.mode==='mtf') CH.link=true; chPrefsSave(); chBuild(); });
     el('chn').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CH.n=+b.dataset.n; chPrefsSave(); chBuild(); });
     el('chlink').onclick=()=>{ if(CH.mode==='mtf') return; CH.link=!CH.link; chPrefsSave(); chSyncToolbar(); };
     el('chreset').onclick=()=>{ CH.panes.forEach(p=>{ chResetView(p); chDraw(p); }); };
     el('chemabtn').onclick=()=>{ CH.ema.on=!CH.ema.on; chPrefsSave(); chSyncToolbar(); CH.panes.forEach(chDraw); };
+    // A strip that was off has no payload yet, so switching it on fetches before it can draw. The
+    // region carve is pure geometry, so everything already loaded reflows on the same frame.
+    el('chstud').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+      const k=b.dataset.s; CH.stud[k]=!CH.stud[k];
+      chPrefsSave(); chSyncToolbar();
+      CH.panes.forEach(q=>{ chDraw(q); });
+      if(CH.stud[k]) CH.panes.forEach(q=>chStudLoad(q,CH.seq));
+    });
+    el('chbasis').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+      CH.oiBasis=b.dataset.b==='usd'?'usd':'units'; chPrefsSave(); chSyncToolbar(); CH.panes.forEach(chDraw);
+    });
     const emaIn=(id,key,def)=>{ const i=el(id); i.addEventListener('change',()=>{ CH.ema[key]=chEmaPeriod(i.value,def); i.value=CH.ema[key]; chPrefsSave(); CH.panes.forEach(chDraw); }); };
     emaIn('chema1','p1',CH_EMA_DEF[0]); emaIn('chema2','p2',CH_EMA_DEF[1]);
     el('chsave').onclick=()=>{
@@ -5936,11 +6009,12 @@ function chBuild(){
         :'<span class="chtfs">'+CH_TFS.map(t=>'<button type="button" data-tf="'+t.k+'"'+(t.k===sp.tf?' class="on"':'')+'>'+t.l+'</button>').join('')+'</span>')
       +'</div>'
       +'<div class="chrd"><span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394</span></div>'
-      +'<div class="chcw"><canvas></canvas><span class="chcov"></span></div>';
+      +'<div class="chcw"><canvas></canvas></div><div class="chcov"></div>';
     g.appendChild(d);
     const src=(CH_TFS.find(t=>t.k===sp.tf)||{}).src||'i';
     const p={el:d,coin:sp.coin,tf:sp.tf,src,canvas:d.querySelector('canvas'),rd:d.querySelector('.chrd'),
-      lastEl:d.querySelector('.chlast'),covEl:d.querySelector('.chcov'),view:null,hover:null,_agg:null,_aggK:0,_aggAt:0};
+      lastEl:d.querySelector('.chlast'),covEl:d.querySelector('.chcov'),view:null,hover:null,_agg:null,_aggK:0,_aggAt:0,
+      ser:null,liq:null};
     p.ctx=p.canvas.getContext('2d');
     CH.panes.push(p);
     chWire(p);
@@ -5948,6 +6022,7 @@ function chBuild(){
   });
 }
 async function chLoad(p,seq){
+  chStudLoad(p,seq);                             // fired alongside the tape, not behind it
   try{
     await chFetch(p.coin,p.src);
     if(seq!==CH.seq) return;                     // a rebuild superseded this pane
@@ -6022,17 +6097,40 @@ function chDraw(p){
   const PR=Math.min(58,w*0.17),PB=15,PT=4;
   const pw=w-PR, ph=h-PB-PT;
   if(pw<40||ph<30) return;
-  const volH=Math.max(11,ph*0.15), wMs=p.tf*60000;
+  // Region carve: each active strip takes a clamped slice of the plot, price keeps the rest. The
+  // price floor wins ties — a pane whose candles have been squeezed to a smear has stopped being a
+  // chart, so on a short pane the strips give height back rather than the tape.
+  const studs=chStudList();
+  let each=0, studH=0;
+  if(studs.length){
+    each=Math.max(CH_STUD_MIN,Math.min(CH_STUD_MAX,ph*(studs.length>2?0.17:0.20)));
+    studH=studs.length*(each+CH_STUD_GAP);
+    if(ph-studH<CH_PRICE_MIN){
+      each=Math.max(0,(ph-CH_PRICE_MIN)/studs.length-CH_STUD_GAP);
+      studH=each>=CH_STUD_MIN?studs.length*(each+CH_STUD_GAP):0;   // below the floor, drop the strips entirely
+    }
+  }
+  const priceH=ph-studH;
+  const volH=Math.max(11,priceH*0.15), wMs=p.tf*60000;
   const v=p.view, span=v.to-v.from;
   const bars=series.filter(b=>b[0]+wMs>=v.from&&b[0]<=v.to);
   const X=(t)=>(t-v.from)/span*pw;
   const up=chVar('--up'),dn=chVar('--down'),grid=chVar('--grid')||chVar('--border'),mute=chVar('--muted');
+  const faint=chVar('--faint')||mute, bord=chVar('--border'), blue=chVar('--blue'), acc=chVar('--accent');
+  // The right-edge inset (see below) is hoisted out of the bars block so the STRIPS share the exact
+  // same time->x mapping as the candles. A strip drawn on a different mapping would sit half a bar
+  // off the candle it describes — the one alignment error that makes a study strip actively lie.
+  const stepAll=pw/Math.max(1,span/wMs), bwAll=Math.max(1,Math.min(11,stepAll*0.68));
+  const inset=Math.ceil(bwAll/2)+1;
+  p._inset=inset;
+  const Xi=(t)=>(t-v.from)/span*(pw-inset);
+  let hb=null, studRd='';                        // the hovered bucket + what the strips add to the readout
   if(!bars.length){ msg('no bars in this window'); }
   else{
     let lo=Infinity,hi=-Infinity,vmax=0;
     for(const b of bars){ if(+b[3]<lo)lo=+b[3]; if(+b[2]>hi)hi=+b[2]; if(+b[5]>vmax)vmax=+b[5]; }
     const pad=(hi-lo)*0.06||Math.abs(hi)*0.002||1; lo-=pad; hi+=pad;
-    const Y=(x)=>PT+(ph-volH-3)-((x-lo)/(hi-lo))*(ph-volH-3);
+    const Y=(x)=>PT+(priceH-volH-3)-((x-lo)/(hi-lo))*(priceH-volH-3);
     ctx.strokeStyle=grid; ctx.lineWidth=1; ctx.fillStyle=mute;
     ctx.font='9.5px '+mono; ctx.textAlign='left'; ctx.textBaseline='middle';
     for(let i=0;i<=3;i++){
@@ -6040,7 +6138,7 @@ function chDraw(p){
       ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(pw,y); ctx.stroke();
       ctx.fillText(chPx(val),pw+4,y);
     }
-    const step=pw/Math.max(1,span/wMs), bw=Math.max(1,Math.min(11,step*0.68));
+    const bw=bwAll;
     // Right-edge fix (-02): the raw mapping put the LAST bar's center half a bar-width from the
     // plot edge, so with narrow bars its right half fell off the plot \u2014 the standing
     // \u201clast candle cut in half\u201d. Inset the drawable span by half a body (+1px) so a
@@ -6048,16 +6146,13 @@ function chDraw(p){
     // plot rect so a bar straddling the edge mid-pan cuts cleanly instead of bleeding under the
     // price axis. The inset is stored on the pane so the pointer\u2192time inverse in chWire
     // uses the SAME mapping \u2014 a crosshair off by the inset would hover the wrong bar.
-    const inset=Math.ceil(bw/2)+1;
-    p._inset=inset;
-    const Xi=(t)=>(t-v.from)/span*(pw-inset);
-    ctx.save(); ctx.beginPath(); ctx.rect(0,PT,pw,ph); ctx.clip();
+    ctx.save(); ctx.beginPath(); ctx.rect(0,PT,pw,priceH); ctx.clip();
     for(const b of bars){
       const x=Xi(b[0]+wMs/2), col=+b[4]>=+b[1]?up:dn;
       ctx.fillStyle=col; ctx.strokeStyle=col;
       ctx.globalAlpha=0.32;
       const vh=vmax?(+b[5]/vmax)*volH:0;
-      ctx.fillRect(x-bw/2,PT+ph-vh,Math.max(1,bw),vh);
+      ctx.fillRect(x-bw/2,PT+priceH-vh,Math.max(1,bw),vh);
       ctx.globalAlpha=1;
       ctx.beginPath(); ctx.moveTo(Math.round(x)+0.5,Y(+b[2])); ctx.lineTo(Math.round(x)+0.5,Y(+b[3])); ctx.stroke();
       const y1=Y(+b[1]),y2=Y(+b[4]);
@@ -6071,7 +6166,7 @@ function chDraw(p){
       const line=(arr,col)=>{ ctx.strokeStyle=col; ctx.lineWidth=1.2; ctx.beginPath(); let pen=false;
         for(let i=0;i<series.length;i++){ const val=arr[i]; if(val==null){ pen=false; continue; }
           const t=series[i][0]+wMs/2; if(t<v.from-wMs||t>v.to+wMs) continue;
-          const x=Xi(t), y=Y(val); if(y<PT-20||y>PT+ph+20){ pen=false; continue; }
+          const x=Xi(t), y=Y(val); if(y<PT-20||y>PT+priceH+20){ pen=false; continue; }
           if(pen) ctx.lineTo(x,y); else { ctx.moveTo(x,y); pen=true; } }
         ctx.stroke(); };
       line(em.e1,chVar('--blue')); line(em.e2,chVar('--accent'));
@@ -6085,14 +6180,13 @@ function chDraw(p){
       ctx.fillText(chFmtT(t,p.tf),x,PT+ph+3);
     }
     // crosshair + readout (interactive hover on every chart — standing requirement)
-    let hb=null;
     if(p.hover!=null&&p.hover>=v.from&&p.hover<=v.to){
       let best=Infinity;
       for(const b of bars){ const dd=Math.abs(b[0]+wMs/2-p.hover); if(dd<best){ best=dd; hb=b; } }
       if(hb){
         const x=Math.round(Xi(hb[0]+wMs/2))+0.5;
         ctx.strokeStyle=chVar('--border'); ctx.setLineDash([2,3]);
-        ctx.beginPath(); ctx.moveTo(x,PT); ctx.lineTo(x,PT+ph); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x,PT); ctx.lineTo(x,PT+ph); ctx.stroke();   // spans the strips too — one hover, one read
         const yc=Math.round(Y(+hb[4]))+0.5;
         ctx.beginPath(); ctx.moveTo(0,yc); ctx.lineTo(pw,yc); ctx.stroke();
         ctx.setLineDash([]);
@@ -6116,13 +6210,192 @@ function chDraw(p){
         +' <span class="chk">H</span> '+chPx(+hb[2])+' <span class="chk">L</span> '+chPx(+hb[3])
         +' <span class="chk">C</span> '+chPx(+hb[4])+' <span class="chk">V</span> '+chFmtV(hb[5])
         +(dd!=null?' <span class="'+cls+'">'+(dd>=0?'+':'')+dd.toFixed(2)+'%</span>':'')+emh;
-    }else p.rd.innerHTML='<span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394'+(CH.ema.on?' \u00b7 EMA'+CH.ema.p1+'/'+CH.ema.p2:'')+'</span>';
+    }else p.rd.innerHTML='<span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394'+(CH.ema.on?' \u00b7 EMA'+CH.ema.p1+'/'+CH.ema.p2:'')
+      +(CH.stud.oi?' \u00b7 OI':'')+(CH.stud.fund?' \u00b7 funding':'')+(CH.stud.liq?' \u00b7 liqs':'')+'</span>';
+  }
+  // ---- study strips ------------------------------------------------------------------------
+  // Everything here is the SERVER's buckets, rendered — never re-derived. The bucketing (last
+  // sample in bucket for OI, time-weighted mean for funding) happens once in compute.js, so a
+  // strip and the board's OI/funding columns are reading the same arithmetic.
+  if(studH>0){
+    const hbT=hb?+hb[0]:null;
+    const tfL=(CH_TFS.find(t=>t.k===p.tf)||{}).l||(p.tf+'m');
+    // Bucket lookups are per-mousemove across every LINKED pane, so index once per payload.
+    if(p.ser&&!p.ser.err&&p._serAt!==p.ser.at){
+      p._oiMap=new Map(); for(const q of p.ser.oi) p._oiMap.set(+q[0],+q[1]);
+      p._fdMap=new Map(); for(const q of p.ser.funding) p._fdMap.set(+q[0],+q[1]);
+      const all=[]; for(const q of p.ser.funding){ const a=+q[1]*24*365*100; if(isFinite(a)) all.push(a); }
+      all.sort((a,b)=>a-b);
+      const qt=(f)=>{ if(!all.length) return null; const k=(all.length-1)*f, i=Math.floor(k);
+        return all[i]+(all[Math.min(all.length-1,i+1)]-all[i])*(k-i); };
+      p._fdBand=all.length>=20?{lo:qt(0.10),hi:qt(0.90)}:null;   // a band off a dozen buckets is noise, not a baseline
+      p._serAt=p.ser.at;
+    }
+    const lbl=(y,t,col)=>{ ctx.fillStyle=col||faint; ctx.font='9px '+mono; ctx.textAlign='left'; ctx.textBaseline='top'; ctx.fillText(t,3,y+1); };
+    const rlbl=(y,t,col)=>{ ctx.fillStyle=col||faint; ctx.font='9px '+mono; ctx.textAlign='right'; ctx.textBaseline='top'; ctx.fillText(t,pw-3,y+1); };
+    const note=(y,hh,t)=>{ ctx.fillStyle=faint; ctx.font='9.5px '+mono; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(t,pw/2,y+hh/2); };
+    const axis=(y,hh,top,bot)=>{ ctx.fillStyle=mute; ctx.font='9px '+mono; ctx.textAlign='left'; ctx.textBaseline='middle';
+      ctx.fillText(top,pw+4,y+5); ctx.fillText(bot,pw+4,y+hh-5); };
+    const ser=p.ser, rh=each;
+    let ry=PT+priceH;
+    for(const st of studs){
+      ry+=CH_STUD_GAP;
+      ctx.strokeStyle=bord; ctx.lineWidth=1; ctx.beginPath();
+      ctx.moveTo(0,Math.round(ry-3)+0.5); ctx.lineTo(w,Math.round(ry-3)+0.5); ctx.stroke();
+
+      if(st.k==='oi'||st.k==='fund'){
+        const isOi=st.k==='oi';
+        const head=isOi?('OI · '+(CH.oiBasis==='usd'?'usd notional':'units')):'FUNDING APR';
+        if(!ser){ lbl(ry,head); note(ry,rh,'loading…'); ry+=rh; continue; }
+        if(ser.err){ lbl(ry,head); note(ry,rh,'series endpoint did not answer — retries on the next refresh'); ry+=rh; continue; }
+        const track=isOi?ser.oi:ser.funding;
+        if(!track.length){ lbl(ry,head); note(ry,rh,'no '+(isOi?'OI':'funding')+' samples held for this name yet'); ry+=rh; continue; }
+        // Visible buckets only. A bucket the log never captured is absent here exactly as it is
+        // absent server-side: the strip draws a gap, it does not bridge one.
+        const pts=[];
+        let cmap=null;
+        if(isOi&&CH.oiBasis==='usd'){ cmap=new Map(); for(const b of series) cmap.set(+b[0],+b[4]); }
+        for(const q of track){
+          const t=+q[0];
+          if(t+wMs<v.from||t>v.to) continue;
+          let val=+q[1];
+          if(isOi&&cmap){ const px=cmap.get(t); if(px==null||!isFinite(px)) continue; val*=px; }
+          else if(!isOi) val*=24*365*100;                  // hourly rate -> APR %, the board's convention
+          if(!isFinite(val)) continue;
+          pts.push([t,val]);
+        }
+        if(pts.length<2){ lbl(ry,head);
+          note(ry,rh,'no '+(isOi?'OI':'funding')+' in this window — the log starts later than the tape'); ry+=rh; continue; }
+
+        if(isOi){
+          let mn=Infinity,mx=-Infinity;
+          for(const q of pts){ if(q[1]<mn)mn=q[1]; if(q[1]>mx)mx=q[1]; }
+          const sp0=(mx-mn)||Math.abs(mx)*0.01||1; mn=Math.max(0,mn-sp0*0.14); mx+=sp0*0.10;
+          const OY=(x)=>ry+rh-((x-mn)/(mx-mn))*rh;
+          ctx.save(); ctx.beginPath(); ctx.rect(0,ry,pw,rh); ctx.clip();
+          // Area, not a bare line: the question asked of OI is "is positioning building or
+          // unwinding through this move", a magnitude read against its own floor.
+          ctx.beginPath(); ctx.moveTo(Xi(pts[0][0]+wMs/2),ry+rh);
+          for(const q of pts) ctx.lineTo(Xi(q[0]+wMs/2),OY(q[1]));
+          ctx.lineTo(Xi(pts[pts.length-1][0]+wMs/2),ry+rh); ctx.closePath();
+          ctx.globalAlpha=0.15; ctx.fillStyle=blue; ctx.fill(); ctx.globalAlpha=1;
+          ctx.beginPath();
+          for(let i=0;i<pts.length;i++){ const x=Xi(pts[i][0]+wMs/2), y=OY(pts[i][1]); if(i) ctx.lineTo(x,y); else ctx.moveTo(x,y); }
+          ctx.strokeStyle=blue; ctx.lineWidth=1.4; ctx.lineJoin='round'; ctx.stroke();
+          const lq=pts[pts.length-1];
+          ctx.beginPath(); ctx.arc(Xi(lq[0]+wMs/2),OY(lq[1]),2.2,0,6.2832); ctx.fillStyle=blue; ctx.fill();
+          ctx.restore();
+          axis(ry,rh,chFmtV(mx),chFmtV(mn));
+          lbl(ry,head);
+          const dw=pts[0][1]?lq[1]/pts[0][1]-1:null;
+          if(dw!=null&&isFinite(dw)) rlbl(ry,(dw>=0?'+':'')+(dw*100).toFixed(1)+'% window',dw>=0?up:dn);
+          if(hbT!=null&&p._oiMap){
+            let hv=p._oiMap.get(hbT);
+            if(hv!=null&&cmap){ const px=cmap.get(hbT); hv=(px!=null&&isFinite(px))?hv*px:null; }
+            studRd+=' <span class="chkoi">OI</span> '+(hv!=null&&isFinite(hv)?chFmtV(hv):'—');
+          }
+        }else{
+          const band=p._fdBand;
+          // Scale to the VISIBLE bars (always including zero, so the sign is never implied off-screen).
+          // The band is a reference, not data: letting a p90 far outside the viewport set the scale
+          // would flatten the bars the pane is actually about. It is drawn CLIPPED instead — an edge
+          // that runs off the top reads correctly as "the band continues past this view".
+          let flo=0, fhi=0;
+          for(const q of pts){ if(q[1]<flo)flo=q[1]; if(q[1]>fhi)fhi=q[1]; }
+          const pd=(fhi-flo)*0.12||1; flo-=pd; fhi+=pd;
+          const FY=(x)=>ry+rh-2-((x-flo)/(fhi-flo))*(rh-4), zy=FY(0);
+          ctx.save(); ctx.beginPath(); ctx.rect(0,ry,pw,rh); ctx.clip();
+          // p10-p90 of the name's OWN loaded track: what turns "+22% APR" into "rich for this name".
+          if(band){
+            ctx.globalAlpha=0.10; ctx.fillStyle=acc;
+            ctx.fillRect(0,FY(band.hi),pw,Math.max(1,FY(band.lo)-FY(band.hi))); ctx.globalAlpha=1;
+            ctx.strokeStyle=acc; ctx.globalAlpha=0.45; ctx.setLineDash([2,3]); ctx.lineWidth=1;
+            for(const e of [band.lo,band.hi]){ const ey=FY(e);
+              if(ey<ry||ey>ry+rh) continue;                // off-view edges are simply not drawn
+              ctx.beginPath(); ctx.moveTo(0,Math.round(ey)+0.5); ctx.lineTo(pw,Math.round(ey)+0.5); ctx.stroke(); }
+            ctx.setLineDash([]); ctx.globalAlpha=1;
+          }
+          // Diverging in amber/blue, NOT the green/red P&L pair: positive funding is not "good",
+          // and up/down is already carried by which side of zero the bar sits on.
+          for(const q of pts){ const bx=Xi(q[0]+wMs/2), by=FY(q[1]);
+            ctx.fillStyle=q[1]>=0?acc:blue;
+            ctx.fillRect(bx-bwAll/2,Math.min(zy,by),Math.max(1,bwAll),Math.max(1,Math.abs(by-zy))); }
+          ctx.strokeStyle=mute; ctx.globalAlpha=0.45; ctx.beginPath();
+          ctx.moveTo(0,Math.round(zy)+0.5); ctx.lineTo(pw,Math.round(zy)+0.5); ctx.stroke(); ctx.globalAlpha=1;
+          ctx.restore();
+          const ax=(x)=>(Math.abs(x)<0.5?'0%':(x>0?'+':'')+x.toFixed(0)+'%');
+          axis(ry,rh,ax(fhi),ax(flo));
+          lbl(ry,head+(band?' · p10–p90':''));
+          // The live percentile is the SERVER's fundPct (31d hourly, the same number the funding
+          // column flags) — the strip never mints a second percentile for the same rate.
+          const r0=state.rows.get(p.coin);
+          if(r0&&r0.fundPct!=null) rlbl(ry,'now P'+r0.fundPct,acc);
+          if(hbT!=null&&p._fdMap){
+            const hv=p._fdMap.get(hbT);
+            const a=hv!=null?hv*24*365*100:null;
+            studRd+=' <span class="chkfd">FUND</span> '+(a!=null&&isFinite(a)?(a>=0?'+':'')+a.toFixed(1)+'%':'—');
+          }
+        }
+        ry+=rh; continue;
+      }
+
+      if(st.k==='liq'){
+        // Aggregated CEX liquidations (Coinalyze), and labelled as such everywhere: this is not
+        // the Hyperliquid book, it does not exist for HIP-3 equity listings, and it is 48h of
+        // hourly buckets — so the strip states which of those walls it hit instead of drawing a
+        // sliver at the right edge and letting it read as "quiet".
+        lbl(ry,'LIQS · CEX agg · shorts ▴ longs ▾');
+        const lq=p.liq;
+        if(String(p.coin).includes(':')) note(ry,rh,'no CEX counterpart for this HIP-3 listing');
+        else if(p.tf>CH_LIQ_TF_MAX) note(ry,rh,'48h of hourly buckets — too short a history for a '+tfL+' pane');
+        else if(!lq) note(ry,rh,'loading…');
+        else if(lq.enabled===false) note(ry,rh,'Coinalyze is not configured on this server');
+        else if(!lq.hours.length) note(ry,rh,lq.err||'no buckets accumulated for this name yet');
+        else{
+          const HR=3600000;
+          const vis=lq.hours.filter(b=>+b[0]+HR>=v.from&&+b[0]<=v.to);
+          if(!vis.length) note(ry,rh,'the 48h liq window falls outside this viewport');
+          else{
+            let lmax=1; for(const b of vis){ if(+b[1]>lmax)lmax=+b[1]; if(+b[2]>lmax)lmax=+b[2]; }
+            const lbw=Math.max(1,Math.min(14,pw*(HR/span)*0.7)), mid=ry+rh/2, half=rh/2-4;
+            const casc=new Set((lq.casc||[]).map(f=>Math.floor(+f.t/HR)*HR));
+            ctx.save(); ctx.beginPath(); ctx.rect(0,ry,pw,rh); ctx.clip();
+            for(const b of vis){
+              const bx=Xi(+b[0]+HR/2);
+              const hs=(+b[2]||0)/lmax*half, hl=(+b[1]||0)/lmax*half;
+              if(hs>0.4){ ctx.fillStyle=up; ctx.fillRect(bx-lbw/2,mid-hs,lbw,hs); }
+              if(hl>0.4){ ctx.fillStyle=dn; ctx.fillRect(bx-lbw/2,mid+1,lbw,hl); }
+              if(casc.has(+b[0])){ ctx.fillStyle=acc; ctx.font='8px '+mono; ctx.textAlign='center'; ctx.textBaseline='top';
+                ctx.fillText('◆',bx,ry+1); }
+            }
+            ctx.strokeStyle=mute; ctx.globalAlpha=0.45; ctx.beginPath();
+            ctx.moveTo(0,Math.round(mid)+0.5); ctx.lineTo(pw,Math.round(mid)+0.5); ctx.stroke(); ctx.globalAlpha=1;
+            ctx.restore();
+            axis(ry,rh,'\u25b4'+chFmtV(lmax),'\u25be'+chFmtV(lmax));
+            if(hbT!=null){
+              const bkt=Math.floor(hbT/HR)*HR, hbb=lq.hours.find(b=>+b[0]===bkt);
+              if(hbb) studRd+=' <span class="chk">LIQ</span> <span class="pos">'+chFmtV(+hbb[2])+'</span>/<span class="neg">'+chFmtV(+hbb[1])+'</span>';
+            }
+          }
+        }
+        ry+=rh; continue;
+      }
+      ry+=rh;
+    }
+    if(studRd&&hb&&p.rd) p.rd.innerHTML+=studRd;
   }
   // coverage disclosure: what this pane's SOURCE actually holds, never what the window implies
   const cov=d&&d.cov;
   let covTxt=cov&&cov.days?((p.src==='i'?'5m archive ':'deep archive ')+cov.days+'d \u00b7 '+(cov.count||0)+' bars'):'';
   if(covTxt&&CH.ema.on&&series&&series.length&&series.length<CH.ema.p2)
     covTxt+=' \u00b7 EMA'+CH.ema.p2+' needs '+CH.ema.p2+' bars ('+series.length+' held)';
+  // The OI log is a SEPARATE archive from the tape and a shorter one — 365d for xyz, 31d for
+  // crypto, against candles seeded to each listing's birth. Stating the strip's own span next to
+  // the tape's is what stops a strip that simply ends from reading as positioning that flatlined.
+  if(chStudOn()&&p.ser&&!p.ser.err&&p.ser.cov&&p.ser.cov.from){
+    const od=Math.max(1,Math.round((p.ser.cov.to-p.ser.cov.from)/86400000));
+    covTxt+=(covTxt?' \u00b7 ':'')+'OI/funding '+od+'d';
+  }
   p.covEl.textContent=covTxt;
 }
 // ---- interaction -------------------------------------------------------------------------------
@@ -6171,7 +6444,7 @@ function chWire(p){
   p.el.querySelectorAll('[data-tf]').forEach(b=>b.onclick=()=>{
     p.tf=+b.dataset.tf;
     p.src=(CH_TFS.find(t=>t.k===p.tf)||{}).src||'i';
-    p._agg=null; p._aggK=0; p.view=null;
+    p._agg=null; p._aggK=0; p.view=null; p.ser=null;   // buckets are tf-specific: the old payload cannot be reused
     p.el.querySelectorAll('[data-tf]').forEach(x=>x.classList.toggle('on',x===b));
     chLoad(p,CH.seq);
   });
@@ -6185,6 +6458,11 @@ function chSyncToolbar(){
   lk.classList.toggle('on',CH.link);
   lk.disabled=CH.mode==='mtf';
   lk.textContent=CH.mode==='mtf'?'LINK \u00b7 locked':'LINK';
+  el('chstud').querySelectorAll('button').forEach(b=>b.classList.toggle('on',!!CH.stud[b.dataset.s]));
+  { const bs=el('chbasis');
+    bs.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.b===CH.oiBasis));
+    bs.querySelectorAll('button').forEach(b=>b.disabled=!CH.stud.oi);   // a basis for a strip that isn't drawn is a dead control
+  }
   el('chemabtn').classList.toggle('on',CH.ema.on);
   el('chema1').value=CH.ema.p1; el('chema2').value=CH.ema.p2;
   el('chema1').disabled=el('chema2').disabled=!CH.ema.on;
