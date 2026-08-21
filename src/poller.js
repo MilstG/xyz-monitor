@@ -10718,8 +10718,13 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
   const HOUSING_SERIES = [
     { k: "rate30",  sid: "MORTGAGE30US", title: "30y fixed mortgage rate", unit: "%",   freq: "w", dp: 2, start: "2005-01-01",
       src: "Freddie Mac PMMS via FRED", proxy: "Original panel is the 30y JUMBO average (Bankrate/Bloomberg, no public API). Conforming tracks it within ~20bp." },
+    // DRTSPM is HISTORICAL: the SLOOS retired its single prime-mortgage standards question after
+    // 2014Q4 (replaced by GSE-eligible / QM / non-QM categories), so this series simply stops
+    // there and no refresh will ever extend it. The board keeps it — the 2007-08 tightening spike
+    // is the reason the panel exists — and the card labels itself "Ended" with the last print date
+    // rather than posing as current. Repointing at a live successor is a data decision, not a bug fix.
     { k: "sloos",   sid: "DRTSPM",       title: "Lending standards — prime mortgages", unit: "% net tightening", freq: "q", dp: 1, start: "2000-01-01",
-      src: "Fed SLOOS via FRED" },
+      src: "Fed SLOOS via FRED (series ends 2014Q4 — SLOOS retired the prime-mortgage question)" },
     { k: "sf",      sid: "HOUST1F",      title: "Single-family starts", unit: "M saar", freq: "m", dp: 3, start: "2000-01-01", scale: 0.001,
       src: "Census via FRED" },
     { k: "mf",      sid: "HOUST5F",      title: "Multifamily starts (5+)", unit: "M saar", freq: "m", dp: 3, start: "2000-01-01", scale: 0.001,

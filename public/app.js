@@ -7119,7 +7119,25 @@ function hsgWindowStart(win){
   if(win==='5y') return (y-5)+'-01-01';
   return '1900-01-01';
 }
-function hsgSlice(ser,win){ const from=hsgWindowStart(win); return (ser&&ser.obs||[]).filter(o=>o[0]>=from); }
+// Window anchoring for a series that STOPPED. FRED retires series — SLOOS replaced its single
+// "prime mortgage" standards question with granular categories after 2014Q4, so DRTSPM simply
+// ends there — and a today-anchored window slices a retired series to nothing, leaving the card
+// reading "not enough data in this window": true, useless, and silent about the actual reason.
+// Live series keep the calendar window byte-for-byte as before; only a series whose LAST print
+// already predates that window re-anchors to its own tail, so "5y" means the last five years OF
+// DATA. hsgEnded names that case for the chip and the caption so the card says why, not nothing.
+function hsgSpanDays(win){ return win==='1y'?366:win==='5y'?5*366:null; }
+const HSG_DEAD_MS=400*864e5;
+function hsgEnded(ser){ const obs=(ser&&ser.obs)||[]; if(!obs.length) return null;
+  const last=obs[obs.length-1][0];
+  return (Date.now()-Date.parse(last))>HSG_DEAD_MS?last:null; }
+function hsgSlice(ser,win){
+  const obs=(ser&&ser.obs)||[], w=obs.filter(o=>o[0]>=hsgWindowStart(win));
+  if(w.length>=2||obs.length<2) return w;
+  const days=hsgSpanDays(win); if(days==null) return obs;
+  const from=Date.parse(obs[obs.length-1][0])-days*864e5;
+  return obs.filter(o=>Date.parse(o[0])>=from);
+}
 function hsgFmt(v,ser){ if(v==null||!isFinite(v)) return '—';
   if(ser.unit==='$B') return liqB(v);
   if(ser.unit==='$k') return '$'+v.toFixed(0)+'k';
@@ -7195,8 +7213,12 @@ function hsgStackSvg(sf,mf,sfPts,mfPts,o){
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function hsgChip(ser){
-  const proxy=!!ser.proxy;
-  return `<span class="src-chip ${proxy?'proxy':'direct'}" title="${esc(ser.src)}${proxy?' — '+esc(ser.proxy):''}"><i></i>${proxy?'Proxy':'Direct'} · ${esc(ser.sid)}</span>`;
+  // A dead series must not wear the green "Direct" dot: the chip is the card's claim about how
+  // live the number is, and DRTSPM's last print is from 2014.
+  const proxy=!!ser.proxy, ended=hsgEnded(ser);
+  const cls=ended?'ended':proxy?'proxy':'direct', lab=ended?'Ended':proxy?'Proxy':'Direct';
+  const tip=esc(ser.src)+(proxy?' — '+esc(ser.proxy):'')+(ended?' — discontinued: no print since '+esc(hsgDate(ended)):'');
+  return `<span class="src-chip ${cls}" title="${tip}"><i></i>${lab} · ${esc(ser.sid)}</span>`;
 }
 function hsgDelta(ser){
   const y=ser.yoy; if(!y) return '<span class="sec">12m —</span>';
@@ -7209,12 +7231,18 @@ function hsgDelta(ser){
   const cls = v===0?'sec':((v>0)!==bad?'pos':'neg');
   return `<span class="${cls}">${v>0?'▲':'▼'} ${txt.replace('-','')}</span> <span class="sec">12m</span>`;
 }
+// Says the quiet part on a discontinued series: the headline date, the "12m" change and the
+// chart all anchor to the last print, not to today — without this the card reads as current.
+function hsgEndedCap(ser){
+  const ended=hsgEnded(ser); if(!ended) return '';
+  return `<div class="s-cap hsg-ended">No print since ${esc(hsgDate(ended))} — ${esc(ser.sid)} is discontinued. The value, the 12m change and the chart window are anchored to that last observation, not to today.</div>`;
+}
 function hsgCard(ser,chart,extra){
   return `<div class="s-card hsg-card">`+
     `<div class="hsg-head"><span class="hsg-title">${esc(ser.title)}</span>${hsgChip(ser)}</div>`+
     `<div class="hsg-kpis"><span class="hsg-v">${hsgFmt(ser.last.v,ser)}</span><span class="sec hsg-d">${hsgDate(ser.last.d)}</span>${hsgDelta(ser)}`+
       `<span class="sec hsg-rng">range ${hsgFmt(ser.lo.v,ser)} – ${hsgFmt(ser.hi.v,ser)}</span></div>`+
-    chart+(extra||'')+(ser.proxy?`<div class="s-cap">${esc(ser.proxy)}</div>`:'')+`</div>`;
+    chart+(extra||'')+hsgEndedCap(ser)+(ser.proxy?`<div class="s-cap">${esc(ser.proxy)}</div>`:'')+`</div>`;
 }
 function renderHousing(){
   const root=el('hsg-body'); if(!root) return;

@@ -1817,6 +1817,8 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .src-chip i{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--up)}
 .src-chip.proxy i{background:var(--blue)}
 .src-chip.pending i{background:var(--down)}
+.src-chip.ended i{background:var(--muted)}
+.hsg-ended{color:var(--muted)}
 .hsg-pending{flex:1 1 320px;min-width:280px}
 .hsg-empty{border:1px dashed var(--border);border-radius:7px;padding:18px 16px;font-size:12px;line-height:1.5;display:flex;flex-direction:column;gap:4px}
 .lread .sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:0}

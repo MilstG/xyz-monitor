@@ -19817,6 +19817,50 @@ test("housing tab: source + wiring manifest (FRED board, feature-gated route, vi
   assert.ok(css.includes(".src-chip.proxy i{background:var(--blue)}"), "proxy chip colour");
 });
 
+// A retired FRED series (SLOOS dropped the single prime-mortgage question after 2014Q4, so
+// DRTSPM stops there) used to slice to zero points in every calendar window, and the card
+// rendered "not enough data in this window" — true, useless, and silent about the reason.
+test("housing tab: a discontinued series still charts, and says it is discontinued", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const m = app.match(new RegExp("^function " + name + "\\([^\\n]*\\}$|^function " + name + "\\([\\s\\S]*?\\n\\}", "m"));
+    assert.ok(m, name + " extractable");
+    return m[0];
+  };
+  const F = new Function(
+    grab("hsgWindowStart") + "\n" + grab("hsgSpanDays") + "\n" +
+    app.match(/^const HSG_DEAD_MS[^\n]*$/m)[0] + "\n" + grab("hsgEnded") + "\n" + grab("hsgSlice") + "\n" +
+    "return { hsgSlice, hsgEnded, hsgWindowStart };")();
+
+  // quarterly series that ended in 2014 — a decade of history, nothing inside a today-anchored window
+  const dead = { obs: [] };
+  for (let y = 2007; y <= 2014; y++) for (const m of ["01", "04", "07", "10"]) dead.obs.push([y + "-" + m + "-01", 0]);
+  const live = { obs: [] };
+  const yNow = new Date().getUTCFullYear();
+  for (let y = yNow - 8; y <= yNow; y++) for (const m of ["01", "04", "07", "10"]) live.obs.push([y + "-" + m + "-01", 0]);
+
+  for (const win of ["1y", "5y", "all"]) {
+    const sl = F.hsgSlice(dead, win);
+    assert.ok(sl.length >= 2, "dead series charts in " + win + " (got " + sl.length + " pts)");
+    assert.strictEqual(sl[sl.length - 1][0], "2014-10-01", "re-anchored on its own last print, " + win);
+  }
+  // the re-anchored window is the span OF DATA, not the whole history
+  assert.ok(F.hsgSlice(dead, "1y").length < F.hsgSlice(dead, "5y").length, "1y is tighter than 5y");
+  assert.strictEqual(F.hsgSlice(dead, "all").length, dead.obs.length, "all is still everything");
+  // live series keep the old today-anchored behaviour exactly
+  for (const win of ["1y", "5y", "all"]) {
+    const from = F.hsgWindowStart(win);
+    assert.deepStrictEqual(F.hsgSlice(live, win), live.obs.filter((o) => o[0] >= from), "live slice unchanged, " + win);
+  }
+  // and the card labels the dead one instead of implying it is current
+  assert.strictEqual(F.hsgEnded(dead), "2014-10-01", "dead series names its last print");
+  assert.strictEqual(F.hsgEnded(live), null, "live series is not flagged");
+  assert.strictEqual(F.hsgEnded({ obs: [] }), null, "empty series does not throw");
+  assert.ok(app.includes("hsgEndedCap(ser)") && app.includes("is discontinued."), "card carries the caption");
+  assert.ok(/const cls=ended\?'ended':proxy\?'proxy':'direct'/.test(app), "chip drops the live Direct dot");
+});
+
 test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursday refire, view wiring)", () => {
   const fs = require("fs"), path = require("path");
   const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
