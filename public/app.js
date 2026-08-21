@@ -5716,15 +5716,15 @@ function showView(v){
 //                    calendar-engine payload on this tab yet, and a hardcoded session clock is
 //                    exactly the guessed rhythm the FOCUS chart was rebuilt to avoid. Session
 //                    shading + open-anchoring arrive when session windows ride a public payload.
-//   12h/1d        <- the deep archive (res=12h / res=1d), seeded back to each listing's birth.
+//   4h/12h/1d     <- the deep archive (res=4h / res=12h / res=1d), seeded back to each listing's birth.
 //                    Bars are HL's own UTC prints, used verbatim — no client re-cutting.
 // LINK broadcasts the TRANSFORM (zoom factor about the hovered instant, pan delta, crosshair
 // time), never the window itself, so a 1D pane is never squeezed into a 5M pane's 12 hours.
 // Layouts persist per browser (mode, pane count, picks per scope, link, named slots).
-const CH_TFS=[{k:5,l:'5M',src:'i'},{k:15,l:'15M',src:'i'},{k:60,l:'1H',src:'i'},{k:240,l:'4H',src:'i'},{k:720,l:'12H',src:'d12'},{k:1440,l:'1D',src:'d1d'}];
-const CH_SRC_RES={d12:'12h',d1d:'1d'};
+const CH_TFS=[{k:5,l:'5M',src:'i'},{k:15,l:'15M',src:'i'},{k:60,l:'1H',src:'i'},{k:240,l:'4H',src:'d4h'},{k:720,l:'12H',src:'d12'},{k:1440,l:'1D',src:'d1d'}];   // 4H moved to the deep lane (-03): 20d of intraday base is 120 bars — an EMA200 cannot exist there
+const CH_SRC_RES={d4h:'4h',d12:'12h',d1d:'1d'};
 const CH_IBASE_DAYS=20;                          // 5760 raw 5m bars — one fetch feeds all four intraday TFs uncoarsened
-const CH_DEF={5:12*3600000,15:36*3600000,60:7*86400000,240:20*86400000,720:180*86400000,1440:730*86400000};
+const CH_DEF={5:12*3600000,15:36*3600000,60:7*86400000,240:60*86400000,720:180*86400000,1440:730*86400000};   // 4H default widened to 60d (-03): 360 bars, so a 200-period EMA is on screen from the reset view
 const CH_MIN_SPAN=2*3600000;
 const CH_MTF_SETS={4:[15,60,240,1440],6:[5,15,60,240,720,1440],8:[5,15,60,240,720,1440,60,240]};
 const CH_CACHE_MS=60000;                         // per-(name,source) refetch floor; ETag 304s make the refresh nearly free
@@ -5834,7 +5834,7 @@ function chBuild(){
       +'<span class="chlbl">layouts</span><span class="chpick" id="chslots"></span><button type="button" id="chsave">SAVE</button>'
       +'</div>'
       +'<div class="chgrid" id="chgrid"></div>'
-      +'<div class="chfoot">intraday panes (5m\u20134h): local 5m archive, last '+CH_IBASE_DAYS+'d, UTC-grid buckets \u00b7 12H/1D panes: deep archive seeded to each listing\u2019s birth, bars verbatim from the exchange \u00b7 wheel/pinch = zoom \u00b7 drag = pan \u00b7 double-click = reset \u00b7 per-pane coverage bottom-left</div>';
+      +'<div class="chfoot">intraday panes (5m\u20131h): local 5m archive, last '+CH_IBASE_DAYS+'d, UTC-grid buckets \u00b7 4H/12H/1D panes: deep archive seeded to each listing\u2019s birth, bars verbatim from the exchange \u00b7 wheel/pinch = zoom \u00b7 drag = pan \u00b7 double-click = reset \u00b7 per-pane coverage bottom-left</div>';
     el('chmode').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CH.mode=b.dataset.m; if(CH.mode==='mtf') CH.link=true; chPrefsSave(); chBuild(); });
     el('chn').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CH.n=+b.dataset.n; chPrefsSave(); chBuild(); });
     el('chlink').onclick=()=>{ if(CH.mode==='mtf') return; CH.link=!CH.link; chPrefsSave(); chSyncToolbar(); };
