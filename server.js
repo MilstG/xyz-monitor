@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.21-02";
+const VERSION = "2026.08.21-03";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -973,11 +973,12 @@ async function main() {
       const key = "candles5m|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getM5Stamp ? poller.getM5Stamp(coin) : 0);
       return serveKeyed(req, reply, key, () => poller.getCandles5m(coin, from, to, max), { coin, res: "5m", enabled: false, candles: [], coverage: { enabled: false } });
     }
-    // res=12h / res=1d serve the deep-history archive (build 2026.08.21-01) — seeded backward to
-    // each listing's birth via the native window (~6.8y/13.7y at these intervals), captured
+    // res=4h / res=12h / res=1d serve the deep-history archive (12h/1d since -01, 4h since -03) —
+    // seeded backward to
+    // each listing's birth via the native window (~2.3y/6.8y/13.7y at these intervals), captured
     // forward on the closed-bar guard. Same serveKeyed discipline; the ETag folds in the
     // interval's own last-captured-bar stamp so a freshly closed day mints a fresh key.
-    if (req.query && (req.query.res === "12h" || req.query.res === "1d")) {
+    if (req.query && (req.query.res === "4h" || req.query.res === "12h" || req.query.res === "1d")) {
       const iv = req.query.res, from = req.query.from, to = req.query.to, max = req.query.max;
       const key = "candlesdeep|" + iv + "|" + coin + "|" + (from || "") + "|" + (to || "") + "|" + (max || "") + "|" + (poller.getDeepStamp ? poller.getDeepStamp(coin, iv) : 0);
       return serveKeyed(req, reply, key, () => poller.getCandlesDeep(coin, iv, from, to, max), { coin, res: iv, enabled: false, candles: [], coverage: { enabled: false } });
