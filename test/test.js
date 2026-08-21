@@ -5038,6 +5038,54 @@ test("deep archive + CHARTS tab: source + wiring manifest (store, capture lane, 
   // styles
   for (const cls of [".chtb", ".chgrid.g8", ".chpane", ".chtfs", ".chcov", ".chdd", ".chfoot"])
     assert.ok(css.includes(cls), "missing charts style: " + cls);
+  // ---- -02 additions: EMA overlay, right-edge inset + clip, live-edge follow -----------------
+  // EMA: toolbar controls with the 50/200 default, walk memoized per pane, overlay + readout +
+  // insufficient-bars disclosure — and the warm-up head stays null (no unconverged line).
+  assert.ok(app.includes("CH_EMA_DEF=[50,200]"), "EMA default pair pinned at 50/200");
+  for (const pin of ["function chEmaWalk(", "function chEmas(", "id=\"chemabtn\"", "id=\"chema1\"", "id=\"chema2\"",
+    "chEmaPeriod(", "out[n-1]=e", "if(!n||n<2||series.length<n) return out;", "line(em.e1,chVar('--blue')); line(em.e2,chVar('--accent'));",
+    "' needs '+CH.ema.p2+' bars ('"])
+    assert.ok(app.includes(pin), "charts -02 EMA marker missing: " + pin);
+  for (const cls of [".chemain", ".chke1", ".chke2"])
+    assert.ok(css.includes(cls), "missing charts -02 style: " + cls);
+  // right-edge fix: inset mapping used by bars, axis ticks, crosshair AND the pointer inverse,
+  // plus the hard clip that makes a straddling bar cut cleanly at the plot edge
+  assert.ok(app.includes("const inset=Math.ceil(bw/2)+1;") && app.includes("p._inset=inset;"), "right-edge inset present and stored on the pane");
+  assert.ok(app.includes("ctx.rect(0,PT,pw,ph); ctx.clip();"), "bar/EMA layer hard-clipped to the plot rect");
+  assert.ok((app.match(/Xi\(/g) || []).length >= 4, "inset mapping (Xi) drives bars, ticks and the crosshair");
+  assert.ok(app.includes("-(p._inset||0)"), "pointer\u2192time inverse shares the inset — the crosshair hovers the bar it points at");
+  // live-edge follow: a pinned pane rides new bars, a historical view is never yanked forward
+  assert.ok(app.includes("pinned:!!(b&&p.view&&p.view.to>=b.to-p.tf*60000*0.51)"), "pinned-at-edge detection present");
+  assert.ok(app.includes("if(q.pinned&&nb&&q.to!=null&&nb.to>q.to&&p.view)"), "only pinned panes follow the advancing close");
+});
+
+test("charts -02: chEmaWalk arithmetic — SMA seed, honest warm-up nulls, textbook EMA recursion", () => {
+  // The walk lives client-side; extract the REAL function and execute it (string pins prove
+  // presence, only execution proves the arithmetic — the -84 lesson).
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const m = app.match(/function chEmaWalk\(series,n\)\{[\s\S]*?\n\}/);
+  assert.ok(m, "chEmaWalk not found in app.js");
+  const chEmaWalk = new Function("return " + m[0])();
+  const mk = (closes) => closes.map((c, i) => [i, c, c, c, c, 1]);
+  // shorter than the period: NO line at all — never a partial guess
+  assert.deepEqual(chEmaWalk(mk([1, 2, 3]), 5), [null, null, null], "series shorter than n yields all nulls");
+  assert.deepEqual(chEmaWalk(mk([1, 2, 3]), 1), [null, null, null], "n<2 refused");
+  // warm-up head is null, seed at index n-1 is the SMA of the first n closes
+  const closes = [10, 11, 12, 13, 14, 20, 8, 15];
+  const out = chEmaWalk(mk(closes), 5);
+  assert.deepEqual(out.slice(0, 4), [null, null, null, null], "warm-up bars stay empty");
+  assert.equal(out[4], (10 + 11 + 12 + 13 + 14) / 5, "seed = SMA(n) at index n-1");
+  // recursion: e_i = c_i*k + e_{i-1}*(1-k), k = 2/(n+1) — walked by hand
+  const k = 2 / 6;
+  let e = out[4];
+  for (let i = 5; i < closes.length; i++) {
+    e = closes[i] * k + e * (1 - k);
+    assert.ok(Math.abs(out[i] - e) < 1e-12, "EMA recursion at index " + i);
+  }
+  // n === length is legal: exactly one value, the SMA itself
+  const exact = chEmaWalk(mk([2, 4, 6]), 3);
+  assert.deepEqual(exact, [null, null, 4], "n === series length: the seed alone");
 });
 
 // ===== Coinalyze deriv-context lane (build 2026.07.24-01) =======================================
@@ -12152,7 +12200,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
