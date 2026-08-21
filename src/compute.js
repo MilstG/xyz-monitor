@@ -5214,6 +5214,11 @@ const FEATURES = [
   { key: "markets",    kind: "tab", label: "Markets",     def: "public", pin: true, routes: ["/api/snapshot", "/api/daily", "/api/series", "/api/candles"] },
   { key: "trend",      kind: "tab", label: "Trend",       def: "public", routes: ["/api/trend"] },
   { key: "sectors",    kind: "tab", label: "Sectors",     def: "public", routes: [] },
+  // CHARTS (build 2026.08.21-01): the multi-pane chart grid / MTF wall. Public from day one —
+  // it is a VIEWER over /api/candles, which is already pinned public under markets; no route of
+  // its own means gating it could never strand a candle request, and it exposes nothing the
+  // Markets drawer chart doesn't already show.
+  { key: "charts",     kind: "tab", label: "Charts",      def: "public", routes: [] },
   { key: "corr",       kind: "tab", label: "Correlation", def: "public", routes: ["/api/corr-crypto"] },
   { key: "sessions",   kind: "tab", label: "Sessions",    def: "public", routes: ["/api/analytics"] },
   { key: "signals",    kind: "tab", label: "Signals",     def: "public", routes: ["/api/signals", "/api/ledger", "/api/triggers"] },

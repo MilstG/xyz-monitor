@@ -111,6 +111,19 @@ const M5_SEED_DAYS = 17;              // native candleSnapshot window at 5m (500
 const M5_STALE = 5 * 60 * 1000;       // capture each market's freshly CLOSED 5m bars about once per bar
 const M5_FETCH_WEIGHT = 20;           // rate-limit weight per 5m tail pull (steady state returns only the last few bars)
 const M5_SNAPSHOT_MS = 24 * 3600 * 1000;   // VACUUM-INTO off-copy of the archive once a day (it's the sole copy past the native window)
+// ---- deep-history 12h/1d archive (build 2026.08.21-01) ---------------------------------------
+// The native 5000-bar candleSnapshot window is ~6.8y at 12h and ~13.7y at 1d, so unlike the 5m
+// lane these tables seed BACKWARD to each listing's birth in ONE pull per market per interval,
+// then capture forward on the same closed-bar guard. Feeds the CHARTS tab's 12H/1D panes only —
+// the trend ladder's D1/H12 stay on their own frozen construction (withFormingDaily / spine
+// buckets); on overlap the bars are the same exchange prints, but nothing re-derives across
+// sources. Bars land on HL's own UTC grid, verbatim — no local re-anchoring: a daily bar on a
+// 24/7 perp IS a UTC day, and re-cutting it here would invent a series the exchange never printed.
+const DEEP_IVS = { "12h": 12 * HOUR, "1d": 24 * HOUR };
+const DEEP_STALE = 4 * HOUR;          // tail-pull cadence per (market, interval): a few closed bars/day exist at most
+const DEEP_SEED_BARS = 4900;          // just under the native 5000-bar cap — the seed pull asks for everything servable
+const DEEP_SEED_WEIGHT = 60;          // one-time cold pull per (market, interval): up to ~5000 bars in one response
+const DEEP_TAIL_WEIGHT = 15;          // steady state returns a handful of bars
 const SWEEP_LOOK_MS = 4 * HOUR;            // 5m tail scanned for a prior-session-level stop-run (~48 bars; detector needs >=12)
 const RECLAIM_MIN_DIP_PCT = 0.35;          // min peak→trough depth (% of peak) before a dip-reclaim claim exists — below it the "dip" is xyz bar noise. Rides the sweep tail; crypto would need its own (much higher) floor when it gets a lane.
 const SWEEP_FRAC = 0.25;                   // min wick pierce past the swept level, as a fraction of the window's median 5m range
@@ -913,6 +926,56 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       await sleep(M1_TICK);
     }
   }
+  // ---- deep 12h/1d capture (build 2026.08.21-01) ----------------------------------------------
+  // Mirror of capture5m per interval: cursor resolved from disk once (survives redeploys), seed
+  // pull reaches DEEP_SEED_BARS back (the endpoint clips to what exists — a young listing returns
+  // its whole life, a crypto major returns years), tail pulls resume from just before the last
+  // stored bar with the upsert absorbing the overlap. The FORMING bar is never written: a 1d bar
+  // written mid-day would freeze a partial day as final and the next capture's upsert would then
+  // silently rewrite "final" history — the closed-vs-fresh guard is what makes a bar land exactly
+  // once, when it is what it will always be.
+  function deepFilterClosed(iv, raw, now) { const w = DEEP_IVS[iv]; return w ? packHours(raw).filter((k) => k[0] + w <= now) : []; }
+  async function captureDeep(coin, iv) {
+    if (!store.candlesEnabled || !store.candlesEnabled() || !store.insertCandlesDeep) return;
+    const w = DEEP_IVS[iv];
+    const r = rows.get(coin);
+    if (!w || !r || r.delisted || r.px == null) return;
+    const now = Date.now();
+    if (!r.deep) r.deep = {};
+    let d = r.deep[iv];
+    if (!d) { const cov = store.candleCoverageDeep(iv, coin); d = r.deep[iv] = { last: cov.max || 0, ts: 0, fail: 0, failUntil: 0 }; }
+    const from = d.last ? d.last - w : now - DEEP_SEED_BARS * w;
+    const raw = await fetchCandles(coin, iv, from, now, d.last ? DEEP_TAIL_WEIGHT : DEEP_SEED_WEIGHT);
+    if (!Array.isArray(raw) || !raw.length) { d.ts = now; return; }
+    const closed = deepFilterClosed(iv, raw, now);
+    if (closed.length) { store.insertCandlesDeep(iv, coin, closed); d.last = Math.max(d.last, closed[closed.length - 1][0]); }
+    d.ts = now;
+  }
+  // One worker walks BOTH intervals round-robin. Steady state is ~150 markets x 2 intervals on a
+  // 4h staleness check — well under one request a minute; the cold seed spreads through the same
+  // loop behind the per-(coin,interval) inflight guard + exponential fail backoff.
+  const needDeep = (r, iv) => store.candlesEnabled && store.candlesEnabled() && r.px != null &&
+    (!r.deep || !r.deep[iv] || (Date.now() - (r.deep[iv].ts || 0) > DEEP_STALE && Date.now() >= (r.deep[iv].failUntil || 0)));
+  async function deepWorker() {
+    for (;;) {
+      if (!store.candlesEnabled || !store.candlesEnabled() || !store.insertCandlesDeep) { await sleep(60000); continue; }
+      let served = false;
+      for (const iv of Object.keys(DEEP_IVS)) {
+        const coin = pick((r) => needDeep(r, iv), "dp" + iv + ":");
+        if (!coin) continue;
+        if (inflight.has("dp" + iv + ":" + coin)) continue;
+        inflight.add("dp" + iv + ":" + coin);
+        try { await captureDeep(coin, iv); const r = rows.get(coin); if (r && r.deep && r.deep[iv]) r.deep[iv].fail = 0; }
+        catch (_) {
+          const r = rows.get(coin);
+          if (r && r.deep && r.deep[iv]) { const d = r.deep[iv]; d.fail = (d.fail || 0) + 1; d.failUntil = Date.now() + Math.min(FAIL_BACKOFF * d.fail, 15 * 60 * 1000); d.ts = Date.now(); }
+        } finally { inflight.delete("dp" + iv + ":" + coin); }
+        served = true;
+      }
+      await sleep(served ? 1500 : 15000);
+    }
+  }
+
   const need5m = (r) => store.candlesEnabled && store.candlesEnabled() && r.px != null &&
     Date.now() - (r.m5Ts || 0) > M5_STALE && Date.now() >= (r.m5FailUntil || 0);
   // One worker suffices: ~150 markets x a tiny tail pull spread over 5 min is well under 1 req/s.
@@ -6492,6 +6555,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // The FOCUS seats' own lane (2026.08.18-04). Separate worker on purpose: it must not queue
       // behind the shared round-robin, which is the entire reason it exists.
       oneMinWorker();
+      // Deep 12h/1d lane (2026.08.21-01): seeds backward to each listing's birth, then trickles
+      // forward. Rides the daily VACUUM-INTO snapshot below for free — one db, one off-copy.
+      deepWorker();
       const snap = () => { try { if (store.snapshotCandles()) log("5m archive: off-copy snapshot written (candles.db.bak)"); } catch (_) {} };
       setInterval(snap, M5_SNAPSHOT_MS);
       setTimeout(snap, 10 * 60 * 1000);
@@ -6661,6 +6727,35 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const cov = store.candleCoverage(coin);
     return { enabled: true, min: cov.min, max: cov.max, count: cov.count,
       days: cov.min && cov.max ? +((cov.max - cov.min) / DAY).toFixed(1) : 0 };
+  }
+  // Deep 12h/1d reads for the CHARTS tab (build 2026.08.21-01): [[t,o,h,l,c,v], ...] over
+  // [from,to], quantized like every other candle payload, coverage riding along so a young
+  // listing's 90 bars are DISCLOSED as 90 bars rather than dressed as a decade. Downsampling
+  // mirrors getCandles5m (bucketCandles at the interval's own width unit, honest OHLC roll-up) —
+  // at <=5000 native bars it rarely triggers, but a cap the client can trust must still hold.
+  // Unknown intervals return null so the route can 404-shape rather than guess a series.
+  function getCandlesDeep(coin, iv, from, to, maxPoints) {
+    const w = DEEP_IVS[iv];
+    if (!w) return null;
+    if (!store.candlesEnabled || !store.candlesEnabled() || !store.readCandlesDeep)
+      return { coin, res: iv, enabled: false, candles: [], coverage: { enabled: false } };
+    const now = Date.now();
+    let hi = Number.isFinite(+to) ? +to : now;
+    let lo = Number.isFinite(+from) ? +from : hi - DEEP_SEED_BARS * w;
+    if (lo > hi) { const t = lo; lo = hi; hi = t; }
+    const rowsD = store.readCandlesDeep(iv, coin, lo, hi);
+    const cap = Math.max(200, Math.min(6000, Number(maxPoints) || 3000));
+    let out = rowsD;
+    if (rowsD.length > cap) {
+      const mult = Math.ceil((rowsD.length - 1) / (cap - 1));
+      out = bucketCandles(rowsD, mult, w).map((b) => [b.t, b.o, b.h, b.l, b.c, b.v]);
+    }
+    const q = [];
+    for (const k of out) q.push([k[0], sig(k[1], 9), sig(k[2], 9), sig(k[3], 9), sig(k[4], 9), rnd(k[5], 2)]);
+    const cov = store.candleCoverageDeep(iv, coin);
+    return { coin, res: iv, enabled: true, from: lo, to: hi,
+      coverage: { min: cov.min, max: cov.max, count: cov.count, days: cov.min && cov.max ? +((cov.max - cov.min) / DAY).toFixed(1) : 0 },
+      candles: q };
   }
 
   // ---- crypto intraday correlation matrix (Correlation tab, crypto scope) ----------------------
@@ -11967,6 +12062,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // historical window over-invalidates only at the live edge, which is harmless.
     getM5Stamp: (coin) => { const r = rows.get(coin); return r ? (r.m5LastTs || 0) : 0; },
     _m5FilterClosed: m5FilterClosed,   // harness: closed-bar guard, testable without network
+    // Deep 12h/1d archive (2026.08.21-01): the CHARTS tab's long-history read, its ETag stamp
+    // (in-memory last-captured-bar ts per interval), and the closed-bar guard for the harness.
+    getCandlesDeep,
+    getDeepStamp: (coin, iv) => { const r = rows.get(coin); return r && r.deep && r.deep[iv] ? (r.deep[iv].last || 0) : 0; },
+    _deepFilterClosed: deepFilterClosed,   // harness: forming 12h/1d bar must never land
     getTfCandles,
     // Audience-aware since 2026.08.03-02: admin (or an all-public scope set) gets the shared cache
     // object untouched — identity path, memoized serialize/gzip and the numeric ETag all intact.

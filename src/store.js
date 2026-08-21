@@ -55,6 +55,7 @@ function openStore(dataDir) {
   const candleFile = path.join(dataDir, "candles.db");
   let cdb = null, cInsert = null, cRange = null, cEvict = null, cCov = null, cCount = null;
   let mInsert = null, mRange = null, mEvict = null, mCov = null;   // 1m opening-hour archive (2026.08.18-04)
+  const deepStmt = {};   // "12h" / "1d" -> { ins, rng, cov } — deep-history archive (2026.08.21-01)
   try {
     const { DatabaseSync } = require("node:sqlite");
     cdb = new DatabaseSync(candleFile);
@@ -80,6 +81,23 @@ function openStore(dataDir) {
     mRange = cdb.prepare("SELECT ts, o, h, l, c, v FROM candles_1m WHERE coin = ? AND ts >= ? AND ts <= ? ORDER BY ts");
     mEvict = cdb.prepare("DELETE FROM candles_1m WHERE ts < ?");
     mCov = cdb.prepare("SELECT MIN(ts) AS mn, MAX(ts) AS mx, COUNT(*) AS n FROM candles_1m WHERE coin = ? AND ts >= ? AND ts <= ?");
+    // ---- DEEP-HISTORY archive: 12h + 1d (build 2026.08.21-01) -----------------------------
+    // The ~17d ceiling that forced the 5m lane build-forward is a 5m problem: candleSnapshot's
+    // 5000-bar window is ~6.8 YEARS at 12h and ~13.7 at 1d, so deep history is seedable BACKWARD
+    // in one pull per market and these tables are as old as each listing from day one. SEPARATE
+    // tables per interval, same doctrine as candles_1m: mixing widths into one series would hand
+    // every range-reader a mixed-resolution tape with no way to tell which rows are which. No
+    // retention/evict lane — depth is the entire point, the native window bounds what can ever
+    // seed, and forward capture adds ~3 rows/market/day across both tables combined.
+    for (const iv of ["12h", "1d"]) {
+      const tbl = "candles_" + iv;
+      cdb.exec(`CREATE TABLE IF NOT EXISTS ${tbl} (coin TEXT NOT NULL, ts INTEGER NOT NULL, o REAL, h REAL, l REAL, c REAL, v REAL, PRIMARY KEY (coin, ts)) STRICT, WITHOUT ROWID;`);
+      deepStmt[iv] = {
+        ins: cdb.prepare(`INSERT INTO ${tbl} (coin, ts, o, h, l, c, v) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(coin, ts) DO UPDATE SET o=excluded.o, h=excluded.h, l=excluded.l, c=excluded.c, v=excluded.v`),
+        rng: cdb.prepare(`SELECT ts, o, h, l, c, v FROM ${tbl} WHERE coin = ? AND ts >= ? AND ts <= ? ORDER BY ts`),
+        cov: cdb.prepare(`SELECT MIN(ts) AS mn, MAX(ts) AS mx, COUNT(*) AS n FROM ${tbl} WHERE coin = ?`),
+      };
+    }
   } catch (_) { cdb = null; }
 
   function flush() {
@@ -602,6 +620,43 @@ function openStore(dataDir) {
       if (!cdb) return { min: null, max: null, count: 0 };
       try { const r = mCov.get(coin, Math.trunc(+from), Math.trunc(+to));
         return { min: r && r.mn != null ? r.mn : null, max: r && r.mx != null ? r.mx : null, count: r ? Number(r.n) || 0 : 0 }; }
+      catch (_) { return { min: null, max: null, count: 0 }; }
+    },
+    // ---- deep 12h/1d archive (build 2026.08.21-01) ---------------------------------------
+    // Same shape and same idempotent-upsert discipline as the 5m/1m APIs, keyed by interval so
+    // one call surface serves both tables. An unknown interval is a hard no (empty/zero return),
+    // never a silent write into the wrong series. Callers gate on candlesEnabled() as everywhere.
+    insertCandlesDeep(iv, coin, rows) {
+      const st = deepStmt[iv];
+      if (!cdb || !st || !Array.isArray(rows) || !rows.length) return 0;
+      let n = 0;
+      try {
+        cdb.exec("BEGIN");
+        for (const k of rows) {
+          if (!Array.isArray(k)) continue;
+          const t = +k[0], c = +k[4];
+          if (!Number.isFinite(t) || !Number.isFinite(c)) continue;
+          const o = +k[1], h = +k[2], l = +k[3], v = +k[5];
+          st.ins.run(coin, Math.trunc(t), Number.isFinite(o) ? o : c, Number.isFinite(h) ? h : c, Number.isFinite(l) ? l : c, c, Number.isFinite(v) ? v : 0);
+          n++;
+        }
+        cdb.exec("COMMIT");
+      } catch (_) { try { cdb.exec("ROLLBACK"); } catch (_) {} return 0; }
+      return n;
+    },
+    readCandlesDeep(iv, coin, from, to) {
+      const st = deepStmt[iv];
+      if (!cdb || !st) return [];
+      try {
+        const out = [];
+        for (const r of st.rng.all(coin, Math.trunc(+from), Math.trunc(+to))) out.push([r.ts, r.o, r.h, r.l, r.c, r.v]);
+        return out;
+      } catch (_) { return []; }
+    },
+    candleCoverageDeep(iv, coin) {
+      const st = deepStmt[iv];
+      if (!cdb || !st) return { min: null, max: null, count: 0 };
+      try { const r = st.cov.get(coin); return { min: r && r.mn != null ? r.mn : null, max: r && r.mx != null ? r.mx : null, count: r ? Number(r.n) || 0 : 0 }; }
       catch (_) { return { min: null, max: null, count: 0 }; }
     },
     // Off-copy for backup: VACUUM INTO writes a clean, defragmented snapshot. This archive is the
