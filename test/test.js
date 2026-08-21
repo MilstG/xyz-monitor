@@ -12205,7 +12205,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-07"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-08"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19853,40 +19853,52 @@ test("housing tab: a retired series is dropped, not served stale", () => {
   assert.ok(!app.includes("hsg-pending") && !app.includes("d.pending||[]"), "no pending cards rendered");
 });
 
-// `whale ingest13f` with no argument used to default to whaleWindow().cur.q — the quarter now IN
-// PROGRESS, whose filing deadline has not passed. On 2026-08-21 that asked sec.gov for Q3 2026
-// (deadline 2026-11-16): a guaranteed 404, observed three times in a live Railway log. The manual
-// path now shares the scheduler's derivation of the last CLOSED quarter.
-test("13f ingest: the default quarter is one that could exist, and every exit reports itself", () => {
+// Every 13F ingest attempt ever made 404'd, for two compounding reasons. The URL was built as a
+// CALENDAR quarter (01apr2026-30jun2026) but the SEC publishes the window in which filings were
+// RECEIVED — a period ending 31 Mar is due 15 May, so the file is 01mar2026-31may2026_form13f.zip.
+// And the default quarter was one whose filing window had not closed, which cannot exist yet.
+test("13f ingest: the SEC URL convention, and a default quarter that can exist", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  const { whaleWindow } = require("../src/compute.js");
-  const F = new Function("whaleWindow",
-    pol.match(/  function t13fSeasonQuarter\(now\) \{[\s\S]*?\n  \}/)[0] + "\nreturn t13fSeasonQuarter;")(whaleWindow);
-  const at = (d) => F(Date.parse(d + "T12:00:00Z"));
+  const grab = (k) => { const i = pol.indexOf("  " + k);
+    assert.ok(i > 0, k + " present"); return pol.slice(i).match(/^  (?:const [^\n]*|function [\s\S]*?\n  \})/)[0]; };
+  const F = new Function(
+    ["const T13F_MON", "function t13fWindow", "const T13F_POST_GRACE", "function t13fSeasonQuarter"].map(grab).join("\n") +
+    '\nconst T13F_URL = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/";\n' +
+    pol.match(/  function t13fZipUrls\(q\) \{[\s\S]*?\n  \}/)[0] +
+    "\nreturn { t13fZipUrls, t13fSeasonQuarter, t13fWindow };")();
+  const at = (d) => F.t13fSeasonQuarter(Date.parse(d + "T12:00:00Z"));
 
-  // the exact case from the log: mid-Q3, the default must be the last CLOSED quarter, never Q3
-  assert.strictEqual(at("2026-08-21"), "Q2 2026", "mid-quarter default is the last closed quarter");
+  // the one URL confirmed against sec.gov's own listing — byte for byte
+  assert.strictEqual(F.t13fZipUrls("Q1 2026")[0],
+    "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/01mar2026-31may2026_form13f.zip",
+    "Q1 2026 resolves to the real file");
+  // the window opens on the quarter-END month and runs three, rolling the year and honouring leaps
+  assert.strictEqual(F.t13fWindow(2, 2026).span, "01jun2026-31aug2026", "Q2 window");
+  assert.strictEqual(F.t13fWindow(4, 2026).span, "01dec2026-28feb2027", "Q4 rolls the year");
+  assert.strictEqual(F.t13fWindow(4, 2027).span, "01dec2027-29feb2028", "leap February");
+  assert.ok(!/01jan" \+ y \+ "-31mar/.test(pol), "calendar-quarter spans are gone");
+
+  // the default must never name a quarter whose filing window is still open — the original bug
+  assert.strictEqual(at("2026-08-21"), "Q1 2026", "mid-Aug: Q2's window is open until 31 Aug");
+  assert.strictEqual(at("2026-09-05"), "Q2 2026", "once it closes, Q2 becomes the target");
+  assert.strictEqual(at("2027-01-05"), "Q3 2026", "January does not ask for a quarter still filing");
   assert.strictEqual(at("2026-05-02"), "Q4 2025", "year boundary walks back correctly");
-  assert.strictEqual(at("2027-01-05"), "Q3 2026", "January does not ask for a quarter still open");
-  // and it never returns a quarter whose own filing deadline is still in the future
-  for (const d of ["2026-08-21", "2026-05-02", "2027-01-05", "2026-11-20", "2026-02-14"]) {
+  for (const d of ["2026-08-21", "2026-02-14", "2026-11-20", "2027-01-05", "2026-09-05"]) {
     const q = at(d), m = q.match(/^Q([1-4]) (\d{4})$/);
     assert.ok(m, "well-formed quarter for " + d);
-    const end = Date.parse(m[2] + "-" + ["03-31", "06-30", "09-30", "12-31"][+m[1] - 1] + "T12:00:00Z");
-    assert.ok(end < Date.parse(d + "T12:00:00Z"), "on " + d + " the default quarter " + q + " has already ended");
+    assert.ok(Date.parse(d + "T12:00:00Z") >= F.t13fWindow(+m[1], +m[2]).endMs,
+      "on " + d + " the default " + q + " has a CLOSED filing window");
   }
-  // both callers share it — the drift between them was the bug
+  // both callers share the derivation — the drift between them was half the bug
   assert.strictEqual((pol.match(/t13fSeasonQuarter\(/g) || []).length, 3, "defined once, used by both paths");
   assert.ok(!/whaleWindow\(Date\.now\(\)\)\.cur\.q/.test(pol), "no caller defaults to the open quarter");
 
-  // no failure exit is silent: a 404 or a layout change must not look like a dead process
+  // no failure exit is silent: a 404 must not look like a dead process
   const body = pol.slice(pol.indexOf("async function whale13fIngest("), pol.indexOf("async function whale13fTick("));
-  // exactly one plain `done` failure return survives: the catch block, which logs the line above it
   assert.strictEqual((body.match(/return done\(\{ ok: false/g) || []).length, 1, "only the catch returns without fail()");
   assert.ok(/pushOps\([^;]*ingest FAILED[\s\S]{0,180}?return done\(\{ ok: false/.test(body), "and it logs first");
-  assert.ok(body.includes("const fail = (r) =>") && body.includes("pushOps("), "failures reach the ops log");
-  assert.ok(body.includes("tried.push("), "each URL's HTTP status is recorded");
+  assert.ok(body.includes("tried.push(url +"), "each attempt logs its FULL url");
 });
 
 test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursday refire, view wiring)", () => {
@@ -19985,8 +19997,8 @@ test("whale 13f data-set index (2026.08.21-05): fixture ZIP through the REAL ing
   const bin = (buf) => ({ ok: true, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) });
   const extFetch = async (url) => {
     if (url.includes("company_tickers")) return J({ 0: { cik_str: 1, ticker: "MU", title: "Micron Technology Inc" } });
-    if (url.includes("2026q2_form13f.zip")) return bin(q2zip);
-    if (url.includes("2026q1_form13f.zip")) return bin(q1zip);
+    if (url.includes("01jun2026-31aug2026_form13f.zip")) return bin(q2zip);   // the SEC's real filing-window name
+    if (url.includes("01mar2026-31may2026_form13f.zip")) return bin(q1zip);
     if (url.includes("submissions/CIK0000000033")) return J({ name: "TRACKED ONE LP", filings: { recent: {
       form: ["13F-HR"], accessionNumber: ["0033-26-000002"], filingDate: ["2026-08-14"], reportDate: ["2026-06-30"] } } });
     if (url.includes("/003326000002/index.json")) return J({ directory: { item: [{ name: "primary_doc.xml", size: 9 }, { name: "infotable.xml", size: 99 }] } });

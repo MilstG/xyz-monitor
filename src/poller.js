@@ -5400,16 +5400,30 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const T13F_TOP_CAP = t13fCapOpt || 500;        // option C: top-N per cusip stored; aggregates stay exact over ALL holders
   const T13F_URL = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/";
   let t13fBusy = false, t13fProgress = null;
-  // The quarter a data set could plausibly EXIST for. `whaleWindow().cur.q` is the quarter now in
-  // progress — on 2026-08-21 that is Q3 2026, whose filing deadline is 2026-11-16 — so defaulting a
-  // manual ingest to it guarantees a 404 against sec.gov. The scheduled tick already derived the
-  // last CLOSED quarter; both paths now share this, so `whale ingest13f` with no argument asks for
-  // the same quarter the scheduler would.
+  // What the SEC actually publishes. A 13F data set is NOT a calendar quarter — it is the window in
+  // which filings were RECEIVED. A period ending 31 Mar is due 15 May, so those 13Fs arrive across
+  // Mar-May and the file is 01mar2026-31may2026_form13f.zip (verified against sec.gov's listing).
+  // The window opens on the first of the quarter-END month and runs three months. The old code sent
+  // calendar quarters (01apr-30jun) and 404'd on every request ever made.
+  const T13F_MON = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  function t13fWindow(qi, y) {
+    const sM = qi * 3 - 1, eM = (sM + 2) % 12, eY = sM + 2 > 11 ? y + 1 : y;
+    const eD = new Date(Date.UTC(eY, eM + 1, 0)).getUTCDate();     // last day of the end month, leap-aware
+    return { span: "01" + T13F_MON[sM] + y + "-" + eD + T13F_MON[eM] + eY,
+      endMs: Date.UTC(eY, eM, eD, 23, 59, 59) };
+  }
+  // The newest quarter whose data set could EXIST: its filing window has closed, plus a few days for
+  // sec.gov to post. Asking earlier can only 404 — which is what every attempt in the logs did, first
+  // because the manual default was the quarter still in progress, then because Q2 2026's window does
+  // not close until 31 Aug. On 2026-08-21 this correctly resolves to Q1 2026.
+  const T13F_POST_GRACE = 3 * 24 * 3600 * 1000;
   function t13fSeasonQuarter(now) {
-    const win = whaleWindow(now);
-    if (win.state !== "upcoming" && win.state !== "open") return win.cur.q;
-    const m = String(win.cur.q).match(/^Q([1-4]) (\d{4})$/); if (!m) return win.cur.q;
-    const qi = +m[1] === 1 ? 4 : +m[1] - 1, y = +m[1] === 1 ? +m[2] - 1 : +m[2];
+    const d = new Date(now);
+    let y = d.getUTCFullYear(), qi = Math.floor(d.getUTCMonth() / 3) + 1;
+    for (let i = 0; i < 8; i++) {
+      if (now >= t13fWindow(qi, y).endMs + T13F_POST_GRACE) return "Q" + qi + " " + y;
+      qi--; if (qi === 0) { qi = 4; y--; }
+    }
     return "Q" + qi + " " + y;
   }
   function t13fPeriodOf(q) {   // "Q2 2026" -> "30-JUN-2026" comparisons are done on ISO; period end ISO:
@@ -5419,9 +5433,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   }
   function t13fZipUrls(q) {
     const m = String(q).match(/^Q([1-4]) (\d{4})$/); if (!m) return [];
-    const y = m[2], qi = +m[1];
-    const spans = ["01jan" + y + "-31mar" + y, "01apr" + y + "-30jun" + y, "01jul" + y + "-30sep" + y, "01oct" + y + "-31dec" + y];
-    return [T13F_URL + y + "q" + qi + "_form13f.zip", T13F_URL + spans[qi - 1] + "_form13f.zip"];
+    return [T13F_URL + t13fWindow(+m[1], +m[2]).span + "_form13f.zip"];
   }
   // Minimal ZIP reader: central directory walk + STORED/DEFLATE entries. No CRC verification (we
   // parse the payload immediately; a torn download fails the TSV parse with a named error), no
@@ -5513,7 +5525,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           try { require("fs").unlinkSync(tmpZip); } catch (_) {} }
       }
       if (!zipBuf) return fail({ ok: false, notYet: 1, tried,
-        error: q + " not downloaded (" + tried.join("; ") + ") \u2014 two 404s means the set is not published yet (it lands ~1 week after the deadline and the weekly check keeps trying); any other status means the URL or the access rule changed" });
+        error: q + " not downloaded (" + tried.join("; ") + ") \u2014 404 means sec.gov has not posted this filing window yet (it closes at the end of the third month and the weekly check keeps trying); any other status means the URL or the access rule changed" });
       pushOps("13F data set " + q, "downloaded " + (zipBuf.length / 1e6).toFixed(0) + "MB from " + urlUsed.split("/").pop() + " \u2014 ingesting", "info", true);
       const entries = t13fZipEntries(zipBuf);
       const find = (nm) => entries.find((e) => e.name.toUpperCase().endsWith(nm));
@@ -5616,10 +5628,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const win = whaleWindow(now);
     const q = t13fSeasonQuarter(now);
     if (store.t13fMeta("ingested:" + q)) return;
-    // Only start trying once the set could plausibly exist.
-    const per = t13fPeriodOf(q); if (!per) return;
-    const deadline = whaleWindow(Date.parse(per + "T12:00:00Z") + 10 * DAY).cur.deadline;
-    if (now < deadline + 4 * DAY) return;
+    if (!t13fPeriodOf(q)) return;   // t13fSeasonQuarter only names a quarter whose window has closed
     await whale13fIngest(q).catch(() => {});
   }
   function t13fStatus() {
