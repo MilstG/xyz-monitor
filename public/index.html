@@ -66,6 +66,7 @@
   <button class="tab" data-view="focus" id="tab-focus" title="Today's 6 most tradeable equities, frozen at the cash open — gap in the name's own σ, clock-matched RVOL, overnight ΔOI, catalyst chips, distance to structure. sVWAP + first-hour high/low fill once at 10:30 ET, then the list is immutable for the day. Max 2 seats per industry cluster; the cut line discloses what just missed.">Focus</button>
   <button class="tab" data-view="funds" id="tab-funds" title="13F watchlist — tracked institutional filers with filing badges, per-fund books (holdings, QoQ delta, concentration) and the once-per-quarter season summary. Quarter-end snapshots filed up to 45 days late: positioning history, never the current book. Long US-listed equity + listed options only.">Funds</button>
   <button class="tab" data-view="trend" title="EMA 13/21 ribbon evaluated on D1 · H12 · H4 · H1 — ranked long &amp; short trend leaderboards for both universes, with continuation-entry retest flags">Trend</button>
+  <button class="tab" data-view="charts" title="Multi-pane chart grid — up to 8 names side by side, or one name across timeframes (MTF wall). Intraday panes (5m–4h) read the local 5-minute archive; 12H/1D panes read the deep archive seeded back to each listing's birth. Per-pane coverage is disclosed; linked panes share crosshair and zoom.">Charts</button>
   <button class="tab" data-view="sectors">Sectors</button>
   <button class="tab" data-view="corr">Correlation</button>
   <button class="tab" data-view="sessions">Sessions</button>
@@ -193,6 +194,13 @@
     <span class="sec" id="trend-asof" style="align-self:center;font-size:12px"></span>
   </div>
   <div id="trend-body"><div class="msg">Loading…</div></div>
+</section>
+
+<section id="view-charts" hidden>
+  <!-- CHARTS tab (build 2026.08.21-01): toolbar + grid are built by app.js (openCharts) so the
+       pane count, mode and picker stay one renderer with one state object — nothing here to
+       drift against the client. -->
+  <div id="chartswrap"></div>
 </section>
 
 <section id="view-sectors" hidden>

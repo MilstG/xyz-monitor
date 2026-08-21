@@ -1738,3 +1738,56 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .whl-foot .fl{display:block}
 .whl-foot b{color:var(--text);font-weight:500}
 @media(max-width:760px){.whl-wotbl{min-width:560px}.wo-cls{min-width:44px}}
+
+/* ===== CHARTS tab (build 2026.08.21-01) =======================================================
+   Multi-pane grid + MTF wall. Grid cells are minmax(0,1fr) both axes so a canvas can never force
+   a pane wider than its track; #chgrid owns the height so 8 panes split one viewport instead of
+   stacking a scroll. Chips/toolbar reuse the terminal grammar (uppercase, hairline borders). */
+.chtb{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--border);background:var(--panel);margin-bottom:1px;position:relative}
+.chlbl{color:var(--faint);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.chseg{display:flex}
+.chseg button,.chtb>button{font:11px var(--mono);color:var(--muted);background:var(--panel2);border:1px solid var(--border);padding:3px 8px;cursor:pointer;letter-spacing:.04em}
+.chseg button{border-right-width:0}
+.chseg button:last-child{border-right-width:1px}
+.chseg button:hover,.chtb>button:hover{color:var(--text)}
+.chseg button.on,.chtb>button.on{color:#0E1116;background:var(--accent);border-color:var(--accent);font-weight:600}
+.chtb>button:disabled{opacity:.7;cursor:default}
+.chsp{flex:1}
+.chpick{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.chchip{font:11px var(--mono);color:var(--muted);background:var(--panel2);border:1px solid var(--border);padding:2px 7px;cursor:pointer}
+.chchip:hover{color:var(--text)}
+.chchip.on{color:var(--text);border-color:var(--accent-dim);background:#1f1a10}
+.chfindwrap{position:relative}
+.chfind{font:11px var(--mono);color:var(--text);background:var(--bg);border:1px solid var(--border);padding:2px 7px;width:110px}
+.chfind:focus{outline:none;border-color:var(--accent-dim)}
+.chdd{position:absolute;top:100%;left:0;z-index:40;background:var(--panel2);border:1px solid var(--border);display:flex;flex-direction:column;min-width:110px}
+.chdd button{font:11px var(--mono);color:var(--muted);background:none;border:0;border-bottom:1px solid var(--border);padding:4px 8px;text-align:left;cursor:pointer}
+.chdd button:last-child{border-bottom:0}
+.chdd button:hover{color:var(--text);background:var(--panel)}
+.chgrid{display:grid;gap:1px;background:var(--border);border:1px solid var(--border);height:calc(100vh - 190px);min-height:420px}
+.chgrid.g4{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
+.chgrid.g6{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
+.chgrid.g8{grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
+@media (max-width:1100px){ .chgrid.g6,.chgrid.g8{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr))} }
+@media (max-width:640px){ .chgrid{height:auto} .chgrid.g4,.chgrid.g6,.chgrid.g8{grid-template-columns:minmax(0,1fr);grid-template-rows:none;grid-auto-rows:230px} }
+.chpane{background:var(--panel);display:flex;flex-direction:column;min-width:0;min-height:0;position:relative}
+.chph{display:flex;align-items:center;gap:7px;padding:4px 7px 3px;border-bottom:1px solid var(--border)}
+.chtk{font:600 12.5px var(--mono);letter-spacing:.06em;color:var(--text)}
+.chuni{font:9px var(--mono);letter-spacing:.08em;color:var(--faint);border:1px solid var(--border);padding:0 3px}
+.chlast{font:11px var(--mono);color:var(--muted);white-space:nowrap}
+.chlast.pos{color:var(--up)} .chlast.neg{color:var(--down)}
+.chtfs{display:flex;margin-left:auto}
+.chtfs button{font:10px var(--mono);color:var(--muted);background:var(--panel2);border:1px solid var(--border);border-right-width:0;padding:1px 5px;cursor:pointer}
+.chtfs button:last-child{border-right-width:1px}
+.chtfs button:hover{color:var(--text)}
+.chtfs button.on{color:#0E1116;background:var(--accent);border-color:var(--accent);font-weight:600}
+.chtflock{margin-left:auto;font:10px var(--mono);letter-spacing:.08em;color:var(--accent);border:1px solid var(--accent-dim);padding:1px 6px}
+.chrd{padding:2px 7px 3px;font:10.5px var(--mono);color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:19px}
+.chk{color:var(--faint)}
+.chrd .pos{color:var(--up)} .chrd .neg{color:var(--down)}
+.chcw{flex:1;min-height:0;position:relative}
+.chcw canvas{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}
+.chcov{position:absolute;left:6px;bottom:4px;font:9.5px var(--mono);color:var(--faint);pointer-events:none}
+.chempty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--faint);font:11px var(--mono);text-align:center;padding:16px;line-height:1.8}
+.chempty b{color:var(--muted);font-size:12px;font-weight:600}
+.chfoot{padding:6px 10px;border:1px solid var(--border);border-top:0;background:var(--panel);color:var(--faint);font:10px var(--mono);line-height:1.5}

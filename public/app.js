@@ -3567,7 +3567,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -4075,7 +4075,7 @@ function featureOn(key){ return FLAGS_VIEW ? !!FLAGS_VIEW[key] : true; }
 // Crypto scope is Markets + Trend + Report + Correlation + Backtest + Sessions by design (the signal
 // engine is xyz-only since -101). This set was written out longhand in two places that had already
 // drifted apart once; it lives here now and both callers read it.
-const CRYPTO_VIEWS=new Set(['markets','trend','report','corr','backtest','sessions','signals','actionable']);
+const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','signals','actionable']);
 // NOT named inScope: that name was already taken at the top of this file by the predicate that
 // decides whether a market ROW belongs to the active universe. Function declarations hoist, so the
 // later definition silently won, activeRows() started asking "is this row object one of the six
@@ -5679,6 +5679,7 @@ function showView(v){
   setHidden('view-focus', v!=='focus');
   setHidden('view-funds', v!=='funds');
   setHidden('view-trend', v!=='trend');
+  setHidden('view-charts', v!=='charts');
   setHidden('view-sectors', v!=='sectors');
   setHidden('view-corr', v!=='corr');
   setHidden('view-sessions', v!=='sessions');
@@ -5692,6 +5693,7 @@ function showView(v){
   if(v==='focus'){ if(el('view-focus')) openFocus(); else { showView('markets'); return; } }
   if(v==='funds'){ if(el('view-funds')) openFunds(); else { showView('markets'); return; } }
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
+  if(v==='charts'){ if(el('view-charts')) openCharts(); else { showView('markets'); return; } }
   if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
@@ -5704,6 +5706,447 @@ function showView(v){
   if(v==='sectors') renderSectors();
   if(!state.detail) setHash(v==='markets'?'':v);
 }
+
+// ===== CHARTS tab (build 2026.08.21-01) ========================================================
+// Multi-pane chart grid per the approved mockup: GRID mode (up to 8 names, per-pane timeframe) or
+// MTF wall (one name across timeframes). Two sources, disclosed per pane, never mixed in one pane:
+//   5m/15m/1h/4h  <- ONE res=5m archive fetch per name (20d raw window, under the route's 6000-bar
+//                    cap so the server never coarsens it), aggregated client-side on the UTC grid.
+//                    UTC-midnight anchoring (not 09:30) is deliberate for now: the client has no
+//                    calendar-engine payload on this tab yet, and a hardcoded session clock is
+//                    exactly the guessed rhythm the FOCUS chart was rebuilt to avoid. Session
+//                    shading + open-anchoring arrive when session windows ride a public payload.
+//   12h/1d        <- the deep archive (res=12h / res=1d), seeded back to each listing's birth.
+//                    Bars are HL's own UTC prints, used verbatim — no client re-cutting.
+// LINK broadcasts the TRANSFORM (zoom factor about the hovered instant, pan delta, crosshair
+// time), never the window itself, so a 1D pane is never squeezed into a 5M pane's 12 hours.
+// Layouts persist per browser (mode, pane count, picks per scope, link, named slots).
+const CH_TFS=[{k:5,l:'5M',src:'i'},{k:15,l:'15M',src:'i'},{k:60,l:'1H',src:'i'},{k:240,l:'4H',src:'i'},{k:720,l:'12H',src:'d12'},{k:1440,l:'1D',src:'d1d'}];
+const CH_SRC_RES={d12:'12h',d1d:'1d'};
+const CH_IBASE_DAYS=20;                          // 5760 raw 5m bars — one fetch feeds all four intraday TFs uncoarsened
+const CH_DEF={5:12*3600000,15:36*3600000,60:7*86400000,240:20*86400000,720:180*86400000,1440:730*86400000};
+const CH_MIN_SPAN=2*3600000;
+const CH_MTF_SETS={4:[15,60,240,1440],6:[5,15,60,240,720,1440],8:[5,15,60,240,720,1440,60,240]};
+const CH_CACHE_MS=60000;                         // per-(name,source) refetch floor; ETag 304s make the refresh nearly free
+const CH={mode:'grid',n:4,link:false,picks:{stocks:[],crypto:[]},mtf:{stocks:null,crypto:null},slots:[],
+  panes:[],cache:new Map(),timer:null,built:false,seq:0};
+function chPrefsSave(){ try{ localStorage.setItem('xyz-charts',JSON.stringify({mode:CH.mode,n:CH.n,link:CH.link,picks:CH.picks,mtf:CH.mtf,slots:CH.slots})); }catch(_){} }
+function chPrefsLoad(){
+  try{ const p=JSON.parse(localStorage.getItem('xyz-charts')||'null'); if(!p) return;
+    if(p.mode==='grid'||p.mode==='mtf') CH.mode=p.mode;
+    if([4,6,8].indexOf(+p.n)>=0) CH.n=+p.n;
+    CH.link=!!p.link;
+    if(p.picks&&Array.isArray(p.picks.stocks)&&Array.isArray(p.picks.crypto)) CH.picks=p.picks;
+    if(p.mtf&&typeof p.mtf==='object') CH.mtf={stocks:p.mtf.stocks||null,crypto:p.mtf.crypto||null};
+    if(Array.isArray(p.slots)) CH.slots=p.slots.slice(0,12);
+  }catch(_){}
+}
+function chScopeKey(){ return state.scope==='crypto'?'crypto':'stocks'; }
+function chRoster(){ return activeRows().sort((a,b)=>(b.vol||0)-(a.vol||0)); }
+function chDefaultPicks(){
+  const sk=chScopeKey(), have=new Set(chRoster().map(r=>r.coin));
+  CH.picks[sk]=(CH.picks[sk]||[]).filter(c=>have.has(c));
+  if(!CH.picks[sk].length) CH.picks[sk]=chRoster().slice(0,CH.n).map(r=>r.coin);
+  if(!CH.mtf[sk]||!have.has(CH.mtf[sk])) CH.mtf[sk]=(chRoster()[0]||{}).coin||null;
+}
+function chTick(coin){ const r=state.rows.get(coin); return r?r.ticker:(String(coin).includes(':')?String(coin).split(':')[1]:coin); }
+function chPx(v){ return fmtPrice(v); }
+// ---- data --------------------------------------------------------------------------------------
+// One cache entry per (name, source). Intraday is a fixed rolling window (the archive's honest
+// recent slice); deep sources take the server's own default span (the full seedable history).
+async function chFetch(coin,src){
+  const key=coin+'|'+src, c=CH.cache.get(key);
+  if(c&&Date.now()-c.at<CH_CACHE_MS) return c;
+  const now=Date.now();
+  const url=src==='i'
+    ? '/api/candles?coin='+encodeURIComponent(coin)+'&res=5m&from='+(now-CH_IBASE_DAYS*86400000)+'&to='+now+'&max=6000'
+    : '/api/candles?coin='+encodeURIComponent(coin)+'&res='+CH_SRC_RES[src]+'&max=3000';
+  const res=await fetchJSON(url);
+  const v={at:Date.now(),enabled:res.enabled!==false,candles:Array.isArray(res.candles)?res.candles:[],cov:res.coverage||null};
+  CH.cache.set(key,v); return v;
+}
+// Intraday aggregation on the UTC grid: floor(t/w)*w anchors every width at UTC midnight (all four
+// divide a day), so 5m constituents can never straddle a bucket and re-aggregation is stable.
+function chAgg(base,k){
+  if(k===5) return base;
+  const w=k*60000, by=new Map();
+  for(const b of base){ const t=+b[0]; if(!isFinite(t)) continue;
+    const t0=Math.floor(t/w)*w; let g=by.get(t0); if(!g) by.set(t0,g=[]); g.push(b); }
+  const out=[];
+  for(const [t0,g] of [...by.entries()].sort((a,b)=>a[0]-b[0])){
+    let h=-Infinity,l=Infinity,vv=0;
+    for(const r of g){ if(+r[2]>h)h=+r[2]; if(+r[3]<l)l=+r[3]; vv+=(+r[5]||0); }
+    out.push([t0,+g[0][1],h,l,+g[g.length-1][4],vv]);
+  }
+  return out;
+}
+function chSeries(p){
+  const d=CH.cache.get(p.coin+'|'+p.src);
+  if(!d||!d.enabled) return null;
+  if(p.src!=='i') return d.candles;
+  if(p._aggK===p.tf&&p._aggAt===d.at&&p._agg) return p._agg;
+  p._agg=chAgg(d.candles,p.tf); p._aggK=p.tf; p._aggAt=d.at;
+  return p._agg;
+}
+// ---- panes -------------------------------------------------------------------------------------
+function chSpecs(){
+  const sk=chScopeKey();
+  if(CH.mode==='mtf'){ const nm=CH.mtf[sk]; return nm?(CH_MTF_SETS[CH.n]||CH_MTF_SETS[4]).map(tf=>({coin:nm,tf})):[]; }
+  return (CH.picks[sk]||[]).slice(0,CH.n).map(c=>({coin:c,tf:15}));
+}
+function chBuild(){
+  const w=el('chartswrap'); if(!w) return;
+  chDefaultPicks();
+  if(!CH.built){
+    w.innerHTML=
+      '<div class="chtb">'
+      +'<span class="chlbl">mode</span><span class="chseg" id="chmode"><button type="button" data-m="grid" class="on">GRID</button><button type="button" data-m="mtf">MTF WALL</button></span>'
+      +'<span class="chlbl">panes</span><span class="chseg" id="chn"><button type="button" data-n="4" class="on">4</button><button type="button" data-n="6">6</button><button type="button" data-n="8">8</button></span>'
+      +'<span class="chlbl" id="chpicklbl">names</span><span class="chpick" id="chpick"></span>'
+      +'<span class="chsp"></span>'
+      +'<button type="button" id="chlink" data-tip="broadcast crosshair + zoom/pan across panes — each pane keeps its own span">LINK</button>'
+      +'<button type="button" id="chreset" data-tip="reset every pane to its timeframe\u2019s default window">RESET</button>'
+      +'<span class="chlbl">layouts</span><span class="chpick" id="chslots"></span><button type="button" id="chsave">SAVE</button>'
+      +'</div>'
+      +'<div class="chgrid" id="chgrid"></div>'
+      +'<div class="chfoot">intraday panes (5m\u20134h): local 5m archive, last '+CH_IBASE_DAYS+'d, UTC-grid buckets \u00b7 12H/1D panes: deep archive seeded to each listing\u2019s birth, bars verbatim from the exchange \u00b7 wheel/pinch = zoom \u00b7 drag = pan \u00b7 double-click = reset \u00b7 per-pane coverage bottom-left</div>';
+    el('chmode').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CH.mode=b.dataset.m; if(CH.mode==='mtf') CH.link=true; chPrefsSave(); chBuild(); });
+    el('chn').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CH.n=+b.dataset.n; chPrefsSave(); chBuild(); });
+    el('chlink').onclick=()=>{ if(CH.mode==='mtf') return; CH.link=!CH.link; chPrefsSave(); chSyncToolbar(); };
+    el('chreset').onclick=()=>{ CH.panes.forEach(p=>{ chResetView(p); chDraw(p); }); };
+    el('chsave').onclick=()=>{
+      const nm=prompt('Name this layout','Layout '+(CH.slots.length+1));
+      if(!nm) return;
+      CH.slots.push({name:String(nm).slice(0,24),mode:CH.mode,n:CH.n,link:CH.link,scope:chScopeKey(),picks:(CH.picks[chScopeKey()]||[]).slice(0,8),mtf:CH.mtf[chScopeKey()]||null});
+      if(CH.slots.length>12) CH.slots.shift();
+      chPrefsSave(); chRenderSlots();
+    };
+    CH.built=true;
+  }
+  chSyncToolbar(); chRenderPicker(); chRenderSlots();
+  const g=el('chgrid');
+  g.className='chgrid g'+CH.n;
+  g.innerHTML='';
+  CH.panes=[];
+  const specs=chSpecs(), seq=++CH.seq;
+  if(!specs.length){
+    g.innerHTML='<div class="chpane"><div class="chempty"><b>No charts loaded</b>Pick tickers in the bar above \u2014 up to '+CH.n+' panes from the active universe.</div></div>';
+    return;
+  }
+  specs.forEach(sp=>{
+    const d=document.createElement('div'); d.className='chpane';
+    d.innerHTML=
+      '<div class="chph"><span class="chtk">'+esc(chTick(sp.coin))+'</span>'
+      +'<span class="chuni">'+(String(sp.coin).includes(':')?'XYZ':'PERP')+'</span>'
+      +'<span class="chlast"></span>'
+      +(CH.mode==='mtf'
+        ?'<span class="chtflock">'+esc((CH_TFS.find(t=>t.k===sp.tf)||{}).l||sp.tf)+'</span>'
+        :'<span class="chtfs">'+CH_TFS.map(t=>'<button type="button" data-tf="'+t.k+'"'+(t.k===sp.tf?' class="on"':'')+'>'+t.l+'</button>').join('')+'</span>')
+      +'</div>'
+      +'<div class="chrd"><span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394</span></div>'
+      +'<div class="chcw"><canvas></canvas><span class="chcov"></span></div>';
+    g.appendChild(d);
+    const src=(CH_TFS.find(t=>t.k===sp.tf)||{}).src||'i';
+    const p={el:d,coin:sp.coin,tf:sp.tf,src,canvas:d.querySelector('canvas'),rd:d.querySelector('.chrd'),
+      lastEl:d.querySelector('.chlast'),covEl:d.querySelector('.chcov'),view:null,hover:null,_agg:null,_aggK:0,_aggAt:0};
+    p.ctx=p.canvas.getContext('2d');
+    CH.panes.push(p);
+    chWire(p);
+    chLoad(p,seq);
+  });
+}
+async function chLoad(p,seq){
+  try{
+    await chFetch(p.coin,p.src);
+    if(seq!==CH.seq) return;                     // a rebuild superseded this pane
+    if(!p.view) chResetView(p);
+    chDraw(p);
+  }catch(_){ if(seq===CH.seq&&p.rd) p.rd.innerHTML='<span class="chk">candles endpoint did not answer \u2014 will retry on the next refresh</span>'; }
+}
+function chBounds(p){
+  const s=chSeries(p);
+  if(!s||!s.length) return null;
+  const w=p.tf*60000;
+  return { from:s[0][0], to:s[s.length-1][0]+w };
+}
+function chResetView(p){
+  const b=chBounds(p);
+  if(!b){ p.view=null; return; }
+  const span=Math.min(CH_DEF[p.tf]||(b.to-b.from), b.to-b.from);
+  p.view={from:b.to-span,to:b.to};
+}
+function chClamp(p){
+  const b=chBounds(p); if(!b||!p.view) return;
+  const v=p.view, minSpan=Math.min(CH_MIN_SPAN,b.to-b.from);
+  let span=Math.max(minSpan,Math.min(v.to-v.from,b.to-b.from));
+  if(v.to-v.from!==span){ const mid=(v.from+v.to)/2; v.from=mid-span/2; v.to=mid+span/2; }   // zoom floor/ceiling re-applied about the center
+  if(v.from<b.from){ v.from=b.from; v.to=b.from+span; }
+  if(v.to>b.to){ v.to=b.to; v.from=b.to-span; }
+  if(v.from<b.from) v.from=b.from;
+}
+// LINK: same factor / same delta / same instant to every pane — never the window itself.
+function chZoomAll(src,factor,anchorT){
+  const targets=CH.link?CH.panes:[src];
+  for(const p of targets){
+    if(!p.view) continue;
+    const at=(p===src)?anchorT:(p.view.from+p.view.to)/2;
+    const f=Math.max(0,Math.min(1,(at-p.view.from)/(p.view.to-p.view.from)));
+    const span=(p.view.to-p.view.from)*factor;
+    p.view={from:at-span*f,to:at+span*(1-f)};
+    chClamp(p); chDraw(p);
+  }
+}
+function chPanAll(src,dt){
+  const targets=CH.link?CH.panes:[src];
+  for(const p of targets){ if(!p.view) continue; p.view.from+=dt; p.view.to+=dt; chClamp(p); chDraw(p); }
+}
+function chHoverAll(src,t){
+  const targets=CH.link?CH.panes:[src];
+  for(const p of targets){ p.hover=t; chDraw(p); }
+}
+// ---- draw --------------------------------------------------------------------------------------
+function chVar(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function chFmtT(t,tf){
+  const d=new Date(t), hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+  const md=String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0');
+  return tf>=1440?md+'/'+String(d.getFullYear()).slice(2):(tf>=240?md+' '+hm:hm);
+}
+function chFmtV(v){ v=+v; if(!isFinite(v)) return '\u2014'; return v>=1e9?(v/1e9).toFixed(1)+'B':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(1)+'k':String(Math.round(v)); }
+function chDraw(p){
+  const c=p.canvas,ctx=p.ctx,dpr=window.devicePixelRatio||1;
+  const w=c.clientWidth,h=c.clientHeight;
+  if(!w||!h) return;
+  if(c.width!==Math.round(w*dpr)||c.height!==Math.round(h*dpr)){ c.width=Math.round(w*dpr); c.height=Math.round(h*dpr); }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const mono=chVar('--mono')||'monospace';
+  const d=CH.cache.get(p.coin+'|'+p.src);
+  const msg=(t)=>{ ctx.fillStyle=chVar('--muted'); ctx.font='10px '+mono; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(t,w/2,h/2); };
+  if(d&&d.enabled===false){ msg('archive disabled on this deploy \u2014 no chart source'); p.covEl.textContent=''; return; }
+  const series=chSeries(p);
+  if(!series){ msg('loading\u2026'); return; }
+  if(!series.length){ msg('no bars captured for this name yet'); p.covEl.textContent=''; return; }
+  if(!p.view) chResetView(p);
+  const PR=Math.min(58,w*0.17),PB=15,PT=4;
+  const pw=w-PR, ph=h-PB-PT;
+  if(pw<40||ph<30) return;
+  const volH=Math.max(11,ph*0.15), wMs=p.tf*60000;
+  const v=p.view, span=v.to-v.from;
+  const bars=series.filter(b=>b[0]+wMs>=v.from&&b[0]<=v.to);
+  const X=(t)=>(t-v.from)/span*pw;
+  const up=chVar('--up'),dn=chVar('--down'),grid=chVar('--grid')||chVar('--border'),mute=chVar('--muted');
+  if(!bars.length){ msg('no bars in this window'); }
+  else{
+    let lo=Infinity,hi=-Infinity,vmax=0;
+    for(const b of bars){ if(+b[3]<lo)lo=+b[3]; if(+b[2]>hi)hi=+b[2]; if(+b[5]>vmax)vmax=+b[5]; }
+    const pad=(hi-lo)*0.06||Math.abs(hi)*0.002||1; lo-=pad; hi+=pad;
+    const Y=(x)=>PT+(ph-volH-3)-((x-lo)/(hi-lo))*(ph-volH-3);
+    ctx.strokeStyle=grid; ctx.lineWidth=1; ctx.fillStyle=mute;
+    ctx.font='9.5px '+mono; ctx.textAlign='left'; ctx.textBaseline='middle';
+    for(let i=0;i<=3;i++){
+      const val=lo+(hi-lo)*i/3, y=Math.round(Y(val))+0.5;
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(pw,y); ctx.stroke();
+      ctx.fillText(chPx(val),pw+4,y);
+    }
+    const step=pw/Math.max(1,span/wMs), bw=Math.max(1,Math.min(11,step*0.68));
+    for(const b of bars){
+      const x=X(b[0]+wMs/2), col=+b[4]>=+b[1]?up:dn;
+      ctx.fillStyle=col; ctx.strokeStyle=col;
+      ctx.globalAlpha=0.32;
+      const vh=vmax?(+b[5]/vmax)*volH:0;
+      ctx.fillRect(x-bw/2,PT+ph-vh,Math.max(1,bw),vh);
+      ctx.globalAlpha=1;
+      ctx.beginPath(); ctx.moveTo(Math.round(x)+0.5,Y(+b[2])); ctx.lineTo(Math.round(x)+0.5,Y(+b[3])); ctx.stroke();
+      const y1=Y(+b[1]),y2=Y(+b[4]);
+      ctx.fillRect(x-bw/2,Math.min(y1,y2),Math.max(1,bw),Math.max(1,Math.abs(y2-y1)));
+    }
+    ctx.fillStyle=mute; ctx.textAlign='center'; ctx.textBaseline='top';
+    const ticks=Math.max(2,Math.min(6,Math.floor(pw/76)));
+    for(let i=0;i<=ticks;i++){
+      const t=v.from+span*i/ticks, x=X(t);
+      if(x<16||x>pw-16) continue;
+      ctx.fillText(chFmtT(t,p.tf),x,PT+ph+3);
+    }
+    // crosshair + readout (interactive hover on every chart — standing requirement)
+    let hb=null;
+    if(p.hover!=null&&p.hover>=v.from&&p.hover<=v.to){
+      let best=Infinity;
+      for(const b of bars){ const dd=Math.abs(b[0]+wMs/2-p.hover); if(dd<best){ best=dd; hb=b; } }
+      if(hb){
+        const x=Math.round(X(hb[0]+wMs/2))+0.5;
+        ctx.strokeStyle=chVar('--border'); ctx.setLineDash([2,3]);
+        ctx.beginPath(); ctx.moveTo(x,PT); ctx.lineTo(x,PT+ph); ctx.stroke();
+        const yc=Math.round(Y(+hb[4]))+0.5;
+        ctx.beginPath(); ctx.moveTo(0,yc); ctx.lineTo(pw,yc); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle=chVar('--blue'); ctx.fillRect(pw,yc-7,PR,14);
+        ctx.fillStyle='#0E1116'; ctx.font='9.5px '+mono; ctx.textAlign='left'; ctx.textBaseline='middle';
+        ctx.fillText(chPx(+hb[4]),pw+4,yc);
+      }
+    }
+    const lastBar=series[series.length-1], prev=series.length>1?series[series.length-2]:lastBar;
+    const chg=prev&&+prev[4]?(+lastBar[4]/+prev[4]-1)*100:null;
+    p.lastEl.textContent=chPx(+lastBar[4])+(chg!=null?'  '+(chg>=0?'+':'')+chg.toFixed(2)+'%':'');
+    p.lastEl.className='chlast '+(chg==null?'':chg>=0?'pos':'neg');
+    if(hb){
+      const dd=+hb[1]?(+hb[4]/+hb[1]-1)*100:null, cls=dd!=null&&dd>=0?'pos':'neg';
+      p.rd.innerHTML='<span class="chk">'+chFmtT(hb[0],p.tf)+'</span> <span class="chk">O</span> '+chPx(+hb[1])
+        +' <span class="chk">H</span> '+chPx(+hb[2])+' <span class="chk">L</span> '+chPx(+hb[3])
+        +' <span class="chk">C</span> '+chPx(+hb[4])+' <span class="chk">V</span> '+chFmtV(hb[5])
+        +(dd!=null?' <span class="'+cls+'">'+(dd>=0?'+':'')+dd.toFixed(2)+'%</span>':'');
+    }else p.rd.innerHTML='<span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394</span>';
+  }
+  // coverage disclosure: what this pane's SOURCE actually holds, never what the window implies
+  const cov=d&&d.cov;
+  p.covEl.textContent=cov&&cov.days?((p.src==='i'?'5m archive ':'deep archive ')+cov.days+'d \u00b7 '+(cov.count||0)+' bars'):'';
+}
+// ---- interaction -------------------------------------------------------------------------------
+function chWire(p){
+  const c=p.canvas;
+  const tAt=(ev)=>{
+    const r=c.getBoundingClientRect(), pw=r.width-Math.min(58,r.width*0.17);
+    const f=Math.max(0,Math.min(1,(ev.clientX-r.left)/Math.max(1,pw)));
+    return p.view?p.view.from+(p.view.to-p.view.from)*f:null;
+  };
+  c.addEventListener('wheel',(e)=>{ if(!p.view) return; e.preventDefault(); chZoomAll(p,e.deltaY>0?1.18:1/1.18,tAt(e)); },{passive:false});
+  c.addEventListener('dblclick',()=>{ (CH.link?CH.panes:[p]).forEach(q=>{ chResetView(q); chDraw(q); }); });
+  const ptrs=new Map(); let drag=null,pinchRef=null;
+  c.addEventListener('pointerdown',(e)=>{
+    ptrs.set(e.pointerId,e.clientX);
+    if(ptrs.size===2){ const xs=[...ptrs.values()]; pinchRef={d:Math.abs(xs[0]-xs[1])||1,view:p.view?{...p.view}:null,lastF:1}; drag=null; }
+    else if(p.view){ drag={x:e.clientX}; }
+    c.setPointerCapture(e.pointerId);
+  });
+  c.addEventListener('pointermove',(e)=>{
+    if(ptrs.has(e.pointerId)) ptrs.set(e.pointerId,e.clientX);
+    if(ptrs.size===2&&pinchRef&&pinchRef.view){
+      const xs=[...ptrs.values()], nd=Math.abs(xs[0]-xs[1])||1, f=pinchRef.d/nd;
+      const mid=(pinchRef.view.from+pinchRef.view.to)/2, span=(pinchRef.view.to-pinchRef.view.from)*f;
+      p.view={from:mid-span/2,to:mid+span/2}; chClamp(p); chDraw(p);
+      // Linked peers get the INCREMENTAL factor since the last move (this pane's own window is set
+      // absolutely from the pinch reference, so re-broadcasting the total factor would compound).
+      if(CH.link&&pinchRef.lastF){ const inc=f/pinchRef.lastF;
+        for(const q of CH.panes){ if(q===p||!q.view) continue;
+          const m=(q.view.from+q.view.to)/2, s2=(q.view.to-q.view.from)*inc;
+          q.view={from:m-s2/2,to:m+s2/2}; chClamp(q); chDraw(q); } }
+      pinchRef.lastF=f;
+      return;
+    }
+    if(drag&&p.view){
+      const r=c.getBoundingClientRect(), pw=r.width-Math.min(58,r.width*0.17);
+      const dt=-(e.clientX-drag.x)/Math.max(1,pw)*(p.view.to-p.view.from);
+      drag.x=e.clientX; chPanAll(p,dt);
+    }else{
+      chHoverAll(p,tAt(e));
+    }
+  });
+  const end=(e)=>{ ptrs.delete(e.pointerId); if(ptrs.size<2) pinchRef=null; if(!ptrs.size) drag=null; };
+  c.addEventListener('pointerup',end); c.addEventListener('pointercancel',end);
+  c.addEventListener('pointerleave',(e)=>{ end(e); chHoverAll(p,null); });
+  p.el.querySelectorAll('[data-tf]').forEach(b=>b.onclick=()=>{
+    p.tf=+b.dataset.tf;
+    p.src=(CH_TFS.find(t=>t.k===p.tf)||{}).src||'i';
+    p._agg=null; p._aggK=0; p.view=null;
+    p.el.querySelectorAll('[data-tf]').forEach(x=>x.classList.toggle('on',x===b));
+    chLoad(p,CH.seq);
+  });
+}
+// ---- toolbar -----------------------------------------------------------------------------------
+function chSyncToolbar(){
+  if(!CH.built) return;
+  el('chmode').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.m===CH.mode));
+  el('chn').querySelectorAll('button').forEach(b=>b.classList.toggle('on',+b.dataset.n===CH.n));
+  const lk=el('chlink');
+  lk.classList.toggle('on',CH.link);
+  lk.disabled=CH.mode==='mtf';
+  lk.textContent=CH.mode==='mtf'?'LINK \u00b7 locked':'LINK';
+}
+function chRenderPicker(){
+  const box=el('chpick'); if(!box) return;
+  el('chpicklbl').textContent=CH.mode==='mtf'?'instrument':'names';
+  const sk=chScopeKey(), roster=chRoster();
+  const cur=CH.mode==='mtf'?null:new Set(CH.picks[sk]||[]);
+  const mkChip=(coin,on)=>{ const b=document.createElement('button'); b.type='button';
+    b.className='chchip'+(on?' on':''); b.textContent=chTick(coin);
+    b.onclick=()=>{
+      if(CH.mode==='mtf'){ CH.mtf[sk]=coin; }
+      else{
+        const arr=CH.picks[sk]||(CH.picks[sk]=[]);
+        const i=arr.indexOf(coin);
+        if(i>=0) arr.splice(i,1);
+        else{ if(arr.length>=CH.n) arr.shift(); arr.push(coin); }   // grid full: oldest pick rotates out (mockup behaviour, approved)
+      }
+      chPrefsSave(); chBuild();
+    };
+    return b;
+  };
+  box.innerHTML='';
+  // selected first (order preserved), then a type-ahead over the rest — 8 chips can't carry 150 names
+  const sel=CH.mode==='mtf'?(CH.mtf[sk]?[CH.mtf[sk]]:[]):(CH.picks[sk]||[]);
+  sel.forEach(c=>box.appendChild(mkChip(c,true)));
+  const inp=document.createElement('input');
+  inp.type='text'; inp.className='chfind'; inp.placeholder='add ticker\u2026'; inp.autocomplete='off'; inp.spellcheck=false;
+  const dd=document.createElement('div'); dd.className='chdd'; dd.hidden=true;
+  const fill=()=>{
+    const q=inp.value.trim().toUpperCase();
+    dd.innerHTML='';
+    if(!q){ dd.hidden=true; return; }
+    const hits=roster.filter(r=>r.ticker.toUpperCase().indexOf(q)>=0&&(CH.mode==='mtf'||!cur.has(r.coin))).slice(0,8);
+    if(!hits.length){ dd.hidden=true; return; }
+    hits.forEach(r=>{ const o=document.createElement('button'); o.type='button'; o.textContent=r.ticker;
+      o.onclick=()=>{ inp.value=''; dd.hidden=true; mkChip(r.coin,false).onclick(); }; dd.appendChild(o); });
+    dd.hidden=false;
+  };
+  inp.addEventListener('input',fill);
+  inp.addEventListener('keydown',(e)=>{ if(e.key==='Enter'){ const f=dd.querySelector('button'); if(f) f.click(); } if(e.key==='Escape'){ dd.hidden=true; } });
+  inp.addEventListener('blur',()=>setTimeout(()=>{ dd.hidden=true; },150));
+  const wrap=document.createElement('span'); wrap.className='chfindwrap'; wrap.appendChild(inp); wrap.appendChild(dd);
+  box.appendChild(wrap);
+}
+function chRenderSlots(){
+  const box=el('chslots'); if(!box) return;
+  box.innerHTML='';
+  CH.slots.forEach((s,i)=>{
+    const b=document.createElement('button'); b.type='button'; b.className='chchip';
+    b.textContent=s.name; b.title='load \u00b7 shift-click to delete';
+    b.onclick=(e)=>{
+      if(e.shiftKey){ CH.slots.splice(i,1); chPrefsSave(); chRenderSlots(); return; }
+      CH.mode=s.mode==='mtf'?'mtf':'grid'; CH.n=[4,6,8].indexOf(+s.n)>=0?+s.n:4; CH.link=!!s.link||CH.mode==='mtf';
+      const sk=s.scope==='crypto'?'crypto':'stocks';
+      if(Array.isArray(s.picks)) CH.picks[sk]=s.picks.slice(0,8);
+      if(s.mtf) CH.mtf[sk]=s.mtf;
+      chPrefsSave(); chBuild();
+    };
+    box.appendChild(b);
+  });
+}
+// ---- entry -------------------------------------------------------------------------------------
+// Refresh rhythm: while the tab is visible, re-pull every pane's cache past the 60s floor (ETag
+// 304s make an unchanged tape nearly free) and redraw PRESERVING each viewport — a refresh must
+// never yank a chart out from under a zoomed-in read.
+let _chScope=null;
+function openCharts(){
+  chPrefsLoad();
+  const sk=chScopeKey();
+  if(_chScope!==sk){ _chScope=sk; CH.seq++; }
+  chBuild();
+  if(CH.timer) clearInterval(CH.timer);
+  CH.timer=setInterval(async()=>{
+    const vw=el('view-charts'); if(!vw||vw.hidden) return;
+    const seq=CH.seq;
+    const seen=new Set();
+    for(const p of CH.panes){
+      const key=p.coin+'|'+p.src;
+      if(seen.has(key)) continue; seen.add(key);
+      const c=CH.cache.get(key);
+      if(c&&Date.now()-c.at<CH_CACHE_MS) continue;
+      try{ p._agg=null; await chFetch(p.coin,p.src); }catch(_){}
+      if(seq!==CH.seq) return;
+    }
+    CH.panes.forEach(p=>{ p._agg=null; chClamp(p); chDraw(p); });
+  },CH_CACHE_MS);
+}
+{ let _chRt=null; window.addEventListener('resize',()=>{ clearTimeout(_chRt); _chRt=setTimeout(()=>{ const vw=el('view-charts'); if(vw&&!vw.hidden) CH.panes.forEach(chDraw); },90); }); }
 
 // ===== trigger alerts (browser transport) =====
 // This is a TRANSPORT, not a detector. The poller owns detection: it decides what counts as a new
@@ -8529,7 +8972,7 @@ function closeHelp(){ const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=
 // live universe can't be jumped to. Results are: matching tabs first, then matching tickers. Enter
 // opens the ticker's drawer; Shift+Enter opens its AI report; a tab row switches tabs.
 const CMDK_TABS=[
-  {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'funds',label:'Funds'},{v:'trend',label:'Trend'},{v:'sectors',label:'Sectors'},
+  {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'funds',label:'Funds'},{v:'trend',label:'Trend'},{v:'charts',label:'Charts'},{v:'sectors',label:'Sectors'},
   {v:'corr',label:'Correlation'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
   {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'admin',label:'Admin'}];
