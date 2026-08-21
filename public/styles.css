@@ -1791,3 +1791,12 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .chempty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--faint);font:11px var(--mono);text-align:center;padding:16px;line-height:1.8}
 .chempty b{color:var(--muted);font-size:12px;font-weight:600}
 .chfoot{padding:6px 10px;border:1px solid var(--border);border-top:0;background:var(--panel);color:var(--faint);font:10px var(--mono);line-height:1.5}
+
+/* CHARTS -02: EMA controls + readout keys */
+.chemain{font:11px var(--mono);color:var(--text);background:var(--bg);border:1px solid var(--border);padding:2px 4px;width:46px;-moz-appearance:textfield}
+.chemain::-webkit-outer-spin-button,.chemain::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.chemain:focus{outline:none;border-color:var(--accent-dim)}
+.chemain:disabled{opacity:.45}
+.chemain.e1{border-bottom:2px solid var(--blue)}
+.chemain.e2{border-bottom:2px solid var(--accent)}
+.chke1{color:var(--blue)} .chke2{color:var(--accent)}

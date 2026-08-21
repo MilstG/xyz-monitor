@@ -5728,9 +5728,12 @@ const CH_DEF={5:12*3600000,15:36*3600000,60:7*86400000,240:20*86400000,720:180*8
 const CH_MIN_SPAN=2*3600000;
 const CH_MTF_SETS={4:[15,60,240,1440],6:[5,15,60,240,720,1440],8:[5,15,60,240,720,1440,60,240]};
 const CH_CACHE_MS=60000;                         // per-(name,source) refetch floor; ETag 304s make the refresh nearly free
+const CH_EMA_DEF=[50,200];                       // default pair; both periods user-configurable (2..500)
 const CH={mode:'grid',n:4,link:false,picks:{stocks:[],crypto:[]},mtf:{stocks:null,crypto:null},slots:[],
+  ema:{on:true,p1:CH_EMA_DEF[0],p2:CH_EMA_DEF[1]},
   panes:[],cache:new Map(),timer:null,built:false,seq:0};
-function chPrefsSave(){ try{ localStorage.setItem('xyz-charts',JSON.stringify({mode:CH.mode,n:CH.n,link:CH.link,picks:CH.picks,mtf:CH.mtf,slots:CH.slots})); }catch(_){} }
+function chEmaPeriod(v,def){ v=Math.round(+v); return Number.isFinite(v)&&v>=2&&v<=500?v:def; }
+function chPrefsSave(){ try{ localStorage.setItem('xyz-charts',JSON.stringify({mode:CH.mode,n:CH.n,link:CH.link,picks:CH.picks,mtf:CH.mtf,slots:CH.slots,ema:CH.ema})); }catch(_){} }
 function chPrefsLoad(){
   try{ const p=JSON.parse(localStorage.getItem('xyz-charts')||'null'); if(!p) return;
     if(p.mode==='grid'||p.mode==='mtf') CH.mode=p.mode;
@@ -5739,6 +5742,7 @@ function chPrefsLoad(){
     if(p.picks&&Array.isArray(p.picks.stocks)&&Array.isArray(p.picks.crypto)) CH.picks=p.picks;
     if(p.mtf&&typeof p.mtf==='object') CH.mtf={stocks:p.mtf.stocks||null,crypto:p.mtf.crypto||null};
     if(Array.isArray(p.slots)) CH.slots=p.slots.slice(0,12);
+    if(p.ema&&typeof p.ema==='object') CH.ema={on:p.ema.on!==false,p1:chEmaPeriod(p.ema.p1,CH_EMA_DEF[0]),p2:chEmaPeriod(p.ema.p2,CH_EMA_DEF[1])};
   }catch(_){}
 }
 function chScopeKey(){ return state.scope==='crypto'?'crypto':'stocks'; }
@@ -5780,6 +5784,25 @@ function chAgg(base,k){
   }
   return out;
 }
+// EMA series over the WHOLE tape, SMA-seeded at index n-1: everything before the seed is null (an
+// unconverged EMA head is a fabricated line, so it is simply not drawn), and a series shorter than
+// the period yields no line at all \u2014 the coverage row discloses why instead of plotting a guess.
+function chEmaWalk(series,n){
+  const out=new Array(series.length).fill(null);
+  if(!n||n<2||series.length<n) return out;
+  let sum=0; for(let i=0;i<n;i++) sum+=+series[i][4];
+  let e=sum/n; out[n-1]=e;
+  const k=2/(n+1);
+  for(let i=n;i<series.length;i++){ e=+series[i][4]*k+e*(1-k); out[i]=e; }
+  return out;
+}
+function chEmas(p,series){
+  const d=CH.cache.get(p.coin+'|'+p.src), at=d?d.at:0;
+  const c=p._ema;
+  if(c&&c.at===at&&c.tf===p.tf&&c.p1===CH.ema.p1&&c.p2===CH.ema.p2) return c;
+  const v={at,tf:p.tf,p1:CH.ema.p1,p2:CH.ema.p2,e1:chEmaWalk(series,CH.ema.p1),e2:chEmaWalk(series,CH.ema.p2)};
+  p._ema=v; return v;
+}
 function chSeries(p){
   const d=CH.cache.get(p.coin+'|'+p.src);
   if(!d||!d.enabled) return null;
@@ -5806,6 +5829,8 @@ function chBuild(){
       +'<span class="chsp"></span>'
       +'<button type="button" id="chlink" data-tip="broadcast crosshair + zoom/pan across panes — each pane keeps its own span">LINK</button>'
       +'<button type="button" id="chreset" data-tip="reset every pane to its timeframe\u2019s default window">RESET</button>'
+      +'<span class="chlbl">ema</span><button type="button" id="chemabtn" data-tip="two EMAs on every pane, walked over each pane\u2019s FULL series (not the viewport) \u2014 warm-up bars stay empty rather than plotting an unconverged head">EMA</button>'
+      +'<input type="number" id="chema1" class="chemain e1" min="2" max="500" step="1" data-tip="first EMA period (2\u2013500)"><input type="number" id="chema2" class="chemain e2" min="2" max="500" step="1" data-tip="second EMA period (2\u2013500)">'
       +'<span class="chlbl">layouts</span><span class="chpick" id="chslots"></span><button type="button" id="chsave">SAVE</button>'
       +'</div>'
       +'<div class="chgrid" id="chgrid"></div>'
@@ -5814,6 +5839,9 @@ function chBuild(){
     el('chn').querySelectorAll('button').forEach(b=>b.onclick=()=>{ CH.n=+b.dataset.n; chPrefsSave(); chBuild(); });
     el('chlink').onclick=()=>{ if(CH.mode==='mtf') return; CH.link=!CH.link; chPrefsSave(); chSyncToolbar(); };
     el('chreset').onclick=()=>{ CH.panes.forEach(p=>{ chResetView(p); chDraw(p); }); };
+    el('chemabtn').onclick=()=>{ CH.ema.on=!CH.ema.on; chPrefsSave(); chSyncToolbar(); CH.panes.forEach(chDraw); };
+    const emaIn=(id,key,def)=>{ const i=el(id); i.addEventListener('change',()=>{ CH.ema[key]=chEmaPeriod(i.value,def); i.value=CH.ema[key]; chPrefsSave(); CH.panes.forEach(chDraw); }); };
+    emaIn('chema1','p1',CH_EMA_DEF[0]); emaIn('chema2','p2',CH_EMA_DEF[1]);
     el('chsave').onclick=()=>{
       const nm=prompt('Name this layout','Layout '+(CH.slots.length+1));
       if(!nm) return;
@@ -5949,8 +5977,19 @@ function chDraw(p){
       ctx.fillText(chPx(val),pw+4,y);
     }
     const step=pw/Math.max(1,span/wMs), bw=Math.max(1,Math.min(11,step*0.68));
+    // Right-edge fix (-02): the raw mapping put the LAST bar's center half a bar-width from the
+    // plot edge, so with narrow bars its right half fell off the plot \u2014 the standing
+    // \u201clast candle cut in half\u201d. Inset the drawable span by half a body (+1px) so a
+    // series at rest always shows its final bar whole, and hard-clip the bar/EMA layer to the
+    // plot rect so a bar straddling the edge mid-pan cuts cleanly instead of bleeding under the
+    // price axis. The inset is stored on the pane so the pointer\u2192time inverse in chWire
+    // uses the SAME mapping \u2014 a crosshair off by the inset would hover the wrong bar.
+    const inset=Math.ceil(bw/2)+1;
+    p._inset=inset;
+    const Xi=(t)=>(t-v.from)/span*(pw-inset);
+    ctx.save(); ctx.beginPath(); ctx.rect(0,PT,pw,ph); ctx.clip();
     for(const b of bars){
-      const x=X(b[0]+wMs/2), col=+b[4]>=+b[1]?up:dn;
+      const x=Xi(b[0]+wMs/2), col=+b[4]>=+b[1]?up:dn;
       ctx.fillStyle=col; ctx.strokeStyle=col;
       ctx.globalAlpha=0.32;
       const vh=vmax?(+b[5]/vmax)*volH:0;
@@ -5960,10 +5999,24 @@ function chDraw(p){
       const y1=Y(+b[1]),y2=Y(+b[4]);
       ctx.fillRect(x-bw/2,Math.min(y1,y2),Math.max(1,bw),Math.max(1,Math.abs(y2-y1)));
     }
+    // EMA overlay (-02): drawn over the FULL walk (chEmas), sliced to the viewport by x \u2014 the
+    // line entering the left edge already carries its whole history, never a viewport-local restart.
+    let em=null;
+    if(CH.ema.on){
+      em=chEmas(p,series);
+      const line=(arr,col)=>{ ctx.strokeStyle=col; ctx.lineWidth=1.2; ctx.beginPath(); let pen=false;
+        for(let i=0;i<series.length;i++){ const val=arr[i]; if(val==null){ pen=false; continue; }
+          const t=series[i][0]+wMs/2; if(t<v.from-wMs||t>v.to+wMs) continue;
+          const x=Xi(t), y=Y(val); if(y<PT-20||y>PT+ph+20){ pen=false; continue; }
+          if(pen) ctx.lineTo(x,y); else { ctx.moveTo(x,y); pen=true; } }
+        ctx.stroke(); };
+      line(em.e1,chVar('--blue')); line(em.e2,chVar('--accent'));
+    }
+    ctx.restore();
     ctx.fillStyle=mute; ctx.textAlign='center'; ctx.textBaseline='top';
     const ticks=Math.max(2,Math.min(6,Math.floor(pw/76)));
     for(let i=0;i<=ticks;i++){
-      const t=v.from+span*i/ticks, x=X(t);
+      const t=v.from+span*i/ticks, x=Xi(t);
       if(x<16||x>pw-16) continue;
       ctx.fillText(chFmtT(t,p.tf),x,PT+ph+3);
     }
@@ -5973,7 +6026,7 @@ function chDraw(p){
       let best=Infinity;
       for(const b of bars){ const dd=Math.abs(b[0]+wMs/2-p.hover); if(dd<best){ best=dd; hb=b; } }
       if(hb){
-        const x=Math.round(X(hb[0]+wMs/2))+0.5;
+        const x=Math.round(Xi(hb[0]+wMs/2))+0.5;
         ctx.strokeStyle=chVar('--border'); ctx.setLineDash([2,3]);
         ctx.beginPath(); ctx.moveTo(x,PT); ctx.lineTo(x,PT+ph); ctx.stroke();
         const yc=Math.round(Y(+hb[4]))+0.5;
@@ -5990,21 +6043,29 @@ function chDraw(p){
     p.lastEl.className='chlast '+(chg==null?'':chg>=0?'pos':'neg');
     if(hb){
       const dd=+hb[1]?(+hb[4]/+hb[1]-1)*100:null, cls=dd!=null&&dd>=0?'pos':'neg';
+      let emh='';
+      if(em){ const bi=series.indexOf(hb);
+        const v1=bi>=0?em.e1[bi]:null, v2=bi>=0?em.e2[bi]:null;
+        emh=' <span class="chke1">E'+CH.ema.p1+'</span> '+(v1!=null?chPx(v1):'\u2014')
+           +' <span class="chke2">E'+CH.ema.p2+'</span> '+(v2!=null?chPx(v2):'\u2014'); }
       p.rd.innerHTML='<span class="chk">'+chFmtT(hb[0],p.tf)+'</span> <span class="chk">O</span> '+chPx(+hb[1])
         +' <span class="chk">H</span> '+chPx(+hb[2])+' <span class="chk">L</span> '+chPx(+hb[3])
         +' <span class="chk">C</span> '+chPx(+hb[4])+' <span class="chk">V</span> '+chFmtV(hb[5])
-        +(dd!=null?' <span class="'+cls+'">'+(dd>=0?'+':'')+dd.toFixed(2)+'%</span>':'');
-    }else p.rd.innerHTML='<span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394</span>';
+        +(dd!=null?' <span class="'+cls+'">'+(dd>=0?'+':'')+dd.toFixed(2)+'%</span>':'')+emh;
+    }else p.rd.innerHTML='<span class="chk">hover for OHLC \u00b7 V \u00b7 bar \u0394'+(CH.ema.on?' \u00b7 EMA'+CH.ema.p1+'/'+CH.ema.p2:'')+'</span>';
   }
   // coverage disclosure: what this pane's SOURCE actually holds, never what the window implies
   const cov=d&&d.cov;
-  p.covEl.textContent=cov&&cov.days?((p.src==='i'?'5m archive ':'deep archive ')+cov.days+'d \u00b7 '+(cov.count||0)+' bars'):'';
+  let covTxt=cov&&cov.days?((p.src==='i'?'5m archive ':'deep archive ')+cov.days+'d \u00b7 '+(cov.count||0)+' bars'):'';
+  if(covTxt&&CH.ema.on&&series&&series.length&&series.length<CH.ema.p2)
+    covTxt+=' \u00b7 EMA'+CH.ema.p2+' needs '+CH.ema.p2+' bars ('+series.length+' held)';
+  p.covEl.textContent=covTxt;
 }
 // ---- interaction -------------------------------------------------------------------------------
 function chWire(p){
   const c=p.canvas;
   const tAt=(ev)=>{
-    const r=c.getBoundingClientRect(), pw=r.width-Math.min(58,r.width*0.17);
+    const r=c.getBoundingClientRect(), pw=r.width-Math.min(58,r.width*0.17)-(p._inset||0);
     const f=Math.max(0,Math.min(1,(ev.clientX-r.left)/Math.max(1,pw)));
     return p.view?p.view.from+(p.view.to-p.view.from)*f:null;
   };
@@ -6060,6 +6121,9 @@ function chSyncToolbar(){
   lk.classList.toggle('on',CH.link);
   lk.disabled=CH.mode==='mtf';
   lk.textContent=CH.mode==='mtf'?'LINK \u00b7 locked':'LINK';
+  el('chemabtn').classList.toggle('on',CH.ema.on);
+  el('chema1').value=CH.ema.p1; el('chema2').value=CH.ema.p2;
+  el('chema1').disabled=el('chema2').disabled=!CH.ema.on;
 }
 function chRenderPicker(){
   const box=el('chpick'); if(!box) return;
@@ -6134,6 +6198,12 @@ function openCharts(){
   CH.timer=setInterval(async()=>{
     const vw=el('view-charts'); if(!vw||vw.hidden) return;
     const seq=CH.seq;
+    // Remember each pane's pre-refresh bounds + whether it sat at the live edge: a pinned view
+    // FOLLOWS new bars (same span, shifted to the new close) so \u201cauto update\u201d means the
+    // chart actually advances \u2014 while a view parked in history stays exactly where the reader
+    // left it, never yanked forward by a refresh.
+    const pre=CH.panes.map(p=>{ const b=chBounds(p);
+      return { p, to:b?b.to:null, pinned:!!(b&&p.view&&p.view.to>=b.to-p.tf*60000*0.51) }; });
     const seen=new Set();
     for(const p of CH.panes){
       const key=p.coin+'|'+p.src;
@@ -6143,7 +6213,15 @@ function openCharts(){
       try{ p._agg=null; await chFetch(p.coin,p.src); }catch(_){}
       if(seq!==CH.seq) return;
     }
-    CH.panes.forEach(p=>{ p._agg=null; chClamp(p); chDraw(p); });
+    for(const q of pre){
+      const p=q.p; p._agg=null;
+      const nb=chBounds(p);
+      if(q.pinned&&nb&&q.to!=null&&nb.to>q.to&&p.view){
+        const span=p.view.to-p.view.from;
+        p.view={from:nb.to-span,to:nb.to};
+      }
+      chClamp(p); chDraw(p);
+    }
   },CH_CACHE_MS);
 }
 { let _chRt=null; window.addEventListener('resize',()=>{ clearTimeout(_chRt); _chRt=setTimeout(()=>{ const vw=el('view-charts'); if(vw&&!vw.hidden) CH.panes.forEach(chDraw); },90); }); }
