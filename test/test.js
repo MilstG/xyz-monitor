@@ -4142,8 +4142,8 @@ test("UI -23: amber theme removed, one density, status bar reformatted", () => {
   // the controls, so the anchor is now an element that exists for that job and nothing else.
   assert.ok(html.includes('id="tabSpacer"'), "tab/control divider missing from the markup");
   assert.ok(css.includes(".tabspacer{margin-left:auto}"), "the spacer must absorb the slack");
-  assert.equal((app.match(/el\('tabSpacer'\)|getElementById\('tabSpacer'\)/g) || []).length, 2,
-    "both the saved-order pass and the Treemap installer must anchor on the spacer");
+  assert.equal((app.match(/el\('tabSpacer'\)|getElementById\('tabSpacer'\)/g) || []).length, 3,
+    "the saved-order pass, the Treemap installer and the group builder must all anchor on the spacer");
 
   // Status bar: a panel strip with a right-pinned tray, not right-aligned floating text.
   assert.ok(/\.statusline\{[^}]*background:var\(--panel\)/.test(css), "status bar must read as a strip");
@@ -7820,7 +7820,8 @@ test("tabs: backtest is hidden from the strip by default without withdrawing the
   for (const v of ["backtest", "actionable"])
     assert.equal(C.featureState({}, v), "admin", `${v} must default to admin in the manifest (it used to be in HIDDEN_TABS)`);
   assert.ok(s.includes("function applyTabVisibility"), "tab visibility applier missing");
-  assert.ok(/applyTabOrder\(\); applyTabVisibility\(\);/.test(s), "visibility must be applied on the initial nav pass");
+  assert.ok(/applyTabOrder\(\);(?: buildTabGroups\(\);)? applyTabVisibility\(\);/.test(s),
+    "visibility must be applied on the initial nav pass, after any grouping step");
   // The applier must evaluate EVERY tab, not just members of a hide-list, or a flag flipped to public
   // in the panel would leave the tab stuck hidden until someone edited app.js.
   assert.ok(/t\.hidden = !tabVisible\(t\.dataset\.view\)/.test(s), "applyTabVisibility must both hide and un-hide via tabVisible");
@@ -12205,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-08"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-09"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19899,6 +19900,56 @@ test("13f ingest: the SEC URL convention, and a default quarter that can exist",
   assert.strictEqual((body.match(/return done\(\{ ok: false/g) || []).length, 1, "only the catch returns without fail()");
   assert.ok(/pushOps\([^;]*ingest FAILED[\s\S]{0,180}?return done\(\{ ok: false/.test(body), "and it logs first");
   assert.ok(body.includes("tried.push(url +"), "each attempt logs its FULL url");
+});
+
+// The ribbon was one flex row holding the scope switcher, 18 tabs and two controls, and it had
+// run out of width with four tabs already hidden to make it fit. Tabs now live in four menus; the
+// row holds six triggers. The risk this test guards is DRIFT: a tab added to the server manifest
+// but not to the client taxonomy, and the [hidden] trap that let a closed menu eat its own clicks.
+test("nav groups: every tab is placed, exactly once, and a closed menu is really closed", () => {
+  const fs = require("fs"), path = require("path");
+  const R = (p) => fs.readFileSync(path.join(__dirname, "..", p), "utf8");
+  const app = R("public/app.js"), css = R("public/styles.css"), cmp = R("src/compute.js");
+  const F = new Function(
+    app.match(/^const TAB_PINNED = new Set\([\s\S]*?\);$/m)[0] + "\n" +
+    app.match(/^const TAB_GROUPS = \[[\s\S]*?\n\];$/m)[0] +
+    "\nreturn { TAB_PINNED, TAB_GROUPS };")();
+
+  // every tab the SERVER ships is placed by the client taxonomy — this is the drift guard
+  const shipped = [...cmp.matchAll(/\{ key: "([a-z0-9]+)",\s+kind: "tab"/g)].map((m) => m[1]);
+  assert.ok(shipped.length >= 18, "found the tab manifest (" + shipped.length + " tabs)");
+  const placed = new Map();
+  for (const g of F.TAB_GROUPS) for (const v of g.views) {
+    assert.ok(!placed.has(v), v + " is in one group only, not " + placed.get(v) + " and " + g.key);
+    placed.set(v, g.key);
+  }
+  for (const v of shipped) {
+    assert.ok(F.TAB_PINNED.has(v) || placed.has(v), v + " is pinned or grouped, never orphaned");
+    assert.ok(!(F.TAB_PINNED.has(v) && placed.has(v)), v + " is not both pinned and grouped");
+  }
+  // and nothing in the taxonomy points at a tab that does not exist
+  for (const [v] of placed) assert.ok(shipped.includes(v), v + " is a real tab in FEATURES");
+  for (const v of F.TAB_PINNED) assert.ok(shipped.includes(v), "pinned " + v + " is a real tab");
+
+  // markets stays flat because it is pin:true and every load lands on it; admin because it is a
+  // single locked entry. Both would be a bad two-click trade.
+  assert.ok(/\{ key: "markets",[^}]*pin: true/.test(cmp), "markets is pinned in the manifest too");
+  assert.ok(F.TAB_PINNED.has("markets") && F.TAB_PINNED.has("admin"), "the two flat tabs");
+  assert.ok(F.TAB_GROUPS.length >= 3 && F.TAB_GROUPS.length <= 6,
+    "few enough groups to fit the row (" + F.TAB_GROUPS.length + ")");
+
+  // the [hidden] trap: .tabmenu/.tabgrp set display, which beats the UA's [hidden] rule on ORIGIN.
+  // Without these two lines a CLOSED menu still intercepted pointer events over its own trigger —
+  // caught by driving a real browser, invisible to any source-level assertion.
+  assert.ok(css.includes(".tabmenu[hidden]{display:none}"), "closed menu is display:none");
+  assert.ok(css.includes(".tabgrp[hidden]{display:none}"), "emptied group is display:none");
+
+  // the real .tab buttons MOVE into menus — everything keyed off them must keep working
+  assert.ok(app.includes("members.forEach(t=>menu.appendChild(t))"), "tabs are moved, not cloned");
+  assert.ok(/syncTabGroups\(/.test(app) && (app.match(/syncTabGroups\(/g) || []).length >= 4,
+    "group state syncs from showView and the visibility pass");
+  assert.ok(app.includes("if(over.parentNode!==drag.parentNode) return;"), "drag stays inside its own container");
+  assert.ok(!/nav\.insertBefore\(drag,/.test(app), "drag no longer reparents a tab into the flat row");
 });
 
 test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursday refire, view wiring)", () => {

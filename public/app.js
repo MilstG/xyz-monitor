@@ -5677,6 +5677,8 @@ function showView(v){
   { const hm=el('helpmodal'); if(hm&&!hm.hidden) closeHelp(); }   // help is per-tab — never leave a stale explainer open across a switch
   state.view=v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
+  if(typeof syncTabGroups==='function') syncTabGroups(v);            // underline the group that owns it
+  if(typeof closeTabMenus==='function') closeTabMenus();             // navigating always dismisses the menu
   const setHidden=(id,hidden)=>{ const e=el(id); if(e) e.hidden=hidden; };   // null-safe: a stale index.html missing a section can't break navigation
   setHidden('view-markets', v!=='markets');
   setHidden('view-focus', v!=='focus');
@@ -9024,6 +9026,7 @@ function saveTabOrder(){ try{ const nav=document.querySelector('nav.tabs');
 function applyTabVisibility(){
   const nav=document.querySelector('nav.tabs'); if(!nav) return;
   nav.querySelectorAll('.tab').forEach(t=>{ t.hidden = !tabVisible(t.dataset.view); });
+  if(typeof syncTabGroups==='function') syncTabGroups(state.view);   // a group with nothing left in it hides too
 }
 function applyTabOrder(){ let ord; try{ ord=JSON.parse(store.get(TABKEY)||'null'); }catch(_){ ord=null; }
   const nav=document.querySelector('nav.tabs'); if(!nav||!Array.isArray(ord)||!ord.length) return;
@@ -9043,10 +9046,110 @@ function wireTabDrag(){ const nav=document.querySelector('nav.tabs'); if(!nav) r
   nav.addEventListener('dragover',e=>{ const drag=nav.querySelector('.tab.dragging'); if(!drag) return;
     e.preventDefault();
     const over=(e.target&&e.target.closest)?e.target.closest('.tab'):null; if(!over||over===drag) return;
+    if(over.parentNode!==drag.parentNode) return;   // no dragging across groups: a tab's group is the taxonomy's call, not a drop target
     const r=over.getBoundingClientRect();
-    nav.insertBefore(drag, (e.clientX < r.left + r.width/2) ? over : over.nextSibling); });   // live reorder — the moving tab IS the drop indicator
+    const menu=over.closest('.tabmenu');            // menus stack vertically, the flat row horizontally
+    const before=menu ? (e.clientY < r.top + r.height/2) : (e.clientX < r.left + r.width/2);
+    over.parentNode.insertBefore(drag, before ? over : over.nextSibling); });   // live reorder — the moving tab IS the drop indicator
 }
-applyTabOrder(); applyTabVisibility(); wireTabDrag();
+// ===== nav groups: five triggers instead of eighteen peers =====================================
+// The ribbon was one flex row holding the scope switcher, every tab and two controls, and it ran
+// out of width — visibly, with four tabs already hidden to make it fit. Grouping stops the row
+// growing with the feature list: adding a tab now costs a menu row, not horizontal space.
+//
+// The real .tab buttons MOVE INTO the menus rather than being replaced by copies. Everything that
+// already keys off them keeps working untouched: showView's active sweep, applyTabVisibility's
+// per-tab hidden, the per-tab click handlers, the treemap installer's delegated nav listener
+// (menus stay inside nav.tabs, so clicks still bubble to it) and saveTabOrder's DOM read.
+//
+// markets and admin stay flat on purpose: markets is pin:true in the server manifest and is the
+// view every load lands on, so putting home two clicks away would be a bad trade; admin is a
+// single locked entry and a one-item menu is pure cost. A tab in NO group and not pinned stays
+// flat too — a tab added without touching this list degrades to today's behaviour instead of
+// disappearing.
+const TAB_PINNED = new Set(['markets','admin']);
+const TAB_GROUPS = [
+  { key:'tape',     label:'Tape',     views:['trend','charts','treemap','sectors','corr','sessions'] },
+  { key:'signals',  label:'Signals',  views:['signals','actionable','focus','backtest'] },
+  { key:'macro',    label:'Macro',    views:['earnings','news','housing','liquidity'] },
+  { key:'research', label:'Research', views:['report','funds'] },
+];
+const tabGroupOf=(v)=>TAB_GROUPS.find(g=>g.views.includes(v))||null;
+function closeTabMenus(except){
+  document.querySelectorAll('.tabgrp').forEach(w=>{ if(w===except) return;
+    const b=w.querySelector('.grp'), m=w.querySelector('.tabmenu');
+    if(b) b.setAttribute('aria-expanded','false'); if(m) m.hidden=true; });
+}
+function openTabMenu(wrap){
+  const btn=wrap.querySelector('.grp'), menu=wrap.querySelector('.tabmenu');
+  if(!btn||!menu) return;
+  closeTabMenus(wrap);
+  menu.hidden=false; btn.setAttribute('aria-expanded','true');
+  // fixed positioning, measured on open: nav.tabs becomes an overflow-x scroller on narrow
+  // viewports and would otherwise clip the menu.
+  const r=btn.getBoundingClientRect();
+  menu.style.top=(r.bottom+5)+'px';
+  menu.style.left='0px'; menu.style.right='auto';
+  const w=menu.offsetWidth||186;
+  menu.style.left=Math.max(8, Math.min(r.left, window.innerWidth-w-8))+'px';
+}
+function toggleTabMenu(wrap){
+  const btn=wrap.querySelector('.grp');
+  if(btn&&btn.getAttribute('aria-expanded')==='true') closeTabMenus(); else openTabMenu(wrap);
+}
+// Idempotent: re-runnable after a tab is injected at runtime (treemap arrives on DOMContentLoaded).
+function buildTabGroups(){
+  const nav=document.querySelector('nav.tabs'); const anchor=el('tabSpacer');
+  if(!nav||!anchor) return;
+  const byView={}; nav.querySelectorAll('.tab').forEach(t=>{ byView[t.dataset.view]=t; });
+  // pinned first, in a fixed order, so home never moves
+  if(byView['markets']) nav.insertBefore(byView['markets'],anchor);
+  for(const g of TAB_GROUPS){
+    const members=g.views.map(v=>byView[v]).filter(Boolean);
+    let wrap=nav.querySelector('.tabgrp[data-grp="'+g.key+'"]');
+    if(!members.length){ if(wrap) wrap.remove(); continue; }
+    if(!wrap){
+      wrap=document.createElement('span'); wrap.className='tabgrp'; wrap.dataset.grp=g.key;
+      const btn=document.createElement('button');
+      btn.type='button'; btn.className='grp'; btn.setAttribute('aria-haspopup','true');
+      btn.setAttribute('aria-expanded','false');
+      btn.innerHTML='<span class="lbl"></span><span class="cnt"></span><span class="caret">\u25BE</span>';
+      const menu=document.createElement('div');
+      menu.className='tabmenu'; menu.setAttribute('role','menu'); menu.hidden=true;
+      wrap.appendChild(btn); wrap.appendChild(menu);
+      btn.addEventListener('click',(e)=>{ e.stopPropagation(); toggleTabMenu(wrap); });
+      btn.addEventListener('keydown',(e)=>{ if(e.key==='ArrowDown'||e.key==='Enter'||e.key===' '){
+        e.preventDefault(); openTabMenu(wrap); const f=menu.querySelector('.tab:not([hidden])'); if(f) f.focus(); } });
+    }
+    wrap.querySelector('.lbl').textContent=g.label;
+    const menu=wrap.querySelector('.tabmenu');
+    members.forEach(t=>menu.appendChild(t));      // preserves the persisted relative order
+    nav.insertBefore(wrap,anchor);
+  }
+  // ungrouped, unpinned tabs stay flat rather than vanishing
+  nav.querySelectorAll('.tab').forEach(t=>{ const v=t.dataset.view;
+    if(t.closest('.tabmenu')||TAB_PINNED.has(v)) return;
+    if(!tabGroupOf(v)) nav.insertBefore(t,anchor); });
+  if(byView['admin']) nav.insertBefore(byView['admin'],anchor);   // admin sits last, next to the controls
+  syncTabGroups(state.view);
+}
+// A group shows only if it has a visible member, and its count reflects what the viewer can
+// actually reach — crypto scope and the feature flags both prune members, so an admin on stocks
+// and a group member on crypto see different counts on the same trigger.
+function syncTabGroups(v){
+  document.querySelectorAll('.tabgrp').forEach(wrap=>{
+    const menu=wrap.querySelector('.tabmenu'), btn=wrap.querySelector('.grp');
+    if(!menu||!btn) return;
+    const shown=[...menu.querySelectorAll('.tab')].filter(t=>!t.hidden);
+    wrap.hidden=!shown.length;
+    btn.querySelector('.cnt').textContent=shown.length?String(shown.length):'';
+    btn.classList.toggle('active', shown.some(t=>t.dataset.view===v));
+  });
+}
+document.addEventListener('click',(e)=>{ if(!e.target.closest||!e.target.closest('.tabgrp')) closeTabMenus(); });
+document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') closeTabMenus(); });
+window.addEventListener('resize',()=>closeTabMenus());
+applyTabOrder(); buildTabGroups(); applyTabVisibility(); wireTabDrag();
 { const vb=el('admVap'); if(vb) vb.addEventListener('click',toggleViewAsPublic); }
 // Logout button: only meaningful when the server set the JS-visible auth marker at login.
 { const lb=el('logoutBtn'); if(lb && /(^|;\s*)xyzauth=1/.test(document.cookie)){ lb.hidden=false;
@@ -10238,6 +10341,7 @@ function renderTreemap(){
       // Join the systems that wired the static tabs before this one existed: saved tab order
       // (so a persisted position for treemap applies on load) and drag-to-reorder (idempotent).
       if(typeof applyTabOrder==='function') applyTabOrder();
+      if(typeof buildTabGroups==='function') buildTabGroups();   // treemap lands in the Tape menu, not loose in the row
       if(typeof applyTabVisibility==='function') applyTabVisibility();
       if(typeof wireTabDrag==='function') wireTabDrag();
     }

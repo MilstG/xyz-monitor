@@ -29,6 +29,8 @@
 .seg[hidden]{display:none}
 .scope[hidden]{display:none}
 .cg-basectl[hidden]{display:none}   /* -07: runtime-templated hidden, so the markup audit never saw it — the spread-mode base select was painting in Index mode and read as a forced basket comparison */
+.tabmenu[hidden]{display:none}      /* -09: display:flex beat [hidden]; a closed menu still ate the clicks on its own trigger */
+.tabgrp[hidden]{display:none}       /* -09: same for a group emptied by scope or a feature flag */
 /* Industry-board honesty chips: «thin» (n<5, noisier stats) and «= sector» (fallback group). */
 .sthin{display:inline-block;font-size:9px;color:var(--muted);border:1px solid var(--border);border-radius:3px;padding:0 4px;margin-left:6px;letter-spacing:.04em;vertical-align:1px;font-style:normal;font-weight:400}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
@@ -278,6 +280,30 @@ footer code{font-family:var(--mono);color:var(--muted)}
 /* The divider between tabs and controls. Zero width; its only job is to absorb the slack, which
    also makes it the one stable insertion anchor for tab ordering. */
 .tabspacer{margin-left:auto}
+/* ---- nav groups: menus instead of eighteen peers ----------------------------------------------
+   The trigger is a .tab visually (same type, same underline) so the row reads as one system; the
+   menu is position:fixed and coordinates are computed on open, because .tabs turns into an
+   overflow-x scroller under 1100px and an absolutely-positioned child would be clipped by it. */
+.tabgrp{display:inline-flex}
+.grp{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);
+  font-family:var(--disp);font-size:14px;font-weight:500;padding:9px 13px;cursor:pointer;margin-bottom:-1px;
+  white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+.grp:hover{color:var(--text)}
+.grp.active{color:var(--text);border-bottom-color:var(--accent)}
+.grp[aria-expanded="true"]{color:var(--text);background:var(--panel2)}
+.grp:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.grp .cnt{font-family:var(--mono);font-size:10px;color:var(--faint);font-variant-numeric:tabular-nums}
+.grp .caret{font-size:9px;color:var(--faint);transition:transform .12s ease}
+.grp[aria-expanded="true"] .caret{transform:rotate(180deg)}
+.tabmenu{position:fixed;z-index:60;min-width:186px;padding:5px;background:var(--panel);
+  border:1px solid var(--border);border-radius:9px;box-shadow:0 14px 34px -10px rgba(0,0,0,.72);
+  display:flex;flex-direction:column;gap:1px}
+.tabmenu .tab{border-bottom:none;margin-bottom:0;border-radius:6px;padding:8px 11px;font-size:13.5px;
+  text-align:left;width:100%}
+.tabmenu .tab:hover{background:var(--panel2);color:var(--text)}
+.tabmenu .tab.active{color:var(--accent);background:var(--panel2)}
+.tabmenu .tab.dragging{opacity:.35}
+@media (prefers-reduced-motion:reduce){.grp .caret{transition:none}}
 .tabs .tabbtn{align-self:center;padding:6px 12px;margin-bottom:5px}
 .tab.dragging{opacity:.35}
 
