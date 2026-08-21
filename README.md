@@ -32,13 +32,16 @@ instant, and the per-IP rate limit stops being a per-user problem.
   name's usual range — shown on the tab and in the drawer. Session-spanning ledger claims in
   force within 1 day of a print are tagged (E in claim history) so the earnings-conditioned
   base-rate split accrues out of sample.
-- **Housing tab** (`/api/housing`) — macro housing / MBS board: 30y mortgage rate, Fed SLOOS lending
-  standards, single-family vs multifamily starts, months' supply, new-home sales, median price and a BBB
-  OAS proxy for non-QM spreads. Eight FRED series pulled in full history (needs `FRED_KEY`), refreshed
-  every 6h, warm-cached on the volume (`housing.json`). Each card names its series; a *Proxy* chip says
-  what differs from the paid original (jumbo rates, NAR existing-home data, DB non-QM spreads). SIFMA
-  issuance and FINRA TRACE volume are declared as *Pending* until their file feeds are wired. Ships
-  admin-only.
+- **Housing tab** (`/api/housing`) — macro housing / MBS board: 30y mortgage rate, single-family vs
+  multifamily starts, months' supply, new-home sales, median price and a BBB OAS proxy for non-QM
+  spreads. Seven FRED series pulled in full history (needs `FRED_KEY`), refreshed every 6h,
+  warm-cached on the volume (`housing.json`). Each card names its series; a *Proxy* chip says what
+  differs from the paid original (jumbo rates, NAR existing-home data, DB non-QM spreads). A series
+  whose newest print is older than its own cadence can explain is dropped with its reason rather
+  than served — FRED retires series silently (SLOOS lending standards, `DRTSPM`, stopped at 2014Q4
+  and was removed for that reason), and a retired panel is stale data wearing a live label. SIFMA
+  issuance and FINRA TRACE volume are not on the board: both are form-gated or file-fed xlsx with no
+  API, and a placeholder card showing nothing is a roadmap item, not a panel. Ships admin-only.
 - **Liquidity tab** (`/api/liquidity`) — Fed net liquidity board: total assets − TGA − ON RRP on the
   weekly H.4.1 dates, as dollars and % of nominal GDP, year-to-date change by component (signed by
   liquidity effect), balance-sheet composition, the TGA/ON RRP drains, plus bank reserves and SOFR−IORB

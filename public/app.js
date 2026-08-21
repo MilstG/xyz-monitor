@@ -7119,25 +7119,7 @@ function hsgWindowStart(win){
   if(win==='5y') return (y-5)+'-01-01';
   return '1900-01-01';
 }
-// Window anchoring for a series that STOPPED. FRED retires series — SLOOS replaced its single
-// "prime mortgage" standards question with granular categories after 2014Q4, so DRTSPM simply
-// ends there — and a today-anchored window slices a retired series to nothing, leaving the card
-// reading "not enough data in this window": true, useless, and silent about the actual reason.
-// Live series keep the calendar window byte-for-byte as before; only a series whose LAST print
-// already predates that window re-anchors to its own tail, so "5y" means the last five years OF
-// DATA. hsgEnded names that case for the chip and the caption so the card says why, not nothing.
-function hsgSpanDays(win){ return win==='1y'?366:win==='5y'?5*366:null; }
-const HSG_DEAD_MS=400*864e5;
-function hsgEnded(ser){ const obs=(ser&&ser.obs)||[]; if(!obs.length) return null;
-  const last=obs[obs.length-1][0];
-  return (Date.now()-Date.parse(last))>HSG_DEAD_MS?last:null; }
-function hsgSlice(ser,win){
-  const obs=(ser&&ser.obs)||[], w=obs.filter(o=>o[0]>=hsgWindowStart(win));
-  if(w.length>=2||obs.length<2) return w;
-  const days=hsgSpanDays(win); if(days==null) return obs;
-  const from=Date.parse(obs[obs.length-1][0])-days*864e5;
-  return obs.filter(o=>Date.parse(o[0])>=from);
-}
+function hsgSlice(ser,win){ const from=hsgWindowStart(win); return (ser&&ser.obs||[]).filter(o=>o[0]>=from); }
 function hsgFmt(v,ser){ if(v==null||!isFinite(v)) return '—';
   if(ser.unit==='$B') return liqB(v);
   if(ser.unit==='$k') return '$'+v.toFixed(0)+'k';
@@ -7176,24 +7158,6 @@ function hsgLineSvg(ser,pts,o){
   const xs=pts.map((_,i)=>X(i)), rows=pts.map(p=>`<div class="sec">${hsgDate(p[0])}</div><div><b>${hsgFmt(p[1],ser)}</b></div>`);
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
-// diverging bars around zero (SLOOS): above zero paints --down (tightening is the bad side here)
-function hsgDivergeSvg(ser,pts,o){
-  o=o||{}; const W=o.w||560,H=o.h||190,pl=44,pr=12,pt=10,pb=20;
-  if(!pts||pts.length<2) return '<div class="msg sec" style="padding:30px 0">not enough data in this window</div>';
-  let lo=0,hi=0; for(const p of pts){ if(p[1]<lo)lo=p[1]; if(p[1]>hi)hi=p[1]; }
-  const pad=(hi-lo)*0.08||1; lo-=pad; hi+=pad;
-  const ticks=lcTicks(lo,hi,4);
-  const bw=(W-pl-pr)/pts.length;
-  const X=i=>pl+bw*(i+0.5), Y=v=>pt+(H-pt-pb)*(1-(v-lo)/(hi-lo));
-  let s=lcGrid(pl,W-pr,ticks,Y,v=>v.toFixed(0)+'%');
-  s+=hsgXLabels(pts,W,pl+bw/2,pr+bw/2).replace(/__YB__/g,(H-4).toFixed(1));
-  s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--faint)" stroke-dasharray="2 3"/>`;
-  pts.forEach((p,i)=>{ const y0=Y(0), y1=Y(p[1]); const top=Math.min(y0,y1), h=Math.max(1,Math.abs(y1-y0));
-    s+=`<rect x="${(X(i)-bw/2+0.6).toFixed(1)}" y="${top.toFixed(1)}" width="${Math.max(1.2,bw-1.2).toFixed(1)}" height="${h.toFixed(1)}" fill="${p[1]>=0?'var(--down)':'var(--up)'}" rx="1"/>`; });
-  const xs=pts.map((_,i)=>X(i)), rows=pts.map(p=>{ const q=Math.floor((+p[0].slice(5,7)-1)/3)+1;
-    return `<div class="sec">${p[0].slice(0,4)} Q${q}</div><div><b class="${p[1]>=0?'neg':'pos'}">${Math.abs(p[1]).toFixed(1)}%</b> net ${p[1]>=0?'tightening':'easing'}</div>`; });
-  return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
-}
 // stacked area: multifamily on the floor, single-family on top (both in M saar)
 function hsgStackSvg(sf,mf,sfPts,mfPts,o){
   o=o||{}; const W=o.w||1140,H=o.h||200,pl=44,pr=12,pt=10,pb=20;
@@ -7213,36 +7177,26 @@ function hsgStackSvg(sf,mf,sfPts,mfPts,o){
   return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});
 }
 function hsgChip(ser){
-  // A dead series must not wear the green "Direct" dot: the chip is the card's claim about how
-  // live the number is, and DRTSPM's last print is from 2014.
-  const proxy=!!ser.proxy, ended=hsgEnded(ser);
-  const cls=ended?'ended':proxy?'proxy':'direct', lab=ended?'Ended':proxy?'Proxy':'Direct';
-  const tip=esc(ser.src)+(proxy?' — '+esc(ser.proxy):'')+(ended?' — discontinued: no print since '+esc(hsgDate(ended)):'');
-  return `<span class="src-chip ${cls}" title="${tip}"><i></i>${lab} · ${esc(ser.sid)}</span>`;
+  const proxy=!!ser.proxy;
+  return `<span class="src-chip ${proxy?'proxy':'direct'}" title="${esc(ser.src)}${proxy?' — '+esc(ser.proxy):''}"><i></i>${proxy?'Proxy':'Direct'} · ${esc(ser.sid)}</span>`;
 }
 function hsgDelta(ser){
   const y=ser.yoy; if(!y) return '<span class="sec">12m —</span>';
-  const isLvl = ser.unit==='%'||ser.unit==='bp'||ser.unit==='months'||ser.unit==='% net tightening';
+  const isLvl = ser.unit==='%'||ser.unit==='bp'||ser.unit==='months';
   const v = isLvl ? y.diff : y.pct;
   if(v==null) return '<span class="sec">12m —</span>';
   const txt = isLvl ? (ser.unit==='%' ? (v*100).toFixed(0)+'bp' : ser.unit==='bp' ? v.toFixed(0)+'bp' : ser.unit==='months' ? v.toFixed(1)+' mo' : v.toFixed(1)+'pt') : Math.abs(v).toFixed(1)+'%';
   // direction semantics: higher rates / spreads / supply / tightening read as the bad side
-  const bad = ser.k==='rate30'||ser.k==='spread'||ser.k==='supply'||ser.k==='sloos';
+  const bad = ser.k==='rate30'||ser.k==='spread'||ser.k==='supply';
   const cls = v===0?'sec':((v>0)!==bad?'pos':'neg');
   return `<span class="${cls}">${v>0?'▲':'▼'} ${txt.replace('-','')}</span> <span class="sec">12m</span>`;
-}
-// Says the quiet part on a discontinued series: the headline date, the "12m" change and the
-// chart all anchor to the last print, not to today — without this the card reads as current.
-function hsgEndedCap(ser){
-  const ended=hsgEnded(ser); if(!ended) return '';
-  return `<div class="s-cap hsg-ended">No print since ${esc(hsgDate(ended))} — ${esc(ser.sid)} is discontinued. The value, the 12m change and the chart window are anchored to that last observation, not to today.</div>`;
 }
 function hsgCard(ser,chart,extra){
   return `<div class="s-card hsg-card">`+
     `<div class="hsg-head"><span class="hsg-title">${esc(ser.title)}</span>${hsgChip(ser)}</div>`+
     `<div class="hsg-kpis"><span class="hsg-v">${hsgFmt(ser.last.v,ser)}</span><span class="sec hsg-d">${hsgDate(ser.last.d)}</span>${hsgDelta(ser)}`+
       `<span class="sec hsg-rng">range ${hsgFmt(ser.lo.v,ser)} – ${hsgFmt(ser.hi.v,ser)}</span></div>`+
-    chart+(extra||'')+hsgEndedCap(ser)+(ser.proxy?`<div class="s-cap">${esc(ser.proxy)}</div>`:'')+`</div>`;
+    chart+(extra||'')+(ser.proxy?`<div class="s-cap">${esc(ser.proxy)}</div>`:'')+`</div>`;
 }
 function renderHousing(){
   const root=el('hsg-body'); if(!root) return;
@@ -7260,7 +7214,6 @@ function renderHousing(){
   const cards=[];
   if(g('rate30')) cards.push(hsgCard(g('rate30'),hsgLineSvg(g('rate30'),sl('rate30'),{color:'var(--blue)'})));
   if(g('spread')) cards.push(hsgCard(g('spread'),hsgLineSvg(g('spread'),sl('spread'),{color:'var(--accent)'})));
-  if(g('sloos')) cards.push(hsgCard(g('sloos'),hsgDivergeSvg(g('sloos'),sl('sloos')),sLeg([{color:'var(--down)',label:'net % tightening'},{color:'var(--up)',label:'net % easing'}])));
   if(g('supply')) cards.push(hsgCard(g('supply'),hsgLineSvg(g('supply'),sl('supply'),{color:'var(--accent)',zero:true})));
   if(g('sales')) cards.push(hsgCard(g('sales'),hsgLineSvg(g('sales'),sl('sales'),{color:'var(--muted)',zero:true})));
   if(g('price')) cards.push(hsgCard(g('price'),hsgLineSvg(g('price'),sl('price'),{color:'var(--accent)'})));
@@ -7270,11 +7223,9 @@ function renderHousing(){
       `<div class="hsg-kpis"><span class="hsg-v">${sf.last.v.toFixed(2)}M</span><span class="sec hsg-d">single-family · ${hsgDate(sf.last.d)}</span>${hsgDelta(sf)}<span class="sec" style="margin:0 6px">|</span><span class="hsg-v" style="font-size:15px">${mf.last.v.toFixed(2)}M</span><span class="sec hsg-d">multifamily</span>${hsgDelta(mf)}</div>`+
       sLeg([{color:'var(--blue)',label:'Single-family'},{color:'var(--muted)',label:'Multifamily (5+ units)'}])+
       hsgStackSvg(sf,mf,sl('sf'),sl('mf'))+`</div>`; }
-  const pending=(d.pending||[]).map(p=>`<div class="s-card hsg-card hsg-pending"><div class="hsg-head"><span class="hsg-title">${esc(p.title)}</span><span class="src-chip pending" title="${esc(p.why)}"><i></i>Pending</span></div>`+
-    `<div class="hsg-empty"><div><b>Source:</b> ${esc(p.src)}</div><div class="sec">${esc(p.why)}</div></div></div>`).join('');
   const missing=(d.missing&&d.missing.length)?`<div class="s-cap" style="margin-top:10px">Absent this pass (not shown stale): ${d.missing.map(esc).join(', ')}</div>`:'';
   const errl=d.error?`<div class="s-cap" style="margin-top:10px;color:var(--down)">Last refresh failed — showing the previous board. ${esc(d.error)}</div>`:'';
-  root.innerHTML=tiles+`<div class="s-grid">${cards.join('')}</div>`+starts+`<div class="s-grid" style="margin-top:12px">${pending}</div>`+missing+errl;
+  root.innerHTML=tiles+`<div class="s-grid">${cards.join('')}</div>`+starts+missing+errl;
   attachLineHover();
 }
 // Adaptive EPS display precision: expand decimals (2 -> 4) until actual and estimate render as
@@ -9184,9 +9135,10 @@ const HELP={
 <div class="hlp-h">% of GDP</div><p>Net liquidity divided by nominal GDP (quarterly, forward-filled). The level that matters is relative to the economy — $6T meant something different in 2014 than in 2024. The caption shows the peak and how far below it we sit.</p>
 <div class="hlp-h">Plumbing stress (ours)</div><p>Two series the usual net-liquidity pages leave out. <b>Bank reserves</b> are what the Fed actually targets as "ample"; the 2019 repo spike came when they hit ~$1.4T. <b>SOFR − IORB</b> is the overnight funding rate against what the Fed pays on reserves — persistently positive means collateral is scarce and reserves are getting tight, the earliest warning that QT has gone too far. <b>QT end</b> on the Treasuries tile is derived: the first week after the 13-week change in holdings stopped being negative.</p>`,
   housing:`<div class="hlp-h">What this is</div><p>A macro board for US housing and mortgage credit — the backdrop behind the homebuilders, mortgage servicers, REITs and banks in the universe. Every panel is a public series pulled server-side from FRED and refreshed every 6 hours; nothing here is intraday.</p>
-<div class="hlp-h">Reading the source chips</div><p>Each card carries a chip naming its series. <b>Direct</b> means the panel is the same series the institutional Market Monitor uses. <b>Proxy</b> means the original is paid or proprietary (jumbo rates, NAR existing-home data, Deutsche Bank's non-QM spread) and the card shows the closest public stand-in — the chip text says exactly what differs. <b>Pending</b> cards name a file-fed source (SIFMA, FINRA) that is not wired yet.</p>
-<div class="hlp-h">Panels</div><p><b>Mortgage rate</b> — Freddie Mac 30y conforming, weekly. <b>Lending standards</b> — Fed SLOOS, net % of banks tightening on prime mortgages; above zero is tightening. <b>Starts</b> — single-family and multifamily, millions SAAR. <b>Months' supply</b> — new homes; 6+ months historically reads as a buyer's market. <b>Sales / price</b> — Census new-home sales and the median price of houses sold. <b>Spread proxy</b> — ICE BofA BBB corporate OAS in bp, standing in for non-QM spreads.</p>
-<div class="hlp-h">Change columns</div><p>12m compares the latest print with the observation closest to one year earlier — a missing month returns a dash, never an approximation. Series that didn't come back on the last pass are listed at the foot of the tab rather than shown stale.</p>`,
+<div class="hlp-h">Reading the source chips</div><p>Each card carries a chip naming its series. <b>Direct</b> means the panel is the same series the institutional Market Monitor uses. <b>Proxy</b> means the original is paid or proprietary (jumbo rates, NAR existing-home data, Deutsche Bank's non-QM spread) and the card shows the closest public stand-in — the chip text says exactly what differs.</p>
+<div class="hlp-h">Panels</div><p><b>Mortgage rate</b> — Freddie Mac 30y conforming, weekly. <b>Starts</b> — single-family and multifamily, millions SAAR. <b>Months' supply</b> — new homes; 6+ months historically reads as a buyer's market. <b>Sales / price</b> — Census new-home sales and the median price of houses sold. <b>Spread proxy</b> — ICE BofA BBB corporate OAS in bp, standing in for non-QM spreads.</p>
+<div class="hlp-h">Change columns</div><p>12m compares the latest print with the observation closest to one year earlier — a missing month returns a dash, never an approximation. Series that didn't come back on the last pass are listed at the foot of the tab rather than shown stale.</p>
+<div class="hlp-h">What is deliberately absent</div><p>FRED retires series without erroring — the request still returns 200 and the observations simply stop. A panel whose newest print is older than its own cadence can explain is dropped and named at the foot of the tab, never charted as if it were current; SLOOS lending standards (<b>DRTSPM</b>) was removed for exactly that reason, having stopped at 2014Q4 when the survey retired the question. Non-agency MBS issuance (SIFMA) and TRACE secondary volume (FINRA) are absent too: both are xlsx downloads with no API, and an empty card promising a future feed is a roadmap item, not a panel.</p>`,
 focus:`
 <div class="hlp-h">What this list is</div>
 <p>Six seats, <b>stamped once at the 09:30 ET cash open</b>, one late fill at +1h, then immutable for the day — a compressed morning scan, not a signal. The engine reads only what the board already computed (gap machinery, clock-matched RVOL, the OI history, the earnings calendar, the news tape, the 30d extremes) and freezes it. The first hour itself is measured on <b>1m</b> bars captured by a lane reserved for the six seats, republished every ~25s until the 10:30 freeze. It never reshuffles at 10:47 because a number ticked; yesterday's list stays viewable exactly as stamped.</p>

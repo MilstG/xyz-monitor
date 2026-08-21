@@ -19791,7 +19791,7 @@ test("housing tab: source + wiring manifest (FRED board, feature-gated route, vi
   assert.ok(srv.includes("poller.getHousing()"), "route reads the poller board");
   assert.ok(/getHousing\s*:/.test(pol), "poller exports getHousing");
   // fetcher contract: every series is fetched in full history, per-series isolation, FRED pacing
-  for (const sid of ["MORTGAGE30US", "DRTSPM", "HOUST1F", "HOUST5F", "MSACSR", "HSN1F", "MSPUS", "BAMLC0A4CBBB"])
+  for (const sid of ["MORTGAGE30US", "HOUST1F", "HOUST5F", "MSACSR", "HSN1F", "MSPUS", "BAMLC0A4CBBB"])
     assert.ok(pol.includes(`sid: "${sid}"`), "series " + sid);
   assert.ok(pol.includes('observation_start: def.start'), "full history, not latest-30");
   assert.ok(/for \(const def of HOUSING_SERIES\) \{\s*try \{\s*await sleep\(150\);/.test(pol), "per-series try + 150ms pacing");
@@ -19808,7 +19808,7 @@ test("housing tab: source + wiring manifest (FRED board, feature-gated route, vi
   assert.ok(/HASH_VIEWS=new Set\(\[[^\]]*'housing'/.test(app), "deep link");
   assert.ok(/CMDK_TABS=\[[\s\S]*?\{v:'housing',label:'Housing'\}/.test(app), "command palette");
   assert.ok(/\n  housing:`/.test(app) && app.includes("housing:'Housing'"), "help text + title");
-  for (const fn of ["loadHousing", "openHousing", "renderHousing", "hsgLineSvg", "hsgDivergeSvg", "hsgStackSvg"])
+  for (const fn of ["loadHousing", "openHousing", "renderHousing", "hsgLineSvg", "hsgStackSvg"])
     assert.strictEqual((app.match(new RegExp("^(?:async )?function " + fn + "\\(", "gm")) || []).length, 1, fn + " defined once");
   assert.ok(app.includes("return hoverChart(s,{w:W,h:H,pt,pb,xs,rows});"), "charts ride the shared crosshair");
   assert.ok(app.includes("attachLineHover();\n}\n") && /root\.innerHTML=tiles[\s\S]*?attachLineHover\(\);/.test(app), "hover bound after paint");
@@ -19817,48 +19817,40 @@ test("housing tab: source + wiring manifest (FRED board, feature-gated route, vi
   assert.ok(css.includes(".src-chip.proxy i{background:var(--blue)}"), "proxy chip colour");
 });
 
-// A retired FRED series (SLOOS dropped the single prime-mortgage question after 2014Q4, so
-// DRTSPM stops there) used to slice to zero points in every calendar window, and the card
-// rendered "not enough data in this window" — true, useless, and silent about the reason.
-test("housing tab: a discontinued series still charts, and says it is discontinued", () => {
+// A retired FRED series returns 200 with observations that simply STOP — no error to catch. DRTSPM
+// did that (SLOOS dropped its prime-mortgage question after 2014Q4) and the panel showed a 2014
+// print as current for a decade. The board's contract is "never stale, never faked", so a series
+// past any lag its own cadence could explain is dropped with its reason, like a failed fetch.
+test("housing tab: a retired series is dropped, not served stale", () => {
   const fs = require("fs"), path = require("path");
-  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  const grab = (name) => {
-    const m = app.match(new RegExp("^function " + name + "\\([^\\n]*\\}$|^function " + name + "\\([\\s\\S]*?\\n\\}", "m"));
-    assert.ok(m, name + " extractable");
-    return m[0];
-  };
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const F = new Function(
-    grab("hsgWindowStart") + "\n" + grab("hsgSpanDays") + "\n" +
-    app.match(/^const HSG_DEAD_MS[^\n]*$/m)[0] + "\n" + grab("hsgEnded") + "\n" + grab("hsgSlice") + "\n" +
-    "return { hsgSlice, hsgEnded, hsgWindowStart };")();
+    pol.match(/^  const HOUSING_MAX_AGE = \{[^\n]*$/m)[0].trim() + "\n" +
+    pol.match(/^  function housingStaleAge\(def, lastD\) \{[\s\S]*?\n  \}/m)[0] + "\n" +
+    "return housingStaleAge;")();
+  const ago = (d) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
 
-  // quarterly series that ended in 2014 — a decade of history, nothing inside a today-anchored window
-  const dead = { obs: [] };
-  for (let y = 2007; y <= 2014; y++) for (const m of ["01", "04", "07", "10"]) dead.obs.push([y + "-" + m + "-01", 0]);
-  const live = { obs: [] };
-  const yNow = new Date().getUTCFullYear();
-  for (let y = yNow - 8; y <= yNow; y++) for (const m of ["01", "04", "07", "10"]) live.obs.push([y + "-" + m + "-01", 0]);
+  // the case that shipped: a quarterly series that stopped printing in 2014
+  assert.ok(F({ freq: "q" }, "2014-10-01") > 4000, "a decade-dead quarterly series is stale");
+  // ...and every cadence catches its own retirement
+  for (const [freq, cap] of [["d", 30], ["w", 60], ["m", 180], ["q", 400]]) {
+    assert.strictEqual(F({ freq }, ago(Math.floor(cap / 2))), 0, freq + " within its lag is fine");
+    assert.ok(F({ freq }, ago(cap + 30)) > 0, freq + " past its lag is stale");
+  }
+  // normal publication lag must NOT drop a live panel: these are the real cadences on the board
+  assert.strictEqual(F({ freq: "q" }, ago(200)), 0, "quarterly published two quarters back is live");
+  assert.strictEqual(F({ freq: "m" }, ago(60)), 0, "monthly with a two-month lag is live");
+  assert.strictEqual(F({ freq: "w" }, ago(10)), 0, "weekly over a holiday is live");
+  assert.strictEqual(F({ freq: undefined }, ago(100)), 0, "unknown cadence falls back to the loosest cap");
 
-  for (const win of ["1y", "5y", "all"]) {
-    const sl = F.hsgSlice(dead, win);
-    assert.ok(sl.length >= 2, "dead series charts in " + win + " (got " + sl.length + " pts)");
-    assert.strictEqual(sl[sl.length - 1][0], "2014-10-01", "re-anchored on its own last print, " + win);
-  }
-  // the re-anchored window is the span OF DATA, not the whole history
-  assert.ok(F.hsgSlice(dead, "1y").length < F.hsgSlice(dead, "5y").length, "1y is tighter than 5y");
-  assert.strictEqual(F.hsgSlice(dead, "all").length, dead.obs.length, "all is still everything");
-  // live series keep the old today-anchored behaviour exactly
-  for (const win of ["1y", "5y", "all"]) {
-    const from = F.hsgWindowStart(win);
-    assert.deepStrictEqual(F.hsgSlice(live, win), live.obs.filter((o) => o[0] >= from), "live slice unchanged, " + win);
-  }
-  // and the card labels the dead one instead of implying it is current
-  assert.strictEqual(F.hsgEnded(dead), "2014-10-01", "dead series names its last print");
-  assert.strictEqual(F.hsgEnded(live), null, "live series is not flagged");
-  assert.strictEqual(F.hsgEnded({ obs: [] }), null, "empty series does not throw");
-  assert.ok(app.includes("hsgEndedCap(ser)") && app.includes("is discontinued."), "card carries the caption");
-  assert.ok(/const cls=ended\?'ended':proxy\?'proxy':'direct'/.test(app), "chip drops the live Direct dot");
+  // both paths enforce it — the live fetch and the warm cache a redeploy serves from
+  assert.ok(pol.includes("discontinued or dropped by FRED"), "fetch path drops with a reason");
+  assert.ok(pol.includes('missing.push(def.sid + " (warm cache: no print in "'), "warm path drops too");
+  assert.ok(!pol.includes('sid: "DRTSPM"'), "the retired series is off the board");
+  // and the roadmap placeholders are not cards
+  assert.ok(!pol.includes("HOUSING_PENDING"), "no pending placeholder payload");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(!app.includes("hsg-pending") && !app.includes("d.pending||[]"), "no pending cards rendered");
 });
 
 test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursday refire, view wiring)", () => {

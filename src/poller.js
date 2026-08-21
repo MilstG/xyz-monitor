@@ -10718,13 +10718,6 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
   const HOUSING_SERIES = [
     { k: "rate30",  sid: "MORTGAGE30US", title: "30y fixed mortgage rate", unit: "%",   freq: "w", dp: 2, start: "2005-01-01",
       src: "Freddie Mac PMMS via FRED", proxy: "Original panel is the 30y JUMBO average (Bankrate/Bloomberg, no public API). Conforming tracks it within ~20bp." },
-    // DRTSPM is HISTORICAL: the SLOOS retired its single prime-mortgage standards question after
-    // 2014Q4 (replaced by GSE-eligible / QM / non-QM categories), so this series simply stops
-    // there and no refresh will ever extend it. The board keeps it — the 2007-08 tightening spike
-    // is the reason the panel exists — and the card labels itself "Ended" with the last print date
-    // rather than posing as current. Repointing at a live successor is a data decision, not a bug fix.
-    { k: "sloos",   sid: "DRTSPM",       title: "Lending standards — prime mortgages", unit: "% net tightening", freq: "q", dp: 1, start: "2000-01-01",
-      src: "Fed SLOOS via FRED (series ends 2014Q4 — SLOOS retired the prime-mortgage question)" },
     { k: "sf",      sid: "HOUST1F",      title: "Single-family starts", unit: "M saar", freq: "m", dp: 3, start: "2000-01-01", scale: 0.001,
       src: "Census via FRED" },
     { k: "mf",      sid: "HOUST5F",      title: "Multifamily starts (5+)", unit: "M saar", freq: "m", dp: 3, start: "2000-01-01", scale: 0.001,
@@ -10738,11 +10731,20 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     { k: "spread",  sid: "BAMLC0A4CBBB", title: "Credit spread proxy — BBB corporate OAS", unit: "bp", freq: "d", dp: 0, start: "2019-01-01", scale: 100,
       src: "ICE BofA via FRED", proxy: "Original panel is Deutsche Bank's fixed 2y non-QM spread (proprietary, no public series). ICE BofA BBB OAS is the proxy — same risk-premium cycle, different level." },
   ];
-  const HOUSING_PENDING = [
-    { k: "issuance", title: "US non-agency MBS issuance", src: "SIFMA US MBS statistics (monthly xlsx, form-gated download)", why: "No API; the workbook sits behind a form. Needs a scheduled download + xlsx parse." },
-    { k: "trace",    title: "MBS secondary trading (TRACE)", src: "FINRA Structured Trading Activity Report (FINRA_IDS_STAR.xlsx)", why: "Public xlsx on cdn.finra.org; needs an xlsx parse and a check of the IG / non-IG split." },
-  ];
   const HOUSING_STALE = 6 * 3600 * 1000, HOUSING_RETRY_MS = 30 * 60 * 1000;
+  // A FRED series can be RETIRED without any error: the request still returns 200, the observations
+  // just stop. DRTSPM did exactly that (SLOOS dropped its prime-mortgage question after 2014Q4) and
+  // the panel sat on the board for a decade showing a 2014 print as if it were current. That is the
+  // "never stale, never faked" contract failing quietly, so enforce it: a series whose newest
+  // observation is older than any publication lag its own cadence could explain is DROPPED with its
+  // reason, exactly like a series that failed to fetch. Thresholds are deliberately loose — the job
+  // is to catch a retirement, not to quibble with a slow month.
+  const HOUSING_MAX_AGE = { d: 30, w: 60, m: 180, q: 400 };
+  function housingStaleAge(def, lastD) {
+    const days = Math.floor((Date.now() - Date.parse(lastD)) / 864e5);
+    const cap = HOUSING_MAX_AGE[def.freq] || 400;
+    return days > cap ? days : 0;
+  }
   let housingCache = null, housingVer = 0, housingSig = "", lastHousingOk = 0;
   function housingDress(def, obs) {
     const sc = def.scale || 1;
@@ -10779,7 +10781,10 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
         try {
           await sleep(150);
           const obs = fredObsSeries(await fget("series/observations", { series_id: def.sid, observation_start: def.start, sort_order: "asc", limit: 100000 }));
-          if (obs.length) series[def.k] = housingDress(def, obs); else missing.push(def.sid);
+          if (!obs.length) { missing.push(def.sid); continue; }
+          const stale = housingStaleAge(def, obs[obs.length - 1][0]);
+          if (stale) { missing.push(def.sid + " (no print in " + stale + "d — discontinued or dropped by FRED)"); continue; }
+          series[def.k] = housingDress(def, obs);
         } catch (e) { missing.push(def.sid + " (" + ((e && e.message) || "fetch failed") + ")"); }
       }
       if (!Object.keys(series).length) err = "FRED unreachable: " + missing.join(", ");
@@ -10795,7 +10800,7 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     if (sig !== housingSig) { housingSig = sig; housingVer = now; }
     if (!err) lastHousingOk = now;
     housingCache = { ts: now, dataTs: housingVer, asOf: err ? (housingCache && housingCache.asOf) || null : now, error: err,
-      series, missing, pending: HOUSING_PENDING };
+      series, missing };
     if (!err && store.saveHousing) store.saveHousing({ ts: now, series, missing });
     log("Housing board: " + Object.keys(series).length + "/" + HOUSING_SERIES.length + " FRED series" + (err ? " (" + err + ")" : ""));
   }
@@ -10804,8 +10809,16 @@ Respond with ONLY a JSON object, no prose outside it and no markdown fences:
     const data = store.loadHousing ? store.loadHousing() : null;
     if (!data || !data.series || !Object.keys(data.series).length) return false;
     housingVer = data.ts || Date.now();
-    housingCache = { ts: Date.now(), dataTs: housingVer, asOf: data.ts || null, error: null,
-      series: data.series, missing: data.missing || [], pending: HOUSING_PENDING };
+    // Same guard on the warm path: a cache written before a series retired would otherwise put the
+    // stale panel back on the board for the first six hours after every redeploy.
+    const series = {}, missing = (data.missing || []).slice();
+    for (const def of HOUSING_SERIES) {
+      const ser = data.series[def.k]; if (!ser || !ser.last) continue;
+      const stale = housingStaleAge(def, ser.last.d);
+      if (stale) missing.push(def.sid + " (warm cache: no print in " + stale + "d)"); else series[def.k] = ser;
+    }
+    if (!Object.keys(series).length) return false;
+    housingCache = { ts: Date.now(), dataTs: housingVer, asOf: data.ts || null, error: null, series, missing };
     return true;
   }
   // ---- Liquidity board (build 2026.08.21-04) --------------------------------------------------
