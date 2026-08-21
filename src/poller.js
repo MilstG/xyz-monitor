@@ -5491,7 +5491,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       for (const url of t13fZipUrls(q)) {
         try {
           const res = await extFetch(url, { headers: { "user-agent": SEC_UA } });
-          if (!res || !res.ok) { tried.push(url.split("/").pop() + " \u2192 HTTP " + (res ? res.status : "no response")); continue; }
+          if (!res || !res.ok) { tried.push(url + " \u2192 HTTP " + (res ? res.status : "no response")); continue; }
           // Stream to disk, then read back ONCE. The previous Buffer.from(await res.arrayBuffer())
           // held the zip TWICE transiently (~700MB peak) — enough to OOM-kill a memory-tight
           // container mid-ingest, which presents as "ran the command, ops went quiet, no panel".
@@ -5509,7 +5509,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             zipBuf = Buffer.from(await res.arrayBuffer());   // injected test transports have no stream body
           }
           urlUsed = url; break;
-        } catch (e) { tried.push(url.split("/").pop() + " \u2192 " + String(e && e.message).slice(0, 60));
+        } catch (e) { tried.push(url + " \u2192 " + String(e && e.message).slice(0, 60));
           try { require("fs").unlinkSync(tmpZip); } catch (_) {} }
       }
       if (!zipBuf) return fail({ ok: false, notYet: 1, tried,
