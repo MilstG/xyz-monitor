@@ -55,6 +55,8 @@ function openStore(dataDir) {
   // stores were built around. If the module is unavailable (older runtime, or the flag is off) the
   // whole sub-store degrades to no-ops via candlesEnabled(); nothing else in the app is affected.
   const candleFile = path.join(dataDir, "candles.db");
+  const t13fFile = path.join(dataDir, "whale13f.db");   // market-wide 13F holder index — separate, droppable, rebuildable
+  let t13f = null;
   let cdb = null, cInsert = null, cRange = null, cEvict = null, cCov = null, cCount = null;
   let mInsert = null, mRange = null, mEvict = null, mCov = null;   // 1m opening-hour archive (2026.08.18-04)
   const deepStmt = {};   // "12h" / "1d" -> { ins, rng, cov } — deep-history archive (2026.08.21-01)
@@ -801,6 +803,98 @@ function openStore(dataDir) {
       catch (_) {}
       return null;
     },
+    // ---- market-wide 13F holder index (build 2026.08.21-05) -----------------------------------
+    // A SEPARATE SQLite file (whale13f.db) holding the SEC quarterly Form 13F structured data
+    // set, boiled down to option C of the design fork: per (quarter, cusip) an exact aggregate
+    // row (how many filers hold it, total common-line value) plus the top-N holders by value —
+    // N capped (default 500) because nobody queries holder #501 and the cap saves ~40% of a
+    // full two-quarter index. Two quarters kept (current + prior, for share-delta QoQ); older
+    // quarters deleted at finalize. Separate file on purpose: droppable and rebuildable without
+    // ever breathing near candles.db. Store owns schema + statements (the candle-archive
+    // precedent); the poller owns download, unzip, parsing and the scale/dedupe rules.
+    open13F() {
+      if (t13f) return t13f;
+      try {
+        const { DatabaseSync } = require("node:sqlite");
+        t13f = new DatabaseSync(t13fFile);
+        t13f.exec("PRAGMA journal_mode=WAL; PRAGMA auto_vacuum=INCREMENTAL;");
+        t13f.exec(`CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS agg(q TEXT, cusip TEXT, nFilers INTEGER, totVal REAL, PRIMARY KEY(q,cusip)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS top(q TEXT, cusip TEXT, rk INTEGER, cik INTEGER, name TEXT, value REAL, shares REAL, shOk INTEGER, PRIMARY KEY(q,cusip,rk)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS top_cik ON top(q, cusip, cik);`);
+        return t13f;
+      } catch (_) { t13f = null; return null; }
+    },
+    t13fReady() { try { return !!this.open13F(); } catch (_) { return false; } },
+    t13fMeta(k) { const d = this.open13F(); if (!d) return null;
+      try { const r = d.prepare("SELECT v FROM meta WHERE k=?").get(String(k)); return r ? r.v : null; } catch (_) { return null; } },
+    t13fMetaSet(k, v) { const d = this.open13F(); if (!d) return;
+      try { d.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(String(k), String(v)); } catch (_) {} },
+    // Ingest staging: rebuilt fresh per run; a crashed ingest leaves only a dead staging table
+    // that the next run drops — agg/top for already-finalized quarters are never touched mid-run.
+    t13fIngestStart() { const d = this.open13F(); if (!d) return false;
+      d.exec("DROP TABLE IF EXISTS stage; DROP TABLE IF EXISTS smult; DROP TABLE IF EXISTS snames; DROP TABLE IF EXISTS schosen;");
+      d.exec(`CREATE TABLE stage(acc TEXT, cusip TEXT, value REAL, shares REAL, sh INTEGER, put INTEGER);
+CREATE TABLE smult(acc TEXT PRIMARY KEY, mult REAL) WITHOUT ROWID;
+CREATE TABLE snames(cik INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID;
+CREATE TABLE schosen(acc TEXT PRIMARY KEY, cik INTEGER) WITHOUT ROWID;`);
+      return true; },
+    t13fStageRows(rows) { const d = this.open13F(); if (!d || !rows.length) return;
+      const st = d.prepare("INSERT INTO stage VALUES(?,?,?,?,?,?)");
+      d.exec("BEGIN");
+      try { for (const r of rows) st.run(r.acc, r.cusip, r.value, r.shares, r.sh, r.put); d.exec("COMMIT"); }
+      catch (e) { d.exec("ROLLBACK"); throw e; } },
+    t13fStageMeta(mults, names, chosen) { const d = this.open13F(); if (!d) return;
+      const sm = d.prepare("INSERT OR REPLACE INTO smult VALUES(?,?)");
+      const sn = d.prepare("INSERT OR REPLACE INTO snames VALUES(?,?)");
+      const sc = d.prepare("INSERT OR REPLACE INTO schosen VALUES(?,?)");
+      d.exec("BEGIN");
+      try {
+        for (const [acc, m] of mults) sm.run(acc, m);
+        for (const [cik, nm] of names) sn.run(+cik, String(nm).slice(0, 60));
+        for (const [acc, cik] of chosen) sc.run(acc, +cik);
+        d.exec("COMMIT");
+      } catch (e) { d.exec("ROLLBACK"); throw e; } },
+    // Pass 2 in SQL: chosen accessions only, common lines only (put=0 — an options desk must not
+    // outrank a real owner), per-filer thousands correction via the mult join, exact aggregates
+    // over ALL holders, then the capped rank table. Old quarters beyond keep-2 deleted, space
+    // reclaimed via incremental vacuum.
+    t13fFinalize(q, cap) { const d = this.open13F(); if (!d) return { ok: false, error: "sqlite unavailable" };
+      try {
+        d.exec("BEGIN");
+        d.prepare("DELETE FROM agg WHERE q=?").run(q);
+        d.prepare("DELETE FROM top WHERE q=?").run(q);
+        d.prepare(`INSERT INTO agg
+          SELECT ?, s.cusip, COUNT(DISTINCT c.cik), SUM(s.value*m.mult)
+          FROM stage s JOIN schosen c ON c.acc=s.acc JOIN smult m ON m.acc=s.acc
+          WHERE s.put=0 GROUP BY s.cusip`).run(q);
+        d.prepare(`INSERT INTO top
+          SELECT ?, cusip, rk, cik, name, val, CASE WHEN ok=1 THEN sh ELSE NULL END, ok FROM (
+            SELECT s.cusip cusip, c.cik cik, COALESCE(n.name,'CIK '||c.cik) name,
+                   SUM(s.value*m.mult) val, SUM(s.shares) sh, MIN(s.sh) ok,
+                   ROW_NUMBER() OVER (PARTITION BY s.cusip ORDER BY SUM(s.value*m.mult) DESC) rk
+            FROM stage s JOIN schosen c ON c.acc=s.acc JOIN smult m ON m.acc=s.acc
+                 LEFT JOIN snames n ON n.cik=c.cik
+            WHERE s.put=0 GROUP BY s.cusip, c.cik
+          ) WHERE rk<=?`).run(q, cap);
+        d.exec("DROP TABLE IF EXISTS stage; DROP TABLE IF EXISTS smult; DROP TABLE IF EXISTS snames; DROP TABLE IF EXISTS schosen;");
+        // keep-2: every quarter beyond the two newest by label-encoded date goes.
+        const qs = d.prepare("SELECT DISTINCT q FROM agg").all().map((r) => r.q)
+          .sort((a, b) => (b.slice(3) + b.slice(1, 2)).localeCompare(a.slice(3) + a.slice(1, 2)));
+        for (const old of qs.slice(2)) { d.prepare("DELETE FROM agg WHERE q=?").run(old); d.prepare("DELETE FROM top WHERE q=?").run(old); }
+        d.exec("COMMIT");
+        d.exec("PRAGMA incremental_vacuum;");
+        return { ok: true, quarters: qs.slice(0, 2) };
+      } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} return { ok: false, error: String(e && e.message).slice(0, 200) }; } },
+    t13fQuarters() { const d = this.open13F(); if (!d) return [];
+      try { return d.prepare("SELECT DISTINCT q FROM agg").all().map((r) => r.q)
+        .sort((a, b) => (b.slice(3) + b.slice(1, 2)).localeCompare(a.slice(3) + a.slice(1, 2))); } catch (_) { return []; } },
+    t13fAgg(q, cusip) { const d = this.open13F(); if (!d) return null;
+      try { return d.prepare("SELECT nFilers, totVal FROM agg WHERE q=? AND cusip=?").get(q, cusip) || null; } catch (_) { return null; } },
+    t13fTop(q, cusip, lim) { const d = this.open13F(); if (!d) return [];
+      try { return d.prepare("SELECT rk, cik, name, value, shares, shOk FROM top WHERE q=? AND cusip=? ORDER BY rk LIMIT ?").all(q, cusip, lim | 0); } catch (_) { return []; } },
+    t13fHolderRow(q, cusip, cik) { const d = this.open13F(); if (!d) return null;
+      try { return d.prepare("SELECT value, shares, shOk FROM top WHERE q=? AND cusip=? AND cik=?").get(q, cusip, +cik) || null; } catch (_) { return null; } },
     saveDerivMap(data) {
       try {
         const tmp = derivMapFile + ".tmp";

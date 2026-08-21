@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.21-04";
+const VERSION = "2026.08.21-05";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1086,6 +1086,7 @@ async function main() {
     if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
     if (op === "search") return poller.whaleSearch(String(b.q || ""));
     if (op === "pull") return poller.whalePull(String(b.key || ""));   // "find latest filing" — one on-demand EDGAR check, 60s/fund cooldown inside
+    if (op === "ingest13f") { poller.whale13fIngestNow(b.q ? String(b.q) : undefined).catch(() => {}); return { ok: true, started: 1, note: "ingest running in the background \u2014 progress lands in the ops log; the data set is ~300MB, give it a few minutes" }; }
     if (op === "add") return poller.whaleAdd(+b.cik, String(b.name || ""));
     if (op === "rm") return poller.whaleRm(String(b.key || ""));
     if (op === "mute") return poller.whaleMute(String(b.key || ""), !!b.on);

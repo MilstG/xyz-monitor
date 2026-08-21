@@ -174,7 +174,7 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -5381,6 +5381,217 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const net = live.reduce((s, l) => s + (l.d.dVal || 0), 0);
     return { dir: net > 0 ? "add" : net < 0 ? "trim" : "flat", mixed: 1 };
   }
+
+  // ---- market-wide 13F holder index — ingest + query (build 2026.08.21-05) --------------------
+  // The TOP HOLDERS panel's engine: once a quarter, download the SEC's Form 13F structured data
+  // set (one ZIP: INFOTABLE.tsv ~7-8M rows = every position of every filer, SUBMISSION.tsv,
+  // COVERPAGE.tsv), stream it into store's whale13f.db, and answer "top N institutional holders
+  // of this cusip" from an index hit forever after. Rules carried over from the watchlist lane,
+  // stated once: per-filer thousands-convention correction (the SAME compute.whale13FScale rule,
+  // sampled per accession), option lines never enter the ranks, HR/A supersedes HR for the same
+  // (cik, period), rows filed for a DIFFERENT period than the target quarter are excluded (a
+  // data set is a quarter of FILINGS and late prior-period filings ride along in it).
+  // Memory honesty: the compressed ZIP is buffered (~250-400MB RAM peak, disclosed); the
+  // INFLATED tsv (~1.2GB) is never held — it streams through zlib into a line splitter, rows
+  // batch into a staging table, and pass 2 is pure SQL. LOUD standing caveat: sec.gov is
+  // unreachable from the build sandbox and this file layout has drifted historically — the
+  // parser reads headers by NAME, tries two URL naming patterns, and fails with the exact
+  // reason in ops; the first real ingest is the true verification.
+  const T13F_TOP_CAP = t13fCapOpt || 500;        // option C: top-N per cusip stored; aggregates stay exact over ALL holders
+  const T13F_URL = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/";
+  let t13fBusy = false, t13fProgress = null;
+  function t13fPeriodOf(q) {   // "Q2 2026" -> "30-JUN-2026" comparisons are done on ISO; period end ISO:
+    const m = String(q).match(/^Q([1-4]) (\d{4})$/); if (!m) return null;
+    const ends = ["03-31", "06-30", "09-30", "12-31"];
+    return m[2] + "-" + ends[+m[1] - 1];
+  }
+  function t13fZipUrls(q) {
+    const m = String(q).match(/^Q([1-4]) (\d{4})$/); if (!m) return [];
+    const y = m[2], qi = +m[1];
+    const spans = ["01jan" + y + "-31mar" + y, "01apr" + y + "-30jun" + y, "01jul" + y + "-30sep" + y, "01oct" + y + "-31dec" + y];
+    return [T13F_URL + y + "q" + qi + "_form13f.zip", T13F_URL + spans[qi - 1] + "_form13f.zip"];
+  }
+  // Minimal ZIP reader: central directory walk + STORED/DEFLATE entries. No CRC verification (we
+  // parse the payload immediately; a torn download fails the TSV parse with a named error), no
+  // ZIP64 (the data sets are ~300MB; a ZIP64 file gets an honest "layout changed" error).
+  function t13fZipEntries(buf) {
+    let i = buf.length - 22;
+    while (i >= 0 && buf.readUInt32LE(i) !== 0x06054b50) i--;
+    if (i < 0) throw new Error("ZIP: end-of-central-directory not found");
+    const n = buf.readUInt16LE(i + 10), cdOff = buf.readUInt32LE(i + 16);
+    if (cdOff === 0xffffffff) throw new Error("ZIP64 layout — the data-set format changed, ingest needs a patch");
+    const out = []; let p = cdOff;
+    for (let k = 0; k < n; k++) {
+      if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error("ZIP: central directory corrupt at entry " + k);
+      const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20), usize = buf.readUInt32LE(p + 24);
+      const nlen = buf.readUInt16LE(p + 28), elen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32);
+      const lho = buf.readUInt32LE(p + 42);
+      out.push({ name: buf.toString("utf8", p + 46, p + 46 + nlen), method, csize, usize, lho });
+      p += 46 + nlen + elen + clen;
+    }
+    return out;
+  }
+  function t13fZipSlice(buf, e) {   // -> Buffer of the COMPRESSED payload (caller inflates or uses raw)
+    if (buf.readUInt32LE(e.lho) !== 0x04034b50) throw new Error("ZIP: local header mismatch for " + e.name);
+    const nlen = buf.readUInt16LE(e.lho + 26), elen = buf.readUInt16LE(e.lho + 28);
+    const start = e.lho + 30 + nlen + elen;
+    return buf.subarray(start, start + e.csize);
+  }
+  // Stream an entry's TSV through a line callback without ever holding the inflated whole.
+  function t13fStreamLines(buf, e, onLine) {
+    return new Promise((resolve, reject) => {
+      const zlib = require("zlib");
+      const raw = t13fZipSlice(buf, e);
+      let tail = "";
+      const feed = (chunk) => {
+        const s = tail + chunk.toString("utf8");
+        const lines = s.split("\n");
+        tail = lines.pop();
+        for (const ln of lines) onLine(ln.endsWith("\r") ? ln.slice(0, -1) : ln);
+      };
+      if (e.method === 0) { try { feed(raw); if (tail) onLine(tail); resolve(); } catch (er) { reject(er); } return; }
+      if (e.method !== 8) { reject(new Error("ZIP: unsupported compression method " + e.method + " on " + e.name)); return; }
+      const inf = zlib.createInflateRaw();
+      inf.on("data", (c) => { try { feed(c); } catch (er) { inf.destroy(); reject(er); } });
+      inf.on("end", () => { try { if (tail) onLine(tail); resolve(); } catch (er) { reject(er); } });
+      inf.on("error", reject);
+      inf.end(raw);
+    });
+  }
+  const t13fCols = (header) => { const m = {}; header.split("\t").forEach((h, i) => { m[h.trim().toUpperCase()] = i; }); return m; };
+  async function whale13fIngest(qArg) {
+    if (t13fBusy) return { ok: false, error: "an ingest is already running" };
+    if (!store.t13fReady || !store.t13fReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
+    const q = String(qArg || whaleWindow(Date.now()).cur.q);
+    const period = t13fPeriodOf(q);
+    if (!period) return { ok: false, error: "bad quarter \u201c" + q + "\u201d \u2014 expected like Q2 2026" };
+    t13fBusy = true; t13fProgress = { q, stage: "download", rows: 0 };
+    const done = (r) => { t13fBusy = false; t13fProgress = null; return r; };
+    try {
+      let zipBuf = null, urlUsed = null;
+      for (const url of t13fZipUrls(q)) {
+        try {
+          const res = await extFetch(url, { headers: { "user-agent": SEC_UA } });
+          if (res && res.ok) { zipBuf = Buffer.from(await res.arrayBuffer()); urlUsed = url; break; }
+        } catch (_) {}
+      }
+      if (!zipBuf) return done({ ok: false, notYet: 1, error: q + " data set not at sec.gov yet (tried both URL patterns) \u2014 it lands ~1 week after the deadline; the weekly check keeps trying" });
+      pushOps("13F data set " + q, "downloaded " + (zipBuf.length / 1e6).toFixed(0) + "MB from " + urlUsed.split("/").pop() + " \u2014 ingesting", "info", true);
+      const entries = t13fZipEntries(zipBuf);
+      const find = (nm) => entries.find((e) => e.name.toUpperCase().endsWith(nm));
+      const eInfo = find("INFOTABLE.TSV"), eSub = find("SUBMISSION.TSV"), eCov = find("COVERPAGE.TSV");
+      if (!eInfo || !eSub) return done({ ok: false, error: "data-set layout changed: " + (!eInfo ? "INFOTABLE.tsv" : "SUBMISSION.tsv") + " missing from the zip \u2014 ingest needs a patch" });
+      // SUBMISSION: acc -> {cik, period, type}; choose newest accession per (cik, period), HR/A first.
+      t13fProgress.stage = "submissions";
+      const subs = new Map(); let subCols = null;
+      await t13fStreamLines(zipBuf, eSub, (ln) => {
+        if (!subCols) { subCols = t13fCols(ln); return; }
+        const c = ln.split("\t");
+        const acc = c[subCols.ACCESSION_NUMBER], cik = +c[subCols.CIK];
+        const per = String(c[subCols.PERIODOFREPORT] || "");
+        const typ = String(c[subCols.SUBMISSIONTYPE] || "");
+        if (!acc || !Number.isFinite(cik)) return;
+        // Period normalization: sets have shipped both ISO and DD-MON-YYYY; accept both.
+        const iso = /^\d{4}-\d{2}-\d{2}$/.test(per) ? per
+          : (() => { const m = per.match(/^(\d{2})-([A-Z]{3})-(\d{4})$/i); if (!m) return per;
+              const mo = { JAN: "01", FEB: "02", MAR: "03", APR: "04", MAY: "05", JUN: "06", JUL: "07", AUG: "08", SEP: "09", OCT: "10", NOV: "11", DEC: "12" }[m[2].toUpperCase()];
+              return mo ? m[3] + "-" + mo + "-" + m[1] : per; })();
+        subs.set(acc, { cik, period: iso, typ });
+      });
+      const chosen = new Map();   // "cik|period" -> acc  (newest wins; /A beats not-/A at equal recency)
+      for (const [acc, s] of subs) {
+        if (s.period !== period) continue;   // a late prior-period filing riding in this set — not this quarter's book
+        const k = s.cik + "|" + s.period, had = chosen.get(k);
+        if (!had) { chosen.set(k, acc); continue; }
+        const hadA = /\/A$/.test((subs.get(had) || {}).typ || ""), isA = /\/A$/.test(s.typ);
+        if ((isA && !hadA) || (isA === hadA && acc > had)) chosen.set(k, acc);
+      }
+      const chosenAccs = new Map(); for (const [k, acc] of chosen) chosenAccs.set(acc, +k.split("|")[0]);
+      // COVERPAGE: cik -> manager name (via chosen accession).
+      const names = new Map();
+      if (eCov) { let cc = null;
+        await t13fStreamLines(zipBuf, eCov, (ln) => {
+          if (!cc) { cc = t13fCols(ln); return; }
+          const c = ln.split("\t"); const acc = c[cc.ACCESSION_NUMBER];
+          const cik = chosenAccs.get(acc);
+          if (cik != null && cc.FILINGMANAGER_NAME != null) names.set(cik, c[cc.FILINGMANAGER_NAME]);
+        }); }
+      // INFOTABLE pass 1: stage rows for chosen accessions; reservoir of implied-price ratios per
+      // accession feeds the SAME thousands-rule the watchlist uses (compute.whale13FScale).
+      t13fProgress.stage = "infotable";
+      if (!store.t13fIngestStart()) return done({ ok: false, error: "staging init failed" });
+      const RES_N = 48;
+      const reservoirs = new Map();   // acc -> [{value, shares}] capped
+      let batch = [], total = 0, ic = null;
+      const flush = () => { if (batch.length) { store.t13fStageRows(batch); batch = []; } };
+      await t13fStreamLines(zipBuf, eInfo, (ln) => {
+        if (!ic) { ic = t13fCols(ln); return; }
+        const c = ln.split("\t");
+        const acc = c[ic.ACCESSION_NUMBER];
+        if (!chosenAccs.has(acc)) return;
+        const cusip = String(c[ic.CUSIP] || "").replace(/\s+/g, "").toUpperCase();
+        const value = +c[ic.VALUE], shares = +c[ic.SSHPRNAMT];
+        if (cusip.length !== 9 || !Number.isFinite(value)) return;
+        const sh = String(c[ic.SSHPRNAMTTYPE] || "").trim().toUpperCase() === "SH" ? 1 : 0;
+        const put = String(ic.PUTCALL != null ? c[ic.PUTCALL] || "" : "").trim() ? 1 : 0;
+        batch.push({ acc, cusip, value, shares: Number.isFinite(shares) ? shares : null, sh, put });
+        if (sh && !put && value > 0 && shares > 0) {
+          let rv = reservoirs.get(acc); if (!rv) { rv = []; reservoirs.set(acc, rv); }
+          if (rv.length < RES_N) rv.push({ value, shares });
+        }
+        total++; t13fProgress.rows = total;
+        if (batch.length >= 4000) flush();
+      });
+      flush();
+      if (!total) return done({ ok: false, error: "INFOTABLE parsed to zero rows for " + q + " \u2014 header names may have changed; ingest needs a patch" });
+      const mults = new Map();
+      for (const acc of chosenAccs.keys()) {
+        const det = whale13FScale(reservoirs.get(acc) || []);
+        mults.set(acc, det.mult);
+      }
+      t13fProgress.stage = "finalize";
+      store.t13fStageMeta(mults, names, chosenAccs);
+      const fin = store.t13fFinalize(q, T13F_TOP_CAP);
+      if (!fin.ok) return done({ ok: false, error: "finalize: " + fin.error });
+      store.t13fMetaSet("ingested:" + q, String(Date.now()));
+      store.t13fMetaSet("cap", String(T13F_TOP_CAP));
+      whaleBump();
+      const scaled = [...mults.values()].filter((m) => m > 1).length;
+      pushOps("13F data set " + q, "ingested: " + chosenAccs.size + " filers, " + total + " rows, top-" + T13F_TOP_CAP +
+        " per cusip stored" + (scaled ? ", " + scaled + " thousands-convention filer(s) corrected \u00d71000" : ""), "info", true);
+      log(`whale13f: ${q} ingested \u2014 ${chosenAccs.size} filers / ${total} rows / cap ${T13F_TOP_CAP}${scaled ? ` / ${scaled} scaled` : ""}`);
+      return done({ ok: true, q, filers: chosenAccs.size, rows: total, scaled });
+    } catch (e) {
+      pushOps("13F data set " + q, "ingest FAILED: " + String(e && e.message).slice(0, 140), "warn", true);
+      return done({ ok: false, error: String(e && e.message).slice(0, 200) });
+    }
+  }
+  // Weekly check: from deadline+4d until the set lands, then quiet until next season. The season
+  // quarter is the last CLOSED one — during "upcoming" that is windowInfo.cur only after roll,
+  // so derive from the deadline that most recently passed.
+  let t13fLastCheck = 0;
+  async function whale13fTick(nowArg) {
+    const now = nowArg || Date.now();
+    if (now - t13fLastCheck < 12 * HOUR) return;
+    t13fLastCheck = now;
+    if (!store.t13fReady || !store.t13fReady()) return;
+    const win = whaleWindow(now);
+    const q = win.state === "upcoming" || win.state === "open"
+      ? (() => { const m = win.cur.q.match(/^Q([1-4]) (\d{4})$/); const qi = +m[1] === 1 ? 4 : +m[1] - 1; const y = +m[1] === 1 ? +m[2] - 1 : +m[2]; return "Q" + qi + " " + y; })()
+      : win.cur.q;
+    if (store.t13fMeta("ingested:" + q)) return;
+    // Only start trying once the set could plausibly exist.
+    const per = t13fPeriodOf(q); if (!per) return;
+    const deadline = whaleWindow(Date.parse(per + "T12:00:00Z") + 10 * DAY).cur.deadline;
+    if (now < deadline + 4 * DAY) return;
+    await whale13fIngest(q).catch(() => {});
+  }
+  function t13fStatus() {
+    const qs = store.t13fQuarters ? store.t13fQuarters() : [];
+    return { ready: !!(store.t13fReady && store.t13fReady()), quarters: qs,
+      busy: t13fBusy, progress: t13fProgress, cap: +(store.t13fMeta && store.t13fMeta("cap")) || T13F_TOP_CAP };
+  }
+
   async function getWhaleHolds(qRaw) {
     const q = String(qRaw || "").trim();
     if (!q) return { ok: false, error: "usage: whale who <ticker, name fragment, or CUSIP>" };
@@ -5474,11 +5685,47 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         + " positions, by ticker, normalized name" + (subOk ? ", substring" : "") + " and CUSIP. Not held \u2260 not owned: shorts, futures, non-US and anything bought since quarter-end are invisible in a 13F." };
     issuers.sort((a, c) => HOLDS_BASIS_RANK[c.basis] - HOLDS_BASIS_RANK[a.basis] || c.combined - a.combined);
     const P = issuers[0];
+    // Market-wide TOP HOLDERS (build 2026.08.21-05): when the SEC data-set index has the PRIMARY
+    // issuer's cusip, the same response carries the top-N across ALL ~8,500 filers. Primary cusip
+    // = the primary issuer's largest by institutional value (share classes stay separate rows in
+    // the index; the count of sibling cusips is disclosed). Tracked overlay by CIK. \u0394 shares
+    // vs the prior stored set; a holder absent from the prior TOP table is NEW only when the
+    // prior set exists — outside-the-cap ambiguity renders as a dash, never a guess.
+    let top = null;
+    try {
+      const qs = store.t13fQuarters ? store.t13fQuarters() : [];
+      if (qs.length) {
+        const matched = new Set();
+        for (const f of P.funds) { for (const l of f.lines) if (l.cusip) matched.add(l.cusip); for (const x of f.exited) if (x.cusip) matched.add(x.cusip); }
+        if (isCusip) matched.add(QU);
+        let best = null;
+        for (const cu of matched) { const a = store.t13fAgg(qs[0], cu); if (a && (!best || a.totVal > best.a.totVal)) best = { cu, a }; }
+        if (best) {
+          const rows3 = store.t13fTop(qs[0], best.cu, 10);
+          const prevQ = qs[1] || null;
+          const watchByCik = new Map(whaleState.watch.map((w) => [+w.cik, w.key]));
+          let anyPrev = false;
+          const list = rows3.map((r) => {
+            const prev = prevQ ? store.t13fHolderRow(prevQ, best.cu, r.cik) : null;
+            if (prev) anyPrev = true;
+            return { rank: r.rk, cik: r.cik, name: r.name, value: r.value, shares: r.shares,
+              dSh: prev && prev.shares != null && r.shares != null ? r.shares - prev.shares : null,
+              isNew: prevQ && !prev ? 1 : 0, tracked: watchByCik.get(+r.cik) || null };
+          });
+          top = { q: qs[0], prevQ, cusip: best.cu, nFilers: best.a.nFilers, totVal: best.a.totVal,
+            rows: list, otherCusips: Math.max(0, matched.size - 1),
+            allNew: prevQ && rows3.length && !anyPrev ? 1 : 0,   // the IPO signature: nobody in the top existed last set
+            cap: +(store.t13fMeta && store.t13fMeta("cap")) || T13F_TOP_CAP };
+        }
+      }
+    } catch (_) {}
+    const t13fS = t13fStatus();
     return { ok: true, q, issuers, watchN: whaleState.watch.length, noBook,
       // primary mirror — the shape every -06 caller already reads
       name: P.name, tk: P.tk, basis: P.basisLabel, funds: P.funds, notHeld: P.notHeld,
       combined: P.combined, common: P.common, optNotional: P.optNotional,
-      held: P.held, adding: P.adding, cutting: P.cutting, flat: P.flat };
+      held: P.held, adding: P.adding, cutting: P.cutting, flat: P.flat,
+      top, topMeta: { ready: !!(t13fS.ready && t13fS.quarters.length), quarters: t13fS.quarters, busy: t13fS.busy } };
   }
   async function getWhaleSeasonQ(qRaw) {
     const q = String(qRaw || "").trim() || (getWhale().seasonQ || "");
@@ -6447,6 +6694,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     whaleHydrate();
     if (whaleState.watch.length) log(`Restored 13F watchlist: ${whaleState.watch.length} fund(s), ${Object.keys(whaleState.filings).length} with cached books — FUNDS tab warm`);
     setInterval(() => { whaleTick().catch((e) => log("whale tick failed (isolated, server stays up): " + (e && e.message))); }, WHALE_POLL_MS);
+    setInterval(() => { whale13fTick().catch((e) => log("whale13f tick failed (isolated): " + (e && e.message))); }, 6 * HOUR);
+    setTimeout(() => { whale13fTick().catch(() => {}); }, 90 * 1000);
     setTimeout(() => { whaleTick().catch((e) => log("whale first tick failed (isolated): " + (e && e.message))); }, 20 * 1000);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
@@ -12276,6 +12525,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getWhaleSeasonQ,
     whaleSearch,
     whaleAdd, whaleRm, whaleMute, whaleSeen, whalePull,
+    whale13fIngestNow: whale13fIngest, whale13fTickNow: whale13fTick, t13fStatus,
     whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
     hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()
     whaleIngestNow: whaleIngest,                 // harness: push one filing through the REAL ingest path

@@ -12205,7 +12205,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19885,4 +19885,114 @@ test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursd
     assert.strictEqual((app.match(new RegExp("^(?:async )?function " + fn + "\\(", "gm")) || []).length, 1, fn + " defined once");
   assert.ok(/root\.innerHTML=tiles\+`<div class="s-grid">\$\{cards\.join\(''\)\}<\/div>`\+stack\+drains[\s\S]*?attachLineHover\(\);/.test(app), "hover bound after paint");
   assert.ok(!/CRYPTO_VIEWS=[^;]*liquidity/.test(app), "not a crypto view");
+});
+
+test("whale 13f data-set index (2026.08.21-05): fixture ZIP through the REAL ingest — scale-corrected ranks, HR/A dedupe, period filter, options out, cap honesty, QoQ, tracked overlay", async () => {
+  const { createPoller } = require("../src/poller");
+  const zlib = require("zlib");
+  // Byte-wise STORED-format ZIP builder — no CRC games, the reader doesn't verify them.
+  const mkzip = (files) => {
+    const parts = [], cd = []; let off = 0;
+    for (const [name, text] of files) {
+      const data = Buffer.from(text, "utf8"), nm = Buffer.from(name, "utf8");
+      const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(0, 8);
+      lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nm.length, 26);
+      parts.push(lh, nm, data);
+      const ce = Buffer.alloc(46); ce.writeUInt32LE(0x02014b50, 0); ce.writeUInt16LE(0, 10);
+      ce.writeUInt32LE(data.length, 20); ce.writeUInt32LE(data.length, 24); ce.writeUInt16LE(nm.length, 28);
+      ce.writeUInt32LE(off, 42);
+      cd.push(Buffer.concat([ce, nm]));
+      off += 30 + nm.length + data.length;
+    }
+    const cdBuf = Buffer.concat(cd);
+    const eo = Buffer.alloc(22); eo.writeUInt32LE(0x06054b50, 0); eo.writeUInt16LE(cd.length, 8); eo.writeUInt16LE(cd.length, 10);
+    eo.writeUInt32LE(cdBuf.length, 12); eo.writeUInt32LE(off, 16);
+    return Buffer.concat([...parts, cdBuf, eo]);
+  };
+  const T = (rows) => rows.map((r) => r.join("\t")).join("\n") + "\n";
+  const mkSet = (period, filers) => {
+    // filers: [{acc, cik, name, typ, rows:[[cusip, value, shares, shType, putCall]]}]
+    const sub = [["ACCESSION_NUMBER", "CIK", "SUBMISSIONTYPE", "PERIODOFREPORT"]];
+    const cov = [["ACCESSION_NUMBER", "FILINGMANAGER_NAME"]];
+    const inf = [["ACCESSION_NUMBER", "NAMEOFISSUER", "TITLEOFCLASS", "CUSIP", "VALUE", "SSHPRNAMT", "SSHPRNAMTTYPE", "PUTCALL"]];
+    for (const f of filers) {
+      sub.push([f.acc, String(f.cik), f.typ || "13F-HR", f.period || period]);
+      cov.push([f.acc, f.name]);
+      for (const r of f.rows) inf.push([f.acc, "ISSUER", "COM", r[0], String(r[1]), String(r[2]), r[3] || "SH", r[4] || ""]);
+    }
+    return mkzip([["2026q2_form13f/SUBMISSION.tsv", T(sub)], ["2026q2_form13f/COVERPAGE.tsv", T(cov)], ["2026q2_form13f/INFOTABLE.tsv", T(inf)]]);
+  };
+  const CU = "595112103";
+  const q2zip = mkSet("2026-06-30", [
+    // Ranks by CORRECTED value must be: MEGA ($9B, filed in THOUSANDS) > BIGCO ($5B) > TRACKED1 ($3B) > SMALL ($1B).
+    { acc: "A-1", cik: 11, name: "BIGCO ADVISORS", rows: [[CU, 5e9, 25e6]] },
+    // Thousands convention: $200/sh real, $0.0002 implied raw. THREE rows because the scale rule's
+    // own sample floor (>=3 usable rows, by design) refuses to claim anything on fewer — a real
+    // filing has hundreds; a fixture must respect the precondition it is testing.
+    { acc: "A-2", cik: 22, name: "MEGA CAPITAL LP", rows: [[CU, 9e6, 45e6], ["AAA000AA1", 2e6, 10e6], ["BBB000BB2", 1e6, 8e6]] },
+    { acc: "A-3", cik: 33, name: "TRACKED ONE LP", rows: [[CU, 3e9, 15e6]] },
+    { acc: "A-4", cik: 44, name: "SMALL FUND LLC", rows: [[CU, 1e9, 5e6]] },
+    // Options desk with a HUGE call line — must NOT enter the ranks; also not the aggregate.
+    { acc: "A-5", cik: 55, name: "OPTIONS DESK LLC", rows: [[CU, 20e9, 100e6, "SH", "Call"]] },
+    // HR/A supersede: cik 66 filed HR then HR/A with a different size — only the /A counts.
+    { acc: "A-6", cik: 66, name: "AMENDER LP", typ: "13F-HR", rows: [[CU, 8e9, 40e6]] },
+    { acc: "A-7", cik: 66, name: "AMENDER LP", typ: "13F-HR/A", rows: [[CU, 0.5e9, 2.5e6]] },
+    // A LATE PRIOR-PERIOD filing riding in this set — excluded by the period filter.
+    { acc: "A-8", cik: 77, name: "LATE FILER LP", period: "2026-03-31", rows: [[CU, 50e9, 250e6]] },
+  ]);
+  const q1zip = mkSet("2026-03-31", [
+    { acc: "B-1", cik: 11, name: "BIGCO ADVISORS", rows: [[CU, 4e9, 20e6]] },       // BIGCO +5M sh QoQ
+    { acc: "B-2", cik: 22, name: "MEGA CAPITAL LP", rows: [[CU, 8e6, 40e6], ["AAA000AA1", 2e6, 11e6], ["BBB000BB2", 1e6, 9e6]] },   // thousands again; MEGA +5M sh on CU
+    { acc: "B-3", cik: 33, name: "TRACKED ONE LP", rows: [[CU, 3.2e9, 16e6]] },     // TRACKED1 -1M sh
+  ]);
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  const bin = (buf) => ({ ok: true, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) });
+  const extFetch = async (url) => {
+    if (url.includes("company_tickers")) return J({ 0: { cik_str: 1, ticker: "MU", title: "Micron Technology Inc" } });
+    if (url.includes("2026q2_form13f.zip")) return bin(q2zip);
+    if (url.includes("2026q1_form13f.zip")) return bin(q1zip);
+    if (url.includes("submissions/CIK0000000033")) return J({ name: "TRACKED ONE LP", filings: { recent: {
+      form: ["13F-HR"], accessionNumber: ["0033-26-000002"], filingDate: ["2026-08-14"], reportDate: ["2026-06-30"] } } });
+    if (url.includes("/003326000002/index.json")) return J({ directory: { item: [{ name: "primary_doc.xml", size: 9 }, { name: "infotable.xml", size: 99 }] } });
+    if (url.includes("/003326000002/infotable.xml")) return { ok: true, json: async () => { throw new Error("x"); },
+      text: async () => `<x><infoTable><nameOfIssuer>MICRON TECHNOLOGY INC</nameOfIssuer><cusip>${CU}</cusip><value>3000000000</value><shrsOrPrnAmt><sshPrnamt>15000000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable></x>` };
+    return { ok: false, status: 404, error: "404" };
+  };
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "t13f-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch, t13fCap: 3 });
+  p.hydrateWhaleNow();
+  p.whaleAdd(33, "Tracked One LP");
+  await p.whalePull("TRACKED");
+  // Ingest both sets through the real path (prior first so QoQ has its leg).
+  let r = await p.whale13fIngestNow("Q1 2026");
+  assert.ok(r.ok, "Q1 ingest: " + (r.error || ""));
+  r = await p.whale13fIngestNow("Q2 2026");
+  assert.ok(r.ok, "Q2 ingest: " + (r.error || ""));
+  assert.equal(r.scaled, 1, "MEGA's thousands-convention filing detected and corrected — the same rule the watchlist uses");
+  // Query through the holds engine.
+  const h = await p.getWhaleHolds(CU);
+  assert.ok(h.ok && h.top, "top block rides the holds response");
+  const t = h.top;
+  assert.equal(t.q, "Q2 2026");
+  assert.equal(t.nFilers, 5, "aggregate counts EVERY common-line holder exactly, incl. beyond the cap — the options desk's call-only book is excluded from the AGGREGATE too (common-only lane, both numbers one rule), the late prior-period filer is excluded, the HR/A pair counts once");
+  assert.deepEqual(t.rows.map((x) => x.name), ["MEGA CAPITAL LP", "BIGCO ADVISORS", "TRACKED ONE LP"],
+    "top-3 (cap) by CORRECTED value — a thousands filer ranks by its real $9B, an options desk's $20B call notional never outranks a real owner");
+  assert.ok(t.rows.every((x) => x.name !== "AMENDER LP"), "the HR/A superseded AMENDER down to $0.5B — outside the cap, the HR's $8B never counted");
+  assert.equal(t.rows[0].dSh, 5e6, "QoQ share delta vs the prior set, on corrected books");
+  assert.equal(t.rows[2].dSh, -1e6);
+  assert.equal(t.rows[2].tracked, "TRACKED", "your watchlist overlays by CIK");
+  assert.equal(t.cap, 3, "cap disclosed on the payload");
+  assert.equal(t.allNew, 0);
+  // Weekly tick wiring + status shape.
+  const st = p.t13fStatus();
+  assert.deepEqual(st.quarters, ["Q2 2026", "Q1 2026"], "two quarters kept, newest first");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("TOP HOLDERS \\u00b7 MARKET-WIDE") && app.includes("whl-trk") && app.includes("sub==='ingest13f'"), "panel + tracked badge + admin verb wired");
+  assert.ok(app.includes("INSTITUTIONAL MANAGERS only"), "the IPO invisibility banner exists");
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.ok(sv.includes('op === "ingest13f"') && sv.indexOf('op === "ingest13f"') > sv.indexOf("if (!isAdmin(req)) return"), "ingest op behind the admin recheck");
+  fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -12035,6 +12035,32 @@ async function whlWho(qv,keep){
   out.innerHTML=whoAgg(P,r.watchN)+whoTable(P)+alts
     +`<div class="whl-foot">${whoFoot(P,r)}`
     +`<span class="fl">searched the latest cached filing of each tracked fund + its prior quarter for exits \u00b7 quarter-end snapshots filed up to 45d late \u2014 positioning history, never the current book</span></div>`;
+  // Market-wide TOP HOLDERS (2026.08.21-05): the SEC data-set index rendered under the tracked-
+  // funds tables. Tracked rows gold + clickable into your books; NEW when absent from the prior
+  // set; dash when the prior row sat outside the stored cap (ambiguity disclosed, not guessed).
+  if(r.top){
+    const t=r.top;
+    const maxV=Math.max(...t.rows.map(x=>x.value||0),1);
+    const trow=(x)=>{
+      const d=x.isNew?'<span class="new" data-tip="no row in the prior data set — for a fresh listing this is a pre-IPO stake becoming reportable, not a buy at these prices">NEW</span>'
+        :(x.dSh!=null?`<span class="${x.dSh>0?'pos':'neg'}">${whlSgnSh(x.dSh)}</span>`
+        :'<span class="na" data-tip="prior-quarter share count unavailable — the holder sat outside the stored top-'+t.cap+' last set, or reported non-SH counts; nothing is guessed">\u2014</span>');
+      return `<tr class="whl-worow${x.tracked?' whl-mine':''}"${x.tracked?' data-whlopen2="'+esc(x.tracked)+'"':''} data-tip="${esc(x.name+' \u00b7 CIK '+x.cik+' \u00b7 $'+Math.round(x.value).toLocaleString()+(x.shares!=null?' \u00b7 '+Math.round(x.shares).toLocaleString()+' sh':'')+(x.tracked?' \u00b7 ON YOUR WATCHLIST — click for the book':''))}">`
+        +`<td class="r sec">${x.rank}</td>`
+        +`<td class="l">${esc(x.name)}${x.tracked?'<span class="whl-badge whl-trk">TRACKED</span>':''}</td>`
+        +`<td class="r">${whlMoney(x.value)}</td>`
+        +`<td class="r">${whlSh(x.shares)}</td>`
+        +`<td class="r">${d}</td>`
+        +`<td class="l"><span class="whl-tbar" style="width:${Math.max(2,Math.round((x.value||0)/maxV*120))}px" data-tip="relative to the largest holder's position — NOT % of float (shares outstanding is not in a 13F; the number is omitted rather than faked)"></span></td></tr>`; };
+    out.innerHTML+=`<div class="whl-tophd"><span class="whl-hd" data-tip="top institutional holders across ALL ~8,500 13F filers — from the SEC's quarterly Form 13F structured data set, indexed on your volume. Common-share lines only (an options desk must never outrank a real owner); per-filer thousands-convention correction applied; HR/A supersedes HR. Quarter-end positions in a data set published ~a week after the 45-day deadline — the freshest possible market-wide view is still ~7 weeks stale.">TOP HOLDERS \u00b7 MARKET-WIDE</span>`
+      +`<span class="whl-qtag" data-tip="which quarterly data set this reads${t.prevQ?' \u00b7 \u0394 shares vs the '+esc(t.prevQ)+' set':' \u00b7 no prior set stored — the \u0394 column dashes'}">${esc(t.q)} data set</span>`
+      +`<span class="sec">${t.nFilers.toLocaleString()} filer${t.nFilers===1?'':'s'} hold \u00b7 ${whlMoney(t.totVal)} institutional value${t.otherCusips?` \u00b7 ${t.otherCusips} sibling share class${t.otherCusips===1?'':'es'} indexed separately`:''}</span></div>`
+      +(t.allNew?`<div class="whl-ipowarn" data-tip="every top holder is NEW to the data set — the signature of a listing inside the quarter">13F shows INSTITUTIONAL MANAGERS only \u2014 founder/insider stakes, employee shares and non-filing pre-IPO entities are invisible here; for a fresh listing the true largest holders are mostly NOT on this list.</div>`:'')
+      +`<div class="tblwrap"><table class="whl-tbl whl-wotbl"><thead><tr><th class="r">#</th><th class="l">HOLDER</th><th class="r" data-tip="value as in the SEC data set — thousands-convention filers corrected by the same rule your watchlist uses">VALUE</th><th class="r">SHARES</th><th class="r" data-tip="share change vs the prior quarter's data set">\u0394 QoQ</th><th class="l">SIZE</th></tr></thead><tbody>${t.rows.map(trow).join('')}</tbody></table></div>`
+      +`<div class="whl-foot">source: SEC quarterly Form 13F structured data set \u00b7 top-${t.cap} per cusip stored, aggregates exact over all holders \u00b7 index complexes (Vanguard/BlackRock/State Street/Geode) hold by mandate, not conviction</div>`;
+  } else if(r.topMeta&&!r.topMeta.ready){
+    out.innerHTML+=`<div class="sec" style="padding:8px 2px" data-tip="the market-wide index builds from the SEC's quarterly data set (~300MB) — it downloads automatically ~a week after each 45-day deadline, or an admin can force it: terminal \u2192 whale ingest13f">market-wide top holders: ${r.topMeta.busy?'data set ingesting \u2014 a few minutes, progress in ops':'no data set ingested yet \u2014 it lands automatically after each quarter\u2019s deadline'}</div>`;
+  }
   out.querySelectorAll('[data-whlopen2]').forEach(tr=>tr.onclick=()=>whlOpenFund(tr.dataset.whlopen2));
   out.querySelectorAll('[data-whoalt]').forEach(h=>h.onclick=()=>{
     const k=h.dataset.whoalt;
@@ -12269,7 +12295,13 @@ async function termWhale(args){
         +(iss.notHeld&&iss.notHeld.length?`\n<span class="tp-trans">not held: ${iss.notHeld.map(tesc).join(', ')}</span>`:'');
     };
     const blocks=(r.issuers||[]).map((iss,i)=>block(iss,i===0)).join('\n\n');
-    return termOut(`${blocks}\n<span class="tp-trans">quarter-end books filed up to 45d late \u2014 positioning history, not the current book${r.noBook&&r.noBook.length?' \u00b7 no book yet: '+r.noBook.map(tesc).join(', '):''}</span>`);
+    const topTail=r.top?`\n\n<span class="tp-th">market-wide \u00b7 ${tesc(r.top.q)} data set \u00b7 ${r.top.nFilers.toLocaleString()} filers \u00b7 ${whlMoney(r.top.totVal)}</span>\n`+r.top.rows.slice(0,5).map(x=>`  ${tpad(String(x.rank),3)} ${tpad(tesc(x.name.slice(0,22))+(x.tracked?'*':''),24)} ${tpad(whlMoney(x.value),9,true)} ${tpad(whlSh(x.shares),10,true)} ${x.isNew?'<span class="amber">NEW</span>':(x.dSh!=null?`<span class="${x.dSh>0?'pos':'neg'}">${whlSgnSh(x.dSh)}</span>`:'\u2014')}`).join('\n')+`\n<span class="tp-trans">  * tracked \u00b7 full table + honesty notes on the FUNDS tab</span>`:'';
+    return termOut(`${blocks}\n<span class="tp-trans">quarter-end books filed up to 45d late \u2014 positioning history, not the current book${r.noBook&&r.noBook.length?' \u00b7 no book yet: '+r.noBook.map(tesc).join(', '):''}</span>${topTail}`);
+  }
+  if(sub==='ingest13f'){
+    if(!IS_ADMIN) return termErr('whale ingest13f is admin-only');
+    const r=await whlPost({op:'ingest13f',q:args.slice(1).join(' ').trim()||undefined});
+    return r&&r.ok?termOut(`<span class="pos">ingest started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
   }
   if(sub==='pull'){
     if(!IS_ADMIN) return termErr('whale pull is admin-only');
