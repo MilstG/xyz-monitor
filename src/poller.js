@@ -5400,6 +5400,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const T13F_TOP_CAP = t13fCapOpt || 500;        // option C: top-N per cusip stored; aggregates stay exact over ALL holders
   const T13F_URL = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/";
   let t13fBusy = false, t13fProgress = null;
+  // The quarter a data set could plausibly EXIST for. `whaleWindow().cur.q` is the quarter now in
+  // progress — on 2026-08-21 that is Q3 2026, whose filing deadline is 2026-11-16 — so defaulting a
+  // manual ingest to it guarantees a 404 against sec.gov. The scheduled tick already derived the
+  // last CLOSED quarter; both paths now share this, so `whale ingest13f` with no argument asks for
+  // the same quarter the scheduler would.
+  function t13fSeasonQuarter(now) {
+    const win = whaleWindow(now);
+    if (win.state !== "upcoming" && win.state !== "open") return win.cur.q;
+    const m = String(win.cur.q).match(/^Q([1-4]) (\d{4})$/); if (!m) return win.cur.q;
+    const qi = +m[1] === 1 ? 4 : +m[1] - 1, y = +m[1] === 1 ? +m[2] - 1 : +m[2];
+    return "Q" + qi + " " + y;
+  }
   function t13fPeriodOf(q) {   // "Q2 2026" -> "30-JUN-2026" comparisons are done on ISO; period end ISO:
     const m = String(q).match(/^Q([1-4]) (\d{4})$/); if (!m) return null;
     const ends = ["03-31", "06-30", "09-30", "12-31"];
@@ -5462,19 +5474,24 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   async function whale13fIngest(qArg) {
     if (t13fBusy) return { ok: false, error: "an ingest is already running" };
     if (!store.t13fReady || !store.t13fReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
-    const q = String(qArg || whaleWindow(Date.now()).cur.q);
+    const q = String(qArg || t13fSeasonQuarter(Date.now()));
     const period = t13fPeriodOf(q);
     if (!period) return { ok: false, error: "bad quarter \u201c" + q + "\u201d \u2014 expected like Q2 2026" };
     t13fBusy = true; t13fProgress = { q, stage: "download", rows: 0 };
     const done = (r) => { t13fBusy = false; t13fProgress = null; return r; };
+    // Every exit says why, in the ops log. Only the thrown-error path used to, so a 404 or a layout
+    // change looked exactly like a process that died mid-download — the single most misleading thing
+    // this ingest could do to whoever is watching Railway.
+    const fail = (r) => { pushOps("13F data set " + q, (r.notYet ? "not ingested \u2014 " : "ingest FAILED: ") + r.error,
+      r.notYet ? "info" : "warn", true); return done(r); };
     try {
       pushOps("13F data set " + q, "downloading (~300MB \u2014 can take a few minutes on first try)", "info", true);
-      let zipBuf = null, urlUsed = null;
+      let zipBuf = null, urlUsed = null; const tried = [];
       const tmpZip = require("path").join(require("os").tmpdir(), "t13f-" + q.replace(/\s+/g, "") + ".zip");
       for (const url of t13fZipUrls(q)) {
         try {
           const res = await extFetch(url, { headers: { "user-agent": SEC_UA } });
-          if (!res || !res.ok) continue;
+          if (!res || !res.ok) { tried.push(url.split("/").pop() + " \u2192 HTTP " + (res ? res.status : "no response")); continue; }
           // Stream to disk, then read back ONCE. The previous Buffer.from(await res.arrayBuffer())
           // held the zip TWICE transiently (~700MB peak) — enough to OOM-kill a memory-tight
           // container mid-ingest, which presents as "ran the command, ops went quiet, no panel".
@@ -5492,14 +5509,16 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             zipBuf = Buffer.from(await res.arrayBuffer());   // injected test transports have no stream body
           }
           urlUsed = url; break;
-        } catch (_) { try { require("fs").unlinkSync(tmpZip); } catch (_) {} }
+        } catch (e) { tried.push(url.split("/").pop() + " \u2192 " + String(e && e.message).slice(0, 60));
+          try { require("fs").unlinkSync(tmpZip); } catch (_) {} }
       }
-      if (!zipBuf) return done({ ok: false, notYet: 1, error: q + " data set not at sec.gov yet (tried both URL patterns) \u2014 it lands ~1 week after the deadline; the weekly check keeps trying" });
+      if (!zipBuf) return fail({ ok: false, notYet: 1, tried,
+        error: q + " not downloaded (" + tried.join("; ") + ") \u2014 two 404s means the set is not published yet (it lands ~1 week after the deadline and the weekly check keeps trying); any other status means the URL or the access rule changed" });
       pushOps("13F data set " + q, "downloaded " + (zipBuf.length / 1e6).toFixed(0) + "MB from " + urlUsed.split("/").pop() + " \u2014 ingesting", "info", true);
       const entries = t13fZipEntries(zipBuf);
       const find = (nm) => entries.find((e) => e.name.toUpperCase().endsWith(nm));
       const eInfo = find("INFOTABLE.TSV"), eSub = find("SUBMISSION.TSV"), eCov = find("COVERPAGE.TSV");
-      if (!eInfo || !eSub) return done({ ok: false, error: "data-set layout changed: " + (!eInfo ? "INFOTABLE.tsv" : "SUBMISSION.tsv") + " missing from the zip \u2014 ingest needs a patch" });
+      if (!eInfo || !eSub) return fail({ ok: false, error: "data-set layout changed: " + (!eInfo ? "INFOTABLE.tsv" : "SUBMISSION.tsv") + " missing from the zip \u2014 ingest needs a patch" });
       // SUBMISSION: acc -> {cik, period, type}; choose newest accession per (cik, period), HR/A first.
       t13fProgress.stage = "submissions";
       const subs = new Map(); let subCols = null;
@@ -5538,7 +5557,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // INFOTABLE pass 1: stage rows for chosen accessions; reservoir of implied-price ratios per
       // accession feeds the SAME thousands-rule the watchlist uses (compute.whale13FScale).
       t13fProgress.stage = "infotable";
-      if (!store.t13fIngestStart()) return done({ ok: false, error: "staging init failed" });
+      if (!store.t13fIngestStart()) return fail({ ok: false, error: "staging init failed" });
       const RES_N = 48;
       const reservoirs = new Map();   // acc -> [{value, shares}] capped
       let batch = [], total = 0, ic = null;
@@ -5562,7 +5581,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (batch.length >= 4000) flush();
       });
       flush();
-      if (!total) return done({ ok: false, error: "INFOTABLE parsed to zero rows for " + q + " \u2014 header names may have changed; ingest needs a patch" });
+      if (!total) return fail({ ok: false, error: "INFOTABLE parsed to zero rows for " + q + " \u2014 header names may have changed; ingest needs a patch" });
       const mults = new Map();
       for (const acc of chosenAccs.keys()) {
         const det = whale13FScale(reservoirs.get(acc) || []);
@@ -5571,7 +5590,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       t13fProgress.stage = "finalize";
       store.t13fStageMeta(mults, names, chosenAccs);
       const fin = store.t13fFinalize(q, T13F_TOP_CAP);
-      if (!fin.ok) return done({ ok: false, error: "finalize: " + fin.error });
+      if (!fin.ok) return fail({ ok: false, error: "finalize: " + fin.error });
       store.t13fMetaSet("ingested:" + q, String(Date.now()));
       store.t13fMetaSet("cap", String(T13F_TOP_CAP));
       whaleBump();
@@ -5595,9 +5614,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     t13fLastCheck = now;
     if (!store.t13fReady || !store.t13fReady()) return;
     const win = whaleWindow(now);
-    const q = win.state === "upcoming" || win.state === "open"
-      ? (() => { const m = win.cur.q.match(/^Q([1-4]) (\d{4})$/); const qi = +m[1] === 1 ? 4 : +m[1] - 1; const y = +m[1] === 1 ? +m[2] - 1 : +m[2]; return "Q" + qi + " " + y; })()
-      : win.cur.q;
+    const q = t13fSeasonQuarter(now);
     if (store.t13fMeta("ingested:" + q)) return;
     // Only start trying once the set could plausibly exist.
     const per = t13fPeriodOf(q); if (!per) return;

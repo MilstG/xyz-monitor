@@ -12205,7 +12205,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-07"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19851,6 +19851,42 @@ test("housing tab: a retired series is dropped, not served stale", () => {
   assert.ok(!pol.includes("HOUSING_PENDING"), "no pending placeholder payload");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(!app.includes("hsg-pending") && !app.includes("d.pending||[]"), "no pending cards rendered");
+});
+
+// `whale ingest13f` with no argument used to default to whaleWindow().cur.q — the quarter now IN
+// PROGRESS, whose filing deadline has not passed. On 2026-08-21 that asked sec.gov for Q3 2026
+// (deadline 2026-11-16): a guaranteed 404, observed three times in a live Railway log. The manual
+// path now shares the scheduler's derivation of the last CLOSED quarter.
+test("13f ingest: the default quarter is one that could exist, and every exit reports itself", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const { whaleWindow } = require("../src/compute.js");
+  const F = new Function("whaleWindow",
+    pol.match(/  function t13fSeasonQuarter\(now\) \{[\s\S]*?\n  \}/)[0] + "\nreturn t13fSeasonQuarter;")(whaleWindow);
+  const at = (d) => F(Date.parse(d + "T12:00:00Z"));
+
+  // the exact case from the log: mid-Q3, the default must be the last CLOSED quarter, never Q3
+  assert.strictEqual(at("2026-08-21"), "Q2 2026", "mid-quarter default is the last closed quarter");
+  assert.strictEqual(at("2026-05-02"), "Q4 2025", "year boundary walks back correctly");
+  assert.strictEqual(at("2027-01-05"), "Q3 2026", "January does not ask for a quarter still open");
+  // and it never returns a quarter whose own filing deadline is still in the future
+  for (const d of ["2026-08-21", "2026-05-02", "2027-01-05", "2026-11-20", "2026-02-14"]) {
+    const q = at(d), m = q.match(/^Q([1-4]) (\d{4})$/);
+    assert.ok(m, "well-formed quarter for " + d);
+    const end = Date.parse(m[2] + "-" + ["03-31", "06-30", "09-30", "12-31"][+m[1] - 1] + "T12:00:00Z");
+    assert.ok(end < Date.parse(d + "T12:00:00Z"), "on " + d + " the default quarter " + q + " has already ended");
+  }
+  // both callers share it — the drift between them was the bug
+  assert.strictEqual((pol.match(/t13fSeasonQuarter\(/g) || []).length, 3, "defined once, used by both paths");
+  assert.ok(!/whaleWindow\(Date\.now\(\)\)\.cur\.q/.test(pol), "no caller defaults to the open quarter");
+
+  // no failure exit is silent: a 404 or a layout change must not look like a dead process
+  const body = pol.slice(pol.indexOf("async function whale13fIngest("), pol.indexOf("async function whale13fTick("));
+  // exactly one plain `done` failure return survives: the catch block, which logs the line above it
+  assert.strictEqual((body.match(/return done\(\{ ok: false/g) || []).length, 1, "only the catch returns without fail()");
+  assert.ok(/pushOps\([^;]*ingest FAILED[\s\S]{0,180}?return done\(\{ ok: false/.test(body), "and it logs first");
+  assert.ok(body.includes("const fail = (r) =>") && body.includes("pushOps("), "failures reach the ops log");
+  assert.ok(body.includes("tried.push("), "each URL's HTTP status is recorded");
 });
 
 test("liquidity tab: source + wiring manifest (net liquidity math, units, Thursday refire, view wiring)", () => {
