@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-12"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.21-13"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20131,5 +20131,11 @@ test("whale 13f data-set index (2026.08.21-05): fixture ZIP through the REAL ing
   assert.ok(app.includes("INSTITUTIONAL MANAGERS only"), "the IPO invisibility banner exists");
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   assert.ok(sv.includes('op === "ingest13f"') && sv.indexOf('op === "ingest13f"') > sv.indexOf("if (!isAdmin(req)) return"), "ingest op behind the admin recheck");
+  // 2026.08.21-13: the panel renders the top 20, both query paths at the same depth, from one
+  // named constant â€” never a bare literal that can drift between the hit and the miss path.
+  const pol13 = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/const T13F_TOP_SHOW = 20;/.test(pol13), "the rendered depth is 20, declared once");
+  assert.equal((pol13.match(/t13fTop\([^)]*T13F_TOP_SHOW\)/g) || []).length, 2,
+    "both the watchlist-hit and the CUSIP-miss path ask for the same depth");
   fs.rmSync(dir, { recursive: true, force: true });
 });
