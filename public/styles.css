@@ -438,6 +438,19 @@ svg.spark{width:100%;height:46px;display:block;margin:5px 0 2px}
 .bt-trow:not(.bt-thd):hover{background:var(--panel2)}
 .bt-thd{color:var(--muted);font-size:9.5px;text-transform:uppercase;letter-spacing:.6px}
 .bt-trow .r{text-align:right}
+/* no-rule hold: the overnight / cash-session decomposition. Bars are magnitude-relative to the
+   larger of the two, so the shorter bar reads as "smaller share", never as "small number". */
+.bt-split{display:grid;grid-template-columns:96px 1fr 74px;gap:10px;align-items:center;
+  font-family:var(--mono);font-size:12px;padding:4px 2px}
+.bt-splab{color:var(--muted);font-size:11px}
+.bt-splbar{height:9px;background:var(--panel2);border:1px solid var(--border);border-radius:3px;overflow:hidden}
+.bt-splfill{display:block;height:100%}
+.bt-splfill.up{background:var(--up);opacity:.75}
+.bt-splfill.dn{background:var(--down);opacity:.75}
+.bt-spv{text-align:right}
+.bt-sptot{border-top:1px solid var(--border);margin-top:4px;padding-top:7px}
+.bt-sptot .bt-splab{color:var(--text)}
+.bt-sptot .bt-splbar{background:none;border:none}   /* the total row is a sum, not a share — an empty track would read as "zero" */
 .bk-builtin{color:var(--faint);font-size:9px;letter-spacing:.1em}
 .bk-guest{color:var(--blue);font-size:8.5px;letter-spacing:.08em;border:1px solid var(--blue);border-radius:2px;padding:0 3px;opacity:.85}
 .bk-guestbanner{border-left:2px solid var(--blue);padding-left:6px}

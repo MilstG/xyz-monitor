@@ -20167,7 +20167,7 @@ function _btHarness(){
   global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: {}, __ADMIN: true };
   global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
   global.fetch = () => new Promise(() => {});
-  const api = new Function(app + "\n;return {state, btRun, btMode, btPickRows, btUniverse, btPickerHtml, renderBacktest, dailyReturns};")();
+  const api = new Function(app + "\n;return {state, btRun, btRunOne, btMode, btPickRows, btUniverse, btPickerHtml, renderBacktest, dailyReturns, btOvernightSplit};")();
   const restore = () => { global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
     global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f; };
@@ -20177,12 +20177,15 @@ function _btHarness(){
   const mkRow = (coin, seed, n, sector) => {
     let s = seed >>> 0;
     const rnd = () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
-    const daily = [], dailyFund = []; let px = 100, reg = 0;
+    const daily = [], dailyFund = [], overnight = []; let px = 100, reg = 0;
     for (let i = 0; i < n; i++) { reg = reg * 0.94 + (rnd() - 0.5) * 0.006; let g = 0; for (let k = 0; k < 6; k++) g += rnd(); g = (g - 3) / 1.22;
-      px *= Math.exp(reg + g * 0.021);
+      const dayLog = reg + g * 0.021; px *= Math.exp(dayLog);
       daily.push({ t: t0 + i * DAY, c: +px.toFixed(4), h: +(px * 1.01).toFixed(4), v: 1e6 });
-      dailyFund.push({ t: t0 + i * DAY, f: 0.0002 }); }
-    return { coin, ticker: coin, uni: "xyz", delisted: false, sector, assetClass: "Equity", daily, dailyFund };
+      dailyFund.push({ t: t0 + i * DAY, f: 0.0002 });
+      // a known 65/35 split of each day's move between the close→open boundary and the session,
+      // so the decomposition has a right answer to be checked against rather than just an output
+      if (i > 0) overnight.push({ t: t0 + i * DAY, g: +(Math.exp(dayLog * 0.65) - 1).toFixed(8), f: 0.0001 }); }
+    return { coin, ticker: coin, uni: "xyz", delisted: false, sector, assetClass: "Equity", daily, dailyFund, overnight };
   };
   const { state } = api;
   state.rows = new Map();
@@ -20382,11 +20385,143 @@ test("backtest single-asset manifest: precedence, no lookahead in the entry scal
     "btAddPick must resolve against live rows only");
   assert.ok(s.includes("dm.size<BT_MIN_DAYS") && s.includes("pushToast("), "a too-short history must be refused out loud");
   // single mode reuses the shared curve, it does not fork one
-  assert.ok(s.includes("res.single") && s.includes("btCurveSvg(res,splitIdx)"), "single mode must render through the shared curve");
+  assert.ok(s.includes("res.single") && s.includes("btCurveSvg(res,res.holdMode?0:splitIdx)"), "single mode must render through the shared curve");
   assert.ok(css.includes(".bt-na{opacity:") && css.includes(".bt-pick"), "picker + disabled-control styling must ship");
   // the tab's own help documents the mode (this app documents in-app, not in a changelog)
   const help = s.slice(s.indexOf("backtest:`"));
   const helpBlock = help.slice(0, help.indexOf("report:`"));
   assert.ok(/Testing one name/.test(helpBlock) && /position ribbon/.test(helpBlock) && /anecdote/.test(helpBlock),
     "backtest help must document single-asset mode, its curve, and its small-sample honesty");
+});
+
+// ===== No-rule hold: close→close vs overnight on one name (build 2026.08.22) ====================
+// The baseline question underneath every timing rule: does owning this thing pay, and does the
+// money arrive overnight or during the session? Nothing is ranked, rebalanced or fitted, so the
+// tests here are mostly about what must NOT happen — the rule controls must be inert, not merely
+// greyed out — plus the one identity the decomposition has to satisfy exactly.
+
+test("backtest hold: no rule means a constant 1x long, and every rule control is genuinely inert", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    state.backtest.picks = ["NVDA"];
+    state.backtest.signal = "none";
+    assert.equal(api.btMode(), "single");
+    const cc = api.btRunOne(Object.assign({}, state.backtest, { holdWindow: "cc" }));
+    assert.ok(cc.ok && cc.single, "a hold run is still a single-asset run");
+    assert.deepEqual([...new Set(cc.pos)], [1], "the position must be 1x long on every single day");
+    assert.equal(cc.exposure, 1, "a hold is in the market by definition");
+    assert.equal(cc.trades.length, 1, "the position never changes, so there is exactly one round trip");
+    assert.ok(cc.trades[0].live, "and it is still open at the end");
+    // It starts from the first day of history: there is no lookback window to warm up.
+    const mom = (state.backtest.signal = "mom", api.btRunOne(state.backtest));
+    state.backtest.signal = "none";
+    assert.ok(cc.days.length > mom.days.length, "a hold run must not burn a warmup it has no use for");
+
+    // The dimmed controls are dimmed because they do nothing — prove it, don't just style it.
+    const baseline = JSON.stringify(cc.eq);
+    for (const [k, v] of [["lookback", 120], ["cadence", 1], ["entry", 1], ["direction", "low"],
+      ["structure", "short"], ["weighting", "vol"], ["reqSign", true], ["quantile", 0.1]]) {
+      const p = Object.assign({}, state.backtest, { holdWindow: "cc" });
+      p[k] = v;
+      assert.equal(JSON.stringify(api.btRunOne(p).eq), baseline, `${k} must not change a no-rule hold`);
+    }
+    // The taker fee is the one knob that does move it, and on the close→close leg it is charged
+    // exactly once — you buy it and you keep it.
+    const free = api.btRunOne(Object.assign({}, state.backtest, { holdWindow: "cc", cost: 0 }));
+    const dear = api.btRunOne(Object.assign({}, state.backtest, { holdWindow: "cc", cost: 20 }));
+    assert.equal(free.feeCum, 0);
+    assert.ok(Math.abs(dear.feeCum - 0.002) < 1e-12, "one entry at 20bp and nothing after");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest hold: the overnight leg pays a nightly round trip, and the fee is the whole contest", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    state.backtest.picks = ["NVDA"];
+    state.backtest.signal = "none";
+    const on = api.btRunOne(Object.assign({}, state.backtest, { holdWindow: "on", cost: 5 }));
+    assert.ok(on.ok && on.ovCov > 0, "the overnight leg needs the close→open boundaries");
+    assert.ok(on.nights > 100, "nights held must count the boundaries, not the trades");
+    assert.equal(on.trades.length, 1, "the position never changes — the trade count is NOT the night count");
+    // every night is a round trip: two crossings at the taker fee, once per night held
+    assert.ok(Math.abs(on.feeCum - on.nights * 2 * 0.0005) < 1e-9, "fees must be 2x the taker fee per night held");
+    const free = api.btRunOne(Object.assign({}, state.backtest, { holdWindow: "on", cost: 0 }));
+    assert.equal(free.feeCum, 0);
+    assert.ok(free.eq[free.eq.length - 1] > on.eq[on.eq.length - 1],
+      "a zero-fee overnight leg must beat the same leg paying 5bp a side");
+    // ...and the gross path is identical either way: the fee changes the P&L, never the exposure
+    assert.deepEqual(free.pos, on.pos, "the taker fee must not change what the leg holds");
+    // the close→close leg holds through the session too, so the two legs are genuinely different
+    const cc = api.btRunOne(Object.assign({}, state.backtest, { holdWindow: "cc", cost: 5 }));
+    assert.notEqual(cc.eq[cc.eq.length - 1], on.eq[on.eq.length - 1], "the two windows must not produce the same curve");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest hold: the overnight/session split is multiplicatively exact and recovers the known fixture split", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    state.backtest.picks = ["NVDA"];
+    state.backtest.signal = "none";
+    const cc = api.btRunOne(Object.assign({}, state.backtest, { holdWindow: "cc" }));
+    const sp = api.btOvernightSplit(state.rows.get("NVDA"), cc.days);
+    assert.ok(sp && sp.cov > 100, "the split needs boundary days to work with");
+    assert.equal(sp.cov, sp.seen, "this fixture carries a boundary on every day, so nothing is dropped");
+    // the identity the panel claims: the two windows compound back to the price line
+    assert.ok(Math.abs((1 + sp.ov) * (1 + sp.sess) - (1 + sp.tot)) < 1e-12,
+      "overnight and session must compound to the total, not merely sum near it");
+    // the fixture puts 65% of each day's LOG move in the boundary, so log(1+ov)/log(1+tot) ≈ 0.65
+    const share = Math.log(1 + sp.ov) / Math.log(1 + sp.tot);
+    assert.ok(Math.abs(share - 0.65) < 0.02, `the split must recover the fixture's 65/35 construction (got ${share.toFixed(3)})`);
+    // a name with no boundaries at all reports nothing rather than inventing a bucket
+    const bare = state.rows.get("XOM"); delete bare.overnight; delete bare._dov;
+    const none = api.btOvernightSplit(bare, cc.days);
+    assert.equal(none.cov, 0, "no boundaries means no split, not a zero-filled one");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest hold render: both legs, a verdict, no fitted machinery — and 'no rule' exists only for one name", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    // 'no rule' must not be offered as a way to rank a universe
+    const universe = api.renderBacktest();
+    assert.ok(!/no rule/.test(universe), "the hold option must not appear in the cross-sectional roster");
+
+    state.backtest.picks = ["NVDA"];
+    state.backtest.signal = "none";
+    const html = api.renderBacktest();
+    assert.ok(/Hold — no rule/.test(html), "the mode bar must say there is no rule");
+    assert.ok(/Held close/.test(html) && /Overnight only · \d+ nights/.test(html), "both legs get their own stat box");
+    assert.ok(/Verdict/.test(html) && /(winner|less bad)/.test(html), "the comparison must state a verdict");
+    assert.ok(html.includes("bt-split"), "the overnight/session decomposition panel must render");
+    assert.ok(!html.includes('id="btEntry"') && !html.includes('id="btQ"'), "no entry threshold, no book quantile");
+    assert.ok(!html.includes(">pos</text>"), "a ribbon of a constant position says nothing — it must be dropped");
+    assert.ok(/nothing was fitted here/.test(html), "the in-sample split must be dimmed with its reason");
+    assert.ok(/overnight only \(net\)/.test(html), "the legend must name the second leg");
+
+    // removing the pick can't leave a cross-section ranking on 'nothing'
+    state.backtest.picks = [];
+    api.renderBacktest();
+    assert.equal(state.backtest.signal, "mom", "dropping back to a universe must restore a real rule");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest hold manifest: the option is single-name only, and its accounting is the shared one", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(s.includes("const BT_HOLD='none'"), "the hold key must be named, not a bare string literal");
+  assert.ok(s.includes("k!==BT_HOLD||single"), "the roster must hide 'no rule' outside single-asset mode");
+  assert.ok(s.includes("if(!single && p.signal===BT_HOLD) p.signal='mom';"), "leaving single mode must restore a rule");
+  // both legs come from the SAME run function — a second cost model would be a second truth
+  assert.equal((s.match(/function btRunOne\(/g) || []).length, 1, "there is exactly one single-asset engine");
+  assert.ok(s.includes("btRunOne(Object.assign({},p,{holdWindow:'cc'}))") && s.includes("btRunOne(Object.assign({},p,{holdWindow:'on'}))"),
+    "the two legs must be the same engine run twice, not two implementations");
+  assert.ok(s.includes("if(Number.isFinite(g)){ pr=w*g; if(w!==0) nights++; }"), "nights must count boundaries actually held");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  assert.ok(css.includes(".bt-splfill"), "the split bars must ship styling");
+  const help = s.slice(s.indexOf("backtest:`"));
+  assert.ok(/no rule/.test(help.slice(0, help.indexOf("report:`"))), "the tab help must document the hold option");
 });

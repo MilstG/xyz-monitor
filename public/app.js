@@ -5205,11 +5205,17 @@ function drawSessions(){
 // parameter tweaks are instant and add no server load. Non-fitted ranking rules: the honest overfitting
 // risk is the user picking params by eye, which the in-sample/out-of-sample split is there to expose.
 const BT_MIN_DAYS=25, BT_ANN=252;
+// 'none' is not a ranking rule and never appears in the cross-sectional roster — it exists only
+// once a single name is picked, where the honest baseline question isn't "which rule times this
+// name" but "does simply holding it make money, and does the money arrive overnight or during the
+// session". No score, no rebalance, no fitted parameter: 1x long, every day.
+const BT_HOLD='none';
 const BT_SIGNALS={ mom:'Momentum', smom:'Sector-relative momentum', rev:'Short-term reversion', res:'Residual momentum (β-neutral)',
   lowvol:'Low volatility', ivol:'Low idiosyncratic vol', beta:'Low beta (BAB)', max:'Anti-lottery (low MAX)',
   carry:'Funding carry', hprox:'High proximity', volt:'Volume trend', oid:'OI change',
   m0:'Blend M0 — live-score analogue', mres:'Blend V1 — β-residual slow horizons', moi:'Blend V2 — regime-qualified OI',
-  mfund:'Blend V3 — funding-crowding haircut', mpart:'Blend V4 — volume participation' };
+  mfund:'Blend V3 — funding-crowding haircut', mpart:'Blend V4 — volume participation',
+  none:'\u2014 no rule \u00b7 just hold it (1\u00d7 long)' };
 // the live-score variant family: the promotion bench for the Markets-tab momentum column. Fixed
 // 1/7/30d horizons mirroring computeMomentum — the lookback control is ignored for these five.
 const BT_MVAR={ m0:1, mres:1, moi:1, mfund:1, mpart:1 };
@@ -5479,7 +5485,7 @@ function btRun(){
 function btRunOne(p){
   const tgt=btPickRows()[0]; if(!tgt) return { ok:false, have:0, days:0, need:1 };
   const cr=state.scope==='crypto', L=p.lookback, cad=Math.max(1,p.cadence), costR=p.cost/1e4;
-  const warmN=BT_MVAR[p.signal]?Math.max(L,31):L;
+  const warmN=p.signal===BT_HOLD?1:(BT_MVAR[p.signal]?Math.max(L,31):L);   // nothing to warm up when there is no rule — hold from the first day of history
   // Sector-relative momentum is a demean against peers, so on one name the peers have to come
   // along — otherwise the rule silently degrades to plain momentum under a label that promises
   // otherwise. They join the matrix (shared day axis) but never take a position.
@@ -5499,8 +5505,10 @@ function btRunOne(p){
   const ex={ f:fund.get(c)||null, px:pxm.get(c)||null, hi:him.get(c)||null, vo:vom.get(c)||null, oi:oim.get(c)||null };
   const base=p.signal==='smom'?'mom':p.signal;
   const peerC=peers.map(r=>r.coin);
+  const hold=p.signal===BT_HOLD;                          // no rule: the "score" is the constant 1, so the position never changes
   const raw=new Array(N).fill(NaN);                       // the score on each day, using data through that day only
-  for(let di=warmN; di<N; di++){
+  if(hold){ for(let di=warmN; di<N; di++) raw[di]=1; }
+  else for(let di=warmN; di<N; di++){
     let s=btScore(base, a, benchSeries, di, L, ex);
     if(!Number.isFinite(s)) continue;
     if(p.signal==='smom'){ let ps=0,pn=0;
@@ -5515,11 +5523,12 @@ function btRunOne(p){
   const on=p.holdWindow==='on' && !cr;
   const start=warmN;
   const eq=[1], eqg=[1], eqb=[1], eqbh=[1], curveDays=[days[start]], portR=[], pos=[], trades=[];
-  let w=0, feeCum=0, fundCum=0, inMkt=0, open=null, flips=0;
+  let w=0, feeCum=0, fundCum=0, inMkt=0, open=null, flips=0, nights=0;
   for(let di=start; di<N-1; di++){
     if((di-start)%cad===0){                               // re-decide the position
-      let nw=0; const s=raw[di], sig=(p.direction==='low'? -s : s);   // sig = the quantity we go long on
-      if(Number.isFinite(sig) && sig!==0){
+      let nw=0; const s=raw[di], sig=(p.direction==='low'&&!hold? -s : s);   // sig = the quantity we go long on
+      if(hold){ nw=1; }                                  // 1x long, unconditionally — that IS the test
+      else if(Number.isFinite(sig) && sig!==0){
         const sc=scale[di];
         const clears = p.entry<=0 ? true : (Number.isFinite(sc) && sc>0 && Math.abs(sig)>=p.entry*sc);
         if(clears) nw=sig>0?1:-1;
@@ -5541,7 +5550,7 @@ function btRunOne(p){
     }
     const fd=di+1; let pr=0, fpay=0;
     if(on){ const ga=ovG.get(c), g=ga?ga[fd]:NaN;         // overnight: hold the close→open gap, flat through the cash session
-      if(Number.isFinite(g)) pr=w*g;
+      if(Number.isFinite(g)){ pr=w*g; if(w!==0) nights++; }   // nights actually held — NOT the trade count, which is 1 when the position never changes
       const fa=ovF.get(c); if(fa) fpay=w*fa[fd];
     } else {
       const x=a[fd]; if(Number.isFinite(x)) pr=w*(Math.exp(x)-1);
@@ -5562,7 +5571,7 @@ function btRunOne(p){
   if(open){ open.exit=days[N-1]; open.ret=eq[eq.length-1]/open.eq0-1; open.live=true; trades.push(open); }
   return { ok:true, single:true, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
     turnover:0, avgPos:inMkt?1:0, universeN:1, book:null, peers:peers.length,
-    fundCov, fundCum, feeCum, ovCov, on, flips, exposure:pos.length?inMkt/pos.length:0,
+    fundCov, fundCum, feeCum, ovCov, on, flips, nights, exposure:pos.length?inMkt/pos.length:0,
     curW:w, curScore:raw[N-2], curZ:(Number.isFinite(scale[N-2])&&scale[N-2]>0)?raw[N-2]/scale[N-2]:null };
 }
 function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
@@ -5583,7 +5592,9 @@ function btCurveSvg(res, splitIdx){
   const pct=arr=>arr.map(e=>(e/arr[0]-1)*100);
   const net=pct(res.eq), gross=pct(res.eqg), bench=pct(res.eqb), ew=pct(res.eqew);
   const vb=res.eqvb?pct(res.eqvb):null;
-  let lo=Infinity,hi=-Infinity; for(const arr of (vb?[net,gross,bench,ew,vb]:[net,gross,bench,ew])) for(const y of arr){ if(y<lo)lo=y; if(y>hi)hi=y; }
+  const onl=res.eqOn?pct(res.eqOn):null;                          // hold mode: the overnight-only leg, drawn instead of gross
+  const series=[net,bench,ew].concat(res.holdMode?[]:[gross]).concat(vb?[vb]:[]).concat(onl?[onl]:[]);
+  let lo=Infinity,hi=-Infinity; for(const arr of series) for(const y of arr){ if(y<lo)lo=y; if(y>hi)hi=y; }
   if(!(hi>lo)){ hi=1; lo=-1; } const padv=(hi-lo)*0.08||1; lo-=padv; hi+=padv;
   const X=i=>pl+(m<2?0:i/(m-1))*(W-pl-pr), Y=y=>pt+(1-(y-lo)/(hi-lo))*(H-pt-pb);
   const path=arr=>arr.map((y,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(y).toFixed(1)).join(' ');
@@ -5603,11 +5614,17 @@ function btCurveSvg(res, splitIdx){
     : `<path d="${path(ew)}" fill="none" stroke="var(--faint)" stroke-width="1"/>`;
   if(vb) s+=`<path class="bt-vb" d="${path(vb)}" fill="none" stroke="var(--accent-dim)" stroke-width="1.2" stroke-dasharray="4 3"/>`;
   s+=`<path d="${path(bench)}" fill="none" stroke="var(--muted)" stroke-width="1.2"/>`;
-  s+=`<path d="${path(gross)}" fill="none" stroke="var(--blue)" stroke-width="1.2" opacity="0.85"/>`;
+  // In hold mode the blue line is the overnight-only leg, not gross: with no rule to fit, the
+  // comparison that matters is between the two windows you could have held, not between one
+  // window's price and its own costs — the dashed price line already shows that gap.
+  s+= res.holdMode
+    ? (onl?`<path d="${path(onl)}" fill="none" stroke="var(--blue)" stroke-width="1.6"/>`:'')
+    : `<path d="${path(gross)}" fill="none" stroke="var(--blue)" stroke-width="1.2" opacity="0.85"/>`;
   s+=`<path d="${path(net)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
   const endLab=(arr,col)=>`<text x="${(W-pr+4)}" y="${(Y(arr[m-1])+3).toFixed(1)}" style="font-size:9px;fill:${col}">${(arr[m-1]>0?'+':'')+arr[m-1].toFixed(1)}%</text>`;
   s+=endLab(net,'var(--accent)');
-  if(res.single){                                                   // position ribbon: WHEN the rule was on, and on which side
+  if(res.holdMode){ s+=endLab(ew,'var(--text)'); if(onl) s+=endLab(onl,'var(--blue)'); }
+  else if(res.single){                                              // position ribbon: WHEN the rule was on, and on which side
     s+=endLab(ew,'var(--text)');
     const y0=H-26, hgt=9, wd=Math.max(1.2,(X(1)-X(0))+0.7);
     for(let i=0;i<res.pos.length&&i<m-1;i++){ const w=res.pos[i];
@@ -5621,10 +5638,14 @@ function btCurveSvg(res, splitIdx){
   const xs=days.map((_,i)=>X(i)), rows=days.map((d,i)=>{
     const tag=(splitIdx>0&&i>=splitIdx)?'<span style="color:var(--muted)">OOS</span>':'<span style="color:var(--muted)">IS</span>';
     return `<b>${dfmt(d)}</b> ${tag}<br>`+
-      `<span style="color:var(--accent)">net ${(net[i]>0?'+':'')+net[i].toFixed(2)}%</span> · `+
-      `<span style="color:var(--blue)">gross ${(gross[i]>0?'+':'')+gross[i].toFixed(2)}%</span><br>`+
+      `<span style="color:var(--accent)">${res.holdMode?'held':'net'} ${(net[i]>0?'+':'')+net[i].toFixed(2)}%</span> · `+
+      (res.holdMode
+        ? (onl?`<span style="color:var(--blue)">overnight ${(onl[i]>0?'+':'')+onl[i].toFixed(2)}%</span><br>`:'<br>')
+        : `<span style="color:var(--blue)">gross ${(gross[i]>0?'+':'')+gross[i].toFixed(2)}%</span><br>`)+
       `<span style="color:var(--muted)">bench ${(bench[i]>0?'+':'')+bench[i].toFixed(2)}%</span> · `+
-      (res.single
+      (res.holdMode
+        ? `<span style="color:var(--text)">price ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`
+        : res.single
         ? `<span style="color:var(--text)">hold ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`
           +`<br><span class="sec">position </span>`+(()=>{ const w=i>0?res.pos[i-1]:0;
               return w>0?`<span class="pos">LONG ${w.toFixed(2)}\u00d7</span>`:w<0?`<span class="neg">SHORT ${Math.abs(w).toFixed(2)}\u00d7</span>`:`<span class="sec">flat</span>`; })()
@@ -5680,6 +5701,75 @@ function btPositionPanel(res){
     `<div class="bt-ttbl"><div class="bt-trow bt-thd"><span>side</span><span>in</span><span>out</span><span class="r">size</span><span class="r">return</span></div>${rows}</div>`+
     (res.trades.length>MAX?`<div class="sec" style="font-size:10.5px;padding:6px 2px 0">+${res.trades.length-MAX} earlier</div>`:''));
 }
+// ===== No-rule hold: does simply owning it pay, and when? =====================================
+// Decompose the name's own price path into the two disjoint windows a cash-hours perp trades in:
+// the close->open boundary (overnight + weekends) and the cash session itself. Multiplicatively
+// exact over the days that carry a boundary — session = (1+day)/(1+overnight) - 1 — so the two
+// compound back to the price return rather than approximately summing to it. Gross by
+// construction: this is where the return comes FROM, before anyone pays to go get it.
+function btOvernightSplit(row, days){
+  const rm=dailyReturns(row), ov=overnightReturns(row);
+  if(!rm) return null;
+  let tot=1, ovc=1, ses=1, cov=0, seen=0;
+  for(let i=1;i<days.length;i++){
+    const d=days[i], lr=rm.get(d);
+    if(lr==null||!isFinite(lr)) continue;
+    seen++;
+    const g=ov&&ov.g?ov.g.get(d):null;
+    if(g==null||!isFinite(g)) continue;                  // no boundary that morning — it belongs to neither bucket, so it enters none of them
+    const r=Math.exp(lr)-1;
+    tot*=(1+r); ovc*=(1+g); ses*=((1+r)/(1+g)); cov++;
+  }
+  return { tot:tot-1, ov:ovc-1, sess:ses-1, cov, seen };
+}
+function btHoldSplitPanel(row, days, cr){
+  const tk=esc(row.ticker||row.coin);
+  if(cr) return sCard(`<div class="s-cap" style="margin:0">${tk} trades 24/7 — there is no close\u2192open boundary to split the return across, which is exactly why the overnight column is absent above. On a 24/7 market, holding it IS the whole exposure.</div>`);
+  const sp=btOvernightSplit(row,days);
+  if(!sp||!sp.cov) return sCard(`<div class="s-cap" style="margin:0">No close\u2192open boundaries loaded for ${tk} yet \u2014 the overnight split fills in once the server ships the hourly spine for this name.</div>`);
+  const f=x=>(x>0?'+':'')+(x*100).toFixed(1)+'%';
+  const mag=Math.max(Math.abs(sp.ov),Math.abs(sp.sess),1e-9);
+  const bar=(label,v,tip)=>`<div class="bt-split"><span class="bt-splab" title="${esc(tip)}">${label}</span>`+
+    `<span class="bt-splbar"><span class="bt-splfill ${v>=0?'up':'dn'}" style="width:${(Math.abs(v)/mag*100).toFixed(1)}%"></span></span>`+
+    `<span class="bt-spv ${v>=0?'pos':'neg'}">${f(v)}</span></div>`;
+  return sCard(`<div class="s-cap" style="margin:0 0 10px">Where ${tk}'s return actually comes from \u2014 the same days, cut into the two windows you can hold separately (gross, before any fee or funding)</div>`+
+    bar('overnight',sp.ov,'close \u2192 next open, weekends included: the window the overnight hold buys')+
+    bar('cash session',sp.sess,'open \u2192 close: the window the overnight hold sits out')+
+    `<div class="bt-split bt-sptot"><span class="bt-splab">price, both</span><span class="bt-splbar"></span><span class="bt-spv ${sp.tot>=0?'pos':'neg'}">${f(sp.tot)}</span></div>`+
+    `<div class="s-cap" style="margin:8px 0 0">Multiplicatively exact over the ${sp.cov} day${sp.cov===1?'':'s'} that carry a boundary${sp.seen>sp.cov?` (${sp.seen-sp.cov} of ${sp.seen} had none and enter neither bucket)`:''}: the two windows compound back to the price line. A big overnight number is the <i>opportunity</i>; whether it survives the round-trip fee every night is the question the panel above answers.</div>`);
+}
+function btHoldStats(cc, on, row, cr, ann){
+  const tk=esc(row.ticker||row.coin);
+  const pn=(x,d)=>(x>0?'+':'')+(x*100).toFixed(d==null?1:d)+'%';
+  const bhR=[]; for(let i=1;i<cc.eqbh.length;i++) bhR.push(cc.eqbh[i]/cc.eqbh[i-1]-1);
+  const bh=btStats(bhR,cc.eqbh,ann);
+  const netOf=r=>r?r.eq[r.eq.length-1]/r.eq[0]-1:null;
+  const ccNet=netOf(cc), onNet=netOf(on);
+  const box=(title,accent,r,net)=>`<div class="s-stat"><div class="s-k" style="color:${accent}">${title}</div>`+
+    `<div class="s-row"><span>net</span><b class="${net>=0?'pos':'neg'}">${pn(net)}</b></div>`+
+    `<div class="s-row"><span>funding</span>${r.fundCov>0?`<b class="${r.fundCum>=0?'pos':'neg'}">${pn(r.fundCum,2)}</b>`:`<b class="sec" title="funding not loaded for this name yet">\u2014</b>`}</div>`+
+    `<div class="s-row"><span>fees</span><b class="neg">\u2212${(r.feeCum*100).toFixed(2)}%</b></div>`+
+    `<div class="s-row"><span>Sharpe</span><b>${(btStats(r.portR,r.eq,ann)||{sharpe:0}).sharpe.toFixed(2)}</b></div></div>`;
+  const onBox = on
+    ? box(`Overnight only \u00b7 ${on.nights} night${on.nights===1?'':'s'}`,'var(--blue)',on,onNet)
+    : `<div class="s-stat"><div class="s-k" style="color:var(--blue)">Overnight only</div><div class="sec" style="font-size:11.5px;line-height:1.5;padding:2px 0">${cr?'24/7 market \u2014 there is no close\u2192open boundary to hold across.':'Not loaded \u2014 the close\u2192open boundaries for this name haven\u2019t shipped yet.'}</div></div>`;
+  // The verdict is the only thing anyone actually wants from this screen, so it gets its own box
+  // and states the loser too — a comparison that only names the winner hides half the answer.
+  let verdict;
+  if(onNet==null) verdict=`<div class="s-row"><span>vs hold</span><b class="sec">\u2014</b></div><div class="s-row"><span>vs price</span><b class="${ccNet-bh.total>=0?'pos':'neg'}">${pn(ccNet-bh.total,2)}</b></div>`;
+  else { const gap=onNet-ccNet;
+    verdict=`<div class="s-row"><span>overnight \u2212 held</span><b class="${gap>=0?'pos':'neg'}">${pn(gap)}</b></div>`+
+      `<div class="s-row"><span>${onNet<=0&&ccNet<=0?'less bad':'winner'}</span><b style="color:${gap>=0?'var(--blue)':'var(--accent)'}">${gap>=0?'overnight':'close\u2192close'}</b></div>`+
+      `<div class="s-row"><span>both positive</span><b>${onNet>0&&ccNet>0?'yes':(onNet<=0&&ccNet<=0?'neither':'one')}</b></div>`; }
+  return `<div class="s-grid" style="margin:12px 0 4px">`+
+    `<div class="s-stat"><div class="s-k">Buy &amp; hold ${tk} \u00b7 ${bh?bh.n:0}d</div>`+
+      `<div class="s-row"><span>price</span><b class="${bh&&bh.total>=0?'pos':'neg'}">${bh?pn(bh.total):'\u2014'}</b></div>`+
+      `<div class="s-row"><span>Sharpe</span><b>${bh?bh.sharpe.toFixed(2):'\u2014'}</b></div>`+
+      `<div class="s-row"><span>hit</span><b>${bh?(bh.hit*100).toFixed(0)+'%':'\u2014'}</b></div>`+
+      `<div class="s-row"><span>max DD</span><b class="neg">${bh?(bh.mdd*100).toFixed(1)+'%':'\u2014'}</b></div></div>`+
+    box('Held close\u2192close','var(--accent)',cc,ccNet)+onBox+
+    `<div class="s-stat"><div class="s-k">Verdict</div>${verdict}</div></div>`;
+}
 // ===== target picker — typeahead over the live scope, never a dropdown =========================
 // The roster is a few hundred names across two universes; a <select> is unusable at that size. Same
 // contract as the COMP/G picker: only names in the live universe resolve, free text never does.
@@ -5721,8 +5811,17 @@ function renderBacktest(){
   const p=state.backtest;
   if(featureOn('baskets')&&!BASKETS.list.length) loadBaskets();   // -09: the vs-⬒ select must populate even when Backtest is the first tab visited; loadBaskets redraws this view when the registry lands
   const mode=btMode(), single=mode==='single', picked=btPickRows();
-  const res=btRun();
-  const head=sHead('Strategy backtest', single
+  if(!single && p.signal===BT_HOLD) p.signal='mom';   // 'no rule' only exists for one name — dropping back to a cross-section restores a rule rather than ranking on nothing
+  const holdMode=single && p.signal===BT_HOLD;
+  // A hold run has no rule to switch, so it doesn't pick between close→close and overnight — it
+  // runs BOTH and shows them side by side, because "which of these two is profitable" IS the question.
+  const res=holdMode? btRunOne(Object.assign({},p,{holdWindow:'cc'})) : btRun();
+  if(holdMode){ res.holdMode=true;
+    if(res.ok && state.scope!=='crypto'){ const onRun=btRunOne(Object.assign({},p,{holdWindow:'on'}));
+      if(onRun.ok && onRun.ovCov>0){ res.eqOn=onRun.eq; res.onRun=onRun; } } }
+  const head=sHead('Strategy backtest', holdMode
+    ? 'no rule at all — just hold one name, and see which window pays for it'
+    : single
     ? 'test one name on its own — the same signal, run as a timing rule, net of costs'
     : 'define a cross-sectional rule and test it net of costs — in-sample vs out-of-sample');
   // controls
@@ -5740,14 +5839,20 @@ function renderBacktest(){
     ? `<span class="lbl">vs <span class="bkg">\u2b12</span></span><select id="btVsB" class="clocksel" title="overlay a basket's price-only EW daily index on the curve \u2014 a yardstick, not a strategy: no costs, no funding, and it never enters the stats">`
       +opt('','off',p.vsBasket)+basketScopeList().map(b=>opt(b.name,'\u2b12 '+b.name,p.vsBasket)).join('')+`</select>`
     : '';
-  let sigSel=`<select id="btSig" class="clocksel">`+Object.keys(BT_SIGNALS).map(k=>opt(k,BT_SIGNALS[k],p.signal)).join('')+`</select>`;
+  let sigSel=`<select id="btSig" class="clocksel">`+Object.keys(BT_SIGNALS)
+    .filter(k=>k!==BT_HOLD||single)                       // ranking a universe by "nothing" isn't a rule, it's the equal-weight line the curve already draws
+    .map(k=>opt(k,BT_SIGNALS[k],p.signal)).join('')+`</select>`;
   // A control that has nothing left to act on is DIMMED with the reason on hover, never hidden and
   // never silently ignored: the point of the picker is that you can see what your choice cost you.
   const grp=(off,why)=>` class="bt-grp${off?' bt-na':''}"${off?` title="${esc(why)}"`:''}`;
   const uniWrap=grp(picked.length, single
       ? 'superseded by the picked name — on one name, the name IS the universe'
       : `superseded by the ${picked.length} picked names`);
-  const modeBar = single
+  const modeBar = holdMode
+    ? `<div class="bt-mode"><b>Hold \u2014 no rule</b> \u00b7 <span class="bt-mname">${esc(picked[0].ticker||picked[0].coin)}</span> `+
+      `<span class="sec">${esc(picked[0].sector||picked[0].assetClass||'\u2014')}</span> \u2014 1\u00d7 long every day, nothing ranked, nothing rebalanced, nothing fitted. `+
+      `Both hold windows run at once${cr?' (crypto is 24/7, so only close\u2192close exists)':' \u2014 close\u2192close against overnight-only'}; the only knob that changes the answer is the taker fee.</div>`
+    : single
     ? `<div class="bt-mode"><b>Single-asset mode</b> · <span class="bt-mname">${esc(res.row?(res.row.ticker||res.row.coin):(picked[0].ticker||picked[0].coin))}</span> `+
       `<span class="sec">${esc((picked[0].sector||picked[0].assetClass||'—'))}</span> — the rank collapses into a timing rule on one name: the score's own sign, `+
       `measured against the <b>entry</b> threshold, is the position. Dimmed controls have no cross-section left to act on.</div>`
@@ -5758,17 +5863,19 @@ function renderBacktest(){
   const controls=
     `<div class="s-ctrls">${btPickerHtml()}</div>`+
     `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span${uniWrap}><span class="lbl">universe</span>${uniSel}</span>${vbSel}`+
-    (cr?'':`<span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}`)+`</div>`+   // crypto is 24/7 — no overnight boundary to hold across
+    (cr?'':`<span${grp(holdMode,'a hold run tests both windows at once — that comparison is the whole screen, so there is nothing to switch')}><span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}</span>`)+`</div>`+   // crypto is 24/7 — no overnight boundary to hold across
     modeBar+
-    `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d'],[60,'60d'],[120,'120d']])}`+
+    `<div class="s-ctrls"><span${grp(holdMode,'no rule means no lookback window to score over')}><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d'],[60,'60d'],[120,'120d']])}</span>`+
     (BT_MVAR[p.signal]?`<span class="sec" style="align-self:center">n/a — this rule runs fixed 1/7/30d horizons</span>`:'')+
-    `<span class="lbl">rebalance</span>${seg('btCad',p.cadence,[[1,'1d'],[5,'5d'],[10,'10d']])}`+
-    (single
+    `<span${grp(holdMode,'the position never changes, so there is nothing to rebalance')}><span class="lbl">rebalance</span>${seg('btCad',p.cadence,[[1,'1d'],[5,'5d'],[10,'10d']])}</span>`+
+    (holdMode
+      ? ''
+      : single
       ? `<span class="lbl" title="how far from zero the score must sit before a position is taken — the single-name replacement for the book quantile. σ is that name's own trailing score scale (RMS about zero), measured through that day only.">entry</span>${seg('btEntry',p.entry,[[0,'sign only'],[0.5,'±0.5σ'],[1,'±1σ']])}`
       : `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`)+
-    `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
-    `<span class="lbl">in-sample</span>${seg('btSplit',p.split,[[0.5,'50%'],[0.6,'60%'],[0.7,'70%']])}</div>`+
-    `<div class="s-ctrls"><span class="lbl">direction</span>${seg('btDir',p.direction,[['high','long strong'],['low','long weak']])}`+
+    `<span class="bt-grp"><span class="lbl"${holdMode?' title="the one knob that decides a hold run: an overnight hold pays it twice a night, a close→close hold pays it once, ever"':''}>taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}</span>`+
+    `<span${grp(holdMode,'nothing was fitted here — with no parameter to hold out, an in-sample split would be decoration')}><span class="lbl">in-sample</span>${seg('btSplit',p.split,[[0.5,'50%'],[0.6,'60%'],[0.7,'70%']])}</span></div>`+
+    `<div class="s-ctrls${holdMode?' bt-na" title="a hold run takes no view: the position is 1\u00d7 long every day, so there is no side to pick, no structure to impose and no size to scale':''}"><span class="lbl">direction</span>${seg('btDir',p.direction,[['high','long strong'],['low','long weak']])}`+
     `<span class="lbl">structure</span>${single
       ? seg('btStruct',p.structure,[['ls','long / short'],['long','long or flat'],['short','short or flat']])
       : seg('btStruct',p.structure,[['ls','long / short'],['long','long-only'],['short','short-only']])}`+
@@ -5828,12 +5935,19 @@ function renderBacktest(){
         `<div class="s-row"><span>universe</span><b>${res.universeN}</b></div>`+
         `<div class="s-row"><span>turnover</span><b>${(res.turnover*100).toFixed(0)}%</b></div>`+
         fundRow+feeRow+`</div>`;
-  const stats=`<div class="s-grid" style="margin:12px 0 4px">`+
-    btStatBox('In-sample',is,'var(--blue)')+btStatBox('Out-of-sample',oos,'var(--accent)')+
-    (res.single?'':btStatBox('Full period',full,'var(--text)'))+extraBox+`</div>`;
-  const legItems=[{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'},
+  const stats=res.holdMode
+    ? btHoldStats(res,res.onRun||null,res.row,cr,ann)
+    : `<div class="s-grid" style="margin:12px 0 4px">`+
+      btStatBox('In-sample',is,'var(--blue)')+btStatBox('Out-of-sample',oos,'var(--accent)')+
+      (res.single?'':btStatBox('Full period',full,'var(--text)'))+extraBox+`</div>`;
+  const legItems=res.holdMode
+    ? [{color:'var(--accent)',label:'held close&rarr;close (net)'}]
+      .concat(res.eqOn?[{color:'var(--blue)',label:'overnight only (net)'}]:[])
+      .concat([{color:'var(--text)',label:'price \u2014 buy &amp; hold '+esc(res.row.ticker||res.row.coin)+' (dashed)'},
+               {color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'}])
+    : [{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'},
     res.single?{color:'var(--text)',label:'buy &amp; hold '+esc(res.row.ticker||res.row.coin)+' (dashed)'}:{color:'var(--faint)',label:'equal-weight'}];
-  if(res.single) legItems.push({color:'var(--up)',label:'position: long'},{color:'var(--faint)',label:'flat'},{color:'var(--down)',label:'short'});
+  if(res.single&&!res.holdMode) legItems.push({color:'var(--up)',label:'position: long'},{color:'var(--faint)',label:'flat'},{color:'var(--down)',label:'short'});
   if(res.eqvb) legItems.push({color:'var(--accent-dim)',label:'\u2b12 '+res.vbName+' (price-only EW)'});
   const leg=sLeg(legItems);
   const pctq=(p.quantile*100).toFixed(0), dirTop=p.direction==='high'?'top':'bottom';
@@ -5861,11 +5975,26 @@ function renderBacktest(){
     `<b>One name is one bet:</b> there is no cross-sectional diversification here, and this run rests on ${res.trades.length} round trip${res.trades.length===1?'':'s'}`+
     `${res.trades.length<BT_TRADE_MIN?` — under ${BT_TRADE_MIN}, so read the Sharpe as an anecdote and the out-of-sample half as the only honest part`:''}. `+
     `Shaded region is out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
-  const cap = res.single ? capOne : res.on
+  const onNet=res.onRun? res.onRun.eq[res.onRun.eq.length-1]-1 : null;
+  const ccNet=res.holdMode? res.eq[res.eq.length-1]-1 : null;
+  const capHold=!res.holdMode?'':`Hold <b>${oneTk}</b> at 1\u00d7 long, every day, with no rule of any kind — the baseline every timing rule on this tab has to beat. `+
+    `<b>Close\u2192close</b> owns it around the clock: one taker fee at entry, then the funding a long pays for as long as it is held. `+
+    (res.eqOn
+      ? `<b>Overnight only</b> buys it at each 16:00 ET close and sells at the next 09:30 ET open (Fri\u2192Mon over the weekend), flat through the cash session — which means it pays the ${p.cost}bp fee <b>twice every night</b>. That nightly round trip is the entire contest: at ${p.cost}bp it costs ${(res.onRun.feeCum*100).toFixed(1)}% over these ${res.onRun.nights} nights, so drag the taker fee to 0 and back to see how much of the edge is real and how much is the broker's. `
+      : (cr?`There is no <b>overnight</b> leg: a 24/7 market has no close\u2192open boundary to sit out. `
+           :`The <b>overnight</b> leg needs the close\u2192open boundaries from the hourly spine, which haven't shipped for this name yet. `))+
+    `Both legs are net of funding, which is the real cost of carrying a perp: `+
+    (res.fundCov>0?`holding it cost ${(res.fundCum*100).toFixed(2)}% here (a positive number means the position <i>earned</i> funding).`:`funding isn't loaded for this name yet, so both legs are price-only for now.`)+
+    ` The dashed line is the price itself — the gap between it and the accent line is exactly what carrying the position cost you. `+
+    `Nothing here is fitted, so there is no in-sample half to distrust${onNet!=null&&ccNet!=null?`, and the verdict is simply the bigger number: ${onNet>ccNet?'overnight':'close\u2192close'} by ${(Math.abs(onNet-ccNet)*100).toFixed(1)} points`:''}. `+
+    `Slippage is not modeled, and on the overnight leg — which crosses the spread twice a night — that omission flatters it. <b>Hover</b> the curve.`;
+  const cap = res.holdMode ? capHold : res.single ? capOne : res.on
     ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
     : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
   const vbCap=res.eqvb?` The dashed <b>\u2b12 ${esc(res.vbName)}</b> line is that basket's price-only EW daily index over the same days \u2014 no costs, no funding, a comparison yardstick that never enters the stats; basket gap days (sub-floor coverage) compound flat.`:'';
-  return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection();
+  const panel=res.holdMode? btHoldSplitPanel(res.row,res.days,cr)
+    : res.single? btPositionPanel(res) : btBookPanel(res.book);
+  return head+controls+stats+panel+leg+sCard(btCurveSvg(res,res.holdMode?0:splitIdx))+sCap(cap+vbCap)+renderDuelSection();
 }
 // ===== Score duel — MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) =====
 // The adjudicator for the candidate column. Server-computed record (/api/duel): once per UTC
@@ -9736,6 +9865,10 @@ backtest:`
 <p>The <b>target</b> box takes a ticker from the live universe (typeahead, not a dropdown — the roster is too long to scroll, and free text never resolves). Pick <b>one</b> name and the tab switches to <b>single-asset mode</b>: a rank of one name isn't a rank, so the same signal runs as a <i>timing rule</i> — the score's own sign decides the position, and <b>entry</b> decides how far from zero it has to sit first (sign only, ±0.5σ or ±1σ of that name's own trailing score scale, measured through that day only, never with hindsight). The controls that exist purely to slice a cross-section — the book quantile and the rank gate — are dimmed with the reason on hover rather than silently ignored; <b>weighting</b> becomes position <b>sizing</b> (flat 1×, scaled by conviction, or sized to a 20% annualized vol target); <b>structure</b> keeps its three options as long/short, long-or-flat, short-or-flat. Costs, funding, the hold window and the IS/OOS split are the identical accounting the cross-sectional path uses — that is what makes the two modes comparable.</p>
 <p>The curve gains two things: <b>buy &amp; hold that name</b> as the dashed line — the only benchmark a one-name rule actually has to beat — and a <b>position ribbon</b> under the axis showing when the rule was long, short or flat. The book panel becomes the current position plus every round trip it took. Read the round-trip count first: one name over the history this server ships is a few dozen decisions at most, there is no cross-sectional diversification to average the luck out, and a Sharpe on under ten round trips is an anecdote with a decimal point — the stat flags itself, shown rather than hidden. Sector-relative momentum still demeans against the name's live sector peers; with fewer than three of them the tab refuses the run instead of quietly serving plain momentum under the wrong label.</p>
 <p>Pick <b>several</b> names and it stays cross-sectional, ranked only among those — a custom universe, with the thin-book arithmetic stated up front (a 20% book of five names is one name per side). Picks belong to one universe: flipping Stocks/Crypto clears them.</p>
+<div class="hlp-h">No rule at all — just hold it</div>
+<p>With one name picked, the signal list gains <b>— no rule · just hold it</b>. It is the baseline every timing rule on this tab has to beat: <b>1× long every day</b>, nothing ranked, nothing rebalanced, nothing fitted — so the lookback, rebalance, entry, direction, structure, sizing and gate controls all go dark, and so does the in-sample split (with no fitted parameter, there is nothing to hold out, and the curve stops shading). The controls aren't just greyed: changing any of them cannot move a hold curve, and the suite asserts exactly that.</p>
+<p>Because there is no rule to switch, it doesn't make you choose a hold window either — it runs <b>both</b> and puts them side by side. <b>Close→close</b> owns the name around the clock: one taker fee at entry, then the funding a long pays for as long as it is held. <b>Overnight only</b> buys at the 16:00 ET close and sells at the next 09:30 ET open (Fri→Mon across the weekend), flat through the cash session — which means it pays the taker fee <b>twice every night</b>. That nightly round trip is usually the entire story: drag <b>taker bps</b> to 0 and back to see how much of the edge is real and how much belongs to the exchange. Crypto has no close→open boundary, so there only the close→close leg exists.</p>
+<p>Underneath, the <b>overnight / cash session split</b> cuts the name's own price path into the two windows you could hold separately — multiplicatively exact, so they compound back to the price line rather than approximately summing to it. It is stated gross, before any fee or funding: it tells you where the return <i>comes from</i>, which is a different question from whether you can afford to go get it. A name that makes all its money on the gap and gives it back during the session is the whole reason the overnight leg exists — and the fee line above is why it so often doesn't survive contact.</p>
 <div class="hlp-h">Crypto scope</div>
 <p>The tab follows the Stocks/Crypto switcher: crypto runs the top-60 Hyperliquid perps against a <b>BTC benchmark</b> with 365-day annualization, no overnight hold (24/7 markets have no boundary), and funding carry at home. The two universes never mix in one run.</p>
 <div class="hlp-h">How to read the curve</div>
