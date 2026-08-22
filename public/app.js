@@ -5237,7 +5237,11 @@ function btPickRows(){     // picked rows that exist, carry daily history and be
 function btMode(){ const n=btPickRows().length; return n===0?'universe':(n===1?'single':'set'); }
 function btUniverse(){
   const u=state.backtest.universe, cr=state.scope==='crypto';
-  if(state.backtest.picks.length) return btPickRows();   // an explicit target supersedes the universe select — never both at once
+  // An explicit target supersedes the universe select — never both at once. Keyed on the RESOLVED
+  // rows, not the raw pick list, so a pick that stops resolving (delisted mid-session, history
+  // aged out) can't hand the run an empty universe while btMode still reads "universe": the two
+  // must agree about what is being tested, and the chip's own dimmed state says the pick sat out.
+  const pr=btPickRows(); if(pr.length) return pr;
   return [...state.rows.values()].filter(r=>{
     if((r.uni==='main')!==cr) return false;                       // scope picks the universe: xyz vs Hyperliquid main — never merged
     if(r.delisted || !r.daily || r.coin===scopeBench()) return false;

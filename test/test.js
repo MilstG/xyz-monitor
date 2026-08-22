@@ -20296,6 +20296,17 @@ test("backtest picks: a custom universe stays cross-sectional, and a sector rule
     assert.equal(set.universeN, 4, "the run must see only the picked names");
     assert.ok(set.book && (set.book.longs.length + set.book.shorts.length) > 0, "a picked set still produces a book");
 
+    // a pick that no longer resolves (delisted, history aged out) must not hand the run an empty
+    // universe: btUniverse and btMode have to agree about what is under test, always.
+    state.backtest.picks = ["GHOST"];        // never existed in state.rows
+    assert.equal(api.btMode(), "universe", "an unresolvable pick leaves the tab in universe mode");
+    assert.ok(api.btUniverse().length > 8, "an unresolvable pick must fall back to the universe, never to nothing");
+    state.rows.get("AMD").delisted = true;   // resolved yesterday, gone today
+    state.backtest.picks = ["AMD"];
+    assert.equal(api.btMode(), "universe");
+    assert.ok(api.btRun().ok, "a pick that stopped resolving must not break the run");
+    state.rows.get("AMD").delisted = false;
+
     // sector-relative momentum on one name needs its peers — and says so when they aren't there
     state.backtest.picks = ["VST"];          // the only utility in the fixture
     state.backtest.signal = "smom";
@@ -20351,7 +20362,9 @@ test("backtest single-asset manifest: precedence, no lookahead in the entry scal
   const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
   // picks supersede the universe select — the one precedence rule a fixture can't prove is absent
-  assert.ok(s.includes("if(state.backtest.picks.length) return btPickRows();"), "picks must short-circuit btUniverse");
+  assert.ok(s.includes("const pr=btPickRows(); if(pr.length) return pr;"), "picks must short-circuit btUniverse");
+  assert.ok(!/if\(state\.backtest\.picks\.length\) return btPickRows\(\)/.test(s),
+    "precedence must key on the RESOLVED picks, so btUniverse and btMode can never disagree about what is under test");
   // the entry threshold's σ is measured on PAST scores only: the scale is written before the day's
   // own score joins the accumulator. Reversing those two lines would quietly add lookahead.
   const scale = s.slice(s.indexOf("const scale=new Array(N).fill(NaN);"));
