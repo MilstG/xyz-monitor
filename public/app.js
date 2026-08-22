@@ -137,7 +137,8 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   colOrder:[...DEFAULT_ORDER], colHidden:new Set(DEFAULT_HIDDEN), pollMs:60000,
   sect:{ wt:'vol', sel:null, mode:'flow', corrTf:'30', grp:'sector' }, dataTs:0, connOk:true, view:'markets', regimeSrv:null,
   backtest:{ signal:'mom', lookback:20, cadence:5, quantile:0.2, cost:5, universe:'all', split:0.6,
-    direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'' },
+    direction:'high', structure:'ls', weighting:'eq', reqSign:false, holdWindow:'cc', vsBasket:'',
+    picks:[], entry:0 },   // picks: explicitly targeted coins — one = single-asset timing test, several = a custom universe. entry: the σ threshold that replaces the book quantile on one name.
   duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
   watch:new Set(), watchOnly:false, detail:null,
   homeMkts:null, homeState:null,   // home-session defs + live per-market state — server-computed, client renders only
@@ -5215,8 +5216,28 @@ const BT_MVAR={ m0:1, mres:1, moi:1, mfund:1, mpart:1 };
 // signals that need payload columns beyond closes — btRun reports an honest "not shipped" instead of an empty rank
 const BT_NEEDS={ carry:'fundCov', hprox:'hiCov', volt:'voCov', oid:'oiCov', moi:'oiCov', mfund:'fundCov', mpart:'voCov' };
 function btAnn(){ return state.scope==='crypto'?365:BT_ANN; }   // crypto trades every day; equities ~252 sessions
+// ===== Target picks — the cross-section is a choice, not a given =====================
+// picks[] holds coins the user typed into the target box. Zero picks is the tab's original
+// behaviour (rank the whole universe). ONE pick collapses the cross-section entirely: a rank of
+// one name is not a rank, so the run becomes a time-series timing rule (see btRunOne) and the
+// controls that only exist to slice a cross-section are disabled rather than silently ignored.
+// Several picks stay cross-sectional over exactly those names — a custom universe, thin book and
+// all, which the render says out loud.
+const BT_SET_MIN=4;        // floor for a picked set: below 4 names the tails aren't a cross-section, they're a coin flip
+const BT_VOLTGT=0.20;      // inverse-vol sizing on one name targets 20% annualized — the cross-sectional path has no equivalent to inherit
+const BT_TRADE_MIN=10;     // fewer round trips than this and the Sharpe is an anecdote; the stat is flagged, never hidden
+function btPickRows(){     // picked rows that exist, carry daily history and belong to the live scope
+  const out=[], seen=new Set();
+  for(const c of state.backtest.picks){ if(seen.has(c)) continue; seen.add(c);
+    const r=state.rows.get(c); if(!r||r.delisted||!inScope(r)||!r.daily) continue;
+    const m=dailyReturns(r); if(!m||m.size<BT_MIN_DAYS) continue;
+    out.push(r); }
+  return out;
+}
+function btMode(){ const n=btPickRows().length; return n===0?'universe':(n===1?'single':'set'); }
 function btUniverse(){
   const u=state.backtest.universe, cr=state.scope==='crypto';
+  if(state.backtest.picks.length) return btPickRows();   // an explicit target supersedes the universe select — never both at once
   return [...state.rows.values()].filter(r=>{
     if((r.uni==='main')!==cr) return false;                       // scope picks the universe: xyz vs Hyperliquid main — never merged
     if(r.delisted || !r.daily || r.coin===scopeBench()) return false;
@@ -5227,8 +5248,8 @@ function btUniverse(){
     return true;
   });
 }
-function btMatrix(){
-  const rows=btUniverse(), dayset=new Set(), rmap=new Map();
+function btMatrix(rowsIn){
+  const rows=rowsIn||btUniverse(), dayset=new Set(), rmap=new Map();   // rowsIn: single-asset mode builds the matrix over the target (plus its sector peers, when the rule needs them)
   for(const r of rows){ const m=dailyReturns(r); rmap.set(r.coin,m); for(const d of m.keys()) dayset.add(d); }
   const days=[...dayset].sort((a,b)=>a-b), idx=new Map(days.map((d,i)=>[d,i]));
   const series=new Map();                                   // dense per-name log-return series over the common day axis (NaN where missing)
@@ -5371,9 +5392,12 @@ function btScore(sig, a, bench, di, L, ex){
   return n2>=Math.max(4,L*0.5)? s2 : NaN;
 }
 function btRun(){
-  const p=state.backtest, mx=btMatrix();
+  const p=state.backtest, mode=btMode();
+  if(mode==='single') return btRunOne(p);
+  const mx=btMatrix();
   const warmN=BT_MVAR[p.signal]?Math.max(p.lookback,31):p.lookback;   // variants need their fixed 30d horizon + 1 regardless of the lookback setting
-  if(mx.rows.length<8 || mx.days.length<warmN+p.cadence+6) return { ok:false, have:mx.rows.length, days:mx.days.length };
+  const minRows=mode==='set'?BT_SET_MIN:8;                            // a picked set is allowed to be small; the whole universe is not
+  if(mx.rows.length<minRows || mx.days.length<warmN+p.cadence+6) return { ok:false, have:mx.rows.length, days:mx.days.length, need:minRows };
   const { rows, days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov }=mx, coins=rows.map(r=>r.coin);
   const covOf={ fundCov, hiCov, voCov, oiCov };
   if(BT_NEEDS[p.signal] && !(covOf[BT_NEEDS[p.signal]]>0)) return { ok:false, nodata:BT_SIGNALS[p.signal] };   // the column this rule ranks on isn't in the payload yet — say so instead of ranking nothing
@@ -5439,6 +5463,104 @@ function btRun(){
     turnover:rebalances?turnoverSum/rebalances:0, avgPos:posCount?posSum/posCount:0, universeN:rows.length, book:lastBook,
     fundCov, fundCum, feeCum, ovCov, on };
 }
+// ===== Single-asset mode — the same signal, run as a timing rule on one name ==================
+// What changes: the score stops being a RANK and becomes a LEVEL, so the position comes from the
+// score's own sign measured against an entry threshold in that name's own units. What deliberately
+// does NOT change: the cost model, the funding accrual, the hold window, the IS/OOS split and the
+// stats — a real position's drag doesn't care how the position was chosen, and reusing the exact
+// accounting is what keeps the two modes comparable.
+// Threshold units: σ here is the RMS of that name's own PAST scores measured about zero (not about
+// their mean), computed through the current day only — no lookahead, and "score > 0" and "±1σ" sit
+// on the same axis, which they wouldn't if the scale were demeaned.
+function btRunOne(p){
+  const tgt=btPickRows()[0]; if(!tgt) return { ok:false, have:0, days:0, need:1 };
+  const cr=state.scope==='crypto', L=p.lookback, cad=Math.max(1,p.cadence), costR=p.cost/1e4;
+  const warmN=BT_MVAR[p.signal]?Math.max(L,31):L;
+  // Sector-relative momentum is a demean against peers, so on one name the peers have to come
+  // along — otherwise the rule silently degrades to plain momentum under a label that promises
+  // otherwise. They join the matrix (shared day axis) but never take a position.
+  const peers=p.signal==='smom'
+    ? [...state.rows.values()].filter(r=>r.coin!==tgt.coin && !r.delisted && inScope(r) && r.daily
+        && (r.sector||r.assetClass||'—')===(tgt.sector||tgt.assetClass||'—')
+        && (dailyReturns(r)||{size:0}).size>=BT_MIN_DAYS)
+    : [];
+  if(p.signal==='smom' && peers.length<3) return { ok:false, nopeers:(tgt.sector||tgt.assetClass||'its sector'), have:peers.length };   // a "sector-relative" score with no sector to be relative to would be plain momentum wearing the wrong label
+  const mx=btMatrix([tgt,...peers]);
+  const { days, series, benchSeries, fund, fundCov, ovG, ovF, ovCov, pxm, him, vom, oim, hiCov, voCov, oiCov }=mx;
+  const N=days.length;
+  if(N<warmN+cad+6) return { ok:false, have:1, days:N, need:1 };
+  const covOf={ fundCov, hiCov, voCov, oiCov };
+  if(BT_NEEDS[p.signal] && !(covOf[BT_NEEDS[p.signal]]>0)) return { ok:false, nodata:BT_SIGNALS[p.signal] };   // this name doesn't carry the column the rule ranks on
+  const c=tgt.coin, a=series.get(c);
+  const ex={ f:fund.get(c)||null, px:pxm.get(c)||null, hi:him.get(c)||null, vo:vom.get(c)||null, oi:oim.get(c)||null };
+  const base=p.signal==='smom'?'mom':p.signal;
+  const peerC=peers.map(r=>r.coin);
+  const raw=new Array(N).fill(NaN);                       // the score on each day, using data through that day only
+  for(let di=warmN; di<N; di++){
+    let s=btScore(base, a, benchSeries, di, L, ex);
+    if(!Number.isFinite(s)) continue;
+    if(p.signal==='smom'){ let ps=0,pn=0;
+      for(const pc of peerC){ const v=btScore('mom', series.get(pc), benchSeries, di, L, null); if(Number.isFinite(v)){ ps+=v; pn++; } }
+      if(pn<3) continue;                                  // under three peers there is no sector mean worth subtracting
+      s-=ps/pn; }
+    raw[di]=s;
+  }
+  const scale=new Array(N).fill(NaN);                     // trailing RMS about zero — the σ the entry threshold is quoted in
+  { let q=0,n=0; for(let di=warmN; di<N; di++){ if(n>=8) scale[di]=Math.sqrt(q/n);   // ≥8 past scores before a scale means anything
+      const x=raw[di]; if(Number.isFinite(x)){ q+=x*x; n++; } } }
+  const on=p.holdWindow==='on' && !cr;
+  const start=warmN;
+  const eq=[1], eqg=[1], eqb=[1], eqbh=[1], curveDays=[days[start]], portR=[], pos=[], trades=[];
+  let w=0, feeCum=0, fundCum=0, inMkt=0, open=null, flips=0;
+  for(let di=start; di<N-1; di++){
+    if((di-start)%cad===0){                               // re-decide the position
+      let nw=0; const s=raw[di], sig=(p.direction==='low'? -s : s);   // sig = the quantity we go long on
+      if(Number.isFinite(sig) && sig!==0){
+        const sc=scale[di];
+        const clears = p.entry<=0 ? true : (Number.isFinite(sc) && sc>0 && Math.abs(sig)>=p.entry*sc);
+        if(clears) nw=sig>0?1:-1;
+        if(p.structure==='long'&&nw<0) nw=0;              // long-only: long or flat, never short
+        if(p.structure==='short'&&nw>0) nw=0;
+        if(nw!==0){
+          if(p.weighting==='sig'){ nw*=(Number.isFinite(sc)&&sc>0)? clamp(Math.abs(sig)/sc,0.25,2) : 1; }        // size with conviction
+          else if(p.weighting==='vol'){ const v=btVol(a,di,Math.max(20,L)); nw*= v>0? clamp(BT_VOLTGT/(v*Math.sqrt(btAnn())),0.25,2) : 1; }   // size to a 20% annualized vol target
+        }
+      }
+      if(nw!==w){
+        const to=Math.abs(nw-w);
+        if(!on){ feeCum+=to*costR; eq[eq.length-1]*=(1-to*costR); }   // overnight charges its nightly round-trip below instead
+        flips++;
+        if(open){ open.exit=days[di]; open.ret=eq[eq.length-1]/open.eq0-1; trades.push(open); open=null; }
+        if(nw!==0) open={ side:nw>0?'LONG':'SHORT', size:Math.abs(nw), entry:days[di], eq0:eq[eq.length-1], score:raw[di], z:(Number.isFinite(scale[di])&&scale[di]>0)?raw[di]/scale[di]:null };
+        w=nw;
+      }
+    }
+    const fd=di+1; let pr=0, fpay=0;
+    if(on){ const ga=ovG.get(c), g=ga?ga[fd]:NaN;         // overnight: hold the close→open gap, flat through the cash session
+      if(Number.isFinite(g)) pr=w*g;
+      const fa=ovF.get(c); if(fa) fpay=w*fa[fd];
+    } else {
+      const x=a[fd]; if(Number.isFinite(x)) pr=w*(Math.exp(x)-1);
+      const fa=fund.get(c); if(fa) fpay=w*fa[fd];
+    }
+    const fRet=-fpay, feeDay=on? Math.abs(w)*2*costR : 0;  // a long pays funding, a short receives it
+    if(on) feeCum+=feeDay;
+    fundCum+=fRet; if(w!==0) inMkt++;
+    portR.push(pr+fRet-feeDay);
+    eq.push(eq[eq.length-1]*(1+pr+fRet-feeDay));
+    eqg.push(eqg[eqg.length-1]*(1+pr));                    // gross = price only; the gross↔net gap is funding + fees
+    const bx=benchSeries?benchSeries[fd]:NaN;
+    eqb.push(eqb[eqb.length-1]*(1+(Number.isFinite(bx)?Math.exp(bx)-1:0)));
+    const ax=a[fd];
+    eqbh.push(eqbh[eqbh.length-1]*(1+(Number.isFinite(ax)?Math.exp(ax)-1:0)));   // buy & hold the name itself — the only benchmark a one-name rule has to beat
+    pos.push(w); curveDays.push(days[fd]);
+  }
+  if(open){ open.exit=days[N-1]; open.ret=eq[eq.length-1]/open.eq0-1; open.live=true; trades.push(open); }
+  return { ok:true, single:true, row:tgt, days:curveDays, eq, eqg, eqb, eqew:eqbh, eqbh, portR, pos, trades,
+    turnover:0, avgPos:inMkt?1:0, universeN:1, book:null, peers:peers.length,
+    fundCov, fundCum, feeCum, ovCov, on, flips, exposure:pos.length?inMkt/pos.length:0,
+    curW:w, curScore:raw[N-2], curZ:(Number.isFinite(scale[N-2])&&scale[N-2]>0)?raw[N-2]/scale[N-2]:null };
+}
 function btVol(a, di, L){ const lo=di-L+1; if(lo<0) return 0; let s=0,sq=0,n=0;
   for(let i=lo;i<=di;i++){ const x=a[i]; if(Number.isFinite(x)){ s+=x; sq+=x*x; n++; } }
   if(n<3) return 0; const m=s/n; return Math.sqrt(Math.max(0,(sq-n*m*m)/(n-1))); }
@@ -5453,7 +5575,7 @@ function btStats(portR, eqSeg, ann){
 }
 // equity curve: net (accent) / gross (blue) / benchmark (muted) / equal-weight (faint); IS|OOS split shaded; crosshair hover
 function btCurveSvg(res, splitIdx){
-  const W=680,H=210, pl=48,pr=54,pt=14,pb=26, days=res.days, m=days.length;
+  const W=680,H=res.single?232:210, pl=48,pr=54,pt=14,pb=res.single?48:26, days=res.days, m=days.length;   // single-asset mode reserves a strip under the axis for the position ribbon
   const pct=arr=>arr.map(e=>(e/arr[0]-1)*100);
   const net=pct(res.eq), gross=pct(res.eqg), bench=pct(res.eqb), ew=pct(res.eqew);
   const vb=res.eqvb?pct(res.eqvb):null;
@@ -5470,13 +5592,24 @@ function btCurveSvg(res, splitIdx){
   }
   s+=lcGrid(pl,W-pr,ticks,Y,v=>(v>0?'+':'')+v.toFixed(1)+'%');
   s+=`<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W-pr}" y2="${Y(0).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`;
-  s+=`<path d="${path(ew)}" fill="none" stroke="var(--faint)" stroke-width="1"/>`;
+  // the fourth line is the naive alternative to the whole exercise: equal-weight the universe, or —
+  // on one name — just hold it. Drawn heavier in single mode because there it IS the bar to clear.
+  s+=res.single
+    ? `<path d="${path(ew)}" fill="none" stroke="var(--text)" stroke-width="1.3" stroke-dasharray="4 3" opacity="0.55"/>`
+    : `<path d="${path(ew)}" fill="none" stroke="var(--faint)" stroke-width="1"/>`;
   if(vb) s+=`<path class="bt-vb" d="${path(vb)}" fill="none" stroke="var(--accent-dim)" stroke-width="1.2" stroke-dasharray="4 3"/>`;
   s+=`<path d="${path(bench)}" fill="none" stroke="var(--muted)" stroke-width="1.2"/>`;
   s+=`<path d="${path(gross)}" fill="none" stroke="var(--blue)" stroke-width="1.2" opacity="0.85"/>`;
   s+=`<path d="${path(net)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
   const endLab=(arr,col)=>`<text x="${(W-pr+4)}" y="${(Y(arr[m-1])+3).toFixed(1)}" style="font-size:9px;fill:${col}">${(arr[m-1]>0?'+':'')+arr[m-1].toFixed(1)}%</text>`;
   s+=endLab(net,'var(--accent)');
+  if(res.single){                                                   // position ribbon: WHEN the rule was on, and on which side
+    s+=endLab(ew,'var(--text)');
+    const y0=H-26, hgt=9, wd=Math.max(1.2,(X(1)-X(0))+0.7);
+    for(let i=0;i<res.pos.length&&i<m-1;i++){ const w=res.pos[i];
+      s+=`<rect x="${X(i+1).toFixed(1)}" y="${y0}" width="${wd.toFixed(2)}" height="${hgt}" fill="${w>0?'var(--up)':w<0?'var(--down)':'var(--faint)'}" opacity="${w===0?0.3:0.8}"/>`; }
+    s+=`<text x="${pl-6}" y="${y0+7}" text-anchor="end" class="lc-tick">pos</text>`;
+  }
   // x date labels (start / split / end)
   const dfmt=d=>{ const dt=new Date(d*DAY); return (dt.getUTCMonth()+1)+'/'+dt.getUTCDate(); };
   s+=`<text x="${pl}" y="${H-8}" class="lc-tick">${dfmt(days[0])}</text>`;
@@ -5487,7 +5620,11 @@ function btCurveSvg(res, splitIdx){
       `<span style="color:var(--accent)">net ${(net[i]>0?'+':'')+net[i].toFixed(2)}%</span> · `+
       `<span style="color:var(--blue)">gross ${(gross[i]>0?'+':'')+gross[i].toFixed(2)}%</span><br>`+
       `<span style="color:var(--muted)">bench ${(bench[i]>0?'+':'')+bench[i].toFixed(2)}%</span> · `+
-      `<span style="color:var(--faint)">EW ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`+
+      (res.single
+        ? `<span style="color:var(--text)">hold ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`
+          +`<br><span class="sec">position </span>`+(()=>{ const w=i>0?res.pos[i-1]:0;
+              return w>0?`<span class="pos">LONG ${w.toFixed(2)}\u00d7</span>`:w<0?`<span class="neg">SHORT ${Math.abs(w).toFixed(2)}\u00d7</span>`:`<span class="sec">flat</span>`; })()
+        : `<span style="color:var(--faint)">EW ${(ew[i]>0?'+':'')+ew[i].toFixed(2)}%</span>`)+
       (vb?`<br><span style="color:var(--accent-dim)">\u2b12${esc(res.vbName||'')} ${(vb[i]>0?'+':'')+vb[i].toFixed(2)}%</span>`:'');
   });
   return hoverChart(s, { w:W, h:H, pt, pb, xs, rows });
@@ -5516,11 +5653,74 @@ function btBookPanel(book){
   return sCard(`<div class="s-cap" style="margin:0 0 9px">Latest rebalance — the actual positions the rule holds now (ticker · signal · weight)</div>`+
     `<div class="bt-book-grid">`+col('LONG',b.longs,'pos','+')+col('SHORT',b.shorts,'neg','−')+`</div>`);
 }
+// The single-asset stand-in for the long/short book: a book of one row says nothing, but WHEN the
+// rule was on, on which side, and what each round trip actually made is the whole story.
+function btPositionPanel(res){
+  const tk=res.row?(res.row.ticker||res.row.coin):'', w=res.curW||0, MAX=8;
+  const tag = w>0 ? `<span class="bt-now pos">LONG ${w.toFixed(2)}×</span>`
+            : w<0 ? `<span class="bt-now neg">SHORT ${Math.abs(w).toFixed(2)}×</span>`
+                  : `<span class="bt-now flat">FLAT</span>`;
+  const d=(x)=>sessDate(x*DAY);
+  const list=res.trades.slice(-MAX).reverse();
+  const rows=list.length? list.map(t=>
+      `<div class="bt-trow"><span class="${t.side==='LONG'?'pos':'neg'}">${t.side}</span>`+
+      `<span class="sec">${d(t.entry)}</span><span class="sec">${t.live?'open':d(t.exit)}</span>`+
+      `<span class="r sec">${t.size.toFixed(2)}×</span>`+
+      `<span class="r ${t.ret>=0?'pos':'neg'}">${(t.ret>0?'+':'')+(t.ret*100).toFixed(2)}%</span></div>`).join('')
+    : `<div class="bt-trow"><span class="sec" style="grid-column:1/-1">No position ever cleared the entry threshold — loosen it, shorten the lookback, or pick a longer history.</span></div>`;
+  const wins=res.trades.filter(t=>t.ret>0).length;
+  return sCard(`<div class="s-cap" style="margin:0 0 9px">Where the rule stands on ${esc(tk)} right now, and every round trip that got it here</div>`+
+    `<div class="bt-nowrow">${tag}<span class="sec">score ${res.curScore!=null&&isFinite(res.curScore)?(res.curScore>0?'+':'')+res.curScore.toFixed(3):'—'}`+
+      `${res.curZ!=null&&isFinite(res.curZ)?` · ${(res.curZ>0?'+':'')+res.curZ.toFixed(2)}σ`:''} · entry ${state.backtest.entry>0?'±'+state.backtest.entry+'σ':'sign only'}`+
+      ` · ${res.trades.length} round trip${res.trades.length===1?'':'s'}${res.trades.length?`, ${Math.round(wins/res.trades.length*100)}% green`:''}</span></div>`+
+    `<div class="bt-ttbl"><div class="bt-trow bt-thd"><span>side</span><span>in</span><span>out</span><span class="r">size</span><span class="r">return</span></div>${rows}</div>`+
+    (res.trades.length>MAX?`<div class="sec" style="font-size:10.5px;padding:6px 2px 0">+${res.trades.length-MAX} earlier</div>`:''));
+}
+// ===== target picker — typeahead over the live scope, never a dropdown =========================
+// The roster is a few hundred names across two universes; a <select> is unusable at that size. Same
+// contract as the COMP/G picker: only names in the live universe resolve, free text never does.
+function btPickerHtml(){
+  const picks=state.backtest.picks, cr=state.scope==='crypto';
+  const chips=picks.map(c=>{ const r=state.rows.get(c), tk=r?(r.ticker||c):c, off=!r||r.delisted||!inScope(r)||!r.daily;
+    return `<span class="cg-chip bt-tgt${off?' off':''}" title="${esc(off?tk+' — no daily history in this scope, so it sits out of the run':(tk+' · '+((r&&(r.sector||r.assetClass))||'—')))}">${esc(tk)}<span class="cg-x" data-btx="${esc(c)}" title="remove">×</span></span>`; }).join('');
+  return `<span class="lbl">target</span>`+
+    `<span class="bt-pick"><input id="btFind" autocomplete="off" spellcheck="false" placeholder="${cr?'search a coin — e.g. BTC, HYPE':'search a name — e.g. NVDA, OPENAI'}" title="type a name from the live ${cr?'crypto':'xyz'} universe to test the rule on it alone; pick several to rank only those"><div id="btSugg" class="cg-sugg" hidden></div></span>`+
+    (picks.length?`<span class="bt-chips">${chips}<button class="cg-pill" id="btClearPick" title="back to the whole universe">clear</button></span>`:'');
+}
+function btSuggest(){
+  const inp=el('btFind'), sg=el('btSugg'); if(!inp||!sg) return;
+  const q=inp.value.trim().toUpperCase();
+  if(!q){ sg.hidden=true; return; }
+  const picked=new Set(state.backtest.picks);
+  const pool=[...state.rows.values()].filter(r=>!r.delisted&&inScope(r)&&r.daily&&!picked.has(r.coin));
+  const key=r=>String(r.ticker||r.coin).toUpperCase();
+  const hit=r=>key(r).startsWith(q), soft=r=>key(r).includes(q)||String(r.coin).toUpperCase().includes(q);
+  const m=[...pool.filter(hit), ...pool.filter(r=>!hit(r)&&soft(r))].slice(0,7);
+  if(!m.length){ sg.innerHTML=`<div class="cg-sg-none">no match in the live ${state.scope==='crypto'?'crypto':'xyz'} universe</div>`; sg.hidden=false; return; }
+  sg.innerHTML=m.map((r,i)=>{ const dm=dailyReturns(r), n=dm?dm.size:0, thin=n<BT_MIN_DAYS;
+    return `<div class="cg-sg${i===0?' on':''}${thin?' thin':''}" data-btc="${esc(r.coin)}" title="${thin?`only ${n}d of daily history — under the ${BT_MIN_DAYS}d floor this tab needs`:`${n}d of daily history`}">${esc(r.ticker||r.coin)}`+
+      `<span class="cg-sg-r">${esc(thin?n+'d · too short':(r.sector||r.assetClass||'—'))}</span></div>`; }).join('');
+  sg.hidden=false;
+  sg.querySelectorAll('.cg-sg').forEach(x=>x.onclick=()=>btAddPick(x.dataset.btc));
+}
+function btAddPick(coin){
+  const r=coin?state.rows.get(coin):null;
+  if(!r||!inScope(r)) return;
+  const dm=dailyReturns(r);
+  if(!dm||dm.size<BT_MIN_DAYS) return pushToast(`${r.ticker||coin} has under ${BT_MIN_DAYS} days of daily history — not enough to test anything on`);
+  if(state.backtest.picks.includes(coin)) return;
+  state.backtest.picks.push(coin);
+  drawBacktest();
+  const ni=el('btFind'); if(ni) ni.focus();
+}
 function renderBacktest(){
   const p=state.backtest;
   if(featureOn('baskets')&&!BASKETS.list.length) loadBaskets();   // -09: the vs-⬒ select must populate even when Backtest is the first tab visited; loadBaskets redraws this view when the registry lands
+  const mode=btMode(), single=mode==='single', picked=btPickRows();
   const res=btRun();
-  const head=sHead('Strategy backtest','define a cross-sectional rule and test it net of costs — in-sample vs out-of-sample');
+  const head=sHead('Strategy backtest', single
+    ? 'test one name on its own — the same signal, run as a timing rule, net of costs'
+    : 'define a cross-sectional rule and test it net of costs — in-sample vs out-of-sample');
   // controls
   const opt=(v,l,cur)=>`<option value="${esc(v)}"${cur===v?' selected':''}>${esc(l)}</option>`;
   const seg=(id,cur,opts)=>`<div class="seg" id="${id}">`+opts.map(([v,l])=>`<button data-v="${v}"${String(cur)===String(v)?' class="active"':''}>${l}</button>`).join('')+`</div>`;
@@ -5537,23 +5737,52 @@ function renderBacktest(){
       +opt('','off',p.vsBasket)+basketScopeList().map(b=>opt(b.name,'\u2b12 '+b.name,p.vsBasket)).join('')+`</select>`
     : '';
   let sigSel=`<select id="btSig" class="clocksel">`+Object.keys(BT_SIGNALS).map(k=>opt(k,BT_SIGNALS[k],p.signal)).join('')+`</select>`;
+  // A control that has nothing left to act on is DIMMED with the reason on hover, never hidden and
+  // never silently ignored: the point of the picker is that you can see what your choice cost you.
+  const grp=(off,why)=>` class="bt-grp${off?' bt-na':''}"${off?` title="${esc(why)}"`:''}`;
+  const uniWrap=grp(picked.length, single
+      ? 'superseded by the picked name — on one name, the name IS the universe'
+      : `superseded by the ${picked.length} picked names`);
+  const modeBar = single
+    ? `<div class="bt-mode"><b>Single-asset mode</b> · <span class="bt-mname">${esc(res.row?(res.row.ticker||res.row.coin):(picked[0].ticker||picked[0].coin))}</span> `+
+      `<span class="sec">${esc((picked[0].sector||picked[0].assetClass||'—'))}</span> — the rank collapses into a timing rule on one name: the score's own sign, `+
+      `measured against the <b>entry</b> threshold, is the position. Dimmed controls have no cross-section left to act on.</div>`
+    : mode==='set'
+      ? `<div class="bt-mode"><b>Custom universe</b> · ${picked.length} names — cross-sectional as usual, ranked only among what you picked. `+
+        `<span class="sec">Thin book: at ${(p.quantile*100).toFixed(0)}% that's ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side, so treat the stats as a sketch. Remove all but one to run a single-asset timing test instead.</span></div>`
+      : '';
   const controls=
-    `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span class="lbl">universe</span>${uniSel}${vbSel}`+
+    `<div class="s-ctrls">${btPickerHtml()}</div>`+
+    `<div class="s-ctrls"><span class="lbl">signal</span>${sigSel}<span${uniWrap}><span class="lbl">universe</span>${uniSel}</span>${vbSel}`+
     (cr?'':`<span class="lbl">hold</span>${seg('btHold',p.holdWindow,[['cc','close→close'],['on','overnight']])}`)+`</div>`+   // crypto is 24/7 — no overnight boundary to hold across
+    modeBar+
     `<div class="s-ctrls"><span class="lbl">lookback</span>${seg('btLb',p.lookback,[[5,'5d'],[10,'10d'],[20,'20d'],[40,'40d'],[60,'60d'],[120,'120d']])}`+
     (BT_MVAR[p.signal]?`<span class="sec" style="align-self:center">n/a — this rule runs fixed 1/7/30d horizons</span>`:'')+
     `<span class="lbl">rebalance</span>${seg('btCad',p.cadence,[[1,'1d'],[5,'5d'],[10,'10d']])}`+
-    `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`+
+    (single
+      ? `<span class="lbl" title="how far from zero the score must sit before a position is taken — the single-name replacement for the book quantile. σ is that name's own trailing score scale (RMS about zero), measured through that day only.">entry</span>${seg('btEntry',p.entry,[[0,'sign only'],[0.5,'±0.5σ'],[1,'±1σ']])}`
+      : `<span class="lbl">book</span>${seg('btQ',p.quantile,[[0.1,'10%'],[0.2,'20%'],[0.33,'33%'],[1,'all']])}`)+
     `<span class="lbl">taker bps</span>${seg('btCost',p.cost,[[0,'0'],[5,'5'],[10,'10'],[20,'20']])}`+
     `<span class="lbl">in-sample</span>${seg('btSplit',p.split,[[0.5,'50%'],[0.6,'60%'],[0.7,'70%']])}</div>`+
     `<div class="s-ctrls"><span class="lbl">direction</span>${seg('btDir',p.direction,[['high','long strong'],['low','long weak']])}`+
-    `<span class="lbl">structure</span>${seg('btStruct',p.structure,[['ls','long / short'],['long','long-only'],['short','short-only']])}`+
-    `<span class="lbl">weighting</span>${seg('btWt',p.weighting,[['eq','equal'],['sig','by signal'],['vol','inverse-vol']])}`+
-    `<span class="lbl">gate</span>${seg('btReq',p.reqSign?'sign':'any',[['any','any rank'],['sign','signal must agree']])}</div>`;
+    `<span class="lbl">structure</span>${single
+      ? seg('btStruct',p.structure,[['ls','long / short'],['long','long or flat'],['short','short or flat']])
+      : seg('btStruct',p.structure,[['ls','long / short'],['long','long-only'],['short','short-only']])}`+
+    (single
+      ? `<span class="lbl" title="one position, so weighting is position sizing: flat 1×, scaled by the score's own conviction, or sized to a ${(BT_VOLTGT*100).toFixed(0)}% annualized vol target">sizing</span>${seg('btWt',p.weighting,[['eq','flat 1×'],['sig','by |score|'],['vol','vol-target']])}`
+      : `<span class="lbl">weighting</span>${seg('btWt',p.weighting,[['eq','equal'],['sig','by signal'],['vol','inverse-vol']])}`)+
+    (single
+      ? `<span${grp(true,'there is no rank left to disagree with — on one name the sign of the score IS the position, and the entry threshold is what gates it')}><span class="lbl">gate</span>${seg('btReq',p.reqSign?'sign':'any',[['any','any rank'],['sign','signal must agree']])}</span>`
+      : `<span class="lbl">gate</span>${seg('btReq',p.reqSign?'sign':'any',[['any','any rank'],['sign','signal must agree']])}`)+
+    `</div>`;
   if(!res.ok){
     const msg=res.nodata
       ? `${esc(res.nodata)} ranks on a data column this server isn't shipping yet (daily highs/volume, OI, or funding). Redeploy the backend, then it fills in on the next /api/daily load.`
-      : `Not enough daily history yet — ${res.have||0} names, need 8 with ≥${BT_MIN_DAYS}d (and more days than the lookback). Fills in as /api/daily loads, or pick a shorter lookback.`;
+      : res.nopeers
+      ? `Sector-relative momentum is a demean against peers, and ${esc(res.nopeers)} has only ${res.have} other name${res.have===1?'':'s'} with daily history in this scope — under three there is no sector mean worth subtracting, and running it anyway would be plain momentum wearing the wrong label. Pick plain <b>Momentum</b>, or a name from a fuller sector.`
+      : single
+        ? `Not enough daily history on ${esc(picked.length?(picked[0].ticker||picked[0].coin):'this name')} yet — ${res.days||0} aligned days, need more than the ${p.lookback}d lookback plus a few rebalances. Pick a shorter lookback, or a name with a longer history.`
+        : `Not enough daily history yet — ${res.have||0} names, need ${res.need||8} with ≥${BT_MIN_DAYS}d (and more days than the lookback). ${mode==='set'?'Pick more names, or remove all but one to run a single-asset timing test instead.':'Fills in as /api/daily loads, or pick a shorter lookback.'}`;
     return head+controls+sCard(`<div class="msg" style="height:150px;display:flex;align-items:center;justify-content:center;text-align:center;padding:0 30px">${msg}</div>`)+renderDuelSection();
   }
   // -09 basket yardstick: the picked basket's EW daily index compounded over the SAME curve days,
@@ -5571,14 +5800,36 @@ function renderBacktest(){
   const isE=res.eq.slice(0,splitIdx+1), oosE=res.eq.slice(splitIdx);
   const ann=btAnn();
   const full=btStats(res.portR,res.eq,ann), is=btStats(isR,isE,ann), oos=btStats(oosR,oosE,ann);
+  const fundRow=`<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`;
+  const feeRow=`<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div>`;
+  // Single-asset mode replaces the universe/turnover box with the two numbers that actually decide
+  // whether a one-name rule was worth running: what it made against simply holding the thing, and
+  // how many independent decisions that verdict rests on.
+  const thin=res.single&&res.trades.length<BT_TRADE_MIN;
+  const holdTot=res.single? res.eqbh[res.eqbh.length-1]/res.eqbh[0]-1 : 0;
+  const stratTot=res.single? res.eq[res.eq.length-1]/res.eq[0]-1 : 0;
+  const wins=res.single? res.trades.filter(t=>t.ret>0).length : 0;
+  const pn=(x,d)=>(x>0?'+':'')+(x*100).toFixed(d==null?1:d)+'%';
+  const extraBox=res.single
+    ? `<div class="s-stat"><div class="s-k">vs buy &amp; hold ${esc(res.row.ticker||res.row.coin)}</div>`+
+        `<div class="s-row"><span>strategy</span><b class="${stratTot>=0?'pos':'neg'}">${pn(stratTot)}</b></div>`+
+        `<div class="s-row"><span>buy &amp; hold</span><b class="${holdTot>=0?'pos':'neg'}">${pn(holdTot)}</b></div>`+
+        `<div class="s-row"><span>excess</span><b class="${stratTot-holdTot>=0?'pos':'neg'}">${pn(stratTot-holdTot)}</b></div>`+
+        `<div class="s-row"><span title="share of days the rule held any position at all">exposure</span><b>${(res.exposure*100).toFixed(0)}%</b></div></div>`+
+      `<div class="s-stat"><div class="s-k">Trades &amp; frictions</div>`+
+        `<div class="s-row"><span>round trips</span><b class="${thin?'neg':''}"${thin?` title="under ${BT_TRADE_MIN} round trips the Sharpe above is an anecdote with a decimal point — it is shown, not trusted"`:''}>${res.trades.length}${thin?' ⚠':''}</b></div>`+
+        `<div class="s-row"><span>win rate</span><b>${res.trades.length?Math.round(wins/res.trades.length*100)+'%':'—'}</b></div>`+
+        fundRow+feeRow+`</div>`
+    : `<div class="s-stat"><div class="s-k">Frictions</div>`+
+        `<div class="s-row"><span>universe</span><b>${res.universeN}</b></div>`+
+        `<div class="s-row"><span>turnover</span><b>${(res.turnover*100).toFixed(0)}%</b></div>`+
+        fundRow+feeRow+`</div>`;
   const stats=`<div class="s-grid" style="margin:12px 0 4px">`+
-    btStatBox('In-sample',is,'var(--blue)')+btStatBox('Out-of-sample',oos,'var(--accent)')+btStatBox('Full period',full,'var(--text)')+
-    `<div class="s-stat"><div class="s-k">Frictions</div>`+
-      `<div class="s-row"><span>universe</span><b>${res.universeN}</b></div>`+
-      `<div class="s-row"><span>turnover</span><b>${(res.turnover*100).toFixed(0)}%</b></div>`+
-      `<div class="s-row"><span>funding</span>${res.fundCov>0?`<b class="${res.fundCum>=0?'pos':'neg'}">${(res.fundCum>0?'+':'')+(res.fundCum*100).toFixed(1)}%</b>`:`<b class="sec" title="funding not loaded — update the server">—</b>`}</div>`+
-      `<div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum*100).toFixed(1)}%</b></div></div></div>`;
-  const legItems=[{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'},{color:'var(--faint)',label:'equal-weight'}];
+    btStatBox('In-sample',is,'var(--blue)')+btStatBox('Out-of-sample',oos,'var(--accent)')+
+    (res.single?'':btStatBox('Full period',full,'var(--text)'))+extraBox+`</div>`;
+  const legItems=[{color:'var(--accent)',label:'net'},{color:'var(--blue)',label:'gross'},{color:'var(--muted)',label:cr?'benchmark (BTC)':'benchmark (SP500)'},
+    res.single?{color:'var(--text)',label:'buy &amp; hold '+esc(res.row.ticker||res.row.coin)+' (dashed)'}:{color:'var(--faint)',label:'equal-weight'}];
+  if(res.single) legItems.push({color:'var(--up)',label:'position: long'},{color:'var(--faint)',label:'flat'},{color:'var(--down)',label:'short'});
   if(res.eqvb) legItems.push({color:'var(--accent-dim)',label:'\u2b12 '+res.vbName+' (price-only EW)'});
   const leg=sLeg(legItems);
   const pctq=(p.quantile*100).toFixed(0), dirTop=p.direction==='high'?'top':'bottom';
@@ -5590,11 +5841,27 @@ function renderBacktest(){
   const mvarNote = BT_MVAR[p.signal]
     ? ` <b>Live-score variant:</b> fixed 1/7/30d risk-adjusted horizons mirroring the Markets-tab momentum blend — the lookback control does not apply. Judge it against <i>Blend M0 — live-score analogue</i> on out-of-sample net: only a term that beats the control there earns promotion into the live column. Daily granularity can only mirror the ≥1d structure of the live score (weights renormalized to .40/.40/.20; the intraday terms carry over untested either way), and the range tilt runs on closes — the daily tuple ships no low${mvarCol?`. Names missing the ${mvarCol} column fall back to the unmodulated core, so the ranked universe matches the control and the OOS gap measures the term itself`:''}.`
     : '';
-  const cap = res.on
-    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
-    : `Each rebalance, rank the universe by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
+  // ---- single-asset caption: what the rule did, and the two things that make a one-name result
+  // easier to fool yourself with than a cross-sectional one (no diversification, few decisions).
+  const oneTk=res.single?esc(res.row.ticker||res.row.coin):'';
+  const entryTxt=p.entry>0?`whenever it clears ±${p.entry}σ of that name's own trailing score scale`:`whenever it is non-zero`;
+  const sizeTxt=p.weighting==='sig'?`sized by the score's own conviction (|score| ÷ σ, capped at 0.25–2×)`
+    :p.weighting==='vol'?`sized to a ${(BT_VOLTGT*100).toFixed(0)}% annualized vol target (capped at 0.25–2×)`:`at a flat 1×`;
+  const sideTxt=p.structure==='long'?`<b>long or flat</b> — long when the score points ${p.direction==='high'?'up':'down'}, flat otherwise`
+    :p.structure==='short'?`<b>short or flat</b>`
+    :`<b>long/short</b> — the position flips with the score's sign`;
+  const capOne=!res.single?'':`Every ${p.cadence}d, score <b>${oneTk}</b> by ${BT_SIGNALS[p.signal].toLowerCase()} over the trailing ${p.lookback}d and take the position ${entryTxt}: ${sideTxt}, ${sizeTxt}. `+
+    `Net of the ${p.cost}bp taker fee on every flip and the funding the position pays or earns while held${res.fundCov>0?'':' — funding not loaded for this name yet, so this is price-only until the server ships it'}. `+
+    `The dashed line is <b>buy &amp; hold ${oneTk}</b>, the only benchmark a one-name rule has to beat; the ribbon under the curve is when it was actually on (green long, red short, grey flat). `+
+    (p.signal==='smom'?`Sector-relative momentum is demeaned against ${res.peers} live peers in the same sector, so the rule keeps its meaning on one name${res.peers<3?' — under three peers there is no sector mean and the run stays flat':''}. `:'')+
+    `<b>One name is one bet:</b> there is no cross-sectional diversification here, and this run rests on ${res.trades.length} round trip${res.trades.length===1?'':'s'}`+
+    `${res.trades.length<BT_TRADE_MIN?` — under ${BT_TRADE_MIN}, so read the Sharpe as an anecdote and the out-of-sample half as the only honest part`:''}. `+
+    `Shaded region is out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`;
+  const cap = res.single ? capOne : res.on
+    ? `<b>Overnight hold.</b> Each night buy the book at the 16:00 ET close and sell at the next 09:30 ET open (Fri→Mon over the weekend), flat during the cash session — ${structTxt}${mode==='set'?` of the ${picked.length} picked names`:''}, ${wtTxt}. The book round-trips every night, so it pays the ${p.cost}bp taker fee twice a night (that's the big drag here), plus the funding accrued over each hold. Gross is price-only; the gross↔net gap is fees + funding. Uses the close→open boundary holds from the hourly spine${res.ovCov>0?'':' — not loaded yet, so this is empty until the server ships them'}. Shaded = out-of-sample. Slippage not modeled.${mvarNote} <b>Hover</b> the curve. Not a live trade signal.`
+    : `Each rebalance, rank ${mode==='set'?`the ${picked.length} picked names`:'the universe'} by ${BT_SIGNALS[p.signal].toLowerCase()} and go ${structTxt}, ${wtTxt}, held to the next rebalance. Net of a ${p.cost}bp market-order taker fee on turnover and the actual funding each position pays or earns while held${res.fundCov>0?'':' — funding not loaded yet, so this is price-only until the server ships it'}. Gross line is price-only; the gross↔net gap is your funding + fee drag. Shaded region is out-of-sample. In-sample-selected, slippage not yet modeled — the test runs on exactly the daily history this server ships${cr?' (crypto: ~90d, BTC benchmark, 365d annualization)':''}.${mvarNote}${mode==='set'?` <b>Custom universe:</b> ranks run only among the ${picked.length} names you picked, so the tails are ${Math.max(1,Math.floor(picked.length*p.quantile))} name per side — a sketch, not a cross-section.`:''} <b>Hover</b> the curve. Not a live trade signal.`;
   const vbCap=res.eqvb?` The dashed <b>\u2b12 ${esc(res.vbName)}</b> line is that basket's price-only EW daily index over the same days \u2014 no costs, no funding, a comparison yardstick that never enters the stats; basket gap days (sub-floor coverage) compound flat.`:'';
-  return head+controls+stats+btBookPanel(res.book)+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection();
+  return head+controls+stats+(res.single?btPositionPanel(res):btBookPanel(res.book))+leg+sCard(btCurveSvg(res,splitIdx))+sCap(cap+vbCap)+renderDuelSection();
 }
 // ===== Score duel — MOM vs MOM+ on daily forward rank IC (build 2026.07.24-07) =====
 // The adjudicator for the candidate column. Server-computed record (/api/duel): once per UTC
@@ -5678,6 +5945,30 @@ function attachBtControls(){
   segWire('btLb','lookback',true); segWire('btCad','cadence',true); segWire('btQ','quantile',true); segWire('btCost','cost',true); segWire('btSplit','split',true);
   segWire('btDir','direction',false); segWire('btStruct','structure',false); segWire('btWt','weighting',false); segWire('btHold','holdWindow',false);
   const rq=el('btReq'); if(rq) rq.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ state.backtest.reqSign=(b.dataset.v==='sign'); drawBacktest(); }));
+  segWire('btEntry','entry',true);
+  // target picker: type to search the live scope, ⏎ takes the first match, ⌫ on an empty box pops
+  // the last chip. Same keyboard contract as the COMP/G picker so the two never behave differently.
+  const fi=el('btFind');
+  if(fi){
+    fi.addEventListener('input',btSuggest);
+    fi.addEventListener('keydown',e=>{
+      const sg=el('btSugg');
+      if(e.key==='Escape'){ if(sg) sg.hidden=true; return; }
+      if(e.key==='Backspace'&&!fi.value&&state.backtest.picks.length){ state.backtest.picks.pop(); drawBacktest(); const n=el('btFind'); if(n) n.focus(); return; }
+      if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+        if(!sg||sg.hidden) return; e.preventDefault();
+        const opts=[...sg.querySelectorAll('.cg-sg')]; if(!opts.length) return;
+        let i=opts.findIndex(x=>x.classList.contains('on')); i=(i+(e.key==='ArrowDown'?1:opts.length-1)+opts.length)%opts.length;
+        opts.forEach((x,k)=>x.classList.toggle('on',k===i)); return; }
+      if(e.key==='Enter'){ e.preventDefault();
+        const on=sg&&!sg.hidden?sg.querySelector('.cg-sg.on'):null;
+        if(on) btAddPick(on.dataset.btc); }
+    });
+    fi.addEventListener('blur',()=>setTimeout(()=>{ const sg=el('btSugg'); if(sg) sg.hidden=true; },140));   // let a click on a suggestion land first
+  }
+  document.querySelectorAll('#backtest-body [data-btx]').forEach(x=>x.addEventListener('click',()=>{
+    state.backtest.picks=state.backtest.picks.filter(c=>c!==x.dataset.btx); drawBacktest(); }));
+  const cp=el('btClearPick'); if(cp) cp.addEventListener('click',()=>{ state.backtest.picks=[]; drawBacktest(); });
 }
 function drawBacktest(){ const host=el('backtest-body'); if(!host) return; host.innerHTML=renderBacktest(); attachBtControls(); attachLineHover(); loadDuelData(); }
 async function renderBacktest_load(){ drawBacktest(); if(![...state.rows.values()].some(r=>r.daily)){ await loadDaily(); if(state.view==='backtest') drawBacktest(); } }
@@ -5716,6 +6007,7 @@ function applyScope(){
   syncGrpSeg();   // markets group lens: hide the industries button on crypto (coerced to sectors), relabel names 'stocks'/'coins'
   if(state.view==='corr' && !el('view-corr').hidden){ state.corr.pair=null; state.corr.selected=null; renderCorr(); setTimeout(compgAuto,60); }   // repaint the matrix for the new universe/data source, then auto-open COMP/G for it
   if(state.view==='trend') renderTrend();   // scope flip repaints the board for the new universe
+  state.backtest.picks=[];   // a backtest target belongs to one universe: xyz names don't exist in the crypto scope and vice versa
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
   if(state.view==='sessions'){ syncAnalyticsSlot(); drawSessions(); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
   if(state.view==='signals') renderSignals();       // scope flip re-filters the cards to the new universe
@@ -9436,6 +9728,10 @@ backtest:`
 <p>A client-side, cross-sectional long/short backtest on the daily returns already in your browser — parameter tweaks are instant and cost the server nothing. Ranking rules are deliberately non-fitted; the honest overfitting risk is <i>you</i>, picking parameters by eye.</p>
 <div class="hlp-h">The signal roster</div>
 <p>Seventeen non-fitted ranking rules in six families. <b>Trend</b>: momentum, sector-relative momentum (demeaned within each sector so no rank is just a sector bet), residual momentum (β-neutral), high proximity (closeness to the window high). <b>Reversion</b>: short-term reversion. <b>Risk</b>: low volatility, low idiosyncratic vol, low beta (BAB), anti-lottery (fade the biggest single-day pop). <b>Perp-native</b>: funding carry — long the names shorts pay to hold. <b>Flow</b>: volume trend and OI change, both deliberately sign-ambiguous — the direction toggle decides which tail you own. <b>Live-score variants</b>: Blend M0 is the daily mirror of the Markets-tab momentum score (risk-adjusted 1/7/30d blend × cross-horizon coherence + range tilt), and V1–V4 each add exactly one candidate upgrade — β-residual slow horizons, regime-qualified OI, a funding-crowding haircut, volume participation. This family is the promotion bench for the live column: a candidate ships into the board's Momentum only after beating M0 on out-of-sample net, and losers get deleted, not left as clutter. These five run fixed horizons, so the lookback control doesn't apply. Rules that rank on daily highs/volume, OI, or funding say so honestly when the server isn't shipping that column yet.</p>
+<div class="hlp-h">Testing one name — the target picker</div>
+<p>The <b>target</b> box takes a ticker from the live universe (typeahead, not a dropdown — the roster is too long to scroll, and free text never resolves). Pick <b>one</b> name and the tab switches to <b>single-asset mode</b>: a rank of one name isn't a rank, so the same signal runs as a <i>timing rule</i> — the score's own sign decides the position, and <b>entry</b> decides how far from zero it has to sit first (sign only, ±0.5σ or ±1σ of that name's own trailing score scale, measured through that day only, never with hindsight). The controls that exist purely to slice a cross-section — the book quantile and the rank gate — are dimmed with the reason on hover rather than silently ignored; <b>weighting</b> becomes position <b>sizing</b> (flat 1×, scaled by conviction, or sized to a 20% annualized vol target); <b>structure</b> keeps its three options as long/short, long-or-flat, short-or-flat. Costs, funding, the hold window and the IS/OOS split are the identical accounting the cross-sectional path uses — that is what makes the two modes comparable.</p>
+<p>The curve gains two things: <b>buy &amp; hold that name</b> as the dashed line — the only benchmark a one-name rule actually has to beat — and a <b>position ribbon</b> under the axis showing when the rule was long, short or flat. The book panel becomes the current position plus every round trip it took. Read the round-trip count first: one name over the history this server ships is a few dozen decisions at most, there is no cross-sectional diversification to average the luck out, and a Sharpe on under ten round trips is an anecdote with a decimal point — the stat flags itself, shown rather than hidden. Sector-relative momentum still demeans against the name's live sector peers; with fewer than three of them the tab refuses the run instead of quietly serving plain momentum under the wrong label.</p>
+<p>Pick <b>several</b> names and it stays cross-sectional, ranked only among those — a custom universe, with the thin-book arithmetic stated up front (a 20% book of five names is one name per side). Picks belong to one universe: flipping Stocks/Crypto clears them.</p>
 <div class="hlp-h">Crypto scope</div>
 <p>The tab follows the Stocks/Crypto switcher: crypto runs the top-60 Hyperliquid perps against a <b>BTC benchmark</b> with 365-day annualization, no overnight hold (24/7 markets have no boundary), and funding carry at home. The two universes never mix in one run.</p>
 <div class="hlp-h">How to read the curve</div>
