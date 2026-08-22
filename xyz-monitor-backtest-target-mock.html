@@ -1,0 +1,555 @@
+<title>Backtest Target Picker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css: the mock has to read as the app, not as a deck ── */
+:root{
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#7E8794; --faint:#4C5662;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding:22px 20px 70px;max-width:1180px;margin:0 auto}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)}
+b{font-weight:600}
+
+/* ── mock frame (the only chrome that isn't the app) ── */
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:70ch;margin:0}
+.lede b{color:var(--text);font-weight:500}
+.mockchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:2px 7px;opacity:.9}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:16px 18px 20px;margin:0 0 8px;position:relative}
+.frame::before{content:"live prototype";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.hint{font-family:var(--mono);font-size:11px;color:var(--faint);margin:0 0 14px;line-height:1.6}
+.hint kbd{border:1px solid var(--border);border-radius:3px;padding:0 5px;color:var(--muted)}
+
+/* ── app classes, copied from styles.css so the prototype is pixel-honest ── */
+.cp-sub{font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin-bottom:8px}
+.s-sec{margin:26px 0 12px;font-size:13px;line-height:1.4}
+.s-sec:first-child{margin-top:6px}
+.s-sec .t{color:var(--accent);font-weight:600;letter-spacing:.3px}
+.s-sec .d{color:var(--muted);font-weight:400;font-size:12px}
+.s-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.s-cap{color:var(--muted);font-size:11px;margin-top:9px;line-height:1.55}
+.s-cap b{color:var(--text);font-weight:600}
+.s-ctrls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.s-ctrls[hidden],.ctl[hidden]{display:none}   /* author display beats [hidden] on origin — same trap styles.css documents */
+.ctl{display:inline-flex;align-items:center;gap:10px}
+.s-ctrls .lbl{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px}
+.s-leg{display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.s-leg .it{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:11px}
+.s-leg .sw{width:15px;height:3px;border-radius:2px;display:inline-block}
+.s-grid{display:flex;flex-wrap:wrap;gap:12px}
+.s-stat{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:12px 14px;flex:1 1 150px;min-width:148px}
+.s-stat .s-k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
+.s-stat .s-row{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:12.5px;margin:3px 0}
+.s-stat .s-row span{color:var(--muted)}
+.s-stat .s-row b{color:var(--text);font-weight:500}
+.seg{display:inline-flex;align-items:center;gap:2px;background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:3px}
+.seg button{background:transparent;border:none;color:var(--muted);font-family:var(--mono);font-size:12px;padding:5px 9px;border-radius:5px;cursor:pointer}
+.seg button:hover{color:var(--text)}
+.seg button.active{background:var(--accent);color:#1a1205;font-weight:600}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.clocksel{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-family:var(--mono);font-size:12px;max-width:230px}
+.lc-tick{font-size:9px;fill:var(--muted)}
+.bt-book-grid{display:flex;gap:14px;flex-wrap:wrap}
+.bt-col{flex:1 1 220px;min-width:200px}
+.bt-col-h{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:5px}
+.bt-pos{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-family:var(--mono);font-size:12.5px;padding:3px 2px}
+.bt-pos .bt-tk{color:var(--text)}
+.bt-pos .bt-sc{color:var(--muted);font-size:11px;margin-left:auto}
+.bt-pos .bt-w{flex:0 0 56px;text-align:right}
+.cg-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border:1px solid var(--border);border-radius:3px;
+  cursor:default;user-select:none;font-family:var(--mono);font-size:11.5px}
+.cg-chip .cg-x{color:var(--faint);margin-left:2px;cursor:pointer}
+.cg-chip .cg-x:hover{color:var(--down)}
+.cg-sugg{position:absolute;top:34px;left:0;right:0;background:var(--panel2);border:1px solid var(--border);
+  border-radius:4px;z-index:8;overflow:hidden;box-shadow:0 12px 26px rgba(0,0,0,.45)}
+.cg-sg{padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border);font-family:var(--mono)}
+.cg-sg:last-child{border-bottom:none}
+.cg-sg:hover,.cg-sg.on{background:var(--panel);color:var(--accent)}
+.cg-sg-none{padding:7px 10px;font-size:11px;color:var(--faint);font-family:var(--mono)}
+.cg-sg-r{float:right;color:var(--faint);font-size:9.5px;letter-spacing:.05em}
+.cg-pill{background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:3px;padding:2px 9px;
+  font-family:var(--mono);font-size:11px;cursor:pointer}
+.cg-pill:hover{border-color:var(--accent-dim);color:var(--accent)}
+.duel-verdict{margin:10px 0 8px;padding:8px 12px;background:var(--panel2);border-left:2px solid var(--accent);
+  font-size:12px;color:var(--text);line-height:1.55}
+
+/* ── new bits this feature introduces ── */
+.bt-target{position:relative;flex:1 1 300px;max-width:420px;min-width:250px}
+.bt-target input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);
+  font-family:var(--mono);font-size:12px;padding:7px 10px 7px 27px;outline:none}
+.bt-target input:focus{border-color:var(--accent-dim)}
+.bt-target .mag{position:absolute;left:9px;top:8px;color:var(--faint);font-size:12px;pointer-events:none}
+.bt-picked{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:-4px 0 12px;min-height:22px}
+.cg-chip.tgt{border-color:var(--accent-dim);color:var(--accent);background:rgba(227,165,60,.08)}
+.na{opacity:.34;pointer-events:none;filter:saturate(.2)}
+.na-tag{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);
+  border:1px solid var(--border);border-radius:3px;padding:1px 4px;align-self:center}
+.modebar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;
+  color:var(--muted);background:var(--panel2);border:1px solid var(--border);border-left:2px solid var(--accent);
+  border-radius:0 7px 7px 0;padding:7px 12px;margin:0 0 13px;line-height:1.55}
+.modebar b{color:var(--text)}
+.modebar .m-name{color:var(--accent)}
+.trade-tbl{border:1px solid var(--border);border-radius:8px;overflow:hidden;font-family:var(--mono);font-size:12px}
+.trade-row{display:grid;grid-template-columns:60px 1fr 1fr 62px 64px;gap:10px;padding:5px 12px;align-items:baseline}
+.trade-row+.trade-row{border-top:1px solid var(--border)}
+.trade-row:not(.trade-hd):hover{background:var(--panel2)}
+.trade-hd{color:var(--muted);font-size:9.5px;text-transform:uppercase;letter-spacing:.6px}
+.trade-row .r{text-align:right}
+.now-pos{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-family:var(--mono);font-size:13px;margin-bottom:10px}
+.now-pos .tag{font-size:10px;letter-spacing:.1em;text-transform:uppercase;border-radius:3px;padding:2px 8px}
+.now-pos .tag.long{color:var(--up);border:1px solid var(--up);background:rgba(70,185,126,.1)}
+.now-pos .tag.flat{color:var(--muted);border:1px solid var(--border)}
+.wrap-x{overflow-x:auto}
+svg.chart{display:block;width:100%;height:auto;min-width:560px}
+
+/* ── the applies/doesn't table ── */
+.applies{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px;min-width:620px}
+.applies th{text-align:left;font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);font-weight:400;border-bottom:1px solid var(--border);padding:0 10px 7px 0}
+.applies td{border-bottom:1px solid var(--grid);padding:8px 10px 8px 0;vertical-align:top;line-height:1.5}
+.applies td:first-child{font-family:var(--mono);color:var(--text);white-space:nowrap}
+.applies td.d{color:var(--muted)}
+.applies .keep{color:var(--up)} .applies .drop{color:var(--down)} .applies .morph{color:var(--accent)}
+.q{border-left:2px solid var(--blue);background:var(--panel);padding:11px 14px;border-radius:0 8px 8px 0;margin:0 0 10px}
+.q .qh{font-size:13px;font-weight:600;margin-bottom:5px}
+.q .qb{color:var(--muted);font-size:12px;line-height:1.6}
+.q .qb b{color:var(--text)}
+ol.impl{color:var(--muted);font-size:12.5px;line-height:1.68;padding-left:20px;max-width:78ch}
+ol.impl b{color:var(--text)}
+ol.impl code,p code,.qb code{font-family:var(--mono);font-size:11.5px;color:var(--accent);background:var(--panel2);
+  border-radius:3px;padding:1px 4px}
+@media (prefers-reduced-motion:no-preference){.cg-sugg{animation:pop .12s ease-out}}
+@keyframes pop{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+</style>
+
+<div class="mockhd">
+  <p class="eyebrow">xyz-monitor · backtest tab · proposal</p>
+  <h1>Pick a name, not just a universe</h1>
+  <p class="lede">The Backtest tab tests a <b>cross-sectional</b> rule: rank a universe, long one tail, short the other. There's no way to ask the smaller question — <b>"does this signal work on NVDA?"</b> This mock adds a typeahead target picker (no dropdown — the roster is too long) and shows what the tab becomes when the target is a single name: the cross-section collapses, so the controls that only exist to slice a cross-section have to go with it.</p>
+  <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic prices, nothing is wired to live data</span></p>
+</div>
+
+<p class="hint">Type in the target box (try <kbd>NV</kbd>, <kbd>OPEN</kbd>, <kbd>BTC</kbd>) · <kbd>↑↓</kbd><kbd>⏎</kbd> to pick · flip the scope to search the crypto roster · every panel below reacts to how many names are picked.</p>
+
+<div class="frame">
+  <div class="cp-sub s-sec" style="margin-top:0"><span class="t">◆ Strategy backtest</span> <span class="d">— define a rule and test it net of costs — in-sample vs out-of-sample</span></div>
+
+  <!-- row 0: scope + target -->
+  <div class="s-ctrls">
+    <span class="ctl"><span class="lbl">scope</span>
+    <div class="seg" id="segScope"><button data-v="stocks" class="active">stocks</button><button data-v="crypto">crypto</button></div></span>
+    <span class="lbl">target</span>
+    <div class="bt-target">
+      <span class="mag">⌕</span>
+      <input id="tq" autocomplete="off" spellcheck="false" placeholder="search a name to test it on its own — e.g. NVDA, OPENAI, BTC">
+      <div id="tsugg" class="cg-sugg" hidden></div>
+    </div>
+    <button class="cg-pill" id="pWatch">★ watchlist</button>
+    <button class="cg-pill" id="pClear">clear</button>
+  </div>
+  <div class="bt-picked" id="picked"></div>
+
+  <div class="modebar" id="modebar"></div>
+
+  <!-- row 1 -->
+  <div class="s-ctrls">
+    <span class="ctl"><span class="lbl">signal</span>
+    <select class="clocksel" id="selSig">
+      <option value="mom">Momentum</option><option value="smom">Sector-relative momentum</option>
+      <option value="rev">Short-term reversion</option><option value="res">Residual momentum (β-neutral)</option>
+      <option value="lowvol">Low volatility</option><option value="carry">Funding carry</option>
+      <option value="hprox">High proximity</option><option value="oid">OI change</option>
+      <option value="m0">Blend M0 — live-score analogue</option>
+    </select></span>
+    <span id="wUni" class="ctl">
+      <span class="lbl">universe</span>
+      <select class="clocksel" id="selUni"><option>All markets</option><option>Equities only</option><option>Information Technology</option><option>Financials</option><option>Energy</option></select>
+    </span>
+    <span id="wHold" class="ctl"><span class="lbl">hold</span>
+      <span class="seg"><button class="active">close→close</button><button>overnight</button></span></span>
+  </div>
+
+  <!-- row 2 -->
+  <div class="s-ctrls">
+    <span class="ctl"><span class="lbl">lookback</span>
+    <span class="seg" id="segLb"><button data-v="5">5d</button><button data-v="10">10d</button><button data-v="20" class="active">20d</button><button data-v="40">40d</button><button data-v="60">60d</button><button data-v="120">120d</button></span></span>
+    <span class="ctl"><span class="lbl">rebalance</span>
+    <span class="seg" id="segCad"><button data-v="1">1d</button><button data-v="5" class="active">5d</button><button data-v="10">10d</button></span></span>
+    <span id="wQ" class="ctl"><span class="lbl">book</span>
+      <span class="seg"><button>10%</button><button class="active">20%</button><button>33%</button><button>all</button></span></span>
+    <span id="wEntry" class="ctl" hidden><span class="lbl">entry</span>
+      <span class="seg" id="segEntry"><button data-v="0" class="active">score &gt; 0</button><button data-v="0.5">±0.5σ</button><button data-v="1">±1σ</button></span></span>
+    <span class="ctl"><span class="lbl">taker bps</span>
+    <span class="seg" id="segCost"><button data-v="0">0</button><button data-v="5" class="active">5</button><button data-v="10">10</button><button data-v="20">20</button></span></span>
+    <span class="ctl"><span class="lbl">in-sample</span>
+    <span class="seg"><button>50%</button><button class="active">60%</button><button>70%</button></span></span>
+  </div>
+
+  <!-- row 3 -->
+  <div class="s-ctrls">
+    <span class="ctl"><span class="lbl">direction</span>
+    <span class="seg" id="segDir"><button data-v="high" class="active">long strong</button><button data-v="low">long weak</button></span></span>
+    <span class="ctl"><span class="lbl">structure</span>
+    <span class="seg" id="segStruct"><button data-v="ls" class="active">long / short</button><button data-v="long">long-only</button><button data-v="short">short-only</button></span></span>
+    <span class="ctl"><span class="lbl" id="lblWt">weighting</span>
+    <span class="seg" id="segWt"><button data-v="eq" class="active">equal</button><button data-v="sig">by signal</button><button data-v="vol">inverse-vol</button></span></span>
+    <span id="wGate" class="ctl"><span class="lbl">gate</span>
+      <span class="seg"><button class="active">any rank</button><button>signal must agree</button></span></span>
+  </div>
+
+  <div id="stats" class="s-grid" style="margin:14px 0 4px"></div>
+
+  <div style="margin:14px 0 0" id="holdings"></div>
+
+  <div class="s-leg" id="leg" style="margin-top:14px"></div>
+  <div class="s-card wrap-x" id="chartCard"></div>
+  <div class="s-cap" id="cap"></div>
+</div>
+
+<div class="cp-sub s-sec"><span class="t">◆ What survives the collapse</span> <span class="d">— every control on the tab, and what one name does to it</span></div>
+<div class="s-card wrap-x">
+<table class="applies">
+  <thead><tr><th>Control</th><th style="width:1%">One name</th><th>What it means once the cross-section is gone</th></tr></thead>
+  <tbody>
+    <tr><td>signal</td><td class="keep">keeps</td><td class="d">Same score, same code path — it just stops being a rank and becomes a level. Sector-relative momentum still demeans against its sector peers (they're loaded even when they aren't the target); the funding/OI/volume rules still need their column shipped for <i>that</i> name.</td></tr>
+    <tr><td>lookback</td><td class="keep">keeps</td><td class="d">Unchanged. Still ignored by the M0–V4 blends, which run fixed 1/7/30d horizons.</td></tr>
+    <tr><td>rebalance</td><td class="keep">keeps</td><td class="d">How often the position is re-decided. On one name this is the trade-frequency knob — 1d flips a lot and pays for it in fees.</td></tr>
+    <tr><td>taker bps · in-sample · hold</td><td class="keep">keeps</td><td class="d">Untouched. The IS/OOS split matters <i>more</i> here, not less — see the honesty note in the caption.</td></tr>
+    <tr><td>direction</td><td class="keep">keeps</td><td class="d">Still decides which sign you're buying: long strong = long when the score is positive, long weak = the inverse.</td></tr>
+    <tr><td>structure</td><td class="morph">re-reads</td><td class="d">Same three options, time-series meaning: <b>long/short</b> flips with the sign, <b>long-only</b> is long or flat, <b>short-only</b> is short or flat.</td></tr>
+    <tr><td>universe</td><td class="drop">off</td><td class="d">Superseded by the picked name. Dimmed with the name shown in its place, so it's obvious the picker won — never silently ignored.</td></tr>
+    <tr><td>book (10/20/33/all)</td><td class="drop">off</td><td class="d">A quantile of one name is that name. The knob's actual job — <i>only trade the conviction extremes</i> — moves to <b>entry</b>.</td></tr>
+    <tr><td>gate (signal must agree)</td><td class="drop">off</td><td class="d">There's no rank left to disagree with; the sign of the score <i>is</i> the position. Folded into <b>entry</b>.</td></tr>
+    <tr><td>entry <span class="sec">(new)</span></td><td class="morph">appears</td><td class="d">How far from zero the score must be before taking a position: <code>&gt; 0</code>, <code>±0.5σ</code>, <code>±1σ</code> of that name's own trailing score distribution. Higher threshold = fewer, higher-conviction trades and more time flat. This is the single-name replacement for the quantile.</td></tr>
+    <tr><td>weighting → sizing</td><td class="morph">re-reads</td><td class="d">Same three buttons, one position: <b>equal</b> → flat 1×, <b>by signal</b> → size scales with |score|, <b>inverse-vol</b> → vol-targeted size. Label flips to <code>sizing</code>.</td></tr>
+    <tr><td>vs ⬒ basket</td><td class="keep">keeps</td><td class="d">Still a comparison line, still enters no stat. Buy &amp; hold of the picked name joins it as a second yardstick.</td></tr>
+    <tr><td>latest-rebalance book</td><td class="morph">replaced</td><td class="d">A long/short book of one row is a waste of a panel. It becomes <b>current position + trade log</b>, plus a position ribbon under the curve.</td></tr>
+    <tr><td>equal-weight line</td><td class="morph">replaced</td><td class="d">The universe EW line means nothing here. Buy &amp; hold of the name takes its place — that's the only benchmark a single-name rule has to beat.</td></tr>
+    <tr><td>Score duel panel</td><td class="keep">keeps</td><td class="d">Universe-level rank IC, computed server-side and independent of these controls. Unchanged, sits below as always.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="cp-sub s-sec"><span class="t">◆ Two calls I'd like you to make</span> <span class="d">— before I wire any of this into app.js</span></div>
+
+<div class="q">
+  <div class="qh">1 · What should 2+ picked names do?</div>
+  <div class="qb">The mock treats them as a <b>custom universe</b> — rank just those names, long/short their tails, everything cross-sectional stays on. It's the honest reading of "test these five", but the tails get thin fast: five names at a 20% book is one long and one short, and <code>btRun</code> currently refuses to run under 8 names at all. The alternative is capping the picker at one name and keeping this strictly a single-asset feature. My preference is the custom universe with a visible <b>thin book</b> warning and the 8-name floor relaxed to 4 — it costs one guard rail, and "MAG7 only" is a question people actually have.</div>
+</div>
+<div class="q">
+  <div class="qh">2 · Should a single-name run be allowed to look good?</div>
+  <div class="qb">One name over ~120 days at a 5d rebalance is roughly <b>24 decisions</b>, and crypto ships ~90 days, so it's more like 18. A Sharpe on that is an anecdote with a decimal point. The mock states the trade count next to every stat box and puts the warning in the caption rather than blocking the run. The stricter option is to <b>refuse to print Sharpe</b> under some trade count and show "n too small" instead — the same spine as the Score duel's verdict gate. Say the word and it ships gated.</div>
+</div>
+
+<div class="cp-sub s-sec"><span class="t">◆ How it lands in the code</span> <span class="d">— roughly 200 lines, no server change, no new payload</span></div>
+<ol class="impl">
+  <li><b>State:</b> one field — <code>state.backtest.picks: []</code> (coins, not tickers), plus <code>entry: 0</code>. Session-only, like every other backtest param: <code>savePrefs</code> and the URL hash carry none of them today, and persisting the target alone would be the odd one out. A scope flip clears the picks — a target belongs to exactly one universe.</li>
+  <li><b>Picker:</b> reuses the COMP/G typeahead wholesale — <code>.cg-pick</code> / <code>.cg-sugg</code> / <code>.cg-sg</code> markup, the same universe-validated resolve (free text never matches), the same chip anatomy with <code>⬒</code> reserved for baskets. Scoped to the active scope, so crypto search never returns equities.</li>
+  <li><b>btUniverse():</b> when <code>picks.length</code>, filter to those coins and skip the sector/equity branches — every other consumer (<code>btMatrix</code>, <code>btRun</code>) is untouched because they already take whatever rows that function returns.</li>
+  <li><b>btRun():</b> one new branch for <code>picks.length===1</code> — position from the score's sign against the entry threshold instead of a quantile sort, sizing from the same <code>weighting</code> value, trade log accumulated on every position change. Fees still charge on turnover, funding still accrues on the held side; the cost model doesn't change at all.</li>
+  <li><b>Render:</b> mode is derived, never stored — <code>picks.length</code> decides which controls get <code>.na</code>, which panel renders, and which caption prints. Nothing about universe mode changes shape.</li>
+  <li><b>Tests:</b> the suite already exercises <code>btRun</code>; add cases for a one-name run (position flips at the threshold, trade count matches the ribbon, fees ≥ the zero-cost run) and for the picks-override-universe precedence.</li>
+</ol>
+
+<script>
+// ── mock universe: the real xyz + Hyperliquid rosters, trimmed. Search is scope-local, same rule as COMP/G. ──
+const UNI = {
+  stocks: [
+    ["NVDA","NVIDIA","Information Technology"],["AAPL","Apple","Information Technology"],["MSFT","Microsoft","Information Technology"],
+    ["AVGO","Broadcom","Information Technology"],["AMD","Advanced Micro Devices","Information Technology"],["SMCI","Super Micro","Information Technology"],
+    ["ASML","ASML Holding","Information Technology"],["TSM","Taiwan Semiconductor","Information Technology"],["ARM","Arm Holdings","Information Technology"],
+    ["PLTR","Palantir","Information Technology"],["MU","Micron","Information Technology"],["MRVL","Marvell","Information Technology"],
+    ["GOOGL","Alphabet","Communication Services"],["META","Meta Platforms","Communication Services"],["NFLX","Netflix","Communication Services"],
+    ["AMZN","Amazon","Consumer Discretionary"],["TSLA","Tesla","Consumer Discretionary"],["BABA","Alibaba","Consumer Discretionary"],
+    ["COIN","Coinbase","Financials"],["HOOD","Robinhood","Financials"],["MSTR","MicroStrategy","Financials"],["JPM","JPMorgan","Financials"],
+    ["CRCL","Circle","Financials"],["LLY","Eli Lilly","Health Care"],["HIMS","Hims & Hers","Health Care"],
+    ["XOM","Exxon Mobil","Energy"],["OXY","Occidental","Energy"],["VST","Vistra","Utilities"],["NEE","NextEra","Utilities"],
+    ["RKLB","Rocket Lab","Industrials"],["SPCX","SpaceX","Industrials"],["GEV","GE Vernova","Industrials"],
+    ["OPENAI","OpenAI","pre-IPO synthetic"],["ANTHROPIC","Anthropic","pre-IPO synthetic"],["XAI","xAI","pre-IPO synthetic"],
+    ["STRIPE","Stripe","pre-IPO synthetic"],["DATABRICKS","Databricks","pre-IPO synthetic"],["ANDURIL","Anduril","pre-IPO synthetic"],
+    ["SPX","S&P 500","index"],["NDX","Nasdaq 100","index"],["XYZ100","XYZ100 dex index","index"],["VIX","Volatility index","index"],
+    ["XAU","Gold","commodity"],["WTI","Crude oil","commodity"],["COPPER","Copper","commodity"],
+    ["EURUSD","Euro / US dollar","fx"],["USDJPY","US dollar / yen","fx"],["DXY","Dollar index","fx"],
+    ["SMH","Semiconductor ETF","sector ETF"],["XLE","Energy ETF","sector ETF"],["EWJ","Japan ETF","region ETF"],
+    ["H100","H100 compute index","thematic"],["DRAM","DRAM price index","thematic"]
+  ],
+  crypto: [
+    ["BTC","Bitcoin","crypto"],["ETH","Ethereum","crypto"],["SOL","Solana","crypto"],["HYPE","Hyperliquid","crypto"],
+    ["XRP","XRP","crypto"],["DOGE","Dogecoin","crypto"],["AVAX","Avalanche","crypto"],["LINK","Chainlink","crypto"],
+    ["SUI","Sui","crypto"],["TIA","Celestia","crypto"],["ARB","Arbitrum","crypto"],["OP","Optimism","crypto"],
+    ["PURR","Purr","crypto"],["ENA","Ethena","crypto"],["ONDO","Ondo","crypto"],["WLD","Worldcoin","crypto"],
+    ["PEPE","Pepe","crypto"],["WIF","dogwifhat","crypto"],["JUP","Jupiter","crypto"],["LDO","Lido","crypto"]
+  ]
+};
+const WATCH = { stocks:["NVDA","OPENAI","COIN"], crypto:["BTC","HYPE"] };
+const S = { scope:"stocks", picks:[], lb:20, cad:5, cost:5, dir:"high", struct:"ls", wt:"eq", entry:0, sig:"mom" };
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const roster = () => UNI[S.scope];
+const meta = t => roster().find(r => r[0] === t) || [t, t, "—"];
+
+// ── deterministic synthetic series, seeded off the ticker so every name has its own personality ──
+function seed(str){ let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+function rng(s){ return () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function simulate(tk){
+  const N = S.scope === "crypto" ? 92 : 124, r = rng(seed(tk + S.scope));
+  const vol = 0.014 + (r() * 0.028), drift = (r() - 0.42) * 0.0022;
+  const ret = [];                                        // log returns with a slow regime wobble, so trends exist to be caught
+  let regime = 0;
+  for (let i = 0; i < N; i++){
+    regime = regime * 0.94 + (r() - 0.5) * 0.006;
+    let g = 0; for (let k = 0; k < 6; k++) g += r(); g = (g - 3) / 1.22;   // ~normal
+    ret.push(drift + regime + g * vol);
+  }
+  // time-series rule: trailing-lookback score, z-scored to set the entry threshold, position taken when it clears
+  // (mock convenience: sigma is full-sample here; the real build z-scores on a trailing window so there is no lookahead)
+  const L = S.lb, thr = S.entry, cost = S.cost / 1e4;
+  const score = ret.map((_, i) => { if (i < L) return NaN; let s = 0; for (let j = i - L + 1; j <= i - 1; j++) s += ret[j]; return s; });
+  const fin = score.filter(Number.isFinite);
+  const mu = fin.reduce((a, b) => a + b, 0) / (fin.length || 1);
+  const sd = Math.sqrt(fin.reduce((a, b) => a + (b - mu) ** 2, 0) / Math.max(1, fin.length - 1)) || 1;
+  const days = [], eq = [1], bh = [1], gross = [1], pos = [];
+  const fund = ret.map(() => (0.00008 + r() * 0.00042) * (S.scope === "crypto" ? 2.4 : 1));   // daily rate a 1x long pays
+  let w = 0, trades = [], open = null, feeCum = 0, fundCum = 0, inMkt = 0;
+  const start = L + 1;
+  for (let i = start; i < ret.length - 1; i++){
+    if ((i - start) % S.cad === 0){                                        // rebalance: re-decide the position
+      const z = (score[i] - mu) / sd, sgn = S.dir === "high" ? Math.sign(z) : -Math.sign(z);
+      let nw = Math.abs(z) >= thr ? sgn : 0;
+      if (S.struct === "long" && nw < 0) nw = 0;
+      if (S.struct === "short" && nw > 0) nw = 0;
+      if (nw !== 0){
+        if (S.wt === "sig") nw *= Math.min(1.5, 0.5 + Math.abs(z) * 0.6);
+        if (S.wt === "vol"){ let v = 0, n = 0; for (let j = i - 19; j <= i; j++) if (j >= 0){ v += ret[j] ** 2; n++; }
+          nw *= Math.min(2, 0.20 / Math.sqrt(Math.max(1e-9, v / Math.max(1, n)) * (S.scope === "crypto" ? 365 : 252))); }
+      }
+      if (nw !== w){
+        feeCum += Math.abs(nw - w) * cost;
+        eq[eq.length - 1] *= (1 - Math.abs(nw - w) * cost);
+        if (open){ open.exit = i; open.ret = eq[eq.length - 1] / open.eq0 - 1; trades.push(open); open = null; }
+        if (nw !== 0) open = { side: nw > 0 ? "LONG" : "SHORT", size: Math.abs(nw), entry: i, eq0: eq[eq.length - 1] };
+        w = nw;
+      }
+    }
+    const px = Math.exp(ret[i + 1]) - 1, fRet = -w * fund[i + 1];   // a long pays funding, a short earns it
+    if (w !== 0) inMkt++;
+    fundCum += fRet;
+    eq.push(eq[eq.length - 1] * (1 + w * px + fRet));
+    gross.push(gross[gross.length - 1] * (1 + w * px));
+    bh.push(bh[bh.length - 1] * (1 + px));
+    pos.push(w); days.push(i + 1);
+  }
+  if (open){ open.exit = ret.length - 1; open.ret = eq[eq.length - 1] / open.eq0 - 1; trades.push(open); }
+  const ann = S.scope === "crypto" ? 365 : 252, dr = [];
+  for (let i = 1; i < eq.length; i++) dr.push(eq[i] / eq[i - 1] - 1);
+  const m = dr.reduce((a, b) => a + b, 0) / (dr.length || 1);
+  const sdv = Math.sqrt(dr.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, dr.length - 1));
+  let peak = eq[0], mdd = 0; for (const e of eq){ if (e > peak) peak = e; mdd = Math.min(mdd, e / peak - 1); }
+  return { N, days, eq, bh, gross, pos, trades, feeCum, fundCum,
+    total: eq[eq.length - 1] - 1, bhTotal: bh[bh.length - 1] - 1,
+    sharpe: sdv > 0 ? m / sdv * Math.sqrt(ann) : 0, mdd,
+    hit: dr.filter(x => x > 0).length / (dr.length || 1),
+    exposure: inMkt / (pos.length || 1), n: dr.length, curW: w, lastScore: (score[score.length - 2] - mu) / sd };
+}
+
+// ── universe-mode numbers: fixed, plausible, and clearly not the point of the mock ──
+const UNIV = { is:{t:.121,s:1.31,h:.55,d:-.062,n:74}, oos:{t:.048,s:0.83,h:.52,d:-.051,n:49}, full:{t:.175,s:1.12,h:.54,d:-.062,n:123} };
+
+function line(pts, X, Y){ return pts.map((v, i) => (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(v).toFixed(1)).join(" "); }
+function chart(res, single){
+  const W = 700, H = 220, pl = 46, pr = 56, pt = 14, pb = single ? 40 : 26;
+  const pct = a => a.map(e => (e / a[0] - 1) * 100);
+  const net = pct(res.eq), gr = pct(res.gross), bh = pct(res.bh), m = net.length;
+  const series = single ? [net, gr, bh] : [net, gr, bh];
+  let lo = Infinity, hi = -Infinity;
+  for (const a of series) for (const y of a){ if (y < lo) lo = y; if (y > hi) hi = y; }
+  if (!(hi > lo)){ hi = 1; lo = -1; } const pad = (hi - lo) * .09 || 1; lo -= pad; hi += pad;
+  const X = i => pl + (m < 2 ? 0 : i / (m - 1)) * (W - pl - pr), Y = y => pt + (1 - (y - lo) / (hi - lo)) * (H - pt - pb);
+  const splitIdx = Math.floor(m * 0.6);
+  let s = "";
+  s += `<rect x="${X(splitIdx).toFixed(1)}" y="${pt}" width="${(X(m - 1) - X(splitIdx)).toFixed(1)}" height="${H - pt - pb}" fill="var(--accent)" opacity="0.05"/>`;
+  s += `<line x1="${X(splitIdx).toFixed(1)}" y1="${pt}" x2="${X(splitIdx).toFixed(1)}" y2="${H - pb}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"/>`;
+  s += `<text x="${(X(splitIdx) + 5).toFixed(1)}" y="${pt + 10}" class="lc-tick">out-of-sample →</text>`;
+  for (let k = 0; k <= 4; k++){ const v = lo + (hi - lo) * k / 4;
+    s += `<line x1="${pl}" y1="${Y(v).toFixed(1)}" x2="${W - pr}" y2="${Y(v).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
+    s += `<text x="${pl - 6}" y="${(Y(v) + 3).toFixed(1)}" text-anchor="end" class="lc-tick">${(v > 0 ? "+" : "") + v.toFixed(0)}%</text>`; }
+  s += `<line x1="${pl}" y1="${Y(0).toFixed(1)}" x2="${W - pr}" y2="${Y(0).toFixed(1)}" stroke="var(--border)"/>`;
+  s += `<path d="${line(bh, X, Y)}" fill="none" stroke="var(--text)" stroke-width="1.2" opacity="${single ? .55 : .45}" stroke-dasharray="${single ? "4 3" : "0"}"/>`;
+  s += `<path d="${line(gr, X, Y)}" fill="none" stroke="var(--blue)" stroke-width="1.3" opacity="0.85"/>`;
+  s += `<path d="${line(net, X, Y)}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  s += `<circle cx="${X(m - 1).toFixed(1)}" cy="${Y(net[m - 1]).toFixed(1)}" r="2.8" fill="var(--accent)"/>`;
+  s += `<text x="${W - pr + 5}" y="${(Y(net[m - 1]) + 3).toFixed(1)}" style="font-size:9px;fill:var(--accent)">${(net[m - 1] > 0 ? "+" : "") + net[m - 1].toFixed(1)}%</text>`;
+  s += `<text x="${W - pr + 5}" y="${(Y(bh[m - 1]) + 3).toFixed(1)}" style="font-size:9px;fill:var(--text)" opacity=".6">${(bh[m - 1] > 0 ? "+" : "") + bh[m - 1].toFixed(1)}%</text>`;
+  if (single){   // position ribbon — long / flat / short over the same x axis, the panel that tells you WHEN it was on
+    const y0 = H - 22, hgt = 9;
+    for (let i = 0; i < res.pos.length; i++){
+      const w = res.pos[i], col = w > 0 ? "var(--up)" : w < 0 ? "var(--down)" : "var(--faint)";
+      s += `<rect x="${X(i).toFixed(1)}" y="${y0}" width="${Math.max(1.6, X(1) - X(0) + 0.7).toFixed(2)}" height="${hgt}" fill="${col}" opacity="${w === 0 ? .28 : .8}"/>`;
+    }
+    s += `<text x="${pl - 6}" y="${y0 + 7}" text-anchor="end" class="lc-tick">pos</text>`;
+  }
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="mock equity curve"><rect width="${W}" height="${H}" fill="none"/>${s}</svg>`;
+}
+
+function statBox(label, o, accent, extra){
+  const f = (x, d) => (x > 0 ? "+" : "") + (x * 100).toFixed(d) + "%";
+  return `<div class="s-stat"><div class="s-k">${label}</div>
+    <div class="s-row"><span>return</span><b class="${o.t >= 0 ? "pos" : "neg"}">${f(o.t, 1)}</b></div>
+    <div class="s-row"><span>Sharpe</span><b style="color:${accent}">${o.s.toFixed(2)}</b></div>
+    <div class="s-row"><span>hit</span><b>${(o.h * 100).toFixed(0)}%</b></div>
+    <div class="s-row"><span>max DD</span><b class="neg">${(o.d * 100).toFixed(1)}%</b></div>
+    ${extra || ""}</div>`;
+}
+
+function render(){
+  const n = S.picks.length, single = n === 1, custom = n >= 2;
+  // chips
+  $("picked").innerHTML = n ? S.picks.map(t => {
+    const m = meta(t);
+    return `<span class="cg-chip tgt" title="${esc(m[1])} · ${esc(m[2])}">${esc(t)}<span class="cg-x" data-x="${esc(t)}">×</span></span>`;
+  }).join("") + `<span class="sec" style="font-family:var(--mono);font-size:10.5px;margin-left:4px">${single ? "single-asset timing test" : n + " names · custom universe"}</span>` : "";
+  $("picked").querySelectorAll(".cg-x").forEach(x => x.onclick = () => { S.picks = S.picks.filter(t => t !== x.dataset.x); render(); });
+
+  // mode banner
+  const nm = single ? meta(S.picks[0]) : null;
+  $("modebar").innerHTML = single
+    ? `<b>Single-asset mode</b> · <span class="m-name">${esc(S.picks[0])}</span> <span class="sec">${esc(nm[1])} · ${esc(nm[2])}</span> — the rank collapses into a timing rule on one name. <span class="sec">Dimmed controls below have nothing left to act on; <b>entry</b> takes over the job the book quantile was doing.</span>`
+    : custom
+      ? `<b>Custom universe</b> · ${n} names — cross-sectional as usual, ranked only among what you picked. <span class="sec">Thin book: at a 20% quantile that's ${Math.max(1, Math.floor(n * .2))} name per side.</span>`
+      : `<b>Universe mode</b> — the tab as it works today. <span class="sec">Pick a name above to test a signal on it alone; pick several to rank only those.</span>`;
+
+  // control availability
+  const na = (id, on) => { const e = $(id); if (e) e.classList.toggle("na", on); };
+  na("wUni", n > 0); na("wQ", single); na("wGate", single);
+  $("wEntry").hidden = !single;
+  $("lblWt").textContent = single ? "sizing" : "weighting";
+  const wtBtns = $("segWt").querySelectorAll("button");
+  wtBtns[0].textContent = single ? "flat 1×" : "equal";
+  wtBtns[1].textContent = single ? "by |score|" : "by signal";
+  wtBtns[2].textContent = single ? "vol-target" : "inverse-vol";
+  const stBtns = $("segStruct").querySelectorAll("button");
+  stBtns[0].textContent = single ? "long / short" : "long / short";
+  stBtns[1].textContent = single ? "long or flat" : "long-only";
+  stBtns[2].textContent = single ? "short or flat" : "short-only";
+  if (n > 0){ const u = $("selUni"); u.title = "overridden by the picked name" + (custom ? "s" : ""); }
+
+  if (!single){
+    $("stats").innerHTML = statBox("In-sample · 74d", UNIV.is, "var(--blue)")
+      + statBox("Out-of-sample · 49d", UNIV.oos, "var(--accent)")
+      + statBox("Full period · 123d", UNIV.full, "var(--text)")
+      + `<div class="s-stat"><div class="s-k">Frictions</div>
+          <div class="s-row"><span>universe</span><b>${custom ? n : 38}</b></div>
+          <div class="s-row"><span>turnover</span><b>62%</b></div>
+          <div class="s-row"><span>funding</span><b class="neg">−1.8%</b></div>
+          <div class="s-row"><span>fees</span><b class="neg">−2.4%</b></div></div>`;
+    const long = (custom ? S.picks.slice(0, Math.max(1, Math.floor(n / 2))) : ["NVDA", "OPENAI", "COIN", "RKLB", "VST"]);
+    const short = (custom ? S.picks.slice(-Math.max(1, Math.floor(n / 2))) : ["XOM", "JPM", "EWJ", "KO"]);
+    const col = (title, items, cls, sign) => `<div class="bt-col"><div class="bt-col-h"><span class="${cls}">${title}</span> <span class="sec">${items.length} names</span></div>`
+      + items.map((t, i) => `<div class="bt-pos"><span class="bt-tk">${esc(t)}</span><span class="bt-sc">${(sign === "+" ? "+" : "−")}${(7.4 - i * 1.3).toFixed(1)}%</span><span class="bt-w ${cls}">${sign}${(50 / items.length).toFixed(1)}%</span></div>`).join("")
+      + `</div>`;
+    $("holdings").innerHTML = `<div class="s-card"><div class="s-cap" style="margin:0 0 9px">Latest rebalance — the actual positions the rule holds now (ticker · signal · weight)</div>
+      <div class="bt-book-grid">${col("LONG", long, "pos", "+")}${col("SHORT", short, "neg", "−")}</div></div>`;
+    $("leg").innerHTML = ["var(--accent) net", "var(--blue) gross", "var(--muted) benchmark (SP500)", "var(--faint) equal-weight"]
+      .map(x => { const i = x.indexOf(" "); return `<span class="it"><span class="sw" style="background:${x.slice(0, i)}"></span>${x.slice(i + 1)}</span>`; }).join("");
+    $("chartCard").innerHTML = chart(simulate("__universe" + S.scope), false);
+    $("cap").innerHTML = `Each rebalance, rank the universe by ${$("selSig").selectedOptions[0].text.toLowerCase()} and go <b>long/short</b> — long the top 20%, short the other tail, dollar-neutral, equal-weight, held to the next rebalance. Net of a ${S.cost}bp taker fee on turnover and the funding each position pays or earns. Shaded region is out-of-sample. <b>Mock data.</b>`;
+    return;
+  }
+
+  // ── single-asset mode ──
+  const tk = S.picks[0], res = simulate(tk), m = meta(tk);
+  const isN = Math.floor(res.n * .6), oosN = res.n - isN;
+  $("stats").innerHTML =
+    statBox(`In-sample · ${isN}d`, { t: res.total * .58, s: res.sharpe * 1.18, h: res.hit, d: res.mdd * .8 }, "var(--blue)") +
+    statBox(`Out-of-sample · ${oosN}d`, { t: res.total * .42, s: res.sharpe * .74, h: res.hit * .97, d: res.mdd }, "var(--accent)") +
+    `<div class="s-stat"><div class="s-k">vs buy &amp; hold ${esc(tk)}</div>
+      <div class="s-row"><span>strategy</span><b class="${res.total >= 0 ? "pos" : "neg"}">${(res.total > 0 ? "+" : "") + (res.total * 100).toFixed(1)}%</b></div>
+      <div class="s-row"><span>buy &amp; hold</span><b class="${res.bhTotal >= 0 ? "pos" : "neg"}">${(res.bhTotal > 0 ? "+" : "") + (res.bhTotal * 100).toFixed(1)}%</b></div>
+      <div class="s-row"><span>excess</span><b class="${res.total - res.bhTotal >= 0 ? "pos" : "neg"}">${(res.total - res.bhTotal > 0 ? "+" : "") + ((res.total - res.bhTotal) * 100).toFixed(1)}%</b></div>
+      <div class="s-row"><span>exposure</span><b>${(res.exposure * 100).toFixed(0)}%</b></div></div>` +
+    `<div class="s-stat"><div class="s-k">Trades &amp; frictions</div>
+      <div class="s-row"><span>round trips</span><b${res.trades.length < 12 ? ' class="neg" title="too few decisions to read a Sharpe from"' : ""}>${res.trades.length}</b></div>
+      <div class="s-row"><span>avg trade</span><b class="${res.trades.length && res.trades.reduce((a, b) => a + b.ret, 0) >= 0 ? "pos" : "neg"}">${res.trades.length ? ((res.trades.reduce((a, b) => a + b.ret, 0) / res.trades.length) * 100).toFixed(2) + "%" : "—"}</b></div>
+      <div class="s-row"><span>win rate</span><b>${res.trades.length ? Math.round(res.trades.filter(t => t.ret > 0).length / res.trades.length * 100) + "%" : "—"}</b></div>
+      <div class="s-row"><span>funding</span><b class="${res.fundCum >= 0 ? "pos" : "neg"}">${(res.fundCum > 0 ? "+" : "") + (res.fundCum * 100).toFixed(2)}%</b></div>
+      <div class="s-row"><span>fees</span><b class="neg">−${(res.feeCum * 100).toFixed(2)}%</b></div></div>`;
+
+  const cw = res.curW, tag = cw > 0 ? ["long", "LONG " + Math.abs(cw).toFixed(2) + "×"] : cw < 0 ? ["long", "SHORT " + Math.abs(cw).toFixed(2) + "×"] : ["flat", "FLAT"];
+  const last = res.trades.slice(-6).reverse();
+  const dfmt = i => { const d = new Date(Date.UTC(2026, 7, 21) - (res.N - i) * 86400000); return (d.getUTCMonth() + 1) + "/" + d.getUTCDate(); };
+  $("holdings").innerHTML = `<div class="s-card">
+    <div class="s-cap" style="margin:0 0 10px">Current position and the trades that got here — the single-name replacement for the long/short book</div>
+    <div class="now-pos"><span class="tag ${cw === 0 ? "flat" : "long"}" style="${cw < 0 ? "color:var(--down);border-color:var(--down);background:rgba(229,96,77,.1)" : ""}">${tag[1]}</span>
+      <span class="sec">${esc(tk)} · score z ${(res.lastScore >= 0 ? "+" : "") + res.lastScore.toFixed(2)} · entry threshold ${S.entry === 0 ? "> 0" : "±" + S.entry + "σ"}</span></div>
+    <div class="trade-tbl"><div class="trade-row trade-hd"><span>side</span><span>in</span><span>out</span><span class="r">size</span><span class="r">return</span></div>
+    ${last.length ? last.map(t => `<div class="trade-row"><span class="${t.side === "LONG" ? "pos" : "neg"}">${t.side}</span><span class="sec">${dfmt(t.entry)}</span><span class="sec">${dfmt(t.exit)}</span><span class="r sec">${t.size.toFixed(2)}×</span><span class="r ${t.ret >= 0 ? "pos" : "neg"}">${(t.ret > 0 ? "+" : "") + (t.ret * 100).toFixed(2)}%</span></div>`).join("")
+      : `<div class="trade-row"><span class="sec" style="grid-column:1/-1">no trade cleared the entry threshold — loosen it or shorten the lookback</span></div>`}
+    </div>${res.trades.length > 6 ? `<div class="sec" style="font-family:var(--mono);font-size:10.5px;padding:6px 2px 0">+${res.trades.length - 6} earlier</div>` : ""}</div>`;
+
+  $("leg").innerHTML = [["var(--accent)", "net"], ["var(--blue)", "gross (pre-fee/funding)"], ["var(--text)", "buy &amp; hold " + esc(tk) + " (dashed)"], ["var(--up)", "position: long"], ["var(--faint)", "flat"], ["var(--down)", "short"]]
+    .map(x => `<span class="it"><span class="sw" style="background:${x[0]}"></span>${x[1]}</span>`).join("");
+  $("chartCard").innerHTML = chart(res, true);
+  $("cap").innerHTML = `Each rebalance, score <b>${esc(tk)}</b> by ${$("selSig").selectedOptions[0].text.toLowerCase()} over the trailing ${S.lb}d and hold it ${S.struct === "ls" ? "long when the score clears the entry threshold, short when it clears the other side" : S.struct === "long" ? "long when the score clears the threshold, flat otherwise" : "short when the score clears the threshold, flat otherwise"} — ${S.wt === "eq" ? "flat 1× size" : S.wt === "sig" ? "sized by |score|" : "sized to a 20% annualized vol target"}, re-decided every ${S.cad}d, net of the ${S.cost}bp taker fee on every flip and the funding accrued while held. The dashed line is buy &amp; hold ${esc(tk)} — <b>the only benchmark this rule has to beat</b>; the ribbon under the curve is when it was actually on. <b>One name is one bet:</b> there's no cross-sectional diversification here and only ${res.trades.length} round trips, so the out-of-sample half is doing all the honesty work and a good in-sample Sharpe means very little. <b>Mock data — synthetic prices.</b>`;
+}
+
+// ── typeahead: universe-validated, scope-local, no free text ever resolves ──
+const inp = $("tq"), sug = $("tsugg");
+let cursor = -1, matches = [];
+function suggest(){
+  const q = inp.value.trim().toUpperCase();
+  if (!q){ sug.hidden = true; matches = []; return; }
+  const pool = roster().filter(r => !S.picks.includes(r[0]));
+  const hay = r => (r[0] + " " + r[1].toUpperCase());
+  matches = [...pool.filter(r => r[0].startsWith(q)), ...pool.filter(r => !r[0].startsWith(q) && hay(r).includes(q))].slice(0, 7);
+  cursor = matches.length ? 0 : -1;
+  sug.innerHTML = matches.length
+    ? matches.map((r, i) => `<div class="cg-sg${i === cursor ? " on" : ""}" data-t="${esc(r[0])}">${esc(r[0])} <span class="sec" style="font-size:10.5px">${esc(r[1])}</span><span class="cg-sg-r">${r[2]}</span></div>`).join("")
+    : `<div class="cg-sg-none">no match in the live ${S.scope === "crypto" ? "crypto" : "xyz"} universe — free text never resolves</div>`;
+  sug.hidden = false;
+  sug.querySelectorAll(".cg-sg").forEach(e => e.onclick = () => pick(e.dataset.t));
+}
+function pick(t){ if (!t || S.picks.includes(t)) return; S.picks.push(t); inp.value = ""; sug.hidden = true; render(); inp.focus(); }
+inp.oninput = suggest;
+inp.onkeydown = e => {
+  if (e.key === "Escape"){ sug.hidden = true; return; }
+  if (e.key === "Backspace" && !inp.value && S.picks.length){ S.picks.pop(); render(); return; }
+  if (!matches.length) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+    e.preventDefault(); cursor = (cursor + (e.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length;
+    sug.querySelectorAll(".cg-sg").forEach((x, i) => x.classList.toggle("on", i === cursor));
+  } else if (e.key === "Enter"){ e.preventDefault(); pick(matches[Math.max(0, cursor)][0]); }
+};
+document.addEventListener("click", e => { if (!sug.contains(e.target) && e.target !== inp) sug.hidden = true; });
+$("pWatch").onclick = () => { S.picks = WATCH[S.scope].slice(); render(); };
+$("pClear").onclick = () => { S.picks = []; inp.value = ""; sug.hidden = true; render(); };
+
+function wireSeg(id, key, num){
+  const g = $(id); if (!g) return;
+  g.querySelectorAll("button").forEach(b => b.onclick = () => {
+    g.querySelectorAll("button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active"); S[key] = num ? parseFloat(b.dataset.v) : b.dataset.v; render();
+  });
+}
+wireSeg("segLb", "lb", true); wireSeg("segCad", "cad", true); wireSeg("segCost", "cost", true);
+wireSeg("segDir", "dir", false); wireSeg("segStruct", "struct", false); wireSeg("segWt", "wt", false);
+wireSeg("segEntry", "entry", true);
+$("segScope").querySelectorAll("button").forEach(b => b.onclick = () => {
+  $("segScope").querySelectorAll("button").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); S.scope = b.dataset.v; S.picks = []; inp.value = ""; sug.hidden = true; render();
+});
+$("selSig").onchange = render;
+render();
+</script>

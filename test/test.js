@@ -20139,3 +20139,254 @@ test("whale 13f data-set index (2026.08.21-05): fixture ZIP through the REAL ing
     "both the watchlist-hit and the CUSIP-miss path ask for the same depth");
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ===== Backtest target picker + single-asset mode (build 2026.08.22) ============================
+// The tab could only ever test a cross-section. Picking ONE name collapses that cross-section, so
+// this suite EXECUTES the new engine on fixtures rather than pattern-matching the source: the
+// position must come from the score's own sign, the entry threshold must actually keep it flat,
+// long-only must never short, costs must bite, and the buy & hold line must equal an independent
+// recomputation of the name's own returns. The manifest assertions at the end pin only the things
+// no fixture can catch — that picks supersede the universe select, and that the σ the entry
+// threshold is quoted in never sees a future day.
+
+function _btHarness(){
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const els = {};
+  const mk = (id) => ({ id, innerHTML: "", hidden: false, value: "", checked: false, textContent: "", style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, appendChild() {}, removeChild() {},
+    setAttribute() {}, getAttribute: () => null, focus() {}, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 300 }) });
+  const saved = { si: global.setInterval, st: global.setTimeout, raf: global.requestAnimationFrame,
+    doc: global.document, win: global.window, ls: global.localStorage, f: global.fetch,
+    ct: global.clearTimeout, ci: global.clearInterval };
+  global.setInterval = () => 0; global.setTimeout = () => 0; global.requestAnimationFrame = () => 0;
+  global.clearTimeout = () => 0; global.clearInterval = () => 0;
+  global.document = { getElementById: (id) => (els[id] = els[id] || mk(id)), querySelectorAll: () => [], querySelector: () => null,
+    createElement: mk, addEventListener() {}, body: mk("body"), documentElement: mk("html"), hidden: false };
+  global.window = { addEventListener() {}, location: { reload() {}, href: "/", hash: "" }, matchMedia: () => ({ matches: false, addEventListener() {} }), __FLAGS: {}, __ADMIN: true };
+  global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+  global.fetch = () => new Promise(() => {});
+  const api = new Function(app + "\n;return {state, btRun, btMode, btPickRows, btUniverse, btPickerHtml, renderBacktest, dailyReturns};")();
+  const restore = () => { global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
+    global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
+    global.document = saved.doc; global.window = saved.win; global.localStorage = saved.ls; global.fetch = saved.f; };
+  // deterministic fixture rows — a slow regime wobble on top of daily noise, so trends exist for a
+  // trend rule to catch and flip on. Same seed => same series => same assertions, forever.
+  const DAY = 86400000, t0 = Date.UTC(2026, 3, 1);
+  const mkRow = (coin, seed, n, sector) => {
+    let s = seed >>> 0;
+    const rnd = () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+    const daily = [], dailyFund = []; let px = 100, reg = 0;
+    for (let i = 0; i < n; i++) { reg = reg * 0.94 + (rnd() - 0.5) * 0.006; let g = 0; for (let k = 0; k < 6; k++) g += rnd(); g = (g - 3) / 1.22;
+      px *= Math.exp(reg + g * 0.021);
+      daily.push({ t: t0 + i * DAY, c: +px.toFixed(4), h: +(px * 1.01).toFixed(4), v: 1e6 });
+      dailyFund.push({ t: t0 + i * DAY, f: 0.0002 }); }
+    return { coin, ticker: coin, uni: "xyz", delisted: false, sector, assetClass: "Equity", daily, dailyFund };
+  };
+  const { state } = api;
+  state.rows = new Map();
+  for (const [c, sd, sec] of [["NVDA", 11, "Information Technology"], ["AMD", 22, "Information Technology"], ["MU", 33, "Information Technology"],
+    ["AVGO", 55, "Information Technology"], ["ASML", 66, "Information Technology"], ["PLTR", 77, "Information Technology"],
+    ["XOM", 44, "Energy"], ["OXY", 88, "Energy"], ["JPM", 99, "Financials"], ["COIN", 101, "Financials"],
+    ["LLY", 111, "Health Care"], ["VST", 121, "Utilities"]]) state.rows.set(c, mkRow(c, sd, 150, sec));
+  state.scope = "stocks"; state.view = "backtest";
+  const reset = () => { Object.assign(state.backtest, { signal: "mom", lookback: 20, cadence: 5, quantile: 0.2, cost: 5,
+    universe: "all", split: 0.6, direction: "high", structure: "ls", weighting: "eq", reqSign: false, holdWindow: "cc", vsBasket: "", picks: [], entry: 0 }); };
+  reset();
+  return { api, state, reset, restore };
+}
+
+test("backtest single-asset: one pick collapses the cross-section into a timing rule the fixtures can verify", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    // no picks: the tab is exactly what it was
+    assert.equal(api.btMode(), "universe");
+    const uni = api.btRun();
+    assert.ok(uni.ok && !uni.single && uni.universeN > 8, "universe mode must still run cross-sectionally");
+    assert.ok(uni.book && Array.isArray(uni.book.longs), "universe mode still produces a book");
+
+    // one pick: the universe select is superseded, not merged with
+    state.backtest.picks = ["NVDA"];
+    state.backtest.universe = "sec:Energy";                       // deliberately contradicts the pick
+    assert.equal(api.btMode(), "single");
+    assert.deepEqual(api.btUniverse().map(r => r.coin), ["NVDA"], "an explicit pick must supersede the universe select");
+    const r = api.btRun();
+    assert.ok(r.ok && r.single, "one pick must run the single-asset path");
+    assert.equal(r.universeN, 1);
+    assert.equal(r.pos.length, r.days.length - 1, "one position per forward day");
+    assert.ok(r.trades.length > 0, "a trend rule on a trending fixture must take at least one position");
+
+    // buy & hold is the name's own compounding — recomputed here from the raw fixture, not read back
+    const m = api.dailyReturns(state.rows.get("NVDA"));
+    let hold = 1; for (let i = 1; i < r.days.length; i++) { const v = m.get(r.days[i]); if (v != null && isFinite(v)) hold *= Math.exp(v); }
+    assert.ok(Math.abs(hold - r.eqbh[r.eqbh.length - 1]) < 1e-9, "the buy & hold line must equal the name's own compounded returns");
+
+    // the trade log reconciles with the position series: every non-flat run is one round trip
+    let runs = 0; for (let i = 0; i < r.pos.length; i++) if (r.pos[i] !== 0 && (i === 0 || r.pos[i] !== r.pos[i - 1])) runs++;
+    assert.equal(runs, r.trades.length, "trade log must account for exactly the non-flat runs in the position series");
+    assert.ok(r.trades[r.trades.length - 1].live === true || r.curW === 0, "an open position must be marked live in the log");
+
+    // exposure is the share of days holding anything
+    const held = r.pos.filter(w => w !== 0).length;
+    assert.ok(Math.abs(r.exposure - held / r.pos.length) < 1e-12, "exposure must be the share of days in the market");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest single-asset: entry threshold, structure and costs each do what the label says", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    state.backtest.picks = ["NVDA"];
+    // entry: a higher threshold can only keep the rule out of the market more often
+    const exposure = {};
+    for (const e of [0, 0.5, 1]) { state.backtest.entry = e; const x = api.btRun(); assert.ok(x.ok); exposure[e] = x.exposure; }
+    assert.equal(exposure[0], 1, "sign-only entry with a long/short structure is always in the market");
+    assert.ok(exposure[0.5] <= exposure[0] && exposure[1] <= exposure[0.5], "a wider entry band must not increase exposure");
+    assert.ok(exposure[1] < 1, "±1σ must actually keep the rule flat some of the time");
+    state.backtest.entry = 0;
+
+    // structure: long-only never shorts, short-only never longs — on one name as on a book
+    state.backtest.structure = "long";
+    let x = api.btRun();
+    assert.ok(Math.min(...x.pos) >= 0 && Math.max(...x.pos) > 0, "long-only must hold long or flat, never short");
+    assert.ok(x.trades.every(t => t.side === "LONG"), "long-only trade log must contain no shorts");
+    state.backtest.structure = "short";
+    x = api.btRun();
+    assert.ok(Math.max(...x.pos) <= 0 && Math.min(...x.pos) < 0, "short-only must hold short or flat, never long");
+    state.backtest.structure = "ls";
+
+    // sizing: flat is flat, the other two vary the size (and stay inside the documented cap)
+    state.backtest.weighting = "eq";
+    const flat = api.btRun();
+    assert.deepEqual([...new Set(flat.pos.filter(w => w !== 0).map(Math.abs))], [1], "flat 1× sizing must not vary the size");
+    for (const w of ["sig", "vol"]) { state.backtest.weighting = w; const v = api.btRun();
+      const sizes = v.pos.filter(z => z !== 0).map(Math.abs);
+      assert.ok(new Set(sizes.map(z => z.toFixed(3))).size > 1, `${w} sizing must actually vary the position size`);
+      assert.ok(Math.max(...sizes) <= 2 + 1e-9 && Math.min(...sizes) >= 0.25 - 1e-9, `${w} sizing must stay inside the 0.25–2× cap`); }
+    state.backtest.weighting = "eq";
+
+    // costs: the fee is charged on every flip, and a costlier run can only end lower
+    state.backtest.cost = 0; const free = api.btRun();
+    state.backtest.cost = 20; const dear = api.btRun();
+    assert.equal(free.feeCum, 0, "a zero-bp run must charge nothing");
+    assert.ok(dear.feeCum > 0, "a 20bp run must charge the taker fee");
+    assert.ok(dear.eq[dear.eq.length - 1] < free.eq[free.eq.length - 1], "fees must reduce the net curve");
+    assert.equal(free.trades.length, dear.trades.length, "cost changes the P&L, never the decisions");
+    // funding: a position pays or earns it, and the gross line is deliberately free of it
+    assert.ok(free.fundCum !== 0 && free.eqg[free.eqg.length - 1] !== free.eq[free.eq.length - 1],
+      "gross must exclude the funding that net includes");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest picks: a custom universe stays cross-sectional, and a sector rule refuses a sector it doesn't have", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    // 2–3 names is not a cross-section: refused with the floor stated, not silently ranked
+    state.backtest.picks = ["NVDA", "AMD"];
+    assert.equal(api.btMode(), "set");
+    const thin = api.btRun();
+    assert.ok(!thin.ok && thin.need === 4, "a picked set under the floor must refuse and name the floor");
+
+    // 4+ names runs the ordinary cross-sectional path over exactly those names
+    state.backtest.picks = ["NVDA", "AMD", "MU", "XOM"];
+    const set = api.btRun();
+    assert.ok(set.ok && !set.single, "a picked set of four must run cross-sectionally");
+    assert.equal(set.universeN, 4, "the run must see only the picked names");
+    assert.ok(set.book && (set.book.longs.length + set.book.shorts.length) > 0, "a picked set still produces a book");
+
+    // a pick that no longer resolves (delisted, history aged out) must not hand the run an empty
+    // universe: btUniverse and btMode have to agree about what is under test, always.
+    state.backtest.picks = ["GHOST"];        // never existed in state.rows
+    assert.equal(api.btMode(), "universe", "an unresolvable pick leaves the tab in universe mode");
+    assert.ok(api.btUniverse().length > 8, "an unresolvable pick must fall back to the universe, never to nothing");
+    state.rows.get("AMD").delisted = true;   // resolved yesterday, gone today
+    state.backtest.picks = ["AMD"];
+    assert.equal(api.btMode(), "universe");
+    assert.ok(api.btRun().ok, "a pick that stopped resolving must not break the run");
+    state.rows.get("AMD").delisted = false;
+
+    // sector-relative momentum on one name needs its peers — and says so when they aren't there
+    state.backtest.picks = ["VST"];          // the only utility in the fixture
+    state.backtest.signal = "smom";
+    const noPeers = api.btRun();
+    assert.ok(!noPeers.ok && noPeers.nopeers === "Utilities",
+      "sector-relative momentum must refuse rather than quietly degrade to plain momentum");
+    state.backtest.picks = ["NVDA"];         // six IT names in the fixture, so the demean is real
+    const peers = api.btRun();
+    assert.ok(peers.ok && peers.peers >= 3, "with a real sector the demean runs against live peers");
+    // the demean changes the answer — otherwise the label would be decorative
+    state.backtest.signal = "mom";
+    const plain = api.btRun();
+    assert.notEqual(peers.eq[peers.eq.length - 1], plain.eq[plain.eq.length - 1],
+      "sector-relative momentum must not produce the same curve as plain momentum");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest render: the picker is always offered, and one pick disables exactly the controls it invalidates", () => {
+  const { api, state, restore } = _btHarness();
+  try {
+    const universe = api.renderBacktest();
+    assert.ok(universe.includes('id="btFind"'), "the target picker must be offered in every mode");
+    assert.ok(universe.includes('id="btQ"'), "universe mode keeps the book quantile");
+    assert.ok(!universe.includes('id="btEntry"'), "universe mode has no entry threshold — there is a quantile instead");
+    assert.ok(universe.includes("bt-book-grid"), "universe mode keeps the long/short book panel");
+    assert.ok(!universe.includes("bt-na"), "nothing is disabled when nothing is picked");
+
+    state.backtest.picks = ["NVDA"];
+    const single = api.renderBacktest();
+    assert.ok(single.includes('id="btEntry"'), "single-asset mode offers the entry threshold");
+    assert.ok(!single.includes('id="btQ"'), "single-asset mode drops the book quantile");
+    assert.ok(single.includes("bt-na") && /title="[^"]*no rank left to disagree with/.test(single),
+      "the rank gate must be dimmed WITH its reason, not silently ignored");
+    assert.ok(/superseded by the picked name/.test(single), "the universe select must say the pick won");
+    assert.ok(single.includes("bt-ttbl") && !single.includes("bt-book-grid"), "the book panel becomes the trade log");
+    assert.ok(single.includes(">pos</text>"), "the curve must carry the position ribbon");
+    assert.ok(/buy &amp; hold NVDA/.test(single), "buy & hold of the name must be named in the legend");
+    assert.ok(/round trip/.test(single), "the round-trip count must be stated next to the stats");
+    assert.ok(/sizing/.test(single) && /flat 1/.test(single), "weighting must re-read as position sizing");
+
+    // several picks: cross-sectional again, with the thin book said out loud
+    state.backtest.picks = ["NVDA", "AMD", "MU", "XOM"];
+    const set = api.renderBacktest();
+    assert.ok(set.includes('id="btQ"') && set.includes("bt-book-grid"), "a picked set is still a cross-section");
+    assert.ok(/Thin book/.test(set), "a picked set must state the thin-book arithmetic");
+    restore();
+  } catch (e) { restore(); throw e; }
+});
+
+test("backtest single-asset manifest: precedence, no lookahead in the entry scale, scope hygiene, help", () => {
+  const fs = require("fs"), path = require("path");
+  const s = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // picks supersede the universe select — the one precedence rule a fixture can't prove is absent
+  assert.ok(s.includes("const pr=btPickRows(); if(pr.length) return pr;"), "picks must short-circuit btUniverse");
+  assert.ok(!/if\(state\.backtest\.picks\.length\) return btPickRows\(\)/.test(s),
+    "precedence must key on the RESOLVED picks, so btUniverse and btMode can never disagree about what is under test");
+  // the entry threshold's σ is measured on PAST scores only: the scale is written before the day's
+  // own score joins the accumulator. Reversing those two lines would quietly add lookahead.
+  const scale = s.slice(s.indexOf("const scale=new Array(N).fill(NaN);"));
+  const body = scale.slice(0, scale.indexOf("\n  const on="));
+  assert.ok(body.indexOf("scale[di]=Math.sqrt(q/n)") < body.indexOf("q+=x*x"),
+    "the entry scale must be recorded before the current day's score enters it — otherwise it sees its own day");
+  assert.ok(s.includes("BT_TRADE_MIN=10"), "the thin-sample flag threshold must exist");
+  assert.ok(s.includes("BT_SET_MIN=4"), "the picked-set floor must exist");
+  assert.ok(s.includes("const BT_VOLTGT=0.20"), "single-name vol targeting must state its target");
+  // a pick belongs to one universe: the scope flip clears it rather than running an empty test
+  assert.ok(s.includes("state.backtest.picks=[];   // a backtest target belongs to one universe"),
+    "scope flip must clear the picked target");
+  // the picker validates against the live universe — free text can never resolve
+  assert.ok(s.includes("const r=coin?state.rows.get(coin):null;") && s.includes("if(!r||!inScope(r)) return;"),
+    "btAddPick must resolve against live rows only");
+  assert.ok(s.includes("dm.size<BT_MIN_DAYS") && s.includes("pushToast("), "a too-short history must be refused out loud");
+  // single mode reuses the shared curve, it does not fork one
+  assert.ok(s.includes("res.single") && s.includes("btCurveSvg(res,splitIdx)"), "single mode must render through the shared curve");
+  assert.ok(css.includes(".bt-na{opacity:") && css.includes(".bt-pick"), "picker + disabled-control styling must ship");
+  // the tab's own help documents the mode (this app documents in-app, not in a changelog)
+  const help = s.slice(s.indexOf("backtest:`"));
+  const helpBlock = help.slice(0, help.indexOf("report:`"));
+  assert.ok(/Testing one name/.test(helpBlock) && /position ribbon/.test(helpBlock) && /anecdote/.test(helpBlock),
+    "backtest help must document single-asset mode, its curve, and its small-sample honesty");
+});
