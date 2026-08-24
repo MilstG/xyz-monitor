@@ -38,6 +38,7 @@ function openStore(dataDir) {
   const derivFile = path.join(dataDir, "derivs.log");        // Coinalyze 15-min rows: coin\tts\tlongLiq\tshortLiq\toi
   const derivMapFile = path.join(dataDir, "derivmap.json");  // resolved base-asset -> Coinalyze symbol map
   const focusFile = path.join(dataDir, "focus.json");        // FOCUS tab: today's frozen list + yesterday's, verbatim
+  const notesFile = path.join(dataDir, "notes.json");      // per-ticker written notes (group-shared CONFIG)
   const whaleFile = path.join(dataDir, "whale.json");        // 13F watchlist + cached quarterly books + unseen state + season builds
   let dbuf = [];
   let dPruning = false;   // hold deriv appends in dbuf during the streaming rewrite, same as the OI prune
@@ -337,6 +338,23 @@ function openStore(dataDir) {
     },
     loadBaskets() {
       try { if (fs.existsSync(basketsFile)) return JSON.parse(fs.readFileSync(basketsFile, "utf8")); }
+      catch (_) {}
+      return null;
+    },
+    // Per-ticker notes (build 2026.08.24-01). The highest-value CONFIG on the volume: a note is
+    // prose somebody sat and typed about a name, and unlike a basket it cannot be reconstructed
+    // from anything the server knows. Same tmp+rename discipline for exactly that reason — a
+    // half-written file must never be able to eat the only copy of a thesis.
+    saveNotes(data) {
+      try {
+        const tmp = notesFile + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, notesFile);
+        return true;
+      } catch (_) { return false; }
+    },
+    loadNotes() {
+      try { if (fs.existsSync(notesFile)) return JSON.parse(fs.readFileSync(notesFile, "utf8")); }
       catch (_) {}
       return null;
     },

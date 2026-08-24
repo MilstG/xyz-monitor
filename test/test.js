@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.21-13"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-01"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19960,7 +19960,7 @@ test("nav groups: every tab is placed once, and renames/moves are validated at t
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "nope" } }).views, {}, "unknown target menu rejected");
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "tape" } }).views, {}, "a move to where it already is stores nothing");
   // a menu emptied by moves still resolves — the client hides it
-  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape" } });
+  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape", notes: "tape" } });
   assert.strictEqual(empty.find((g) => g.key === "research").views.length, 0, "a menu can be emptied");
 
   // ---- wiring --------------------------------------------------------------------------------
@@ -20389,4 +20389,158 @@ test("backtest single-asset manifest: precedence, no lookahead in the entry scal
   const helpBlock = help.slice(0, help.indexOf("report:`"));
   assert.ok(/Testing one name/.test(helpBlock) && /position ribbon/.test(helpBlock) && /anecdote/.test(helpBlock),
     "backtest help must document single-asset mode, its curve, and its small-sample honesty");
+});
+
+test("notes: create/edit/drop round trip, px stamped at write, edit keeps the original stamp", () => {
+  const { createPoller } = require("../src/poller");
+  let saved = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveNotes: (d) => { saved = d; return true; }, loadNotes: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  p.seedRowNow("xyz:AAA", { px: 100 });
+  p.seedRowNow("xyz:BBB", { px: 50 });
+
+  // the write gate is the first wall, before any validation
+  assert.equal(p.createNote("xyz:AAA", "hi", false).error, "not-admin", "non-admin cannot write");
+  assert.equal(p.editNote(1, "hi", false).error, "not-admin", "non-admin cannot edit");
+  assert.equal(p.dropNote(1, false).error, "not-admin", "non-admin cannot delete");
+
+  const c = p.createNote("xyz:AAA", "waiting for a reclaim of 118 #level  ", true);
+  assert.ok(c.ok, "create: " + (c.error || "ok"));
+  assert.equal(c.note.px, 100, "the live mark is frozen into the note at write time");
+  assert.equal(c.note.body, "waiting for a reclaim of 118 #level", "body is trimmed");
+  assert.deepEqual(c.note.tags, ["level"], "tags derive from the body");
+  assert.ok(saved && saved.list.length === 1, "persisted through the store");
+
+  // refusals, each with a stated reason
+  assert.ok(!p.createNote("xyz:NOPE", "x", true).ok, "a note needs a market the board knows");
+  assert.ok(!p.createNote("xyz:AAA", "   ", true).ok, "empty note refused, not stored blank");
+
+  // the mark moves; the stamp must not
+  p.seedRowNow("xyz:AAA", { px: 118 });
+  const e = p.editNote(c.note.id, "reclaimed it, size up over 118 #level", true);
+  assert.ok(e.ok, "edit: " + (e.error || "ok"));
+  assert.equal(e.note.px, 100, "an edit KEEPS the original price stamp: the claim was made at that price");
+  assert.equal(e.note.at, c.note.at, "an edit keeps the original timestamp too");
+  assert.equal(e.note.edited, true, "the rewrite is disclosed");
+
+  assert.equal(p.getNotesPayload().notes.length, 1, "one note in the book");
+  assert.ok(!p.dropNote(999, true).ok, "dropping an unknown id is refused, not a silent no-op");
+  assert.ok(p.dropNote(c.note.id, true).ok, "drop works");
+  assert.equal(p.getNotesPayload().notes.length, 0, "book is empty after the drop");
+  assert.equal(saved.list.length, 0, "the drop persisted too");
+});
+
+test("notes: newest-first ordering, malformed rows dropped, control chars stripped, warm reload survives", () => {
+  const { createPoller } = require("../src/poller");
+  const t0 = Date.now() - 5 * 86400e3;
+  const seedFile = { list: [
+    { id: 4, coin: "xyz:AAA", body: "older note", at: t0, px: 90 },
+    { id: 9, coin: "xyz:AAA", body: "newest note", at: t0 + 86400e3, px: 95 },
+    { id: 2, coin: "xyz:BBB", body: "other name", at: t0 - 86400e3, px: 40 },
+    { id: 7, coin: "", body: "no coin", at: t0, px: 1 },              // dropped: unaddressable
+    { id: 8, coin: "xyz:AAA", body: "   ", at: t0, px: 1 },           // dropped: empty
+    { coin: "xyz:AAA", body: "no id", at: t0, px: 1 },                // dropped: no id
+  ] };
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, saveNews: () => {}, loadNews: () => null,
+    saveNotes: () => true, loadNotes: () => seedFile };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test" });
+  p.seedRowNow("xyz:AAA", { px: 100 });
+  const pay = p.getNotesPayload();
+  assert.equal(pay.notes.length, 3, "three malformed rows dropped, the good ones kept");
+  assert.equal(pay.notes[0].id, 9, "newest first");
+  assert.ok(pay.notes[0].at > pay.notes[1].at, "ordering is by timestamp, not by id");
+
+  // a new note must never reuse an id already present in the loaded file
+  const c = p.createNote("xyz:AAA", "fresh\u0007body", true);
+  assert.ok(c.ok, "create after a warm reload");
+  assert.ok(c.note.id > 9, "id sequence starts above the highest id in the loaded file");
+  assert.equal(c.note.body, "freshbody", "control characters are stripped at the write");
+
+  // a note whose price stamp is missing is still a note: it just has no move to report
+  p.seedRowNow("xyz:CCC", {});
+  const noPx = p.createNote("xyz:CCC", "no mark available when this was written", true);
+  assert.ok(noPx.ok && noPx.note.px === null, "a missing mark stamps null, never zero");
+});
+
+test("notes: manifest gates the tab and the write verb separately, and both routes are claimed", () => {
+  const { FEATURES } = require("../src/compute");
+  const tab = FEATURES.find((f) => f.key === "notes");
+  const act = FEATURES.find((f) => f.key === "notes.write");
+  assert.ok(tab && tab.kind === "tab", "notes ships as a tab feature");
+  assert.ok(act && act.kind === "act", "the write verb has its own act key");
+  assert.ok(tab.routes.includes("/api/notes"), "the tab claims the read route");
+  assert.deepEqual(act.routes, ["POST /api/notes"],
+    "the act claims only the write verb, so the GET stays gated by the tab key");
+  // The whole point of two keys: opening the tab to the group must not hand the group the pen.
+  assert.equal(act.def, "admin", "writes default admin even if the tab is opened up");
+});
+
+test("notes: the digest rides every snapshot row, and its revision busts the content signature", () => {
+  const fs = require("fs"), path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "../src/poller.js"), "utf8");
+  assert.ok(/nt: noteDigest\(r\.coin\)/.test(src), "mapMarket ships the per-coin digest");
+  assert.ok(/\+ "#" \+ notesRev;/.test(src),
+    "notesRev must ride the snapshot content signature, or a note written on a quiet board never surfaces its marker");
+  const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
+  assert.ok(/const NOTES_WRITE = IS_ADMIN && featureOn\('notes\.write'\)/.test(app),
+    "the client gates the pen on both locks");
+  // Age is calendar time. A vol-scaled fade was considered and rejected: it would move the marker
+  // when the MARKET changed rather than when the note did.
+  assert.ok(/Math\.floor\(\(Date\.now\(\)-ts\)\/DAY\)/.test(app), "note age is derived from calendar days only");
+  const ageBlock = app.slice(app.indexOf("function noteAgeDays"), app.indexOf("function noteBadge"));
+  assert.ok(!/vol30|\.vol\b|sigma/.test(ageBlock), "no volatility input may leak into the age classes");
+});
+
+test("notes: the digest reaches the snapshot row, and a note on an IDLE board still rebuilds it", () => {
+  const { createPoller } = require("../src/poller");
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, loadTriggers: () => null, saveTriggers: () => {},
+    saveNotes: () => true, loadNotes: () => null };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+  p.seedRowNow("xyz:AAA", { px: 100 });
+  p.seedRowNow("xyz:BBB", { px: 50 });
+
+  p.buildSnapshotNow();
+  const a = p.getSnapshot();
+  const rowA0 = a.markets.find((m) => m.coin === "xyz:AAA");
+  assert.ok(rowA0, "seeded row is on the board");
+  assert.equal(rowA0.nt, undefined, "a name with no notes carries no digest at all — the row costs nothing");
+
+  // This is the load-bearing case, and it is exactly the alertVer case: the board is idle (no price
+  // moved) and a note is written. The snapshot object is FROZEN while the content signature holds,
+  // so without notesRev in that signature the marker would never surface on a quiet board.
+  const c = p.createNote("xyz:AAA", "first note #level", true);
+  assert.ok(c.ok, "note written");
+  p.buildSnapshotNow();
+  const b = p.getSnapshot();
+  assert.notStrictEqual(b, a, "a written note rebuilds the snapshot object even though no price moved");
+
+  const rowA = b.markets.find((m) => m.coin === "xyz:AAA");
+  const rowB = b.markets.find((m) => m.coin === "xyz:BBB");
+  assert.ok(rowA.nt, "the digest rides the row");
+  assert.equal(rowA.nt.n, 1, "count");
+  assert.equal(rowA.nt.px, 100, "the mark the newest note was written at");
+  assert.equal(rowA.nt.ts, c.note.at, "the newest note's timestamp");
+  assert.equal(rowB.nt, undefined, "the untouched name is still clean");
+  assert.deepEqual(Object.keys(rowA.nt).sort(), ["n", "px", "ts"],
+    "three fields only — the bodies must never ride the 15s poll");
+
+  // a second, newer note re-points the digest at the NEWEST, and bumps the count
+  p.seedRowNow("xyz:AAA", { px: 118 });
+  const c2 = p.createNote("xyz:AAA", "second note", true);
+  p.buildSnapshotNow();
+  const rowA2 = p.getSnapshot().markets.find((m) => m.coin === "xyz:AAA");
+  assert.equal(rowA2.nt.n, 2, "count follows the book");
+  assert.equal(rowA2.nt.px, 118, "the digest tracks the NEWEST note's stamp, not the first");
+  assert.equal(rowA2.nt.ts, c2.note.at, "…and its timestamp, which is what drives the marker's age class");
+
+  // deleting the last note takes the marker away entirely, rather than leaving a zero-count digest
+  p.dropNote(c.note.id, true);
+  p.dropNote(c2.note.id, true);
+  p.buildSnapshotNow();
+  const rowA3 = p.getSnapshot().markets.find((m) => m.coin === "xyz:AAA");
+  assert.equal(rowA3.nt, undefined, "the last delete removes the digest, so the marker disappears");
 });

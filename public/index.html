@@ -77,6 +77,7 @@
   <button class="tab" data-view="housing" title="Macro housing &amp; MBS board — 30y mortgage rate, Fed lending standards, single-family vs multifamily starts, months&#39; supply, new-home sales and median price, plus a BBB OAS proxy for non-QM spreads. FRED-fed, refreshed server-side every 6h. Each card names its series; a proxy chip says exactly what differs from the paid original; a series that didn&#39;t come back is absent, never stale.">Housing</button>
   <button class="tab" data-view="liquidity" title="Fed net liquidity board — total assets − TGA − ON RRP from the weekly H.4.1, as dollars and % of GDP, year-to-date change by component, balance-sheet composition, plus bank reserves and SOFR−IORB as plumbing-stress reads. All FRED; refreshes after the Thursday 4:30pm ET release. Everything normalised to billions before arithmetic.">Liquidity</button>
   <button class="tab" data-view="backtest" title="Cross-sectional long/short strategy backtest on the daily returns already loaded — in-sample vs out-of-sample, net of costs">Backtest</button>
+  <button class="tab" data-view="notes" id="tab-notes" title="Your own written notes, per ticker — every note across every name, newest first, searchable and #tag-filterable. Each note is stamped with the mark it was written at, so it carries the move since. Written in the ticker drawer; the markets table shows a post-it on any name you have written on.">Notes</button>
   <button class="tab" data-view="report" title="AI analyst report — everything this server holds on one ticker (trend ladder, signals &amp; track record, positioning, earnings, flags) compiled and synthesized by an AI analyst (Claude or GPT, per server config) into a plain-language read with scenarios, R/R and an annotated chart. Cached for everyone; regenerate unlocks on TTL expiry or material change.">Report</button>
   <button class="tab" data-view="admin" id="tab-admin" title="Feature visibility — choose what the group sees and what stays admin-only. Server-enforced: a gated tab is absent from the markup and its routes 403.">Admin</button>
   <!-- Everything before this spacer is a tab; everything after it is a control. It is the single
@@ -136,6 +137,7 @@
         <input class="fnum" id="oiMin" placeholder="min" autocomplete="off" spellcheck="false"/><span class="fdash">–</span><input class="fnum" id="oiMax" placeholder="max" autocomplete="off" spellcheck="false"/></div>
       <div class="fpg fpg-act">
         <button class="btn" id="watchOnly" title="Show only watchlisted tickers">★ only</button>
+        <button class="btn" id="noteOnly" title="Show only names you have written a note on">◢ noted</button>
         <button class="btn" id="dimOff" title="Dim foreign-home names (KRX / TSE / HKEX) while their home exchange is closed — the perp still trades, but the reference book under it is asleep. Visual only; per browser.">☾ dim</button>
         <button class="btn" id="clearFilters">Clear</button>
       </div>
@@ -332,6 +334,9 @@
   <div id="signals-body"><div class="msg">Loading…</div></div>
 </section>
 
+<section id="view-notes" hidden>
+  <div id="notes-body"></div>
+</section>
 <section id="view-news" hidden>
   <div id="news-body"></div>
 </section>

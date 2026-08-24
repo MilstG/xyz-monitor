@@ -15,7 +15,7 @@ const LKEY = 'xyzmon.layouts.v1';   // named table layouts: columns, sort, windo
 
 const COLS=[
   {key:'ticker', label:'Ticker', type:'str', def:'asc', hideable:false,
-    td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${cdsHtml(r)}</td>`},
+    td:r=>`<td class="tkc">${railHtml(r)}<span class="star${state.watch.has(r.coin)?' on':''}" data-star="${esc(r.coin)}" title="add to watchlist">${state.watch.has(r.coin)?'★':'☆'}</span><span class="tk" title="${esc(r.nm?r.nm+' \u00b7 '+r.coin:r.coin)}">${esc(r.ticker)}</span>${earnBadge(r)}${noteBadge(r)}${cdsHtml(r)}</td>`},
   {key:'sess', label:'Sess', type:'str', def:'asc', tip:'Home market of the reference line under the perp \u2014 KR (KRX), JP (TSE), HK (HKEX) for foreign listings with no US symbol; US for everything else. Lit dot = that exchange is OPEN right now (server-computed, holiday-aware). US\u00b7TW etc. on ADRs = US-listed line (full ET machinery applies) with the home line leading it overnight \u2014 context, never anchoring. Stocks scope only.',
     td:r=>sessCell(r)},
   {key:'px', label:'Price', type:'num',
@@ -141,6 +141,7 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
     picks:[], entry:0 },   // picks: explicitly targeted coins — one = single-asset timing test, several = a custom universe. entry: the σ threshold that replaces the book quantile on one name.
   duel:{ data:null, at:0, pending:false },   // score-duel record (/api/duel), 60s client memo
   watch:new Set(), watchOnly:false, detail:null,
+  notes:null, notesRev:0, noteOnly:false, noteTag:null, noteQ:'',   // written notes: the book from /api/notes, the ★-only-style row filter, and the Notes tab's own filters
   homeMkts:null, homeState:null,   // home-session defs + live per-market state — server-computed, client renders only
   dimOff:(()=>{try{return localStorage.getItem('xyz-dimoff')==='1';}catch(_){return false;}})(),   // variant A: dim foreign-home rows while their exchange sleeps
   report:{ coin:null, data:null, list:null, gen:false, tick:null, tf:'1d' },   // AI analyst report tab
@@ -847,6 +848,7 @@ function sortedRows(){ let rows=activeRows(); const f=state.filter.trim().toUppe
   if(state.grpDrill&&state.grpDrill.set) rows=rows.filter(r=>state.grpDrill.set.has(r.coin));   // group drill-down: visible chip, one × to clear
   if(f) rows=rows.filter(r=>r.ticker.toUpperCase().includes(f)||r.coin.toUpperCase().includes(f));
   if(state.watchOnly) rows=rows.filter(r=>state.watch.has(r.coin));
+  if(state.noteOnly) rows=rows.filter(r=>r.nt&&r.nt.n);
   rows=thresholdRows(rows);
   const k=state.sortKey, dir=state.sortDir==='asc'?1:-1, col=COLS.find(c=>c.key===k);
   rows.sort((a,b)=>{ let av=a[k],bv=b[k]; if(col.type==='str')return dir*String(av).localeCompare(String(bv));
@@ -1207,6 +1209,7 @@ const GCOLS=[
 function groupRowsSorted(){
   let rows=activeRows();
   if(state.watchOnly) rows=rows.filter(r=>state.watch.has(r.coin));
+  if(state.noteOnly) rows=rows.filter(r=>r.nt&&r.nt.n);
   rows=thresholdRows(rows);
   const list=computeMktGroups(rows, mktGrp(), state.grpWt);
   mktGroupCohesion(list);
@@ -1493,6 +1496,17 @@ function renderActionLists(){
 }
 function render(){
   if(!state.rows.size) return; computeDerived(); evaluateAlerts();
+  // Reconcile the note book against the digest riding the snapshot. The digest is authoritative:
+  // if the counts disagree, somebody wrote from another browser and our bodies are behind. One
+  // comparison per render, one fetch only when they actually diverge.
+  // Bounded to ONE refetch per snapshot version. Without that bound a book that is legitimately
+  // ahead of a cached snapshot (we just wrote; the next poll hasn't landed) would refetch forever
+  // on a timer, because the mismatch it is reacting to cannot clear until a new snapshot arrives.
+  if(_notesSeenSnap!==state.dataTs&&notesStale()&&!_notesLoading){
+    _notesSeenSnap=state.dataTs;
+    loadNotes().then(()=>{ render(); if(state.detail) renderDrawerNotes(state.detail);
+      if(el('view-notes')&&!el('view-notes').hidden) renderNotes(); });
+  }
   if(mktGrp()!=='names'){ renderGroupBoard(); return; }   // the markets #body always mirrors the active lens, whichever tab is on top
   const body=el('body'), rows=sortedRows(), vc=visibleCols();
   const fc=el('fcount'); if(fc){ const tot=activeRows().length; fc.textContent=(rows.length!==tot)?`showing ${rows.length} of ${tot}`:''; }
@@ -2748,6 +2762,7 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
     <div class="dsub">${esc(r.coin)} · ${fmtPrice(r.px)}${r.coin===state.benchCoin?' · S&amp;P benchmark':''}${r.coin===state.benchMain?' · BTC — crypto benchmark':''}${r.uni==='main'?' · 24/7 · 90d dailies':''} · <span id="dai" style="color:var(--blue);cursor:pointer;text-decoration:underline;text-underline-offset:2px" data-tip="jump to the Report tab — everything this server holds on this name, synthesized into a plain-language read with scenarios and R/R">AI report →</span></div>
     ${sessDrawerHtml(r)}
     ${earnDrawerHtml(r)}
+    ${noteDrawerHtml(r)}
     ${closes.length>2?`<div class="dsec">90-day price</div>${sparkline(closes,{color: closes[closes.length-1]>=closes[0]?'var(--up)':'var(--down)'})}`:''}
     <div id="dcandles"></div>
     ${splitHtml}
@@ -2778,6 +2793,8 @@ function openDetail(coin){ const r=state.rows.get(coin); if(!r) return; state.de
   el('drawer').classList.add('show'); el('drawerbg').classList.add('show'); el('drawer').setAttribute('aria-hidden','false');
   el('dclose').onclick=closeDetail;
   el('dstar').onclick=()=>{ toggleWatch(coin); openDetail(coin); };
+  wireDrawerNotes(coin);
+  if(!state.notes) loadNotes().then(()=>{ if(state.detail===coin) renderDrawerNotes(coin); });
   setHash('t='+encodeURIComponent(coin));
   loadDrawerSeries(coin);
   loadDrawerCandles(coin);
@@ -3144,7 +3161,7 @@ function toggleWatch(coin){ if(state.watch.has(coin)) state.watch.delete(coin); 
 let prefsT=null;
 function savePrefs(){ clearTimeout(prefsT); prefsT=setTimeout(()=>{ store.set(PKEY, JSON.stringify({
   colOrder:state.colOrder, colHidden:[...state.colHidden], layoutV:LAYOUT_V, tf:state.tf, refreshMs:state.pollMs,
-  sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, dvbBasket:state.dvbBasket||null,
+  sortKey:state.sortKey, sortDir:state.sortDir, filterText:state.filter, watch:[...state.watch], watchOnly:!!state.watchOnly, noteOnly:!!state.noteOnly, dvbBasket:state.dvbBasket||null,
   sectGrp:state.sect.grp, grp:state.grp, grpWt:state.grpWt, actOpen2:state.actOpen?1:0,
   filters:{vMin:el('volMin').value,vMax:el('volMax').value,oMin:el('oiMin').value,oMax:el('oiMax').value} }));
   updateLayoutBtn(); }, 250); }
@@ -3168,7 +3185,7 @@ function loadPrefs(){ let p; try{ p=JSON.parse(store.get(PKEY)||'null'); }catch(
   if(typeof p.filterText==='string') state.filter=p.filterText;
   if(Array.isArray(p.watch)) state.watch=new Set(p.watch);
   if(p.sectGrp==='ind'||p.sectGrp==='sector') state.sect.grp=p.sectGrp;
-  state.watchOnly=!!p.watchOnly; state._savedFilters=p.filters||null; }
+  state.watchOnly=!!p.watchOnly; state.noteOnly=!!p.noteOnly; state._savedFilters=p.filters||null; }
 
 // ===== saved layouts (named views of the markets table) =====
 // A layout captures: column order + visibility, sort key/dir, analysis window, the vol/OI
@@ -3571,7 +3588,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -6043,6 +6060,7 @@ function showView(v){
   setHidden('view-actionable', v!=='actionable');
   setHidden('view-earnings', v!=='earnings');
   setHidden('view-news', v!=='news');
+  setHidden('view-notes', v!=='notes');
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
   setHidden('view-admin', v!=='admin');
@@ -6058,6 +6076,7 @@ function showView(v){
   if(v==='actionable'){ if(el('view-actionable')) openActionable(); else { showView('markets'); return; } }
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
   if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
+  if(v==='notes'){ if(el('view-notes')) openNotes(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
@@ -7334,6 +7353,249 @@ function earnBadge(r){
   return `<i class="eb ${p.diff===0?'eb0':'eb1'}" title="Earnings ${p.diff===0?'TODAY':'tomorrow'} \u00b7 ${earnSessLbl(p.e.s)}${eps} \u00b7 ${p.e.d} (ET calendar day)">E</i>`;
 }
 function openEarnings(){ renderEarnings(); if(Date.now()-_earnLast>60*1000) loadEarnings(); }
+
+// ===== per-ticker notes (build 2026.08.24-01) ==================================================
+// Two data paths, deliberately: the markets table paints its markers off the {n,ts,px} digest that
+// already rides every snapshot row (r.nt), so a note costs the 15s poll nothing; the bodies come
+// from /api/notes, fetched once and refetched only when a write moves the revision or the digest
+// disagrees with what we hold. The drawer and the tab read the same in-memory book.
+const NOTE_FRESH_D = 7, NOTE_WARM_D = 30;   // calendar days — see the age classes in styles.css
+// Two locks, same as every other write in this app: the manifest act key decides audience, the
+// admin cookie decides authz, and the server re-checks both. This only hides the pen.
+const NOTES_WRITE = IS_ADMIN && featureOn('notes.write');
+// Notes are keyed by coin and DISPLAYED by ticker, so a market rename moves the note with the
+// market instead of orphaning it. Falls back to the coin when the board no longer carries the row.
+function noteTicker(coin){ const r=state.rows?state.rows.get(coin):null;
+  if(r&&r.ticker) return r.ticker;
+  // No row: the market left the universe. Show the bare symbol rather than the dex-prefixed
+  // storage key — 'FTM' is what the operator wrote the note about, 'xyz:FTM' is bookkeeping.
+  const c=String(coin||''), i=c.indexOf(':'); return i>0?c.slice(i+1):c; }
+let _notesLast = 0, _notesLoading = null, _notesSeenSnap = 0;
+// Age is CALENDAR time and only calendar time. The rejected alternative was scaling by the name's
+// own volatility; it would move the marker when the MARKET changed rather than when the note did,
+// so a note written Tuesday would brighten through Thursday because realised vol came in.
+function noteAgeDays(ts){ return Math.max(0, Math.floor((Date.now()-ts)/DAY)); }
+function noteAgeCls(d){ return d<=NOTE_FRESH_D?'fresh':d<=NOTE_WARM_D?'warm':'cold'; }
+function noteAgeTxt(d){
+  return d===0?'today':d===1?'yesterday':d<30?d+'d ago':d<365?Math.round(d/30)+'mo ago':(d/365).toFixed(1)+'y ago';
+}
+// The move since the note was written — the whole reason the px stamp exists. Null (not zero) when
+// either end is missing: a note written with no mark available has no move to report.
+function noteSince(n, r){
+  if(!n||!r||!n.px||!isFinite(n.px)||n.px<=0||r.px==null||!isFinite(r.px)) return null;
+  return (r.px/n.px-1)*100;
+}
+function noteSinceHtml(v){ return v==null?'':`<span class="${v>=0?'pos':'neg'}">${v>=0?'+':'−'}${Math.abs(v).toFixed(1)}%</span>`; }
+const NOTE_TAG_RE = /#[a-z0-9][a-z0-9_-]{0,23}/gi;
+function noteTags(body){
+  const out=[]; for(const m of String(body||'').match(NOTE_TAG_RE)||[]){ const t=m.slice(1).toLowerCase(); if(!out.includes(t)) out.push(t); }
+  return out;
+}
+// Escape FIRST, then linkify the tags — never the other way round, or a body containing markup
+// would have it re-introduced by the replace.
+function noteBodyHtml(body){
+  return esc(body).replace(NOTE_TAG_RE, m=>`<span class="nt-tag" data-ntag="${esc(m.slice(1).toLowerCase())}">${m}</span>`);
+}
+const NOTE_PIT_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path class="pbody" d="M1 1 H11 V7.5 L7.5 11 H1 Z"/><path class="pfold" d="M11 7.5 H7.5 V11 Z"/></svg>';
+// The markets-table marker. Absent when the name has no note — an always-drawn hollow outline would
+// sit next to the ☆ and mean nothing. Reads the snapshot digest, so it needs no fetch.
+function noteBadge(r){
+  const d = r.nt; if(!d||!d.n) return '';
+  const days = noteAgeDays(d.ts), cls = noteAgeCls(days);
+  // Hover carries the actual read: the newest note's first line, its age, and the move since.
+  const book = state.notes ? notesFor(r.coin) : null;
+  const newest = book&&book.length?book[0]:null;
+  let t = `${d.n} note${d.n>1?'s':''} · newest ${noteAgeTxt(days)}`;
+  if(newest){ const f=newest.body.split('\n')[0]; t += `\n"${f.length>96?f.slice(0,95)+'…':f}"`; }
+  if(d.px){ const sc=noteSince({px:d.px}, r);
+    t += `\nwritten at ${fmtPrice(d.px)}` + (sc==null?'':` · ${sc>=0?'+':'−'}${Math.abs(sc).toFixed(1)}% since`); }
+  return `<span class="pit ${cls}" tabindex="0" role="button" data-pit="${esc(r.coin)}" title="${esc(t)}">`
+    + NOTE_PIT_SVG + (d.n>1?`<i class="pn">${d.n}</i>`:'') + '</span>';
+}
+async function loadNotes(force){
+  if(_notesLoading) return _notesLoading;
+  _notesLoading = (async()=>{
+    try{ const d = await fetchJSON('/api/notes');
+      if(d&&Array.isArray(d.notes)){ state.notes = d.notes; state.notesRev = d.rev; _notesLast = Date.now(); }
+    }catch(_){}
+    finally{ _notesLoading = null; }
+  })();
+  return _notesLoading;
+}
+// The digest on the snapshot is the source of truth for "is our book current". If the counts
+// disagree with what we hold, a write happened somewhere (another browser, another admin) and the
+// bodies are refetched. Cheap: one comparison per render, one fetch only when they diverge.
+function notesStale(){
+  if(!state.notes||!state.rows) return true;
+  for(const r of state.rows.values()) if(r.nt&&r.nt.n){
+    if(notesFor(r.coin).length!==r.nt.n) return true;
+  }
+  return false;
+}
+function notesFor(coin){ return (state.notes||[]).filter(n=>n.coin===coin); }
+
+// ---- drawer panel ----------------------------------------------------------------------------
+// Sits ABOVE the charts on purpose: everything else in the drawer is the server's read of the
+// name; the note is yours, and it is what you want to hit before re-deriving an opinion from the
+// same metrics that produced it last time.
+function noteDrawerHtml(r){
+  if(!NOTES_WRITE && !notesFor(r.coin).length) return '';   // nothing to show and nothing to add
+  return `<div class="nt-head"><div class="dsec" style="margin-bottom:8px">Notes</div>`
+    + (NOTES_WRITE?`<button class="nt-new" id="ntNew" style="margin-bottom:8px">＋ note</button>`:'')
+    + `</div><div class="nt-compose" id="ntCompose" hidden>`
+    + `<textarea class="nt-box" id="ntBox" maxlength="2000" placeholder="What do you actually think about this name? A level, a reason, a rule for yourself. #tags work."></textarea>`
+    + `<div class="nt-crow"><span class="nt-stamp" id="ntStamp"></span>`
+    + `<button class="nt-btn ghost" id="ntCancel">cancel</button><button class="nt-btn" id="ntSave" disabled>save note</button></div>`
+    + `<div class="nt-err" id="ntErr" hidden></div></div><div id="ntList"></div>`;
+}
+function renderDrawerNotes(coin){
+  const list = el('ntList'); if(!list) return;
+  const r = state.rows ? state.rows.get(coin) : null;
+  const ns = notesFor(coin);
+  list.innerHTML = ns.length ? ns.map(n=>{
+    const d = noteAgeDays(n.at), sc = noteSince(n, r);
+    const since = n.px ? `<span class="nt-since" title="${esc('the mark has moved from '+fmtPrice(n.px)+' (when you wrote this) to '+(r&&r.px!=null?fmtPrice(r.px):'—')+' now')}">wrote it at ${fmtPrice(n.px)}${sc==null?'':' · '+noteSinceHtml(sc)+' since'}</span>` : '';
+    return `<div class="nt-item${noteAgeCls(d)==='cold'?' cold':''}">`
+      + `<div class="nt-body">${noteBodyHtml(n.body)}</div>`
+      + `<div class="nt-meta"><span class="age" title="${esc(new Date(n.at).toLocaleString())}">${noteAgeTxt(d)}</span>${since}`
+      + (n.edited?'<span title="the body was rewritten — the price stamp still measures from when the note was FIRST written, because that is when the claim was made">· edited</span>':'')
+      + (NOTES_WRITE?`<span class="nt-act"><button data-nedit="${n.id}">edit</button><button class="del" data-ndel="${n.id}">delete</button></span>`:'')
+      + `</div></div>`;
+  }).join('')
+    : `<div class="nt-empty">Nothing written on ${esc(r?r.ticker:coin)} yet.${NOTES_WRITE?' Notes are kept on the server and never expire — they only fade.':''}</div>`;
+}
+let _ntEditing = null;
+function ntStampTxt(coin){
+  const r = state.rows ? state.rows.get(coin) : null;
+  if(_ntEditing){ const n=(state.notes||[]).find(x=>x.id===_ntEditing);
+    return n&&n.px?'keeps its original stamp of '+fmtPrice(n.px):'keeps its original stamp'; }
+  return r&&r.px!=null?'stamps at '+fmtPrice(r.px):'no live mark — this note saves without a price stamp';
+}
+function ntOpenCompose(coin, id){
+  _ntEditing = id||null;
+  const box=el('ntBox'), cmp=el('ntCompose'); if(!box||!cmp) return;
+  const n = id?(state.notes||[]).find(x=>x.id===id):null;
+  cmp.hidden=false; box.value=n?n.body:'';
+  el('ntSave').disabled=!box.value.trim();
+  el('ntSave').textContent=n?'save edit':'save note';
+  el('ntStamp').textContent=ntStampTxt(coin);
+  el('ntStamp').title=_ntEditing
+    ? 'an edit rewrites the body and nothing else — the claim was made at the original price, and a record whose author can move its own goalposts is not a record'
+    : 'the mark at the moment you save, frozen into the note so the move since can be measured against what you were actually looking at';
+  const err=el('ntErr'); if(err){ err.hidden=true; err.textContent=''; }
+  box.focus();
+}
+function ntCloseCompose(){ _ntEditing=null; const c=el('ntCompose'); if(c){ c.hidden=true; el('ntBox').value=''; } }
+async function ntWrite(body, coin){
+  const save=el('ntSave'), err=el('ntErr');
+  if(save) save.disabled=true;
+  try{
+    const b = _ntEditing?{id:_ntEditing, body}:{coin, body};
+    const res = await fetch('/api/notes',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});
+    const d = await res.json().catch(()=>null);
+    if(!d||!d.ok){
+      if(err){ err.hidden=false; err.textContent = d&&d.error==='not-admin'
+        ? 'Notes are admin-only on this board — this note was not saved.'
+        : (d&&d.error? d.error : 'Could not save the note. It is still in the box — try again.'); }
+      if(save) save.disabled=false;
+      return false;
+    }
+    ntCloseCompose();
+    await loadNotes(true);
+    renderDrawerNotes(coin);
+    render();                      // repaint the markers off the refreshed book
+    if(el('view-notes')&&!el('view-notes').hidden) renderNotes();
+    forceRefresh();                // pull a snapshot so r.nt agrees with the book we just changed
+    return true;
+  }catch(_){
+    if(err){ err.hidden=false; err.textContent='Could not reach the server. The note is still in the box.'; }
+    if(save) save.disabled=false;
+    return false;
+  }
+}
+// Delegated once on the drawer, not rebound per render — the panel's innerHTML is replaced on
+// every note write, and per-render handlers would leak one listener per keystroke-to-save cycle.
+function wireDrawerNotes(coin){
+  const nn=el('ntNew'); if(nn) nn.onclick=()=>ntOpenCompose(coin,null);
+  const cancel=el('ntCancel'); if(cancel) cancel.onclick=ntCloseCompose;
+  const box=el('ntBox');
+  if(box){
+    box.oninput=()=>{ el('ntSave').disabled=!box.value.trim(); };
+    box.onkeydown=e=>{ if(e.key==='Escape'){ e.stopPropagation(); ntCloseCompose(); }
+      if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); const s=el('ntSave'); if(s&&!s.disabled) s.click(); } };
+  }
+  const save=el('ntSave'); if(save) save.onclick=()=>{ const b=el('ntBox').value.trim(); if(b) ntWrite(b, coin); };
+  const list=el('ntList');
+  if(list) list.onclick=e=>{
+    const tag=e.target.closest('[data-ntag]');
+    if(tag){ state.noteTag=tag.dataset.ntag; state.noteQ=''; closeDetail(); showView('notes'); return; }
+    const ed=e.target.closest('[data-nedit]'); if(ed) return ntOpenCompose(coin, +ed.dataset.nedit);
+    const del=e.target.closest('[data-ndel]');
+    if(del){ const n=(state.notes||[]).find(x=>x.id===+del.dataset.ndel);
+      if(n&&confirm('Delete this note?\n\n"'+(n.body.length>140?n.body.slice(0,139)+'…':n.body)+'"\n\nThis cannot be undone.')){
+        _ntEditing=null;
+        fetch('/api/notes',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:n.id,drop:true})})
+          .then(r=>r.json()).then(async d=>{ if(d&&d.ok){ await loadNotes(true); renderDrawerNotes(coin); render();
+            if(el('view-notes')&&!el('view-notes').hidden) renderNotes(); forceRefresh(); } }).catch(()=>{});
+      } }
+  };
+  renderDrawerNotes(coin);
+}
+
+// ---- Notes tab -------------------------------------------------------------------------------
+function openNotes(){ renderNotes(); if(!state.notes||Date.now()-_notesLast>60*1000) loadNotes().then(renderNotes); }
+function renderNotes(){
+  const host=el('notes-body'); if(!host) return;
+  const all = state.notes||[];
+  const tags={}; all.forEach(n=>noteTags(n.body).forEach(t=>{ tags[t]=(tags[t]||0)+1; }));
+  const q=(state.noteQ||'').toLowerCase();
+  // Sorted HERE, not inherited. The server ships newest-first, but this view buckets by age and
+  // a book that arrives out of order renders repeating day headers — a correctness bug that
+  // depends on someone else's invariant holding. One sort makes the view answer for itself.
+  let list=all.slice().sort((a,b)=>b.at-a.at);
+  if(state.noteTag) list=list.filter(n=>noteTags(n.body).includes(state.noteTag));
+  if(q) list=list.filter(n=>(n.body+' '+noteTicker(n.coin)).toLowerCase().includes(q));
+  const chips=Object.keys(tags).sort((a,b)=>tags[b]-tags[a]||a.localeCompare(b)).slice(0,12)
+    .map(t=>`<button class="tagchip${state.noteTag===t?' on':''}" data-ntag="${esc(t)}">#${esc(t)} <span class="sec">${tags[t]}</span></button>`).join('');
+  let rows='';
+  if(!list.length){
+    rows = `<div class="ntb-none">${all.length
+      ? 'No note matches'+(state.noteTag?' #'+esc(state.noteTag):'')+(q?' containing “'+esc(state.noteQ)+'”':'')+'.'
+      : 'No notes yet. Open any ticker’s drawer and write one — it is stamped with the price at that moment, so it carries the move since.'}</div>`;
+  } else {
+    let bucket=null;
+    for(const n of list){
+      const d=noteAgeDays(n.at), cls=noteAgeCls(d);
+      const row=state.rows?state.rows.get(n.coin):null, r=(row&&!row.delisted)?row:null;
+      const sc=noteSince(n,r);
+      const b = d<=1?'Today & yesterday':d<=7?'This week':d<=30?'This month':d<=90?'Older than a month':'Older than a quarter';
+      if(b!==bucket){ rows+=`<div class="ntb-day">${b}</div>`; bucket=b; }
+      // A note outlives its market: a name rotated out of the universe keeps its note, greyed and
+      // labelled, because a record that silently drops rows is not one.
+      const side = r
+        ? `<b>${noteAgeTxt(d)}</b>${n.px?'wrote it at '+fmtPrice(n.px)+'<br>now '+(r.px!=null?fmtPrice(r.px):'—')+(sc==null?'':' · '+noteSinceHtml(sc)):'no price stamp'}`
+        : `<b>${noteAgeTxt(d)}</b>${n.px?'wrote it at '+fmtPrice(n.px)+'<br>':''}<span class="na">market gone</span>`;
+      const sideT = r
+        ? (sc==null?'this note carries no price stamp, so there is no move to measure':'the mark has moved '+(sc>=0?'+':'−')+Math.abs(sc).toFixed(1)+'% since you wrote this')
+        : 'this market is no longer in the universe, so there is no live price to measure against — the note is kept anyway';
+      rows += `<div class="ntb-row ${r?(cls==='cold'?'cold':''):'gone'}"${r?` data-nopen="${esc(n.coin)}"`:''}>`
+        + `<div class="ntb-tk">${esc(noteTicker(n.coin))}<span class="pit ${cls}" style="cursor:inherit">${NOTE_PIT_SVG}</span>`
+        + (r?'':'<span class="sub">NOT IN UNIVERSE</span>') + `</div>`
+        + `<div class="ntb-mid"><div class="nt-body">${noteBodyHtml(n.body)}</div></div>`
+        + `<div class="ntb-side" title="${esc(sideT)}">${side}</div></div>`;
+    }
+  }
+  host.innerHTML = `<div class="ntb-bar"><input class="ntb-q" id="ntbQ" placeholder="search your notes…" autocomplete="off" spellcheck="false" value="${esc(state.noteQ||'')}">`
+    + `<div style="display:flex;gap:6px;flex-wrap:wrap">${chips}</div>`
+    + `<span class="ntb-count">${list.length===all.length?all.length+' note'+(all.length===1?'':'s'):list.length+' of '+all.length+' notes'}</span></div>${rows}`;
+  const qi=el('ntbQ');
+  if(qi){ qi.oninput=e=>{ state.noteQ=e.target.value; renderNotes(); const f=el('ntbQ'); if(f){ f.focus(); f.setSelectionRange(f.value.length,f.value.length); } }; }
+  host.querySelectorAll('[data-ntag]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation(); state.noteTag = state.noteTag===b.dataset.ntag?null:b.dataset.ntag; renderNotes(); });
+  host.querySelectorAll('[data-nopen]').forEach(rw=>rw.onclick=e=>{
+    if(e.target.closest('[data-ntag]')) return;
+    openDetail(rw.dataset.nopen); });
+}
 
 // ---- Liquidity tab (build 2026.08.21-04) ----------------------------------------------------
 // Fed net liquidity board off /api/liquidity. Same contract as Housing: paint from cache, refetch
@@ -9251,13 +9513,23 @@ updateBell();
 el('filter').value=state.filter;
 if(state._savedFilters){ const sf=state._savedFilters; el('volMin').value=sf.vMin||''; el('volMax').value=sf.vMax||''; el('oiMin').value=sf.oMin||''; el('oiMax').value=sf.oMax||''; }
 el('watchOnly').classList.toggle('on', state.watchOnly);
+{ const nb=el('noteOnly'); if(nb) nb.classList.toggle('on', state.noteOnly); }
 updateLayoutBtn();
 el('refresh').addEventListener('click', forceRefresh);
 el('filter').addEventListener('input', e=>{ state.filter=e.target.value; render(); savePrefs(); });
 el('body').addEventListener('click', e=>{ const star=e.target.closest('.star');
   if(star){ e.stopPropagation(); toggleWatch(star.dataset.star); return; }
+  const pit=e.target.closest('.pit[data-pit]');
+  if(pit){ e.stopPropagation(); openDetail(pit.dataset.pit); return; }
   const tr=e.target.closest('tr[data-coin]'); if(tr) openDetail(tr.dataset.coin); });
+// The marker is focusable, so it has to answer the keyboard too — a tabindex that does nothing on
+// Enter is worse than no tabindex at all.
+el('body').addEventListener('keydown', e=>{ const pit=e.target.closest&&e.target.closest('.pit[data-pit]');
+  if(pit&&(e.key==='Enter'||e.key===' ')){ e.preventDefault(); e.stopPropagation(); openDetail(pit.dataset.pit); } });
 el('watchOnly').addEventListener('click',()=>{ state.watchOnly=!state.watchOnly; el('watchOnly').classList.toggle('on', state.watchOnly); updateFilterChip(); render(); savePrefs(); });
+// Deliberately NOT part of a saved layout, unlike ★-only: adding a field to the layout signature
+// would mark every layout the operator has already saved as dirty. Per browser, in prefs.
+{ const nb=el('noteOnly'); if(nb) nb.addEventListener('click',()=>{ state.noteOnly=!state.noteOnly; nb.classList.toggle('on', state.noteOnly); updateFilterChip(); render(); savePrefs(); }); }
 { const db=el('dimOff');   // variant A toggle — visual only, per browser, never part of a saved layout
   if(db){ db.classList.toggle('on', state.dimOff);
     db.addEventListener('click',()=>{ state.dimOff=!state.dimOff; db.classList.toggle('on', state.dimOff);
@@ -9291,7 +9563,7 @@ applyNumFilters();
 el('clearFilters').addEventListener('click', ()=>{ ['volMin','volMax','oiMin','oiMax'].forEach(id=>{ el(id).value=''; el(id).classList.remove('bad'); });
   state.filters={volMin:null,volMax:null,oiMin:null,oiMax:null}; updateFilterChip(); render(); savePrefs(); });
 function updateFilterChip(){
-  const f=state.filters, on = f.volMin!=null||f.volMax!=null||f.oiMin!=null||f.oiMax!=null||!!state.watchOnly;
+  const f=state.filters, on = f.volMin!=null||f.volMax!=null||f.oiMin!=null||f.oiMax!=null||!!state.watchOnly||!!state.noteOnly;
   const dot=el('filtDot'); if(dot) dot.hidden=!on;
   const b=el('filtersBtn'); if(b) b.classList.toggle('on', on);
 }

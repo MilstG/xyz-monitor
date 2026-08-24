@@ -52,6 +52,29 @@ instant, and the per-IP rate limit stops being a per-user problem.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
 - **Deep links** — the URL reflects the current tab and open ticker (`#sectors`, `#t=<coin>`), so links are shareable.
+- **Notes tab** (`/api/notes`) — your own written notes, per ticker. Written in the ticker drawer, where
+  the panel sits above the charts: everything else there is the server's read of the name, the note is
+  yours. Each note is stamped with **the mark it was written at**, so every later read carries the move
+  since ("wrote it at 113.90 · +4.0% since") instead of a bare date — that one field is what separates
+  this from a text box, and it costs one number because the snapshot already holds the mark. `#tags` in
+  the body are derived at read time (never stored alongside it) and filter the tab; search runs over
+  bodies and tickers. A name rotated out of the universe **keeps** its note, greyed and labelled — notes
+  are keyed by `coin` and displayed by ticker, so a rename moves the note with the market. Editing
+  rewrites the body and nothing else: the original timestamp and price stamp stand, because the claim
+  was made then, and the rewrite is disclosed. Stored server-side on the volume (`notes.json`, atomic
+  tmp-then-rename, warm-loaded on boot) rather than in `localStorage` next to the watchlist: a layout is
+  a *view* and losing it costs a re-click, but a note is prose somebody sat and typed. Ships admin-only,
+  with the write verb behind its own key so opening the tab to the group never hands the group the pen.
+- **Note markers on Markets** — a post-it in the ticker cell of any name you have written on. No new
+  column (same reasoning as the E badge: that cell is the only one always on screen), and *absent*
+  entirely when there is no note, so it never competes with the ☆ beside it. The glyph encodes three
+  things at 11px: that a note exists, how many (a count past one), and **how fresh** — solid accent
+  within 7 days, dimmed to 30, a hollow outline after. Age is **calendar time only**; a vol-scaled fade
+  was considered and rejected because it would move the marker when the *market* changed rather than
+  when the note did. Hovering gives the newest note's first line and the move since it was written;
+  clicking opens the drawer. `◢ noted` in the filter menu narrows the table to noted names, the way
+  ★-only already does. The markers cost the 15s poll nothing: every snapshot row carries a three-field
+  digest (`nt:{n, ts, px}`) and the bodies load once with the drawer.
 - **Saved layouts** — named views of the markets table (column order + visibility, sort,
   analysis window, vol/OI filters, ★-only), saved and switched from the Layouts menu. Stored
   per browser in localStorage; the active layout shows a • when the live view has unsaved changes.

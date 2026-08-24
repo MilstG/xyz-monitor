@@ -5222,7 +5222,7 @@ const NAV_GROUPS = [
   { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "sessions"] },
   { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
   { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
-  { key: "research", label: "Research", views: ["report", "funds"] },
+  { key: "research", label: "Research", views: ["report", "funds", "notes"] },
 ];
 // markets is pin:true and is where every load lands; admin is the locked panel itself. Both stay
 // flat in the row and are deliberately NOT movable — a one-item menu, or a home two clicks away,
@@ -5319,6 +5319,10 @@ const FEATURES = [
   // open the watchlist to public edits.
   { key: "funds",      kind: "tab", label: "Funds",       def: "admin",  routes: ["/api/whale"] },
   { key: "treemap",    kind: "tab", label: "Treemap",     def: "public", runtime: true, routes: [] },
+  // NOTES (build 2026.08.24-01): per-ticker written notes + the markets-table post-it marker.
+  // The TAB key gates reading; notes.write below gates every verb that mutates the file, so
+  // opening the tab to the group can never hand the group the pen. Admin while it soaks.
+  { key: "notes",      kind: "tab", label: "Notes",       def: "admin",  routes: ["/api/notes"] },
   { key: "ai.generate",   kind: "act", label: "AI report generation", def: "admin",  routes: ["POST /api/ai-report"] },
   { key: "ai.ask",        kind: "act", label: "Terminal AI fallback", def: "admin",  routes: ["POST /api/ask"] },
   { key: "ai.reset",      kind: "act", label: "AI budget reset",      def: "admin",  routes: ["POST /api/ai-reset"] },
@@ -5337,6 +5341,10 @@ const FEATURES = [
   // would have left the GET unclaimed and gated by the handler check alone — one wall, not two.
   { key: "focus.limits",  kind: "act", label: "Set FOCUS liquidity floors", def: "admin", routes: ["/api/focus/limits"] },
   { key: "earnings.void", kind: "act", label: "Void an earnings row", def: "admin",  routes: ["POST /api/earnings/void"] },
+  // Note writes (create / edit / delete). Same two-lock posture as whale.write: the manifest gate
+  // is audience visibility, the handler's own admin-cookie check is authz, and both must pass.
+  // Method-specific so the tab's own GET stays gated by the notes key alone — one wall each.
+  { key: "notes.write",   kind: "act", label: "Write notes",           def: "admin",  routes: ["POST /api/notes"] },
   { key: "derivs.refresh", kind: "act", label: "Force derivs refresh", def: "admin", routes: ["POST /api/derivs/refresh"] },
   // Custom baskets + ratio pair candles (build 2026.07.28-06). One key covers the registry, the
   // COMP/G virtual tickers, the manager panel and the ratio chart — admin-only while it soaks.

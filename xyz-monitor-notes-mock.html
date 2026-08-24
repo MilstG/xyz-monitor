@@ -1,0 +1,547 @@
+<title>Notes on a Name</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css: the mock has to read as the app, not as a deck ── */
+:root{
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#7E8794; --faint:#4C5662;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding:22px 20px 70px;max-width:1180px;margin:0 auto}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)} .na{color:var(--faint)}
+b{font-weight:600}
+
+/* ── mock frame (the only chrome that isn't the app) ── */
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:70ch;margin:0}
+.lede b{color:var(--text);font-weight:500}
+.mockchip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--blue);border:1px solid var(--blue);border-radius:3px;padding:2px 7px;opacity:.9}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:16px 18px 20px;margin:0 0 8px;position:relative}
+.frame::before{content:"live prototype";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.hint{font-family:var(--mono);font-size:11px;color:var(--faint);margin:0 0 14px;line-height:1.6}
+.hint kbd{border:1px solid var(--border);border-radius:3px;padding:0 5px;color:var(--muted)}
+
+/* ── app classes, copied from styles.css so the prototype is pixel-honest ── */
+.s-sec{margin:30px 0 12px;font-size:13px;line-height:1.4}
+.s-sec:first-child{margin-top:6px}
+.s-sec .t{color:var(--accent);font-weight:600;letter-spacing:.3px}
+.s-sec .d{color:var(--muted);font-weight:400;font-size:12px}
+.s-cap{color:var(--muted);font-size:11.5px;margin-top:11px;line-height:1.62;max-width:82ch}
+.s-cap b{color:var(--text);font-weight:600}
+.s-ctrls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.s-ctrls .lbl{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px}
+.seg{display:inline-flex;align-items:center;gap:2px;background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:3px}
+.seg button{background:transparent;border:none;color:var(--muted);font-family:var(--mono);font-size:12px;padding:5px 9px;border-radius:5px;cursor:pointer}
+.seg button:hover{color:var(--text)}
+.seg button.active{background:var(--accent);color:#1a1205;font-weight:600}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.wrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px;background:var(--panel)}
+.wrap table{border-collapse:collapse;width:100%;min-width:760px}
+.wrap thead th{position:sticky;top:0;background:var(--panel2);z-index:2;font-size:11px;text-transform:uppercase;
+  letter-spacing:.6px;color:var(--muted);font-weight:600;text-align:right;padding:11px 12px;white-space:nowrap;
+  border-bottom:1px solid var(--border);user-select:none}
+.wrap thead th:first-child{text-align:left}
+.wrap tbody td{font-family:var(--mono);font-size:13px;text-align:right;padding:9px 12px;white-space:nowrap;border-bottom:1px solid var(--grid)}
+.wrap tbody tr:last-child td{border-bottom:none}
+.wrap tbody tr{cursor:pointer}
+.wrap tbody tr:hover td{background:rgba(227,165,60,.045)}
+.wrap tbody td:first-child{text-align:left}
+td.tkc{position:relative}
+.tk{font-weight:600;font-size:13.5px;color:var(--text);font-family:var(--mono)}
+.px{color:var(--text)}
+.star{cursor:pointer;color:var(--faint);margin-right:7px;font-size:12px;transition:color .12s}
+.star:hover{color:var(--muted)} .star.on{color:var(--accent)}
+.eb{display:inline-block;margin-left:6px;font-style:normal;font-family:var(--mono);font-size:9.5px;
+  font-weight:700;line-height:1;padding:2px 4px;border-radius:3px;vertical-align:1px;cursor:help}
+.eb.eb0{background:var(--accent);color:var(--bg);border:1px solid var(--accent)}
+.eb.eb1{background:transparent;color:var(--accent);border:1px solid var(--accent-dim)}
+.dsec{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);
+  margin:18px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--border)}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   NEW — everything below this line is the feature's own CSS proposal.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── the marker: a post-it in the sticky ticker cell, next to the star and the E badge.
+      NOT a new column — same reasoning styles.css already writes down for .eb: the ticker
+      cell is the one cell that is always on screen, and a marker you have to scroll
+      sideways to find is not a marker. Absent when there is no note: an always-drawn
+      hollow outline would compete with the ☆ next to it and mean nothing. ── */
+.pit{display:inline-flex;align-items:center;gap:2px;margin-left:6px;vertical-align:1px;cursor:pointer;
+  line-height:1;transition:filter .12s}
+.pit:hover{filter:brightness(1.35)}
+.pit:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+.pit svg{width:11px;height:11px;display:block;overflow:visible}
+.pit .body{fill:currentColor}
+.pit .fold{fill:currentColor;opacity:.42}
+/* age is the whole point: a note is a claim made at a price, and it decays. */
+.pit.fresh{color:var(--accent)}                       /* ≤ 7d  — solid, full accent */
+.pit.warm{color:var(--accent-dim)}                    /* 8–30d — solid, dimmed */
+.pit.cold{color:var(--faint)}                         /* > 30d — outline only */
+.pit.cold .body{fill:none;stroke:currentColor;stroke-width:1.15}
+.pit.cold .fold{fill:none;stroke:currentColor;stroke-width:1.15;opacity:1}
+.pit .pn{font-style:normal;font-family:var(--mono);font-size:8.5px;font-weight:600;color:var(--muted);
+  vertical-align:top;margin-left:1px}
+
+/* ── the drawer panel ── */
+.drawermock{width:460px;max-width:100%;background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  padding:18px 20px 22px;align-self:flex-start}
+.drawermock .dhead{font-family:var(--disp);font-size:22px;font-weight:600;color:var(--text);display:flex;align-items:baseline;gap:10px}
+.drawermock .dname{color:var(--muted);font-size:12.5px;margin-top:3px}
+.drawermock .dsub{color:var(--muted);font-family:var(--mono);font-size:11.5px;margin-top:5px}
+.nt-panel{margin-top:4px}
+.nt-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.nt-head .dsec{flex:1;margin-bottom:0}
+.nt-new{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--mono);
+  font-size:10.5px;padding:3px 9px;border-radius:5px;cursor:pointer;white-space:nowrap;margin-bottom:8px}
+.nt-new:hover{border-color:var(--accent-dim);color:var(--accent)}
+.nt-new:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.nt-compose{margin:2px 0 12px}
+.nt-compose[hidden]{display:none}
+.nt-box{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:7px;
+  padding:9px 11px;font-family:var(--mono);font-size:12px;line-height:1.6;resize:vertical;min-height:74px}
+.nt-box:focus{outline:none;border-color:var(--accent-dim)}
+.nt-box::placeholder{color:var(--faint)}
+.nt-crow{display:flex;align-items:center;gap:9px;margin-top:7px}
+.nt-stamp{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-right:auto;cursor:help}
+.nt-btn{background:var(--accent);color:#1a1205;border:none;border-radius:5px;font-family:var(--mono);font-size:11px;
+  font-weight:600;padding:5px 12px;cursor:pointer}
+.nt-btn:disabled{background:var(--panel2);color:var(--faint);cursor:not-allowed}
+.nt-btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--border);font-weight:400}
+.nt-btn.ghost:hover{color:var(--text)}
+.nt-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+.nt-item{border-left:2px solid var(--accent-dim);background:var(--panel2);border-radius:0 7px 7px 0;
+  padding:9px 11px;margin-bottom:7px}
+.nt-item.cold{border-left-color:var(--faint)}
+.nt-body{font-size:12.5px;line-height:1.62;color:var(--text);white-space:pre-wrap;word-break:break-word}
+.nt-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:7px;
+  font-family:var(--mono);font-size:10px;color:var(--faint)}
+.nt-meta .age{color:var(--muted)}
+.nt-since{cursor:help}
+.nt-act{margin-left:auto;display:flex;gap:7px;opacity:0;transition:opacity .12s}
+.nt-item:hover .nt-act,.nt-item:focus-within .nt-act{opacity:1}
+.nt-act button{background:none;border:none;color:var(--faint);font-family:var(--mono);font-size:10px;cursor:pointer;padding:0}
+.nt-act button:hover{color:var(--text)}
+.nt-act button.del:hover{color:var(--down)}
+.nt-tag{color:var(--blue);cursor:pointer}
+.nt-empty{font-size:11.5px;color:var(--faint);line-height:1.6;padding:2px 0 4px}
+
+/* ── the Notes tab ── */
+.ntb-bar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:14px}
+.ntb-q{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;
+  font-family:var(--mono);font-size:12px;min-width:230px}
+.ntb-q:focus{outline:none;border-color:var(--accent-dim)}
+.ntb-q::placeholder{color:var(--faint)}
+.tagchip{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:11px;border:1px solid var(--border);
+  background:transparent;color:var(--muted);cursor:pointer}
+.tagchip:hover{border-color:var(--accent-dim);color:var(--text)}
+.tagchip.on{border-color:var(--blue);background:rgba(111,147,201,.12);color:var(--blue)}
+.tagchip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.ntb-day{font-family:var(--mono);font-size:11px;letter-spacing:.6px;color:var(--muted);
+  margin:18px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.ntb-row{display:flex;align-items:flex-start;gap:14px;padding:10px 12px;background:var(--panel);
+  border-left:2px solid var(--accent-dim);margin-bottom:3px;cursor:pointer;border-radius:0 7px 7px 0}
+.ntb-row:hover{background:var(--panel2)}
+.ntb-row.cold{border-left-color:var(--faint)}
+.ntb-row.gone{border-left-color:var(--faint);opacity:.72}
+.ntb-tk{font-family:var(--mono);font-weight:600;font-size:13px;min-width:104px;display:flex;align-items:center;gap:1px;flex:0 0 auto}
+.ntb-tk .sub{display:block;font-weight:400;font-size:9.5px;color:var(--faint);letter-spacing:.4px;margin-top:3px}
+.ntb-mid{flex:1;min-width:0}
+.ntb-mid .nt-body{font-size:12.5px}
+.ntb-side{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:right;flex:0 0 auto;
+  min-width:132px;line-height:1.75;cursor:help}
+.ntb-side b{display:block;font-weight:500;color:var(--muted)}
+.ntb-none{font-size:12px;color:var(--faint);padding:14px 2px}
+.ntb-count{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:auto}
+
+/* ── states gallery ── */
+.states{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:12px}   /* the three age states are a progression — they have to sit on one row to read as one */
+.state{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:13px 15px}
+.state .sh{font-family:var(--mono);font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--accent);margin-bottom:9px}
+.state .sd{font-size:11.5px;color:var(--muted);line-height:1.6;margin-top:9px}
+
+/* ── the two closing prose blocks ── */
+.notegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.notecard{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:14px 16px}
+.notecard h3{font-size:12.5px;margin:0 0 8px;color:var(--text);font-weight:600;letter-spacing:.2px}
+.notecard p{margin:0;font-size:11.5px;line-height:1.65;color:var(--muted)}
+.notecard p+p{margin-top:8px}
+.notecard code{font-family:var(--mono);font-size:10.5px;color:var(--blue)}
+.todo{border-left:2px solid var(--blue)}
+.row2{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}
+.row2>.grow{flex:1 1 420px;min-width:0}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="mockhd">
+  <p class="eyebrow">xyz-monitor · markets + drawer + new tab · proposal</p>
+  <h1>What you already decided about this name</h1>
+  <p class="lede">The board tells you what a name is doing. It has never held <b>what you concluded about it</b> — the level you're waiting for, the reason you sized down, the thesis you bought in March. That lives in a text file or nowhere. This adds notes per ticker, written in the drawer, and a <b>post-it marker in the markets table</b> so you can see which names you've already thought about without opening any of them. The one idea that makes it more than a scratchpad: <b>a note is stamped with the price you wrote it at</b>, so the app can tell you the move since — and fade the marker as the note ages out of relevance.</p>
+  <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic prices and notes, nothing is wired to live data</span></p>
+</div>
+
+<div class="s-sec"><span class="t">1 · The markers</span> &nbsp;<span class="d">markets table — the ticker cell grows a post-it when a note exists</span></div>
+<p class="hint">Hover a post-it for the newest note and the move since it was written · click one to open the drawer below · <kbd>noted only</kbd> filters the table the way ★-only already does · drag <kbd>age the notes</kbd> to watch the markers decay.</p>
+
+<div class="frame">
+  <div class="s-ctrls">
+    <span class="lbl">scope</span>
+    <div class="seg" id="segScope"><button class="active" data-v="stocks">stocks</button><button data-v="crypto">crypto</button></div>
+    <span class="lbl">filter</span>
+    <div class="seg" id="segFilt"><button class="active" data-v="all">all</button><button data-v="noted">noted only</button><button data-v="star">★ only</button></div>
+    <span class="lbl" style="margin-left:6px">age the notes</span>
+    <input type="range" id="ageSlide" min="0" max="120" value="0" step="1" style="accent-color:var(--accent);width:150px">
+    <span class="nt-stamp" id="ageOut" style="margin-right:0">+0d</span>
+  </div>
+  <div class="wrap">
+    <table>
+      <thead><tr><th>Ticker</th><th>Price</th><th>24h</th><th>30d</th><th>Funding (APR)</th><th>Open Interest</th></tr></thead>
+      <tbody id="mkt"></tbody>
+    </table>
+  </div>
+  <div class="nt-empty" id="mktNone" hidden></div>
+</div>
+<p class="s-cap"><b>No new column.</b> The marker sits in the sticky ticker cell beside ★ and the E badge, for the reason <code style="font-family:var(--mono);font-size:11px;color:var(--blue)">styles.css</code> already writes down for the E badge: that cell is the only one always on screen, and a marker you have to scroll sideways to reach is not a marker. <b>The glyph is a shape, not a dot</b> — the folded corner is what makes it read as a written note rather than another status light at 11px, next to a rail, a star, a badge and a countdown that are all already competing in that cell. <b>Absence is drawn as absence:</b> a name with no note shows nothing at all, because a permanent hollow outline on every row would sit next to the ☆ and mean nothing.</p>
+
+<div class="s-sec"><span class="t">2 · The marker fades</span> &nbsp;<span class="d">a note is a claim made at a price, and it decays</span></div>
+<div class="frame">
+  <div class="states">
+    <div class="state">
+      <div class="sh">≤ 7 days — solid accent</div>
+      <div style="font-family:var(--mono);font-size:13.5px"><span class="tk">NVDA</span><span class="pit fresh" data-demo="1"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="body" d="M1 1 H11 V7.5 L7.5 11 H1 Z"/><path class="fold" d="M11 7.5 H7.5 V11 Z"/></svg></span></div>
+      <div class="sd">Written this week. Still describes the tape you're looking at.</div>
+    </div>
+    <div class="state">
+      <div class="sh">8–30 days — dimmed</div>
+      <div style="font-family:var(--mono);font-size:13.5px"><span class="tk">COIN</span><span class="pit warm" data-demo="1"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="body" d="M1 1 H11 V7.5 L7.5 11 H1 Z"/><path class="fold" d="M11 7.5 H7.5 V11 Z"/></svg></span></div>
+      <div class="sd">Still yours, but the name has had a month to disagree with you. Read it before you act on it.</div>
+    </div>
+    <div class="state">
+      <div class="sh">&gt; 30 days — outline</div>
+      <div style="font-family:var(--mono);font-size:13.5px"><span class="tk">VST</span><span class="pit cold" data-demo="1"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="body" d="M1 1 H11 V7.5 L7.5 11 H1 Z"/><path class="fold" d="M11 7.5 H7.5 V11 Z"/></svg></span></div>
+      <div class="sd">Old enough that it is history, not guidance. It is never deleted and never hidden — it just stops shouting.</div>
+    </div>
+    <div class="state">
+      <div class="sh">more than one — counted</div>
+      <div style="font-family:var(--mono);font-size:13.5px"><span class="tk">BTC</span><span class="pit fresh" data-demo="1"><svg viewBox="0 0 12 12" aria-hidden="true"><path class="body" d="M1 1 H11 V7.5 L7.5 11 H1 Z"/><path class="fold" d="M11 7.5 H7.5 V11 Z"/></svg><i class="pn">3</i></span></div>
+      <div class="sd">The count appears only past one, and the colour always tracks the <b>newest</b> note — three stale notes must not read as a live one.</div>
+    </div>
+  </div>
+  <p class="s-cap" style="margin-top:14px"><b>Why fade at all.</b> The failure mode of every notes feature is the note you wrote at $94 still reading as advice at $118. Age is the cheapest honest signal available, and it costs no extra data: the marker is bright while the note is probably still true, dim while it might be, and a hollow outline once it is a record rather than a plan. Nothing is ever auto-deleted — <b>the app dims your notes, it does not throw them away</b>. <b>The clock is calendar time, and only calendar time.</b> The alternative — scaling the fade by the name's own volatility, so a note on a 90%-vol perp ages faster than one on a 15%-vol utility — is rejected: see below. The 7d / 30d thresholds themselves are a starting proposal, not a finding.</p>
+</div>
+
+<div class="s-sec"><span class="t">3 · Writing one</span> &nbsp;<span class="d">the ticker drawer — where you already are when you have the thought</span></div>
+<p class="hint">Type a note and save it · the table above grows the marker immediately · <kbd>#tags</kbd> in the body become filters on the Notes tab · hover a note's price line for the arithmetic.</p>
+<div class="frame">
+  <div class="row2">
+    <div class="drawermock">
+      <div class="dhead" id="dwTicker">NVDA <span class="star on" style="font-size:16px">★</span></div>
+      <div class="dname" id="dwName">NVIDIA</div>
+      <div class="dsub" id="dwSub">NVDA · 118.42 · Information Technology</div>
+      <div class="nt-panel">
+        <div class="nt-head">
+          <div class="dsec">Notes</div>
+          <button class="nt-new" id="ntNew">＋ note</button>
+        </div>
+        <div class="nt-compose" id="ntCompose" hidden>
+          <textarea class="nt-box" id="ntBox" placeholder="What do you actually think about this name? A level, a reason, a rule for yourself. #tags work."></textarea>
+          <div class="nt-crow">
+            <span class="nt-stamp" id="ntStamp" title="the mark at the moment you save — frozen into the note, so the move since can be measured against what you were actually looking at">stamps at 118.42</span>
+            <button class="nt-btn ghost" id="ntCancel">cancel</button>
+            <button class="nt-btn" id="ntSave" disabled>save note</button>
+          </div>
+        </div>
+        <div id="ntList"></div>
+      </div>
+      <div class="dsec">90-day price</div>
+      <div class="nt-empty" style="padding-bottom:0">…the rest of the drawer is unchanged: sparkline, candles, series, ledger, news, metrics.</div>
+    </div>
+    <div class="grow">
+      <p class="s-cap" style="margin-top:0"><b>Notes sit above the charts, not at the bottom.</b> Everything else in the drawer is the server's read of the name. The note is yours, and it is the thing you want to hit <em>before</em> you re-derive an opinion from the same metrics that produced it last time. Placing it under the sparkline would make it a footnote to the data; placing it above makes the data the second opinion.</p>
+      <p class="s-cap"><b>Empty costs one line.</b> With no notes the panel is a single <span style="color:var(--muted)">＋ note</span> button and one line of muted text — it never occupies drawer height it hasn't earned, which is why it can afford to sit this high.</p>
+      <p class="s-cap"><b>The stamp is the price, not just the time.</b> Saving freezes the current mark into the note. That single field is what lets every later read say <span class="pos">+18.4% since</span> instead of just a date, turns the Notes tab into a record you can be wrong in front of, and costs one number per note.</p>
+      <p class="s-cap"><b>Editing keeps the original stamp.</b> An edited note shows <span style="color:var(--faint);font-family:var(--mono);font-size:10.5px">· edited</span> and still measures from the price you first wrote it at — the claim was made then. Rewriting the stamp would let you quietly move your own goalposts, which is the one thing a self-scoring record must not allow.</p>
+    </div>
+  </div>
+</div>
+
+<div class="s-sec"><span class="t">4 · The Notes tab</span> &nbsp;<span class="d">every note across every name, newest first</span></div>
+<p class="hint">Search the bodies · click a <kbd>#tag</kbd> to filter · click any row to open that ticker's drawer.</p>
+<div class="frame">
+  <div class="ntb-bar">
+    <input class="ntb-q" id="ntbQ" placeholder="search your notes…" autocomplete="off" spellcheck="false">
+    <div id="ntbTags" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    <span class="ntb-count" id="ntbCount"></span>
+  </div>
+  <div id="ntbList"></div>
+</div>
+<p class="s-cap"><b>A note outlives its market.</b> The last row is on a name that is no longer in the universe — a market that got delisted, renamed, or rotated out of the xyz dex. It is kept, greyed, and labelled, because the note is a record of what you thought, and a record that silently drops rows is not one. Notes are keyed by <code>coin</code> and displayed by ticker, so a rename moves the note with the market instead of orphaning it.</p>
+
+<div class="s-sec"><span class="t">5 · What this pins down</span></div>
+<div class="notegrid">
+  <div class="notecard">
+    <h3>Notes are content, not preferences</h3>
+    <p>The watchlist, layouts and column prefs live in <code>localStorage</code>, which is right: they are a <em>view</em>, and losing them costs you a re-click. A note is something a person sat and typed. Clearing a browser or opening the board on a phone must not lose it.</p>
+    <p>So notes are CONFIG-grade and server-side, exactly like <code>baskets.json</code>: written to <code>$DATA_DIR/notes.json</code> with the same atomic tmp-then-rename, warm-loaded on boot, surviving redeploys — and group-shared behind the same <code>isAdmin</code> write gate baskets already use.</p>
+  </div>
+  <div class="notecard">
+    <h3>The price stamp is the feature</h3>
+    <p>Without it this is a text box, and a text box is what the app is trying to replace. With it, every note carries the move since it was written, the markers can decay honestly, and the Notes tab becomes a plain-language ledger that sits next to the machine one.</p>
+    <p>It is also nearly free: the snapshot already holds the mark, so writing a note costs one extra number and reading it costs one subtraction.</p>
+  </div>
+  <div class="notecard">
+    <h3>Age is shown, never enforced</h3>
+    <p>The marker fades and the note grows a "written 94d ago" line. Nothing expires, nothing is archived, nothing prompts you to "review" anything. A stale note is still evidence about how you were thinking, which is the part worth keeping.</p>
+  </div>
+  <div class="notecard">
+    <h3>Notes age in days, not in volatility</h3>
+    <p>The tempting version scales the fade by the name's own vol, so a note on a 90%-vol perp greys out faster than one on a sleepy utility. It is rejected, for one reason: <b>the marker would then change when the market changed, not when anything about your note changed.</b> A note you wrote on Tuesday would brighten through Thursday because realised vol came in. A marker that moves on its own is not a marker.</p>
+    <p>Calendar time is also the unit you already think in. You remember writing something <em>last week</em>; nobody has ever recalled a thought in vol-adjusted units. And it needs no input beyond the timestamp — nothing to compute, nothing to be stale, nothing to explain in a tooltip.</p>
+  </div>
+  <div class="notecard">
+    <h3>One marker, three states, no new column</h3>
+    <p>The ticker cell already carries a session rail, a star, an E badge and a countdown microline. The post-it earns its place there by encoding three things in one 11px glyph — <b>exists</b>, <b>how fresh</b>, <b>how many</b> — and by being absent the rest of the time.</p>
+  </div>
+</div>
+
+<div class="s-sec"><span class="t">6 · What is missing before this ships</span></div>
+<div class="notegrid">
+  <div class="notecard todo">
+    <h3>The route does not exist</h3>
+    <p><code>GET /api/notes</code> and <code>POST /api/notes</code> (<code>{coin, body}</code> creates, <code>{id, body}</code> edits, <code>{id, drop:true}</code> deletes) — one route, verbs in the body, matching the shape <code>/api/baskets</code> already uses so the admin gate covers all of them at once. Storage is a solved problem in this repo; none of it is written for notes yet.</p>
+  </div>
+  <div class="notecard todo">
+    <h3>The table needs a digest, not the bodies</h3>
+    <p>Painting the markers must not cost a fetch per row. The snapshot should carry a tiny per-coin digest — <code>nt:{n, ts, px}</code>, three fields — enough for the glyph, its age class and the hover line. Full bodies stay behind <code>/api/notes</code> and load with the drawer.</p>
+  </div>
+  <div class="notecard todo">
+    <h3>Still open</h3>
+    <p>Where exactly the 7d / 30d thresholds sit. The axis is settled — see <em>Notes age in days</em> — but the two numbers are a starting proposal and want a few weeks of real notes before anyone defends them.</p>
+    <p>Should a note be attachable to a ledger claim, so "why I took this" and the scored outcome sit together? That is the natural next step and deliberately out of scope here.</p>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ── mock data ────────────────────────────────────────────────────────────────
+// Prices/changes are seeded synthetic, in the shape the snapshot already ships.
+const ROWS = {
+  stocks: [
+    {coin:"NVDA:XYZ", tk:"NVDA", nm:"NVIDIA", px:118.42, d1:1.84, d30:12.6, fund:14.2, oi:41.2e6, star:1, earn:0},
+    {coin:"OPENAI:XYZ", tk:"OPENAI", nm:"OpenAI", px:264.10, d1:-2.41, d30:31.8, fund:48.6, oi:88.4e6, star:1},
+    {coin:"COIN:XYZ", tk:"COIN", nm:"Coinbase", px:301.77, d1:3.12, d30:-8.4, fund:9.1, oi:12.9e6, star:1},
+    {coin:"HIMS:XYZ", tk:"HIMS", nm:"Hims & Hers", px:41.06, d1:-0.62, d30:22.9, fund:21.4, oi:6.1e6, earn:1},
+    {coin:"VST:XYZ", tk:"VST", nm:"Vistra", px:168.30, d1:0.44, d30:5.1, fund:6.8, oi:9.4e6},
+    {coin:"RKLB:XYZ", tk:"RKLB", nm:"Rocket Lab", px:24.88, d1:-1.15, d30:-3.7, fund:11.9, oi:4.8e6},
+    {coin:"MSTR:XYZ", tk:"MSTR", nm:"MicroStrategy", px:389.05, d1:4.02, d30:-11.2, fund:33.7, oi:27.6e6},
+    {coin:"LLY:XYZ", tk:"LLY", nm:"Eli Lilly", px:812.44, d1:0.21, d30:2.8, fund:3.4, oi:5.2e6}
+  ],
+  crypto: [
+    {coin:"BTC", tk:"BTC", nm:"Bitcoin", px:96420, d1:0.92, d30:7.4, fund:12.1, oi:1.24e9, star:1},
+    {coin:"ETH", tk:"ETH", nm:"Ethereum", px:3284.6, d1:1.44, d30:4.1, fund:9.8, oi:640e6},
+    {coin:"HYPE", tk:"HYPE", nm:"Hyperliquid", px:38.12, d1:-3.20, d30:18.7, fund:26.4, oi:210e6, star:1},
+    {coin:"SOL", tk:"SOL", nm:"Solana", px:184.90, d1:2.06, d30:-6.2, fund:15.5, oi:410e6},
+    {coin:"PURR", tk:"PURR", nm:"Purr", px:0.2841, d1:-5.80, d30:-22.4, fund:-8.2, oi:14e6}
+  ]
+};
+// A note: {id, coin, ts(days ago), px(mark when written), body, edited}
+let SEQ = 100;
+let NOTES = [
+  {id:++SEQ, coin:"NVDA:XYZ", ago:2, px:113.90, body:"Trimmed a third into the print. Re-add only on a hold above 118 with OI building underneath it — not on a gap that fades by the close. #size"},
+  {id:++SEQ, coin:"NVDA:XYZ", ago:19, px:104.20, body:"The whole sector is one trade again: check the SMH correlation before adding here, or I'm just buying the same exposure twice. #corr"},
+  {id:++SEQ, coin:"OPENAI:XYZ", ago:1, px:271.05, body:"Pre-IPO synthetic, so funding IS the story — 48% APR longs is the entire crowd standing on one side of the boat. Fade rallies until it normalises, never short into a squeeze. #funding #fade"},
+  {id:++SEQ, coin:"COIN:XYZ", ago:24, px:329.40, body:"Beta to BTC is doing the work here, not the exchange. If I want this exposure I'd rather own BTC directly and skip the earnings risk. #pairs"},
+  {id:++SEQ, coin:"HIMS:XYZ", ago:5, px:39.80, body:"Reaction study says this one expands ~2.4x its usual range on prints. Never hold size through an earnings date on it. #earnings #size"},
+  {id:++SEQ, coin:"VST:XYZ", ago:94, px:142.10, body:"Power-demand thesis, bought the story in the spring. Nothing has broken it yet. Revisit only if utilities RS rolls over on the RRG. #thesis"},
+  {id:++SEQ, coin:"MSTR:XYZ", ago:11, px:441.60, body:"Premium to NAV is the position, not the coin. When the premium compresses this falls faster than BTC and I always forget that. #premium"},
+  {id:++SEQ, coin:"BTC", ago:3, px:94100, body:"Weekly close above the range high is the only thing that changes my mind. Everything under it is chop and I keep paying for chop. #level"},
+  {id:++SEQ, coin:"BTC", ago:8, px:91800, body:"Funding went negative for two days and I did nothing. That was the entry. #funding"},
+  {id:++SEQ, coin:"BTC", ago:41, px:88250, body:"Note to self: stop sizing crypto off the equity book's vol. Different animal. #size"},
+  {id:++SEQ, coin:"HYPE", ago:6, px:33.40, body:"Own dex, own token, own reflexivity — this trades on xyz flow more than on anything macro. Watch OI, not the S&P. #thesis"},
+  {id:++SEQ, coin:"PURR", ago:33, px:0.4120, body:"Small and thin. Position sizing is the entire edge here; the chart is noise below a certain notional. #size"},
+  {id:++SEQ, coin:"FTM:XYZ", ago:57, px:0.7240, body:"Rotated out of the universe before I ever acted on this. Keeping the note — the reasoning still applies to the next thin name I get excited about. #thesis", gone:"FTM"}
+];
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[<>&"]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+const S = {scope:"stocks", filt:"all", agePlus:0, drawer:"NVDA:XYZ", tag:null, q:""};
+
+const rowFor = coin => ROWS.stocks.concat(ROWS.crypto).find(r => r.coin === coin) || null;
+const notesFor = coin => NOTES.filter(n => n.coin === coin).sort((a, b) => ageOf(a) - ageOf(b));
+const ageOf = n => n.ago + S.agePlus;
+// The three age classes the marker encodes. Thresholds are the proposal, not a finding.
+const ageCls = d => d <= 7 ? "fresh" : d <= 30 ? "warm" : "cold";
+const ageTxt = d => d === 0 ? "today" : d === 1 ? "yesterday" : d < 30 ? d + "d ago"
+  : d < 365 ? Math.round(d / 30) + "mo ago" : (d / 365).toFixed(1) + "y ago";
+const fmtPx = v => v == null ? "—" : v >= 1000 ? v.toLocaleString("en-US", {maximumFractionDigits:0})
+  : v >= 1 ? v.toFixed(2) : v.toFixed(4);
+const fmtUsd = v => v >= 1e9 ? "$" + (v / 1e9).toFixed(2) + "B" : v >= 1e6 ? "$" + (v / 1e6).toFixed(1) + "M" : "$" + Math.round(v / 1e3) + "K";
+const signed = (v, dp, suf) => `<span class="${v > 0 ? "pos" : v < 0 ? "neg" : "sec"}">${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}${suf}</span>`;
+// The move since the note was written — the whole reason the price stamp exists.
+const sinceOf = (n, r) => (!r || !n.px) ? null : (r.px - n.px) / n.px * 100;
+const PIT_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path class="body" d="M1 1 H11 V7.5 L7.5 11 H1 Z"/><path class="fold" d="M11 7.5 H7.5 V11 Z"/></svg>';
+const tagsOf = body => (body.match(/#[a-z0-9]+/gi) || []).map(t => t.slice(1).toLowerCase());   // key is the word, not the '#': chips and inline tags must filter on the same string
+const bodyHtml = body => esc(body).replace(/#[a-z0-9]+/gi, m => `<span class="nt-tag" data-tag="${esc(m.slice(1).toLowerCase())}">${m}</span>`);
+
+// ── 1 · the markers in the markets table ─────────────────────────────────────
+function pitHtml(r){
+  const ns = notesFor(r.coin);
+  if (!ns.length) return "";                        // absence drawn as absence
+  const newest = ns[0], d = ageOf(newest), since = sinceOf(newest, r);
+  const first = newest.body.split("\n")[0];
+  const head = first.length > 96 ? first.slice(0, 95) + "…" : first;
+  const t = `${ns.length} note${ns.length > 1 ? "s" : ""} · newest ${ageTxt(d)}\n"${head}"\n` +
+    `written at ${fmtPx(newest.px)}` + (since == null ? "" : ` · ${since >= 0 ? "+" : "−"}${Math.abs(since).toFixed(1)}% since`);
+  return `<span class="pit ${ageCls(d)}" tabindex="0" role="button" data-pit="${esc(r.coin)}" title="${esc(t)}">` +
+    PIT_SVG + (ns.length > 1 ? `<i class="pn">${ns.length}</i>` : "") + "</span>";
+}
+function renderMkt(){
+  let rows = ROWS[S.scope];
+  if (S.filt === "noted") rows = rows.filter(r => notesFor(r.coin).length);
+  if (S.filt === "star") rows = rows.filter(r => r.star);
+  $("mkt").innerHTML = rows.map(r => `<tr data-row="${esc(r.coin)}">
+    <td class="tkc"><span class="star${r.star ? " on" : ""}">${r.star ? "★" : "☆"}</span><span class="tk">${esc(r.tk)}</span>${r.earn ? '<i class="eb eb1" title="Earnings tomorrow">E</i>' : ""}${pitHtml(r)}</td>
+    <td class="px">${fmtPx(r.px)}</td><td>${signed(r.d1, 2, "%")}</td><td>${signed(r.d30, 1, "%")}</td>
+    <td class="${r.fund > 0 ? "neg" : "pos"}">${r.fund > 0 ? "+" : "−"}${Math.abs(r.fund).toFixed(1)}%</td>
+    <td class="sec">${fmtUsd(r.oi)}</td></tr>`).join("");
+  const none = $("mktNone");
+  none.hidden = rows.length > 0;
+  if (!rows.length) none.textContent = S.filt === "noted"
+    ? "No notes on any " + S.scope + " name yet — the filter says so instead of showing an empty table."
+    : "Nothing starred in this scope.";
+}
+
+// ── 3 · the drawer panel ─────────────────────────────────────────────────────
+function renderDrawer(){
+  const r = rowFor(S.drawer); if (!r) return;
+  $("dwTicker").innerHTML = esc(r.tk) + `<span class="star${r.star ? " on" : ""}" style="font-size:16px">${r.star ? "★" : "☆"}</span>`;
+  $("dwName").textContent = r.nm;
+  $("dwSub").textContent = r.coin + " · " + fmtPx(r.px);
+  $("ntStamp").textContent = "stamps at " + fmtPx(r.px);
+  const ns = notesFor(r.coin);
+  $("ntList").innerHTML = ns.length ? ns.map(n => {
+    const d = ageOf(n), since = sinceOf(n, r);
+    const sinceHtml = since == null ? "" :
+      `<span class="nt-since" title="the mark has moved from ${fmtPx(n.px)} (when you wrote this) to ${fmtPx(r.px)} now">` +
+      `wrote it at ${fmtPx(n.px)} · ${signed(since, 1, "% since")}</span>`;
+    return `<div class="nt-item ${ageCls(d) === "cold" ? "cold" : ""}">
+      <div class="nt-body">${bodyHtml(n.body)}</div>
+      <div class="nt-meta"><span class="age">${ageTxt(d)}</span>${sinceHtml}${n.edited ? "<span>· edited</span>" : ""}
+        <span class="nt-act"><button data-edit="${n.id}">edit</button><button class="del" data-del="${n.id}">delete</button></span></div></div>`;
+  }).join("") : `<div class="nt-empty">Nothing written on ${esc(r.tk)} yet. Notes are yours, kept on the server, and never expire — they only fade.</div>`;
+}
+let editing = null;
+function openCompose(id){
+  editing = id || null;
+  const n = id ? NOTES.find(x => x.id === id) : null;
+  $("ntCompose").hidden = false;
+  $("ntBox").value = n ? n.body : "";
+  $("ntSave").disabled = !$("ntBox").value.trim();
+  $("ntSave").textContent = n ? "save edit" : "save note";
+  const r = rowFor(S.drawer);
+  // An edit keeps the ORIGINAL stamp: the claim was made at that price, not this one.
+  $("ntStamp").textContent = n ? "keeps its original stamp of " + fmtPx(n.px) : "stamps at " + fmtPx(r.px);
+  $("ntBox").focus();
+}
+function closeCompose(){ $("ntCompose").hidden = true; $("ntBox").value = ""; editing = null; }
+$("ntNew").onclick = () => openCompose(null);
+$("ntCancel").onclick = closeCompose;
+$("ntBox").oninput = () => { $("ntSave").disabled = !$("ntBox").value.trim(); };
+$("ntBox").onkeydown = e => {
+  if (e.key === "Escape") closeCompose();
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") $("ntSave").click();
+};
+$("ntSave").onclick = () => {
+  const body = $("ntBox").value.trim(); if (!body) return;
+  if (editing){ const n = NOTES.find(x => x.id === editing); n.body = body; n.edited = true; }
+  else NOTES.unshift({id:++SEQ, coin:S.drawer, ago:-S.agePlus, px:rowFor(S.drawer).px, body});  // ago+agePlus = 0 → "today"
+  closeCompose(); renderAll();
+};
+$("ntList").onclick = e => {
+  const ed = e.target.closest("[data-edit]"), del = e.target.closest("[data-del]"), tag = e.target.closest("[data-tag]");
+  if (ed) return openCompose(+ed.dataset.edit);
+  if (del){ NOTES = NOTES.filter(n => n.id !== +del.dataset.del); return renderAll(); }
+  if (tag){ S.tag = tag.dataset.tag; renderTab(); $("ntbList").scrollIntoView({behavior:"smooth", block:"center"}); }
+};
+
+// ── 4 · the Notes tab ────────────────────────────────────────────────────────
+function renderTab(){
+  const tags = {};
+  NOTES.forEach(n => tagsOf(n.body).forEach(t => { tags[t] = (tags[t] || 0) + 1; }));
+  $("ntbTags").innerHTML = Object.keys(tags).sort((a, b) => tags[b] - tags[a] || a.localeCompare(b)).slice(0, 8)
+    .map(t => `<button class="tagchip${S.tag === t ? " on" : ""}" data-tag="${esc(t)}">#${esc(t)} <span class="sec">${tags[t]}</span></button>`).join("");
+  let list = NOTES.slice().sort((a, b) => ageOf(a) - ageOf(b));
+  if (S.tag) list = list.filter(n => tagsOf(n.body).includes(S.tag));
+  if (S.q) list = list.filter(n => (n.body + " " + (rowFor(n.coin) ? rowFor(n.coin).tk : n.gone || "")).toLowerCase().includes(S.q));
+  $("ntbCount").textContent = list.length + " of " + NOTES.length + " notes";
+  if (!list.length){ $("ntbList").innerHTML = `<div class="ntb-none">No note matches${S.tag ? " #" + esc(S.tag) : ""}${S.q ? ' containing "' + esc(S.q) + '"' : ""}.</div>`; return; }
+  let out = "", bucket = null;
+  list.forEach(n => {
+    const d = ageOf(n), cls = ageCls(d);
+    const b = d <= 1 ? "Today & yesterday" : d <= 7 ? "This week" : d <= 30 ? "This month" : d <= 90 ? "Older than a month" : "Older than a quarter";
+    if (b !== bucket){ out += `<div class="ntb-day">${b}</div>`; bucket = b; }
+    const r = rowFor(n.coin), since = sinceOf(n, r);
+    const side = r
+      ? `<b>${ageTxt(d)}</b>wrote it at ${fmtPx(n.px)}<br>now ${fmtPx(r.px)} · ${since == null ? "" : signed(since, 1, "%")}`
+      : `<b>${ageTxt(d)}</b>wrote it at ${fmtPx(n.px)}<br><span class="na">market gone</span>`;
+    const sideT = r ? "the mark has moved " + (since >= 0 ? "+" : "−") + Math.abs(since).toFixed(1) + "% since you wrote this"
+      : "this market is no longer in the universe, so there is no live price to measure against — the note is kept anyway";
+    out += `<div class="ntb-row ${r ? (cls === "cold" ? "cold" : "") : "gone"}" data-open="${esc(n.coin)}">
+      <div class="ntb-tk">${esc(r ? r.tk : n.gone)}<span class="pit ${cls}" style="cursor:inherit">${PIT_SVG}</span>
+        ${r ? "" : '<span class="sub">NOT IN UNIVERSE</span>'}</div>
+      <div class="ntb-mid"><div class="nt-body">${bodyHtml(n.body)}</div></div>
+      <div class="ntb-side" title="${esc(sideT)}">${side}</div></div>`;
+  });
+  $("ntbList").innerHTML = out;
+}
+$("ntbTags").onclick = e => { const b = e.target.closest("[data-tag]"); if (!b) return; S.tag = S.tag === b.dataset.tag ? null : b.dataset.tag; renderTab(); };
+$("ntbQ").oninput = e => { S.q = e.target.value.trim().toLowerCase(); renderTab(); };
+$("ntbList").onclick = e => {
+  const tag = e.target.closest("[data-tag]");
+  if (tag){ S.tag = S.tag === tag.dataset.tag ? null : tag.dataset.tag; return renderTab(); }
+  const row = e.target.closest("[data-open]"); if (!row) return;
+  const r = rowFor(row.dataset.open); if (!r) return;                       // a gone market has no drawer to open
+  S.scope = ROWS.crypto.includes(r) ? "crypto" : "stocks";
+  syncSeg("segScope", S.scope); S.drawer = r.coin; closeCompose(); renderAll();
+  $("ntNew").scrollIntoView({behavior:"smooth", block:"center"});
+};
+
+// ── wiring ───────────────────────────────────────────────────────────────────
+function syncSeg(id, v){ $(id).querySelectorAll("button").forEach(b => b.classList.toggle("active", b.dataset.v === v)); }
+function wireSeg(id, key, after){
+  $(id).querySelectorAll("button").forEach(b => b.onclick = () => { S[key] = b.dataset.v; syncSeg(id, S[key]); if (after) after(); renderAll(); });
+}
+wireSeg("segScope", "scope", () => {
+  S.filt = "all"; syncSeg("segFilt", "all");
+  const r = ROWS[S.scope].find(x => notesFor(x.coin).length) || ROWS[S.scope][0];
+  S.drawer = r.coin; closeCompose();
+});
+wireSeg("segFilt", "filt");
+$("ageSlide").oninput = e => {
+  S.agePlus = +e.target.value;
+  $("ageOut").textContent = "+" + S.agePlus + "d";
+  renderAll();
+};
+$("mkt").onclick = e => {
+  const row = e.target.closest("[data-row]"); if (!row) return;
+  S.drawer = row.dataset.row; closeCompose(); renderAll();
+  if (e.target.closest("[data-pit]")) $("ntNew").scrollIntoView({behavior:"smooth", block:"center"});
+};
+$("mkt").onkeydown = e => { const p = e.target.closest("[data-pit]"); if (p && (e.key === "Enter" || e.key === " ")){ e.preventDefault(); S.drawer = p.dataset.pit; closeCompose(); renderAll(); $("ntNew").scrollIntoView({behavior:"smooth", block:"center"}); } };
+
+function renderAll(){ renderMkt(); renderDrawer(); renderTab(); }
+renderAll();
+</script>

@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.21-13";
+const VERSION = "2026.08.24-01";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -871,6 +871,23 @@ async function main() {
     const b = req.body || {};
     const admin = isAdmin(req);
     const res = b.drop ? poller.dropBasket(b.name, admin) : poller.createBasket(b.name, b.members, admin);
+    reply.header("cache-control", "no-store").send(res);
+  });
+  // Per-ticker notes (build 2026.08.24-01). GET is the whole book — bodies included — because the
+  // Notes tab wants all of them and the drawer wants one name's worth; both are the same small
+  // payload and it changes only when somebody writes. The markets table never calls this: it paints
+  // its markers off the {n, ts, px} digest already riding the snapshot.
+  fastify.get("/api/notes", (req, reply) =>
+    serveKeyed(req, reply, "notes|" + poller.getNotesStamp(), () => poller.getNotesPayload(), { ts: 0, notes: [] }));
+  // One route, three verbs in the body: {coin, body} creates, {id, body} edits, {id, drop:true}
+  // deletes. Same shape as /api/baskets so the manifest gate covers the whole write surface at once.
+  // bodyLimit is generous because a note is prose — the per-note ceiling is enforced in the poller.
+  fastify.post("/api/notes", { bodyLimit: 16 * 1024 }, (req, reply) => {
+    const b = req.body || {};
+    const admin = isAdmin(req);
+    const res = b.drop ? poller.dropNote(b.id, admin)
+      : b.id != null ? poller.editNote(b.id, b.body, admin)
+      : poller.createNote(b.coin, b.body, admin);
     reply.header("cache-control", "no-store").send(res);
   });
   // Ratio pair candles: server-computed from hourly ratio closes (basket legs synthesized hourly),
