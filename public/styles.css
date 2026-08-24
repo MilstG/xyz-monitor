@@ -1905,3 +1905,96 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .whl-mine td:first-child{border-left:2px solid var(--accent)}
 .whl-tbar{display:inline-block;height:8px;background:var(--up);opacity:.65;border-radius:1px;vertical-align:middle}
 .whl-ipowarn{border-left:2px solid var(--down);padding:7px 11px;background:var(--panel2);margin:6px 0 10px;font-size:11px;color:var(--muted);line-height:1.65}
+
+
+/* ===== per-ticker notes: markets-table marker + drawer panel + Notes tab (build 2026.08.24-01) ===== */
+/* Marker is inside the sticky ticker cell — always visible, no new column, same reasoning as .eb.
+   Absent when the name has no note: a permanent hollow outline on every row would sit next to the
+   ☆ and mean nothing. The folded corner is what makes it read as a written note rather than one
+   more status light in a cell that already carries a rail, a star, a badge and a countdown. */
+.pit{display:inline-flex;align-items:center;gap:2px;margin-left:6px;vertical-align:1px;cursor:pointer;
+  line-height:1;transition:filter .12s}
+.pit:hover{filter:brightness(1.35)}
+.pit:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+.pit svg{width:11px;height:11px;display:block;overflow:visible}
+.pit .pbody{fill:currentColor}
+.pit .pfold{fill:currentColor;opacity:.42}
+/* Age is the point: a note is a claim made at a price, and it decays. Calendar time only —
+   a vol-scaled fade would move the marker when the MARKET changed, not when the note did. */
+.pit.fresh{color:var(--accent)}                       /* <= 7d  — solid accent */
+.pit.warm{color:var(--accent-dim)}                    /* 8-30d  — dimmed */
+.pit.cold{color:var(--faint)}                         /* > 30d  — outline only */
+.pit.cold .pbody{fill:none;stroke:currentColor;stroke-width:1.15}
+.pit.cold .pfold{fill:none;stroke:currentColor;stroke-width:1.15;opacity:1}
+.pit .pn{font-style:normal;font-family:var(--mono);font-size:8.5px;font-weight:600;color:var(--muted);
+  vertical-align:top;margin-left:1px}
+
+/* drawer panel */
+.nt-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.nt-head .dsec{flex:1}
+.nt-new{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--mono);
+  font-size:10.5px;padding:3px 9px;border-radius:5px;cursor:pointer;white-space:nowrap}
+.nt-new:hover{border-color:var(--accent-dim);color:var(--accent)}
+.nt-new:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.nt-compose{margin:2px 0 12px}
+.nt-compose[hidden]{display:none}
+.nt-box{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:7px;
+  padding:9px 11px;font-family:var(--mono);font-size:12px;line-height:1.6;resize:vertical;min-height:74px}
+.nt-box:focus{outline:none;border-color:var(--accent-dim)}
+.nt-box::placeholder{color:var(--faint)}
+.nt-crow{display:flex;align-items:center;gap:9px;margin-top:7px}
+.nt-stamp{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-right:auto;cursor:help}
+.nt-btn{background:var(--accent);color:#1a1205;border:none;border-radius:5px;font-family:var(--mono);font-size:11px;
+  font-weight:600;padding:5px 12px;cursor:pointer}
+.nt-btn:disabled{background:var(--panel2);color:var(--faint);cursor:not-allowed}
+.nt-btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--border);font-weight:400}
+.nt-btn.ghost:hover{color:var(--text)}
+.nt-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.nt-err{font-family:var(--mono);font-size:10.5px;color:var(--down);margin-top:6px;line-height:1.5}
+.nt-item{border-left:2px solid var(--accent-dim);background:var(--panel2);border-radius:0 7px 7px 0;
+  padding:9px 11px;margin-bottom:7px}
+.nt-item.cold{border-left-color:var(--faint)}
+.nt-body{font-size:12.5px;line-height:1.62;color:var(--text);white-space:pre-wrap;word-break:break-word}
+.nt-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:7px;
+  font-family:var(--mono);font-size:10px;color:var(--faint)}
+.nt-meta .age{color:var(--muted)}
+.nt-since{cursor:help}
+.nt-act{margin-left:auto;display:flex;gap:7px;opacity:0;transition:opacity .12s}
+.nt-item:hover .nt-act,.nt-item:focus-within .nt-act{opacity:1}
+.nt-act button{background:none;border:none;color:var(--faint);font-family:var(--mono);font-size:10px;cursor:pointer;padding:0}
+.nt-act button:hover{color:var(--text)}
+.nt-act button.del:hover{color:var(--down)}
+.nt-tag{color:var(--blue);cursor:pointer}
+.nt-empty{font-size:11.5px;color:var(--faint);line-height:1.6;padding:2px 0 4px}
+
+/* Notes tab */
+.ntb-bar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:14px}
+.ntb-q{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;
+  font-family:var(--mono);font-size:12px;min-width:230px}
+.ntb-q:focus{outline:none;border-color:var(--accent-dim)}
+.ntb-q::placeholder{color:var(--faint)}
+.tagchip{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:11px;border:1px solid var(--border);
+  background:transparent;color:var(--muted);cursor:pointer}
+.tagchip:hover{border-color:var(--accent-dim);color:var(--text)}
+.tagchip.on{border-color:var(--blue);background:rgba(111,147,201,.12);color:var(--blue)}
+.tagchip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.ntb-day{font-family:var(--mono);font-size:11px;letter-spacing:.6px;color:var(--muted);
+  margin:18px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.ntb-row{display:flex;align-items:flex-start;gap:14px;padding:10px 12px;background:var(--panel);
+  border-left:2px solid var(--accent-dim);margin-bottom:3px;cursor:pointer;border-radius:0 7px 7px 0}
+.ntb-row:hover{background:var(--panel2)}
+.ntb-row.cold{border-left-color:var(--faint)}
+.ntb-row.gone{border-left-color:var(--faint);opacity:.72;cursor:default}
+.ntb-tk{font-family:var(--mono);font-weight:600;font-size:13px;min-width:104px;display:flex;align-items:center;
+  gap:1px;flex:0 0 auto;flex-wrap:wrap}
+.ntb-tk .sub{flex:0 0 100%;font-weight:400;font-size:9.5px;color:var(--faint);letter-spacing:.4px;margin-top:3px}
+.ntb-mid{flex:1;min-width:0}
+.ntb-side{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:right;flex:0 0 auto;
+  min-width:132px;line-height:1.75;cursor:help}
+.ntb-side b{display:block;font-weight:500;color:var(--muted)}
+.ntb-none{font-size:12px;color:var(--faint);padding:14px 2px}
+.ntb-count{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:auto}
+@media (max-width:680px){
+  .ntb-row{flex-wrap:wrap;gap:8px}
+  .ntb-side{text-align:left;min-width:0}
+}

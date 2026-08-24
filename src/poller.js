@@ -1318,6 +1318,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         liq24: droll ? (droll.ll24 || 0) + (droll.sl24 || 0) : undefined,
         liqL24: droll ? droll.ll24 : undefined, liqS24: droll ? droll.sl24 : undefined,
         coin: r.coin, ticker: r.ticker, delisted: !!r.delisted, uni: r.uni,
+        // Notes digest (build 2026.08.24-01): {n, ts, px} — count, newest note's timestamp and
+        // the mark it was written at. Exactly what the ticker cell needs to paint the post-it
+        // and its age class; the bodies never ride the 15s poll. undefined when the name has
+        // no notes, so a row costs nothing until somebody writes on it.
+        nt: noteDigest(r.coin),
         // Signed so ONE metric expresses both sides: +4 fully stacked up, -4 fully stacked down.
         tscore: tb ? (tb.side === "long" ? tb.score : -tb.score) : undefined,
         e21d: (tb && tb.e21 > 0 && r.px > 0) ? rnd((r.px / tb.e21 - 1) * 100, 2) : undefined,
@@ -1400,7 +1405,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       // renders (the bell badge), and the snapshot object is FROZEN while the signature holds — so
       // shipping alertVer without signing it would hand every client a permanently stale sequence
       // exactly when the board is quiet, which is when alerts matter most.
-      + "#" + trigSeq;
+      + "#" + trigSeq
+      // Notes ride the signature for the same reason alertVer does: the digest is something the
+      // client RENDERS, and the snapshot object is frozen while the signature holds — so a note
+      // written on a quiet board would otherwise not surface its marker until an unrelated price
+      // moved. One counter busts it for every row at once.
+      + "#" + notesRev;
     if (snapshotCache && lastSnapSig === csig) return;   // nothing a client renders changed — keep the object
     lastSnapSig = csig; snapVer = Date.now();
     snapshotCache = {
@@ -9071,6 +9081,135 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   let basketsRev = 0;
   function persistBaskets() { if (store.saveBaskets) store.saveBaskets({ list: baskets }); basketsRev++; }
 
+  // ===== per-ticker notes (build 2026.08.24-01) =========================================
+  // A note is prose about a name plus the mark it was written at. That px stamp is the whole
+  // design: it is what lets every later read say "+18.4% since" instead of a bare date, and it
+  // is why a note can never be reconstructed after the fact — the price it was written at is
+  // gone the moment the tape moves. Hence CONFIG-grade storage and a hard cap, not a cache.
+  const NOTE_MAX_LEN = 2000;          // one note's body
+  const NOTE_MAX_PER_COIN = 200;
+  const NOTE_MAX_TOTAL = 5000;        // whole-file ceiling; the volume is small and shared
+  const NOTE_TAG_RE = /#[a-z0-9][a-z0-9_-]{0,23}/gi;
+  // Tags are DERIVED from the body at read time, never stored alongside it. One source of truth:
+  // editing the body to drop a #tag drops the tag, with no second field to fall out of sync.
+  function noteTags(body) {
+    const out = [];
+    for (const m of String(body || "").match(NOTE_TAG_RE) || []) {
+      const t = m.slice(1).toLowerCase();
+      if (!out.includes(t)) out.push(t);
+    }
+    return out;
+  }
+  // Bodies are stored verbatim (the client escapes at render, as it does for every other
+  // server string) but control characters are stripped at the WRITE — they cannot survive a
+  // round trip through JSON + HTML usefully, and a stored \u0000 is a landmine for every later
+  // reader. Tabs and newlines are kept: people format notes with them.
+  function noteClean(body) {
+    return String(body == null ? "" : body)
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+      .slice(0, NOTE_MAX_LEN)
+      .trim();
+  }
+  function notesSanitize(raw) {
+    const list = raw && Array.isArray(raw.list) ? raw.list : [];
+    const out = [];
+    for (const n of list) {
+      if (!n || typeof n !== "object") continue;
+      const coin = String(n.coin || "").trim();
+      const body = noteClean(n.body);
+      const id = +n.id;
+      if (!coin || !body || !Number.isFinite(id)) continue;
+      out.push({
+        id, coin, body,
+        at: Number.isFinite(+n.at) ? +n.at : Date.now(),
+        // px may legitimately be absent: a note written while the mark was unavailable is still
+        // a note. Everything downstream treats a null stamp as "no move to measure", never zero.
+        px: Number.isFinite(+n.px) && +n.px > 0 ? +n.px : null,
+        edited: n.edited ? +n.edited || 1 : 0,
+        owner: "admin",
+      });
+      if (out.length >= NOTE_MAX_TOTAL) break;
+    }
+    // Newest first is the order every consumer wants; sort once here rather than at each read.
+    out.sort((a, b) => b.at - a.at);
+    return out;
+  }
+  let notes = notesSanitize(store.loadNotes ? store.loadNotes() : null);
+  let notesRev = 0;
+  // Highest id ever seen +1. Derived from the file rather than persisted separately, so a
+  // hand-edited notes.json can never hand out an id that is already taken.
+  let noteSeq = notes.reduce((m, n) => Math.max(m, n.id), 0) + 1;
+  function persistNotes() { if (store.saveNotes) store.saveNotes({ list: notes }); notesRev++; rebuildNotesIdx(); }
+  // coin -> {n, ts, px} digest, rebuilt on every write. The markets table needs exactly these
+  // three fields per row to paint a marker (does it exist, how old is the newest, what was it
+  // written at) and nothing else — so the snapshot carries the digest and the bodies stay behind
+  // /api/notes, where they load once with the drawer instead of on every 15s poll.
+  let notesIdx = new Map();
+  function rebuildNotesIdx() {
+    const m = new Map();
+    for (const n of notes) {
+      const cur = m.get(n.coin);
+      if (!cur) m.set(n.coin, { n: 1, ts: n.at, px: n.px });
+      else { cur.n++; if (n.at > cur.ts) { cur.ts = n.at; cur.px = n.px; } }
+    }
+    notesIdx = m;
+  }
+  rebuildNotesIdx();
+  function noteDigest(coin) { return notesIdx.get(coin); }
+  function getNotesPayload() {
+    return { ts: Date.now(), rev: notesRev, maxLen: NOTE_MAX_LEN, total: notes.length,
+             notes: notes.map((n) => ({ id: n.id, coin: n.coin, body: n.body, at: n.at, px: n.px, edited: !!n.edited, tags: noteTags(n.body) })) };
+  }
+  function getNotesStamp() { return notesRev + "|" + notes.length; }
+  // Live mark for the stamp. Reads the SAME row object the snapshot ships, so the price frozen
+  // into a note is by construction the price the operator was looking at when they typed it.
+  function noteMarkFor(coin) {
+    const r = rows.get(coin);
+    return r && !r.delisted && Number.isFinite(r.px) && r.px > 0 ? r.px : null;
+  }
+  function createNote(coin, body, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "not-admin" };
+    const c = String(coin || "").trim();
+    if (!c) return { ok: false, error: "no coin given" };
+    // A note may be written on a name that has since left the universe (that is the point of
+    // keeping them), but a NEW note has to be about something the board actually knows.
+    if (!rows.has(c)) return { ok: false, error: `unknown market “${c}”` };
+    const b = noteClean(body);
+    if (!b) return { ok: false, error: "note is empty" };
+    if (notes.length >= NOTE_MAX_TOTAL) return { ok: false, error: `note cap reached (${NOTE_MAX_TOTAL})` };
+    const mine = notes.filter((n) => n.coin === c).length;
+    if (mine >= NOTE_MAX_PER_COIN) return { ok: false, error: `note cap reached on this name (${NOTE_MAX_PER_COIN})` };
+    const def = { id: noteSeq++, coin: c, body: b, at: Date.now(), px: noteMarkFor(c), edited: 0, owner: "admin" };
+    notes.unshift(def);
+    persistNotes();
+    // The id and the name, never the body: a note is the operator's own prose and logs travel.
+    log(`note ${def.id} written on ${c}`);
+    return { ok: true, note: { id: def.id, coin: def.coin, body: def.body, at: def.at, px: def.px, edited: false, tags: noteTags(def.body) } };
+  }
+  // Editing rewrites the body and NOTHING else. The `at` and `px` stamps stay at their original
+  // values on purpose: the claim was made then, at that price, and a record whose author can
+  // quietly move its own goalposts is not a record. `edited` says the text changed.
+  function editNote(id, body, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "not-admin" };
+    const n = notes.find((x) => x.id === +id);
+    if (!n) return { ok: false, error: "no such note" };
+    const b = noteClean(body);
+    if (!b) return { ok: false, error: "note is empty" };
+    if (b === n.body) return { ok: true, note: { id: n.id, coin: n.coin, body: n.body, at: n.at, px: n.px, edited: !!n.edited, tags: noteTags(n.body) } };
+    n.body = b; n.edited = Date.now();
+    persistNotes();
+    return { ok: true, note: { id: n.id, coin: n.coin, body: n.body, at: n.at, px: n.px, edited: true, tags: noteTags(n.body) } };
+  }
+  function dropNote(id, isAdmin) {
+    if (!isAdmin) return { ok: false, error: "not-admin" };
+    const i = notes.findIndex((x) => x.id === +id);
+    if (i < 0) return { ok: false, error: "no such note" };
+    const [n] = notes.splice(i, 1);
+    persistNotes();
+    log(`note ${n.id} on ${n.coin} deleted`);
+    return { ok: true, id: n.id, coin: n.coin };
+  }
+
   function basketScopeTickers(scope) {
     const s = new Set();
     for (const r of rows.values()) {
@@ -12831,6 +12970,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     getBasketsStamp,
     createBasket,
     dropBasket,
+    getNotesPayload,
+    getNotesStamp,
+    createNote,
+    editNote,
+    dropNote,
     getRatio,
     setTgChannels,
     tgIngestNow: (html, ch) => {   // harness: the full per-item pipeline (parse -> attribute -> merge -> payload) without network
