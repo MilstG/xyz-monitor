@@ -240,7 +240,7 @@ td.tkc{position:relative}
       <div class="sd">The count appears only past one, and the colour always tracks the <b>newest</b> note — three stale notes must not read as a live one.</div>
     </div>
   </div>
-  <p class="s-cap" style="margin-top:14px"><b>Why fade at all.</b> The failure mode of every notes feature is the note you wrote at $94 still reading as advice at $118. Age is the cheapest honest signal available, and it costs no extra data: the marker is bright while the note is probably still true, dim while it might be, and a hollow outline once it is a record rather than a plan. Nothing is ever auto-deleted — <b>the app dims your notes, it does not throw them away</b>. Thresholds (7d / 30d) are a starting proposal, not a finding.</p>
+  <p class="s-cap" style="margin-top:14px"><b>Why fade at all.</b> The failure mode of every notes feature is the note you wrote at $94 still reading as advice at $118. Age is the cheapest honest signal available, and it costs no extra data: the marker is bright while the note is probably still true, dim while it might be, and a hollow outline once it is a record rather than a plan. Nothing is ever auto-deleted — <b>the app dims your notes, it does not throw them away</b>. <b>The clock is calendar time, and only calendar time.</b> The alternative — scaling the fade by the name's own volatility, so a note on a 90%-vol perp ages faster than one on a 15%-vol utility — is rejected: see below. The 7d / 30d thresholds themselves are a starting proposal, not a finding.</p>
 </div>
 
 <div class="s-sec"><span class="t">3 · Writing one</span> &nbsp;<span class="d">the ticker drawer — where you already are when you have the thought</span></div>
@@ -307,6 +307,11 @@ td.tkc{position:relative}
     <p>The marker fades and the note grows a "written 94d ago" line. Nothing expires, nothing is archived, nothing prompts you to "review" anything. A stale note is still evidence about how you were thinking, which is the part worth keeping.</p>
   </div>
   <div class="notecard">
+    <h3>Notes age in days, not in volatility</h3>
+    <p>The tempting version scales the fade by the name's own vol, so a note on a 90%-vol perp greys out faster than one on a sleepy utility. It is rejected, for one reason: <b>the marker would then change when the market changed, not when anything about your note changed.</b> A note you wrote on Tuesday would brighten through Thursday because realised vol came in. A marker that moves on its own is not a marker.</p>
+    <p>Calendar time is also the unit you already think in. You remember writing something <em>last week</em>; nobody has ever recalled a thought in vol-adjusted units. And it needs no input beyond the timestamp — nothing to compute, nothing to be stale, nothing to explain in a tooltip.</p>
+  </div>
+  <div class="notecard">
     <h3>One marker, three states, no new column</h3>
     <p>The ticker cell already carries a session rail, a star, an E badge and a countdown microline. The post-it earns its place there by encoding three things in one 11px glyph — <b>exists</b>, <b>how fresh</b>, <b>how many</b> — and by being absent the rest of the time.</p>
   </div>
@@ -323,8 +328,8 @@ td.tkc{position:relative}
     <p>Painting the markers must not cost a fetch per row. The snapshot should carry a tiny per-coin digest — <code>nt:{n, ts, px}</code>, three fields — enough for the glyph, its age class and the hover line. Full bodies stay behind <code>/api/notes</code> and load with the drawer.</p>
   </div>
   <div class="notecard todo">
-    <h3>Open questions</h3>
-    <p>Are the 7d / 30d thresholds right, or should the fade key off the name's own volatility — a 30d-old note on a 15%-vol utility is fresher than a 5-day-old one on a 90%-vol perp?</p>
+    <h3>Still open</h3>
+    <p>Where exactly the 7d / 30d thresholds sit. The axis is settled — see <em>Notes age in days</em> — but the two numbers are a starting proposal and want a few weeks of real notes before anyone defends them.</p>
     <p>Should a note be attachable to a ledger claim, so "why I took this" and the scored outcome sit together? That is the natural next step and deliberately out of scope here.</p>
   </div>
 </div>
