@@ -6190,7 +6190,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const buf = Buffer.from(await res.arrayBuffer());
       const head = buf.subarray(0, 64).toString("latin1");
       const isPdf = buf.subarray(0, 5).toString("latin1") === "%PDF-";
-      const out = { ok: true, url, status: res.status, ct, bytes: buf.length, isPdf,
+      const out = { ok: true, build: version, url, status: res.status, ct, bytes: buf.length, isPdf,
         head: JSON.stringify(head), producer: null, runs: 0, rows: 0, tx: 0, sampleRuns: [], sampleRows: [], sampleTx: [] };
       if (!isPdf) return out;
       const pm = buf.toString("latin1").match(/\/(Producer|Creator)\s*\(([^)]{0,60})\)/);
@@ -6275,7 +6275,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   }
   function congressStatus() {
     const last = +(store.congressMeta && store.congressMeta("lastSync")) || 0;
-    return { ready: !!(store.congressReady && store.congressReady()),
+    return { build: version, ready: !!(store.congressReady && store.congressReady()),
       busy: congressBusy, progress: congressProgress, lastSync: last || null,
       lastError: congressLastError,
       counts: (store.congressCounts && store.congressCounts()) || null,
