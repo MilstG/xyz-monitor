@@ -2053,3 +2053,6 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 /* A ticker resolved from the issuer NAME rather than written on the form: a weaker claim than the
    filer's own parenthetical, so it is marked rather than presented identically. */
 .cng-tk.derived{border-bottom:1px dotted var(--accent-dim)}
+/* An asset with no ticker IN EXISTENCE (municipal bond, farm, real property) reads differently
+   from one the resolver simply missed: the first is the data's shape, the second is a gap. */
+.cng-un.na{font-style:italic;opacity:.75}
