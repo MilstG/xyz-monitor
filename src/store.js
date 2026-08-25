@@ -1126,6 +1126,18 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
     // Starred members. Keyed on the member string exactly as the Clerk's index spells it, which is
     // the only identifier a filing actually carries — there is no CIK here, and normalising the
     // name would invent an identity the source does not have.
+    // One filing for a member, preferring the ones that need explaining: read-but-empty first, then
+    // still-queued, then anything. Ordering by what is BROKEN is the point — a filing that parsed
+    // cleanly teaches nothing about why the others did not.
+    congressFilerDoc(q) { const d = this.openCongress(); if (!d) return null;
+      const toks = congressTokens(q);
+      if (!toks.length) return null;
+      const where = toks.map(() => "member LIKE ?").join(" AND ");
+      try { return d.prepare(`SELECT docId, member, filed, parsed, nTx FROM filing
+        WHERE type='ptr' AND ${where}
+        ORDER BY (CASE WHEN parsed=1 AND COALESCE(nTx,0)=0 THEN 0 WHEN parsed=0 THEN 1 ELSE 2 END),
+          filed DESC LIMIT 1`).get(...toks.map((t) => "%" + t + "%")) || null; }
+      catch (_) { return null; } },
     congressWatchList() { const d = this.openCongress(); if (!d) return [];
       try { return d.prepare("SELECT member, at, notify FROM watch ORDER BY member").all(); } catch (_) { return []; } },
     congressWatchSet(member, on, notify) { const d = this.openCongress(); if (!d) return false;

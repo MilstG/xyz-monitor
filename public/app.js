@@ -13201,7 +13201,7 @@ function cngRender(){
       `<span data-tip="${esc(x.n+' PTR filing(s) '+(x.yr0===x.yr1?'in '+x.yr0:'between '+x.yr0+' and '+x.yr1)+', last filed '+(x.last||'?'))}">`
       +`<b>${esc(x.member)}</b> ${x.n} PTR`
       +(x.done?` \u00b7 <span class="pos">${x.done} with transactions</span>`:'')
-      +(x.empty?` \u00b7 <span class="neg" data-tip="these filings were read \u2014 text came out of the PDF \u2014 but the parser recognized no transaction rows in them, so there is nothing to show in the table. That is a parser gap, not an empty filing. Diagnose one with: congress diag ${esc(x.emptyDoc||'')}">${x.empty} read but no rows recognized</span>`:'')
+      +(x.empty?` \u00b7 <span class="neg" data-tip="these filings were read \u2014 text came out of the PDF \u2014 but the parser recognized no transaction rows in them, so there is nothing to show in the table. That is a parser gap, not an empty filing. Diagnose one with: congress diag ${esc(x.emptyDoc||'')}">${x.empty} read but no rows recognized</span>${x.emptyDoc?` <span class="cng-diaghint">congress diag ${esc(x.emptyDoc)}</span>`:''}`:'')
       +(x.queued?` \u00b7 <span class="amber" data-tip="found in the index, not read yet. Terminal: congress parse">${x.queued} queued</span>`:'')
       +(x.unreadable?` \u00b7 <span class="neg" data-tip="photographed paper filings. There is no OCR in this lane, so these can never yield transactions.">${x.unreadable} scanned</span>`:'')
       +`</span>`).join('')}</div>`;

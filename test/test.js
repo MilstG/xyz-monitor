@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-22"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-23"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,37 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -23: diag takes a member name, and picks the filing that needs explaining", async () => {
+  // Production: "Khanna, Rohit · 43 PTR · 38 read but no rows recognized · 5 scanned" — every one of
+  // one member's filings failing is a layout the parser does not know, and the useful question is
+  // "show me one of HIS". Requiring a doc id put a hunt between the symptom and its cause, and a
+  // filing that parsed cleanly teaches nothing about why the others did not.
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congressC-"));
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, congressGap: 0 });
+  const F = (id, member, filed, parsed, nTx) => ({ id, chamber: "H", docId: id.slice(2), yr: 2026,
+    member, lname: member.split(",")[0], fname: "", suffix: "", state: "CA", dist: "17", type: "ptr",
+    typeRaw: "P", filed, url: "https://x/" + id.slice(2) + ".pdf", amends: null, parsed, nTx });
+  store.congressUpsertFilings([
+    F("H:41000", "Khanna, Rohit", "2026-08-01", 1, 4),      // parsed fine — nothing to learn here
+    F("H:41001", "Khanna, Rohit", "2026-08-20", 1, 0),      // read but empty — THIS is the one
+    F("H:41002", "Khanna, Rohit", "2026-08-10", 0, null),   // still queued
+    F("H:41003", "Pelosi, Nancy", "2026-08-21", 1, 0),
+  ]);
+  const pick = store.congressFilerDoc("khanna");
+  assert.equal(pick.docId, "41001", "the read-but-empty filing is preferred over one that parsed");
+  assert.equal(store.congressFilerDoc("rohit khanna").docId, "41001", "name order does not matter here either");
+  assert.equal(store.congressFilerDoc("pelosi").docId, "41003");
+  assert.equal(store.congressFilerDoc("nobody"), null, "and an unknown member is null, not a wrong filing");
+  // The panel prints the doc id rather than burying it in a tooltip.
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/congress diag \$\{esc\(x\.emptyDoc\)\}/.test(app), "the command to run is visible, not hovered for");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -22: a backfill must not notify — the age guard failed OPEN twice over", async () => {
   // Reported from production: notifications kept arriving for OLD filings as the backfill filled
