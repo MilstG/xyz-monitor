@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.24-31";
+const VERSION = "2026.08.25-32";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1171,6 +1171,7 @@ async function main() {
       return { ok: true, started: 1, note: "OCR run started \u2014 seconds per page, so this is slow by nature; progress in the ops log" }; }
     if (op === "diag") return poller.congressDiagNow(String(b.doc || ""));
     if (op === "requeue") return poller.congressRequeueNow(b.all ? "all" : null);
+    if (op === "reticker") return poller.congressRetickerNow(+b.n || undefined);
     if (op === "watch") return poller.congressWatchSet(String(b.member || ""), b.on !== false, b.notify !== false);
     if (op === "backfill") { poller.congressBackfillNow(+b.years || undefined).catch(() => {});
       return { ok: true, started: 1, note: "backfill started \u2014 one prior year at a time, progress in the ops log" }; }

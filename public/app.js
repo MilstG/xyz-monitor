@@ -13059,6 +13059,12 @@ async function termCongress(args){
     const r=await cngPost({op:'backfill',years:+(args[1]||0)||undefined});
     return r&&r.ok?termOut(`<span class="pos">backfill started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
   }
+  if(sub==='reticker'){
+    const r=await cngPost({op:'reticker',n:+args[1]||undefined});
+    if(!r||!r.ok)return termErr(tesc((r&&r.error)||'failed'));
+    const ex=(r.sample||[]).length?`<div class="tp-trans" style="margin-top:4px">${tesc(r.sample.join(' \u00b7 '))}</div>`:'';
+    return termOut(`<span class="pos">${r.fixed}</span> of ${r.scanned} unresolved row(s) now carry a ticker \u00b7 <span class="tp-trans">${r.still} still name-only</span>${ex}<div class="tp-trans" style="margin-top:4px">server build ${tesc(r.build||'?')}</div>`);
+  }
   if(sub==='requeue'){
     const r=await cngPost({op:'requeue',all:(args[1]||'')==='all'});
     return r&&r.ok?termOut(`<span class="pos">${r.requeued} filing(s) requeued</span> <span class="tp-trans">\u00b7 run <b>congress parse</b> to work them again</span>`):termErr(tesc((r&&r.error)||'failed'));
@@ -13093,7 +13099,7 @@ async function termCongress(args){
   // Anything that looks like a verb is a verb, even one this build does not implement — otherwise
   // 'congress ocr 20' answers as a rollup for a ticker called OCR, which is a different question
   // wearing the same words. Only a lone token that is NOT a verb is treated as a symbol.
-  const CNG_VERBS=['status','ingest','backfill','parse','ocr','diag','requeue','watch','unwatch','watchlist','feed','help'];
+  const CNG_VERBS=['status','ingest','backfill','parse','ocr','diag','requeue','reticker','watch','unwatch','watchlist','feed','help'];
   if(CNG_VERBS.includes(sub)) return termErr(`congress ${tesc(sub)} is not available in this build (${tesc(state.build||'?')}) \u2014 it may need a deploy`);
   if(args.length>1) return termErr(`unknown congress command \u201c${tesc(sub)}\u201d \u2014 try: congress status | parse | ocr | diag | feed | watch <member>`);
   if(/^[A-Za-z.]{1,6}$/.test(sub)){
@@ -13104,7 +13110,7 @@ async function termCongress(args){
     const body=R.members.map(m=>`  ${tpad(tesc(m.member.slice(0,24)),25)} ${tpad(String(m.n),3,true)} <span class="${m.buys>m.sells?'pos':m.sells>m.buys?'neg':'sec'}">${tpad(m.buys+'b/'+m.sells+'s',8)}</span> ${tpad(m.medLag==null?'\u2014':m.medLag+'d',6,true)} ${tpad('\u2265 '+money(m.floor),14,true)} ${tesc(m.last||'')}`).join('\n');
     return termOut(`<span class="tp-hd">${tesc(R.ticker)} \u00b7 congressional flow</span> <span class="tp-trans">\u00b7 ${R.filings} transaction(s) \u00b7 ${R.buys} buy / ${R.sells} sell \u00b7 \u2265 ${money(R.floor)} disclosed floor</span>\n${body}\n<span class="tp-trans">\u2265 sums the LOW end of every disclosed band \u2014 a hard floor, never an estimate of the real total</span>`);
   }
-  return termErr('usage: congress status | ingest [year] | backfill [years] | parse [n] | ocr [n] | diag [docId|member] | requeue [all] | watch/unwatch <member> | watchlist | feed | <TICKER>');
+  return termErr('usage: congress status | ingest [year] | backfill [years] | parse [n] | ocr [n] | diag [docId|member] | requeue [all] | reticker [n] | watch/unwatch <member> | watchlist | feed | <TICKER>');
 }
 // ---- CONGRESS panel (build 2026.08.24-06) -----------------------------------------------------
 // The PTR feed, sorted by FILING date because that is the moment the information became public —

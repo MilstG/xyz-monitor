@@ -4780,6 +4780,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   let whalePolling = false;
   const whaleLastPoll = new Map();               // cik -> ts of last submissions check
   let whaleNameMap = null, whaleNameMapAt = 0;   // normalized issuer name -> ticker (from the SEC company map)
+  let whaleSymSet = null;                       // every symbol the SEC company map knows, for confirming a curated ticker
   function whaleBump() { whaleVer = Date.now(); }
   function whalePersist() {
     store.saveWhale && store.saveWhale({ ts: Date.now(), watch: whaleState.watch,
@@ -4834,6 +4835,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (whaleNameMap && now - whaleNameMapAt < FUND_TTL) return whaleNameMap;
     const maps = await ensureCikMaps();
     if (!maps) return whaleNameMap;   // stale beats empty; null on first miss means name-only rows
+    whaleSymSet = new Set(maps.co.keys());
     const m = new Map(), dead = new Set();
     for (const [sym, e] of maps.co) {
       if (!e || !e.name) continue;
@@ -5893,7 +5895,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // "CrowdStrike Holdings, Inc. - Class A Common Stock" is the issuer plus a description of the
   // instrument. whaleNameKey strips corporate suffixes but not that tail, so it comes off here —
   // conservatively, from the END only, so the issuer's own words are never touched.
-  const CONGRESS_TAIL = /\s*(?:-|\u2013|\u2014)?\s*(?:class\s+[a-z]\b|common\s+stock|common\s+shares?|ordinary\s+shares?|capital\s+stock|depositary\s+(?:shares?|receipts?)|american\s+depositary\s+(?:shares?|receipts?)|adr|ads|units?|stock|shares?|inc\.?|corp\.?|company)\s*$/i;
+  const CONGRESS_TAIL = /\s*(?:-|\u2013|\u2014)?\s*(?:class\s+[a-z]\b|common\s+stock|common\s+shares?|ordinary\s+shares?|capital\s+stock|depositary\s+(?:shares?|receipts?)|american\s+depositary\s+(?:shares?|receipts?)|adr|ads|units?|common|capital|stock|shares?|inc\.?|corp\.?|company)\s*$/i;
   function congressAssetName(asset) {
     let t = String(asset || "").replace(/\([^)]*\)/g, " ").replace(/\[[A-Z]{2}\]/g, " ")
       .replace(/\s+/g, " ").trim();
@@ -5913,20 +5915,71 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // then the full issuer name, then the name with generic tail words removed one at a time. Every
   // lookup goes through the SAME collision-safe map, so an ambiguous name resolves to nothing at
   // any depth rather than to a coin flip.
-  function congressResolve(asset, tmap) {
+  // A filing names an issuer more briefly than the SEC does: "Taiwan Semiconductor" against
+  // "Taiwan Semiconductor Manufacturing Company Ltd". A PREFIX match closes that, but only when it
+  // is unique — if two companies share the opening words, it resolves to neither, and a single word
+  // may never prefix-match at all, or "Apple" would swallow "Apple Hospitality".
+  let congressPrefixKeys = null, congressPrefixFor = null;
+  function congressPrefixHit(key, tmap) {
+    if (!key || key.length < 10 || key.split(" ").length < 2) return null;
+    if (congressPrefixFor !== tmap) { congressPrefixKeys = [...tmap.keys()].sort(); congressPrefixFor = tmap; }
+    const keys = congressPrefixKeys;
+    let lo = 0, hi = keys.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (keys[mid] < key) lo = mid + 1; else hi = mid; }
+    let found = null;
+    for (let i = lo; i < keys.length && keys[i].startsWith(key); i++) {
+      if (keys[i] !== key && keys[i][key.length] !== " ") continue;   // a word boundary, not a substring
+      if (found) return null;                                          // two candidates: resolve to neither
+      found = keys[i];
+    }
+    return found ? tmap.get(found) : null;
+  }
+  // A DUAL-CLASS issuer files under one name for two symbols, so the collision-safe map — doing
+  // exactly what it should — evicts the name entirely and "Alphabet Inc. - Class C Capital Stock"
+  // resolves to nothing. The class letter the filer WROTE is the missing bit, and it is not
+  // something the SEC's name file carries: GOOGL and GOOG appear there under the identical string
+  // "Alphabet Inc.". So it is supplied here, as exact verified pairs and nothing else. This is not
+  // fuzzy matching creeping back in — no entry is ever inferred, and every one is confirmed against
+  // the SEC's own symbol list before it is used, so a stale or mistyped row resolves to nothing
+  // rather than to a wrong ticker.
+  const CONGRESS_CLASS = new Map([
+    ["ALPHABET A", "GOOGL"], ["ALPHABET C", "GOOG"],
+    ["FOX A", "FOXA"], ["FOX B", "FOX"],
+    ["NEWS A", "NWSA"], ["NEWS B", "NWS"],
+    ["BERKSHIRE HATHAWAY A", "BRK-A"], ["BERKSHIRE HATHAWAY B", "BRK-B"],
+    ["UNDER ARMOUR A", "UAA"], ["UNDER ARMOUR C", "UA"],
+    ["ZILLOW A", "ZG"], ["ZILLOW C", "Z"],
+  ]);
+  function congressClassHit(asset, nm, symset) {
+    const m = /\bclass\s+([A-Z])\b/i.exec(String(asset || ""));
+    if (!m) return null;
+    const sym = CONGRESS_CLASS.get(whaleNameKey(nm) + " " + m[1].toUpperCase());
+    if (!sym) return null;
+    // Confirmed against the SEC's list when we have it. No list yet (first poll) is not a licence
+    // to claim — an unverified ticker is exactly the wrong chart link this lane refuses to draw.
+    return symset && symset.has(sym) ? sym : null;
+  }
+  function congressResolve(asset, tmap, symsetArg) {
     if (!tmap) return null;
     const nm = congressAssetName(asset);
     if (!nm) return null;
-    let hit = whaleTickerOf(nm, tmap);
+    const symset = symsetArg === undefined ? whaleSymSet : symsetArg;
+    // The class letter first: it is strictly MORE information than the bare name, and the only
+    // path that can answer a name the map had to evict.
+    let hit = congressClassHit(asset, nm, symset);
+    if (hit) return hit;
+    hit = whaleTickerOf(nm, tmap);
     if (hit) return hit;
     let w = nm.toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim().split(" ");
+    // Trim generic tail words, trying the map at each step.
     while (w.length > 1 && CONGRESS_GENERIC.has(w[w.length - 1])) {
       w.pop();
       if (w.join(" ").length < 4) break;
       hit = whaleTickerOf(w.join(" "), tmap);
       if (hit) return hit;
     }
-    return null;
+    // Then the other direction: the filing's name as a unique PREFIX of a longer official one.
+    return congressPrefixHit(whaleNameKey(nm), tmap) || congressPrefixHit(w.join(" "), tmap);
   }
   // A starred member's new activity, pushed on its own class. Two guards, both learned elsewhere in
   // this codebase rather than theorised:
@@ -6255,6 +6308,29 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       }
       return out;
     } catch (e) { return { ok: false, url, error: String(e && e.message).slice(0, 200) }; }
+  }
+  // Apply the CURRENT resolver to rows that were parsed under an older one. Purely a re-read of
+  // stored asset names against the SEC map — no network, no PDF, so it is safe to run at will and
+  // it cannot lose data: only an EMPTY ticker is ever written to, so a ticker the filer wrote is
+  // never overwritten by a derived one.
+  async function congressReticker(limArg) {
+    if (!store.congressUnresolved) return { ok: false, error: "sqlite unavailable in this runtime" };
+    const tmap = await whaleTickerMap().catch(() => null);
+    if (!tmap) return { ok: false, error: "the SEC company map is not loaded yet \u2014 try again in a minute" };
+    const rows = store.congressUnresolved(+limArg || 5000);
+    let fixed = 0;
+    const sample = [];
+    for (const r of rows) {
+      const sym = congressResolve(r.asset, tmap);
+      if (!sym) continue;
+      if (store.congressSetTicker(r.fid, r.ln, sym)) {
+        fixed++;
+        if (sample.length < 6) sample.push(sym + " \u2190 " + String(r.asset).slice(0, 44));
+      }
+    }
+    pushOps("congress tickers", fixed + " of " + rows.length + " unresolved row(s) now resolve" +
+      (sample.length ? " \u00b7 " + sample.join(", ") : ""), fixed ? "good" : "info", true);
+    return { ok: true, scanned: rows.length, fixed, still: rows.length - fixed, sample, build: version };
   }
   function congressRequeue(which) {
     const n = store.congressRequeue ? store.congressRequeue(which) : 0;
@@ -13435,6 +13511,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // CONGRESS lane phase 1 (2026.08.24-02): admin-only index ingest — no public payload yet.
     congressIngestNow: congressIngest, congressTickNow: congressTick, congressStatus,
     congressParseNow: congressParse, congressDiagNow: congressDiag, congressRequeueNow: congressRequeue,
+    congressRetickerNow: congressReticker,
     congressOcrNow: congressOcr,
     congressBackfillNow: congressBackfill,
     congressFilerSearch: (q) => (store.congressFilerSearch ? store.congressFilerSearch(q) : []),
@@ -13451,6 +13528,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
     houseIndexUrls,                              // harness: the candidate list is pinned by test
     congressAssetName,                           // harness: issuer-name cleaning, pinned by test
+    congressResolveNow: congressResolve,         // harness: full issuer-name -> ticker resolution, pinned by test
     whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
     hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()
     whaleIngestNow: whaleIngest,                 // harness: push one filing through the REAL ingest path
