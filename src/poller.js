@@ -6078,6 +6078,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // the tool that turns "222 unreadable" into a fixable fact.
   async function congressDiag(docIdArg) {
     let id = String(docIdArg || "").trim().replace(/^H:/i, "");
+    // A NAME is a legitimate way to ask. When one member's filings all fail — 38 of Khanna's 43 read
+    // but yielded no rows — the useful question is "show me one of HIS", and hunting for a doc id
+    // first is friction between a symptom and its cause. A member argument picks one of that
+    // member's failures by preference, since a filing that already parsed has nothing to diagnose.
+    if (id && !/^\d{4,}$/.test(id)) {
+      const pick = store.congressFilerDoc ? store.congressFilerDoc(id) : null;
+      if (!pick) return { ok: false, error: "no filing found for a member matching \u201c" + id + "\u201d" };
+      id = String(pick.docId);
+    }
     if (!id) {
       // No argument: diagnose the head of the queue. When nothing has parsed there is no row on the
       // panel to copy an id from, so requiring one made the tool useless exactly when it is needed.
