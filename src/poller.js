@@ -5649,6 +5649,195 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       busy: t13fBusy, progress: t13fProgress, cap: +(store.t13fMeta && store.t13fMeta("cap")) || T13F_TOP_CAP };
   }
 
+  // ---- CONGRESS lane, phase 1: House filing INDEX ingest (build 2026.08.24-02) ---------------
+  // Deliberately the smallest slice of the congressional-disclosure feature that can be WRONG in
+  // production: download the House Clerk's annual financial-disclosure ZIP, parse the filing index
+  // inside it, write one row per filing. Nothing is read out of the PTR documents themselves —
+  // that is phase 2 — and there is no public surface: an admin verb plus the ops log is the whole
+  // interface while this soaks (the LIQUIDITY board shipped the same way).
+  //
+  // Why ship a lane with no UI: the fetch layer is the ONLY part that cannot be tested here.
+  // disclosures-clerk.house.gov is unreachable from the build sandbox — the egress proxy answers
+  // 403 to CONNECT, exactly as it does for sec.gov — so the parser gets fixtures and the network
+  // gets a production round-trip. The 13F lane learned this the expensive way: it shipped, then
+  // spent four consecutive commits on URL and window reality, the last one titled "use the SEC's
+  // real filing-window URL". So this lane asks for MORE THAN ONE candidate up front, logs every
+  // full URL it tried on failure, and reports what the ZIP actually contained on success.
+  //
+  // STANDING CAVEAT until the first real ingest lands: the candidate list, the index filename and
+  // the XML element names below are the documented/observed shapes, NOT verified against a live
+  // download. Whichever candidate answers gets written into the ops log and belongs in this
+  // comment afterwards.
+  const HOUSE_DISC = "https://disclosures-clerk.house.gov/public_disc/";
+  // Filing-type codes, mapped only where the meaning is certain. An unmapped code is NOT dropped
+  // and NOT guessed: the row is kept, `type` reads "other", and the raw code rides in `typeRaw` so
+  // a code that appears later can be identified from stored data instead of a re-crawl.
+  const HOUSE_TYPE = { P: "ptr", O: "annual", A: "amendment", C: "candidate", T: "termination", X: "extension" };
+  let congressBusy = false, congressProgress = null, congressLastError = null;
+  function houseIndexUrls(y) {
+    const yr = String(y);
+    return [
+      HOUSE_DISC + "financial-pdfs/" + yr + "FD.zip",
+      HOUSE_DISC + "financial-pdfs/" + yr + "/" + yr + "FD.zip",
+      HOUSE_DISC + "financial-disclosure/" + yr + "FD.zip",
+    ];
+  }
+  const housePtrUrl = (y, docId) => HOUSE_DISC + "ptr-pdfs/" + y + "/" + docId + ".pdf";
+  // Whole-entry read, for the index. The 13F lane streams because its TSV inflates to ~1.2GB; an
+  // index is a few MB and XML is not line-oriented, so this one materializes. Same ZIP primitives.
+  function zipEntryText(buf, e) {
+    const raw = t13fZipSlice(buf, e);
+    if (e.method === 0) return raw.toString("utf8");
+    if (e.method !== 8) throw new Error("ZIP: unsupported compression method " + e.method + " on " + e.name);
+    return require("zlib").inflateRawSync(raw).toString("utf8");
+  }
+  const houseDate = (v) => {                       // "8/13/2026" or already-ISO -> ISO
+    const t = String(v || "").trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+    const m = t.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    return m ? m[3] + "-" + String(m[1]).padStart(2, "0") + "-" + String(m[2]).padStart(2, "0") : "";
+  };
+  // Read fields by NAME, never by position — the rule the 13F parser already runs on, for the same
+  // reason: an upstream column reorder must fail loudly or not at all, never shift data silently.
+  function parseHouseIndex(text, yearHint) {
+    const rows = [], seen = new Set();
+    const push = (f) => {
+      const docId = String(f.DocID || "").trim();
+      if (!docId) return;
+      const id = "H:" + docId;
+      if (seen.has(id)) return;                    // a doc id repeated in one index is one filing
+      seen.add(id);
+      const code = String(f.FilingType || "").trim().toUpperCase();
+      const type = HOUSE_TYPE[code] || "other";
+      const sd = String(f.StateDst || "").trim().toUpperCase();
+      const last = String(f.Last || "").trim(), first = String(f.First || "").trim();
+      const suffix = String(f.Suffix || "").trim();
+      const yr = +String(f.Year || yearHint || "").trim() || (yearHint | 0);
+      rows.push({ id, chamber: "H", docId, yr,
+        member: (last + (first ? ", " + first : "") + (suffix ? " " + suffix : "")).trim(),
+        lname: last, fname: first, suffix,
+        state: sd.slice(0, 2), dist: sd.slice(2),
+        type, typeRaw: code, filed: houseDate(f.FilingDate),
+        url: housePtrUrl(yr, docId),
+        // The index carries no supersede link — an amendment arrives as its own filing with type A.
+        // Resolving which filing an A amends needs the documents themselves, so it waits for phase 2
+        // rather than being guessed from name-and-date collisions here.
+        amends: null,
+        parsed: type === "ptr" ? 0 : null, nTx: null });
+    };
+    // Scan the INNER content of each member block, never the block text itself — a generic
+    // <tag>…</tag> sweep run over the whole block matches the <Member> wrapper first and eats
+    // every field inside it, which parses to a confident zero.
+    const blocks = [...text.matchAll(/<Member>([\s\S]*?)<\/Member>/gi)];
+    if (blocks.length) {
+      for (const b of blocks) {
+        const f = {};
+        for (const m of b[1].matchAll(/<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/g)) f[m[1]] = m[2];
+        push(f);
+      }
+      return rows;
+    }
+    // Fallback: the ZIP has also carried a tab-delimited index. Same by-name rule on the header.
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    if (lines.length > 1 && lines[0].includes("\t")) {
+      const cols = lines[0].split("\t").map((h) => h.trim());
+      for (let i = 1; i < lines.length; i++) {
+        const c = lines[i].split("\t"), f = {};
+        cols.forEach((h, j) => { f[h] = c[j]; });
+        push(f);
+      }
+    }
+    return rows;
+  }
+  async function congressIngest(yearArg) {
+    if (congressBusy) return { ok: false, error: "an ingest is already running" };
+    if (!store.congressReady || !store.congressReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
+    const yr = +yearArg || new Date().getUTCFullYear();
+    if (!(yr >= 2008 && yr <= new Date().getUTCFullYear() + 1)) return { ok: false, error: "bad year “" + yearArg + "” — the House index starts at 2008" };
+    congressBusy = true; congressProgress = { yr, stage: "download" };
+    const done = (r) => { congressBusy = false; congressProgress = null; return r; };
+    // Every exit says why, in ops. The 13F lane's worst failure mode was a silent one that looked
+    // identical to a process dying mid-download; not repeating it.
+    const fail = (r) => { congressLastError = r.error;
+      pushOps("congress index " + yr, "ingest FAILED: " + r.error, "warn", true); return done(r); };
+    try {
+      pushOps("congress index " + yr, "downloading the House Clerk filing index", "info", true);
+      let zipBuf = null, urlUsed = null; const tried = [];
+      const tmpZip = require("path").join(require("os").tmpdir(), "congress-" + yr + ".zip");
+      for (const url of houseIndexUrls(yr)) {
+        try {
+          const res = await extFetch(url, { headers: { "user-agent": SEC_UA } });
+          if (!res || !res.ok) { tried.push(url + " → HTTP " + (res ? res.status : "no response")); continue; }
+          if (res.body && typeof res.body.getReader === "function") {
+            const fsm = require("fs");
+            const w = fsm.createWriteStream(tmpZip);
+            const reader = res.body.getReader();
+            for (;;) { const { done: d2, value } = await reader.read(); if (d2) break; w.write(Buffer.from(value)); }
+            await new Promise((res2, rej2) => { w.end(); w.on("finish", res2); w.on("error", rej2); });
+            zipBuf = fsm.readFileSync(tmpZip);
+            try { fsm.unlinkSync(tmpZip); } catch (_) {}
+          } else {
+            zipBuf = Buffer.from(await res.arrayBuffer());   // injected test transports have no stream body
+          }
+          urlUsed = url; break;
+        } catch (e) { tried.push(url + " → " + String(e && e.message).slice(0, 60));
+          try { require("fs").unlinkSync(tmpZip); } catch (_) {} }
+      }
+      if (!zipBuf) return fail({ ok: false, tried,
+        error: yr + " index not downloaded (" + tried.join("; ") + ") — every candidate URL is listed above in full; a 404 on all of them means the Clerk's naming changed and the candidate list needs a patch" });
+      congressProgress.stage = "parse";
+      const entries = t13fZipEntries(zipBuf);
+      // What the ZIP actually holds is unverified from here — whether it carries only the index or
+      // the PDFs alongside it. The first production run answers that, so it is logged either way.
+      const idx = entries.find((e) => /\.xml$/i.test(e.name)) || entries.find((e) => /\.txt$/i.test(e.name));
+      if (!idx) return fail({ ok: false,
+        error: "no .xml or .txt index inside the zip (" + entries.length + " entr" + (entries.length === 1 ? "y" : "ies") + ": "
+          + entries.slice(0, 6).map((e) => e.name).join(", ") + ") — layout changed, ingest needs a patch" });
+      const rows = parseHouseIndex(zipEntryText(zipBuf, idx), yr);
+      if (!rows.length) return fail({ ok: false,
+        error: "index " + idx.name + " parsed to zero filings — element or column names may have changed; ingest needs a patch" });
+      congressProgress.stage = "store";
+      const up = store.congressUpsertFilings(rows);
+      const ptr = rows.filter((r) => r.type === "ptr").length;
+      const unknown = [...new Set(rows.filter((r) => r.type === "other").map((r) => r.typeRaw))].filter(Boolean);
+      store.congressMetaSet("synced:" + yr, String(Date.now()));
+      store.congressMetaSet("lastSync", String(Date.now()));
+      store.congressMetaSet("indexUrl:" + yr, urlUsed);
+      congressLastError = null;
+      const note = up.seen + " filings (" + ptr + " PTR), " + up.added + " new · zip "
+        + (zipBuf.length / 1e6).toFixed(1) + "MB / " + entries.length + " entries · index " + idx.name
+        + (unknown.length ? " · unmapped filing-type code(s) kept verbatim: " + unknown.join(",") : "");
+      pushOps("congress index " + yr, "ingested from " + urlUsed + " — " + note, "info", true);
+      log("congress: " + yr + " index ingested — " + note);
+      return done({ ok: true, yr, url: urlUsed, filings: up.seen, added: up.added, ptr,
+        entries: entries.length, index: idx.name, bytes: zipBuf.length, unknownTypes: unknown });
+    } catch (e) {
+      return fail({ ok: false, error: String(e && e.message).slice(0, 200) });
+    }
+  }
+  // Daily-ish. The Clerk republishes the annual ZIP as filings land, so this is a refresh, not a
+  // one-shot: there is no "already ingested, stop" short-circuit the way the quarterly 13F set has.
+  // January and February also refresh the PRIOR year, because a December filing can be indexed
+  // after the calendar rolls and would otherwise never be seen.
+  let congressLastCheck = 0;
+  async function congressTick(nowArg) {
+    const now = nowArg || Date.now();
+    if (now - congressLastCheck < 20 * HOUR) return;
+    congressLastCheck = now;
+    if (!store.congressReady || !store.congressReady()) return;
+    const d = new Date(now), yr = d.getUTCFullYear();
+    await congressIngest(yr).catch(() => {});
+    if (d.getUTCMonth() <= 1) await congressIngest(yr - 1).catch(() => {});
+  }
+  function congressStatus() {
+    const last = +(store.congressMeta && store.congressMeta("lastSync")) || 0;
+    return { ready: !!(store.congressReady && store.congressReady()),
+      busy: congressBusy, progress: congressProgress, lastSync: last || null,
+      lastError: congressLastError,
+      counts: (store.congressCounts && store.congressCounts()) || null,
+      years: (store.congressYears && store.congressYears()) || [] };
+  }
+
   async function getWhaleHolds(qRaw) {
     const q = String(qRaw || "").trim();
     if (!q) return { ok: false, error: "usage: whale who <ticker, name fragment, or CUSIP>" };
@@ -6790,6 +6979,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     setInterval(() => { whaleTick().catch((e) => log("whale tick failed (isolated, server stays up): " + (e && e.message))); }, WHALE_POLL_MS);
     setInterval(() => { whale13fTick().catch((e) => log("whale13f tick failed (isolated): " + (e && e.message))); }, 6 * HOUR);
     setTimeout(() => { whale13fTick().catch(() => {}); }, 90 * 1000);
+    setInterval(() => { congressTick().catch((e) => log("congress tick failed (isolated): " + (e && e.message))); }, 6 * HOUR);
+    setTimeout(() => { congressTick().catch(() => {}); }, 120 * 1000);
     setTimeout(() => { whaleTick().catch((e) => log("whale first tick failed (isolated): " + (e && e.message))); }, 20 * 1000);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
@@ -12788,6 +12979,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     whaleSearch,
     whaleAdd, whaleRm, whaleMute, whaleSeen, whalePull,
     whale13fIngestNow: whale13fIngest, whale13fTickNow: whale13fTick, t13fStatus,
+    // CONGRESS lane phase 1 (2026.08.24-02): admin-only index ingest — no public payload yet.
+    congressIngestNow: congressIngest, congressTickNow: congressTick, congressStatus,
+    congressFilings: (o) => (store.congressFilings ? store.congressFilings(o) : []),
+    houseIndexUrls,                              // harness: the candidate list is pinned by test
     whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
     hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()
     whaleIngestNow: whaleIngest,                 // harness: push one filing through the REAL ingest path

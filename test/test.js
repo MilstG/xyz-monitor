@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-01"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-02"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20543,4 +20543,137 @@ test("notes: the digest reaches the snapshot row, and a note on an IDLE board st
   p.buildSnapshotNow();
   const rowA3 = p.getSnapshot().markets.find((m) => m.coin === "xyz:AAA");
   assert.equal(rowA3.nt, undefined, "the last delete removes the digest, so the marker disappears");
+});
+
+// ---- CONGRESS lane phase 1 (build 2026.08.24-02) ------------------------------------------------
+// The House filing INDEX ingest, end to end through the real code path against a fixture ZIP.
+// Phase 1 deliberately parses no PTR documents, so what is worth pinning here is: the candidate
+// URL list (the 13F lane's four fetch-layer commits are the argument for more than one), by-name
+// field reading, unmapped filing-type codes surviving, upsert idempotency, and the one rule a daily
+// re-sync could silently break — that re-ingesting must never reset phase 2's parse state.
+test("congress -02: House index ingest — candidates, by-name parse, idempotent upsert, parse state preserved", async () => {
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const mkzip = (files) => {
+    const parts = [], cd = []; let off = 0;
+    for (const [name, text] of files) {
+      const data = Buffer.from(text, "utf8"), nm = Buffer.from(name, "utf8");
+      const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(0, 8);
+      lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nm.length, 26);
+      parts.push(lh, nm, data);
+      const ce = Buffer.alloc(46); ce.writeUInt32LE(0x02014b50, 0); ce.writeUInt16LE(0, 10);
+      ce.writeUInt32LE(data.length, 20); ce.writeUInt32LE(data.length, 24); ce.writeUInt16LE(nm.length, 28);
+      ce.writeUInt32LE(off, 42);
+      cd.push(Buffer.concat([ce, nm]));
+      off += 30 + nm.length + data.length;
+    }
+    const cdBuf = Buffer.concat(cd);
+    const eo = Buffer.alloc(22); eo.writeUInt32LE(0x06054b50, 0); eo.writeUInt16LE(cd.length, 8); eo.writeUInt16LE(cd.length, 10);
+    eo.writeUInt32LE(cdBuf.length, 12); eo.writeUInt32LE(off, 16);
+    return Buffer.concat([...parts, cdBuf, eo]);
+  };
+  // Element ORDER is deliberately shuffled between members: the parser reads by name, so a reorder
+  // must not shift a single field. "ZZ" is an unmapped filing-type code and must survive verbatim.
+  const memberXml = `<?xml version="1.0"?><FinancialDisclosure>
+<Member><Prefix>Hon.</Prefix><Last>Pelosi</Last><First>Nancy</First><Suffix></Suffix><FilingType>P</FilingType><StateDst>CA11</StateDst><Year>2026</Year><FilingDate>8/13/2026</FilingDate><DocID>20033725</DocID></Member>
+<Member><DocID>20033726</DocID><FilingDate>12/30/2025</FilingDate><StateDst>TN07</StateDst><FilingType>P</FilingType><Year>2026</Year><Last>Green</Last><First>Mark</First></Member>
+<Member><Last>Khanna</Last><First>Ro</First><Suffix>Jr.</Suffix><FilingType>O</FilingType><StateDst>CA17</StateDst><Year>2026</Year><FilingDate>5/15/2026</FilingDate><DocID>10041234</DocID></Member>
+<Member><Last>Unknown</Last><First>Code</First><FilingType>ZZ</FilingType><StateDst>NY01</StateDst><Year>2026</Year><FilingDate>6/01/2026</FilingDate><DocID>10041235</DocID></Member>
+</FinancialDisclosure>`;
+  const zip2026 = mkzip([["2026FD.xml", memberXml]]);
+  // A year whose ZIP carries the tab-delimited index instead — same fields, read by header name.
+  const zip2025 = mkzip([["2025FD.txt",
+    "Prefix\tLast\tFirst\tSuffix\tFilingType\tStateDst\tYear\tFilingDate\tDocID\n" +
+    "Hon.\tGottheimer\tJosh\t\tP\tNJ05\t2025\t7/02/2025\t20029001\n"]]);
+  const bin = (buf) => ({ ok: true, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) });
+  let hits = [];
+  const extFetch = async (url) => {
+    hits.push(url);
+    if (url.endsWith("2026FD.zip") && url.includes("financial-pdfs/2026FD")) return bin(zip2026);
+    if (url.endsWith("2025FD.zip") && url.includes("financial-pdfs/2025FD")) return bin(zip2025);
+    if (url.includes("2019FD")) return { ok: false, status: 404 };
+    return { ok: false, status: 404 };
+  };
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+
+  // Candidate URLs: MORE than one, first is the long-standing pattern, all absolute.
+  const urls = p.houseIndexUrls(2026);
+  assert.ok(urls.length >= 2, "the fetch layer tries more than one candidate — the 13F lane's lesson");
+  assert.equal(urls[0], "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/2026FD.zip");
+  assert.ok(urls.every((u) => /^https:\/\/disclosures-clerk\.house\.gov\//.test(u)), "every candidate is an absolute Clerk URL");
+
+  const r = await p.congressIngestNow(2026);
+  assert.ok(r.ok, "2026 ingest: " + (r.error || ""));
+  assert.equal(r.filings, 4, "every member row is stored, not just the PTRs");
+  assert.equal(r.ptr, 2, "two filings carry type P");
+  assert.equal(r.added, 4);
+  assert.deepEqual(r.unknownTypes, ["ZZ"], "an unmapped filing-type code is reported, not silently swallowed");
+
+  const rows = p.congressFilings({ limit: 50 });
+  const byId = new Map(rows.map((x) => [x.id, x]));
+  const pel = byId.get("H:20033725");
+  assert.ok(pel, "doc id is chamber-prefixed so the Senate can share the table later");
+  assert.equal(pel.member, "Pelosi, Nancy");
+  assert.equal(pel.filed, "2026-08-13", "US M/D/YYYY normalized to ISO");
+  assert.equal(pel.state, "CA"); assert.equal(pel.dist, "11");
+  assert.equal(pel.type, "ptr");
+  assert.equal(pel.parsed, 0, "a PTR enters phase 2's queue; nothing is parsed in phase 1");
+  assert.equal(pel.url, "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20033725.pdf");
+  // Shuffled element order must not shift a field.
+  const grn = byId.get("H:20033726");
+  assert.equal(grn.member, "Green, Mark"); assert.equal(grn.filed, "2025-12-30"); assert.equal(grn.state, "TN");
+  // Non-PTR filings are kept for context but never queued for parsing.
+  assert.equal(byId.get("H:10041234").type, "annual");
+  assert.equal(byId.get("H:10041234").parsed, null, "only PTRs are queued");
+  assert.equal(byId.get("H:10041235").type, "other", "an unmapped code lands as other, with the raw code stored");
+
+  // Idempotency: the Clerk republishes the SAME zip daily, so a re-ingest must add nothing.
+  const r2 = await p.congressIngestNow(2026);
+  assert.ok(r2.ok && r2.added === 0 && r2.filings === 4, "re-ingesting the same index adds nothing");
+  assert.equal(p.congressFilings({ limit: 50 }).length, 4, "and creates no duplicate rows");
+
+  // The rule a daily re-sync could silently break: phase 2 marks a filing parsed, then tomorrow's
+  // sync runs. If the upsert reset parsed to 0, every day would re-queue everything already done.
+  store.openCongress().prepare("UPDATE filing SET parsed=1, nTx=7 WHERE id=?").run("H:20033725");
+  await p.congressIngestNow(2026);
+  const after = store.openCongress().prepare("SELECT parsed, nTx FROM filing WHERE id=?").get("H:20033725");
+  assert.equal(after.parsed, 1, "a daily re-sync never resets phase 2's parse state");
+  assert.equal(after.nTx, 7, "nor the transaction count it recorded");
+
+  // The tab-delimited fallback index parses through the same by-name rule.
+  const r3 = await p.congressIngestNow(2025);
+  assert.ok(r3.ok && r3.filings === 1, "tsv fallback index: " + (r3.error || ""));
+  assert.equal(p.congressFilings({ type: "ptr", limit: 50 }).length, 3, "type filter reaches both years");
+
+  // Every candidate 404s: the error names all of them in FULL — the failure the 13F lane shipped
+  // blind, where only the basename was logged and a wrong path looked like a dead process.
+  const r4 = await p.congressIngestNow(2019);
+  assert.ok(!r4.ok, "an unavailable year fails rather than pretending");
+  assert.equal(r4.tried.length, p.houseIndexUrls(2019).length, "every candidate is reported");
+  assert.ok(r4.tried.every((t) => t.startsWith("https://")), "full URLs, not basenames");
+
+  // Status shape — what the admin verb renders.
+  const st = p.congressStatus();
+  assert.ok(st.ready && st.counts, "status carries readiness and counts");
+  assert.equal(st.counts.n, 5); assert.equal(st.counts.ptr, 3);
+  assert.equal(st.counts.pending, 2, "one of the three PTRs was marked parsed above");
+  assert.ok(st.lastSync > 0, "a successful sync stamps the clock");
+  assert.deepEqual(st.years.map((y) => y.yr), [2026, 2025], "newest year first");
+  assert.equal(store.congressMeta("indexUrl:2026"), urls[0], "the URL that actually answered is recorded for the header comment");
+
+  // Wiring: admin-gated in BOTH directions, and no public surface anywhere in phase 1.
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const getIdx = sv.indexOf('fastify.get("/api/congress"'), postIdx = sv.indexOf('fastify.post("/api/congress"');
+  assert.ok(getIdx > 0 && postIdx > 0, "both congress routes exist");
+  assert.ok(sv.slice(getIdx, getIdx + 400).includes("if (!isAdmin(req))"), "the READ is gated too — phase 1 ships no public surface");
+  assert.ok(sv.slice(postIdx, postIdx + 500).indexOf('op === "ingest"') > sv.slice(postIdx, postIdx + 500).indexOf("if (!isAdmin(req))"),
+    "the ingest op sits behind the admin recheck, same ordering the 13F op is pinned to");
+  const app2 = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app2.includes("async function termCongress(") && app2.includes("h==='congress'"), "admin verb wired into the terminal");
+  assert.ok(app2.includes("congress is admin-only"), "the verb refuses non-admins client-side too");
+  assert.ok(!/tab-congress|CONGRESS \\u00b7 PTR FEED/.test(app2), "phase 1 adds NO tab and NO panel");
+  fs.rmSync(dir, { recursive: true, force: true });
 });
