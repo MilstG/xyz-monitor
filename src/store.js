@@ -966,6 +966,10 @@ CREATE INDEX IF NOT EXISTS tx_tk ON tx(ticker, txDate);`);
         try { congress.exec("ALTER TABLE filing ADD COLUMN tries INTEGER"); } catch (_) {}
         // Why a filing failed, so "222 unreadable" can be broken down instead of believed.
         try { congress.exec("ALTER TABLE filing ADD COLUMN pnote TEXT"); } catch (_) {}
+        // How a ticker was arrived at: "form" (the parenthetical the filer wrote) or "name"
+        // (resolved from the issuer name against the universe). Two different strengths of claim,
+        // so they are stored apart and rendered apart rather than blurred into one column.
+        try { congress.exec("ALTER TABLE tx ADD COLUMN tkSrc TEXT"); } catch (_) {}
         return congress;
       } catch (_) { congress = null; return null; }
     },
@@ -1023,13 +1027,14 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         .all(maxTries == null ? 5 : maxTries | 0, Math.max(1, Math.min(500, limit | 0 || 25))); } catch (_) { return []; } },
     congressSaveTx(fid, rows) { const d = this.openCongress(); if (!d) return 0;
       const del = d.prepare("DELETE FROM tx WHERE fid=?");
-      const ins = d.prepare("INSERT INTO tx(fid,ln,owner,asset,ticker,act,txDate,notified,loAmt,hiAmt) VALUES(?,?,?,?,?,?,?,?,?,?)");
+      const ins = d.prepare("INSERT INTO tx(fid,ln,owner,asset,ticker,act,txDate,notified,loAmt,hiAmt,tkSrc) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
       const mark = d.prepare("UPDATE filing SET parsed=1, nTx=?, tries=0 WHERE id=?");
       d.exec("BEGIN");
       try {
         del.run(String(fid));                          // re-parsing a filing replaces its rows wholesale
         rows.forEach((r, i) => ins.run(String(fid), i, r.owner, String(r.asset).slice(0, 160), r.ticker,
-          r.act, r.txDate, r.notified, r.loAmt == null ? null : +r.loAmt, r.hiAmt == null ? null : +r.hiAmt));
+          r.act, r.txDate, r.notified, r.loAmt == null ? null : +r.loAmt, r.hiAmt == null ? null : +r.hiAmt,
+          r.tkSrc || (r.ticker ? "form" : null)));
         mark.run(rows.length, String(fid));
         d.exec("COMMIT");
       } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} throw e; }
@@ -1062,7 +1067,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       if (o.since) { where.push("f.filed>=?"); args.push(String(o.since)); }
       const lim = Math.max(1, Math.min(500, o.limit | 0 || 50));
       try { return d.prepare(`SELECT f.filed, f.member, f.state, f.dist, f.url, t.fid, t.owner, t.asset,
-        t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt
+        t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt, t.tkSrc
         FROM tx t JOIN filing f ON f.id=t.fid WHERE ${where.join(" AND ")}
         ORDER BY f.filed DESC, t.fid DESC, t.ln LIMIT ?`).all(...args, lim); } catch (_) { return []; } },
     // Per-ticker roll-up. Every sum is over the band FLOOR and is therefore a hard lower bound —

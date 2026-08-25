@@ -13078,76 +13078,134 @@ async function termCongress(args){
 // permanently, not as an error state: how many filings could not be parsed, and how many assets
 // never resolved to a ticker. A lane that hides its own coverage rate is asking to be trusted more
 // than it has earned.
-const CNG={rows:[],stat:null,tk:'',busy:false};
+// Column model. Sorting, filtering and hiding are the three things a table this long needs, and
+// the panel owns them client-side over the fetched page: the sort keys are derived values (lag is
+// filed minus traded, band sorts on its FLOOR) which the server has no reason to compute twice.
+const CNG_COLS=[
+  {k:'filed', label:'FILED', cls:'l', tip:'when the filing became public. The default sort — a trade from seven weeks ago that files today is today\u2019s information.'},
+  {k:'lag',   label:'LAG',   cls:'r', tip:'filing date minus trade date. The STOCK Act caps it at 45 days; how close a member runs to that cap is itself a behavioural read.'},
+  {k:'member',label:'MEMBER',cls:'l', tip:'the filer. SP / DC / JT marks a trade filed for a spouse, dependent child or jointly rather than the member personally.'},
+  {k:'asset', label:'ASSET', cls:'l', tip:'the ticker where one is known, otherwise the raw asset name the filing carried.'},
+  {k:'act',   label:'ACT',   cls:'l', tip:'purchase, sale, partial sale or exchange, as disclosed.'},
+  {k:'band',  label:'BAND',  cls:'r', tip:'the band the filer disclosed. A PTR never carries an exact figure, so none is shown and no midpoint is computed anywhere in this lane. Sorts on the band FLOOR.'},
+  {k:'traded',label:'TRADED',cls:'l', tip:'the transaction date itself.'},
+  {k:'src',   label:'SRC',   cls:'l', tip:'the filed PDF at the House Clerk, the source each row was parsed from.'},
+];
+const CNG_LS='cngview';
+const CNG={rows:[],stat:null,tk:'',busy:false,q:'',acts:new Set(),sort:{k:'filed',dir:-1},hidden:new Set(),menu:false};
+try{ const v=JSON.parse(localStorage.getItem(CNG_LS)||'{}');
+  if(v.hidden) CNG.hidden=new Set(v.hidden);
+  if(v.sort&&v.sort.k) CNG.sort=v.sort;
+}catch(_){}
+function cngSave(){ try{ localStorage.setItem(CNG_LS,JSON.stringify({hidden:[...CNG.hidden],sort:CNG.sort})); }catch(_){} }
 function cngMoney(v){ if(v==null) return '\u2014';
   const a=Math.abs(v);
   if(a>=1e9) return '$'+(v/1e9).toFixed(1)+'B';
   if(a>=1e6) return '$'+(v/1e6).toFixed(1)+'M';
   if(a>=1e3) return '$'+Math.round(v/1e3)+'K';
   return '$'+Math.round(v); }
+const cngLag=(x)=>x.filed&&x.txDate?Math.round((Date.parse(x.filed)-Date.parse(x.txDate))/86400000):null;
+// One accessor per column, used by BOTH the sort and the filter so the two can never disagree
+// about what a column contains.
+const CNG_VAL={
+  filed:(x)=>x.filed||'', lag:(x)=>{const l=cngLag(x); return l==null?-1e9:l;},
+  member:(x)=>(x.member||'').toLowerCase(), asset:(x)=>(x.ticker||x.asset||'').toLowerCase(),
+  act:(x)=>x.act||'', band:(x)=>x.loAmt==null?-1:x.loAmt, traded:(x)=>x.txDate||'', src:(x)=>x.url||'',
+};
 async function openCongress(){
   const out=el('congress-body'); if(!out) return;
   if(!CNG.rows.length) out.innerHTML='<div class="msg">reading the congressional index\u2026</div>';
-  const r=await cngGet('?feed=1&limit=120'+(CNG.tk?'&ticker='+encodeURIComponent(CNG.tk):''));
+  const r=await cngGet('?feed=1&limit=400'+(CNG.tk?'&ticker='+encodeURIComponent(CNG.tk):''));
   if(!r||!r.ok){ out.innerHTML=`<div class="msg err">${esc((r&&r.error)||'fetch failed')}</div>`; return; }
   CNG.rows=r.feed||[]; CNG.stat=r.status||null;
   cngRender();
+}
+function cngVisible(){
+  const q=CNG.q.trim().toLowerCase();
+  return CNG.rows.filter(x=>{
+    if(CNG.acts.size){ const base=String(x.act||'').split('-')[0]; if(!CNG.acts.has(base)) return false; }
+    if(!q) return true;
+    return (x.member||'').toLowerCase().includes(q)||(x.ticker||'').toLowerCase().includes(q)
+      ||(x.asset||'').toLowerCase().includes(q)||(x.state||'').toLowerCase().includes(q);
+  }).sort((a,b)=>{
+    const f=CNG_VAL[CNG.sort.k]||CNG_VAL.filed;
+    const va=f(a), vb=f(b);
+    if(va<vb) return -CNG.sort.dir;
+    if(va>vb) return CNG.sort.dir;
+    return (b.filed||'').localeCompare(a.filed||'');   // stable tiebreak: newest filed first
+  });
 }
 function cngRender(){
   const out=el('congress-body'); if(!out) return;
   const st=CNG.stat||{}, c=st.counts||{}, ps=st.parse||{};
   const when=st.lastSync?new Date(st.lastSync).toISOString().slice(0,16).replace('T',' ')+'Z':'never';
   const pct=(a,b)=>b?Math.round(a/b*100)+'%':'\u2014';
+  const rows=cngVisible();
+  const shown=CNG_COLS.filter(col=>!CNG.hidden.has(col.k));
   const head=`<div class="whl-head">`
     +`<span class="whl-hd">CONGRESS \u00b7 PTR FEED</span>`
     +`<span class="cng-tag" data-tip="the House Clerk republishes its filing index daily; this is the last time we read it">house index \u00b7 synced ${esc(when)}</span>`
     +`<span class="sec">${(c.n||0).toLocaleString()} filings \u00b7 ${(c.ptr||0).toLocaleString()} PTR \u00b7 ${(c.members||0).toLocaleString()} filers</span>`
     +`<span class="whl-sp"></span>`
-    +`<input id="cng-tk" class="cng-in" placeholder="filter by ticker\u2026" value="${esc(CNG.tk)}" maxlength="6" autocomplete="off" spellcheck="false">`
+    +`<input id="cng-q" class="cng-in" placeholder="filter \u2014 member, ticker, asset" value="${esc(CNG.q)}" maxlength="40" autocomplete="off" spellcheck="false">`
+    +['buy','sell','exchange'].map(a=>`<button type="button" class="cng-chip${CNG.acts.has(a)?' on':''}" data-cngact="${a}">${a}</button>`).join('')
+    +`<button type="button" class="cng-chip" id="cng-colbtn" data-tip="show or hide columns \u2014 remembered on this browser">columns \u25be</button>`
     +`</div>`
     +`<div class="cng-rates">`
-      +`<span data-tip="filings whose PDF yielded transactions, over all PTRs the index knows about. The rest are queued or unreadable — both are counted here rather than quietly excluded.">parsed <b>${(ps.parsed||0).toLocaleString()}</b> / ${(c.ptr||0).toLocaleString()} <span class="sec">(${pct(ps.parsed||0,c.ptr||0)})</span></span>`
-      +`<span data-tip="scanned or handwritten filings. There is no OCR in this lane: they are marked once, never re-fetched, and counted here so the coverage number stays honest.">unreadable <b>${(ps.unreadable||0).toLocaleString()}</b></span>`
-      +`<span data-tip="PTRs the index has found but nobody has read yet — the parse queue, worked daily and forceable from the terminal with: congress parse">queued <b>${(ps.pending||0).toLocaleString()}</b></span>`
-      +`<span data-tip="transactions whose asset carried the parenthetical ticker the form asks for. The rest keep their raw asset name and stay visible — nothing is fuzzy-matched to a plausible-looking symbol.">ticker resolved <b>${pct(ps.resolved||0,ps.tx||0)}</b> <span class="sec">(${(ps.resolved||0).toLocaleString()}/${(ps.tx||0).toLocaleString()})</span></span>`
-      +((ps.parsed&&!ps.tx)?`<span class="cng-warn" data-tip="these filings DID yield text — extraction worked — but the parser recognized no transaction rows in it, which means the table shape differs from what it expects. Run: congress diag">\u26a0 ${ps.parsed} parsed, 0 transactions \u2014 text extracted but no rows recognized</span>`:'')
-      +(c.noDate?`<span class="cng-warn" data-tip="filings whose FilingDate the parser could not read. They are kept, never dropped; the raw values are sampled into the ingest ops line so the shape can be identified.">unreadable dates <b>${c.noDate}</b></span>`:'')
+      +`<span data-tip="filings whose PDF yielded transactions, over all PTRs the index knows about. The rest are queued or unreadable \u2014 both are counted here rather than quietly excluded.">parsed <b>${(ps.parsed||0).toLocaleString()}</b> / ${(c.ptr||0).toLocaleString()} <span class="sec">(${pct(ps.parsed||0,c.ptr||0)})</span></span>`
+      +`<span data-tip="a real PDF that yielded no text at all \u2014 an image-only filing. There is no OCR in this lane: these are marked once, never re-fetched, and counted here so the coverage number stays honest.">unreadable <b>${(ps.unreadable||0).toLocaleString()}</b></span>`
+      +`<span data-tip="PTRs the index has found but nobody has read yet. Worked daily; forceable with: congress parse">queued <b>${(ps.pending||0).toLocaleString()}</b></span>`
+      +`<span data-tip="transactions carrying a ticker \u2014 either the parenthetical the filer wrote, or the issuer name resolved against the universe. The rest keep their raw asset name and stay visible.">ticker resolved <b>${pct(ps.resolved||0,ps.tx||0)}</b> <span class="sec">(${(ps.resolved||0).toLocaleString()}/${(ps.tx||0).toLocaleString()})</span></span>`
+      +((ps.parsed&&!ps.tx)?`<span class="cng-warn" data-tip="these filings DID yield text \u2014 extraction worked \u2014 but the parser recognized no transaction rows in it. Run: congress diag">\u26a0 ${ps.parsed} parsed, 0 transactions</span>`:'')
+      +(c.noDate?`<span class="cng-warn" data-tip="filings whose FilingDate the parser could not read. They are kept, never dropped; the raw values are sampled into the ingest ops line.">unreadable dates <b>${c.noDate}</b></span>`:'')
     +`</div>`
-    +((ps.notes&&ps.notes.length)?`<div class="cng-why"><span class="k">why</span>${ps.notes.map(n2=>`<span data-tip="${esc(n2.note)}">${esc(n2.note.split(':')[0])} <b>\u00d7${n2.n}</b></span>`).join('')}</div>`:'');
-  if(!CNG.rows.length){
-    out.innerHTML=head+`<div class="sec" style="padding:10px 2px">${ps.pending?`${ps.parsed?`${ps.parsed} filing(s) parsed but no transactions recognized \u2014 run <b>congress diag</b> (no argument needed) to see what the documents actually contain`:`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`}`:'no transactions match'}</div>`;
+    +((ps.notes&&ps.notes.length)?`<div class="cng-why"><span class="k">why</span>${ps.notes.map(n2=>`<span data-tip="${esc(n2.sample||n2.note)}">${esc(n2.note.split(':')[0])} <b>\u00d7${n2.n}</b></span>`).join('')}</div>`:'')
+    +(CNG.menu?`<div class="cng-colmenu">${CNG_COLS.map(col=>`<label><input type="checkbox" data-cngcol="${col.k}"${CNG.hidden.has(col.k)?'':' checked'}> ${esc(col.label)}</label>`).join('')}</div>`:'');
+  if(!rows.length){
+    out.innerHTML=head+`<div class="sec" style="padding:10px 2px">${CNG.rows.length?'no rows match this filter':(ps.pending?`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`:'no transactions')}</div>`;
     cngBind(); return;
   }
-  const row=(x)=>{
-    const lag=x.filed&&x.txDate?Math.round((Date.parse(x.filed)-Date.parse(x.txDate))/86400000):null;
-    const lagc=lag==null?'na':lag<14?'fast':lag<35?'mid':'slow';
-    const dir=/^buy/.test(x.act)?'p':/^sell/.test(x.act)?'s':'e';
-    const band=x.hiAmt!=null?cngMoney(x.loAmt)+' \u2013 '+cngMoney(x.hiAmt):cngMoney(x.loAmt)+'+';
-    const who=x.owner&&x.owner!=='self'?`<span class="cng-own" data-tip="filed for the member's ${esc(x.owner)}, not the member personally">${esc(x.owner==='dependent'?'DC':x.owner==='spouse'?'SP':'JT')}</span>`:'';
-    return `<tr class="whl-worow" data-tip="${esc(x.asset+' \u00b7 filed '+(x.filed||'?')+' \u00b7 traded '+(x.txDate||'?')+(x.notified?' \u00b7 notified '+x.notified:'')+' \u00b7 disclosed band '+band)}">`
-      +`<td class="l sec">${esc(x.filed||'\u2014')}</td>`
-      +`<td class="r"><span class="cng-lag ${lagc}">${lag==null?'\u2014':lag+'d'}</span></td>`
-      +`<td class="l"><span class="cng-nm">${esc((x.member||'').slice(0,26))}</span>${who}<span class="cng-dist">${esc((x.state||'')+(x.dist?'-'+x.dist:''))}</span></td>`
-      +`<td class="l">${x.ticker?`<span class="cng-tk">${esc(x.ticker)}</span>`:`<span class="cng-un" data-tip="this asset carried no ticker on the form — the raw name is kept and it is counted in the resolution rate above, never guessed at">${esc(x.asset.length>30?x.asset.slice(0,30)+'\u2026':x.asset)}</span>`}</td>`
-      +`<td class="l"><span class="cng-act ${dir}">${esc(x.act)}</span></td>`
-      +`<td class="r">${esc(band)}</td>`
-      +`<td class="l sec">${esc(x.txDate||'\u2014')}</td>`
-      +`<td class="l">${x.url?`<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener" data-tip="the filed PDF at the House Clerk \u2014 the source this row was parsed from">source</a>`:''}</td></tr>`;
+  const cell=(k,x)=>{
+    const lag=cngLag(x);
+    if(k==='filed') return `<td class="l sec">${esc(x.filed||'\u2014')}</td>`;
+    if(k==='lag') return `<td class="r"><span class="cng-lag ${lag==null?'na':lag<14?'fast':lag<35?'mid':'slow'}">${lag==null?'\u2014':lag+'d'}</span></td>`;
+    if(k==='member'){ const who=x.owner&&x.owner!=='self'?`<span class="cng-own" data-tip="filed for the member\u2019s ${esc(x.owner)}, not the member personally">${esc(x.owner==='dependent'?'DC':x.owner==='spouse'?'SP':'JT')}</span>`:'';
+      return `<td class="l"><span class="cng-nm">${esc((x.member||'').slice(0,26))}</span>${who}<span class="cng-dist">${esc((x.state||'')+(x.dist?'-'+x.dist:''))}</span></td>`; }
+    if(k==='asset') return `<td class="l">${x.ticker?`<span class="cng-tk${x.tkSrc==='name'?' derived':''}" data-tip="${esc(x.tkSrc==='name'?'resolved from the issuer name \u2014 "'+(x.asset||'')+'" \u2014 against the universe, using the same collision-safe map the 13F lane uses: a name that could mean two symbols resolves to neither. The filer did not write a ticker on the form.':'the ticker exactly as the filer wrote it on the form')}">${esc(x.ticker)}</span>`:`<span class="cng-un" data-tip="${esc('no ticker on the form, and the issuer name did not resolve against the universe: '+(x.asset||''))}">${esc(x.asset.length>30?x.asset.slice(0,30)+'\u2026':x.asset)}</span>`}</td>`;
+    if(k==='act'){ const dir=/^buy/.test(x.act)?'p':/^sell/.test(x.act)?'s':'e'; return `<td class="l"><span class="cng-act ${dir}">${esc(x.act)}</span></td>`; }
+    if(k==='band') return `<td class="r">${esc(x.hiAmt!=null?cngMoney(x.loAmt)+' \u2013 '+cngMoney(x.hiAmt):cngMoney(x.loAmt)+'+')}</td>`;
+    if(k==='traded') return `<td class="l sec">${esc(x.txDate||'\u2014')}</td>`;
+    return `<td class="l">${x.url?`<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener">source</a>`:''}</td>`;
   };
+  const arrow=(k)=>CNG.sort.k===k?`<span class="cng-arr">${CNG.sort.dir>0?'\u25b2':'\u25bc'}</span>`:'';
   out.innerHTML=head
     +`<div class="tblwrap"><table class="whl-tbl cng-tbl"><thead><tr>`
-    +`<th class="l" data-tip="when the filing became public. The feed sorts on this, not on the trade date: a trade from seven weeks ago that files today is today's information.">FILED</th>`
-    +`<th class="r" data-tip="filing date minus trade date. The STOCK Act caps it at 45 days; how close a member runs to that cap is itself a behavioural read.">LAG</th>`
-    +`<th class="l">MEMBER</th><th class="l">ASSET</th><th class="l">ACT</th>`
-    +`<th class="r" data-tip="the band the filer disclosed. A PTR never carries an exact figure, so none is shown and no midpoint is computed anywhere in this lane.">BAND</th>`
-    +`<th class="l">TRADED</th><th class="l">SRC</th></tr></thead><tbody>${CNG.rows.map(row).join('')}</tbody></table></div>`
-    +`<div class="whl-foot">source: House Clerk Periodic Transaction Reports, filed under the STOCK Act \u00b7 sorted by FILING date \u2014 the moment the information became public \u00b7 amounts are disclosed bands, never point figures \u00b7 Senate filings and executive-branch (OGE 278-T) filings are NOT in this lane</div>`;
+    +shown.map(col=>`<th class="${col.cls} cng-th" data-cngsort="${col.k}" data-tip="${esc(col.tip+' \u00b7 click to sort')}">${esc(col.label)}${arrow(col.k)}</th>`).join('')
+    +`</tr></thead><tbody>`
+    +rows.map(x=>`<tr class="whl-worow">${shown.map(col=>cell(col.k,x)).join('')}</tr>`).join('')
+    +`</tbody></table></div>`
+    +`<div class="whl-foot">${rows.length.toLocaleString()} of ${CNG.rows.length.toLocaleString()} transaction(s) shown \u00b7 source: House Clerk Periodic Transaction Reports, filed under the STOCK Act \u00b7 sorted by FILING date by default \u2014 the moment the information became public \u00b7 amounts are disclosed bands, never point figures \u00b7 a <span class="cng-tk derived">dotted</span> ticker was resolved from the issuer name, not written on the form \u00b7 Senate and executive-branch (OGE 278-T) filings are NOT in this lane</div>`;
   cngBind();
 }
 function cngBind(){
-  const i=el('cng-tk'); if(!i) return;
-  i.onkeydown=(e)=>{ if(e.key==='Enter'){ CNG.tk=i.value.trim().toUpperCase(); openCongress(); } };
-  i.onblur=()=>{ const v=i.value.trim().toUpperCase(); if(v!==CNG.tk){ CNG.tk=v; openCongress(); } };
+  const q=el('cng-q');
+  if(q){ q.oninput=()=>{ CNG.q=q.value; const p=q.selectionStart; cngRender(); const q2=el('cng-q'); if(q2){ q2.focus(); try{q2.setSelectionRange(p,p);}catch(_){} } }; }
+  const out=el('congress-body'); if(!out) return;
+  out.querySelectorAll('[data-cngsort]').forEach(th=>th.onclick=()=>{
+    const k=th.dataset.cngsort;
+    if(CNG.sort.k===k) CNG.sort.dir=-CNG.sort.dir; else CNG.sort={k,dir:k==='member'||k==='asset'||k==='act'?1:-1};
+    cngSave(); cngRender(); });
+  out.querySelectorAll('[data-cngact]').forEach(b=>b.onclick=()=>{
+    const a=b.dataset.cngact;
+    if(CNG.acts.has(a)) CNG.acts.delete(a); else CNG.acts.add(a);
+    cngRender(); });
+  const cb=el('cng-colbtn'); if(cb) cb.onclick=()=>{ CNG.menu=!CNG.menu; cngRender(); };
+  out.querySelectorAll('[data-cngcol]').forEach(inp=>inp.onchange=()=>{
+    const k=inp.dataset.cngcol;
+    if(inp.checked) CNG.hidden.delete(k); else CNG.hidden.add(k);
+    // Never hide every column: an empty table is not a view, it is a broken one.
+    if(CNG.hidden.size>=CNG_COLS.length) CNG.hidden.delete(k);
+    cngSave(); cngRender(); });
 }
 async function cngGet(qs){ try{ return await fetchJSON('/api/congress'+(qs||'')); }catch(e){ return {ok:false,error:e.message||'fetch failed'}; } }
 async function cngPost(body){ try{ const r=await fetch('/api/congress',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
