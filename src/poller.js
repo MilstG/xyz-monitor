@@ -6219,6 +6219,33 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       out.tx = pr.tx.length;
       out.sampleTx = pr.tx.slice(0, 4);
       out.skipped = pr.skipped.slice(0, 4);
+      // No text and images present means this is a scan, and the only question that matters is what
+      // OCR actually SEES. "nothing passed validation" could mean a clean typed form my gate is too
+      // strict about, or handwriting no engine can read — those are opposite conclusions, and the
+      // raw text is the only thing that tells them apart. One page, so diag stays interactive.
+      if (!runs.length && out.images && out.images.length) {
+        let worker = null;
+        try {
+          const { createWorker } = require("tesseract.js");
+          const path2 = require("path");
+          worker = await createWorker("eng", 1, {
+            langPath: path2.join(process.cwd(), "node_modules/@tesseract.js-data/eng/4.0.0_best_int"),
+            gzip: true, cachePath: require("os").tmpdir(), logger: () => {} });
+          const imgs = pdfImages(buf).filter((i) => i.ready);
+          const first = imgs[0];
+          const payload = first && (first.filter === "CCITTFaxDecode" ? ccittTiff(first) : first.data);
+          if (payload) {
+            const rec = await worker.recognize(payload);
+            const text = String((rec.data && rec.data.text) || "");
+            out.ocrChars = text.replace(/\s+/g, " ").trim().length;
+            out.ocrText = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 12);
+            const gate = ocrPtrRows(text, { filed: row && row.filed });
+            out.ocrRows = gate.rows.length;
+            out.ocrDropped = gate.dropped.slice(0, 4);
+          }
+        } catch (e) { out.ocrError = String(e && e.message).slice(0, 120); }
+        finally { try { if (worker) await worker.terminate(); } catch (_) {} }
+      }
       return out;
     } catch (e) { return { ok: false, url, error: String(e && e.message).slice(0, 200) }; }
   }

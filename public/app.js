@@ -13035,6 +13035,12 @@ async function termCongress(args){
     (r.sampleRows||[]).forEach(x=>L.push(`    row  ${tesc(x)}`));
     (r.sampleTx||[]).forEach(x=>L.push(`    tx   ${tesc(JSON.stringify(x))}`));
     (r.skipped||[]).forEach(x=>L.push(`    skip ${tesc(JSON.stringify(x))}`));
+    if(r.ocrChars!=null){
+      L.push(`  ${tpad('ocr',12)} ${r.ocrChars} char(s) recognized \u00b7 ${r.ocrRows||0} row(s) passed the gate`);
+      (r.ocrText||[]).forEach(x=>L.push(`    text ${tesc(String(x).slice(0,96))}`));
+      (r.ocrDropped||[]).forEach(x=>L.push(`    drop ${tesc(x.why)} \u2014 ${tesc(String(x.line||'').slice(0,60))}`));
+    }
+    if(r.ocrError) L.push(`  ${tpad('ocr',12)} <span class="neg">${tesc(r.ocrError)}</span>`);
     return termOut(L.join('\n'));
   }
   if(sub==='watch'||sub==='unwatch'){
@@ -13079,7 +13085,8 @@ async function termCongress(args){
     const body=c.n?`\n  ${tpad('filings',12)} ${tpad(String(c.n),8,true)}\n  ${tpad('of those PTR',12)} ${tpad(String(c.ptr),8,true)}\n  ${tpad('members',12)} ${tpad(String(c.members),8,true)}\n  ${tpad('range',12)} ${tesc((c.first||'\u2014')+' \u2192 '+(c.last||'\u2014'))}${c.noDate?` <span class="tp-err">${c.noDate} filing(s) with an unreadable date</span> <span class="tp-trans">\u2014 kept and counted; raw values are sampled in the ingest ops line</span>`:''}\n  ${tpad('by year',12)} ${tesc(yrs)}\n  ${tpad('unparsed',12)} ${tpad(String(c.pending),8,true)} <span class="tp-trans">PTRs queued for phase 2 \u2014 no document is parsed yet</span>`
       :'\n  <span class="sec">no index ingested yet</span> <span class="tp-trans">\u00b7 admin: congress ingest</span>';
     const notes=(st.parse&&st.parse.notes)||[];
-    const why=notes.length?`\n  ${tpad('why',12)} ${notes.map(n2=>tesc(n2.note.slice(0,42))+' \u00d7'+n2.n).join('\n'+' '.repeat(15))}`:'';
+    const why=notes.length?`\n  ${tpad('why',12)} ${notes.map(n2=>tesc(n2.note.slice(0,42))+' \u00d7'+n2.n
+      +(n2.sample&&n2.sample!==n2.note?'  <span class="tp-trans">'+tesc(String(n2.sample).slice(0,72))+'</span>':'')).join('\n'+' '.repeat(15))}`:'';
     const err=(st.lastError?`\n  <span class="tp-err">last error</span> ${tesc(String(st.lastError).slice(0,160))}`:'')+why;
     return termOut(head+body+err);
   }
