@@ -13020,7 +13020,7 @@ async function termCongress(args){
     const think=termThinking(); const r=await cngPost({op:'diag',doc:doc||undefined}); think.remove();
     if(!r) return termErr('failed');
     const L=[];
-    L.push(`<span class="tp-hd">congress diag ${tesc(doc)}</span>`);
+    L.push(`<span class="tp-hd">congress diag ${tesc(doc||'')}</span>${r.build?` <span class="tp-trans">\u00b7 server build ${tesc(r.build)}</span>`:''}`);
     L.push(`  ${tpad('url',12)} ${tesc(r.url||'')}`);
     L.push(`  ${tpad('http',12)} ${tesc(String(r.status||r.error||'?'))}${r.ct?' \u00b7 '+tesc(r.ct):''}`);
     if(r.bytes!=null) L.push(`  ${tpad('bytes',12)} ${r.bytes.toLocaleString()}`);
@@ -13081,7 +13081,7 @@ async function termCongress(args){
     if(!st.ready) return termErr('congress index unavailable \u2014 sqlite is off in this runtime');
     const when=st.lastSync?new Date(st.lastSync).toISOString().slice(0,16).replace('T',' ')+'Z':'never';
     const yrs=(st.years||[]).map(y=>`${y.yr}:${y.n}`).join(' ')||'\u2014';
-    const head=`<span class="tp-hd">congress index</span> <span class="tp-trans">\u00b7 last sync ${tesc(when)}${st.busy?' \u00b7 <span class="amber">ingesting now</span>':''}</span>`;
+    const head=`<span class="tp-hd">congress index</span> <span class="tp-trans">${st.build?'\u00b7 build '+tesc(st.build)+' ':''}\u00b7 last sync ${tesc(when)}${st.busy?' \u00b7 <span class="amber">ingesting now</span>':''}</span>`;
     const body=c.n?`\n  ${tpad('filings',12)} ${tpad(String(c.n),8,true)}\n  ${tpad('of those PTR',12)} ${tpad(String(c.ptr),8,true)}\n  ${tpad('members',12)} ${tpad(String(c.members),8,true)}\n  ${tpad('range',12)} ${tesc((c.first||'\u2014')+' \u2192 '+(c.last||'\u2014'))}${c.noDate?` <span class="tp-err">${c.noDate} filing(s) with an unreadable date</span> <span class="tp-trans">\u2014 kept and counted; raw values are sampled in the ingest ops line</span>`:''}\n  ${tpad('by year',12)} ${tesc(yrs)}\n  ${tpad('unparsed',12)} ${tpad(String(c.pending),8,true)} <span class="tp-trans">PTRs queued for phase 2 \u2014 no document is parsed yet</span>`
       :'\n  <span class="sec">no index ingested yet</span> <span class="tp-trans">\u00b7 admin: congress ingest</span>';
     const notes=(st.parse&&st.parse.notes)||[];
