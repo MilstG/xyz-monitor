@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-21"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-22"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,49 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -22: a backfill must not notify — the age guard failed OPEN twice over", async () => {
+  // Reported from production: notifications kept arriving for OLD filings as the backfill filled
+  // them in, when the newest filing in existence was days old. Two bugs pointing the same way:
+  //   1. congressQueue never SELECTed `filed`, so the filing's date was undefined at alert time;
+  //   2. the guard read "if the date is known AND old, skip" — so an UNKNOWN date alerted.
+  // Together: every one of thousands of backfilled historical filings pushed a notification.
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congressB-"));
+  const store = openStore(dir);
+  const iso = (d) => new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
+  const pdf = fs.readFileSync(path.join(__dirname, "..", "package.json"));
+  const extFetch = async () => ({ ok: true, headers: { get: () => "application/pdf" },
+    arrayBuffer: async () => pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) });
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch, congressGap: 0 });
+  const F = (id, filed) => ({ id, chamber: "H", docId: id.slice(2), yr: 2026, member: "Starred, Member",
+    lname: "Starred", fname: "", suffix: "", state: "CA", dist: "11", type: "ptr", typeRaw: "P",
+    filed, url: "https://x/" + id + ".pdf", amends: null, parsed: 0, nTx: null });
+  store.congressUpsertFilings([F("H:5001", iso(2)), F("H:5002", iso(400)), F("H:5003", "")]);
+  p.congressWatchSet("Starred, Member", true);
+  store.congressMetaSet("alertPrimed", String(Date.now()));       // past the seed run
+
+  // The queue must carry the date at all — this is the half that made the guard unreachable.
+  const q = store.congressQueue(10);
+  assert.ok(q.every((r) => "filed" in r), "the parse queue carries each filing's date");
+
+  const tx = [{ owner: "self", asset: "Apple Inc. (AAPL)", ticker: "AAPL", act: "buy",
+    txDate: iso(3), notified: null, loAmt: 1001, hiAmt: 15000, tkSrc: "form", atype: "ST" }];
+  const fired = () => p.getTriggers(0, "", true).recent.filter((t) => t.kind === "congress").length;
+  const before = fired();
+  store.congressSaveTx("H:5002", tx);
+  p.congressAlertNow(q.find((r) => r.id === "H:5002"), tx);
+  assert.equal(fired(), before, "a filing from over a year ago raises nothing, however it arrives");
+  store.congressSaveTx("H:5003", tx);
+  p.congressAlertNow(q.find((r) => r.id === "H:5003"), tx);
+  assert.equal(fired(), before, "and an unknown date is NOT treated as recent — the guard fails closed");
+  store.congressSaveTx("H:5001", tx);
+  p.congressAlertNow(q.find((r) => r.id === "H:5001"), tx);
+  assert.equal(fired(), before + 1, "while a filing from two days ago does alert");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -21: starred filters in SQL, and an impossible lag is not a fact", async () => {
   // The starred chip filtered the LOADED PAGE in the browser. With 288 parsed filings and 50 rows a

@@ -5943,9 +5943,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!store.congressMeta || !store.congressMeta("alertPrimed")) return;
       const w = store.congressWatched && store.congressWatched(filing.member);
       if (!w || !w.notify) return;
-      const filed = filing.filed || (store.congressFilings ? "" : "");
+      // FAIL CLOSED on age. The guard used to read "if the date is known AND it is old, skip",
+      // which meant an UNKNOWN date alerted — and the queue never selected `filed`, so the date was
+      // unknown for every filing. Both halves of the bug pointed the same way: a backfill walking
+      // years of history pushed a notification for every one of them. An age that cannot be
+      // established is not evidence of recency.
+      const filed = String(filing.filed || "");
       const at = filed ? Date.parse(filed + "T00:00:00Z") : NaN;
-      if (Number.isFinite(at) && Date.now() - at > CONGRESS_ALERT_MAX_AGE) return;
+      if (!Number.isFinite(at)) return;
+      if (Date.now() - at > CONGRESS_ALERT_MAX_AGE) return;
       const buys = txs.filter((t) => /^buy/.test(t.act)).length;
       const sells = txs.filter((t) => /^sell/.test(t.act)).length;
       const names = [...new Set(txs.map((t) => t.ticker || (t.asset || "").slice(0, 18)).filter(Boolean))].slice(0, 6);
@@ -13302,6 +13308,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     congressParseNow: congressParse, congressDiagNow: congressDiag, congressRequeueNow: congressRequeue,
     congressBackfillNow: congressBackfill,
     congressFilerSearch: (q) => (store.congressFilerSearch ? store.congressFilerSearch(q) : []),
+    congressAlertNow: congressAlert,             // harness: the age guard is pinned by test
     congressWatchList: () => (store.congressWatchList ? store.congressWatchList() : []),
     congressWatchSet: (m, on, notify) => {
       const ok = store.congressWatchSet ? store.congressWatchSet(m, on, notify) : false;
