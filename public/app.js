@@ -13110,10 +13110,12 @@ function cngRender(){
       +`<span data-tip="scanned or handwritten filings. There is no OCR in this lane: they are marked once, never re-fetched, and counted here so the coverage number stays honest.">unreadable <b>${(ps.unreadable||0).toLocaleString()}</b></span>`
       +`<span data-tip="PTRs the index has found but nobody has read yet — the parse queue, worked daily and forceable from the terminal with: congress parse">queued <b>${(ps.pending||0).toLocaleString()}</b></span>`
       +`<span data-tip="transactions whose asset carried the parenthetical ticker the form asks for. The rest keep their raw asset name and stay visible — nothing is fuzzy-matched to a plausible-looking symbol.">ticker resolved <b>${pct(ps.resolved||0,ps.tx||0)}</b> <span class="sec">(${(ps.resolved||0).toLocaleString()}/${(ps.tx||0).toLocaleString()})</span></span>`
+      +((ps.parsed&&!ps.tx)?`<span class="cng-warn" data-tip="these filings DID yield text — extraction worked — but the parser recognized no transaction rows in it, which means the table shape differs from what it expects. Run: congress diag">\u26a0 ${ps.parsed} parsed, 0 transactions \u2014 text extracted but no rows recognized</span>`:'')
       +(c.noDate?`<span class="cng-warn" data-tip="filings whose FilingDate the parser could not read. They are kept, never dropped; the raw values are sampled into the ingest ops line so the shape can be identified.">unreadable dates <b>${c.noDate}</b></span>`:'')
-    +`</div>`;
+    +`</div>`
+    +((ps.notes&&ps.notes.length)?`<div class="cng-why"><span class="k">why</span>${ps.notes.map(n2=>`<span data-tip="${esc(n2.note)}">${esc(n2.note.split(':')[0])} <b>\u00d7${n2.n}</b></span>`).join('')}</div>`:'');
   if(!CNG.rows.length){
-    out.innerHTML=head+`<div class="sec" style="padding:10px 2px">${ps.pending?`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`:'no transactions match'}</div>`;
+    out.innerHTML=head+`<div class="sec" style="padding:10px 2px">${ps.pending?`${ps.parsed?`${ps.parsed} filing(s) parsed but no transactions recognized \u2014 run <b>congress diag</b> (no argument needed) to see what the documents actually contain`:`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`}`:'no transactions match'}</div>`;
     cngBind(); return;
   }
   const row=(x)=>{

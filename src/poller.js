@@ -5942,8 +5942,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // text the extractor found, what the rows look like, and what the parser made of them. This is
   // the tool that turns "222 unreadable" into a fixable fact.
   async function congressDiag(docIdArg) {
-    const id = String(docIdArg || "").trim().replace(/^H:/i, "");
-    if (!/^\d{4,}$/.test(id)) return { ok: false, error: "usage: congress diag <docId> — the numeric id from a source link" };
+    let id = String(docIdArg || "").trim().replace(/^H:/i, "");
+    if (!id) {
+      // No argument: diagnose the head of the queue. When nothing has parsed there is no row on the
+      // panel to copy an id from, so requiring one made the tool useless exactly when it is needed.
+      const q = store.congressQueue(1, 99);
+      if (!q.length) return { ok: false, error: "queue is empty — pass a docId explicitly: congress diag <docId>" };
+      id = String(q[0].id).replace(/^H:/, "");
+    }
+    if (!/^\d{4,}$/.test(id)) return { ok: false, error: "usage: congress diag [docId] — omit it to take the head of the queue" };
     const row = store.congressFilings({ limit: 500 }).find((r) => r.id === "H:" + id);
     const yr = new Date().getUTCFullYear();
     const url = (row && row.url) || housePtrUrl(yr, id);
