@@ -8052,6 +8052,86 @@ function pdfTextRuns(buf) {
   return runs;
 }
 
+// Embedded images, for the OCR lane. A scanned filing IS an image: there is nothing to rasterise,
+// the page is a photograph sitting in a stream. What matters is the FILTER, because that decides
+// whether the bytes are already a file an OCR engine can open (DCTDecode is a JPEG, JPXDecode a
+// JPEG 2000) or a raw bitmap that would have to be re-encoded first (CCITTFaxDecode, JBIG2Decode,
+// or a plain Flate bitmap). Reporting the filter is the point: building a decoder for the wrong
+// encoding is the mistake this whole lane has already made once.
+function pdfImages(buf) {
+  const objs = pdfObjects(buf);
+  const out = [];
+  for (const [num, o] of objs) {
+    if (!o.img || !o.data) continue;
+    const f = (o.dict.match(/\/Filter\s*\/?\[?\s*\/([A-Za-z0-9]+)/) || [])[1] || null;
+    const gi = (k) => { const m = o.dict.match(new RegExp("\\/" + k + "\\s+(\\d+)")); return m ? +m[1] : null; };
+    out.push({ num, filter: f, width: gi("Width"), height: gi("Height"), bpc: gi("BitsPerComponent"),
+      bytes: o.data.length, data: o.data,
+      // Only these arrive as a file an image decoder already understands.
+      ready: f === "DCTDecode" || f === "JPXDecode" });
+  }
+  return out.sort((a, b) => b.bytes - a.bytes);
+}
+
+// OCR text -> transactions, under a GATE rather than a cleanup. Measured on a rendered filing:
+// amounts and tickers came through exactly, every trade date was right, but a transaction type read
+// as "3" instead of "P" and two notification dates lost their slashes ("08/1472026"). A misread
+// digit inside an amount would be indistinguishable from a real one, so nothing here is repaired or
+// inferred — a field is either unambiguously well-formed or its row is dropped and counted.
+//
+// The bands are the strongest check available: eleven exact tiers exist, so "$16,001 - $50,000" is
+// not a band at all and cannot be silently accepted as the tier next to it.
+let PTR_TIER_SET = null;
+const ptrTierSet = () => (PTR_TIER_SET
+  || (PTR_TIER_SET = new Set(PTR_BANDS.map((b) => b[0] + ":" + b[1]).concat(["50000000:null"]))));
+function ocrPtrRows(text, opt) {
+  const o = opt || {};
+  const rows = [], dropped = [];
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    const band = ptrBand(line);
+    if (!band) continue;                                   // not a transaction line at all
+    // 1. the band must be a REAL tier, exactly.
+    if (!ptrTierSet().has(band.lo + ":" + (band.hi == null ? "null" : band.hi))) {
+      dropped.push({ why: "amount is not one of the disclosed tiers", line: line.slice(0, 110) });
+      continue;
+    }
+    // 2. a clean transaction date, and nothing salvaged from a mangled one.
+    const dm = line.match(/\b(\d{2})\/(\d{2})\/(\d{4})\b/);
+    if (!dm) { dropped.push({ why: "no clean transaction date", line: line.slice(0, 110) }); continue; }
+    const mo = +dm[1], dy = +dm[2], yr = +dm[3];
+    if (!(mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31 && yr >= 2008 && yr <= 2100)) {
+      dropped.push({ why: "date out of range", line: line.slice(0, 110) }); continue;
+    }
+    const txDate = dm[3] + "-" + dm[1] + "-" + dm[2];
+    // 3. a report cannot predate its own trade.
+    if (o.filed && txDate > o.filed) { dropped.push({ why: "trade dated after the filing", line: line.slice(0, 110) }); continue; }
+    // 4. the action must be exactly P, S or E standing alone. "3" is not a transaction type, and
+    //    guessing which letter it was meant to be is how a sale becomes a purchase.
+    const upto = line.slice(0, line.indexOf(dm[0]));
+    const acts = [...upto.matchAll(/(?:^|\s)([PSEpse])(?:\s*\(partial\))?(?=\s|$)/g)];
+    if (!acts.length) { dropped.push({ why: "no readable transaction type", line: line.slice(0, 110) }); continue; }
+    const rawAct = acts[acts.length - 1][1].toUpperCase();
+    let asset = upto.slice(0, acts[acts.length - 1].index).trim();
+    let owner = "self";
+    const om = asset.match(/^(SP|DC|JT)\b\s*/i);
+    if (om) { owner = PTR_OWNER[om[1].toUpperCase()] || "self"; asset = asset.slice(om[0].length).trim(); }
+    const atm = line.match(/\[([A-Z]{2})\]/);
+    asset = asset.replace(/\s*\[[A-Z]{2}\]\s*/g, " ").replace(/\s+/g, " ").trim();
+    if (asset.length < 3) { dropped.push({ why: "no asset name", line: line.slice(0, 110) }); continue; }
+    // 5. a ticker is accepted only if the universe confirms it. OCR turns O into 0 and I into 1;
+    //    an unverified three-letter guess is exactly the fabrication this lane refuses.
+    const guess = ptrTicker(asset);
+    const ticker = guess && (!o.known || o.known(guess)) ? guess : null;
+    rows.push({ owner, asset, atype: atm ? atm[1] : null, ticker,
+      act: PTR_ACT[rawAct] + (/\(partial\)/i.test(upto) ? "-partial" : ""),
+      txDate, notified: null,                              // never trusted from OCR: see the note above
+      loAmt: band.lo, hiAmt: band.hi, src: "ocr" });
+  }
+  return { rows, dropped };
+}
+
 // Positioned runs -> table rows. Runs sharing a baseline (within tolerance) are one row; the gaps
 // between their x positions are the column boundaries. Cells keep their x so a caller can map
 // columns by position rather than by counting, which survives an empty cell.
@@ -8206,4 +8286,6 @@ module.exports.ptrTicker = ptrTicker;
 module.exports.parsePtr = parsePtr;
 module.exports.PTR_BANDS = PTR_BANDS;
 module.exports.PTR_TICKERABLE = PTR_TICKERABLE;
+module.exports.pdfImages = pdfImages;
+module.exports.ocrPtrRows = ocrPtrRows;
 module.exports.PTR_NO_TICKER = PTR_NO_TICKER;

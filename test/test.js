@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-25"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-26"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,47 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -25: the OCR gate rejects what OCR gets wrong", () => {
+  // Measured, not assumed. A PTR table was rendered and photographed, then read by the engine that
+  // would do this in production. What came back, verbatim:
+  //   'SP Apple Inc. (AAPL) [ST] P 08/13/2026 08/1472026 $1,001 - $15,000'   <- notification mangled
+  //   'NVIDIA Corporation (NVDA) [ST] s 07/22/2026 077252026 $15,001 - $50,000'  <- lowercase s
+  //   'JT Microsoft Corp (MSFT) [ST] 3 06/02/2026 06/03/2026 $250,001 - $500,000' <- P read as 3
+  // Amounts, tickers and trade dates survived exactly; a transaction TYPE did not. Since a misread
+  // digit inside an amount is indistinguishable from a real one, nothing here is repaired: a field
+  // is unambiguously well-formed or its row is dropped and counted.
+  const { ocrPtrRows } = require("../src/compute");
+  const known = (t) => ["AAPL", "NVDA", "MSFT"].includes(t);
+  const r = ocrPtrRows([
+    "SP Apple Inc. (AAPL) [ST] P 08/13/2026 08/1472026 $1,001 - $15,000",
+    "NVIDIA Corporation (NVDA) [ST] s 07/22/2026 077252026 $15,001 - $50,000",
+    "JT Microsoft Corp (MSFT) [ST] 3 06/02/2026 06/03/2026 $250,001 - $500,000",
+    "SP Fake Corp (FAKE) [ST] P 05/01/2026 05/02/2026 $16,001 - $50,000",
+  ].join("\n"), { filed: "2026-08-24", known });
+  assert.equal(r.rows.length, 2, "two of the four lines are trustworthy");
+  assert.equal(r.rows[0].ticker, "AAPL");
+  assert.deepEqual([r.rows[0].loAmt, r.rows[0].hiAmt], [1001, 15000]);
+  assert.equal(r.rows[0].owner, "spouse");
+  assert.equal(r.rows[1].act, "sell", "a lowercase s is a FONT, not an ambiguity — that row is real");
+  assert.equal(r.rows[0].notified, null, "notification dates are never trusted from OCR: two of three were mangled");
+  assert.ok(r.rows.every((x) => x.src === "ocr"), "and every row is marked as OCR-derived");
+  const why = r.dropped.map((d) => d.why);
+  assert.ok(why.some((w) => /transaction type/.test(w)),
+    "'3' is not a transaction type, and guessing which letter it was is how a sale becomes a purchase");
+  assert.ok(why.some((w) => /not one of the disclosed tiers/.test(w)),
+    "$16,001 is not a band that exists — a misread digit must not pass as the tier next to it");
+  // A trade dated after its own filing is rejected here too, at the source rather than in the panel.
+  const late = ocrPtrRows("SP Apple Inc. (AAPL) [ST] P 12/26/2026 12/27/2026 $1,001 - $15,000",
+    { filed: "2026-02-09", known });
+  assert.equal(late.rows.length, 0);
+  assert.ok(/after the filing/.test(late.dropped[0].why));
+  // An unverifiable ticker is not invented: OCR turns O into 0 and I into 1.
+  const unk = ocrPtrRows("Some Corp (ZZZZ) [ST] P 08/13/2026 08/14/2026 $1,001 - $15,000",
+    { filed: "2026-08-24", known });
+  assert.equal(unk.rows.length, 1, "the row is still real");
+  assert.equal(unk.rows[0].ticker, null, "but a ticker the universe cannot confirm stays unresolved");
+});
 
 test("congress -24: image data is not text — a scan was masquerading as an unparseable layout", () => {
   // congress diag khanna, on production: 475KB, /BitsPerComponent, 38 streams, and SEVEN text runs
