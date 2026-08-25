@@ -13011,6 +13011,31 @@ async function termCongress(args){
     const r=await cngPost({op:'parse',n:+(args[1]||0)||undefined});
     return r&&r.ok?termOut(`<span class="pos">parse run started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
   }
+  if(sub==='diag'){
+    const doc=(args[1]||'').trim();
+    if(!doc) return termErr('usage: congress diag <docId> \u2014 the numeric id at the end of a source link');
+    const think=termThinking(); const r=await cngPost({op:'diag',doc}); think.remove();
+    if(!r) return termErr('failed');
+    const L=[];
+    L.push(`<span class="tp-hd">congress diag ${tesc(doc)}</span>`);
+    L.push(`  ${tpad('url',12)} ${tesc(r.url||'')}`);
+    L.push(`  ${tpad('http',12)} ${tesc(String(r.status||r.error||'?'))}${r.ct?' \u00b7 '+tesc(r.ct):''}`);
+    if(r.bytes!=null) L.push(`  ${tpad('bytes',12)} ${r.bytes.toLocaleString()}`);
+    if(r.isPdf!=null) L.push(`  ${tpad('is a PDF',12)} <span class="${r.isPdf?'pos':'neg'}">${r.isPdf?'yes':'NO'}</span>`);
+    if(r.head) L.push(`  ${tpad('first bytes',12)} ${tesc(String(r.head).slice(0,90))}`);
+    if(r.producer) L.push(`  ${tpad('producer',12)} ${tesc(r.producer)}`);
+    if(r.objects!=null) L.push(`  ${tpad('structure',12)} ${r.objects} object(s) \u00b7 ${r.streams} stream(s)${r.objStm?' \u00b7 <span class="neg">object streams</span>':''}${r.encrypted?' \u00b7 <span class="neg">ENCRYPTED</span>':''}`);
+    if(r.runs!=null) L.push(`  ${tpad('text runs',12)} ${r.runs} \u00b7 rows ${r.rows} \u00b7 tx ${r.tx}`);
+    (r.sampleRuns||[]).forEach(x=>L.push(`    run  x${tpad(String(x.x),5,true)} y${tpad(String(x.y),5,true)}  ${tesc(x.t)}`));
+    (r.sampleRows||[]).forEach(x=>L.push(`    row  ${tesc(x)}`));
+    (r.sampleTx||[]).forEach(x=>L.push(`    tx   ${tesc(JSON.stringify(x))}`));
+    (r.skipped||[]).forEach(x=>L.push(`    skip ${tesc(JSON.stringify(x))}`));
+    return termOut(L.join('\n'));
+  }
+  if(sub==='requeue'){
+    const r=await cngPost({op:'requeue',all:(args[1]||'')==='all'});
+    return r&&r.ok?termOut(`<span class="pos">${r.requeued} filing(s) requeued</span> <span class="tp-trans">\u00b7 run <b>congress parse</b> to work them again</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
   if(sub==='feed'){
     const r=await cngGet('?feed=1&limit=20'); if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
     const rows=r.feed||[];
@@ -13032,7 +13057,9 @@ async function termCongress(args){
     const head=`<span class="tp-hd">congress index</span> <span class="tp-trans">\u00b7 last sync ${tesc(when)}${st.busy?' \u00b7 <span class="amber">ingesting now</span>':''}</span>`;
     const body=c.n?`\n  ${tpad('filings',12)} ${tpad(String(c.n),8,true)}\n  ${tpad('of those PTR',12)} ${tpad(String(c.ptr),8,true)}\n  ${tpad('members',12)} ${tpad(String(c.members),8,true)}\n  ${tpad('range',12)} ${tesc((c.first||'\u2014')+' \u2192 '+(c.last||'\u2014'))}${c.noDate?` <span class="tp-err">${c.noDate} filing(s) with an unreadable date</span> <span class="tp-trans">\u2014 kept and counted; raw values are sampled in the ingest ops line</span>`:''}\n  ${tpad('by year',12)} ${tesc(yrs)}\n  ${tpad('unparsed',12)} ${tpad(String(c.pending),8,true)} <span class="tp-trans">PTRs queued for phase 2 \u2014 no document is parsed yet</span>`
       :'\n  <span class="sec">no index ingested yet</span> <span class="tp-trans">\u00b7 admin: congress ingest</span>';
-    const err=st.lastError?`\n  <span class="tp-err">last error</span> ${tesc(String(st.lastError).slice(0,160))}`:'';
+    const notes=(st.parse&&st.parse.notes)||[];
+    const why=notes.length?`\n  ${tpad('why',12)} ${notes.map(n2=>tesc(n2.note.slice(0,42))+' \u00d7'+n2.n).join('\n'+' '.repeat(15))}`:'';
+    const err=(st.lastError?`\n  <span class="tp-err">last error</span> ${tesc(String(st.lastError).slice(0,160))}`:'')+why;
     return termOut(head+body+err);
   }
   if(/^[A-Za-z.]{1,6}$/.test(sub)){
@@ -13043,7 +13070,7 @@ async function termCongress(args){
     const body=R.members.map(m=>`  ${tpad(tesc(m.member.slice(0,24)),25)} ${tpad(String(m.n),3,true)} <span class="${m.buys>m.sells?'pos':m.sells>m.buys?'neg':'sec'}">${tpad(m.buys+'b/'+m.sells+'s',8)}</span> ${tpad(m.medLag==null?'\u2014':m.medLag+'d',6,true)} ${tpad('\u2265 '+money(m.floor),14,true)} ${tesc(m.last||'')}`).join('\n');
     return termOut(`<span class="tp-hd">${tesc(R.ticker)} \u00b7 congressional flow</span> <span class="tp-trans">\u00b7 ${R.filings} transaction(s) \u00b7 ${R.buys} buy / ${R.sells} sell \u00b7 \u2265 ${money(R.floor)} disclosed floor</span>\n${body}\n<span class="tp-trans">\u2265 sums the LOW end of every disclosed band \u2014 a hard floor, never an estimate of the real total</span>`);
   }
-  return termErr('usage: congress status | ingest [year] | parse [n] | feed | <TICKER>');
+  return termErr('usage: congress status | ingest [year] | parse [n] | diag <docId> | requeue [all] | feed | <TICKER>');
 }
 // ---- CONGRESS panel (build 2026.08.24-06) -----------------------------------------------------
 // The PTR feed, sorted by FILING date because that is the moment the information became public —
