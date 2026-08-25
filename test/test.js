@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-19"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-20"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,43 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -20: the parse run is throttle-bound, and concurrency must not corrupt the queue", async () => {
+  // Measured on a real encrypted fixture: decrypt + extract + parse is well under a millisecond a
+  // document. A 200-document run costs ~90ms of computation and used to take 200 SECONDS, all of it
+  // deliberate waiting. Parallelising the WAIT is the only thing that makes this faster — but only
+  // if workers sharing a cursor never hand the same filing to two of them, or one document gets
+  // fetched twice and another never at all.
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const { pdfTextRuns } = require("../src/compute");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress9-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const rows = [];
+  for (let i = 0; i < 24; i++) rows.push({ id: "H:7" + (100 + i), chamber: "H", docId: "7" + (100 + i),
+    yr: 2026, member: "Filer " + (i % 4), lname: "Filer", fname: "", suffix: "", state: "CA", dist: "1",
+    type: "ptr", typeRaw: "P", filed: "2026-08-20", url: "https://x/7" + (100 + i) + ".pdf",
+    amends: null, parsed: 0, nTx: null });
+  store.congressUpsertFilings(rows);
+  const seen = new Map();
+  const pdf = fs.readFileSync(path.join(__dirname, "..", "package.json")); // deliberately NOT a pdf
+  const extFetch = async (url) => {
+    seen.set(url, (seen.get(url) || 0) + 1);
+    return { ok: true, headers: { get: () => "application/pdf" },
+      arrayBuffer: async () => pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
+    extFetch, congressGap: 0, congressConc: 4 });
+  const r = await p.congressParseNow(24);
+  assert.equal(r.done, 24, "every queued filing is handed out");
+  const docs = [...seen.entries()].filter(([u]) => /\/7\d+\.pdf$/.test(u));
+  assert.equal(docs.length, 24, "to exactly one worker each \u2014 every filing fetched, none skipped");
+  assert.ok(docs.every(([, n2]) => n2 === 1), "and none fetched twice, which a shared cursor could easily do");
+  assert.equal(r.notPdf, 24, "the non-PDF bodies are classified honestly under concurrency too");
+  assert.equal(pdfTextRuns(pdf).length, 0, "sanity: the fixture really is not a PDF");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -19: the alert actually formats — a ticker-less event was dying silently", () => {
   // The whole alert lane was inert and nothing said so. pushFmt returns null for any event with no
