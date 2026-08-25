@@ -1033,7 +1033,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
     // readable by trying again). `tries` counts TRANSIENT failures only, so a network blip retries
     // and a scan does not burn fetches forever.
     congressQueue(limit, maxTries) { const d = this.openCongress(); if (!d) return [];
-      try { return d.prepare("SELECT id, yr, url, member FROM filing WHERE type='ptr' AND parsed=0 AND url IS NOT NULL"
+      try { return d.prepare("SELECT id, yr, url, member, filed, state, dist FROM filing WHERE type='ptr' AND parsed=0 AND url IS NOT NULL"
         + " AND (tries IS NULL OR tries < ?) ORDER BY filed DESC, id DESC LIMIT ?")
         .all(maxTries == null ? 5 : maxTries | 0, Math.max(1, Math.min(500, limit | 0 || 25))); } catch (_) { return []; } },
     congressSaveTx(fid, rows) { const d = this.openCongress(); if (!d) return 0;
