@@ -21,6 +21,7 @@ const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCor
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
+const { pdfTextRuns, ptrRows, parsePtr } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
@@ -175,7 +176,7 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -5664,14 +5665,26 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // real filing-window URL". So this lane asks for MORE THAN ONE candidate up front, logs every
   // full URL it tried on failure, and reports what the ZIP actually contained on success.
   //
-  // STANDING CAVEAT until the first real ingest lands: the candidate list, the index filename and
-  // the XML element names below are the documented/observed shapes, NOT verified against a live
-  // download. Whichever candidate answers gets written into the ops log and belongs in this
-  // comment afterwards.
+  // VERIFIED IN PRODUCTION 2026-08-25 — the first real ingest, which is the whole reason phase 1
+  // shipped on its own. What the network actually does, replacing the pre-flight guesses:
+  //   - the FIRST candidate answers: /public_disc/financial-pdfs/2026FD.zip
+  //   - the ZIP carries ONLY the index: 0.1MB, 2 entries (2026FD.xml plus a .txt twin), no PDFs.
+  //     That settles the open sizing question — the daily tick is trivially cheap, ~60ms end to
+  //     end. The stream-to-disk path below is therefore unnecessary at this size; it stays because
+  //     it costs nothing and the file grows across a year.
+  //   - the 2026 index holds 1,573 filings, 364 of them PTRs.
+  //   - a second run a minute later wrote 0 new rows: the upsert is idempotent against the REAL
+  //     feed, not merely against the fixture.
+  //   - filing-type codes W, D and H appear in the live index and are NOT in HOUSE_TYPE below.
+  //     They ride as "other" with the raw code stored, which is exactly what that design is for.
+  //     Do NOT guess at them: the Clerk publishes no code table (searched), and the only honest
+  //     way to identify one is to open a filing that carries it — GET /api/congress?type=other —
+  //     and read the document. Until then they are unidentified, not mislabelled.
   const HOUSE_DISC = "https://disclosures-clerk.house.gov/public_disc/";
   // Filing-type codes, mapped only where the meaning is certain. An unmapped code is NOT dropped
   // and NOT guessed: the row is kept, `type` reads "other", and the raw code rides in `typeRaw` so
   // a code that appears later can be identified from stored data instead of a re-crawl.
+  // Observed live but deliberately absent: W, D, H (see the production note above).
   const HOUSE_TYPE = { P: "ptr", O: "annual", A: "amendment", C: "candidate", T: "termination", X: "extension" };
   let congressBusy = false, congressProgress = null, congressLastError = null;
   function houseIndexUrls(y) {
@@ -5691,16 +5704,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (e.method !== 8) throw new Error("ZIP: unsupported compression method " + e.method + " on " + e.name);
     return require("zlib").inflateRawSync(raw).toString("utf8");
   }
-  const houseDate = (v) => {                       // "8/13/2026" or already-ISO -> ISO
+  // Date shapes seen or plausible in the index, normalized to ISO. A shape not listed here returns
+  // "" rather than a guessed date — and the ingest COUNTS those and samples the raw text, because
+  // production showed the symptom of a blank date (a dash where the earliest filing should be) with
+  // no way to tell how many rows were affected or what the offending value even looked like.
+  const MON3 = { JAN: "01", FEB: "02", MAR: "03", APR: "04", MAY: "05", JUN: "06",
+    JUL: "07", AUG: "08", SEP: "09", OCT: "10", NOV: "11", DEC: "12" };
+  const houseDate = (v) => {
     const t = String(v || "").trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
-    const m = t.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-    return m ? m[3] + "-" + String(m[1]).padStart(2, "0") + "-" + String(m[2]).padStart(2, "0") : "";
+    if (!t) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;                       // already ISO
+    let m = t.match(/^(\d{4})[/.](\d{1,2})[/.](\d{1,2})$/);            // 2026/08/13
+    if (m) return m[1] + "-" + m[2].padStart(2, "0") + "-" + m[3].padStart(2, "0");
+    m = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/);       // 8/13/2026 · 8-13-26
+    if (m) { const y = m[3].length === 2 ? (+m[3] > 70 ? "19" : "20") + m[3] : m[3];
+      return y + "-" + m[1].padStart(2, "0") + "-" + m[2].padStart(2, "0"); }
+    m = t.match(/^(\d{1,2})[-\s]([A-Za-z]{3})[A-Za-z]*[-\s](\d{4})$/); // 13-AUG-2026
+    if (m && MON3[m[2].toUpperCase()]) return m[3] + "-" + MON3[m[2].toUpperCase()] + "-" + m[1].padStart(2, "0");
+    m = t.match(/^([A-Za-z]{3})[A-Za-z]*\s+(\d{1,2}),?\s+(\d{4})$/);  // August 13, 2026
+    if (m && MON3[m[1].toUpperCase()]) return m[3] + "-" + MON3[m[1].toUpperCase()] + "-" + m[2].padStart(2, "0");
+    return "";
   };
   // Read fields by NAME, never by position — the rule the 13F parser already runs on, for the same
   // reason: an upstream column reorder must fail loudly or not at all, never shift data silently.
   function parseHouseIndex(text, yearHint) {
-    const rows = [], seen = new Set();
+    const rows = [], seen = new Set(), badDates = [];
     const push = (f) => {
       const docId = String(f.DocID || "").trim();
       if (!docId) return;
@@ -5717,8 +5745,18 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         member: (last + (first ? ", " + first : "") + (suffix ? " " + suffix : "")).trim(),
         lname: last, fname: first, suffix,
         state: sd.slice(0, 2), dist: sd.slice(2),
-        type, typeRaw: code, filed: houseDate(f.FilingDate),
-        url: housePtrUrl(yr, docId),
+        type, typeRaw: code, filed: (() => {
+          const iso = houseDate(f.FilingDate);
+          // A filing whose date cannot be read is KEPT — dropping it would hide a filing — but the
+          // raw value is sampled so the shape can be identified instead of theorized about.
+          if (!iso && badDates.length < 5) badDates.push(String(f.FilingDate == null ? "(absent)" : f.FilingDate).slice(0, 40));
+          return iso;
+        })(),
+        // Only a PTR gets a document URL. The ptr-pdfs path is corroborated by live documents
+        // going back years; the path for every OTHER filing type is NOT verified from here, and a
+        // link that 404s on the 1,209 non-PTR rows of a 1,573-row index is worse than no link.
+        // Phase 2 resolves it if it ever has a reason to fetch one.
+        url: type === "ptr" ? housePtrUrl(yr, docId) : null,
         // The index carries no supersede link — an amendment arrives as its own filing with type A.
         // Resolving which filing an A amends needs the documents themselves, so it waits for phase 2
         // rather than being guessed from name-and-date collisions here.
@@ -5735,7 +5773,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         for (const m of b[1].matchAll(/<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/g)) f[m[1]] = m[2];
         push(f);
       }
-      return rows;
+      return { rows, badDates };
     }
     // Fallback: the ZIP has also carried a tab-delimited index. Same by-name rule on the header.
     const lines = text.split(/\r?\n/).filter((l) => l.trim());
@@ -5747,7 +5785,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         push(f);
       }
     }
-    return rows;
+    return { rows, badDates };
   }
   async function congressIngest(yearArg) {
     if (congressBusy) return { ok: false, error: "an ingest is already running" };
@@ -5793,7 +5831,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!idx) return fail({ ok: false,
         error: "no .xml or .txt index inside the zip (" + entries.length + " entr" + (entries.length === 1 ? "y" : "ies") + ": "
           + entries.slice(0, 6).map((e) => e.name).join(", ") + ") — layout changed, ingest needs a patch" });
-      const rows = parseHouseIndex(zipEntryText(zipBuf, idx), yr);
+      const parsedIdx = parseHouseIndex(zipEntryText(zipBuf, idx), yr);
+      const rows = parsedIdx.rows, badDates = parsedIdx.badDates;
+      const noDate = rows.filter((r) => !r.filed).length;
       if (!rows.length) return fail({ ok: false,
         error: "index " + idx.name + " parsed to zero filings — element or column names may have changed; ingest needs a patch" });
       congressProgress.stage = "store";
@@ -5806,10 +5846,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       congressLastError = null;
       const note = up.seen + " filings (" + ptr + " PTR), " + up.added + " new · zip "
         + (zipBuf.length / 1e6).toFixed(1) + "MB / " + entries.length + " entries · index " + idx.name
-        + (unknown.length ? " · unmapped filing-type code(s) kept verbatim: " + unknown.join(",") : "");
+        + (unknown.length ? " · unmapped filing-type code(s) kept verbatim: " + unknown.join(",") : "")
+        + (noDate ? " · " + noDate + " filing(s) with an unreadable FilingDate, kept and counted (raw: "
+          + badDates.map((b) => JSON.stringify(b)).join(", ") + ")" : "");
       pushOps("congress index " + yr, "ingested from " + urlUsed + " — " + note, "info", true);
       log("congress: " + yr + " index ingested — " + note);
-      return done({ ok: true, yr, url: urlUsed, filings: up.seen, added: up.added, ptr,
+      return done({ ok: true, yr, url: urlUsed, filings: up.seen, added: up.added, ptr, noDate, badDates,
         entries: entries.length, index: idx.name, bytes: zipBuf.length, unknownTypes: unknown });
     } catch (e) {
       return fail({ ok: false, error: String(e && e.message).slice(0, 200) });
@@ -5828,6 +5870,59 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const d = new Date(now), yr = d.getUTCFullYear();
     await congressIngest(yr).catch(() => {});
     if (d.getUTCMonth() <= 1) await congressIngest(yr - 1).catch(() => {});
+    await congressParse().catch(() => {});      // work whatever the refreshed index just queued
+  }
+  // ---- CONGRESS phase 2: the PTR parse queue --------------------------------------------------
+  // Filings the index found but nobody has read yet. Politeness first: one document a second, a cap
+  // per run, and resumable — the queue IS the parsed=0 rows, so an interrupted run leaves no
+  // half-state to reconcile. A fetch that fails transiently bumps `tries` and comes back; a
+  // document with no text operators at all is a scan, which is permanent, so it is marked once and
+  // never re-fetched. The difference matters: without it a few hundred scanned filings would
+  // consume the whole rate budget every single day, forever.
+  const CONGRESS_PARSE_CAP = 40;          // documents per run
+  const CONGRESS_PARSE_GAP = congressGapOpt == null ? 1000 : +congressGapOpt;   // ms between fetches (0 in tests)
+  let congressParseBusy = false;
+  async function congressParse(limitArg) {
+    if (congressParseBusy) return { ok: false, error: "a parse run is already going" };
+    if (!store.congressReady || !store.congressReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
+    const lim = Math.max(1, Math.min(200, +limitArg || CONGRESS_PARSE_CAP));
+    const queue = store.congressQueue(lim);
+    if (!queue.length) return { ok: true, done: 0, note: "queue empty" };
+    congressParseBusy = true;
+    let parsed = 0, tx = 0, scanned = 0, failed = 0, first = null;
+    try {
+      for (const f of queue) {
+        try {
+          // Timeout per document. extFetch is a bare fetch wrapper, so without an abort a single
+          // hung response stalls the entire run — and this run is on the daily tick.
+          const ac = new AbortController();
+          const to = setTimeout(() => ac.abort(), 25 * 1000);
+          let res;
+          try { res = await extFetch(f.url, { headers: { "user-agent": SEC_UA }, signal: ac.signal }); }
+          finally { clearTimeout(to); }
+          if (!res || !res.ok) { store.congressBumpTry(f.id); failed++;
+            if (!first) first = f.id + " → HTTP " + (res ? res.status : "no response"); continue; }
+          const buf = Buffer.from(await res.arrayBuffer());
+          const runs = pdfTextRuns(buf);
+          if (!runs.length) { store.congressMarkUnreadable(f.id); scanned++; continue; }
+          const out = parsePtr(ptrRows(runs));
+          // A text PDF that yields no transaction row is NOT the same as a scan: it parsed, it just
+          // had nothing this parser recognized. It is saved as zero rows so it leaves the queue and
+          // shows up in the counts as a parsed filing with no transactions — visible, not silent.
+          store.congressSaveTx(f.id, out.tx);
+          parsed++; tx += out.tx.length;
+        } catch (e) { store.congressBumpTry(f.id); failed++;
+          if (!first) first = f.id + " → " + String(e && e.message).slice(0, 60); }
+        if (CONGRESS_PARSE_GAP) await new Promise((r) => setTimeout(r, CONGRESS_PARSE_GAP));
+      }
+    } finally { congressParseBusy = false; }
+    const st = store.congressParseStats();
+    const note = parsed + " parsed (" + tx + " transactions)" + (scanned ? ", " + scanned + " scanned/unreadable" : "")
+      + (failed ? ", " + failed + " fetch failures (first: " + first + ")" : "")
+      + " · queue now " + (st ? st.pending : "?");
+    pushOps("congress PTR parse", note, failed && !parsed ? "warn" : "info", true);
+    log("congress: parse run — " + note);
+    return { ok: true, done: queue.length, parsed, tx, scanned, failed, stats: st };
   }
   function congressStatus() {
     const last = +(store.congressMeta && store.congressMeta("lastSync")) || 0;
@@ -5835,6 +5930,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       busy: congressBusy, progress: congressProgress, lastSync: last || null,
       lastError: congressLastError,
       counts: (store.congressCounts && store.congressCounts()) || null,
+      parse: (store.congressParseStats && store.congressParseStats()) || null,
+      parsing: congressParseBusy,
       years: (store.congressYears && store.congressYears()) || [] };
   }
 
@@ -12981,7 +13078,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     whale13fIngestNow: whale13fIngest, whale13fTickNow: whale13fTick, t13fStatus,
     // CONGRESS lane phase 1 (2026.08.24-02): admin-only index ingest — no public payload yet.
     congressIngestNow: congressIngest, congressTickNow: congressTick, congressStatus,
+    congressParseNow: congressParse,
     congressFilings: (o) => (store.congressFilings ? store.congressFilings(o) : []),
+    congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
+    congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
     houseIndexUrls,                              // harness: the candidate list is pinned by test
     whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
     hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()

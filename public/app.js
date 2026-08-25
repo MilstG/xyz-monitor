@@ -3588,7 +3588,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -6061,6 +6061,7 @@ function showView(v){
   setHidden('view-earnings', v!=='earnings');
   setHidden('view-news', v!=='news');
   setHidden('view-notes', v!=='notes');
+  setHidden('view-congress', v!=='congress');
   setHidden('view-backtest', v!=='backtest');
   setHidden('view-report', v!=='report');
   setHidden('view-admin', v!=='admin');
@@ -6077,6 +6078,7 @@ function showView(v){
   if(v==='earnings'){ if(el('view-earnings')) openEarnings(); else { showView('markets'); return; } }
   if(v==='news'){ if(el('view-news')) openNews(); else { showView('markets'); return; } }
   if(v==='notes'){ if(el('view-notes')) openNotes(); else { showView('markets'); return; } }
+  if(v==='congress'){ if(el('view-congress')) openCongress(); else { showView('markets'); return; } }
   if(v==='backtest'){ if(el('view-backtest')) renderBacktest_load(); else { showView('markets'); return; } }
   if(v==='report'){ if(el('view-report')) openReportView(); else { showView('markets'); return; } }
   if(v==='admin'){ if(el('view-admin')&&IS_ADMIN) openAdmin(); else { showView('markets'); return; } }
@@ -13005,6 +13007,22 @@ async function termCongress(args){
     const r=await cngPost({op:'ingest',year:yr?+yr:undefined});
     return r&&r.ok?termOut(`<span class="pos">index ingest started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
   }
+  if(sub==='parse'){
+    const r=await cngPost({op:'parse',n:+(args[1]||0)||undefined});
+    return r&&r.ok?termOut(`<span class="pos">parse run started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  if(sub==='feed'){
+    const r=await cngGet('?feed=1&limit=20'); if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
+    const rows=r.feed||[];
+    if(!rows.length) return termOut('<span class="sec">no parsed transactions yet</span> <span class="tp-trans">\u00b7 admin: congress parse</span>');
+    const money=(v)=>v==null?'\u2014':'$'+Math.round(v).toLocaleString();
+    const body=rows.map(x=>{
+      const lag=x.filed&&x.txDate?Math.round((Date.parse(x.filed)-Date.parse(x.txDate))/86400000):null;
+      const dir=/^buy/.test(x.act)?'pos':/^sell/.test(x.act)?'neg':'amber';
+      return `  ${tpad(tesc(x.filed||''),11)} ${tpad(lag==null?'\u2014':lag+'d',5,true)} ${tpad(tesc((x.member||'').slice(0,22)),23)} ${tpad(tesc(x.ticker||'\u2014'),7)} <span class="${dir}">${tpad(tesc(x.act),13)}</span> ${tesc('\u2265 '+money(x.loAmt))}`;
+    }).join('\n');
+    return termOut(`<span class="tp-hd">congress \u00b7 PTR feed</span> <span class="tp-trans">\u00b7 newest FILED first \u2014 the filing date is when the market learned, not the trade date</span>\n${body}\n<span class="tp-trans">amounts are the disclosed band FLOOR (\u2265) \u2014 a PTR discloses a range, never a figure</span>`);
+  }
   if(sub==='status'){
     const r=await cngGet(); if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
     const st=r.status||{}, c=st.counts||{};
@@ -13012,14 +13030,97 @@ async function termCongress(args){
     const when=st.lastSync?new Date(st.lastSync).toISOString().slice(0,16).replace('T',' ')+'Z':'never';
     const yrs=(st.years||[]).map(y=>`${y.yr}:${y.n}`).join(' ')||'\u2014';
     const head=`<span class="tp-hd">congress index</span> <span class="tp-trans">\u00b7 last sync ${tesc(when)}${st.busy?' \u00b7 <span class="amber">ingesting now</span>':''}</span>`;
-    const body=c.n?`\n  ${tpad('filings',12)} ${tpad(String(c.n),8,true)}\n  ${tpad('of those PTR',12)} ${tpad(String(c.ptr),8,true)}\n  ${tpad('members',12)} ${tpad(String(c.members),8,true)}\n  ${tpad('range',12)} ${tesc((c.first||'\u2014')+' \u2192 '+(c.last||'\u2014'))}\n  ${tpad('by year',12)} ${tesc(yrs)}\n  ${tpad('unparsed',12)} ${tpad(String(c.pending),8,true)} <span class="tp-trans">PTRs queued for phase 2 \u2014 no document is parsed yet</span>`
+    const body=c.n?`\n  ${tpad('filings',12)} ${tpad(String(c.n),8,true)}\n  ${tpad('of those PTR',12)} ${tpad(String(c.ptr),8,true)}\n  ${tpad('members',12)} ${tpad(String(c.members),8,true)}\n  ${tpad('range',12)} ${tesc((c.first||'\u2014')+' \u2192 '+(c.last||'\u2014'))}${c.noDate?` <span class="tp-err">${c.noDate} filing(s) with an unreadable date</span> <span class="tp-trans">\u2014 kept and counted; raw values are sampled in the ingest ops line</span>`:''}\n  ${tpad('by year',12)} ${tesc(yrs)}\n  ${tpad('unparsed',12)} ${tpad(String(c.pending),8,true)} <span class="tp-trans">PTRs queued for phase 2 \u2014 no document is parsed yet</span>`
       :'\n  <span class="sec">no index ingested yet</span> <span class="tp-trans">\u00b7 admin: congress ingest</span>';
     const err=st.lastError?`\n  <span class="tp-err">last error</span> ${tesc(String(st.lastError).slice(0,160))}`:'';
     return termOut(head+body+err);
   }
-  return termErr('usage: congress status | congress ingest [year]');
+  if(/^[A-Za-z.]{1,6}$/.test(sub)){
+    const r=await cngGet('?ticker='+encodeURIComponent(sub.toUpperCase()));
+    if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
+    if(!r.roll) return termOut(`<span class="sec">no congressional transactions on ${tesc(sub.toUpperCase())}</span> <span class="tp-trans">\u00b7 in what has been parsed so far</span>`);
+    const R=r.roll, money=(v)=>'$'+Math.round(v).toLocaleString();
+    const body=R.members.map(m=>`  ${tpad(tesc(m.member.slice(0,24)),25)} ${tpad(String(m.n),3,true)} <span class="${m.buys>m.sells?'pos':m.sells>m.buys?'neg':'sec'}">${tpad(m.buys+'b/'+m.sells+'s',8)}</span> ${tpad(m.medLag==null?'\u2014':m.medLag+'d',6,true)} ${tpad('\u2265 '+money(m.floor),14,true)} ${tesc(m.last||'')}`).join('\n');
+    return termOut(`<span class="tp-hd">${tesc(R.ticker)} \u00b7 congressional flow</span> <span class="tp-trans">\u00b7 ${R.filings} transaction(s) \u00b7 ${R.buys} buy / ${R.sells} sell \u00b7 \u2265 ${money(R.floor)} disclosed floor</span>\n${body}\n<span class="tp-trans">\u2265 sums the LOW end of every disclosed band \u2014 a hard floor, never an estimate of the real total</span>`);
+  }
+  return termErr('usage: congress status | ingest [year] | parse [n] | feed | <TICKER>');
 }
-async function cngGet(){ try{ return await fetchJSON('/api/congress'); }catch(e){ return {ok:false,error:e.message||'fetch failed'}; } }
+// ---- CONGRESS panel (build 2026.08.24-06) -----------------------------------------------------
+// The PTR feed, sorted by FILING date because that is the moment the information became public —
+// a seven-week-old trade filed this morning is this morning's news. Two numbers ride in the header
+// permanently, not as an error state: how many filings could not be parsed, and how many assets
+// never resolved to a ticker. A lane that hides its own coverage rate is asking to be trusted more
+// than it has earned.
+const CNG={rows:[],stat:null,tk:'',busy:false};
+function cngMoney(v){ if(v==null) return '\u2014';
+  const a=Math.abs(v);
+  if(a>=1e9) return '$'+(v/1e9).toFixed(1)+'B';
+  if(a>=1e6) return '$'+(v/1e6).toFixed(1)+'M';
+  if(a>=1e3) return '$'+Math.round(v/1e3)+'K';
+  return '$'+Math.round(v); }
+async function openCongress(){
+  const out=el('congress-body'); if(!out) return;
+  if(!CNG.rows.length) out.innerHTML='<div class="msg">reading the congressional index\u2026</div>';
+  const r=await cngGet('?feed=1&limit=120'+(CNG.tk?'&ticker='+encodeURIComponent(CNG.tk):''));
+  if(!r||!r.ok){ out.innerHTML=`<div class="msg err">${esc((r&&r.error)||'fetch failed')}</div>`; return; }
+  CNG.rows=r.feed||[]; CNG.stat=r.status||null;
+  cngRender();
+}
+function cngRender(){
+  const out=el('congress-body'); if(!out) return;
+  const st=CNG.stat||{}, c=st.counts||{}, ps=st.parse||{};
+  const when=st.lastSync?new Date(st.lastSync).toISOString().slice(0,16).replace('T',' ')+'Z':'never';
+  const pct=(a,b)=>b?Math.round(a/b*100)+'%':'\u2014';
+  const head=`<div class="whl-head">`
+    +`<span class="whl-hd">CONGRESS \u00b7 PTR FEED</span>`
+    +`<span class="cng-tag" data-tip="the House Clerk republishes its filing index daily; this is the last time we read it">house index \u00b7 synced ${esc(when)}</span>`
+    +`<span class="sec">${(c.n||0).toLocaleString()} filings \u00b7 ${(c.ptr||0).toLocaleString()} PTR \u00b7 ${(c.members||0).toLocaleString()} filers</span>`
+    +`<span class="whl-sp"></span>`
+    +`<input id="cng-tk" class="cng-in" placeholder="filter by ticker\u2026" value="${esc(CNG.tk)}" maxlength="6" autocomplete="off" spellcheck="false">`
+    +`</div>`
+    +`<div class="cng-rates">`
+      +`<span data-tip="filings whose PDF yielded transactions, over all PTRs the index knows about. The rest are queued or unreadable — both are counted here rather than quietly excluded.">parsed <b>${(ps.parsed||0).toLocaleString()}</b> / ${(c.ptr||0).toLocaleString()} <span class="sec">(${pct(ps.parsed||0,c.ptr||0)})</span></span>`
+      +`<span data-tip="scanned or handwritten filings. There is no OCR in this lane: they are marked once, never re-fetched, and counted here so the coverage number stays honest.">unreadable <b>${(ps.unreadable||0).toLocaleString()}</b></span>`
+      +`<span data-tip="PTRs the index has found but nobody has read yet — the parse queue, worked daily and forceable from the terminal with: congress parse">queued <b>${(ps.pending||0).toLocaleString()}</b></span>`
+      +`<span data-tip="transactions whose asset carried the parenthetical ticker the form asks for. The rest keep their raw asset name and stay visible — nothing is fuzzy-matched to a plausible-looking symbol.">ticker resolved <b>${pct(ps.resolved||0,ps.tx||0)}</b> <span class="sec">(${(ps.resolved||0).toLocaleString()}/${(ps.tx||0).toLocaleString()})</span></span>`
+      +(c.noDate?`<span class="cng-warn" data-tip="filings whose FilingDate the parser could not read. They are kept, never dropped; the raw values are sampled into the ingest ops line so the shape can be identified.">unreadable dates <b>${c.noDate}</b></span>`:'')
+    +`</div>`;
+  if(!CNG.rows.length){
+    out.innerHTML=head+`<div class="sec" style="padding:10px 2px">${ps.pending?`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`:'no transactions match'}</div>`;
+    cngBind(); return;
+  }
+  const row=(x)=>{
+    const lag=x.filed&&x.txDate?Math.round((Date.parse(x.filed)-Date.parse(x.txDate))/86400000):null;
+    const lagc=lag==null?'na':lag<14?'fast':lag<35?'mid':'slow';
+    const dir=/^buy/.test(x.act)?'p':/^sell/.test(x.act)?'s':'e';
+    const band=x.hiAmt!=null?cngMoney(x.loAmt)+' \u2013 '+cngMoney(x.hiAmt):cngMoney(x.loAmt)+'+';
+    const who=x.owner&&x.owner!=='self'?`<span class="cng-own" data-tip="filed for the member's ${esc(x.owner)}, not the member personally">${esc(x.owner==='dependent'?'DC':x.owner==='spouse'?'SP':'JT')}</span>`:'';
+    return `<tr class="whl-worow" data-tip="${esc(x.asset+' \u00b7 filed '+(x.filed||'?')+' \u00b7 traded '+(x.txDate||'?')+(x.notified?' \u00b7 notified '+x.notified:'')+' \u00b7 disclosed band '+band)}">`
+      +`<td class="l sec">${esc(x.filed||'\u2014')}</td>`
+      +`<td class="r"><span class="cng-lag ${lagc}">${lag==null?'\u2014':lag+'d'}</span></td>`
+      +`<td class="l"><span class="cng-nm">${esc((x.member||'').slice(0,26))}</span>${who}<span class="cng-dist">${esc((x.state||'')+(x.dist?'-'+x.dist:''))}</span></td>`
+      +`<td class="l">${x.ticker?`<span class="cng-tk">${esc(x.ticker)}</span>`:`<span class="cng-un" data-tip="this asset carried no ticker on the form — the raw name is kept and it is counted in the resolution rate above, never guessed at">${esc(x.asset.length>30?x.asset.slice(0,30)+'\u2026':x.asset)}</span>`}</td>`
+      +`<td class="l"><span class="cng-act ${dir}">${esc(x.act)}</span></td>`
+      +`<td class="r">${esc(band)}</td>`
+      +`<td class="l sec">${esc(x.txDate||'\u2014')}</td>`
+      +`<td class="l">${x.url?`<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener" data-tip="the filed PDF at the House Clerk \u2014 the source this row was parsed from">source</a>`:''}</td></tr>`;
+  };
+  out.innerHTML=head
+    +`<div class="tblwrap"><table class="whl-tbl cng-tbl"><thead><tr>`
+    +`<th class="l" data-tip="when the filing became public. The feed sorts on this, not on the trade date: a trade from seven weeks ago that files today is today's information.">FILED</th>`
+    +`<th class="r" data-tip="filing date minus trade date. The STOCK Act caps it at 45 days; how close a member runs to that cap is itself a behavioural read.">LAG</th>`
+    +`<th class="l">MEMBER</th><th class="l">ASSET</th><th class="l">ACT</th>`
+    +`<th class="r" data-tip="the band the filer disclosed. A PTR never carries an exact figure, so none is shown and no midpoint is computed anywhere in this lane.">BAND</th>`
+    +`<th class="l">TRADED</th><th class="l">SRC</th></tr></thead><tbody>${CNG.rows.map(row).join('')}</tbody></table></div>`
+    +`<div class="whl-foot">source: House Clerk Periodic Transaction Reports, filed under the STOCK Act \u00b7 sorted by FILING date \u2014 the moment the information became public \u00b7 amounts are disclosed bands, never point figures \u00b7 Senate filings and executive-branch (OGE 278-T) filings are NOT in this lane</div>`;
+  cngBind();
+}
+function cngBind(){
+  const i=el('cng-tk'); if(!i) return;
+  i.onkeydown=(e)=>{ if(e.key==='Enter'){ CNG.tk=i.value.trim().toUpperCase(); openCongress(); } };
+  i.onblur=()=>{ const v=i.value.trim().toUpperCase(); if(v!==CNG.tk){ CNG.tk=v; openCongress(); } };
+}
+async function cngGet(qs){ try{ return await fetchJSON('/api/congress'+(qs||'')); }catch(e){ return {ok:false,error:e.message||'fetch failed'}; } }
 async function cngPost(body){ try{ const r=await fetch('/api/congress',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   return await r.json(); }catch(e){ return {ok:false,error:e.message||'post failed'}; } }
 async function termWhale(args){

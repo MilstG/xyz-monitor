@@ -955,7 +955,15 @@ CREATE TABLE IF NOT EXISTS filing(
   type TEXT, typeRaw TEXT, filed TEXT, url TEXT, amends TEXT,
   parsed INTEGER, nTx INTEGER) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS fil_dt ON filing(filed);
-CREATE INDEX IF NOT EXISTS fil_ty ON filing(type, filed);`);
+CREATE INDEX IF NOT EXISTS fil_ty ON filing(type, filed);
+CREATE TABLE IF NOT EXISTS tx(
+  fid TEXT, ln INTEGER, owner TEXT, asset TEXT, ticker TEXT, act TEXT,
+  txDate TEXT, notified TEXT, loAmt REAL, hiAmt REAL, PRIMARY KEY(fid, ln)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS tx_tk ON tx(ticker, txDate);`);
+        // Phase 2 adds a retry counter to a table that already holds rows in production, so the
+        // migration is an ALTER that is allowed to fail: on a fresh database the column comes from
+        // the CREATE above once this line has run, and on an existing one it is added in place.
+        try { congress.exec("ALTER TABLE filing ADD COLUMN tries INTEGER"); } catch (_) {}
         return congress;
       } catch (_) { congress = null; return null; }
     },
@@ -971,7 +979,10 @@ CREATE INDEX IF NOT EXISTS fil_ty ON filing(type, filed);`);
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fname=excluded.fname,
   suffix=excluded.suffix, state=excluded.state, dist=excluded.dist, type=excluded.type,
-  typeRaw=excluded.typeRaw, filed=excluded.filed, url=excluded.url`);
+  typeRaw=excluded.typeRaw, url=excluded.url,
+  -- a re-sync must never DOWNGRADE a date: if today's index row has an unreadable FilingDate but
+  -- a previous run read one, the good value stands rather than being blanked.
+  filed=CASE WHEN excluded.filed<>'' THEN excluded.filed ELSE filing.filed END`);
       const had = d.prepare("SELECT 1 FROM filing WHERE id=?");
       let added = 0;
       d.exec("BEGIN");
@@ -979,7 +990,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         for (const r of rows) {
           if (!had.get(r.id)) added++;
           ins.run(r.id, r.chamber, r.docId, r.yr | 0, r.member, r.lname, r.fname, r.suffix || "",
-            r.state || "", r.dist || "", r.type, r.typeRaw || "", r.filed, r.url || "",
+            r.state || "", r.dist || "", r.type, r.typeRaw || "", r.filed, r.url == null ? null : r.url,
             r.amends || null, r.parsed == null ? null : r.parsed | 0, r.nTx == null ? null : r.nTx | 0);
         }
         d.exec("COMMIT");
@@ -991,11 +1002,88 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         const a = d.prepare("SELECT COUNT(*) n, COUNT(DISTINCT member) members, MIN(filed) first, MAX(filed) last FROM filing").get() || {};
         const p = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr'").get() || {};
         const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
-        return { n: a.n || 0, members: a.members || 0, first: a.first || null, last: a.last || null,
-          ptr: p.n || 0, pending: q.n || 0 };
+        // Blank filing dates are a real condition in the live index, so they get a number rather
+        // than showing up only as a dash where the earliest filing should be.
+        const nd = d.prepare("SELECT COUNT(*) n FROM filing WHERE filed IS NULL OR filed=''").get() || {};
+        const f2 = d.prepare("SELECT MIN(filed) first FROM filing WHERE filed<>''").get() || {};
+        return { n: a.n || 0, members: a.members || 0, first: f2.first || null, last: a.last || null,
+          ptr: p.n || 0, pending: q.n || 0, noDate: nd.n || 0 };
       } catch (_) { return null; } },
     congressYears() { const d = this.openCongress(); if (!d) return [];
       try { return d.prepare("SELECT yr, COUNT(*) n FROM filing GROUP BY yr ORDER BY yr DESC").all(); } catch (_) { return []; } },
+    // ---- phase 2: the parse queue and what comes out of it ------------------------------------
+    // parsed: 0 pending · 1 parsed · 2 unreadable (permanent — a scanned filing never becomes
+    // readable by trying again). `tries` counts TRANSIENT failures only, so a network blip retries
+    // and a scan does not burn fetches forever.
+    congressQueue(limit, maxTries) { const d = this.openCongress(); if (!d) return [];
+      try { return d.prepare("SELECT id, yr, url, member FROM filing WHERE type='ptr' AND parsed=0 AND url IS NOT NULL"
+        + " AND (tries IS NULL OR tries < ?) ORDER BY filed DESC, id DESC LIMIT ?")
+        .all(maxTries == null ? 5 : maxTries | 0, Math.max(1, Math.min(500, limit | 0 || 25))); } catch (_) { return []; } },
+    congressSaveTx(fid, rows) { const d = this.openCongress(); if (!d) return 0;
+      const del = d.prepare("DELETE FROM tx WHERE fid=?");
+      const ins = d.prepare("INSERT INTO tx(fid,ln,owner,asset,ticker,act,txDate,notified,loAmt,hiAmt) VALUES(?,?,?,?,?,?,?,?,?,?)");
+      const mark = d.prepare("UPDATE filing SET parsed=1, nTx=?, tries=0 WHERE id=?");
+      d.exec("BEGIN");
+      try {
+        del.run(String(fid));                          // re-parsing a filing replaces its rows wholesale
+        rows.forEach((r, i) => ins.run(String(fid), i, r.owner, String(r.asset).slice(0, 160), r.ticker,
+          r.act, r.txDate, r.notified, r.loAmt == null ? null : +r.loAmt, r.hiAmt == null ? null : +r.hiAmt));
+        mark.run(rows.length, String(fid));
+        d.exec("COMMIT");
+      } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} throw e; }
+      return rows.length; },
+    congressMarkUnreadable(fid) { const d = this.openCongress(); if (!d) return;
+      try { d.prepare("UPDATE filing SET parsed=2, nTx=0 WHERE id=?").run(String(fid)); } catch (_) {} },
+    congressBumpTry(fid) { const d = this.openCongress(); if (!d) return;
+      try { d.prepare("UPDATE filing SET tries=COALESCE(tries,0)+1 WHERE id=?").run(String(fid)); } catch (_) {} },
+    // The feed: transactions newest-FILED first, because the filing date is when the market learned.
+    congressFeed(opt) { const d = this.openCongress(); if (!d) return [];
+      const o = opt || {}, where = ["f.parsed=1"], args = [];
+      if (o.ticker) { where.push("t.ticker=?"); args.push(String(o.ticker).toUpperCase()); }
+      if (o.since) { where.push("f.filed>=?"); args.push(String(o.since)); }
+      const lim = Math.max(1, Math.min(500, o.limit | 0 || 50));
+      try { return d.prepare(`SELECT f.filed, f.member, f.state, f.dist, f.url, t.fid, t.owner, t.asset,
+        t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt
+        FROM tx t JOIN filing f ON f.id=t.fid WHERE ${where.join(" AND ")}
+        ORDER BY f.filed DESC, t.fid DESC, t.ln LIMIT ?`).all(...args, lim); } catch (_) { return []; } },
+    // Per-ticker roll-up. Every sum is over the band FLOOR and is therefore a hard lower bound —
+    // the caller renders it with a ≥, and no midpoint is computed anywhere in this lane.
+    congressTickerRoll(ticker) { const d = this.openCongress(); if (!d) return null;
+      const tk = String(ticker || "").toUpperCase();
+      try {
+        const rows = d.prepare(`SELECT f.member, f.state, f.dist, f.filed, t.act, t.txDate, t.loAmt
+          FROM tx t JOIN filing f ON f.id=t.fid WHERE t.ticker=? AND f.parsed=1
+          ORDER BY f.filed DESC`).all(tk);
+        if (!rows.length) return null;
+        const by = new Map();
+        for (const r of rows) {
+          let m = by.get(r.member);
+          if (!m) { m = { member: r.member, state: r.state, dist: r.dist, n: 0, buys: 0, sells: 0,
+            floor: 0, lags: [], last: r.filed }; by.set(r.member, m); }
+          m.n++;
+          if (/^buy/.test(r.act)) m.buys++; else if (/^sell/.test(r.act)) m.sells++;
+          m.floor += r.loAmt || 0;
+          if (r.filed && r.txDate) m.lags.push(Math.round((Date.parse(r.filed) - Date.parse(r.txDate)) / 86400000));
+        }
+        const med = (a) => { if (!a.length) return null; const b = a.slice().sort((x, y) => x - y);
+          return b.length % 2 ? b[(b.length - 1) / 2] : Math.round((b[b.length / 2 - 1] + b[b.length / 2]) / 2); };
+        const members = [...by.values()].map((m) => ({ ...m, medLag: med(m.lags), lags: undefined }))
+          .sort((a, b) => b.floor - a.floor || b.n - a.n);
+        return { ticker: tk, filings: rows.length, members,
+          buys: rows.filter((r) => /^buy/.test(r.act)).length,
+          sells: rows.filter((r) => /^sell/.test(r.act)).length,
+          floor: rows.reduce((s2, r) => s2 + (r.loAmt || 0), 0) };
+      } catch (_) { return null; } },
+    // The two rates that have to be printed on the panel before the admin gate can come off.
+    congressParseStats() { const d = this.openCongress(); if (!d) return null;
+      try {
+        const p = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=1").get() || {};
+        const u = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=2").get() || {};
+        const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
+        const t = d.prepare("SELECT COUNT(*) n, SUM(CASE WHEN ticker IS NULL THEN 0 ELSE 1 END) got FROM tx").get() || {};
+        return { parsed: p.n || 0, unreadable: u.n || 0, pending: q.n || 0,
+          tx: t.n || 0, resolved: t.got || 0 };
+      } catch (_) { return null; } },
     congressFilings(opt) { const d = this.openCongress(); if (!d) return [];
       const o = opt || {};
       const where = [], args = [];

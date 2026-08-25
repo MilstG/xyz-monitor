@@ -1998,3 +1998,37 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
   .ntb-row{flex-wrap:wrap;gap:8px}
   .ntb-side{text-align:left;min-width:0}
 }
+
+/* ---- CONGRESS panel (build 2026.08.24-06) -----------------------------------------------------
+   Borrows the whale table furniture wholesale; only what is genuinely new to this lane is defined
+   here. Party affiliation is deliberately absent from the colour channel: red and green already
+   mean sell and buy on this board, and a second meaning for the same two colours would make both
+   unreadable. Chamber and district ride as monochrome text instead. */
+.cng-tag{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:2px;padding:1px 6px}
+.cng-in{background:var(--panel2);border:1px solid var(--border);color:var(--text);font:inherit;font-size:11.5px;
+  padding:4px 8px;border-radius:3px;width:150px}
+.cng-in:focus{outline:none;border-color:var(--accent)}
+.cng-rates{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:11.5px;color:var(--muted);
+  border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 2px;margin-bottom:10px}
+.cng-rates b{color:var(--text);font-weight:600}
+.cng-rates .cng-warn{color:var(--down)}
+.cng-rates .cng-warn b{color:var(--down)}
+.cng-tbl{min-width:900px}
+.cng-nm{font-family:var(--disp);font-weight:600;font-size:12.5px}
+.cng-dist{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin-left:7px;letter-spacing:.04em}
+.cng-own{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;border:1px solid var(--border);
+  color:var(--muted);border-radius:2px;padding:0 4px;margin-left:6px;vertical-align:1px}
+.cng-tk{color:var(--accent);font-weight:600}
+.cng-un{color:var(--faint)}
+.cng-lag{font-family:var(--mono);font-size:11px}
+.cng-lag.fast{color:var(--muted)}
+.cng-lag.mid{color:var(--accent)}
+.cng-lag.slow{color:var(--down)}
+.cng-lag.na{color:var(--faint)}
+.cng-act{font-family:var(--mono);font-size:10px;letter-spacing:.06em;border-radius:2px;padding:1px 6px;border:1px solid}
+.cng-act.p{color:var(--up);border-color:rgba(70,185,126,.4);background:rgba(70,185,126,.09)}
+.cng-act.s{color:var(--down);border-color:rgba(229,96,77,.4);background:rgba(229,96,77,.09)}
+.cng-act.e{color:#9a7fd6;border-color:rgba(154,127,214,.4);background:rgba(154,127,214,.09)}
+.cng-src{color:var(--blue);font-size:10.5px;text-decoration:none}
+.cng-src:hover{text-decoration:underline}
+@media(max-width:760px){.cng-tbl{min-width:760px}}

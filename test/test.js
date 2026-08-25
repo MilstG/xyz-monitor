@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19960,7 +19960,7 @@ test("nav groups: every tab is placed once, and renames/moves are validated at t
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "nope" } }).views, {}, "unknown target menu rejected");
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "tape" } }).views, {}, "a move to where it already is stores nothing");
   // a menu emptied by moves still resolves — the client hides it
-  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape", notes: "tape" } });
+  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape", notes: "tape", congress: "tape" } });
   assert.strictEqual(empty.find((g) => g.key === "research").views.length, 0, "a menu can be emptied");
 
   // ---- wiring --------------------------------------------------------------------------------
@@ -20579,6 +20579,9 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
 <Member><DocID>20033726</DocID><FilingDate>12/30/2025</FilingDate><StateDst>TN07</StateDst><FilingType>P</FilingType><Year>2026</Year><Last>Green</Last><First>Mark</First></Member>
 <Member><Last>Khanna</Last><First>Ro</First><Suffix>Jr.</Suffix><FilingType>O</FilingType><StateDst>CA17</StateDst><Year>2026</Year><FilingDate>5/15/2026</FilingDate><DocID>10041234</DocID></Member>
 <Member><Last>Unknown</Last><First>Code</First><FilingType>ZZ</FilingType><StateDst>NY01</StateDst><Year>2026</Year><FilingDate>6/01/2026</FilingDate><DocID>10041235</DocID></Member>
+<Member><Last>Seen</Last><First>InTheWild</First><FilingType>W</FilingType><StateDst>NY02</StateDst><Year>2026</Year><FilingDate>6/02/2026</FilingDate><DocID>10041236</DocID></Member>
+<Member><Last>Alt</Last><First>Shape</First><FilingType>P</FilingType><StateDst>TX01</StateDst><Year>2026</Year><FilingDate>13-AUG-2026</FilingDate><DocID>20033727</DocID></Member>
+<Member><Last>NoDate</Last><First>Blank</First><FilingType>P</FilingType><StateDst>FL01</StateDst><Year>2026</Year><FilingDate>whenever</FilingDate><DocID>20033728</DocID></Member>
 </FinancialDisclosure>`;
   const zip2026 = mkzip([["2026FD.xml", memberXml]]);
   // A year whose ZIP carries the tab-delimited index instead — same fields, read by header name.
@@ -20607,10 +20610,10 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
 
   const r = await p.congressIngestNow(2026);
   assert.ok(r.ok, "2026 ingest: " + (r.error || ""));
-  assert.equal(r.filings, 4, "every member row is stored, not just the PTRs");
-  assert.equal(r.ptr, 2, "two filings carry type P");
-  assert.equal(r.added, 4);
-  assert.deepEqual(r.unknownTypes, ["ZZ"], "an unmapped filing-type code is reported, not silently swallowed");
+  assert.equal(r.filings, 7, "every member row is stored, not just the PTRs");
+  assert.equal(r.ptr, 4, "four filings carry type P");
+  assert.equal(r.added, 7);
+  assert.deepEqual(r.unknownTypes, ["ZZ", "W"], "unmapped filing-type codes are reported, not silently swallowed");
 
   const rows = p.congressFilings({ limit: 50 });
   const byId = new Map(rows.map((x) => [x.id, x]));
@@ -20629,11 +20632,30 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   assert.equal(byId.get("H:10041234").type, "annual");
   assert.equal(byId.get("H:10041234").parsed, null, "only PTRs are queued");
   assert.equal(byId.get("H:10041235").type, "other", "an unmapped code lands as other, with the raw code stored");
+  // W, D and H all appear in the real 2026 index and the Clerk publishes no code table. This pins
+  // that they stay honestly unidentified: a future "helpful" guess at a meaning fails here.
+  const w = byId.get("H:10041236");
+  assert.equal(w.type, "other", "a code seen live but undocumented is never assigned a meaning");
+  // A document URL is only ever built for a PTR — the ptr-pdfs path is corroborated, the path for
+  // other filing types is not, and a link that 404s is worse than no link.
+  assert.equal(byId.get("H:10041234").url, null, "a non-PTR filing carries no guessed document URL");
+  assert.equal(w.url, null);
+  assert.ok(pel.url.includes("/ptr-pdfs/"), "a PTR still carries its corroborated document URL");
+  // Production showed a blank earliest-filing date with no way to tell how many rows caused it or
+  // what the raw value looked like. A shape the normalizer knows is read; one it does not is kept,
+  // counted, and SAMPLED — never dropped, and never guessed into a plausible date.
+  assert.equal(byId.get("H:20033727").filed, "2026-08-13", "an alternate date shape normalizes to ISO");
+  assert.equal(byId.get("H:20033728").filed, "", "an unreadable date is blank, not invented");
+  assert.equal(r.noDate, 1, "and is counted");
+  assert.deepEqual(r.badDates, ["whenever"], "with the raw value sampled so the shape can be identified");
+  assert.equal(p.congressStatus().counts.noDate, 1, "the count reaches the status line");
+  assert.equal(p.congressStatus().counts.first, "2025-12-30",
+    "the earliest-filing date ignores blank rows instead of collapsing to a dash");
 
   // Idempotency: the Clerk republishes the SAME zip daily, so a re-ingest must add nothing.
   const r2 = await p.congressIngestNow(2026);
-  assert.ok(r2.ok && r2.added === 0 && r2.filings === 4, "re-ingesting the same index adds nothing");
-  assert.equal(p.congressFilings({ limit: 50 }).length, 4, "and creates no duplicate rows");
+  assert.ok(r2.ok && r2.added === 0 && r2.filings === 7, "re-ingesting the same index adds nothing");
+  assert.equal(p.congressFilings({ limit: 50 }).length, 7, "and creates no duplicate rows");
 
   // The rule a daily re-sync could silently break: phase 2 marks a filing parsed, then tomorrow's
   // sync runs. If the upsert reset parsed to 0, every day would re-queue everything already done.
@@ -20646,7 +20668,7 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   // The tab-delimited fallback index parses through the same by-name rule.
   const r3 = await p.congressIngestNow(2025);
   assert.ok(r3.ok && r3.filings === 1, "tsv fallback index: " + (r3.error || ""));
-  assert.equal(p.congressFilings({ type: "ptr", limit: 50 }).length, 3, "type filter reaches both years");
+  assert.equal(p.congressFilings({ type: "ptr", limit: 50 }).length, 5, "type filter reaches both years");
 
   // Every candidate 404s: the error names all of them in FULL — the failure the 13F lane shipped
   // blind, where only the basename was logged and a wrong path looked like a dead process.
@@ -20658,8 +20680,8 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   // Status shape — what the admin verb renders.
   const st = p.congressStatus();
   assert.ok(st.ready && st.counts, "status carries readiness and counts");
-  assert.equal(st.counts.n, 5); assert.equal(st.counts.ptr, 3);
-  assert.equal(st.counts.pending, 2, "one of the three PTRs was marked parsed above");
+  assert.equal(st.counts.n, 8); assert.equal(st.counts.ptr, 5);
+  assert.equal(st.counts.pending, 4, "one PTR was marked parsed above");
   assert.ok(st.lastSync > 0, "a successful sync stamps the clock");
   assert.deepEqual(st.years.map((y) => y.yr), [2026, 2025], "newest year first");
   assert.equal(store.congressMeta("indexUrl:2026"), urls[0], "the URL that actually answered is recorded for the header comment");
@@ -20668,12 +20690,200 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const getIdx = sv.indexOf('fastify.get("/api/congress"'), postIdx = sv.indexOf('fastify.post("/api/congress"');
   assert.ok(getIdx > 0 && postIdx > 0, "both congress routes exist");
-  assert.ok(sv.slice(getIdx, getIdx + 400).includes("if (!isAdmin(req))"), "the READ is gated too — phase 1 ships no public surface");
+  // The READ is gated by the feature manifest (def:"admin") rather than a hardcoded check, so the
+  // lane can be taken public with a flag rather than an edit. The manifest entry and the route
+  // registration are asserted below; what matters here is that the gate is not simply absent.
+  assert.ok(!sv.slice(getIdx, getIdx + 400).includes("isAdmin(req)"),
+    "the read path leaves gating to the manifest instead of duplicating it");
   assert.ok(sv.slice(postIdx, postIdx + 500).indexOf('op === "ingest"') > sv.slice(postIdx, postIdx + 500).indexOf("if (!isAdmin(req))"),
     "the ingest op sits behind the admin recheck, same ordering the 13F op is pinned to");
   const app2 = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(app2.includes("async function termCongress(") && app2.includes("h==='congress'"), "admin verb wired into the terminal");
   assert.ok(app2.includes("congress is admin-only"), "the verb refuses non-admins client-side too");
-  assert.ok(!/tab-congress|CONGRESS \\u00b7 PTR FEED/.test(app2), "phase 1 adds NO tab and NO panel");
+  // Phase 2 adds the tab, but ADMIN-ONLY: the manifest entry is what gates it, so taking the lane
+  // public later is a flag flip rather than an edit. The POST stays admin regardless of that flag —
+  // gate and authz are different axes, the posture the whale watchlist route already documents.
+  assert.ok(app2.includes('id="tab-congress"') || fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8").includes('id="tab-congress"'),
+    "the tab exists");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(/key: "congress",\s+kind: "tab",[^}]*def: "admin"/.test(cmp), "the tab ships admin-gated by the manifest");
+  assert.ok(/routes: \["\/api\/congress"\]/.test(cmp), "and its route is registered so the gate actually covers it");
+  const gi = sv.indexOf('fastify.post("/api/congress"');
+  assert.ok(sv.slice(gi, gi + 500).includes("if (!isAdmin(req))"), "the write path rechecks admin on its own");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---- CONGRESS lane phase 2 (build 2026.08.24-04) ------------------------------------------------
+// The PTR document parser, exercised on real PDF bytes rather than a stubbed text layer: the whole
+// risk of this phase lives in getting text out of a PDF, so the fixtures ARE PDFs — built here with
+// the same primitives a generator uses, in both the plain and the subset-font flavour. The subset
+// case matters most: without ToUnicode decoding it parses to confident garbage rather than failing.
+function _mkPtrPdf(lines, opt) {
+  const o = opt || {};
+  let content = "BT\n/F1 9 Tf\n";
+  const hexOf = o.subset
+    ? (t) => { let h = ""; for (const ch of t) h += ((o.code.get(ch) || 1)).toString(16).padStart(4, "0"); return "<" + h + ">"; }
+    : null;
+  for (const [x, y, txt] of lines) {
+    content += `1 0 0 1 ${x} ${y} Tm\n`;
+    content += o.subset ? `${hexOf(txt)} Tj\n` : `(${txt.replace(/([()\\])/g, "\\$1")}) Tj\n`;
+  }
+  content += "ET\n";
+  let cmap = "";
+  if (o.subset) {
+    let bf = "";
+    for (const [ch, c] of o.code) bf += `<${c.toString(16).padStart(4, "0")}> <${ch.charCodeAt(0).toString(16).padStart(4, "0")}>\n`;
+    cmap = `begincmap\n${o.code.size} beginbfchar\n${bf}endbfchar\nendcmap`;
+  }
+  let out = "%PDF-1.4\n";
+  const font = o.subset ? "<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+Arial /ToUnicode 6 0 R >>"
+    : "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+  const objs = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>", null, font, null];
+  objs.forEach((d, i) => {
+    const n = i + 1;
+    if (n === 4) {
+      let data = Buffer.from(content, "latin1"), dict = `<< /Length ${data.length} >>`;
+      if (o.flate) { data = require("zlib").deflateSync(data); dict = `<< /Length ${data.length} /Filter /FlateDecode >>`; }
+      out += `${n} 0 obj\n${dict}\nstream\n${data.toString("latin1")}\nendstream\nendobj\n`;
+    } else if (n === 6) { if (o.subset) out += `${n} 0 obj\n<< /Length ${cmap.length} >>\nstream\n${cmap}\nendstream\nendobj\n`; }
+    else out += `${n} 0 obj\n${d}\nendobj\n`;
+  });
+  return Buffer.from(out + "trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n", "latin1");
+}
+
+test("congress -04: PTR parsing — real PDF bytes, subset fonts, wrapped assets, bands never midpointed", () => {
+  const { pdfTextRuns, ptrRows, parsePtr, ptrBand, ptrTicker } = require("../src/compute");
+  const HEAD = [[60, 700, "ID"], [250, 700, "Asset"], [365, 700, "Transaction Type"], [425, 700, "Date"], [500, 700, "Notification Date"], [560, 700, "Amount"]];
+  const body = [
+    [60, 680, "SP"], [90, 680, "Apple Inc. (AAPL) [ST]"], [365, 680, "P"], [425, 680, "08/13/2026"], [500, 680, "08/14/2026"], [560, 680, "$1,001 - $15,000"],
+    [90, 660, "Lockheed Martin Corp (LMT) [ST]"], [365, 660, "S"], [425, 660, "07/22/2026"], [500, 660, "07/25/2026"], [560, 660, "$50,001 - $100,000"],
+    [60, 640, "DC"], [90, 640, "Microsoft Corp (MSFT) [ST]"], [365, 640, "S (partial)"], [425, 640, "02/11/2026"], [500, 640, "02/12/2026"], [560, 640, "$250,001 - $500,000"],
+    [90, 620, "Extremely Long Fund Name With Many"], [365, 620, "P"], [425, 620, "01/05/2026"], [500, 620, "01/07/2026"], [560, 620, "Over $50,000,000"],
+    [90, 606, "Words Series B Interest (BIGF)"],                    // the wrap, no band and no date
+    [90, 400, "Footer note far below — must not attach"],       // too far below to be a wrap
+  ];
+  // Plain and Flate-compressed content streams must produce identical results.
+  for (const flate of [false, true]) {
+    const out = parsePtr(ptrRows(pdfTextRuns(_mkPtrPdf(HEAD.concat(body), { flate }))));
+    assert.equal(out.tx.length, 4, "four transactions, header and footer are not trades (flate=" + flate + ")");
+    const [aapl, lmt, msft, big] = out.tx;
+    assert.equal(aapl.owner, "spouse", "the SP owner code is read, not swallowed into the asset");
+    assert.equal(aapl.ticker, "AAPL");
+    assert.equal(aapl.act, "buy");
+    assert.equal(aapl.txDate, "2026-08-13");
+    assert.equal(aapl.notified, "2026-08-14", "both clocks are kept — the legal one starts at notification");
+    assert.deepEqual([aapl.loAmt, aapl.hiAmt], [1001, 15000], "BOTH band ends stored; no midpoint exists anywhere");
+    assert.equal(lmt.owner, "self", "a row with no owner code is the member's own trade");
+    assert.equal(lmt.act, "sell");
+    assert.equal(msft.owner, "dependent");
+    assert.equal(msft.act, "sell-partial", "a partial sale is not rounded up into a full exit");
+    assert.ok(/Extremely Long Fund Name With Many Words Series B Interest/.test(big.asset),
+      "a wrapped asset name is rejoined from the continuation line");
+    assert.equal(big.ticker, "BIGF", "and the ticker hiding on the continuation line is recovered");
+    assert.deepEqual([big.loAmt, big.hiAmt], [50000000, null], "an open-ended top band has no upper bound to invent");
+    assert.ok(!out.tx.some((t) => /Footer note/.test(t.asset)), "a distant line is never glued onto a trade");
+  }
+  // Subset font: the content stream carries glyph indices; only /ToUnicode says what they mean.
+  const alpha = " ()$,-./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  const code = new Map(); alpha.split("").forEach((ch, i) => code.set(ch, i + 1));
+  const sub = parsePtr(ptrRows(pdfTextRuns(_mkPtrPdf([
+    [90, 680, "Nvidia Corp (NVDA)"], [365, 680, "P"], [425, 680, "08/13/2026"], [500, 680, "08/14/2026"], [560, 680, "$1,000,001 - $5,000,000"],
+  ], { subset: true, code }))));
+  assert.equal(sub.tx.length, 1, "a subset-font filing parses rather than yielding garbage");
+  assert.equal(sub.tx[0].ticker, "NVDA");
+  assert.deepEqual([sub.tx[0].loAmt, sub.tx[0].hiAmt], [1000001, 5000000]);
+  // A scanned filing has no text operators at all — detectable, not guessable.
+  assert.equal(pdfTextRuns(Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF", "latin1")).length, 0,
+    "an image-only filing yields zero runs, which is how the queue knows it is permanently unreadable");
+  // Bands and tickers on their own.
+  assert.deepEqual(ptrBand("$15,001 - $50,000"), { lo: 15001, hi: 50000 });
+  assert.deepEqual(ptrBand("$50,000,000 +"), { lo: 50000000, hi: null });
+  assert.equal(ptrBand("no amount here"), null, "an unreadable band is null, never a zero and never a guess");
+  assert.equal(ptrTicker("Some Private LLC Interest"), null, "no parenthetical ticker means unresolved, not fuzzy-matched");
+  assert.equal(ptrTicker("Berkshire Hathaway (BRK.B)"), "BRK.B", "a dotted class ticker survives");
+  assert.equal(ptrTicker("Something (N/A)"), null, "a placeholder is not a ticker");
+});
+
+test("congress -04: parse queue — scans marked once, transient failures retried, feed and roll-up", async () => {
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const alpha = " ()$,-./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  const code = new Map(); alpha.split("").forEach((ch, i) => code.set(ch, i + 1));
+  const pdfA = _mkPtrPdf([[90, 680, "Nvidia Corp (NVDA) [ST]"], [365, 680, "P"], [425, 680, "08/13/2026"], [500, 680, "08/20/2026"], [560, 680, "$1,000,001 - $5,000,000"]], { flate: true });
+  const pdfB = _mkPtrPdf([[90, 680, "Nvidia Corp (NVDA) [ST]"], [365, 680, "S"], [425, 680, "06/02/2026"], [500, 680, "06/03/2026"], [560, 680, "$250,001 - $500,000"]], { subset: true, code });
+  const scan = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF", "latin1");
+  const bin = (b) => ({ ok: true, arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
+  const idx = (rows) => {
+    const mk = (files) => {                            // minimal STORED zip, as in the phase 1 test
+      const parts = [], cd = []; let off = 0;
+      for (const [name, text] of files) {
+        const data = Buffer.from(text, "utf8"), nm = Buffer.from(name, "utf8");
+        const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(0, 8);
+        lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nm.length, 26);
+        parts.push(lh, nm, data);
+        const ce = Buffer.alloc(46); ce.writeUInt32LE(0x02014b50, 0); ce.writeUInt16LE(0, 10);
+        ce.writeUInt32LE(data.length, 20); ce.writeUInt32LE(data.length, 24); ce.writeUInt16LE(nm.length, 28);
+        ce.writeUInt32LE(off, 42); cd.push(Buffer.concat([ce, nm]));
+        off += 30 + nm.length + data.length;
+      }
+      const cdBuf = Buffer.concat(cd);
+      const eo = Buffer.alloc(22); eo.writeUInt32LE(0x06054b50, 0); eo.writeUInt16LE(cd.length, 8);
+      eo.writeUInt16LE(cd.length, 10); eo.writeUInt32LE(cdBuf.length, 12); eo.writeUInt32LE(off, 16);
+      return Buffer.concat([...parts, cdBuf, eo]);
+    };
+    return mk([["2026FD.xml", "<FinancialDisclosure>" + rows + "</FinancialDisclosure>"]]);
+  };
+  const member = (last, first, doc, filed) =>
+    `<Member><Last>${last}</Last><First>${first}</First><FilingType>P</FilingType><StateDst>CA11</StateDst><Year>2026</Year><FilingDate>${filed}</FilingDate><DocID>${doc}</DocID></Member>`;
+  const zip = idx(member("Alpha", "Ann", "20000001", "8/20/2026") + member("Beta", "Bob", "20000002", "6/03/2026") + member("Gamma", "Gil", "20000003", "5/01/2026"));
+  let flaky = 0, fetches = [];
+  const extFetch = async (url) => {
+    fetches.push(url);
+    if (url.endsWith("2026FD.zip") && url.includes("financial-pdfs/2026FD")) return bin(zip);
+    if (url.endsWith("/20000001.pdf")) return bin(pdfA);
+    if (url.endsWith("/20000002.pdf")) { flaky++; return flaky === 1 ? { ok: false, status: 503 } : bin(pdfB); }
+    if (url.endsWith("/20000003.pdf")) return bin(scan);
+    return { ok: false, status: 404 };
+  };
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress2-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch, congressGap: 0 });
+  assert.ok((await p.congressIngestNow(2026)).ok, "index first");
+  assert.equal(p.congressStatus().parse.pending, 3, "three PTRs queued");
+
+  const r1 = await p.congressParseNow();
+  assert.equal(r1.parsed, 1, "the good filing parsed");
+  assert.equal(r1.scanned, 1, "the image-only filing is recognized as unreadable, not retried forever");
+  assert.equal(r1.failed, 1, "the 503 is a transient failure, counted separately from a scan");
+  assert.equal(r1.tx, 1);
+
+  // Second run: the scan must NOT be re-fetched (that is the rate budget), the 503 must be.
+  fetches = [];
+  const r2 = await p.congressParseNow();
+  assert.ok(!fetches.some((u) => u.endsWith("/20000003.pdf")), "a permanently unreadable filing is never re-fetched");
+  assert.ok(fetches.some((u) => u.endsWith("/20000002.pdf")), "a transient failure comes back around");
+  assert.equal(r2.parsed, 1, "and parses on the retry");
+  const st = p.congressStatus().parse;
+  assert.deepEqual([st.parsed, st.unreadable, st.pending], [2, 1, 0], "queue drains to nothing but the scan");
+  assert.equal(st.tx, 2); assert.equal(st.resolved, 2, "both transactions resolved a ticker");
+
+  // Feed order is by FILING date, not trade date — the whole point of the lane.
+  const feed = p.congressFeed({ limit: 10 });
+  assert.deepEqual(feed.map((f) => f.member), ["Alpha, Ann", "Beta, Bob"], "newest FILED first");
+  assert.equal(feed[0].loAmt, 1000001);
+  assert.equal(feed[0].hiAmt, 5000000, "the band's upper end survives into the feed");
+
+  // Roll-up: floors only, and the median lag each member files at.
+  const roll = p.congressTickerRoll("nvda");
+  assert.equal(roll.ticker, "NVDA", "lookup is case-insensitive");
+  assert.equal(roll.filings, 2);
+  assert.equal(roll.buys, 1); assert.equal(roll.sells, 1);
+  assert.equal(roll.floor, 1000001 + 250001, "the roll-up sums band FLOORS — a hard lower bound, never an estimate");
+  const ann = roll.members.find((m) => /Alpha/.test(m.member));
+  assert.equal(ann.medLag, 7, "filed 8/20 on an 8/13 trade — a seven-day filer");
+  assert.equal(roll.members.find((m) => /Beta/.test(m.member)).medLag, 1);
+  assert.equal(p.congressTickerRoll("ZZZZ"), null, "a name with no congressional flow says so rather than inventing an empty shell");
   fs.rmSync(dir, { recursive: true, force: true });
 });

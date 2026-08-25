@@ -5222,7 +5222,7 @@ const NAV_GROUPS = [
   { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "sessions"] },
   { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
   { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
-  { key: "research", label: "Research", views: ["report", "funds", "notes"] },
+  { key: "research", label: "Research", views: ["report", "funds", "congress", "notes"] },
 ];
 // markets is pin:true and is where every load lands; admin is the locked panel itself. Both stay
 // flat in the row and are deliberately NOT movable — a one-item menu, or a home two clicks away,
@@ -5304,6 +5304,12 @@ const FEATURES = [
   { key: "housing",    kind: "tab", label: "Housing",     def: "admin",  routes: ["/api/housing"] },
   // LIQUIDITY (build 2026.08.21-04): Fed net liquidity (H.4.1 − TGA − ON RRP) board. Admin-only while it soaks.
   { key: "liquidity",  kind: "tab", label: "Liquidity",   def: "admin",  routes: ["/api/liquidity"] },
+  // CONGRESS (build 2026.08.24-06): the congressional PTR feed. Admin-only while phase 2 soaks —
+  // the parse rate and the ticker-resolution rate have to be real numbers on the panel before the
+  // group reads them, and the eyeball pass against source PDFs comes first. Flipping it public is
+  // then a flag change here, not a code change. The POST rechecks admin regardless of this flag:
+  // gate and authz are different axes, exactly as the whale watchlist route documents.
+  { key: "congress",   kind: "tab", label: "Congress",    def: "admin",  routes: ["/api/congress"] },
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
   { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },
@@ -7696,3 +7702,276 @@ module.exports.FOCUS_PREVIEW_N = FOCUS_PREVIEW_N;
 module.exports.focusPreview = focusPreview;
 module.exports.focusDiff = focusDiff;
 module.exports.focusSelect = focusSelect;
+
+// ===== CONGRESS phase 2: PTR document parsing =====================================================
+// Turning a filed PDF into transaction rows. Three layers, kept separate so each can be tested and
+// can fail honestly on its own: pdfTextRuns (bytes -> positioned text), ptrRows (positioned text ->
+// table rows), parsePtr (table rows -> transactions).
+//
+// On the zero-dependency choice: the decision gate said hand-roll first, fall back to pdfjs-dist if
+// the fixtures could not be made green. E-filed House PTRs are machine-generated with a stable
+// layout, which is the favorable case for a hand-rolled reader — no OCR, no exotic layout. What is
+// NOT handled, deliberately and detectably: scanned/handwritten filings (no text operators at all —
+// they come back with zero runs and the caller marks them permanently unreadable rather than
+// retrying forever), and encrypted PDFs. Both are conditions to COUNT, not to guess through.
+
+// A PDF string: literal "( ... )" with backslash escapes, or hex "< ... >".
+function pdfString(src, i) {
+  const out = [];
+  if (src[i] === "<") {
+    let j = i + 1, hex = "";
+    while (j < src.length && src[j] !== ">") { if (!/\s/.test(src[j])) hex += src[j]; j++; }
+    if (hex.length % 2) hex += "0";
+    for (let k = 0; k < hex.length; k += 2) out.push(parseInt(hex.slice(k, k + 2), 16));
+    return { bytes: out, next: j + 1, hex: true };
+  }
+  let j = i + 1, depth = 1;
+  while (j < src.length) {
+    const c = src[j];
+    if (c === "\\") {
+      const n = src[j + 1];
+      const esc = { n: 10, r: 13, t: 9, b: 8, f: 12, "(": 40, ")": 41, "\\": 92 };
+      if (n >= "0" && n <= "7") {                       // octal escape, up to three digits
+        let oct = "";
+        let k = j + 1;
+        while (k < src.length && oct.length < 3 && src[k] >= "0" && src[k] <= "7") { oct += src[k]; k++; }
+        out.push(parseInt(oct, 8)); j = k; continue;
+      }
+      if (esc[n] != null) { out.push(esc[n]); j += 2; continue; }
+      if (n === "\n") { j += 2; continue; }             // line continuation
+      out.push(n.charCodeAt(0)); j += 2; continue;
+    }
+    if (c === "(") depth++;
+    if (c === ")") { depth--; if (!depth) return { bytes: out, next: j + 1, hex: false }; }
+    out.push(c.charCodeAt(0)); j++;
+  }
+  return { bytes: out, next: j, hex: false };
+}
+
+// /ToUnicode CMap: bfchar and bfrange give the code -> unicode mapping a subset font needs. Without
+// one, a subset font's bytes are meaningless glyph indices — so a font that HAS a CMap is decoded
+// through it, and one that does not is read as Latin-1, which is right for the standard 14 fonts.
+function pdfCMap(text) {
+  const map = new Map();
+  const uni = (h) => { const s = String(h).replace(/\s+/g, "");
+    let out = "";
+    for (let i = 0; i + 3 < s.length + 1; i += 4) { const cp = parseInt(s.slice(i, i + 4), 16);
+      if (Number.isFinite(cp)) out += String.fromCharCode(cp); }
+    return out; };
+  for (const blk of text.matchAll(/beginbfchar([\s\S]*?)endbfchar/g))
+    for (const m of blk[1].matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g))
+      map.set(parseInt(m[1], 16), uni(m[2]));
+  for (const blk of text.matchAll(/beginbfrange([\s\S]*?)endbfrange/g)) {
+    for (const m of blk[1].matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)) {
+      const lo = parseInt(m[1], 16), hi = parseInt(m[2], 16), dst = parseInt(m[3], 16);
+      for (let c = lo; c <= hi && c - lo < 512; c++) map.set(c, String.fromCharCode(dst + (c - lo)));
+    }
+  }
+  return map;
+}
+
+// Pull every object's stream out of the file, inflating FlateDecode. Objects are found by scan
+// rather than through the xref table: a torn or incrementally-updated PDF still yields its objects,
+// and the xref adds a failure mode with nothing in return for this use.
+function pdfObjects(buf) {
+  const zlib = require("zlib");
+  const src = buf.toString("latin1");
+  const objs = new Map();
+  for (const m of src.matchAll(/(\d+)\s+(\d+)\s+obj\b/g)) {
+    const num = +m[1], start = m.index + m[0].length;
+    const endTok = src.indexOf("endobj", start);
+    const body = src.slice(start, endTok < 0 ? src.length : endTok);
+    const sIdx = body.indexOf("stream");
+    let dict = body, data = null;
+    if (sIdx >= 0) {
+      dict = body.slice(0, sIdx);
+      let p = sIdx + 6;
+      if (body[p] === "\r") p++;
+      if (body[p] === "\n") p++;
+      const eIdx = body.indexOf("endstream", p);
+      const rawStr = body.slice(p, eIdx < 0 ? body.length : eIdx);
+      let raw = Buffer.from(rawStr, "latin1");
+      if (/\/FlateDecode/.test(dict)) {
+        try { raw = zlib.inflateSync(raw); }
+        catch (_) { try { raw = zlib.inflateRawSync(raw); } catch (_2) { raw = null; } }
+      }
+      data = raw;
+    }
+    objs.set(num, { dict, data });
+  }
+  return objs;
+}
+
+// Text runs with page-space positions. Only the operators a generated table actually uses are
+// implemented; anything else is skipped rather than approximated.
+function pdfTextRuns(buf) {
+  const objs = pdfObjects(buf);
+  // Font code -> unicode maps, keyed by the /Fn name used inside content streams.
+  const cmaps = new Map();
+  for (const [, o] of objs) {
+    for (const m of o.dict.matchAll(/\/([A-Za-z0-9]+)\s+(\d+)\s+0\s+R/g)) {
+      const ref = objs.get(+m[2]);
+      if (ref && ref.dict && /\/ToUnicode/.test(ref.dict)) {
+        const um = ref.dict.match(/\/ToUnicode\s+(\d+)\s+0\s+R/);
+        const tu = um ? objs.get(+um[1]) : null;
+        if (tu && tu.data) cmaps.set(m[1], pdfCMap(tu.data.toString("latin1")));
+      }
+    }
+  }
+  const runs = [];
+  let page = 0;
+  for (const [, o] of objs) {
+    if (!o.data) continue;
+    const s = o.data.toString("latin1");
+    if (!/\bBT\b/.test(s)) continue;                     // not a content stream
+    page++;
+    let tm = [1, 0, 0, 1, 0, 0], tlm = tm.slice(), leading = 0, font = null;
+    const decode = (bytes, hex) => {
+      const cm = font && cmaps.get(font);
+      if (cm && cm.size) return bytes.map((b) => (cm.has(b) ? cm.get(b) : "")).join("");
+      if (hex) { let out = ""; for (let i = 0; i + 1 < bytes.length; i += 2) out += String.fromCharCode((bytes[i] << 8) | bytes[i + 1]); return out; }
+      return bytes.map((b) => String.fromCharCode(b)).join("");
+    };
+    const emit = (txt) => { if (txt) runs.push({ page, x: tm[4], y: tm[5], text: txt }); };
+    const nums = [];
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === "(" || c === "<") {
+        if (c === "<" && s[i + 1] === "<") { i++; continue; }   // dictionary, not a string
+        const r = pdfString(s, i);
+        emit(decode(r.bytes, r.hex));
+        i = r.next - 1; continue;
+      }
+      if (/[-\d.]/.test(c) && /[\s[]/.test(s[i - 1] || " ")) {
+        const m = s.slice(i).match(/^-?\d*\.?\d+/);
+        if (m) { nums.push(+m[0]); i += m[0].length - 1; continue; }
+      }
+      const op = s.slice(i).match(/^(BT|ET|Tm|Td|TD|T\*|TL|Tf|TJ|Tj)\b/);
+      if (!op) { if (/\s/.test(c)) continue; nums.length = 0; continue; }
+      const k = op[1];
+      if (k === "BT") { tm = [1, 0, 0, 1, 0, 0]; tlm = tm.slice(); }
+      else if (k === "Tm" && nums.length >= 6) { tm = nums.slice(-6); tlm = tm.slice(); }
+      else if ((k === "Td" || k === "TD") && nums.length >= 2) {
+        if (k === "TD") leading = -nums[nums.length - 1];
+        tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tlm[4] + nums[nums.length - 2], tlm[5] + nums[nums.length - 1]];
+        tm = tlm.slice();
+      } else if (k === "T*") { tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tlm[4], tlm[5] - leading]; tm = tlm.slice(); }
+      else if (k === "TL" && nums.length) leading = nums[nums.length - 1];
+      else if (k === "Tf") { const fm = s.slice(0, i).match(/\/([A-Za-z0-9]+)\s+[\d.]+\s*$/); if (fm) font = fm[1]; }
+      nums.length = 0;
+      i += k.length - 1;
+    }
+  }
+  return runs;
+}
+
+// Positioned runs -> table rows. Runs sharing a baseline (within tolerance) are one row; the gaps
+// between their x positions are the column boundaries. Cells keep their x so a caller can map
+// columns by position rather than by counting, which survives an empty cell.
+function ptrRows(runs, yTol) {
+  const tol = yTol || 3;
+  const byPage = new Map();
+  for (const r of runs) { if (!byPage.has(r.page)) byPage.set(r.page, []); byPage.get(r.page).push(r); }
+  const rows = [];
+  for (const page of [...byPage.keys()].sort((a, b) => a - b)) {
+    const items = byPage.get(page).slice().sort((a, b) => b.y - a.y || a.x - b.x);
+    let cur = null;
+    for (const it of items) {
+      if (!cur || Math.abs(cur.y - it.y) > tol) { cur = { page, y: it.y, cells: [] }; rows.push(cur); }
+      const last = cur.cells[cur.cells.length - 1];
+      // Runs that abut horizontally are one cell: generators split a word across runs for kerning.
+      if (last && it.x - (last.x + last.text.length * 4.2) < 6) last.text += it.text;
+      else cur.cells.push({ x: it.x, text: it.text });
+    }
+  }
+  for (const r of rows) for (const c of r.cells) c.text = c.text.replace(/\s+/g, " ").trim();
+  return rows.map((r) => ({ page: r.page, y: r.y, cells: r.cells.filter((c) => c.text) }))
+    .filter((r) => r.cells.length);
+}
+
+// The disclosed amount bands. BOTH ends are kept; a midpoint is never computed anywhere in this
+// lane, because a midpoint is a fabricated number that gets quoted back as if it were real.
+const PTR_BANDS = [
+  [1001, 15000], [15001, 50000], [50001, 100000], [100001, 250000], [250001, 500000],
+  [500001, 1000000], [1000001, 5000000], [5000001, 25000000], [25000001, 50000000],
+];
+function ptrBand(s) {
+  const t = String(s || "").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+  const money = (v) => +String(v).replace(/[$,\s]/g, "");
+  const pair = t.match(/\$?([\d,]+)\s*(?:-|–|—|to)\s*\$?([\d,]+)/);
+  if (pair) {
+    const lo = money(pair[1]), hi = money(pair[2]);
+    if (Number.isFinite(lo) && Number.isFinite(hi) && hi >= lo) return { lo, hi };
+    return null;
+  }
+  const over = t.match(/(?:over|above|\+)\s*\$?([\d,]+)|\$?([\d,]+)\s*\+/i);
+  if (over) { const lo = money(over[1] || over[2]); if (Number.isFinite(lo)) return { lo, hi: null }; }
+  return null;
+}
+// A ticker is taken ONLY from the parenthetical the form asks filers to provide. No fuzzy matching
+// against company names: an asset that resolves to a plausible-but-wrong ticker is worse than one
+// that stays unresolved, because only the second is visible as a gap.
+function ptrTicker(asset) {
+  const m = String(asset || "").match(/\(([A-Z][A-Z.]{0,5})\)/);
+  if (!m) return null;
+  const t = m[1].replace(/\.$/, "");
+  if (!/^[A-Z]{1,5}(\.[A-Z]{1,2})?$/.test(t)) return null;
+  if (["N", "A", "NA", "ST", "OP", "CS"].includes(t)) return null;   // asset-class codes, not tickers
+  return t;
+}
+const PTR_ACT = { P: "buy", S: "sell", E: "exchange" };
+const PTR_OWNER = { SP: "spouse", DC: "dependent", JT: "joint" };
+// Table rows -> transactions. Everything that cannot be read is COUNTED, never dropped silently:
+// the caller prints those counts, because a parser that quietly discards 8% of a filing looks
+// exactly like a filing with 8% fewer trades.
+function parsePtr(rows) {
+  const tx = [], skipped = [];
+  const dt = (s) => { const m = String(s || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    return m ? m[3] + "-" + m[1].padStart(2, "0") + "-" + m[2].padStart(2, "0") : null; };
+  let last = null;                        // the previous emitted tx and the row geometry it came from
+  for (const row of rows) {
+    const line = row.cells.map((c) => c.text).join(" ");
+    const band = ptrBand(line);
+    const dates = [...line.matchAll(/\d{1,2}\/\d{1,2}\/\d{4}/g)].map((m) => m[0]);
+    if (!band || !dates.length) {
+      // A long asset name wraps onto the next line, which carries no band and no date. Such a row
+      // belongs to the transaction above it when it sits immediately below, on the same page, and
+      // entirely to the LEFT of that transaction's date column — otherwise it is a header, a total,
+      // or a footer and must not be glued onto a real trade.
+      if (last && row.page === last.page && last.y - row.y > 0 && last.y - row.y < 22
+        && row.cells.every((c) => c.x < last.dateX - 8)) {
+        last.tx.asset = (last.tx.asset + " " + line).replace(/\s+/g, " ").trim();
+        last.tx.ticker = ptrTicker(last.tx.asset) || last.tx.ticker;
+      }
+      continue;                                                 // not a transaction row
+    }
+    // The action code sits alone between the asset and the first date. Take the LAST such token
+    // before that date so an asset name ending in " P" cannot be mistaken for a purchase.
+    const upto = line.slice(0, line.indexOf(dates[0]));
+    const acts = [...upto.matchAll(/(?:^|\s)(P|S|E)(?:\s*\(partial\))?(?=\s|$)/gi)];
+    const raw = acts.length ? acts[acts.length - 1][1].toUpperCase() : null;
+    const partial = /\(partial\)/i.test(upto);
+    // The asset is everything before the action token, minus a leading owner code.
+    let asset = acts.length ? upto.slice(0, acts[acts.length - 1].index).trim() : upto.trim();
+    let owner = "self";
+    const om = asset.match(/^(SP|DC|JT)\b\s*/i);
+    if (om) { owner = PTR_OWNER[om[1].toUpperCase()] || "self"; asset = asset.slice(om[0].length).trim(); }
+    asset = asset.replace(/\s*\[[A-Z]{2}\]\s*$/, "").trim();     // trailing asset-class bracket
+    if (!raw || !asset) { skipped.push({ why: !raw ? "no transaction type" : "no asset", line: line.slice(0, 120) }); continue; }
+    const rec = { owner, asset, ticker: ptrTicker(asset),
+      act: PTR_ACT[raw] + (partial ? "-partial" : ""),
+      txDate: dt(dates[0]), notified: dates[1] ? dt(dates[1]) : null,
+      loAmt: band.lo, hiAmt: band.hi };
+    tx.push(rec);
+    const dcell = row.cells.find((c) => /\d{1,2}\/\d{1,2}\/\d{4}/.test(c.text));
+    last = { tx: rec, page: row.page, y: row.y, dateX: dcell ? dcell.x : Infinity };
+  }
+  return { tx, skipped };
+}
+module.exports.pdfTextRuns = pdfTextRuns;
+module.exports.ptrRows = ptrRows;
+module.exports.ptrBand = ptrBand;
+module.exports.ptrTicker = ptrTicker;
+module.exports.parsePtr = parsePtr;
+module.exports.PTR_BANDS = PTR_BANDS;
