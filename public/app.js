@@ -13023,7 +13023,8 @@ async function termCongress(args){
     if(r.isPdf!=null) L.push(`  ${tpad('is a PDF',12)} <span class="${r.isPdf?'pos':'neg'}">${r.isPdf?'yes':'NO'}</span>`);
     if(r.head) L.push(`  ${tpad('first bytes',12)} ${tesc(String(r.head).slice(0,90))}`);
     if(r.producer) L.push(`  ${tpad('producer',12)} ${tesc(r.producer)}`);
-    if(r.objects!=null) L.push(`  ${tpad('structure',12)} ${r.objects} object(s) \u00b7 ${r.streams} stream(s)${r.objStm?' \u00b7 <span class="neg">object streams</span>':''}${r.encrypted?' \u00b7 <span class="neg">ENCRYPTED</span>':''}`);
+    if(r.objects!=null) L.push(`  ${tpad('structure',12)} ${r.objects} object(s) \u00b7 ${r.streams} stream(s)${r.objStm?' \u00b7 <span class="neg">object streams</span>':''}${r.encrypted?' \u00b7 <span class="amber">encrypted</span>':''}`);
+    if(r.encryption) L.push(`  ${tpad('encryption',12)} ${r.encryption.unsupported?`<span class="neg">${tesc(r.encryption.unsupported)}</span>`:`<span class="pos">V${r.encryption.V}/R${r.encryption.R} ${r.encryption.aes?'AES-128':'RC4'} \u2014 decrypted with the empty user password</span>`}`);
     if(r.runs!=null) L.push(`  ${tpad('text runs',12)} ${r.runs} \u00b7 rows ${r.rows} \u00b7 tx ${r.tx}`);
     (r.sampleRuns||[]).forEach(x=>L.push(`    run  x${tpad(String(x.x),5,true)} y${tpad(String(x.y),5,true)}  ${tesc(x.t)}`));
     (r.sampleRows||[]).forEach(x=>L.push(`    row  ${tesc(x)}`));

@@ -7770,6 +7770,102 @@ function pdfCMap(text) {
   return map;
 }
 
+// ---- PDF standard security handler ------------------------------------------------------------
+// House PTRs ship ENCRYPTED. Not password-protected in any meaningful sense: they use an empty USER
+// password with owner restrictions (no copying, no printing), so every viewer opens them silently
+// and they look like ordinary PDFs — which is exactly why the first cut of this parser reported
+// them as "no text" rather than as a document it could not open. Streams must be decrypted BEFORE
+// inflation; skip that and zlib is handed noise.
+//
+// Implemented: V1/V2 (RC4 40/128) and V4 (/AESV2, AES-128-CBC), which covers PDF 1.4-1.6 and every
+// filing observed. V5/R6 (AES-256) is DETECTED AND REPORTED, never silently mishandled — if it
+// turns up, the count says so and this is where the work goes.
+const PDF_PAD = Buffer.from([0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56,
+  0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE,
+  0x64, 0x53, 0x69, 0x7A]);
+function rc4(key, data) {
+  const S = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) S[i] = i;
+  let j = 0;
+  for (let i = 0; i < 256; i++) { j = (j + S[i] + key[i % key.length]) & 255; const t = S[i]; S[i] = S[j]; S[j] = t; }
+  const out = Buffer.alloc(data.length);
+  let i = 0; j = 0;
+  for (let k = 0; k < data.length; k++) {
+    i = (i + 1) & 255; j = (j + S[i]) & 255;
+    const t = S[i]; S[i] = S[j]; S[j] = t;
+    out[k] = data[k] ^ S[(S[i] + S[j]) & 255];
+  }
+  return out;
+}
+// A PDF string in a DICTIONARY: "( ... )" with escapes, or "< ... >" hex. Same shapes pdfString
+// reads inside a content stream, but here it is reached by key name.
+function pdfDictString(dict, key) {
+  const at = dict.indexOf(key);
+  if (at < 0) return null;
+  let i = at + key.length;
+  while (i < dict.length && /\s/.test(dict[i])) i++;
+  if (dict[i] !== "(" && dict[i] !== "<") return null;
+  const r = pdfString(dict, i);
+  return Buffer.from(r.bytes);
+}
+function pdfNum(dict, key, dflt) {
+  const m = dict.match(new RegExp("\\" + key + "\\s+(-?\\d+)"));
+  return m ? +m[1] : dflt;
+}
+// Returns { decrypt(objNum, gen, data) } or { unsupported: "..." } or null when the file is plain.
+function pdfDecryptor(src, objs) {
+  const em = src.match(/\/Encrypt\s+(\d+)\s+(\d+)\s+R/);
+  if (!em) return null;
+  const eObj = objs.get(+em[1]);
+  if (!eObj) return { unsupported: "encrypt dictionary not found" };
+  const d = eObj.dict;
+  const V = pdfNum(d, "V", 0), R = pdfNum(d, "R", 0);
+  if (V >= 5 || R >= 5) return { unsupported: "AES-256 (V" + V + "/R" + R + ") not implemented" };
+  if (!/\/Standard/.test(d)) return { unsupported: "non-standard security handler" };
+  const O = pdfDictString(d, "/O"), U = pdfDictString(d, "/U");
+  if (!O || !U) return { unsupported: "encrypt dictionary missing /O or /U" };
+  const P = pdfNum(d, "P", -1);
+  const len = pdfNum(d, "Length", 40);
+  // V4 names its crypt filter; AESV2 means AES-128-CBC with the IV in the first 16 bytes.
+  let aes = false;
+  if (V === 4) {
+    if (/\/AESV2/.test(d)) aes = true;
+    else if (!/\/V2\b/.test(d) && !/\/RC4/.test(d)) return { unsupported: "unknown crypt filter method" };
+  }
+  const idm = src.match(/\/ID\s*\[\s*<([0-9A-Fa-f]*)>/);
+  const id0 = Buffer.from(idm ? idm[1] : "", "hex");
+  const crypto2 = require("crypto");
+  const md5 = (b) => crypto2.createHash("md5").update(b).digest();
+  const pBuf = Buffer.alloc(4); pBuf.writeInt32LE(P | 0, 0);
+  // Algorithm 2, with the EMPTY user password — which is what these filings use.
+  let h = Buffer.concat([PDF_PAD, O.subarray(0, 32), pBuf, id0]);
+  const encMeta = !/\/EncryptMetadata\s+false/.test(d);
+  if (R >= 4 && !encMeta) h = Buffer.concat([h, Buffer.from([255, 255, 255, 255])]);
+  let key = md5(h);
+  const n = R === 2 ? 5 : Math.max(5, Math.min(16, Math.floor(len / 8)));
+  if (R >= 3) for (let i = 0; i < 50; i++) key = md5(key.subarray(0, n));
+  key = key.subarray(0, n);
+  const objKey = (num, gen) => {
+    const ext = Buffer.from([num & 255, (num >> 8) & 255, (num >> 16) & 255, gen & 255, (gen >> 8) & 255]);
+    let x = Buffer.concat([key, ext]);
+    if (aes) x = Buffer.concat([x, Buffer.from([0x73, 0x41, 0x6C, 0x54])]);   // "sAlT"
+    return md5(x).subarray(0, Math.min(key.length + 5, 16));
+  };
+  return { aes, R, V,
+    decrypt(num, gen, data) {
+      if (!data || !data.length) return data;
+      const k = objKey(num, gen);
+      if (!aes) return rc4(k, data);
+      try {
+        const iv = data.subarray(0, 16);
+        const dec = crypto2.createDecipheriv("aes-128-cbc", k, iv);
+        dec.setAutoPadding(false);
+        const out = Buffer.concat([dec.update(data.subarray(16)), dec.final()]);
+        const pad = out.length ? out[out.length - 1] : 0;   // strip PKCS#7 by hand: setAutoPadding
+        return pad > 0 && pad <= 16 && pad <= out.length ? out.subarray(0, out.length - pad) : out;
+      } catch (_) { return data; }
+    } };
+}
 // Pull every object's stream out of the file, inflating FlateDecode. Objects are found by scan
 // rather than through the xref table: a torn or incrementally-updated PDF still yields its objects,
 // and the xref adds a failure mode with nothing in return for this use.
@@ -7777,8 +7873,10 @@ function pdfObjects(buf) {
   const zlib = require("zlib");
   const src = buf.toString("latin1");
   const objs = new Map();
+  // Two passes: collect raw objects, then — if the file is encrypted — decrypt every stream with a
+  // key derived from the object's own number, which is why decryption cannot happen inline above.
   for (const m of src.matchAll(/(\d+)\s+(\d+)\s+obj\b/g)) {
-    const num = +m[1], start = m.index + m[0].length;
+    const num = +m[1], gen = +m[2], start = m.index + m[0].length;
     const endTok = src.indexOf("endobj", start);
     const body = src.slice(start, endTok < 0 ? src.length : endTok);
     const sIdx = body.indexOf("stream");
@@ -7788,17 +7886,35 @@ function pdfObjects(buf) {
       let p = sIdx + 6;
       if (body[p] === "\r") p++;
       if (body[p] === "\n") p++;
+      // Stream length: /Length when it is a direct integer, because the EOL that precedes
+      // "endstream" is a delimiter and NOT part of the data. Including that one byte is harmless
+      // to a stream cipher — zlib ignores a trailing byte — but it makes the ciphertext length
+      // indivisible by 16, so AES-CBC refuses it and the document silently reads as unparseable.
+      const lm = dict.match(/\/Length\s+(\d+)(?!\s+\d+\s+R)/);
       const eIdx = body.indexOf("endstream", p);
-      const rawStr = body.slice(p, eIdx < 0 ? body.length : eIdx);
-      let raw = Buffer.from(rawStr, "latin1");
-      if (/\/FlateDecode/.test(dict)) {
-        try { raw = zlib.inflateSync(raw); }
-        catch (_) { try { raw = zlib.inflateRawSync(raw); } catch (_2) { raw = null; } }
+      let rawStr;
+      if (lm && p + +lm[1] <= body.length) rawStr = body.slice(p, p + +lm[1]);
+      else {
+        rawStr = body.slice(p, eIdx < 0 ? body.length : eIdx);
+        rawStr = rawStr.replace(/\r\n$|[\r\n]$/, "");     // drop the delimiter EOL, exactly one
       }
-      data = raw;
+      data = { raw: Buffer.from(rawStr, "latin1"), gen, flate: /\/FlateDecode/.test(dict) };
     }
-    objs.set(num, { dict, data });
+    objs.set(num, { dict, data, gen });
   }
+  const dec = pdfDecryptor(src, objs);
+  for (const [num, o] of objs) {
+    if (!o.data) { o.data = null; continue; }
+    let raw = o.data.raw;
+    const flate = o.data.flate, gen = o.data.gen;
+    if (dec && dec.decrypt) raw = dec.decrypt(num, gen, raw);
+    if (flate) {
+      try { raw = zlib.inflateSync(raw); }
+      catch (_) { try { raw = zlib.inflateRawSync(raw); } catch (_2) { raw = null; } }
+    }
+    o.data = raw;
+  }
+  objs.encryption = dec ? (dec.unsupported ? { unsupported: dec.unsupported } : { V: dec.V, R: dec.R, aes: dec.aes }) : null;
   return objs;
 }
 
@@ -7970,6 +8086,8 @@ function parsePtr(rows) {
   return { tx, skipped };
 }
 module.exports.pdfTextRuns = pdfTextRuns;
+module.exports.pdfDecryptor = pdfDecryptor;
+module.exports.pdfObjects = pdfObjects;
 module.exports.ptrRows = ptrRows;
 module.exports.ptrBand = ptrBand;
 module.exports.ptrTicker = ptrTicker;
