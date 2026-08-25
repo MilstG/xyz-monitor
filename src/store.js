@@ -58,7 +58,8 @@ function openStore(dataDir) {
   // whole sub-store degrades to no-ops via candlesEnabled(); nothing else in the app is affected.
   const candleFile = path.join(dataDir, "candles.db");
   const t13fFile = path.join(dataDir, "whale13f.db");   // market-wide 13F holder index — separate, droppable, rebuildable
-  let t13f = null;
+  const congressFile = path.join(dataDir, "congress.db");   // congressional disclosure index — same posture: separate, droppable, rebuildable
+  let t13f = null, congress = null;
   let cdb = null, cInsert = null, cRange = null, cEvict = null, cCov = null, cCount = null;
   let mInsert = null, mRange = null, mEvict = null, mCov = null;   // 1m opening-hour archive (2026.08.18-04)
   const deepStmt = {};   // "12h" / "1d" -> { ins, rng, cov } — deep-history archive (2026.08.21-01)
@@ -928,6 +929,82 @@ CREATE TABLE schosen(acc TEXT PRIMARY KEY, cik INTEGER) WITHOUT ROWID;`);
       try { return d.prepare("SELECT rk, cik, name, value, shares, shOk FROM top WHERE q=? AND cusip=? ORDER BY rk LIMIT ?").all(q, cusip, lim | 0); } catch (_) { return []; } },
     t13fHolderRow(q, cusip, cik) { const d = this.open13F(); if (!d) return null;
       try { return d.prepare("SELECT value, shares, shOk FROM top WHERE q=? AND cusip=? AND cik=?").get(q, cusip, +cik) || null; } catch (_) { return null; } },
+
+    // ---- congressional disclosure index (build 2026.08.24-02) ---------------------------------
+    // Phase 1 of the CONGRESS lane. A THIRD sqlite file, separate from whale13f.db for exactly the
+    // reason that one is separate from candles.db: droppable and rebuildable without breathing near
+    // anything expensive to refill. This phase stores the House Clerk's FILING INDEX only — who
+    // filed what, when, and where the source document lives. No transaction is parsed out of a PTR
+    // yet; that is phase 2, and `parsed`/`nTx` are carried NOW so phase 2 needs no migration.
+    // Two deliberate departures from the 13F index:
+    //   - no keep-N eviction. A decade of every member's filings is megabytes, and the history IS
+    //     the product here (a 13F index only ever gets asked about the newest two quarters).
+    //   - re-ingest never clobbers parse state. The Clerk republishes the same annual ZIP daily, so
+    //     the upsert refreshes index fields and leaves `parsed`/`nTx` alone — otherwise every daily
+    //     sync would silently reset phase 2's work back to the queue.
+    openCongress() {
+      if (congress) return congress;
+      try {
+        const { DatabaseSync } = require("node:sqlite");
+        congress = new DatabaseSync(congressFile);
+        congress.exec("PRAGMA journal_mode=WAL; PRAGMA auto_vacuum=INCREMENTAL;");
+        congress.exec(`CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS filing(
+  id TEXT PRIMARY KEY, chamber TEXT, docId TEXT, yr INTEGER,
+  member TEXT, lname TEXT, fname TEXT, suffix TEXT, state TEXT, dist TEXT,
+  type TEXT, typeRaw TEXT, filed TEXT, url TEXT, amends TEXT,
+  parsed INTEGER, nTx INTEGER) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS fil_dt ON filing(filed);
+CREATE INDEX IF NOT EXISTS fil_ty ON filing(type, filed);`);
+        return congress;
+      } catch (_) { congress = null; return null; }
+    },
+    congressReady() { try { return !!this.openCongress(); } catch (_) { return false; } },
+    congressMeta(k) { const d = this.openCongress(); if (!d) return null;
+      try { const r = d.prepare("SELECT v FROM meta WHERE k=?").get(String(k)); return r ? r.v : null; } catch (_) { return null; } },
+    congressMetaSet(k, v) { const d = this.openCongress(); if (!d) return;
+      try { d.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(String(k), String(v)); } catch (_) {} },
+    // Idempotent by doc id: the SAME index re-ingested changes nothing but the refreshed columns.
+    // parsed/nTx are pointedly absent from the DO UPDATE list — see the note above.
+    congressUpsertFilings(rows) { const d = this.openCongress(); if (!d || !rows || !rows.length) return { seen: 0, added: 0 };
+      const ins = d.prepare(`INSERT INTO filing(id,chamber,docId,yr,member,lname,fname,suffix,state,dist,type,typeRaw,filed,url,amends,parsed,nTx)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fname=excluded.fname,
+  suffix=excluded.suffix, state=excluded.state, dist=excluded.dist, type=excluded.type,
+  typeRaw=excluded.typeRaw, filed=excluded.filed, url=excluded.url`);
+      const had = d.prepare("SELECT 1 FROM filing WHERE id=?");
+      let added = 0;
+      d.exec("BEGIN");
+      try {
+        for (const r of rows) {
+          if (!had.get(r.id)) added++;
+          ins.run(r.id, r.chamber, r.docId, r.yr | 0, r.member, r.lname, r.fname, r.suffix || "",
+            r.state || "", r.dist || "", r.type, r.typeRaw || "", r.filed, r.url || "",
+            r.amends || null, r.parsed == null ? null : r.parsed | 0, r.nTx == null ? null : r.nTx | 0);
+        }
+        d.exec("COMMIT");
+      } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} throw e; }
+      return { seen: rows.length, added };
+    },
+    congressCounts() { const d = this.openCongress(); if (!d) return null;
+      try {
+        const a = d.prepare("SELECT COUNT(*) n, COUNT(DISTINCT member) members, MIN(filed) first, MAX(filed) last FROM filing").get() || {};
+        const p = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr'").get() || {};
+        const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
+        return { n: a.n || 0, members: a.members || 0, first: a.first || null, last: a.last || null,
+          ptr: p.n || 0, pending: q.n || 0 };
+      } catch (_) { return null; } },
+    congressYears() { const d = this.openCongress(); if (!d) return [];
+      try { return d.prepare("SELECT yr, COUNT(*) n FROM filing GROUP BY yr ORDER BY yr DESC").all(); } catch (_) { return []; } },
+    congressFilings(opt) { const d = this.openCongress(); if (!d) return [];
+      const o = opt || {};
+      const where = [], args = [];
+      if (o.type) { where.push("type=?"); args.push(String(o.type)); }
+      if (o.since) { where.push("filed>=?"); args.push(String(o.since)); }
+      const lim = Math.max(1, Math.min(500, o.limit | 0 || 50));
+      try { return d.prepare("SELECT id, member, state, dist, type, filed, url, parsed FROM filing"
+        + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY filed DESC, id DESC LIMIT ?").all(...args, lim); }
+      catch (_) { return []; } },
     saveDerivMap(data) {
       try {
         const tmp = derivMapFile + ".tmp";

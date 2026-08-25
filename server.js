@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.24-01";
+const VERSION = "2026.08.24-02";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1125,6 +1125,27 @@ async function main() {
     if (op === "add") return poller.whaleAdd(+b.cik, String(b.name || ""));
     if (op === "rm") return poller.whaleRm(String(b.key || ""));
     if (op === "mute") return poller.whaleMute(String(b.key || ""), !!b.on);
+    return reply.code(400).send({ ok: false, error: "unknown op" });
+  });
+  // CONGRESS lane phase 1 (build 2026.08.24-02): admin-only in BOTH directions while it soaks —
+  // the read is gated too, so phase 1 ships with genuinely no public surface (the LIQUIDITY board's
+  // posture). Phase 2 grows a feed on this same route and drops the gate on the GET once the parse
+  // rate and the ticker-resolution rate are numbers worth printing.
+  fastify.get("/api/congress", async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    const q = req.query || {};
+    return { ok: true, status: poller.congressStatus(),
+      filings: poller.congressFilings({ type: q.type ? String(q.type) : null, limit: +q.limit || 25 }) };
+  });
+  fastify.post("/api/congress", { bodyLimit: 4 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    const b = req.body || {};
+    const op = String(b.op || "");
+    if (op === "ingest") { poller.congressIngestNow(b.year ? +b.year : undefined).catch(() => {});
+      return { ok: true, started: 1, note: "index ingest running in the background \u2014 progress and the URL that answered land in the ops log" }; }
+    if (op === "status") return { ok: true, status: poller.congressStatus() };
     return reply.code(400).send({ ok: false, error: "unknown op" });
   });
   fastify.get("/api/ai-report", (req, reply) => {

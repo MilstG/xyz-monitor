@@ -10512,6 +10512,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
   if(head==='fund'||head==='bs'||head==='balance'||head==='etf'||head==='holdings') return !!p[1];   // symbols may live outside the universe (ETFs)
   if(head==='whale'||head==='13f') return true;   // bare = watchlist; args validate server-side against the live list
+  if(head==='congress') return true;   // bare = status; the verb itself validates admin server-side
   if(head==='holds'||head==='who') return !!p[1];
   if(head==='basket') return ['create','list','drop'].includes((p[1]||'').toLowerCase());
   if(head==='ratio') return p.length>=2;
@@ -10529,6 +10530,7 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='reports') return termReports();
   if(h==='fund'||h==='bs'||h==='balance') return termFund(p[1]);
   if(h==='whale'||h==='13f') return termWhale(p.slice(1));
+  if(h==='congress') return termCongress(p.slice(1));
   if(h==='holds'||h==='who') return termWhale(['who'].concat(p.slice(1)));
   if(h==='etf'||h==='holdings') return termEtf(p[1]);
   if(h==='vs'||h==='compare'){ const a=termFind(p[1]), b=termFind(p[2]); return (a&&b)?termCompare(a,b):termErr('usage: vs <a> <b>'); }
@@ -10738,7 +10740,7 @@ function termClose(){ const p=termEl('termPanel'), fab=termEl('termFab'); if(p) 
 function termToggle(){ const p=termEl('termPanel'); if(p&&p.hidden) termOpen(); else termClose(); }
 // TERM_VERBS was referenced by the completion engine but never defined — a silent
 // ReferenceError on every keystroke that killed ghost text + tab completion. Now real.
-const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','whale','holds','help','clear','stocks','crypto'];
+const TERM_VERBS=['top','bottom','screen','signals','earnings','news','breadth','sectors','reports','report','corr','comp','diverge','vs','compare','basket','ratio','fund','etf','whale','holds','congress','help','clear','stocks','crypto'];
 const TERM_FIELDS=['funding','oi','squeeze','momentum','vstape','carry','beta','dd','vol','d7','d30','rvol','gap','vsvwap','vsma200','sector'];
 function termComps(text){ const p=text.split(/\s+/), cur=(p[p.length-1]||'').toLowerCase();
   if(p.length===1) return TERM_VERBS.concat(termActive().map(r=>r.ticker.toLowerCase())).filter(x=>x.startsWith(cur));
@@ -12991,6 +12993,35 @@ function termWhaleSeason(q){
     termOut(`<span class="tp-hd">${tesc(s.q)} 13F season</span> <span class="tp-trans">\u00b7 ${s.filedN}/${s.watchN} filed${s.missing&&s.missing.length?' \u00b7 missing '+tesc(s.missing.join(',')):''}${s.healed?' \u00b7 rebuilt from stored books':s.amended?' \u00b7 rebuilt after amendment':''}</span>\n<span class="tp-k" data-tip="net traded $ — share change \u00d7 implied quarter-end price">${tpad('most bought',14)}</span> <span class="pos">${l(a.bought)}</span>\n<span class="tp-k">${tpad('most sold',14)}</span> <span class="neg">${l(a.sold)}</span>\n<span class="tp-k">${tpad('opens',14)}</span> <span class="amber">${l(a.opens)}</span>\n<span class="tp-k">${tpad('exits',14)}</span> <span class="sec">${l(a.exits)}</span>\n<span class="tp-k">${tpad('crowding',14)}</span> ${a.crowd.slice(0,3).map(r=>(r.tk?tesc(r.tk):tesc(r.name.slice(0,12)))+' '+r.held+'/'+a.nFunds).join(' \u00b7 ')||'\u2014'}\n<span class="tp-trans">consensus across your ${a.nFunds} watched fund(s) only \u2014 full breakdown with per-fund legs lives on the FUNDS tab</span>`);
   }).catch(()=>{ think.remove(); termErr('season fetch failed'); });
 }
+// CONGRESS lane phase 1 (2026.08.24-02): the ENTIRE user interface for the House filing index —
+// two admin verbs and the ops log. No tab, no panel, nothing public: the index is worth nothing to
+// a reader until phase 2 parses transactions out of the PTR documents, and shipping a tab that only
+// says "someone filed something" would be a surface to maintain in exchange for nothing.
+async function termCongress(args){
+  const sub=(args[0]||'status').toLowerCase();
+  if(!IS_ADMIN) return termErr('congress is admin-only while the lane soaks');
+  if(sub==='ingest'){
+    const yr=(args[1]||'').trim();
+    const r=await cngPost({op:'ingest',year:yr?+yr:undefined});
+    return r&&r.ok?termOut(`<span class="pos">index ingest started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  if(sub==='status'){
+    const r=await cngGet(); if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
+    const st=r.status||{}, c=st.counts||{};
+    if(!st.ready) return termErr('congress index unavailable \u2014 sqlite is off in this runtime');
+    const when=st.lastSync?new Date(st.lastSync).toISOString().slice(0,16).replace('T',' ')+'Z':'never';
+    const yrs=(st.years||[]).map(y=>`${y.yr}:${y.n}`).join(' ')||'\u2014';
+    const head=`<span class="tp-hd">congress index</span> <span class="tp-trans">\u00b7 last sync ${tesc(when)}${st.busy?' \u00b7 <span class="amber">ingesting now</span>':''}</span>`;
+    const body=c.n?`\n  ${tpad('filings',12)} ${tpad(String(c.n),8,true)}\n  ${tpad('of those PTR',12)} ${tpad(String(c.ptr),8,true)}\n  ${tpad('members',12)} ${tpad(String(c.members),8,true)}\n  ${tpad('range',12)} ${tesc((c.first||'\u2014')+' \u2192 '+(c.last||'\u2014'))}\n  ${tpad('by year',12)} ${tesc(yrs)}\n  ${tpad('unparsed',12)} ${tpad(String(c.pending),8,true)} <span class="tp-trans">PTRs queued for phase 2 \u2014 no document is parsed yet</span>`
+      :'\n  <span class="sec">no index ingested yet</span> <span class="tp-trans">\u00b7 admin: congress ingest</span>';
+    const err=st.lastError?`\n  <span class="tp-err">last error</span> ${tesc(String(st.lastError).slice(0,160))}`:'';
+    return termOut(head+body+err);
+  }
+  return termErr('usage: congress status | congress ingest [year]');
+}
+async function cngGet(){ try{ return await fetchJSON('/api/congress'); }catch(e){ return {ok:false,error:e.message||'fetch failed'}; } }
+async function cngPost(body){ try{ const r=await fetch('/api/congress',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  return await r.json(); }catch(e){ return {ok:false,error:e.message||'post failed'}; } }
 async function termWhale(args){
   if(!featureOn('funds')&&!IS_ADMIN) return termErr('the FUNDS tab is not enabled for this view');
   const sub=(args[0]||'').toLowerCase();
