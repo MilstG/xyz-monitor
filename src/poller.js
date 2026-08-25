@@ -5915,7 +5915,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             continue;
           }
           const runs = pdfTextRuns(buf);
-          if (!runs.length) { store.congressMarkUnreadable(f.id, "pdf-but-no-text"); scanned++; continue; }
+          if (!runs.length) {
+            // Distinguish "image-only, needs OCR" from "encrypted in a way this build cannot open".
+            // The first is permanent; the second is a gap that a later build closes, so it must not
+            // be condemned as unreadable forever.
+            let why = "pdf-but-no-text";
+            try { const oo = require("./compute").pdfObjects(buf);
+              if (oo.encryption && oo.encryption.unsupported) why = "encryption-unsupported:" + oo.encryption.unsupported; } catch (_) {}
+            if (/^encryption-unsupported/.test(why)) { store.congressBumpTry(f.id); store.congressNote(f.id, why); failed++; }
+            else { store.congressMarkUnreadable(f.id, why); scanned++; }
+            continue;
+          }
           const out = parsePtr(ptrRows(runs));
           if (!out.tx.length) store.congressNote(f.id, "text-but-no-rows:" + runs.length + " runs");
           // A text PDF that yields no transaction row is NOT the same as a scan: it parsed, it just
@@ -5976,6 +5986,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       const raw = buf.toString("latin1");
       out.objStm = /\/Type\s*\/ObjStm/.test(raw);
       out.encrypted = /\/Encrypt\b/.test(raw);
+      try { const oo = require("./compute").pdfObjects(buf); out.encryption = oo.encryption || null; } catch (_) {}
       out.objects = (raw.match(/\d+\s+\d+\s+obj\b/g) || []).length;
       out.streams = (raw.match(/\bstream\b/g) || []).length;
       const runs = pdfTextRuns(buf);

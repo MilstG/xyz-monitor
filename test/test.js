@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-09"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-10"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20803,6 +20803,90 @@ test("congress -04: PTR parsing — real PDF bytes, subset fonts, wrapped assets
   assert.equal(ptrTicker("Some Private LLC Interest"), null, "no parenthetical ticker means unresolved, not fuzzy-matched");
   assert.equal(ptrTicker("Berkshire Hathaway (BRK.B)"), "BRK.B", "a dotted class ticker survives");
   assert.equal(ptrTicker("Something (N/A)"), null, "a placeholder is not a ticker");
+});
+
+// ---- CONGRESS: encrypted PTRs (build 2026.08.24-10) --------------------------------------------
+// Production's diag settled what three builds of guessing could not: the Clerk's PTRs carry an
+// /Encrypt dictionary. Not password-protected in any meaningful sense — an empty USER password with
+// owner restrictions, so every viewer opens them silently and they look like ordinary PDFs. The
+// parser inflated the still-encrypted bytes, got noise, and reported "no text", which is how 222
+// perfectly readable filings came to be recorded as scans.
+//
+// This fixture encrypts a PDF the same way and asserts the text comes back out. It validates the
+// plumbing — encrypt-dictionary parsing, the empty-password key derivation, per-object keys, and
+// stream decryption before inflation — in both the RC4 and AES-128 flavours.
+function _encPdf(opt) {
+  const crypto2 = require("crypto"), zlib = require("zlib");
+  const aes = !!(opt && opt.aes);
+  const PAD = Buffer.from([0x28,0xBF,0x4E,0x5E,0x4E,0x75,0x8A,0x41,0x64,0x00,0x4E,0x56,0xFF,0xFA,0x01,0x08,
+    0x2E,0x2E,0x00,0xB6,0xD0,0x68,0x3E,0x80,0x2F,0x0C,0xA9,0xFE,0x64,0x53,0x69,0x7A]);
+  const md5 = (b) => crypto2.createHash("md5").update(b).digest();
+  const rc4x = (key, data) => {
+    const S = new Uint8Array(256); for (let i = 0; i < 256; i++) S[i] = i;
+    let j = 0; for (let i = 0; i < 256; i++) { j = (j + S[i] + key[i % key.length]) & 255; const t = S[i]; S[i] = S[j]; S[j] = t; }
+    const out = Buffer.alloc(data.length); let i = 0; j = 0;
+    for (let k = 0; k < data.length; k++) { i = (i + 1) & 255; j = (j + S[i]) & 255; const t = S[i]; S[i] = S[j]; S[j] = t; out[k] = data[k] ^ S[(S[i] + S[j]) & 255]; }
+    return out;
+  };
+  const O = Buffer.alloc(32, 0x5a), U = Buffer.alloc(32, 0x7b);
+  const P = -3904, idHex = "0123456789abcdef0123456789abcdef";
+  const pBuf = Buffer.alloc(4); pBuf.writeInt32LE(P, 0);
+  let key = md5(Buffer.concat([PAD, O, pBuf, Buffer.from(idHex, "hex")]));
+  for (let i = 0; i < 50; i++) key = md5(key.subarray(0, 16));
+  key = key.subarray(0, 16);
+  const objKey = (num, gen) => {
+    let x = Buffer.concat([key, Buffer.from([num & 255, (num >> 8) & 255, (num >> 16) & 255, gen & 255, (gen >> 8) & 255])]);
+    if (aes) x = Buffer.concat([x, Buffer.from([0x73, 0x41, 0x6C, 0x54])]);
+    return md5(x).subarray(0, 16);
+  };
+  const lines = [[90,680,"Nvidia Corp (NVDA) [ST]"],[365,680,"P"],[425,680,"08/13/2026"],[500,680,"08/14/2026"],[560,680,"$1,000,001 - $5,000,000"]];
+  let content = "BT\n/F1 9 Tf\n";
+  for (const [x, y, t] of lines) content += `1 0 0 1 ${x} ${y} Tm\n(${t.replace(/([()\\])/g, "\\$1")}) Tj\n`;
+  content += "ET\n";
+  let data = zlib.deflateSync(Buffer.from(content, "latin1"));
+  if (aes) { const iv = crypto2.randomBytes(16); const c = crypto2.createCipheriv("aes-128-cbc", objKey(4, 0), iv);
+    data = Buffer.concat([iv, c.update(data), c.final()]); }
+  else data = rc4x(objKey(4, 0), data);
+  const enc = aes
+    ? `<< /Filter /Standard /V 4 /R 4 /Length 128 /P ${P} /O <${O.toString("hex")}> /U <${U.toString("hex")}> /CF << /StdCF << /CFM /AESV2 >> >> /StmF /StdCF >>`
+    : `<< /Filter /Standard /V 2 /R 3 /Length 128 /P ${P} /O <${O.toString("hex")}> /U <${U.toString("hex")}> >>`;
+  let out = "%PDF-1.4\n";
+  const objs = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>", null,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", enc];
+  objs.forEach((d, i) => { const num = i + 1;
+    if (num === 4) out += `${num} 0 obj\n<< /Length ${data.length} /Filter /FlateDecode >>\nstream\n${data.toString("latin1")}\nendstream\nendobj\n`;
+    else out += `${num} 0 obj\n${d}\nendobj\n`; });
+  return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
+}
+
+test("congress -10: an encrypted PTR is decrypted, not mistaken for a scan", () => {
+  const { pdfTextRuns, ptrRows, parsePtr, pdfObjects } = require("../src/compute");
+  for (const aes of [false, true]) {
+    const buf = _encPdf({ aes });
+    const objs = pdfObjects(buf);
+    assert.ok(objs.encryption, "the encrypt dictionary is detected (" + (aes ? "AES" : "RC4") + ")");
+    assert.equal(objs.encryption.aes, aes);
+    const runs = pdfTextRuns(buf);
+    assert.ok(runs.length > 0, "text comes out of an encrypted filing (" + (aes ? "AES-128" : "RC4-128") + ")");
+    const out = parsePtr(ptrRows(runs));
+    assert.equal(out.tx.length, 1);
+    assert.equal(out.tx[0].ticker, "NVDA");
+    assert.deepEqual([out.tx[0].loAmt, out.tx[0].hiAmt], [1000001, 5000000]);
+  }
+  // The delimiter EOL before "endstream" is NOT stream data. Including it is invisible to a stream
+  // cipher — zlib ignores one trailing byte — but it makes an AES ciphertext length indivisible by
+  // 16, so the block cipher refuses it and a perfectly readable document reads as unparseable.
+  // /Length is authoritative and is what settles it.
+  const aesBuf = _encPdf({ aes: true });
+  const objs2 = pdfObjects(aesBuf);
+  assert.ok(objs2.get(4) && objs2.get(4).data && objs2.get(4).data.length > 0,
+    "the content stream survives decryption — the byte-exact length is what makes that possible");
+  // AES-256 is not implemented; it must be REPORTED, never silently mishandled.
+  const v5 = Buffer.from(String(_encPdf({}).toString("latin1")).replace("/V 2 /R 3", "/V 5 /R 6"), "latin1");
+  const objs3 = pdfObjects(v5);
+  assert.ok(objs3.encryption && /not implemented/.test(objs3.encryption.unsupported || ""),
+    "an unimplemented encryption revision says so rather than pretending the file is empty");
 });
 
 test("congress -04: parse queue — scans marked once, transient failures retried, feed and roll-up", async () => {
