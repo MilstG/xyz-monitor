@@ -964,6 +964,8 @@ CREATE INDEX IF NOT EXISTS tx_tk ON tx(ticker, txDate);`);
         // migration is an ALTER that is allowed to fail: on a fresh database the column comes from
         // the CREATE above once this line has run, and on an existing one it is added in place.
         try { congress.exec("ALTER TABLE filing ADD COLUMN tries INTEGER"); } catch (_) {}
+        // Why a filing failed, so "222 unreadable" can be broken down instead of believed.
+        try { congress.exec("ALTER TABLE filing ADD COLUMN pnote TEXT"); } catch (_) {}
         return congress;
       } catch (_) { congress = null; return null; }
     },
@@ -1032,8 +1034,23 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         d.exec("COMMIT");
       } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} throw e; }
       return rows.length; },
-    congressMarkUnreadable(fid) { const d = this.openCongress(); if (!d) return;
-      try { d.prepare("UPDATE filing SET parsed=2, nTx=0 WHERE id=?").run(String(fid)); } catch (_) {} },
+    congressMarkUnreadable(fid, note) { const d = this.openCongress(); if (!d) return;
+      try { d.prepare("UPDATE filing SET parsed=2, nTx=0, pnote=? WHERE id=?").run(note || null, String(fid)); } catch (_) {} },
+    congressNote(fid, note) { const d = this.openCongress(); if (!d) return;
+      try { d.prepare("UPDATE filing SET pnote=? WHERE id=?").run(note || null, String(fid)); } catch (_) {} },
+    // Undo a verdict. A filing marked unreadable by a BUG must be able to come back — otherwise a
+    // classification mistake is permanent, which is exactly the trap 222 "scans" walked into.
+    congressRequeue(which) { const d = this.openCongress(); if (!d) return 0;
+      try {
+        const sql = which === "all" ? "UPDATE filing SET parsed=0, tries=0, pnote=NULL WHERE type='ptr' AND parsed<>1"
+          : "UPDATE filing SET parsed=0, tries=0, pnote=NULL WHERE type='ptr' AND parsed=2";
+        const r = d.prepare(sql).run();
+        return r && r.changes != null ? r.changes : 0;
+      } catch (_) { return 0; } },
+    // The failure breakdown. "unreadable" is a verdict, not a reason; this is the reason.
+    congressNotes() { const d = this.openCongress(); if (!d) return [];
+      try { return d.prepare("SELECT COALESCE(pnote,'(none)') note, COUNT(*) n FROM filing"
+        + " WHERE type='ptr' AND pnote IS NOT NULL GROUP BY pnote ORDER BY n DESC LIMIT 8").all(); } catch (_) { return []; } },
     congressBumpTry(fid) { const d = this.openCongress(); if (!d) return;
       try { d.prepare("UPDATE filing SET tries=COALESCE(tries,0)+1 WHERE id=?").run(String(fid)); } catch (_) {} },
     // The feed: transactions newest-FILED first, because the filing date is when the market learned.
@@ -1082,7 +1099,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
         const t = d.prepare("SELECT COUNT(*) n, SUM(CASE WHEN ticker IS NULL THEN 0 ELSE 1 END) got FROM tx").get() || {};
         return { parsed: p.n || 0, unreadable: u.n || 0, pending: q.n || 0,
-          tx: t.n || 0, resolved: t.got || 0 };
+          tx: t.n || 0, resolved: t.got || 0, notes: this.congressNotes() };
       } catch (_) { return null; } },
     congressFilings(opt) { const d = this.openCongress(); if (!d) return [];
       const o = opt || {};

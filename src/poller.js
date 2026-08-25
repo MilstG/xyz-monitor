@@ -5889,7 +5889,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const queue = store.congressQueue(lim);
     if (!queue.length) return { ok: true, done: 0, note: "queue empty" };
     congressParseBusy = true;
-    let parsed = 0, tx = 0, scanned = 0, failed = 0, first = null;
+    let parsed = 0, tx = 0, scanned = 0, failed = 0, notPdf = 0, first = null, firstBody = null;
     try {
       for (const f of queue) {
         try {
@@ -5903,9 +5903,21 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           if (!res || !res.ok) { store.congressBumpTry(f.id); failed++;
             if (!first) first = f.id + " → HTTP " + (res ? res.status : "no response"); continue; }
           const buf = Buffer.from(await res.arrayBuffer());
+          // A 200 whose body is not a PDF is a FETCH problem — a redirect, an error page, a login
+          // wall — and must never be recorded as "scanned". The first cut did exactly that, which
+          // marked the row permanently unreadable and made a wrong URL look like a paper filing.
+          if (buf.length < 5 || buf.subarray(0, 5).toString("latin1") !== "%PDF-") {
+            store.congressBumpTry(f.id);
+            store.congressNote(f.id, "not-a-pdf:" + JSON.stringify(buf.subarray(0, 24).toString("latin1")).slice(0, 40));
+            notPdf++;
+            if (!firstBody) firstBody = f.id + " → " + (res.headers && res.headers.get ? res.headers.get("content-type") : "?")
+              + " " + JSON.stringify(buf.subarray(0, 48).toString("latin1"));
+            continue;
+          }
           const runs = pdfTextRuns(buf);
-          if (!runs.length) { store.congressMarkUnreadable(f.id); scanned++; continue; }
+          if (!runs.length) { store.congressMarkUnreadable(f.id, "pdf-but-no-text"); scanned++; continue; }
           const out = parsePtr(ptrRows(runs));
+          if (!out.tx.length) store.congressNote(f.id, "text-but-no-rows:" + runs.length + " runs");
           // A text PDF that yields no transaction row is NOT the same as a scan: it parsed, it just
           // had nothing this parser recognized. It is saved as zero rows so it leaves the queue and
           // shows up in the counts as a parsed filing with no transactions — visible, not silent.
@@ -5917,12 +5929,65 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       }
     } finally { congressParseBusy = false; }
     const st = store.congressParseStats();
-    const note = parsed + " parsed (" + tx + " transactions)" + (scanned ? ", " + scanned + " scanned/unreadable" : "")
+    const note = parsed + " parsed (" + tx + " transactions)"
+      + (scanned ? ", " + scanned + " PDF-but-no-text" : "")
+      + (notPdf ? ", " + notPdf + " NOT-A-PDF responses (first: " + firstBody + ")" : "")
       + (failed ? ", " + failed + " fetch failures (first: " + first + ")" : "")
       + " · queue now " + (st ? st.pending : "?");
     pushOps("congress PTR parse", note, failed && !parsed ? "warn" : "info", true);
     log("congress: parse run — " + note);
-    return { ok: true, done: queue.length, parsed, tx, scanned, failed, stats: st };
+    return { ok: true, done: queue.length, parsed, tx, scanned, notPdf, failed, stats: st };
+  }
+  // One document, end to end, reported in full: what came back, whether it is even a PDF, how much
+  // text the extractor found, what the rows look like, and what the parser made of them. This is
+  // the tool that turns "222 unreadable" into a fixable fact.
+  async function congressDiag(docIdArg) {
+    const id = String(docIdArg || "").trim().replace(/^H:/i, "");
+    if (!/^\d{4,}$/.test(id)) return { ok: false, error: "usage: congress diag <docId> — the numeric id from a source link" };
+    const row = store.congressFilings({ limit: 500 }).find((r) => r.id === "H:" + id);
+    const yr = new Date().getUTCFullYear();
+    const url = (row && row.url) || housePtrUrl(yr, id);
+    try {
+      const ac = new AbortController();
+      const to = setTimeout(() => ac.abort(), 25 * 1000);
+      let res;
+      try { res = await extFetch(url, { headers: { "user-agent": SEC_UA }, signal: ac.signal }); }
+      finally { clearTimeout(to); }
+      if (!res) return { ok: false, url, error: "no response" };
+      const ct = res.headers && res.headers.get ? res.headers.get("content-type") : null;
+      if (!res.ok) return { ok: false, url, status: res.status, ct, error: "HTTP " + res.status };
+      const buf = Buffer.from(await res.arrayBuffer());
+      const head = buf.subarray(0, 64).toString("latin1");
+      const isPdf = buf.subarray(0, 5).toString("latin1") === "%PDF-";
+      const out = { ok: true, url, status: res.status, ct, bytes: buf.length, isPdf,
+        head: JSON.stringify(head), producer: null, runs: 0, rows: 0, tx: 0, sampleRuns: [], sampleRows: [], sampleTx: [] };
+      if (!isPdf) return out;
+      const pm = buf.toString("latin1").match(/\/(Producer|Creator)\s*\(([^)]{0,60})\)/);
+      out.producer = pm ? pm[2] : null;
+      // Structural facts that explain a zero-run result: object streams and encryption both hide
+      // content from a top-level object scan, and neither is guessable from the outside.
+      const raw = buf.toString("latin1");
+      out.objStm = /\/Type\s*\/ObjStm/.test(raw);
+      out.encrypted = /\/Encrypt\b/.test(raw);
+      out.objects = (raw.match(/\d+\s+\d+\s+obj\b/g) || []).length;
+      out.streams = (raw.match(/\bstream\b/g) || []).length;
+      const runs = pdfTextRuns(buf);
+      out.runs = runs.length;
+      out.sampleRuns = runs.slice(0, 12).map((r) => ({ x: Math.round(r.x), y: Math.round(r.y), t: String(r.text).slice(0, 40) }));
+      const rows2 = ptrRows(runs);
+      out.rows = rows2.length;
+      out.sampleRows = rows2.slice(0, 10).map((r) => r.cells.map((c) => c.text).join(" | ").slice(0, 160));
+      const pr = parsePtr(rows2);
+      out.tx = pr.tx.length;
+      out.sampleTx = pr.tx.slice(0, 4);
+      out.skipped = pr.skipped.slice(0, 4);
+      return out;
+    } catch (e) { return { ok: false, url, error: String(e && e.message).slice(0, 200) }; }
+  }
+  function congressRequeue(which) {
+    const n = store.congressRequeue ? store.congressRequeue(which) : 0;
+    pushOps("congress PTR parse", n + " filing(s) put back in the queue" + (which === "all" ? " (all non-parsed)" : " (previously marked unreadable)"), "info", true);
+    return { ok: true, requeued: n };
   }
   function congressStatus() {
     const last = +(store.congressMeta && store.congressMeta("lastSync")) || 0;
@@ -13078,7 +13143,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     whale13fIngestNow: whale13fIngest, whale13fTickNow: whale13fTick, t13fStatus,
     // CONGRESS lane phase 1 (2026.08.24-02): admin-only index ingest — no public payload yet.
     congressIngestNow: congressIngest, congressTickNow: congressTick, congressStatus,
-    congressParseNow: congressParse,
+    congressParseNow: congressParse, congressDiagNow: congressDiag, congressRequeueNow: congressRequeue,
     congressFilings: (o) => (store.congressFilings ? store.congressFilings(o) : []),
     congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
     congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),

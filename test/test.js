@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-06"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-07"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20856,6 +20856,7 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   const r1 = await p.congressParseNow();
   assert.equal(r1.parsed, 1, "the good filing parsed");
   assert.equal(r1.scanned, 1, "the image-only filing is recognized as unreadable, not retried forever");
+  assert.equal(r1.notPdf, 0, "and is not confused with a response that was never a PDF at all");
   assert.equal(r1.failed, 1, "the 503 is a transient failure, counted separately from a scan");
   assert.equal(r1.tx, 1);
 
@@ -20885,5 +20886,31 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   assert.equal(ann.medLag, 7, "filed 8/20 on an 8/13 trade — a seven-day filer");
   assert.equal(roll.members.find((m) => /Beta/.test(m.member)).medLag, 1);
   assert.equal(p.congressTickerRoll("ZZZZ"), null, "a name with no congressional flow says so rather than inventing an empty shell");
+
+  // The failure the first parse run in production actually hit: a 200 whose body is NOT a PDF was
+  // being recorded as "scanned", which marks the row permanently unreadable — so a wrong URL or an
+  // error page looked exactly like a paper filing and could never be retried. A non-PDF body is a
+  // fetch problem: it retries, it carries a reason, and requeue can undo a bad verdict.
+  const dir2 = fs.mkdtempSync(path.join(os2.tmpdir(), "congress3-"));
+  const store2 = openStore(dir2);
+  const html = Buffer.from("<!DOCTYPE html><html><head><title>404 Not Found</title></head><body>nope</body></html>", "latin1");
+  const ef2 = async (url) => {
+    if (url.endsWith("2026FD.zip") && url.includes("financial-pdfs/2026FD")) return bin(zip);
+    return { ok: true, headers: { get: () => "text/html" }, arrayBuffer: async () => html.buffer.slice(html.byteOffset, html.byteOffset + html.byteLength) };
+  };
+  const p2 = createPoller({ dex: "xyz", store: store2, log: () => {}, version: "test", crypto: false, extFetch: ef2, congressGap: 0 });
+  assert.ok((await p2.congressIngestNow(2026)).ok);
+  const bad = await p2.congressParseNow();
+  assert.equal(bad.notPdf, 3, "an HTML body is counted as not-a-PDF");
+  assert.equal(bad.scanned, 0, "and is NEVER recorded as a scanned filing");
+  const st2 = p2.congressStatus().parse;
+  assert.equal(st2.unreadable, 0, "so nothing is permanently condemned by a fetch problem");
+  assert.ok(st2.notes.some((n) => /not-a-pdf/.test(n.note)), "the reason is stored, so the count can be broken down");
+  // And a wrong verdict is reversible.
+  store2.congressMarkUnreadable("H:20000001", "pdf-but-no-text");
+  assert.equal(p2.congressStatus().parse.unreadable, 1);
+  assert.equal(p2.congressRequeueNow().requeued, 1, "requeue puts a condemned filing back");
+  assert.equal(p2.congressStatus().parse.unreadable, 0);
+  fs.rmSync(dir2, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
 });
