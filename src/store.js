@@ -1061,6 +1061,17 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         d.exec("COMMIT");
       } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} throw e; }
       return rows.length; },
+    // Rows whose ticker was never resolved, so an IMPROVED resolver can be applied to filings that
+    // are already parsed. Without this the fix only reaches documents fetched after the deploy and
+    // every historical row keeps its dash forever — re-parsing to get it would re-download
+    // thousands of PDFs to re-derive text that is already stored.
+    congressUnresolved(lim) { const d = this.openCongress(); if (!d) return [];
+      try { return d.prepare("SELECT fid, ln, asset FROM tx WHERE (ticker IS NULL OR ticker='') AND " +
+        "(tkSrc IS NULL OR tkSrc<>'n/a') AND asset IS NOT NULL LIMIT ?")
+        .all(Math.max(1, Math.min(20000, +lim || 5000))); } catch (_) { return []; } },
+    congressSetTicker(fid, ln, ticker) { const d = this.openCongress(); if (!d) return 0;
+      try { return d.prepare("UPDATE tx SET ticker=?, tkSrc='name' WHERE fid=? AND ln=? AND (ticker IS NULL OR ticker='')")
+        .run(String(ticker), String(fid), +ln).changes || 0; } catch (_) { return 0; } },
     congressMarkUnreadable(fid, note) { const d = this.openCongress(); if (!d) return;
       try { d.prepare("UPDATE filing SET parsed=2, nTx=0, pnote=? WHERE id=?").run(note || null, String(fid)); } catch (_) {} },
     congressNote(fid, note) { const d = this.openCongress(); if (!d) return;

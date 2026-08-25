@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-31"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.25-32"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -21426,6 +21426,61 @@ test("congress -12: issuer names resolve to tickers conservatively, and the clai
   assert.ok(/tkSrc==='name'/.test(app), "and distinguishes it from the form's own parenthetical");
   const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
   assert.ok(/ALTER TABLE tx ADD COLUMN tkSrc/.test(st), "the distinction is stored, not just rendered");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("congress -32: the issuer name resolves through cleaning, prefix and share class \u2014 never by guessing", () => {
+  // "you didn't fully fix naming of stocks" \u2014 Microsoft, Taiwan Semiconductor and Alphabet all
+  // rendered a dash. Three DIFFERENT causes, so three different fixes, each pinned here:
+  //   1. "- Common" is an instrument description the tail-trimmer did not know (it only knew
+  //      "common stock"), so the key stayed "MICROSOFT CORPORATION COMMON" and matched nothing.
+  //   2. A filer names an issuer more briefly than the SEC does. "Taiwan Semiconductor" is a
+  //      unique PREFIX of the official name, which is a match \u2014 but only while it is unique.
+  //   3. A dual-class issuer has one name and two symbols, so the collision-safe map evicts it
+  //      entirely. The class letter the filer wrote is the missing bit, and it is supplied from an
+  //      exact table that is CONFIRMED against the SEC symbol list before it is believed.
+  const fs = require("fs"), path = require("path"), os2 = require("os");
+  const { createPoller } = require("../src/poller");
+  const { openStore } = require("../src/store");
+  const { whaleNameKey } = require("../src/compute");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress32-"));
+  const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false });
+  // Built exactly as whaleTickerMap builds it: whaleNameKey on both sides, a collision evicts.
+  const SEC = [["MSFT", "Microsoft Corporation"], ["AAPL", "Apple Inc."], ["APLE", "Apple Hospitality REIT, Inc."],
+    ["TSM", "Taiwan Semiconductor Manufacturing Company Ltd"], ["INTC", "Intel Corporation"],
+    ["GOOGL", "Alphabet Inc."], ["GOOG", "Alphabet Inc."], ["CRWD", "CrowdStrike Holdings, Inc."],
+    ["V", "Visa Inc."], ["AMD", "Advanced Micro Devices, Inc."]];
+  const tmap = new Map(), dead = new Set();
+  for (const [sym, name] of SEC) { const k = whaleNameKey(name);
+    if (!k || dead.has(k)) continue;
+    if (tmap.has(k) && tmap.get(k) !== sym) { tmap.delete(k); dead.add(k); continue; }
+    tmap.set(k, sym); }
+  const syms = new Set(SEC.map((e) => e[0]));
+  const R = (a) => p.congressResolveNow(a, tmap, syms) || null;
+  assert.equal(tmap.has("ALPHABET"), false, "the shared name is evicted \u2014 the map itself never guesses");
+  assert.equal(R("Microsoft Corporation - Common"), "MSFT", "a bare '- Common' tail comes off");
+  assert.equal(R("Intel Corporation - Common Stock"), "INTC");
+  assert.equal(R("Taiwan Semiconductor"), "TSM", "a unique prefix of the official name resolves");
+  assert.equal(R("CrowdStrike Holdings, Inc. - Class A Common Stock"), "CRWD");
+  assert.equal(R("Alphabet Inc. - Class A Common Stock"), "GOOGL", "the class letter separates what the name cannot");
+  assert.equal(R("Alphabet Inc. - Class C Capital Stock"), "GOOG");
+  assert.equal(R("Alphabet Inc."), null, "no class letter, no claim \u2014 an evicted name stays unresolved");
+  assert.equal(R("Berkshire Hathaway Inc. - Class B"), null,
+    "a table entry the SEC symbol list does not confirm resolves to nothing, not to a wrong ticker");
+  assert.equal(R("Visa Inc. - Class A"), "V", "a single-class issuer is unaffected by the class table");
+  // The guard rails the whole lane is built on: no truncation to a single word, ever.
+  assert.equal(R("Apple Hospitality REIT, Inc."), "APLE");
+  assert.equal(R("Apple Inc."), "AAPL", "and neither swallows the other");
+  assert.equal(R("Some Unknown Private LLC"), null);
+  // A fix that only reaches documents fetched AFTER the deploy leaves every historical row dashed
+  // forever, so the improved resolver can be replayed over stored rows without re-fetching a PDF.
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(/congressUnresolved\(/.test(st) && /congressSetTicker\(/.test(st), "stored rows can be re-resolved");
+  assert.ok(/ticker IS NULL OR ticker=''/.test(st), "and only an EMPTY ticker is ever written to");
+  const pl = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/async function congressReticker/.test(pl), "exposed as a run, not a migration");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("'reticker'"), "and reachable from the terminal");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
