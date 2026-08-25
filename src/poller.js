@@ -6093,7 +6093,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (!queue.length) return { ok: true, done: 0, note: "no scanned filings waiting" };
     let worker = null;
     congressOcrBusy = true;
-    let read = 0, rowsTotal = 0, empty = 0, failed = 0, pages = 0, first = null;
+    let read = 0, rowsTotal = 0, empty = 0, failed = 0, pages = 0, checkbox = 0, first = null;
     try {
       const { createWorker } = require("tesseract.js");
       const path2 = require("path");
@@ -6125,8 +6125,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           }
           const out = ocrPtrRows(text, { filed: f.filed || null, known });
           if (!out.rows.length) {
-            // Read, but nothing survived the gate. That is a real outcome and it is recorded as one.
-            store.congressNote(f.id, "ocr-nothing-passed-validation:" + (out.dropped[0] ? out.dropped[0].why : "no candidate rows"));
+            // Two different outcomes wearing the same shape. A CHECKBOX form is a wall: its amounts
+            // are ticked boxes under column headers, so no recognition quality recovers them and
+            // there is nothing to come back for. Anything else read but did not survive the gate,
+            // which a better gate might yet fix.
+            store.congressNote(f.id, out.checkbox
+              ? "ocr-checkbox-form:amounts are ticked boxes, not text \u2014 not machine-readable"
+              : "ocr-nothing-passed-validation:" + (out.dropped[0] ? out.dropped[0].why : "no candidate rows"));
+            if (out.checkbox) checkbox++;
             empty++;
             continue;
           }
@@ -6146,12 +6152,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     const st = store.congressParseStats();
     const note = read + " scanned filing(s) recovered (" + rowsTotal + " transactions from " + pages + " page(s))"
-      + (empty ? ", " + empty + " read but nothing passed validation" : "")
+      + (checkbox ? ", " + checkbox + " checkbox-form (amounts are ticked boxes \u2014 not machine-readable)" : "")
+      + (empty - checkbox > 0 ? ", " + (empty - checkbox) + " read but nothing passed validation" : "")
       + (failed ? ", " + failed + " failed (first: " + first + ")" : "")
       + (st ? " \u00b7 " + st.ocr + " OCR row(s) total" : "");
     pushOps("congress OCR", note, read || !failed ? "info" : "warn", true);
     log("congress: OCR run \u2014 " + note);
-    return { ok: true, done: queue.length, read, rows: rowsTotal, pages, empty, failed, stats: st };
+    return { ok: true, done: queue.length, read, rows: rowsTotal, pages, empty, checkbox, failed, stats: st };
   }
   // One document, end to end, reported in full: what came back, whether it is even a PDF, how much
   // text the extractor found, what the rows look like, and what the parser made of them. This is
