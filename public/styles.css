@@ -2077,3 +2077,4 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .cng-star{background:none;border:none;color:var(--faint);cursor:pointer;font-size:14px;padding:0 2px;line-height:1}
 .cng-star:hover{color:var(--accent)}
 .cng-star.on{color:var(--accent)}
+.cng-lag.bad{color:var(--down);font-weight:600}

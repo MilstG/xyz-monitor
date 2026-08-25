@@ -13145,6 +13145,7 @@ async function openCongress(){
   const q=CNG.q.trim();
   const r=await cngGet('?feed=1&limit='+CNG_PAGE+'&offset='+(CNG.page*CNG_PAGE)
     +'&sort='+encodeURIComponent(CNG.sort.k)+'&dir='+CNG.sort.dir
+    +(CNG.starred?'&starred=1':'')
     +(q?'&q='+encodeURIComponent(q):'')+(CNG.tk?'&ticker='+encodeURIComponent(CNG.tk):''));
   if(!r||!r.ok){ out.innerHTML=`<div class="msg err">${esc((r&&r.error)||'fetch failed')}</div>`; return; }
   CNG.rows=r.feed||[]; CNG.stat=r.status||null; CNG.filers=r.filers||null; CNG.total=r.total||0;
@@ -13159,10 +13160,10 @@ function cngVisible(){
   // Search, sort and paging all happen in SQL now — a header click has to order every matching
   // transaction, not the page that happens to be loaded. The browser only narrows by direction,
   // which is a view of the page rather than a claim about the whole set.
-  let r=CNG.rows;
-  if(CNG.starred) r=r.filter(x=>CNG.watch.has(x.member));
-  if(CNG.acts.size) r=r.filter(x=>CNG.acts.has(String(x.act||'').split('-')[0]));
-  return r;
+  // starred and the text search are SQL-side; only the act chips narrow the loaded page, and they
+  // say so by only ever removing rows the reader can already see.
+  if(!CNG.acts.size) return CNG.rows;
+  return CNG.rows.filter(x=>CNG.acts.has(String(x.act||'').split('-')[0]));
 }
 function cngRender(){
   const out=el('congress-body'); if(!out) return;
@@ -13188,6 +13189,7 @@ function cngRender(){
       +`<span data-tip="transactions carrying a ticker \u2014 the parenthetical the filer wrote, or the issuer name resolved against the universe. Measured over instruments that CAN have one: municipal bonds, real property, farms and private equity are excluded from the denominator, because no ticker exists for them and counting them as failures would make this number describe the data rather than the parser.">ticker resolved <b>${pct(ps.resolved||0,Math.max(0,(ps.tx||0)-(ps.noTicker||0)))}</b> <span class="sec">(${(ps.resolved||0).toLocaleString()}/${Math.max(0,(ps.tx||0)-(ps.noTicker||0)).toLocaleString()} tickerable)</span></span>`
       +((ps.noTicker||0)?`<span data-tip="municipal bonds, real property, farms, private equity, bank accounts \u2014 the form's own asset-type code says these are not exchange-listed instruments, so no ticker exists to pair. They are shown by name and excluded from the rate above rather than counted as failures.">not listed <b>${(ps.noTicker||0).toLocaleString()}</b></span>`:'')
       +((ps.parsed&&!ps.tx)?`<span class="cng-warn" data-tip="these filings DID yield text \u2014 extraction worked \u2014 but the parser recognized no transaction rows in it. Run: congress diag">\u26a0 ${ps.parsed} parsed, 0 transactions</span>`:'')
+      +((ps.badDate||0)?`<span class="cng-warn" data-tip="rows whose trade date parsed as LATER than the filing that reports it \u2014 impossible, so the dates were misread from those documents. They are counted here rather than shown as a negative lag.">\u2717 ${ps.badDate} impossible date(s)</span>`:'')
       +(c.noDate?`<span class="cng-warn" data-tip="filings whose FilingDate the parser could not read. They are kept, never dropped; the raw values are sampled into the ingest ops line.">unreadable dates <b>${c.noDate}</b></span>`:'')
     +`</div>`
     +((ps.notes&&ps.notes.length)?`<div class="cng-why"><span class="k">why</span>${ps.notes.map(n2=>`<span data-tip="${esc(n2.sample||n2.note)}">${esc(n2.note.split(':')[0])} <b>\u00d7${n2.n}</b></span>`).join('')}</div>`:'')
@@ -13206,7 +13208,11 @@ function cngRender(){
   };
   if(!rows.length){
     out.innerHTML=head+filerNote()
-      +`<div class="sec" style="padding:10px 2px">${CNG.q.trim()?'no parsed transactions match \u2014 see what the index knows above':(ps.pending?`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`:'no transactions')}</div>`;
+      +`<div class="sec" style="padding:10px 2px">${
+        CNG.q.trim()?'no parsed transactions match \u2014 see what the index knows above'
+        :CNG.starred?'none of your starred members have parsed transactions yet \u2014 unstar the filter to see everyone else'
+        :CNG.acts.size?'no rows on this page match that direction \u2014 try clearing the buy/sell chips'
+        :ps.parsed?'no transactions to show':`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`}</div>`;
     cngBind(); return;
   }
   const cell=(k,x)=>{
@@ -13214,7 +13220,12 @@ function cngRender(){
     if(k==='star'){ const on=CNG.watch.has(x.member);
       return `<td class="l"><button type="button" class="cng-star${on?' on':''}" data-cngstar="${esc(x.member)}" data-tip="${esc(on?'starred \u2014 click to remove. New filings by this member raise a congress alert.':'star '+(x.member||'')+' \u2014 keeps them on your list and raises an alert on new filings')}">${on?'\u2605':'\u2606'}</button></td>`; }
     if(k==='filed') return `<td class="l sec">${esc(x.filed||'\u2014')}</td>`;
-    if(k==='lag') return `<td class="r"><span class="cng-lag ${lag==null?'na':lag<14?'fast':lag<35?'mid':'slow'}">${lag==null?'\u2014':lag+'d'}</span></td>`;
+    if(k==='lag'){
+      // A negative lag means the filing predates the trade it reports, which cannot happen. That is
+      // a parse error in the dates, and printing "-320d" states it as fact.
+      if(lag!=null&&lag<0) return `<td class="r"><span class="cng-lag bad" data-tip="the trade date parsed as ${esc(x.txDate||'?')} but the filing is dated ${esc(x.filed||'?')} \u2014 a report cannot predate its own trade, so one of these dates was misread from the document. The row is shown because the filing is real; the lag is not computed from bad input.">\u2717</span></td>`;
+      return `<td class="r"><span class="cng-lag ${lag==null?'na':lag<14?'fast':lag<35?'mid':'slow'}">${lag==null?'\u2014':lag+'d'}</span></td>`;
+    }
     if(k==='member') return `<td class="l"><span class="cng-nm">${esc((x.member||'').slice(0,26))}</span><span class="cng-dist">${esc((x.state||'')+(x.dist?'-'+x.dist:''))}</span></td>`;
     if(k==='owner') return `<td class="l">${x.owner&&x.owner!=='self'
       ?`<span class="cng-own" data-tip="filed for the member\u2019s ${esc(x.owner)}, not the member personally">${esc(x.owner==='dependent'?'DC':x.owner==='spouse'?'SP':'JT')}</span>`
@@ -13272,7 +13283,7 @@ function cngBind(){
     if(CNG.acts.has(a)) CNG.acts.delete(a); else CNG.acts.add(a);
     cngRender(); });
   const cb=el('cng-colbtn'); if(cb) cb.onclick=()=>{ CNG.menu=!CNG.menu; cngRender(); };
-  const sb=el('cng-starred'); if(sb) sb.onclick=()=>{ CNG.starred=!CNG.starred; cngRender(); };
+  const sb=el('cng-starred'); if(sb) sb.onclick=()=>{ CNG.starred=!CNG.starred; CNG.page=0; openCongress(); };
   out.querySelectorAll('[data-cngstar]').forEach(b=>b.onclick=async()=>{
     const m=b.dataset.cngstar, on=!CNG.watch.has(m);
     if(on) CNG.watch.add(m); else CNG.watch.delete(m);

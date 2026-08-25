@@ -1087,6 +1087,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         where.push("(f.member LIKE ? OR t.asset LIKE ? OR t.ticker LIKE ?)");
         args.push(like, like, like.toUpperCase());
       }
+      if (o.starred) where.push("f.member IN (SELECT member FROM watch)");
       const lim = Math.max(1, Math.min(500, o.limit | 0 || 50));
       const off = Math.max(0, o.offset | 0);
       // Sort in SQL, from a WHITELIST: a header click has to order the whole result set, not the
@@ -1114,6 +1115,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         where.push("(f.member LIKE ? OR t.asset LIKE ? OR t.ticker LIKE ?)");
         args.push(like, like, like.toUpperCase());
       }
+      if (o.starred) where.push("f.member IN (SELECT member FROM watch)");
       try { const r = d.prepare(`SELECT COUNT(*) n FROM tx t JOIN filing f ON f.id=t.fid
         WHERE ${where.join(" AND ")}`).get(...args);
         return (r && r.n) || 0; } catch (_) { return 0; } },
@@ -1187,8 +1189,13 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
         const t = d.prepare("SELECT COUNT(*) n, SUM(CASE WHEN ticker IS NULL THEN 0 ELSE 1 END) got,"
           + " SUM(CASE WHEN tkSrc='n/a' THEN 1 ELSE 0 END) na FROM tx").get() || {};
+        // You cannot file a report before the trade it reports. A row that claims otherwise is a
+        // misparse, and it has to be counted rather than rendered as a -320 day lag.
+        const bad = d.prepare("SELECT COUNT(*) n FROM tx t JOIN filing f ON f.id=t.fid"
+          + " WHERE t.txDate IS NOT NULL AND f.filed<>'' AND t.txDate > f.filed").get() || {};
         return { parsed: p.n || 0, unreadable: u.n || 0, pending: q.n || 0,
-          tx: t.n || 0, resolved: t.got || 0, noTicker: t.na || 0, notes: this.congressNotes() };
+          tx: t.n || 0, resolved: t.got || 0, noTicker: t.na || 0, badDate: bad.n || 0,
+          notes: this.congressNotes() };
       } catch (_) { return null; } },
     congressFilings(opt) { const d = this.openCongress(); if (!d) return [];
       const o = opt || {};
