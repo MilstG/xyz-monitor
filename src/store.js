@@ -999,8 +999,12 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         const a = d.prepare("SELECT COUNT(*) n, COUNT(DISTINCT member) members, MIN(filed) first, MAX(filed) last FROM filing").get() || {};
         const p = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr'").get() || {};
         const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
-        return { n: a.n || 0, members: a.members || 0, first: a.first || null, last: a.last || null,
-          ptr: p.n || 0, pending: q.n || 0 };
+        // Blank filing dates are a real condition in the live index, so they get a number rather
+        // than showing up only as a dash where the earliest filing should be.
+        const nd = d.prepare("SELECT COUNT(*) n FROM filing WHERE filed IS NULL OR filed=''").get() || {};
+        const f2 = d.prepare("SELECT MIN(filed) first FROM filing WHERE filed<>''").get() || {};
+        return { n: a.n || 0, members: a.members || 0, first: f2.first || null, last: a.last || null,
+          ptr: p.n || 0, pending: q.n || 0, noDate: nd.n || 0 };
       } catch (_) { return null; } },
     congressYears() { const d = this.openCongress(); if (!d) return [];
       try { return d.prepare("SELECT yr, COUNT(*) n FROM filing GROUP BY yr ORDER BY yr DESC").all(); } catch (_) { return []; } },

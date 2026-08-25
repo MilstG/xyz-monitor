@@ -5704,16 +5704,31 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     if (e.method !== 8) throw new Error("ZIP: unsupported compression method " + e.method + " on " + e.name);
     return require("zlib").inflateRawSync(raw).toString("utf8");
   }
-  const houseDate = (v) => {                       // "8/13/2026" or already-ISO -> ISO
+  // Date shapes seen or plausible in the index, normalized to ISO. A shape not listed here returns
+  // "" rather than a guessed date — and the ingest COUNTS those and samples the raw text, because
+  // production showed the symptom of a blank date (a dash where the earliest filing should be) with
+  // no way to tell how many rows were affected or what the offending value even looked like.
+  const MON3 = { JAN: "01", FEB: "02", MAR: "03", APR: "04", MAY: "05", JUN: "06",
+    JUL: "07", AUG: "08", SEP: "09", OCT: "10", NOV: "11", DEC: "12" };
+  const houseDate = (v) => {
     const t = String(v || "").trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
-    const m = t.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-    return m ? m[3] + "-" + String(m[1]).padStart(2, "0") + "-" + String(m[2]).padStart(2, "0") : "";
+    if (!t) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;                       // already ISO
+    let m = t.match(/^(\d{4})[/.](\d{1,2})[/.](\d{1,2})$/);            // 2026/08/13
+    if (m) return m[1] + "-" + m[2].padStart(2, "0") + "-" + m[3].padStart(2, "0");
+    m = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/);       // 8/13/2026 · 8-13-26
+    if (m) { const y = m[3].length === 2 ? (+m[3] > 70 ? "19" : "20") + m[3] : m[3];
+      return y + "-" + m[1].padStart(2, "0") + "-" + m[2].padStart(2, "0"); }
+    m = t.match(/^(\d{1,2})[-\s]([A-Za-z]{3})[A-Za-z]*[-\s](\d{4})$/); // 13-AUG-2026
+    if (m && MON3[m[2].toUpperCase()]) return m[3] + "-" + MON3[m[2].toUpperCase()] + "-" + m[1].padStart(2, "0");
+    m = t.match(/^([A-Za-z]{3})[A-Za-z]*\s+(\d{1,2}),?\s+(\d{4})$/);  // August 13, 2026
+    if (m && MON3[m[1].toUpperCase()]) return m[3] + "-" + MON3[m[1].toUpperCase()] + "-" + m[2].padStart(2, "0");
+    return "";
   };
   // Read fields by NAME, never by position — the rule the 13F parser already runs on, for the same
   // reason: an upstream column reorder must fail loudly or not at all, never shift data silently.
   function parseHouseIndex(text, yearHint) {
-    const rows = [], seen = new Set();
+    const rows = [], seen = new Set(), badDates = [];
     const push = (f) => {
       const docId = String(f.DocID || "").trim();
       if (!docId) return;
@@ -5730,7 +5745,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         member: (last + (first ? ", " + first : "") + (suffix ? " " + suffix : "")).trim(),
         lname: last, fname: first, suffix,
         state: sd.slice(0, 2), dist: sd.slice(2),
-        type, typeRaw: code, filed: houseDate(f.FilingDate),
+        type, typeRaw: code, filed: (() => {
+          const iso = houseDate(f.FilingDate);
+          // A filing whose date cannot be read is KEPT — dropping it would hide a filing — but the
+          // raw value is sampled so the shape can be identified instead of theorized about.
+          if (!iso && badDates.length < 5) badDates.push(String(f.FilingDate == null ? "(absent)" : f.FilingDate).slice(0, 40));
+          return iso;
+        })(),
         // Only a PTR gets a document URL. The ptr-pdfs path is corroborated by live documents
         // going back years; the path for every OTHER filing type is NOT verified from here, and a
         // link that 404s on the 1,209 non-PTR rows of a 1,573-row index is worse than no link.
@@ -5752,7 +5773,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         for (const m of b[1].matchAll(/<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/g)) f[m[1]] = m[2];
         push(f);
       }
-      return rows;
+      return { rows, badDates };
     }
     // Fallback: the ZIP has also carried a tab-delimited index. Same by-name rule on the header.
     const lines = text.split(/\r?\n/).filter((l) => l.trim());
@@ -5764,7 +5785,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         push(f);
       }
     }
-    return rows;
+    return { rows, badDates };
   }
   async function congressIngest(yearArg) {
     if (congressBusy) return { ok: false, error: "an ingest is already running" };
@@ -5810,7 +5831,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       if (!idx) return fail({ ok: false,
         error: "no .xml or .txt index inside the zip (" + entries.length + " entr" + (entries.length === 1 ? "y" : "ies") + ": "
           + entries.slice(0, 6).map((e) => e.name).join(", ") + ") — layout changed, ingest needs a patch" });
-      const rows = parseHouseIndex(zipEntryText(zipBuf, idx), yr);
+      const parsedIdx = parseHouseIndex(zipEntryText(zipBuf, idx), yr);
+      const rows = parsedIdx.rows, badDates = parsedIdx.badDates;
+      const noDate = rows.filter((r) => !r.filed).length;
       if (!rows.length) return fail({ ok: false,
         error: "index " + idx.name + " parsed to zero filings — element or column names may have changed; ingest needs a patch" });
       congressProgress.stage = "store";
@@ -5823,10 +5846,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       congressLastError = null;
       const note = up.seen + " filings (" + ptr + " PTR), " + up.added + " new · zip "
         + (zipBuf.length / 1e6).toFixed(1) + "MB / " + entries.length + " entries · index " + idx.name
-        + (unknown.length ? " · unmapped filing-type code(s) kept verbatim: " + unknown.join(",") : "");
+        + (unknown.length ? " · unmapped filing-type code(s) kept verbatim: " + unknown.join(",") : "")
+        + (noDate ? " · " + noDate + " filing(s) with an unreadable FilingDate, kept and counted (raw: "
+          + badDates.map((b) => JSON.stringify(b)).join(", ") + ")" : "");
       pushOps("congress index " + yr, "ingested from " + urlUsed + " — " + note, "info", true);
       log("congress: " + yr + " index ingested — " + note);
-      return done({ ok: true, yr, url: urlUsed, filings: up.seen, added: up.added, ptr,
+      return done({ ok: true, yr, url: urlUsed, filings: up.seen, added: up.added, ptr, noDate, badDates,
         entries: entries.length, index: idx.name, bytes: zipBuf.length, unknownTypes: unknown });
     } catch (e) {
       return fail({ ok: false, error: String(e && e.message).slice(0, 200) });

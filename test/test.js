@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-04"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-05"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20580,6 +20580,8 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
 <Member><Last>Khanna</Last><First>Ro</First><Suffix>Jr.</Suffix><FilingType>O</FilingType><StateDst>CA17</StateDst><Year>2026</Year><FilingDate>5/15/2026</FilingDate><DocID>10041234</DocID></Member>
 <Member><Last>Unknown</Last><First>Code</First><FilingType>ZZ</FilingType><StateDst>NY01</StateDst><Year>2026</Year><FilingDate>6/01/2026</FilingDate><DocID>10041235</DocID></Member>
 <Member><Last>Seen</Last><First>InTheWild</First><FilingType>W</FilingType><StateDst>NY02</StateDst><Year>2026</Year><FilingDate>6/02/2026</FilingDate><DocID>10041236</DocID></Member>
+<Member><Last>Alt</Last><First>Shape</First><FilingType>P</FilingType><StateDst>TX01</StateDst><Year>2026</Year><FilingDate>13-AUG-2026</FilingDate><DocID>20033727</DocID></Member>
+<Member><Last>NoDate</Last><First>Blank</First><FilingType>P</FilingType><StateDst>FL01</StateDst><Year>2026</Year><FilingDate>whenever</FilingDate><DocID>20033728</DocID></Member>
 </FinancialDisclosure>`;
   const zip2026 = mkzip([["2026FD.xml", memberXml]]);
   // A year whose ZIP carries the tab-delimited index instead — same fields, read by header name.
@@ -20608,9 +20610,9 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
 
   const r = await p.congressIngestNow(2026);
   assert.ok(r.ok, "2026 ingest: " + (r.error || ""));
-  assert.equal(r.filings, 5, "every member row is stored, not just the PTRs");
-  assert.equal(r.ptr, 2, "two filings carry type P");
-  assert.equal(r.added, 5);
+  assert.equal(r.filings, 7, "every member row is stored, not just the PTRs");
+  assert.equal(r.ptr, 4, "four filings carry type P");
+  assert.equal(r.added, 7);
   assert.deepEqual(r.unknownTypes, ["ZZ", "W"], "unmapped filing-type codes are reported, not silently swallowed");
 
   const rows = p.congressFilings({ limit: 50 });
@@ -20639,11 +20641,21 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   assert.equal(byId.get("H:10041234").url, null, "a non-PTR filing carries no guessed document URL");
   assert.equal(w.url, null);
   assert.ok(pel.url.includes("/ptr-pdfs/"), "a PTR still carries its corroborated document URL");
+  // Production showed a blank earliest-filing date with no way to tell how many rows caused it or
+  // what the raw value looked like. A shape the normalizer knows is read; one it does not is kept,
+  // counted, and SAMPLED — never dropped, and never guessed into a plausible date.
+  assert.equal(byId.get("H:20033727").filed, "2026-08-13", "an alternate date shape normalizes to ISO");
+  assert.equal(byId.get("H:20033728").filed, "", "an unreadable date is blank, not invented");
+  assert.equal(r.noDate, 1, "and is counted");
+  assert.deepEqual(r.badDates, ["whenever"], "with the raw value sampled so the shape can be identified");
+  assert.equal(p.congressStatus().counts.noDate, 1, "the count reaches the status line");
+  assert.equal(p.congressStatus().counts.first, "2025-12-30",
+    "the earliest-filing date ignores blank rows instead of collapsing to a dash");
 
   // Idempotency: the Clerk republishes the SAME zip daily, so a re-ingest must add nothing.
   const r2 = await p.congressIngestNow(2026);
-  assert.ok(r2.ok && r2.added === 0 && r2.filings === 5, "re-ingesting the same index adds nothing");
-  assert.equal(p.congressFilings({ limit: 50 }).length, 5, "and creates no duplicate rows");
+  assert.ok(r2.ok && r2.added === 0 && r2.filings === 7, "re-ingesting the same index adds nothing");
+  assert.equal(p.congressFilings({ limit: 50 }).length, 7, "and creates no duplicate rows");
 
   // The rule a daily re-sync could silently break: phase 2 marks a filing parsed, then tomorrow's
   // sync runs. If the upsert reset parsed to 0, every day would re-queue everything already done.
@@ -20656,7 +20668,7 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   // The tab-delimited fallback index parses through the same by-name rule.
   const r3 = await p.congressIngestNow(2025);
   assert.ok(r3.ok && r3.filings === 1, "tsv fallback index: " + (r3.error || ""));
-  assert.equal(p.congressFilings({ type: "ptr", limit: 50 }).length, 3, "type filter reaches both years");
+  assert.equal(p.congressFilings({ type: "ptr", limit: 50 }).length, 5, "type filter reaches both years");
 
   // Every candidate 404s: the error names all of them in FULL — the failure the 13F lane shipped
   // blind, where only the basename was logged and a wrong path looked like a dead process.
@@ -20668,8 +20680,8 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   // Status shape — what the admin verb renders.
   const st = p.congressStatus();
   assert.ok(st.ready && st.counts, "status carries readiness and counts");
-  assert.equal(st.counts.n, 6); assert.equal(st.counts.ptr, 3);
-  assert.equal(st.counts.pending, 2, "one of the three PTRs was marked parsed above");
+  assert.equal(st.counts.n, 8); assert.equal(st.counts.ptr, 5);
+  assert.equal(st.counts.pending, 4, "one PTR was marked parsed above");
   assert.ok(st.lastSync > 0, "a successful sync stamps the clock");
   assert.deepEqual(st.years.map((y) => y.yr), [2026, 2025], "newest year first");
   assert.equal(store.congressMeta("indexUrl:2026"), urls[0], "the URL that actually answered is recorded for the header comment");
