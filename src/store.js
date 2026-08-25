@@ -9,6 +9,13 @@ const readline = require("readline");
 
 const MAX_BUF = 50000; // hard cap on unflushed lines if the volume is unwritable
 
+// Search tokens: words, order-independent. "marjorie taylor greene" has to find
+// "Greene, Marjorie Taylor", which a single phrase LIKE never will.
+function congressTokens(q) {
+  return String(q == null ? "" : q).replace(/[%_]/g, " ").split(/[\s,]+/)
+    .map((t) => t.trim()).filter((t) => t.length >= 2).slice(0, 6);
+}
+
 function openStore(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, "oi.log");
@@ -1072,9 +1079,14 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       // Search runs in SQL, over every parsed transaction. Filtering the loaded page in the browser
       // silently scoped every search to the most recent few hundred rows — so a member whose
       // filings sat outside that window read as "not in the tool" rather than "not on this page".
-      if (o.q) { const like = "%" + String(o.q).replace(/[%_]/g, "") + "%";
+      // Every word must appear SOMEWHERE in the row, in any order: the index spells a member
+      // "Greene, Marjorie Taylor", so a single LIKE over the whole phrase fails on exactly the way
+      // a person naturally types a name. Each token may match the member, the asset or the ticker.
+      for (const tok of congressTokens(o.q)) {
+        const like = "%" + tok + "%";
         where.push("(f.member LIKE ? OR t.asset LIKE ? OR t.ticker LIKE ?)");
-        args.push(like, like, like.toUpperCase()); }
+        args.push(like, like, like.toUpperCase());
+      }
       const lim = Math.max(1, Math.min(500, o.limit | 0 || 50));
       const off = Math.max(0, o.offset | 0);
       // Sort in SQL, from a WHITELIST: a header click has to order the whole result set, not the
@@ -1097,9 +1109,11 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       const o = opt || {}, where = ["f.parsed=1"], args = [];
       if (o.ticker) { where.push("t.ticker=?"); args.push(String(o.ticker).toUpperCase()); }
       if (o.since) { where.push("f.filed>=?"); args.push(String(o.since)); }
-      if (o.q) { const like = "%" + String(o.q).replace(/[%_]/g, "") + "%";
+      for (const tok of congressTokens(o.q)) {
+        const like = "%" + tok + "%";
         where.push("(f.member LIKE ? OR t.asset LIKE ? OR t.ticker LIKE ?)");
-        args.push(like, like, like.toUpperCase()); }
+        args.push(like, like, like.toUpperCase());
+      }
       try { const r = d.prepare(`SELECT COUNT(*) n FROM tx t JOIN filing f ON f.id=t.fid
         WHERE ${where.join(" AND ")}`).get(...args);
         return (r && r.n) || 0; } catch (_) { return 0; } },
@@ -1124,13 +1138,16 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
     congressWatched(member) { const d = this.openCongress(); if (!d) return null;
       try { return d.prepare("SELECT member, notify FROM watch WHERE member=?").get(String(member || "")) || null; } catch (_) { return null; } },
     congressFilerSearch(q) { const d = this.openCongress(); if (!d) return [];
-      const like = "%" + String(q || "").replace(/[%_]/g, "") + "%";
+      const toks = congressTokens(q);
+      if (!toks.length) return [];
+      const where = toks.map(() => "member LIKE ?").join(" AND ");
+      const args = toks.map((t) => "%" + t + "%");
       try { return d.prepare(`SELECT member, COUNT(*) n,
         SUM(CASE WHEN parsed=1 THEN 1 ELSE 0 END) done,
         SUM(CASE WHEN parsed=0 THEN 1 ELSE 0 END) queued,
         SUM(CASE WHEN parsed=2 THEN 1 ELSE 0 END) unreadable,
         MAX(filed) last, MIN(yr) yr0, MAX(yr) yr1
-        FROM filing WHERE type='ptr' AND member LIKE ? GROUP BY member ORDER BY n DESC LIMIT 12`).all(like); }
+        FROM filing WHERE type='ptr' AND ${where} GROUP BY member ORDER BY n DESC LIMIT 12`).all(...args); }
       catch (_) { return []; } },
     // Per-ticker roll-up. Every sum is over the band FLOOR and is therefore a hard lower bound —
     // the caller renders it with a ≥, and no midpoint is computed anywhere in this lane.

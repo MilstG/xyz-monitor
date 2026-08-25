@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.24-16";
+const VERSION = "2026.08.24-17";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1142,9 +1142,15 @@ async function main() {
     if (q.ticker) return { ok: true, roll: poller.congressTickerRoll(String(q.ticker)) };
     if (q.feed) {
       const qq = q.q ? String(q.q).slice(0, 40) : null;
+      // The selection and the VIEW of it are separate: total must count every row the filter
+      // matches, not the page being returned, or the pager cannot know how many pages exist.
+      const sel = { since: q.since ? String(q.since) : null, q: qq,
+        ticker: q.ticker ? String(q.ticker) : null };
       return { ok: true, status: poller.congressStatus(),
-        feed: poller.congressFeed({ limit: lim, since: q.since ? String(q.since) : null, q: qq,
-          ticker: q.ticker ? String(q.ticker) : null }),
+        feed: poller.congressFeed(Object.assign({ limit: lim, offset: +q.offset || 0,
+          sort: q.sort ? String(q.sort) : null,
+          dir: q.dir == null || q.dir === "" ? -1 : +q.dir }, sel)),
+        total: poller.congressFeedCount(sel),
         // When a search comes up thin, the INDEX still knows whether that member filed at all.
         filers: qq ? poller.congressFilerSearch(qq) : null,
         watch: poller.congressWatchList() };
