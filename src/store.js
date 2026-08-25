@@ -970,6 +970,9 @@ CREATE INDEX IF NOT EXISTS tx_tk ON tx(ticker, txDate);`);
         // (resolved from the issuer name against the universe). Two different strengths of claim,
         // so they are stored apart and rendered apart rather than blurred into one column.
         try { congress.exec("ALTER TABLE tx ADD COLUMN tkSrc TEXT"); } catch (_) {}
+        // The form's own asset-type code: what kind of thing was traded, and therefore whether a
+        // ticker could exist for it at all.
+        try { congress.exec("ALTER TABLE tx ADD COLUMN atype TEXT"); } catch (_) {}
         return congress;
       } catch (_) { congress = null; return null; }
     },
@@ -1027,14 +1030,14 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         .all(maxTries == null ? 5 : maxTries | 0, Math.max(1, Math.min(500, limit | 0 || 25))); } catch (_) { return []; } },
     congressSaveTx(fid, rows) { const d = this.openCongress(); if (!d) return 0;
       const del = d.prepare("DELETE FROM tx WHERE fid=?");
-      const ins = d.prepare("INSERT INTO tx(fid,ln,owner,asset,ticker,act,txDate,notified,loAmt,hiAmt,tkSrc) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+      const ins = d.prepare("INSERT INTO tx(fid,ln,owner,asset,ticker,act,txDate,notified,loAmt,hiAmt,tkSrc,atype) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
       const mark = d.prepare("UPDATE filing SET parsed=1, nTx=?, tries=0 WHERE id=?");
       d.exec("BEGIN");
       try {
         del.run(String(fid));                          // re-parsing a filing replaces its rows wholesale
         rows.forEach((r, i) => ins.run(String(fid), i, r.owner, String(r.asset).slice(0, 160), r.ticker,
           r.act, r.txDate, r.notified, r.loAmt == null ? null : +r.loAmt, r.hiAmt == null ? null : +r.hiAmt,
-          r.tkSrc || (r.ticker ? "form" : null)));
+          r.tkSrc || (r.ticker ? "form" : null), r.atype || null));
         mark.run(rows.length, String(fid));
         d.exec("COMMIT");
       } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} throw e; }
@@ -1067,7 +1070,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       if (o.since) { where.push("f.filed>=?"); args.push(String(o.since)); }
       const lim = Math.max(1, Math.min(500, o.limit | 0 || 50));
       try { return d.prepare(`SELECT f.filed, f.member, f.state, f.dist, f.url, t.fid, t.owner, t.asset,
-        t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt, t.tkSrc
+        t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt, t.tkSrc, t.atype
         FROM tx t JOIN filing f ON f.id=t.fid WHERE ${where.join(" AND ")}
         ORDER BY f.filed DESC, t.fid DESC, t.ln LIMIT ?`).all(...args, lim); } catch (_) { return []; } },
     // Per-ticker roll-up. Every sum is over the band FLOOR and is therefore a hard lower bound —
@@ -1104,9 +1107,10 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         const p = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=1").get() || {};
         const u = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=2").get() || {};
         const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
-        const t = d.prepare("SELECT COUNT(*) n, SUM(CASE WHEN ticker IS NULL THEN 0 ELSE 1 END) got FROM tx").get() || {};
+        const t = d.prepare("SELECT COUNT(*) n, SUM(CASE WHEN ticker IS NULL THEN 0 ELSE 1 END) got,"
+          + " SUM(CASE WHEN tkSrc='n/a' THEN 1 ELSE 0 END) na FROM tx").get() || {};
         return { parsed: p.n || 0, unreadable: u.n || 0, pending: q.n || 0,
-          tx: t.n || 0, resolved: t.got || 0, notes: this.congressNotes() };
+          tx: t.n || 0, resolved: t.got || 0, noTicker: t.na || 0, notes: this.congressNotes() };
       } catch (_) { return null; } },
     congressFilings(opt) { const d = this.openCongress(); if (!d) return [];
       const o = opt || {};

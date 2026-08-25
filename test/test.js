@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-12"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-13"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,57 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -13: the real filing shape — flipped page, and a transaction split across rows", () => {
+  // Everything here comes from one production diag, and none of it was guessable:
+  //   1. these pages draw through a FLIP, so raw text y grows DOWNWARD. Read naively, every row
+  //      ordered bottom-to-top and a transaction's continuation line sorted ABOVE its trade.
+  //   2. a transaction is a GROUP of rows. The trade line runs out of width, so the amount band is
+  //      split ("$250,001 -" on the trade line, "$500,000" beneath it) and the asset's tail — a
+  //      maturity date, the asset-type code — continues underneath.
+  // Requiring a complete band on one row found nothing in documents that were parsing perfectly.
+  const { pdfTextRuns, ptrRows, parsePtr } = require("../src/compute");
+  const mk = (lines) => {
+    let c = "q\n1 0 0 -1 0 792 cm\nBT\n/F1 9 Tf\n";          // the flip these filings use
+    for (const [x, y, t] of lines) c += `1 0 0 1 ${x} ${y} Tm\n(${t.replace(/([()\\])/g, "\\$1")}) Tj\n`;
+    c += "ET\nQ\n";
+    const objs = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+      "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>", null,
+      "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"];
+    let out = "%PDF-1.4\n";
+    objs.forEach((d, i) => { const n = i + 1;
+      if (n === 4) out += `${n} 0 obj\n<< /Length ${c.length} >>\nstream\n${c}\nendstream\nendobj\n`;
+      else out += `${n} 0 obj\n${d}\nendobj\n`; });
+    return Buffer.from(out + "trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n", "latin1");
+  };
+  const rows = ptrRows(pdfTextRuns(mk([
+    [128, 46, "P"], [286, 46, "T"], [508, 46, "R"],                     // the letter-spaced title
+    [63, 97, "Clerk of the House of Representatives"],
+    [30, 300, "JT"], [70, 300, "Washington ST 5% Go Utx Due"], [330, 300, "P"],
+    [380, 300, "08/07/2026"], [460, 300, "08/07/2026"], [545, 300, "$250,001 -"],
+    [70, 312, "08/01/30"], [250, 312, "[GS]"], [545, 312, "$500,000"],   // the continuation
+    [30, 340, "SP"], [70, 340, "Nvidia Corp (NVDA) [ST]"], [330, 340, "S"],
+    [380, 340, "07/22/2026"], [460, 340, "07/25/2026"], [545, 340, "$15,001 - $50,000"],
+  ])));
+  assert.ok(/P \| T \| R/.test(rows[0].cells.map((c) => c.text).join(" | ")),
+    "the page title sorts FIRST — the flip is honoured, so rows read top to bottom");
+  const out = parsePtr(rows);
+  assert.equal(out.tx.length, 2, "both trades are found");
+  const muni = out.tx[0];
+  assert.equal(muni.owner, "joint");
+  assert.deepEqual([muni.loAmt, muni.hiAmt], [250001, 500000],
+    "the band's two halves are rejoined across the row break — the whole reason this filing parsed to nothing before");
+  assert.equal(muni.atype, "GS", "the asset-type code is captured, not stripped as noise");
+  assert.equal(muni.ticker, null, "a municipal bond has no ticker in existence, and none is invented");
+  assert.ok(/Washington ST 5% Go Utx Due/.test(muni.asset));
+  assert.equal(out.tx[1].ticker, "NVDA");
+  assert.equal(out.tx[1].atype, "ST");
+  // A band whose halves are separated by a maturity date must not read that date as its upper end.
+  const { ptrBand } = require("../src/compute");
+  assert.equal(ptrBand("$250,001 - 08/01/30 [GS]"), null,
+    "an unterminated band is null rather than a band ending at 8");
+  assert.deepEqual(ptrBand("$250,001 - $500,000"), { lo: 250001, hi: 500000 });
+});
 
 test("congress -12: issuer names resolve to tickers conservatively, and the claim is marked", () => {
   // The filer is not required to write a ticker and most do not — CrowdStrike and Alibaba arrive as

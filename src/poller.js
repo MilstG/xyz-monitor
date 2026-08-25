@@ -28,6 +28,7 @@ const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaA
 const { momPair, spearmanIC, duelStats, epResolve, epScore } = require("./compute");
 const { hourlyPickTier, hourlyPickBetter } = require("./compute");
 const { parse13FInfotable, whaleBook, whaleDelta, whaleNameKey, whaleIssuerKey, whaleWindow, whaleQOfPeriod, whaleSeason, whale13FScale } = require("./compute");
+const { PTR_TICKERABLE, PTR_NO_TICKER } = require("./compute");
 const { NAV_VIEW_ORDER, navGroupKeys, navLabelClean, navConfigSanitize, resolveNavGroups } = require("./compute");
 const { carryR, netRR, setupEV, barsInTrigger, mergeActionable, ACT_TF_MS, lateR, trigKey, trigEligible, pushEligible, pushFmt, pushBatch, pushCodeOk, pushCodeNorm, levelHit, PUSH_CLASSES, PUSH_DEFAULT_CLASSES, PUSH_ADMIN_CLASSES, PUSH_CODE_ALPHABET, inQuietWindow, quietEndsAt, piercesQuiet, validateQuiet,
   RULE_METRICS, RULE_BY_K, RULE_OPS, RULE_OP_LABEL, ruleEval, ruleLabel, ruleFmtValue, validateRule } = require("./compute");
@@ -5893,6 +5894,33 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     t = t.replace(/[\s,;:\-\u2013\u2014]+$/, "").trim();   // punctuation left behind by the trim
     return t.length >= 3 ? t : null;
   }
+  // Words that carry no identity: dropping them cannot turn one company into another, so the lookup
+  // may retry without them. "Apple Hospitality" must NEVER become "Apple", so truncation is allowed
+  // to remove only these — never an arbitrary trailing word, which is exactly the fuzzy matching
+  // this lane refuses.
+  const CONGRESS_GENERIC = new Set(["HOLDINGS", "HOLDING", "GROUP", "CORPORATION", "CORP", "COMPANY",
+    "CO", "INCORPORATED", "INC", "TECHNOLOGIES", "TECHNOLOGY", "INTERNATIONAL", "INDUSTRIES",
+    "PARTNERS", "ENTERPRISES", "SYSTEMS", "SOLUTIONS", "LIMITED", "LTD", "PLC", "NV", "SA", "AG",
+    "CLASS", "COMMON", "STOCK", "SHARES", "ORDINARY", "CAPITAL", "AMERICAN", "DEPOSITARY"]);
+  // Resolution, most authoritative first, stopping at the first hit: the ticker the filer wrote,
+  // then the full issuer name, then the name with generic tail words removed one at a time. Every
+  // lookup goes through the SAME collision-safe map, so an ambiguous name resolves to nothing at
+  // any depth rather than to a coin flip.
+  function congressResolve(asset, tmap) {
+    if (!tmap) return null;
+    const nm = congressAssetName(asset);
+    if (!nm) return null;
+    let hit = whaleTickerOf(nm, tmap);
+    if (hit) return hit;
+    let w = nm.toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim().split(" ");
+    while (w.length > 1 && CONGRESS_GENERIC.has(w[w.length - 1])) {
+      w.pop();
+      if (w.join(" ").length < 4) break;
+      hit = whaleTickerOf(w.join(" "), tmap);
+      if (hit) return hit;
+    }
+    return null;
+  }
   async function congressParse(limitArg) {
     if (congressParseBusy) return { ok: false, error: "a parse run is already going" };
     if (!store.congressReady || !store.congressReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
@@ -5951,8 +5979,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // record HOW each ticker was arrived at so the two strengths of claim stay separable.
           for (const t of out.tx) {
             if (t.ticker) { t.tkSrc = "form"; continue; }
-            const nm = congressAssetName(t.asset);
-            const sym = nm ? whaleTickerOf(nm, tmap) : null;
+            // An asset class that cannot have a ticker is not an unresolved one. Saying so is the
+            // difference between a coverage rate that describes the parser and one that describes
+            // the composition of the data.
+            if (t.atype && !PTR_TICKERABLE.has(t.atype)) { t.tkSrc = "n/a"; continue; }
+            const sym = congressResolve(t.asset, tmap);
             if (sym) { t.ticker = sym; t.tkSrc = "name"; }
           }
           if (!out.tx.length) store.congressNote(f.id, "text-but-no-rows:" + runs.length + " runs");

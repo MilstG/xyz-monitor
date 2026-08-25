@@ -7942,13 +7942,27 @@ function pdfTextRuns(buf) {
     if (!/\bBT\b/.test(s)) continue;                     // not a content stream
     page++;
     let tm = [1, 0, 0, 1, 0, 0], tlm = tm.slice(), leading = 0, font = null;
+    // The CTM is not decoration. These filings draw through a flip (cm with a negative d), which is
+    // why the page title extracts at y=46 and the letterhead below it at y=97: in RAW text space y
+    // was growing DOWNWARD. Reading tm[5] as a page position therefore ordered every row bottom to
+    // top, which put a transaction's continuation line ABOVE the trade it belongs to.
+    let ctm = [1, 0, 0, 1, 0, 0];
+    const ctmStack = [];
+    const mul = (a, b) => [
+      a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+      a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+      a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]];
     const decode = (bytes, hex) => {
       const cm = font && cmaps.get(font);
       if (cm && cm.size) return bytes.map((b) => (cm.has(b) ? cm.get(b) : "")).join("");
       if (hex) { let out = ""; for (let i = 0; i + 1 < bytes.length; i += 2) out += String.fromCharCode((bytes[i] << 8) | bytes[i + 1]); return out; }
       return bytes.map((b) => String.fromCharCode(b)).join("");
     };
-    const emit = (txt) => { if (txt) runs.push({ page, x: tm[4], y: tm[5], text: txt }); };
+    const emit = (txt) => {
+      if (!txt) return;
+      const m2 = mul(tm, ctm);
+      runs.push({ page, x: m2[4], y: m2[5], text: txt });
+    };
     const nums = [];
     for (let i = 0; i < s.length; i++) {
       const c = s[i];
@@ -7962,10 +7976,13 @@ function pdfTextRuns(buf) {
         const m = s.slice(i).match(/^-?\d*\.?\d+/);
         if (m) { nums.push(+m[0]); i += m[0].length - 1; continue; }
       }
-      const op = s.slice(i).match(/^(BT|ET|Tm|Td|TD|T\*|TL|Tf|TJ|Tj)\b/);
+      const op = s.slice(i).match(/^(BT|ET|Tm|Td|TD|T\*|TL|Tf|TJ|Tj|cm|q|Q)\b/);
       if (!op) { if (/\s/.test(c)) continue; nums.length = 0; continue; }
       const k = op[1];
-      if (k === "BT") { tm = [1, 0, 0, 1, 0, 0]; tlm = tm.slice(); }
+      if (k === "q") { ctmStack.push(ctm.slice()); }
+      else if (k === "Q") { if (ctmStack.length) ctm = ctmStack.pop(); }
+      else if (k === "cm" && nums.length >= 6) { ctm = mul(nums.slice(-6), ctm); }
+      else if (k === "BT") { tm = [1, 0, 0, 1, 0, 0]; tlm = tm.slice(); }
       else if (k === "Tm" && nums.length >= 6) { tm = nums.slice(-6); tlm = tm.slice(); }
       else if ((k === "Td" || k === "TD") && nums.length >= 2) {
         if (k === "TD") leading = -nums[nums.length - 1];
@@ -8015,7 +8032,10 @@ function ptrBand(s) {
   const t = String(s || "").replace(/\s+/g, " ").trim();
   if (!t) return null;
   const money = (v) => +String(v).replace(/[$,\s]/g, "");
-  const pair = t.match(/\$?([\d,]+)\s*(?:-|–|—|to)\s*\$?([\d,]+)/);
+  // BOTH ends must carry their own $. Filings split a band across two lines ("$250,001 -" then
+  // "$500,000") and the merged text can carry a maturity date in between — "$250,001 - 08/01/30"
+  // would otherwise parse as a band whose upper bound is 8.
+  const pair = t.match(/\$\s?([\d,]{3,})\s*(?:-|–|—|to)\s*\$\s?([\d,]{3,})/);
   if (pair) {
     const lo = money(pair[1]), hi = money(pair[2]);
     if (Number.isFinite(lo) && Number.isFinite(hi) && hi >= lo) return { lo, hi };
@@ -8037,51 +8057,89 @@ function ptrTicker(asset) {
   return t;
 }
 const PTR_ACT = { P: "buy", S: "sell", E: "exchange" };
+// House asset-type codes that denote an exchange-listed instrument — the ones for which a missing
+// ticker is a PARSER failure. Everything else (government securities, real property, farms, private
+// equity, cash accounts, life insurance, collectibles) has no ticker in existence, so pairing one
+// to it would be fabrication, and counting it as unresolved would be self-flagellation.
+const PTR_TICKERABLE = new Set(["ST", "EF", "MF", "CS", "OP", "AB", "PS", "OT"]);
+const PTR_NO_TICKER = { GS: "government security", RP: "real property", FA: "farm", PE: "private equity",
+  BA: "bank account", IH: "insurance", CT: "collectible", TR: "trust", OL: "other asset",
+  RE: "retirement account", VE: "venture", HN: "hedge fund" };
 const PTR_OWNER = { SP: "spouse", DC: "dependent", JT: "joint" };
 // Table rows -> transactions. Everything that cannot be read is COUNTED, never dropped silently:
 // the caller prints those counts, because a parser that quietly discards 8% of a filing looks
 // exactly like a filing with 8% fewer trades.
+// Table rows -> transactions.
+//
+// The shape a real filing actually has, which no amount of reasoning produced and one diag run
+// showed immediately: a transaction is a GROUP of rows, not a row. The trade line carries the owner,
+// asset, action and dates and then RUNS OUT OF WIDTH — so the amount band is split across two lines
+// ("$250,001 -" on the trade line, "$500,000" beneath it) and the asset's tail (a maturity date, an
+// asset-type code) continues underneath as well. Requiring a complete band on one row found nothing
+// in a document that was parsing perfectly well.
+//
+// So: a row carrying a transaction date opens a group, following date-less rows join it, and cells
+// are merged BY COLUMN — each continuation cell appends to whichever cell of the trade line sits
+// nearest it horizontally. That keeps the band's two halves in the band, and the asset's tail in
+// the asset, instead of flattening a group into one undifferentiated line.
 function parsePtr(rows) {
   const tx = [], skipped = [];
-  const dt = (s) => { const m = String(s || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  const DATE = /\d{1,2}\/\d{1,2}\/\d{4}/;
+  const dt = (s2) => { const m = String(s2 || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
     return m ? m[3] + "-" + m[1].padStart(2, "0") + "-" + m[2].padStart(2, "0") : null; };
-  let last = null;                        // the previous emitted tx and the row geometry it came from
-  for (const row of rows) {
-    const line = row.cells.map((c) => c.text).join(" ");
+  const isPrimary = (r) => DATE.test(r.cells.map((c) => c.text).join(" "));
+  const groups = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (!isPrimary(rows[i])) continue;
+    const g = { row: rows[i], cont: [] };
+    for (let j = i + 1; j < rows.length; j++) {
+      const r = rows[j];
+      if (isPrimary(r)) break;                       // the next trade starts; this group is closed
+      if (r.page !== rows[i].page) break;
+      if (Math.abs(r.y - rows[i].y) > 34) break;     // too far below to belong to this trade
+      g.cont.push(r);
+    }
+    groups.push(g);
+  }
+  for (const g of groups) {
+    // Merge continuation cells into the trade line's cells by nearest column.
+    const cells = g.row.cells.map((c) => ({ x: c.x, text: c.text }));
+    for (const r of g.cont) {
+      for (const c of r.cells) {
+        let best = null, bd = Infinity;
+        for (const t of cells) { const d = Math.abs(t.x - c.x); if (d < bd) { bd = d; best = t; } }
+        if (best && bd < 90) best.text += " " + c.text;
+        else cells.push({ x: c.x, text: c.text });
+      }
+    }
+    cells.sort((a, b) => a.x - b.x);
+    const line = cells.map((c) => c.text).join(" ").replace(/\s+/g, " ").trim();
     const band = ptrBand(line);
     const dates = [...line.matchAll(/\d{1,2}\/\d{1,2}\/\d{4}/g)].map((m) => m[0]);
     if (!band || !dates.length) {
-      // A long asset name wraps onto the next line, which carries no band and no date. Such a row
-      // belongs to the transaction above it when it sits immediately below, on the same page, and
-      // entirely to the LEFT of that transaction's date column — otherwise it is a header, a total,
-      // or a footer and must not be glued onto a real trade.
-      if (last && row.page === last.page && last.y - row.y > 0 && last.y - row.y < 22
-        && row.cells.every((c) => c.x < last.dateX - 8)) {
-        last.tx.asset = (last.tx.asset + " " + line).replace(/\s+/g, " ").trim();
-        last.tx.ticker = ptrTicker(last.tx.asset) || last.tx.ticker;
-      }
-      continue;                                                 // not a transaction row
+      skipped.push({ why: !band ? "no amount band" : "no transaction date", line: line.slice(0, 140) });
+      continue;
     }
-    // The action code sits alone between the asset and the first date. Take the LAST such token
-    // before that date so an asset name ending in " P" cannot be mistaken for a purchase.
     const upto = line.slice(0, line.indexOf(dates[0]));
     const acts = [...upto.matchAll(/(?:^|\s)(P|S|E)(?:\s*\(partial\))?(?=\s|$)/gi)];
     const raw = acts.length ? acts[acts.length - 1][1].toUpperCase() : null;
     const partial = /\(partial\)/i.test(upto);
-    // The asset is everything before the action token, minus a leading owner code.
     let asset = acts.length ? upto.slice(0, acts[acts.length - 1].index).trim() : upto.trim();
     let owner = "self";
     const om = asset.match(/^(SP|DC|JT)\b\s*/i);
     if (om) { owner = PTR_OWNER[om[1].toUpperCase()] || "self"; asset = asset.slice(om[0].length).trim(); }
-    asset = asset.replace(/\s*\[[A-Z]{2}\]\s*$/, "").trim();     // trailing asset-class bracket
-    if (!raw || !asset) { skipped.push({ why: !raw ? "no transaction type" : "no asset", line: line.slice(0, 120) }); continue; }
-    const rec = { owner, asset, ticker: ptrTicker(asset),
+    // The asset-type code is not noise to be stripped — it is the form telling us whether a ticker
+    // can exist at all. [ST] is a stock and must resolve; [GS] is a government security, [RP] real
+    // property, [OL] "other" — none of those HAVE a ticker, and counting them as resolution
+    // failures makes the coverage rate lie about the parser rather than describe the data.
+    const atm = line.match(/\[([A-Z]{2})\]/g);
+    const atype = atm && atm.length ? atm[atm.length - 1].slice(1, 3) : null;
+    asset = asset.replace(/\s*\[[A-Z]{2}\]\s*/g, " ").replace(/\s+/g, " ").trim();
+    if (!raw || !asset) { skipped.push({ why: !raw ? "no transaction type" : "no asset", line: line.slice(0, 140) }); continue; }
+    tx.push({ owner, asset, atype, ticker: ptrTicker(asset),
       act: PTR_ACT[raw] + (partial ? "-partial" : ""),
       txDate: dt(dates[0]), notified: dates[1] ? dt(dates[1]) : null,
-      loAmt: band.lo, hiAmt: band.hi };
-    tx.push(rec);
-    const dcell = row.cells.find((c) => /\d{1,2}\/\d{1,2}\/\d{4}/.test(c.text));
-    last = { tx: rec, page: row.page, y: row.y, dateX: dcell ? dcell.x : Infinity };
+      loAmt: band.lo, hiAmt: band.hi });
   }
   return { tx, skipped };
 }
@@ -8093,3 +8151,5 @@ module.exports.ptrBand = ptrBand;
 module.exports.ptrTicker = ptrTicker;
 module.exports.parsePtr = parsePtr;
 module.exports.PTR_BANDS = PTR_BANDS;
+module.exports.PTR_TICKERABLE = PTR_TICKERABLE;
+module.exports.PTR_NO_TICKER = PTR_NO_TICKER;
