@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-13"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-15"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20860,6 +20860,41 @@ function _encPdf(opt) {
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
 
+test("congress -14: search runs in SQL, and a missing member gets an answer from the index", async () => {
+  // "I can't find Pelosi" had three possible causes and the tool gave the same silence to all of
+  // them: the year was never ingested, the filing is queued, or it is a scan this lane cannot read.
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress5-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, congressGap: 0 });
+  const F = (id, member, filed, parsed) => ({ id, chamber: "H", docId: id.slice(2), yr: +filed.slice(0, 4),
+    member, lname: member.split(",")[0], fname: "", suffix: "", state: "CA", dist: "11",
+    type: "ptr", typeRaw: "P", filed, url: "https://x/" + id + ".pdf", amends: null, parsed, nTx: null });
+  store.congressUpsertFilings([
+    F("H:1", "Pelosi, Nancy", "2026-08-24", 0),          // queued: filed, not read yet
+    F("H:2", "Pelosi, Nancy", "2026-05-01", 2),          // a scan: this lane has no OCR
+    F("H:3", "Khanna, Ro", "2026-08-23", 1),
+  ]);
+  store.congressSaveTx("H:3", [{ owner: "self", asset: "Apple Inc. (AAPL)", ticker: "AAPL", act: "buy",
+    txDate: "2026-08-17", notified: "2026-08-18", loAmt: 1001, hiAmt: 15000, tkSrc: "form", atype: "ST" }]);
+  // Search reaches every parsed transaction, not just a loaded page.
+  assert.equal(store.congressFeed({ q: "khanna", limit: 50 }).length, 1, "member search runs in SQL");
+  assert.equal(store.congressFeed({ q: "apple", limit: 50 }).length, 1, "so does asset search");
+  assert.equal(store.congressFeed({ q: "pelosi", limit: 50 }).length, 0, "nothing parsed for her yet");
+  // ...and THAT is the case the index can still answer.
+  const f = p.congressFilerSearch("pelosi");
+  assert.equal(f.length, 1);
+  assert.equal(f[0].member, "Pelosi, Nancy");
+  assert.equal(f[0].n, 2, "two PTR filings are known to the index");
+  assert.equal(f[0].queued, 1, "one is waiting to be read");
+  assert.equal(f[0].unreadable, 1, "one is a scan, which is a different answer from 'not there'");
+  assert.equal(f[0].done, 0);
+  assert.equal(p.congressFilerSearch("nobodyhere").length, 0, "and a genuine absence still reads as absent");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("congress -13: the real filing shape — flipped page, and a transaction split across rows", () => {
   // Everything here comes from one production diag, and none of it was guessable:
   //   1. these pages draw through a FLIP, so raw text y grows DOWNWARD. Read naively, every row
@@ -21036,6 +21071,12 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   // Feed order is by FILING date, not trade date — the whole point of the lane.
   const feed = p.congressFeed({ limit: 10 });
   assert.deepEqual(feed.map((f) => f.member), ["Alpha, Ann", "Beta, Bob"], "newest FILED first");
+  // An absent sort direction must mean newest-first, which is the feed's whole premise: +undefined
+  // is NaN and NaN < 0 is false, so a naive check silently defaults a feed to OLDEST first.
+  assert.deepEqual(p.congressFeed({ limit: 10, dir: 1 }).map((f) => f.member), ["Beta, Bob", "Alpha, Ann"],
+    "and an explicit ascending direction is honoured");
+  assert.equal(p.congressFeedCount({}), 2, "the pager's total counts every matching row, not the page");
+  assert.equal(p.congressFeed({ limit: 1, offset: 1 })[0].member, "Beta, Bob", "offset paginates in SQL");
   assert.equal(feed[0].loAmt, 1000001);
   assert.equal(feed[0].hiAmt, 5000000, "the band's upper end survives into the feed");
 
