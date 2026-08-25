@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.24-05";
+const VERSION = "2026.08.24-06";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1133,7 +1133,9 @@ async function main() {
   // rate and the ticker-resolution rate are numbers worth printing.
   fastify.get("/api/congress", async (req, reply) => {
     reply.header("cache-control", "no-store");
-    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    // No hardcoded admin check here on purpose: the route is registered in the feature manifest as
+    // def:"admin", so the gate already refuses non-admins — and taking the lane public later is a
+    // flag flip rather than an edit to this file. The POST below is a different axis and rechecks.
     const q = req.query || {};
     const lim = +q.limit || 25;
     if (q.ticker) return { ok: true, roll: poller.congressTickerRoll(String(q.ticker)) };

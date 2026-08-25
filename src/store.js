@@ -979,7 +979,10 @@ CREATE INDEX IF NOT EXISTS tx_tk ON tx(ticker, txDate);`);
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fname=excluded.fname,
   suffix=excluded.suffix, state=excluded.state, dist=excluded.dist, type=excluded.type,
-  typeRaw=excluded.typeRaw, filed=excluded.filed, url=excluded.url`);
+  typeRaw=excluded.typeRaw, url=excluded.url,
+  -- a re-sync must never DOWNGRADE a date: if today's index row has an unreadable FilingDate but
+  -- a previous run read one, the good value stands rather than being blanked.
+  filed=CASE WHEN excluded.filed<>'' THEN excluded.filed ELSE filing.filed END`);
       const had = d.prepare("SELECT 1 FROM filing WHERE id=?");
       let added = 0;
       d.exec("BEGIN");

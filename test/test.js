@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-05"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-06"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -19960,7 +19960,7 @@ test("nav groups: every tab is placed once, and renames/moves are validated at t
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "nope" } }).views, {}, "unknown target menu rejected");
   assert.deepStrictEqual(C.navConfigSanitize({ views: { trend: "tape" } }).views, {}, "a move to where it already is stores nothing");
   // a menu emptied by moves still resolves — the client hides it
-  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape", notes: "tape" } });
+  const empty = C.resolveNavGroups({ views: { report: "tape", funds: "tape", notes: "tape", congress: "tape" } });
   assert.strictEqual(empty.find((g) => g.key === "research").views.length, 0, "a menu can be emptied");
 
   // ---- wiring --------------------------------------------------------------------------------
@@ -20690,13 +20690,26 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const getIdx = sv.indexOf('fastify.get("/api/congress"'), postIdx = sv.indexOf('fastify.post("/api/congress"');
   assert.ok(getIdx > 0 && postIdx > 0, "both congress routes exist");
-  assert.ok(sv.slice(getIdx, getIdx + 400).includes("if (!isAdmin(req))"), "the READ is gated too — phase 1 ships no public surface");
+  // The READ is gated by the feature manifest (def:"admin") rather than a hardcoded check, so the
+  // lane can be taken public with a flag rather than an edit. The manifest entry and the route
+  // registration are asserted below; what matters here is that the gate is not simply absent.
+  assert.ok(!sv.slice(getIdx, getIdx + 400).includes("isAdmin(req)"),
+    "the read path leaves gating to the manifest instead of duplicating it");
   assert.ok(sv.slice(postIdx, postIdx + 500).indexOf('op === "ingest"') > sv.slice(postIdx, postIdx + 500).indexOf("if (!isAdmin(req))"),
     "the ingest op sits behind the admin recheck, same ordering the 13F op is pinned to");
   const app2 = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
   assert.ok(app2.includes("async function termCongress(") && app2.includes("h==='congress'"), "admin verb wired into the terminal");
   assert.ok(app2.includes("congress is admin-only"), "the verb refuses non-admins client-side too");
-  assert.ok(!/tab-congress|CONGRESS \\u00b7 PTR FEED/.test(app2), "phase 1 adds NO tab and NO panel");
+  // Phase 2 adds the tab, but ADMIN-ONLY: the manifest entry is what gates it, so taking the lane
+  // public later is a flag flip rather than an edit. The POST stays admin regardless of that flag —
+  // gate and authz are different axes, the posture the whale watchlist route already documents.
+  assert.ok(app2.includes('id="tab-congress"') || fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8").includes('id="tab-congress"'),
+    "the tab exists");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  assert.ok(/key: "congress",\s+kind: "tab",[^}]*def: "admin"/.test(cmp), "the tab ships admin-gated by the manifest");
+  assert.ok(/routes: \["\/api\/congress"\]/.test(cmp), "and its route is registered so the gate actually covers it");
+  const gi = sv.indexOf('fastify.post("/api/congress"');
+  assert.ok(sv.slice(gi, gi + 500).includes("if (!isAdmin(req))"), "the write path rechecks admin on its own");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

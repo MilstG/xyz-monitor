@@ -5893,7 +5893,13 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     try {
       for (const f of queue) {
         try {
-          const res = await extFetch(f.url, { headers: { "user-agent": SEC_UA } });
+          // Timeout per document. extFetch is a bare fetch wrapper, so without an abort a single
+          // hung response stalls the entire run — and this run is on the daily tick.
+          const ac = new AbortController();
+          const to = setTimeout(() => ac.abort(), 25 * 1000);
+          let res;
+          try { res = await extFetch(f.url, { headers: { "user-agent": SEC_UA }, signal: ac.signal }); }
+          finally { clearTimeout(to); }
           if (!res || !res.ok) { store.congressBumpTry(f.id); failed++;
             if (!first) first = f.id + " → HTTP " + (res ? res.status : "no response"); continue; }
           const buf = Buffer.from(await res.arrayBuffer());

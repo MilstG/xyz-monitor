@@ -5222,7 +5222,7 @@ const NAV_GROUPS = [
   { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "sessions"] },
   { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
   { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
-  { key: "research", label: "Research", views: ["report", "funds", "notes"] },
+  { key: "research", label: "Research", views: ["report", "funds", "congress", "notes"] },
 ];
 // markets is pin:true and is where every load lands; admin is the locked panel itself. Both stay
 // flat in the row and are deliberately NOT movable — a one-item menu, or a home two clicks away,
@@ -5304,6 +5304,12 @@ const FEATURES = [
   { key: "housing",    kind: "tab", label: "Housing",     def: "admin",  routes: ["/api/housing"] },
   // LIQUIDITY (build 2026.08.21-04): Fed net liquidity (H.4.1 − TGA − ON RRP) board. Admin-only while it soaks.
   { key: "liquidity",  kind: "tab", label: "Liquidity",   def: "admin",  routes: ["/api/liquidity"] },
+  // CONGRESS (build 2026.08.24-06): the congressional PTR feed. Admin-only while phase 2 soaks —
+  // the parse rate and the ticker-resolution rate have to be real numbers on the panel before the
+  // group reads them, and the eyeball pass against source PDFs comes first. Flipping it public is
+  // then a flag change here, not a code change. The POST rechecks admin regardless of this flag:
+  // gate and authz are different axes, exactly as the whale watchlist route documents.
+  { key: "congress",   kind: "tab", label: "Congress",    def: "admin",  routes: ["/api/congress"] },
   { key: "report",     kind: "tab", label: "AI Report",   def: "public", routes: ["/api/ai-report", "/api/ai-reports"] },
   { key: "actionable", kind: "tab", label: "Actionable",  def: "admin",  routes: ["/api/actionable"] },
   { key: "backtest",   kind: "tab", label: "Backtest",    def: "admin",  routes: ["/api/duel"] },
