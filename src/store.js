@@ -1143,9 +1143,11 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       const where = toks.map(() => "member LIKE ?").join(" AND ");
       const args = toks.map((t) => "%" + t + "%");
       try { return d.prepare(`SELECT member, COUNT(*) n,
-        SUM(CASE WHEN parsed=1 THEN 1 ELSE 0 END) done,
+        SUM(CASE WHEN parsed=1 AND COALESCE(nTx,0)>0 THEN 1 ELSE 0 END) done,
+        SUM(CASE WHEN parsed=1 AND COALESCE(nTx,0)=0 THEN 1 ELSE 0 END) empty,
         SUM(CASE WHEN parsed=0 THEN 1 ELSE 0 END) queued,
         SUM(CASE WHEN parsed=2 THEN 1 ELSE 0 END) unreadable,
+        MAX(CASE WHEN parsed=1 AND COALESCE(nTx,0)=0 THEN docId END) emptyDoc,
         MAX(filed) last, MIN(yr) yr0, MAX(yr) yr1
         FROM filing WHERE type='ptr' AND ${where} GROUP BY member ORDER BY n DESC LIMIT 12`).all(...args); }
       catch (_) { return []; } },

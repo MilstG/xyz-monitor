@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-17"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-18"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,35 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -18: 'parsed' must not promise rows the table cannot show", async () => {
+  // Production showed the index reporting "Khanna, Rohit · 7 PTR · 5 parsed" directly above a table
+  // saying no transactions match. Both were true and the pair was nonsense: parsed counted filings
+  // that yielded TEXT, which is not the same as filings that yielded TRANSACTIONS. A filing can
+  // read perfectly and still produce nothing if the parser does not recognise its table.
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress8-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, congressGap: 0 });
+  const F = (id, filed, parsed) => ({ id, chamber: "H", docId: id.slice(2), yr: 2026, member: "Khanna, Rohit",
+    lname: "Khanna", fname: "Rohit", suffix: "", state: "CA", dist: "17", type: "ptr", typeRaw: "P",
+    filed, url: "https://x/" + id + ".pdf", amends: null, parsed, nTx: null });
+  store.congressUpsertFilings([F("H:9001", "2026-08-20", 0), F("H:9002", "2026-08-19", 0), F("H:9003", "2026-08-18", 0)]);
+  store.congressSaveTx("H:9001", [{ owner: "self", asset: "Apple Inc. (AAPL)", ticker: "AAPL", act: "buy",
+    txDate: "2026-08-10", notified: null, loAmt: 1001, hiAmt: 15000, tkSrc: "form", atype: "ST" }]);
+  store.congressSaveTx("H:9002", []);          // read fine, no rows recognised
+  store.congressSaveTx("H:9003", []);
+  const f = p.congressFilerSearch("khanna")[0];
+  assert.equal(f.n, 3);
+  assert.equal(f.done, 1, "only the filing that actually yielded transactions counts as done");
+  assert.equal(f.empty, 2, "the ones that read but produced nothing are their own category");
+  assert.ok(f.emptyDoc, "and one of them is named, so it can be diagnosed rather than wondered about");
+  assert.equal(p.congressFeedCount({ q: "khanna" }), 1,
+    "which is exactly what the table can show — the note and the table now agree");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -17: the pager's contract, and searching a name the way a person types it", async () => {
   const { createPoller } = require("../src/poller");
