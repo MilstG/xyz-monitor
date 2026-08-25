@@ -6121,6 +6121,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       out.objStm = /\/Type\s*\/ObjStm/.test(raw);
       out.encrypted = /\/Encrypt\b/.test(raw);
       try { const oo = require("./compute").pdfObjects(buf); out.encryption = oo.encryption || null; } catch (_) {}
+      try {
+        const imgs = require("./compute").pdfImages(buf);
+        out.images = imgs.slice(0, 4).map((i) => ({ filter: i.filter, w: i.width, h: i.height,
+          bpc: i.bpc, kb: Math.round(i.bytes / 1024), ready: i.ready }));
+        out.nImages = imgs.length;
+      } catch (_) {}
       out.objects = (raw.match(/\d+\s+\d+\s+obj\b/g) || []).length;
       out.streams = (raw.match(/\bstream\b/g) || []).length;
       const runs = pdfTextRuns(buf);
