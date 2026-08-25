@@ -177,7 +177,7 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt, congressConc: congressConcOpt }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -5880,8 +5880,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // document with no text operators at all is a scan, which is permanent, so it is marked once and
   // never re-fetched. The difference matters: without it a few hundred scanned filings would
   // consume the whole rate budget every single day, forever.
-  const CONGRESS_PARSE_CAP = 40;          // documents per run
-  const CONGRESS_PARSE_GAP = congressGapOpt == null ? 1000 : +congressGapOpt;   // ms between fetches (0 in tests)
+  // Measured: decrypt + extract + parse is 0.47ms per document, so 200 filings is ~90ms of actual
+  // work. The old 200 SECONDS was politeness, not computation — one fetch at a time with a full
+  // second between them. Three workers spaced 750ms each is ~4 requests/second against a static
+  // file host, still well inside what the SEC asks of EDGAR clients, at four times the throughput.
+  // The automatic cap matters more than the rate for catching up: 40 a day could not drain a
+  // 300-deep queue faster than the Clerk refills it.
+  const CONGRESS_PARSE_CAP = 150;         // documents per automatic run
+  const CONGRESS_PARSE_GAP = congressGapOpt == null ? 750 : +congressGapOpt;   // ms between one worker's fetches
+  const CONGRESS_PARSE_CONC = Math.max(1, Math.min(6, +congressConcOpt || 3)); // workers in flight
   let congressParseBusy = false;
   // "CrowdStrike Holdings, Inc. - Class A Common Stock" is the issuer plus a description of the
   // instrument. whaleNameKey strips corporate suffixes but not that tail, so it comes off here —
@@ -5959,14 +5966,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   async function congressParse(limitArg) {
     if (congressParseBusy) return { ok: false, error: "a parse run is already going" };
     if (!store.congressReady || !store.congressReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
-    const lim = Math.max(1, Math.min(200, +limitArg || CONGRESS_PARSE_CAP));
+    const lim = Math.max(1, Math.min(500, +limitArg || CONGRESS_PARSE_CAP));
     const queue = store.congressQueue(lim);
     if (!queue.length) return { ok: true, done: 0, note: "queue empty" };
     congressParseBusy = true;
     const tmap = await whaleTickerMap().catch(() => null);
     let parsed = 0, tx = 0, scanned = 0, failed = 0, notPdf = 0, first = null, firstBody = null;
-    try {
-      for (const f of queue) {
+    let cursor = 0;
+    const worker = async () => {
+      for (;;) {
+        const f = queue[cursor++];
+        if (!f) return;
         try {
           // Timeout per document. extFetch is a bare fetch wrapper, so without an abort a single
           // hung response stalls the entire run — and this run is on the daily tick.
@@ -6032,6 +6042,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           if (!first) first = f.id + " → " + String(e && e.message).slice(0, 60); }
         if (CONGRESS_PARSE_GAP) await new Promise((r) => setTimeout(r, CONGRESS_PARSE_GAP));
       }
+    };
+    try {
+      // Workers share one cursor, so a slow document holds up only its own worker rather than the
+      // whole run.
+      await Promise.all(Array.from({ length: Math.min(CONGRESS_PARSE_CONC, queue.length) }, worker));
     } finally { congressParseBusy = false; }
     // Primed only AFTER a run completes: the first run drains a queue of history, and nothing in
     // it is news to anybody.
