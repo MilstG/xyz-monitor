@@ -13011,6 +13011,10 @@ async function termCongress(args){
     const r=await cngPost({op:'parse',n:+(args[1]||0)||undefined});
     return r&&r.ok?termOut(`<span class="pos">parse run started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
   }
+  if(sub==='ocr'){
+    const r=await cngPost({op:'ocr',n:+(args[1]||0)||undefined});
+    return r&&r.ok?termOut(`<span class="pos">OCR run started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
   if(sub==='diag'){
     const doc=(args[1]||'').trim();
     const think=termThinking(); const r=await cngPost({op:'diag',doc:doc||undefined}); think.remove();
@@ -13087,7 +13091,7 @@ async function termCongress(args){
     const body=R.members.map(m=>`  ${tpad(tesc(m.member.slice(0,24)),25)} ${tpad(String(m.n),3,true)} <span class="${m.buys>m.sells?'pos':m.sells>m.buys?'neg':'sec'}">${tpad(m.buys+'b/'+m.sells+'s',8)}</span> ${tpad(m.medLag==null?'\u2014':m.medLag+'d',6,true)} ${tpad('\u2265 '+money(m.floor),14,true)} ${tesc(m.last||'')}`).join('\n');
     return termOut(`<span class="tp-hd">${tesc(R.ticker)} \u00b7 congressional flow</span> <span class="tp-trans">\u00b7 ${R.filings} transaction(s) \u00b7 ${R.buys} buy / ${R.sells} sell \u00b7 \u2265 ${money(R.floor)} disclosed floor</span>\n${body}\n<span class="tp-trans">\u2265 sums the LOW end of every disclosed band \u2014 a hard floor, never an estimate of the real total</span>`);
   }
-  return termErr('usage: congress status | ingest [year] | backfill [years] | parse [n] | diag [docId] | requeue [all] | watch/unwatch <member> | watchlist | feed | <TICKER>');
+  return termErr('usage: congress status | ingest [year] | backfill [years] | parse [n] | ocr [n] | diag [docId|member] | requeue [all] | watch/unwatch <member> | watchlist | feed | <TICKER>');
 }
 // ---- CONGRESS panel (build 2026.08.24-06) -----------------------------------------------------
 // The PTR feed, sorted by FILING date because that is the moment the information became public —
@@ -13190,6 +13194,7 @@ function cngRender(){
       +`<span data-tip="transactions carrying a ticker \u2014 the parenthetical the filer wrote, or the issuer name resolved against the universe. Measured over instruments that CAN have one: municipal bonds, real property, farms and private equity are excluded from the denominator, because no ticker exists for them and counting them as failures would make this number describe the data rather than the parser.">ticker resolved <b>${pct(ps.resolved||0,Math.max(0,(ps.tx||0)-(ps.noTicker||0)))}</b> <span class="sec">(${(ps.resolved||0).toLocaleString()}/${Math.max(0,(ps.tx||0)-(ps.noTicker||0)).toLocaleString()} tickerable)</span></span>`
       +((ps.noTicker||0)?`<span data-tip="municipal bonds, real property, farms, private equity, bank accounts \u2014 the form's own asset-type code says these are not exchange-listed instruments, so no ticker exists to pair. They are shown by name and excluded from the rate above rather than counted as failures.">not listed <b>${(ps.noTicker||0).toLocaleString()}</b></span>`:'')
       +((ps.parsed&&!ps.tx)?`<span class="cng-warn" data-tip="these filings DID yield text \u2014 extraction worked \u2014 but the parser recognized no transaction rows in it. Run: congress diag">\u26a0 ${ps.parsed} parsed, 0 transactions</span>`:'')
+      +((ps.ocr||0)?`<span data-tip="transactions recovered from photographed paper filings by OCR, each one through a strict validation gate. Shown with an OCR marker because the reading is weaker than a text filing.">from OCR <b>${(ps.ocr||0).toLocaleString()}</b></span>`:'')
       +((ps.badDate||0)?`<span class="cng-warn" data-tip="rows whose trade date parsed as LATER than the filing that reports it \u2014 impossible, so the dates were misread from those documents. They are counted here rather than shown as a negative lag.">\u2717 ${ps.badDate} impossible date(s)</span>`:'')
       +(c.noDate?`<span class="cng-warn" data-tip="filings whose FilingDate the parser could not read. They are kept, never dropped; the raw values are sampled into the ingest ops line.">unreadable dates <b>${c.noDate}</b></span>`:'')
     +`</div>`
@@ -13241,7 +13246,7 @@ function cngRender(){
     if(k==='ticker') return `<td class="l">${x.ticker
       ?`<span class="cng-tk${x.tkSrc==='name'?' derived':''}" data-tip="${esc(x.tkSrc==='name'?('resolved from the issuer name \u2014 \u201c'+(x.asset||'')+'\u201d \u2014 against the universe, using the same collision-safe map the 13F lane uses: a name that could mean two symbols resolves to neither. The filer did not write a ticker on the form.'):'the ticker exactly as the filer wrote it on the form')}">${esc(x.ticker)}</span>`
       :`<span class="cng-un${x.tkSrc==='n/a'?' na':''}" data-tip="${esc(x.tkSrc==='n/a'?('not an exchange-listed instrument'+(x.atype?' \u2014 the filing types it ['+x.atype+']':'')+', so no ticker exists to pair'):'no ticker on the form, and the issuer name did not resolve against the universe')}">${x.tkSrc==='n/a'?'not listed':'\u2014'}</span>`}</td>`;
-    if(k==='asset') return `<td class="l"><span class="cng-asset" data-tip="${esc(x.asset||'')}">${esc((x.asset||'').length>38?(x.asset||'').slice(0,38)+'\u2026':(x.asset||''))}</span></td>`;
+    if(k==='asset') return `<td class="l">${x.src==='ocr'?'<span class="cng-ocr" data-tip="read by OCR from a photographed paper filing, not from a text layer. Every field on this row passed a strict check \u2014 the amount matches a real disclosed tier exactly, the date is valid and precedes the filing, the type is a literal P/S/E \u2014 and anything ambiguous was dropped rather than guessed. It is still a weaker reading than a text filing.">OCR</span> ':''}<span class="cng-asset" data-tip="${esc(x.asset||'')}">${esc((x.asset||'').length>38?(x.asset||'').slice(0,38)+'\u2026':(x.asset||''))}</span></td>`;
     if(k==='atype') return `<td class="l">${x.atype?`<span class="cng-atype" data-tip="the form\u2019s own asset-type code">${esc(x.atype)}</span>`:'<span class="sec">\u2014</span>'}</td>`;
     if(k==='notified') return `<td class="l sec">${esc(x.notified||'\u2014')}</td>`;
     if(k==='ln') return `<td class="r sec" data-tip="line ${x.ln} of filing ${esc(x.fid||'')}">${x.ln==null?'\u2014':x.ln+1}</td>`;

@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-26"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-27"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,56 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -27: CCITT is wrapped, not decoded, and the OCR queue is the scanned pile", async () => {
+  // diag on the failing member: 18 images, CCITTFaxDecode, 2200x1696. Those bytes are not a file any
+  // decoder opens — but CCITT is natively a TIFF compression scheme, and the OCR engine's libtiff
+  // already speaks Group 4 (verified separately by feeding it a TIFF and getting exact text back).
+  // So the strip is WRAPPED in a TIFF header rather than decoded. Writing a fax decoder to feed a
+  // library that contains one would be work done twice.
+  const { ccittTiff, pdfImages } = require("../src/compute");
+  const img = { filter: "CCITTFaxDecode", data: Buffer.alloc(29000, 0x26), width: 2200, height: 1696,
+    dict: "<< /Subtype /Image /Width 2200 /Height 1696 /BitsPerComponent 1 /Filter /CCITTFaxDecode"
+      + " /DecodeParms << /K -1 /Columns 2200 /Rows 1696 /BlackIs1 false >> >>" };
+  const tif = ccittTiff(img);
+  assert.equal(tif.subarray(0, 2).toString("latin1"), "II", "a little-endian TIFF");
+  assert.equal(tif.readUInt16LE(2), 42);
+  const tags = {};
+  const n = tif.readUInt16LE(8);
+  for (let i = 0; i < n; i++) { const o = 10 + i * 12; tags[tif.readUInt16LE(o)] = tif.readUInt32LE(o + 8); }
+  assert.equal(tags[256], 2200, "width comes from Columns");
+  assert.equal(tags[257], 1696, "height from Rows");
+  assert.equal(tags[258], 1, "one bit per sample — these are bilevel scans");
+  assert.equal(tags[259], 4, "K < 0 is two-dimensional coding, which is Group 4");
+  assert.equal(tags[262], 0, "fax is white-is-zero unless BlackIs1 says otherwise");
+  assert.equal(tags[279], 29000, "and the strip is the raw CCITT payload, untouched");
+  const g3 = ccittTiff(Object.assign({}, img, { dict: img.dict.replace("/K -1", "/K 0") }));
+  assert.equal(g3.readUInt16LE(10 + 12 * Object.keys(tags).indexOf("259")) >= 0, true);
+  const g3tags = {}; const n3 = g3.readUInt16LE(8);
+  for (let i = 0; i < n3; i++) { const o = 10 + i * 12; g3tags[g3.readUInt16LE(o)] = g3.readUInt32LE(o + 8); }
+  assert.equal(g3tags[259], 3, "K >= 0 is Group 3");
+  const inv = ccittTiff(Object.assign({}, img, { dict: img.dict.replace("/BlackIs1 false", "/BlackIs1 true") }));
+  const it = {}; const ni = inv.readUInt16LE(8);
+  for (let i = 0; i < ni; i++) { const o = 10 + i * 12; it[inv.readUInt16LE(o)] = inv.readUInt32LE(o + 8); }
+  assert.equal(it[262], 1, "BlackIs1 inverts the photometric sense rather than being ignored");
+  assert.equal(ccittTiff({ filter: "DCTDecode", data: Buffer.alloc(10) }), null, "a JPEG needs no wrapper");
+
+  // The OCR queue is the pile the text parser correctly gave up on, and a run must RESUME.
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congressOcr-"));
+  const store = openStore(dir);
+  const F = (id, parsed, note) => ({ id, chamber: "H", docId: id.slice(2), yr: 2026, member: "M",
+    lname: "M", fname: "", suffix: "", state: "CA", dist: "1", type: "ptr", typeRaw: "P",
+    filed: "2026-08-20", url: "https://x/" + id.slice(2) + ".pdf", amends: null, parsed, nTx: null });
+  store.congressUpsertFilings([F("H:6001", 2), F("H:6002", 1), F("H:6003", 0), F("H:6004", 2)]);
+  assert.deepEqual(store.congressOcrQueue(10).map((r) => r.id).sort(), ["H:6001", "H:6004"],
+    "only the scanned filings — not the ones that parsed, and not the ones still queued for text");
+  store.congressNote("H:6001", "ocr-nothing-passed-validation:no candidate rows");
+  assert.deepEqual(store.congressOcrQueue(10).map((r) => r.id), ["H:6004"],
+    "and a filing OCR has already been tried on is not ground through again");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -25: the OCR gate rejects what OCR gets wrong", () => {
   // Measured, not assumed. A PTR table was rendered and photographed, then read by the engine that
