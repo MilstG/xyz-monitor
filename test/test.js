@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-16"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-17"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,54 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -17: the pager's contract, and searching a name the way a person types it", async () => {
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress7-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, congressGap: 0 });
+  const F = (id, member, filed) => ({ id, chamber: "H", docId: id.slice(2), yr: 2026, member,
+    lname: member.split(",")[0], fname: "", suffix: "", state: "GA", dist: "14", type: "ptr",
+    typeRaw: "P", filed, url: "https://x/" + id + ".pdf", amends: null, parsed: 0, nTx: null });
+  const rows = [];
+  for (let i = 0; i < 12; i++) rows.push(F("H:3" + (1000 + i), i % 2 ? "Greene, Marjorie Taylor" : "Khanna, Ro", "2026-08-0" + (1 + (i % 9))));
+  store.congressUpsertFilings(rows);
+  rows.forEach((f, i) => store.congressSaveTx(f.id, [{ owner: "self", asset: "Apple Inc. (AAPL)",
+    ticker: "AAPL", act: "buy", txDate: "2026-07-" + String(10 + i).padStart(2, "0"),
+    notified: null, loAmt: 1001, hiAmt: 15000, tkSrc: "form", atype: "ST" }]));
+
+  // The pager's contract: total counts the SELECTION, offset moves through it, and the two must be
+  // computed from the same filter or the pager lies about how many pages exist.
+  assert.equal(p.congressFeedCount({}), 12, "total counts every matching row");
+  assert.equal(p.congressFeed({ limit: 5, offset: 0 }).length, 5);
+  assert.equal(p.congressFeed({ limit: 5, offset: 10 }).length, 2, "the last page is short, not empty");
+  const pg0 = p.congressFeed({ limit: 5, offset: 0, sort: "traded", dir: -1 });
+  const pg1 = p.congressFeed({ limit: 5, offset: 5, sort: "traded", dir: -1 });
+  assert.ok(pg0[0].txDate > pg1[0].txDate, "paging walks DOWN one ordering, it does not restart it");
+  assert.equal(new Set([...pg0, ...pg1].map((r) => r.fid + ":" + r.ln)).size, 10, "and never repeats a row");
+
+  // A name typed the way a person says it. The index spells it "Greene, Marjorie Taylor", so a
+  // single phrase LIKE matches nothing — which is exactly how a real member reads as absent.
+  assert.equal(p.congressFeedCount({ q: "marjorie taylor greene" }), 6, "natural word order finds her");
+  assert.equal(p.congressFeedCount({ q: "greene marjorie" }), 6, "any order, in fact");
+  assert.equal(p.congressFeedCount({ q: "ro khanna" }), 6);
+  assert.equal(p.congressFeedCount({ q: "khanna aapl" }), 6, "tokens may match different columns");
+  assert.equal(p.congressFeedCount({ q: "khanna tesla" }), 0, "every token must match something");
+  const f = p.congressFilerSearch("marjorie taylor greene");
+  assert.equal(f.length, 1, "and the index lookup answers in the same word order");
+  assert.equal(f[0].member, "Greene, Marjorie Taylor");
+
+  // The route has to actually PASS offset, sort and total through — this regressed once by being
+  // silently dropped in a rebase, and the symptom was a pager whose buttons did nothing.
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  const seg = sv.slice(sv.indexOf("if (q.feed)"), sv.indexOf("if (q.feed)") + 900);
+  assert.ok(/offset:\s*\+q\.offset/.test(seg), "the route forwards offset");
+  assert.ok(/sort:\s*q\.sort/.test(seg), "and the sort key");
+  assert.ok(/total:\s*poller\.congressFeedCount/.test(seg), "and returns the selection's total");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -16: starring a member, and the two guards that keep alerts from becoming a wall", async () => {
   const { createPoller } = require("../src/poller");
