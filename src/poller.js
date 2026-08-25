@@ -5882,6 +5882,17 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const CONGRESS_PARSE_CAP = 40;          // documents per run
   const CONGRESS_PARSE_GAP = congressGapOpt == null ? 1000 : +congressGapOpt;   // ms between fetches (0 in tests)
   let congressParseBusy = false;
+  // "CrowdStrike Holdings, Inc. - Class A Common Stock" is the issuer plus a description of the
+  // instrument. whaleNameKey strips corporate suffixes but not that tail, so it comes off here —
+  // conservatively, from the END only, so the issuer's own words are never touched.
+  const CONGRESS_TAIL = /\s*(?:-|\u2013|\u2014)?\s*(?:class\s+[a-z]\b|common\s+stock|common\s+shares?|ordinary\s+shares?|capital\s+stock|depositary\s+(?:shares?|receipts?)|american\s+depositary\s+(?:shares?|receipts?)|adr|ads|units?|stock|shares?|inc\.?|corp\.?|company)\s*$/i;
+  function congressAssetName(asset) {
+    let t = String(asset || "").replace(/\([^)]*\)/g, " ").replace(/\[[A-Z]{2}\]/g, " ")
+      .replace(/\s+/g, " ").trim();
+    for (let i = 0; i < 5 && CONGRESS_TAIL.test(t); i++) t = t.replace(CONGRESS_TAIL, "").trim();
+    t = t.replace(/[\s,;:\-\u2013\u2014]+$/, "").trim();   // punctuation left behind by the trim
+    return t.length >= 3 ? t : null;
+  }
   async function congressParse(limitArg) {
     if (congressParseBusy) return { ok: false, error: "a parse run is already going" };
     if (!store.congressReady || !store.congressReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
@@ -5889,6 +5900,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const queue = store.congressQueue(lim);
     if (!queue.length) return { ok: true, done: 0, note: "queue empty" };
     congressParseBusy = true;
+    const tmap = await whaleTickerMap().catch(() => null);
     let parsed = 0, tx = 0, scanned = 0, failed = 0, notPdf = 0, first = null, firstBody = null;
     try {
       for (const f of queue) {
@@ -5921,12 +5933,28 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
             // be condemned as unreadable forever.
             let why = "pdf-but-no-text";
             try { const oo = require("./compute").pdfObjects(buf);
-              if (oo.encryption && oo.encryption.unsupported) why = "encryption-unsupported:" + oo.encryption.unsupported; } catch (_) {}
+              if (oo.encryption && oo.encryption.unsupported) why = "encryption-unsupported:" + oo.encryption.unsupported;
+              // An image-only filing is a SCAN and says so: the Clerk's older paper filings are
+              // photographed, not typeset. That is a coverage limit of this lane (no OCR), not a
+              // parser bug, and the count only means something if it is named correctly.
+              else if (/\/BitsPerComponent|\/Subtype\s*\/Image|\/DCTDecode|\/JBIG2Decode|\/CCITTFaxDecode/.test(buf.toString("latin1")))
+                why = "scanned-image:no OCR in this lane"; } catch (_) {}
             if (/^encryption-unsupported/.test(why)) { store.congressBumpTry(f.id); store.congressNote(f.id, why); failed++; }
             else { store.congressMarkUnreadable(f.id, why); scanned++; }
             continue;
           }
           const out = parsePtr(ptrRows(runs));
+          // A filer is not required to write the ticker, and most do not. The issuer NAME is still
+          // there, and the 13F lane already owns a conservative name->ticker map built from the
+          // SEC's own company list — collision-safe by construction: a name that could mean two
+          // symbols is dropped from the map rather than resolved to a coin flip. Reuse it, and
+          // record HOW each ticker was arrived at so the two strengths of claim stay separable.
+          for (const t of out.tx) {
+            if (t.ticker) { t.tkSrc = "form"; continue; }
+            const nm = congressAssetName(t.asset);
+            const sym = nm ? whaleTickerOf(nm, tmap) : null;
+            if (sym) { t.ticker = sym; t.tkSrc = "name"; }
+          }
           if (!out.tx.length) store.congressNote(f.id, "text-but-no-rows:" + runs.length + " runs");
           // A text PDF that yields no transaction row is NOT the same as a scan: it parsed, it just
           // had nothing this parser recognized. It is saved as zero rows so it leaves the queue and
@@ -13166,6 +13194,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
     congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
     houseIndexUrls,                              // harness: the candidate list is pinned by test
+    congressAssetName,                           // harness: issuer-name cleaning, pinned by test
     whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
     hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()
     whaleIngestNow: whaleIngest,                 // harness: push one filing through the REAL ingest path

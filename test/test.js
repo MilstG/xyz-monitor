@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-11"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-12"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,34 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -12: issuer names resolve to tickers conservatively, and the claim is marked", () => {
+  // The filer is not required to write a ticker and most do not â€” CrowdStrike and Alibaba arrive as
+  // names. The 13F lane's map already answers this and is collision-safe BY CONSTRUCTION: a name
+  // that could mean two symbols is dropped from the map rather than resolved to a coin flip. What
+  // matters here is the descriptive tail: "- Class A Common Stock" is a description of the
+  // instrument, not part of the issuer, and it has to come off before the name key sees it.
+  const fs = require("fs"), path = require("path"), os2 = require("os");
+  const { createPoller } = require("../src/poller");
+  const { openStore } = require("../src/store");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress4-"));
+  const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false });
+  const clean = p.congressAssetName;
+  assert.equal(clean("CrowdStrike Holdings, Inc. - Class A Common Stock"), "CrowdStrike Holdings",
+    "the instrument description comes off; the corporate suffix is harmless either way since the name key drops it");
+  assert.equal(clean("Alibaba Group Holding Limited"), "Alibaba Group Holding Limited");
+  assert.equal(clean("Coterra Energy Inc. Common Stock"), "Coterra Energy");
+  assert.equal(clean("Apple Inc. (AAPL) [ST]"), "Apple", "the parenthetical and class bracket come off too");
+  assert.equal(clean("AB"), null, "too short to be an issuer name is null, not a lookup");
+  // The stored row records HOW the ticker was arrived at, so a name-derived match is never
+  // presented with the same authority as one the filer wrote.
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(app.includes("cng-tk derived") || app.includes("'cng-tk'"), "the panel marks a derived ticker");
+  assert.ok(/tkSrc==='name'/.test(app), "and distinguishes it from the form's own parenthetical");
+  const st = fs.readFileSync(path.join(__dirname, "..", "src", "store.js"), "utf8");
+  assert.ok(/ALTER TABLE tx ADD COLUMN tkSrc/.test(st), "the distinction is stored, not just rendered");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -10: an encrypted PTR is decrypted, not mistaken for a scan", () => {
   const { pdfTextRuns, ptrRows, parsePtr, pdfObjects } = require("../src/compute");
