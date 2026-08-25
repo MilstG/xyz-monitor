@@ -13083,6 +13083,12 @@ async function termCongress(args){
     const err=(st.lastError?`\n  <span class="tp-err">last error</span> ${tesc(String(st.lastError).slice(0,160))}`:'')+why;
     return termOut(head+body+err);
   }
+  // Anything that looks like a verb is a verb, even one this build does not implement — otherwise
+  // 'congress ocr 20' answers as a rollup for a ticker called OCR, which is a different question
+  // wearing the same words. Only a lone token that is NOT a verb is treated as a symbol.
+  const CNG_VERBS=['status','ingest','backfill','parse','ocr','diag','requeue','watch','unwatch','watchlist','feed','help'];
+  if(CNG_VERBS.includes(sub)) return termErr(`congress ${tesc(sub)} is not available in this build (${tesc(state.build||'?')}) \u2014 it may need a deploy`);
+  if(args.length>1) return termErr(`unknown congress command \u201c${tesc(sub)}\u201d \u2014 try: congress status | parse | ocr | diag | feed | watch <member>`);
   if(/^[A-Za-z.]{1,6}$/.test(sub)){
     const r=await cngGet('?ticker='+encodeURIComponent(sub.toUpperCase()));
     if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));

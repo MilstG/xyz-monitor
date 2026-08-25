@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-27"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-28"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,25 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -28: a verb is never read as a ticker", () => {
+  // 'congress ocr 20' against a build without the verb answered "no congressional transactions on
+  // OCR" â€” the bare-ticker branch, treating a command as a symbol. A command silently becoming a
+  // DIFFERENT command is worse than an error: the answer looked authoritative and was about
+  // something else entirely.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const i = app.indexOf("const CNG_VERBS=");
+  assert.ok(i > 0, "the verb list exists");
+  const list = app.slice(i, app.indexOf("]", i));
+  for (const v of ["status", "ingest", "backfill", "parse", "ocr", "diag", "requeue", "watch", "watchlist", "feed"])
+    assert.ok(list.includes("'" + v + "'"), "verb guarded: " + v);
+  // and the guard has to sit BEFORE the ticker branch, or it does nothing at all
+  assert.ok(i < app.indexOf("if(/^[A-Za-z.]{1,6}$/.test(sub))"),
+    "the verb check precedes the symbol fallback");
+  assert.ok(/not available in this build/.test(app),
+    "a verb this build lacks says so, rather than answering a different question");
+});
 
 test("congress -27: CCITT is wrapped, not decoded, and the OCR queue is the scanned pile", async () => {
   // diag on the failing member: 18 images, CCITTFaxDecode, 2200x1696. Those bytes are not a file any
