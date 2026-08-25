@@ -1068,11 +1068,53 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       const o = opt || {}, where = ["f.parsed=1"], args = [];
       if (o.ticker) { where.push("t.ticker=?"); args.push(String(o.ticker).toUpperCase()); }
       if (o.since) { where.push("f.filed>=?"); args.push(String(o.since)); }
+      // Search runs in SQL, over every parsed transaction. Filtering the loaded page in the browser
+      // silently scoped every search to the most recent few hundred rows — so a member whose
+      // filings sat outside that window read as "not in the tool" rather than "not on this page".
+      if (o.q) { const like = "%" + String(o.q).replace(/[%_]/g, "") + "%";
+        where.push("(f.member LIKE ? OR t.asset LIKE ? OR t.ticker LIKE ?)");
+        args.push(like, like, like.toUpperCase()); }
       const lim = Math.max(1, Math.min(500, o.limit | 0 || 50));
-      try { return d.prepare(`SELECT f.filed, f.member, f.state, f.dist, f.url, t.fid, t.owner, t.asset,
+      const off = Math.max(0, o.offset | 0);
+      // Sort in SQL, from a WHITELIST: a header click has to order the whole result set, not the
+      // page that happens to be loaded — paginating a browser-sorted page would show a different
+      // "top" on every page. The map is closed, so a sort key can never reach the query as text.
+      const SORTS = { filed: "f.filed", lag: "(julianday(f.filed) - julianday(t.txDate))",
+        member: "f.member", asset: "t.asset", ticker: "t.ticker", act: "t.act",
+        band: "t.loAmt", traded: "t.txDate", notified: "t.notified", atype: "t.atype",
+        owner: "t.owner", dist: "(f.state || f.dist)" };
+      const col = SORTS[o.sort] || SORTS.filed;
+      const dir = (o.dir == null || Number.isNaN(+o.dir) ? -1 : +o.dir) < 0 ? "DESC" : "ASC";
+      try { return d.prepare(`SELECT f.filed, f.member, f.state, f.dist, f.url, t.fid, t.ln, t.owner, t.asset,
         t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt, t.tkSrc, t.atype
         FROM tx t JOIN filing f ON f.id=t.fid WHERE ${where.join(" AND ")}
-        ORDER BY f.filed DESC, t.fid DESC, t.ln LIMIT ?`).all(...args, lim); } catch (_) { return []; } },
+        ORDER BY ${col} ${dir}, f.filed DESC, t.fid DESC, t.ln LIMIT ? OFFSET ?`)
+        .all(...args, lim, off); } catch (_) { return []; } },
+    // The row count behind the current filter, so the pager says "of N" honestly rather than
+    // implying the loaded page is everything there is.
+    congressFeedCount(opt) { const d = this.openCongress(); if (!d) return 0;
+      const o = opt || {}, where = ["f.parsed=1"], args = [];
+      if (o.ticker) { where.push("t.ticker=?"); args.push(String(o.ticker).toUpperCase()); }
+      if (o.since) { where.push("f.filed>=?"); args.push(String(o.since)); }
+      if (o.q) { const like = "%" + String(o.q).replace(/[%_]/g, "") + "%";
+        where.push("(f.member LIKE ? OR t.asset LIKE ? OR t.ticker LIKE ?)");
+        args.push(like, like, like.toUpperCase()); }
+      try { const r = d.prepare(`SELECT COUNT(*) n FROM tx t JOIN filing f ON f.id=t.fid
+        WHERE ${where.join(" AND ")}`).get(...args);
+        return (r && r.n) || 0; } catch (_) { return 0; } },
+    // "Why can't I find this member?" answered from the INDEX rather than from the parsed subset:
+    // the index knows about every filer, so it can distinguish "never filed" from "filed, not read
+    // yet" from "filed on paper, and this lane has no OCR". Those are three different answers and
+    // the tool was giving the same silence to all of them.
+    congressFilerSearch(q) { const d = this.openCongress(); if (!d) return [];
+      const like = "%" + String(q || "").replace(/[%_]/g, "") + "%";
+      try { return d.prepare(`SELECT member, COUNT(*) n,
+        SUM(CASE WHEN parsed=1 THEN 1 ELSE 0 END) done,
+        SUM(CASE WHEN parsed=0 THEN 1 ELSE 0 END) queued,
+        SUM(CASE WHEN parsed=2 THEN 1 ELSE 0 END) unreadable,
+        MAX(filed) last, MIN(yr) yr0, MAX(yr) yr1
+        FROM filing WHERE type='ptr' AND member LIKE ? GROUP BY member ORDER BY n DESC LIMIT 12`).all(like); }
+      catch (_) { return []; } },
     // Per-ticker roll-up. Every sum is over the band FLOOR and is therefore a hard lower bound —
     // the caller renders it with a ≥, and no midpoint is computed anywhere in this lane.
     congressTickerRoll(ticker) { const d = this.openCongress(); if (!d) return null;

@@ -2056,3 +2056,21 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 /* An asset with no ticker IN EXISTENCE (municipal bond, farm, real property) reads differently
    from one the resolver simply missed: the first is the data's shape, the second is a gap. */
 .cng-un.na{font-style:italic;opacity:.75}
+/* What the INDEX knows about a searched filer, which is a different question from what has been
+   parsed: "never filed", "filed but not read yet" and "filed on paper" are three answers, and the
+   panel used to give the same silence to all three. */
+.cng-note{display:flex;flex-wrap:wrap;gap:5px 16px;align-items:baseline;background:var(--panel2);
+  border:1px solid var(--border);border-radius:3px;padding:9px 12px;margin:0 0 10px;
+  font-size:11.5px;color:var(--muted);line-height:1.7}
+.cng-note .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.cng-note b{color:var(--text);font-weight:600}
+/* Pager. Sorting and paging both run in SQL, so the range shown is a claim about the whole
+   result set rather than about the rows that happen to be loaded. */
+.cng-pager{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 2px 2px;font-size:11.5px}
+.cng-pager .cng-chip{margin-left:0}
+.cng-pager .cng-chip[disabled]{opacity:.35;cursor:default}
+.cng-pager .cng-chip[disabled]:hover{border-color:var(--border);color:var(--muted)}
+.cng-pnum{font-family:var(--mono);color:var(--text);font-variant-numeric:tabular-nums}
+.cng-asset{color:var(--muted)}
+.cng-atype{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;border:1px solid var(--border);
+  color:var(--muted);border-radius:2px;padding:0 4px}

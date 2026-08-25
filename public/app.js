@@ -13032,6 +13032,10 @@ async function termCongress(args){
     (r.skipped||[]).forEach(x=>L.push(`    skip ${tesc(JSON.stringify(x))}`));
     return termOut(L.join('\n'));
   }
+  if(sub==='backfill'){
+    const r=await cngPost({op:'backfill',years:+(args[1]||0)||undefined});
+    return r&&r.ok?termOut(`<span class="pos">backfill started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
   if(sub==='requeue'){
     const r=await cngPost({op:'requeue',all:(args[1]||'')==='all'});
     return r&&r.ok?termOut(`<span class="pos">${r.requeued} filing(s) requeued</span> <span class="tp-trans">\u00b7 run <b>congress parse</b> to work them again</span>`):termErr(tesc((r&&r.error)||'failed'));
@@ -13070,7 +13074,7 @@ async function termCongress(args){
     const body=R.members.map(m=>`  ${tpad(tesc(m.member.slice(0,24)),25)} ${tpad(String(m.n),3,true)} <span class="${m.buys>m.sells?'pos':m.sells>m.buys?'neg':'sec'}">${tpad(m.buys+'b/'+m.sells+'s',8)}</span> ${tpad(m.medLag==null?'\u2014':m.medLag+'d',6,true)} ${tpad('\u2265 '+money(m.floor),14,true)} ${tesc(m.last||'')}`).join('\n');
     return termOut(`<span class="tp-hd">${tesc(R.ticker)} \u00b7 congressional flow</span> <span class="tp-trans">\u00b7 ${R.filings} transaction(s) \u00b7 ${R.buys} buy / ${R.sells} sell \u00b7 \u2265 ${money(R.floor)} disclosed floor</span>\n${body}\n<span class="tp-trans">\u2265 sums the LOW end of every disclosed band \u2014 a hard floor, never an estimate of the real total</span>`);
   }
-  return termErr('usage: congress status | ingest [year] | parse [n] | diag <docId> | requeue [all] | feed | <TICKER>');
+  return termErr('usage: congress status | ingest [year] | backfill [years] | parse [n] | diag [docId] | requeue [all] | feed | <TICKER>');
 }
 // ---- CONGRESS panel (build 2026.08.24-06) -----------------------------------------------------
 // The PTR feed, sorted by FILING date because that is the moment the information became public —
@@ -13082,17 +13086,27 @@ async function termCongress(args){
 // the panel owns them client-side over the fetched page: the sort keys are derived values (lag is
 // filed minus traded, band sorts on its FLOOR) which the server has no reason to compute twice.
 const CNG_COLS=[
-  {k:'filed', label:'FILED', cls:'l', tip:'when the filing became public. The default sort — a trade from seven weeks ago that files today is today\u2019s information.'},
-  {k:'lag',   label:'LAG',   cls:'r', tip:'filing date minus trade date. The STOCK Act caps it at 45 days; how close a member runs to that cap is itself a behavioural read.'},
-  {k:'member',label:'MEMBER',cls:'l', tip:'the filer. SP / DC / JT marks a trade filed for a spouse, dependent child or jointly rather than the member personally.'},
-  {k:'asset', label:'ASSET', cls:'l', tip:'the ticker where one is known, otherwise the raw asset name the filing carried.'},
-  {k:'act',   label:'ACT',   cls:'l', tip:'purchase, sale, partial sale or exchange, as disclosed.'},
-  {k:'band',  label:'BAND',  cls:'r', tip:'the band the filer disclosed. A PTR never carries an exact figure, so none is shown and no midpoint is computed anywhere in this lane. Sorts on the band FLOOR.'},
-  {k:'traded',label:'TRADED',cls:'l', tip:'the transaction date itself.'},
-  {k:'src',   label:'SRC',   cls:'l', tip:'the filed PDF at the House Clerk, the source each row was parsed from.'},
+  {k:'filed',   label:'FILED',    cls:'l', tip:'when the filing became public. The default sort \u2014 a trade from seven weeks ago that files today is today\u2019s information.'},
+  {k:'lag',     label:'LAG',      cls:'r', tip:'filing date minus trade date. The STOCK Act caps it at 45 days; how close a member runs to that cap is itself a behavioural read.'},
+  {k:'member',  label:'MEMBER',   cls:'l', tip:'the filer, with chamber and district.'},
+  {k:'owner',   label:'OWNER',    cls:'l', tip:'whose account traded: the member, a spouse (SP), a dependent child (DC) or a joint account (JT). A spouse\u2019s trade is disclosed but is not the member\u2019s own.'},
+  {k:'ticker',  label:'TICKER',   cls:'l', tip:'the ticker where one exists. Written by the filer, or resolved from the issuer name \u2014 a dotted underline marks the second, weaker claim.'},
+  {k:'asset',   label:'ASSET',    cls:'l', tip:'the issuer or instrument exactly as the filing named it, kept verbatim even where a ticker was resolved from it.'},
+  {k:'atype',   label:'TYPE',     cls:'l', tip:'the form\u2019s own asset-type code. [ST] stock, [EF] ETF, [MF] mutual fund, [GS] government security, [RP] real property, [FA] farm \u2014 it decides whether a ticker can exist at all.'},
+  {k:'act',     label:'ACT',      cls:'l', tip:'purchase, sale, partial sale or exchange, as disclosed.'},
+  {k:'band',    label:'BAND',     cls:'r', tip:'the band the filer disclosed. A PTR never carries an exact figure, so none is shown and no midpoint is computed anywhere in this lane. Sorts on the band FLOOR.'},
+  {k:'traded',  label:'TRADED',   cls:'l', tip:'the transaction date itself.'},
+  {k:'notified',label:'NOTIFIED', cls:'l', tip:'when the filer says they were told of the trade. On a managed account the 45-day clock starts here, not at the trade \u2014 which is how a filing can be late-looking and perfectly compliant.'},
+  {k:'ln',      label:'#',        cls:'r', tip:'the line number within its filing. Two identical-looking rows with different line numbers are two separate lots in the document, not a double-count.'},
+  {k:'src',     label:'SRC',      cls:'l', tip:'the filed PDF at the House Clerk, the source each row was parsed from.'},
 ];
+// Everything the parser knows is a column; the reader decides what to look at. Only the line
+// number starts hidden, since it exists to answer a question most readers will not be asking.
+const CNG_HIDE_DEFAULT=['ln'];
 const CNG_LS='cngview';
-const CNG={rows:[],stat:null,tk:'',busy:false,q:'',acts:new Set(),sort:{k:'filed',dir:-1},hidden:new Set(),menu:false};
+const CNG_PAGE=50;
+const CNG={rows:[],stat:null,filers:null,total:0,page:0,tk:'',busy:false,q:'',acts:new Set(),sort:{k:'filed',dir:-1},hidden:new Set(),menu:false};
+CNG.hidden=new Set(CNG_HIDE_DEFAULT);
 try{ const v=JSON.parse(localStorage.getItem(CNG_LS)||'{}');
   if(v.hidden) CNG.hidden=new Set(v.hidden);
   if(v.sort&&v.sort.k) CNG.sort=v.sort;
@@ -13115,25 +13129,24 @@ const CNG_VAL={
 async function openCongress(){
   const out=el('congress-body'); if(!out) return;
   if(!CNG.rows.length) out.innerHTML='<div class="msg">reading the congressional index\u2026</div>';
-  const r=await cngGet('?feed=1&limit=400'+(CNG.tk?'&ticker='+encodeURIComponent(CNG.tk):''));
+  const q=CNG.q.trim();
+  const r=await cngGet('?feed=1&limit='+CNG_PAGE+'&offset='+(CNG.page*CNG_PAGE)
+    +'&sort='+encodeURIComponent(CNG.sort.k)+'&dir='+CNG.sort.dir
+    +(q?'&q='+encodeURIComponent(q):'')+(CNG.tk?'&ticker='+encodeURIComponent(CNG.tk):''));
   if(!r||!r.ok){ out.innerHTML=`<div class="msg err">${esc((r&&r.error)||'fetch failed')}</div>`; return; }
-  CNG.rows=r.feed||[]; CNG.stat=r.status||null;
+  CNG.rows=r.feed||[]; CNG.stat=r.status||null; CNG.filers=r.filers||null; CNG.total=r.total||0;
+  // A filter or a sort can land the reader past the end of the new result set.
+  if(CNG.page&&!CNG.rows.length&&CNG.total){ CNG.page=Math.max(0,Math.ceil(CNG.total/CNG_PAGE)-1); return openCongress(); }
   cngRender();
 }
+let cngT=null;
+function cngSearch(){ clearTimeout(cngT); cngT=setTimeout(openCongress,260); }
 function cngVisible(){
-  const q=CNG.q.trim().toLowerCase();
-  return CNG.rows.filter(x=>{
-    if(CNG.acts.size){ const base=String(x.act||'').split('-')[0]; if(!CNG.acts.has(base)) return false; }
-    if(!q) return true;
-    return (x.member||'').toLowerCase().includes(q)||(x.ticker||'').toLowerCase().includes(q)
-      ||(x.asset||'').toLowerCase().includes(q)||(x.state||'').toLowerCase().includes(q);
-  }).sort((a,b)=>{
-    const f=CNG_VAL[CNG.sort.k]||CNG_VAL.filed;
-    const va=f(a), vb=f(b);
-    if(va<vb) return -CNG.sort.dir;
-    if(va>vb) return CNG.sort.dir;
-    return (b.filed||'').localeCompare(a.filed||'');   // stable tiebreak: newest filed first
-  });
+  // Search, sort and paging all happen in SQL now — a header click has to order every matching
+  // transaction, not the page that happens to be loaded. The browser only narrows by direction,
+  // which is a view of the page rather than a claim about the whole set.
+  if(!CNG.acts.size) return CNG.rows;
+  return CNG.rows.filter(x=>CNG.acts.has(String(x.act||'').split('-')[0]));
 }
 function cngRender(){
   const out=el('congress-body'); if(!out) return;
@@ -13162,40 +13175,78 @@ function cngRender(){
     +`</div>`
     +((ps.notes&&ps.notes.length)?`<div class="cng-why"><span class="k">why</span>${ps.notes.map(n2=>`<span data-tip="${esc(n2.sample||n2.note)}">${esc(n2.note.split(':')[0])} <b>\u00d7${n2.n}</b></span>`).join('')}</div>`:'')
     +(CNG.menu?`<div class="cng-colmenu">${CNG_COLS.map(col=>`<label><input type="checkbox" data-cngcol="${col.k}"${CNG.hidden.has(col.k)?'':' checked'}> ${esc(col.label)}</label>`).join('')}</div>`:'');
+  const filerNote=()=>{
+    const f=CNG.filers;
+    if(!f||!f.length) return CNG.q.trim()?`<div class="cng-note">no filer matching \u201c${esc(CNG.q.trim())}\u201d in the ${(c.n||0).toLocaleString()} filings this lane has indexed. The index currently covers ${esc((st.years||[]).map(y=>y.yr).join(', ')||'no years')} \u2014 earlier years are not loaded until an admin runs <b>congress backfill</b>.</div>`:'';
+    return `<div class="cng-note"><span class="k">in the index</span>${f.map(x=>
+      `<span data-tip="${esc(x.n+' PTR filing(s) '+(x.yr0===x.yr1?'in '+x.yr0:'between '+x.yr0+' and '+x.yr1)+', last filed '+(x.last||'?'))}">`
+      +`<b>${esc(x.member)}</b> ${x.n} PTR`
+      +(x.done?` \u00b7 <span class="pos">${x.done} parsed</span>`:'')
+      +(x.queued?` \u00b7 <span class="amber">${x.queued} queued</span>`:'')
+      +(x.unreadable?` \u00b7 <span class="neg">${x.unreadable} scanned</span>`:'')
+      +`</span>`).join('')}</div>`;
+  };
   if(!rows.length){
-    out.innerHTML=head+`<div class="sec" style="padding:10px 2px">${CNG.rows.length?'no rows match this filter':(ps.pending?`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`:'no transactions')}</div>`;
+    out.innerHTML=head+filerNote()
+      +`<div class="sec" style="padding:10px 2px">${CNG.q.trim()?'no parsed transactions match \u2014 see what the index knows above':(ps.pending?`nothing parsed yet \u2014 ${ps.pending} PTR(s) queued. Terminal: <b>congress parse</b>`:'no transactions')}</div>`;
     cngBind(); return;
   }
   const cell=(k,x)=>{
     const lag=cngLag(x);
     if(k==='filed') return `<td class="l sec">${esc(x.filed||'\u2014')}</td>`;
     if(k==='lag') return `<td class="r"><span class="cng-lag ${lag==null?'na':lag<14?'fast':lag<35?'mid':'slow'}">${lag==null?'\u2014':lag+'d'}</span></td>`;
-    if(k==='member'){ const who=x.owner&&x.owner!=='self'?`<span class="cng-own" data-tip="filed for the member\u2019s ${esc(x.owner)}, not the member personally">${esc(x.owner==='dependent'?'DC':x.owner==='spouse'?'SP':'JT')}</span>`:'';
-      return `<td class="l"><span class="cng-nm">${esc((x.member||'').slice(0,26))}</span>${who}<span class="cng-dist">${esc((x.state||'')+(x.dist?'-'+x.dist:''))}</span></td>`; }
-    if(k==='asset') return `<td class="l">${x.ticker?`<span class="cng-tk${x.tkSrc==='name'?' derived':''}" data-tip="${esc(x.tkSrc==='name'?'resolved from the issuer name \u2014 "'+(x.asset||'')+'" \u2014 against the universe, using the same collision-safe map the 13F lane uses: a name that could mean two symbols resolves to neither. The filer did not write a ticker on the form.':'the ticker exactly as the filer wrote it on the form')}">${esc(x.ticker)}</span>`:`<span class="cng-un${x.tkSrc==='n/a'?' na':''}" data-tip="${esc(x.tkSrc==='n/a'?('not an exchange-listed instrument'+(x.atype?' \u2014 the filing types it ['+x.atype+']':'')+', so no ticker exists to pair: '+(x.asset||'')):('no ticker on the form, and the issuer name did not resolve against the universe: '+(x.asset||'')))}">${esc(x.asset.length>30?x.asset.slice(0,30)+'\u2026':x.asset)}</span>`}</td>`;
+    if(k==='member') return `<td class="l"><span class="cng-nm">${esc((x.member||'').slice(0,26))}</span><span class="cng-dist">${esc((x.state||'')+(x.dist?'-'+x.dist:''))}</span></td>`;
+    if(k==='owner') return `<td class="l">${x.owner&&x.owner!=='self'
+      ?`<span class="cng-own" data-tip="filed for the member\u2019s ${esc(x.owner)}, not the member personally">${esc(x.owner==='dependent'?'DC':x.owner==='spouse'?'SP':'JT')}</span>`
+      :'<span class="sec">self</span>'}</td>`;
+    if(k==='ticker') return `<td class="l">${x.ticker
+      ?`<span class="cng-tk${x.tkSrc==='name'?' derived':''}" data-tip="${esc(x.tkSrc==='name'?('resolved from the issuer name \u2014 \u201c'+(x.asset||'')+'\u201d \u2014 against the universe, using the same collision-safe map the 13F lane uses: a name that could mean two symbols resolves to neither. The filer did not write a ticker on the form.'):'the ticker exactly as the filer wrote it on the form')}">${esc(x.ticker)}</span>`
+      :`<span class="cng-un${x.tkSrc==='n/a'?' na':''}" data-tip="${esc(x.tkSrc==='n/a'?('not an exchange-listed instrument'+(x.atype?' \u2014 the filing types it ['+x.atype+']':'')+', so no ticker exists to pair'):'no ticker on the form, and the issuer name did not resolve against the universe')}">${x.tkSrc==='n/a'?'not listed':'\u2014'}</span>`}</td>`;
+    if(k==='asset') return `<td class="l"><span class="cng-asset" data-tip="${esc(x.asset||'')}">${esc((x.asset||'').length>38?(x.asset||'').slice(0,38)+'\u2026':(x.asset||''))}</span></td>`;
+    if(k==='atype') return `<td class="l">${x.atype?`<span class="cng-atype" data-tip="the form\u2019s own asset-type code">${esc(x.atype)}</span>`:'<span class="sec">\u2014</span>'}</td>`;
+    if(k==='notified') return `<td class="l sec">${esc(x.notified||'\u2014')}</td>`;
+    if(k==='ln') return `<td class="r sec" data-tip="line ${x.ln} of filing ${esc(x.fid||'')}">${x.ln==null?'\u2014':x.ln+1}</td>`;
     if(k==='act'){ const dir=/^buy/.test(x.act)?'p':/^sell/.test(x.act)?'s':'e'; return `<td class="l"><span class="cng-act ${dir}">${esc(x.act)}</span></td>`; }
     if(k==='band') return `<td class="r">${esc(x.hiAmt!=null?cngMoney(x.loAmt)+' \u2013 '+cngMoney(x.hiAmt):cngMoney(x.loAmt)+'+')}</td>`;
     if(k==='traded') return `<td class="l sec">${esc(x.txDate||'\u2014')}</td>`;
     return `<td class="l">${x.url?`<a class="cng-src" href="${esc(x.url)}" target="_blank" rel="noopener">source</a>`:''}</td>`;
   };
   const arrow=(k)=>CNG.sort.k===k?`<span class="cng-arr">${CNG.sort.dir>0?'\u25b2':'\u25bc'}</span>`:'';
-  out.innerHTML=head
+  out.innerHTML=head+(CNG.q.trim()?filerNote():'')
     +`<div class="tblwrap"><table class="whl-tbl cng-tbl"><thead><tr>`
     +shown.map(col=>`<th class="${col.cls} cng-th" data-cngsort="${col.k}" data-tip="${esc(col.tip+' \u00b7 click to sort')}">${esc(col.label)}${arrow(col.k)}</th>`).join('')
     +`</tr></thead><tbody>`
     +rows.map(x=>`<tr class="whl-worow">${shown.map(col=>cell(col.k,x)).join('')}</tr>`).join('')
     +`</tbody></table></div>`
-    +`<div class="whl-foot">${rows.length.toLocaleString()} of ${CNG.rows.length.toLocaleString()} transaction(s) shown \u00b7 source: House Clerk Periodic Transaction Reports, filed under the STOCK Act \u00b7 sorted by FILING date by default \u2014 the moment the information became public \u00b7 amounts are disclosed bands, never point figures \u00b7 a <span class="cng-tk derived">dotted</span> ticker was resolved from the issuer name, not written on the form \u00b7 Senate and executive-branch (OGE 278-T) filings are NOT in this lane</div>`;
+    +cngPager()
+    +`<div class="whl-foot">${rows.length.toLocaleString()} shown of ${CNG.total.toLocaleString()} matching transaction(s) \u00b7 source: House Clerk Periodic Transaction Reports, filed under the STOCK Act \u00b7 sorted by FILING date by default \u2014 the moment the information became public \u00b7 amounts are disclosed bands, never point figures \u00b7 a <span class="cng-tk derived">dotted</span> ticker was resolved from the issuer name, not written on the form \u00b7 Senate and executive-branch (OGE 278-T) filings are NOT in this lane</div>`;
   cngBind();
+}
+function cngPager(){
+  const pages=Math.max(1,Math.ceil(CNG.total/CNG_PAGE));
+  if(pages<=1) return '';
+  const from=CNG.page*CNG_PAGE+1, to=Math.min(CNG.total,(CNG.page+1)*CNG_PAGE);
+  return `<div class="cng-pager">`
+    +`<button type="button" class="cng-chip" data-cngpage="first"${CNG.page?'':' disabled'}>\u00ab first</button>`
+    +`<button type="button" class="cng-chip" data-cngpage="prev"${CNG.page?'':' disabled'}>\u2039 prev</button>`
+    +`<span class="cng-pnum">${from.toLocaleString()}\u2013${to.toLocaleString()} of ${CNG.total.toLocaleString()}</span>`
+    +`<button type="button" class="cng-chip" data-cngpage="next"${CNG.page+1<pages?'':' disabled'}>next \u203a</button>`
+    +`<button type="button" class="cng-chip" data-cngpage="last"${CNG.page+1<pages?'':' disabled'}>last \u00bb</button>`
+    +`<span class="sec">page ${CNG.page+1} / ${pages.toLocaleString()}</span></div>`;
 }
 function cngBind(){
   const q=el('cng-q');
-  if(q){ q.oninput=()=>{ CNG.q=q.value; const p=q.selectionStart; cngRender(); const q2=el('cng-q'); if(q2){ q2.focus(); try{q2.setSelectionRange(p,p);}catch(_){} } }; }
+  if(q){ q.oninput=()=>{ CNG.q=q.value; CNG.page=0; cngSearch(); }; }
   const out=el('congress-body'); if(!out) return;
   out.querySelectorAll('[data-cngsort]').forEach(th=>th.onclick=()=>{
     const k=th.dataset.cngsort;
     if(CNG.sort.k===k) CNG.sort.dir=-CNG.sort.dir; else CNG.sort={k,dir:k==='member'||k==='asset'||k==='act'?1:-1};
-    cngSave(); cngRender(); });
+    CNG.page=0;                       // a new ordering makes the old page number meaningless
+    cngSave(); openCongress(); });
+  out.querySelectorAll('[data-cngpage]').forEach(b=>b.onclick=()=>{
+    const pages=Math.max(1,Math.ceil(CNG.total/CNG_PAGE)), w=b.dataset.cngpage;
+    CNG.page=w==='first'?0:w==='prev'?Math.max(0,CNG.page-1):w==='next'?Math.min(pages-1,CNG.page+1):pages-1;
+    openCongress(); });
   out.querySelectorAll('[data-cngact]').forEach(b=>b.onclick=()=>{
     const a=b.dataset.cngact;
     if(CNG.acts.has(a)) CNG.acts.delete(a); else CNG.acts.add(a);

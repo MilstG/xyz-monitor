@@ -6066,6 +6066,25 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     pushOps("congress PTR parse", n + " filing(s) put back in the queue" + (which === "all" ? " (all non-parsed)" : " (previously marked unreadable)"), "info", true);
     return { ok: true, requeued: n };
   }
+  // The Clerk publishes one index per YEAR and the daily tick only ever asks for the current one,
+  // so the store held 2026 and nothing else — a member who last filed in 2025 simply did not exist
+  // as far as this lane was concerned. Backfill walks previous years, newest first, and stops at
+  // the first year that yields nothing rather than grinding back to 2008 on every run.
+  async function congressBackfill(yearsArg) {
+    const years = Math.max(1, Math.min(12, +yearsArg || 3));
+    const now = new Date().getUTCFullYear();
+    const out = [];
+    for (let i = 1; i <= years; i++) {
+      const yr = now - i;
+      const r = await congressIngest(yr).catch((e) => ({ ok: false, error: String(e && e.message) }));
+      out.push({ yr, ok: !!r.ok, filings: r.filings || 0, added: r.added || 0, ptr: r.ptr || 0, error: r.error || null });
+      if (!r.ok) break;                       // a year with no index means there is nothing older to find
+    }
+    const total = out.reduce((a, b) => a + (b.added || 0), 0);
+    pushOps("congress index", "backfill: " + out.map((o) => o.yr + (o.ok ? " +" + o.added : " \u2717")).join(", ")
+      + " \u00b7 " + total + " new filing(s)", "info", true);
+    return { ok: true, years: out, added: total };
+  }
   function congressStatus() {
     const last = +(store.congressMeta && store.congressMeta("lastSync")) || 0;
     return { ready: !!(store.congressReady && store.congressReady()),
@@ -13221,8 +13240,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // CONGRESS lane phase 1 (2026.08.24-02): admin-only index ingest — no public payload yet.
     congressIngestNow: congressIngest, congressTickNow: congressTick, congressStatus,
     congressParseNow: congressParse, congressDiagNow: congressDiag, congressRequeueNow: congressRequeue,
+    congressBackfillNow: congressBackfill,
+    congressFilerSearch: (q) => (store.congressFilerSearch ? store.congressFilerSearch(q) : []),
     congressFilings: (o) => (store.congressFilings ? store.congressFilings(o) : []),
     congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
+    congressFeedCount: (o) => (store.congressFeedCount ? store.congressFeedCount(o) : 0),
     congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
     houseIndexUrls,                              // harness: the candidate list is pinned by test
     congressAssetName,                           // harness: issuer-name cleaning, pinned by test
