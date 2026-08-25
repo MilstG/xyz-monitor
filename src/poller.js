@@ -5947,7 +5947,10 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         + (buys ? " \u00b7 " + buys + " buy" : "") + (sells ? " \u00b7 " + sells + " sell" : "")
         + " \u00b7 \u2265 $" + Math.round(floor).toLocaleString()
         + (names.length ? " \u00b7 " + names.join(", ") : "");
+      const traded = txs.map((t) => t.txDate).filter(Boolean).sort().pop() || null;
       emitTrig("congress", { t: null, coin: null, congress: 1, member: filing.member,
+        dist: [filing.state, filing.dist].filter(Boolean).join("-") || null,
+        brief, names: names.join(", ") || null, filed: filed || null, traded,
         h: filing.member + " \u2014 " + brief, url: filing.url || null,
         pub: Number.isFinite(at) ? at : Date.now() });
       persistTriggers();
