@@ -5921,6 +5921,38 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return null;
   }
+  // A starred member's new activity, pushed on its own class. Two guards, both learned elsewhere in
+  // this codebase rather than theorised:
+  //   - PRIMED. The very first parse run works through a queue hundreds deep, and a backfill walks
+  //     years of history. Alerting on those would fire a wall of notifications about trades from
+  //     2024, which is how a channel gets muted and the real alert gets missed. Nothing fires until
+  //     one parse run has completed, exactly as the whale lane refuses to alert on its seed pull.
+  //   - RECENT. Even primed, a filing older than the statutory window is history being filled in,
+  //     not news. The filing DATE is the clock — that is when the information became public.
+  const CONGRESS_ALERT_MAX_AGE = 10 * DAY;
+  function congressAlert(filing, txs) {
+    try {
+      if (!txs || !txs.length) return;
+      if (!store.congressMeta || !store.congressMeta("alertPrimed")) return;
+      const w = store.congressWatched && store.congressWatched(filing.member);
+      if (!w || !w.notify) return;
+      const filed = filing.filed || (store.congressFilings ? "" : "");
+      const at = filed ? Date.parse(filed + "T00:00:00Z") : NaN;
+      if (Number.isFinite(at) && Date.now() - at > CONGRESS_ALERT_MAX_AGE) return;
+      const buys = txs.filter((t) => /^buy/.test(t.act)).length;
+      const sells = txs.filter((t) => /^sell/.test(t.act)).length;
+      const names = [...new Set(txs.map((t) => t.ticker || (t.asset || "").slice(0, 18)).filter(Boolean))].slice(0, 6);
+      const floor = txs.reduce((a, b) => a + (b.loAmt || 0), 0);
+      const brief = txs.length + " transaction" + (txs.length === 1 ? "" : "s")
+        + (buys ? " \u00b7 " + buys + " buy" : "") + (sells ? " \u00b7 " + sells + " sell" : "")
+        + " \u00b7 \u2265 $" + Math.round(floor).toLocaleString()
+        + (names.length ? " \u00b7 " + names.join(", ") : "");
+      emitTrig("congress", { t: null, coin: null, congress: 1, member: filing.member,
+        h: filing.member + " \u2014 " + brief, url: filing.url || null,
+        pub: Number.isFinite(at) ? at : Date.now() });
+      persistTriggers();
+    } catch (_) {}
+  }
   async function congressParse(limitArg) {
     if (congressParseBusy) return { ok: false, error: "a parse run is already going" };
     if (!store.congressReady || !store.congressReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
@@ -5992,11 +6024,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
           // shows up in the counts as a parsed filing with no transactions — visible, not silent.
           store.congressSaveTx(f.id, out.tx);
           parsed++; tx += out.tx.length;
+          congressAlert(f, out.tx);
         } catch (e) { store.congressBumpTry(f.id); failed++;
           if (!first) first = f.id + " → " + String(e && e.message).slice(0, 60); }
         if (CONGRESS_PARSE_GAP) await new Promise((r) => setTimeout(r, CONGRESS_PARSE_GAP));
       }
     } finally { congressParseBusy = false; }
+    // Primed only AFTER a run completes: the first run drains a queue of history, and nothing in
+    // it is news to anybody.
+    try { if (store.congressMetaSet && !store.congressMeta("alertPrimed")) store.congressMetaSet("alertPrimed", String(Date.now())); } catch (_) {}
     const st = store.congressParseStats();
     const note = parsed + " parsed (" + tx + " transactions)"
       + (scanned ? ", " + scanned + " PDF-but-no-text" : "")
@@ -13242,6 +13278,12 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     congressParseNow: congressParse, congressDiagNow: congressDiag, congressRequeueNow: congressRequeue,
     congressBackfillNow: congressBackfill,
     congressFilerSearch: (q) => (store.congressFilerSearch ? store.congressFilerSearch(q) : []),
+    congressWatchList: () => (store.congressWatchList ? store.congressWatchList() : []),
+    congressWatchSet: (m, on, notify) => {
+      const ok = store.congressWatchSet ? store.congressWatchSet(m, on, notify) : false;
+      return ok ? { ok: true, member: String(m), watched: !!on, notify: notify !== false }
+        : { ok: false, error: "could not update the watchlist" };
+    },
     congressFilings: (o) => (store.congressFilings ? store.congressFilings(o) : []),
     congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
     congressFeedCount: (o) => (store.congressFeedCount ? store.congressFeedCount(o) : 0),

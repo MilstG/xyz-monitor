@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract â€
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-15"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-16"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,33 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -16: starring a member, and the two guards that keep alerts from becoming a wall", async () => {
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congress6-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, congressGap: 0 });
+  assert.deepEqual(p.congressWatchList(), [], "nobody is starred to begin with");
+  assert.ok(p.congressWatchSet("Pelosi, Nancy", true).ok);
+  assert.equal(p.congressWatchList().length, 1);
+  assert.equal(store.congressWatched("Pelosi, Nancy").notify, 1, "starred implies notify unless told otherwise");
+  assert.ok(p.congressWatchSet("Pelosi, Nancy", false).ok);
+  assert.equal(p.congressWatchList().length, 0, "and unstarring removes them");
+  // The guards live in the source and matter more than any of the plumbing: a backfill walks YEARS
+  // of filings, and alerting on that history would fire hundreds of notifications about trades from
+  // two years ago â€” which is how a channel gets muted and the real alert gets missed.
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  assert.ok(/alertPrimed/.test(pol), "nothing fires until one parse run has completed");
+  assert.ok(/CONGRESS_ALERT_MAX_AGE/.test(pol), "and a filing older than the window is history, not news");
+  const cmp = fs.readFileSync(path.join(__dirname, "..", "src", "compute.js"), "utf8");
+  const cls = cmp.match(/const PUSH_CLASSES = \[([^\]]+)\]/)[1];
+  const def = cmp.match(/const PUSH_DEFAULT_CLASSES = \[([^\]]+)\]/)[1];
+  assert.ok(/"congress"/.test(cls), "congress is a push class of its own");
+  assert.ok(!/congress/.test(def), "and is OPT-IN, like every class added after the frozen defaults");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("congress -14: search runs in SQL, and a missing member gets an answer from the index", async () => {
   // "I can't find Pelosi" had three possible causes and the tool gave the same silence to all of

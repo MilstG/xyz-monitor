@@ -13032,6 +13032,18 @@ async function termCongress(args){
     (r.skipped||[]).forEach(x=>L.push(`    skip ${tesc(JSON.stringify(x))}`));
     return termOut(L.join('\n'));
   }
+  if(sub==='watch'||sub==='unwatch'){
+    const m=args.slice(1).join(' ').trim();
+    if(!m) return termErr('usage: congress '+sub+' <member name as it appears on the panel>');
+    const r=await cngPost({op:'watch',member:m,on:sub==='watch'});
+    return r&&r.ok?termOut(`<span class="pos">${sub==='watch'?'starred':'unstarred'}</span> ${tesc(m)} <span class="tp-trans">${sub==='watch'?'\u00b7 new filings by this member raise a congress alert (enable the congress class in push settings to get it on Telegram)':''}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  if(sub==='watchlist'){
+    const r=await cngGet('?watch=1'); if(!r||!r.ok) return termErr('failed');
+    const w=r.watch||[];
+    if(!w.length) return termOut('<span class="sec">no members starred</span> <span class="tp-trans">\u00b7 star one on the Congress tab, or: congress watch &lt;name&gt;</span>');
+    return termOut(`<span class="tp-hd">starred members</span>\n`+w.map(x=>`  ${tpad(tesc(x.member),28)} ${x.notify?'<span class="pos">alerts on</span>':'<span class="sec">muted</span>'}`).join('\n'));
+  }
   if(sub==='backfill'){
     const r=await cngPost({op:'backfill',years:+(args[1]||0)||undefined});
     return r&&r.ok?termOut(`<span class="pos">backfill started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
@@ -13074,7 +13086,7 @@ async function termCongress(args){
     const body=R.members.map(m=>`  ${tpad(tesc(m.member.slice(0,24)),25)} ${tpad(String(m.n),3,true)} <span class="${m.buys>m.sells?'pos':m.sells>m.buys?'neg':'sec'}">${tpad(m.buys+'b/'+m.sells+'s',8)}</span> ${tpad(m.medLag==null?'\u2014':m.medLag+'d',6,true)} ${tpad('\u2265 '+money(m.floor),14,true)} ${tesc(m.last||'')}`).join('\n');
     return termOut(`<span class="tp-hd">${tesc(R.ticker)} \u00b7 congressional flow</span> <span class="tp-trans">\u00b7 ${R.filings} transaction(s) \u00b7 ${R.buys} buy / ${R.sells} sell \u00b7 \u2265 ${money(R.floor)} disclosed floor</span>\n${body}\n<span class="tp-trans">\u2265 sums the LOW end of every disclosed band \u2014 a hard floor, never an estimate of the real total</span>`);
   }
-  return termErr('usage: congress status | ingest [year] | backfill [years] | parse [n] | diag [docId] | requeue [all] | feed | <TICKER>');
+  return termErr('usage: congress status | ingest [year] | backfill [years] | parse [n] | diag [docId] | requeue [all] | watch/unwatch <member> | watchlist | feed | <TICKER>');
 }
 // ---- CONGRESS panel (build 2026.08.24-06) -----------------------------------------------------
 // The PTR feed, sorted by FILING date because that is the moment the information became public —
@@ -13086,6 +13098,7 @@ async function termCongress(args){
 // the panel owns them client-side over the fetched page: the sort keys are derived values (lag is
 // filed minus traded, band sorts on its FLOOR) which the server has no reason to compute twice.
 const CNG_COLS=[
+  {k:'star',    label:'\u2605',   cls:'l', tip:'star a member to keep them on your list \u2014 and, with the congress push class enabled, to be told on Telegram when they file new activity.'},
   {k:'filed',   label:'FILED',    cls:'l', tip:'when the filing became public. The default sort \u2014 a trade from seven weeks ago that files today is today\u2019s information.'},
   {k:'lag',     label:'LAG',      cls:'r', tip:'filing date minus trade date. The STOCK Act caps it at 45 days; how close a member runs to that cap is itself a behavioural read.'},
   {k:'member',  label:'MEMBER',   cls:'l', tip:'the filer, with chamber and district.'},
@@ -13105,7 +13118,7 @@ const CNG_COLS=[
 const CNG_HIDE_DEFAULT=['ln'];
 const CNG_LS='cngview';
 const CNG_PAGE=50;
-const CNG={rows:[],stat:null,filers:null,total:0,page:0,tk:'',busy:false,q:'',acts:new Set(),sort:{k:'filed',dir:-1},hidden:new Set(),menu:false};
+const CNG={rows:[],stat:null,filers:null,watch:new Set(),starred:false,total:0,page:0,tk:'',busy:false,q:'',acts:new Set(),sort:{k:'traded',dir:-1},hidden:new Set(),menu:false};
 CNG.hidden=new Set(CNG_HIDE_DEFAULT);
 try{ const v=JSON.parse(localStorage.getItem(CNG_LS)||'{}');
   if(v.hidden) CNG.hidden=new Set(v.hidden);
@@ -13135,6 +13148,7 @@ async function openCongress(){
     +(q?'&q='+encodeURIComponent(q):'')+(CNG.tk?'&ticker='+encodeURIComponent(CNG.tk):''));
   if(!r||!r.ok){ out.innerHTML=`<div class="msg err">${esc((r&&r.error)||'fetch failed')}</div>`; return; }
   CNG.rows=r.feed||[]; CNG.stat=r.status||null; CNG.filers=r.filers||null; CNG.total=r.total||0;
+  if(r.watch) CNG.watch=new Set(r.watch.map(w=>w.member));
   // A filter or a sort can land the reader past the end of the new result set.
   if(CNG.page&&!CNG.rows.length&&CNG.total){ CNG.page=Math.max(0,Math.ceil(CNG.total/CNG_PAGE)-1); return openCongress(); }
   cngRender();
@@ -13145,8 +13159,10 @@ function cngVisible(){
   // Search, sort and paging all happen in SQL now — a header click has to order every matching
   // transaction, not the page that happens to be loaded. The browser only narrows by direction,
   // which is a view of the page rather than a claim about the whole set.
-  if(!CNG.acts.size) return CNG.rows;
-  return CNG.rows.filter(x=>CNG.acts.has(String(x.act||'').split('-')[0]));
+  let r=CNG.rows;
+  if(CNG.starred) r=r.filter(x=>CNG.watch.has(x.member));
+  if(CNG.acts.size) r=r.filter(x=>CNG.acts.has(String(x.act||'').split('-')[0]));
+  return r;
 }
 function cngRender(){
   const out=el('congress-body'); if(!out) return;
@@ -13162,6 +13178,7 @@ function cngRender(){
     +`<span class="whl-sp"></span>`
     +`<input id="cng-q" class="cng-in" placeholder="filter \u2014 member, ticker, asset" value="${esc(CNG.q)}" maxlength="40" autocomplete="off" spellcheck="false">`
     +['buy','sell','exchange'].map(a=>`<button type="button" class="cng-chip${CNG.acts.has(a)?' on':''}" data-cngact="${a}">${a}</button>`).join('')
+    +`<button type="button" class="cng-chip${CNG.starred?' on':''}" id="cng-starred" data-tip="show only the members you have starred">\u2605 starred${CNG.watch.size?' ('+CNG.watch.size+')':''}</button>`
     +`<button type="button" class="cng-chip" id="cng-colbtn" data-tip="show or hide columns \u2014 remembered on this browser">columns \u25be</button>`
     +`</div>`
     +`<div class="cng-rates">`
@@ -13193,6 +13210,8 @@ function cngRender(){
   }
   const cell=(k,x)=>{
     const lag=cngLag(x);
+    if(k==='star'){ const on=CNG.watch.has(x.member);
+      return `<td class="l"><button type="button" class="cng-star${on?' on':''}" data-cngstar="${esc(x.member)}" data-tip="${esc(on?'starred \u2014 click to remove. New filings by this member raise a congress alert.':'star '+(x.member||'')+' \u2014 keeps them on your list and raises an alert on new filings')}">${on?'\u2605':'\u2606'}</button></td>`; }
     if(k==='filed') return `<td class="l sec">${esc(x.filed||'\u2014')}</td>`;
     if(k==='lag') return `<td class="r"><span class="cng-lag ${lag==null?'na':lag<14?'fast':lag<35?'mid':'slow'}">${lag==null?'\u2014':lag+'d'}</span></td>`;
     if(k==='member') return `<td class="l"><span class="cng-nm">${esc((x.member||'').slice(0,26))}</span><span class="cng-dist">${esc((x.state||'')+(x.dist?'-'+x.dist:''))}</span></td>`;
@@ -13252,6 +13271,14 @@ function cngBind(){
     if(CNG.acts.has(a)) CNG.acts.delete(a); else CNG.acts.add(a);
     cngRender(); });
   const cb=el('cng-colbtn'); if(cb) cb.onclick=()=>{ CNG.menu=!CNG.menu; cngRender(); };
+  const sb=el('cng-starred'); if(sb) sb.onclick=()=>{ CNG.starred=!CNG.starred; cngRender(); };
+  out.querySelectorAll('[data-cngstar]').forEach(b=>b.onclick=async()=>{
+    const m=b.dataset.cngstar, on=!CNG.watch.has(m);
+    if(on) CNG.watch.add(m); else CNG.watch.delete(m);
+    cngRender();                                   // optimistic: the star answers the click at once
+    const r=await cngPost({op:'watch',member:m,on});
+    if(!r||!r.ok){ if(on) CNG.watch.delete(m); else CNG.watch.add(m); cngRender(); }
+  });
   out.querySelectorAll('[data-cngcol]').forEach(inp=>inp.onchange=()=>{
     const k=inp.dataset.cngcol;
     if(inp.checked) CNG.hidden.delete(k); else CNG.hidden.add(k);
