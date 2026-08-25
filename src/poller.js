@@ -5664,14 +5664,26 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // real filing-window URL". So this lane asks for MORE THAN ONE candidate up front, logs every
   // full URL it tried on failure, and reports what the ZIP actually contained on success.
   //
-  // STANDING CAVEAT until the first real ingest lands: the candidate list, the index filename and
-  // the XML element names below are the documented/observed shapes, NOT verified against a live
-  // download. Whichever candidate answers gets written into the ops log and belongs in this
-  // comment afterwards.
+  // VERIFIED IN PRODUCTION 2026-08-25 — the first real ingest, which is the whole reason phase 1
+  // shipped on its own. What the network actually does, replacing the pre-flight guesses:
+  //   - the FIRST candidate answers: /public_disc/financial-pdfs/2026FD.zip
+  //   - the ZIP carries ONLY the index: 0.1MB, 2 entries (2026FD.xml plus a .txt twin), no PDFs.
+  //     That settles the open sizing question — the daily tick is trivially cheap, ~60ms end to
+  //     end. The stream-to-disk path below is therefore unnecessary at this size; it stays because
+  //     it costs nothing and the file grows across a year.
+  //   - the 2026 index holds 1,573 filings, 364 of them PTRs.
+  //   - a second run a minute later wrote 0 new rows: the upsert is idempotent against the REAL
+  //     feed, not merely against the fixture.
+  //   - filing-type codes W, D and H appear in the live index and are NOT in HOUSE_TYPE below.
+  //     They ride as "other" with the raw code stored, which is exactly what that design is for.
+  //     Do NOT guess at them: the Clerk publishes no code table (searched), and the only honest
+  //     way to identify one is to open a filing that carries it — GET /api/congress?type=other —
+  //     and read the document. Until then they are unidentified, not mislabelled.
   const HOUSE_DISC = "https://disclosures-clerk.house.gov/public_disc/";
   // Filing-type codes, mapped only where the meaning is certain. An unmapped code is NOT dropped
   // and NOT guessed: the row is kept, `type` reads "other", and the raw code rides in `typeRaw` so
   // a code that appears later can be identified from stored data instead of a re-crawl.
+  // Observed live but deliberately absent: W, D, H (see the production note above).
   const HOUSE_TYPE = { P: "ptr", O: "annual", A: "amendment", C: "candidate", T: "termination", X: "extension" };
   let congressBusy = false, congressProgress = null, congressLastError = null;
   function houseIndexUrls(y) {
@@ -5718,7 +5730,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         lname: last, fname: first, suffix,
         state: sd.slice(0, 2), dist: sd.slice(2),
         type, typeRaw: code, filed: houseDate(f.FilingDate),
-        url: housePtrUrl(yr, docId),
+        // Only a PTR gets a document URL. The ptr-pdfs path is corroborated by live documents
+        // going back years; the path for every OTHER filing type is NOT verified from here, and a
+        // link that 404s on the 1,209 non-PTR rows of a 1,573-row index is worse than no link.
+        // Phase 2 resolves it if it ever has a reason to fetch one.
+        url: type === "ptr" ? housePtrUrl(yr, docId) : null,
         // The index carries no supersede link — an amendment arrives as its own filing with type A.
         // Resolving which filing an A amends needs the documents themselves, so it waits for phase 2
         // rather than being guessed from name-and-date collisions here.

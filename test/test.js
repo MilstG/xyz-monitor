@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-02"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-03"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20579,6 +20579,7 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
 <Member><DocID>20033726</DocID><FilingDate>12/30/2025</FilingDate><StateDst>TN07</StateDst><FilingType>P</FilingType><Year>2026</Year><Last>Green</Last><First>Mark</First></Member>
 <Member><Last>Khanna</Last><First>Ro</First><Suffix>Jr.</Suffix><FilingType>O</FilingType><StateDst>CA17</StateDst><Year>2026</Year><FilingDate>5/15/2026</FilingDate><DocID>10041234</DocID></Member>
 <Member><Last>Unknown</Last><First>Code</First><FilingType>ZZ</FilingType><StateDst>NY01</StateDst><Year>2026</Year><FilingDate>6/01/2026</FilingDate><DocID>10041235</DocID></Member>
+<Member><Last>Seen</Last><First>InTheWild</First><FilingType>W</FilingType><StateDst>NY02</StateDst><Year>2026</Year><FilingDate>6/02/2026</FilingDate><DocID>10041236</DocID></Member>
 </FinancialDisclosure>`;
   const zip2026 = mkzip([["2026FD.xml", memberXml]]);
   // A year whose ZIP carries the tab-delimited index instead — same fields, read by header name.
@@ -20607,10 +20608,10 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
 
   const r = await p.congressIngestNow(2026);
   assert.ok(r.ok, "2026 ingest: " + (r.error || ""));
-  assert.equal(r.filings, 4, "every member row is stored, not just the PTRs");
+  assert.equal(r.filings, 5, "every member row is stored, not just the PTRs");
   assert.equal(r.ptr, 2, "two filings carry type P");
-  assert.equal(r.added, 4);
-  assert.deepEqual(r.unknownTypes, ["ZZ"], "an unmapped filing-type code is reported, not silently swallowed");
+  assert.equal(r.added, 5);
+  assert.deepEqual(r.unknownTypes, ["ZZ", "W"], "unmapped filing-type codes are reported, not silently swallowed");
 
   const rows = p.congressFilings({ limit: 50 });
   const byId = new Map(rows.map((x) => [x.id, x]));
@@ -20629,11 +20630,20 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   assert.equal(byId.get("H:10041234").type, "annual");
   assert.equal(byId.get("H:10041234").parsed, null, "only PTRs are queued");
   assert.equal(byId.get("H:10041235").type, "other", "an unmapped code lands as other, with the raw code stored");
+  // W, D and H all appear in the real 2026 index and the Clerk publishes no code table. This pins
+  // that they stay honestly unidentified: a future "helpful" guess at a meaning fails here.
+  const w = byId.get("H:10041236");
+  assert.equal(w.type, "other", "a code seen live but undocumented is never assigned a meaning");
+  // A document URL is only ever built for a PTR — the ptr-pdfs path is corroborated, the path for
+  // other filing types is not, and a link that 404s is worse than no link.
+  assert.equal(byId.get("H:10041234").url, null, "a non-PTR filing carries no guessed document URL");
+  assert.equal(w.url, null);
+  assert.ok(pel.url.includes("/ptr-pdfs/"), "a PTR still carries its corroborated document URL");
 
   // Idempotency: the Clerk republishes the SAME zip daily, so a re-ingest must add nothing.
   const r2 = await p.congressIngestNow(2026);
-  assert.ok(r2.ok && r2.added === 0 && r2.filings === 4, "re-ingesting the same index adds nothing");
-  assert.equal(p.congressFilings({ limit: 50 }).length, 4, "and creates no duplicate rows");
+  assert.ok(r2.ok && r2.added === 0 && r2.filings === 5, "re-ingesting the same index adds nothing");
+  assert.equal(p.congressFilings({ limit: 50 }).length, 5, "and creates no duplicate rows");
 
   // The rule a daily re-sync could silently break: phase 2 marks a filing parsed, then tomorrow's
   // sync runs. If the upsert reset parsed to 0, every day would re-queue everything already done.
@@ -20658,7 +20668,7 @@ test("congress -02: House index ingest — candidates, by-name parse, idempotent
   // Status shape — what the admin verb renders.
   const st = p.congressStatus();
   assert.ok(st.ready && st.counts, "status carries readiness and counts");
-  assert.equal(st.counts.n, 5); assert.equal(st.counts.ptr, 3);
+  assert.equal(st.counts.n, 6); assert.equal(st.counts.ptr, 3);
   assert.equal(st.counts.pending, 2, "one of the three PTRs was marked parsed above");
   assert.ok(st.lastSync > 0, "a successful sync stamps the clock");
   assert.deepEqual(st.years.map((y) => y.yr), [2026, 2025], "newest year first");

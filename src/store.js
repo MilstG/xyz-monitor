@@ -979,7 +979,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         for (const r of rows) {
           if (!had.get(r.id)) added++;
           ins.run(r.id, r.chamber, r.docId, r.yr | 0, r.member, r.lname, r.fname, r.suffix || "",
-            r.state || "", r.dist || "", r.type, r.typeRaw || "", r.filed, r.url || "",
+            r.state || "", r.dist || "", r.type, r.typeRaw || "", r.filed, r.url == null ? null : r.url,
             r.amends || null, r.parsed == null ? null : r.parsed | 0, r.nTx == null ? null : r.nTx | 0);
         }
         d.exec("COMMIT");
