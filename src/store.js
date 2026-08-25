@@ -1049,8 +1049,9 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       } catch (_) { return 0; } },
     // The failure breakdown. "unreadable" is a verdict, not a reason; this is the reason.
     congressNotes() { const d = this.openCongress(); if (!d) return [];
-      try { return d.prepare("SELECT COALESCE(pnote,'(none)') note, COUNT(*) n FROM filing"
-        + " WHERE type='ptr' AND pnote IS NOT NULL GROUP BY pnote ORDER BY n DESC LIMIT 8").all(); } catch (_) { return []; } },
+      try { return d.prepare("SELECT CASE WHEN instr(pnote,':')>0 THEN substr(pnote,1,instr(pnote,':')-1) ELSE pnote END note,"
+        + " COUNT(*) n, MAX(pnote) sample FROM filing"
+        + " WHERE type='ptr' AND pnote IS NOT NULL GROUP BY note ORDER BY n DESC LIMIT 8").all(); } catch (_) { return []; } },
     congressBumpTry(fid) { const d = this.openCongress(); if (!d) return;
       try { d.prepare("UPDATE filing SET tries=COALESCE(tries,0)+1 WHERE id=?").run(String(fid)); } catch (_) {} },
     // The feed: transactions newest-FILED first, because the filing date is when the market learned.

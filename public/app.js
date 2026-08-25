@@ -13013,8 +13013,7 @@ async function termCongress(args){
   }
   if(sub==='diag'){
     const doc=(args[1]||'').trim();
-    if(!doc) return termErr('usage: congress diag <docId> \u2014 the numeric id at the end of a source link');
-    const think=termThinking(); const r=await cngPost({op:'diag',doc}); think.remove();
+    const think=termThinking(); const r=await cngPost({op:'diag',doc:doc||undefined}); think.remove();
     if(!r) return termErr('failed');
     const L=[];
     L.push(`<span class="tp-hd">congress diag ${tesc(doc)}</span>`);
