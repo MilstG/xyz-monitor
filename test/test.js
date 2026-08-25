@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-30"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-31"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,36 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -31: the checkbox form is a wall, and it is recognised as one", () => {
+  // The end of the OCR road, established from a real filing rather than reasoned about. diag ran
+  // OCR on a scanned PTR and returned 1331 characters — so the engine reads it fine — including:
+  //   "Exceed. Partial $1001. | 515001 | $50,001 |$100,00- |S250001 | $500.001 | $1,000,001"
+  // Those tiers are COLUMN HEADERS. On this layout the filer ticks a box beneath the right one, so
+  // the amount is never printed on the row. No recognition quality recovers it: the value is the
+  // x-position of a pencil mark on a skewed bilevel scan. Reading that needs mark detection against
+  // column geometry, and getting it wrong means printing a number nobody wrote.
+  const { ocrPtrRows, ocrCheckboxForm } = require("../src/compute");
+  const real = [
+    "NAME. RoR: Khanna P { 8 8",
+    "Cr TI re Ts Te Tel Ue [ow IT TT 5] \"x |",
+    "Exceed. Partial $1001. | 515001 | $50,001 |$100,00- |S250001 | $500.001 | $1,000,001 | $5000.00",
+    "5% 01/01/27 1) 07/08/26 08/03/26",
+    "CMN 07/27/26] _ 08/03/26",
+  ].join("\n");
+  assert.ok(ocrCheckboxForm(real), "the header band of tier boundaries identifies the layout");
+  const r = ocrPtrRows(real, { filed: "2026-08-24" });
+  assert.equal(r.rows.length, 0, "nothing is recovered, because nothing recoverable is present");
+  assert.ok(r.checkbox, "and it is reported as a LAYOUT wall, not as a validation failure");
+  assert.ok(/ticked box/.test(r.dropped[0].why), "with a reason that says why no retry will help");
+  // A typed scan is a different document and must still go down the normal path. These forms write
+  // two-digit years, which costs nothing to accept and is unambiguous inside this data set.
+  const typed = ocrPtrRows("SP Apple Inc. (AAPL) [ST] P 08/13/26 08/14/26 $1,001 - $15,000",
+    { filed: "2026-08-24", known: () => true });
+  assert.equal(typed.rows.length, 1, "a typed scan still yields its row");
+  assert.equal(typed.rows[0].txDate, "2026-08-13", "07/08/26 style dates resolve inside the data set's range");
+  assert.ok(!typed.checkbox);
+});
 
 test("congress -28: a verb is never read as a ticker", () => {
   // 'congress ocr 20' against a build without the verb answered "no congressional transactions on

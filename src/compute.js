@@ -8137,9 +8137,30 @@ function ccittTiff(img) {
 let PTR_TIER_SET = null;
 const ptrTierSet = () => (PTR_TIER_SET
   || (PTR_TIER_SET = new Set(PTR_BANDS.map((b) => b[0] + ":" + b[1]).concat(["50000000:null"]))));
+// The older paper PTR is a CHECKBOX form, and that is a wall rather than a difficulty. Its amount
+// tiers are COLUMN HEADERS printed across the top — OCR of a real one returned
+//   "Exceed. Partial $1001. | 515001 | $50,001 |$100,00- |S250001 | $500.001 | $1,000,001"
+// — and the filer marks a box beneath the right one. The amount is never printed on the row, so no
+// text recognition can recover it at any quality: the value IS the x-position of a pencil mark on a
+// skewed bilevel scan. Reading that needs mark detection against column geometry, and getting it
+// wrong means printing a number nobody wrote. Recognising the layout and saying so is the honest
+// end of this road.
+function ocrCheckboxForm(text) {
+  const t = String(text || "");
+  // Three or more tier boundaries on ONE line is the header band; no transaction row carries them.
+  for (const line of t.split(/\r?\n/)) {
+    const hits = (line.match(/[$S]\s?\d{1,3}[.,]?\d{3}/g) || []).length;
+    if (hits >= 4) return true;
+  }
+  return false;
+}
 function ocrPtrRows(text, opt) {
   const o = opt || {};
   const rows = [], dropped = [];
+  if (ocrCheckboxForm(text)) {
+    return { rows, checkbox: true,
+      dropped: [{ why: "checkbox form — the amount is a ticked box, not text on the row", line: "" }] };
+  }
   for (const raw of String(text || "").split(/\r?\n/)) {
     const line = raw.replace(/\s+/g, " ").trim();
     if (!line) continue;
@@ -8151,13 +8172,14 @@ function ocrPtrRows(text, opt) {
       continue;
     }
     // 2. a clean transaction date, and nothing salvaged from a mangled one.
-    const dm = line.match(/\b(\d{2})\/(\d{2})\/(\d{4})\b/);
+    const dm = line.match(/\b(\d{2})\/(\d{2})\/(\d{2}|\d{4})\b/);
     if (!dm) { dropped.push({ why: "no clean transaction date", line: line.slice(0, 110) }); continue; }
-    const mo = +dm[1], dy = +dm[2], yr = +dm[3];
+    // These forms write 07/08/26. A two-digit year is unambiguous within this data set's range.
+    const mo = +dm[1], dy = +dm[2], yr = dm[3].length === 2 ? 2000 + +dm[3] : +dm[3];
     if (!(mo >= 1 && mo <= 12 && dy >= 1 && dy <= 31 && yr >= 2008 && yr <= 2100)) {
       dropped.push({ why: "date out of range", line: line.slice(0, 110) }); continue;
     }
-    const txDate = dm[3] + "-" + dm[1] + "-" + dm[2];
+    const txDate = yr + "-" + dm[1] + "-" + dm[2];
     // 3. a report cannot predate its own trade.
     if (o.filed && txDate > o.filed) { dropped.push({ why: "trade dated after the filing", line: line.slice(0, 110) }); continue; }
     // 4. the action must be exactly P, S or E standing alone. "3" is not a transaction type, and
@@ -8342,4 +8364,5 @@ module.exports.PTR_TICKERABLE = PTR_TICKERABLE;
 module.exports.pdfImages = pdfImages;
 module.exports.ccittTiff = ccittTiff;
 module.exports.ocrPtrRows = ocrPtrRows;
+module.exports.ocrCheckboxForm = ocrCheckboxForm;
 module.exports.PTR_NO_TICKER = PTR_NO_TICKER;
