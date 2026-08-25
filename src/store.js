@@ -981,6 +981,9 @@ CREATE TABLE IF NOT EXISTS watch(member TEXT PRIMARY KEY, at INTEGER, notify INT
         // The form's own asset-type code: what kind of thing was traded, and therefore whether a
         // ticker could exist for it at all.
         try { congress.exec("ALTER TABLE tx ADD COLUMN atype TEXT"); } catch (_) {}
+        // Where a row came from: the PDF's own text layer, or OCR of a photographed page. A weaker
+        // provenance, so it is stored rather than blended in.
+        try { congress.exec("ALTER TABLE tx ADD COLUMN src TEXT"); } catch (_) {}
         return congress;
       } catch (_) { congress = null; return null; }
     },
@@ -1036,16 +1039,24 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       try { return d.prepare("SELECT id, yr, url, member, filed, state, dist FROM filing WHERE type='ptr' AND parsed=0 AND url IS NOT NULL"
         + " AND (tries IS NULL OR tries < ?) ORDER BY filed DESC, id DESC LIMIT ?")
         .all(maxTries == null ? 5 : maxTries | 0, Math.max(1, Math.min(500, limit | 0 || 25))); } catch (_) { return []; } },
+    // The OCR queue is the SCANNED pile — filings the text parser correctly gave up on. Ordered
+    // newest first, and skipping any that OCR has already been tried on, so a run resumes rather
+    // than grinding the same documents.
+    congressOcrQueue(limit) { const d = this.openCongress(); if (!d) return [];
+      try { return d.prepare("SELECT id, yr, url, member, filed, state, dist FROM filing"
+        + " WHERE type='ptr' AND parsed=2 AND url IS NOT NULL AND (pnote IS NULL OR pnote NOT LIKE 'ocr%')"
+        + " ORDER BY filed DESC, id DESC LIMIT ?").all(Math.max(1, Math.min(200, limit | 0 || 20))); }
+      catch (_) { return []; } },
     congressSaveTx(fid, rows) { const d = this.openCongress(); if (!d) return 0;
       const del = d.prepare("DELETE FROM tx WHERE fid=?");
-      const ins = d.prepare("INSERT INTO tx(fid,ln,owner,asset,ticker,act,txDate,notified,loAmt,hiAmt,tkSrc,atype) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
+      const ins = d.prepare("INSERT INTO tx(fid,ln,owner,asset,ticker,act,txDate,notified,loAmt,hiAmt,tkSrc,atype,src) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)");
       const mark = d.prepare("UPDATE filing SET parsed=1, nTx=?, tries=0 WHERE id=?");
       d.exec("BEGIN");
       try {
         del.run(String(fid));                          // re-parsing a filing replaces its rows wholesale
         rows.forEach((r, i) => ins.run(String(fid), i, r.owner, String(r.asset).slice(0, 160), r.ticker,
           r.act, r.txDate, r.notified, r.loAmt == null ? null : +r.loAmt, r.hiAmt == null ? null : +r.hiAmt,
-          r.tkSrc || (r.ticker ? "form" : null), r.atype || null));
+          r.tkSrc || (r.ticker ? "form" : null), r.atype || null, r.src || "pdf"));
         mark.run(rows.length, String(fid));
         d.exec("COMMIT");
       } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} throw e; }
@@ -1100,7 +1111,7 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
       const col = SORTS[o.sort] || SORTS.filed;
       const dir = (o.dir == null || Number.isNaN(+o.dir) ? -1 : +o.dir) < 0 ? "DESC" : "ASC";
       try { return d.prepare(`SELECT f.filed, f.member, f.state, f.dist, f.url, t.fid, t.ln, t.owner, t.asset,
-        t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt, t.tkSrc, t.atype
+        t.ticker, t.act, t.txDate, t.notified, t.loAmt, t.hiAmt, t.tkSrc, t.atype, t.src
         FROM tx t JOIN filing f ON f.id=t.fid WHERE ${where.join(" AND ")}
         ORDER BY ${col} ${dir}, f.filed DESC, t.fid DESC, t.ln LIMIT ? OFFSET ?`)
         .all(...args, lim, off); } catch (_) { return []; } },
@@ -1200,13 +1211,14 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
         const u = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=2").get() || {};
         const q = d.prepare("SELECT COUNT(*) n FROM filing WHERE type='ptr' AND parsed=0").get() || {};
         const t = d.prepare("SELECT COUNT(*) n, SUM(CASE WHEN ticker IS NULL THEN 0 ELSE 1 END) got,"
-          + " SUM(CASE WHEN tkSrc='n/a' THEN 1 ELSE 0 END) na FROM tx").get() || {};
+          + " SUM(CASE WHEN tkSrc='n/a' THEN 1 ELSE 0 END) na,"
+          + " SUM(CASE WHEN src='ocr' THEN 1 ELSE 0 END) ocr FROM tx").get() || {};
         // You cannot file a report before the trade it reports. A row that claims otherwise is a
         // misparse, and it has to be counted rather than rendered as a -320 day lag.
         const bad = d.prepare("SELECT COUNT(*) n FROM tx t JOIN filing f ON f.id=t.fid"
           + " WHERE t.txDate IS NOT NULL AND f.filed<>'' AND t.txDate > f.filed").get() || {};
         return { parsed: p.n || 0, unreadable: u.n || 0, pending: q.n || 0,
-          tx: t.n || 0, resolved: t.got || 0, noTicker: t.na || 0, badDate: bad.n || 0,
+          tx: t.n || 0, resolved: t.got || 0, noTicker: t.na || 0, badDate: bad.n || 0, ocr: t.ocr || 0,
           notes: this.congressNotes() };
       } catch (_) { return null; } },
     congressFilings(opt) { const d = this.openCongress(); if (!d) return [];

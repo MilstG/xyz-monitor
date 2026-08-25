@@ -21,7 +21,7 @@ const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCor
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
-const { pdfTextRuns, ptrRows, parsePtr } = require("./compute");
+const { pdfTextRuns, ptrRows, parsePtr, pdfImages, ccittTiff, ocrPtrRows } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
@@ -6072,6 +6072,86 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     pushOps("congress PTR parse", note, failed && !parsed ? "warn" : "info", true);
     log("congress: parse run — " + note);
     return { ok: true, done: queue.length, parsed, tx, scanned, notPdf, failed, stats: st };
+  }
+  // ---- CONGRESS OCR: reading the photographed filings ------------------------------------------
+  // Roughly a tenth of House PTRs are photographs — the Clerk scans paper filings to CCITT Group 4,
+  // 18 bilevel strips in the one that prompted this. The text parser is right to give up on them;
+  // this lane picks them up afterwards, deliberately separate so a slow, lossy process can never
+  // hold up or degrade the exact one.
+  //
+  // Nothing here is trusted on arrival. ocrPtrRows is a gate: measured against real engine output,
+  // amounts and trade dates survive intact while a transaction type can read as "3" and a
+  // notification date can lose its slashes. A row is admitted only if every critical field is
+  // independently well-formed, and everything rejected is counted with a reason.
+  const OCR_PAGE_CAP = 8;              // pages per filing — the table is at the front, not page 14
+  const OCR_DOC_CAP = 20;              // documents per run: OCR is seconds per page, not milliseconds
+  let congressOcrBusy = false;
+  async function congressOcr(limitArg) {
+    if (congressOcrBusy) return { ok: false, error: "an OCR run is already going" };
+    if (!store.congressOcrQueue) return { ok: false, error: "sqlite unavailable in this runtime" };
+    const queue = store.congressOcrQueue(+limitArg || OCR_DOC_CAP);
+    if (!queue.length) return { ok: true, done: 0, note: "no scanned filings waiting" };
+    let worker = null;
+    congressOcrBusy = true;
+    let read = 0, rowsTotal = 0, empty = 0, failed = 0, pages = 0, first = null;
+    try {
+      const { createWorker } = require("tesseract.js");
+      const path2 = require("path");
+      // Language data is vendored through npm, so this works with no network at all. A CDN fetch at
+      // runtime would make every deploy depend on jsdelivr being reachable.
+      worker = await createWorker("eng", 1, {
+        langPath: path2.join(process.cwd(), "node_modules/@tesseract.js-data/eng/4.0.0_best_int"),
+        gzip: true, cachePath: require("os").tmpdir(), logger: () => {} });
+      const tmap = await whaleTickerMap().catch(() => null);
+      const known = (sym) => !tmap || !!whaleTickerOf(sym, tmap) || tmap.has(sym) ||
+        [...tmap.values()].includes(sym);
+      for (const f of queue) {
+        try {
+          const ac = new AbortController();
+          const to = setTimeout(() => ac.abort(), 40 * 1000);
+          let res;
+          try { res = await extFetch(f.url, { headers: { "user-agent": SEC_UA }, signal: ac.signal }); }
+          finally { clearTimeout(to); }
+          if (!res || !res.ok) { failed++; if (!first) first = f.id + " \u2192 HTTP " + (res ? res.status : "no response"); continue; }
+          const buf = Buffer.from(await res.arrayBuffer());
+          const imgs = pdfImages(buf).filter((i) => i.ready);
+          if (!imgs.length) { store.congressNote(f.id, "ocr-no-usable-image"); empty++; continue; }
+          let text = "";
+          for (const img of imgs.slice(0, OCR_PAGE_CAP)) {
+            const payload = img.filter === "CCITTFaxDecode" ? ccittTiff(img) : img.data;
+            if (!payload) continue;
+            try { const r = await worker.recognize(payload); text += "\n" + (r.data.text || ""); pages++; }
+            catch (_) { /* one unreadable page must not lose the rest of the filing */ }
+          }
+          const out = ocrPtrRows(text, { filed: f.filed || null, known });
+          if (!out.rows.length) {
+            // Read, but nothing survived the gate. That is a real outcome and it is recorded as one.
+            store.congressNote(f.id, "ocr-nothing-passed-validation:" + (out.dropped[0] ? out.dropped[0].why : "no candidate rows"));
+            empty++;
+            continue;
+          }
+          store.congressSaveTx(f.id, out.rows);
+          store.congressNote(f.id, "ocr:" + out.rows.length + " row(s), " + out.dropped.length + " dropped");
+          read++; rowsTotal += out.rows.length;
+          congressAlert(f, out.rows);
+        } catch (e) { failed++; if (!first) first = f.id + " \u2192 " + String(e && e.message).slice(0, 60); }
+      }
+    } catch (e) {
+      congressOcrBusy = false;
+      pushOps("congress OCR", "could not start: " + String(e && e.message).slice(0, 140), "warn", true);
+      return { ok: false, error: String(e && e.message).slice(0, 200) };
+    } finally {
+      try { if (worker) await worker.terminate(); } catch (_) {}
+      congressOcrBusy = false;
+    }
+    const st = store.congressParseStats();
+    const note = read + " scanned filing(s) recovered (" + rowsTotal + " transactions from " + pages + " page(s))"
+      + (empty ? ", " + empty + " read but nothing passed validation" : "")
+      + (failed ? ", " + failed + " failed (first: " + first + ")" : "")
+      + (st ? " \u00b7 " + st.ocr + " OCR row(s) total" : "");
+    pushOps("congress OCR", note, read || !failed ? "info" : "warn", true);
+    log("congress: OCR run \u2014 " + note);
+    return { ok: true, done: queue.length, read, rows: rowsTotal, pages, empty, failed, stats: st };
   }
   // One document, end to end, reported in full: what came back, whether it is even a PDF, how much
   // text the extractor found, what the rows look like, and what the parser made of them. This is
@@ -13321,6 +13401,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     // CONGRESS lane phase 1 (2026.08.24-02): admin-only index ingest — no public payload yet.
     congressIngestNow: congressIngest, congressTickNow: congressTick, congressStatus,
     congressParseNow: congressParse, congressDiagNow: congressDiag, congressRequeueNow: congressRequeue,
+    congressOcrNow: congressOcr,
     congressBackfillNow: congressBackfill,
     congressFilerSearch: (q) => (store.congressFilerSearch ? store.congressFilerSearch(q) : []),
     congressAlertNow: congressAlert,             // harness: the age guard is pinned by test

@@ -8066,11 +8066,64 @@ function pdfImages(buf) {
     const f = (o.dict.match(/\/Filter\s*\/?\[?\s*\/([A-Za-z0-9]+)/) || [])[1] || null;
     const gi = (k) => { const m = o.dict.match(new RegExp("\\/" + k + "\\s+(\\d+)")); return m ? +m[1] : null; };
     out.push({ num, filter: f, width: gi("Width"), height: gi("Height"), bpc: gi("BitsPerComponent"),
-      bytes: o.data.length, data: o.data,
+      bytes: o.data.length, data: o.data, dict: o.dict,
       // Only these arrive as a file an image decoder already understands.
-      ready: f === "DCTDecode" || f === "JPXDecode" });
+      // "ready" means an engine can open these bytes as they stand. CCITT cannot be opened, but it
+      // can be WRAPPED in a TIFF, which is the same thing one header away.
+      ready: f === "DCTDecode" || f === "JPXDecode" || f === "CCITTFaxDecode" });
   }
   return out.sort((a, b) => b.bytes - a.bytes);
+}
+
+// CCITT Group 3/4 is what the Clerk's scanner emits — 18 bilevel strips of 2200x1696 in the filing
+// that prompted this. Those bytes are not a file any decoder opens, but CCITT is natively a TIFF
+// compression scheme, so the strip can be WRAPPED rather than decoded: build a TIFF header around
+// it and hand that to an engine whose libtiff already speaks G4. Writing a fax decoder to feed a
+// library that contains one would be work done twice.
+function ccittTiff(img) {
+  if (!img || !img.data || img.filter !== "CCITTFaxDecode") return null;
+  const parm = (k, dflt) => {
+    const m = String(img.dict || "").match(new RegExp("\\/" + k + "\\s*(-?\\d+)"));
+    return m ? +m[1] : dflt;
+  };
+  const K = parm("K", 0);
+  const cols = parm("Columns", img.width || 1728);
+  const rows = parm("Rows", img.height || 0) || img.height || 0;
+  if (!cols || !rows) return null;
+  // K < 0 is pure two-dimensional coding (Group 4). K >= 0 is Group 3.
+  const comp = K < 0 ? 4 : 3;
+  // Fax is white-is-zero unless the filing says otherwise; PDF's BlackIs1 inverts that sense.
+  const blackIs1 = /\/BlackIs1\s+true/.test(String(img.dict || ""));
+  const photometric = blackIs1 ? 1 : 0;
+  const tags = [
+    [256, 3, 1, cols],          // ImageWidth
+    [257, 3, 1, rows],          // ImageLength
+    [258, 3, 1, 1],             // BitsPerSample
+    [259, 3, 1, comp],          // Compression: 3 = G3, 4 = G4
+    [262, 3, 1, photometric],   // PhotometricInterpretation
+    [273, 4, 1, 0],             // StripOffsets — patched to the data offset below
+    [277, 3, 1, 1],             // SamplesPerPixel
+    [278, 3, 1, rows],          // RowsPerStrip: one strip
+    [279, 4, 1, img.data.length],
+    [266, 3, 1, 1],             // FillOrder: most significant bit first
+  ];
+  if (comp === 4) tags.push([293, 4, 1, 0]);                 // T6Options
+  else tags.push([292, 4, 1, K > 0 ? 1 : 0]);                // T4Options: bit 0 = 2D coding
+  tags.sort((a, b) => a[0] - b[0]);
+  const ifdOff = 8, dataOff = ifdOff + 2 + tags.length * 12 + 4;
+  const head = Buffer.alloc(dataOff);
+  head.write("II", 0, "latin1");
+  head.writeUInt16LE(42, 2);
+  head.writeUInt32LE(ifdOff, 4);
+  head.writeUInt16LE(tags.length, ifdOff);
+  let t = ifdOff + 2;
+  for (const [id, ty, cnt, val] of tags) {
+    head.writeUInt16LE(id, t); head.writeUInt16LE(ty, t + 2);
+    head.writeUInt32LE(cnt, t + 4); head.writeUInt32LE(id === 273 ? dataOff : val, t + 8);
+    t += 12;
+  }
+  head.writeUInt32LE(0, t);
+  return Buffer.concat([head, img.data]);
 }
 
 // OCR text -> transactions, under a GATE rather than a cleanup. Measured on a rendered filing:
@@ -8287,5 +8340,6 @@ module.exports.parsePtr = parsePtr;
 module.exports.PTR_BANDS = PTR_BANDS;
 module.exports.PTR_TICKERABLE = PTR_TICKERABLE;
 module.exports.pdfImages = pdfImages;
+module.exports.ccittTiff = ccittTiff;
 module.exports.ocrPtrRows = ocrPtrRows;
 module.exports.PTR_NO_TICKER = PTR_NO_TICKER;

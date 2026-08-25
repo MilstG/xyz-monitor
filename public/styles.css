@@ -2080,3 +2080,7 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .cng-lag.bad{color:var(--down);font-weight:600}
 .cng-diaghint{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--rule,#262E39);
   border-radius:2px;padding:0 5px;margin-left:4px}
+/* A row read by OCR from a photograph: it passed a strict gate, but it is a weaker reading than a
+   text filing and should never be indistinguishable from one. */
+.cng-ocr{font-family:var(--mono);font-size:9px;letter-spacing:.08em;border:1px solid var(--accent-dim);
+  color:var(--accent);border-radius:2px;padding:0 4px;vertical-align:1px}
