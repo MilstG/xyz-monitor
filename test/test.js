@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-10"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-11"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20995,6 +20995,13 @@ test("congress -04: parse queue — scans marked once, transient failures retrie
   assert.equal(p2.congressStatus().parse.unreadable, 1);
   assert.equal(p2.congressRequeueNow().requeued, 1, "requeue puts a condemned filing back");
   assert.equal(p2.congressStatus().parse.unreadable, 0);
+  // A filing that PARSED but yielded zero transactions is what a parser fix repairs, so requeue all
+  // has to reach it. Leaving it at parsed=1 made it permanently invisible to a re-run — the same
+  // trap as a wrong unreadable verdict, one state along.
+  store2.congressSaveTx("H:20000002", []);
+  assert.equal(p2.congressStatus().parse.parsed, 1, "parsed, but with nothing in it");
+  assert.ok(p2.congressRequeueNow("all").requeued >= 1, "requeue all reaches a parsed-but-empty filing");
+  assert.equal(p2.congressStatus().parse.parsed, 0, "so a mapping fix can replay it");
   fs.rmSync(dir2, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -1042,7 +1042,8 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
     // classification mistake is permanent, which is exactly the trap 222 "scans" walked into.
     congressRequeue(which) { const d = this.openCongress(); if (!d) return 0;
       try {
-        const sql = which === "all" ? "UPDATE filing SET parsed=0, tries=0, pnote=NULL WHERE type='ptr' AND parsed<>1"
+        const sql = which === "all"
+          ? "UPDATE filing SET parsed=0, tries=0, pnote=NULL WHERE type='ptr' AND (parsed<>1 OR COALESCE(nTx,0)=0)"
           : "UPDATE filing SET parsed=0, tries=0, pnote=NULL WHERE type='ptr' AND parsed=2";
         const r = d.prepare(sql).run();
         return r && r.changes != null ? r.changes : 0;
