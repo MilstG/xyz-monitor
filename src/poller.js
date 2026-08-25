@@ -21,6 +21,7 @@ const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCor
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
   pca2, hourReturnMeans, hourReturnStats, pearson,
   fourHourReturns, tapeRedStats, rvolMulti } = require("./compute");
+const { pdfTextRuns, ptrRows, parsePtr } = require("./compute");
 const { etDayStr, earnDayDiff, earnEntryState, parseEarningsCalendar, mergeEarnPrints, scrubPlaceholderActuals, earnReactionsFor, recentEarnPrints, earnChunks, purgeStalePrints, reconcileEarnPrints, mergeNews, newsRelevant, topicHit, parseTgPreview, attributeTg, parseEdgarAtom, linkEarningsFilings, pickXbrlFacts, parseNportHoldings } = require("./compute");
 const { bucketCandles, trendLadder, trendRead, withFormingDaily, stackedRun, TREND_TFS, ribbonWidth, TREND_TF_MS, median, corrMatrix } = require("./compute");
 const { closedBars, closedLadder, emaLast, emaCrossOutcomes, emaCrossStudy, emaAlertState } = require("./compute");
@@ -175,7 +176,7 @@ function rnd(x, dp) { return Number.isFinite(x) ? +x.toFixed(dp) : null; }
 function sig(x, n) { return Number.isFinite(x) ? (x === 0 ? 0 : +x.toPrecision(n)) : null; }
 const sigq = sig;   // alias for scopes that shadow `sig` locally (buildDaily declares its content-signature as `sig`)
 
-function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt }) {
+function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, pushFetch: pushFetchOpt, extFetch: extFetchOpt, t13fCap: t13fCapOpt, congressGap: congressGapOpt }) {
   const rows = new Map();          // coin -> row
   const hist = store.loadAll(Date.now() - OI_RETENTION); // coin -> [[ts, oi], ...]
   let order = [];
@@ -5844,6 +5845,53 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const d = new Date(now), yr = d.getUTCFullYear();
     await congressIngest(yr).catch(() => {});
     if (d.getUTCMonth() <= 1) await congressIngest(yr - 1).catch(() => {});
+    await congressParse().catch(() => {});      // work whatever the refreshed index just queued
+  }
+  // ---- CONGRESS phase 2: the PTR parse queue --------------------------------------------------
+  // Filings the index found but nobody has read yet. Politeness first: one document a second, a cap
+  // per run, and resumable — the queue IS the parsed=0 rows, so an interrupted run leaves no
+  // half-state to reconcile. A fetch that fails transiently bumps `tries` and comes back; a
+  // document with no text operators at all is a scan, which is permanent, so it is marked once and
+  // never re-fetched. The difference matters: without it a few hundred scanned filings would
+  // consume the whole rate budget every single day, forever.
+  const CONGRESS_PARSE_CAP = 40;          // documents per run
+  const CONGRESS_PARSE_GAP = congressGapOpt == null ? 1000 : +congressGapOpt;   // ms between fetches (0 in tests)
+  let congressParseBusy = false;
+  async function congressParse(limitArg) {
+    if (congressParseBusy) return { ok: false, error: "a parse run is already going" };
+    if (!store.congressReady || !store.congressReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
+    const lim = Math.max(1, Math.min(200, +limitArg || CONGRESS_PARSE_CAP));
+    const queue = store.congressQueue(lim);
+    if (!queue.length) return { ok: true, done: 0, note: "queue empty" };
+    congressParseBusy = true;
+    let parsed = 0, tx = 0, scanned = 0, failed = 0, first = null;
+    try {
+      for (const f of queue) {
+        try {
+          const res = await extFetch(f.url, { headers: { "user-agent": SEC_UA } });
+          if (!res || !res.ok) { store.congressBumpTry(f.id); failed++;
+            if (!first) first = f.id + " → HTTP " + (res ? res.status : "no response"); continue; }
+          const buf = Buffer.from(await res.arrayBuffer());
+          const runs = pdfTextRuns(buf);
+          if (!runs.length) { store.congressMarkUnreadable(f.id); scanned++; continue; }
+          const out = parsePtr(ptrRows(runs));
+          // A text PDF that yields no transaction row is NOT the same as a scan: it parsed, it just
+          // had nothing this parser recognized. It is saved as zero rows so it leaves the queue and
+          // shows up in the counts as a parsed filing with no transactions — visible, not silent.
+          store.congressSaveTx(f.id, out.tx);
+          parsed++; tx += out.tx.length;
+        } catch (e) { store.congressBumpTry(f.id); failed++;
+          if (!first) first = f.id + " → " + String(e && e.message).slice(0, 60); }
+        if (CONGRESS_PARSE_GAP) await new Promise((r) => setTimeout(r, CONGRESS_PARSE_GAP));
+      }
+    } finally { congressParseBusy = false; }
+    const st = store.congressParseStats();
+    const note = parsed + " parsed (" + tx + " transactions)" + (scanned ? ", " + scanned + " scanned/unreadable" : "")
+      + (failed ? ", " + failed + " fetch failures (first: " + first + ")" : "")
+      + " · queue now " + (st ? st.pending : "?");
+    pushOps("congress PTR parse", note, failed && !parsed ? "warn" : "info", true);
+    log("congress: parse run — " + note);
+    return { ok: true, done: queue.length, parsed, tx, scanned, failed, stats: st };
   }
   function congressStatus() {
     const last = +(store.congressMeta && store.congressMeta("lastSync")) || 0;
@@ -5851,6 +5899,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       busy: congressBusy, progress: congressProgress, lastSync: last || null,
       lastError: congressLastError,
       counts: (store.congressCounts && store.congressCounts()) || null,
+      parse: (store.congressParseStats && store.congressParseStats()) || null,
+      parsing: congressParseBusy,
       years: (store.congressYears && store.congressYears()) || [] };
   }
 
@@ -12997,7 +13047,10 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     whale13fIngestNow: whale13fIngest, whale13fTickNow: whale13fTick, t13fStatus,
     // CONGRESS lane phase 1 (2026.08.24-02): admin-only index ingest — no public payload yet.
     congressIngestNow: congressIngest, congressTickNow: congressTick, congressStatus,
+    congressParseNow: congressParse,
     congressFilings: (o) => (store.congressFilings ? store.congressFilings(o) : []),
+    congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
+    congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
     houseIndexUrls,                              // harness: the candidate list is pinned by test
     whaleTickNow: whaleTick,                     // harness: one poll pass at an injected clock
     hydrateWhaleNow: whaleHydrate,               // harness: hydrate whale state from the (stubbed) store without start()

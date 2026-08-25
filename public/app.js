@@ -13005,6 +13005,22 @@ async function termCongress(args){
     const r=await cngPost({op:'ingest',year:yr?+yr:undefined});
     return r&&r.ok?termOut(`<span class="pos">index ingest started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
   }
+  if(sub==='parse'){
+    const r=await cngPost({op:'parse',n:+(args[1]||0)||undefined});
+    return r&&r.ok?termOut(`<span class="pos">parse run started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  if(sub==='feed'){
+    const r=await cngGet('?feed=1&limit=20'); if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
+    const rows=r.feed||[];
+    if(!rows.length) return termOut('<span class="sec">no parsed transactions yet</span> <span class="tp-trans">\u00b7 admin: congress parse</span>');
+    const money=(v)=>v==null?'\u2014':'$'+Math.round(v).toLocaleString();
+    const body=rows.map(x=>{
+      const lag=x.filed&&x.txDate?Math.round((Date.parse(x.filed)-Date.parse(x.txDate))/86400000):null;
+      const dir=/^buy/.test(x.act)?'pos':/^sell/.test(x.act)?'neg':'amber';
+      return `  ${tpad(tesc(x.filed||''),11)} ${tpad(lag==null?'\u2014':lag+'d',5,true)} ${tpad(tesc((x.member||'').slice(0,22)),23)} ${tpad(tesc(x.ticker||'\u2014'),7)} <span class="${dir}">${tpad(tesc(x.act),13)}</span> ${tesc('\u2265 '+money(x.loAmt))}`;
+    }).join('\n');
+    return termOut(`<span class="tp-hd">congress \u00b7 PTR feed</span> <span class="tp-trans">\u00b7 newest FILED first \u2014 the filing date is when the market learned, not the trade date</span>\n${body}\n<span class="tp-trans">amounts are the disclosed band FLOOR (\u2265) \u2014 a PTR discloses a range, never a figure</span>`);
+  }
   if(sub==='status'){
     const r=await cngGet(); if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
     const st=r.status||{}, c=st.counts||{};
@@ -13017,9 +13033,17 @@ async function termCongress(args){
     const err=st.lastError?`\n  <span class="tp-err">last error</span> ${tesc(String(st.lastError).slice(0,160))}`:'';
     return termOut(head+body+err);
   }
-  return termErr('usage: congress status | congress ingest [year]');
+  if(/^[A-Za-z.]{1,6}$/.test(sub)){
+    const r=await cngGet('?ticker='+encodeURIComponent(sub.toUpperCase()));
+    if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
+    if(!r.roll) return termOut(`<span class="sec">no congressional transactions on ${tesc(sub.toUpperCase())}</span> <span class="tp-trans">\u00b7 in what has been parsed so far</span>`);
+    const R=r.roll, money=(v)=>'$'+Math.round(v).toLocaleString();
+    const body=R.members.map(m=>`  ${tpad(tesc(m.member.slice(0,24)),25)} ${tpad(String(m.n),3,true)} <span class="${m.buys>m.sells?'pos':m.sells>m.buys?'neg':'sec'}">${tpad(m.buys+'b/'+m.sells+'s',8)}</span> ${tpad(m.medLag==null?'\u2014':m.medLag+'d',6,true)} ${tpad('\u2265 '+money(m.floor),14,true)} ${tesc(m.last||'')}`).join('\n');
+    return termOut(`<span class="tp-hd">${tesc(R.ticker)} \u00b7 congressional flow</span> <span class="tp-trans">\u00b7 ${R.filings} transaction(s) \u00b7 ${R.buys} buy / ${R.sells} sell \u00b7 \u2265 ${money(R.floor)} disclosed floor</span>\n${body}\n<span class="tp-trans">\u2265 sums the LOW end of every disclosed band \u2014 a hard floor, never an estimate of the real total</span>`);
+  }
+  return termErr('usage: congress status | ingest [year] | parse [n] | feed | <TICKER>');
 }
-async function cngGet(){ try{ return await fetchJSON('/api/congress'); }catch(e){ return {ok:false,error:e.message||'fetch failed'}; } }
+async function cngGet(qs){ try{ return await fetchJSON('/api/congress'+(qs||'')); }catch(e){ return {ok:false,error:e.message||'fetch failed'}; } }
 async function cngPost(body){ try{ const r=await fetch('/api/congress',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   return await r.json(); }catch(e){ return {ok:false,error:e.message||'post failed'}; } }
 async function termWhale(args){
