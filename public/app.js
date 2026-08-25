@@ -13197,14 +13197,21 @@ function cngRender(){
   const filerNote=()=>{
     const f=CNG.filers;
     if(!f||!f.length) return CNG.q.trim()?`<div class="cng-note">no filer matching \u201c${esc(CNG.q.trim())}\u201d in the ${(c.n||0).toLocaleString()} filings this lane has indexed. The index currently covers ${esc((st.years||[]).map(y=>y.yr).join(', ')||'no years')} \u2014 earlier years are not loaded until an admin runs <b>congress backfill</b>.</div>`:'';
-    return `<div class="cng-note"><span class="k">in the index</span>${f.map(x=>
+    return `<div class="cng-note"><span class="k">in the index</span>${f.map(x=>{
+      // A member whose every filing is a photograph will never appear in the table, however long
+      // you wait or how often you re-parse. Saying so once beats leaving it to be inferred from a
+      // breakdown each time.
+      const allScan=x.n&&!x.done&&!x.queued&&(x.unreadable+x.empty)>=x.n;
+      return allScan
+        ? `<span data-tip="${esc(x.n+' PTR filing(s), every one of them a photographed paper filing. This lane reads text PDFs and has no OCR, so this member has no transactions to show and re-parsing will not change that.')}"><b>${esc(x.member)}</b> ${x.n} PTR \u00b7 <span class="neg">files on paper \u2014 unreadable without OCR</span></span>`
+        :
       `<span data-tip="${esc(x.n+' PTR filing(s) '+(x.yr0===x.yr1?'in '+x.yr0:'between '+x.yr0+' and '+x.yr1)+', last filed '+(x.last||'?'))}">`
       +`<b>${esc(x.member)}</b> ${x.n} PTR`
       +(x.done?` \u00b7 <span class="pos">${x.done} with transactions</span>`:'')
       +(x.empty?` \u00b7 <span class="neg" data-tip="these filings were read \u2014 text came out of the PDF \u2014 but the parser recognized no transaction rows in them, so there is nothing to show in the table. That is a parser gap, not an empty filing. Diagnose one with: congress diag ${esc(x.emptyDoc||'')}">${x.empty} read but no rows recognized</span>${x.emptyDoc?` <span class="cng-diaghint">congress diag ${esc(x.emptyDoc)}</span>`:''}`:'')
       +(x.queued?` \u00b7 <span class="amber" data-tip="found in the index, not read yet. Terminal: congress parse">${x.queued} queued</span>`:'')
       +(x.unreadable?` \u00b7 <span class="neg" data-tip="photographed paper filings. There is no OCR in this lane, so these can never yield transactions.">${x.unreadable} scanned</span>`:'')
-      +`</span>`).join('')}</div>`;
+      +`</span>`;}).join('')}</div>`;
   };
   if(!rows.length){
     out.innerHTML=head+filerNote()
