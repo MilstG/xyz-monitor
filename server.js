@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.24-15";
+const VERSION = "2026.08.24-16";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1138,6 +1138,7 @@ async function main() {
     // flag flip rather than an edit to this file. The POST below is a different axis and rechecks.
     const q = req.query || {};
     const lim = +q.limit || 25;
+    if (q.watch) return { ok: true, watch: poller.congressWatchList() };
     if (q.ticker) return { ok: true, roll: poller.congressTickerRoll(String(q.ticker)) };
     if (q.feed) {
       const qq = q.q ? String(q.q).slice(0, 40) : null;
@@ -1145,7 +1146,8 @@ async function main() {
         feed: poller.congressFeed({ limit: lim, since: q.since ? String(q.since) : null, q: qq,
           ticker: q.ticker ? String(q.ticker) : null }),
         // When a search comes up thin, the INDEX still knows whether that member filed at all.
-        filers: qq ? poller.congressFilerSearch(qq) : null };
+        filers: qq ? poller.congressFilerSearch(qq) : null,
+        watch: poller.congressWatchList() };
     }
     return { ok: true, status: poller.congressStatus(),
       filings: poller.congressFilings({ type: q.type ? String(q.type) : null, limit: lim }) };
@@ -1161,6 +1163,7 @@ async function main() {
       return { ok: true, started: 1, note: "parse run started \u2014 one document a second, progress in the ops log" }; }
     if (op === "diag") return poller.congressDiagNow(String(b.doc || ""));
     if (op === "requeue") return poller.congressRequeueNow(b.all ? "all" : null);
+    if (op === "watch") return poller.congressWatchSet(String(b.member || ""), b.on !== false, b.notify !== false);
     if (op === "backfill") { poller.congressBackfillNow(+b.years || undefined).catch(() => {});
       return { ok: true, started: 1, note: "backfill started \u2014 one prior year at a time, progress in the ops log" }; }
     if (op === "status") return { ok: true, status: poller.congressStatus() };

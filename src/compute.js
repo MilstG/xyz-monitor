@@ -4643,7 +4643,7 @@ function trigEligible(row, cfg) {
 // name would be a lie about what the event is. Three sub-events per release (day-ahead, imminent,
 // result) at ~7 releases a month is ~20 messages a month, which is why it can fire individually
 // instead of being batched the way headlines are.
-const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "ma200", "filing", "earnings", "macro", "ai", "regime", "coverage", "ops"];
+const PUSH_CLASSES = ["setup", "ledger", "rule", "trend", "ma200", "filing", "earnings", "macro", "ai", "regime", "coverage", "congress", "ops"];
 // Classes only an operator should receive. Ops is server health — a stalled poller is actionable if
 // you can redeploy and noise if you cannot, and the group should not be woken by the plumbing.
 // Enforced in delivery AND in the in-app feed, not just hidden in the panel: a class the public

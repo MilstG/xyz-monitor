@@ -959,7 +959,8 @@ CREATE INDEX IF NOT EXISTS fil_ty ON filing(type, filed);
 CREATE TABLE IF NOT EXISTS tx(
   fid TEXT, ln INTEGER, owner TEXT, asset TEXT, ticker TEXT, act TEXT,
   txDate TEXT, notified TEXT, loAmt REAL, hiAmt REAL, PRIMARY KEY(fid, ln)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS tx_tk ON tx(ticker, txDate);`);
+CREATE INDEX IF NOT EXISTS tx_tk ON tx(ticker, txDate);
+CREATE TABLE IF NOT EXISTS watch(member TEXT PRIMARY KEY, at INTEGER, notify INTEGER) WITHOUT ROWID;`);
         // Phase 2 adds a retry counter to a table that already holds rows in production, so the
         // migration is an ALTER that is allowed to fail: on a fresh database the column comes from
         // the CREATE above once this line has run, and on an existing one it is added in place.
@@ -1106,6 +1107,22 @@ ON CONFLICT(id) DO UPDATE SET member=excluded.member, lname=excluded.lname, fnam
     // the index knows about every filer, so it can distinguish "never filed" from "filed, not read
     // yet" from "filed on paper, and this lane has no OCR". Those are three different answers and
     // the tool was giving the same silence to all of them.
+    // Starred members. Keyed on the member string exactly as the Clerk's index spells it, which is
+    // the only identifier a filing actually carries — there is no CIK here, and normalising the
+    // name would invent an identity the source does not have.
+    congressWatchList() { const d = this.openCongress(); if (!d) return [];
+      try { return d.prepare("SELECT member, at, notify FROM watch ORDER BY member").all(); } catch (_) { return []; } },
+    congressWatchSet(member, on, notify) { const d = this.openCongress(); if (!d) return false;
+      const m = String(member || "").trim();
+      if (!m) return false;
+      try {
+        if (on) d.prepare("INSERT INTO watch(member,at,notify) VALUES(?,?,?) ON CONFLICT(member) DO UPDATE SET notify=excluded.notify")
+          .run(m, Date.now(), notify === false ? 0 : 1);
+        else d.prepare("DELETE FROM watch WHERE member=?").run(m);
+        return true;
+      } catch (_) { return false; } },
+    congressWatched(member) { const d = this.openCongress(); if (!d) return null;
+      try { return d.prepare("SELECT member, notify FROM watch WHERE member=?").get(String(member || "")) || null; } catch (_) { return null; } },
     congressFilerSearch(q) { const d = this.openCongress(); if (!d) return [];
       const like = "%" + String(q || "").replace(/[%_]/g, "") + "%";
       try { return d.prepare(`SELECT member, COUNT(*) n,
