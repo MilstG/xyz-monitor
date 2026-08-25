@@ -7938,7 +7938,13 @@ function pdfObjects(buf) {
       }
       data = { raw: Buffer.from(rawStr, "latin1"), gen, flate: /\/FlateDecode/.test(dict) };
     }
-    objs.set(num, { dict, data, gen });
+    // An IMAGE is not a content stream. A 475KB scan contains the two bytes "BT" by chance, which
+    // was the entire test for "this stream has text in it" — so image data got parsed as PostScript,
+    // emitted garbage runs at the origin, and the caller saw runs.length > 0 and concluded the
+    // document had text it could not lay out. It had no text at all.
+    const img = /\/Subtype\s*\/Image/.test(dict) || /\/BitsPerComponent/.test(dict)
+      || /\/(DCTDecode|JPXDecode|JBIG2Decode|CCITTFaxDecode)/.test(dict);
+    objs.set(num, { dict, data, gen, img });
   }
   const dec = pdfDecryptor(src, objs);
   for (const [num, o] of objs) {
@@ -7975,7 +7981,7 @@ function pdfTextRuns(buf) {
   const runs = [];
   let page = 0;
   for (const [, o] of objs) {
-    if (!o.data) continue;
+    if (!o.data || o.img) continue;                      // image data is never text
     const s = o.data.toString("latin1");
     if (!/\bBT\b/.test(s)) continue;                     // not a content stream
     page++;
@@ -7996,8 +8002,18 @@ function pdfTextRuns(buf) {
       if (hex) { let out = ""; for (let i = 0; i + 1 < bytes.length; i += 2) out += String.fromCharCode((bytes[i] << 8) | bytes[i + 1]); return out; }
       return bytes.map((b) => String.fromCharCode(b)).join("");
     };
+    // Belt and braces on top of skipping images: a run that is mostly unprintable is not text that
+    // failed to lay out, it is bytes being read as characters. Dropping it keeps a stray misparse
+    // from ever again looking like "a document with text this parser could not understand".
+    const printable = (t) => {
+      let ok = 0;
+      for (let k = 0; k < t.length; k++) { const c = t.charCodeAt(k);
+        if (c === 9 || c === 10 || c === 13 || (c >= 32 && c <= 126) || (c >= 160 && c <= 255)) ok++; }
+      return ok / t.length;
+    };
     const emit = (txt) => {
       if (!txt) return;
+      if (txt.length > 2 && printable(txt) < 0.75) return;
       const m2 = mul(tm, ctm);
       runs.push({ page, x: m2[4], y: m2[5], text: txt });
     };

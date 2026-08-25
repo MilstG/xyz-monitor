@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-23"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-24"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,33 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -24: image data is not text — a scan was masquerading as an unparseable layout", () => {
+  // congress diag khanna, on production: 475KB, /BitsPerComponent, 38 streams, and SEVEN text runs
+  // of binary garbage at the origin. The document is a photograph. My test for "this stream has
+  // text" was whether it contained the two bytes "BT", which a 475KB JPEG contains by chance — so
+  // image data got parsed as PostScript, emitted noise, and because runs.length > 0 the
+  // scanned-image detector never ran. 148 filings were filed under "read but no rows recognized"
+  // when the truth was "there is nothing here to read".
+  const { pdfTextRuns } = require("../src/compute");
+  const noise = Buffer.alloc(4000);
+  for (let i = 0; i < noise.length; i++) noise[i] = (i * 77) % 256;
+  noise.write("BT", 100); noise.write("(garbage)", 300); noise.write("BT", 900);
+  const dict = "<< /Type /XObject /Subtype /Image /Width 1700 /Height 2200 /BitsPerComponent 8"
+    + " /Filter /DCTDecode /Length " + noise.length + " >>";
+  const scan = Buffer.concat([
+    Buffer.from("%PDF-1.5\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+      + "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+      + "3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n4 0 obj\n" + dict + "\nstream\n", "latin1"),
+    noise,
+    Buffer.from("\nendstream\nendobj\ntrailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n", "latin1"),
+  ]);
+  assert.equal(pdfTextRuns(scan).length, 0,
+    "a photographed filing yields NO text, so the queue can call it a scan instead of a layout it failed to read");
+  // And a real text filing is untouched by the exclusion.
+  const ok = _encPdf({ aes: false });
+  assert.ok(pdfTextRuns(ok).length > 0, "an actual text filing still parses");
+});
 
 test("congress -23: diag takes a member name, and picks the filing that needs explaining", async () => {
   // Production: "Khanna, Rohit · 43 PTR · 38 read but no rows recognized · 5 scanned" — every one of
