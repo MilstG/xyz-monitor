@@ -4837,16 +4837,34 @@ function pushFmt(ev, opts) {
   }
 
   if (kind === "congress") {
-    // Read on a lock screen: WHO, then what moved, then the two dates that make a PTR mean
-    // something — when it was traded and when it became public. The gap between them is the lag.
+    // ONE LINE PER TRADE, in a <pre> block so the columns actually align on a phone. An aggregate
+    // ("3 transactions · 2 buy · 1 sell") reads as informative and tells you nothing you can act
+    // on: not which name was bought, not which was sold, not for how much. The whole value of a
+    // PTR is per-instrument, so that is the unit the message is built from.
     const lag = ev.filed && ev.traded
       ? Math.round((Date.parse(ev.filed) - Date.parse(ev.traded)) / 86400000) : null;
+    const rows = Array.isArray(ev.rows) ? ev.rows : [];
+    // Telegram hard-fails over 4096 chars, so a filing with fifty lines is truncated with the count
+    // it dropped — never silently, because a partial list that looks complete is a lie about size.
+    const SHOWN = 14;
+    const head = rows.slice(0, SHOWN);
+    const money = (v) => (v == null ? "?" : "$" + Math.round(v).toLocaleString("en-US"));
+    const band = (r) => (r.hi != null ? money(r.lo) + "\u2013" + money(r.hi) : money(r.lo) + "+");
+    const side = (a) => (/^buy/.test(a) ? "\u{1f7e2} BUY " : /^sell/.test(a) ? "\u{1f534} SELL" : "\u{1f7e1} EXCH");
+    const nameW = Math.max.apply(null, head.map((r) => String(r.name || "").length).concat([4]));
+    const bandW = Math.max.apply(null, head.map((r) => band(r).length).concat([5]));
+    const body = head.map((r) => tgEsc(side(r.act) + "  " + String(r.name || "").padEnd(nameW)
+      + "  " + band(r).padEnd(bandW)
+      + (r.date ? "  " + String(r.date).slice(5) : "")
+      + (r.partial ? " (part)" : "")
+      + (r.owner && r.owner !== "self" ? "  " + (r.owner === "spouse" ? "SP" : r.owner === "dependent" ? "DC" : "JT") : "")));
     return out([g + " <b>" + tgEsc(ev.member || "congress") + "</b>"
-      + (ev.dist ? " \u00b7 " + tgEsc(ev.dist) : ""),
-      tgEsc(ev.brief || ev.h || ""),
-      ev.names ? "<code>" + tgEsc(ev.names) + "</code>" : "",
-      [ev.traded ? "traded " + tgEsc(ev.traded) : "", ev.filed ? "filed " + tgEsc(ev.filed) : "",
-        lag != null ? lag + "d lag" : ""].filter(Boolean).join(" \u00b7 "),
+      + (ev.dist ? " \u00b7 " + tgEsc(ev.dist) : "")
+      + " \u00b7 " + rows.length + " trade" + (rows.length === 1 ? "" : "s"),
+      body.length ? "<pre>" + body.join("\n") + "</pre>" : tgEsc(ev.brief || ev.h || ""),
+      rows.length > SHOWN ? tgEsc("+ " + (rows.length - SHOWN) + " more on the filing") : "",
+      [ev.filed ? "filed " + tgEsc(ev.filed) : "", lag != null ? lag + "d after the trade" : ""]
+        .filter(Boolean).join(" \u00b7 "),
       ev.url ? '<a href="' + tgEsc(ev.url) + '">read the filing \u2192</a>' : ""]);
   }
   if (kind === "filing") {

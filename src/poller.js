@@ -5955,9 +5955,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         + " \u00b7 \u2265 $" + Math.round(floor).toLocaleString()
         + (names.length ? " \u00b7 " + names.join(", ") : "");
       const traded = txs.map((t) => t.txDate).filter(Boolean).sort().pop() || null;
+      // Per-trade rows for the message: the ticker where one exists, otherwise the asset name
+      // trimmed to something that still fits a phone column.
+      const rowsOut = txs.map((t) => ({
+        name: t.ticker || String(t.asset || "").replace(/\s+/g, " ").slice(0, 22),
+        act: t.act, lo: t.loAmt, hi: t.hiAmt, date: t.txDate,
+        partial: /partial/.test(t.act || ""), owner: t.owner }));
       emitTrig("congress", { t: null, coin: null, congress: 1, member: filing.member,
         dist: [filing.state, filing.dist].filter(Boolean).join("-") || null,
-        brief, names: names.join(", ") || null, filed: filed || null, traded,
+        brief, names: names.join(", ") || null, rows: rowsOut, filed: filed || null, traded,
         h: filing.member + " \u2014 " + brief, url: filing.url || null,
         pub: Number.isFinite(at) ? at : Date.now() });
       persistTriggers();

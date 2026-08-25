@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-20"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-21"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20860,6 +20860,42 @@ function _encPdf(opt) {
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
 
+test("congress -21: starred filters in SQL, and an impossible lag is not a fact", async () => {
+  // The starred chip filtered the LOADED PAGE in the browser. With 288 parsed filings and 50 rows a
+  // page, a starred member's trades sat on page 4 and the chip rendered an empty table — the same
+  // shape of bug as the old client-side search, one control along.
+  const { createPoller } = require("../src/poller");
+  const os2 = require("os"), fs = require("fs"), path = require("path");
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), "congressA-"));
+  const { openStore } = require("../src/store");
+  const store = openStore(dir);
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, congressGap: 0 });
+  const F = (id, member, filed) => ({ id, chamber: "H", docId: id.slice(2), yr: 2026, member,
+    lname: member.split(",")[0], fname: "", suffix: "", state: "CA", dist: "11", type: "ptr",
+    typeRaw: "P", filed, url: "https://x/" + id + ".pdf", amends: null, parsed: 0, nTx: null });
+  const rows = [];
+  for (let i = 0; i < 60; i++) rows.push(F("H:8" + (100 + i), i === 59 ? "Starred, Member" : "Other, Person" + i, "2026-08-20"));
+  store.congressUpsertFilings(rows);
+  rows.forEach((f) => store.congressSaveTx(f.id, [{ owner: "self", asset: "Apple Inc. (AAPL)",
+    ticker: "AAPL", act: "buy", txDate: "2026-08-10", notified: null, loAmt: 1001, hiAmt: 15000,
+    tkSrc: "form", atype: "ST" }]));
+  p.congressWatchSet("Starred, Member", true);
+  // Page one holds none of the starred member's rows, which is exactly when the old filter broke.
+  assert.equal(p.congressFeedCount({ starred: 1 }), 1, "starred counts across the whole set");
+  assert.equal(p.congressFeed({ starred: 1, limit: 50 }).length, 1, "and returns the row from wherever it sits");
+  assert.equal(p.congressFeed({ starred: 1, limit: 50 })[0].member, "Starred, Member");
+  assert.equal(p.congressFeedCount({}), 60, "unfiltered still sees everything");
+
+  // A trade dated AFTER the filing that reports it cannot happen; production showed one as "-320d".
+  store.congressUpsertFilings([F("H:8999", "Cohen, Steve", "2026-02-09")]);
+  store.congressSaveTx("H:8999", [{ owner: "self", asset: "Sony Group Corporation", ticker: "SONY",
+    act: "buy", txDate: "2026-12-26", notified: null, loAmt: 1001, hiAmt: 15000, tkSrc: "name", atype: "ST" }]);
+  assert.equal(p.congressStatus().parse.badDate, 1, "the impossible row is counted, not rendered as a negative lag");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.ok(/lag<0/.test(app), "and the panel refuses to print a negative lag as if it were measured");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("congress -20: the parse run is throttle-bound, and concurrency must not corrupt the queue", async () => {
   // Measured on a real encrypted fixture: decrypt + extract + parse is well under a millisecond a
   // document. A 200-document run costs ~90ms of computation and used to take 200 SECONDS, all of it
@@ -20903,17 +20939,31 @@ test("congress -19: the alert actually formats — a ticker-less event was dying
   // wire: starred, fired, formatted to nothing, never delivered. A subject that is a PERSON rather
   // than a symbol has to be exempted explicitly, the way regime and macro already are.
   const { pushFmt, pushEligible, PUSH_CLASSES } = require("../src/compute");
+  // ONE LINE PER TRADE. The first cut aggregated — "3 transactions · 2 buy · 1 sell" — which reads
+  // as informative and tells you nothing you can act on: not which name was bought, not which was
+  // sold, not for how much. A PTR's value is per-instrument, so that is the unit.
   const ev = { kind: "congress", member: "Pelosi, Nancy", dist: "CA-11",
-    brief: "3 transactions \u00b7 2 buy \u00b7 1 sell \u00b7 \u2265 $1,015,003",
-    names: "NVDA, AAPL, BE", filed: "2026-08-24", traded: "2026-08-13",
+    filed: "2026-08-24", traded: "2026-08-13",
+    rows: [
+      { name: "NVDA", act: "buy", lo: 1000001, hi: 5000000, date: "2026-08-13", owner: "spouse" },
+      { name: "AAPL", act: "buy", lo: 1001, hi: 15000, date: "2026-08-17", owner: "self" },
+      { name: "BE", act: "sell-partial", lo: 500001, hi: 1000000, date: "2026-07-28", partial: true, owner: "self" },
+    ],
     url: "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20033725.pdf" };
   const msg = pushFmt(ev, { baseUrl: "https://example.test" });
   assert.ok(msg, "a congress event formats at all — this is the assertion that was false");
   assert.ok(/Pelosi, Nancy/.test(msg) && /CA-11/.test(msg), "who filed, and from where");
-  assert.ok(/2 buy/.test(msg) && /\u2265 \$1,015,003/.test(msg), "what moved, floored not estimated");
-  assert.ok(/NVDA, AAPL, BE/.test(msg), "the instruments");
-  assert.ok(/traded 2026-08-13/.test(msg) && /filed 2026-08-24/.test(msg) && /11d lag/.test(msg),
-    "both clocks and the gap between them, which is what a PTR is actually about");
+  assert.ok(/NVDA/.test(msg) && /\$1,000,001.\$5,000,000/.test(msg), "each ticker carries its OWN amount");
+  assert.ok(/AAPL/.test(msg) && /\$1,001.\$15,000/.test(msg), "including the small one");
+  assert.ok(/BE/.test(msg) && /SELL/.test(msg) && /part/.test(msg), "and the direction of each, partials marked");
+  assert.ok(/3 trades/.test(msg), "the count is a header, not a substitute for the detail");
+  assert.ok(/filed 2026-08-24/.test(msg) && /11d after the trade/.test(msg), "with the lag stated once");
+  // A long filing must not exceed Telegram's hard 4096 limit, and must say what it dropped.
+  const many = { kind: "congress", member: "Prolific Filer", filed: "2026-08-24", traded: "2026-08-13",
+    rows: Array.from({ length: 60 }, (_, i) => ({ name: "TICK" + i, act: "buy", lo: 1000001, hi: 5000000, date: "2026-08-13" })) };
+  const big = pushFmt(many, {});
+  assert.ok(big.length < 4096, "a fifty-line filing still fits the wire: " + big.length);
+  assert.ok(/\+ 46 more on the filing/.test(big), "and says how many it could not show, rather than looking complete");
   assert.ok(/ptr-pdfs\/2026\/20033725\.pdf/.test(msg), "and the source document");
   assert.ok(PUSH_CLASSES.includes("congress"));
   assert.equal(pushEligible(ev, { classes: ["congress"] }, {}) !== false, true,
