@@ -12206,7 +12206,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.24-18"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.24-19"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
@@ -20859,6 +20859,29 @@ function _encPdf(opt) {
     else out += `${num} 0 obj\n${d}\nendobj\n`; });
   return Buffer.from(out + `trailer\n<< /Size 7 /Root 1 0 R /Encrypt 6 0 R /ID [<${idHex}> <${idHex}>] >>\n%%EOF\n`, "latin1");
 }
+
+test("congress -19: the alert actually formats — a ticker-less event was dying silently", () => {
+  // The whole alert lane was inert and nothing said so. pushFmt returns null for any event with no
+  // ticker, so a congress alert entered the trigger ring and then vanished between there and the
+  // wire: starred, fired, formatted to nothing, never delivered. A subject that is a PERSON rather
+  // than a symbol has to be exempted explicitly, the way regime and macro already are.
+  const { pushFmt, pushEligible, PUSH_CLASSES } = require("../src/compute");
+  const ev = { kind: "congress", member: "Pelosi, Nancy", dist: "CA-11",
+    brief: "3 transactions \u00b7 2 buy \u00b7 1 sell \u00b7 \u2265 $1,015,003",
+    names: "NVDA, AAPL, BE", filed: "2026-08-24", traded: "2026-08-13",
+    url: "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20033725.pdf" };
+  const msg = pushFmt(ev, { baseUrl: "https://example.test" });
+  assert.ok(msg, "a congress event formats at all — this is the assertion that was false");
+  assert.ok(/Pelosi, Nancy/.test(msg) && /CA-11/.test(msg), "who filed, and from where");
+  assert.ok(/2 buy/.test(msg) && /\u2265 \$1,015,003/.test(msg), "what moved, floored not estimated");
+  assert.ok(/NVDA, AAPL, BE/.test(msg), "the instruments");
+  assert.ok(/traded 2026-08-13/.test(msg) && /filed 2026-08-24/.test(msg) && /11d lag/.test(msg),
+    "both clocks and the gap between them, which is what a PTR is actually about");
+  assert.ok(/ptr-pdfs\/2026\/20033725\.pdf/.test(msg), "and the source document");
+  assert.ok(PUSH_CLASSES.includes("congress"));
+  assert.equal(pushEligible(ev, { classes: ["congress"] }, {}) !== false, true,
+    "and it survives the eligibility gate without a ticker to threshold on");
+});
 
 test("congress -18: 'parsed' must not promise rows the table cannot show", async () => {
   // Production showed the index reporting "Khanna, Rohit · 7 PTR · 5 parsed" directly above a table

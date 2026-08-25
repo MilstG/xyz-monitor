@@ -4705,6 +4705,9 @@ function pushEligible(ev, sub) {
   // wrote. Layering the setup thresholds on top would silently veto somebody's own alert.
   if (kind === "rule") return true;
   if (kind === "filing" || kind === "earnings" || kind === "ai") return true;
+  // A congressional filing has no ticker to threshold on and may name several. The class chip is
+  // the control, exactly as it is for macro.
+  if (kind === "congress") return true;
   // Macro has no per-recipient threshold that would mean anything: there is no R:R on a CPI print
   // and no ticker to mute. The class chip IS the control.
   if (kind === "macro") return true;
@@ -4722,7 +4725,7 @@ function pushEligible(ev, sub) {
 // and a side dot — enough to sort a class at a glance on a lock screen, not enough to become soup.
 const PUSH_GLYPH = { setup: "\u26a1", ledger: "\u23f1", rule: "\u{1f4d0}", trend: "\u{1f4c8}", ma200: "\u{1f4cf}",
   filing: "\u{1f4c4}", earnings: "\u{1f4c5}", macro: "\u{1f3db}\ufe0f", ai: "\u{1f9e0}", regime: "\u{1f30a}",
-  coverage: "\u26a0\ufe0f", ops: "\u{1f527}" };
+  coverage: "\u26a0\ufe0f", congress: "\u{1f3db}\ufe0f", ops: "\u{1f527}" };
 const sideDot = (s) => (s === "long" ? "\u{1f7e2}" : s === "short" ? "\u{1f534}" : "");
 const sideWord = (s) => (s === "long" ? "LONG" : s === "short" ? "SHORT" : String(s || "").toUpperCase());
 // Right-pads labels so a <pre> block reads as a table rather than a run-on. Telegram renders <pre>
@@ -4755,7 +4758,11 @@ function pushFmt(ev, opts) {
   // Three kinds legitimately have no ticker: regime (tape-wide), macro (universe-wide by
   // construction) and the earnings PREVIEW (a roster-wide calendar, not one name's print).
   // Everything else without a coin is a malformed event and says nothing rather than half a thing.
-  if (!ev.coin && kind !== "regime" && kind !== "macro" && !(kind === "earnings" && ev.sub === "preview")) return null;
+  // Congress joins the legitimately ticker-less kinds: the subject is a MEMBER, and one filing can
+  // name a dozen instruments or none that trade. Without this the formatter returned null and every
+  // congress alert died silently between the trigger ring and the wire.
+  if (!ev.coin && kind !== "regime" && kind !== "macro" && kind !== "congress"
+    && !(kind === "earnings" && ev.sub === "preview")) return null;
 
   if (kind === "setup") {
     const head = g + " <b>" + name + "</b> " + sideDot(ev.side) + " " + sideWord(ev.side)
@@ -4829,6 +4836,19 @@ function pushFmt(ev, opts) {
     return out([head, body, link("open " + (ev.t || ev.coin))]);
   }
 
+  if (kind === "congress") {
+    // Read on a lock screen: WHO, then what moved, then the two dates that make a PTR mean
+    // something — when it was traded and when it became public. The gap between them is the lag.
+    const lag = ev.filed && ev.traded
+      ? Math.round((Date.parse(ev.filed) - Date.parse(ev.traded)) / 86400000) : null;
+    return out([g + " <b>" + tgEsc(ev.member || "congress") + "</b>"
+      + (ev.dist ? " \u00b7 " + tgEsc(ev.dist) : ""),
+      tgEsc(ev.brief || ev.h || ""),
+      ev.names ? "<code>" + tgEsc(ev.names) + "</code>" : "",
+      [ev.traded ? "traded " + tgEsc(ev.traded) : "", ev.filed ? "filed " + tgEsc(ev.filed) : "",
+        lag != null ? lag + "d lag" : ""].filter(Boolean).join(" \u00b7 "),
+      ev.url ? '<a href="' + tgEsc(ev.url) + '">read the filing \u2192</a>' : ""]);
+  }
   if (kind === "filing") {
     return out([g + " <b>" + name + "</b> \u00b7 " + tgEsc(ev.form || "filing"),
       tgEsc(ev.h || ""),
