@@ -111,7 +111,7 @@ table.tf tr:last-child td{border-bottom:none}
 </style>
 
 <div class="mockhd">
-  <p class="eyebrow">xyz-monitor · funding tab · market data menu · build 2026.08.26-34</p>
+  <p class="eyebrow">xyz-monitor · funding tab · market data menu · build 2026.08.26-35</p>
   <h1>The cross-section of carry, over calendar time</h1>
   <p class="lede">The positioning stack could already say what carry is doing <b>now</b> (the regime aggregate) and <b>when in the day</b> it concentrates (the funding clock). Neither showed the whole book's carry building or decaying across days — which is where a crowded side actually announces itself: one row going hot for two days while everything else sits flat. This is that view: a row per market, a column per time bucket, readable at <b>1h, 8h or 24h</b>. The decision the rest of this page defends is that the timeframe changes the <b>quantity</b>, not the zoom.</p>
   <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic funding, nothing is wired to live data</span></p>
@@ -196,9 +196,9 @@ table.tf tr:last-child td{border-bottom:none}
     <p>So the server computes one cap per timeframe over the whole grid and ships it. Sorting, re-ranking and the row-count control move rows around; they never touch a colour.</p>
   </div>
   <div class="notecard">
-    <h3>The grid moves the ETag</h3>
-    <p>The columns re-cut every time a bucket closes, even when the roster, the coverage and every rate are unchanged. So the newest 1h column start joins the board's own content signature.</p>
-    <p>Without it, a book that stopped listing new markets would serve a cached payload and the right edge of the heatmap would quietly freeze — the one failure mode nobody reports, because a stale chart looks exactly like a quiet market.</p>
+    <h3>The ETag follows the grid, not a summary of it</h3>
+    <p>The first version signed on row count, market count, the newest column start and the cap. Every one of those can hold still while the grid changes: a re-ranked roster, or a hatched bucket filling in from the backfill, is the same four numbers and a different picture — and the browser would keep 304-ing against it for up to an hour.</p>
+    <p>So the signature is a checksum over the whole grid: every ticker, every axis, every cell, with a null hashed differently from a real zero so a gap closing registers as the change it is. It is ~60×120 numbers, which costs microseconds — and it is exact, where the summary was a guess that a stale chart looks exactly like a quiet market.</p>
   </div>
   <div class="notecard">
     <h3>Ranked by open interest, capped at 60</h3>
@@ -209,6 +209,7 @@ table.tf tr:last-child td{border-bottom:none}
     <h3>A tab of its own means a route of its own</h3>
     <p>It first shipped as one section of the Sessions payload. As a board in its own right that was untenable: opening the tab pulled the entire session study set — levels, anatomy, seasonality, the decomposition — to paint one grid, and waited on the analytics build cadence to do it.</p>
     <p><code>/api/funding</code> is lazy and memoized on the same contract <code>/api/trend</code> uses, one board per universe, with a scope-prefixed validator so a crypto request can never 304 against a cached stocks body.</p>
+    <p>A build that throws is <em>named</em>, never dressed as a warm-up: the last grid that built keeps serving underneath the warning, and the failed attempt is stamped like a successful one so a permanent failure backs off to the TTL instead of re-running on every request.</p>
   </div>
   <div class="notecard">
     <h3>It reuses the funding spine already on disk</h3>

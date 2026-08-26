@@ -1529,7 +1529,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     const sig = coins + ":" + lens + ":" + (offHours.closed ? 1 : 0) + ":" + ["KR", "JP", "HK"].map((k) => (offHoursBy[k].closed ? 1 : 0)).join("") + ":" + ohlcN + ":" + oiN;   // session flips bust it — the US one AND each home market's (a KRX close must refresh SMSN's liveClose even while NYSE is open)
     if (dailyCache && sig === dailySig) return;   // unchanged — keep the OBJECT so serialize/gzip caches stay warm + 304s flow
-    dailySig = sig; dailyVer = Date.now();   // content changed -> new ETag + fresh object
+    dailySig = sig; dailyVer = Math.max(Date.now(), dailyVer + 1);   // content changed -> new ETag + fresh object; monotonic: two content changes in one ms must not share an ETag
     if (crypto) buildDailyMain(daily, funding, oi);
     dailyCache = { ts: Date.now(), dataTs: dailyVer, daily, funding, overnight, offHours, offHoursBy, liveClose, oi };
   }
@@ -3833,9 +3833,11 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const cells = g.cells.map((v) => (v == null ? null : +v.toFixed(9)));
         best = Math.max(best, cells.filter((v) => v != null).length);
         tf[k] = cells;
-        for (const v of cells) if (v != null) pool[k].push(v);
       }
+      // The cap is a percentile of what the grid SHOWS, so a row about to be dropped must not
+      // vote on it — feed the pool only after the row has earned its place.
       if (best < FUNDHEAT_MIN_CELLS) continue;
+      for (const k of keys) for (const v of tf[k]) if (v != null) pool[k].push(v);
       rows.push({ coin: r.coin, ticker: r.ticker, assetClass: U.classOf(r), oi: oi >= 0 ? Math.round(oi) : null, tf });
     }
     if (rows.length < FUNDHEAT_MIN_MKTS) return { pending: true, count: rows.length, need: FUNDHEAT_MIN_MKTS };
@@ -3849,7 +3851,8 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return {
       tz: U.tz, isCrypto: U.isCrypto, tfs: keys, tfDefault: FUNDHEAT_DEFAULT_TF, axis, rows,
-      count: rows.length, universe: mkts.length, capped: rows.length >= FUNDHEAT_ROWS, rowCap: FUNDHEAT_ROWS,
+      count: rows.length, universe: mkts.length, book: U.roster().length,
+      capped: rows.length >= FUNDHEAT_ROWS, rowCap: FUNDHEAT_ROWS,
       minCov: FUNDHEAT_MIN_COV, capPctl: FUNDHEAT_CAP_PCTL,
     };
   }
@@ -3869,21 +3872,58 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   const FUNDBOARD_MS = 60 * 1000;
   const fundBoard = { stocks: null, crypto: null }, fundBoardBuilt = { stocks: 0, crypto: 0 };
   const fundBoardVer = { stocks: 0, crypto: 0 }, fundBoardSig = { stocks: "", crypto: "" };
+  const fundBoardErr = { stocks: "", crypto: "" };
+  // The signature has to move whenever anything a client RENDERS moves. A summary of
+  // count/universe/cap could not see a top-60 reshuffle or a bucket that filled in from the
+  // backfill: the row count and the cap are identical, the grid is not, and the browser would
+  // 304 against stale content until the 1h column start next rolled — up to an hour of a frozen
+  // board. So the checksum runs over the whole grid. It is ~60x120 numbers; this costs microseconds
+  // and is exact where the summary was a guess.
+  function fundBoardSigOf(heat) {
+    if (heat.pending) return `p${heat.count}`;
+    let h = 2166136261;
+    const mix = (x) => { h = Math.imul(h ^ (x >>> 0), 16777619); };
+    for (const r of heat.rows) { for (let i = 0; i < r.ticker.length; i++) mix(r.ticker.charCodeAt(i)); mix(0x2c); }
+    for (const k of heat.tfs) {
+      const ax = heat.axis[k];
+      mix(ax.t0 / 1000); mix(Math.round(ax.cap * 1e12)); mix(ax.buckets);
+      // a null (an uncovered bucket) has to hash differently from a real 0, or a hatch filling in
+      // with genuinely flat carry would not register as a change at all
+      for (const r of heat.rows) for (const v of r.tf[k]) mix(v == null ? 0x7fffffff : Math.round(v * 1e12));
+    }
+    return `${heat.count}:${heat.universe}:${h >>> 0}`;
+  }
   function buildFundingBoard(k) {
     const heat = buildFundingHeat(analyticsUniverse(k));
-    const sig = heat.pending
-      ? `p${heat.count}`
-      : `${heat.count}:${heat.universe}:${heat.axis["1h"].t0}:${heat.axis["8h"].cap}`;
-    if (sig !== fundBoardSig[k]) { fundBoardSig[k] = sig; fundBoardVer[k] = Date.now(); }
+    const sig = fundBoardSigOf(heat);
+    if (sig !== fundBoardSig[k]) { fundBoardSig[k] = sig; fundBoardVer[k] = Math.max(Date.now(), fundBoardVer[k] + 1); }   // monotonic, per getActionable — two content changes in one ms must not share an ETag
     fundBoard[k] = Object.assign({ scope: k, ts: Date.now(), dataTs: fundBoardVer[k] }, heat);
-    fundBoardBuilt[k] = Date.now();
     return fundBoard[k];
   }
   function getFundingHeat(scope) {
     const k = scope === "crypto" ? "crypto" : "stocks";
     if (k === "crypto" && !crypto) return null;   // no main-dex lane configured — the route serves its honest empty
     if (!fundBoard[k] || Date.now() - fundBoardBuilt[k] > FUNDBOARD_MS) {
-      try { buildFundingBoard(k); } catch (e) { log("buildFundingBoard error: " + (e && e.message)); }
+      // Stamp the ATTEMPT, not the success: a build that throws every time must back off to the
+      // TTL exactly like a successful one, or every single request re-runs it synchronously on
+      // the event loop for as long as the failure lasts.
+      fundBoardBuilt[k] = Date.now();
+      try { buildFundingBoard(k); fundBoardErr[k] = ""; }
+      catch (e) {
+        const msg = (e && e.message) || String(e);
+        fundBoardErr[k] = msg;
+        log("buildFundingBoard(" + k + ") failed: " + msg);
+        // Say it out loud. A persistent build failure and a cold cache look identical from the
+        // client, and "warming up — this fills in within a poll or two" is a promise the server
+        // knows it is not going to keep. Same contract /api/analytics carries buildError for.
+        // One object per state so the route's serialize/gzip memo still keys on identity, and a
+        // fresh stamp so the error actually reaches a client holding the previous validator.
+        fundBoardVer[k] = Math.max(Date.now(), fundBoardVer[k] + 1);
+        fundBoardSig[k] = "err:" + msg;
+        fundBoard[k] = Object.assign({},
+          fundBoard[k] || { scope: k, pending: true, count: 0, need: FUNDHEAT_MIN_MKTS },
+          { ts: Date.now(), dataTs: fundBoardVer[k], buildError: msg });
+      }
     }
     return fundBoard[k];
   }
@@ -13589,6 +13629,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     },
     getAnalyticsErr: (scope) => (scope === "crypto" ? analyticsCryptoErrMsg : analyticsErrMsg),
     getFundingHeat,   // /api/funding — the funding heatmap board, per universe
+    fundBoardRebuildNow: (scope) => {   // harness: force one board rebuild past the TTL memo, through the real path (error handling included)
+      const k = scope === "crypto" ? "crypto" : "stocks";
+      fundBoardBuilt[k] = 0;
+      return getFundingHeat(k);
+    },
     getDuel,
     duelTickNow: duelTick,           // harness: run one duel snapshot attempt at an injected clock, with an optional injected universe
     hydrateDuelNow: hydrateDuel,     // harness: hydrate duel state from the (stubbed) store without start()

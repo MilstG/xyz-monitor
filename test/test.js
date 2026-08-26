@@ -5,6 +5,11 @@ const assert = require("node:assert");
 const { classify, companyName } = require("../src/sectors");
 
 // ===== build 2026.08.26-33: funding heatmap (1h / 8h / 24h) =====================================
+// The board is memoized behind a 60s TTL and Date.now() is real here, so a test that changes the
+// book has to clear that memo explicitly. The hook clears only the TTL stamp — the rebuild itself
+// runs the production path, error handling and all.
+function forceRebuild(p) { p.fundBoardRebuildNow("stocks"); }
+
 test("funding heatmap: a cell is the funding a 1x long paid over the bucket, at every timeframe", () => {
   const { fundingHeat } = require("../src/compute");
   const end = Math.floor(Date.now() / HOUR) * HOUR;
@@ -128,6 +133,121 @@ test("funding heatmap: /api/funding ships one shared axis, an own cap per timefr
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("funding board: the ETag follows the grid, not a summary of it", () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzfhsig-"));
+  try {
+    const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false });
+    const now = Math.floor(Date.now() / HOUR) * HOUR;
+    const seed = (t, oi, rate) => {
+      const m = new Map();
+      for (let h = 40 * 24; h >= 0; h--) m.set(now - h * HOUR, rate);
+      p.seedRowNow("xyz:" + t, { px: 100, ticker: t, oi, funding: rate, fundH: m });
+    };
+    ["A", "B", "C", "D", "E", "F"].forEach((t, i) => seed(t, 1e6 * (10 - i), 1.25e-5));
+    const v0 = p.getFundingHeat("stocks").dataTs;
+    const rows0 = p.getFundingHeat("stocks").rows.map((r) => r.ticker);
+
+    // A pure RESHUFFLE: same markets, same rates, same cap, same row count — only the OI ranking
+    // moves. The old summary signature (count:universe:t0:cap) could not see this at all, so the
+    // browser kept 304-ing against a grid whose rows had swapped places.
+    p.seedRowNow("xyz:F", { oi: 99e6 });
+    forceRebuild(p);
+    const b1 = p.getFundingHeat("stocks");
+    assert.notDeepEqual(b1.rows.map((r) => r.ticker), rows0, "the reshuffle actually reordered the grid");
+    assert.equal(b1.count, 6, "...with the same row count");
+    assert.ok(b1.dataTs !== v0, "a reshuffled roster must bust the validator");
+
+    // A CELL change with the row set untouched: one market's carry moves. Row count, universe and
+    // the ranking are all identical; only the numbers differ.
+    const v1 = b1.dataTs;
+    const m = new Map();
+    for (let h = 40 * 24; h >= 0; h--) m.set(now - h * HOUR, h < 100 ? 9e-5 : 1.25e-5);
+    p.seedRowNow("xyz:A", { fundH: m, _fVer: 99 });
+    forceRebuild(p);
+    const b2 = p.getFundingHeat("stocks");
+    assert.ok(b2.dataTs !== v1, "a changed cell must bust the validator");
+    // ...and an untouched book must NOT, or every poll becomes a full-body transfer.
+    forceRebuild(p);
+    assert.equal(p.getFundingHeat("stocks").dataTs, b2.dataTs, "an unchanged grid keeps its validator");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("funding board: a failing build says so, and backs off instead of re-running every request", () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzfherr-"));
+  try {
+    const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false });
+    const now = Math.floor(Date.now() / HOUR) * HOUR;
+    ["A", "B", "C", "D", "E", "F"].forEach((t, i) => {
+      const m = new Map();
+      for (let h = 40 * 24; h >= 0; h--) m.set(now - h * HOUR, 1.25e-5);
+      p.seedRowNow("xyz:" + t, { px: 100, ticker: t, oi: 1e6 * (10 - i), funding: 1.25e-5, fundH: m });
+    });
+    const good = p.getFundingHeat("stocks");
+    assert.ok(!good.pending && !good.buildError, "a healthy board carries no error");
+
+    // Poison a row so the build throws: getFunding reads fundH, and a non-Map is a TypeError.
+    p.seedRowNow("xyz:A", { fundH: { size: 1 }, _fVer: 101 });   // _fVer: getFunding memoizes per row; a swap it cannot see is not a test
+    forceRebuild(p);
+    const bad = p.getFundingHeat("stocks");
+    assert.ok(bad.buildError, "a persistent failure is NAMED, not dressed as a cold cache");
+    assert.ok(bad.dataTs !== good.dataTs, "and the error reaches a client holding the previous validator");
+    assert.deepEqual(bad.rows.map((r) => r.ticker), good.rows.map((r) => r.ticker),
+      "the last grid that built keeps serving underneath the warning");
+    // The attempt is stamped whether it threw or not, so the next request inside the TTL is served
+    // from cache rather than re-running the throwing build synchronously on the event loop.
+    const before = p.getFundingHeat("stocks");
+    assert.equal(p.getFundingHeat("stocks"), before, "a failing build still backs off to the TTL");
+
+    // ...and it recovers on its own once the cause clears.
+    const m = new Map();
+    for (let h = 40 * 24; h >= 0; h--) m.set(now - h * HOUR, 1.25e-5);
+    p.seedRowNow("xyz:A", { fundH: m, _fVer: 102 });
+    forceRebuild(p);
+    const fixed = p.getFundingHeat("stocks");
+    assert.ok(!fixed.buildError, "the error clears when the build succeeds again");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("funding board: a row dropped for a thin spine does not vote on the colour cap", () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzfhcap-"));
+  try {
+    const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false });
+    const now = Math.floor(Date.now() / HOUR) * HOUR;
+    // Five markets with a SHORT spine — six hourly cells each. Keeping the pool small is the whole
+    // point: a 98th percentile over thousands of cells shrugs off two outliers, so a test on a full
+    // grid would pass with or without the fix and prove nothing.
+    ["A", "B", "C", "D", "E"].forEach((t, i) => {
+      const m = new Map();
+      for (let h = 7; h >= 2; h--) m.set(now - h * HOUR, 1.25e-5);
+      p.seedRowNow("xyz:" + t, { px: 100, ticker: t, oi: 1e6 * (10 - i), funding: 1.25e-5, fundH: m });
+    });
+    const capBefore = p.getFundingHeat("stocks").axis["1h"].cap;
+    assert.ok(Math.abs(capBefore - 1.25e-5) < 1e-12, "the healthy cap is the book's own rate");
+
+    // Now a market whose spine is TOO THIN to plot — two hours, under FUNDHEAT_MIN_CELLS in every
+    // timeframe — but whose rate is enormous. It is dropped from the grid, so it must not vote on
+    // the colour scale the grid is drawn with.
+    const thin = new Map();
+    for (let h = 3; h >= 2; h--) thin.set(now - h * HOUR, 5e-3);
+    p.seedRowNow("xyz:HUGE", { px: 100, ticker: "HUGE", oi: 1e12, funding: 5e-3, fundH: thin });
+    forceRebuild(p);
+    const after = p.getFundingHeat("stocks");
+    assert.ok(!after.rows.some((r) => r.ticker === "HUGE"), "the thin row is not in the grid");
+    assert.equal(after.count, 5, "...and the five plottable markets still are");
+    assert.equal(after.axis["1h"].cap, capBefore,
+      "...so it did not move the cap either — pooling it would have painted the whole grid one shade of nothing");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("funding heatmap: it is a tab of its own — nav, route, gate, hash, scope, help", () => {
   const fs = require("fs"), path = require("path");
   const C = require("../src/compute");
@@ -155,8 +275,10 @@ test("funding heatmap: it is a tab of its own — nav, route, gate, hash, scope,
   assert.ok(sv.includes('\'W/"\' + scope + "-" + (body.dataTs'), "the funding ETag must be scope-distinct");
   assert.ok(pol.includes("function getFundingHeat(scope)") && pol.includes("getFundingHeat,"),
     "the board is built and exported per universe");
-  assert.ok(pol.includes("fundBoardSig[k]") && pol.includes('heat.axis["1h"].t0'),
-    "the ETag rides the content, and the newest column start is part of it — the grid re-cuts as buckets close");
+  assert.ok(pol.includes("fundBoardSig[k]") && pol.includes("function fundBoardSigOf(heat)"),
+    "the ETag rides a checksum of the whole grid — a reshuffled roster or a bucket filled in by the backfill is a content change even when the row count and the cap are identical");
+  assert.ok(/mix\(ax\.t0 \/ 1000\)/.test(pol), "the column axis is part of the checksum — the grid re-cuts as buckets close");
+  assert.ok(pol.includes("mix(v == null ? 0x7fffffff"), "a null bucket must hash differently from a real zero, or a hatch filling in would not register");
   // Markup, routing, deep link, palette and help — a tab missing any one of these is stranded.
   assert.ok(html.includes('data-view="funding"') && html.includes('id="view-funding"'), "nav button + view section");
   assert.ok(app.includes("setHidden('view-funding', v!=='funding');"), "showView toggles the section");
@@ -165,7 +287,15 @@ test("funding heatmap: it is a tab of its own — nav, route, gate, hash, scope,
   assert.ok(app.includes("{v:'funding',label:'Funding'}"), "findable in the command palette");
   assert.ok(/\nfunding:`/.test(app), "the tab carries its own help entry");
   // Two slots, one per universe — a scope flip mid-flight must never paint crypto into a stocks view.
-  assert.ok(app.includes("funding:{ stocks:null, crypto:null, view:null, err:null, ts:0 }"), "per-universe slots");
+  assert.ok(app.includes("funding:{ stocks:{data:null,err:null,ts:0}, crypto:{data:null,err:null,ts:0}, view:null }"),
+    "per-universe slots, each carrying its OWN err and ts — held globally, one universe's failure shows under the other");
+  assert.ok(app.includes("const _fundingInflight={stocks:false,crypto:false}, _fundingLast={stocks:0,crypto:0};"),
+    "inflight and freshness are per-scope, or a stocks fetch swallows the crypto refetch a scope flip asks for");
+  assert.ok(app.includes("if(fundingSlot()!==k && state.view==='funding') loadFunding();"),
+    "a flip that lands mid-flight must still fetch the universe now on screen");
+  assert.ok(app.includes("return !state.funding[k].data || Date.now()-_fundingLast[k]>60*1000;"),
+    "an empty slot always fetches — a recent load of the OTHER universe must not gate it");
+  assert.ok(app.includes("if(fh.buildError){"), "a failing server-side build is named, never dressed as a warm-up");
   assert.ok(app.includes("if(state.view==='funding'){ syncFundingSlot(); renderFunding(); loadFunding(); }"),
     "a scope flip repaints from the new universe's slot before refetching");
   // And it is GONE from the Sessions tab — one study, one home.
@@ -5656,6 +5786,56 @@ test("live-score variant family (2026.07.24-05): btMomVariant executed — M0 mi
   assert.ok(partHi > m0up && partLo < m0up, "participation must nudge in the volume's direction");
   assert.ok(Math.abs(partHi - m0up) < Math.abs(m0up) * 0.35, "the participation nudge stays a nudge — capped, never a regime of its own");
   assert.equal(mv("mpart", up, null, di, exBase(up)), m0up, "no volume column -> exactly M0");
+});
+
+test("ETag stamps are monotonic: two content changes in one millisecond must not share a validator", () => {
+  // The version stamp behind every dataTs is Date.now(). Two content changes inside the same
+  // millisecond therefore mint the SAME ETag, and a client holding the first revalidates to 304
+  // against the second — serving stale content until something else changes. getActionable and
+  // the focus board already carry a monotonic guard for exactly this; buildDaily did not, which
+  // made the daily-payload ETag test above fail roughly one run in fifty on a fast machine.
+  //
+  // Timing cannot be asserted directly, so this drives the loop hard enough that a same-millisecond
+  // pair is near-certain and pins the property that actually matters: strictly increasing.
+  const { createPoller } = require("../src/poller");
+  const mkStore = () => ({ loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null,
+    saveLedger: () => {}, insert: () => {}, saveRegime: () => {}, loadFeatures: () => null });
+  const D0 = Math.floor(Date.now() / DAY) * DAY;
+  const p = createPoller({ dex: "xyz", store: mkStore(), log: () => {}, version: "test", crypto: false });
+  const bars = (n) => { const a = []; for (let i = n; i >= 1; i--) a.push({ t: D0 - i * DAY, c: 100 + i }); return a; };
+  let prev = 0, sameMs = 0, lastWall = 0;
+  for (let k = 0; k < 60; k++) {
+    // each pass changes the CONTENT (one more bar), so each pass must bust the signature
+    p.seedRowNow("xyz:AAA", { px: 101, ticker: "AAA", uni: "xyz", vol: 1e7, dailyRaw: bars(20 + k), dailyTs: Date.now() });
+    p.buildDailyNow();
+    const v = p.getDaily().dataTs;
+    assert.ok(v > prev, `daily ETag stamp must strictly increase on every content change (pass ${k}: ${v} <= ${prev})`);
+    const wall = Date.now();
+    if (wall === lastWall) sameMs++;
+    lastWall = wall; prev = v;
+  }
+  // If the loop never produced a same-millisecond pair the test proved less than it meant to, but
+  // it still proved monotonicity — so this is reported, never asserted, and never made flaky itself.
+  assert.ok(prev > 0, `${sameMs} same-millisecond pair(s) exercised`);
+});
+
+test("ETag stamps: every hand-rolled version bump that can fire twice in a millisecond is monotonic", () => {
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  // The four stamps a test (or a burst of admin writes) can drive twice inside one millisecond.
+  // Anything else on the Date.now() pattern is timer-driven and minutes apart; this list is the
+  // set with a demonstrated or reachable collision, not every stamp in the file.
+  for (const pin of [
+    "dailyVer = Math.max(Date.now(), dailyVer + 1)",
+    "actVer = Math.max(Date.now(), actVer + 1)",
+    "focusVer = Math.max(Date.now(), focusVer + 1)",
+    "fundBoardVer[k] = Math.max(Date.now(), fundBoardVer[k] + 1)",
+  ]) assert.ok(pol.includes(pin), `version stamp must be monotonic: ${pin}`);
+  // And the guard must sit INSIDE the content-changed branch — bumping unconditionally would mint
+  // a fresh ETag on every rebuild and turn every poll into a full-body transfer.
+  assert.ok(pol.includes("if (dailyCache && sig === dailySig) return;"), "daily still short-circuits on an unchanged signature");
+  assert.ok(/if \(sig !== fundBoardSig\[k\]\) \{ fundBoardSig\[k\] = sig; fundBoardVer\[k\] = Math\.max/.test(pol),
+    "the funding board bumps only when its content signature moved");
 });
 
 test("daily payload v3 (2026.07.24-06): warm closes-only bars overlay h/v from the spine, upgrades bust the cache, warm files round-trip", () => {
@@ -12396,7 +12576,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.26-34"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.26-35"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

@@ -153,7 +153,9 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
     fheat:{ tf:'8h', sort:'oi', rows:'25' } },
   // FUNDING tab (build 2026.08.26-34) — its own board on /api/funding. Two slots so a scope flip
   // mid-flight can never paint a crypto grid into a stocks view; `view` is whichever matches.
-  funding:{ stocks:null, crypto:null, view:null, err:null, ts:0 },
+  // err and ts live INSIDE each slot: held globally, one universe's failure and freshness stamp
+  // would be shown under the other, which is the bug the sessions tab's two slots already avoid.
+  funding:{ stocks:{data:null,err:null,ts:0}, crypto:{data:null,err:null,ts:0}, view:null },
   alerts:{ rules:[], log:[], unseen:0, notify:false,
     // feed = the server's own recent event list, re-read on every pull. This is the log now: it
     // survives a refresh and a closed laptop, because the events live in the poller's persisted
@@ -4714,37 +4716,58 @@ function attachFundHeatControls(){
 // and waiting on the analytics build cadence to do it. Same two-slot discipline the sessions tab
 // uses: each universe lands in its own slot, so a scope flip mid-flight can never paint a crypto
 // grid into a stocks view, and `view` points at whichever slot matches the live scope.
-let _fundingInflight=false, _fundingLast=0;
+// Per-scope inflight + freshness. Held globally, a stocks fetch in flight would swallow the
+// crypto refetch that applyScope fires on a flip, and a recent stocks load would convince
+// openFunding that an empty crypto slot needed no fetch — the tab then sits on "Loading..."
+// until the TTL lapses AND it is re-entered.
+const _fundingInflight={stocks:false,crypto:false}, _fundingLast={stocks:0,crypto:0};
 function fundingSlot(){ return state.scope==='crypto'?'crypto':'stocks'; }
-function syncFundingSlot(){ state.funding.view=state.funding[fundingSlot()]||null; }
+function syncFundingSlot(){ state.funding.view=state.funding[fundingSlot()]; }
 async function loadFunding(){
-  if(_fundingInflight) return; _fundingInflight=true;
-  const k=fundingSlot();
+  const k=fundingSlot();                       // captured up front: the answer lands in the slot it was asked for
+  if(_fundingInflight[k]) return;
+  _fundingInflight[k]=true;
   try{ const d=await fetchJSON(k==='crypto'?'/api/funding?u=crypto':'/api/funding');
-    state.funding[k]=d; state.funding.err=null; state.funding.ts=Date.now(); _fundingLast=Date.now();
-  }catch(e){ state.funding.err=e.message||String(e); }
-  finally{ _fundingInflight=false; syncFundingSlot(); }
+    state.funding[k]={data:d,err:null,ts:Date.now()}; _fundingLast[k]=Date.now();
+  }catch(e){ state.funding[k]=Object.assign({},state.funding[k],{err:e.message||String(e)}); }
+  finally{ _fundingInflight[k]=false; syncFundingSlot(); }
   if(state.view==='funding') renderFunding();
+  // The scope may have flipped while this was in flight; the slot it just filled is no longer the
+  // one on screen, so fetch the one that is.
+  if(fundingSlot()!==k && state.view==='funding') loadFunding();
 }
-function openFunding(){ syncFundingSlot(); renderFunding(); if(Date.now()-_fundingLast>60*1000) loadFunding(); }
+function fundingStale(){ const k=fundingSlot();
+  return !state.funding[k].data || Date.now()-_fundingLast[k]>60*1000; }
+function openFunding(){ syncFundingSlot(); renderFunding(); if(fundingStale()) loadFunding(); }
 function renderFunding(){
   const host=el('funding-body'); if(!host) return;
   syncFundingSlot();
-  const fh=state.funding.view, err=state.funding.err;
+  const slot=state.funding.view||{}, fh=slot.data, err=slot.err;
   const title=`<div class="cp-head">Funding heatmap <span class="sec" style="font-weight:400;font-size:12.5px">\u2014 every market\u2019s carry over calendar time, at 1h \u00b7 8h \u00b7 24h</span></div>`;
   if(err && !fh){ host.innerHTML=title+`<div class="msg">Couldn\u2019t load the funding board: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
   if(!fh){ host.innerHTML=title+`<div class="msg">Loading\u2026</div>`; return; }
+  // A build that throws every cycle and a cache that has not filled yet look identical from here.
+  // The server ships the reason when it has one, so say which it is rather than promising progress.
+  if(fh.buildError){
+    host.innerHTML=title+`<div class="msg">The funding board is failing server-side: ${esc(fh.buildError)}`+
+      `<br><span class="sec">Retrying every cycle. This is a bug, not a warm-up \u2014 the reason above is from the server log.</span>`+
+      (Array.isArray(fh.rows)&&fh.rows.length?`<br><span class="sec">The grid below is the last one that built.</span></div>`+renderFundHeat(fh):`</div>`);
+    if(Array.isArray(fh.rows)&&fh.rows.length) attachFundHeatControls();
+    return; }
   if(fh.pending || !Array.isArray(fh.rows) || !fh.rows.length){
     host.innerHTML=title+`<div class="msg">Warming up \u2014 the grid needs \u2265${fh.need||5} markets with a funding spine (have ${fh.count||0}).`+
       `<br><span class="sec">The spine is seeded from the persisted OI samples on boot, so this fills in within a poll or two of a cold start.</span></div>`;
     return; }
-  const age=state.funding.ts?`updated ${Math.max(0,Math.round((Date.now()-state.funding.ts)/1000))}s ago`:'';
-  const status=`<div class="sg-status">${fh.count} markets with a funding spine \u00b7 ${fh.universe} in the ${fh.isCrypto?'main':'xyz'} book \u00b7 `+
-    `${Math.round((fh.minCov||0.5)*100)}% bucket-coverage floor \u00b7 ${esc(fh.tz)}${age?' \u00b7 '+age:''}</div>`;
+  const age=slot.ts?`updated ${Math.max(0,Math.round((Date.now()-slot.ts)/1000))}s ago`:'';
+  // `universe` counts markets that HAVE a funding spine; `book` is the roster. Billing the first
+  // as the second read as "30 of 30 in the book" on a book of 140.
+  const status=`<div class="sg-status">${fh.count} shown \u00b7 ${fh.universe} with a funding spine`+
+    `${fh.book?` \u00b7 ${fh.book} in the ${fh.isCrypto?'main':'xyz'} book`:''}`+
+    `${fh.capped?` \u00b7 top ${fh.rowCap} by OI`:''}`+
+    ` \u00b7 ${Math.round((fh.minCov||0.5)*100)}% bucket-coverage floor \u00b7 ${esc(fh.tz)}${age?' \u00b7 '+age:''}</div>`;
   host.innerHTML=title+status+renderFundHeat(fh);
   attachFundHeatControls();
 }
-
 // ---- cross-ticker clustering (PCA of the normalized 24h vol profile) ----
 function clusterScatterSvg(points, classes){
   const W=560,H=360, pl=30,pr=16,pt=16,pb=28;
