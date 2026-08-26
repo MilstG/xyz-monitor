@@ -69,6 +69,7 @@
   <button class="tab" data-view="charts" title="Multi-pane chart grid — up to 8 names side by side, or one name across timeframes (MTF wall). Intraday panes (5m–4h) read the local 5-minute archive; 12H/1D panes read the deep archive seeded back to each listing's birth. Per-pane coverage is disclosed; linked panes share crosshair and zoom.">Charts</button>
   <button class="tab" data-view="sectors">Sectors</button>
   <button class="tab" data-view="corr">Correlation</button>
+  <button class="tab" data-view="funding" id="tab-funding" title="Funding heatmap — every market's carry laid out over calendar time: a row per market, a column per time bucket, readable at 1h, 8h or 24h. A cell is the funding a 1× long paid over that bucket, so the timeframe changes the quantity, not the zoom. Red = longs pay (crowded long), green = longs receive; a bucket the funding spine cannot cover is hatched, never drawn as zero.">Funding</button>
   <button class="tab" data-view="sessions">Sessions</button>
   <button class="tab" data-view="signals" id="tab-signals" title="Live conditions ranked by unusualness × this market's own historical base rate">Signals</button>
   <button class="tab" data-view="actionable" id="tab-actionable" title="Every name currently AT a swing trigger — entry, void and target read verbatim from the claim frozen at fire time, reward:risk net of expected funding over the hold, ranked by expectancy. Days-to-weeks horizons only (D1 · H12 · H4).">Actionable</button>
@@ -315,6 +316,10 @@
   <div id="compg" class="corrpanel" hidden></div>
   <div id="ratiopanel" class="corrpanel" hidden></div>
   <div id="basketpanel" class="corrpanel" hidden></div>
+</section>
+
+<section id="view-funding" hidden>
+  <div id="funding-body"><div class="msg">Loading…</div></div>
 </section>
 
 <section id="view-sessions" hidden>

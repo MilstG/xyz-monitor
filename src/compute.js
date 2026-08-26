@@ -5304,7 +5304,7 @@ const FEATURE_NEVER_GATE = new Set(["/api/health", "/login", "/logout",
 // Config shape: { labels: {groupKey: name}, views: {viewKey: groupKey} }. Only DIFFERENCES from the
 // defaults are stored — renaming a menu back, or moving a tab home, leaves no residue behind.
 const NAV_GROUPS = [
-  { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "sessions"] },
+  { key: "tape",     label: "Tape",     views: ["trend", "charts", "treemap", "sectors", "corr", "funding", "sessions"] },
   { key: "signals",  label: "Signals",  views: ["signals", "actionable", "focus", "backtest"] },
   { key: "macro",    label: "Macro",    views: ["earnings", "news", "housing", "liquidity"] },
   { key: "research", label: "Research", views: ["report", "funds", "congress", "notes"] },
@@ -5380,6 +5380,10 @@ const FEATURES = [
   // Markets drawer chart doesn't already show.
   { key: "charts",     kind: "tab", label: "Charts",      def: "public", routes: [] },
   { key: "corr",       kind: "tab", label: "Correlation", def: "public", routes: ["/api/corr-crypto"] },
+  // FUNDING (build 2026.08.26-34): the funding heatmap, promoted out of the Sessions tab into a
+  // board of its own. Its own route on purpose — as one section of /api/analytics it made the tab
+  // pull the entire session study set (levels, anatomy, seasonality, ...) to paint one grid.
+  { key: "funding",    kind: "tab", label: "Funding",     def: "public", routes: ["/api/funding"] },
   { key: "sessions",   kind: "tab", label: "Sessions",    def: "public", routes: ["/api/analytics"] },
   { key: "signals",    kind: "tab", label: "Signals",     def: "public", routes: ["/api/signals", "/api/ledger", "/api/triggers"] },
   { key: "earnings",   kind: "tab", label: "Earnings",    def: "public", routes: ["/api/earnings"] },

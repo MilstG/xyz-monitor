@@ -48,12 +48,15 @@ instant, and the per-IP rate limit stops being a per-user problem.
   as plumbing-stress reads. Ten FRED series; everything normalised to billions before any arithmetic
   (H.4.1 lines publish in millions, ON RRP/GDP in billions). Refires after the Thursday ~4:30pm ET
   release and every 6h otherwise; warm-cached (`liquidity.json`). Ships admin-only.
-- **Sessions tab** (`/api/analytics`) — the session/positioning studies. Among them the **funding
-  heatmap**: a row per market, a column per time bucket, readable at **1h, 8h or 24h**. A cell is
-  the funding a 1× long *paid* over that bucket (the hourly funding spine summed over the bucket
-  and scaled to full width), so the timeframe buttons change the quantity rather than the zoom and
-  each timeframe carries its own colour cap. Red = longs pay, green = longs receive; a bucket with
-  under half its hours observed is hatched rather than drawn as zero. Ranked by open interest.
+- **Funding tab** (`/api/funding`) — the funding heatmap: a row per market, a column per time
+  bucket, readable at **1h, 8h or 24h**. A cell is the funding a 1× long *paid* over that bucket
+  (the hourly funding spine summed across it and scaled to full width), so the timeframe buttons
+  change the quantity rather than the zoom — the same market reads ~8× larger per 8h than per 1h —
+  and each timeframe carries its own colour cap. Red = longs pay (crowded long, carry is a cost),
+  green = longs receive; a bucket whose spine covers under half its hours is hatched rather than
+  drawn as zero, and the newest column is always the last *complete* bucket. Rows rank by open
+  interest, capped at 60. Built per universe, lazily, off the funding history already on the
+  volume — no new fetch and no new persistence. Lives in the Tape menu; an admin can move it.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).

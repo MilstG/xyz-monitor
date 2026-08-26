@@ -3631,12 +3631,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     await buildYield();
     const anSt = buildAnatomy(U);       // same one-computation contract as the levels study
     const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday ? anSt.monday.weeks : 0}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
-    await buildYield();
-    const fhSt = buildFundingHeat(U);   // positioning study; same one-computation contract, so sig and payload agree
-    // The grid re-cuts on every completed bucket even when the roster is unchanged, so the newest
-    // 1h column start joins the signature — otherwise a stale ETag would freeze the right edge.
-    const fhSig = fhSt.pending ? `p${fhSt.count}` : `${fhSt.count}:${fhSt.universe}:${fhSt.axis["1h"].t0}:${fhSt.axis["8h"].cap}`;
-    const sig = `${U.scope}:${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${fhSig}:${anSig}`;
+    const sig = `${U.scope}:${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
     const cache = U.isCrypto ? { get v() { return analyticsCryptoVer; }, set v(x) { analyticsCryptoVer = x; }, get s() { return analyticsCryptoSig; }, set s(x) { analyticsCryptoSig = x; } }
                              : { get v() { return analyticsVer; }, set v(x) { analyticsVer = x; }, get s() { return analyticsSig; }, set s(x) { analyticsSig = x; } };
     if (sig !== cache.s) { cache.s = sig; cache.v = Date.now(); }   // content changed -> new ETag
@@ -3666,7 +3661,6 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const seasonality = on("clocks") ? buildSeasonality(U) : DISABLED;
         return {
           regime,
-          fundHeat: fhSt,
           sessionDecomp,
           hourClock,
           dow,
@@ -3858,6 +3852,40 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       count: rows.length, universe: mkts.length, capped: rows.length >= FUNDHEAT_ROWS, rowCap: FUNDHEAT_ROWS,
       minCov: FUNDHEAT_MIN_COV, capPctl: FUNDHEAT_CAP_PCTL,
     };
+  }
+
+  // ---- /api/funding: the heatmap's own payload (build 2026.08.26-34) --------------------------
+  // It shipped inside /api/analytics as one section of the Sessions tab. As a board of its own it
+  // needs its own route: riding the analytics payload meant opening the tab pulled the entire
+  // session study set — levels, anatomy, seasonality, the session decomposition — to paint one
+  // grid, and waited on the analytics build cadence to do it.
+  //
+  // Lazy + memoized on exactly the contract getTrend() uses: built on the first read, rebuilt once
+  // past the TTL, and the ETag rides the CONTENT rather than the build time — so a poll that finds
+  // nothing changed is a 304 even though the object was just rebuilt. The signature carries the
+  // newest 1h column start because the grid re-cuts every time a bucket closes, even when the
+  // roster, the coverage and every rate are unchanged; without it the right edge would freeze
+  // behind a stale validator, which looks exactly like a quiet market.
+  const FUNDBOARD_MS = 60 * 1000;
+  const fundBoard = { stocks: null, crypto: null }, fundBoardBuilt = { stocks: 0, crypto: 0 };
+  const fundBoardVer = { stocks: 0, crypto: 0 }, fundBoardSig = { stocks: "", crypto: "" };
+  function buildFundingBoard(k) {
+    const heat = buildFundingHeat(analyticsUniverse(k));
+    const sig = heat.pending
+      ? `p${heat.count}`
+      : `${heat.count}:${heat.universe}:${heat.axis["1h"].t0}:${heat.axis["8h"].cap}`;
+    if (sig !== fundBoardSig[k]) { fundBoardSig[k] = sig; fundBoardVer[k] = Date.now(); }
+    fundBoard[k] = Object.assign({ scope: k, ts: Date.now(), dataTs: fundBoardVer[k] }, heat);
+    fundBoardBuilt[k] = Date.now();
+    return fundBoard[k];
+  }
+  function getFundingHeat(scope) {
+    const k = scope === "crypto" ? "crypto" : "stocks";
+    if (k === "crypto" && !crypto) return null;   // no main-dex lane configured — the route serves its honest empty
+    if (!fundBoard[k] || Date.now() - fundBoardBuilt[k] > FUNDBOARD_MS) {
+      try { buildFundingBoard(k); } catch (e) { log("buildFundingBoard error: " + (e && e.message)); }
+    }
+    return fundBoard[k];
   }
 
   // Day-of-week x hour-of-day 7x24 heatmap (the weekend-gap / Friday->Monday story). Per-ticker grids
@@ -13560,6 +13588,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
       return c;
     },
     getAnalyticsErr: (scope) => (scope === "crypto" ? analyticsCryptoErrMsg : analyticsErrMsg),
+    getFundingHeat,   // /api/funding — the funding heatmap board, per universe
     getDuel,
     duelTickNow: duelTick,           // harness: run one duel snapshot attempt at an injected clock, with an optional injected universe
     hydrateDuelNow: hydrateDuel,     // harness: hydrate duel state from the (stubbed) store without start()

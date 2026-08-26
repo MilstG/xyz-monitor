@@ -67,14 +67,13 @@ test("funding heatmap: a thin bucket is scaled to full width, an empty one is nu
   assert.deepEqual(fundingHeat(null, { bucketHours: 1, buckets: 2, end }).cells, [null, null]);
 });
 
-test("funding heatmap: the section ships one shared axis, an own cap per timeframe, rows by OI", async () => {
+test("funding heatmap: /api/funding ships one shared axis, an own cap per timeframe, rows by OI", async () => {
   const { openStore } = require("../src/store");
   const { createPoller } = require("../src/poller");
   const fs = require("fs"), path = require("path"), os = require("os");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzfh-"));
   try {
-    const store = openStore(dir);
-    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const p = createPoller({ dex: "xyz", store: openStore(dir), log: () => {}, version: "test", crypto: false });
     const now = Math.floor(Date.now() / HOUR) * HOUR;
     const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
     names.forEach((t, i) => {
@@ -83,9 +82,10 @@ test("funding heatmap: the section ships one shared axis, an own cap per timefra
       // OI ascending with i, so a correct sort must REVERSE the seeding order
       p.seedRowNow("xyz:" + t, { px: 100, ticker: t, oi: 1e6 * (i + 1), funding: 1.25e-5, fundH: m });
     });
-    await p.buildAnalyticsNow();
-    const fh = p.getAnalytics().sections.fundHeat;
-    assert.ok(fh && !fh.pending, "section builds once the book has funding spines");
+    const fh = p.getFundingHeat("stocks");
+    assert.ok(fh && !fh.pending, "the board builds once the book has funding spines");
+    assert.equal(fh.scope, "stocks");
+    assert.ok(fh.dataTs > 0, "the payload carries its own ETag stamp");
     assert.deepEqual(fh.tfs, ["1h", "8h", "24h"], "all three timeframes ship together");
     assert.equal(fh.tfDefault, "8h");
     assert.equal(fh.count, names.length);
@@ -106,36 +106,75 @@ test("funding heatmap: the section ships one shared axis, an own cap per timefra
     assert.ok(Math.abs(nvda.tf["8h"].at(-1) + 8 * 1.25e-5) < 1e-9, "8h cells are what the bucket paid");
     const msft = fh.rows.find((r) => r.ticker === "MSFT");
     assert.ok(msft.tf["24h"].at(-1) > 0 && nvda.tf["24h"].at(-1) < 0, "pay and receive stay opposite sides of zero");
-    // Below the market floor the study stays honestly pending instead of shipping a two-row
-    // "cross-section". Its own store dir: p1's build persists regime history into `store`, and a
-    // second poller reading a first poller's volume is a coupling this assertion does not want.
+    // Memoized on the getTrend contract: a read inside the TTL is the SAME object, so the route's
+    // serialize/gzip caches stay warm and an unchanged board revalidates to 304.
+    assert.equal(p.getFundingHeat("stocks"), fh, "a read inside the TTL returns the memoized board");
+    // A universe this deployment does not run must serve an honest empty, never a stocks body.
+    assert.equal(p.getFundingHeat("crypto"), null, "no main-dex lane configured -> no crypto board");
+    // One study, one home: it left /api/analytics when it became a tab of its own.
+    await p.buildAnalyticsNow();
+    assert.equal(p.getAnalytics().sections.fundHeat, undefined, "the board must not also ride the analytics payload");
+
+    // Below the market floor the board stays honestly pending instead of shipping a two-row
+    // "cross-section". Its own store dir: a second poller reading a first poller's volume is a
+    // coupling this assertion does not want — it asserts about an empty book, so it starts from one.
     const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "xyzfh2-"));
     const p2 = createPoller({ dex: "xyz", store: openStore(dir2), log: () => {}, version: "test", crypto: false });
     const m2 = new Map(); for (let h = 48; h >= 0; h--) m2.set(now - h * HOUR, 1e-5);
     p2.seedRowNow("xyz:AAPL", { px: 100, ticker: "AAPL", oi: 1e6, fundH: m2 });
-    await p2.buildAnalyticsNow();
-    const thin = p2.getAnalytics().sections.fundHeat;
+    const thin = p2.getFundingHeat("stocks");
     assert.ok(thin.pending && thin.need === 5 && thin.count === 1, "one market is not a cross-section");
     fs.rmSync(dir2, { recursive: true, force: true });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("funding heatmap: client wiring — timeframe is a quantity, gaps are hatched, the sign is never colour-only", () => {
+test("funding heatmap: it is a tab of its own — nav, route, gate, hash, scope, help", () => {
+  const fs = require("fs"), path = require("path");
+  const C = require("../src/compute");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  // It ships in the Tape menu — the market-data set — and the nav config can still move it.
+  const tape = C.resolveNavGroups(null).find((g) => g.key === "tape");
+  assert.ok(tape.views.includes("funding"), "the tab ships in the Tape menu by default");
+  assert.ok(C.NAV_VIEW_ORDER.includes("funding"), "and in the canonical order, so a move lands it deterministically");
+  assert.ok(C.resolveNavGroups({ views: { funding: "macro" } }).find((g) => g.key === "macro").views.includes("funding"),
+    "an admin can move it between menus like any other tab");
+  // Public by default, and the manifest names the route it owns so gating the tab gates the data.
+  assert.equal(C.featureState({}, "funding"), "public");
+  assert.deepEqual(C.FEATURES.find((f) => f.key === "funding").routes, ["/api/funding"],
+    "the tab's route rides its manifest entry");
+  // Its own route, with a SCOPE-PREFIXED validator: both universes stamp dataTs from Date.now()
+  // and can collide, which would 304 a crypto request with a cached stocks body.
+  assert.ok(sv.includes('fastify.get("/api/funding"'), "the route exists");
+  assert.ok(sv.includes('\'W/"\' + scope + "-" + (body.dataTs'), "the funding ETag must be scope-distinct");
+  assert.ok(pol.includes("function getFundingHeat(scope)") && pol.includes("getFundingHeat,"),
+    "the board is built and exported per universe");
+  assert.ok(pol.includes("fundBoardSig[k]") && pol.includes('heat.axis["1h"].t0'),
+    "the ETag rides the content, and the newest column start is part of it — the grid re-cuts as buckets close");
+  // Markup, routing, deep link, palette and help — a tab missing any one of these is stranded.
+  assert.ok(html.includes('data-view="funding"') && html.includes('id="view-funding"'), "nav button + view section");
+  assert.ok(app.includes("setHidden('view-funding', v!=='funding');"), "showView toggles the section");
+  assert.ok(app.includes("if(v==='funding'){ if(el('view-funding')) openFunding();"), "and opens it");
+  assert.ok(/HASH_VIEWS=new Set\(\[[^\]]*'funding'/.test(app), "#funding must resolve");
+  assert.ok(app.includes("{v:'funding',label:'Funding'}"), "findable in the command palette");
+  assert.ok(/\nfunding:`/.test(app), "the tab carries its own help entry");
+  // Two slots, one per universe — a scope flip mid-flight must never paint crypto into a stocks view.
+  assert.ok(app.includes("funding:{ stocks:null, crypto:null, view:null, err:null, ts:0 }"), "per-universe slots");
+  assert.ok(app.includes("if(state.view==='funding'){ syncFundingSlot(); renderFunding(); loadFunding(); }"),
+    "a scope flip repaints from the new universe's slot before refetching");
+  // And it is GONE from the Sessions tab — one study, one home.
+  assert.ok(!app.includes("sections.fundHeat") && !app.includes("fhBlock"),
+    "the sessions tab must not still render the board");
+});
+
+test("funding heatmap: the grid's own rules — quantity, gaps, and a sign that is never colour-only", () => {
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
-  // server: built once, folded into the ETag, published in the payload
-  for (const pin of ["const fhSt = buildFundingHeat(U);", "fundHeat: fhSt,", "${fhSig}:${anSig}",
-    'const fhSig = fhSt.pending ?', "function fundHeatCap(vals, bucketHours)"])
-    assert.ok(pol.includes(pin), `poller.js missing funding-heatmap pin: ${pin}`);
-  // The newest 1h column start is in the signature: the grid re-cuts on every completed bucket
-  // even when the roster never changes, and a stale ETag would freeze the right edge.
-  assert.ok(pol.includes('fhSt.axis["1h"].t0'), "the column axis must move the ETag");
-  // client: the three timeframes, each read against its OWN shipped cap
-  for (const pin of ["fheat:{ tf:'8h', sort:'oi', rows:'25' }", "function fhColor(v,cap)",
-    "function renderFundHeat(fh)", "function attachFundHeatControls()", "if(fhBlock) attachFundHeatControls();",
-    "{html:regimeBlock},{html:fhBlock},{pend:fhPend}", "cap=ax.cap"])
+  for (const pin of ["function fhColor(v,cap)", "function renderFundHeat(fh)",
+    "function attachFundHeatControls()", "cap=ax.cap"])
     assert.ok(app.includes(pin), `app.js missing funding-heatmap pin: ${pin}`);
   // an unknown bucket is hatched, never painted as zero carry
   assert.ok(/if\(v==null\|\|!isFinite\(v\)\) return null;/.test(app) && app.includes("url(#${pid})"),
@@ -1495,7 +1534,7 @@ test("pre-epoch crypto purge: claims stamped under the OLD geometry leave the le
     "const shPanel=d&&d.shadows&&(state.scope==='crypto'?d.shadows.main:d.shadows.xyz);",
     // Signals and Actionable are in scope for crypto again; markets stays PINNED public so the
     // tabVisible fallback can never itself be gated.
-    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','signals','actionable'])",   // charts joined 2026.08.21-01 — the grid works in both universes
+    "const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable'])",   // charts joined 2026.08.21-01, funding 2026.08.26-34 — both work in either universe
     "if(!tabVisible(v)) v='markets';",
     "strategy shadows (earning their record)"])
     assert.ok(app.includes(pin), `client scope pin missing: ${pin}`);
@@ -12353,7 +12392,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.26-33"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.26-34"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

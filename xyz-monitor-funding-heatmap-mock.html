@@ -111,7 +111,7 @@ table.tf tr:last-child td{border-bottom:none}
 </style>
 
 <div class="mockhd">
-  <p class="eyebrow">xyz-monitor · sessions tab · positioning group · build 2026.08.26-33</p>
+  <p class="eyebrow">xyz-monitor · funding tab · tape menu · build 2026.08.26-34</p>
   <h1>The cross-section of carry, over calendar time</h1>
   <p class="lede">The positioning stack could already say what carry is doing <b>now</b> (the regime aggregate) and <b>when in the day</b> it concentrates (the funding clock). Neither showed the whole book's carry building or decaying across days — which is where a crowded side actually announces itself: one row going hot for two days while everything else sits flat. This is that view: a row per market, a column per time bucket, readable at <b>1h, 8h or 24h</b>. The decision the rest of this page defends is that the timeframe changes the <b>quantity</b>, not the zoom.</p>
   <p style="margin:14px 0 0"><span class="mockchip">◆ mock · synthetic funding, nothing is wired to live data</span></p>
@@ -197,13 +197,18 @@ table.tf tr:last-child td{border-bottom:none}
   </div>
   <div class="notecard">
     <h3>The grid moves the ETag</h3>
-    <p>The columns re-cut every time a bucket closes, even when the roster, the coverage and every other study are unchanged. So the newest 1h column start joins the analytics signature.</p>
+    <p>The columns re-cut every time a bucket closes, even when the roster, the coverage and every rate are unchanged. So the newest 1h column start joins the board's own content signature.</p>
     <p>Without it, a book that stopped listing new markets would serve a cached payload and the right edge of the heatmap would quietly freeze — the one failure mode nobody reports, because a stale chart looks exactly like a quiet market.</p>
   </div>
   <div class="notecard">
     <h3>Ranked by open interest, capped at 60</h3>
     <p>Rows past the cap are a scrollbar, not a signal, and the crypto book is large enough to make that a real cost in payload and in reading time. OI is the ranking because carry on a market nobody holds is trivia.</p>
     <p>The client shows 25 by default and says <em>top 60 of N by OI</em> only when the cap actually bound the list — a market dropped for a spine too thin to plot is not a market the cap hid.</p>
+  </div>
+  <div class="notecard">
+    <h3>A tab of its own means a route of its own</h3>
+    <p>It first shipped as one section of the Sessions payload. As a board in its own right that was untenable: opening the tab pulled the entire session study set — levels, anatomy, seasonality, the decomposition — to paint one grid, and waited on the analytics build cadence to do it.</p>
+    <p><code>/api/funding</code> is lazy and memoized on the same contract <code>/api/trend</code> uses, one board per universe, with a scope-prefixed validator so a crypto request can never 304 against a cached stocks body.</p>
   </div>
   <div class="notecard">
     <h3>It reuses the funding spine already on disk</h3>

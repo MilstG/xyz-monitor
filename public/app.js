@@ -151,6 +151,9 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   analytics:{ data:null, err:null, ts:0, regime:{ sel:'all' }, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' },
     // funding heatmap: timeframe is the quantity (funding paid per 1h/8h/24h bucket), not a zoom
     fheat:{ tf:'8h', sort:'oi', rows:'25' } },
+  // FUNDING tab (build 2026.08.26-34) — its own board on /api/funding. Two slots so a scope flip
+  // mid-flight can never paint a crypto grid into a stocks view; `view` is whichever matches.
+  funding:{ stocks:null, crypto:null, view:null, err:null, ts:0 },
   alerts:{ rules:[], log:[], unseen:0, notify:false,
     // feed = the server's own recent event list, re-read on every pull. This is the log now: it
     // survives a refresh and a closed laptop, because the events live in the poller's persisted
@@ -3590,7 +3593,7 @@ function loadAlerts(){ let d; try{ d=JSON.parse(store.get(AKEY)||'null'); }catch
   if(d.open&&typeof d.open==='object') state.alerts.open=Object.assign(state.alerts.open,d.open); }
 
 function setHash(h){ try{ history.replaceState(null,'', h?('#'+h):(location.pathname+location.search)); }catch(_){} }
-const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress']);
+const HASH_VIEWS=new Set(['markets','focus','funds','trend','charts','sectors','corr','funding','sessions','signals','earnings','news','backtest','report','actionable','admin','housing','liquidity','notes','congress']);
 // ===== admin panel: feature visibility switchboard =============================================
 // Reads /api/features (manifest + raw states + BOTH resolved audiences). Writes one key per call and
 // rolls back on failure — a batch write would make a partial failure ambiguous, and there is no save
@@ -4153,7 +4156,9 @@ function featureOn(key){ return FLAGS_VIEW ? !!FLAGS_VIEW[key] : true; }
 // Crypto scope is Markets + Trend + Report + Correlation + Backtest + Sessions by design (the signal
 // engine is xyz-only since -101). This set was written out longhand in two places that had already
 // drifted apart once; it lives here now and both callers read it.
-const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','signals','actionable']);
+// funding joins the crypto set: the heatmap is built per universe and the 24/7 book is where
+// carry is most worth watching — nothing on the board is an equities-only concept.
+const CRYPTO_VIEWS=new Set(['markets','trend','charts','report','corr','backtest','sessions','funding','signals','actionable']);
 // NOT named inScope: that name was already taken at the top of this file by the predicate that
 // decides whether a market ROW belongs to the active universe. Function declarations hoist, so the
 // later definition silently won, activeRows() started asking "is this row object one of the six
@@ -4694,13 +4699,50 @@ function renderFundHeat(fh){
     `The scale is capped at the grid's own ${Math.round((fh.capPctl||0.98)*100)}th percentile (±${esc(capPct)} per ${esc(tf)}) so one blowout can't flatten everything else; `+
     `beyond that the cell just saturates. Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${Math.round((fh.minCov||0.5)*100)}% of its hours to print. `+
     `The number on the right is that row's mean per bucket over the window. <b>Hover</b> any cell for its exact rate and direction.`;
-  return sHead('Funding heatmap',`every market's carry over calendar time, at 1h · 8h · 24h`)+controls+legend+
-    `<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(cap);
+  // No sHead: the board IS the tab now, so the tab's own title carries the name. A section header
+  // here would print the same sentence twice, one line apart.
+  return controls+legend+`<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(cap);
 }
 function attachFundHeatControls(){
-  document.querySelectorAll('.fhtf').forEach(b=>b.addEventListener('click',()=>{ state.analytics.fheat.tf=b.dataset.tf; drawSessions(); }));
-  const s=el('fhsort'); if(s) s.addEventListener('change',()=>{ state.analytics.fheat.sort=s.value; drawSessions(); });
-  const r=el('fhrows'); if(r) r.addEventListener('change',()=>{ state.analytics.fheat.rows=r.value; drawSessions(); });
+  document.querySelectorAll('.fhtf').forEach(b=>b.addEventListener('click',()=>{ state.analytics.fheat.tf=b.dataset.tf; renderFunding(); }));
+  const s=el('fhsort'); if(s) s.addEventListener('change',()=>{ state.analytics.fheat.sort=s.value; renderFunding(); });
+  const r=el('fhrows'); if(r) r.addEventListener('change',()=>{ state.analytics.fheat.rows=r.value; renderFunding(); });
+}
+// ---- FUNDING tab (build 2026.08.26-34) ------------------------------------------------------
+// The board rides its OWN payload. As a section of /api/analytics, opening it meant pulling the
+// entire session study set — levels, anatomy, seasonality, the decomposition — to paint one grid,
+// and waiting on the analytics build cadence to do it. Same two-slot discipline the sessions tab
+// uses: each universe lands in its own slot, so a scope flip mid-flight can never paint a crypto
+// grid into a stocks view, and `view` points at whichever slot matches the live scope.
+let _fundingInflight=false, _fundingLast=0;
+function fundingSlot(){ return state.scope==='crypto'?'crypto':'stocks'; }
+function syncFundingSlot(){ state.funding.view=state.funding[fundingSlot()]||null; }
+async function loadFunding(){
+  if(_fundingInflight) return; _fundingInflight=true;
+  const k=fundingSlot();
+  try{ const d=await fetchJSON(k==='crypto'?'/api/funding?u=crypto':'/api/funding');
+    state.funding[k]=d; state.funding.err=null; state.funding.ts=Date.now(); _fundingLast=Date.now();
+  }catch(e){ state.funding.err=e.message||String(e); }
+  finally{ _fundingInflight=false; syncFundingSlot(); }
+  if(state.view==='funding') renderFunding();
+}
+function openFunding(){ syncFundingSlot(); renderFunding(); if(Date.now()-_fundingLast>60*1000) loadFunding(); }
+function renderFunding(){
+  const host=el('funding-body'); if(!host) return;
+  syncFundingSlot();
+  const fh=state.funding.view, err=state.funding.err;
+  const title=`<div class="cp-head">Funding heatmap <span class="sec" style="font-weight:400;font-size:12.5px">\u2014 every market\u2019s carry over calendar time, at 1h \u00b7 8h \u00b7 24h</span></div>`;
+  if(err && !fh){ host.innerHTML=title+`<div class="msg">Couldn\u2019t load the funding board: ${esc(err)}. Retrying on the next refresh.</div>`; return; }
+  if(!fh){ host.innerHTML=title+`<div class="msg">Loading\u2026</div>`; return; }
+  if(fh.pending || !Array.isArray(fh.rows) || !fh.rows.length){
+    host.innerHTML=title+`<div class="msg">Warming up \u2014 the grid needs \u2265${fh.need||5} markets with a funding spine (have ${fh.count||0}).`+
+      `<br><span class="sec">The spine is seeded from the persisted OI samples on boot, so this fills in within a poll or two of a cold start.</span></div>`;
+    return; }
+  const age=state.funding.ts?`updated ${Math.max(0,Math.round((Date.now()-state.funding.ts)/1000))}s ago`:'';
+  const status=`<div class="sg-status">${fh.count} markets with a funding spine \u00b7 ${fh.universe} in the ${fh.isCrypto?'main':'xyz'} book \u00b7 `+
+    `${Math.round((fh.minCov||0.5)*100)}% bucket-coverage floor \u00b7 ${esc(fh.tz)}${age?' \u00b7 '+age:''}</div>`;
+  host.innerHTML=title+status+renderFundHeat(fh);
+  attachFundHeatControls();
 }
 
 // ---- cross-ticker clustering (PCA of the normalized 24h vol profile) ----
@@ -5299,10 +5341,6 @@ function drawSessions(){
     pvPend = sgPendRow('Time-based pivots', det,'\u2605\u2605\u2605\u2606\u2606'); }
   const regime = a.sections && a.sections.regime;
   const regimeBlock = renderRegime(regime, (state.analytics.regime&&state.analytics.regime.sel)||'all');
-  const fh = a.sections && a.sections.fundHeat;
-  let fhBlock='', fhPend='';
-  if(fh && !fh.pending && !fh.disabled && Array.isArray(fh.rows) && fh.rows.length) fhBlock = renderFundHeat(fh);
-  else if(!fh||!fh.disabled) fhPend = sgPendRow('Funding heatmap', fh?`computing \u2014 needs \u2265${fh.need||5} markets with a funding spine (have ${fh.count||0})`:'every market\u2019s carry over calendar time, at 1h \u00b7 8h \u00b7 24h','\u2605\u2605\u2605\u2605\u2606');
   // ---- group verdicts: computed from the same section objects the panels render ----
   const vPositioning=()=>{ const d=regime&&regime.all;
     if(!d||d.pending||!d.crowd) return 'accruing \u2014 fills in as OI &amp; funding history banks';
@@ -5310,10 +5348,6 @@ function drawSessions(){
     if(cw.netFundApr!=null) p.push(`skew ${cw.netFundApr>=0?'+':''}${cw.netFundApr.toFixed(1)}%`);
     if(cw.longExtPct!=null) p.push(`${cw.longExtPct}% crowded-long`);
     if(cw.shortExtPct!=null) p.push(`${cw.shortExtPct}% crowded-short`);
-    // The heatmap's own one-liner: the hottest row on the timeframe the user is actually looking at.
-    if(fh&&!fh.pending&&Array.isArray(fh.rows)&&fh.rows.length){ const tf=fhTf(fh);
-      let top=null,tv=0; for(const r of fh.rows){ const m=fhMean(r,tf); if(m!=null&&Math.abs(m)>Math.abs(tv)){ tv=m; top=r; } }
-      if(top) p.push(`hottest carry ${esc(top.ticker)} ${fhPct(tv,3)}/${tf}`); }
     return p.join(' \u00b7 ')||'\u2014'; };
   const vHolds=()=>{ if(!sd||sd.pending) return sd?`computing \u2014 ${sd.equityCount}/${sd.need} ${sd.isCrypto?'perps':'equities'} ready`:'computing';
     const S=sd.sessions||{}, seg=(k,l)=>S[k]&&S[k].totNet!=null?`${l} ${fp(S[k].totNet)} net`:null;
@@ -5341,23 +5375,23 @@ function drawSessions(){
     if(em&&!em.pending&&em.tf&&em.tf['1d']&&em.tf['1d'].n) p.push(`ema200 ${em.tf['1d'].n} D1 events`);
     return p.join(' \u00b7 ')||'computing'; };
   // ---- assemble ----
-  const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||emBlock||anBlock||cbBlock||pvBlock||fhBlock;
+  const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||emBlock||anBlock||cbBlock||pvBlock;
   const isCr = !!(a && a.isCrypto);
   // Only studies this universe actually publishes can hold back the all-live footer, and the count
   // is derived from the live payload rather than hard-coded — crypto ships a five-study Holds +
   // Positioning set, so claiming "eleven" there would be a lie. (-19)
   const onG=(id)=>sessGroups().some(g=>g.id===id);
-  const gate=[sdPend,anPend,cbPend,pvPend,fhPend]
+  const gate=[sdPend,anPend,cbPend,pvPend]
     .concat(onG('clocks')?[hcPend,ovPend,sePend]:[])
     .concat(onG('week')?[dowPend]:[])
     .concat(onG('structure')?[clPend,lvPend,emPend]:[]);
   const allLive = anySections && !gate.some(Boolean);
-  const nStudies = 1/*regime*/+4/*decomp, anatomy, candles, pivots*/+1/*funding heatmap*/
+  const nStudies = 1/*regime*/+4/*decomp, anatomy, candles, pivots*/
     +(onG('clocks')?3:0)+(onG('week')?1:0)+(onG('structure')?2:0);
   const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All ${nStudies} studies live. \u25c6</div>` : '';
   // Render only the groups this universe publishes (-19) — crypto ships positioning + holds.
   const GROUP_BODY={
-    positioning:()=>sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock},{html:fhBlock},{pend:fhPend}]),
+    positioning:()=>sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock}]),
     holds:()=>sgSection('holds','Holds',vHolds(),[{html:flagship},{pend:sdPend},{html:anBlock},{pend:anPend},{html:cbBlock},{pend:cbPend},{html:pvBlock},{pend:pvPend}]),
     clocks:()=>sgSection('clocks','Clocks',vClocks(),[{html:clocks},{pend:hcPend},{html:overlay},{pend:ovPend},{html:seBlock},{pend:sePend}]),
     week:()=>sgSection('week','Week',vWeek(),[{html:dowBlock},{pend:dowPend}]),
@@ -5367,7 +5401,6 @@ function drawSessions(){
   host.innerHTML=title+status+bar+jump+groups+foot;
   if(regime) wireRegimeControls();
   if(hc && !hc.pending && !hc.disabled){ attachClockControls(); if(overlay) attachOverlayControls(); }
-  if(fhBlock) attachFundHeatControls();
   if(dow && !dow.pending && !dow.disabled) attachDowControls();
   if(se && !se.pending && !se.disabled) attachSeasonControls();
   if(lv && !lv.pending && !lv.disabled) attachStudyScope('lvlsel','levels');
@@ -6189,6 +6222,7 @@ function applyScope(){
   state.backtest.picks=[];   // a backtest target belongs to one universe: xyz names don't exist in the crypto scope and vice versa
   if(state.view==='backtest') drawBacktest();   // scope flip re-runs the test on the new universe + benchmark
   if(state.view==='sessions'){ syncAnalyticsSlot(); drawSessions(); loadAnalytics(); }   // -17: repaint sessions for the new universe (its own analytics payload)
+  if(state.view==='funding'){ syncFundingSlot(); renderFunding(); loadFunding(); }   // same contract: repaint from this universe's slot, then refresh it
   if(state.view==='signals') renderSignals();       // scope flip re-filters the cards to the new universe
   if(state.view==='actionable') renderActionable();  // ...and the actionable board with them
   setSigTabBadge();   // the badge is scoped too — a flip must restamp it immediately
@@ -6213,6 +6247,7 @@ function showView(v){
   setHidden('view-charts', v!=='charts');
   setHidden('view-sectors', v!=='sectors');
   setHidden('view-corr', v!=='corr');
+  setHidden('view-funding', v!=='funding');
   setHidden('view-sessions', v!=='sessions');
   setHidden('view-signals', v!=='signals');
   setHidden('view-actionable', v!=='actionable');
@@ -6230,6 +6265,7 @@ function showView(v){
   if(v==='trend'){ if(el('view-trend')) openTrend(); else { showView('markets'); return; } }
   if(v==='charts'){ if(el('view-charts')) openCharts(); else { showView('markets'); return; } }
   if(v==='corr'){ openCorr(); setTimeout(compgAuto,60); }   // COMP/G auto-opens with the tab — no launcher button
+  if(v==='funding'){ if(el('view-funding')) openFunding(); else { showView('markets'); return; } }
   if(v==='sessions') renderSessions();
   if(v==='signals'){ if(el('view-signals')) openSignals(); else { showView('markets'); return; } }
   if(v==='actionable'){ if(el('view-actionable')) openActionable(); else { showView('markets'); return; } }
@@ -10100,6 +10136,15 @@ corr:`
 <p>The names that move with it (proxies, contagion map) and against it (natural hedges). Strongest-pairs below surfaces the tightest relationships across the whole set. ↓ CSV exports the matrix.</p>
 <div class="hlp-h">COMP/G — N-name comparison</div>
 <p>The pair view generalized. <b>COMP/G</b> (button top-right, or <span class="amber">comp NVDA AAPL MSFT …</span> in the terminal) rebases every selected name to <b>100</b> at a chosen date and overlays them — "how have these six traded relative to each other since X." Set the anchor with the presets, the date picker, or by <b>dragging the amber line</b>. <b>Spread mode</b> plots each name minus the equal-weight basket of visible names (or a base you pick) in percentage points — a clean read on who's leading and lagging the group. Runs on the closes already loaded — daily on equities, the shared intraday grid (4h/1d/7d) on crypto, the same series the correlation matrix uses — so it's instant and never adds a fetch. A name listed after the anchor rebases to its own first close, dated in the legend — no fake shared origin.</p>`,
+funding:`
+<div class="hlp-h">What a cell is</div>
+<p>The funding a <b>1× long paid</b> over that bucket — the hourly funding spine summed across it. <b>Red = longs pay</b>: the crowded side is long and carry is a cost to hold it. <b>Green = longs receive</b>: the crowded side is short and the carry pays you to be long. Flat carry is the panel colour, so a quiet market reads as nothing rather than as a hue of its own.</p>
+<div class="hlp-h">1h / 8h / 24h change the quantity, not the zoom</div>
+<p>Hyperliquid pays hourly, so an 8h bucket is eight payments and a 24h bucket is twenty-four — the same market genuinely reads ~8× and ~24× larger. Each timeframe therefore has <b>its own colour scale</b>, and the window moves with it: 1h spans two days, 8h fourteen, 24h thirty. Don't compare a number on one timeframe to a number on another without multiplying.</p>
+<div class="hlp-h">Hatched means unknown, never zero</div>
+<p>The funding spine has holes — it is seeded from the persisted OI samples and topped up by a best-effort backfill. A bucket that can't see at least half its hours is drawn as a <b>hatch</b>, because a gap in the data and a market that genuinely went flat mean opposite things to anyone sizing a position. The newest column is always the last <b>complete</b> bucket for the same reason.</p>
+<div class="hlp-h">Reading it</div>
+<p>The scale is capped at the grid's own 98th percentile so one blowout can't flatten everything else; past the cap a cell just saturates. The number on the right is that row's mean per bucket over the window — its sign is the direction, stated without relying on colour. Rows rank by open interest; sort by carry side or |carry| to bring the crowded names to the top. <b>Hover</b> any cell for its exact rate and which side is paying.</p>`,
 sessions:`
 <div class="hlp-h">Session decomposition — the flagship</div>
 <p>What an <b>overnight</b> (close→open), <b>weekend</b> (Fri→Mon), and <b>cash</b> (open→close) hold actually pays, pooled one equal-weight bet per calendar boundary across the equity class, compounded into equity curves. <b>Gross</b> vs <b>net</b>: the shaded band is the running funding drag — an edge that dies net-of-funding is not an edge, it's a donation. A persistently rising overnight curve while the cash curve is flat is the classic overnight effect; the drawer's "where the 30d return happened" split is the per-name version of the same question.</p>
@@ -10216,7 +10261,7 @@ function closeHelp(){ const bg=el('helpbg'), m=el('helpmodal'); if(bg)bg.hidden=
 // opens the ticker's drawer; Shift+Enter opens its AI report; a tab row switches tabs.
 const CMDK_TABS=[
   {v:'markets',label:'Markets'},{v:'focus',label:'Focus'},{v:'funds',label:'Funds'},{v:'trend',label:'Trend'},{v:'charts',label:'Charts'},{v:'sectors',label:'Sectors'},
-  {v:'corr',label:'Correlation'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
+  {v:'corr',label:'Correlation'},{v:'funding',label:'Funding'},{v:'sessions',label:'Sessions'},{v:'signals',label:'Signals'},
   {v:'earnings',label:'Earnings'},{v:'news',label:'News'},{v:'report',label:'AI Report'},
   {v:'actionable',label:'Actionable'},{v:'backtest',label:'Backtest'},{v:'housing',label:'Housing'},{v:'liquidity',label:'Liquidity'},{v:'admin',label:'Admin'}];
 let _cmdkSel=0, _cmdkRows=[];

@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.26-33";
+const VERSION = "2026.08.26-34";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -712,6 +712,18 @@ async function main() {
     if (req.headers["if-none-match"] === tag) { return reply.code(304).send(); }
     reply.header("content-type", "application/json; charset=utf-8");
     return reply.send(JSON.stringify(body));
+  });
+  // Funding heatmap board — every market's carry over calendar time, at 1h / 8h / 24h.
+  // Scope-prefixed ETag, for the same reason /api/analytics carries one: the two universes' dataTs
+  // are both Date.now()-stamped and can coincide to the millisecond at boot, which would let a
+  // browser 304 a crypto request with a cached stocks body. Prefixing the scope means the two URLs
+  // can never share a validator.
+  fastify.get("/api/funding", (req, reply) => {
+    const scope = req.query && req.query.u === "crypto" ? "crypto" : "stocks";
+    const body = poller.getFundingHeat(scope)
+      || { ts: 0, dataTs: 0, scope, pending: true, count: 0, need: 5 };
+    return sendCachedBody(req, reply, body,
+      'W/"' + scope + "-" + (body.dataTs != null ? body.dataTs : (body.ts || 0)) + '"');
   });
   // Score duel: MOM vs MOM+ daily rank-IC record. Content only moves when a new IC day lands,
   // so serveCached's dataTs ETag makes this a 304 for nearly every poll.
