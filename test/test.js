@@ -106,13 +106,17 @@ test("funding heatmap: the section ships one shared axis, an own cap per timefra
     assert.ok(Math.abs(nvda.tf["8h"].at(-1) + 8 * 1.25e-5) < 1e-9, "8h cells are what the bucket paid");
     const msft = fh.rows.find((r) => r.ticker === "MSFT");
     assert.ok(msft.tf["24h"].at(-1) > 0 && nvda.tf["24h"].at(-1) < 0, "pay and receive stay opposite sides of zero");
-    // Below the market floor the study stays honestly pending instead of shipping a two-row "cross-section".
-    const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    // Below the market floor the study stays honestly pending instead of shipping a two-row
+    // "cross-section". Its own store dir: p1's build persists regime history into `store`, and a
+    // second poller reading a first poller's volume is a coupling this assertion does not want.
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "xyzfh2-"));
+    const p2 = createPoller({ dex: "xyz", store: openStore(dir2), log: () => {}, version: "test", crypto: false });
     const m2 = new Map(); for (let h = 48; h >= 0; h--) m2.set(now - h * HOUR, 1e-5);
     p2.seedRowNow("xyz:AAPL", { px: 100, ticker: "AAPL", oi: 1e6, fundH: m2 });
     await p2.buildAnalyticsNow();
     const thin = p2.getAnalytics().sections.fundHeat;
     assert.ok(thin.pending && thin.need === 5 && thin.count === 1, "one market is not a cross-section");
+    fs.rmSync(dir2, { recursive: true, force: true });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
