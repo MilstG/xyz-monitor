@@ -514,10 +514,22 @@ table.cmx tbody td:not(.diag):not(.nodata){cursor:pointer}
 /* Sessions tab — hour-of-day clock controls */
 .clocksel{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-family:var(--mono);font-size:12px;max-width:220px}
 .clockseg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
-.clockmetric,.ovmetric,.dowmetric{background:var(--panel2);color:var(--muted);border:none;padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer}
-.clockmetric:hover,.ovmetric:hover,.dowmetric:hover{color:var(--text)}
-.clockmetric.on,.ovmetric.on,.dowmetric.on{background:var(--accent);color:var(--bg)}
-.clockmetric+.clockmetric,.ovmetric+.ovmetric,.dowmetric+.dowmetric{border-left:1px solid var(--border)}
+.clockmetric,.ovmetric,.dowmetric,.fhtf{background:var(--panel2);color:var(--muted);border:none;padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer}
+.clockmetric:hover,.ovmetric:hover,.dowmetric:hover,.fhtf:hover{color:var(--text)}
+.clockmetric.on,.ovmetric.on,.dowmetric.on,.fhtf.on{background:var(--accent);color:var(--bg)}
+.clockmetric+.clockmetric,.ovmetric+.ovmetric,.dowmetric+.dowmetric,.fhtf+.fhtf{border-left:1px solid var(--border)}
+
+/* Funding heatmap — row labels, the signed per-row direct label (the sign is the colour-free
+   half of the encoding, so it never dims), and the legend's swatch for an unknown bucket. */
+.fheat .fh-hd{font-size:9px;fill:var(--faint);letter-spacing:.5px;text-transform:uppercase}
+.fheat .fh-tk{font-size:10.5px;fill:var(--muted)}
+.fheat .fh-nv{font-size:10px;fill:var(--muted)}
+.fheat .fh-nv.pos{fill:var(--up)}
+.fheat .fh-nv.neg{fill:var(--down)}
+.fheat .fh-nv.sec{fill:var(--faint)}
+.fheat rect:hover{stroke:var(--text);stroke-width:1.2}
+.s-leg .fh-gapsw{width:15px;height:10px;border-radius:2px;display:inline-block;background:var(--panel2);
+  background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(124,135,148,.45) 3px,rgba(124,135,148,.45) 4px)}
 
 /* Sessions tab — interactive chart hover (crosshair + readout) */
 .lwrap{position:relative}

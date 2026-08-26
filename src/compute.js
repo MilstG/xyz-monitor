@@ -246,6 +246,53 @@ function fundingAvg(hist, windowMs) {
   return simN ? simSum / simN : null;
 }
 
+// ---- funding heatmap: an hourly funding series folded into fixed-width time buckets -------------
+// The funding spine is one rate per hour (Hyperliquid pays hourly), so the funding a 1x long
+// actually pays over an N-hour bucket is the SUM of that bucket's hourly rates. That makes the
+// timeframe switch (1h / 8h / 24h) a real change of quantity, not a rescaling of one number:
+// "0.03% per 8h" is what the position was charged over those eight hours.
+//
+// Coverage is the honest part. A bucket rarely holds all N hours — the seed comes from ~5-min OI
+// samples deduped to the hour, the 60d backfill is best-effort, and quiet markets skip hours. A
+// raw sum would then read as "carry collapsed" when the truth is "we only saw three of the eight
+// hours". So each bucket is scaled to full width (mean observed rate x N hours) and a bucket
+// under `minCov` of its hours returns null — a gap the renderer draws as a gap, never as zero.
+const FUNDHEAT_MIN_COV = 0.5;   // >= half the bucket's hours must be observed, or the cell is unknown
+function fundingHeat(hist, opts) {
+  const o = opts || {};
+  const HOUR = 3600 * 1000;
+  const bucketHours = Math.max(1, Math.round(o.bucketHours || 8));
+  const buckets = Math.max(1, Math.round(o.buckets || 42));
+  const width = bucketHours * HOUR;
+  const minCov = o.minCov == null ? FUNDHEAT_MIN_COV : o.minCov;
+  // Buckets are anchored to the epoch (floor(end / width)), not to "now", so every market in the
+  // grid shares one column axis and two markets' cells are always comparable side by side. The
+  // last bucket is the most recent COMPLETE one — a partly-elapsed bucket would render as a fake
+  // collapse in carry at the right edge of every row.
+  const endTs = Number.isFinite(o.end) ? o.end : Date.now();
+  const lastStart = Math.floor(endTs / width) * width - width;
+  const t0 = lastStart - (buckets - 1) * width;
+  const cells = new Array(buckets).fill(null), n = new Array(buckets).fill(0);
+  if (Array.isArray(hist)) {
+    for (const s of hist) {
+      if (!s) continue;
+      const t = Array.isArray(s) ? s[0] : s.t, f = Array.isArray(s) ? s[1] : s.f;
+      if (!Number.isFinite(t) || !Number.isFinite(f)) continue;
+      if (t < t0 || t >= lastStart + width) continue;
+      const i = Math.floor((t - t0) / width);
+      if (i < 0 || i >= buckets) continue;
+      cells[i] = (cells[i] == null ? 0 : cells[i]) + f;
+      n[i]++;
+    }
+  }
+  const need = Math.max(1, Math.ceil(bucketHours * minCov));
+  for (let i = 0; i < buckets; i++) {
+    if (cells[i] == null || n[i] < need) { cells[i] = null; continue; }
+    cells[i] = (cells[i] / n[i]) * bucketHours;   // scale the observed mean out to a full bucket
+  }
+  return { t0, width, bucketHours, buckets, cells, n };
+}
+
 // Daily log-returns keyed by day-index, from a [[t, close], ...] or [{t, c}, ...] series.
 function dailyLogReturns(daily) {
   const m = new Map(); let prev = null;
@@ -3816,7 +3863,7 @@ function duelStats(rows, minN) {
 }
 
 module.exports = {
-  stdev, median, linregR2, priceAt, featuresFromHourly, bucketOpens, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
+  stdev, median, linregR2, priceAt, featuresFromHourly, bucketOpens, pxRingPush, pxRingRef, oiDeltaPct, fundingAvg, fundingHeat, FUNDHEAT_MIN_COV, firstIndexGT, firstIndexGE, dailyLogReturns, pearson, meanPairwiseCorr, corrMatrix, stopGeometryOk, fadeStats, regimeAggregate, momPair, spearmanIC, duelStats,
   fourHourReturns, tapeRedStats, rvolMulti,
   // boundary-backtest engine (ET session calendar, anchor generators, net-of-funding hold math)
   etParts, etOffsetAt, etWallToUtc, etDays, nextEtDate, cashAnchors, overnightAnchors, weekendAnchors,

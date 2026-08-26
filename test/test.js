@@ -3,6 +3,149 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { classify, companyName } = require("../src/sectors");
+
+// ===== build 2026.08.26-33: funding heatmap (1h / 8h / 24h) =====================================
+test("funding heatmap: a cell is the funding a 1x long paid over the bucket, at every timeframe", () => {
+  const { fundingHeat } = require("../src/compute");
+  const end = Math.floor(Date.now() / HOUR) * HOUR;
+  const flat = []; for (let i = 48; i > 0; i--) flat.push([end - i * HOUR, 1e-4]);
+  // 1h reads the hourly rate itself; 8h and 24h read what was actually PAID over the bucket, so
+  // the same market is 8x and 24x larger. This is the whole point of the timeframe switch.
+  const h1 = fundingHeat(flat, { bucketHours: 1, buckets: 4, end });
+  const h8 = fundingHeat(flat, { bucketHours: 8, buckets: 4, end });
+  const h24 = fundingHeat(flat, { bucketHours: 24, buckets: 1, end });
+  for (const v of h1.cells) assert.ok(Math.abs(v - 1e-4) < 1e-12, "1h cell is the hourly rate");
+  for (const v of h8.cells) assert.ok(Math.abs(v - 8e-4) < 1e-12, "8h cell is eight hours of it");
+  assert.ok(Math.abs(h24.cells[0] - 24e-4) < 1e-12, "24h cell is a full day of it");
+  assert.equal(h1.cells.length, 4); assert.equal(h8.buckets, 4); assert.equal(h24.bucketHours, 24);
+});
+
+test("funding heatmap: buckets are epoch-anchored, complete, and nest 24h = 3 x 8h", () => {
+  const { fundingHeat } = require("../src/compute");
+  const end = Date.now();
+  // Epoch anchoring is what makes two rows comparable column-for-column: t0 must not move with the
+  // caller's clock inside a bucket, or two markets built a second apart land on different columns.
+  const a = fundingHeat([], { bucketHours: 8, buckets: 5, end });
+  const b = fundingHeat([], { bucketHours: 8, buckets: 5, end: end + 60 * 1000 });
+  assert.equal(a.t0, b.t0, "t0 is stable within a bucket");
+  assert.equal(a.t0 % a.width, 0, "buckets sit on epoch multiples of their own width");
+  // and the last bucket is the last COMPLETE one — a half-elapsed bucket would read as a fake
+  // collapse in carry at the right edge of every row.
+  assert.ok(a.t0 + a.buckets * a.width <= Math.floor(end / a.width) * a.width, "no in-progress bucket");
+  // 8h buckets tile a 24h bucket exactly, so the three timeframes tell one consistent story. The
+  // two grids do NOT end together — each stops on its own last COMPLETE bucket — so line them up
+  // on a shared day boundary rather than on the right edge.
+  const hist = []; for (let i = 96; i > 0; i--) hist.push([Math.floor(end / HOUR) * HOUR - i * HOUR, 2e-5 * (i % 7)]);
+  const g8 = fundingHeat(hist, { bucketHours: 8, buckets: 12, end });
+  const g24 = fundingHeat(hist, { bucketHours: 24, buckets: 3, end });
+  const day = g24.t0 + g24.width, i0 = Math.round((day - g8.t0) / g8.width);
+  assert.ok(i0 >= 0 && i0 + 2 < g8.buckets, "that day sits inside the 8h grid");
+  assert.equal(g8.t0 + i0 * g8.width, day, "a day boundary IS an 8h boundary");
+  const sum = g8.cells[i0] + g8.cells[i0 + 1] + g8.cells[i0 + 2];
+  assert.ok(Math.abs(sum - g24.cells[1]) < 1e-12, "one day equals its three 8h buckets");
+});
+
+test("funding heatmap: a thin bucket is scaled to full width, an empty one is null — never zero", () => {
+  const { fundingHeat, FUNDHEAT_MIN_COV } = require("../src/compute");
+  const end = Math.floor(Date.now() / HOUR) * HOUR;
+  const width = 8 * HOUR, last = Math.floor(end / width) * width - width;
+  // Six of the bucket's eight hours observed: the mean is scaled out to a full bucket, so a gappy
+  // spine reads as the carry it implies rather than as "carry collapsed".
+  const six = []; for (let k = 0; k < 6; k++) six.push([last + k * HOUR, 1e-4]);
+  const g = fundingHeat(six, { bucketHours: 8, buckets: 1, end });
+  assert.equal(g.n[0], 6);
+  assert.ok(Math.abs(g.cells[0] - 8e-4) < 1e-12, "six observed hours still price a full 8h bucket");
+  // Three of eight is under the coverage floor — that is a gap in the spine, and a gap is unknown,
+  // not flat. The renderer hatches null; a zero would be a claim the data cannot support.
+  const three = []; for (let k = 0; k < 3; k++) three.push([last + k * HOUR, 1e-4]);
+  assert.equal(fundingHeat(three, { bucketHours: 8, buckets: 1, end }).cells[0], null);
+  assert.equal(FUNDHEAT_MIN_COV, 0.5);
+  assert.equal(fundingHeat(three, { bucketHours: 8, buckets: 1, end, minCov: 0.25 }).cells[0] != null, true,
+    "the coverage floor is a parameter, not a hard-coded half");
+  // Junk in the spine never becomes a number.
+  assert.deepEqual(fundingHeat([[last, NaN], [last + HOUR, null], [null, 1e-4]], { bucketHours: 8, buckets: 1, end }).cells, [null]);
+  assert.deepEqual(fundingHeat(null, { bucketHours: 1, buckets: 2, end }).cells, [null, null]);
+});
+
+test("funding heatmap: the section ships one shared axis, an own cap per timeframe, rows by OI", async () => {
+  const { openStore } = require("../src/store");
+  const { createPoller } = require("../src/poller");
+  const fs = require("fs"), path = require("path"), os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xyzfh-"));
+  try {
+    const store = openStore(dir);
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const now = Math.floor(Date.now() / HOUR) * HOUR;
+    const names = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"];
+    names.forEach((t, i) => {
+      const m = new Map();
+      for (let h = 40 * 24; h >= 0; h--) m.set(now - h * HOUR, (i % 2 ? 1 : -1) * 1.25e-5);
+      // OI ascending with i, so a correct sort must REVERSE the seeding order
+      p.seedRowNow("xyz:" + t, { px: 100, ticker: t, oi: 1e6 * (i + 1), funding: 1.25e-5, fundH: m });
+    });
+    await p.buildAnalyticsNow();
+    const fh = p.getAnalytics().sections.fundHeat;
+    assert.ok(fh && !fh.pending, "section builds once the book has funding spines");
+    assert.deepEqual(fh.tfs, ["1h", "8h", "24h"], "all three timeframes ship together");
+    assert.equal(fh.tfDefault, "8h");
+    assert.equal(fh.count, names.length);
+    assert.deepEqual(fh.rows.map((r) => r.ticker), names.slice().reverse(), "rows ranked by notional OI");
+    for (const k of fh.tfs) {
+      const ax = fh.axis[k];
+      assert.equal(ax.width, ax.bucketHours * HOUR);
+      assert.ok(ax.cap > 0, "every timeframe carries its own colour cap");
+      for (const r of fh.rows) assert.equal(r.tf[k].length, ax.buckets, "every row spans the shared axis");
+    }
+    // The cap is a QUANTITY per timeframe, not a rescaling — 8h carry is ~8x 1h carry, so a client
+    // that reused one cap across the buttons would paint the 1h grid solid.
+    assert.ok(fh.axis["8h"].cap > fh.axis["1h"].cap * 4, "8h cap is a bucket of hours, not one hour");
+    assert.ok(fh.axis["24h"].cap > fh.axis["8h"].cap * 2, "24h cap likewise");
+    // NVDA was seeded on the receive side, so the sign must survive the bucketing too.
+    const nvda = fh.rows.find((r) => r.ticker === "NVDA");
+    assert.ok(nvda.tf["1h"].every((v) => v == null || Math.abs(v + 1.25e-5) < 1e-9), "1h cells are the signed hourly rate");
+    assert.ok(Math.abs(nvda.tf["8h"].at(-1) + 8 * 1.25e-5) < 1e-9, "8h cells are what the bucket paid");
+    const msft = fh.rows.find((r) => r.ticker === "MSFT");
+    assert.ok(msft.tf["24h"].at(-1) > 0 && nvda.tf["24h"].at(-1) < 0, "pay and receive stay opposite sides of zero");
+    // Below the market floor the study stays honestly pending instead of shipping a two-row "cross-section".
+    const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    const m2 = new Map(); for (let h = 48; h >= 0; h--) m2.set(now - h * HOUR, 1e-5);
+    p2.seedRowNow("xyz:AAPL", { px: 100, ticker: "AAPL", oi: 1e6, fundH: m2 });
+    await p2.buildAnalyticsNow();
+    const thin = p2.getAnalytics().sections.fundHeat;
+    assert.ok(thin.pending && thin.need === 5 && thin.count === 1, "one market is not a cross-section");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("funding heatmap: client wiring — timeframe is a quantity, gaps are hatched, the sign is never colour-only", () => {
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+  // server: built once, folded into the ETag, published in the payload
+  for (const pin of ["const fhSt = buildFundingHeat(U);", "fundHeat: fhSt,", "${fhSig}:${anSig}",
+    'const fhSig = fhSt.pending ?', "function fundHeatCap(vals, bucketHours)"])
+    assert.ok(pol.includes(pin), `poller.js missing funding-heatmap pin: ${pin}`);
+  // The newest 1h column start is in the signature: the grid re-cuts on every completed bucket
+  // even when the roster never changes, and a stale ETag would freeze the right edge.
+  assert.ok(pol.includes('fhSt.axis["1h"].t0'), "the column axis must move the ETag");
+  // client: the three timeframes, each read against its OWN shipped cap
+  for (const pin of ["fheat:{ tf:'8h', sort:'oi', rows:'25' }", "function fhColor(v,cap)",
+    "function renderFundHeat(fh)", "function attachFundHeatControls()", "if(fhBlock) attachFundHeatControls();",
+    "{html:regimeBlock},{html:fhBlock},{pend:fhPend}", "cap=ax.cap"])
+    assert.ok(app.includes(pin), `app.js missing funding-heatmap pin: ${pin}`);
+  // an unknown bucket is hatched, never painted as zero carry
+  assert.ok(/if\(v==null\|\|!isFinite\(v\)\) return null;/.test(app) && app.includes("url(#${pid})"),
+    "a gap in the funding spine must render as a gap, not as flat carry");
+  assert.ok(css.includes(".s-leg .fh-gapsw"), "and the legend says what the hatch means");
+  // red/green is the hard CVD pair, so the direction is carried twice more WITHOUT colour: a signed
+  // per-row direct label, and a tooltip that names the side in words.
+  assert.ok(app.includes("'longs pay'") && app.includes("'longs receive'"), "tooltips name the direction");
+  assert.ok(app.includes('class="fh-nv ') && app.includes("fhPct(mean,dp)"), "every row is direct-labelled with its signed mean");
+  assert.ok(app.includes("\\u22480%"), "a value that rounds away must not claim a direction");
+  // the timeframe must never be presented as a zoom
+  assert.ok(/change the quantity, not the zoom/.test(app), "the caption says the timeframe changes the quantity");
+});
+
 const { stdev, median, linregR2, priceAt, featuresFromHourly, oiDeltaPct, pearson, meanPairwiseCorr, corrMatrix, studyBreakdown, playbook, confSplit, studyOIFlush, studyFPDiv, offDriftStats } = require("../src/compute");
 
 const HOUR = 3600 * 1000, DAY = 86400 * 1000;
@@ -12206,7 +12349,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.25-32"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.26-33"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

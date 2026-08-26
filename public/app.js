@@ -148,7 +148,9 @@ const state={ rows:new Map(), order:[], mainOrder:[], scope:(()=>{try{return loc
   housing:null, housingWin:'5y', liq:null, liqWin:'5y',   // Housing tab: the /api/housing board and the chart window
   earn:null, earnPayload:null,   // earnings calendar: ticker -> upcoming entries, and the raw /api/earnings payload
   layouts:{ list:{}, active:null },
-  analytics:{ data:null, err:null, ts:0, regime:{ sel:'all' }, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' } },
+  analytics:{ data:null, err:null, ts:0, regime:{ sel:'all' }, clock:{ sel:'all', metric:'vol' }, overlay:{ metric:'vol' }, dow:{ sel:'all', metric:'vol' }, season:{ sel:'all' },
+    // funding heatmap: timeframe is the quantity (funding paid per 1h/8h/24h bucket), not a zoom
+    fheat:{ tf:'8h', sort:'oi', rows:'25' } },
   alerts:{ rules:[], log:[], unseen:0, notify:false,
     // feed = the server's own recent event list, re-read on every pull. This is the log now: it
     // survives a refresh and a closed laptop, because the events live in the poller's persisted
@@ -4554,6 +4556,153 @@ function attachDowControls(){
   document.querySelectorAll('.dowmetric').forEach(b=>b.addEventListener('click',()=>{ state.analytics.dow.metric=b.dataset.m; drawSessions(); }));
 }
 
+// ---- funding heatmap: every market's carry, at 1h / 8h / 24h ----
+// Rows are markets, columns are time buckets, and a cell is the funding a 1× long PAID over that
+// bucket — so the timeframe buttons change the QUANTITY, not the zoom: the same market reads
+// ~0.00125%/1h, ~0.01%/8h, ~0.03%/24h. Each timeframe carries its own colour cap from the server
+// (a percentile of that grid's own |cells|), so one blowout never flattens the rest and a re-sort
+// never repaints the survivors.
+//
+// Colour is the app's standing carry semantic, shared with the funding clock: red = longs pay,
+// green = longs receive, neutral midpoint = the panel itself, so flat carry reads as "nothing
+// here" rather than as a hue of its own. Red/green is the hard pair for deuteranopes, so the sign
+// is carried twice more without colour — every row is direct-labelled with its signed mean, and
+// every cell's tooltip names the direction in words. An unknown bucket is HATCHED, never
+// zero-filled: a gap in the funding spine and a genuinely flat market must not look alike.
+const FH_STRIDE={'1h':6,'8h':6,'24h':5};        // label every Nth column — chosen to land on clean 6h/2d/5d marks
+const FH_SORTS=[['oi','open interest'],['pay','longs pay most'],['recv','longs receive most'],['abs','strongest carry'],['tkr','ticker A–Z']];
+const FH_ROWOPTS=[['25','top 25'],['50','top 50'],['all','all rows']];
+function fhColor(v,cap){
+  if(v==null||!isFinite(v)) return null;                       // null = unknown; the caller hatches it
+  const t=clamp(Math.abs(v)/(cap>0?cap:1e-12),0,1);
+  const k=Math.pow(t,0.7);                                     // lift the small end so a quiet cell is still legibly tinted
+  const mid=[20,26,33], tg=v>0?[229,96,77]:[70,185,126];       // >0 longs pay (--down), <0 longs receive (--up)
+  return `rgb(${lerp(mid[0],tg[0],k)},${lerp(mid[1],tg[1],k)},${lerp(mid[2],tg[2],k)})`;
+}
+function fhTf(fh){ const tfs=(fh&&fh.tfs)||['1h','8h','24h'], st=state.analytics.fheat;
+  return tfs.indexOf(st.tf)>-1?st.tf:((fh&&fh.tfDefault)||tfs[0]); }
+function fhMean(row,tf){ const c=(row.tf&&row.tf[tf])||[]; let s=0,n=0;
+  for(const v of c) if(Number.isFinite(v)){ s+=v; n++; } return n?s/n:null; }
+// Time labels follow the payload's own tz (ET for the xyz book, UTC for the 24/7 crypto book) —
+// the same clock every other session study is drawn on. Built once per tz, not per cell.
+let _fhFmtTz=null,_fhFmtD=null,_fhFmtH=null;
+function fhFmts(tz){ if(_fhFmtTz!==tz){ const z=tz==='UTC'?'UTC':'America/New_York';
+    _fhFmtD=new Intl.DateTimeFormat('en-GB',{timeZone:z,month:'short',day:'numeric'});
+    _fhFmtH=new Intl.DateTimeFormat('en-GB',{timeZone:z,hour:'2-digit',minute:'2-digit',hour12:false});
+    _fhFmtTz=tz; }
+  return {d:_fhFmtD,h:_fhFmtH}; }
+// Percent at the precision the grid deserves. The whole mean column shares ONE dp, derived from
+// that timeframe's colour cap (two significant figures at the cap), so the numbers line up and a
+// 1h grid is not forced into the same decimals as a 24h one. A value that rounds away prints as
+// "~0%" rather than "-0.0000%" — a string of zeros still claims a direction the number lacks.
+function fhDp(cap){ const c=Math.abs((cap||0)*100)||1e-9; return clamp(1-Math.floor(Math.log10(c)),2,6); }
+function fhPct(v,dp){
+  if(v==null||!isFinite(v)) return '\u2014';
+  const body=Math.abs(v*100).toFixed(dp==null?4:dp);
+  if(!parseFloat(body)) return '\u22480%';
+  return (v>0?'+':'\u2212')+body+'%';
+}
+function fhSortRows(rows,tf,sort){
+  const a=rows.slice();
+  if(sort==='tkr') a.sort((x,y)=>x.ticker<y.ticker?-1:(x.ticker>y.ticker?1:0));
+  else if(sort==='oi') a.sort((x,y)=>((y.oi==null?-1:y.oi)-(x.oi==null?-1:x.oi))||(x.ticker<y.ticker?-1:1));
+  else { const key=r=>{ const m=fhMean(r,tf); return m==null?null:(sort==='abs'?Math.abs(m):(sort==='recv'?-m:m)); };
+    a.sort((x,y)=>{ const kx=key(x),ky=key(y);
+      if(kx==null&&ky==null) return x.ticker<y.ticker?-1:1;
+      if(kx==null) return 1; if(ky==null) return -1;
+      return (ky-kx)||(x.ticker<y.ticker?-1:1); }); }
+  return a;
+}
+// Time-axis ticks. Buckets are anchored to the EPOCH, so an 8h bucket never opens at local
+// midnight (ET is UTC-4/5) — asking "is this tick midnight?" labels nothing and the axis reads as
+// the same clock time seven times over. A date tick is instead the first bucket whose LOCAL DATE
+// differs from the bucket before it; sub-daily grids top up the gaps with clock ticks. Labels are
+// then packed newest-first and only kept where they physically fit, so nothing ever overprints.
+function fhTicks(ax,f,nb,cw){
+  const wOf=(lab)=>lab.length*6+12;
+  const day=[]; let prev=null;
+  for(let i=0;i<nb;i++){ const d=f.d.format(ax.t0+i*ax.width); if(d!==prev){ day.push(i); prev=d; } }
+  const isDay=new Set(day);
+  const cands=day.map((i)=>({i,lab:f.d.format(ax.t0+i*ax.width),day:true}));
+  if(ax.bucketHours<24){ const hs=Math.max(1,Math.round(6/ax.bucketHours));
+    for(let i=nb-1;i>=0;i-=hs) if(!isDay.has(i)) cands.push({i,lab:f.h.format(ax.t0+i*ax.width),day:false}); }
+  for(const c of cands) c.w=wOf(c.lab);
+  cands.sort((a,b)=>(b.day?1:0)-(a.day?1:0)||b.i-a.i);   // dates win the space, newest first
+  const kept=[];
+  for(const c of cands){ const x=c.i*cw+cw/2;
+    if(kept.every((k)=>Math.abs((k.i*cw+cw/2)-x)>=(k.w+c.w)/2)) kept.push(c); }
+  return kept.sort((a,b)=>a.i-b.i);
+}
+function fhHeatSvg(fh,rows,tf){
+  const ax=(fh.axis||{})[tf]; if(!ax||!rows.length) return '<div class="msg">No funding grid yet.</div>';
+  const nb=ax.buckets, cap=ax.cap, f=fhFmts(fh.tz), dp=fhDp(cap), zero=0.5*Math.pow(10,-dp)/100;
+  const lx=54, rx=62, pt=22, ch=16, pb=30, W=780;
+  const cw=(W-lx-rx)/nb, H=pt+ch*rows.length+pb;
+  const pid='fhg'+(++_hoverSeq);   // one hatch pattern per render — ids must not collide across redraws
+  let s=`<svg viewBox="0 0 ${W} ${H.toFixed(1)}" class="sheat fheat" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">`+
+    `<defs><pattern id="${pid}" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">`+
+    `<rect width="4" height="4" fill="var(--panel2)"/><line x1="0" y1="0" x2="0" y2="4" stroke="var(--faint)" stroke-width="1" stroke-opacity=".45"/></pattern></defs>`+
+    `<text x="${lx-7}" y="13" text-anchor="end" class="fh-hd">market</text>`+
+    `<text x="${W-4}" y="13" text-anchor="end" class="fh-hd">mean / ${esc(tf)}</text>`;
+  rows.forEach((r,ri)=>{
+    const y=pt+ri*ch, cells=(r.tf&&r.tf[tf])||[], mean=fhMean(r,tf);
+    s+=`<text x="${lx-7}" y="${(y+ch/2+3.5).toFixed(1)}" text-anchor="end" class="fh-tk">${esc(r.ticker)}</text>`;
+    for(let i=0;i<nb;i++){
+      const x=lx+i*cw, v=cells[i], col=fhColor(v,cap);
+      const t0=ax.t0+i*ax.width, when=f.d.format(t0)+(ax.bucketHours>=24?'':' '+f.h.format(t0));
+      const tip=`${r.ticker} \u00b7 ${when} ${fh.tz} \u00b7 ${ax.bucketHours}h bucket\n`+
+        (col==null?'no funding data for this bucket':`${fhPct(v,dp+1)} \u2014 ${v>0?'longs pay':(v<0?'longs receive':'flat')}`);
+      s+=`<rect x="${x.toFixed(2)}" y="${y}" width="${Math.max(0.5,cw-1).toFixed(2)}" height="${ch-1}" `+
+         `fill="${col==null?`url(#${pid})`:col}"><title>${esc(tip)}</title></rect>`;
+    }
+    // Direct label: the row's signed mean per bucket. The sign is the whole point — it says which
+    // way the carry runs without asking the reader to separate red from green.
+    const flat = mean==null||Math.abs(mean)<zero;   // rounds away -> it is not a direction, so it wears neither colour
+    s+=`<text x="${W-4}" y="${(y+ch/2+3.5).toFixed(1)}" text-anchor="end" class="fh-nv ${flat?'sec':(mean>0?'neg':'pos')}">${esc(fhPct(mean,dp))}</text>`;
+  });
+  const ay=pt+ch*rows.length;
+  s+=`<line x1="${lx}" y1="${(ay+3).toFixed(1)}" x2="${(W-rx).toFixed(1)}" y2="${(ay+3).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>`;
+  for(const t of fhTicks(ax,f,nb,cw)){
+    const x=lx+t.i*cw+cw/2;
+    s+=`<line x1="${x.toFixed(1)}" y1="${(ay+3).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(ay+6).toFixed(1)}" stroke="var(--faint)" stroke-width="1"/>`+
+       `<text x="${x.toFixed(1)}" y="${(ay+16).toFixed(1)}" text-anchor="middle" class="lc-tick">${esc(t.lab)}</text>`;
+  }
+  s+=`<text x="${((lx+W-rx)/2).toFixed(1)}" y="${(ay+26).toFixed(1)}" text-anchor="middle" class="lc-ax">${esc(fh.tz)} \u00b7 ${ax.bucketHours}h buckets \u00b7 oldest left</text>`;
+  return s+'</svg>';
+}
+function renderFundHeat(fh){
+  const st=state.analytics.fheat, tf=fhTf(fh), ax=(fh.axis||{})[tf]||{};
+  const sorted=fhSortRows(fh.rows||[],tf,st.sort);
+  const lim=st.rows==='all'?sorted.length:Math.min(sorted.length,parseInt(st.rows,10)||25);
+  const shown=sorted.slice(0,lim);
+  const tbtn=(k)=>`<button type="button" class="fhtf${tf===k?' on':''}" data-tf="${k}">${k}</button>`;
+  const opt=(v,l,sel)=>`<option value="${esc(v)}"${sel===v?' selected':''}>${esc(l)}</option>`;
+  const controls=`<div class="s-ctrls"><span class="lbl">funding per</span>`+
+    `<span class="clockseg">${(fh.tfs||['1h','8h','24h']).map(tbtn).join('')}</span>`+
+    `<span class="lbl">sort</span><select id="fhsort" class="clocksel">${FH_SORTS.map(([v,l])=>opt(v,l,st.sort)).join('')}</select>`+
+    `<select id="fhrows" class="clocksel">${FH_ROWOPTS.map(([v,l])=>opt(v,l,st.rows)).join('')}</select>`+
+    `<span class="rt">${shown.length} of ${fh.count} markets${fh.capped?` · top ${fh.rowCap} of ${fh.universe} by OI`:''}</span></div>`;
+  const capPct=fhPct(ax.cap,fhDp(ax.cap)).replace('+','');
+  const legend=`<div class="s-leg"><span class="it">−${esc(capPct)} · longs receive</span>`+
+    `<span style="width:150px;height:10px;border-radius:3px;display:inline-block;background:linear-gradient(90deg,rgb(70,185,126),rgb(20,26,33),rgb(229,96,77))"></span>`+
+    `<span class="it">longs pay · +${esc(capPct)}</span>`+
+    `<span class="it" style="margin-left:6px"><span class="fh-gapsw"></span>no data</span>`+
+    `<span class="it">per ${esc(tf)}</span></div>`;
+  const cap=`One row per market, one column per ${ax.bucketHours}h bucket; a cell is the funding a <b>1× long paid</b> over that bucket — `+
+    `<b>red = longs pay</b> (crowded long, carry is a cost), <b>green = longs receive</b> (crowded short, carry pays you to be long). `+
+    `The timeframe buttons change the quantity, not the zoom: the same market reads roughly 8× larger per 8h than per 1h. `+
+    `The scale is capped at the grid's own ${Math.round((fh.capPctl||0.98)*100)}th percentile (±${esc(capPct)} per ${esc(tf)}) so one blowout can't flatten everything else; `+
+    `beyond that the cell just saturates. Hatched cells are gaps in the funding spine, not flat carry — a bucket needs ≥${Math.round((fh.minCov||0.5)*100)}% of its hours to print. `+
+    `The number on the right is that row's mean per bucket over the window. <b>Hover</b> any cell for its exact rate and direction.`;
+  return sHead('Funding heatmap',`every market's carry over calendar time, at 1h · 8h · 24h`)+controls+legend+
+    `<div class="s-card" style="overflow-x:auto">${fhHeatSvg(fh,shown,tf)}</div>`+sCap(cap);
+}
+function attachFundHeatControls(){
+  document.querySelectorAll('.fhtf').forEach(b=>b.addEventListener('click',()=>{ state.analytics.fheat.tf=b.dataset.tf; drawSessions(); }));
+  const s=el('fhsort'); if(s) s.addEventListener('change',()=>{ state.analytics.fheat.sort=s.value; drawSessions(); });
+  const r=el('fhrows'); if(r) r.addEventListener('change',()=>{ state.analytics.fheat.rows=r.value; drawSessions(); });
+}
+
 // ---- cross-ticker clustering (PCA of the normalized 24h vol profile) ----
 function clusterScatterSvg(points, classes){
   const W=560,H=360, pl=30,pr=16,pt=16,pb=28;
@@ -5150,6 +5299,10 @@ function drawSessions(){
     pvPend = sgPendRow('Time-based pivots', det,'\u2605\u2605\u2605\u2606\u2606'); }
   const regime = a.sections && a.sections.regime;
   const regimeBlock = renderRegime(regime, (state.analytics.regime&&state.analytics.regime.sel)||'all');
+  const fh = a.sections && a.sections.fundHeat;
+  let fhBlock='', fhPend='';
+  if(fh && !fh.pending && !fh.disabled && Array.isArray(fh.rows) && fh.rows.length) fhBlock = renderFundHeat(fh);
+  else if(!fh||!fh.disabled) fhPend = sgPendRow('Funding heatmap', fh?`computing \u2014 needs \u2265${fh.need||5} markets with a funding spine (have ${fh.count||0})`:'every market\u2019s carry over calendar time, at 1h \u00b7 8h \u00b7 24h','\u2605\u2605\u2605\u2605\u2606');
   // ---- group verdicts: computed from the same section objects the panels render ----
   const vPositioning=()=>{ const d=regime&&regime.all;
     if(!d||d.pending||!d.crowd) return 'accruing \u2014 fills in as OI &amp; funding history banks';
@@ -5157,6 +5310,10 @@ function drawSessions(){
     if(cw.netFundApr!=null) p.push(`skew ${cw.netFundApr>=0?'+':''}${cw.netFundApr.toFixed(1)}%`);
     if(cw.longExtPct!=null) p.push(`${cw.longExtPct}% crowded-long`);
     if(cw.shortExtPct!=null) p.push(`${cw.shortExtPct}% crowded-short`);
+    // The heatmap's own one-liner: the hottest row on the timeframe the user is actually looking at.
+    if(fh&&!fh.pending&&Array.isArray(fh.rows)&&fh.rows.length){ const tf=fhTf(fh);
+      let top=null,tv=0; for(const r of fh.rows){ const m=fhMean(r,tf); if(m!=null&&Math.abs(m)>Math.abs(tv)){ tv=m; top=r; } }
+      if(top) p.push(`hottest carry ${esc(top.ticker)} ${fhPct(tv,3)}/${tf}`); }
     return p.join(' \u00b7 ')||'\u2014'; };
   const vHolds=()=>{ if(!sd||sd.pending) return sd?`computing \u2014 ${sd.equityCount}/${sd.need} ${sd.isCrypto?'perps':'equities'} ready`:'computing';
     const S=sd.sessions||{}, seg=(k,l)=>S[k]&&S[k].totNet!=null?`${l} ${fp(S[k].totNet)} net`:null;
@@ -5184,23 +5341,23 @@ function drawSessions(){
     if(em&&!em.pending&&em.tf&&em.tf['1d']&&em.tf['1d'].n) p.push(`ema200 ${em.tf['1d'].n} D1 events`);
     return p.join(' \u00b7 ')||'computing'; };
   // ---- assemble ----
-  const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||emBlock||anBlock||cbBlock||pvBlock;
+  const anySections = flagship||clocks||overlay||dowBlock||clBlock||seBlock||lvBlock||emBlock||anBlock||cbBlock||pvBlock||fhBlock;
   const isCr = !!(a && a.isCrypto);
   // Only studies this universe actually publishes can hold back the all-live footer, and the count
   // is derived from the live payload rather than hard-coded — crypto ships a five-study Holds +
   // Positioning set, so claiming "eleven" there would be a lie. (-19)
   const onG=(id)=>sessGroups().some(g=>g.id===id);
-  const gate=[sdPend,anPend,cbPend,pvPend]
+  const gate=[sdPend,anPend,cbPend,pvPend,fhPend]
     .concat(onG('clocks')?[hcPend,ovPend,sePend]:[])
     .concat(onG('week')?[dowPend]:[])
     .concat(onG('structure')?[clPend,lvPend,emPend]:[]);
   const allLive = anySections && !gate.some(Boolean);
-  const nStudies = 1/*regime*/+4/*decomp, anatomy, candles, pivots*/
+  const nStudies = 1/*regime*/+4/*decomp, anatomy, candles, pivots*/+1/*funding heatmap*/
     +(onG('clocks')?3:0)+(onG('week')?1:0)+(onG('structure')?2:0);
   const foot = allLive ? `<div class="sec" style="margin-top:4px;font-size:11px;opacity:.8">All ${nStudies} studies live. \u25c6</div>` : '';
   // Render only the groups this universe publishes (-19) — crypto ships positioning + holds.
   const GROUP_BODY={
-    positioning:()=>sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock}]),
+    positioning:()=>sgSection('positioning','Positioning',vPositioning(),[{html:regimeBlock},{html:fhBlock},{pend:fhPend}]),
     holds:()=>sgSection('holds','Holds',vHolds(),[{html:flagship},{pend:sdPend},{html:anBlock},{pend:anPend},{html:cbBlock},{pend:cbPend},{html:pvBlock},{pend:pvPend}]),
     clocks:()=>sgSection('clocks','Clocks',vClocks(),[{html:clocks},{pend:hcPend},{html:overlay},{pend:ovPend},{html:seBlock},{pend:sePend}]),
     week:()=>sgSection('week','Week',vWeek(),[{html:dowBlock},{pend:dowPend}]),
@@ -5210,6 +5367,7 @@ function drawSessions(){
   host.innerHTML=title+status+bar+jump+groups+foot;
   if(regime) wireRegimeControls();
   if(hc && !hc.pending && !hc.disabled){ attachClockControls(); if(overlay) attachOverlayControls(); }
+  if(fhBlock) attachFundHeatControls();
   if(dow && !dow.pending && !dow.disabled) attachDowControls();
   if(se && !se.pending && !se.disabled) attachSeasonControls();
   if(lv && !lv.pending && !lv.disabled) attachStudyScope('lvlsel','levels');

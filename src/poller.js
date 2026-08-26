@@ -16,7 +16,7 @@ const {
 const { pxRingPush, pxRingRef, dipReclaim } = require("./compute");
 const { focusSelect, focusGapSigma, focusLevelDist, firstHourStats, sessionCloseStats, FOCUS_CAP, FOCUS_PER_CLUSTER, focusPreview, focusDiff, FOCUS_PREVIEW_N, foldLiveMark,
   focusGate, focusLimits, FOCUS_HARD_VOL, FOCUS_HARD_OI, FOCUS_BELOW_N } = require("./compute");
-const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, meanPairwiseCorr, regimeAggregate,
+const { featuresFromHourly, bucketOpens, oiDeltaPct, fundingAvg, fundingHeat, FUNDHEAT_MIN_COV, meanPairwiseCorr, regimeAggregate,
   cashAnchors, overnightAnchors, weekendAnchors, utcDayAnchors, cryptoWeekendAnchors, runHolds, sessionComposite, activityClock, dowClock, priceAsOf,
   HOME_MKTS, homeCalCovered, homeCalHorizon, homeOvernightAnchors, homeWeekendAnchors, homeClosedWindows,
   pca2, hourReturnMeans, hourReturnStats, pearson,
@@ -3631,7 +3631,12 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     await buildYield();
     const anSt = buildAnatomy(U);       // same one-computation contract as the levels study
     const anSig = anSt.pending ? `p${anSt.count}` : `${anSt.tickerSessions}:${anSt.days}:${anSt.mfe.medUpSd}:${anSt.monday ? anSt.monday.weeks : 0}:${anSt.naked.revisit.join(",")}:${anSt.candles ? anSt.candles.n : 0}:${anSt.pivots ? anSt.pivots.hi.nDays : 0}`;
-    const sig = `${U.scope}:${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${anSig}`;
+    await buildYield();
+    const fhSt = buildFundingHeat(U);   // positioning study; same one-computation contract, so sig and payload agree
+    // The grid re-cuts on every completed bucket even when the roster is unchanged, so the newest
+    // 1h column start joins the signature — otherwise a stale ETag would freeze the right edge.
+    const fhSig = fhSt.pending ? `p${fhSt.count}` : `${fhSt.count}:${fhSt.universe}:${fhSt.axis["1h"].t0}:${fhSt.axis["8h"].cap}`;
+    const sig = `${U.scope}:${universe.length}:${hc.coins}:${hc.candles}:${fc.coins}:${fc.points}:${fc.endpoint}:${ready}:${rgSig}:${lvSig}:${fhSig}:${anSig}`;
     const cache = U.isCrypto ? { get v() { return analyticsCryptoVer; }, set v(x) { analyticsCryptoVer = x; }, get s() { return analyticsCryptoSig; }, set s(x) { analyticsCryptoSig = x; } }
                              : { get v() { return analyticsVer; }, set v(x) { analyticsVer = x; }, get s() { return analyticsSig; }, set s(x) { analyticsSig = x; } };
     if (sig !== cache.s) { cache.s = sig; cache.v = Date.now(); }   // content changed -> new ETag
@@ -3661,6 +3666,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         const seasonality = on("clocks") ? buildSeasonality(U) : DISABLED;
         return {
           regime,
+          fundHeat: fhSt,
           sessionDecomp,
           hourClock,
           dow,
@@ -3773,6 +3779,85 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     const byClass = {};
     for (const c of [...new Set(tickers.map((t) => t.assetClass))]) byClass[c] = _poolClocks(tickers.filter((t) => t.assetClass === c));
     return { hours: 24, tz: U.tz, isCrypto: U.isCrypto, metricDefault: "vol", tickers, pooled: { all: _poolClocks(tickers), byClass } };
+  }
+
+  // Funding heatmap: every market's carry as one grid — a row per ticker, a column per time bucket,
+  // read at 1h, 8h or 24h. The rest of the positioning stack answers "what is carry doing NOW"
+  // (the regime aggregate) or "when in the day does it concentrate" (the funding clock); neither
+  // shows the cross-section decaying over calendar time, which is where a crowded side actually
+  // announces itself — one row going hot for two days while the book stays flat.
+  //
+  // The three timeframes are three real quantities, not three zooms: a cell is the funding a 1x
+  // long paid over that bucket, so the same market reads ~0.00125%/1h, ~0.01%/8h, ~0.03%/24h. Each
+  // timeframe therefore carries its OWN color cap; the client never rescales one into another.
+  // Bucket depth is chosen so all three land in the same readable column count (~30-48) while
+  // spanning the horizon that timeframe is for: two days hourly, two weeks of funding epochs, a
+  // month of days.
+  const FUNDHEAT_TF = {
+    "1h": { bucketHours: 1, buckets: 48 },     // 2 days  — the intraday carry spike
+    "8h": { bucketHours: 8, buckets: 42 },     // 14 days — the classic funding-epoch view
+    "24h": { bucketHours: 24, buckets: 30 },   // 30 days — the whole spine, one cell per day
+  };
+  const FUNDHEAT_DEFAULT_TF = "8h";
+  const FUNDHEAT_ROWS = 60;        // grid cap: rows beyond this are a scrollbar, not a signal. Ranked by notional OI.
+  const FUNDHEAT_MIN_MKTS = 5;     // below this the "cross-section" is a handful of rows — stay pending and say so
+  const FUNDHEAT_MIN_CELLS = 3;    // a row needs this many known cells in SOME timeframe, or it is all gap
+  const FUNDHEAT_CAP_PCTL = 0.98;  // color cap = this percentile of |cell| — a single blowout must not flatten the grid
+  const FUNDHEAT_CAP_FLOOR = 1e-5; // per bucket-HOUR: a dead-flat book must not amplify rounding into a red row
+
+  // Symmetric color cap for one timeframe's grid. Percentile over the pooled |values| so the scale
+  // is set by the body of the distribution, floored so a quiet book stays quiet on screen. Shipped
+  // rather than derived client-side: sorting or filtering rows must never repaint the survivors.
+  function fundHeatCap(vals, bucketHours) {
+    const a = vals.filter((x) => Number.isFinite(x)).map(Math.abs).sort((x, y) => x - y);
+    const floor = FUNDHEAT_CAP_FLOOR * bucketHours;
+    if (!a.length) return +floor.toFixed(10);
+    const p = a[Math.min(a.length - 1, Math.floor(FUNDHEAT_CAP_PCTL * (a.length - 1)))];
+    return +Math.max(p, floor).toFixed(10);
+  }
+  function buildFundingHeat(U) {
+    U = U || analyticsUniverse("stocks");
+    const mkts = U.roster().filter((r) => r && !r.delisted && r.fundH && r.fundH.size);
+    if (mkts.length < FUNDHEAT_MIN_MKTS) return { pending: true, count: mkts.length, need: FUNDHEAT_MIN_MKTS };
+    // One `end` for the whole grid, so every row and every timeframe is cut on the same clock —
+    // computing it per row would let two markets built a second apart land on different columns.
+    const end = Date.now();
+    const keys = Object.keys(FUNDHEAT_TF);
+    const ranked = mkts
+      .map((r) => ({ r, oi: Number.isFinite(r.oi) ? r.oi : -1 }))
+      .sort((a, b) => (b.oi - a.oi) || (a.r.ticker < b.r.ticker ? -1 : 1));
+    const rows = [], pool = {};
+    for (const k of keys) pool[k] = [];
+    for (const { r, oi } of ranked) {
+      if (rows.length >= FUNDHEAT_ROWS) break;
+      const hist = getFunding(r.coin);
+      if (!hist.length) continue;
+      const tf = {};
+      let best = 0;
+      for (const k of keys) {
+        const g = fundingHeat(hist, Object.assign({ end }, FUNDHEAT_TF[k]));
+        const cells = g.cells.map((v) => (v == null ? null : +v.toFixed(9)));
+        best = Math.max(best, cells.filter((v) => v != null).length);
+        tf[k] = cells;
+        for (const v of cells) if (v != null) pool[k].push(v);
+      }
+      if (best < FUNDHEAT_MIN_CELLS) continue;
+      rows.push({ coin: r.coin, ticker: r.ticker, assetClass: U.classOf(r), oi: oi >= 0 ? Math.round(oi) : null, tf });
+    }
+    if (rows.length < FUNDHEAT_MIN_MKTS) return { pending: true, count: rows.length, need: FUNDHEAT_MIN_MKTS };
+    // The column axis is per-timeframe and shared by every row (fundingHeat anchors buckets to the
+    // epoch), so it ships once instead of on each row.
+    const axis = {};
+    for (const k of keys) {
+      const g = fundingHeat([], Object.assign({ end }, FUNDHEAT_TF[k]));
+      axis[k] = { t0: g.t0, width: g.width, bucketHours: g.bucketHours, buckets: g.buckets,
+                  cap: fundHeatCap(pool[k], g.bucketHours) };
+    }
+    return {
+      tz: U.tz, isCrypto: U.isCrypto, tfs: keys, tfDefault: FUNDHEAT_DEFAULT_TF, axis, rows,
+      count: rows.length, universe: mkts.length, capped: rows.length >= FUNDHEAT_ROWS, rowCap: FUNDHEAT_ROWS,
+      minCov: FUNDHEAT_MIN_COV, capPctl: FUNDHEAT_CAP_PCTL,
+    };
   }
 
   // Day-of-week x hour-of-day 7x24 heatmap (the weekend-gap / Friday->Monday story). Per-ticker grids
