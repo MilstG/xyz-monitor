@@ -135,9 +135,13 @@ test("funding heatmap: it is a tab of its own — nav, route, gate, hash, scope,
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  // It ships in the Tape menu — the market-data set — and the nav config can still move it.
+  // It ships in the `tape` group — the market-data menu — and the nav config can still move it.
+  // The group KEY is structural; the LABEL is the admin's (this deployment renamed it to "Market
+  // Data"), so the assertion keys off `tape` and never off what the ribbon happens to read.
   const tape = C.resolveNavGroups(null).find((g) => g.key === "tape");
-  assert.ok(tape.views.includes("funding"), "the tab ships in the Tape menu by default");
+  assert.ok(tape.views.includes("funding"), "the tab ships in the market-data menu by default");
+  assert.equal(C.resolveNavGroups({ labels: { tape: "Market Data" } }).find((g) => g.key === "tape").views.length,
+    tape.views.length, "a renamed menu holds the same tabs — the label is not the identity");
   assert.ok(C.NAV_VIEW_ORDER.includes("funding"), "and in the canonical order, so a move lands it deterministically");
   assert.ok(C.resolveNavGroups({ views: { funding: "macro" } }).find((g) => g.key === "macro").views.includes("funding"),
     "an admin can move it between menus like any other tab");

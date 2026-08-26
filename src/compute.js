@@ -5381,8 +5381,11 @@ const FEATURES = [
   { key: "charts",     kind: "tab", label: "Charts",      def: "public", routes: [] },
   { key: "corr",       kind: "tab", label: "Correlation", def: "public", routes: ["/api/corr-crypto"] },
   // FUNDING (build 2026.08.26-34): the funding heatmap, promoted out of the Sessions tab into a
-  // board of its own. Its own route on purpose — as one section of /api/analytics it made the tab
-  // pull the entire session study set (levels, anatomy, seasonality, ...) to paint one grid.
+  // board of its own. It joins the `tape` group above — the market-data menu, which this
+  // deployment has renamed to "Market Data"; group KEYS are structural and labels are the
+  // admin's, so read the key, never the ribbon. Its own route on purpose — as one section of
+  // /api/analytics it made the tab pull the entire session study set (levels, anatomy,
+  // seasonality, ...) to paint one grid.
   { key: "funding",    kind: "tab", label: "Funding",     def: "public", routes: ["/api/funding"] },
   { key: "sessions",   kind: "tab", label: "Sessions",    def: "public", routes: ["/api/analytics"] },
   { key: "signals",    kind: "tab", label: "Signals",     def: "public", routes: ["/api/signals", "/api/ledger", "/api/triggers"] },

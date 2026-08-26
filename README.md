@@ -56,7 +56,8 @@ instant, and the per-IP rate limit stops being a per-user problem.
   green = longs receive; a bucket whose spine covers under half its hours is hatched rather than
   drawn as zero, and the newest column is always the last *complete* bucket. Rows rank by open
   interest, capped at 60. Built per universe, lazily, off the funding history already on the
-  volume — no new fetch and no new persistence. Lives in the Tape menu; an admin can move it.
+  volume — no new fetch and no new persistence. Ships in the market-data menu (the `tape` group);
+  an admin can rename that menu or move the tab out of it without a deploy.
 - **Sectors tab** — sector classification, a rotation flow map, a Relative Rotation Graph (RS-Ratio / RS-Momentum vs the S&P), per-sector detail, and a sector×sector correlation matrix.
 - **Persistence** — OI *and* funding history are written to the `/data` volume and survive restarts; the computed feature cache is persisted too, so redeploys serve a warm table instantly.
 - **Staleness** — the snapshot carries the last successful poll time; the status dot turns amber if the server's data goes stale (poller stalled).
