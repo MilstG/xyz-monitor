@@ -2823,6 +2823,67 @@ test("earnings: recently-reported window keeps the two prior ET days, drops toda
   assert.ok(srv.includes("recent: []"), "/api/earnings fallback declares the recent field");
 });
 
+test("earnings row: the printed EPS pair reconciles with the surprise % printed beside it", () => {
+  // The live CRWD row (2026-08-26) read "EPS 0.31 vs 0.3 beat +3.9%" — a pair that, taken at its
+  // printed word, is +3.3%. Two separate defects behind one line: the pair rounded to 2dp while
+  // the surprise kept the feed's 4dp values, and the trailing-zero trim ran per value, so the
+  // actual printed two decimals and the estimate one. Both are display lies about a number the
+  // operator trades on, so both are pinned here against the real functions in app.js.
+  const fs = require("fs"), path = require("path");
+  const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  const grab = (name) => {
+    const i = app.indexOf("function " + name + "(");
+    assert.ok(i > -1, name + " present in app.js");
+    let d = 0;
+    for (let k = app.indexOf("{", i); k < app.length; k++) {
+      if (app[k] === "{") d++; else if (app[k] === "}") { d--; if (!d) return app.slice(i, k + 1); }
+    }
+    throw new Error("unbalanced " + name);
+  };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmtUsd = (x) => "$" + x;
+  const api = new Function("esc", "fmtUsd",
+    grab("epsSurStr") + "\n" + grab("epsPairFmt") + "\n" + grab("epsFmt") + "\n" + grab("earnEpsHtml")
+    + "\nreturn { epsSurStr, epsPairFmt, epsFmt, earnEpsHtml };")(esc, fmtUsd);
+
+  // The pair as printed must imply the surprise as printed — the invariant, checked directly.
+  const reconciles = (a, b) => {
+    const [fa, fe] = api.epsPairFmt(a, b);
+    assert.equal(fa.split(".")[1] ? fa.split(".")[1].length : 0,
+      fe.split(".")[1] ? fe.split(".")[1].length : 0, `${a}/${b}: both sides print at the same precision`);
+    assert.equal(api.epsSurStr(+fa, +fe), api.epsSurStr(a, b),
+      `${a}/${b}: printed "${fa} vs ${fe}" must imply the printed surprise`);
+    return [fa, fe];
+  };
+  assert.deepEqual(reconciles(0.3116, 0.3), ["0.3116", "0.3000"], "CRWD: 2dp hid a full half-point of surprise");
+  assert.deepEqual(reconciles(0.31, 0.2984), ["0.3100", "0.2984"], "same lie with the imprecision on the estimate side");
+  assert.deepEqual(reconciles(5.71, 5.62), ["5.71", "5.62"], "clean 2dp values stay at 2dp — no gratuitous decimals");
+  assert.deepEqual(reconciles(1.5, 1.2), ["1.5", "1.2"], "shared trailing zeros come off BOTH sides");
+  assert.deepEqual(reconciles(2, 1), ["2.0", "1.0"], "trim stops at one decimal — EPS is not an integer field");
+  assert.deepEqual(reconciles(-0.1, -0.2), ["-0.1", "-0.2"], "negative EPS: sign never disturbs the pairing");
+  reconciles(0.0007, 0.0004); reconciles(4.1123, 4.11); reconciles(0.8, 0.7999);
+  // The original NFLX lesson still holds: values that DIFFER must READ as different.
+  assert.deepEqual(api.epsPairFmt(0.8, 0.8042), ["0.8000", "0.8042"], "NFLX: 2dp collapsed a real -0.52% miss into 0.8 vs 0.8");
+  assert.deepEqual(api.epsPairFmt(3, 3), ["3.0", "3.0"], "equal values are equal at any precision");
+  assert.deepEqual(api.epsPairFmt(0.05, 0), ["0.05", "0.00"], "a zero estimate suppresses surprise, never the pairing");
+
+  // Rendered rows: the numbers in the row and the percentage next to them tell one story.
+  const row = api.earnEpsHtml({ epsA: 0.3116, eps: 0.3 });
+  assert.ok(row.includes("EPS 0.3116 vs 0.3000"), "row prints the reconciling pair: " + row);
+  assert.ok(row.includes("beat +3.9%"), "row keeps the true surprise, computed on stored values: " + row);
+  assert.ok(!/EPS 0\.31 vs 0\.3 </.test(row), "the shipped contradiction is gone");
+  assert.ok(api.earnEpsHtml({ epsA: 0.8, eps: 0.8042 }).includes("EPS 0.8000 vs 0.8042"), "verdict-contradicting collapse stays fixed");
+
+  // A lone estimate is house-style 2dp, not the feed's raw 4dp ("EPS est 2.1283" shipped live).
+  assert.ok(api.earnEpsHtml({ eps: 2.1283, rev: null }).includes("EPS est 2.13"), "NVDA: raw feed precision no longer leaks into the row");
+  assert.ok(api.earnEpsHtml({ eps: 2.1283, rev: null }).includes("2.1283"), "the exact feed estimate survives in the tooltip");
+  assert.ok(api.earnEpsHtml({ eps: 0.0042, rev: null }).includes("EPS est 0.0042"), "a sub-cent estimate is never rounded away to 0.00");
+  assert.ok(api.earnEpsHtml({ epsA: 1.2, eps: null }).includes("EPS 1.20 · no est"), "actual with no estimate: same house style");
+  assert.ok(api.earnEpsHtml({ eps: null, rev: null }).includes(">—<"), "nothing known stays a dash, never a zero");
+  assert.equal(api.epsSurStr(1, 0), null, "a zero estimate has no surprise to state");
+  assert.equal(api.epsSurStr(1, 1), null, "in line prints no surprise");
+});
+
 test("client integrity manifest: app.js contains every load-bearing symbol, exactly once", () => {
   // Regression guard for the build that shipped a gutted app.js: a bad splice replaced ~1,600
   // lines and still passed node --check (valid JS) and this suite (which never read the client).
@@ -2837,7 +2898,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "openSigHistory", "runSigHist", "loadSigHistory", "sigHistRow", "loadDrawerLedger",
     "ddCell", "ddyCell", "openCell", "dopenCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
-    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsPairFmt", "wireEarnVoid",
+    "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsSurStr", "epsPairFmt", "epsFmt", "wireEarnVoid",
     "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
     "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
@@ -12576,7 +12637,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.26-35"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-36"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

@@ -8062,32 +8062,54 @@ function renderHousing(){
   root.innerHTML=tiles+`<div class="s-grid">${cards.join('')}</div>`+starts+missing+errl;
   attachLineHover();
 }
-// Adaptive EPS display precision: expand decimals (2 -> 4) until actual and estimate render as
-// DIFFERENT numbers whenever they ARE different. "0.8 vs 0.8 miss +0.0%" (the live NFLX print:
-// 0.8000 actual vs 0.8042 est collapsed at 2dp) is a display contradicting its own verdict —
-// never acceptable. Trailing zeros trimmed after the distinction is secured.
+// Surprise % exactly as the row prints it — ONE definition, because epsPairFmt reconciles the
+// numbers it shows against this very string. Gains a decimal when it would otherwise round to a
+// signless 0.0%.
+function epsSurStr(a,b){
+  if(a==null||b==null||b===0) return null;
+  const s=(a-b)/Math.abs(b)*100;
+  return s===0?null:(s>=0?'+':'')+s.toFixed(Math.abs(s)<0.95?2:1)+'%';
+}
+// Adaptive EPS display precision: expand decimals (2 -> 4, the precision the feed rows are stored
+// at) until the printed pair tells the truth twice over.
+//   1. Values that DIFFER must READ as different. "EPS 0.8 vs 0.8 miss -0.52%" (the live NFLX
+//      print: 0.8000 actual vs 0.8042 est collapsed at 2dp) contradicts its own verdict.
+//   2. The pair must RECONCILE with the surprise printed beside it. Rule 1 alone passed 0.3116 vs
+//      0.3000 at 2dp — "EPS 0.31 vs 0.3 beat +3.9%", a pair that reads +3.3% (live CRWD,
+//      2026-08-26). The surprise is computed on the stored 4dp values and must NOT be rounded to
+//      match the display (that was the NFLX lie in the other direction), so the NUMBERS expand
+//      until they explain the percentage standing next to them.
+// Trailing zeros then come off both sides in lockstep or not at all: two decimals on the actual
+// and one on the estimate ("0.31 vs 0.3") reads as false precision on one of them. Removing a
+// shared trailing zero changes neither value, so neither rule can regress in the trim.
 function epsPairFmt(a,b){
+  const sur=epsSurStr(a,b);
   let dp=2;
-  while(dp<4&&a!==b&&a.toFixed(dp)===b.toFixed(dp)) dp++;
-  const tr=(x)=>x.toFixed(dp).replace(/(\.\d*?)0+$/,'$1').replace(/\.$/,'');
-  return [tr(a),tr(b)];
+  while(dp<4&&((a!==b&&a.toFixed(dp)===b.toFixed(dp))||(sur!=null&&epsSurStr(+a.toFixed(dp),+b.toFixed(dp))!==sur))) dp++;
+  while(dp>1&&a.toFixed(dp).endsWith('0')&&b.toFixed(dp).endsWith('0')) dp--;
+  return [a.toFixed(dp),b.toFixed(dp)];
+}
+// A single EPS number with no partner to contradict it: 2dp house style, expanding to 4dp only
+// when 2dp would round the print away entirely — a sub-cent estimate is not "0.00". The raw feed
+// value (4dp, which is what leaked into the row as "EPS est 2.1283") stays in the tooltip.
+function epsFmt(x){
+  return typeof x!=='number'||!isFinite(x)?'—':(x!==0&&+x.toFixed(2)===0?x.toFixed(4):x.toFixed(2));
 }
 // EPS segment: schedule estimate before the print; estimate vs ACTUAL with a beat/miss/in-line
 // verdict and surprise % once the feed fills the actual (same calendar row updates after the
 // report). Verdict is computed on the stored 4dp values, tri-state — equal values are IN LINE,
-// never a miss. Surprise gains a decimal when it would otherwise round to a signless 0.0%.
+// never a miss.
 function earnEpsHtml(e){
   if(e.epsA!=null&&e.eps!=null){
     const v=e.epsA>e.eps?'beat':e.epsA<e.eps?'miss':'in line';
-    const sur=e.eps!==0?((e.epsA-e.eps)/Math.abs(e.eps)*100):null;
-    const surStr=sur!=null&&sur!==0?(sur>=0?'+':'')+sur.toFixed(Math.abs(sur)<0.95?2:1)+'%':null;
+    const surStr=epsSurStr(e.epsA,e.eps);
     const [fa,fe]=epsPairFmt(e.epsA,e.eps);
     const tip=`reported · EPS ${e.epsA} vs ${e.eps} est${surStr!=null?` (${surStr} surprise)`:''}${e.rev!=null||e.revA!=null?` · revenue ${e.revA!=null?fmtUsd(e.revA):'—'} vs ${e.rev!=null?fmtUsd(e.rev):'—'} est`:''} · verdict is EPS-only, vs the FEED's estimate (consensus differs by source) — the tape's verdict is the move next to it`;
     return `<span class="earn-eps" data-tip="${esc(tip)}">EPS ${fa} vs ${fe} <b class="${v==='beat'?'pos':v==='miss'?'neg':'sec'}">${v}${v!=='in line'&&surStr!=null?' '+surStr:''}</b></span>`;
   }
-  if(e.epsA!=null) return `<span class="earn-eps sec" data-tip="actual reported; the feed carries no estimate to compare against">EPS ${e.epsA} · no est</span>`;
+  if(e.epsA!=null) return `<span class="earn-eps sec" data-tip="${esc('actual reported, exactly '+e.epsA+' per the feed; no estimate carried to compare against')}">EPS ${epsFmt(e.epsA)} · no est</span>`;
   const revTip=e.rev!=null?` · revenue est ${fmtUsd(e.rev)}`:'';
-  return `<span class="earn-eps sec"${e.rev!=null?` data-tip="${esc('EPS est '+(e.eps!=null?e.eps:'—')+revTip)}"`:''}>${e.eps!=null?'EPS est '+e.eps:'—'}</span>`;
+  return `<span class="earn-eps sec"${e.eps!=null||e.rev!=null?` data-tip="${esc('EPS est '+(e.eps!=null?e.eps:'—')+revTip+(e.eps!=null?' · the feed’s own estimate, shown rounded in the row':''))}"`:''}>${e.eps!=null?'EPS est '+epsFmt(e.eps):'—'}</span>`;
 }
 // Live context from the snapshot already in the browser: today's move, live volume, ADR.
 // Null-honest — a row still backfilling shows dashes, never zeros.
@@ -8115,7 +8137,7 @@ function earnDrawerHtml(r){
   const p=earnNext(r.ticker);
   const st=state.earnPayload&&state.earnPayload.study&&state.earnPayload.study[r.ticker];
   if(!p&&!st) return '';
-  const up=p?`Earnings ${p.diff===0?'<b style="color:var(--accent)">TODAY</b>':p.diff===1?'<b style="color:var(--accent)">tomorrow</b>':'in '+p.diff+'d'} · ${esc(earnSessLbl(p.e.s))}${p.e.eps!=null?' · EPS est '+p.e.eps:''}`:'';
+  const up=p?`Earnings ${p.diff===0?'<b style="color:var(--accent)">TODAY</b>':p.diff===1?'<b style="color:var(--accent)">tomorrow</b>':'in '+p.diff+'d'} · ${esc(earnSessLbl(p.e.s))}${p.e.eps!=null?' · EPS est '+epsFmt(p.e.eps):''}`:'';
   const hist=st?`${up?' · ':''}<span class="sec" data-tip="own reaction base rate — hover the Earnings tab row for the full breakdown">${st.n} print${st.n===1?'':'s'}, avg |${st.avgAbs}%|</span>`:'';
   return `<div class="dsub" style="margin-top:2px">${up}${hist}</div>`;
 }
@@ -10214,7 +10236,7 @@ earnings:`
 <div class="hlp-h">Coverage — what's honestly absent</div>
 <p>Indices, ETFs, FX, commodities, thematic baskets and pre-IPO synthetics never report earnings. Foreign listings without a US symbol (SMSN, KIOXIA, SOFTBANK…) are real companies with real earnings, but this feed doesn't carry them — they're <b>absent, never guessed</b>. A missing name means "no report scheduled in the window OR not covered", and the coverage line states how many eligible equities exist so absence is auditable.</p>
 <div class="hlp-h">Reported rows — beat/miss, kept for 48h</div>
-<p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the move next to it, and they disagree often enough to be interesting. Reports don't vanish at midnight: a <b>Reported</b> section at the top keeps the two prior ET days on the tab with their beat/miss and a <b>reaction</b> move — the print's own reaction candle per the study convention (BMO/DMH scores its own UTC daily candle, AMC the next one), never today's unrelated move. A reaction candle still forming reads "so far"; one not opened yet says so instead of showing zero. Rows come from the persisted print history, so a late-landing actual upgrades the row in place and the section survives redeploys. Two hygiene rules run against every (chunked, complete) fetch: a print the feed retracted from the refetched 5-day back window is dropped, and a past print whose ticker is still scheduled ahead for the same fiscal quarter is a placeholder-date phantom, dropped. For garbage neither rule can reach — a feed asserting a report that never happened, with no corrected row anywhere — the <b>×</b> on a reported row voids the print permanently (tombstoned; no future fetch can re-add it). The verdict is beat / miss / <b>in line</b> vs the feed's own estimate, with display precision expanding until actual and estimate read as different numbers whenever they are.</p>
+<p>Once a company reports, the same feed row fills in the <b>actual</b>: the tab shows "EPS 5.71 vs 5.62 est · <b>beat</b> +1.6%" and the E badge flips to a scoreboard (verdict + the live day move). The verdict is EPS-only — the tape's verdict is the move next to it, and they disagree often enough to be interesting. Reports don't vanish at midnight: a <b>Reported</b> section at the top keeps the two prior ET days on the tab with their beat/miss and a <b>reaction</b> move — the print's own reaction candle per the study convention (BMO/DMH scores its own UTC daily candle, AMC the next one), never today's unrelated move. A reaction candle still forming reads "so far"; one not opened yet says so instead of showing zero. Rows come from the persisted print history, so a late-landing actual upgrades the row in place and the section survives redeploys. Two hygiene rules run against every (chunked, complete) fetch: a print the feed retracted from the refetched 5-day back window is dropped, and a past print whose ticker is still scheduled ahead for the same fiscal quarter is a placeholder-date phantom, dropped. For garbage neither rule can reach — a feed asserting a report that never happened, with no corrected row anywhere — the <b>×</b> on a reported row voids the print permanently (tombstoned; no future fetch can re-add it). The verdict is beat / miss / <b>in line</b> vs the feed's own estimate. The pair's display precision expands in lockstep — both numbers always at the same decimals — until two things hold: actual and estimate read as different numbers whenever they are, AND the pair reconciles with the surprise % printed beside it. The surprise is computed on the feed's stored 4dp values and is never rounded to match the display, so it is the NUMBERS that expand to explain it (“EPS 0.31 vs 0.3 beat +3.9%” reads as +3.3%, and that contradiction is what the rule prevents). An estimate with no actual beside it prints at two decimals — four only when two would round a sub-cent estimate away entirely — with the feed's exact value in the row's tooltip.</p>
 <div class="hlp-h">The reaction study</div>
 <p>Each name's <b>own earnings base rate</b>, measured on the perp's daily closes (UTC — it trades through weekends, so a Friday AMC print scores Saturday's candle): number of prints, average and median |next-session move|, up/down split, gap behavior where opens are retained, and the move as a multiple of that name's usual daily range. History starts from a one-time ~1y feed backfill (depth = whatever the free tier honestly returns) and <b>self-accrues</b> from there — every print that passes is persisted like the OI log. n is shown always; "no history" means exactly that, never a hidden zero.</p>
 <div class="hlp-h">Live context columns</div>
@@ -10458,7 +10480,7 @@ function termEarnings(r){
   termHi(r.coin);
   if(!p) return termOut(`${termTkHdr(r)}\n<span class="tp-k">earnings</span> <span class="sec">no report scheduled in the next ${win}d</span> <span class="tp-trans">(foreign listings without a US symbol aren't covered)</span>\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`);
   const when=p.diff===0?'<b class="amber">today</b>':p.diff===1?'<b>tomorrow</b>':`<b>in ${p.diff}d</b> (${tesc(p.e.d)})`;
-  const rep=p.diff===0&&p.e.epsA!=null?` · reported EPS ${p.e.epsA}`:'';
+  const rep=p.diff===0&&p.e.epsA!=null?` · reported EPS ${epsFmt(p.e.epsA)}`:'';
   termOut(`${termTkHdr(r)}\n<span class="tp-k">earnings</span> ${when} · ${tesc(earnSessLbl(p.e.s))}${rep}\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
 function termScreen(expr){ const cls=(expr||'').split('&').map(c=>c.trim()).filter(Boolean); if(!cls.length) return termErr('screen needs an expression, e.g. funding>20 & squeeze>50');
   const preds=[]; let sortF=null;
@@ -10531,7 +10553,7 @@ async function termEarnCal(mode){
   if(mode==='recent'){ const rec=(d.recent||[]).slice(0,10);
     if(!rec.length) return termOut('<span class="sec">no recently reported names in the window</span>');
     const lines=rec.map(e=>{ const r=termFind(e.t);
-      const eps=e.epsA!=null?`EPS ${e.epsA}${e.eps!=null?' vs '+e.eps+' est ('+(e.epsA>e.eps?'<span class="pos">beat</span>':e.epsA<e.eps?'<span class="neg">miss</span>':'in line')+')':''}`:'<span class="sec">EPS pending</span>';
+      const eps=e.epsA!=null?(e.eps!=null?(([fa,fe])=>`EPS ${fa} vs ${fe} est (${e.epsA>e.eps?'<span class="pos">beat</span>':e.epsA<e.eps?'<span class="neg">miss</span>':'in line'})`)(epsPairFmt(e.epsA,e.eps)):`EPS ${epsFmt(e.epsA)}`):'<span class="sec">EPS pending</span>';
       const day=r&&r.d1!=null&&isFinite(r.d1)?` · day ${tpct(r.d1)}`:'';
       return `<span class="tp-deep" data-tcmd="${tesc(e.t)}">${tpad(tesc(e.t),7)}</span> ${tesc(e.d)} ${tesc(earnSessLbl(e.s))} · ${eps}${day}`; }).join('\n');
     return termOut(`<span class="tp-hd">recently reported</span>\n${lines}\n<span class="tp-deep" data-tview="earnings">open earnings tab ▸</span>`); }
