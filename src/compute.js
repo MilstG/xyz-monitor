@@ -5020,26 +5020,34 @@ function pushFmt(ev, opts) {
   return null;
 }
 
-// Telegram caps a sendMessage body at 4096 chars, so a burst is batched into as few messages as
-// possible rather than one per event — and the batch is CAPPED, with the overflow disclosed as a
-// count instead of silently dropped. Same honest-null rule the UI uses for suppressed signals.
-const PUSH_MSG_MAX = 3800, PUSH_BATCH_MAX = 8;
+// Telegram caps a sendMessage body at 4096 chars, so a burst is PACKED into as few messages as
+// will hold it — and into as many as it takes. Nothing is held back. The old 8-event cap
+// disclosed its overflow as "+N more held — batch cap" and then dropped it: "held" reads as a
+// deferral, and nothing ever came, so the wire quietly lied about the size of what fired. A burst
+// that needs four messages gets four, part-marked so the reader can see the shape of what is
+// arriving; the outbox paces them ~3s apart, in order.
+//
+// The character limit is now the ONLY bound here. Volume rails live downstream where they can
+// hold rather than delete: the per-recipient hourly cap delays, the bounded outbox is sized for
+// a real burst and discloses any overflow on the next send.
+const PUSH_MSG_MAX = 3800;
 function pushBatch(msgs, opts) {
   const o = opts || {};
-  const cap = o.max || PUSH_BATCH_MAX, lim = o.limit || PUSH_MSG_MAX;
+  const lim = o.limit || PUSH_MSG_MAX;
   const list = (msgs || []).filter((m) => typeof m === "string" && m);
   if (!list.length) return [];
-  const take = list.slice(0, cap), extra = list.length - take.length;
   const out = [];
   let cur = "";
-  for (const m of take) {
+  for (const m of list) {
     const next = cur ? cur + "\n\n" + m : m;
+    // An event longer than the limit on its own still ships whole rather than being truncated —
+    // pushFmt bodies run a few hundred chars and PUSH_MSG_MAX leaves ~300 of headroom under
+    // Telegram's hard 4096, so the part marker below can never push a message over it either.
     if (next.length > lim && cur) { out.push(cur); cur = m; }
     else cur = next;
   }
   if (cur) out.push(cur);
-  if (extra > 0 && out.length) out[out.length - 1] += "\n\n<i>+" + extra + " more held \u2014 batch cap</i>";
-  return out;
+  return out.length > 1 ? out.map((t, i) => "<i>" + (i + 1) + "/" + out.length + "</i>\n" + t) : out;
 }
 
 

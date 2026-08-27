@@ -9342,14 +9342,56 @@ test("push pure layer: escaping, code validation, eligibility, formatting, batch
   const evil = C.pushFmt(Object.assign({}, setup, { t: "<script>x</script>" }), {});
   assert.ok(!evil.includes("<script>") && evil.includes("&lt;script&gt;"), "event text is escaped before it reaches parse_mode=HTML");
 
-  // Batching: bounded, and the overflow is DISCLOSED rather than silently dropped.
+  // Batching: EVERYTHING ships. The character limit is the only bound — a burst splits across as
+  // many messages as it takes rather than being truncated to a count. The old cap disclosed its
+  // overflow as "+N more held — batch cap" and then dropped it, which is a deletion wearing the
+  // word "held": nothing ever followed.
   const many = Array.from({ length: 12 }, (_, i) => "msg" + i);
   const out = C.pushBatch(many);
-  assert.ok(out.length >= 1);
-  assert.ok(out.join("\n").includes("+4 more held"), "events past the batch cap are counted in the message, not vanished");
+  assert.equal(out.length, 1, "twelve short events still pack into one message — the packer is about bytes, not counts");
+  for (const m of many) assert.ok(out.join("\n").includes(m), m + " reached the wire");
+  assert.ok(!out.join("\n").includes("batch cap"), "no event is ever held back, so there is no overflow to disclose");
+  assert.ok(!out[0].includes("1/1"), "a single message carries no part marker");
+
+  // A burst too big for one body: every event present exactly once, nothing over the limit, and
+  // the parts are marked in order so the reader can see the shape of what is arriving.
+  const burst = Array.from({ length: 40 }, (_, i) => "<b>EV" + i + "</b> " + "x".repeat(400));
+  const parts = C.pushBatch(burst);
+  assert.ok(parts.length >= 5, "a 40-event burst becomes several messages, not eight events and a lie");
+  for (let i = 0; i < burst.length; i++) {
+    const hits = parts.filter((t) => t.includes("<b>EV" + i + "</b>")).length;
+    assert.equal(hits, 1, "EV" + i + " appears exactly once across the split");
+  }
+  parts.forEach((t, i) => {
+    assert.ok(t.startsWith("<i>" + (i + 1) + "/" + parts.length + "</i>\n"), "part " + (i + 1) + " is marked in order");
+    assert.ok(t.length <= 4096, "every part stays under Telegram's hard body limit, marker included");
+  });
   const long = C.pushBatch(["a".repeat(3000), "b".repeat(3000)]);
   assert.equal(long.length, 2, "a batch that would exceed Telegram's body limit splits instead of being rejected");
+  assert.ok(C.pushBatch(["z".repeat(3900)])[0].includes("z".repeat(3900)), "a single oversized event ships whole rather than truncated");
   assert.deepEqual(C.pushBatch([]), []);
+});
+
+test("push outbox: the hourly cap holds one recipient's burst without blocking everyone else", () => {
+  // The queue is SHARED across recipients and the cap check used to run on the head item only,
+  // returning outright — so one person's burst hitting their 20/h ceiling parked every other
+  // recipient's alerts a minute at a time. Pinned at the source: the selector must skip a capped
+  // chat rather than the drain giving up on the tick.
+  const fs = require("fs"), path = require("path");
+  const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
+  const i = pol.indexOf("async function pushDrain()");
+  assert.ok(i > -1, "pushDrain present");
+  const body = pol.slice(i, i + 1600);
+  assert.ok(/const deliverable = \(q\) =>/.test(body), "one predicate decides deliverability");
+  assert.ok(/q\.force \|\| pushRecent\(q\.chat, now\) < PUSH_CAP_HOUR/.test(body),
+    "the hourly cap is part of item SELECTION, so a capped chat is skipped, not blocking");
+  assert.ok(/pushQueue\.findIndex\(deliverable\)/.test(body), "the drain picks the first deliverable item");
+  assert.ok(!/if \(!item\.force && pushRecent\(item\.chat, now\) >= PUSH_CAP_HOUR\)/.test(body),
+    "the head-of-line cap check is gone");
+  // The outbox is sized for the uncapped batcher: several recipients, several parts each, and an
+  // hourly cap that parks messages here rather than dropping them.
+  assert.ok(/PUSH_QUEUE_MAX = 250\b/.test(pol), "outbox bound sized for a real multi-part burst");
+  assert.ok(!/pushBatch\([^)]*\{ max:/.test(pol), "no call site re-imposes an event cap on the batcher");
 });
 
 // Shared harness: a poller with an injected transport that records every call and replays queued
@@ -10937,7 +10979,8 @@ test("brief: breadth is share-green, deliberately not benchmark-relative", () =>
 test("the drain picks the first ELIGIBLE item, so a deferred message cannot head-of-line block", () => {
   const fs = require("fs"), path = require("path");
   const pol = fs.readFileSync(path.join(__dirname, "..", "src", "poller.js"), "utf8");
-  assert.ok(/const idx = pushQueue\.findIndex\(\(q\) => !q\.after \|\| q\.after <= now\);/.test(pol),
+  assert.ok(/const deliverable = \(q\) => \(!q\.after \|\| q\.after <= now\)/.test(pol)
+    && /const idx = pushQueue\.findIndex\(deliverable\);/.test(pol),
     "a message held until 07:00 sitting at the head would block every urgent one behind it for hours");
   const drain = pol.slice(pol.indexOf("async function pushDrain()"), pol.indexOf("function pushLogAdd"));
   assert.ok(!/pushQueue\.shift\(\)/.test(drain), "every removal in the drain must target the chosen index, not the head");
@@ -12637,7 +12680,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-36"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-37"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

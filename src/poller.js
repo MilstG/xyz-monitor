@@ -10934,7 +10934,12 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
   const PUSH_LINK_TTL = 10 * 60 * 1000;     // a link code is read off a screen and typed into a phone
   const PUSH_SEND_GAP = 3000;               // 1 msg / 3s — Telegram's per-chat ceiling is ~20/min
   const PUSH_CAP_HOUR = 20;                 // per-recipient hourly cap; overflow is DISCLOSED, not dropped silently
-  const PUSH_QUEUE_MAX = 50;                // bounded outbox — an unreachable chat cannot grow memory without limit
+  const PUSH_QUEUE_MAX = 250;               // bounded outbox — an unreachable chat cannot grow memory without limit.
+  // Sized for the uncapped batcher: a burst now packs into as many ~3800-char messages as it
+  // takes, several recipients share this ONE queue, and the hourly cap parks messages here for up
+  // to an hour rather than dropping them. At 50 a routine multi-recipient burst could evict its
+  // own head; 250 x ~4KB is a quarter of a megabyte at the absolute worst, which is the cheaper
+  // side of the trade by a wide margin.
   const PUSH_GRACE_MS = 5 * 60 * 1000;      // startup grace: the ring may hold events nobody was listening for
   const PUSH_UPDATES_MS = 20 * 1000;        // getUpdates poll — no webhook, no public URL, no extra Railway config
   const PUSH_DRAIN_MS = 1000;               // outbox tick; the gap above does the actual pacing
@@ -11164,18 +11169,23 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
     if (pushSending || !pushQueue.length || !pushOn()) return;
     const now = Date.now();
     if (now < pushHoldUntil) return;
-    // First ELIGIBLE item, not the first item. A message scheduled for the end of a quiet window
-    // sitting at the head would otherwise block every urgent one behind it for hours — the same
-    // head-of-line failure the undeliverable-message drop had to fix.
-    const idx = pushQueue.findIndex((q) => !q.after || q.after <= now);
-    if (idx < 0) return;
-    const item = pushQueue[idx];
-    if (!item.force && pushRecent(item.chat, now) >= PUSH_CAP_HOUR) {
-      // Held, not dropped. The cap protects the channel from becoming unreadable; the disclosure
-      // protects you from believing silence means nothing fired.
-      pushHoldUntil = now + 60 * 1000;
+    // First DELIVERABLE item, not the first item: past its schedule AND belonging to a chat that
+    // is not over its hourly cap. Both were head-of-line blocks. A message scheduled for the end
+    // of a quiet window sitting at the head would block every urgent one behind it for hours —
+    // the same failure the undeliverable-message drop had to fix. The hourly cap was the same
+    // shape and worse: this queue is SHARED across recipients, so one person's burst hitting
+    // their cap parked everyone else's alerts, a minute at a time, until it cleared.
+    const deliverable = (q) => (!q.after || q.after <= now)
+      && (q.force || pushRecent(q.chat, now) < PUSH_CAP_HOUR);
+    const idx = pushQueue.findIndex(deliverable);
+    if (idx < 0) {
+      // Nothing sendable this tick. If something is due but capped, re-check in a minute instead
+      // of spinning the drain: the cap HOLDS, it never drops — the message keeps its place and
+      // goes out as soon as the oldest send ages out of the hour.
+      if (pushQueue.some((q) => !q.after || q.after <= now)) pushHoldUntil = now + 60 * 1000;
       return;
     }
+    const item = pushQueue[idx];
     pushSending = true;
     try {
       const held = pushDropped;
@@ -11259,7 +11269,7 @@ Hard rules: if claimAnchor exists, its stop IS the void level — use exactly th
         pushEnqueue(rec.chat, text);
       if (held.length) {
         const after = quietEndsAt(now, rec.quiet);
-        for (const text of pushBatch(held.map((e) => pushFmt(e, { baseUrl: base })).filter(Boolean), { max: 20 }))
+        for (const text of pushBatch(held.map((e) => pushFmt(e, { baseUrl: base })).filter(Boolean)))
           pushEnqueue(rec.chat, "<i>held overnight</i>\n" + text, false, after);
       }
       pushDirty = true;
