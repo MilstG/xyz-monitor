@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.27-39";
+const VERSION = "2026.08.27-40";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -843,6 +843,16 @@ async function main() {
   // Operator surgery for feed-garbage earnings prints (e.g. a phantom report date the feed
   // asserted and never corrected): removes the print from history and the reaction study and
   // tombstones it so no future fetch can resurrect it. Session-gated like every route.
+  // Forced history backfill for the reaction study. Admin-only: it is an operator action that
+  // spends the vendor's rate budget on a long chunk walk, and unlike the automatic one it runs
+  // whatever the done-flag says.
+  fastify.post("/api/earnings/backfill", { bodyLimit: 2 * 1024 }, async (req, reply) => {
+    reply.header("cache-control", "no-store");
+    if (!isAdmin(req)) return reply.code(403).send({ ok: false, error: "forbidden" });
+    const b = req.body || {};
+    const r = await poller.earnHistBackfillNow({ days: +b.days || undefined });
+    return reply.code(r.ok ? 200 : 400).send(r);
+  });
   fastify.post("/api/earnings/void", (req, reply) => {
     const b = req.body || {};
     const r = poller.voidEarnPrint(b.t, b.d);

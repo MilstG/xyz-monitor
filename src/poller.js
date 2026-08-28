@@ -7268,20 +7268,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     }
     return { ok: true, applied };
   }
-  async function fetchEarnings() {
-    const token = process.env.FINNHUB_TOKEN || "";
-    const now = Date.now();
-    if (!token) {
-      // No token, no feed — say so once in the payload instead of silently serving nothing.
-      if (!earnCache) earnCache = { ts: now, dataTs: 0, asOf: null, windowDays: EARN_WINDOW_DAYS,
-        source: "finnhub", error: "FINNHUB_TOKEN not set", entries: [], recent: [], eligible: earnEligible().size };
-      return;
-    }
-    const elig = earnEligible();
-    if (!elig.size) return;   // universe not reconciled yet — the next tick will have it
-    // Window reaches 5 days BACK so a print stays available while its actual lands (the feed
-    // fills epsActual/revenueActual on the same calendar row after the report) and then
-    // graduates into the persisted print history.
+  // The calendar fetchers, built per call over the CURRENT token and eligible roster. They live
+  // here rather than inside fetchEarnings because the forced history backfill below needs the same
+  // chunk walk — and the truncation lesson it encodes must exist in exactly one place.
+  //
+  // Window reaches 5 days BACK so a print stays available while its actual lands (the feed fills
+  // epsActual/revenueActual on the same calendar row after the report) and then graduates into the
+  // persisted print history.
+  function earnCalFetchers(token, elig) {
     const getCal = async (f, t) => {
       const res = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${f}&to=${t}&token=${encodeURIComponent(token)}`,
         { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000) });
@@ -7294,7 +7288,7 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // actuals). Every pull therefore walks small disjoint date chunks, near dates first, paced
     // under the 60/min budget, deduped by ticker+date preferring the record with the actual.
     // Any chunk failing fails the whole pull — a PARTIAL window must never masquerade as the
-    // feed's complete view (the purge below treats the window as authoritative for reschedules).
+    // feed's complete view (the purge treats the window as authoritative for reschedules).
     const getCalChunked = async (fromMs, toMs, chunkDays, paceMs) => {
       const seen = new Map();
       for (const [f, t] of earnChunks(fromMs, toMs, chunkDays)) {
@@ -7309,6 +7303,57 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       out.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
       return out;
     };
+    return { getCal, getCalChunked };
+  }
+  // FORCED history backfill for the reaction study. The automatic one runs once and flags itself
+  // done (histDone2), which is right — and left no way back: a volume that completed the walk while
+  // the feed was thin, or one that wants a deeper window than the automatic 370 days, could only be
+  // rescued by editing earnings.json on disk or shipping a build that versions the flag up. That is
+  // the same trap the "2" in histDone2 exists to record, so this is the door out of it.
+  //
+  // Re-pulling is idempotent by construction: mergeEarnPrints dedupes on ticker+date and upgrades a
+  // row in place, so a second walk over the same window changes nothing and a wider one only adds.
+  let earnHistBusy = false;
+  async function earnHistBackfill(opts) {
+    const o = opts || {};
+    if (earnHistBusy) return { ok: false, error: "a history backfill is already running" };
+    const token = process.env.FINNHUB_TOKEN || "";
+    if (!token) return { ok: false, error: "FINNHUB_TOKEN not set" };
+    const elig = earnEligible();
+    if (!elig.size) return { ok: false, error: "the equity universe has not reconciled yet — nothing to walk" };
+    const days = Math.max(30, Math.min(1100, +o.days || 370));
+    earnHistBusy = true;
+    const before = earnPrints.length;
+    try {
+      const now = Date.now();
+      const { getCalChunked } = earnCalFetchers(token, elig);
+      const hist = await getCalChunked(now - days * DAY, now - 6 * DAY, 7, 300);
+      earnPrints = mergeEarnPrints(earnPrints, hist, now);
+      if (earnVoids.size) earnPrints = earnPrints.filter((p) => !earnVoids.has(p.t + "|" + p.d));
+      earnHistDone = true;
+      refreshEarnStudy(true);
+      log(`Earnings history backfill (forced, ${days}d): ${hist.length} past print(s) retrieved, history ${before} -> ${earnPrints.length}`);
+      // Republish through the ordinary path rather than hand-rolling the persist and the ETag
+      // signature here: one place decides what a served earnings payload looks like.
+      await fetchEarnings();
+      return { ok: true, days, retrieved: hist.length, printsBefore: before, printsAfter: earnPrints.length,
+        study: Object.keys(earnStudy).length };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || "backfill failed" };
+    } finally { earnHistBusy = false; }
+  }
+  async function fetchEarnings() {
+    const token = process.env.FINNHUB_TOKEN || "";
+    const now = Date.now();
+    if (!token) {
+      // No token, no feed — say so once in the payload instead of silently serving nothing.
+      if (!earnCache) earnCache = { ts: now, dataTs: 0, asOf: null, windowDays: EARN_WINDOW_DAYS,
+        source: "finnhub", error: "FINNHUB_TOKEN not set", entries: [], recent: [], eligible: earnEligible().size };
+      return;
+    }
+    const elig = earnEligible();
+    if (!elig.size) return;   // universe not reconciled yet — the next tick will have it
+    const { getCalChunked } = earnCalFetchers(token, elig);
     try {
       let parsed = await getCalChunked(now - 5 * DAY, now + EARN_WINDOW_DAYS * DAY, 3, 200);
       // Operator tombstones apply at the mouth of the pipe: a voided print never re-enters
@@ -13913,6 +13958,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     congressFeed: (o) => (store.congressFeed ? store.congressFeed(o) : []),
     congressFeedCount: (o) => (store.congressFeedCount ? store.congressFeedCount(o) : 0),
     congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
+    earnHistBackfillNow: earnHistBackfill,
     insidersFeed: (o) => (store.insidersFeed ? store.insidersFeed(o) : []),
     insidersFeedCount: (o) => (store.insidersFeedCount ? store.insidersFeedCount(o) : 0),
     insidersStatus: insidersStatusFull,

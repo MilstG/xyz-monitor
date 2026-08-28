@@ -10759,7 +10759,7 @@ function termGrammarComplete(p){ const head=p[0].toLowerCase(), r=termFind(p[0])
   if(head==='screen'||head==='scr') return p.length>1 && /[<>=]/.test(p.join(' '));
   if(head==='signals'||head==='sig'||head==='help'||head==='clear'||head==='stocks'||head==='crypto'
     ||head==='breadth'||head==='sectors'||head==='news'||head==='reports') return true;
-  if(head==='earnings'||head==='earn') return p.length===1||!!termFind(p[1])||['today','tomorrow','week','recent'].includes((p[1]||'').toLowerCase());
+  if(head==='earnings'||head==='earn') return p.length===1||!!termFind(p[1])||['today','tomorrow','week','recent','backfill'].includes((p[1]||'').toLowerCase());
   if(head==='vs'||head==='compare') return !!(termFind(p[1])&&termFind(p[2]));
   if(head==='comp') return p.slice(1).filter(x=>termFind(x)||isBasketName(x)).length>=2;
   if(head==='report'||head==='ai'||head==='corr'||head==='diverge') return !!termFind(p[1]);
@@ -10797,8 +10797,9 @@ function termExec(cmdStr){ const p=cmdStr.trim().split(/\s+/), h=p[0].toLowerCas
   if(h==='ratio') return termRatio(p.slice(1));
   if(h==='report'||h==='ai'){ const rr=termFind(p[1])||termFind(p[0]); return rr?termReport(rr):termErr('usage: report <ticker>'); }
   if(h==='earnings'||h==='earn'){ const a1=(p[1]||'').toLowerCase();
+    if(a1==='backfill') return termEarnBackfill(p.slice(2));
     if(!p[1]||['today','tomorrow','week','recent'].includes(a1)) return termEarnCal(a1||'today');
-    const rr=termFind(p[1]); return rr?termEarnings(rr):termErr('usage: earnings [ticker | today | tomorrow | week | recent]'); }
+    const rr=termFind(p[1]); return rr?termEarnings(rr):termErr('usage: earnings [ticker | today | tomorrow | week | recent | backfill [days]]'); }
   if(h==='corr') return termCorr(p[1],p[2]);
   if(h==='diverge'){ const r=termFind(p[1]); return r?termDiverge(r):termErr('usage: diverge <ticker>'); }
   const r=termFind(T); if(r){ if(p[1]) return termFieldCmd(r,p[1]); return termCard(r); }
@@ -13528,6 +13529,24 @@ function insBind() {
 // The insiders lane's operator surface. The tab reads; this is how you make it read FASTER — the
 // steady-state tick takes one queued Form 4 every 45s, which is right for a lane fed hourly by the
 // EDGAR rotation and wrong for a cold start with a few hundred filings behind it.
+// Forces the reaction study's history walk. The automatic one runs once per volume and flags
+// itself done, which left no way back for a volume that completed it while the feed was thin —
+// this is that way back. Blocking rather than fire-and-forget: the walk is ~50 chunked reads and
+// the operator wants the count it ended with, not a "started" line.
+async function termEarnBackfill(args){
+  if(!IS_ADMIN) return termErr('earnings backfill is admin-only \u2014 it spends the vendor rate budget on a long chunk walk');
+  const days=+(args[0]||0)||undefined;
+  const think=termThinking();
+  let r; try{ const res=await fetch('/api/earnings/backfill',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({days})}); r=await res.json(); }
+  catch(e){ r={ok:false,error:e.message||'failed'}; }
+  think.remove();
+  if(!r||!r.ok) return termErr(tesc((r&&r.error)||'failed'));
+  return termOut(`<span class="tp-hd">earnings history backfill</span> <span class="tp-trans">\u00b7 ${r.days}d window</span>\n`
+    +`  ${tpad('retrieved',12)} <b>${(r.retrieved||0).toLocaleString()}</b> past print(s) from the feed\n`
+    +`  ${tpad('history',12)} ${(r.printsBefore||0).toLocaleString()} \u2192 <b>${(r.printsAfter||0).toLocaleString()}</b> print(s) held`
+    +(r.printsAfter===r.printsBefore?` <span class="tp-trans">(nothing new \u2014 the merge dedupes on ticker+date, so a repeat walk is a no-op)</span>`:'')+`\n`
+    +`  ${tpad('study',12)} ${(r.study||0).toLocaleString()} name(s) now carry a reaction base rate`);
+}
 async function termInsiders(args){
   const sub=(args[0]||'status').toLowerCase();
   if(sub==='status'||!sub){

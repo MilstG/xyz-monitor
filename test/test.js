@@ -2912,6 +2912,66 @@ const F4_PLANSELL = `<nonDerivativeTransaction><securityTitle><value>Common Stoc
 <transactionAmounts><transactionShares><value>12,500</value></transactionShares><transactionPricePerShare><footnoteId id="F1"/></transactionPricePerShare>
 <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode></transactionAmounts></nonDerivativeTransaction>`;
 
+test("earnings: the history backfill can be FORCED, past the flag that says it already ran", async () => {
+  // The automatic walk runs once per volume and flags itself done — which is right, and left no
+  // way back. A volume that completed it while the feed was thin, or one that wants a deeper
+  // window, could only be rescued by editing earnings.json on disk or shipping a build that
+  // versions the flag up. That is the same trap the "2" in histDone2 records.
+  const { createPoller } = require("../src/poller");
+  const saved = { fetch: global.fetch, tok: process.env.FINNHUB_TOKEN };
+  process.env.FINNHUB_TOKEN = "test-token";
+  let savedEarn = null;
+  const store = { loadAll: () => new Map(), loadRegime: () => [], loadLedger: () => null, saveLedger: () => {},
+    insert: () => {}, saveRegime: () => {}, saveEarnings: (d) => { savedEarn = d; }, loadEarnings: () => null };
+  const windows = [];
+  const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  // One print per chunk request, dated inside the window that chunk covers — enough to prove the
+  // walk happened and that the merge deduped it, without pretending to model the feed.
+  global.fetch = async (url) => {
+    const m = String(url).match(/from=(\d{4}-\d{2}-\d{2})&to=(\d{4}-\d{2}-\d{2})/);
+    windows.push(m ? [m[1], m[2]] : null);
+    return { ok: true, json: async () => ({ earningsCalendar: [
+      { symbol: "INTC", date: m ? m[1] : day(30), hour: "amc", epsEstimate: 1.1, epsActual: 1.2, quarter: 2, year: 2026 }] }) };
+  };
+  try {
+    const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    p.seedRowNow("xyz:INTC", { px: 100, ticker: "INTC", uni: "xyz" });
+
+    const r = await p.earnHistBackfillNow({ days: 90 });
+    assert.ok(r.ok, "forced backfill: " + (r.error || "ok"));
+    assert.equal(r.days, 90, "the window is the operator's, not the automatic 370");
+    assert.ok(r.retrieved > 0, "prints came back from the walk");
+    assert.ok(r.printsAfter > r.printsBefore, "and reached the persisted history");
+    assert.ok(savedEarn && savedEarn.histDone2 === true, "the walk republishes through the ordinary path, flag and all");
+
+    // The chunk walk, not one long window: the free tier truncates a long pull and serves the FAR
+    // end first, which is how a thin history looked like a complete one.
+    const histWins = windows.filter(Boolean).filter((w) => w[0] < day(20));
+    assert.ok(histWins.length >= 5, "the history window is walked in chunks, not asked for whole: " + histWins.length);
+    for (const w of histWins) assert.ok(w[0] <= w[1], "every chunk is a forward range");
+    assert.ok(histWins.every((w) => w[0] >= day(91)), "no chunk reaches outside the requested window");
+
+    // FORCED means forced: the flag is now set, and a second call still runs.
+    const n = windows.length;
+    const r2 = await p.earnHistBackfillNow({ days: 90 });
+    assert.ok(r2.ok, "a second run is not refused by the done-flag — that is the entire point");
+    assert.ok(windows.length > n, "it really re-walked");
+    // ...and re-walking is a no-op on the data, because the merge dedupes on ticker+date.
+    assert.equal(r2.printsAfter, r2.printsBefore, "a repeat walk over the same window adds nothing");
+
+    // Honest refusals rather than a silent no-op.
+    process.env.FINNHUB_TOKEN = "";
+    assert.equal((await p.earnHistBackfillNow({})).error, "FINNHUB_TOKEN not set", "no key is said out loud");
+    process.env.FINNHUB_TOKEN = "test-token";
+    const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false });
+    assert.match((await p2.earnHistBackfillNow({})).error, /universe has not reconciled/,
+      "an empty roster is a refusal with a reason, not an empty walk reported as success");
+  } finally {
+    global.fetch = saved.fetch;
+    if (saved.tok == null) delete process.env.FINNHUB_TOKEN; else process.env.FINNHUB_TOKEN = saved.tok;
+  }
+});
+
 test("insiders: Form 4 numbers survive the parser exactly, and every absence stays an absence", () => {
   const C = require("../src/compute");
   const p = C.parseForm4(f4Doc(F4_BUY + F4_PLANSELL, { deriv: "<derivativeTable><derivativeTransaction><transactionCoding><transactionCode>M</transactionCode></transactionCoding></derivativeTransaction></derivativeTable>" }));
@@ -3243,7 +3303,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "dopenCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsSurStr", "epsPairFmt", "epsFmt", "wireEarnVoid",
-    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders",
+    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders", "termEarnBackfill",
     "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
     "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
@@ -13025,7 +13085,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-39"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-40"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
