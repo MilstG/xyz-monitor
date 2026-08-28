@@ -2111,3 +2111,5 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .ins-plan{font-size:10px;letter-spacing:.03em;padding:1px 4px;border:1px solid var(--line);border-radius:3px;color:var(--faint)}
 .ins-plan.off{border-style:dashed}
 .ins-dv{font-size:9.5px;color:var(--faint);margin-left:4px}
+.ins-role.top{color:var(--fg);border-bottom-color:var(--accent)}
+.ins-role.ten{color:var(--accent)}

@@ -13272,7 +13272,7 @@ const INS_COLS = [
   { k: 'traded', label: 'TRADED',  cls: 'l', tip: 'the transaction date on the form — the day the trade actually happened.' },
   { k: 'ticker', label: 'TICKER',  cls: 'l', tip: 'the issuer’s trading symbol as written on the form itself, not resolved from a name.' },
   { k: 'owner',  label: 'INSIDER', cls: 'l', tip: 'the reporting person. A joint filing is attributed to the first owner named and says so on hover — counting one trade once per filer would multiply the flow.' },
-  { k: 'role',   label: 'ROLE',    cls: 'l', tip: 'director, officer, 10% owner — the boxes ticked on the form, plus the officer title where one is given. A CEO buying is not the same event as a 10% fund trimming.' },
+  { k: 'role',   label: 'ROLE',    cls: 'l', tip: 'the officer TITLE as filed — CEO, CFO, EVP of whatever — because the relationship boxes alone read “director/officer” for almost everyone and separate nothing. Falls back to the boxes only where the form gave no title. A 10% owner rides alongside a title: a fund over the threshold is a different actor from an executive. Sorts by title, so one person’s job groups together.' },
   { k: 'act',    label: 'ACT',     cls: 'l', tip: 'the transaction CODE, which is what decides whether a row means anything. P is an open-market purchase and S an open-market sale — decisions. A (grant), M (option exercise) and F (shares withheld for tax) are compensation mechanics, not views on the price.' },
   { k: 'shares', label: 'SHARES',  cls: 'r', tip: 'share count exactly as filed.' },
   { k: 'price',  label: 'PRICE',   cls: 'r', tip: 'price per share exactly as filed. Blank where the form carried none — a footnoted weighted average or a range — which is a real and common case, never a zero.' },
@@ -13358,6 +13358,47 @@ function insUsd(v) {
   return (v < 0 ? '-$' : '$') + (a >= 1e9 ? (a / 1e9).toFixed(2) + 'B' : a >= 1e6 ? (a / 1e6).toFixed(2) + 'M'
     : a >= 1e3 ? (a / 1e3).toFixed(1) + 'K' : a.toFixed(0));
 }
+// ROLE, at the specificity the form actually offers. The relationship boxes are nearly always
+// "director · officer" — true of most of the roster, and therefore worth nothing to a reader. The
+// officer TITLE is the field that separates a CEO buying from a VP of Sales selling, and it was
+// parsed all along, sitting in a tooltip.
+//
+// Abbreviation is CONSERVATIVE and phrase-level: only forms whose short version is unambiguous are
+// shortened, everything else rides verbatim. "Chief Security Officer" and "Chief Strategy Officer"
+// both want to be CSO, so neither is touched — an invented abbreviation is worse than a long
+// column. The filer's exact words are always one hover away.
+const INS_TITLE_ABBR = [
+  [/\bchief executive officer\b/gi, 'CEO'], [/\bchief financial officer\b/gi, 'CFO'],
+  [/\bchief operating officer\b/gi, 'COO'], [/\bchief technology officer\b/gi, 'CTO'],
+  [/\bchief accounting officer\b/gi, 'CAO'], [/\bchief legal officer\b/gi, 'CLO'],
+  [/\bchief information officer\b/gi, 'CIO'], [/\bchief marketing officer\b/gi, 'CMO'],
+  [/\bchief revenue officer\b/gi, 'CRO'], [/\bchief product officer\b/gi, 'CPO'],
+  [/\bchief human resources officer\b/gi, 'CHRO'], [/\bchief compliance officer\b/gi, 'CCO'],
+  [/\bexecutive vice president\b/gi, 'EVP'], [/\bsenior vice president\b/gi, 'SVP'],
+  [/\bvice president\b/gi, 'VP'], [/\bprincipal (?:executive|financial|accounting) officer\b/gi, (m) => m.replace(/principal/i, 'Prin.')],
+  [/\band\b/gi, '&'],
+];
+function insTitleShort(t) {
+  let s2 = String(t || '').replace(/\s+/g, ' ').trim();
+  if (!s2) return '';
+  for (const [re, to] of INS_TITLE_ABBR) s2 = s2.replace(re, to);
+  return s2.replace(/\s*,\s*/g, ', ').replace(/\s+/g, ' ').trim();
+}
+// What the cell says, and what the hover says. A 10% owner is kept alongside a title because it is
+// a materially different actor — a fund crossing 5% is not an executive — while "also a director",
+// which is true of most CEOs, is left to the hover rather than spent on column width.
+function insRoleCell(x) {
+  const boxes = String(x.role || '').split(' · ').filter(Boolean);
+  const ten = boxes.includes('10% owner');
+  const title = insTitleShort(x.title);
+  const short = title ? (ten ? title + ' · 10%' : title)
+    : (boxes.length ? boxes.map((b) => b === '10% owner' ? '10%' : b).join(' · ') : '');
+  if (!short) return '<td class="l"><span class="sec" data-tip="the form ticked no relationship box and gave no title — rare, and left as unknown rather than guessed">—</span></td>';
+  const tip = (x.title ? 'the title exactly as filed: “' + x.title + '”' : 'the form gave no officer title')
+    + (boxes.length ? ' · boxes ticked: ' + boxes.join(', ') : '');
+  const cls = 'ins-role' + (ten ? ' ten' : '') + (/\b(CEO|CFO|COO|President|Chair)\b/i.test(short) ? ' top' : '');
+  return `<td class="l"><span class="${cls}" data-tip="${esc(tip)}">${esc(short.length > 26 ? short.slice(0, 25) + '…' : short)}</span></td>`;
+}
 function insRender() {
   const out = el('insiders-body'); if (!out) return;
   const st = INS.stat || {}, f = st.filings || {}, t = st.tx || {}, bf = st.backfill || {};
@@ -13372,8 +13413,10 @@ function insRender() {
     + `<div class="cng-rates ins-filters">`
       + INS_CHIPS.map(c => `<button type="button" class="cng-chip${INS.codes.has(c.k) ? ' on' : ''}" data-inscode="${c.k}" data-tip="${esc(c.tip)}">${esc(c.label)}</button>`).join('')
       + `<span class="ins-sep"></span>`
-      + [['', 'any role'], ['officer', 'officers'], ['director', 'directors'], ['10%', '10% owners']]
-        .map(([v, l]) => `<button type="button" class="cng-chip${INS.role === v ? ' on' : ''}" data-insrole="${esc(v)}" data-tip="${esc(v ? 'only rows where the form ticked ' + l : 'no role filter')}">${esc(l)}</button>`).join('')
+      + [['', 'any role'], ['c-suite', 'C-suite'], ['officer', 'officers'], ['director', 'directors'], ['10%', '10% owners']]
+        .map(([v, l]) => `<button type="button" class="cng-chip${INS.role === v ? ' on' : ''}" data-insrole="${esc(v)}" data-tip="${esc(
+          v === 'c-suite' ? 'rows whose filed TITLE names a chief officer, a president or a chair — matched on the filer’s own words, so a title written in some other way is not in this bucket. Officers with any other title are under “officers”.'
+          : v ? 'only rows where the form ticked ' + l : 'no role filter')}">${esc(l)}</button>`).join('')
       + `<span class="ins-sep"></span>`
       + [['', 'plan: any'], ['excl', 'discretionary'], ['only', '10b5-1 only']]
         .map(([v, l]) => `<button type="button" class="cng-chip${(INS.plan || '') === v ? ' on' : ''}" data-insplan="${esc(v)}" data-tip="${esc(v === 'only' ? 'only rows whose 10b5-1 box is ticked — scheduled in advance' : v === 'excl' ? 'rows NOT marked as plan sales. Includes rows where the box is absent entirely (filings before 2023 had no box), so this is “not marked” rather than a proven discretionary trade.' : 'no plan filter')}">${esc(l)}</button>`).join('')
@@ -13408,7 +13451,7 @@ function insRender() {
     if (k === 'traded') return `<td class="l">${esc(x.txDate || '—')}</td>`;
     if (k === 'ticker') return `<td class="l">${x.tk ? `<span class="cng-tk" data-tip="the issuer’s symbol as written on the form">${esc(x.tk)}</span>` : '<span class="sec">—</span>'}</td>`;
     if (k === 'owner') return `<td class="l"><span class="cng-nm" data-tip="${esc((x.owner || '') + (x.title ? ' — ' + x.title : ''))}">${esc((x.owner || '—').slice(0, 24))}</span></td>`;
-    if (k === 'role') return `<td class="l">${x.role ? `<span class="ins-role" data-tip="${esc(x.role + (x.title ? ' · ' + x.title : ''))}">${esc(x.role.replace(' · ', '/'))}</span>` : '<span class="sec">—</span>'}</td>`;
+    if (k === 'role') return insRoleCell(x);
     if (k === 'act') {
       const d = x.code === 'P' ? 'p' : x.code === 'S' ? 's' : 'e';
       // The derivative marker rides HERE rather than on the form column, which starts hidden. It

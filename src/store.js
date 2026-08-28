@@ -33,7 +33,18 @@ function insidersWhere(opt) {
   // marked. Neither bucket may swallow the rows where the box is absent — that is a third answer.
   if (o.plan === "only") where.push("t.plan=1");
   if (o.plan === "excl") where.push("(t.plan=0 OR t.plan IS NULL)");
-  if (o.role) { where.push("f.role LIKE ?"); args.push("%" + String(o.role).slice(0, 20) + "%"); }
+  // Role filter. "c-suite" is a match on the filer's OWN WORDS in the title field, not a taxonomy
+  // this lane invented: a chief officer, a president or a chair. It is therefore incomplete by
+  // construction — a title written some other way is not in the bucket — which is what the chip's
+  // hover says rather than implying the filter knows every executive.
+  if (o.role === "c-suite") {
+    // "President" alone swept in every Vice President, Executive VP and Senior VP on the roster —
+    // the exact opposite of the bucket's purpose, and the sort of filter that is wrong quietly.
+    // Presidency is therefore matched only where it is NOT a vice-presidency.
+    where.push("(f.title LIKE '%Chief%' OR f.title LIKE '%Chair%'"
+      + " OR (f.title LIKE '%President%' AND f.title NOT LIKE '%Vice President%' AND f.title NOT LIKE '%VP%')"
+      + " OR f.title LIKE '%CEO%' OR f.title LIKE '%CFO%' OR f.title LIKE '%COO%' OR f.title LIKE '%CTO%')");
+  } else if (o.role) { where.push("f.role LIKE ?"); args.push("%" + String(o.role).slice(0, 20) + "%"); }
   for (const tok of congressTokens(o.q)) {
     const like = "%" + tok + "%";
     where.push("(f.owner LIKE ? OR f.issuer LIKE ? OR t.tk LIKE ? OR f.title LIKE ?)");
@@ -1038,10 +1049,18 @@ ON CONFLICT(acc) DO UPDATE SET tk=excluded.tk, form=excluded.form, url=excluded.
       const h = head || {};
       try {
         d.exec("BEGIN");
-        d.prepare(`UPDATE filing SET tk=COALESCE(?,tk), issuer=?, period=?, owner=?, role=?, title=?,
-          parsed=1, nTx=?, nDeriv=?, pnote=NULL WHERE acc=?`)
-          .run(h.tk || null, h.issuer || null, h.period || null, h.owner || null, h.role || null, h.title || null,
-            (tx || []).length, h.nDeriv | 0, String(acc));
+        // UPSERT, not a blind UPDATE. Save is only ever reached for an accession that came out of
+        // the pending queue, so the filing row exists — but an UPDATE that matched nothing wrote
+        // transactions belonging to no filing, and every read here JOINs the two, so those rows
+        // existed and were invisible. A store should not have a call order that can orphan its own
+        // writes; the insert branch also makes a direct save (a harness, a repair) self-consistent.
+        d.prepare(`INSERT INTO filing(acc,tk,issuer,period,owner,role,title,parsed,nTx,nDeriv,form,filed,url,tries,pnote)
+VALUES(?,?,?,?,?,?,?,1,?,?,NULL,0,NULL,0,NULL)
+ON CONFLICT(acc) DO UPDATE SET tk=COALESCE(excluded.tk, filing.tk), issuer=excluded.issuer,
+  period=excluded.period, owner=excluded.owner, role=excluded.role, title=excluded.title,
+  parsed=1, nTx=excluded.nTx, nDeriv=excluded.nDeriv, pnote=NULL`)
+          .run(String(acc), h.tk || null, h.issuer || null, h.period || null, h.owner || null, h.role || null, h.title || null,
+            (tx || []).length, h.nDeriv | 0);
         d.prepare("DELETE FROM tx WHERE acc=?").run(String(acc));   // a re-parse REPLACES its rows, never doubles them
         const ins = d.prepare(`INSERT INTO tx(acc,ln,tk,txDate,code,act,ad,shares,price,value,own,dir,plan,sec)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
@@ -1064,7 +1083,9 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       // Sort in SQL from a closed WHITELIST — a header click orders the whole result set, not the
       // page that happens to be loaded, and a sort key can never reach the query as text.
       const SORTS = { filed: "f.filed", traded: "t.txDate", ticker: "t.tk", owner: "f.owner",
-        role: "f.role", act: "t.code", shares: "t.shares", price: "t.price", value: "t.value",
+        // ROLE sorts on what the column SHOWS — the title, falling back to the boxes — so one
+        // person's job groups together instead of every row collating under "director · officer".
+        role: "COALESCE(NULLIF(f.title,''), f.role)", act: "t.code", shares: "t.shares", price: "t.price", value: "t.value",
         own: "t.own", plan: "t.plan", issuer: "f.issuer", sec: "t.sec", form: "f.form",
         // Position change: what the trade did to their holding. Null-safe — a row with no
         // post-transaction figure sorts as unknown rather than as zero.

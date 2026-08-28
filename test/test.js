@@ -3080,6 +3080,22 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   assert.deepEqual(st.insidersFeed({ sort: "value", dir: -1, limit: 2, offset: 2 }).map((r) => r.tk + ":" + r.code),
     ["NVDA:A", "INTC:S"], "page 2 continues page 1's ordering");
 
+  // "c-suite" matches the filer's OWN WORDS in the title, not a taxonomy this lane invented — so
+  // it is incomplete by construction, which is what the chip's hover says.
+  assert.equal(st.insidersFeedCount({ role: "c-suite" }), 4, "both filings carry chief-officer titles");
+  st.insidersSave("0007777777-26-000001", { tk: "WWWW", owner: "A Manager", role: "officer", title: "Vice President, Sales", nDeriv: 0 },
+    [{ ln: 0, code: "P", act: "buy", shares: 10, price: 1, value: 10, txDate: "2026-08-20" }]);
+  assert.equal(st.insidersFeedCount({ role: "c-suite" }), 4,
+    "a VICE president is an officer and NOT c-suite — matching '%President%' alone swept in every VP, EVP and SVP on the roster");
+  assert.equal(st.insidersFeedCount({ role: "officer" }), 5, "...but is still under officers");
+  st.insidersSave("0007777777-26-000002", { tk: "VVVV", owner: "The Boss", role: "officer", title: "President", nDeriv: 0 },
+    [{ ln: 0, code: "P", act: "buy", shares: 10, price: 1, value: 10, txDate: "2026-08-20" }]);
+  assert.equal(st.insidersFeedCount({ role: "c-suite" }), 5, "...while an actual President is");
+  // ROLE sorts on what the column SHOWS. Sorting on the relationship boxes collated every row
+  // under "director · officer" and grouped nothing.
+  const roles = st.insidersFeed({ sort: "role", dir: 1 }).map((r) => r.title || r.role);
+  assert.deepEqual(roles.slice(-1), ["Vice President, Sales"], "titles sort as titles, so one person's job groups together");
+
   // A re-parse REPLACES a filing's rows. An amended Form 4 must not leave the original trade
   // behind next to the corrected one.
   st.insidersSave("0000050863-26-000101", { tk: "INTC", owner: "Tan Lip-Bu", nDeriv: 0 },
@@ -3233,7 +3249,7 @@ test("insiders tab: columns sort, hide and REORDER, and the view survives a colu
   global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
   global.fetch = () => new Promise(() => {});
   try {
-    const api = new Function(app + "\n;return { INS, INS_COLS, INS_HIDE_DEFAULT, insRender, insCols, insSave, insLoad };")();
+    const api = new Function(app + "\n;return { INS, INS_COLS, INS_HIDE_DEFAULT, insRender, insCols, insSave, insLoad, insTitleShort, insRoleCell };")();
     const { INS } = api;
     INS.stat = { filings: { n: 2, done: 2, queued: 0, failed: 0 }, tx: { n: 2, names: 2, noPrice: 1 } };
     INS.total = 2;
@@ -3281,6 +3297,31 @@ test("insiders tab: columns sort, hide and REORDER, and the view survives a colu
     global.localStorage.setItem("insview", JSON.stringify({ sort: { k: "haxx", dir: -1 } }));
     api.insLoad();
     assert.notEqual(INS.sort.k, "haxx", "a stored sort key that is not a column is refused");
+
+    // ROLE has to say something. The relationship boxes read "director · officer" for almost every
+    // filer on the roster, which separates nothing — the TITLE is the field that distinguishes a
+    // CEO buying from a VP of Sales selling.
+    const short = api.insTitleShort;
+    assert.equal(short("President and Chief Executive Officer"), "President & CEO");
+    assert.equal(short("Chief Financial Officer"), "CFO");
+    assert.equal(short("Executive Vice President, Global Operations"), "EVP, Global Operations");
+    assert.equal(short("Senior Vice President and General Counsel"), "SVP & General Counsel");
+    // Ambiguous abbreviations are NOT invented: both of these want to be "CSO", so neither is
+    // shortened. A long column beats a wrong three letters.
+    assert.equal(short("Chief Security Officer"), "Chief Security Officer");
+    assert.equal(short("Chief Strategy Officer"), "Chief Strategy Officer");
+    assert.equal(short(""), "", "no title is no string, not a placeholder");
+    const cell = (r, t) => api.insRoleCell({ role: r, title: t }).replace(/<[^>]*>/g, "").trim();
+    assert.equal(cell("director · officer", "Chief Executive Officer"), "CEO", "the title wins over the boxes");
+    assert.equal(cell("director", null), "director", "...and the boxes are the fallback when no title was filed");
+    assert.equal(cell("officer", null), "officer");
+    assert.equal(cell("10% owner", null), "10%");
+    // A 10% owner rides ALONGSIDE a title: a fund over the threshold is a different actor from an
+    // executive, and a row can be both.
+    assert.equal(cell("officer · 10% owner", "Chief Executive Officer"), "CEO · 10%");
+    assert.equal(cell("", null), "\u2014", "no box and no title is unknown, not a guess");
+    assert.ok(api.insRoleCell({ role: "director · officer", title: "Chief Executive Officer" }).includes("Chief Executive Officer"),
+      "the exact filed words stay one hover away");
   } finally {
     global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
@@ -3303,7 +3344,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "dopenCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsSurStr", "epsPairFmt", "epsFmt", "wireEarnVoid",
-    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders", "termEarnBackfill",
+    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders", "termEarnBackfill", "insTitleShort", "insRoleCell",
     "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
     "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
@@ -13085,7 +13126,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-40"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-41"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);
