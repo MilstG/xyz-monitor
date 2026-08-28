@@ -56,6 +56,16 @@ function insidersWhere(opt) {
   // are all share transactions, so they answer to "shares" rather than falling out of both buckets.
   if (o.kind === "S") where.push("COALESCE(t.kind,'S')='S'");
   if (o.kind === "D") where.push("t.kind='D'");
+  // Universe scope. A Form 4 reaches this lane through the submissions feed of EVERY CIK on it, so
+  // a 10% holder's own feed carries filings about the companies it holds — Volkswagen's stake in
+  // RIVN, Blackstone's in a dozen names — and those issuers are not on the board. Filtered at READ
+  // time rather than dropped at parse: the roster changes, and a name added to the universe should
+  // show the history this lane already has for it instead of needing every document re-fetched.
+  if (Array.isArray(o.uni) && o.uni.length) {
+    const list = o.uni.slice(0, 800).map((t) => String(t).toUpperCase());
+    where.push("t.tk IN (" + list.map(() => "?").join(",") + ")");
+    args.push(...list);
+  }
   // "plan" is TRI-state on the form and stays tri-state here: only=marked, excl=explicitly not
   // marked. Neither bucket may swallow the rows where the box is absent — that is a third answer.
   if (o.plan === "only") where.push("t.plan=1");

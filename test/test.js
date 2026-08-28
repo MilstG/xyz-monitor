@@ -3189,6 +3189,22 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   assert.equal(st.insidersFeedCount({ from: "not-a-date" }), st.insidersFeedCount({}), "a malformed bound is dropped, not interpolated");
   assert.equal(st.insidersFeedCount({ from: "2026-08-26' OR 1=1--" }), st.insidersFeedCount({}), "...including one shaped like an injection");
 
+  // UNIVERSE SCOPE. A Form 4 is associated with every CIK on it, so a 10% holder's own submissions
+  // feed carries filings about the companies it HOLDS. Those are real and correctly read, and they
+  // are not about anything on the board — so they are filtered at READ time, which keeps them for
+  // the day a name joins the universe instead of needing every document re-fetched.
+  const uni = ["INTC", "NVDA"];
+  assert.equal(st.insidersFeedCount({ uni }), 4, "only the covered names");
+  assert.ok(st.insidersFeedCount({}) > 4, "...while the lane still HOLDS the rest");
+  assert.deepEqual(st.insidersFeed({ uni }).map((r) => r.tk).filter((v, i, a) => a.indexOf(v) === i).sort(),
+    ["INTC", "NVDA"], "nothing off-board survives the scope");
+  assert.equal(st.insidersFeedCount({ uni: ["intc"] }), 2, "the roster is matched case-insensitively");
+  assert.equal(st.insidersFeedCount({ uni: [] }), st.insidersFeedCount({}),
+    "an EMPTY roster scopes nothing — a board that has not reconciled yet must not report zero insider activity");
+  // The scope is a filter like any other: the count behind the pager sees the same set.
+  assert.equal(st.insidersFeed({ uni, limit: 500 }).length, st.insidersFeedCount({ uni }), "page and count agree under scope");
+  assert.equal(st.insidersFeedCount({ uni, codes: "P" }), st.insidersFeed({ uni, codes: "P" }).length, "...and it composes with the others");
+
   // A re-parse REPLACES a filing's rows. An amended Form 4 must not leave the original trade
   // behind next to the corrected one.
   st.insidersSave("0000050863-26-000101", { tk: "INTC", owner: "Tan Lip-Bu", nDeriv: 0 },
@@ -3275,6 +3291,18 @@ test("insiders lane: discovery rides the EDGAR rotation, and the parse reads the
   assert.equal(st2.filings.noSym, 1, "...but it is COUNTED and the reason is kept, so a thin tab can say why");
   assert.equal(st2.filings.queued, 0, "it leaves the queue rather than being retried forever");
   void prev;
+
+  // The scope is injected by the LANE, not asked for by the route: every read is scoped to the
+  // covered universe, because a caller that has to remember to pass the roster is one that will
+  // eventually forget. Off-board rows stay in the store and are counted, never served.
+  store.insidersSave("0000320193-26-000777", { tk: "AAPL", issuer: "APPLE INC", owner: "A Holder", role: "10% owner", nDeriv: 0 },
+    [{ ln: 0, kind: "S", code: "P", act: "buy", shares: 1000, price: 200, value: 200000, txDate: "2026-08-20" }]);
+  assert.equal(store.insidersFeedCount({}), 3, "the store holds the off-board row");
+  p.seedRowNow("xyz:INTC", { px: 20, ticker: "INTC", uni: "xyz" });   // the board now covers exactly one name
+  assert.deepEqual(p.insidersFeed({}).map((r) => r.tk).sort(), ["INTC", "INTC"], "reads are scoped without the caller asking");
+  assert.equal(p.insidersFeedCount({}), 2, "and the count behind the pager sees the same set");
+  assert.equal(p.insidersStatus().scope.offUni, 1, "what the scope hides is stated, not left to be inferred from a short table");
+  assert.equal(p.insidersStatus().scope.covered, 1, "...alongside how many names the board covers");
 
   // A second run has nothing to do — the queue is the work list, not a re-crawl.
   const n = hits.length;
@@ -13267,7 +13295,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-43"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-44"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

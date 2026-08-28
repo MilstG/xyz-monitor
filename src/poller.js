@@ -5016,9 +5016,33 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       return { ok: false, error: insLastErr };
     } finally { insBackBusy = false; insBackProgress = null; }
   }
+  // Every ticker the board covers, in both spellings the two worlds use: the xyz symbol and the US
+  // exchange symbol where they differ (BRKB / BRK.B). A Form 4 carries the SEC's spelling, so
+  // matching only one of them would drop a name for a reason that has nothing to do with the data.
+  function insUniTickers() {
+    const out = new Set();
+    for (const [k, v] of earnEligible()) {
+      if (k) out.add(String(k).toUpperCase());
+      if (v && v.ticker) out.add(String(v.ticker).toUpperCase());
+    }
+    return [...out];
+  }
+  // Scope a selection to the universe — unless the roster has not reconciled yet, in which case
+  // scoping to an EMPTY list would report "no insider transactions" for a board that simply has
+  // not booted. An unscoped read there is the honest degradation: stale coverage beats a false zero.
+  function insUniScope(o) {
+    const uni = insUniTickers();
+    return uni.length ? Object.assign({}, o || {}, { uni }) : (o || {});
+  }
   function insidersStatusFull() {
     const s = store.insidersStatus ? store.insidersStatus() : { ready: 0 };
+    // What the scope is hiding, stated rather than left to be inferred from a short table: rows
+    // this lane holds for issuers the board does not cover.
+    const all = store.insidersFeedCount ? store.insidersFeedCount({}) : 0;
+    const uni = insUniTickers();
+    const shown = uni.length && store.insidersFeedCount ? store.insidersFeedCount({ uni }) : all;
     return Object.assign({}, s, { busy: insBusy ? 1 : 0, lastErr: insLastErr, run: insStat,
+      scope: { covered: uni.length, offUni: Math.max(0, all - shown) },
       backfill: { done: store.insidersMeta ? store.insidersMeta(INS_BACK_FLAG) : null,
         busy: insBackBusy ? 1 : 0, progress: insBackProgress },
       // The roster this lane can ever see: EDGAR feeds are pulled per equity in the universe, so a
@@ -13975,8 +13999,11 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     congressFeedCount: (o) => (store.congressFeedCount ? store.congressFeedCount(o) : 0),
     congressTickerRoll: (t) => (store.congressTickerRoll ? store.congressTickerRoll(t) : null),
     earnHistBackfillNow: earnHistBackfill,
-    insidersFeed: (o) => (store.insidersFeed ? store.insidersFeed(o) : []),
-    insidersFeedCount: (o) => (store.insidersFeedCount ? store.insidersFeedCount(o) : 0),
+    // The roster is injected HERE rather than asked for by the caller: every read of this lane is
+    // scoped to the covered universe, and a route that had to remember to pass it is a route that
+    // will one day forget.
+    insidersFeed: (o) => (store.insidersFeed ? store.insidersFeed(insUniScope(o)) : []),
+    insidersFeedCount: (o) => (store.insidersFeedCount ? store.insidersFeedCount(insUniScope(o)) : 0),
     insidersStatus: insidersStatusFull,
     insidersTickerRoll: (t, d) => (store.insidersTickerRoll ? store.insidersTickerRoll(t, d) : null),
     insidersParseNow: insidersParseTick,
