@@ -8515,10 +8515,21 @@ function f4DocPlan(xml, nTx) {
   const raw = ((v ? v[1] : all[0].replace(/<\/?aff10b5One\b[^>]*>/gi, "")) || "").replace(/<[^>]*>/g, "").trim();
   return raw === "" ? null : (f4Flag(raw) ? 1 : 0);
 }
-// Form 4 XML -> transaction rows. Table I (nonDerivative) ONLY, deliberately: a derivative row's
-// "price" is the exercise price of an option, a different quantity in the same shaped field, and
-// letting it into a PRICE column would silently mix two things the reader would then average.
-// Derivative rows are COUNTED so the tab can disclose that they exist and were not shown.
+// Form 4 XML -> transaction rows, from BOTH of the form's tables.
+//
+// Table I is share transactions; Table II is derivatives — options, RSUs, convertibles. They are
+// separate tables on the form because their columns mean different things, and the first cut of
+// this parser read Table I only for exactly that reason: a derivative row's exercise price sits in
+// an identically-shaped field to a share row's transaction price, and one column holding both is a
+// number that cannot be sorted or averaged without lying.
+//
+// That reasoning was right about the COLUMN and wrong about the DATA. The missing half is what
+// separates a decision from a payday: "CEO sold 5,191 at $258.66" reads as conviction until Table
+// II of the same filing shows those shares were created that morning by exercising options struck
+// at $12.04. So both tables are parsed, and the quantities are kept APART instead of the rows
+// being dropped — `kind` says which table a row came from, `strike` carries the exercise price and
+// `price` stays what it has always been, the price of a share transaction. A derivative row's
+// price and value are null: shares x strike is a number nobody paid and nobody received.
 function parseForm4(xml) {
   const s = typeof xml === "string" ? xml : "";
   if (!s || !/<ownershipDocument/i.test(s)) return { ok: false, error: "not an ownership document", tx: [] };
@@ -8546,7 +8557,8 @@ function parseForm4(xml) {
   const tx = [];
   let ln = 0;
   const nonDeriv = f4Blocks(s, "nonDerivativeTransaction");
-  const nDeriv = f4Blocks(s, "derivativeTransaction").length;
+  const nonDeriv2 = f4Blocks(s, "derivativeTransaction");
+  const nDeriv = nonDeriv2.length;
   const docPlan = f4DocPlan(s, nonDeriv.length + nDeriv);
   for (const b of nonDeriv) {
     const code = (f4Val(b, "transactionCode") || "").trim().toUpperCase() || null;
@@ -8555,7 +8567,7 @@ function parseForm4(xml) {
     const ad = (f4Val(b, "transactionAcquiredDisposedCode") || "").trim().toUpperCase() || null;
     const txDate = (f4Val(b, "transactionDate") || "").slice(0, 10) || null;
     tx.push({
-      ln: ln++, sec: f4Val(b, "securityTitle"), code, act: code ? (F4_CODES[code] || "other") : null, ad,
+      ln: ln++, kind: "S", sec: f4Val(b, "securityTitle"), code, act: code ? (F4_CODES[code] || "other") : null, ad,
       shares, price,
       // Dollar value only where a price exists. A grant prices at 0 and a footnoted price is
       // absent; both would compute a $0 "value" that reads as a fact rather than as an absence.
@@ -8564,6 +8576,36 @@ function parseForm4(xml) {
       own: f4Num(b, "sharesOwnedFollowingTransaction"),
       dir: (f4Val(b, "directOrIndirectOwnership") || "").trim().toUpperCase() || null,
       plan: f4Plan(b, docPlan),
+      strike: null, expiry: null, under: null,
+    });
+  }
+  // Table II. Same shapes, same null-honesty: a footnoted strike is absent, never zero — and a
+  // strike of zero is a real thing (an RSU converts one-for-one at no cost), which is precisely why
+  // absent and zero must not collapse into each other here.
+  for (const b of nonDeriv2) {
+    const code = (f4Val(b, "transactionCode") || "").trim().toUpperCase() || null;
+    tx.push({
+      ln: ln++, kind: "D", sec: f4Val(b, "securityTitle"), code, act: code ? (F4_CODES[code] || "other") : null,
+      ad: (f4Val(b, "transactionAcquiredDisposedCode") || "").trim().toUpperCase() || null,
+      shares: f4Num(b, "transactionShares"),
+      // A derivative row has NO share price and NO dollar value, by construction rather than by
+      // omission. The form's own transactionPricePerShare here is what was paid for the derivative
+      // itself — nearly always zero, because it was granted — and it is not a share price, so it
+      // does not go in the share-price column.
+      price: null, value: null,
+      txDate: (f4Val(b, "transactionDate") || "").slice(0, 10) || null,
+      own: f4Num(b, "sharesOwnedFollowingTransaction"),
+      dir: (f4Val(b, "directOrIndirectOwnership") || "").trim().toUpperCase() || null,
+      plan: f4Plan(b, docPlan),
+      strike: f4Num(b, "conversionOrExercisePrice"),
+      expiry: (f4Val(b, "expirationDate") || "").slice(0, 10) || null,
+      // What the derivative turns into. Usually "Common Stock" one-for-one, but not always, and a
+      // ratio that is not 1:1 is the difference between a small option position and a large one.
+      under: (() => {
+        const t = f4Val(b, "underlyingSecurityTitle");
+        const n = f4Num(b, "underlyingSecurityShares");
+        return t || n != null ? ((t || "?") + (n != null ? " \u00d7 " + n : "")) : null;
+      })(),
     });
   }
   return { ok: true, docType, amended: /\/A$/.test(docType || ""),

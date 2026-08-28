@@ -13273,10 +13273,14 @@ const INS_COLS = [
   { k: 'ticker', label: 'TICKER',  cls: 'l', tip: 'the issuer’s trading symbol as written on the form itself, not resolved from a name.' },
   { k: 'owner',  label: 'INSIDER', cls: 'l', tip: 'the reporting person. A joint filing is attributed to the first owner named and says so on hover — counting one trade once per filer would multiply the flow.' },
   { k: 'role',   label: 'ROLE',    cls: 'l', tip: 'the officer TITLE as filed — CEO, CFO, EVP of whatever — because the relationship boxes alone read “director/officer” for almost everyone and separate nothing. Falls back to the boxes only where the form gave no title. A 10% owner rides alongside a title: a fund over the threshold is a different actor from an executive. Sorts by title, so one person’s job groups together.' },
+  { k: 'kind',   label: 'KIND',    cls: 'l', tip: 'which of the form\u2019s two tables the row came from. Table I is a SHARE transaction; Table II is a DERIVATIVE one \u2014 an option, an RSU, a convertible. They are separate tables because their columns mean different things, which is why STRIKE exists rather than a strike being written into PRICE.' },
   { k: 'act',    label: 'ACT',     cls: 'l', tip: 'the transaction CODE, which is what decides whether a row means anything. P is an open-market purchase and S an open-market sale — decisions. A (grant), M (option exercise) and F (shares withheld for tax) are compensation mechanics, not views on the price.' },
   { k: 'shares', label: 'SHARES',  cls: 'r', tip: 'share count exactly as filed.' },
   { k: 'price',  label: 'PRICE',   cls: 'r', tip: 'price per share exactly as filed. Blank where the form carried none — a footnoted weighted average or a range — which is a real and common case, never a zero.' },
   { k: 'value',  label: 'VALUE',   cls: 'r', tip: 'shares x price, computed only where a price exists. A grant prices at zero and a footnoted price is absent; both would otherwise read as a $0 trade.' },
+  { k: 'strike', label: 'STRIKE',  cls: 'r', tip: 'the exercise or conversion price on a derivative row \u2014 what the insider pays per share to turn the option into stock. It is NOT a transaction price and never enters the PRICE column: the two are identically shaped fields holding different quantities, and one column holding both is a number that cannot be sorted or averaged without lying. Blank on a share row, and blank on a derivative whose strike the form footnoted.' },
+  { k: 'expiry', label: 'EXPIRY',  cls: 'l', tip: 'when the derivative lapses. Turns amber inside 90 days \u2014 an option exercised weeks before it would have expired is mechanical, not a view on the price.' },
+  { k: 'under',  label: 'UNDER',   cls: 'l', tip: 'what the derivative converts into, and at what ratio. One-for-one into common stock is usual and is not guaranteed; a ratio that is not 1:1 is the difference between a small position and a large one.' },
   { k: 'pct',    label: 'Δ POS', cls: 'r', tip: 'the trade as a share of the holding it left behind — how much of their own position this was. Blank unless the form carries the post-transaction figure.' },
   { k: 'own',    label: 'HOLDING', cls: 'r', tip: 'shares owned after the transaction, as reported. Direct holdings and indirect (a trust, a family LLC) are different claims and are marked D or I.' },
   { k: 'plan',   label: 'PLAN',    cls: 'l', tip: 'the Rule 10b5-1 checkbox. A sale under a pre-arranged plan was scheduled months ago and says little about today; a discretionary one is a decision taken now. THREE states: marked, not marked, and blank — the box did not exist before 2023, so blank means the form does not say, never "not a plan".' },
@@ -13288,7 +13292,12 @@ const INS_COLS = [
 // Everything the parser knows is a column and the reader decides what to look at. Issuer name,
 // security class and form type start hidden: they repeat the ticker, repeat "Common Stock" and
 // read "4" on almost every row respectively.
-const INS_HIDE_DEFAULT = ['issuer', 'sec', 'form'];
+// KIND, STRIKE, EXPIRY and UNDER start hidden because the tab opens on SHARES, where KIND is
+// constant and the other three are empty. Switching the kind filter to derivatives or both reveals
+// them automatically — a filter that returns rows whose defining columns are hidden is a filter
+// that looks broken.
+const INS_HIDE_DEFAULT = ['issuer', 'sec', 'form', 'kind', 'strike', 'expiry', 'under'];
+const INS_DERIV_COLS = ['kind', 'strike', 'expiry'];
 const INS_LS = 'insview';
 const INS_PAGE = 50;
 // The transaction codes, grouped as a reader thinks about them rather than as the form lists them.
@@ -13301,7 +13310,7 @@ const INS_CHIPS = [
   { k: 'G', label: 'gifts', tip: 'code G — a gift. No price, no proceeds.' },
 ];
 const INS = { rows: [], stat: null, total: 0, page: 0, q: '', codes: new Set(['P', 'S']), plan: null,
-  role: '', minValue: 0, sort: { k: 'filed', dir: -1 }, hidden: new Set(INS_HIDE_DEFAULT),
+  role: '', minValue: 0, kind: 'S', sort: { k: 'filed', dir: -1 }, hidden: new Set(INS_HIDE_DEFAULT),
   order: INS_COLS.map(c => c.k), menu: false, drag: null };
 // The saved view: which columns, in what order, sorted how. Filters are deliberately NOT saved —
 // a filter is a question being asked right now, and reopening the tab to yesterday's narrowed set
@@ -13342,6 +13351,7 @@ async function openInsiders() {
   if (INS.plan) p.push('plan=' + INS.plan);
   if (INS.role) p.push('role=' + encodeURIComponent(INS.role));
   if (INS.minValue > 0) p.push('minValue=' + INS.minValue);
+  if (INS.kind) p.push('kind=' + INS.kind);
   const r = await insGet('?' + p.join('&'));
   if (!r || !r.ok) { out.innerHTML = `<div class="msg err">${esc((r && r.error) || 'fetch failed')}</div>`; return; }
   INS.rows = r.feed || []; INS.stat = r.status || null; INS.total = r.total || 0;
@@ -13399,6 +13409,57 @@ function insRoleCell(x) {
   const cls = 'ins-role' + (ten ? ' ten' : '') + (/\b(CEO|CFO|COO|President|Chair)\b/i.test(short) ? ' top' : '');
   return `<td class="l"><span class="${cls}" data-tip="${esc(tip)}">${esc(short.length > 26 ? short.slice(0, 25) + '…' : short)}</span></td>`;
 }
+// The cashless exercise, read off two rows that each stay individually true.
+//
+// An M on Table II and an S on Table I, same filing, same date, same share count, is an insider
+// creating shares at the strike and selling them the same day. Nothing on the form says the two
+// legs are related — the SEC does not link them — so this pairing is INFERRED and is marked as
+// such wherever it is shown. It matters because it changes the reading of the single largest kind
+// of row on the tab: a big CEO sale is conviction, or it is compensation being converted to cash,
+// and the bare Table I row cannot tell you which.
+//
+// The matcher declines to guess. Exact accession, exact date, exact share count, exactly one M and
+// one S in that filing on that date — anything else draws nothing rather than a fuzzy brace. It
+// runs over the LOADED PAGE only and is never stored: a reading aid that can be wrong without
+// corrupting anything, recomputed on every render.
+function insPairs(rows) {
+  const by = new Map();
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.acc || !r.txDate || r.shares == null) continue;
+    const isM = r.kind === 'D' && r.code === 'M', isS = r.kind !== 'D' && r.code === 'S';
+    if (!isM && !isS) continue;
+    const k = r.acc + '|' + r.txDate + '|' + r.shares;
+    let g = by.get(k); if (!g) { g = { m: [], s: [] }; by.set(k, g); }
+    (isM ? g.m : g.s).push(i);
+  }
+  const pair = new Map();   // row index -> pair id
+  let n = 0;
+  for (const g of by.values()) {
+    if (g.m.length !== 1 || g.s.length !== 1) continue;   // ambiguous: two exercises, or a partial — no brace
+    const id = ++n;
+    pair.set(g.m[0], id); pair.set(g.s[0], id);
+  }
+  return pair;
+}
+// The story line under a completed pair. Cost and proceeds are both filed figures multiplied by a
+// filed share count; nothing here models tax, which the form does not carry, and it says so.
+function insPairStory(mRow, sRow) {
+  const sh = sRow.shares;
+  const cost = mRow.strike != null ? mRow.strike * sh : null;
+  const proceeds = sRow.value != null ? sRow.value : (sRow.price != null ? sRow.price * sh : null);
+  const net = cost != null && proceeds != null ? proceeds - cost : null;
+  const bits = [`exercised <b>${insNum(sh)}</b> @ ${mRow.strike == null ? '<span class="sec">a footnoted strike</span>' : '$' + insNum(mRow.strike, 2)}`,
+    `sold <b>${insNum(sh)}</b> @ ${sRow.price == null ? '<span class="sec">a footnoted price</span>' : '$' + insNum(sRow.price, 2)}`];
+  const nums = [cost != null ? `cost <b>${insUsd(cost)}</b>` : null,
+    proceeds != null ? `proceeds <b>${insUsd(proceeds)}</b>` : null,
+    net != null ? `net <b class="pos">${insUsd(net)}</b>` : null].filter(Boolean);
+  return `<tr class="ins-story"><td class="l" colspan="99"><span class="k-story">`
+    + `<b>cashless exercise</b>`
+    + `<span class="k-derived" data-tip="${esc('INFERRED, not filed. The form states both legs and says nothing about their relationship — this pairing is read from a matching accession, date and share count, and is drawn over the two rows rather than replacing them. Where the counts do not match exactly, or the filing carries more than one exercise that day, no pairing is claimed. Net is proceeds minus strike cost, both filed figures; nothing here models tax, which the form does not carry.')}">inferred</span>`
+    + ` · ${bits.join(' → ')}${nums.length ? ' · ' + nums.join(' · ') : ''}`
+    + `<span class="sec"> · the shares did not exist that morning</span></span></td></tr>`;
+}
 function insRender() {
   const out = el('insiders-body'); if (!out) return;
   const st = INS.stat || {}, f = st.filings || {}, t = st.tx || {}, bf = st.backfill || {};
@@ -13412,6 +13473,12 @@ function insRender() {
     + `</div>`
     + `<div class="cng-rates ins-filters">`
       + INS_CHIPS.map(c => `<button type="button" class="cng-chip${INS.codes.has(c.k) ? ' on' : ''}" data-inscode="${c.k}" data-tip="${esc(c.tip)}">${esc(c.label)}</button>`).join('')
+      + `<span class="ins-sep"></span>`
+      + [['S', 'shares'], ['D', 'derivatives'], ['', 'both']]
+        .map(([v, l]) => `<button type="button" class="cng-chip${(INS.kind || '') === v ? ' on' : ''}" data-inskind="${esc(v)}" data-tip="${esc(
+          v === 'S' ? 'Table I only — actual share transactions. The tab opens here.'
+          : v === 'D' ? 'Table II only — options, RSUs and convertibles, with their strike and expiry. A derivative row has no share price and no dollar value: shares x strike is a number nobody paid and nobody received.'
+          : 'both tables interleaved. This is where an exercise and the same-day sale it funded appear together — the pairing is only visible when both legs are in the result set.')}">${esc(l)}</button>`).join('')
       + `<span class="ins-sep"></span>`
       + [['', 'any role'], ['c-suite', 'C-suite'], ['officer', 'officers'], ['director', 'directors'], ['10%', '10% owners']]
         .map(([v, l]) => `<button type="button" class="cng-chip${INS.role === v ? ' on' : ''}" data-insrole="${esc(v)}" data-tip="${esc(
@@ -13454,15 +13521,38 @@ function insRender() {
     if (k === 'role') return insRoleCell(x);
     if (k === 'act') {
       const d = x.code === 'P' ? 'p' : x.code === 'S' ? 's' : 'e';
-      // The derivative marker rides HERE rather than on the form column, which starts hidden. It
-      // is a statement about what this table is NOT showing, and a disclosure that only appears
-      // once the reader goes looking for it is not one.
+      // The derivative marker is a statement about what this view is NOT showing, so it appears
+      // only when that is true: with the KIND filter on shares, on a share row, for a filing that
+      // has derivative rows sitting outside the result set. Once the reader switches to
+      // derivatives or both, the rows are right there and a marker counting them would be
+      // pointing at itself.
+      const hidden = INS.kind === 'S' && x.kind !== 'D' && x.nDeriv;
       return `<td class="l"><span class="cng-act ${d}" data-tip="${esc('transaction code ' + (x.code || '?') + (x.ad ? ' · ' + (x.ad === 'A' ? 'acquired' : 'disposed') : ''))}">${esc(x.act || x.code || '—')}</span>`
-        + (x.nDeriv ? `<span class="ins-dv" data-tip="${esc('the same filing also carried ' + x.nDeriv + ' derivative transaction(s) — options, and their exercise prices. They are NOT in this table: a derivative row’s “price” is a strike, and letting it into the price column would silently mix two different quantities. Open the form to read them.')}">+${x.nDeriv}D</span>` : '')
+        + (hidden ? `<span class="ins-dv" data-tip="${esc('the same filing carried ' + x.nDeriv + ' derivative transaction(s) — options, with their own strikes and expiries — and the KIND filter is on shares, so they are not in this result set. Switch KIND to “derivatives” or “both” to read them; on “both”, an exercise and the same-day sale it funded are drawn as a pair.')}">+${x.nDeriv}D</span>` : '')
         + `</td>`;
     }
+    if (k === 'kind') return `<td class="l"><span class="k-kind ${x.kind === 'D' ? 'dv' : 'sh'}" data-tip="${esc(x.kind === 'D'
+      ? 'Table II of the form — a derivative: ' + (x.sec || 'an option or similar') + '. Its exercise price is in STRIKE; it has no share price.'
+      : 'Table I of the form — an actual share transaction')}">${x.kind === 'D' ? 'option' : 'share'}</span></td>`;
+    if (k === 'strike') return `<td class="r">${x.strike == null
+      ? `<span class="sec">—</span>`
+      : `<span class="k-strike" data-tip="${esc('exercise price — what they pay per share to convert. Not a transaction price, which is why it is not in the PRICE column.')}">$${insNum(x.strike, 2)}</span>`}</td>`;
+    if (k === 'expiry') {
+      if (!x.expiry) return `<td class="l sec">—</td>`;
+      // Inside 90 days the exercise is likely mechanical: an option is worth nothing after it
+      // lapses, so exercising a near-dated one says far less than exercising a long-dated one.
+      const d90 = (Date.parse(x.expiry + 'T00:00:00Z') - Date.now()) / 86400000;
+      return `<td class="l"><span class="k-exp${isFinite(d90) && d90 < 90 ? ' near' : ''}" data-tip="${esc(isFinite(d90) && d90 < 90
+        ? 'expires in ' + Math.max(0, Math.round(d90)) + ' days — an exercise this close to expiry is mechanical, not a view on the price'
+        : 'the date the derivative lapses')}">${esc(x.expiry)}</span></td>`;
+    }
+    if (k === 'under') return `<td class="l sec">${esc((x.under || '—').slice(0, 24))}</td>`;
     if (k === 'shares') return `<td class="r">${insNum(x.shares)}</td>`;
-    if (k === 'price') return `<td class="r">${x.price == null ? '<span class="sec" data-tip="the form carried no price for this row — a footnoted weighted average, a range, or a grant. Not a zero.">—</span>' : '$' + insNum(x.price, 2)}</td>`;
+    if (k === 'price') return `<td class="r">${x.price == null
+      ? `<span class="sec" data-tip="${esc(x.kind === 'D'
+          ? 'a derivative row has no share price by construction, not by omission: what it carries is a STRIKE, and putting a strike here would mix two quantities in one column'
+          : 'the form carried no price for this row — a footnoted weighted average, a range, or a grant. Not a zero.')}">—</span>`
+      : '$' + insNum(x.price, 2)}</td>`;
     if (k === 'value') return `<td class="r">${x.value == null ? '<span class="sec">—</span>' : `<b class="${x.code === 'P' ? 'pos' : x.code === 'S' ? 'neg' : ''}">${insUsd(x.value)}</b>`}</td>`;
     if (k === 'pct') {
       // Share of the resulting holding. Only computable where the form carries the post-transaction
@@ -13486,10 +13576,31 @@ function insRender() {
     + `<div class="tblwrap"><table class="whl-tbl cng-tbl ins-tbl"><thead><tr>`
     + shown.map(col => `<th class="${col.cls} cng-th ins-th" draggable="true" data-inssort="${col.k}" data-tip="${esc(col.tip + ' · click to sort, drag to move the column')}">${esc(col.label)}${arrow(col.k)}</th>`).join('')
     + `</tr></thead><tbody>`
-    + INS.rows.map(x => `<tr class="whl-worow"${x.tk ? ` data-instk="${esc(x.tk)}"` : ''}>${shown.map(col => cell(col.k, x)).join('')}</tr>`).join('')
+    + (() => {
+      // Pair legs are marked wherever they land in the current ordering, and the story line is
+      // emitted once, after the SECOND leg to be rendered. The brace glyph is only drawn when the
+      // two are adjacent — under a sort that separates them, claiming a bracket across unrelated
+      // intervening rows would be worse than saying nothing.
+      const pair = insPairs(INS.rows);
+      const seen = new Map();
+      const out = [];
+      INS.rows.forEach((x, i) => {
+        const id = pair.get(i);
+        const other = id ? seen.get(id) : null;
+        const adjacent = other != null && other === i - 1;
+        const cls = 'whl-worow' + (x.kind === 'D' ? ' dv' : '') + (id ? ' paired' : '') + (adjacent ? ' pair-b' : '');
+        out.push(`<tr class="${cls}"${x.tk ? ` data-instk="${esc(x.tk)}"` : ''}>${shown.map(col => cell(col.k, x)).join('')}</tr>`);
+        if (!id) return;
+        if (other == null) { seen.set(id, i); return; }
+        const m = INS.rows[other].kind === 'D' ? INS.rows[other] : x;
+        const sr = INS.rows[other].kind === 'D' ? x : INS.rows[other];
+        out.push(insPairStory(m, sr));
+      });
+      return out.join('');
+    })()
     + `</tbody></table></div>`
     + insPager()
-    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s) · source: SEC Form 4, filed under Section 16 · shares, price and date are the filer’s own figures — nothing on this tab is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · Table I (share) transactions only; derivative rows are counted per filing, never priced into this table · a blank price is a price the form did not carry, never a zero</div>`;
+    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s) · source: SEC Form 4, filed under Section 16 · shares, price, strike and date are the filer’s own figures — no number in this table is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · both of the form’s tables are here: Table I share transactions and Table II derivatives, kept apart by the KIND column because an exercise price and a transaction price are different quantities — a strike never enters PRICE, and a derivative row has no dollar value because shares × strike is a number nobody paid · a blank price is a price the form did not carry, never a zero · the one INFERRED thing on this tab is the cashless-exercise pairing, drawn over two rows that each remain individually true and marked wherever it appears</div>`;
   insBind();
 }
 function insPager() {
@@ -13546,6 +13657,14 @@ function insBind() {
   out.querySelectorAll('[data-inscode]').forEach(b => b.onclick = () => {
     const c = b.dataset.inscode;
     if (INS.codes.has(c)) INS.codes.delete(c); else INS.codes.add(c);
+    INS.page = 0; openInsiders();
+  });
+  out.querySelectorAll('[data-inskind]').forEach(b => b.onclick = () => {
+    INS.kind = b.dataset.inskind || '';
+    // Asking for derivatives and getting rows whose defining columns are hidden reads as a broken
+    // filter. Revealing them is a one-way courtesy: it never re-hides a column the reader chose to
+    // keep, and switching back to shares leaves the view as they now have it.
+    if (INS.kind !== 'S') { for (const k of INS_DERIV_COLS) INS.hidden.delete(k); insSave(); }
     INS.page = 0; openInsiders();
   });
   out.querySelectorAll('[data-insrole]').forEach(b => b.onclick = () => { INS.role = b.dataset.insrole; INS.page = 0; openInsiders(); });

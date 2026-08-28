@@ -2113,3 +2113,23 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .ins-dv{font-size:9.5px;color:var(--faint);margin-left:4px}
 .ins-role.top{color:var(--fg);border-bottom-color:var(--accent)}
 .ins-role.ten{color:var(--accent)}
+/* ---- INSIDERS: the form's two tables, kept visually apart -------------------------------------
+   A derivative row is tinted along its whole width. Sorting by VALUE interleaves the two kinds, and
+   at that point the KIND chip alone is something you have to look for rather than something you
+   see. The tint is what makes "different quantity" pre-attentive. */
+.k-kind{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;padding:1px 5px;border-radius:3px;border:1px solid;white-space:nowrap}
+.k-kind.sh{color:var(--faint);border-color:var(--line)}
+.k-kind.dv{color:var(--blue,#6f93c9);border-color:rgba(111,147,201,.42);background:rgba(111,147,201,.07)}
+.ins-tbl tr.dv td{background:rgba(111,147,201,.045)}
+.ins-tbl tr.dv:hover td{background:rgba(111,147,201,.085)}
+.k-strike{color:var(--blue,#6f93c9)}
+.k-exp{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.k-exp.near{color:var(--accent)}
+/* the inferred pair: marked, never quiet */
+.ins-tbl tr.paired td{background:rgba(227,165,60,.05)}
+.ins-tbl tr.paired:hover td{background:rgba(227,165,60,.09)}
+.ins-tbl tr.pair-b td{border-top:1px dashed rgba(227,165,60,.28)}
+.ins-tbl tr.ins-story td{background:rgba(227,165,60,.05);border-bottom:1px solid var(--line)}
+.k-story{font-family:var(--mono);font-size:11.5px;color:var(--faint);line-height:1.6;display:block;padding:2px 0 3px}
+.k-story b{color:var(--fg)}
+.k-derived{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);border:1px dashed var(--accent);border-radius:3px;padding:1px 5px;margin-left:7px;cursor:help}

@@ -2906,6 +2906,19 @@ const F4_BUY = `<nonDerivativeTransaction><securityTitle><value>Common Stock</va
 <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction>`;
 // A sale under a 10b5-1 plan, with the price left to a footnote — both of the cases that a naive
 // reader of this form gets wrong.
+// Table II: an option exercise, the leg that turns "the CEO sold $1.3M of stock" into "the CEO
+// converted compensation to cash". Carries a strike where a share row carries a price, which is
+// the entire reason the two tables are separate on the form.
+const F4_DERIV = `<derivativeTable><derivativeTransaction>
+<securityTitle><value>Employee Stock Option (right to buy)</value></securityTitle>
+<conversionOrExercisePrice><value>12.04</value></conversionOrExercisePrice>
+<transactionDate><value>2026-08-26</value></transactionDate>
+<transactionCoding><transactionFormType>4</transactionFormType><transactionCode>M</transactionCode></transactionCoding>
+<transactionAmounts><transactionShares><value>5191</value></transactionShares><transactionPricePerShare><value>0</value></transactionPricePerShare>
+<transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode></transactionAmounts>
+<expirationDate><value>2032-09-14</value></expirationDate>
+<underlyingSecurity><underlyingSecurityTitle><value>Common Stock</value></underlyingSecurityTitle><underlyingSecurityShares><value>5191</value></underlyingSecurityShares></underlyingSecurity>
+</derivativeTransaction></derivativeTable>`;
 const F4_PLANSELL = `<nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle>
 <transactionDate><value>2026-08-26</value></transactionDate>
 <transactionCoding><transactionCode>S</transactionCode><aff10b5One><value>1</value></aff10b5One></transactionCoding>
@@ -2974,7 +2987,7 @@ test("earnings: the history backfill can be FORCED, past the flag that says it a
 
 test("insiders: Form 4 numbers survive the parser exactly, and every absence stays an absence", () => {
   const C = require("../src/compute");
-  const p = C.parseForm4(f4Doc(F4_BUY + F4_PLANSELL, { deriv: "<derivativeTable><derivativeTransaction><transactionCoding><transactionCode>M</transactionCode></transactionCoding></derivativeTransaction></derivativeTable>" }));
+  const p = C.parseForm4(f4Doc(F4_BUY + F4_PLANSELL, { deriv: F4_DERIV }));
   assert.ok(p.ok, "an ownership document parses");
   assert.equal(p.issuer.tk, "INTC", "the symbol is read off the form, never resolved from a name");
   assert.equal(p.owner.name, "Tan Lip-Bu");
@@ -2993,8 +3006,20 @@ test("insiders: Form 4 numbers survive the parser exactly, and every absence sta
   // value, a size filter and a sort.
   assert.equal(sell.price, null, "a footnoted price is ABSENT, never zero");
   assert.equal(sell.value, null, "no price means no value — not a $0 trade");
-  assert.equal(p.nDeriv, 1, "derivative rows are counted, so the tab can say they exist");
-  assert.equal(p.tx.length, 2, "...but never priced into the share table: an option's price is a strike");
+  assert.equal(p.nDeriv, 1, "derivative rows are counted per filing");
+  assert.equal(p.tx.length, 3, "...and PARSED: both of the form's tables are read, not just Table I");
+  assert.deepEqual(p.tx.map((t) => t.kind), ["S", "S", "D"], "every row says which table it came from");
+  const dv = p.tx[2];
+  // The reason Table II was excluded at first, now handled by keeping the quantities APART rather
+  // than dropping the rows: an exercise price and a transaction price are identically-shaped
+  // fields holding different things.
+  assert.equal(dv.strike, 12.04, "the exercise price is read...");
+  assert.equal(dv.price, null, "...and never lands in the share-price column");
+  assert.equal(dv.value, null, "a derivative row has no dollar value: shares x strike is a number nobody paid");
+  assert.equal(dv.expiry, "2032-09-14", "expiry rides along — an exercise weeks before it lapses is mechanical");
+  assert.equal(dv.under, "Common Stock \u00d7 5191", "what it converts into, and at what ratio");
+  assert.equal(dv.code, "M"); assert.equal(dv.act, "exercise");
+  assert.equal(dv.shares, 5191);
 
   // The 10b5-1 box is TRI-state, and the flag belongs to the transaction that carries it. The
   // first cut fell back to the document for every row, which marked this same insider's
@@ -3080,6 +3105,7 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   assert.deepEqual(st.insidersFeed({ sort: "value", dir: -1, limit: 2, offset: 2 }).map((r) => r.tk + ":" + r.code),
     ["NVDA:A", "INTC:S"], "page 2 continues page 1's ordering");
 
+
   // "c-suite" matches the filer's OWN WORDS in the title, not a taxonomy this lane invented — so
   // it is incomplete by construction, which is what the chip's hover says.
   assert.equal(st.insidersFeedCount({ role: "c-suite" }), 4, "both filings carry chief-officer titles");
@@ -3095,6 +3121,24 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   // under "director · officer" and grouped nothing.
   const roles = st.insidersFeed({ sort: "role", dir: 1 }).map((r) => r.title || r.role);
   assert.deepEqual(roles.slice(-1), ["Vice President, Sales"], "titles sort as titles, so one person's job groups together");
+
+  // Table II joins the same table, kept apart by KIND rather than by living somewhere else — one
+  // query behind one pager, one definition of "the set the rows come from".
+  st.insidersSave("0000010101-26-000001",
+    { tk: "ARM", issuer: "ARM HOLDINGS", owner: "Haas Rene", role: "officer", title: "Chief Executive Officer", nDeriv: 1 },
+    [{ ln: 0, kind: "S", code: "S", act: "sell", shares: 5191, price: 258.66, value: 1342704.06, txDate: "2026-08-26" },
+      { ln: 1, kind: "D", code: "M", act: "exercise", shares: 5191, price: null, value: null, txDate: "2026-08-26",
+        strike: 12.04, expiry: "2032-09-14", under: "Common Stock \u00d7 5191" }]);
+  assert.equal(st.insidersFeedCount({ kind: "D" }), 1, "the derivative row is reachable on its own");
+  assert.equal(st.insidersFeedCount({ kind: "S", ticker: "ARM" }), 1, "...and the share row separately");
+  assert.equal(st.insidersFeedCount({ ticker: "ARM" }), 2, "no kind filter interleaves both");
+  const d0 = st.insidersFeed({ kind: "D" })[0];
+  assert.equal(d0.strike, 12.04); assert.equal(d0.price, null, "a strike never arrives as a price");
+  assert.equal(d0.expiry, "2032-09-14"); assert.equal(d0.kind, "D");
+  // Rows written before Table II was read carry no kind. They are share rows and must answer to
+  // "shares" rather than falling out of both buckets and quietly vanishing from the tab.
+  assert.equal(st.insidersFeedCount({ kind: "S" }) + st.insidersFeedCount({ kind: "D" }),
+    st.insidersFeedCount({}), "the two kinds partition the set exactly once — nothing falls between them");
 
   // A re-parse REPLACES a filing's rows. An amended Form 4 must not leave the original trade
   // behind next to the corrected one.
@@ -3249,7 +3293,7 @@ test("insiders tab: columns sort, hide and REORDER, and the view survives a colu
   global.localStorage = { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
   global.fetch = () => new Promise(() => {});
   try {
-    const api = new Function(app + "\n;return { INS, INS_COLS, INS_HIDE_DEFAULT, insRender, insCols, insSave, insLoad, insTitleShort, insRoleCell };")();
+    const api = new Function(app + "\n;return { INS, INS_COLS, INS_HIDE_DEFAULT, insRender, insCols, insSave, insLoad, insTitleShort, insRoleCell, insPairs, insPairStory };")();
     const { INS } = api;
     INS.stat = { filings: { n: 2, done: 2, queued: 0, failed: 0 }, tx: { n: 2, names: 2, noPrice: 1 } };
     INS.total = 2;
@@ -3322,6 +3366,31 @@ test("insiders tab: columns sort, hide and REORDER, and the view survives a colu
     assert.equal(cell("", null), "\u2014", "no box and no title is unknown, not a guess");
     assert.ok(api.insRoleCell({ role: "director · officer", title: "Chief Executive Officer" }).includes("Chief Executive Officer"),
       "the exact filed words stay one hover away");
+
+    // The cashless exercise: an M on Table II and an S on Table I, same filing, same day, same
+    // count. Nothing on the form links them, so this is INFERRED — and what makes it safe is what
+    // it REFUSES to match, not what it matches.
+    const leg = (o) => Object.assign({ acc: "a1", txDate: "2026-08-26", shares: 5191, kind: "S", code: "S", price: 258.66, value: 1342704.06 }, o);
+    const mLeg = (o) => leg(Object.assign({ kind: "D", code: "M", price: null, value: null, strike: 12.04 }, o));
+    const pairs = (rows) => api.insPairs(rows).size;
+    assert.equal(pairs([mLeg({}), leg({})]), 2, "both legs are marked when the filing, date and count all match");
+    assert.equal(pairs([mLeg({}), leg({ acc: "a2" })]), 0, "a different FILING is not a pair");
+    assert.equal(pairs([mLeg({}), leg({ txDate: "2026-08-27" })]), 0, "a different DAY is not a pair");
+    assert.equal(pairs([mLeg({}), leg({ shares: 5000 })]), 0, "a partial sale is not a pair — no fuzzy bracket");
+    assert.equal(pairs([mLeg({}), mLeg({}), leg({})]), 0, "two exercises for one sale is ambiguous: nothing is claimed");
+    assert.equal(pairs([mLeg({}), leg({}), leg({})]), 0, "and so is two sales for one exercise");
+    assert.equal(pairs([mLeg({ code: "A" }), leg({})]), 0, "an option GRANT is not an exercise — only M pairs");
+    assert.equal(pairs([mLeg({}), leg({ code: "P" })]), 0, "and only against a SALE");
+    assert.equal(pairs([leg({ kind: "D", code: "M" }), leg({ kind: "D", code: "S" })]), 0,
+      "two derivative rows are not a cashless exercise — the sale leg has to be a share sale");
+    // The arithmetic, and what it declines to state.
+    const story = api.insPairStory(mLeg({}), leg({}));
+    assert.ok(story.includes("inferred"), "the pairing is marked wherever it appears");
+    assert.ok(story.includes("$62.5K"), "cost is strike x shares: " + story.replace(/<[^>]*>/g, " "));
+    assert.ok(story.includes("$1.34M") && story.includes("$1.28M"), "proceeds and net, both from filed figures");
+    const noStrike = api.insPairStory(mLeg({ strike: null }), leg({}));
+    assert.ok(/footnoted strike/.test(noStrike) && !/\$NaN|\$0\b/.test(noStrike),
+      "a footnoted strike means no cost and no net, never a zero: " + noStrike.replace(/<[^>]*>/g, " "));
   } finally {
     global.setInterval = saved.si; global.setTimeout = saved.st; global.requestAnimationFrame = saved.raf;
     global.clearTimeout = saved.ct; global.clearInterval = saved.ci;
@@ -3344,7 +3413,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "dopenCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsSurStr", "epsPairFmt", "epsFmt", "wireEarnVoid",
-    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders", "termEarnBackfill", "insTitleShort", "insRoleCell",
+    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders", "termEarnBackfill", "insTitleShort", "insRoleCell", "insPairs", "insPairStory",
     "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
     "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
@@ -13126,7 +13195,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-41"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-42"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

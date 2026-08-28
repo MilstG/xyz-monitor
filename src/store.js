@@ -29,6 +29,10 @@ function insidersWhere(opt) {
     .filter((c) => /^[A-Z]$/.test(c)).slice(0, 12);
   if (codes.length) { where.push("t.code IN (" + codes.map(() => "?").join(",") + ")"); args.push(...codes); }
   if (o.minValue) { where.push("t.value >= ?"); args.push(+o.minValue); }
+  // Which of the form's two tables. A null kind is a row written before Table II was read: those
+  // are all share transactions, so they answer to "shares" rather than falling out of both buckets.
+  if (o.kind === "S") where.push("COALESCE(t.kind,'S')='S'");
+  if (o.kind === "D") where.push("t.kind='D'");
   // "plan" is TRI-state on the form and stays tri-state here: only=marked, excl=explicitly not
   // marked. Neither bucket may swallow the rows where the box is absent — that is a third answer.
   if (o.plan === "only") where.push("t.plan=1");
@@ -1005,6 +1009,22 @@ CREATE TABLE IF NOT EXISTS tx(
   PRIMARY KEY(acc, ln)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ins_tx_tk ON tx(tk, txDate);
 CREATE INDEX IF NOT EXISTS ins_tx_code ON tx(code, txDate);`);
+        // Table II joins the same table rather than getting one of its own: a derivative
+        // transaction IS a transaction, and splitting them would mean two queries behind one pager
+        // and two definitions of "the set the rows come from". The columns are nullable and added
+        // by the ALTER-that-may-fail migration the congress lane uses — on a fresh database they
+        // come from the CREATE above once this has run, on an existing one they are added in place.
+        //   kind   "S" a share transaction (Table I), "D" a derivative one (Table II)
+        //   strike the exercise / conversion price. NOT a share price, which is why it is not in
+        //          the price column: one column, one quantity.
+        //   expiry when the derivative lapses. An option exercised weeks before it does is
+        //          mechanical, not a view.
+        //   under  what it converts into, and at what ratio — 1:1 is usual and not guaranteed.
+        try { insiders.exec("ALTER TABLE tx ADD COLUMN kind TEXT"); } catch (_) {}
+        try { insiders.exec("ALTER TABLE tx ADD COLUMN strike REAL"); } catch (_) {}
+        try { insiders.exec("ALTER TABLE tx ADD COLUMN expiry TEXT"); } catch (_) {}
+        try { insiders.exec("ALTER TABLE tx ADD COLUMN under TEXT"); } catch (_) {}
+        try { insiders.exec("CREATE INDEX IF NOT EXISTS ins_tx_kind ON tx(kind, txDate)"); } catch (_) {}
         return insiders;
       } catch (_) { insiders = null; return null; }
     },
@@ -1062,13 +1082,18 @@ ON CONFLICT(acc) DO UPDATE SET tk=COALESCE(excluded.tk, filing.tk), issuer=exclu
           .run(String(acc), h.tk || null, h.issuer || null, h.period || null, h.owner || null, h.role || null, h.title || null,
             (tx || []).length, h.nDeriv | 0);
         d.prepare("DELETE FROM tx WHERE acc=?").run(String(acc));   // a re-parse REPLACES its rows, never doubles them
-        const ins = d.prepare(`INSERT INTO tx(acc,ln,tk,txDate,code,act,ad,shares,price,value,own,dir,plan,sec)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+        const ins = d.prepare(`INSERT INTO tx(acc,ln,tk,txDate,code,act,ad,shares,price,value,own,dir,plan,sec,kind,strike,expiry,under)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
         for (const t of tx || [])
           ins.run(String(acc), t.ln | 0, h.tk || null, t.txDate || null, t.code || null, t.act || null, t.ad || null,
             t.shares == null ? null : +t.shares, t.price == null ? null : +t.price,
             t.value == null ? null : +t.value, t.own == null ? null : +t.own,
-            t.dir || null, t.plan == null ? null : (t.plan ? 1 : 0), t.sec || null);
+            t.dir || null, t.plan == null ? null : (t.plan ? 1 : 0), t.sec || null,
+            // Rows written before Table II was read carry no kind. They are all share rows, but
+            // they are not LABELLED as such, and a kind filter that silently swallowed them would
+            // make the tab quietly lose history. Defaulted here on write; read-side treats a null
+            // kind as a share row for the same reason.
+            t.kind || "S", t.strike == null ? null : +t.strike, t.expiry || null, t.under || null);
         d.exec("COMMIT");
         return (tx || []).length;
       } catch (e) { try { d.exec("ROLLBACK"); } catch (_) {} return 0; }
@@ -1086,6 +1111,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
         // ROLE sorts on what the column SHOWS — the title, falling back to the boxes — so one
         // person's job groups together instead of every row collating under "director · officer".
         role: "COALESCE(NULLIF(f.title,''), f.role)", act: "t.code", shares: "t.shares", price: "t.price", value: "t.value",
+        kind: "COALESCE(t.kind,'S')", strike: "t.strike", expiry: "t.expiry",
         own: "t.own", plan: "t.plan", issuer: "f.issuer", sec: "t.sec", form: "f.form",
         // Position change: what the trade did to their holding. Null-safe — a row with no
         // post-transaction figure sorts as unknown rather than as zero.
@@ -1097,7 +1123,8 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       // "cheapest first" sort buries every row the reader asked to see under the rows that have no
       // answer at all. Unknown belongs at the bottom whichever way the column is pointing.
       try { return d.prepare(`SELECT f.acc, f.tk, f.form, f.filed, f.url, f.issuer, f.period, f.owner, f.role, f.title,
-        f.nDeriv, t.ln, t.txDate, t.code, t.act, t.ad, t.shares, t.price, t.value, t.own, t.dir, t.plan, t.sec
+        f.nDeriv, t.ln, t.txDate, t.code, t.act, t.ad, t.shares, t.price, t.value, t.own, t.dir, t.plan, t.sec,
+        COALESCE(t.kind,'S') kind, t.strike, t.expiry, t.under
         FROM tx t JOIN filing f ON f.acc=t.acc WHERE ${b.where}
         ORDER BY ${col} ${dir} NULLS LAST, f.filed DESC, t.acc DESC, t.ln LIMIT ? OFFSET ?`)
         .all(...b.args, lim, off); } catch (_) { return []; } },

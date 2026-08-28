@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.27-41";
+const VERSION = "2026.08.27-42";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1215,6 +1215,7 @@ async function main() {
       codes: q.codes ? String(q.codes).slice(0, 30) : null,
       role: q.role ? String(q.role).slice(0, 20) : null,
       plan: q.plan === "only" || q.plan === "excl" ? q.plan : null,
+      kind: q.kind === "S" || q.kind === "D" ? q.kind : null,
       minValue: q.minValue ? +q.minValue : null,
       since: q.since ? String(q.since).slice(0, 10) : null };
     return { ok: true, status: poller.insidersStatus(),
