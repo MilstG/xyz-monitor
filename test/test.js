@@ -3091,6 +3091,70 @@ test("insiders lane: discovery rides the EDGAR rotation, and the parse reads the
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("insiders backfill: the SEC submissions index reaches the history the atom window cannot", async (t) => {
+  // browse-edgar serves a company's 20 most recent filings of ANY type, so a fresh deploy holds
+  // whatever happened to be in that window — which is indistinguishable, on the tab, from "this
+  // insider has not traded". The backfill walks the submissions index per roster name instead.
+  const fs = require("fs"), os = require("os"), path = require("path");
+  const { createPoller } = require("../src/poller");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "insb-"));
+  const store = require("../src/store").openStore(dir);
+  if (!store.insidersReady()) { fs.rmSync(dir, { recursive: true, force: true }); return t.skip("node:sqlite unavailable"); }
+  const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const hits = [];
+  const J = (o) => ({ ok: true, json: async () => o, text: async () => JSON.stringify(o) });
+  // Column-oriented, exactly as EDGAR ships it: parallel arrays, not a list of objects.
+  const recent = {
+    form:            ["4",                     "8-K",                  "4/A",                  "4",                    "10-Q"],
+    accessionNumber: ["0000050863-26-000101", "0000050863-26-000102", "0000050863-26-000103", "0000050863-25-000900", "0000050863-26-000104"],
+    filingDate:      [day(10),                 day(11),                day(30),                day(400),               day(12)],
+  };
+  // The older-history shard: same columns, at the TOP level rather than under `.recent`.
+  const shard = { form: ["4"], accessionNumber: ["0000050863-25-000500"], filingDate: [day(200)] };
+  const extFetch = async (url) => { hits.push(url);
+    if (url.includes("company_tickers.json")) return J({ 0: { cik_str: 50863, ticker: "INTC", title: "Intel Corp" } });
+    if (url.includes("company_tickers_mf.json")) return J({ fields: ["cik", "seriesId", "classId", "symbol"], data: [] });
+    if (/submissions\/CIK0000050863\.json$/.test(url)) return J({ filings: { recent,
+      files: [{ name: "CIK0000050863-submissions-001.json", filingFrom: day(500), filingTo: day(150) }] } });
+    if (/submissions\/CIK0000050863-submissions-001\.json$/.test(url)) return J(shard);
+    return { ok: false, status: 404 };
+  };
+  const p = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false, extFetch });
+  // Two roster names: one with a US filer, one without — a foreign listing has no Form 4s to find.
+  p.seedRowNow("xyz:INTC", { px: 20, ticker: "INTC", uni: "xyz" });
+  p.seedRowNow("xyz:ASML", { px: 900, ticker: "ASML", uni: "xyz" });
+
+  const r = await p.insidersBackfillNow({ days: 365 });
+  assert.ok(r.ok, "backfill: " + (r.error || "ok"));
+  assert.equal(r.walked, 2, "every roster name is walked");
+  assert.equal(r.noCik, 1, "a name with no US filer is COUNTED, not treated as a failure — the coverage number describes the lane, not the roster");
+  // 4 and 4/A inside the window, plus the one from the older shard. The 8-K and 10-Q are not
+  // insider transactions; the 400-day-old Form 4 is outside the requested window.
+  assert.equal(r.added, 3, "only ownership forms inside the window are queued: " + JSON.stringify(r));
+  const queued = store.insidersPending(50).map((x) => x.acc).sort();
+  assert.deepEqual(queued, ["0000050863-25-000500", "0000050863-26-000101", "0000050863-26-000103"],
+    "the amendment and the shard's older filing are both in, the 8-K/10-Q and the out-of-window 4 are not");
+  assert.ok(hits.some((u) => /submissions-001\.json$/.test(u)),
+    "the older shard is followed — `recent` holds the last ~1000 filings of every type, which for a busy issuer is less than a year");
+
+  // The queued rows must be shaped so the ORDINARY parse path can read them: one code path from
+  // accession to row, so a backfilled row cannot differ from a live one.
+  const one = store.insidersPending(50).find((x) => x.acc === "0000050863-26-000101");
+  assert.ok(/\/Archives\/edgar\/data\/50863\/000005086326000101\/.*-index\.htm$/.test(one.url),
+    "the archive path is synthesized in the same shape the atom link has: " + one.url);
+  assert.equal(one.tk, "INTC");
+
+  // Idempotent, and it says so: re-running queues nothing new rather than duplicating a year.
+  const again = await p.insidersBackfillNow({ days: 365 });
+  assert.equal(again.added, 0, "a second walk adds nothing — the queue upsert is idempotent against accessions it holds");
+  assert.ok(again.queued >= 3, "...though it still SAW them, which is a different number and is reported separately");
+
+  // The flag that stops it running on every boot, and the status the tab reads to disclose depth.
+  assert.ok(p.insidersStatus().backfill.done, "the walk is flagged done on this volume");
+  assert.equal(p.insidersStatus().backfill.busy, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("insiders tab: columns sort, hide and REORDER, and the view survives a column list that changed", () => {
   const fs = require("fs"), path = require("path");
   const app = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
@@ -12961,7 +13025,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-38"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-39"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

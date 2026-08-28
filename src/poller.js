@@ -4820,8 +4820,14 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
   // and a timestamp. The share count, the price and the transaction code live in the XML inside the
   // accession, and they are the entire point. "INTC's CEO filed a Form 4" is not information;
   // "INTC's CEO bought 500,000 shares at $20" is.
-  const INS_PARSE_MS = 45 * 1000;       // one filing per tick — the queue is small in steady state
-  const INS_PARSE_GAP = 900;            // between the two GETs of one filing
+  const INS_PARSE_MS = 45 * 1000;       // tick cadence
+  const INS_PARSE_MAX = 40;             // filings per tick CEILING, not a target: the tick reads whatever
+                                        // the queue holds up to this, so steady state (a handful, fed by the
+                                        // hourly EDGAR rotation) takes a handful and a backfill's few
+                                        // thousand drains in about an hour instead of a day and a half.
+  const INS_PARSE_GAP = 350;            // between SEC reads — 2 per filing, so ~2.9 req/s at full tilt,
+                                        // comfortably inside SEC fair access (10/s) even with the filings
+                                        // rotation and a backfill walking alongside it
   let insBusy = false, insLastErr = null, insStat = { ok: 0, fail: 0, tx: 0, lastOk: null };
   // Ownership forms worth reading. 3 (initial statement) and 5 (annual catch-up) carry holdings and
   // late-reported transactions; 4 is the timely one and the reason this lane exists. Amendments
@@ -4860,7 +4866,9 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     insBusy = true;
     let done = 0, rows = 0;
     try {
-      for (const f of store.insidersPending(n || 1)) {
+      // The pending query IS the batch size — asking for up to the ceiling returns only what is
+      // queued, so no separate depth check and no arithmetic that could drift from reality.
+      for (const f of store.insidersPending(n || INS_PARSE_MAX)) {
         store.insidersBumpTry(f.acc);
         const dir = insidersDir(f.url, f.acc);
         if (!dir) { store.insidersMark(f.acc, 2, "no archive path in the filing url"); continue; }
@@ -4892,9 +4900,111 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
       return { ok: false, error: insLastErr };
     } finally { insBusy = false; }
   }
+  // ---- INSIDERS backfill: the history the atom window cannot reach ----------------------------
+  // Discovery rides browse-edgar, which serves a company's most RECENT filings — 20 of them, of
+  // every type. That is the right shape for keeping up and useless for starting: on a fresh deploy
+  // the tab holds whatever happened to be in that window and nothing before it, so the first thing
+  // it says about a name is an accident of when the lane shipped.
+  //
+  // The submissions API answers the other question — every filing a company has ever made — so the
+  // backfill walks THAT per roster name and queues the Form 4 accessions it finds inside the
+  // window. It is a queue-filler only: the same parse tick reads the documents, so there is exactly
+  // one code path from accession to row and the backfill cannot produce a row shaped differently
+  // from a live one.
+  //
+  // Runs ONCE, flagged in the lane's own meta table, and is forceable from the terminal. The flag
+  // is versioned for the reason the earnings backfill's histDone2 is: a later build that widens the
+  // window needs volumes that completed the narrow one to run again, and a re-run is free because
+  // the queue upsert is idempotent against accessions it already holds.
+  const INS_BACK_FLAG = "backfill1";
+  const INS_BACK_DAYS = 365;            // one year of history — two earnings cycles of insider behaviour
+  const INS_BACK_GAP = 1200;            // between roster names; one submissions read each
+  const INS_BACK_SHARDS = 3;            // older-history shards to follow per name before giving up on depth
+  let insBackBusy = false, insBackProgress = null;
+  // The submissions payload is COLUMN-oriented: parallel arrays, not a list of objects. Shard files
+  // carry the same columns at the top level rather than under `.recent`, so both shapes are read
+  // through one accessor instead of two nearly-identical loops.
+  function insSubRows(body) {
+    const f = (body && body.filings && body.filings.recent) || body || {};
+    const forms = f.form, accs = f.accessionNumber, dates = f.filingDate;
+    if (!Array.isArray(forms) || !Array.isArray(accs) || !Array.isArray(dates)) return [];
+    const out = [];
+    for (let i = 0; i < forms.length; i++)
+      out.push({ form: String(forms[i] || ""), acc: String(accs[i] || ""), filed: String(dates[i] || "") });
+    return out;
+  }
+  async function insidersBackfill(opts) {
+    const o = opts || {};
+    if (insBackBusy) return { ok: false, error: "a backfill is already running" };
+    if (!store.insidersReady || !store.insidersReady()) return { ok: false, error: "sqlite unavailable in this runtime" };
+    const roster = [...earnEligible().values()];
+    if (!roster.length) return { ok: false, error: "the equity universe has not reconciled yet — nothing to walk" };
+    const days = Math.max(30, Math.min(1825, o.days || INS_BACK_DAYS));
+    const cutoff = new Date(Date.now() - days * DAY).toISOString().slice(0, 10);
+    insBackBusy = true;
+    insBackProgress = { names: 0, of: roster.length, queued: 0, added: 0, noCik: 0, failed: 0, days };
+    try {
+      const maps = await ensureCikMaps();
+      if (!maps) return { ok: false, error: "SEC ticker map unavailable — cannot resolve a roster name to a filer" };
+      for (const m of roster) {
+        insBackProgress.names++;
+        const hit = maps.co.get(String(m.ticker).toUpperCase());
+        // A foreign listing with no US filer has no Form 4s to find. Counted, not treated as a
+        // failure: the coverage number has to describe the lane, not the roster.
+        if (!hit || hit.cik == null) { insBackProgress.noCik++; continue; }
+        const cik = hit.cik;
+        let rows = [], shard = 0;
+        const first = await extGet("https://data.sec.gov/submissions/CIK" + cikPad(cik) + ".json", "json");
+        if (!first.ok) { insBackProgress.failed++; insLastErr = "submissions " + m.ticker + ": " + first.error; await sleep(INS_BACK_GAP); continue; }
+        rows = insSubRows(first.body);
+        // `recent` holds the last ~1000 filings of every type. For a busy issuer that can be less
+        // than the requested window, so the older shards are followed until one starts before the
+        // cutoff — and never further, because depth past the window is bytes for nothing.
+        const files = (first.body && first.body.filings && first.body.filings.files) || [];
+        for (const fl of files) {
+          if (shard >= INS_BACK_SHARDS) break;
+          if (!fl || !fl.name) continue;
+          if (fl.filingTo && String(fl.filingTo) < cutoff) break;   // this shard ends before the window opens
+          await sleep(INS_BACK_GAP);
+          const sh = await extGet("https://data.sec.gov/submissions/" + fl.name, "json");
+          shard++;
+          if (!sh.ok) { insBackProgress.failed++; continue; }
+          rows = rows.concat(insSubRows(sh.body));
+          if (fl.filingFrom && String(fl.filingFrom) <= cutoff) break;
+        }
+        const queue = [];
+        for (const r of rows) {
+          if (!INS_FORMS.has(r.form) || r.filed < cutoff) continue;
+          if (!/^\d{10}-\d{2}-\d{6}$/.test(r.acc)) continue;
+          // The archive directory is synthesized in the SAME shape the atom link has, so the parse
+          // tick's path reader works on a backfilled row without knowing where it came from. EDGAR
+          // serves an ownership accession under any associated filer, the issuer included.
+          queue.push({ acc: r.acc, tk: m.ticker, form: r.form,
+            filed: Date.parse(r.filed + "T00:00:00Z") || 0,
+            url: "https://www.sec.gov/Archives/edgar/data/" + cik + "/" + r.acc.replace(/-/g, "") + "/" + r.acc + "-index.htm" });
+        }
+        if (queue.length) {
+          const res = store.insidersQueue(queue);
+          insBackProgress.queued += queue.length;
+          insBackProgress.added += res.added || 0;
+        }
+        await sleep(INS_BACK_GAP);
+      }
+      store.insidersMetaSet(INS_BACK_FLAG, String(Date.now()));
+      const p = insBackProgress;
+      log(`insiders backfill: ${p.names} name(s) walked, ${p.added} new Form 4(s) queued from the last ${days}d`
+        + (p.noCik ? ` (${p.noCik} with no US filer)` : "") + (p.failed ? ` (${p.failed} read failure(s))` : ""));
+      return { ok: true, walked: p.names, queued: p.queued, added: p.added, noCik: p.noCik, failed: p.failed, days };
+    } catch (e) {
+      insLastErr = e && e.message;
+      return { ok: false, error: insLastErr };
+    } finally { insBackBusy = false; insBackProgress = null; }
+  }
   function insidersStatusFull() {
     const s = store.insidersStatus ? store.insidersStatus() : { ready: 0 };
     return Object.assign({}, s, { busy: insBusy ? 1 : 0, lastErr: insLastErr, run: insStat,
+      backfill: { done: store.insidersMeta ? store.insidersMeta(INS_BACK_FLAG) : null,
+        busy: insBackBusy ? 1 : 0, progress: insBackProgress },
       // The roster this lane can ever see: EDGAR feeds are pulled per equity in the universe, so a
       // name outside it has no filings here and is absent rather than empty.
       roster: earnEligible().size });
@@ -7762,7 +7872,15 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
     // Insiders: one queued Form 4 per tick. The queue is fed by the EDGAR rotation, which covers
     // the roster roughly hourly, so a slow drain is the steady state rather than a backlog — and a
     // cold start walks its way in newest-first instead of hammering sec.gov to catch up.
-    setInterval(() => { insidersParseTick(1).catch((e) => log("insiders parse failed (isolated): " + (e && e.message))); }, INS_PARSE_MS);
+    setInterval(() => { insidersParseTick().catch((e) => log("insiders parse failed (isolated): " + (e && e.message))); }, INS_PARSE_MS);
+    // One-shot history walk, once per volume. Deferred past the universe reconcile (the roster is
+    // what it walks) and past the first EDGAR rotations, so a cold boot is not three SEC lanes
+    // starting at once.
+    setTimeout(() => {
+      if (!store.insidersReady || !store.insidersReady()) return;
+      if (store.insidersMeta && store.insidersMeta(INS_BACK_FLAG)) return;   // already walked on this volume
+      insidersBackfill({}).catch((e) => log("insiders backfill failed (will retry next boot): " + (e && e.message)));
+    }, 5 * 60 * 1000);
     setTimeout(() => { whaleTick().catch((e) => log("whale first tick failed (isolated): " + (e && e.message))); }, 20 * 1000);
     const restored = hydrateFeatures();
     if (restored) log(`Restored cached features for ${restored} market(s) — serving warm`);
@@ -13801,6 +13919,7 @@ HARD RULES, all enforced server-side; a violation discards BOTH sections and the
     insidersTickerRoll: (t, d) => (store.insidersTickerRoll ? store.insidersTickerRoll(t, d) : null),
     insidersParseNow: insidersParseTick,
     insidersRequeueNow: (all) => ({ ok: true, requeued: store.insidersRequeue ? store.insidersRequeue(!!all) : 0 }),
+    insidersBackfillNow: insidersBackfill,
     insidersQueueNow: insidersQueueFrom,          // harness: push atom items through the REAL discovery path
     houseIndexUrls,                              // harness: the candidate list is pinned by test
     congressAssetName,                           // harness: issuer-name cleaning, pinned by test

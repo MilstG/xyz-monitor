@@ -13359,7 +13359,7 @@ function insUsd(v) {
 }
 function insRender() {
   const out = el('insiders-body'); if (!out) return;
-  const st = INS.stat || {}, f = st.filings || {}, t = st.tx || {};
+  const st = INS.stat || {}, f = st.filings || {}, t = st.tx || {}, bf = st.backfill || {};
   const shown = insCols();
   const head = `<div class="whl-head">`
     + `<span class="whl-hd">INSIDERS · SEC FORM 4</span>`
@@ -13380,6 +13380,11 @@ function insRender() {
       + [[0, 'any size'], [100000, '≥$100K'], [1000000, '≥$1M'], [10000000, '≥$10M']]
         .map(([v, l]) => `<button type="button" class="cng-chip${INS.minValue === v ? ' on' : ''}" data-insmin="${v}" data-tip="${esc(v ? 'rows worth at least ' + l.slice(1) + '. A row with no price on the form has no value and is excluded by any size filter — it is not counted as zero.' : 'no size filter')}">${esc(l)}</button>`).join('')
     + `</div>`
+    // Depth, stated. Until the history walk has run, this tab holds only what the EDGAR rotation
+    // happened to see since the lane deployed — which looks identical to "this insider has not
+    // traded" unless the tab says otherwise.
+    + (bf.busy ? `<div class="cng-rates"><span class="cng-warn" data-tip="one SEC submissions read per roster name, then the queued filings drain through the same parse tick. The table fills as it goes.">walking filing history — ${(bf.progress && bf.progress.names) || 0}/${(bf.progress && bf.progress.of) || 0} name(s), ${(bf.progress && bf.progress.added) || 0} new filing(s) queued</span></div>`
+      : !bf.done ? `<div class="cng-rates"><span class="cng-warn" data-tip="EDGAR's per-company feed serves a name's 20 most recent filings of any type, so on a fresh deploy this lane holds only what has been filed since — not a name's history. The one-off walk that fixes it reads the SEC submissions index per roster name. Admin terminal: insiders backfill">history not walked yet — this is filings seen since deploy, not a full year</span></div>` : '')
     + (f.queued || f.failed || t.noPrice ? `<div class="cng-rates">`
       + (f.queued ? `<span data-tip="Form 4s the EDGAR rotation has found but this lane has not read yet. Worked one per tick; forceable from the admin panel.">queued <b>${(f.queued || 0).toLocaleString()}</b></span>` : '')
       + (f.failed ? `<span data-tip="filings whose ownership document could not be read. The reason is kept per filing rather than collapsed into a count you would have to trust.">unreadable <b>${(f.failed || 0).toLocaleString()}</b></span>` : '')
@@ -13533,6 +13538,9 @@ async function termInsiders(args){
     L.push(`  ${tpad('filings',12)} <b>${(f.n||0).toLocaleString()}</b> known \u00b7 ${(f.done||0).toLocaleString()} read \u00b7 ${(f.queued||0).toLocaleString()} queued \u00b7 ${(f.failed||0).toLocaleString()} unreadable`);
     L.push(`  ${tpad('transactions',12)} <b>${(t.n||0).toLocaleString()}</b> across ${(t.names||0).toLocaleString()} name(s)\u00b7 ${(t.noPrice||0).toLocaleString()} with no price on the form`);
     if(s2.codes&&s2.codes.length) L.push(`  ${tpad('codes',12)} ${s2.codes.map(c=>`${tesc(c.code||'?')} <b>${c.n}</b>`).join('  ')}`);
+    const bf=s2.backfill||{};
+    if(bf.busy&&bf.progress) L.push(`  ${tpad('backfill',12)} <span class="amber">walking</span> ${bf.progress.names}/${bf.progress.of} name(s) \u00b7 ${bf.progress.added} new filing(s) queued from the last ${bf.progress.days}d`);
+    else L.push(`  ${tpad('backfill',12)} ${bf.done?`<span class="pos">done</span> <span class="tp-trans">${tesc(new Date(+bf.done).toISOString().slice(0,10))}</span>`:'<span class="tp-trans">not run \u2014 the tab holds only what the EDGAR rotation has seen since deploy. Run: insiders backfill</span>'}`);
     if(s2.lastErr) L.push(`  ${tpad('last error',12)} <span class="neg">${tesc(s2.lastErr)}</span>`);
     if(s2.notes&&s2.notes.length) L.push(`  ${tpad('why',12)} ${s2.notes.map(n=>`${tesc(String(n.note||'').slice(0,40))} <b>\u00d7${n.n}</b>`).join('  ')}`);
     return termOut(L.join('\n')+`\n<span class="tp-deep" data-tview="insiders">open insiders tab \u25b8</span>`);
@@ -13546,7 +13554,11 @@ async function termInsiders(args){
     const r=await insPost({op:'requeue',all:(args[1]||'').toLowerCase()==='all'});
     return r&&r.ok?termOut(`<span class="pos">${r.requeued||0} filing(s) requeued</span>`):termErr(tesc((r&&r.error)||'failed'));
   }
-  return termErr('usage: insiders [status | parse [n] | requeue [all]]');
+  if(sub==='backfill'){
+    const r=await insPost({op:'backfill',days:+(args[1]||0)||undefined});
+    return r&&r.ok?termOut(`<span class="pos">history walk started</span> <span class="tp-trans">\u00b7 ${tesc(r.note||'')}</span>`):termErr(tesc((r&&r.error)||'failed'));
+  }
+  return termErr('usage: insiders [status | parse [n] | backfill [days] | requeue [all]]');
 }
 async function termCongress(args){
   const sub=(args[0]||'status').toLowerCase();

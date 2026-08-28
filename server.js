@@ -12,7 +12,7 @@ const { featureGateFor, resolveFeatures } = require("./src/compute");
 // Build stamp. Bumped on every delivery; shipped in /api/health, the snapshot payload and
 // the UI status line — one glance answers "is the live site actually running this build?"
 // (most historical "it doesn't work" reports were stale deploys, not bugs).
-const VERSION = "2026.08.27-38";
+const VERSION = "2026.08.27-39";
 
 // ===== event-loop delay instrumentation (build 2026.07.29-05, Phase 0 of the perf batch) =====
 // The decision gate for any worker-thread work: measure BEFORE architecting. Armed here, before the
@@ -1221,6 +1221,8 @@ async function main() {
     if (op === "parse") { poller.insidersParseNow(Math.min(50, +b.n || 10)).catch(() => {});
       return { ok: true, started: 1, note: "parse run started — two SEC reads per filing, progress in the ops log" }; }
     if (op === "requeue") return poller.insidersRequeueNow(!!b.all);
+    if (op === "backfill") { poller.insidersBackfillNow({ days: +b.days || undefined }).catch(() => {});
+      return { ok: true, started: 1, note: "history walk started — one SEC submissions read per roster name, progress in the ops log and on `insiders status`" }; }
     if (op === "status") return { ok: true, status: poller.insidersStatus() };
     return reply.code(400).send({ ok: false, error: "unknown op" });
   });
