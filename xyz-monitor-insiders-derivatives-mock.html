@@ -1,0 +1,308 @@
+<title>Insiders · the derivative half</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens lifted verbatim from public/styles.css: the mock has to read as the app, not as a deck ── */
+:root{
+  --bg:#0E1116; --panel:#151A21; --panel2:#1B222B; --border:#262E39;
+  --text:#E8E3D7; --muted:#7E8794; --faint:#4C5662;
+  --accent:#E3A53C; --accent-dim:#8a6a28; --blue:#6f93c9;
+  --up:#46B97E; --down:#E5604D; --grid:#1A212A;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  --disp:'Space Grotesk',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--disp);
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1}
+body{padding:22px 20px 70px;max-width:1240px;margin:0 auto}
+.pos{color:var(--up)} .neg{color:var(--down)} .sec{color:var(--muted)} .na{color:var(--faint)}
+b{font-weight:600}
+
+/* ── mock frame (the only chrome that isn't the app) ── */
+.mockhd{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:22px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 8px}
+h1{font-size:27px;font-weight:700;letter-spacing:-.4px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.62;max-width:76ch;margin:0}
+.lede b{color:var(--text);font-weight:500}
+.frame{border:1px dashed var(--accent-dim);border-radius:12px;padding:18px 18px 20px;margin:0 0 10px;position:relative}
+.frame::before{content:"live prototype";position:absolute;top:-8px;left:16px;background:var(--bg);padding:0 7px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-dim)}
+.hint{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin:0 0 14px;line-height:1.68;max-width:96ch}
+.hint b{color:var(--muted);font-weight:600}
+.opt{margin:36px 0 0}
+.opt h2{font-family:var(--disp);font-size:18px;font-weight:600;margin:0 0 4px;letter-spacing:-.2px}
+.opt h2 .n{font-family:var(--mono);font-size:12px;color:var(--accent);margin-right:9px;letter-spacing:.08em}
+.verdict{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:2px 7px;
+  border-radius:3px;border:1px solid;margin-left:10px;vertical-align:2px}
+.verdict.yes{color:var(--up);border-color:var(--up)}
+.verdict.also{color:var(--accent);border-color:var(--accent-dim)}
+.verdict.no{color:var(--faint);border-color:var(--border)}
+.tradeoff{display:grid;grid-template-columns:1fr 1fr;gap:0 26px;margin:14px 0 0;font-size:12.5px;line-height:1.66;max-width:104ch}
+.tradeoff div{color:var(--muted)}
+.tradeoff .k{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;display:block;margin-bottom:3px}
+.tradeoff .for .k{color:var(--up)} .tradeoff .against .k{color:var(--down)}
+@media(max-width:820px){.tradeoff{grid-template-columns:1fr;gap:14px}}
+
+/* ── app classes, copied from styles.css so the prototype is pixel-honest ── */
+.tblwrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;min-width:960px}
+thead th{position:sticky;top:0;background:var(--panel2);z-index:2;font-size:11px;text-transform:uppercase;
+  letter-spacing:.6px;color:var(--muted);font-weight:600;text-align:right;padding:10px 11px;white-space:nowrap;
+  border-bottom:1px solid var(--border);user-select:none;cursor:grab}
+thead th.l{text-align:left}
+tbody td{font-family:var(--mono);font-size:12.5px;text-align:right;padding:8px 11px;white-space:nowrap;border-bottom:1px solid var(--grid)}
+tbody td.l{text-align:left}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:rgba(227,165,60,.045)}
+.cng-tk{font-weight:600;color:var(--text)}
+.cng-nm{color:var(--text)}
+.cng-act{font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:3px;border:1px solid}
+.cng-act.p{color:var(--up);border-color:rgba(70,185,126,.45)}
+.cng-act.s{color:var(--down);border-color:rgba(229,96,77,.45)}
+.cng-act.e{color:var(--muted);border-color:var(--border)}
+.ins-role{font-size:10.5px;letter-spacing:.02em;text-transform:uppercase;color:var(--muted);border-bottom:1px dotted var(--border)}
+.ins-role.top{color:var(--text);border-bottom-color:var(--accent)}
+.ins-plan{font-size:10px;letter-spacing:.03em;padding:1px 4px;border:1px solid var(--border);border-radius:3px;color:var(--faint)}
+.ins-dv{font-size:9.5px;color:var(--faint);margin-left:4px}
+.cng-src{color:var(--blue);text-decoration:none;font-size:11.5px}
+.whl-foot{color:var(--faint);font-size:11px;line-height:1.62;margin-top:11px;max-width:104ch}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   NEW — everything below this line is the proposal's own CSS.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── KIND: which SEC table a row came from. Table I is a share transaction, Table II is a
+      derivative one, and they are separate tables on the form because their columns mean
+      different things. The chip is the smallest honest way to carry that distinction into
+      one list — the reader is never left to infer it from a blank cell. ── */
+.k-kind{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;
+  padding:1px 5px;border-radius:3px;border:1px solid;white-space:nowrap}
+.k-kind.sh{color:var(--muted);border-color:var(--border)}
+.k-kind.dv{color:var(--blue);border-color:rgba(111,147,201,.42);background:rgba(111,147,201,.07)}
+
+/* ── a derivative row is tinted, faintly, along its whole width. Sorting by VALUE mixes the
+      two kinds into one list, and at that point the KIND chip alone is a thing you have to
+      look for. The tint is what makes "these are a different quantity" pre-attentive. ── */
+tbody tr.dv td{background:rgba(111,147,201,.045)}
+tbody tr.dv:hover td{background:rgba(111,147,201,.085)}
+
+/* ── STRIKE lives in its own column and never in PRICE. This is the whole reason the first
+      cut excluded derivatives: an exercise price and a transaction price are different
+      quantities in identically-shaped fields, and one column holding both is a number that
+      cannot be summed, sorted or averaged without lying. ── */
+.k-strike{color:var(--blue)}
+.k-exp{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.k-exp.near{color:var(--accent)}
+.k-moneyness{font-size:10px;color:var(--faint);margin-left:5px}
+
+/* ── the PAIR: an M on Table II and an S on Table I, same filing, same day, same count.
+      Marked as INFERRED, because it is — the form states the two legs and says nothing about
+      their relationship. Both legs stay individually visible and individually sortable; this
+      is a reading aid laid over them, never a replacement row. ── */
+tbody tr.pair-a td{border-bottom:1px dashed rgba(227,165,60,.28)}
+tbody tr.pair-a td, tbody tr.pair-b td{background:rgba(227,165,60,.05)}
+tbody tr.pair-a:hover td, tbody tr.pair-b:hover td{background:rgba(227,165,60,.09)}
+.k-brace{color:var(--accent-dim);font-family:var(--mono);font-size:11px;margin-right:5px}
+.k-derived{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);
+  border:1px dashed var(--accent-dim);border-radius:3px;padding:1px 5px;margin-left:7px;cursor:help}
+.k-story{font-family:var(--mono);font-size:11.5px;color:var(--muted);padding:7px 11px 9px;line-height:1.6}
+.k-story b{color:var(--text)}
+.k-story .spread{color:var(--up)}
+
+/* ── the chip row, as it would join the existing filters ── */
+.chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 12px}
+.chip{background:var(--panel);border:1px solid var(--border);color:var(--muted);font-family:var(--mono);
+  font-size:11px;padding:3px 9px;border-radius:5px;cursor:pointer}
+.chip:hover{color:var(--text);border-color:var(--accent-dim)}
+.chip.on{border-color:var(--accent);color:var(--accent)}
+.chip.new{border-style:dashed;border-color:var(--blue);color:var(--blue)}
+.sep{width:1px;height:14px;background:var(--border);margin:0 3px}
+.cap{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin-right:4px}
+</style>
+
+<div class="mockhd">
+  <p class="eyebrow">xyz-monitor · design record · insiders</p>
+  <h1>The derivative half of a Form 4</h1>
+  <p class="lede">The Insiders tab reads <b>Table I</b> only — actual share transactions. Table II, the derivative
+  half, is counted per filing and shown as a <span class="ins-dv">+4D</span> marker with a tooltip explaining why it
+  is not in the table: <b>a derivative row's “price” is a strike</b>, and letting a strike into the PRICE column would
+  put two different quantities in one place. That reasoning is still right. What it got wrong is concluding that the
+  answer was to leave the data out — because the missing half is what tells you whether a sale was a decision or a
+  payday. Below: what including it costs, in three shapes.</p>
+</div>
+
+<div class="hint"><b>The case, in one row.</b> The screenshot that started this: ARM · Haas Rene · CEO · <b>sell 5,191 @ $258.66</b> — which
+reads as a CEO taking $1.34M off the table. Table II of the same filing says those 5,191 shares did not exist that
+morning: they were created by exercising options struck at <b>$12.04</b>, minutes earlier. Same filing, same day.
+One of those is a view on the price. The other is compensation being converted to cash, on a schedule set years ago.
+The table as shipped cannot tell them apart.</div>
+
+<div class="opt">
+  <h2><span class="n">01</span>Kind column + strike of its own<span class="verdict yes">recommend · the base</span></h2>
+  <p class="hint">Derivative rows join the table as rows. <b>KIND</b> says which SEC table each came from, <b>STRIKE</b> and
+  <b>EXPIRY</b> are columns only Table II fills, and <b>PRICE</b> stays what it has always been — the price of a share
+  transaction. No column ever holds two quantities. Everything stays sortable and filterable across the whole set,
+  which the alternatives below give up. Derivative rows carry a faint tint so that a sort by VALUE, which interleaves
+  the two kinds, does not require reading the KIND chip on every line.</p>
+  <div class="frame">
+    <div class="chips">
+      <span class="cap">rows</span>
+      <button class="chip on">buys</button><button class="chip on">sells</button>
+      <button class="chip">grants</button><button class="chip">exercises</button><button class="chip">tax</button>
+      <span class="sep"></span>
+      <span class="cap">kind</span>
+      <button class="chip new on">shares</button><button class="chip new">derivatives</button><button class="chip new">both</button>
+      <span class="sep"></span>
+      <button class="chip">C-suite</button><button class="chip">≥$1M</button>
+    </div>
+    <div class="tblwrap"><table>
+      <thead><tr>
+        <th class="l">FILED</th><th class="l">TICKER</th><th class="l">INSIDER</th><th class="l">ROLE</th>
+        <th class="l">KIND</th><th class="l">ACT</th><th>SHARES</th><th>PRICE</th><th>STRIKE</th><th>EXPIRY</th><th>VALUE</th><th class="l">PLAN</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="l sec">2026-08-26</td><td class="l"><span class="cng-tk">ARM</span></td>
+          <td class="l"><span class="cng-nm">Haas Rene</span></td><td class="l"><span class="ins-role top">CEO</span></td>
+          <td class="l"><span class="k-kind sh">share</span></td><td class="l"><span class="cng-act s">sell</span></td>
+          <td>5,191</td><td>$258.66</td><td class="na">—</td><td class="na">—</td><td><b class="neg">$1.34M</b></td>
+          <td class="l"><span class="ins-plan">10b5-1</span></td>
+        </tr>
+        <tr class="dv">
+          <td class="l sec">2026-08-26</td><td class="l"><span class="cng-tk">ARM</span></td>
+          <td class="l"><span class="cng-nm">Haas Rene</span></td><td class="l"><span class="ins-role top">CEO</span></td>
+          <td class="l"><span class="k-kind dv">option</span></td><td class="l"><span class="cng-act e">exercise</span></td>
+          <td>5,191</td><td class="na">—</td><td class="k-strike">$12.04</td><td class="k-exp">2032-09-14</td><td class="na">—</td>
+          <td class="l"><span class="ins-plan">10b5-1</span></td>
+        </tr>
+        <tr>
+          <td class="l sec">2026-08-26</td><td class="l"><span class="cng-tk">INTC</span></td>
+          <td class="l"><span class="cng-nm">Tan Lip-Bu</span></td><td class="l"><span class="ins-role top">CEO</span></td>
+          <td class="l"><span class="k-kind sh">share</span></td><td class="l"><span class="cng-act p">buy</span></td>
+          <td>500,000</td><td>$20.00</td><td class="na">—</td><td class="na">—</td><td><b class="pos">$10.00M</b></td>
+          <td class="l na">—</td>
+        </tr>
+        <tr class="dv">
+          <td class="l sec">2026-08-26</td><td class="l"><span class="cng-tk">CRWD</span></td>
+          <td class="l"><span class="cng-nm">Podbere Burt W</span></td><td class="l"><span class="ins-role top">CFO</span></td>
+          <td class="l"><span class="k-kind dv">option</span></td><td class="l"><span class="cng-act e">grant</span></td>
+          <td>40,000</td><td class="na">—</td><td class="k-strike">$400.00<span class="k-moneyness">at the money</span></td>
+          <td class="k-exp">2036-08-26</td><td class="na">—</td><td class="l na">—</td>
+        </tr>
+        <tr class="dv">
+          <td class="l sec">2026-08-25</td><td class="l"><span class="cng-tk">NVDA</span></td>
+          <td class="l"><span class="cng-nm">Huang Jen-Hsun</span></td><td class="l"><span class="ins-role top">CEO</span></td>
+          <td class="l"><span class="k-kind dv">option</span></td><td class="l"><span class="cng-act e">exercise</span></td>
+          <td>100,000</td><td class="na">—</td><td class="k-strike">$4.42</td><td class="k-exp near">2026-12-01</td><td class="na">—</td>
+          <td class="l"><span class="ins-plan">10b5-1</span></td>
+        </tr>
+        <tr>
+          <td class="l sec">2026-08-25</td><td class="l"><span class="cng-tk">MU</span></td>
+          <td class="l"><span class="cng-nm">Zinsner David</span></td><td class="l"><span class="ins-role">EVP, Global Ops</span></td>
+          <td class="l"><span class="k-kind sh">share</span></td><td class="l"><span class="cng-act e">tax</span></td>
+          <td>2,140</td><td>$120.00</td><td class="na">—</td><td class="na">—</td><td>$256.8K</td><td class="l na">—</td>
+        </tr>
+      </tbody>
+    </table></div>
+    <div class="whl-foot">STRIKE is the exercise price written on the form, never a transaction price · EXPIRY turns amber
+    inside 90 days, because an option exercised weeks before it lapses is mechanical, not a view · a derivative row has no
+    VALUE: shares × strike is a number nobody paid and nobody received, so the column stays empty rather than inventing one.</div>
+  </div>
+  <div class="tradeoff">
+    <div class="for"><span class="k">for</span>One table, one mental model. Every column still holds exactly one
+    quantity. Sort, filter, search and the pager keep working across the whole set — a “show me every option exercise
+    over $5M this quarter” is the same machinery as everything else, with no new query path.</div>
+    <div class="against"><span class="k">against</span>Two more columns that are blank on most rows, and the default
+    view gets noisier: option grants and exercises outnumber open-market buys heavily. Mitigated by the KIND chips
+    defaulting to <b>shares</b> — the tab opens exactly as it does today and derivatives are one click away.</div>
+  </div>
+</div>
+
+<div class="opt">
+  <h2><span class="n">02</span>The exercise-and-sell pair<span class="verdict also">recommend · on top of 01</span></h2>
+  <p class="hint">The pattern worth naming. An <b>M</b> on Table II and an <b>S</b> on Table I, same filing, same date,
+  matching share counts, is a cashless exercise: the insider created shares at the strike and sold them the same day.
+  The legs stay separate rows — sortable, filterable, individually true — and the pair is a brace drawn across them
+  with the arithmetic stated. <b>It is marked INFERRED because it is:</b> the form states two legs and says nothing
+  about their relationship. Where the counts do not match exactly, or a partial sale spans two filings, no brace is
+  drawn rather than a fuzzy one.</p>
+  <div class="frame">
+    <div class="tblwrap"><table>
+      <thead><tr>
+        <th class="l">FILED</th><th class="l">TICKER</th><th class="l">INSIDER</th><th class="l">KIND</th>
+        <th class="l">ACT</th><th>SHARES</th><th>PRICE</th><th>STRIKE</th><th>VALUE</th>
+      </tr></thead>
+      <tbody>
+        <tr class="pair-b">
+          <td class="l sec">2026-08-26</td><td class="l"><span class="cng-tk">ARM</span></td>
+          <td class="l"><span class="k-brace">┌</span><span class="cng-nm">Haas Rene</span></td>
+          <td class="l"><span class="k-kind dv">option</span></td><td class="l"><span class="cng-act e">exercise</span></td>
+          <td>5,191</td><td class="na">—</td><td class="k-strike">$12.04</td><td class="na">—</td>
+        </tr>
+        <tr class="pair-a">
+          <td class="l sec">2026-08-26</td><td class="l"><span class="cng-tk">ARM</span></td>
+          <td class="l"><span class="k-brace">└</span><span class="cng-nm">Haas Rene</span></td>
+          <td class="l"><span class="k-kind sh">share</span></td><td class="l"><span class="cng-act s">sell</span></td>
+          <td>5,191</td><td>$258.66</td><td class="na">—</td><td><b class="neg">$1.34M</b></td>
+        </tr>
+        <tr><td colspan="9" class="l k-story">
+          <b>cashless exercise</b><span class="k-derived" title="the form states two legs and says nothing about their relationship — this pairing is read from matching filing, date and share count, and is shown as a reading aid over the rows, never as a row of its own">inferred</span>
+          &nbsp;· exercised <b>5,191</b> @ $12.04 → sold <b>5,191</b> @ $258.66 · cost <b>$62.5K</b> ·
+          proceeds <b>$1.34M</b> · net <b class="spread">$1.28M</b> &nbsp;·&nbsp; <span class="sec">the shares did not exist that morning</span>
+        </td></tr>
+        <tr>
+          <td class="l sec">2026-08-26</td><td class="l"><span class="cng-tk">INTC</span></td>
+          <td class="l"><span class="cng-nm">Tan Lip-Bu</span></td>
+          <td class="l"><span class="k-kind sh">share</span></td><td class="l"><span class="cng-act p">buy</span></td>
+          <td>500,000</td><td>$20.00</td><td class="na">—</td><td><b class="pos">$10.00M</b></td>
+        </tr>
+        <tr><td colspan="9" class="l k-story"><span class="sec">no derivative leg — the shares were bought on the open market with the filer's own money</span></td></tr>
+      </tbody>
+    </table></div>
+    <div class="whl-foot">Net is proceeds − strike cost, both filed figures; nothing here models tax, which the form does
+    not carry · the second row's absence of a brace is itself the information: an unpaired open-market buy is the rarest
+    and most meaningful row on the tab.</div>
+  </div>
+  <div class="tradeoff">
+    <div class="for"><span class="k">for</span>This is the actual insight, and it is unreachable without Table II. It
+    changes the reading of the single most common large row on the tab — a big CEO sale — from “conviction” to
+    “compensation”, or confirms it is neither.</div>
+    <div class="against"><span class="k">against</span>A derivation, in a lane whose whole footer promises nothing is
+    derived. Survivable only if it is marked, if the legs stay independently visible, and if the matcher declines to
+    guess: exact filing, exact date, exact count, or no brace.</div>
+  </div>
+</div>
+
+<div class="opt">
+  <h2><span class="n">03</span>Expand-in-place under the marker<span class="verdict no">not recommended</span></h2>
+  <p class="hint">The <span class="ins-dv">+4D</span> marker becomes a control: click it and the filing's derivative legs
+  unfold beneath the share row. The default table is untouched — which is the appeal, and also the problem.</p>
+  <div class="tradeoff">
+    <div class="for"><span class="k">for</span>Zero cost to the default view; no new columns; the disclosure that
+    already exists becomes the affordance, which is tidy.</div>
+    <div class="against"><span class="k">against</span>Derivatives stay invisible to sort, filter, search and the
+    pager — “every option exercise over $5M” is unanswerable, because the rows are not in the result set, they are a
+    detail of rows that are. That is a second, weaker class of data in one table, which is the thing this tab was
+    built to avoid. It also hides the pattern in 02 behind a click per row, when the pattern is the point.</div>
+  </div>
+</div>
+
+<div class="opt">
+  <h2><span class="n">·</span>What it costs</h2>
+  <p class="hint">
+  <b>Parser.</b> <span class="sec">parseForm4</span> already walks <span class="sec">derivativeTransaction</span> blocks to count
+  them; it would read their fields instead of discarding them — conversion-or-exercise price, expiration date, underlying
+  title and amount. Same shapes as Table I, same null-honesty rules: a footnoted strike is absent, never zero.<br>
+  <b>Store.</b> Three columns on <span class="sec">tx</span> (<span class="sec">strike</span>,
+  <span class="sec">expiry</span>, <span class="sec">under</span>) plus a <span class="sec">kind</span> flag, all
+  nullable, added by the same ALTER-that-may-fail migration the congress lane uses. No new table: a derivative
+  transaction is a transaction, and splitting them would mean two queries behind one pager.<br>
+  <b>Feed.</b> One value in the existing <span class="sec">codes</span> whitelist and a <span class="sec">kind</span>
+  filter in the shared WHERE builder — the pager keeps counting the set the rows come from.<br>
+  <b>Client.</b> Three columns in <span class="sec">INS_COLS</span> (hidden by default, reorderable like the rest) and
+  the KIND chips. The pair brace in 02 is a render-time pass over the loaded page, not a stored relationship —
+  nothing about it is persisted, so it can be wrong without corrupting anything.<br>
+  <b>Backfill.</b> Nothing. The documents are already fetched and already parsed; the derivative half is being thrown
+  away at the last step. Re-reading the stored filings is a <span class="sec">insiders requeue all</span>.</p>
+</div>
