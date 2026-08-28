@@ -4881,11 +4881,27 @@ function createPoller({ dex, store, log, version, crypto, aiFetch: aiFetchOpt, p
         if (!xr.ok) { insStat.fail++; insLastErr = "doc: " + xr.error; continue; }
         const p = parseForm4(xr.body);
         if (!p.ok) { store.insidersMark(f.acc, 2, "unparseable: " + (p.error || "?")); continue; }
-        // A filing with no Table I rows is READ, not failed: an option-only Form 4 is a real
-        // filing that simply has no share transaction to show. It is marked done with nTx 0 so it
-        // leaves the queue, and the derivative count says what was in it instead.
-        const head = { tk: p.issuer.tk || f.tk, issuer: p.issuer.name, period: p.period,
+        // The DOCUMENT's issuer symbol is authoritative, and there is no fallback to the roster
+        // name whose feed found the filing. That fallback was a fabrication waiting to happen: a
+        // Form 4 reaches this lane through the submissions feed of any CIK associated with it, so
+        // a Blackstone entity filing as a 10% owner of some other company arrives via Blackstone's
+        // own feed — and stamping it with Blackstone's ticker would say the trade was in a stock it
+        // was not in.
+        //
+        // A filing whose issuer has no trading symbol is READ, not failed, and stores no rows: a
+        // non-traded fund is a real filing about a company this tab cannot show. Same for a filing
+        // with no Table I or Table II rows at all. Both leave the queue with the reason attached,
+        // so "few rows" can be told apart from "the lane is stalled".
+        const head = { tk: p.issuer.tk, issuer: p.issuer.name, period: p.period,
           owner: p.owner.name, role: p.owner.role, title: p.owner.title, nDeriv: p.nDeriv };
+        if (!p.issuer.tk) {
+          store.insidersSave(f.acc, head, []);
+          store.insidersMark(f.acc, 1, "issuer has no trading symbol: " + (p.issuer.name || "unnamed"));
+          insStat.noSym = (insStat.noSym || 0) + 1;
+          done++;
+          await sleep(INS_PARSE_GAP);
+          continue;
+        }
         rows += store.insidersSave(f.acc, head, p.tx);
         if (!p.tx.length) store.insidersMark(f.acc, 1, p.nDeriv ? "derivative rows only" : "no transactions on the form");
         insStat.ok++; insStat.tx += p.tx.length; insStat.lastOk = Date.now();

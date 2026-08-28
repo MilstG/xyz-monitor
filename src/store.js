@@ -22,7 +22,30 @@ function congressTokens(q) {
 function insidersWhere(opt) {
   const o = opt || {}, where = ["f.parsed=1"], args = [];
   if (o.ticker) { where.push("t.tk=?"); args.push(String(o.ticker).toUpperCase()); }
-  if (o.since) { where.push("t.txDate>=?"); args.push(String(o.since)); }
+  // Date range. TWO dates exist on a Form 4 and they are not the same thing: `txDate` is when the
+  // trade happened, `filed` is when EDGAR published it. Section 16 allows two business days, so
+  // they usually sit close — but a 4/A amending an old trade, or a Form 5 annual catch-up, can put
+  // months between them, and a range that silently picked one would answer a question the reader
+  // did not ask. Which date the range applies to is therefore explicit, and it defaults to TRADED:
+  // "insider buying in August" is a statement about when people traded.
+  //
+  // Reversed ranges are normalised rather than returning nothing. A from/to typo in a date input
+  // is the common case and an empty table is a bad answer to it; the client writes the swapped
+  // values back into the inputs, so the correction is visible rather than silent.
+  const dFrom = /^\d{4}-\d{2}-\d{2}$/.test(String(o.from || "")) ? String(o.from) : null;
+  const dTo = /^\d{4}-\d{2}-\d{2}$/.test(String(o.to || "")) ? String(o.to) : null;
+  const lo = dFrom && dTo && dFrom > dTo ? dTo : dFrom;
+  const hi = dFrom && dTo && dFrom > dTo ? dFrom : dTo;
+  if (o.dateOn === "filed") {
+    // `filed` is epoch milliseconds, so the upper bound has to reach the END of its day —
+    // comparing against midnight would drop everything filed on the last day of the range, which
+    // is the day a reader asking for "this week" most wants to see.
+    if (lo) { where.push("f.filed >= ?"); args.push(Date.parse(lo + "T00:00:00Z")); }
+    if (hi) { where.push("f.filed < ?"); args.push(Date.parse(hi + "T00:00:00Z") + 86400000); }
+  } else {
+    if (lo) { where.push("t.txDate >= ?"); args.push(lo); }
+    if (hi) { where.push("t.txDate <= ?"); args.push(hi); }
+  }
   // Transaction codes arrive as a comma list from the chips. Whitelisted against the code map so
   // the IN list is built from known letters only, and an empty result means "no chips", not "all".
   const codes = String(o.codes || "").split(",").map((c) => c.trim().toUpperCase())
@@ -1025,6 +1048,22 @@ CREATE INDEX IF NOT EXISTS ins_tx_code ON tx(code, txDate);`);
         try { insiders.exec("ALTER TABLE tx ADD COLUMN expiry TEXT"); } catch (_) {}
         try { insiders.exec("ALTER TABLE tx ADD COLUMN under TEXT"); } catch (_) {}
         try { insiders.exec("CREATE INDEX IF NOT EXISTS ins_tx_kind ON tx(kind, txDate)"); } catch (_) {}
+        // One-time scrub of rows stored under a placeholder symbol. "NONE" and "N/A" are what a
+        // filer writes when the issuer has no ticker, and an early build took them at their word:
+        // the live tab carried rows for a company called NONE. The parser refuses them now, but a
+        // fix at the pipe mouth cannot reach what is already on disk, and re-fetching thousands of
+        // documents to correct a value we can identify in place would be silly. Flagged so it runs
+        // once per volume; the filings themselves are kept, with the reason recorded.
+        try {
+          const bad = "('NONE','N/A','NA','N.A.','NULL','NIL','-','--','NOT APPLICABLE','NOT LISTED')";
+          if (!insiders.prepare("SELECT v FROM meta WHERE k='symScrub1'").get()) {
+            const n = insiders.prepare("DELETE FROM tx WHERE tk IS NULL OR upper(trim(tk)) IN " + bad).run();
+            insiders.prepare("UPDATE filing SET nTx=0, pnote='issuer has no trading symbol (scrubbed)'"
+              + " WHERE tk IS NULL OR upper(trim(tk)) IN " + bad).run();
+            insiders.prepare("UPDATE filing SET tk=NULL WHERE upper(trim(COALESCE(tk,''))) IN " + bad).run();
+            insiders.prepare("INSERT INTO meta(k,v) VALUES('symScrub1',?)").run(String((n && n.changes) || 0));
+          }
+        } catch (_) {}
         return insiders;
       } catch (_) { insiders = null; return null; }
     },
@@ -1041,7 +1080,12 @@ CREATE INDEX IF NOT EXISTS ins_tx_code ON tx(code, txDate);`);
       const ins = d.prepare(`INSERT INTO filing(acc,tk,form,filed,url,issuer,period,owner,role,title,parsed,nTx,nDeriv,tries,pnote)
 VALUES(?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,0,NULL)
 ON CONFLICT(acc) DO UPDATE SET tk=excluded.tk, form=excluded.form, url=excluded.url,
-  filed=CASE WHEN excluded.filed>0 THEN excluded.filed ELSE filing.filed END`);
+  -- A known filing date is NEVER overwritten, only filled when missing. The first guard here was
+  -- "don't let a zero clobber a good value", which reads right and does not hold: any nonsense
+  -- positive number still won, and the two discovery paths (the atom rotation and the history
+  -- walk) see the same accession repeatedly with independently-derived timestamps. EDGAR published
+  -- the filing once; the first good value is the answer and a later pass has nothing to add.
+  filed=CASE WHEN COALESCE(filing.filed,0)>0 THEN filing.filed ELSE excluded.filed END`);
       const had = d.prepare("SELECT 1 FROM filing WHERE acc=?");
       let added = 0;
       d.exec("BEGIN");
@@ -1140,8 +1184,12 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const all = (sql, ...a) => { try { return d.prepare(sql).all(...a) || []; } catch (_) { return []; } };
       const f = one("SELECT COUNT(*) n, SUM(parsed=1) done, SUM(parsed=0) queued, SUM(parsed=2) failed FROM filing");
       const t = one("SELECT COUNT(*) n, COUNT(DISTINCT tk) names, SUM(price IS NULL) noPrice FROM tx");
+      // Filings read but carrying no rows, broken out: an issuer with no ticker and an option-only
+      // Form 4 are both "read, nothing to show", and a reader looking at a thin tab deserves to
+      // know which. Counted from the reason the parse recorded, not re-derived.
+      const noSym = one("SELECT COUNT(*) n FROM filing WHERE pnote LIKE 'issuer has no trading symbol%'");
       return { ready: 1,
-        filings: { n: f.n || 0, done: f.done || 0, queued: f.queued || 0, failed: f.failed || 0 },
+        filings: { n: f.n || 0, done: f.done || 0, queued: f.queued || 0, failed: f.failed || 0, noSym: noSym.n || 0 },
         tx: { n: t.n || 0, names: t.names || 0, noPrice: t.noPrice || 0 },
         codes: all("SELECT code, COUNT(*) n FROM tx GROUP BY code ORDER BY n DESC LIMIT 12"),
         notes: all("SELECT pnote note, COUNT(*) n FROM filing WHERE pnote IS NOT NULL GROUP BY pnote ORDER BY n DESC LIMIT 8"),

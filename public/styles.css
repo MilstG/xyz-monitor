@@ -2133,3 +2133,9 @@ tr.dimoff td .sesschip, tr.dimoff td .hrail{opacity:1;}
 .k-story{font-family:var(--mono);font-size:11.5px;color:var(--faint);line-height:1.6;display:block;padding:2px 0 3px}
 .k-story b{color:var(--fg)}
 .k-derived{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);border:1px dashed var(--accent);border-radius:3px;padding:1px 5px;margin-left:7px;cursor:help}
+/* the date range: two inputs read as furniture next to a row of chips, so the active range is
+   restated as a clearable chip and in the row-count line. A filter you can forget you set is the
+   one that makes a table look empty. */
+.ins-dates{align-items:center}
+.ins-dlbl{font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);margin-right:2px;border-bottom:1px dotted var(--line)}
+.ins-date{font-family:var(--mono,ui-monospace);font-size:11.5px;padding:2px 6px;width:auto;min-width:0;color-scheme:dark}

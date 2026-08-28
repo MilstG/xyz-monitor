@@ -13310,7 +13310,8 @@ const INS_CHIPS = [
   { k: 'G', label: 'gifts', tip: 'code G — a gift. No price, no proceeds.' },
 ];
 const INS = { rows: [], stat: null, total: 0, page: 0, q: '', codes: new Set(['P', 'S']), plan: null,
-  role: '', minValue: 0, kind: 'S', sort: { k: 'filed', dir: -1 }, hidden: new Set(INS_HIDE_DEFAULT),
+  role: '', minValue: 0, kind: 'S', from: '', to: '', dateOn: 'traded', preset: '',
+  sort: { k: 'filed', dir: -1 }, hidden: new Set(INS_HIDE_DEFAULT),
   order: INS_COLS.map(c => c.k), menu: false, drag: null };
 // The saved view: which columns, in what order, sorted how. Filters are deliberately NOT saved —
 // a filter is a question being asked right now, and reopening the tab to yesterday's narrowed set
@@ -13352,6 +13353,9 @@ async function openInsiders() {
   if (INS.role) p.push('role=' + encodeURIComponent(INS.role));
   if (INS.minValue > 0) p.push('minValue=' + INS.minValue);
   if (INS.kind) p.push('kind=' + INS.kind);
+  if (INS.from) p.push('from=' + INS.from);
+  if (INS.to) p.push('to=' + INS.to);
+  if (INS.from || INS.to) p.push('dateOn=' + INS.dateOn);
   const r = await insGet('?' + p.join('&'));
   if (!r || !r.ok) { out.innerHTML = `<div class="msg err">${esc((r && r.error) || 'fetch failed')}</div>`; return; }
   INS.rows = r.feed || []; INS.stat = r.status || null; INS.total = r.total || 0;
@@ -13408,6 +13412,33 @@ function insRoleCell(x) {
     + (boxes.length ? ' · boxes ticked: ' + boxes.join(', ') : '');
   const cls = 'ins-role' + (ten ? ' ten' : '') + (/\b(CEO|CFO|COO|President|Chair)\b/i.test(short) ? ' top' : '');
   return `<td class="l"><span class="${cls}" data-tip="${esc(tip)}">${esc(short.length > 26 ? short.slice(0, 25) + '…' : short)}</span></td>`;
+}
+// Date-range presets, resolved against the ET day — the same clock the earnings tab counts market
+// days on, and the one a reader means by "today". Each returns [from, to]; an open end stays empty
+// rather than being pinned to today, so "last 30 days" keeps working tomorrow without a refetch
+// having to re-resolve it.
+const INS_RANGES = [
+  { k: '7d', label: '7d', days: 7, tip: 'the last 7 days' },
+  { k: '30d', label: '30d', days: 30, tip: 'the last 30 days' },
+  { k: '90d', label: '90d', days: 90, tip: 'the last 90 days — about one reporting quarter' },
+  { k: 'ytd', label: 'YTD', tip: 'January 1 of the current year to today' },
+  { k: '12m', label: '12m', days: 365, tip: 'the last twelve months — the depth the history walk fills by default' },
+];
+function insRangeFor(k) {
+  const today = etDayStrC();
+  if (k === 'ytd') return [today.slice(0, 4) + '-01-01', today];
+  const r = INS_RANGES.find(x => x.k === k);
+  if (!r || !r.days) return ['', ''];
+  const d = new Date(Date.parse(today + 'T12:00:00Z') - (r.days - 1) * 86400000);
+  return [d.toISOString().slice(0, 10), today];
+}
+// What the active range says on the tab. A range is the one filter a reader can forget they set —
+// unlike a chip, two date inputs read as furniture — so it is also stated in the row count line.
+function insRangeLabel() {
+  if (!INS.from && !INS.to) return '';
+  const on = INS.dateOn === 'filed' ? 'filed' : 'traded';
+  if (INS.from && INS.to) return `${on} ${INS.from} → ${INS.to}`;
+  return INS.from ? `${on} from ${INS.from}` : `${on} up to ${INS.to}`;
 }
 // The cashless exercise, read off two rows that each stay individually true.
 //
@@ -13491,14 +13522,29 @@ function insRender() {
       + [[0, 'any size'], [100000, '≥$100K'], [1000000, '≥$1M'], [10000000, '≥$10M']]
         .map(([v, l]) => `<button type="button" class="cng-chip${INS.minValue === v ? ' on' : ''}" data-insmin="${v}" data-tip="${esc(v ? 'rows worth at least ' + l.slice(1) + '. A row with no price on the form has no value and is excluded by any size filter — it is not counted as zero.' : 'no size filter')}">${esc(l)}</button>`).join('')
     + `</div>`
+    + `<div class="cng-rates ins-filters ins-dates">`
+      + `<span class="ins-dlbl" data-tip="a Form 4 carries TWO dates and they are not the same: when the trade happened, and when EDGAR published it. Section 16 allows two business days, so they usually sit close — but a 4/A amending an old trade, or a Form 5 annual catch-up, can put months between them. The range says which one it applies to rather than picking for you.">date range on</span>`
+      + [['traded', 'traded'], ['filed', 'filed']].map(([v, l]) =>
+          `<button type="button" class="cng-chip${INS.dateOn === v ? ' on' : ''}" data-insdon="${v}" data-tip="${esc(v === 'traded'
+            ? 'the transaction date on the form — when the insider actually traded. The default: “insider buying in August” is a statement about when people traded.'
+            : 'when the filing reached EDGAR — when the market could first have known. Closer to the congress tab’s convention, and the one to use if you are studying reaction to disclosure.')}">${esc(l)}</button>`).join('')
+      + `<span class="ins-sep"></span>`
+      + INS_RANGES.map(r => `<button type="button" class="cng-chip${INS.preset === r.k ? ' on' : ''}" data-insrange="${r.k}" data-tip="${esc(r.tip)}">${esc(r.label)}</button>`).join('')
+      + `<span class="ins-sep"></span>`
+      + `<input type="date" id="ins-from" class="cng-in ins-date" value="${esc(INS.from)}" max="9999-12-31" data-tip="start of the range, inclusive. Leave empty for no lower bound.">`
+      + `<span class="sec" style="font-size:11px">→</span>`
+      + `<input type="date" id="ins-to" class="cng-in ins-date" value="${esc(INS.to)}" max="9999-12-31" data-tip="end of the range, inclusive — a row filed at 21:00 on the end date is in it.">`
+      + ((INS.from || INS.to) ? `<button type="button" class="cng-chip on" id="ins-dclear" data-tip="clear the range">${esc(insRangeLabel())} ✕</button>` : '')
+    + `</div>`
     // Depth, stated. Until the history walk has run, this tab holds only what the EDGAR rotation
     // happened to see since the lane deployed — which looks identical to "this insider has not
     // traded" unless the tab says otherwise.
     + (bf.busy ? `<div class="cng-rates"><span class="cng-warn" data-tip="one SEC submissions read per roster name, then the queued filings drain through the same parse tick. The table fills as it goes.">walking filing history — ${(bf.progress && bf.progress.names) || 0}/${(bf.progress && bf.progress.of) || 0} name(s), ${(bf.progress && bf.progress.added) || 0} new filing(s) queued</span></div>`
       : !bf.done ? `<div class="cng-rates"><span class="cng-warn" data-tip="EDGAR's per-company feed serves a name's 20 most recent filings of any type, so on a fresh deploy this lane holds only what has been filed since — not a name's history. The one-off walk that fixes it reads the SEC submissions index per roster name. Admin terminal: insiders backfill">history not walked yet — this is filings seen since deploy, not a full year</span></div>` : '')
-    + (f.queued || f.failed || t.noPrice ? `<div class="cng-rates">`
+    + (f.queued || f.failed || t.noPrice || f.noSym ? `<div class="cng-rates">`
       + (f.queued ? `<span data-tip="Form 4s the EDGAR rotation has found but this lane has not read yet. Worked one per tick; forceable from the admin panel.">queued <b>${(f.queued || 0).toLocaleString()}</b></span>` : '')
       + (f.failed ? `<span data-tip="filings whose ownership document could not be read. The reason is kept per filing rather than collapsed into a count you would have to trust.">unreadable <b>${(f.failed || 0).toLocaleString()}</b></span>` : '')
+      + (f.noSym ? `<span data-tip="Form 4s whose ISSUER has no trading symbol — a non-traded fund, a private issuer, stock registered but not listed. They reach this lane because a filing is associated with every CIK on it, so a 10% holder&#39;s own submissions feed carries filings about companies it owns rather than about itself. Real filings, about companies this tab cannot show, so they are read and kept with the reason rather than stamped with the ticker of whichever roster name found them.">issuer not listed <b>${(f.noSym || 0).toLocaleString()}</b></span>` : '')
       + (t.noPrice ? `<span data-tip="transactions the form carried no price for — a footnoted weighted average, a range, or a grant. They are shown with a blank price rather than a zero, and are excluded from any size filter.">no price on the form <b>${(t.noPrice || 0).toLocaleString()}</b></span>` : '')
       + `</div>` : '')
     + (INS.menu ? `<div class="cng-colmenu">${INS.order.map(k => { const c = INS_COLS.find(x => x.k === k); return c
@@ -13508,6 +13554,7 @@ function insRender() {
     const why = INS.q.trim() ? 'no transaction matches that search'
       : INS.codes.size && INS.codes.size < INS_CHIPS.length ? 'no transaction matches those codes — widen the chips'
       : INS.minValue ? 'nothing this large in the stored set — drop the size filter'
+      : (INS.from || INS.to) ? `no transaction in that range (${insRangeLabel()}) — widen it, or switch the range between traded and filed`
       : f.queued ? `nothing parsed yet — ${f.queued.toLocaleString()} Form 4(s) queued, read one per tick`
       : 'no Form 4 transactions stored yet — the EDGAR rotation queues them as it walks the roster';
     out.innerHTML = head + `<div class="sec" style="padding:10px 2px">${why}</div>`;
@@ -13600,7 +13647,7 @@ function insRender() {
     })()
     + `</tbody></table></div>`
     + insPager()
-    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s) · source: SEC Form 4, filed under Section 16 · shares, price, strike and date are the filer’s own figures — no number in this table is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · both of the form’s tables are here: Table I share transactions and Table II derivatives, kept apart by the KIND column because an exercise price and a transaction price are different quantities — a strike never enters PRICE, and a derivative row has no dollar value because shares × strike is a number nobody paid · a blank price is a price the form did not carry, never a zero · the one INFERRED thing on this tab is the cashless-exercise pairing, drawn over two rows that each remain individually true and marked wherever it appears</div>`;
+    + `<div class="whl-foot">${INS.rows.length.toLocaleString()} shown of ${INS.total.toLocaleString()} matching transaction(s)${(INS.from || INS.to) ? ` · <b>${esc(insRangeLabel())}</b>` : ''} · source: SEC Form 4, filed under Section 16 · shares, price, strike and date are the filer’s own figures — no number in this table is derived, banded or estimated, which is the difference from the CONGRESS tab, where the form discloses a range and no price at all · both of the form’s tables are here: Table I share transactions and Table II derivatives, kept apart by the KIND column because an exercise price and a transaction price are different quantities — a strike never enters PRICE, and a derivative row has no dollar value because shares × strike is a number nobody paid · a blank price is a price the form did not carry, never a zero · the one INFERRED thing on this tab is the cashless-exercise pairing, drawn over two rows that each remain individually true and marked wherever it appears</div>`;
   insBind();
 }
 function insPager() {
@@ -13670,6 +13717,30 @@ function insBind() {
   out.querySelectorAll('[data-insrole]').forEach(b => b.onclick = () => { INS.role = b.dataset.insrole; INS.page = 0; openInsiders(); });
   out.querySelectorAll('[data-insplan]').forEach(b => b.onclick = () => { INS.plan = b.dataset.insplan || null; INS.page = 0; openInsiders(); });
   out.querySelectorAll('[data-insmin]').forEach(b => b.onclick = () => { INS.minValue = +b.dataset.insmin || 0; INS.page = 0; openInsiders(); });
+  out.querySelectorAll('[data-insrange]').forEach(b => b.onclick = () => {
+    const k = b.dataset.insrange;
+    if (INS.preset === k) { INS.preset = ''; INS.from = ''; INS.to = ''; }   // clicking the active preset clears it
+    else { INS.preset = k; const [f, t] = insRangeFor(k); INS.from = f; INS.to = t; }
+    INS.page = 0; openInsiders();
+  });
+  out.querySelectorAll('[data-insdon]').forEach(b => b.onclick = () => {
+    INS.dateOn = b.dataset.insdon;
+    // Only refetch when a range is actually set — switching the basis with no range changes
+    // nothing about the result, and a pointless round trip that repaints the table reads as a bug.
+    if (INS.from || INS.to) { INS.page = 0; openInsiders(); } else insRender();
+  });
+  const dc = el('ins-dclear'); if (dc) dc.onclick = () => { INS.from = ''; INS.to = ''; INS.preset = ''; INS.page = 0; openInsiders(); };
+  for (const [id, key] of [['ins-from', 'from'], ['ins-to', 'to']]) {
+    const inp = el(id);
+    if (inp) inp.onchange = () => {
+      INS[key] = /^\d{4}-\d{2}-\d{2}$/.test(inp.value) ? inp.value : '';
+      // A hand-typed range is nobody's preset any more, and a reversed one is normalised so the
+      // inputs show what was actually queried rather than what was typed.
+      INS.preset = '';
+      if (INS.from && INS.to && INS.from > INS.to) { const t = INS.from; INS.from = INS.to; INS.to = t; }
+      INS.page = 0; openInsiders();
+    };
+  }
   const cb = el('ins-colbtn'); if (cb) cb.onclick = () => { INS.menu = !INS.menu; insRender(); };
   const rs = el('ins-colreset'); if (rs) rs.onclick = () => {
     INS.order = INS_COLS.map(c => c.k); INS.hidden = new Set(INS_HIDE_DEFAULT);

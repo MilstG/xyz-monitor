@@ -3049,6 +3049,20 @@ test("insiders: Form 4 numbers survive the parser exactly, and every absence sta
   assert.equal(C.form4DocName({ directory: { item: [{ name: "xslF345X05/wf-form4.xml" }, { name: "wf-form4.xml" }, { name: "primary.htm" }] } }),
     "wf-form4.xml", "the raw ownership xml is chosen by name");
   assert.equal(C.form4DocName({ directory: { item: [{ name: "a.htm" }] } }), null, "an accession with no xml says so");
+
+  // "NONE" is not a ticker. It is what a filer writes when the issuer has no trading symbol, and
+  // an early build stored it: the live tab carried rows for a company called NONE (Blackstone
+  // entities filing as 10% owners of non-traded funds, reaching this lane through a roster name's
+  // own submissions feed). Same doctrine as the earnings feed's epsActual:0 placeholder.
+  for (const v of ["NONE", "none", "N/A", "n/a", "NA", "-", "--", "NULL", "Not Applicable", "", "   "])
+    assert.equal(C.f4Symbol(v), null, JSON.stringify(v) + " is a placeholder, not a symbol");
+  assert.equal(C.f4Symbol("Blackstone Private Multi-Asset Credit and Income Fund"), null,
+    "prose typed into the symbol box is not a symbol either");
+  assert.equal(C.f4Symbol(" intc "), "INTC", "a real symbol survives, trimmed and cased");
+  assert.equal(C.f4Symbol("BRK.B"), "BRK.B", "...dots and dashes included");
+  assert.equal(C.f4Symbol("RDS-A"), "RDS-A");
+  const noSym = C.parseForm4(f4Doc(F4_BUY).replace("<issuerTradingSymbol>INTC</issuerTradingSymbol>", "<issuerTradingSymbol>NONE</issuerTradingSymbol>"));
+  assert.equal(noSym.issuer.tk, null, "and the placeholder never leaves the parser as a ticker");
 });
 
 test("insiders feed: sort, filter and search all run in SQL over the whole set", (t) => {
@@ -3063,6 +3077,10 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   ]);
   assert.deepEqual(st.insidersQueue([{ acc: "0000050863-26-000101", tk: "INTC", form: "4", filed: 1, url: "u" }]),
     { seen: 1, added: 0 }, "re-seeing an accession queues nothing new — the EDGAR rotation revisits every name hourly");
+  // ...and re-seeing it must not DOWNGRADE what is known about it. Both discovery paths derive the
+  // filing date independently; EDGAR published the filing once, so the first good value stands.
+  assert.equal(st.openInsiders().prepare("SELECT filed FROM filing WHERE acc=?").get("0000050863-26-000101").filed,
+    Date.parse("2026-08-26T21:05:00Z"), "a second sighting carrying a worse timestamp leaves the good one alone");
   st.insidersSave("0000050863-26-000101",
     { tk: "INTC", issuer: "INTEL CORP", period: "2026-08-25", owner: "Tan Lip-Bu", role: "director · officer", title: "Chief Executive Officer", nDeriv: 1 },
     [{ ln: 0, code: "P", act: "buy", ad: "A", shares: 500000, price: 20, value: 1e7, txDate: "2026-08-25", own: 1500000, dir: "D", plan: null, sec: "Common Stock" },
@@ -3075,7 +3093,8 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
 
   // SORT: from a closed whitelist, over the whole set. A key that is not in the map can never
   // reach the query as text — it falls back to the default rather than erroring or interpolating.
-  assert.deepEqual(ids({ sort: "value", dir: -1 }), ["NVDA:S", "INTC:P", "NVDA:A", "INTC:S"], "by value, biggest first");
+  assert.deepEqual(ids({ sort: "value", dir: -1 }), ["NVDA:S", "INTC:P", "INTC:S", "NVDA:A"],
+    "by value, biggest first — the two rows with no value tie there and fall back to the filing date");
   assert.equal(st.insidersFeed({ sort: "value; DROP TABLE tx--" }).length, 4, "an unknown sort key falls back to the default, never interpolates");
   assert.ok(st.insidersFeedCount({}) === 4, "the table survived that");
   // NULLS LAST in BOTH directions — SQL puts them first on ascending, which buries every row that
@@ -3090,7 +3109,7 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   assert.deepEqual(ids({ codes: "P,S", minValue: 1 }).indexOf("INTC:S"), -1,
     "a row with no price has no value and is EXCLUDED by a size filter rather than counted as zero");
   // The plan filter is tri-state and neither bucket may swallow the third answer.
-  assert.deepEqual(ids({ plan: "only" }), ["NVDA:S", "INTC:S"], "only rows whose box is ticked");
+  assert.deepEqual(ids({ plan: "only" }).sort(), ["INTC:S", "NVDA:S"], "only rows whose box is ticked");
   assert.deepEqual(ids({ plan: "excl", codes: "P" }), ["INTC:P"], "not-marked includes rows with no box at all");
   assert.equal(st.insidersFeedCount({ plan: "only" }) + st.insidersFeedCount({ plan: "excl" }), 4, "the two buckets partition the set exactly once");
   assert.equal(st.insidersFeedCount({ role: "officer" }), 4, "role filter reads the form's own boxes");
@@ -3103,12 +3122,15 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   assert.equal(st.insidersFeedCount({ q: "nobody here" }), 0, "a search that matches nothing says nothing, honestly");
   // Paging is a view of one ordered set, not a re-sort per page.
   assert.deepEqual(st.insidersFeed({ sort: "value", dir: -1, limit: 2, offset: 2 }).map((r) => r.tk + ":" + r.code),
-    ["NVDA:A", "INTC:S"], "page 2 continues page 1's ordering");
+    ["INTC:S", "NVDA:A"], "page 2 continues page 1's ordering");
 
 
   // "c-suite" matches the filer's OWN WORDS in the title, not a taxonomy this lane invented — so
   // it is incomplete by construction, which is what the chip's hover says.
   assert.equal(st.insidersFeedCount({ role: "c-suite" }), 4, "both filings carry chief-officer titles");
+  st.insidersQueue([{ acc: "0007777777-26-000001", tk: "WWWW", form: "4", filed: Date.parse("2026-08-21T13:00:00Z"), url: url(777, "0007777777-26-000001") },
+    { acc: "0007777777-26-000002", tk: "VVVV", form: "4", filed: Date.parse("2026-08-21T13:00:00Z"), url: url(777, "0007777777-26-000002") },
+    { acc: "0000010101-26-000001", tk: "ARM", form: "4", filed: Date.parse("2026-08-26T21:00:00Z"), url: url(10101, "0000010101-26-000001") }]);
   st.insidersSave("0007777777-26-000001", { tk: "WWWW", owner: "A Manager", role: "officer", title: "Vice President, Sales", nDeriv: 0 },
     [{ ln: 0, code: "P", act: "buy", shares: 10, price: 1, value: 10, txDate: "2026-08-20" }]);
   assert.equal(st.insidersFeedCount({ role: "c-suite" }), 4,
@@ -3139,6 +3161,33 @@ test("insiders feed: sort, filter and search all run in SQL over the whole set",
   // "shares" rather than falling out of both buckets and quietly vanishing from the tab.
   assert.equal(st.insidersFeedCount({ kind: "S" }) + st.insidersFeedCount({ kind: "D" }),
     st.insidersFeedCount({}), "the two kinds partition the set exactly once — nothing falls between them");
+
+  // DATE RANGE. Two dates exist on a Form 4 and they are not the same: when the trade happened,
+  // and when EDGAR published it. A range that picked one silently would answer a question the
+  // reader did not ask, so which date it applies to is explicit.
+  const R = (o) => st.insidersFeed(o).map((r) => r.tk + ":" + r.code + ":" + r.txDate);
+  assert.equal(st.insidersFeedCount({ from: "2026-08-26" }), 3, "traded on or after — inclusive lower bound");
+  assert.equal(st.insidersFeedCount({ to: "2026-08-24" }), 4, "traded on or before — inclusive upper bound");
+  assert.equal(st.insidersFeedCount({ from: "2026-08-25", to: "2026-08-25" }), 1, "a single-day range is a real range");
+  assert.equal(st.insidersFeedCount({ from: "2026-08-24", to: "2026-08-26" }), 6, "the whole span");
+  assert.equal(st.insidersFeedCount({ from: "2027-01-01" }), 0, "a range with nothing in it returns nothing, not everything");
+  // Reversed ranges are normalised rather than returning an empty table: a from/to typo is the
+  // common case and silence is a bad answer to it.
+  assert.equal(st.insidersFeedCount({ from: "2026-08-26", to: "2026-08-24" }),
+    st.insidersFeedCount({ from: "2026-08-24", to: "2026-08-26" }), "a reversed range is normalised, not answered with nothing");
+  // The FILED basis reads a different column with a different type — epoch ms, so the upper bound
+  // has to reach the END of its day or everything filed on the last day of the range disappears.
+  assert.equal(st.insidersFeedCount({ dateOn: "filed", from: "2026-08-26", to: "2026-08-26" }), 4,
+    "a filing timestamped 21:05 is inside a range whose end is that same day — comparing against midnight would drop it");
+  assert.equal(st.insidersFeedCount({ dateOn: "filed", from: "2026-08-25", to: "2026-08-25" }), 2, "the other day's filing");
+  assert.equal(st.insidersFeedCount({ dateOn: "filed", to: "2026-08-22" }), 2, "the two filed on the 21st, and nothing earlier");
+  // The two bases genuinely differ: NVDA traded on the 24th and filed on the 25th.
+  assert.equal(R({ from: "2026-08-25", to: "2026-08-25" }).length, 1, "INTC traded on the 25th");
+  assert.equal(st.insidersFeedCount({ dateOn: "filed", from: "2026-08-25", to: "2026-08-25" }), 2,
+    "same range, other basis, different answer — which is the reason the basis is stated");
+  // Garbage never reaches the query as a bound.
+  assert.equal(st.insidersFeedCount({ from: "not-a-date" }), st.insidersFeedCount({}), "a malformed bound is dropped, not interpolated");
+  assert.equal(st.insidersFeedCount({ from: "2026-08-26' OR 1=1--" }), st.insidersFeedCount({}), "...including one shaped like an injection");
 
   // A re-parse REPLACES a filing's rows. An amended Form 4 must not leave the original trade
   // behind next to the corrected one.
@@ -3203,6 +3252,29 @@ test("insiders lane: discovery rides the EDGAR rotation, and the parse reads the
   assert.equal(rows[1].price, null, "and the absent one stayed absent");
   const stat = p.insidersStatus();
   assert.equal(stat.filings.done, 1); assert.equal(stat.filings.queued, 0, "a read filing leaves the queue");
+
+  // A filing whose ISSUER has no trading symbol stores no rows and is never stamped with the
+  // ticker of whichever roster name's feed found it. That fallback existed and was a fabrication
+  // waiting to happen: a Form 4 reaches this lane through the submissions feed of every CIK
+  // associated with it, so a 10% holder's own feed carries filings about OTHER companies.
+  store.insidersQueue([{ acc: "0000050863-26-000109", tk: "INTC", form: "4", filed: Date.now(),
+    url: "https://www.sec.gov/Archives/edgar/data/50863/000005086326000109/x-index.htm" }]);
+  const nonXml = f4Doc(F4_BUY)
+    .replace("<issuerTradingSymbol>INTC</issuerTradingSymbol>", "<issuerTradingSymbol>NONE</issuerTradingSymbol>")
+    .replace("<issuerName>INTEL CORP</issuerName>", "<issuerName>Blackstone Private Multi-Asset Credit Fund</issuerName>");
+  const prev = extFetch;
+  const p2 = createPoller({ dex: "xyz", store, log: () => {}, version: "test", crypto: false,
+    extFetch: async (u) => (/\/index\.json$/.test(u)
+      ? J({ directory: { item: [{ name: "wf-form4.xml" }] } })
+      : X(nonXml)) });
+  const r2 = await p2.insidersParseNow(5);
+  assert.ok(r2.ok && r2.tx === 0, "the filing is read and stores no transactions: " + JSON.stringify(r2));
+  assert.equal(store.insidersFeedCount({ ticker: "INTC" }), 2, "INTC still has only its own two rows — nothing was attributed to it");
+  assert.equal(store.insidersFeedCount({ q: "Blackstone" }), 0, "and the untickered filing contributes no rows at all");
+  const st2 = p2.insidersStatus();
+  assert.equal(st2.filings.noSym, 1, "...but it is COUNTED and the reason is kept, so a thin tab can say why");
+  assert.equal(st2.filings.queued, 0, "it leaves the queue rather than being retried forever");
+  void prev;
 
   // A second run has nothing to do — the queue is the work list, not a re-crawl.
   const n = hits.length;
@@ -3413,7 +3485,7 @@ test("client integrity manifest: app.js contains every load-bearing symbol, exac
     "ddCell", "ddyCell", "openCell", "dopenCell", "computeMomentum", "computeSqueeze", "fmtTrig", "fmtAge",
     "vsTapeCell", "dcapCell", "hitCell", "rvolCell",
     "loadEarnings", "renderEarnings", "openEarnings", "earnBadge", "earnNext", "earnRecentList", "earnReactHtml", "epsSurStr", "epsPairFmt", "epsFmt", "wireEarnVoid",
-    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders", "termEarnBackfill", "insTitleShort", "insRoleCell", "insPairs", "insPairStory",
+    "openInsiders", "insRender", "insBind", "insCols", "insSave", "insLoad", "insPager", "insUsd", "termInsiders", "termEarnBackfill", "insTitleShort", "insRoleCell", "insPairs", "insPairStory", "insRangeFor", "insRangeLabel",
     "macroStateC", "macroList", "macroNextC", "macroRecentC", "macroTimeLbl", "macroRangeFmt",
     "macroStatFmt", "macroMonthLbl", "macroValHtml", "macroRowHtml", "renderMacroStrip", "macroDayLbl", "wireMacroStrip",
     "applyTabOrder", "saveTabOrder", "wireTabDrag",
@@ -13195,7 +13267,7 @@ test("macro -17 manifest: fetch engine, guards, payload fold, report contract �
   for (const pin of ["saveMacro(data)", "loadMacro()", 'macroFile = path.join(dataDir, "macro.json")'])
     assert.ok(st.includes(pin), "store pin missing: " + pin);
   const sv = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
-  assert.ok(sv.includes('const VERSION = "2026.08.27-42"'), "build stamp");
+  assert.ok(sv.includes('const VERSION = "2026.08.27-43"'), "build stamp");
   const ht = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   for (const pin of ['id="macrostrip"', 'id="tab-calendar"', ">Calendar</button>"])
     assert.ok(ht.includes(pin), "index pin missing: " + pin);

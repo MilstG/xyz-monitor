@@ -8515,6 +8515,22 @@ function f4DocPlan(xml, nTx) {
   const raw = ((v ? v[1] : all[0].replace(/<\/?aff10b5One\b[^>]*>/gi, "")) || "").replace(/<[^>]*>/g, "").trim();
   return raw === "" ? null : (f4Flag(raw) ? 1 : 0);
 }
+// issuerTradingSymbol, or nothing. "NONE", "N/A" and their spelling variants are what a filer
+// writes when the issuer has no trading symbol at all — a non-traded fund, a private issuer, stock
+// that is registered but not listed. They are PLACEHOLDERS and they are not tickers, which is
+// obvious right up until one is stored: the live tab filled with rows for a company called NONE
+// (2026-08-27 — Blackstone entities filing as 10% owners of non-traded funds, discovered through a
+// roster name's own submissions feed). Same doctrine as the earnings feed's epsActual:0: a
+// placeholder that reaches storage becomes a fact nobody can tell from a real one.
+const F4_NO_SYM = new Set(["NONE", "N/A", "NA", "N.A.", "N.A", "N/A.", "NULL", "NIL", "-", "--", "---",
+  "NOT APPLICABLE", "NOT LISTED", "NONE.", "NA.", "N/ A", "NONE ", "(NONE)", "[NONE]"]);
+function f4Symbol(v) {
+  const t = String(v == null ? "" : v).toUpperCase().replace(/\s+/g, " ").trim();
+  if (!t || F4_NO_SYM.has(t)) return null;
+  // A real symbol is short and made of symbol characters. Anything else is prose the filer typed
+  // into the wrong box, and prose is not a ticker either.
+  return /^[A-Z0-9][A-Z0-9.\-]{0,9}$/.test(t) ? t : null;
+}
 // Form 4 XML -> transaction rows, from BOTH of the form's tables.
 //
 // Table I is share transactions; Table II is derivatives — options, RSUs, convertibles. They are
@@ -8538,7 +8554,7 @@ function parseForm4(xml) {
   const issuer = {
     cik: f4Val(issuerB, "issuerCik"),
     name: f4Val(issuerB, "issuerName"),
-    tk: (f4Val(issuerB, "issuerTradingSymbol") || "").toUpperCase().trim() || null,
+    tk: f4Symbol(f4Val(issuerB, "issuerTradingSymbol")),
   };
   // A joint filing carries several <reportingOwner> blocks for ONE set of transactions. The first
   // is the row's owner and the rest are counted: attributing one trade to four people would
@@ -8627,6 +8643,7 @@ function form4DocName(indexJson) {
   return xml.find((n) => /form|ownership|doc4|edgar/i.test(n)) || xml[0] || null;
 }
 module.exports.parseForm4 = parseForm4;
+module.exports.f4Symbol = f4Symbol;
 module.exports.form4DocName = form4DocName;
 module.exports.F4_CODES = F4_CODES;
 module.exports.F4_DECISION = F4_DECISION;
